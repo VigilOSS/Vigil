@@ -7,30 +7,29 @@ description: Dispatch a fresh low-context specialist to attack a finding as a ho
 Finding to verify: $ARGUMENTS
 <!-- vigil:end -->
 <!-- vigil:only codex -->
-Verify the finding the operator named in their message. If they did not name one, ask which.
+Verify the finding the operator named in their message.
 <!-- vigil:end -->
 
-Dispatch a **fresh, low-context** specialist for this. Fresh is the whole point: a specialist
-that already helped build the finding will confirm it, and confirmation is not verification.
-Give it the evidence and the target, not your conclusion.
+**If no finding was named above, ask which one before doing anything else** — this command has no
+default target.
 
-Frame the dispatch as a skeptical triager and maintainer whose job is to kill the finding.
-It must answer, with evidence for each:
+Dispatch `vulnerability-analyst` in review mode, **fresh and low-context**. Fresh is the whole
+point: a specialist that already helped build the finding will confirm it, and confirmation is not
+verification. Give it the evidence and the target, not your conclusion.
 
-- **Real-world impact, or just a band fit?** Does this actually harm someone, or does it merely
-  match the shape of a severity band?
-- **What in the code kills it?** Hunt for the guard, the filter, the framework default, the
-  downstream validation. **Trust the code over the documentation** — the docs describe the
-  intent, the code describes the behaviour, and they disagree more often than not.
-- **Is it expected?** Public by design, already-privileged, documented behaviour, a deliberate
-  product decision, or a feature the vendor will point at and close.
-- **Is the evidence complete?** What is asserted but not shown? A missing request, a missing
-  response, a step that "should" work — each is a place the finding falls apart under triage.
-- **Are the preconditions honestly stated?** Would a triager consider them realistic?
+**Build the dispatch context from `agent/phases/phase-5-verify.md` step c — all of it**, including
+the trust-boundary / threat-model summary. Reachability and auth-path severity calls depend on that
+grounding, and the triager is overconfident without it. The adversarial instruction and the
+review-mode skill/reference load live in the same step; a shorter hand-rolled context produces a
+reviewer that rubber-stamps.
 
+**The gate is already written — invoke it, do not re-derive it.** The dispatch runs the FP &
+severity-downgrade gate (`agent/references/finding-fp-and-severity-gate.md`, C1–C7), which is what a
+hostile triager actually checks; any list of questions invented here is a lower-fidelity copy of it.
 Tell it to hunt **downgrades**, not confirmations, and to bullet exactly what is off.
 
-Then bring back a recommendation — **confirm / downgrade / kill** — with the reasoning, and
-apply it to the backend record. If the verifier killed it, kill it; do not relitigate a finding
-back to life because it was expensive to produce. A finding that dies here would have died at
-triage anyway, and dying here is free.
+**Then apply the disposition.** The reviewer returns one of `PASS` / `UPGRADE` / `DOWNGRADE` /
+`KILL`; `agent/phases/phase-5-verify.md` step d owns the backend command each one maps to, with its
+required flags — run that one. If the verifier killed it, kill it; do not relitigate a finding back
+to life because it was expensive to produce. A finding that dies here would have died at triage
+anyway, and dying here is free.

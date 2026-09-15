@@ -23,7 +23,7 @@ from .install_manifest import (
     install_source_content_sha256,
 )
 from .oob import oob_options, oob_status
-from .oob_relay import load_relay_route
+from .oob_relay import has_pre_routing_oob_state, load_relay_route
 from .orchestrator import orchestrator_status
 from .paths import default_runtime_container, engagements_root, resolve_orchestrator_base_url
 from .runtime import runtime_mounts_ok, runtime_resource_state, runtime_status
@@ -421,12 +421,12 @@ def print_status(status: dict[str, object], *, json_output: bool = False) -> Non
     if isinstance(readiness, dict):
         backend_runtime = readiness.get("backend_runtime")
         if isinstance(backend_runtime, dict) and backend_runtime.get("restart_required"):
-            changed = backend_runtime.get("newer_source_files")
+            changed = backend_runtime.get("changed_inputs")
             preview = ", ".join(str(path) for path in changed[:3]) if isinstance(changed, list) else ""
             suffix = f" ({preview})" if preview else ""
             print(
-                "warn\tbackend restart required: source files changed after process start"
-                f"{suffix}; run `vigil orchestrator restart`"
+                "warn\tbackend restart required: build inputs changed since the process "
+                f"started{suffix}; run `vigil orchestrator restart`"
             )
     print(f"runtime\t{runtime['state']}\tmounts_ok={runtime['mounts_ok']}")  # type: ignore[index]
     resources = runtime.get("resources") if isinstance(runtime, dict) else None  # type: ignore[union-attr]
@@ -664,19 +664,35 @@ def _oob_relay_check(install_root: Path) -> Check:
             or ""
         )
         if not configured_domain:
+            # The parenthetical answers "will allocating a slot move my live
+            # callbacks?", which only a root already running OOB on the shared
+            # route can ask. Asserting it unconditionally told every fresh root
+            # about state it does not have — the same defect `install.py` carries
+            # the conditional for, and the reason
+            # `oob_relay.has_pre_routing_oob_state` is a public name.
+            kept = (
+                " (a root already running OOB on the shared 53/8443 route keeps that "
+                "route instead)"
+                if has_pre_routing_oob_state(install_root)
+                else ""
+            )
             return Check(
                 "oob.relay-route",
                 "WARN",
                 "no OOB route allocated; set `vigil config set oob.domain <domain>` "
-                "then `vigil install`, which reserves this install its own relay slot "
-                "(a root already running OOB on the shared 53/8443 route keeps that "
-                "route instead)",
+                f"then `vigil install`, which reserves this install its own relay slot{kept}",
+            )
+        if has_pre_routing_oob_state(install_root):
+            return Check(
+                "oob.relay-route",
+                "WARN",
+                "no relay-slot metadata; run `vigil install` to pin the shared 53/8443 "
+                "route this root is already running OOB on",
             )
         return Check(
             "oob.relay-route",
             "WARN",
-            "no relay-slot metadata; run `vigil install` to allocate this install's "
-            "slot — or to pin the shared 53/8443 route it is already running OOB on",
+            "no relay-slot metadata; run `vigil install` to allocate this install's slot",
         )
     mode = "legacy-pinned" if route.legacy else "slot"
     return Check(

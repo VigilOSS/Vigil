@@ -31,6 +31,7 @@ sys.path.insert(0, str(repo_root / "src"))
 sys.path.insert(0, str(repo_root / "agent" / "scripts"))
 
 from tests.proof_fixtures import post_artifact_backed_source_observation  # noqa: E402
+from vigil_cli import restart_manifest  # noqa: E402
 
 
 def _copy_agent_fixture(agent_root: Path, install_root: Path) -> Path:
@@ -2556,7 +2557,7 @@ def test_print_status_silent_when_install_current(
     assert "install stamp" not in out
 
 
-def test_print_status_warns_when_backend_sources_changed_after_process_start(
+def test_print_status_warns_when_backend_build_inputs_changed_after_process_start(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     from vigil_cli.status import print_status
@@ -2573,7 +2574,7 @@ def test_print_status_warns_when_backend_sources_changed_after_process_start(
                     "restart_required": True,
                     "process_started_at": "2026-07-24T15:23:00Z",
                     "source_root": "/Users/example/vigil/orchestrator/backend/app",
-                    "newer_source_files": ["services/state_manager/coverage.py"],
+                    "changed_inputs": ["app/services/state_manager/coverage.py"],
                 },
             },
         },
@@ -2665,7 +2666,7 @@ def _capture_relay_route(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
 
     The upgrade verdict is no longer routed through it: relay routing decides
     legacy-vs-allocate from the install's own OOB state
-    (``oob_relay._has_pre_routing_oob_state``), so ``InstallResult.is_upgrade``
+    (``oob_relay.has_pre_routing_oob_state``), so ``InstallResult.is_upgrade``
     is where that contract is asserted. Recording the calls still proves the OOB
     phase ran rather than being silently skipped.
     """
@@ -3515,6 +3516,9 @@ def test_orchestrator_foreground_execs_from_install_root(tmp_path: Path, monkeyp
     frontend_dist = install_root / "orchestrator" / "frontend" / "dist"
     frontend_dist.mkdir(parents=True)
     (frontend_dist / "index.html").write_text("ok", encoding="utf-8")
+    # Freshness is a content stamp, not an mtime: an unstamped `dist/` cannot be
+    # proven current and would trigger a real `npm ci` inside the test.
+    restart_manifest.record_frontend_build(install_root)
     outside = tmp_path / "outside"
     outside.mkdir()
     monkeypatch.chdir(outside)
@@ -3642,6 +3646,9 @@ def test_orchestrator_start_terminates_child_when_health_times_out(tmp_path: Pat
     frontend_dist = install_root / "orchestrator" / "frontend" / "dist"
     frontend_dist.mkdir(parents=True)
     (frontend_dist / "index.html").write_text("ok", encoding="utf-8")
+    # Freshness is a content stamp, not an mtime: an unstamped `dist/` cannot be
+    # proven current and would trigger a real `npm ci` inside the test.
+    restart_manifest.record_frontend_build(install_root)
     pid_file = install_root / ".runtime-data" / "pids" / "orchestrator.pid"
 
     class FakeProcess:
@@ -3695,6 +3702,9 @@ def test_orchestrator_start_terminates_child_when_readiness_times_out(tmp_path: 
     frontend_dist = install_root / "orchestrator" / "frontend" / "dist"
     frontend_dist.mkdir(parents=True)
     (frontend_dist / "index.html").write_text("ok", encoding="utf-8")
+    # Freshness is a content stamp, not an mtime: an unstamped `dist/` cannot be
+    # proven current and would trigger a real `npm ci` inside the test.
+    restart_manifest.record_frontend_build(install_root)
     pid_file = install_root / ".runtime-data" / "pids" / "orchestrator.pid"
 
     class FakeProcess:
@@ -3738,6 +3748,9 @@ def test_orchestrator_start_refuses_when_port_already_in_use(
     frontend_dist = install_root / "orchestrator" / "frontend" / "dist"
     frontend_dist.mkdir(parents=True)
     (frontend_dist / "index.html").write_text("ok", encoding="utf-8")
+    # Freshness is a content stamp, not an mtime: an unstamped `dist/` cannot be
+    # proven current and would trigger a real `npm ci` inside the test.
+    restart_manifest.record_frontend_build(install_root)
 
     popen_called = False
 
@@ -17436,3 +17449,44 @@ def test_start_proxy_reads_docker_output_through_the_capturing_runner(
 
     assert seen["freshness_runner"] is metadata_runner
     assert seen["liveness_runner"] is metadata_runner
+
+
+def test_latest_handoffs_window_follows_the_checkpoint_not_the_creation() -> None:
+    """An old specialist that just checkpointed must appear in "latest handoffs".
+
+    `list_handoffs` orders by the immutable `created_at`; `update_handoff` moves
+    only `last_checkpoint_at`. Slicing the creation-ordered map therefore dropped
+    a handoff that was old but had just been updated — silently, from the very
+    section a resuming operator reads to find what moved most recently.
+    """
+    from app.services import assessment_memory
+
+    # 11 handoffs, newest-created first (what list_handoffs yields), with the
+    # OLDEST one carrying the most recent checkpoint.
+    rows = [
+        {
+            "id": 100 - index,
+            "agent_id": f"worker-{index}",
+            "created_at": f"2026-09-{20 - index:02d}T00:00:00Z",
+            "last_checkpoint_at": f"2026-09-{20 - index:02d}T00:00:00Z",
+        }
+        for index in range(11)
+    ]
+    rows[-1]["last_checkpoint_at"] = "2026-09-30T23:59:59Z"
+    oldest_but_freshest = rows[-1]["agent_id"]
+
+    handoffs = {row["agent_id"]: row for row in rows}
+    ordered = sorted(
+        handoffs.values(),
+        key=lambda row: (
+            str(row.get("last_checkpoint_at") or row.get("created_at") or ""),
+            int(row.get("id") or 0),
+        ),
+        reverse=True,
+    )[: assessment_memory._DISPATCH_LIST_RENDER_CAP]
+
+    assert ordered[0]["agent_id"] == oldest_but_freshest
+    # Creation order would have truncated it away entirely.
+    assert oldest_but_freshest not in [
+        row["agent_id"] for row in list(handoffs.values())[: assessment_memory._DISPATCH_LIST_RENDER_CAP]
+    ]

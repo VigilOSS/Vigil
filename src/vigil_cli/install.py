@@ -5,10 +5,11 @@ import stat
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TextIO
 
 from . import docker
 from . import config as config_module
+from . import term
 from .client_rosters import ClientRosterRepairResult, repair_engagement_client_rosters
 from .image_freshness import is_excluded_input
 from .install_manifest import (
@@ -29,7 +30,11 @@ from .install_fs import (
     remove_entry,
     unsafe_path,
 )
-from .oob_relay import OOB_ALLOCATION_REGISTRY_FILENAME, initialize_relay_route
+from .oob_relay import (
+    OOB_ALLOCATION_REGISTRY_FILENAME,
+    has_pre_routing_oob_state,
+    initialize_relay_route,
+)
 from .runtime import build_runtime
 from .status import write_install_meta
 
@@ -42,7 +47,7 @@ if TYPE_CHECKING:
 # signal: when the install root IS the source checkout they exist before Vigil
 # has ever run there, and the FIRST in-place install would report an upgrade.
 # OOB relay routing no longer keys off this flag at all — it reads the install's
-# own OOB state (`oob_relay._has_pre_routing_oob_state`), because "this root is
+# own OOB state (`oob_relay.has_pre_routing_oob_state`), because "this root is
 # not brand new" never proved that live callbacks were riding the shared
 # 53/8443 route. This marker set still has to stay honest for every other
 # upgrade-sensitive decision.
@@ -475,6 +480,71 @@ def _configured_oob_slot(caller_config: dict[str, str]) -> str:
     return ""
 
 
+# The "no relay route" notice, in sentences so each audience gets exactly the
+# claims that apply to it. Allocation happens inside `install_from_source` and
+# ONLY there, so staying silent leaves an operator who configures OOB after
+# installing with no idea that a SECOND install is what reserves their slot.
+_OOB_NOTICE_FINDING = "[vigil] OOB: no relay route — `oob.domain` is unset."
+# Two steps, both named: setting the key alone allocates nothing, and re-running
+# `vigil install` alone cannot help while the key is unset. Naming only one of
+# them is the no-op loop release follow-up #4 was raised about.
+_OOB_NOTICE_REMEDY = (
+    "Set the domain, then re-run `vigil install` to reserve this install its "
+    "own relay slot:"
+)
+_OOB_NOTICE_COMMAND = "vigil config set oob.domain <domain>    # or export VIGIL_OOB_DOMAIN"
+# Added ONLY for a root whose callbacks are already live on the shared route:
+# it answers "will re-running install move them?" for the one population that
+# can ask it. On a fresh root it asserted a reassurance about state that root
+# does not have, and `vigil doctor`'s `oob.relay-route` row already carries the
+# general form.
+_OOB_NOTICE_LEGACY_ROUTE_KEPT = (
+    "This root keeps the shared legacy route (ports 53/8443) it already runs "
+    "OOB on; live callbacks do not move."
+)
+# Hang continuation lines under the `[vigil] ` marker; the notice's command
+# sits two further in so it reads as a thing to copy rather than more prose.
+_DIAGNOSTIC_INDENT = " " * len("[vigil] ")
+
+
+def _diagnostic(text: str) -> str:
+    """A `[vigil] ...` stderr line, wrapped for a terminal, untouched by a pipe.
+
+    These lines are machine records (`key=value` fields) as much as operator
+    output, so `term.wrap` is deliberately the only treatment applied: piped, it
+    returns the record byte-for-byte, one greppable line; on a terminal it hangs
+    the overflow under the marker instead of letting an 80-column terminal break
+    `permission_overrides=0` across two lines.
+    """
+    return term.wrap(text, indent=_DIAGNOSTIC_INDENT, stream=sys.stderr)
+
+
+def _format_oob_route_notice(install_root: Path, *, stream: TextIO) -> str:
+    """Render the "no relay route allocated" notice for `stream`.
+
+    On a terminal this is a hung, width-wrapped paragraph plus an indented
+    command, because the unwrapped single `print` it replaced let an 80-column
+    terminal hard-wrap `vigil install` mid-word. Off a terminal it collapses to
+    ONE line — the same notice an LLM reader or a `grep` over a redirected
+    install log sees, and fewer bytes than the line it replaced.
+    """
+    sentences = [_OOB_NOTICE_FINDING]
+    if has_pre_routing_oob_state(install_root):
+        sentences.append(_OOB_NOTICE_LEGACY_ROUTE_KEPT)
+    sentences.append(_OOB_NOTICE_REMEDY)
+    paragraph = " ".join(sentences)
+    if not term.is_terminal(stream):
+        # The command's display padding is alignment, not content: collapse it
+        # so a piped reader is never charged for a gutter it cannot see.
+        # Gated on `is_terminal`, not `supports_style`: this picks a LAYOUT, and
+        # an operator who set NO_COLOR still has a width to wrap to.
+        return f"{paragraph} {' '.join(_OOB_NOTICE_COMMAND.split())}"
+    return (
+        f"{term.wrap(paragraph, indent=_DIAGNOSTIC_INDENT, stream=stream)}\n"
+        f"{_DIAGNOSTIC_INDENT}  {_OOB_NOTICE_COMMAND}"
+    )
+
+
 def install_from_source(
     options: InstallOptions,
     *,
@@ -531,14 +601,16 @@ def install_from_source(
             destination_boundary.require_attached()
             if client_roster_repair.physical_roster_paths:
                 print(
-                    "[vigil] client-roster repair: "
-                    f"scanned={client_roster_repair.scanned_engagement_count} "
-                    f"physical={len(client_roster_repair.physical_roster_paths)} "
-                    f"refreshed={len(client_roster_repair.refreshed_physical_roster_paths)} "
-                    f"files_added={client_roster_repair.files_added} "
-                    f"files_updated={client_roster_repair.files_updated} "
-                    f"files_unchanged={client_roster_repair.files_unchanged} "
-                    f"extras_preserved={client_roster_repair.extra_files_preserved}",
+                    _diagnostic(
+                        "[vigil] client-roster repair: "
+                        f"scanned={client_roster_repair.scanned_engagement_count} "
+                        f"physical={len(client_roster_repair.physical_roster_paths)} "
+                        f"refreshed={len(client_roster_repair.refreshed_physical_roster_paths)} "
+                        f"files_added={client_roster_repair.files_added} "
+                        f"files_updated={client_roster_repair.files_updated} "
+                        f"files_unchanged={client_roster_repair.files_unchanged} "
+                        f"extras_preserved={client_roster_repair.extra_files_preserved}"
+                    ),
                     file=sys.stderr,
                 )
                 refreshed_paths = set(
@@ -547,14 +619,16 @@ def install_from_source(
                 for path in client_roster_repair.physical_roster_paths[:20]:
                     if path in refreshed_paths:
                         print(
-                            f"[vigil] client-roster refreshed path={path}",
+                            _diagnostic(f"[vigil] client-roster refreshed path={path}"),
                             file=sys.stderr,
                         )
                     else:
                         print(
-                            "[vigil] warning: preserved physical client roster "
-                            f"path={path}; rerun with --refresh-physical-client-rosters "
-                            "to add or refresh canonical generated files in place",
+                            _diagnostic(
+                                "[vigil] warning: preserved physical client roster "
+                                f"path={path}; rerun with --refresh-physical-client-rosters "
+                                "to add or refresh canonical generated files in place"
+                            ),
                             file=sys.stderr,
                         )
                 hidden_physical_count = (
@@ -562,8 +636,10 @@ def install_from_source(
                 )
                 if hidden_physical_count > 0:
                     print(
-                        "[vigil] warning: client-roster repair has "
-                        f"{hidden_physical_count} additional physical paths",
+                        _diagnostic(
+                            "[vigil] warning: client-roster repair has "
+                            f"{hidden_physical_count} additional physical paths"
+                        ),
                         file=sys.stderr,
                     )
 
@@ -581,20 +657,24 @@ def install_from_source(
             destination_boundary.require_attached()
             if client_entrypoint_repair.scanned_count:
                 print(
-                    "[vigil] client-entrypoint repair: "
-                    f"scanned={client_entrypoint_repair.scanned_count} "
-                    f"reconciled={client_entrypoint_repair.reconciled_count} "
-                    f"skipped={client_entrypoint_repair.skipped_count} "
-                    f"permission_overrides={len(client_entrypoint_repair.permission_overrides)}",
+                    _diagnostic(
+                        "[vigil] client-entrypoint repair: "
+                        f"scanned={client_entrypoint_repair.scanned_count} "
+                        f"reconciled={client_entrypoint_repair.reconciled_count} "
+                        f"skipped={client_entrypoint_repair.skipped_count} "
+                        f"permission_overrides={len(client_entrypoint_repair.permission_overrides)}"
+                    ),
                     file=sys.stderr,
                 )
                 for engagement_key in client_entrypoint_repair.permission_overrides[
                     :20
                 ]:
                     print(
-                        "[vigil] warning: client-entrypoint repair applied explicit "
-                        "permission_mode=skip override "
-                        f"engagement={engagement_key}",
+                        _diagnostic(
+                            "[vigil] warning: client-entrypoint repair applied explicit "
+                            "permission_mode=skip override "
+                            f"engagement={engagement_key}"
+                        ),
                         file=sys.stderr,
                     )
                 hidden_override_count = (
@@ -602,8 +682,10 @@ def install_from_source(
                 )
                 if hidden_override_count > 0:
                     print(
-                        "[vigil] warning: client-entrypoint repair applied explicit "
-                        f"permission override to {hidden_override_count} additional engagements",
+                        _diagnostic(
+                            "[vigil] warning: client-entrypoint repair applied explicit "
+                            f"permission override to {hidden_override_count} additional engagements"
+                        ),
                         file=sys.stderr,
                     )
                 for skip in client_entrypoint_repair.skipped[:20]:
@@ -611,29 +693,25 @@ def install_from_source(
                         f" evidence={','.join(skip.evidence)}" if skip.evidence else ""
                     )
                     print(
-                        "[vigil] warning: client-entrypoint repair skipped "
-                        f"engagement={skip.engagement_key} reason={skip.reason}{evidence}",
+                        _diagnostic(
+                            "[vigil] warning: client-entrypoint repair skipped "
+                            f"engagement={skip.engagement_key} reason={skip.reason}{evidence}"
+                        ),
                         file=sys.stderr,
                     )
                 hidden_skip_count = client_entrypoint_repair.skipped_count - 20
                 if hidden_skip_count > 0:
                     print(
-                        "[vigil] warning: client-entrypoint repair skipped "
-                        f"{hidden_skip_count} additional engagements",
+                        _diagnostic(
+                            "[vigil] warning: client-entrypoint repair skipped "
+                            f"{hidden_skip_count} additional engagements"
+                        ),
                         file=sys.stderr,
                     )
 
             if not configured_oob_domain:
-                # Allocation happens here and only here. Staying silent leaves an
-                # operator who configures OOB later with no idea that a second
-                # install is what reserves their relay slot.
                 print(
-                    "[vigil] no OOB route allocated: `oob.domain` is not set. "
-                    "Set it (`vigil config set oob.domain <domain>` or "
-                    "VIGIL_OOB_DOMAIN) and re-run `vigil install` to reserve this "
-                    "install its own relay slot. A root already running OOB on the "
-                    "shared legacy route (ports 53/8443) keeps that route instead, "
-                    "so its live callbacks are not moved.",
+                    _format_oob_route_notice(phase_root, stream=sys.stderr),
                     file=sys.stderr,
                 )
             if configured_oob_domain:

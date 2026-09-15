@@ -358,6 +358,28 @@ Do not churn it for:
 - field-level or helper-level changes that do not create a new durable seam;
 - caches, generated artifacts, vendor trees, or local-machine state.
 
+# Freshness and restart-manifest maintenance
+
+`src/vigil_cli/restart_manifest.py` derives what an install invalidated; read its docstring before
+changing this area.
+
+**Never judge install-managed content by mtime.** `install.py` rewrites every managed file
+unconditionally, so any timestamp comparison reads stale the instant an install finishes. Use a
+content digest stamped on the consumer — see `src/vigil_cli/image_freshness.py`.
+
+Sets derived from `sys.modules` need no upkeep. Declared lists do, and each has a guard test that
+fails before you can forget:
+
+| Change | Update | Guard |
+|---|---|---|
+| `COPY` in `agent/docker/runtime-full/Dockerfile` | `runtime.py:runtime_image_inputs` | `test_runtime_dockerfile_copy_sources_are_declared_runtime_image_inputs` |
+| `COPY` in `agent/docker/mitmproxy/Dockerfile` | `mitmproxy.py:mitmproxy_image_inputs` **and** `_proxy_build_context` | `test_every_proxy_dockerfile_copy_is_covered_by_the_declared_image_inputs` + the staged-context test |
+| frontend/report build config or source dir | `restart_manifest.py:frontend_build_inputs` / `report_build_inputs` | `test_*_build_config_files_are_all_declared_inputs`, `test_*_source_directories_are_all_declared_inputs` |
+| backend dependency manifest | `app/main.py:_BACKEND_DEPENDENCY_MANIFESTS` | `test_every_top_level_dependency_manifest_is_a_declared_input` |
+
+A new consumer that bakes or caches managed content needs the same three parts: a declared input
+set, a digest stamped where the artifact lives, and a row from `consumer_states`.
+
 # Operator prompt regeneration
 
 `agent/operator-core.md` is the source for the rendered red operator prompts.

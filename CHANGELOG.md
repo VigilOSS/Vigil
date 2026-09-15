@@ -27,6 +27,9 @@ Durable design decisions live in [`docs/adr/`](docs/adr/).
   carry `required`.
 - **Operator checkpoints record both track phases.** A `both` engagement advances its web and code
   tracks independently; the checkpoint and the resume brief now report each by name.
+- **`vigil install` says what actually needs restarting.** It used to print the same "restart
+  everything" list every time, including after the ordinary install that changes only prompt text
+  and needs no restart. The summary is now derived per consumer, with the exact command for each.
 
 ### Fixed
 
@@ -60,6 +63,17 @@ Durable design decisions live in [`docs/adr/`](docs/adr/).
   directory and refused anything else without saying which path it wanted.
 - **A blank operator-checkpoint intent is refused.** `--intent "   "` was stored and superseded the
   previous checkpoint, so resume hydration lost the operator's real save-my-place note.
+- **Two rebuilds that were never needed are gone.** `vigil install` rewrites every managed file
+  regardless of content, and two checks read those fresh timestamps as work: `/readyz` reported
+  `restart_required` for a byte-identical backend, and `vigil up` ran a full `npm run build` for a
+  byte-identical frontend. Both now compare contents.
+- **`root=$(vigil install ~/vigil)` captures only the path.** The post-install summary shared stdout
+  with the install root; it now goes to stderr.
+- **The OOB "no relay route" notice no longer misinforms.** It told every install, including a fresh
+  one, that the root keeps a shared legacy route — state a new root does not have. That sentence now
+  appears only for a root actually running OOB on the shared 53/8443 route.
+- **CLI output wraps on a terminal without changing what a pipe sees.** Piped output stays one
+  record per line, no escape codes, no more bytes than before.
 
 ## [1.0.0] - 2026-09-12
 

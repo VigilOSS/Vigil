@@ -1480,7 +1480,9 @@ def test_install_says_why_it_allocated_no_oob_route(
 
     err = capsys.readouterr().err
     assert "oob.domain" in err, "must name the unset setting"
-    assert "oob route" in err.lower(), "must say no route was allocated"
+    assert "no relay route" in err.lower(), "must say no route was allocated"
+    assert "vigil config set oob.domain" in err, "must name the step that sets it"
+    assert "vigil install" in err, "must name the step that then allocates"
 
 
 def test_up_skip_message_names_every_key_oob_start_requires(
@@ -2173,3 +2175,75 @@ def test_deferred_configuration_keeps_a_pre_rename_record_and_slot_key(
     assert allocated.legacy is False
     assert allocated.slot_name == "pre-rename-slot"
     assert allocated.slot_prefix.startswith("pre-rename-slot-")
+
+
+def _seed_live_oob_state(install_root: Path) -> None:
+    """Leave behind exactly what `vigil oob start` leaves behind.
+
+    A rendered ``frpc.toml`` is the discriminator ``has_pre_routing_oob_state``
+    reads; routing records are bookkeeping and deliberately do not count.
+    """
+    from vigil_cli.oob_relay import OOB_STATE_RELATIVE_PATH
+
+    state_dir = install_root / OOB_STATE_RELATIVE_PATH
+    state_dir.mkdir(parents=True, exist_ok=True)
+    (state_dir / "frpc.toml").write_text("[common]\n", encoding="utf-8")
+
+
+def test_doctor_route_row_omits_the_legacy_reassurance_on_a_fresh_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The parenthetical describes state a fresh root does not have.
+
+    `install.py` already makes the equivalent sentence conditional; the doctor
+    row has to agree, or the two halves of the same answer contradict each other.
+    """
+    from vigil_cli.status import _oob_relay_check
+
+    monkeypatch.delenv("VIGIL_OOB_DOMAIN", raising=False)
+    install_root = tmp_path / "fresh"
+    install_root.mkdir()
+
+    check = _oob_relay_check(install_root)
+
+    assert check.status == "WARN"
+    assert "53/8443" not in check.detail
+    assert "reserves this install its own relay slot" in check.detail
+
+
+def test_doctor_route_row_keeps_the_legacy_reassurance_for_a_root_running_oob(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vigil_cli.status import _oob_relay_check
+
+    monkeypatch.delenv("VIGIL_OOB_DOMAIN", raising=False)
+    install_root = tmp_path / "legacy"
+    install_root.mkdir()
+    _seed_live_oob_state(install_root)
+
+    check = _oob_relay_check(install_root)
+
+    assert check.status == "WARN"
+    assert "keeps that route instead" in check.detail
+
+
+def test_doctor_metadata_row_names_allocation_or_pinning_but_never_both(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With a domain set, the remedy depends on whether callbacks are already live."""
+    from vigil_cli.status import _oob_relay_check
+
+    monkeypatch.setenv("VIGIL_OOB_DOMAIN", "oob.example")
+    fresh = tmp_path / "fresh"
+    fresh.mkdir()
+    legacy = tmp_path / "legacy"
+    legacy.mkdir()
+    _seed_live_oob_state(legacy)
+
+    fresh_detail = _oob_relay_check(fresh).detail
+    legacy_detail = _oob_relay_check(legacy).detail
+
+    assert "allocate this install's slot" in fresh_detail
+    assert "53/8443" not in fresh_detail
+    assert "pin the shared 53/8443 route" in legacy_detail
+    assert "allocate" not in legacy_detail

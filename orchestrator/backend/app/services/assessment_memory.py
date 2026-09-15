@@ -329,7 +329,22 @@ def _recent_dispatch_picture(
             connection, "assessment_dispatch_handoffs", engagement_id
         )
     recent_dispatches = display_dispatches[:_DISPATCH_LIST_RENDER_CAP]
-    latest_handoffs = list(handoffs.values())[:_DISPATCH_LIST_RENDER_CAP]
+    # "Latest" means most recently CHECKPOINTED, not most recently created.
+    # `list_handoffs` orders by the immutable `created_at`, while `update_handoff`
+    # moves only `last_checkpoint_at` — so an older specialist that just
+    # checkpointed would fall outside this 10-row window and its update would be
+    # invisible in the section named "latest". The map above is scanned 1000 deep
+    # for exactly this kind of old-but-live handoff, so the ordering is the only
+    # thing that needs fixing, and only here: the map is consumed by KEY
+    # everywhere else, where order is irrelevant.
+    latest_handoffs = sorted(
+        handoffs.values(),
+        key=lambda row: (
+            str(row.get("last_checkpoint_at") or row.get("created_at") or ""),
+            int(row.get("id") or 0),
+        ),
+        reverse=True,
+    )[:_DISPATCH_LIST_RENDER_CAP]
     return {
         "recent_dispatches": recent_dispatches,
         "recent_dispatches_count": dispatch_total,

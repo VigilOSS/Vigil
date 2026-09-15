@@ -498,12 +498,24 @@ def _append_contained_value(lines: list, label: str, value: object) -> None:
     beginning ``##`` could impersonate a resume-brief heading. Preserve every
     original character and insert only the rendering indent after every separator,
     including bare CR and Unicode line/paragraph separators.
+
+    BOTH halves are contained, not just the payload. Every caller builds `label`
+    by interpolating persisted columns — `kind`, `agent_id`, `agent_role`,
+    `status` — and `DecisionCreate.kind` is deliberately an unconstrained string
+    ("the table just stores the bytes"), so a newline in one of those escaped the
+    block through the label and forged a heading in a brief an agent reads as
+    instructions.
     """
-    text = str(value)
-    contained = _RENDER_LINE_SEPARATOR.sub(
+    lines.extend(
+        [_contain_separators(label), f"{_CONTAINED_VALUE_INDENT}{_contain_separators(str(value))}"]
+    )
+
+
+def _contain_separators(text: str) -> str:
+    """Indent whatever follows every line separator, so nothing reaches column zero."""
+    return _RENDER_LINE_SEPARATOR.sub(
         lambda match: f"{match.group(0)}{_CONTAINED_VALUE_INDENT}", text
     )
-    lines.extend([label, f"{_CONTAINED_VALUE_INDENT}{contained}"])
 
 
 def _render_decisions(lines: list, rows: list, total) -> None:

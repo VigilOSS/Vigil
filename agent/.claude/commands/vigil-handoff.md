@@ -10,9 +10,12 @@ Produce a handoff for the next operator session, whether it uses another client 
 restart. The reader has the engagement directory and backend, not this session's context.
 
 **1. Adopt the engagement's operator role.** Read this engagement's `AGENTS.md`, follow its pointer
-to the canonical operator prompt, and adopt the exact web/red, code, combined, Android, or blue role
-and workflow it defines. A handoff must use that workflow's state and exit language; choosing a
-single-track template for a different mode would hide the work that actually governs completion.
+to the canonical operator prompt, and read that prompt in bounded parts, following its own Map of
+This File. Obey its **Engagement-Type Routing Gate** branch for this engagement's `engagement_type`
+in `scope.json` — including a branch that says STOP, and including its instruction to stop and
+report an `engagement_type` it does not recognize. A handoff must use the loaded workflow's state
+and exit language; a single-track template written for a different mode hides the work that actually
+governs completion.
 
 **2. Read the complete shared backend hydration.** Ground every claim in these outputs instead of
 memory.
@@ -25,12 +28,14 @@ memory.
 
 !`vigil assess operator-checkpoint show 2>&1`
 
-**3. Read the readiness surface for the loaded mode.** Run only the applicable command below.
+**3. Read the readiness surface for the loaded mode.** These route to CLI surfaces no operator
+prompt owns; run only the applicable one.
 
 ### Web/red mode
 
-Run `vigil assess check-phase-readiness --phase report` and carry its blockers and advisories into
-the handoff. This is the web report-readiness projection, not a generic all-mode gate.
+Run `vigil assess check-phase-readiness --phase <active-phase>` and carry its blockers and
+advisories into the handoff. Use `--phase report` only when the workflow is actually approaching
+report closeout — it is the web report-readiness projection, not a generic all-mode gate.
 
 ### Code mode
 
@@ -41,9 +46,10 @@ use `--require-transition-ready <target-phase>` to obtain its structural readine
 ### Combined mode
 
 Read both track states and report their readiness separately. Run
-`vigil assess check-phase-readiness --phase report` for the web track and
-`vigil assess code-coverage` for the code track; when its next code phase is known, add
-`--require-transition-ready <target-phase>`. A clear result on one track does not clear the other.
+`vigil assess check-phase-readiness --phase <active-web-phase>` for the web track (`--phase report`
+only when that track is actually approaching report closeout) and `vigil assess code-coverage` for
+the code track; when its next code phase is known, add `--require-transition-ready <target-phase>`.
+A clear result on one track does not clear the other.
 
 ### Android mode
 
@@ -83,12 +89,17 @@ empty, because an empty section and a forgotten section are indistinguishable to
   unavailable telemetry, or other conditions that would waste or mislead the next session.
 - **The single next action**, with the backend state and readiness fact that makes it next.
 
-**5. Record it.** Replace the engagement's `RESUME.md` with this one coherent account, then record
-the same next intent as the operator's durable save-my-place checkpoint:
+**5. Record it.** Replace the engagement's `RESUME.md` with this one coherent account, then index it
+so it is engagement memory rather than scratch — an unlinked markdown note does not survive resume:
+
+    vigil assess artifact register RESUME.md
+
+Then record the same next intent as the operator's durable save-my-place checkpoint:
 
     vigil assess operator-checkpoint record --intent "<one-sentence statement of where this stands and what is next>"
 
 Additional context the operator gave for this handoff (may be empty): $ARGUMENTS
 
 The checkpoint intent is an operator statement, not evidence. Keep factual claims in the handoff
-grounded in the backend outputs above.
+grounded in the backend outputs above, and report back to the operator in the loaded prompt's own
+output conventions — `[operator]` prefix, numbered choices, phase tracker.

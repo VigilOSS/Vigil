@@ -1,7 +1,9 @@
 import functools
+import hashlib
 import logging
 import os
 import sqlite3
+import sys
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -33,6 +35,131 @@ logger = logging.getLogger(__name__)
 
 _BACKEND_PROCESS_STARTED_AT = time.time()
 _BACKEND_SOURCE_ROOT = Path(__file__).resolve().parent
+_BACKEND_PACKAGE_ROOT = _BACKEND_SOURCE_ROOT.parent
+# Pinned at import, not read per request: the install root a process was
+# launched against cannot change while it runs, and re-reading `settings` would
+# let a later override make the snapshot and the check disagree about which
+# files they are even talking about.
+_BACKEND_INSTALL_ROOT = settings.install_dir.expanduser().resolve()
+
+# Files the backend is built from that are NOT under `app/`. A new dependency
+# lands here and nowhere else, which is precisely the change that cannot work
+# without a restart — and precisely the one the previous `app/**.py` mtime scan
+# could not see.
+_BACKEND_DEPENDENCY_MANIFESTS = ("pyproject.toml", "uv.lock")
+
+# Build artifacts and caches that live inside a source tree but are not source.
+# `vigil_cli.image_freshness` owns the canonical set for the CLI side; the
+# backend is a separate uv project that cannot import it, so it carries the
+# subset that can appear under `app/`. `__pycache__` is the load-bearing entry:
+# every import rewrites bytecode next to the module it came from.
+_NOT_SOURCE_NAMES = frozenset({"__pycache__", ".pytest_cache", ".mypy_cache", ".DS_Store"})
+
+# Stands in for a file on one side of a comparison but not the other, so a
+# deletion and an addition are both a difference rather than an omission.
+_ABSENT = "<absent>"
+
+
+def _is_source_file(path: Path) -> bool:
+    if path.suffix == ".pyc":
+        return False
+    return not any(part in _NOT_SOURCE_NAMES for part in path.parts)
+
+
+def _file_digest(path: Path) -> str:
+    """sha256 of a file's CONTENT, or a marker for one that is gone.
+
+    An absent file gets its own marker rather than being dropped, so DELETING a
+    module the running process imported reads as a required restart instead of
+    silently vanishing from the comparison.
+    """
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return "<absent>"
+
+
+def _declared_backend_inputs() -> dict[str, str]:
+    """Content digests of the backend's own declared build inputs.
+
+    Labels are relative to the backend package root, so `app/db.py` and
+    `uv.lock` share one namespace and a reader of `/readyz` can tell at a glance
+    which half of the backend moved.
+    """
+    inputs: dict[str, str] = {}
+    for path in sorted(_BACKEND_SOURCE_ROOT.rglob("*")):
+        if not path.is_file() or not _is_source_file(path):
+            continue
+        inputs[path.relative_to(_BACKEND_PACKAGE_ROOT).as_posix()] = _file_digest(path)
+    for name in _BACKEND_DEPENDENCY_MANIFESTS:
+        inputs[name] = _file_digest(_BACKEND_PACKAGE_ROOT / name)
+    return inputs
+
+
+def _loaded_cross_tree_inputs() -> dict[str, str]:
+    """Content digests of every module this process imported from outside `app/`.
+
+    `services/state_manager/taxonomy_bridge` puts `agent/scripts` on `sys.path`
+    and imports `assess.lib.vuln_taxonomy` at module import time, so a file under
+    `agent/` really is running inside this process — "`agent/**` is only prompts,
+    no restart needed" is not universally true. No path table would stay right
+    through the next such import; `sys.modules` is the only source that cannot
+    go stale, and it costs one dict walk.
+    """
+    inputs: dict[str, str] = {}
+    for module in list(sys.modules.values()):
+        raw = getattr(module, "__file__", None)
+        if not raw:
+            continue
+        try:
+            path = Path(raw).resolve()
+        except (OSError, ValueError):
+            continue
+        if not path.is_relative_to(_BACKEND_INSTALL_ROOT):
+            continue
+        if path.is_relative_to(_BACKEND_SOURCE_ROOT) or not _is_source_file(path):
+            continue
+        inputs[path.relative_to(_BACKEND_INSTALL_ROOT).as_posix()] = _file_digest(path)
+    return inputs
+
+
+def _inputs_sha256(inputs: dict[str, str]) -> str:
+    """One stable digest over a label -> content-digest map."""
+    rolling = hashlib.sha256()
+    for label in sorted(inputs):
+        rolling.update(label.encode("utf-8"))
+        rolling.update(b"\0")
+        rolling.update(inputs[label].encode("utf-8"))
+        rolling.update(b"\0")
+    return rolling.hexdigest()
+
+
+# The snapshot of what this process is actually running, taken once at import —
+# after every router/service import above, so `sys.modules` is already populated.
+_BACKEND_STARTUP_INPUTS = {**_declared_backend_inputs(), **_loaded_cross_tree_inputs()}
+
+
+def _aligned_backend_inputs(
+    startup: dict[str, str], current: dict[str, str], declared: frozenset[str]
+) -> tuple[dict[str, str], dict[str, str]]:
+    """The startup and current input maps over one comparable set of labels.
+
+    The comparable set is `startup ∪ declared`, and what it LEAVES OUT is the
+    point. A cross-tree module imported lazily after startup (the depth ledger
+    reaching `assess.lib.vuln_taxonomy` through `taxonomy_bridge` is the real
+    case) is in neither set: the process read it from the current disk state, so
+    it is current by construction. Counting it would flip `/readyz` to
+    `restart_required` permanently on the first ledger call.
+
+    Everything that IS in the set is compared both ways, so a DELETED module the
+    process still holds, and a NEW file under `app/` the process has not got,
+    both register — each as `<absent>` on one side.
+    """
+    labels = startup.keys() | declared
+    return (
+        {label: startup.get(label, _ABSENT) for label in labels},
+        {label: current.get(label, _ABSENT) for label in labels},
+    )
 
 
 _FRONTEND_MISSING_HELP = (
@@ -45,29 +172,38 @@ _FRONTEND_MISSING_HELP = (
 
 
 def _backend_runtime_snapshot() -> dict[str, object]:
-    newer_files: list[str] = []
-    newest_mtime = 0.0
-    for path in _BACKEND_SOURCE_ROOT.rglob("*.py"):
-        try:
-            modified_at = path.stat().st_mtime
-        except OSError:
-            continue
-        newest_mtime = max(newest_mtime, modified_at)
-        if modified_at > _BACKEND_PROCESS_STARTED_AT:
-            newer_files.append(path.relative_to(_BACKEND_SOURCE_ROOT).as_posix())
+    """Does the code on disk still match the code this process is running?
+
+    Content, never mtime. `vigil install` rewrites every managed file
+    unconditionally (no content comparison anywhere in its copy path), so every
+    install bumped the mtime of every backend `.py` and the previous
+    high-water mark answered `restart_required: true` with twenty files listed
+    for a byte-identical backend. An operator who is told to restart after every
+    install stops reading the field, which costs exactly the one install that
+    needed it.
+
+    Both digests are published so the answer is auditable from outside without
+    a second implementation of the input set having to agree with this one.
+    """
+    declared = _declared_backend_inputs()
+    startup, current = _aligned_backend_inputs(
+        _BACKEND_STARTUP_INPUTS,
+        {**declared, **_loaded_cross_tree_inputs()},
+        frozenset(declared),
+    )
+    changed = sorted(label for label in startup if startup[label] != current[label])
     return {
         "source_root": str(_BACKEND_SOURCE_ROOT),
+        "install_root": str(_BACKEND_INSTALL_ROOT),
         "process_started_at": datetime.fromtimestamp(
             _BACKEND_PROCESS_STARTED_AT,
             tz=timezone.utc,
         ).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "newest_source_mtime": (
-            datetime.fromtimestamp(newest_mtime, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-            if newest_mtime
-            else None
-        ),
-        "restart_required": bool(newer_files),
-        "newer_source_files": sorted(newer_files)[:20],
+        "startup_inputs_sha256": _inputs_sha256(startup),
+        "current_inputs_sha256": _inputs_sha256(current),
+        "restart_required": bool(changed),
+        "changed_inputs": changed[:20],
+        "changed_input_count": len(changed),
     }
 
 

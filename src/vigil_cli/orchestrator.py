@@ -9,6 +9,8 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import restart_manifest
+
 
 # E1: opt-in multi-worker uvicorn. Default stays 1 (single-process) so existing
 # single-engagement runs are unchanged; raise it only on a dedicated/heavy-tier
@@ -238,6 +240,10 @@ def _build_frontend(install_root: Path) -> None:
     frontend_dir = install_root / "orchestrator" / "frontend"
     subprocess.run(["npm", "ci"], cwd=frontend_dir, check=True)
     subprocess.run(["npm", "run", "build"], cwd=frontend_dir, check=True)
+    # Stamp AFTER the build: vite empties `dist/` on the way in, so a stamp
+    # written first would not survive. An unstamped build can never be proven
+    # current, and would be rebuilt on every launch forever.
+    restart_manifest.record_frontend_build(install_root)
 
 
 def build_frontend(install_root: Path, *, force: bool = False) -> None:
@@ -269,76 +275,33 @@ def _build_report(install_root: Path) -> None:
     report_dir = install_root / "orchestrator" / "report"
     subprocess.run(["npm", "ci"], cwd=report_dir, check=True)
     subprocess.run(["npm", "run", "build"], cwd=report_dir, check=True)
+    restart_manifest.record_report_build(install_root)
 
 
 def _report_build_needed(install_root: Path, *, force: bool = False) -> bool:
+    """True unless the built template is provably the current inputs' output.
+
+    ``not-packaged`` (an install predating the report template) is nothing to
+    build rather than a failure; every other non-``current`` answer — missing,
+    unstamped, or content-changed — rebuilds once and stamps.
+    """
     if force:
         return True
-    report_dir = install_root / "orchestrator" / "report"
-    # The package directory may not exist on an install that predates the
-    # report template — treat that as "nothing to build" rather than failing
-    # the orchestrator launch.
-    if not report_dir.is_dir():
-        return False
-    report_dist = report_dir / "dist" / "template.html"
-    if not report_dist.exists():
-        return True
-    latest_input = _latest_report_input_mtime(report_dir)
-    return latest_input is not None and latest_input > report_dist.stat().st_mtime
-
-
-def _latest_report_input_mtime(report_dir: Path) -> float | None:
-    candidates = [
-        report_dir / "package.json",
-        report_dir / "package-lock.json",
-        report_dir / "index.html",
-        report_dir / "vite.config.ts",
-        report_dir / "tsconfig.json",
-    ]
-    latest: float | None = None
-    for path in candidates:
-        if path.is_file():
-            latest = max(latest or 0, path.stat().st_mtime)
-    src_dir = report_dir / "src"
-    if src_dir.is_dir():
-        for path in src_dir.rglob("*"):
-            if path.is_file():
-                latest = max(latest or 0, path.stat().st_mtime)
-    return latest
+    state = restart_manifest.report_build_state(install_root)
+    return state not in {"current", "not-packaged"}
 
 
 def _frontend_build_needed(install_root: Path, *, force: bool = False) -> bool:
+    """True unless ``dist/`` is provably the current inputs' output.
+
+    Content, never mtime: ``vigil install`` rewrites every managed file
+    unconditionally, so the mtime high-water mark this replaced made the next
+    ``vigil up`` run a full ``npm run build`` after every single install, for a
+    byte-identical frontend.
+    """
     if force:
         return True
-    frontend_dir = install_root / "orchestrator" / "frontend"
-    frontend_dist = frontend_dir / "dist" / "index.html"
-    if not frontend_dist.exists():
-        return True
-    latest_input = _latest_frontend_input_mtime(frontend_dir)
-    return latest_input is not None and latest_input > frontend_dist.stat().st_mtime
-
-
-def _latest_frontend_input_mtime(frontend_dir: Path) -> float | None:
-    candidates = [
-        frontend_dir / "package.json",
-        frontend_dir / "package-lock.json",
-        frontend_dir / "index.html",
-        frontend_dir / "vite.config.ts",
-        frontend_dir / "vite.config.js",
-        frontend_dir / "tsconfig.json",
-        frontend_dir / "tsconfig.app.json",
-        frontend_dir / "tsconfig.node.json",
-    ]
-    latest: float | None = None
-    for path in candidates:
-        if path.is_file():
-            latest = max(latest or 0, path.stat().st_mtime)
-    src_dir = frontend_dir / "src"
-    if src_dir.is_dir():
-        for path in src_dir.rglob("*"):
-            if path.is_file():
-                latest = max(latest or 0, path.stat().st_mtime)
-    return latest
+    return restart_manifest.frontend_build_state(install_root) != "current"
 
 
 def _terminate_process(process: subprocess.Popen[bytes]) -> None:

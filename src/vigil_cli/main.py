@@ -15,7 +15,7 @@ import webbrowser
 from collections.abc import Sequence
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, NoReturn
+from typing import Any, NoReturn, TextIO
 
 from . import auth as auth_module
 from . import backup as backup_module
@@ -23,6 +23,8 @@ from . import bench as bench_module
 from . import blue as blue_module
 from . import config as config_module
 from . import email as email_module
+from . import restart_manifest
+from . import term
 from .docker import run_command as docker_run_command
 from .engagements import (
     PROGRAM_HEADER_PRESETS,
@@ -100,46 +102,128 @@ from .orchestrator import (
 from .paths import default_runtime_container, resolve_install_root, resolve_source_root
 from .preflight import _preflight_engagement_start, _warn_if_install_stale
 from .quickstart import QuickstartOptions, run_quickstart
-from .runtime import RuntimeOptions, vigil_runtime_resources, build_runtime, runtime_image_build_state, runtime_status, start_runtime, stop_runtime
+from .runtime import RuntimeOptions, vigil_runtime_resources, build_runtime, runtime_status, start_runtime, stop_runtime
 from .status import collect_doctor_checks, collect_status, print_doctor, print_status
 from .up import UpOptions, run_up
 
 
-def _print_post_install(result: InstallResult) -> None:
+# The two-layer model is the one thing an operator cannot deduce from the
+# output, and the one thing that makes a stale CLI binary comprehensible. It
+# used to print after EVERY install, which is how a genuinely useful paragraph
+# becomes scenery; it now prints on a first install (where the model is new
+# information) and when the CLI binary is the thing that actually lags.
+_TWO_LAYER_MODEL = (
+    "Two layers: `vigil install` upgrades the WORKING ROOT "
+    "(code/prompts/skills/scripts); `uv tool upgrade vigil` upgrades only the CLI binary. "
+    "`vigil status` warns when the working root differs from its source."
+)
+
+
+def _print_post_install(
+    result: InstallResult,
+    *,
+    states: list[restart_manifest.ConsumerState] | None = None,
+    stream: TextIO | None = None,
+) -> None:
+    """Report what this install actually obliges the operator to do.
+
+    Everything here goes to STDERR. `vigil install` prints the install root on
+    stdout as a machine contract (`root=$(vigil install ~/vigil)`), and this
+    block used to land in that capture — a real bug, not a cosmetic one.
+
+    The list is DERIVED (see `restart_manifest`), never asserted. Only consumers
+    that are provably out of date (`stale`) or that cannot be proven current
+    (`unknown`) are printed, and only when there is a command that fixes them: a
+    stopped service does not need restarting, and an artifact that was never
+    built was not invalidated by this install — `vigil up` builds it on demand.
+    """
+    # Resolved per call, never as a default argument: a default binds `sys.stderr`
+    # at import time, which is the wrong object under any caller that replaces it.
+    stream = sys.stderr if stream is None else stream
     root = result.install_root
-    print()
+    undetermined = ""
+    if states is None:
+        try:
+            states = restart_manifest.consumer_states(root)
+        except Exception as exc:  # noqa: BLE001 — the install already SUCCEEDED
+            # A summary that cannot be computed must not retroactively fail the
+            # command, and must not claim "nothing to restart" either.
+            states, undetermined = [], str(exc) or exc.__class__.__name__
+    actionable = [
+        state for state in states if state.state in {"stale", "unknown"} and state.remedy
+    ]
+    # `unknown` with NO remedy is a consumer we could not reach at all — the
+    # Docker-down shape, where there is no command worth offering while the
+    # daemon is down. It is dropped from `actionable` for that reason, but it
+    # must never be silently counted as clear: "nothing to restart" would then
+    # assert something this install never checked.
+    unreachable = [
+        state for state in states if state.state == "unknown" and not state.remedy
+    ]
+    cli_lags = any(state.key == "cli" for state in actionable)
+
+    print(file=stream)
     if result.is_upgrade:
-        print("Upgrade complete. Services using the previous install should be restarted:")
-        print("  - Kali runtime:   vigil runtime restart")
-        print("  - Orchestrator:   vigil orchestrator restart")
-        if result.image_built:
-            print("  - Docker image was rebuilt — running containers use the old image until restarted")
+        if undetermined:
+            print(
+                term.row(
+                    "warn",
+                    "Upgrade complete; could not determine what needs restarting",
+                    undetermined,
+                    stream=stream,
+                ),
+                file=stream,
+            )
+        elif not actionable and unreachable:
+            print("Upgrade complete. These could not be checked:", file=stream)
+            for state in unreachable:
+                print(
+                    term.row("info", state.label, state.detail, stream=stream),
+                    file=stream,
+                )
+        elif not actionable:
+            print(
+                term.wrap(
+                    "Upgrade complete — nothing to restart (this install changed only "
+                    "files that are read live).",
+                    stream=stream,
+                ),
+                file=stream,
+            )
         else:
-            state = runtime_image_build_state(root)
-            if state == "stale":
-                print("  - Docker image:   OUT OF DATE (baked runtime input changed) — run  vigil runtime build")
-            elif state == "missing":
-                print("  - Docker image:   not built yet — run  vigil runtime build")
-            elif state == "current":
-                print("  - Docker image:   up to date — a restart is enough (no rebuild needed)")
-            else:
-                print("  - Docker image:   run  vigil runtime build  only if the runtime Dockerfile or "
-                      "docker/callback_* changed (most code is host-side; restart is enough)")
+            print("Upgrade complete. These need attention:", file=stream)
+            for state in actionable:
+                detail = f"{state.remedy}  ({state.detail})" if state.detail else state.remedy
+                print(
+                    term.row(
+                        "warn" if state.state == "stale" else "info",
+                        state.label,
+                        detail,
+                        stream=stream,
+                    ),
+                    file=stream,
+                )
+            # Naming these alongside the actionable rows keeps the list honest:
+            # an operator reading only the remedies would otherwise take the
+            # unreachable consumers as having been checked and cleared.
+            for state in unreachable:
+                print(
+                    term.row("info", state.label, state.detail, stream=stream),
+                    file=stream,
+                )
     else:
-        print("Install complete. Next steps:")
-        print(f"  1. Configure tokens and API keys in {root / '.env'}")
-        print("  2. Optional OOB: set oob.frp_host, oob.domain, and oob.frp_token")
-        print("     (set oob.domain and re-run this command to allocate a relay slot)")
-        print("  3. vigil up                      # build/start runtime, orchestrator, and OOB")
-        print("  4. vigil engagement create <target>  # create your first engagement")
-        print("  5. vigil assess kali --help      # discover target-facing CLI verbs")
-    print()
-    print(
-        "Two-layer model: `vigil install` upgraded the WORKING ROOT "
-        "(code/prompts/skills/scripts). `uv tool upgrade vigil` upgrades only the CLI "
-        "binary. `vigil status` warns when the working root differs from its source."
-    )
-    print()
+        print("Install complete. Next steps:", file=stream)
+        print(f"  1. Configure tokens and API keys in {root / '.env'}", file=stream)
+        print("  2. Optional OOB: set oob.frp_host, oob.domain, and oob.frp_token", file=stream)
+        print("     (set oob.domain and re-run this command to allocate a relay slot)", file=stream)
+        print("  3. vigil up                      # build/start runtime, orchestrator, and OOB", file=stream)
+        print("  4. vigil engagement create <target>  # create your first engagement", file=stream)
+        print("  5. vigil assess kali --help      # discover target-facing CLI verbs", file=stream)
+
+    if cli_lags or not result.is_upgrade:
+        print(file=stream)
+        print(term.wrap(_TWO_LAYER_MODEL, stream=stream), file=stream)
+    print(file=stream)
 
 
 def _print_install_dry_run(result: InstallResult) -> None:

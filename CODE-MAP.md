@@ -65,7 +65,10 @@ When you are about to copy one of these into a second file, stop and import.
   `contract.py` and `list_commands.py` render it live; a wrong phase makes a verb undiscoverable.
 - `src/vigil_cli/engagements.py:CLIENT_PROVIDER_KEYS` and `CLIENT_MESSAGE_FLAGS` own client launch
   identity. Generated launchers, preflight, and the benchmark consume them.
-- `src/vigil_cli/image_freshness.py` owns image input digests, freshness, and exclusions.
+- `src/vigil_cli/image_freshness.py` owns the content-digest mechanism every freshness check uses —
+  input entries, digests, the image label, exclusions. Content, never mtime.
+- `src/vigil_cli/restart_manifest.py:consumer_states` owns what an install invalidated, per consumer.
+  Presenters consume its rows; do not derive freshness beside it. See: `AGENTS.md` freshness section.
 - `src/vigil_cli/install_manifest.py` and `src/vigil_cli/install_fs.py` own managed install paths,
   pinned/no-follow operations, and content digests.
 - `agent/scripts/assess/lib/params.py:header_schema_from_headers` owns value-free header schemas.
@@ -168,6 +171,7 @@ A prompt change is **not** prompt-only when the prompt defines an artifact the b
 - `src/vigil_cli/mitmproxy.py` — the single owner of the proxy `docker build` argv, including the inputs-digest label without which the image can never be proven current.
 - `src/vigil_cli/bench/` — the benchmark harness. Verbs are `list`, `run`, `run-all`, `score`, `teardown`, `selftest`, `history`, and the `vm` group. `run-all` defaults to a **billed** launch; `run` does not. See: ADR 0020.
 - `src/vigil_cli/bench/anticheat.py` — the bench guards are **generated at runtime as strings** by this module, not committed files: `bench-guard.sh` is written into the off-tree bench home, `bench-guard.js` into the attempt engagement's OpenCode plugin dirs.
+- `src/vigil_cli/term.py` — the one place CLI output learns whether it is on a terminal. Off a TTY: same bytes or fewer, one record per line, no ESC. Style through it, never a raw escape at a call site.
 - `src/vigil_cli/oob_relay.py` — the single owner of the install's OOB relay-slot identity contract; `oob.py`, `install.py`, `up.py`, and `status.py` consume that record rather than deriving routes independently.
 
 ### orchestrator/backend

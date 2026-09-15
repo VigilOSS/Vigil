@@ -555,7 +555,7 @@ def _oob_state_directories(install_root: Path) -> tuple[Path, ...]:
     return tuple(directories)
 
 
-def _has_pre_routing_oob_state(install_root: Path) -> bool:
+def has_pre_routing_oob_state(install_root: Path) -> bool:
     """True when this root was already running OOB before it had a relay route.
 
     The legacy 53/8443 route exists for exactly one population: installs whose
@@ -614,7 +614,7 @@ def initialize_relay_route(
             registry_path=registry_path,
             preserve_install_path=preserve_install_path,
         )
-    if not _has_pre_routing_oob_state(install_root):
+    if not has_pre_routing_oob_state(install_root):
         return allocate_relay_route(
             install_root,
             slot_name=slot_name or registry_install_root.name,
