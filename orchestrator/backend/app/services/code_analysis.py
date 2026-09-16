@@ -4367,6 +4367,12 @@ def list_code_modules(
 # =========================================================================
 
 _QUEUE_BLOCKED_TERMINAL_STATUSES = frozenset({"error", "needs_context"})
+_QUEUE_STATUSES = frozenset(
+    {"pending", "processing", "done", "error", "needs_context"}
+)
+_QUEUE_MODES = frozenset(
+    {"initial", "reanalysis", "trigger", _METADATA_REFRESH_REVIEW_MODE}
+)
 
 
 def _queue_item_matches(row: dict[str, Any], item: dict[str, Any]) -> bool:
@@ -4824,6 +4830,134 @@ def queue_stats(engagement_id: int) -> dict[str, Any]:
     }
 
 
+def _hydrate_queue_listing_row(row: Any) -> dict[str, Any]:
+    return {
+        "id": int(row["id"]),
+        "file_id": int(row["file_id"]),
+        "file_path": str(row["file_path"]),
+        "classification": str(row["classification"] or ""),
+        "analysis_priority": int(row["analysis_priority"]),
+        "repo_id": int(row["repo_id"]),
+        "repo_key": str(row["repo_key"]),
+        "status": str(row["status"]),
+        "queue_mode": str(row["queue_mode"] or "initial"),
+        "priority": int(row["priority"]),
+        "batch_theme": str(row["batch_theme"] or ""),
+        "slot_types": _json_decode(row["slot_types_json"], []),
+        "guidance_hypotheses": _json_decode(row["guidance_hypotheses_json"], []),
+        "cross_file_triggers": _json_decode(row["cross_file_triggers_json"], []),
+        "agent_name": str(row["assigned_agent"] or ""),
+        "lease_token": str(row["lease_token"] or ""),
+        "repo_generation": int(row["repo_generation"]),
+        "disposition": str(row["disposition"] or ""),
+        "skip_reason": str(row["skip_reason"] or ""),
+        "reanalysis_of_queue_item_id": row["reanalysis_of_queue_item_id"],
+        "consumed_at": row["consumed_at"],
+        "last_heartbeat_at": row["last_heartbeat_at"],
+        "completed_at": row["completed_at"],
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def list_queue_items(
+    engagement_id: int,
+    *,
+    status_filter: str | None = None,
+    repo_id: int | None = None,
+    classification: str | None = None,
+    batch_theme: str | None = None,
+    queue_mode: str | None = None,
+    limit: int | None = None,
+    offset: int = 0,
+) -> dict[str, Any]:
+    """Page the current-generation queue so its row IDs stay recoverable.
+
+    Every current-generation, non-source-superseded attempt is listed, including
+    an older active row that overlaps the latest one. `fetch` refuses to claim
+    those and `stats` reports them only as an `invalid_active_history` count, so
+    a listing that dropped them would hide the exact IDs an operator needs to
+    reconcile the history. Ordering matches the claim order `fetch` applies, so a
+    page fed back through `--ids-file` is claimed in the order it was shown.
+    """
+    engagement = _engagement_or_404(engagement_id)
+    if status_filter is not None and status_filter not in _QUEUE_STATUSES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"invalid queue status: {status_filter}",
+        )
+    if queue_mode is not None and queue_mode not in _QUEUE_MODES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"invalid queue mode: {queue_mode}",
+        )
+    if classification is not None and classification not in _VALID_CLASSIFICATIONS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"invalid classification: {classification}",
+        )
+    clauses = [
+        "queue.engagement_id = ?",
+        "files.retired_at IS NULL",
+        "queue.repo_generation = repos.active_generation",
+        "queue.source_superseded_at IS NULL",
+    ]
+    params: list[Any] = [engagement.id]
+    if status_filter is not None:
+        clauses.append("queue.status = ?")
+        params.append(status_filter)
+    if repo_id is not None:
+        clauses.append("files.repo_id = ?")
+        params.append(_coerce_int(repo_id, field_name="repo_id"))
+    if classification is not None:
+        clauses.append("files.classification = ?")
+        params.append(classification)
+    if batch_theme is not None:
+        clauses.append("queue.batch_theme = ?")
+        params.append(batch_theme)
+    if queue_mode is not None:
+        clauses.append("queue.queue_mode = ?")
+        params.append(queue_mode)
+    from_where = f"""
+        FROM code_analysis_queue AS queue
+        JOIN code_files AS files
+          ON files.id = queue.file_id
+         AND files.engagement_id = queue.engagement_id
+        JOIN code_repos AS repos
+          ON repos.id = files.repo_id
+         AND repos.engagement_id = files.engagement_id
+         AND repos.active_generation > 0
+        WHERE {' AND '.join(clauses)}
+    """
+    query = f"""
+        SELECT queue.*, files.file_path, files.classification,
+               files.analysis_priority, files.repo_id, repos.repo_key
+        {from_where}
+        ORDER BY queue.priority DESC, queue.id ASC
+    """
+    if offset > 0:
+        # SQLite has no bare OFFSET, so an unbounded listing still needs a
+        # LIMIT to skip rows at all. Dropping the offset instead would return
+        # page one while `has_more` described a page the caller never got.
+        query += f" LIMIT {int(limit) if limit is not None else -1} OFFSET {int(offset)}"
+    elif limit is not None:
+        query += f" LIMIT {int(limit)}"
+    with get_connection() as connection:
+        total = _scalar_row(connection, f"SELECT COUNT(*) {from_where}", tuple(params))
+        rows = connection.execute(query, tuple(params)).fetchall()
+    items = [_hydrate_queue_listing_row(row) for row in rows]
+    return {
+        "total": total,
+        "offset": offset,
+        "count": len(items),
+        "has_more": offset + len(items) < total,
+        # The exact shape `code-dispatch fetch --ids-file` consumes, so a page
+        # of this response is itself a valid ids file.
+        "item_ids": [item["id"] for item in items],
+        "items": items,
+    }
+
+
 def fetch_queue_items(
     engagement_id: int,
     limit: int,
@@ -4832,6 +4966,7 @@ def fetch_queue_items(
     repo_id: int | None = None,
     classification: str | None = None,
     batch_theme: str | None = None,
+    queue_mode: str | None = None,
     item_ids: list[int] | None = None,
 ) -> list[dict[str, Any]]:
     """Atomically claim pending queue items for an agent.
@@ -4852,6 +4987,14 @@ def fetch_queue_items(
     if batch_theme is not None:
         filter_clauses.append("queue.batch_theme = ?")
         filter_params.append(batch_theme)
+    if queue_mode is not None:
+        if queue_mode not in _QUEUE_MODES:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"invalid queue mode: {queue_mode}",
+            )
+        filter_clauses.append("queue.queue_mode = ?")
+        filter_params.append(queue_mode)
     if item_ids is not None:
         normalized_ids = sorted(set(item_ids))
         placeholders = ",".join("?" for _ in normalized_ids)
@@ -8479,6 +8622,41 @@ def code_readiness(engagement_id: int, *, target_phase: str) -> dict[str, Any]:
                 )
 
             if target_phase == "hunt":
+                # A5: the durable queue is what Phase 2 claims work from, so an
+                # admitted file with no current-generation row can never be
+                # dispatched and never reaches accounting. The on-disk queue
+                # artifact is planning input and proves nothing about this.
+                unqueued_files = _scalar_row(
+                    connection,
+                    """
+                    SELECT COUNT(*)
+                    FROM code_files AS files
+                    WHERE files.engagement_id = ? AND files.repo_id = ?
+                      AND files.retired_at IS NULL
+                      AND NOT EXISTS (
+                        SELECT 1
+                        FROM code_analysis_queue AS queue
+                        WHERE queue.engagement_id = files.engagement_id
+                          AND queue.file_id = files.id
+                          AND queue.repo_generation = ?
+                          AND queue.source_superseded_at IS NULL
+                      )
+                    """,
+                    (engagement.id, repo_id, active_generation),
+                )
+                if unqueued_files:
+                    blockers.append(
+                        _readiness_blocker(
+                            "admitted_files_unqueued",
+                            (
+                                f"Repository has {unqueued_files} admitted file(s) with no "
+                                "current-generation analysis queue row; every admitted file "
+                                "needs one before hunting, including skip-tier files."
+                            ),
+                            repo_id=repo_id,
+                            overrideable=True,
+                        )
+                    )
                 continue
 
             unaccounted_files = _scalar_row(
@@ -9020,446 +9198,614 @@ def _contains_all_values(existing: list[Any], requested: list[Any]) -> bool:
     )
 
 
+class _TriggerTargetBlocked(Exception):
+    """One trigger target cannot be written; every other target still commits."""
+
+
+def _requeue_selector(item: dict[str, Any], index: int) -> dict[str, Any]:
+    """Reduce one requeue input to exactly one target selector.
+
+    Ambiguity is the defect this rejects. An input naming two targets used to
+    resolve to whichever branch was tested first, and an input naming none was
+    dropped in silence while still counting toward the reported total.
+    """
+    selector: dict[str, Any] = {}
+    if item.get("file_id") is not None:
+        selector["file_id"] = _require_strict_positive_id(
+            item["file_id"], field_name=f"items[{index}].file_id"
+        )
+    if item.get("trigger_id") is not None:
+        selector["trigger_id"] = _require_strict_positive_id(
+            item["trigger_id"], field_name=f"items[{index}].trigger_id"
+        )
+    file_path = str(item.get("file_path", "")).strip()
+    if file_path:
+        selector["file_path"] = file_path
+    if len(selector) != 1:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"items[{index}] needs exactly one selector — file_id, trigger_id, "
+                f"or file_path — but named {len(selector)}"
+            ),
+        )
+    if item.get("repo_id") is not None:
+        if "file_path" not in selector:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"items[{index}].repo_id only disambiguates a file_path selector"
+                ),
+            )
+        selector["repo_id"] = _require_strict_positive_id(
+            item["repo_id"], field_name=f"items[{index}].repo_id"
+        )
+    return selector
+
+
+_REQUEUE_TARGET_COLUMNS = """
+    files.id, files.file_path, files.classification,
+    files.analysis_priority, repos.active_generation
+"""
+
+
+def _requeue_target_by_file_id(connection, engagement_id: int, file_id: int) -> Any:
+    return connection.execute(
+        f"""
+        SELECT {_REQUEUE_TARGET_COLUMNS}
+        FROM code_files AS files
+        JOIN code_repos AS repos
+          ON repos.id = files.repo_id
+         AND repos.engagement_id = files.engagement_id
+         AND repos.active_generation > 0
+        WHERE files.engagement_id = ? AND files.id = ?
+          AND files.retired_at IS NULL
+        """,
+        (engagement_id, file_id),
+    ).fetchone()
+
+
+def _resolve_requeue_target(
+    connection, engagement_id: int, selector: dict[str, Any]
+) -> tuple[Any, str, str]:
+    """Resolve one selector to its current target file row.
+
+    Returns ``(row, outcome, label)``; ``row`` is None unless ``outcome`` is
+    ``resolved``. The label is what the not_found/ambiguous summaries name.
+    """
+    if "file_id" in selector:
+        file_id = int(selector["file_id"])
+        row = _requeue_target_by_file_id(connection, engagement_id, file_id)
+        return (row, "resolved", "") if row is not None else (None, "not_found", str(file_id))
+
+    if "trigger_id" in selector:
+        trigger_id = int(selector["trigger_id"])
+        label = f"trigger:{trigger_id}"
+        trigger = connection.execute(
+            """
+            SELECT triggers.target_file_id, triggers.target_file_path,
+                   source_files.repo_id AS source_repo_id
+            FROM code_analysis_triggers AS triggers
+            JOIN code_files AS source_files
+              ON source_files.id = triggers.source_file_id
+             AND source_files.engagement_id = triggers.engagement_id
+            JOIN code_repos AS source_repos
+              ON source_repos.id = source_files.repo_id
+             AND source_repos.engagement_id = source_files.engagement_id
+             AND source_repos.active_generation > 0
+            WHERE triggers.engagement_id = ? AND triggers.id = ?
+              AND triggers.repo_generation = source_repos.active_generation
+              AND triggers.source_superseded_at IS NULL
+            """,
+            (engagement_id, trigger_id),
+        ).fetchone()
+        if trigger is None:
+            return None, "not_found", label
+        if trigger["target_file_id"] is not None:
+            row = _requeue_target_by_file_id(
+                connection, engagement_id, int(trigger["target_file_id"])
+            )
+            return (row, "resolved", "") if row is not None else (None, "not_found", label)
+        # An unbound trigger names its target by path inside the source repo,
+        # which is the same repository the requeue insert must land in.
+        selector = {
+            "file_path": str(trigger["target_file_path"]),
+            "repo_id": int(trigger["source_repo_id"]),
+        }
+        row, outcome, _label = _resolve_requeue_target(
+            connection, engagement_id, selector
+        )
+        return row, outcome, label
+
+    file_path = str(selector["file_path"])
+    repo_id = selector.get("repo_id")
+    rows = connection.execute(
+        (
+            f"""
+            SELECT {_REQUEUE_TARGET_COLUMNS}
+            FROM code_files AS files
+            JOIN code_repos AS repos
+              ON repos.id = files.repo_id
+             AND repos.engagement_id = files.engagement_id
+             AND repos.active_generation > 0
+            WHERE files.engagement_id = ? AND files.file_path = ?
+              AND files.retired_at IS NULL
+            """
+            if repo_id is None
+            else f"""
+            SELECT {_REQUEUE_TARGET_COLUMNS}
+            FROM code_files AS files
+            JOIN code_repos AS repos
+              ON repos.id = files.repo_id
+             AND repos.engagement_id = files.engagement_id
+             AND repos.active_generation > 0
+            WHERE files.engagement_id = ? AND files.repo_id = ?
+              AND files.file_path = ?
+              AND files.retired_at IS NULL
+            """
+        ),
+        (engagement_id, file_path)
+        if repo_id is None
+        else (engagement_id, int(repo_id), file_path),
+    ).fetchall()
+    if not rows:
+        return None, "not_found", file_path
+    if len(rows) > 1:
+        return None, "ambiguous", file_path
+    return rows[0], "resolved", ""
+
+
+def _requeue_trigger_payload(
+    item: dict[str, Any], *, file_path: str
+) -> dict[str, Any] | None:
+    """Project one input's free-text trigger context into a queue-row entry."""
+    reason = item.get("reason", "")
+    trigger_ctx = item.get("trigger_context")
+    if not reason and not trigger_ctx:
+        return None
+    payload: dict[str, Any] = {"file_path": file_path, "source": "cross_file_trigger"}
+    if reason:
+        payload["reason"] = str(reason)
+    if isinstance(trigger_ctx, dict):
+        reserved_context_keys = {
+            "file_path",
+            "reason",
+            "source",
+            "trigger_id",
+            "source_file_id",
+            "source_file_path",
+            "source_queue_item_id",
+        }
+        payload.update(
+            {
+                key: value
+                for key, value in trigger_ctx.items()
+                if key not in reserved_context_keys
+            }
+        )
+    return {
+        key: value for key, value in payload.items() if value not in (None, "", [], {})
+    }
+
+
+def _apply_requeue_target(
+    connection,
+    engagement_id: int,
+    file_id: int,
+    target: dict[str, Any],
+) -> tuple[str, int | None, str, bool]:
+    """Write one aggregated target. Returns (outcome, queue_item_id, detail, reopened).
+
+    Raises :class:`_TriggerTargetBlocked` when durable state refuses the write,
+    so the caller can roll back this target alone.
+    """
+    if target["blocked_reason"] is not None:
+        raise _TriggerTargetBlocked(target["blocked_reason"])
+
+    pending_trigger_rows = connection.execute(
+        """
+        SELECT triggers.id, triggers.source_queue_item_id,
+               triggers.source_file_id, source_files.file_path AS source_file_path,
+               triggers.target_file_path, triggers.vuln_class, triggers.reason
+        FROM code_analysis_triggers AS triggers
+        JOIN code_files AS source_files
+          ON source_files.id = triggers.source_file_id
+         AND source_files.engagement_id = triggers.engagement_id
+        JOIN code_repos AS source_repos
+          ON source_repos.id = triggers.repo_id
+         AND source_repos.engagement_id = triggers.engagement_id
+         AND source_repos.active_generation > 0
+        JOIN code_files AS target_files
+          ON target_files.id = ?
+         AND target_files.engagement_id = triggers.engagement_id
+        WHERE triggers.engagement_id = ? AND triggers.status = ?
+          AND triggers.repo_generation = source_repos.active_generation
+          AND triggers.source_superseded_at IS NULL
+          AND (
+              triggers.target_file_id = target_files.id
+              OR (
+                  triggers.target_file_id IS NULL
+                  AND triggers.target_file_path = target_files.file_path
+                  AND source_files.repo_id = target_files.repo_id
+              )
+          )
+        ORDER BY triggers.id
+        """,
+        (file_id, engagement_id, _TRIGGER_STATUS_PENDING),
+    ).fetchall()
+    bucket_triggers = target["cross_file_triggers"]
+    existing_trigger_ids = {
+        int(entry["trigger_id"])
+        for entry in bucket_triggers
+        if isinstance(entry, dict) and entry.get("trigger_id") is not None
+    }
+    for trigger_row in pending_trigger_rows:
+        trigger_id = int(trigger_row["id"])
+        if trigger_id in existing_trigger_ids:
+            continue
+        trigger_payload = {
+            "trigger_id": trigger_id,
+            "file_path": str(trigger_row["target_file_path"]),
+            "source": "code_analysis_trigger",
+            "source_file_id": int(trigger_row["source_file_id"]),
+            "source_file_path": str(trigger_row["source_file_path"]),
+            "vuln_class": str(trigger_row["vuln_class"]),
+            "reason": str(trigger_row["reason"]),
+        }
+        if trigger_row["source_queue_item_id"] is not None:
+            trigger_payload["source_queue_item_id"] = int(
+                trigger_row["source_queue_item_id"]
+            )
+        bucket_triggers.append(trigger_payload)
+        existing_trigger_ids.add(trigger_id)
+
+    current_rows = [
+        dict(queue_row)
+        for queue_row in connection.execute(
+            """
+            SELECT *
+            FROM code_analysis_queue
+            WHERE engagement_id = ? AND file_id = ? AND repo_generation = ?
+            ORDER BY id
+            """,
+            (engagement_id, file_id, int(target["repo_generation"])),
+        ).fetchall()
+    ]
+    latest, active, active_issue = _canonical_queue_attempt_state(current_rows)
+    if active_issue is not None:
+        raise _TriggerTargetBlocked(
+            f"{active_issue} queue history requires operator reconciliation"
+        )
+
+    # A15b: a requeue is added depth on the file's existing lane, not a move to
+    # a synthetic one. Provenance rides in queue_mode='trigger' instead.
+    batch_theme = target["batch_theme"]
+    if batch_theme is None:
+        inherited = active if active is not None else latest
+        batch_theme = str((inherited or {}).get("batch_theme") or "")
+
+    if active is not None:
+        active_status = str(active["status"])
+        existing_slots = _json_decode(active.get("slot_types_json"), [])
+        existing_guidance = _json_decode(active.get("guidance_hypotheses_json"), [])
+        existing_triggers = _json_decode(active.get("cross_file_triggers_json"), [])
+        requested_is_present = (
+            int(active["priority"]) == int(target["priority"])
+            and _contains_all_values(existing_slots, target["slot_types"])
+            and _contains_all_values(existing_guidance, target["guidance_hypotheses"])
+            and _contains_all_values(existing_triggers, target["cross_file_triggers"])
+        )
+        if active_status == "processing":
+            if not requested_is_present:
+                raise _TriggerTargetBlocked(
+                    "file is processing; new trigger context cannot be merged into a "
+                    "live lease"
+                )
+            result = (
+                "already_queued",
+                int(active["id"]),
+                "live lease already carries this context",
+                False,
+            )
+            return _finish_requeue_target(
+                connection, engagement_id, file_id, pending_trigger_rows, result
+            )
+        if str(active.get("assigned_agent") or "") or str(
+            active.get("lease_token") or ""
+        ):
+            raise _TriggerTargetBlocked(
+                "pending queue attempt has an inconsistent lease identity"
+            )
+        if str(active.get("queue_mode") or "initial") == "reanalysis":
+            raise _TriggerTargetBlocked(
+                "pending explicit reanalysis owns this file; close that attempt "
+                "before merging trigger context"
+            )
+        cursor = connection.execute(
+            """
+            UPDATE code_analysis_queue
+            SET priority = ?, batch_theme = ?, slot_types_json = ?,
+                guidance_hypotheses_json = ?, cross_file_triggers_json = ?,
+                queue_mode = 'trigger', updated_at = CURRENT_TIMESTAMP
+            WHERE engagement_id = ? AND id = ? AND status = 'pending'
+              AND assigned_agent = '' AND lease_token = ''
+            """,
+            (
+                int(target["priority"]),
+                batch_theme,
+                _json_list_text(_merge_unique_values(existing_slots, target["slot_types"])),
+                _json_list_text(
+                    _merge_unique_values(existing_guidance, target["guidance_hypotheses"])
+                ),
+                _json_list_text(
+                    _merge_unique_values(existing_triggers, target["cross_file_triggers"])
+                ),
+                engagement_id,
+                int(active["id"]),
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise _TriggerTargetBlocked("pending queue item changed during trigger merge")
+        return _finish_requeue_target(
+            connection,
+            engagement_id,
+            file_id,
+            pending_trigger_rows,
+            (
+                "already_queued",
+                int(active["id"]),
+                "merged into the pending attempt",
+                False,
+            ),
+        )
+
+    latest_contains_request = (
+        latest is not None
+        and int(latest["priority"]) == int(target["priority"])
+        and _contains_all_values(
+            _json_decode(latest.get("slot_types_json"), []), target["slot_types"]
+        )
+        and _contains_all_values(
+            _json_decode(latest.get("guidance_hypotheses_json"), []),
+            target["guidance_hypotheses"],
+        )
+        and _contains_all_values(
+            _json_decode(latest.get("cross_file_triggers_json"), []),
+            target["cross_file_triggers"],
+        )
+    )
+    if (
+        latest is not None
+        and str(latest["status"]) == "done"
+        and latest_contains_request
+        and _has_current_successful_review(connection, engagement_id, file_id)
+    ):
+        # A completed review that already carries this context is not reopened,
+        # so its pending triggers stay pending for an explicit disposition.
+        _sync_trigger_status_for_file(connection, engagement_id, file_id)
+        return (
+            "already_completed",
+            int(latest["id"]),
+            "current review already covers this context",
+            False,
+        )
+
+    cursor = connection.execute(
+        """
+        INSERT INTO code_analysis_queue (
+            engagement_id, file_id, priority,
+            batch_theme, slot_types_json, guidance_hypotheses_json,
+            cross_file_triggers_json, repo_generation, queue_mode
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'trigger')
+        """,
+        (
+            engagement_id,
+            file_id,
+            int(target["priority"]),
+            batch_theme,
+            _json_list_text(target["slot_types"]),
+            _json_list_text(target["guidance_hypotheses"]),
+            _json_list_text(target["cross_file_triggers"]),
+            int(target["repo_generation"]),
+        ),
+    )
+    reopened = latest is not None
+    detail = (
+        "reopened a terminal file with a new trigger attempt"
+        if reopened
+        else "created the first trigger attempt"
+    )
+    return _finish_requeue_target(
+        connection,
+        engagement_id,
+        file_id,
+        pending_trigger_rows,
+        ("inserted", int(cursor.lastrowid), detail, reopened),
+    )
+
+
+def _finish_requeue_target(
+    connection,
+    engagement_id: int,
+    file_id: int,
+    pending_trigger_rows: list[Any],
+    result: tuple[str, int, str, bool],
+) -> tuple[str, int, str, bool]:
+    """Bind the target's pending triggers to the written row and resync rollups."""
+    _outcome, queue_item_id, _detail, _reopened = result
+    pending_trigger_ids = [int(row["id"]) for row in pending_trigger_rows]
+    if pending_trigger_ids:
+        placeholders = ",".join("?" for _ in pending_trigger_ids)
+        connection.execute(
+            f"""
+            UPDATE code_analysis_triggers
+            SET target_file_id = ?, resolved_queue_item_id = ?,
+                status = ?, resolution_note = '',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE engagement_id = ? AND status = ?
+              AND id IN ({placeholders})
+            """,
+            (
+                file_id,
+                queue_item_id,
+                _TRIGGER_STATUS_QUEUED,
+                engagement_id,
+                _TRIGGER_STATUS_PENDING,
+                *pending_trigger_ids,
+            ),
+        )
+    _sync_file_analysis_status(connection, engagement_id, file_id)
+    _sync_trigger_status_for_file(connection, engagement_id, file_id)
+    return result
+
+
 def requeue_triggered_files(
     engagement_id: int,
     items: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    """Create new queue items for triggered files (cross-file analysis triggers).
+    """Turn cross-file triggers into linked current analysis attempts.
 
-    Each item must have at least ``file_path`` (or ``file_id``).  Optional
-    fields: ``priority``, ``batch_theme``, ``slot_types``,
-    ``guidance_hypotheses``.
+    Every input names exactly one target — ``file_id``, ``trigger_id``, or
+    ``file_path`` (with ``repo_id`` to disambiguate) — and receives exactly one
+    outcome. Inputs aggregate per target file, so ``input_trigger_count`` and
+    ``target_count`` are reported separately and the target buckets (inserted,
+    already_queued, already_completed, blocked) sum to ``target_count`` exactly.
+    Each target is written inside its own savepoint: a blocked target is
+    reported with its reason instead of discarding every other target's work.
     """
     engagement = _engagement_or_404(engagement_id)
-    inserted = 0
+    selectors = [_requeue_selector(item, index) for index, item in enumerate(items)]
+    counts = {
+        "inserted": 0,
+        "already_queued": 0,
+        "already_completed": 0,
+        "blocked": 0,
+    }
+    reopened_terminal_files = 0
     not_found: list[str] = []
     ambiguous: list[str] = []
-    already_queued = 0
-    already_completed = 0
+    input_file_ids: list[int | None] = []
+    input_outcomes: list[str] = []
+    target_outcomes: list[dict[str, Any]] = []
     with get_connection() as connection:
         connection.execute("BEGIN IMMEDIATE")
         aggregated: dict[int, dict[str, Any]] = {}
-        for item in items:
-            raw_file_id = item.get("file_id")
-            raw_file_path = str(item.get("file_path", "")).strip()
-            repo_id = item.get("repo_id")
-            validated_repo_id = (
-                _require_strict_positive_id(repo_id, field_name="repo_id")
-                if repo_id is not None
-                else None
+        for item, selector in zip(items, selectors, strict=True):
+            row, outcome, label = _resolve_requeue_target(
+                connection, engagement.id, selector
             )
-
-            file_id: int | None
-            if raw_file_id is not None:
-                validated_file_id = _require_strict_positive_id(
-                    raw_file_id,
-                    field_name="file_id",
-                )
-                row = connection.execute(
-                    """
-                    SELECT files.id, files.file_path, files.classification,
-                           files.analysis_priority, repos.active_generation
-                    FROM code_files AS files
-                    JOIN code_repos AS repos
-                      ON repos.id = files.repo_id
-                     AND repos.engagement_id = files.engagement_id
-                     AND repos.active_generation > 0
-                    WHERE files.engagement_id = ? AND files.id = ?
-                      AND files.retired_at IS NULL
-                    """,
-                    (engagement.id, validated_file_id),
-                ).fetchone()
-                if row is None:
-                    not_found.append(str(raw_file_id))
-                    continue
-                file_id = int(row["id"])
-                raw_file_path = str(row["file_path"])
-            elif raw_file_path:
-                rows = connection.execute(
-                    (
-                        """
-                        SELECT files.id, files.file_path, files.classification,
-                               files.analysis_priority, repos.active_generation
-                        FROM code_files AS files
-                        JOIN code_repos AS repos
-                          ON repos.id = files.repo_id
-                         AND repos.engagement_id = files.engagement_id
-                         AND repos.active_generation > 0
-                        WHERE files.engagement_id = ? AND files.file_path = ?
-                          AND files.retired_at IS NULL
-                        """
-                        if validated_repo_id is None
-                        else """
-                        SELECT files.id, files.file_path, files.classification,
-                               files.analysis_priority, repos.active_generation
-                        FROM code_files AS files
-                        JOIN code_repos AS repos
-                          ON repos.id = files.repo_id
-                         AND repos.engagement_id = files.engagement_id
-                         AND repos.active_generation > 0
-                        WHERE files.engagement_id = ? AND files.repo_id = ?
-                          AND files.file_path = ?
-                          AND files.retired_at IS NULL
-                        """
-                    ),
-                    (engagement.id, raw_file_path)
-                    if validated_repo_id is None
-                    else (engagement.id, validated_repo_id, raw_file_path),
-                ).fetchall()
-                if not rows:
-                    not_found.append(raw_file_path)
-                    continue
-                if len(rows) > 1:
-                    ambiguous.append(raw_file_path)
-                    continue
-                row = rows[0]
-                file_id = int(row["id"])
-            else:
+            if row is None:
+                (not_found if outcome == "not_found" else ambiguous).append(label)
+                input_file_ids.append(None)
+                input_outcomes.append(outcome)
                 continue
-
-            classification = str(row["classification"] or "").strip()
-            if classification not in _VALID_CLASSIFICATIONS:
-                raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT,
-                    detail=f"trigger target file {file_id} must be classified before requeue",
-                )
-            expected_priority = int(row["analysis_priority"])
-            supplied_priority = item.get("priority")
-            if supplied_priority is not None:
-                supplied_priority = _require_strict_priority(
-                    supplied_priority,
-                    field_name="trigger priority",
-                )
-                if supplied_priority != expected_priority:
-                    raise HTTPException(
-                        status_code=status.HTTP_409_CONFLICT,
-                        detail=(
-                            f"trigger priority for file {file_id} must equal current "
-                            f"analysis_priority {expected_priority} "
-                            f"(received {supplied_priority})"
-                        ),
-                    )
-
-            bucket = aggregated.setdefault(
+            file_id = int(row["id"])
+            input_file_ids.append(file_id)
+            input_outcomes.append("")
+            target = aggregated.setdefault(
                 file_id,
                 {
-                    "priority": expected_priority,
+                    "priority": int(row["analysis_priority"]),
                     "repo_generation": int(row["active_generation"]),
-                    "batch_theme": "cross-file-trigger",
+                    "file_path": str(row["file_path"]),
+                    "batch_theme": None,
                     "slot_types": [],
                     "guidance_hypotheses": [],
                     "cross_file_triggers": [],
-                    "file_path": raw_file_path,
+                    "blocked_reason": None,
                 },
             )
+            classification = str(row["classification"] or "").strip()
+            if classification not in _VALID_CLASSIFICATIONS:
+                target["blocked_reason"] = (
+                    "target file must be classified before requeue"
+                )
+            supplied_priority = item.get("priority")
+            if supplied_priority is not None:
+                supplied_priority = _require_strict_priority(
+                    supplied_priority, field_name="trigger priority"
+                )
+                if supplied_priority != target["priority"]:
+                    target["blocked_reason"] = (
+                        f"trigger priority must equal the current analysis_priority "
+                        f"{target['priority']} (received {supplied_priority})"
+                    )
             batch_theme = str(item.get("batch_theme", "")).strip()
             if batch_theme:
-                bucket["batch_theme"] = batch_theme
-
-            existing_slots = {str(slot) for slot in bucket["slot_types"]}
-            for slot_name in _normalize_slot_types(
-                item.get("slot_types"),
-                field_name="slot_types",
-            ):
-                if slot_name not in existing_slots:
-                    bucket["slot_types"].append(slot_name)
-                    existing_slots.add(slot_name)
-
-            guidance = _normalize_guidance_hypotheses(
-                item.get("guidance_hypotheses"),
-                field_name="guidance_hypotheses",
+                target["batch_theme"] = batch_theme
+            target["slot_types"] = _merge_unique_values(
+                target["slot_types"],
+                _normalize_slot_types(item.get("slot_types"), field_name="slot_types"),
             )
-            reason = item.get("reason", "")
-            trigger_ctx = item.get("trigger_context")
-            bucket_guidance = bucket["guidance_hypotheses"]
-            for entry in guidance:
-                if entry not in bucket_guidance:
-                    bucket_guidance.append(entry)
+            target["guidance_hypotheses"] = _merge_unique_values(
+                target["guidance_hypotheses"],
+                _normalize_guidance_hypotheses(
+                    item.get("guidance_hypotheses"),
+                    field_name="guidance_hypotheses",
+                ),
+            )
+            trigger_payload = _requeue_trigger_payload(
+                item, file_path=target["file_path"]
+            )
+            if trigger_payload is not None:
+                target["cross_file_triggers"] = _merge_unique_values(
+                    target["cross_file_triggers"], [trigger_payload]
+                )
 
-            if reason or trigger_ctx:
-                trigger_payload: dict[str, Any] = {
-                    "file_path": str(bucket.get("file_path") or raw_file_path),
-                    "source": "cross_file_trigger",
-                }
-                if reason:
-                    trigger_payload["reason"] = str(reason)
-                if isinstance(trigger_ctx, dict):
-                    reserved_context_keys = {
-                        "file_path",
-                        "reason",
-                        "source",
-                        "trigger_id",
-                        "source_file_id",
-                        "source_file_path",
-                        "source_queue_item_id",
+        for file_id, target in aggregated.items():
+            connection.execute("SAVEPOINT requeue_target")
+            try:
+                outcome, queue_item_id, detail, reopened = _apply_requeue_target(
+                    connection, engagement.id, file_id, target
+                )
+            except _TriggerTargetBlocked as blocked:
+                connection.execute("ROLLBACK TO requeue_target")
+                connection.execute("RELEASE requeue_target")
+                counts["blocked"] += 1
+                target_outcomes.append(
+                    {
+                        "file_id": file_id,
+                        "file_path": target["file_path"],
+                        "queue_item_id": None,
+                        "outcome": "blocked",
+                        "detail": str(blocked),
                     }
-                    trigger_payload.update(
-                        {
-                            key: value
-                            for key, value in trigger_ctx.items()
-                            if key not in reserved_context_keys
-                        }
-                    )
-                trigger_payload = {
-                    key: value
-                    for key, value in trigger_payload.items()
-                    if value not in (None, "", [], {})
+                )
+                continue
+            connection.execute("RELEASE requeue_target")
+            counts[outcome] += 1
+            reopened_terminal_files += 1 if reopened else 0
+            target_outcomes.append(
+                {
+                    "file_id": file_id,
+                    "file_path": target["file_path"],
+                    "queue_item_id": queue_item_id,
+                    "outcome": outcome,
+                    "detail": detail,
                 }
-                bucket_triggers = bucket["cross_file_triggers"]
-                signature = json.dumps(trigger_payload, sort_keys=True, default=str)
-                existing_triggers = {
-                    json.dumps(entry, sort_keys=True, default=str)
-                    for entry in bucket_triggers
-                }
-                if signature not in existing_triggers:
-                    bucket_triggers.append(trigger_payload)
+            )
 
-        for file_id, item in aggregated.items():
-            pending_trigger_rows = connection.execute(
-                """
-                SELECT triggers.id, triggers.source_queue_item_id,
-                       triggers.source_file_id, source_files.file_path AS source_file_path,
-                       triggers.target_file_path, triggers.vuln_class, triggers.reason
-                FROM code_analysis_triggers AS triggers
-                JOIN code_files AS source_files
-                  ON source_files.id = triggers.source_file_id
-                 AND source_files.engagement_id = triggers.engagement_id
-                JOIN code_repos AS source_repos
-                  ON source_repos.id = triggers.repo_id
-                 AND source_repos.engagement_id = triggers.engagement_id
-                 AND source_repos.active_generation > 0
-                JOIN code_files AS target_files
-                  ON target_files.id = ?
-                 AND target_files.engagement_id = triggers.engagement_id
-                WHERE triggers.engagement_id = ? AND triggers.status = ?
-                  AND triggers.repo_generation = source_repos.active_generation
-                  AND triggers.source_superseded_at IS NULL
-                  AND (
-                      triggers.target_file_id = target_files.id
-                      OR (
-                          triggers.target_file_id IS NULL
-                          AND triggers.target_file_path = target_files.file_path
-                          AND source_files.repo_id = target_files.repo_id
-                      )
-                  )
-                ORDER BY triggers.id
-                """,
-                (file_id, engagement.id, _TRIGGER_STATUS_PENDING),
-            ).fetchall()
-            bucket_triggers = item["cross_file_triggers"]
-            existing_trigger_ids = {
-                int(entry["trigger_id"])
-                for entry in bucket_triggers
-                if isinstance(entry, dict) and entry.get("trigger_id") is not None
-            }
-            for trigger_row in pending_trigger_rows:
-                trigger_id = int(trigger_row["id"])
-                if trigger_id in existing_trigger_ids:
-                    continue
-                trigger_payload = {
-                    "trigger_id": trigger_id,
-                    "file_path": str(trigger_row["target_file_path"]),
-                    "source": "code_analysis_trigger",
-                    "source_file_id": int(trigger_row["source_file_id"]),
-                    "source_file_path": str(trigger_row["source_file_path"]),
-                    "vuln_class": str(trigger_row["vuln_class"]),
-                    "reason": str(trigger_row["reason"]),
-                }
-                if trigger_row["source_queue_item_id"] is not None:
-                    trigger_payload["source_queue_item_id"] = int(
-                        trigger_row["source_queue_item_id"]
-                    )
-                bucket_triggers.append(trigger_payload)
-                existing_trigger_ids.add(trigger_id)
-
-            current_rows = [
-                dict(queue_row)
-                for queue_row in connection.execute(
-                    """
-                    SELECT *
-                    FROM code_analysis_queue
-                    WHERE engagement_id = ? AND file_id = ? AND repo_generation = ?
-                    ORDER BY id
-                    """,
-                    (engagement.id, file_id, int(item["repo_generation"])),
-                ).fetchall()
-            ]
-            latest, active, active_issue = _canonical_queue_attempt_state(current_rows)
-            if active_issue is not None:
-                raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT,
-                    detail=(
-                        f"trigger target file {file_id} has {active_issue} queue history; "
-                        "reconcile it before requeue"
-                    ),
-                )
-
-            queue_item_id: int
-            if active is not None:
-                active_status = str(active["status"])
-                existing_slots = _json_decode(active.get("slot_types_json"), [])
-                existing_guidance = _json_decode(
-                    active.get("guidance_hypotheses_json"), []
-                )
-                existing_triggers = _json_decode(
-                    active.get("cross_file_triggers_json"), []
-                )
-                requested_is_present = (
-                    int(active["priority"]) == int(item["priority"])
-                    and _contains_all_values(existing_slots, item["slot_types"])
-                    and _contains_all_values(
-                        existing_guidance, item["guidance_hypotheses"]
-                    )
-                    and _contains_all_values(
-                        existing_triggers, item["cross_file_triggers"]
-                    )
-                )
-                if active_status == "processing":
-                    if not requested_is_present:
-                        raise HTTPException(
-                            status_code=status.HTTP_409_CONFLICT,
-                            detail=(
-                                f"trigger target file {file_id} is processing; new trigger "
-                                "context cannot be merged into a live lease"
-                            ),
-                        )
-                    queue_item_id = int(active["id"])
-                    already_queued += 1
-                else:
-                    if str(active.get("assigned_agent") or "") or str(
-                        active.get("lease_token") or ""
-                    ):
-                        raise HTTPException(
-                            status_code=status.HTTP_409_CONFLICT,
-                            detail=(
-                                f"trigger target file {file_id} has an inconsistently leased "
-                                "pending queue attempt"
-                            ),
-                        )
-                    active_mode = str(active.get("queue_mode") or "initial")
-                    if active_mode == "reanalysis":
-                        raise HTTPException(
-                            status_code=status.HTTP_409_CONFLICT,
-                            detail=(
-                                f"trigger target file {file_id} has pending explicit "
-                                "reanalysis; trigger context was not merged"
-                            ),
-                        )
-                    merged_slots = _merge_unique_values(
-                        existing_slots, item["slot_types"]
-                    )
-                    merged_guidance = _merge_unique_values(
-                        existing_guidance, item["guidance_hypotheses"]
-                    )
-                    merged_triggers = _merge_unique_values(
-                        existing_triggers, item["cross_file_triggers"]
-                    )
-                    cursor = connection.execute(
-                        """
-                        UPDATE code_analysis_queue
-                        SET priority = ?, batch_theme = ?, slot_types_json = ?,
-                            guidance_hypotheses_json = ?, cross_file_triggers_json = ?,
-                            queue_mode = 'trigger', updated_at = CURRENT_TIMESTAMP
-                        WHERE engagement_id = ? AND id = ? AND status = 'pending'
-                          AND assigned_agent = '' AND lease_token = ''
-                        """,
-                        (
-                            int(item["priority"]),
-                            str(item["batch_theme"]),
-                            _json_list_text(merged_slots),
-                            _json_list_text(merged_guidance),
-                            _json_list_text(merged_triggers),
-                            engagement.id,
-                            int(active["id"]),
-                        ),
-                    )
-                    if cursor.rowcount != 1:
-                        raise HTTPException(
-                            status_code=status.HTTP_409_CONFLICT,
-                            detail="pending queue item changed during trigger merge",
-                        )
-                    queue_item_id = int(active["id"])
-                    already_queued += 1
-            else:
-                latest_contains_request = (
-                    latest is not None
-                    and int(latest["priority"]) == int(item["priority"])
-                    and _contains_all_values(
-                        _json_decode(latest.get("slot_types_json"), []),
-                        item["slot_types"],
-                    )
-                    and _contains_all_values(
-                        _json_decode(latest.get("guidance_hypotheses_json"), []),
-                        item["guidance_hypotheses"],
-                    )
-                    and _contains_all_values(
-                        _json_decode(latest.get("cross_file_triggers_json"), []),
-                        item["cross_file_triggers"],
-                    )
-                )
-                if (
-                    latest is not None
-                    and str(latest["status"]) == "done"
-                    and latest_contains_request
-                    and _has_current_successful_review(
-                        connection, engagement.id, file_id
-                    )
-                ):
-                    already_completed += 1
-                    _sync_trigger_status_for_file(connection, engagement.id, file_id)
-                    continue
-                cursor = connection.execute(
-                    """
-                    INSERT INTO code_analysis_queue (
-                        engagement_id, file_id, priority,
-                        batch_theme, slot_types_json, guidance_hypotheses_json,
-                        cross_file_triggers_json, repo_generation, queue_mode
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'trigger')
-                    """,
-                    (
-                        engagement.id,
-                        file_id,
-                        int(item["priority"]),
-                        str(item["batch_theme"]),
-                        _json_list_text(item["slot_types"]),
-                        _json_list_text(item["guidance_hypotheses"]),
-                        _json_list_text(item["cross_file_triggers"]),
-                        int(item["repo_generation"]),
-                    ),
-                )
-                inserted += 1
-                queue_item_id = int(cursor.lastrowid)
-
-            pending_trigger_ids = [int(row["id"]) for row in pending_trigger_rows]
-            if pending_trigger_ids:
-                placeholders = ",".join("?" for _ in pending_trigger_ids)
-                connection.execute(
-                    f"""
-                    UPDATE code_analysis_triggers
-                    SET target_file_id = ?, resolved_queue_item_id = ?,
-                        status = ?, resolution_note = '',
-                        updated_at = CURRENT_TIMESTAMP
-                    WHERE engagement_id = ? AND status = ?
-                      AND id IN ({placeholders})
-                    """,
-                    (
-                        file_id,
-                        queue_item_id,
-                        _TRIGGER_STATUS_QUEUED,
-                        engagement.id,
-                        _TRIGGER_STATUS_PENDING,
-                        *pending_trigger_ids,
-                    ),
-                )
-            _sync_file_analysis_status(connection, engagement.id, file_id)
-            _sync_trigger_status_for_file(connection, engagement.id, file_id)
+    outcome_by_file = {row["file_id"]: row["outcome"] for row in target_outcomes}
+    inputs = [
+        {
+            "index": index,
+            "selector": selector,
+            "file_id": file_id,
+            "outcome": outcome or outcome_by_file[file_id],
+        }
+        for index, (selector, file_id, outcome) in enumerate(
+            zip(selectors, input_file_ids, input_outcomes, strict=True)
+        )
+    ]
     return {
-        "inserted": inserted,
-        "total": len(items),
+        "input_trigger_count": len(items),
+        "target_count": len(aggregated),
+        **counts,
+        "reopened_terminal_files": reopened_terminal_files,
         "not_found": not_found,
         "ambiguous": ambiguous,
-        "already_queued": already_queued,
-        "already_completed": already_completed,
+        "outcomes": target_outcomes,
+        "inputs": inputs,
     }
 
 

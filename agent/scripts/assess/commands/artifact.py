@@ -5,11 +5,13 @@ import argparse
 import json
 import shlex
 import sys
+from typing import Any
 from urllib.parse import quote, urlencode
 
 from assess.lib.client import (
     AssessmentClient,
     AssessError,
+    canonical_artifact_path,
     require_artifact_write_response,
     require_write_result,
 )
@@ -137,9 +139,24 @@ def register(subparsers) -> None:
     sp_unscratch.set_defaults(func=_run_scratch, scratch=False)
 
 
-def _client(args) -> AssessmentClient:
+def _client_and_config(args) -> tuple[AssessmentClient, Any]:
     cfg = load_config(args.engagement_dir)
-    return AssessmentClient(cfg.base_url, cfg.engagement_key)
+    return AssessmentClient(cfg.base_url, cfg.engagement_key), cfg
+
+
+def _client(args) -> AssessmentClient:
+    return _client_and_config(args)[0]
+
+
+def _canonical_artifact_path(
+    engagement_dir: str, path_value: str, *, operation: str
+) -> str:
+    """CLI form of `client.canonical_artifact_path`: report and exit, never raise."""
+    try:
+        return canonical_artifact_path(engagement_dir, path_value, operation=operation)
+    except AssessError as exc:
+        print(str(exc), file=sys.stderr)
+        sys.exit(1)
 
 
 def _render_rows(rows: list[dict]) -> str:
@@ -301,10 +318,13 @@ def _run_get(args) -> None:
 
 
 def _run_register(args) -> None:
-    client = _client(args)
+    client, cfg = _client_and_config(args)
     try:
+        canonical_path = _canonical_artifact_path(
+            cfg.engagement_dir, args.path, operation="register artifact"
+        )
         payload = {
-            "path": args.path,
+            "path": canonical_path,
             "kind": args.kind,
             "media_type": args.media_type,
             "producer_agent_id": args.agent_id or None,
@@ -314,7 +334,7 @@ def _run_register(args) -> None:
         }
         row = require_artifact_write_response(
             client.post("artifacts", payload),
-            artifact_path=args.path,
+            artifact_path=canonical_path,
             operation="register artifact",
         )
         print(json.dumps(row, indent=2, ensure_ascii=False) if args.as_json else _render_rows([row]))
@@ -365,7 +385,7 @@ def _run_unlink_finding(args) -> None:
 def _run_scratch(args) -> None:
     scratch = args.scratch
     action_label = "mark-scratch" if scratch else "unmark-scratch"
-    client = _client(args)
+    client, cfg = _client_and_config(args)
     try:
         under = (args.under or "").strip()
         if under:
@@ -415,12 +435,15 @@ def _run_scratch(args) -> None:
                 expected={"id": int(target), "scratch": scratch},
             )
         else:
+            canonical_path = _canonical_artifact_path(
+                cfg.engagement_dir, target, operation=f"artifact {action_label}"
+            )
             row = require_artifact_write_response(
                 client.post(
                     "artifacts/scratch-by-path",
-                    {"path": target, "scratch": scratch},
+                    {"path": canonical_path, "scratch": scratch},
                 ),
-                artifact_path=target,
+                artifact_path=canonical_path,
                 operation=f"artifact {action_label}",
             )
             if row.get("scratch") is not scratch:

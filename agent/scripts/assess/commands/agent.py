@@ -957,10 +957,12 @@ def _attach_dispatch_provenance(payload: dict, cfg) -> list[str]:
     payload.pop("launcher_effective_model", None)
     payload.pop("launcher_effective_reasoning", None)
     payload.pop("launcher_effective_source", None)
-    warnings.append(
-        "launcher-effective model and reasoning are unavailable; "
-        "provider-observed model and reasoning are unknown"
-    )
+    # Dropping the fields IS the enforcement; the absence is permanent for
+    # ordinary dispatches and already visible on the row, in `agent list`, and in
+    # resume-brief. Announcing it again on every single start only spent the
+    # stderr channel that real failures use — the fact is published once in the
+    # `agent start` contract, and the dispatch lint warns about the half the
+    # caller can still fix.
     return warnings
 
 

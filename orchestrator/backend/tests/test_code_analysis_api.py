@@ -9922,12 +9922,14 @@ def test_readiness_separates_snapshot_lifecycle_blockers_from_quality_warnings(
     assert {item["code"] for item in hunt["blockers"]} == {
         "threat_model_stale",
         "files_unclassified",
+        "admitted_files_unqueued",
     }
     assert {
         item["code"]: item["overrideable"] for item in hunt["blockers"]
     } == {
         "threat_model_stale": False,
         "files_unclassified": True,
+        "admitted_files_unqueued": True,
     }
 
     threat = client.post(
@@ -9942,6 +9944,20 @@ def test_readiness_separates_snapshot_lifecycle_blockers_from_quality_warnings(
     assert threat.status_code == 200, threat.text
     for row in files:
         _classify_file(client, engagement_key, int(row["id"]), "low", 10)
+    # A5: classification alone does not open hunt — the durable queue is what
+    # Phase 2 claims from. See tests/test_queue_population_gate.py.
+    classified_only = client.get(f"{base}/readiness?target_phase=hunt").json()
+    assert classified_only["transition_ready"] is False
+    assert [blocker["code"] for blocker in classified_only["blockers"]] == [
+        "admitted_files_unqueued"
+    ]
+    queued = client.post(
+        f"{base}/analysis-queue",
+        json={
+            "items": [{"file_id": row["id"], "priority": 10} for row in files]
+        },
+    )
+    assert queued.status_code == 201, queued.text
     ready = client.get(f"{base}/readiness?target_phase=hunt").json()
     assert ready["transition_ready"] is True
     assert ready["blockers"] == []
@@ -15046,16 +15062,23 @@ def test_trigger_requeue_rejects_unclassified_and_mismatched_priority(
     endpoint = (
         f"/engagements/{engagement_key}/assessment/code/analysis-queue/requeue"
     )
+    # A15d: a blocked target is reported with its reason and writes nothing;
+    # it no longer decides the fate of every other target in the batch.
     unclassified = client.post(
         endpoint, json={"items": [{"file_id": file_row["id"]}]}
     )
-    assert unclassified.status_code == 409, unclassified.text
+    assert unclassified.status_code == 201, unclassified.text
+    assert unclassified.json()["blocked"] == 1
+    assert unclassified.json()["inserted"] == 0
+    assert "classified" in unclassified.json()["outcomes"][0]["detail"]
     _classify_file(client, engagement_key, int(file_row["id"]), "high", 70)
     mismatched = client.post(
         endpoint,
         json={"items": [{"file_id": file_row["id"], "priority": 71}]},
     )
-    assert mismatched.status_code == 409, mismatched.text
+    assert mismatched.status_code == 201, mismatched.text
+    assert mismatched.json()["blocked"] == 1
+    assert "analysis_priority" in mismatched.json()["outcomes"][0]["detail"]
     with db_module.get_connection() as connection:
         assert connection.execute(
             "SELECT COUNT(*) FROM code_analysis_queue WHERE file_id = ?",
@@ -16628,7 +16651,9 @@ def test_trigger_requeue_rejects_superseded_active_queue_attempt(
         json={"items": [{"file_id": file_id, "reason": "fresh trigger context"}]},
     )
 
-    assert response.status_code == 409, response.text
+    assert response.status_code == 201, response.text
+    assert response.json()["blocked"] == 1
+    assert "reconciliation" in response.json()["outcomes"][0]["detail"]
     with db_module.get_connection() as connection:
         row = connection.execute(
             "SELECT priority, queue_mode, cross_file_triggers_json FROM code_analysis_queue WHERE id = ?",

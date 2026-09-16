@@ -9,6 +9,7 @@ import re
 import stat
 import sys
 from pathlib import Path
+from urllib.parse import urlencode
 
 from assess.lib.code_audit import write_json_snapshot
 from assess.lib.client import AssessmentClient
@@ -40,10 +41,19 @@ _ACTION_HELP: dict[str, str] = {
         "Usage: vigil assess code-dispatch stats\n\n"
         "Print current and historical analysis-queue counts.\n"
     ),
+    "list": (
+        "Usage: vigil assess code-dispatch list [--status STATUS] [--repo-id ID] "
+        "[--classification TIER] [--batch-theme THEME] [--queue-mode MODE] "
+        "[--limit N] [--offset N] [--json|--ids-only]\n\n"
+        "Page the current-generation analysis queue without claiming anything.\n"
+        "Rows are ordered exactly as fetch claims them (priority desc, id asc).\n"
+        "--json and --ids-only both emit a payload `fetch --ids-file` accepts, so "
+        "explicit IDs stay recoverable after the queue-submission output scrolls.\n"
+    ),
     "fetch": (
         "Usage: vigil assess code-dispatch fetch <limit> <agent-name> "
         "[--repo-id ID] [--classification TIER] [--batch-theme THEME] "
-        "[--ids-file PATH]\n\n"
+        "[--queue-mode MODE] [--ids-file PATH]\n\n"
         "Atomically claim matching current queue items for one analysis worker.\n"
     ),
     "heartbeat": (
@@ -124,7 +134,7 @@ def register(subparsers) -> None:
     p.add_argument(
         "action",
         choices=tuple(_ACTION_HELP),
-        help="stats|fetch|heartbeat|done|error|needs-context|reset-stale|retry-error|retry-needs-context|queue|reanalyze|requeue-triggers|list-triggers|resolve-triggers",
+        help="stats|list|fetch|heartbeat|done|error|needs-context|reset-stale|retry-error|retry-needs-context|queue|reanalyze|requeue-triggers|list-triggers|resolve-triggers",
     )
     p.add_argument("extra", nargs=argparse.REMAINDER, help="Action-specific arguments")
     p.set_defaults(func=run)
@@ -143,12 +153,15 @@ def run(args) -> None:
 
     if action == "stats":
         _stats(cfg)
+    elif action == "list":
+        filters, output = _parse_list_filters(extra)
+        _list(cfg, filters, output)
     elif action == "fetch":
         if len(extra) < 2:
             print(
                 "Usage: code-dispatch fetch <limit> <agent-name> "
                 "[--repo-id ID] [--classification TIER] [--batch-theme THEME] "
-                "[--ids-file PATH]",
+                "[--queue-mode MODE] [--ids-file PATH]",
                 file=sys.stderr,
             )
             sys.exit(1)
@@ -378,6 +391,7 @@ def _parse_fetch_filters(tokens: list[str]) -> dict[str, object]:
         "--repo-id": "repo_id",
         "--classification": "classification",
         "--batch-theme": "batch_theme",
+        "--queue-mode": "queue_mode",
         "--ids-file": "ids_file",
     }
     while index < len(tokens):
@@ -399,6 +413,136 @@ def _parse_fetch_filters(tokens: list[str]) -> dict[str, object]:
             filters[field] = value
         index += 2
     return filters
+
+
+# Flag -> query field, in the canonical order the query string is built, so the
+# same filter set always produces the same endpoint regardless of typing order.
+_LIST_FILTER_OPTIONS = (
+    ("--status", "status"),
+    ("--repo-id", "repo_id"),
+    ("--classification", "classification"),
+    ("--batch-theme", "batch_theme"),
+    ("--queue-mode", "queue_mode"),
+    ("--limit", "limit"),
+    ("--offset", "offset"),
+)
+_LIST_INT_MINIMUMS = {"repo_id": 1, "limit": 1, "offset": 0}
+
+
+def _parse_list_filters(tokens: list[str]) -> tuple[dict[str, str], str]:
+    """Parse `code-dispatch list` flags into query fields plus an output mode."""
+    fields = dict(_LIST_FILTER_OPTIONS)
+    values: dict[str, str] = {}
+    output = "table"
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token in {"--json", "--ids-only"}:
+            if output != "table":
+                print(
+                    "ERROR: choose either --json or --ids-only, not both",
+                    file=sys.stderr,
+                )
+                raise SystemExit(1)
+            output = "json" if token == "--json" else "ids"
+            index += 1
+            continue
+        field = fields.get(token)
+        if field is None or index + 1 >= len(tokens):
+            print(
+                f"Unknown or incomplete code-dispatch list option: {token}",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+        if field in values:
+            print(f"ERROR: {token} was specified more than once", file=sys.stderr)
+            raise SystemExit(1)
+        value = tokens[index + 1]
+        minimum = _LIST_INT_MINIMUMS.get(field)
+        if minimum is None:
+            if not value.strip():
+                print(f"ERROR: {token} requires a value", file=sys.stderr)
+                raise SystemExit(1)
+        elif re.fullmatch(r"[0-9]+", value) is None or int(value) < minimum:
+            print(
+                f"ERROR: {token} requires an integer >= {minimum}",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+        values[field] = value
+        index += 2
+    return values, output
+
+
+def _warn_if_page_is_partial(result: dict, output: str) -> None:
+    """Say so on stderr when an ids file is only part of the queue.
+
+    This verb exists because the insertion output truncates and its IDs become
+    unrecoverable. A listing that silently stops at the page limit reproduces
+    that failure one layer down, and `--ids-only` is where it would bite hardest:
+    its whole purpose is to be redirected straight into a file that the operator
+    then hands to `fetch --ids-file`, so a short page is a short claim set with
+    nothing on stdout to reveal it. The table form already says "More rows".
+    """
+    if not result.get("has_more"):
+        return
+    listed = len(result.get("item_ids") or [])
+    offset = int(result.get("offset", 0) or 0)
+    total = result.get("total", "?")
+    print(
+        f"code-dispatch list: this page carries {listed} of {total} matching rows "
+        f"(offset {offset}). Re-run with --offset {offset + listed} and concatenate, "
+        f"or raise --limit, before using the output as an ids file.",
+        file=sys.stderr,
+    )
+
+
+def _list(cfg, filters: dict[str, str], output: str) -> None:
+    """Render one bounded page of the current-generation analysis queue."""
+    query = urlencode(
+        [(field, filters[field]) for _flag, field in _LIST_FILTER_OPTIONS if field in filters]
+    )
+    endpoint = "code/analysis-queue" + (f"?{query}" if query else "")
+    with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
+        result = client.get(endpoint)
+
+    if not isinstance(result, dict):
+        print(
+            "Backend returned a non-object analysis-queue listing", file=sys.stderr
+        )
+        raise SystemExit(1)
+    if output in {"json", "ids"}:
+        if output == "ids":
+            print(json.dumps(result.get("item_ids") or []))
+        else:
+            print(json.dumps(result, indent=2, ensure_ascii=False))
+        _warn_if_page_is_partial(result, output)
+        return
+
+    items = [item for item in (result.get("items") or []) if isinstance(item, dict)]
+    total = result.get("total", len(items))
+    offset = int(result.get("offset", 0) or 0)
+    print(f"=== Code Analysis Queue ({len(items)} of {total}, offset {offset}) ===")
+    if not items:
+        print("No current-generation queue rows matched these filters.")
+        return
+    print(
+        f"{'ID':>8}  {'STATUS':<13}{'MODE':<17}{'PRI':>4}  {'CLASS':<10}"
+        f"{'THEME':<21}{'AGENT':<17}FILE"
+    )
+    for item in items:
+        print(
+            f"{item.get('id', '?')!s:>8}  {item.get('status', ''):<13}"
+            f"{item.get('queue_mode', ''):<17}{item.get('priority', 0)!s:>4}  "
+            f"{item.get('classification', ''):<10}{item.get('batch_theme', ''):<21}"
+            f"{item.get('agent_name', ''):<17}{item.get('file_path', '')}"
+        )
+    if result.get("has_more"):
+        print(f"\nMore rows: re-run with --offset {offset + len(items)}")
+    print(
+        "Add --ids-only (or --json) to write this page as an ids file for "
+        "`code-dispatch fetch --ids-file`."
+    )
 
 
 def _prepare_dispatch_scratch_dir(
@@ -1180,12 +1324,134 @@ def _queue(
         sys.exit(1)
 
 
+# One strict selector per input. `list-triggers` rows carry `id` AND
+# `target_file_path`, so trigger_id wins over the path it already implies;
+# file_id and trigger_id name different rows and are never both accepted.
+_TRIGGER_ID_FIELDS = ("trigger_id", "id")
+_TRIGGER_PATH_FIELDS = ("file_path", "target_file_path")
+_TRIGGER_PAYLOAD_FIELDS = ("priority", "batch_theme", "slot_types", "guidance_hypotheses")
+# Durable trigger-row columns. The backend rehydrates these onto the queue row
+# from its own tables, so echoing them back as free context only duplicates
+# state — `vuln_class` and `reason` are the specialist's words and stay.
+_TRIGGER_ROW_FIELDS = frozenset({
+    "id",
+    "trigger_id",
+    "engagement_id",
+    "repo_id",
+    "repo_generation",
+    "source_queue_item_id",
+    "source_file_id",
+    "source_file_path",
+    "target_file_id",
+    "target_file_path",
+    "resolved_target_file_path",
+    "resolved_queue_item_id",
+    "status",
+    "resolution_note",
+    "source_manifest_digest",
+    "source_superseded_at",
+    "source_supersession_reason",
+    "replacement_repo_generation",
+    "created_at",
+    "updated_at",
+})
+
+
+_REQUEUE_RESPONSE_COUNTS = (
+    "input_trigger_count",
+    "target_count",
+    "inserted",
+    "already_queued",
+    "already_completed",
+    "blocked",
+    "reopened_terminal_files",
+)
+
+
+def _require_positive_int(value: object, label: str) -> int:
+    if type(value) is not int or value <= 0:
+        print(f"ERROR: {label} must be a positive integer", file=sys.stderr)
+        raise SystemExit(1)
+    return value
+
+
+def _requeue_item(trigger: object, index: int) -> dict:
+    """Normalize one trigger input into the backend's strict requeue item."""
+    if not isinstance(trigger, dict):
+        print(
+            f"ERROR: trigger {index} must be a JSON object naming one target; "
+            "a bare id is not a selector",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+
+    item: dict = {}
+    file_id = trigger.get("file_id")
+    trigger_id = next(
+        (trigger[field] for field in _TRIGGER_ID_FIELDS if trigger.get(field) is not None),
+        None,
+    )
+    if file_id is not None and trigger_id is not None:
+        print(
+            f"ERROR: trigger {index} names both file_id and trigger_id; supply "
+            "exactly one selector",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+    if file_id is not None:
+        item["file_id"] = _require_positive_int(file_id, f"trigger {index} file_id")
+    elif trigger_id is not None:
+        item["trigger_id"] = _require_positive_int(
+            trigger_id, f"trigger {index} trigger_id"
+        )
+    else:
+        file_path = next(
+            (
+                str(trigger[field]).strip()
+                for field in _TRIGGER_PATH_FIELDS
+                if str(trigger.get(field) or "").strip()
+            ),
+            "",
+        )
+        if not file_path:
+            print(
+                f"ERROR: trigger {index} needs file_id, trigger_id/id, or "
+                "file_path/target_file_path",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+        item["file_path"] = file_path
+        if trigger.get("repo_id") is not None:
+            item["repo_id"] = _require_positive_int(
+                trigger["repo_id"], f"trigger {index} repo_id"
+            )
+
+    if trigger.get("reason"):
+        item["reason"] = str(trigger["reason"])
+    for field in _TRIGGER_PAYLOAD_FIELDS:
+        if trigger.get(field) is not None:
+            item[field] = trigger[field]
+    context = {
+        key: value
+        for key, value in trigger.items()
+        if key not in _TRIGGER_ROW_FIELDS
+        and key not in _TRIGGER_PAYLOAD_FIELDS
+        and key not in {"file_id", "file_path", "reason"}
+    }
+    context["source"] = "cross_file_trigger"
+    item["trigger_context"] = context
+    return item
+
+
 def _requeue_triggers(cfg, triggers_file: str) -> None:
     """Requeue cross-file triggers as new analysis queue items.
 
-    Reads a JSON file containing a cross_file_triggers array (as produced in
-    analysis results) and reformats each trigger as a queue item with the
-    triggering finding context, then posts to code/analysis-queue.
+    Accepts a bare array or an object holding `cross_file_triggers`/`triggers`/
+    `items`, so both an analysis result's trigger array and `list-triggers`
+    output are consumable unchanged. Every input is reduced to exactly one
+    selector before the write, and the response's per-target outcomes decide the
+    exit status: a batch that left any target blocked or any selector
+    unresolved is not a success.
     """
     fp = Path(triggers_file)
     if not fp.is_file():
@@ -1193,46 +1459,21 @@ def _requeue_triggers(cfg, triggers_file: str) -> None:
         sys.exit(1)
 
     raw = json.loads(fp.read_text(encoding="utf-8"))
-
-    # Accept either a bare array or an object with a cross_file_triggers key
     if isinstance(raw, dict):
-        triggers = raw.get('cross_file_triggers', [])
+        triggers = raw.get(
+            "cross_file_triggers", raw.get("triggers", raw.get("items", []))
+        )
     elif isinstance(raw, list):
         triggers = raw
     else:
         print("Triggers file must contain a JSON array or object", file=sys.stderr)
         sys.exit(1)
 
-    if not triggers:
-        print("No triggers to requeue.")
-        return
+    if not isinstance(triggers, list) or not triggers:
+        print("Triggers file does not contain any triggers to requeue", file=sys.stderr)
+        sys.exit(1)
 
-    # Convert triggers to queue items
-    items = []
-    for trigger in triggers:
-        item: dict = {
-            'file_path': trigger.get('file_path', ''),
-            'reason': trigger.get('reason', ''),
-            'trigger_context': {
-                'vuln_class': trigger.get('vuln_class', ''),
-                'source': 'cross_file_trigger',
-            },
-        }
-        passthrough_fields = {
-            'file_id',
-            'repo_id',
-            'priority',
-            'batch_theme',
-            'slot_types',
-            'guidance_hypotheses',
-        }
-        # Pass through any extra fields from the trigger
-        for key in trigger:
-            if key in passthrough_fields:
-                item[key] = trigger[key]
-            elif key not in ('file_path', 'reason', 'vuln_class'):
-                item['trigger_context'][key] = trigger[key]
-        items.append(item)
+    items = [_requeue_item(trigger, index) for index, trigger in enumerate(triggers)]
 
     submit_snapshot = write_json_snapshot(
         cfg.engagement_dir,
@@ -1253,18 +1494,60 @@ def _requeue_triggers(cfg, triggers_file: str) -> None:
         source_path=str(submit_snapshot),
         metadata={"command": "code-dispatch requeue-triggers", "count": len(items)},
     )
-    inserted_count = result.get('inserted', len(items)) if isinstance(result, dict) else len(items)
-    print(f"Requeued {inserted_count} trigger item(s)")
-    if isinstance(result, dict):
-        not_found = result.get("not_found") or []
-        ambiguous = result.get("ambiguous") or []
-        if not_found:
-            print(f"Not found: {', '.join(str(item) for item in not_found)}")
-        if ambiguous:
-            print(f"Ambiguous without repo_id: {', '.join(str(item) for item in ambiguous)}")
+    if not isinstance(result, dict):
+        print("Backend returned a non-object requeue response", file=sys.stderr)
+        sys.exit(1)
+
+    counts: dict[str, int] = {}
+    for field in _REQUEUE_RESPONSE_COUNTS:
+        value = result.get(field)
+        if type(value) is not int:
+            # Exit status depends on these, so an absent count must fail closed
+            # rather than read as zero blocked targets.
+            print(f"Requeue response is missing the {field} count", file=sys.stderr)
+            sys.exit(1)
+        counts[field] = value
+    blocked = counts["blocked"]
+    not_found = result.get("not_found") or []
+    ambiguous = result.get("ambiguous") or []
+    print(
+        f"Requeued {counts['input_trigger_count']} trigger input(s) across "
+        f"{counts['target_count']} target(s): "
+        f"inserted={counts['inserted']}, "
+        f"already-queued={counts['already_queued']}, "
+        f"already-completed={counts['already_completed']}, "
+        f"blocked={blocked}"
+    )
+    reopened = counts["reopened_terminal_files"]
+    if reopened:
+        print(f"  reopened {reopened} terminal file(s) with a new trigger attempt")
     print(f"Audit snapshots: {submit_snapshot.name}, {response_snapshot.name}")
-    if isinstance(result, dict) and result:
-        print(json.dumps(result, indent=2, ensure_ascii=False))
+    print(json.dumps(result, indent=2, ensure_ascii=False))
+
+    outcomes = result.get("outcomes")
+    if isinstance(outcomes, list):
+        for outcome in outcomes:
+            if isinstance(outcome, dict) and outcome.get("outcome") == "blocked":
+                print(
+                    f"  blocked: {outcome.get('file_path', '?')} "
+                    f"(file_id={outcome.get('file_id', '?')}) — "
+                    f"{outcome.get('detail', 'no reason reported')}",
+                    file=sys.stderr,
+                )
+    for label in not_found:
+        print(f"  not found: {label}", file=sys.stderr)
+    for label in ambiguous:
+        print(f"  ambiguous without repo_id: {label}", file=sys.stderr)
+    if blocked or not_found or ambiguous:
+        print(
+            f"code-dispatch requeue-triggers: {blocked} blocked target(s), "
+            f"{len(not_found)} unresolved and {len(ambiguous)} ambiguous "
+            "selector(s). Unblocked targets were committed; re-check each "
+            "reported selector against `code-dispatch list-triggers` and "
+            "`code-dispatch list` before retrying.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
 
 def _list_triggers(cfg, status_filter: str) -> None:

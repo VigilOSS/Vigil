@@ -27,6 +27,13 @@ Durable design decisions live in [`docs/adr/`](docs/adr/).
   carry `required`.
 - **Operator checkpoints record both track phases.** A `both` engagement advances its web and code
   tracks independently; the checkpoint and the resume brief now report each by name.
+- **`vigil assess code-dispatch list`** pages the code-analysis queue read-only, with stable IDs and
+  filters for status, repository, classification, theme, and queue mode. `--ids-only` writes the
+  ids file `code-dispatch fetch --ids-file` consumes, so exact-ID batching no longer depends on
+  scraping insertion output that caps at 200 rows and scrolls away. A page that stopped at the
+  limit says so on stderr.
+- **`vigil assess fetch --list-routes`** prints the declared catalog of backend read routes, so a
+  route no longer has to be guessed. `fetch` still reaches any route the backend serves.
 - **`vigil install` says what actually needs restarting.** It used to print the same "restart
   everything" list every time, including after the ordinary install that changes only prompt text
   and needs no restart. The summary is now derived per consumer, with the exact command for each.
@@ -74,6 +81,71 @@ Durable design decisions live in [`docs/adr/`](docs/adr/).
   appears only for a root actually running OOB on the shared 53/8443 route.
 - **CLI output wraps on a terminal without changing what a pipe sees.** Piped output stays one
   record per line, no escape codes, no more bytes than before.
+- **A live but unreachable backend is no longer reported as stopped.** Every failed `/readyz` probe
+  read as `not-running`, the one verdict the install summary drops entirely — so a wedged or
+  slow-to-answer orchestrator could vanish from the summary right after an install replaced the code
+  it is running. A refusal, a timeout, and an unreadable answer are now separate, and only local
+  process evidence (the pidfile, and the port the probe actually used) can establish `not-running`.
+- **The post-install verdict compares against the source it installed from.** `vigil install
+  --source X` resolved X, copied its bytes, and then let the freshness check rediscover a source
+  through environment, config, the running package, and the current directory. With two checkouts on
+  the box the just-installed root could be reported stale against a tree it was never installed
+  from, and the suggested remedy would repeat the mismatch.
+- **The clean install summary no longer asserts a cause it did not measure.** It said the install
+  had changed only files that are read live; nothing recorded which files the install changed, and a
+  backend-source upgrade performed while the backend is stopped reaches the same branch.
+- **Backend freshness sees modules imported after startup.** A cross-tree module first imported
+  lazily was in neither the startup snapshot nor the declared input set, so a later install could
+  replace it on disk while the process kept running the old loaded code — invisibly, for the life of
+  the process. A `sys.meta_path` recorder now digests each install-root source file as it is
+  imported, so the comparison uses the bytes the import actually read.
+- **The correlation wording lint sees negation, not proximity.** Any negation within 60 characters
+  cleared the guard, so "should not be overlooked because it correlates callbacks" and "is not
+  preferred, but it correlates each hit" both passed while asserting exactly what the contract
+  forbids. The negation now has to govern the correlation verb.
+- **`/vigil-resume` stops probing optional files with a failing command.** The Codex branch ran
+  `ls -l RESUME.md COMPACT.md`, which exits non-zero whenever either optional file is absent — next
+  to instructions that make command failure meaningful. It now reports present/absent per file, as
+  the Claude branch already did.
+- **Structural Coverage Debt scales past a handful of files.** One exact line per degraded,
+  unsupported, or truncated file put more metadata than source in front of a specialist on a
+  repository with hundreds of unindexed files, and contradicted Phase 2's own compression rule.
+  Above 25 files the exact lines move to a generation-bound ledger the dispatch cites by path and
+  digest, with counts, an extension breakdown, and security-relevant files still inline.
+- **Hunt readiness requires a populated queue.** Phase 1 recorded classifications and copied the
+  file-analysis artifact but never loaded the backend queue, and hunt readiness returned before any
+  queue accounting — so an operator could enter hunt with every admitted file classified and zero
+  queue rows. The artifact is planning input; the backend queue is the durable ledger, and the gate
+  no longer conflates them. Phase 1 now loads the queue on return.
+- **`code-dispatch requeue-triggers` applies per target and accounts exactly.** One blocked target
+  used to roll back every other valid target in the same transaction, and `total` counted trigger
+  inputs while the outcome buckets counted target files, so they could not sum. Each target now
+  commits inside its own savepoint, blocked targets are reported with reasons and exit nonzero, and
+  `input_trigger_count` is separate from `target_count` whose buckets sum exactly.
+- **`requeue-triggers` accepts the rows `list-triggers` prints.** It read only `file_path`, so the
+  `id`/`target_file_path` objects that `list-triggers` emits became empty selectors the backend
+  silently skipped, and a scalar ID raised `AttributeError`. One strict selector model now covers
+  both, rejects scalars and selector-less objects before any write, and emits one outcome per input.
+- **A requeued file keeps its batch theme.** Trigger requeue defaulted the target to
+  `cross-file-trigger` and rewrote pending rows to it, so requeued work vanished from its lane's
+  filters. Provenance stays in `queue_mode`, which is now a first-class filter on list and fetch.
+- **`artifact register` no longer reports failure after a committed write.** The response validator
+  compared the backend's canonical path against the original spelling, so `./tools/a.md` or an
+  absolute alias was rejected after a valid committed response — the dangerous
+  write-succeeded/report-failed mode. Paths are canonicalized once before the POST, and a response
+  that names the canonical artifact without a usable id now reports `committed but response
+  invalid` instead of inviting a blind retry.
+- **`vigil assess contract` renders enum domains and nested object keys.** Intel contracts listed
+  top-level field names only, so the accepted values for fields like `validation_status` and the
+  legal keys inside objects like `provenance` were unreadable from the one surface that is supposed
+  to be the canonical authoring shape. One schema-aware renderer now covers every schema-backed
+  contract, including a populated `reviewed_spans` example that shows `file_id`, not `file_path`.
+- **Dispatch model/reasoning warnings stopped drowning real failures.** Three warnings fired per
+  dispatch, one of them on every dispatch regardless of input; the caller-fixable case is now one
+  warning and the permanent fact is stated once in the `agent start` contract.
+- **The code pre-dispatch checklist covers model and reasoning.** They are required by the shared
+  operator core and were missing from the code-specific checklist, so the omission surfaced only as
+  repeated warnings on the stderr channel that real failures use.
 
 ## [1.0.0] - 2026-09-12
 

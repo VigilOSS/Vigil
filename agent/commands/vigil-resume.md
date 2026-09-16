@@ -35,9 +35,10 @@ is not an error, but silently skipping one is.
 !`for f in RESUME.md COMPACT.md; do if [ -f "$f" ]; then printf 'present  %-12s %s bytes\n' "$f" "$(wc -c < "$f" | tr -d ' ')"; else printf 'absent   %s\n' "$f"; fi; done`
 <!-- vigil:end -->
 <!-- vigil:only codex -->
-Run this and report every file it reports missing — do not discard its errors:
+Run this and report each file it marks `absent` — a missing optional file is a
+normal result, not a failure:
 
-    ls -l RESUME.md COMPACT.md
+    for f in RESUME.md COMPACT.md; do if [ -f "$f" ]; then printf 'present  %-12s %s bytes\n' "$f" "$(wc -c < "$f" | tr -d ' ')"; else printf 'absent   %s\n' "$f"; fi; done
 <!-- vigil:end -->
 
 **4. Re-establish live state from the backend.** The backend is canonical; recollection is not.

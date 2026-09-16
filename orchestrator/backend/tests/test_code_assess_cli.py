@@ -1635,7 +1635,15 @@ def test_code_dispatch_requeue_triggers_reports_partial_failures(monkeypatch, tm
             captured["endpoint"] = endpoint
             captured["payload"] = payload
             return {
+                "input_trigger_count": 3,
+                "target_count": 1,
                 "inserted": 1,
+                "already_queued": 0,
+                "already_completed": 0,
+                "blocked": 0,
+                "reopened_terminal_files": 0,
+                "outcomes": [],
+                "inputs": [],
                 "not_found": ["src/missing.py"],
                 "ambiguous": ["src/shared.py"],
             }
@@ -1650,16 +1658,27 @@ def test_code_dispatch_requeue_triggers_reports_partial_failures(monkeypatch, tm
 
     monkeypatch.setattr(module, "AssessmentClient", FakeClient)
 
-    module.run(SimpleNamespace(action="requeue-triggers", extra=[str(triggers_path)], engagement_dir=tmp_path))
+    # An unresolved or ambiguous selector is a partial application, so the command
+    # must not report success: the caller has to know which inputs never landed
+    # before it decides whether to retry.
+    with pytest.raises(SystemExit) as exc:
+        module.run(
+            SimpleNamespace(
+                action="requeue-triggers", extra=[str(triggers_path)], engagement_dir=tmp_path
+            )
+        )
+    assert exc.value.code == 1
 
     assert captured["endpoint"] == "code/analysis-queue/requeue"
     assert captured["payload"]["items"][0]["trigger_context"]["source"] == "cross_file_trigger"
     assert captured["payload"]["items"][0]["repo_id"] == 7
     assert "repo_id" not in captured["payload"]["items"][0]["trigger_context"]
-    output = capsys.readouterr().out
-    assert "Requeued 1 trigger item(s)" in output
-    assert "Not found: src/missing.py" in output
-    assert "Ambiguous without repo_id: src/shared.py" in output
+    captured_output = capsys.readouterr()
+    # Inputs and targets are counted separately because they cannot be the same
+    # number: three trigger rows here name one target file.
+    assert "Requeued 3 trigger input(s) across 1 target(s)" in captured_output.out
+    assert "not found: src/missing.py" in captured_output.err
+    assert "ambiguous without repo_id: src/shared.py" in captured_output.err
 
 
 def test_code_dispatch_queue_rejects_obsolete_context_id(monkeypatch, tmp_path):

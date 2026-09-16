@@ -402,10 +402,11 @@ def test_agent_start_overwrites_forged_provenance_and_omits_caller_observed_iden
     assert "launcher_effective_model" not in payload
     assert "launcher_effective_reasoning" not in payload
     assert "launcher_effective_source" not in payload
-    assert (
-        "launcher-effective model and reasoning are unavailable; "
-        "provider-observed model and reasoning are unknown"
-    ) in warnings
+    # Dropping the forged fields is the whole enforcement. The absence of
+    # launcher-effective identity is permanent for ordinary dispatches, so it is
+    # published in the `agent start` contract instead of warning on every start;
+    # nothing here may report it as observed.
+    assert not any("launcher-effective" in warning for warning in warnings), warnings
 
 
 @pytest.mark.parametrize("field", ["--actual-model", "--actual-reasoning"])

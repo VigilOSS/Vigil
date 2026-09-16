@@ -54,6 +54,8 @@ from .runtime import runtime_image_build_state
 # and the stamp survives an upgrade exactly as the built assets beside it do.
 BUILD_INPUTS_STAMP = ".vigil-inputs"
 
+_BACKEND_LABEL = "orchestrator backend"
+
 _RUNTIME_IMAGE = "vigil:latest"
 _PROXY_IMAGE = "vigil-proxy:latest"
 _PROXY_CONTAINER = "vigil-proxy"
@@ -95,6 +97,26 @@ class ConsumerState:
     state: str
     remedy: str
     detail: str
+
+
+@dataclass(frozen=True, slots=True)
+class BackendProbe:
+    """What one ``/readyz`` probe established — and what it did not.
+
+    Three outcomes have to stay distinguishable, because each answers a
+    different question. ``reachable`` with a ``runtime`` block is the only one
+    that says anything about staleness; ``reachable`` without one is an older
+    or malformed backend, i.e. an open question; and unreachable is not one
+    outcome but several — ``unreachable_reason`` keeps a refusal (nothing
+    accepted the connection) apart from a timeout (something did, and then went
+    quiet), which is the difference between a stopped backend and a live one
+    running code this install just replaced.
+    """
+
+    reachable: bool
+    runtime: dict[str, object] | None = None
+    unreachable_reason: str = ""
+    unreachable_detail: str = ""
 
 
 # --- the running process's own loaded modules ---------------------------------
@@ -355,17 +377,10 @@ def _backend_state(install_root: Path) -> ConsumerState:
     re-derives it per request, so no second implementation of the input set has
     to agree with it from out here.
     """
-    reachable, runtime_block = _readyz_backend_runtime(install_root)
-    if not reachable:
-        # Genuinely nothing to restart: a stopped orchestrator picks up this
-        # install when it next starts.
-        return ConsumerState(
-            key="backend",
-            label="orchestrator backend",
-            state="not-running",
-            remedy="",
-            detail="",
-        )
+    probe = _readyz_backend_runtime(install_root)
+    if not probe.reachable:
+        return _backend_offline_state(install_root, probe)
+    runtime_block = probe.runtime
     if runtime_block is None:
         # Reachable but unusable — an older backend with no `backend_runtime`
         # block, or a malformed body. That is the UPGRADE case this consumer
@@ -384,7 +399,7 @@ def _backend_state(install_root: Path) -> ConsumerState:
     if not runtime_block.get("restart_required"):
         return ConsumerState(
             key="backend",
-            label="orchestrator backend",
+            label=_BACKEND_LABEL,
             state="current",
             remedy="",
             detail="",
@@ -392,11 +407,87 @@ def _backend_state(install_root: Path) -> ConsumerState:
     changed = runtime_block.get("changed_inputs")
     return ConsumerState(
         key="backend",
-        label="orchestrator backend",
+        label=_BACKEND_LABEL,
         state="stale",
         remedy="vigil orchestrator restart",
         detail=_changed_summary(changed if isinstance(changed, list) else []),
     )
+
+
+def _backend_offline_state(install_root: Path, probe: BackendProbe) -> ConsumerState:
+    """No answer from ``/readyz`` — which is not the same as "stopped".
+
+    ``not-running`` is the one backend verdict `vigil install` drops entirely,
+    on the grounds that a stopped orchestrator picks this install up when it
+    next starts. Reaching it from a failed probe alone asserted something the
+    probe never measured: a backend that is wedged, still starting, or merely
+    slower than the one-second timeout keeps running the code it loaded, and
+    that loaded code is exactly what an install invalidates. So the process is
+    asked locally, on the same host and port the probe used, and only a
+    positively stopped one clears the row.
+    """
+    from . import orchestrator
+
+    host, port = _orchestrator_host_port(install_root)
+    payload = orchestrator.orchestrator_status_payload(install_root, host=host, port=port)
+    pid = payload.get("pid")
+    process_running = payload.get("state") == "running"
+    port_held = bool(payload.get("port_in_use"))
+    if probe.unreachable_reason == "refused" and not process_running and not port_held:
+        # Nothing accepted the connection, no pidfile claims a live process, and
+        # nothing holds the port. That is a stopped backend, established rather
+        # than assumed.
+        return ConsumerState(
+            key="backend",
+            label=_BACKEND_LABEL,
+            state="not-running",
+            remedy="",
+            detail="",
+        )
+    return _backend_unknown(
+        _backend_offline_detail(probe, process_running, pid, port_held, host, port)
+    )
+
+
+def _backend_offline_detail(
+    probe: BackendProbe,
+    process_running: bool,
+    pid: object,
+    port_held: bool,
+    host: str,
+    port: int,
+) -> str:
+    """Name the exact shape of the failure, so the operator can act on it."""
+    if probe.unreachable_reason == "timeout":
+        probe_phrase = "/readyz timed out"
+    elif probe.unreachable_reason == "refused":
+        probe_phrase = "/readyz refused the connection"
+    else:
+        suffix = f" ({probe.unreachable_detail})" if probe.unreachable_detail else ""
+        probe_phrase = f"/readyz could not be reached{suffix}"
+    if process_running:
+        return f"the orchestrator process (PID {pid}) is running but {probe_phrase}"
+    if port_held:
+        return f"{host}:{port} is held by another process but {probe_phrase}"
+    return f"{probe_phrase}; this backend was never established as stopped"
+
+
+def _orchestrator_host_port(install_root: Path) -> tuple[str, int]:
+    """The host and port ``/readyz`` was actually probed on.
+
+    `orchestrator_status_payload` defaults to 127.0.0.1:18000, but the base URL
+    is configurable through five layers — checking whether the DEFAULT port is
+    held would be evidence about a different service entirely.
+    """
+    from urllib.parse import urlsplit
+
+    from .paths import DEFAULT_ORCHESTRATOR_BASE_URL, resolve_orchestrator_base_url
+
+    for candidate in (resolve_orchestrator_base_url(install_root), DEFAULT_ORCHESTRATOR_BASE_URL):
+        parts = urlsplit(candidate)
+        if parts.hostname:
+            return parts.hostname, parts.port or (443 if parts.scheme == "https" else 80)
+    return "127.0.0.1", 18000
 
 
 def _backend_unknown(detail: str) -> ConsumerState:
@@ -408,28 +499,37 @@ def _backend_unknown(detail: str) -> ConsumerState:
     """
     return ConsumerState(
         key="backend",
-        label="orchestrator backend",
+        label=_BACKEND_LABEL,
         state="unknown",
         remedy="",
         detail=detail,
     )
 
 
-def _readyz_backend_runtime(install_root: Path) -> tuple[bool, dict[str, object] | None]:
-    """``(reachable, backend_runtime)`` from ``/readyz``.
+def _readyz_backend_runtime(install_root: Path) -> BackendProbe:
+    """What ``/readyz`` was able to tell us, with the failure kinds kept apart.
 
-    The two halves must stay separable. Collapsing "no answer" and "an answer we
-    cannot use" into one None made an older backend — the very thing an upgrade
-    produces — read as a stopped one, and a stopped one is dropped from the
-    install summary as needing nothing.
+    Three cases must stay separable, because each one clears a different amount
+    of the question. "An answer we cannot use" collapsed into "no answer" once,
+    and made an older backend — the very thing an upgrade produces — read as a
+    stopped one, which the install summary drops as needing nothing. "No answer
+    at all" then hid the same defect one level down: a refused connection and a
+    timed-out one are not the same claim about whether a process is running.
     """
     from .status import _orchestrator_readyz_snapshot
 
     _, readiness = _orchestrator_readyz_snapshot(install_root)
     if not readiness.get("reachable"):
-        return False, None
+        reason = readiness.get("unreachable_reason")
+        detail = readiness.get("unreachable_detail")
+        return BackendProbe(
+            reachable=False,
+            runtime=None,
+            unreachable_reason=reason if isinstance(reason, str) else "error",
+            unreachable_detail=detail if isinstance(detail, str) else "",
+        )
     block = readiness.get("backend_runtime")
-    return True, block if isinstance(block, dict) else None
+    return BackendProbe(reachable=True, runtime=block if isinstance(block, dict) else None)
 
 
 def _frontend_state(install_root: Path) -> ConsumerState:
@@ -702,7 +802,10 @@ def _changed_summary(changed: list[object], *, limit: int = 3) -> str:
 
 
 def consumer_states(
-    install_root: Path, *, runner: docker.Runner = docker.run_command
+    install_root: Path,
+    *,
+    runner: docker.Runner = docker.run_command,
+    source_root: Path | None = None,
 ) -> list[ConsumerState]:
     """Every consumer of this install, and what each one now needs.
 
@@ -710,6 +813,13 @@ def consumer_states(
     operator should see, which is why ``not-running`` and ``missing`` are
     reported rather than suppressed here: ``vigil status`` wants the full
     inventory and ``vigil install`` wants only the obligations.
+
+    ``source_root`` is the checkout the caller KNOWS this install came from.
+    `vigil install` has it — it resolved ``--source`` before copying a byte — and
+    passing it is the difference between judging the working root against the
+    tree it was installed from and judging it against whichever checkout a fresh
+    discovery happens to land on. Only callers with no install to name (``vigil
+    status``) leave it unset and accept the discovered best effort.
     """
     # `status` imports `orchestrator`, which imports this module for the
     # frontend/report build state — so these two reach in at call time. By then
@@ -721,7 +831,9 @@ def consumer_states(
     # the daemon timeout, and — the reason it is here rather than an
     # optimisation — the only thing that separates "no image" from "no answer".
     docker_ok = docker.daemon_available(runner=runner)
-    cli = cli_state(source_root=_resolve_source_root_offline(install_root))
+    cli = cli_state(
+        source_root=source_root if source_root is not None else _resolve_source_root_offline(install_root)
+    )
     return [
         cli,
         _backend_state(install_root),

@@ -8,6 +8,7 @@ import re
 import socket
 import sys
 import time
+from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlparse
 
@@ -52,25 +53,85 @@ def require_finding_write_response(
     return response
 
 
+def canonical_artifact_path(engagement_dir: str, path_value: str, *, operation: str) -> str:
+    """Canonicalise a submitted path the way the artifact index will.
+
+    Every artifact route answers with ONE engagement-relative POSIX path, so a
+    response can only be matched back to its request when the request was
+    canonical to begin with: `./tools/a.md` and an absolute alias name the same
+    file, and comparing the answer to either spelling reported a committed write
+    as a failure. Canonicalising here also rejects an out-of-engagement path
+    before a write is attempted instead of spending a round trip on a 400.
+
+    It lives beside :func:`require_artifact_write_response` because that function
+    REQUIRES its ``artifact_path`` to already be in this form; leaving the
+    canonicaliser in one command module meant the precondition had no shared
+    implementation to point at.
+
+    KEEP IN SYNC with ``artifact_index._normalize_relative_path`` (authoritative).
+    The backend still re-opens each component with ``O_NOFOLLOW``, so this is a
+    comparison aid and an early rejection — never the read authorization.
+    """
+    value = str(path_value or "").strip()
+    if not value:
+        raise AssessError(f"{operation}: artifact path is required")
+    if "://" in value and urlparse(value).scheme != "file":
+        raise AssessError(f"{operation}: artifact path must be engagement-local")
+    root = Path(engagement_dir).resolve()
+    raw_path = Path(value)
+    candidate = raw_path.expanduser() if raw_path.is_absolute() else root / raw_path
+    try:
+        relative = candidate.resolve(strict=False).relative_to(root)
+    except ValueError as exc:
+        raise AssessError(
+            f"{operation}: artifact path must be inside the engagement directory ({root})"
+        ) from exc
+    return relative.as_posix()
+
+
 def require_artifact_write_response(
     response: dict[str, Any], *, artifact_path: str | None, operation: str
 ) -> dict[str, Any]:
-    """Require the canonical identity of an artifact registration response."""
+    """Require the canonical identity of an artifact registration response.
+
+    ``artifact_path`` must already be the canonical engagement-relative path the
+    backend answers with (``artifact._canonical_artifact_path``); comparing an
+    uncanonicalised spelling rejected a perfectly valid committed response.
+
+    A response that names OUR canonical path but cannot name its row is a
+    different outcome from one that identifies nothing: the write is known to have
+    landed, and saying only "may have committed" understates it enough to make a
+    duplicate retry look reasonable. Both stay non-retryable.
+    """
 
     artifact_id = response.get("id")
     returned_path = response.get("relative_path")
-    valid_id = isinstance(artifact_id, int) and not isinstance(artifact_id, bool)
+    valid_id = (
+        isinstance(artifact_id, int)
+        and not isinstance(artifact_id, bool)
+        and artifact_id >= 1
+    )
     valid_path = isinstance(returned_path, str) and bool(returned_path.strip())
     if artifact_path is not None:
         valid_path = valid_path and returned_path == artifact_path
-    if not valid_id or artifact_id < 1 or not valid_path:
+    if valid_id and valid_path:
+        return response
+    subject = artifact_path or "the submitted file"
+    inspect = (
+        "inspect `vigil assess artifact search --json` and do not retry automatically"
+    )
+    # Only a by-path write carries a canonical identity to verify against; an
+    # id-addressed one (unlink-finding) cannot claim more than uncertainty.
+    if valid_path and artifact_path is not None:
         raise AssessError(
-            f"{operation}: backend did not return canonical artifact "
-            f"id/path for {artifact_path or 'the submitted file'!r}; the write may have committed, so "
-            "inspect `vigil assess artifact search --json` and do not retry "
-            "automatically"
+            f"{operation}: committed but response invalid — the backend named "
+            f"canonical artifact {subject!r} and then returned no usable artifact "
+            f"id; {inspect}"
         )
-    return response
+    raise AssessError(
+        f"{operation}: backend did not return canonical artifact "
+        f"id/path for {subject!r}; the write may have committed, so {inspect}"
+    )
 
 
 def require_write_result(

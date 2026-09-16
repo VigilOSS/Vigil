@@ -30,9 +30,10 @@ the last handoff `vigil-handoff` wrote, and `COMPACT.md`, this engagement's loca
 compaction contract. Read whichever exist and report whichever are absent — a missing optional file
 is not an error, but silently skipping one is.
 
-Run this and report every file it reports missing — do not discard its errors:
+Run this and report each file it marks `absent` — a missing optional file is a
+normal result, not a failure:
 
-    ls -l RESUME.md COMPACT.md
+    for f in RESUME.md COMPACT.md; do if [ -f "$f" ]; then printf 'present  %-12s %s bytes\n' "$f" "$(wc -c < "$f" | tr -d ' ')"; else printf 'absent   %s\n' "$f"; fi; done
 
 **4. Re-establish live state from the backend.** The backend is canonical; recollection is not.
 `agent/rules/resume.md` is an always-active rule, so it is already in your context and it owns this

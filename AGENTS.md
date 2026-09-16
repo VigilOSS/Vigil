@@ -367,8 +367,14 @@ changing this area.
 unconditionally, so any timestamp comparison reads stale the instant an install finishes. Use a
 content digest stamped on the consumer — see `src/vigil_cli/image_freshness.py`.
 
-Sets derived from `sys.modules` need no upkeep. Declared lists do, and each has a guard test that
-fails before you can forget:
+Sets derived from `sys.modules` need no upkeep, with one qualification: the startup snapshot is
+taken once at import, so a module first imported LATER is in neither the snapshot nor the declared
+set. `app/main.py:_ImportDigestRecorder` sits in `sys.meta_path` ahead of `PathFinder` and digests
+each install-root source file as it is imported, so the comparison uses the bytes the import
+actually read — read it before changing how cross-tree imports are compared, and note that mtime
+cannot substitute for it (a byte-identical `vigil install` rewrite would then report a restart).
+
+Declared lists do need upkeep, and each has a guard test that fails before you can forget:
 
 | Change | Update | Guard |
 |---|---|---|

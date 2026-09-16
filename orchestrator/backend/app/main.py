@@ -4,9 +4,11 @@ import logging
 import os
 import sqlite3
 import sys
+import threading
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from importlib.machinery import PathFinder
 from pathlib import Path
 
 from anyio import to_thread
@@ -138,18 +140,151 @@ def _inputs_sha256(inputs: dict[str, str]) -> str:
 # after every router/service import above, so `sys.modules` is already populated.
 _BACKEND_STARTUP_INPUTS = {**_declared_backend_inputs(), **_loaded_cross_tree_inputs()}
 
+# label -> digest of the bytes that were on disk when the module was imported.
+# Written by `_ImportDigestRecorder` under `_LAZY_BASELINE_LOCK`; the lock also
+# guards the read, because `/readyz` is a plain `def` and FastAPI therefore runs
+# concurrent probes in the threadpool while imports may still be happening.
+_LAZY_INPUT_BASELINE: dict[str, str] = {}
+_LAZY_BASELINE_LOCK = threading.Lock()
+
+
+class _ImportDigestRecorder:
+    """Digest every install-root source file at the moment it is imported.
+
+    `_BACKEND_STARTUP_INPUTS` is fixed at import time, so a cross-tree module
+    imported LATER — the depth ledger reaching `assess.lib.vuln_taxonomy`
+    through `taxonomy_bridge` is the real case — is in neither the startup map
+    nor the declared set. Excluding it from the comparison is right exactly
+    once: at first load it was read from the current disk state. It is wrong
+    forever after, because the process then HOLDS those bytes while an install
+    replaces the file, and a label in neither set is never compared again — the
+    drift stays invisible for the life of the process.
+
+    The honest baseline is the content the import actually read, and the only
+    moment that content is knowable is the import itself. Reconstructing it
+    afterwards cannot work: an mtime says when a file was last written, never
+    what the reader got, and `vigil install` rewrites every managed file
+    unconditionally, so a "rewritten since startup" rule would report a restart
+    after every byte-identical install — the exact false positive this whole
+    area exists to eliminate.
+
+    So the recorder sits in ``sys.meta_path`` immediately ahead of
+    ``PathFinder``, delegates the actual search to it, and digests the resolved
+    origin on the way past. Builtin and frozen imports are still handled by the
+    finders ahead of it, and nothing about import semantics changes: the spec
+    returned is the one ``PathFinder`` produced.
+    """
+
+    @staticmethod
+    def find_spec(fullname, path=None, target=None):  # type: ignore[no-untyped-def]
+        spec = _ImportDigestRecorder._delegate(fullname, path, target)
+        origin = getattr(spec, "origin", None)
+        if not origin:
+            return spec
+        try:
+            resolved = Path(origin).resolve()
+        except (OSError, ValueError):
+            return spec
+        if not resolved.is_relative_to(_BACKEND_INSTALL_ROOT) or not _is_source_file(resolved):
+            return spec
+        label = resolved.relative_to(_BACKEND_INSTALL_ROOT).as_posix()
+        with _LAZY_BASELINE_LOCK:
+            if label in _LAZY_INPUT_BASELINE:
+                return spec
+            _LAZY_INPUT_BASELINE[label] = _file_digest(resolved)
+        return spec
+
+    @staticmethod
+    def _delegate(fullname, path, target):  # type: ignore[no-untyped-def]
+        """Hand the search to every finder that sits after this one.
+
+        Calling ``PathFinder`` directly would be shorter, and wrong the moment
+        anything installs a finder between the two — that finder would be
+        skipped for every import, because this one always answers first. Walking
+        the tail of ``sys.meta_path`` keeps the resolution order exactly what it
+        would be if this recorder were not installed at all.
+        """
+        try:
+            start = sys.meta_path.index(_ImportDigestRecorder) + 1
+        except ValueError:  # pragma: no cover — removed from meta_path
+            start = 0
+        for finder in sys.meta_path[start:]:
+            found = getattr(finder, "find_spec", None)
+            if found is None:
+                continue
+            spec = found(fullname, path, target)
+            if spec is not None:
+                return spec
+        return None
+
+
+def _install_import_digest_recorder() -> None:
+    """Put the recorder directly ahead of ``PathFinder``, once."""
+    if any(finder is _ImportDigestRecorder for finder in sys.meta_path):
+        return
+    for index, finder in enumerate(sys.meta_path):
+        if finder is PathFinder:
+            sys.meta_path.insert(index, _ImportDigestRecorder)  # type: ignore[arg-type]
+            return
+    sys.meta_path.append(_ImportDigestRecorder)  # type: ignore[arg-type]
+
+
+# Installed here, directly after the startup snapshot: everything imported so
+# far is already in `_BACKEND_STARTUP_INPUTS`, and everything imported from now
+# on is what the recorder exists to catch.
+_install_import_digest_recorder()
+
+
+def _lazy_input_baseline(loaded: dict[str, str]) -> dict[str, str]:
+    """Import-time digests for the post-startup modules the recorder vouched for.
+
+    These are the labels the comparison gains: each one is compared against the
+    bytes its import actually read, so a later install that replaces the file
+    registers as drift instead of disappearing into a set nothing compares.
+    """
+    with _LAZY_BASELINE_LOCK:
+        recorded = dict(_LAZY_INPUT_BASELINE)
+    return {
+        label: recorded[label]
+        for label in loaded
+        if label not in _BACKEND_STARTUP_INPUTS and label in recorded
+    }
+
+
+def _unvouched_lazy_inputs(loaded: dict[str, str]) -> list[str]:
+    """Post-startup modules the recorder never saw, reported but never gated on.
+
+    A module reaches this list only by being imported through a loader that
+    bypasses ``PathFinder`` — pytest's assertion rewriter is the one that
+    actually occurs, and a deployed backend has none. Nothing on disk can say
+    what such a loader read, so the label is surfaced for an operator rather
+    than counted as drift: manufacturing `restart_required` from a condition
+    that cannot arise in production would resurrect exactly the always-wrong
+    notice this whole area exists to remove.
+    """
+    with _LAZY_BASELINE_LOCK:
+        recorded = frozenset(_LAZY_INPUT_BASELINE)
+    return sorted(
+        label
+        for label in loaded
+        if label not in _BACKEND_STARTUP_INPUTS and label not in recorded
+    )
+
 
 def _aligned_backend_inputs(
     startup: dict[str, str], current: dict[str, str], declared: frozenset[str]
 ) -> tuple[dict[str, str], dict[str, str]]:
     """The startup and current input maps over one comparable set of labels.
 
-    The comparable set is `startup ∪ declared`, and what it LEAVES OUT is the
-    point. A cross-tree module imported lazily after startup (the depth ledger
-    reaching `assess.lib.vuln_taxonomy` through `taxonomy_bridge` is the real
-    case) is in neither set: the process read it from the current disk state, so
-    it is current by construction. Counting it would flip `/readyz` to
-    `restart_required` permanently on the first ledger call.
+    Pure alignment: the comparable set is `startup ∪ declared`, and the caller
+    decides what `startup` contains. `_backend_runtime_snapshot` passes the
+    process-start snapshot MERGED with `_lazy_input_baseline`, so a cross-tree
+    module imported after startup — the depth ledger reaching
+    `assess.lib.vuln_taxonomy` through `taxonomy_bridge` is the real case — is
+    in the set and is compared against the bytes its import actually read. It
+    used to be in neither set, which read as "current by construction" and was
+    true only until the next install replaced the file underneath the running
+    process.
 
     Everything that IS in the set is compared both ways, so a DELETED module the
     process still holds, and a NEW file under `app/` the process has not got,
@@ -186,12 +321,16 @@ def _backend_runtime_snapshot() -> dict[str, object]:
     a second implementation of the input set having to agree with this one.
     """
     declared = _declared_backend_inputs()
+    loaded = _loaded_cross_tree_inputs()
     startup, current = _aligned_backend_inputs(
-        _BACKEND_STARTUP_INPUTS,
-        {**declared, **_loaded_cross_tree_inputs()},
+        {**_BACKEND_STARTUP_INPUTS, **_lazy_input_baseline(loaded)},
+        {**declared, **loaded},
         frozenset(declared),
     )
     changed = sorted(label for label in startup if startup[label] != current[label])
+    # Named apart from the rest because the claim is different: these are not
+    # known to have changed, they are known not to be provable either way.
+    unestablished = _unvouched_lazy_inputs(loaded)
     return {
         "source_root": str(_BACKEND_SOURCE_ROOT),
         "install_root": str(_BACKEND_INSTALL_ROOT),
@@ -204,6 +343,7 @@ def _backend_runtime_snapshot() -> dict[str, object]:
         "restart_required": bool(changed),
         "changed_inputs": changed[:20],
         "changed_input_count": len(changed),
+        "unestablished_inputs": unestablished[:20],
     }
 
 

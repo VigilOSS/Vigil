@@ -163,6 +163,12 @@ _BLOCKER_REPAIRS = {
     'threat_model_stale': lambda repo_id: (
         "vigil assess code-record threat-model for the current generation"
     ),
+    'admitted_files_unqueued': lambda repo_id: (
+        "vigil assess code-dispatch queue <queue-items-json-file> — one row per "
+        "admitted file, including skip-tier; "
+        f"vigil assess code-dispatch list {_repo_selector(repo_id)} shows what is "
+        "already loaded"
+    ),
     'source_snapshot_unverified': lambda repo_id: (
         "vigil assess code-ingest <repo-path> --repo-key <key> — a verified "
         "re-ingest, which advances the generation by design"

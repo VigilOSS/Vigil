@@ -32,6 +32,13 @@ CodeSlotType: TypeAlias = Literal[
     "EXEC-POLICY",
 ]
 StrictPositiveId: TypeAlias = Annotated[int, Field(strict=True, gt=0)]
+CodeClassification: TypeAlias = Literal["critical", "high", "medium", "low", "skip"]
+CodeQueueStatus: TypeAlias = Literal[
+    "pending", "processing", "done", "error", "needs_context"
+]
+CodeQueueMode: TypeAlias = Literal[
+    "initial", "reanalysis", "trigger", "metadata-refresh"
+]
 StructuralAnalysisStatus: TypeAlias = Literal["complete", "degraded", "unsupported"]
 StructuralAnalysisMode: TypeAlias = Literal[
     "tree_sitter",
@@ -240,8 +247,9 @@ class QueueFetchRequest(BaseModel):
     limit: int = Field(default=10, ge=1, le=100)
     agent_name: str = Field(min_length=1, max_length=128)
     repo_id: StrictPositiveId | None = None
-    classification: Literal["critical", "high", "medium", "low", "skip"] | None = None
+    classification: CodeClassification | None = None
     batch_theme: str | None = Field(default=None, max_length=256)
+    queue_mode: CodeQueueMode | None = None
     item_ids: list[StrictPositiveId] | None = Field(default=None, min_length=1, max_length=1000)
 
 
@@ -357,9 +365,12 @@ class AnalysisResultRecord(BaseModel):
 
 
 class RequeueItemRecord(BaseModel):
+    """One trigger input. Exactly one selector; the service enforces that."""
+
     model_config = ConfigDict(extra="forbid")
 
     file_id: StrictPositiveId | None = None
+    trigger_id: StrictPositiveId | None = None
     file_path: str = Field(default="", max_length=4096)
     repo_id: StrictPositiveId | None = None
     priority: int | None = Field(default=None, strict=True, ge=0, le=100)
@@ -1060,6 +1071,30 @@ async def bulk_create_queue_items(engagement_key: str, request: QueueItemsBulkCr
     return record
 
 
+@router.get("/analysis-queue")
+def list_queue_items(
+    engagement_key: str,
+    status_filter: CodeQueueStatus | None = Query(default=None, alias="status"),
+    repo_id: int | None = Query(default=None),
+    classification: CodeClassification | None = Query(default=None),
+    batch_theme: str | None = Query(default=None, max_length=256),
+    queue_mode: CodeQueueMode | None = Query(default=None),
+    limit: int = Query(default=200, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
+) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    return code_analysis.list_queue_items(
+        engagement.id,
+        status_filter=status_filter,
+        repo_id=repo_id,
+        classification=classification,
+        batch_theme=batch_theme,
+        queue_mode=queue_mode,
+        limit=limit,
+        offset=offset,
+    )
+
+
 @router.get("/analysis-queue/stats")
 def get_queue_stats(engagement_key: str) -> dict[str, Any]:
     engagement = get_engagement_or_404(engagement_key)
@@ -1078,6 +1113,7 @@ async def fetch_queue_items(engagement_key: str, request: QueueFetchRequest) -> 
             repo_id=request.repo_id,
             classification=request.classification,
             batch_theme=request.batch_theme,
+            queue_mode=request.queue_mode,
             item_ids=request.item_ids,
         )
     )

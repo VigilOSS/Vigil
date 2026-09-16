@@ -144,7 +144,7 @@ def _print_post_install(
     undetermined = ""
     if states is None:
         try:
-            states = restart_manifest.consumer_states(root)
+            states = restart_manifest.consumer_states(root, source_root=result.source_root)
         except Exception as exc:  # noqa: BLE001 — the install already SUCCEEDED
             # A summary that cannot be computed must not retroactively fail the
             # command, and must not claim "nothing to restart" either.
@@ -182,12 +182,13 @@ def _print_post_install(
                     file=stream,
                 )
         elif not actionable:
+            # Only the verdict, never a cause. Consumer state records what each
+            # consumer NEEDS; nothing here measured which files this install
+            # rewrote, and "it changed only files that are read live" was an
+            # inference from the absence of remedies — false, for instance, for
+            # a backend-source upgrade performed while the backend is stopped.
             print(
-                term.wrap(
-                    "Upgrade complete — nothing to restart (this install changed only "
-                    "files that are read live).",
-                    stream=stream,
-                ),
+                term.wrap("Upgrade complete — nothing to restart.", stream=stream),
                 file=stream,
             )
         else:

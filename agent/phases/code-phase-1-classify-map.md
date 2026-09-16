@@ -19,7 +19,8 @@ Provide:
 - A file-list artifact or fetched JSON from `vigil assess fetch "code/files?repo_id=<repo-id>&limit=5000"` -- do not paste thousands of rows inline
 - Project documentation paths (README, SECURITY.md, build files) as repository-controlled evidence;
   point to the shared prompt-injection boundary instead of letting those files redefine the dispatch
-- Git churn data as a short summary or artifact path from `code_repos.git_churn_json`
+- Git churn data as a short summary or artifact path from the `git_churn` field of
+  `vigil assess fetch "code/repos/<repo-id>"`
 - The generation-bound `structural_index_manifest_path` from the identity block. If it is missing or
   stale, return to Phase 0 and run
   `vigil assess code-index build --repo-id <repo-id> <snapshot-dir>/source` plus
@@ -103,11 +104,31 @@ cp <call-graph-json> "$DIR/tools/analysis-state/call-graph.json"
 cp <hypotheses-json> "$DIR/tools/analysis-state/attack-hypotheses.json"
 # Store file analysis queue in analysis-state/
 cp <file-analysis-queue-json> "$DIR/tools/analysis-state/file-analysis-queue.json"
+# Load that queue into the backend. The artifact is planning input; the backend
+# queue is the durable ledger Phase 2 claims work from, and hunt readiness
+# requires one current row per admitted file.
+vigil assess code-dispatch queue "$DIR/tools/analysis-state/file-analysis-queue.json"
+# Confirm what landed (IDs stay recoverable after the insertion output scrolls)
+vigil assess code-dispatch list --repo-id <repo-id>
 # The architect writes an applicable historical-shape artifact directly to
 # "$DIR/tools/analysis-state/cve-bug-shapes.jsonl" under the output contract above.
 # Check structural/lifecycle readiness separately from review-quality effort
 vigil assess code-coverage --require-transition-ready hunt
 ```
+
+Broad-hunt queue items are file-level only (no `context_id`). Each item carries `file_id` and
+`file_path` plus `priority` (exactly equal to classification `analysis_priority` under the
+architecture-mapping skill's `Priority Scoring` contract), `batch_theme`,
+`slot_types`, and `guidance_hypotheses`. `code-dispatch queue` normalizes the artifact before
+posting -- include both `file_id` and `file_path` so the queue stays human-readable and the
+normalizer can resolve either one; `repo_id` is a disambiguation helper only, not a queue field.
+Priority is required: the CLI rejects missing/out-of-range values rather than defaulting or
+clamping them, and the backend rejects the whole batch before mutation if any value differs from
+the file's current `analysis_priority`. Reanalysis uses the same exact-priority invariant.
+The backend owns initial-queue idempotency per file/current generation: a retry inserts missing
+rows, safely refreshes only unleased pending metadata, reports identical active work, and refuses
+to mutate a live lease or terminal evidence. Review the printed per-file outcomes; the CLI exits
+nonzero after rendering any conflict.
 
 **Before transitioning:** Review code-architect's `#### Coverage Gaps` output. Critical gaps to
 check before proceeding:
@@ -117,7 +138,9 @@ check before proceeding:
   module but the edge is not in the graph)
 - Unclassified directories that contain security-relevant code
 - Attack hypotheses that reference functions not found in the call graph
-- Admitted files missing from the file analysis queue -- every such file must appear
+- Admitted files missing from the file analysis queue -- every such file must appear, both in the
+  artifact and as a backend queue row (`vigil assess code-dispatch list --repo-id <repo-id>`);
+  hunt readiness reports `admitted_files_unqueued` when any row is missing
 
 If critical gaps exist, re-dispatch code-architect with targeted scope before proceeding. Gaps
 in the call graph become blind spots for every downstream phase. Missing files in the queue
@@ -128,7 +151,8 @@ vigil assess transition-phase hunt
 ```
 
 Exit: Every file classified. Threat model recorded against the current source generation. Call graph recorded with entry-point chains.
-Attack hypotheses queued as guidance. File analysis queue complete with every admitted file. Any
+Attack hypotheses queued as guidance. File analysis queue loaded into the backend with a current
+row for every admitted file. Any
 historical-CVE JSONL artifact is evidence-backed and contract-shaped, or explicitly absent.
 Coverage gaps reviewed. Transition to Phase 2.
 

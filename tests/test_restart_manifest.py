@@ -60,8 +60,23 @@ def _no_live_orchestrator(monkeypatch: pytest.MonkeyPatch):
     ``_backend_state`` asks the real ``/readyz``, so on a maintainer's box with a
     live orchestrator these assertions would read that process instead of the
     fixture. Tests that care about a reachable backend override this.
+
+    The refusal is paired with a positively-stopped local process, because that
+    is the combination that yields ``not-running`` — the hermetic default these
+    tests were written against.
     """
-    monkeypatch.setattr(restart_manifest, "_readyz_backend_runtime", lambda _root: (False, None))
+    monkeypatch.setattr(
+        restart_manifest,
+        "_readyz_backend_runtime",
+        lambda _root: restart_manifest.BackendProbe(
+            reachable=False, unreachable_reason="refused"
+        ),
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "orchestrator_status_payload",
+        lambda _root, **_kw: {"state": "stopped", "pid": None, "port_in_use": False},
+    )
 
 
 def _rewrite_in_place(*paths: Path) -> None:
@@ -451,9 +466,9 @@ def test_the_backend_is_stale_when_readyz_says_restart_required(
     monkeypatch.setattr(
         restart_manifest,
         "_readyz_backend_runtime",
-        lambda root: (
-            True,
-            {
+        lambda root: restart_manifest.BackendProbe(
+            reachable=True,
+            runtime={
                 "install_root": str(root),
                 "restart_required": True,
                 "changed_inputs": ["app/db.py", "uv.lock"],
@@ -724,7 +739,11 @@ def _readiness(**fields: object) -> dict[str, object]:
 
 
 def _backend_state_for(
-    monkeypatch: pytest.MonkeyPatch, readiness: dict[str, object], *, install_root: Path
+    monkeypatch: pytest.MonkeyPatch,
+    readiness: dict[str, object],
+    *,
+    install_root: Path,
+    process: dict[str, object] | None = None,
 ) -> restart_manifest.ConsumerState:
     from vigil_cli import status as status_module
 
@@ -735,6 +754,13 @@ def _backend_state_for(
         status_module,
         "_orchestrator_readyz_snapshot",
         lambda _root: (bool(readiness.get("reachable")), readiness),
+    )
+    # Local evidence about the process itself. Default: nothing running and
+    # nothing holding the port — the positively-stopped shape.
+    payload: dict[str, object] = {"state": "stopped", "pid": None, "port_in_use": False}
+    payload.update(process or {})
+    monkeypatch.setattr(
+        orchestrator, "orchestrator_status_payload", lambda _root, **_kw: payload
     )
     return restart_manifest._backend_state(install_root)
 
@@ -760,9 +786,118 @@ def test_an_unreachable_backend_is_not_running(
 ) -> None:
     """A stopped orchestrator genuinely needs no restart — this branch must survive."""
     state = _backend_state_for(
-        monkeypatch, {"reachable": False, "http_status": None}, install_root=tmp_path
+        monkeypatch,
+        {"reachable": False, "http_status": None, "unreachable_reason": "refused"},
+        install_root=tmp_path,
     )
     assert state.state == "not-running"
+
+
+# `not-running` is the ONE backend verdict the install summary drops entirely: a
+# stopped orchestrator picks the install up when it next starts, so there is
+# nothing to say. That makes it the most dangerous verdict to reach by
+# assumption — every test below pins a case where the probe failed but the
+# process was never established as stopped, and the summary must therefore say
+# it could not check rather than that there is nothing to do.
+
+
+def test_a_refused_probe_against_a_live_process_is_unknown_not_stopped(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The pidfile says the orchestrator is up; /readyz refused the connection.
+
+    A process that is alive but not yet (or no longer) serving is the opposite
+    of stopped: it keeps running whatever code it loaded, so an install may well
+    have invalidated it. Calling it `not-running` drops it from the summary and
+    asserts a restart is pointless without having established that anything
+    stopped.
+    """
+    state = _backend_state_for(
+        monkeypatch,
+        {"reachable": False, "http_status": None, "unreachable_reason": "refused"},
+        install_root=tmp_path,
+        process={"state": "running", "pid": 4242, "port_in_use": False},
+    )
+    assert state.state == "unknown"
+    assert state.remedy == ""
+    assert "4242" in state.detail
+
+
+def test_a_refused_probe_while_the_port_is_held_is_unknown_not_stopped(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """No pidfile, but something owns 18000 — a direct `uvicorn` backend does this."""
+    state = _backend_state_for(
+        monkeypatch,
+        {"reachable": False, "http_status": None, "unreachable_reason": "refused"},
+        install_root=tmp_path,
+        process={"state": "stopped", "pid": None, "port_in_use": True},
+    )
+    assert state.state == "unknown"
+    assert state.remedy == ""
+
+
+def test_a_timed_out_probe_is_unknown_even_with_no_local_process_evidence(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A timeout is not a refusal.
+
+    Something accepted the connection and then did not answer — a wedged or
+    heavily loaded backend. It is precisely the live process whose loaded code
+    an install can invalidate, and the probe establishes nothing about whether
+    it stopped.
+    """
+    state = _backend_state_for(
+        monkeypatch,
+        {"reachable": False, "http_status": None, "unreachable_reason": "timeout"},
+        install_root=tmp_path,
+    )
+    assert state.state == "unknown"
+    assert state.remedy == ""
+    assert "timed out" in state.detail.lower() or "timeout" in state.detail.lower()
+
+
+def test_an_unclassifiable_probe_failure_is_unknown(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    state = _backend_state_for(
+        monkeypatch,
+        {
+            "reachable": False,
+            "http_status": None,
+            "unreachable_reason": "error",
+            "unreachable_detail": "[Errno 65] No route to host",
+        },
+        install_root=tmp_path,
+    )
+    assert state.state == "unknown"
+    assert state.remedy == ""
+
+
+def test_readyz_records_why_it_could_not_be_reached(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The snapshot must keep the OSError apart, not collapse it into one bool.
+
+    `_backend_state` cannot separate a refusal from a timeout if the only thing
+    it is handed is `reachable: False`.
+    """
+    import urllib.request
+
+    from vigil_cli import status as status_module
+
+    def _refuse(*_args: object, **_kwargs: object) -> object:
+        raise ConnectionRefusedError(61, "Connection refused")
+
+    monkeypatch.setattr(urllib.request, "urlopen", _refuse)
+    _, readiness = status_module._orchestrator_readyz_snapshot(tmp_path)
+    assert readiness["reachable"] is False
+    assert readiness["unreachable_reason"] == "refused"
+
+    def _time_out(*_args: object, **_kwargs: object) -> object:
+        raise TimeoutError("timed out")
+
+    monkeypatch.setattr(urllib.request, "urlopen", _time_out)
+    _, readiness = status_module._orchestrator_readyz_snapshot(tmp_path)
+    assert readiness["unreachable_reason"] == "timeout"
 
 
 def test_a_backend_serving_another_install_root_cannot_clear_this_one(
@@ -1061,3 +1196,139 @@ def test_the_cli_remedy_reruns_the_install_that_recomputes_everything() -> None:
         "after the binary moves, the working root's verdicts must be recomputed"
     )
     del running
+
+
+# --- the source this install actually copied from -----------------------------
+
+
+def _fake_cli_source(root: Path, body: str) -> Path:
+    """A checkout shaped just enough for `cli_state` to digest its CLI package."""
+    package = root / "src" / "vigil_cli"
+    package.mkdir(parents=True, exist_ok=True)
+    (package / "__init__.py").write_text(body, encoding="utf-8")
+    return root
+
+
+def test_the_post_install_verdict_compares_against_the_source_it_installed_from(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`vigil install --source X` must be judged against X, and nothing else.
+
+    `consumer_states` used to rediscover a source through environment, config,
+    the running package, and the current directory — so with two checkouts on
+    the box, or an explicit `--source`, the root whose bytes were just copied
+    could be compared against a DIFFERENT checkout and reported stale. The
+    remedy it then prints (`uv tool upgrade vigil && vigil install`) repeats the
+    mismatch or silently switches sources.
+    """
+    installed_from = _fake_cli_source(tmp_path / "chosen", "VERSION = 'chosen'\n")
+    other_checkout = _fake_cli_source(tmp_path / "other", "VERSION = 'other'\n")
+
+    seen: list[Path | None] = []
+
+    def _record(*, source_root: Path | None) -> restart_manifest.ConsumerState:
+        seen.append(source_root)
+        return _current("cli", "vigil CLI")
+
+    monkeypatch.setattr(restart_manifest, "cli_state", _record)
+    monkeypatch.setattr(
+        "vigil_cli.status._resolve_source_root_offline", lambda _root: other_checkout
+    )
+
+    restart_manifest.consumer_states(
+        tmp_path / "root", runner=_fake_runner(), source_root=installed_from
+    )
+    assert seen == [installed_from]
+
+
+def test_a_real_install_records_the_source_its_bytes_came_from(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The real install path, with a second checkout present to be mistaken for it.
+
+    `install_from_source` resolves the source once and copies from it. Unless
+    that exact root rides out on the result, the freshness verdict has to guess
+    again — and `other` here is precisely the kind of checkout a fresh discovery
+    would find instead.
+    """
+    from vigil_cli.install import InstallOptions, install_from_source
+
+    monkeypatch.setenv("VIGIL_CONFIG", str(tmp_path / "config.json"))
+    monkeypatch.delenv("VIGIL_OOB_DOMAIN", raising=False)
+    installed_from = _fake_cli_source(tmp_path / "chosen", "VERSION = 'chosen'\n")
+    (installed_from / "agent").mkdir(parents=True, exist_ok=True)
+    (installed_from / "agent" / "README").write_text("managed", encoding="utf-8")
+    _fake_cli_source(tmp_path / "other", "VERSION = 'other'\n")
+
+    result = install_from_source(
+        InstallOptions(
+            source_root=installed_from,
+            install_root=tmp_path / "install",
+            verify_docker_image=False,
+        )
+    )
+    assert result.source_root == installed_from
+
+
+def test_post_install_judges_the_cli_against_the_installed_source(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """End to end: `_print_post_install` hands the result's source down."""
+    from vigil_cli import main as main_module
+    from vigil_cli.install import InstallResult
+
+    installed_from = _fake_cli_source(tmp_path / "chosen", "VERSION = 'chosen'\n")
+    seen: list[Path | None] = []
+
+    def _capture(install_root: Path, **kwargs: object) -> list[restart_manifest.ConsumerState]:
+        seen.append(kwargs.get("source_root"))  # type: ignore[arg-type]
+        return [_current("cli", "vigil CLI")]
+
+    monkeypatch.setattr(main_module.restart_manifest, "consumer_states", _capture)
+    main_module._print_post_install(
+        InstallResult(
+            install_root=tmp_path,
+            is_upgrade=True,
+            image_built=False,
+            source_root=installed_from,
+        ),
+        stream=FakeStream(tty=False),
+    )
+    assert seen == [installed_from]
+
+
+def test_consumer_states_still_discovers_a_source_when_none_is_supplied(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`vigil status` has no install to name a source, and must keep working."""
+    discovered = _fake_cli_source(tmp_path / "discovered", "VERSION = 'discovered'\n")
+    seen: list[Path | None] = []
+
+    def _record(*, source_root: Path | None) -> restart_manifest.ConsumerState:
+        seen.append(source_root)
+        return _current("cli", "vigil CLI")
+
+    monkeypatch.setattr(restart_manifest, "cli_state", _record)
+    monkeypatch.setattr(
+        "vigil_cli.status._resolve_source_root_offline", lambda _root: discovered
+    )
+    restart_manifest.consumer_states(tmp_path / "root", runner=_fake_runner())
+    assert seen == [discovered]
+
+
+def test_the_clean_summary_asserts_no_cause_it_did_not_measure() -> None:
+    """"Nothing to restart" is a verdict; "because X changed" is a measurement.
+
+    Consumer state records what each consumer NEEDS, never which files this
+    install rewrote — so "this install changed only files that are read live"
+    was inferred from the absence of remedies. A backend-source upgrade
+    performed while the backend is stopped reaches the same branch and makes the
+    claim plainly false.
+    """
+    text = _post_install_output(
+        [_current("backend", "orchestrator backend"), _current("cli", "vigil CLI")],
+        tty=False,
+    ).lower()
+    assert "nothing to restart" in text
+    assert "read live" not in text
+    assert "changed only" not in text

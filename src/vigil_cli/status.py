@@ -842,6 +842,12 @@ def _orchestrator_readyz_snapshot(install_root: Path) -> tuple[bool, dict[str, o
     url = f"{resolve_orchestrator_base_url(install_root)}/readyz"
     readiness: dict[str, object] = {
         "reachable": False,
+        # Why there was no answer, when there was none. Collapsing every OSError
+        # into `reachable: False` made a refused connection and a backend that
+        # simply did not answer within the timeout indistinguishable, and
+        # `restart_manifest` read the pair as "the process is stopped".
+        "unreachable_reason": None,
+        "unreachable_detail": None,
         "http_status": None,
         "status": None,
         "database_connected": None,
@@ -861,8 +867,28 @@ def _orchestrator_readyz_snapshot(install_root: Path) -> tuple[bool, dict[str, o
         readiness["http_status"] = exc.code
         _merge_readyz_payload(readiness, exc.read())
         return False, readiness
-    except OSError:
+    except OSError as exc:
+        readiness["unreachable_reason"] = _unreachable_reason(exc)
+        readiness["unreachable_detail"] = str(exc) or exc.__class__.__name__
         return False, readiness
+
+
+def _unreachable_reason(exc: OSError) -> str:
+    """Classify a failed `/readyz` probe: `refused`, `timeout`, or `error`.
+
+    `urlopen` wraps connection-level failures in `URLError`, so the OSError that
+    actually describes what happened is one level down in ``reason``. The
+    distinction matters to `restart_manifest`: a refusal means nothing accepted
+    the connection, while a timeout means something did and then went quiet —
+    a live process whose loaded code an install can invalidate.
+    """
+    reason = getattr(exc, "reason", None)
+    inner = reason if isinstance(reason, OSError) else exc
+    if isinstance(inner, TimeoutError):
+        return "timeout"
+    if isinstance(inner, ConnectionRefusedError):
+        return "refused"
+    return "error"
 
 
 def _merge_readyz_payload(readiness: dict[str, object], raw: bytes) -> None:

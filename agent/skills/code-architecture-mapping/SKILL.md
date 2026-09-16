@@ -83,7 +83,8 @@ Store as `header_snippet` per file for later reference.
 
 ### Step 5: Git Provenance and Churn Context
 
-Use only the ingest-time Git fields and `code_repos.git_churn_json` supplied in dispatch context.
+Use only the ingest-time Git fields and the `git_churn` field of the repository record
+(`vigil assess fetch "code/repos/<repo-id>"`) supplied in dispatch context.
 Do not reopen the mutable origin or infer current source identity from a commit hash: dirty and
 untracked admitted files are covered by the sealed manifest instead. High-churn files in
 security-relevant directories are priority signals, and files named by captured security-history

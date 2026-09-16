@@ -179,7 +179,11 @@ A prompt change is **not** prompt-only when the prompt defines an artifact the b
 - `orchestrator/backend/app/main.py` — FastAPI bootstrap. Routers are registered explicitly here.
 - `orchestrator/backend/app/db.py` — the SQLite persistence boundary and the single schema owner.
 - `orchestrator/backend/app/api/assessment.py` — the canonical live-state interface for recon, surfaces, coverage, readiness, findings, chains, credentials, dispatch/handoff registry writes, bulk ingestion, and command-run audit.
-- `orchestrator/backend/app/api/code_analysis.py` — atomic repo refresh (the only repo/file ingest write path), lease-owned queue work, and generation-bound compare-and-swap for threat models and structural indexes.
+- `orchestrator/backend/app/api/code_analysis.py` — atomic repo refresh (the only repo/file ingest write
+  path), lease-owned queue work, and generation-bound compare-and-swap for threat models and structural
+  indexes. Also the read-only paginated queue listing (`GET analysis-queue`): its `item_ids` page is the
+  ids-file contract `code-dispatch fetch --ids-file` consumes, so the two must keep one ordering and one
+  current-generation filter.
 - `orchestrator/backend/app/api/submissions.py` — the immutable submission-version and sent-reply API shared by the CLI and the web UI.
 - `orchestrator/backend/app/services/state_manager/` — the live-state service package, re-exported
   through `__init__.py` so public `state_manager.<fn>` paths remain stable.

@@ -372,15 +372,27 @@ def validate_specialist_dispatch_contract(
             "Proceeding (stored as-is) in case this is a newly-coined mode."
         )
 
-    if not payload.get("requested_model") and not payload.get("model"):
-        warnings.append(
-            "requested_model not set; the dispatch cannot be compared as a measured "
-            "model recipe. Record the selected client model when it is known."
+    # ONE warning for the whole recipe. Two fields of the same uncertainty used
+    # to warn separately, and the provenance attach added a third on every
+    # dispatch — enough repetition to train operators past the stderr channel
+    # real failures use. The permanent half of the uncertainty (ordinary
+    # dispatches observe no launcher-effective identity, so any value here is
+    # the caller's selection) lives in the `agent start` contract; only the half
+    # the caller can still fix warns.
+    unrecorded = [
+        canonical
+        for canonical, shorthand in (
+            ("requested_model", "model"),
+            ("requested_reasoning", "reasoning"),
         )
-    if not payload.get("requested_reasoning") and not payload.get("reasoning"):
+        if not payload.get(canonical) and not payload.get(shorthand)
+    ]
+    if unrecorded:
         warnings.append(
-            "requested_reasoning not set; the dispatch cannot be compared as a measured "
-            "reasoning recipe. Record the selected effort when it is known."
+            f"{' and '.join(unrecorded)} not set; the dispatch cannot be compared as a "
+            "measured model/reasoning recipe. Record the client model and reasoning "
+            "effort you selected — Vigil records the selection, never a provider-observed "
+            "value, so an unset field is simply lost."
         )
 
     for str_field in ("role", "agent_role"):
@@ -1677,8 +1689,10 @@ _CONTRACTS: dict[str, CommandContract] = {
             "vigil assess code-dispatch queue <queue-items-json-file>",
             "vigil assess code-dispatch reanalyze <queue-items-json-file> <reason>",
             "vigil assess code-dispatch fetch <limit> <agent-name>",
-            "vigil assess code-dispatch fetch <limit> <agent-name> --repo-id <id> --classification <tier> --batch-theme <theme>",
+            "vigil assess code-dispatch fetch <limit> <agent-name> --repo-id <id> --classification <tier> --batch-theme <theme> --queue-mode <mode>",
             "vigil assess code-dispatch fetch <limit> <agent-name> --ids-file <queue-ids-json>",
+            "vigil assess code-dispatch list --status pending --repo-id <id> --limit 200",
+            "vigil assess code-dispatch list --queue-mode trigger --ids-only > ids.json",
             "vigil assess code-dispatch heartbeat <item-id> <agent-name> <lease-token>",
             "vigil assess code-dispatch done <item-id> <agent-name> <lease-token> <disposition> <cwe-coverage-json-file> [notes] [--dry-run] [--skip-reason <reason>]",
             "vigil assess code-dispatch list-triggers [status]",
@@ -1693,21 +1707,34 @@ _CONTRACTS: dict[str, CommandContract] = {
             "a non-empty audit reason for every reanalysis attempt",
             "supersedes on every reanalysis item, naming the exact terminal/current predecessor queue row",
             "an explicit priority exactly equal to the file's current analysis_priority",
-            "optional atomic fetch filters: repo_id, classification, batch_theme, and item_ids",
+            "optional atomic fetch filters: repo_id, classification, batch_theme, queue_mode, and item_ids",
+            "optional list filters: status, repo_id, classification, batch_theme, queue_mode, limit, offset",
+            "exactly one selector per requeue-triggers input: file_id, trigger_id/id, or file_path/target_file_path (+repo_id)",
             "the fetched agent_name + lease_token for heartbeat, results, and closeouts",
             "bare JSON array for cwe_coverage when completing a queue item",
             "trigger_id/id or file_path/target_file_path when resolving triggers",
             "resolution_status: external_context_unavailable, source_equivalent_analyzed, or not_applicable",
             "resolution_note explaining why the trigger is accepted without requeue",
         ),
+        helper_defaults=(
+            (
+                "scratch_dir",
+                "created by `fetch` per claimed item at "
+                "tools/analysis-state/code-dispatch-scratch/<queue-item-id>/lease-<lease-digest> "
+                "and returned on the item; the specialist's temp-file location for that lease",
+            ),
+        ),
         notes=(
             "Initial queue submission is transactionally idempotent per file and active repository generation. A retry inserts missing rows, updates only an unleased pending initial row, reports identical pending/processing work as already_active, and reports conflicts without mutating live leases or terminal evidence.",
             "Use `reanalyze` only for deliberate added depth after a completed queue item. Every item must name that exact predecessor with `supersedes`; error and needs-context rows use their dedicated retry verbs instead.",
             "Every initial or reanalysis item must supply priority explicitly and exactly match the current code_files.analysis_priority. The backend rejects the whole batch before mutation when any item drifts; the CLI rejects missing, non-integer, and out-of-range values instead of silently defaulting or clamping them. File, repository, queue-item, and trigger identifiers are strict positive JSON integers: booleans, floats, and numeric strings are rejected rather than coerced.",
-            "Trigger requeue rejects unclassified targets, derives priority from the current file, and transactionally merges distinct trigger context into one unleased pending row. Trigger-origin rows are protected from ordinary initial retries; new context is never written into a live processing lease.",
+            "`list` is read-only and claims nothing: it pages current-generation queue rows in the same order `fetch` claims them (priority DESC, id ASC), filtered by status, repo_id, classification, batch_theme, and queue_mode. Its `item_ids` array — under `--json`, or alone under `--ids-only` — is the ids-file contract `fetch --ids-file` consumes verbatim, so exact-ID batching never depends on scraping insertion output that truncates at 200 rows.",
+            "Trigger requeue takes exactly one selector per input (file_id, trigger_id/id, or file_path/target_file_path with repo_id) and rejects scalars and selector-less objects before any write, so a `list-triggers` row passes straight through. It rejects unclassified targets, derives priority from the current file, preserves the target's existing batch theme, keeps trigger provenance in queue_mode=trigger, and transactionally merges distinct trigger context into one unleased pending row. Trigger-origin rows are protected from ordinary initial retries; new context is never written into a live processing lease.",
+            "Requeue accounting separates `input_trigger_count` from `target_count`, and `inserted`/`already_queued`/`already_completed`/`blocked` sum exactly to `target_count`. Each target commits inside its own savepoint, so one blocked target no longer rolls back the rest of the batch; every blocked target is reported with its reason, every input gets exactly one outcome, `reopened_terminal_files` reports how many terminal files were reopened, and the CLI exits nonzero whenever any target is blocked or any selector is unresolved.",
             "Every queue response includes per-file inserted, updated, already_active, conflict, or reanalysis outcomes. The CLI exits nonzero when any conflict is reported, after saving and rendering the complete response.",
             "`stats` projects only the latest current-generation attempt per file into actionable status counts and `total`. `historical_total` includes every preserved current-generation attempt; `superseded_history` is the older-attempt count excluded from actionable work. `invalid_active_identity` counts latest pending/processing rows whose lease identity is internally inconsistent. `invalid_active_history` counts files with an older pending/processing attempt overlapping the latest attempt. Both are visible debt but are not fetchable or actionable. Every exact-ID lifecycle mutation, trigger merge, initial/reanalysis write, priority synchronization, and stale reset applies this same canonical-attempt rule and fails closed on malformed history.",
-            "Fetch filters and the active repository generation are applied inside the same serialized SQL claim that changes pending rows to processing. Fetch never rewrites a stale row's generation. The returned agent_name, lease_token, repo_generation, and engagement-contained scratch_dir identify the owned dispatch context; reuse the agent and lease on heartbeat, result, and closeout writes, and write temporary files only under that dispatch's scratch_dir.",
+            "Fetch filters and the active repository generation are applied inside the same serialized SQL claim that changes pending rows to processing. Fetch never rewrites a stale row's generation. The returned agent_name, lease_token, repo_generation, and engagement-contained scratch_dir identify the owned dispatch context; reuse the agent and lease on heartbeat, result, and closeout writes.",
+            "Write temporary files under the fetched item's scratch_dir, in preference to any scratch location the client harness offers: it is created per lease, contained in the engagement, and private to this lane, so nothing lands outside the engagement and no second lane can overwrite it. Where work must share a directory with other lanes of the same client, give every filename a lane-unique prefix (the queue item id or agent_name) so concurrent hunters cannot clobber each other's intermediate state.",
             "An empty fetch prints why no current pending row matched and names the filters used; inspect `code-dispatch stats` and the code-files queue join before retrying rather than treating `[]` as unexplained lost work.",
             "Queue every file admitted by the active repository generation. Classification and priority order claims; they never remove a file from accounting. A skip-tier row closes only through disposition=skipped with a structured reason.",
             "A finding/suspicious closeout requires a current same-disposition result for the active lease with inline evidence or evidence_ref. A clean closeout requires non-empty family coverage and review notes; skipped retains its structured skip reason.",
@@ -1729,6 +1756,8 @@ _CONTRACTS: dict[str, CommandContract] = {
             ("analysis_priority", "queue payloads require explicit `priority`; copy the file's current `analysis_priority` exactly because the backend rejects any mismatch transactionally."),
             ("missing resolution_note", "accepted trigger gaps need a durable rationale"),
             ("using resolve-triggers for pending source that exists", "use requeue-triggers when the target file is available and needs analysis"),
+            ("scraping queue IDs out of insertion output", "`code-dispatch list --ids-only` pages every current row; insertion output caps at 200"),
+            ("passing both file_id and trigger_id on one requeue input", "each input names exactly one target with exactly one selector"),
         ),
         examples=(
             {
@@ -2026,6 +2055,7 @@ _CONTRACTS: dict[str, CommandContract] = {
         common_mistakes=(
             ("file_id-only result", "include queue_item_id; file_id is optional and queue-derived"),
             ("reviewed_span over a registered callable", "include every overlapped structural callable as an exact callable_ref; spans cannot impersonate callable coverage"),
+            ("file_path inside a reviewed_span", "a span names its file by file_id; file_path belongs to cross_file_triggers and is rejected on a span"),
             ("artifact path only in notes", "put an engagement-owned path in evidence_ref so evidence-aware closeout can verify it"),
             ("confidence in finding record", "confidence belongs in code-record analysis, not finding record"),
             ("cross_file_triggers object wrapper", "cross_file_triggers is a bare array on the analysis result"),
@@ -2052,6 +2082,34 @@ _CONTRACTS: dict[str, CommandContract] = {
                 "confidence": "high",
                 "cwe_coverage": [
                     {"family": "buffer-overflow", "effort": 85, "notes": "All parser entry chains traced"}
+                ],
+                "cross_file_triggers": [],
+            },
+            # An unsupported-language file has no registered callables, so the
+            # span IS its coverage evidence — and the whole-file span is the only
+            # shape the backend accepts for it. The span names its file by
+            # file_id: `file_path` reads natural here because cross_file_triggers
+            # uses it, and it is rejected.
+            {
+                "queue_item_id": 77,
+                "agent_name": "code-vuln-hunter",
+                "lease_token": "<fetched-lease-token>",
+                "receipt_kind": "file",
+                "callable_refs": [],
+                "reviewed_spans": [
+                    {
+                        "file_id": 512,
+                        "start_line": 1,
+                        "end_line": 240,
+                        "label": "whole file; structural analysis unsupported for this language",
+                    }
+                ],
+                "hypothesis": "Template renders request-controlled values into an HTML context",
+                "evidence": "Every interpolation site read by hand; all pass through the escaping helper",
+                "disposition": "clean",
+                "confidence": "medium",
+                "cwe_coverage": [
+                    {"family": "xss", "effort": 40, "notes": "All 11 interpolation sites read"}
                 ],
                 "cross_file_triggers": [],
             },
@@ -3646,7 +3704,13 @@ def render_contract(name: str) -> str:
         )
         lines.extend(f"  - {key} = {value}" for key, value in contract.helper_defaults)
 
-    schema_properties = _schema_property_names(contract.schema_name)
+    schema_properties = _schema_field_lines(
+        contract.schema_name,
+        # The top level prints its own "Required top-level fields" summary, and
+        # `details` gets a deeper section of its own on the verbs that write it.
+        mark_required=False,
+        deferred_fields=("details",) if contract.details_schema_name else (),
+    )
     if schema_properties:
         lines.extend(
             [
@@ -3654,7 +3718,7 @@ def render_contract(name: str) -> str:
                 "Allowed top-level fields:",
             ]
         )
-        lines.extend(f"  - {entry}" for entry in schema_properties)
+        lines.extend(schema_properties)
 
     schema_required = _schema_required_names(contract.schema_name)
     if schema_required:
@@ -3666,7 +3730,7 @@ def render_contract(name: str) -> str:
         )
         lines.extend(f"  - {entry}" for entry in schema_required)
 
-    details_properties = _details_property_names(contract.details_schema_name)
+    details_properties = _details_field_lines(contract.details_schema_name)
     if details_properties:
         lines.extend(
             [
@@ -3674,7 +3738,7 @@ def render_contract(name: str) -> str:
                 f"Allowed details keys ({contract.details_schema_name} -> properties.details):",
             ]
         )
-        lines.extend(f"  - {entry}" for entry in details_properties)
+        lines.extend(details_properties)
 
     if contract.common_mistakes:
         lines.extend(
@@ -3866,36 +3930,136 @@ def common_mistake_hints(name: str, payload: dict[str, Any]) -> list[str]:
     return hints
 
 
-def _schema_property_names(schema_name: str) -> list[str]:
-    if not schema_name.endswith(".schema.json"):
-        return []
-    schema = load_schema(schema_name)
-    properties = schema.get("properties", {})
+_DEFERRED_FIELD_POINTER = 'see "Allowed details keys" below'
+
+
+def _schema_content_node(prop: dict[str, Any]) -> dict[str, Any]:
+    """The node that describes what one value of ``prop`` may contain.
+
+    An array documents its element shape under ``items``, so a span list and a
+    span object are the same authoring question one level apart.
+    """
+    items = prop.get("items")
+    return items if isinstance(items, dict) else prop
+
+
+def _schema_type_label(prop: dict[str, Any]) -> str:
+    declared = prop.get("type")
+    if isinstance(declared, list):
+        label = " or ".join(str(entry) for entry in declared)
+    elif isinstance(declared, str):
+        label = declared
+    else:
+        label = "any"
+    if label != "array":
+        return label
+    items = prop.get("items")
+    return f"array of {_schema_type_label(items)}" if isinstance(items, dict) else label
+
+
+def _schema_field_annotation(
+    prop: dict[str, Any], *, required: bool, deferred: bool
+) -> str:
+    """The parenthesised domain of one declared property.
+
+    Type first, then whether it must be supplied, then the facts that decide
+    whether a value is legal at all: the enum a string is confined to, and
+    whether an object accepts keys beyond the ones listed under it.
+    """
+    head = _schema_type_label(prop)
+    if required:
+        head += ", required"
+    extras: list[str] = []
+    items = prop.get("items")
+    enum = prop.get("enum")
+    if enum is None and isinstance(items, dict):
+        enum = items.get("enum")
+    if isinstance(enum, list) and enum:
+        extras.append("one of: " + ", ".join(str(value) for value in enum))
+    if _schema_content_node(prop).get("additionalProperties") is True:
+        extras.append("other keys allowed")
+    if deferred:
+        extras.append(_DEFERRED_FIELD_POINTER)
+    return "; ".join([head, *extras])
+
+
+def _schema_object_lines(
+    node: dict[str, Any],
+    *,
+    depth: int,
+    mark_required: bool,
+    deferred_fields: tuple[str, ...],
+) -> list[str]:
+    """Render one object node's declared properties, nested content included.
+
+    Bundled schemas are strict in both directions: an undeclared key is rejected
+    and so is a value outside a declared enum, and both rules bite inside nested
+    objects and array elements the top-level name says nothing about. The whole
+    rejectable surface therefore has to be printable from the contract, which is
+    the only place an agent can read it. Recursion is bounded by the schema's own
+    declarations, and every level is name-sorted so the rendering is stable.
+    """
+    properties = node.get("properties")
     if not isinstance(properties, dict):
         return []
-    return sorted(str(name) for name in properties)
+    required = node.get("required")
+    required_names = set(required) if isinstance(required, list) else set()
+    indent = "    " * depth
+    lines: list[str] = []
+    for name in sorted(str(key) for key in properties):
+        prop = properties[name] if isinstance(properties[name], dict) else {}
+        deferred = depth == 0 and name in deferred_fields
+        annotation = _schema_field_annotation(
+            prop,
+            required=mark_required and name in required_names,
+            deferred=deferred,
+        )
+        lines.append(f"{indent}  - {name} ({annotation})")
+        if not deferred:
+            lines.extend(
+                _schema_object_lines(
+                    _schema_content_node(prop),
+                    depth=depth + 1,
+                    mark_required=True,
+                    deferred_fields=(),
+                )
+            )
+    return lines
 
 
-def _details_property_names(schema_name: str) -> list[str]:
-    """Allowed keys of the ``details`` object inside a bundled schema.
+def _schema_field_lines(
+    schema_name: str,
+    *,
+    mark_required: bool,
+    deferred_fields: tuple[str, ...],
+) -> list[str]:
+    """Authoring surface of a bundled schema's top-level object."""
+    if not schema_name.endswith(".schema.json"):
+        return []
+    return _schema_object_lines(
+        load_schema(schema_name),
+        depth=0,
+        mark_required=mark_required,
+        deferred_fields=deferred_fields,
+    )
 
-    ``_schema_property_names`` stops at the top level, where ``details`` is a
-    single opaque name — so a caller reading `contract finding record` saw
-    "details" and nothing about the ~60 keys it accepts, and `finding update`
-    (whose ``schema_name`` is prose, not a bundled file) printed no field list at
-    all. Both verbs write that object under ``additionalProperties: false``, so
-    the allowed set has to be readable from the contract or an unknown key is
-    rejected with no way to learn the vocabulary.
+
+def _details_field_lines(schema_name: str) -> list[str]:
+    """Authoring surface of the ``details`` object inside a bundled schema.
+
+    ``details`` needs its own section because `finding update` writes it through
+    a backend Pydantic model with no bundled schema of its own — there is no
+    top-level field list to hang it under. Rendered through the same recursion so
+    the two doors into that object publish one vocabulary.
     """
     if not schema_name.endswith(".schema.json"):
         return []
     details = load_schema(schema_name).get("properties", {}).get("details", {})
     if not isinstance(details, dict):
         return []
-    properties = details.get("properties", {})
-    if not isinstance(properties, dict):
-        return []
-    return sorted(str(name) for name in properties)
+    return _schema_object_lines(
+        details, depth=0, mark_required=True, deferred_fields=()
+    )
 
 
 def _schema_required_names(schema_name: str) -> list[str]:
@@ -4822,7 +4986,7 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
                 "backend-derived Code Source Identity block immediately after Runtime Identity.",
                 "Every output path prints the exact authored rate budget (or an explicit no-target-traffic declaration). --emit-prompt requires the complete prompt-only object (authorized_phase, target, hunt_scope, mindset_lens, depth_expectation, oob, auth_context, credential_id, prior_state, coverage, cleanup, human_reach_decision, role_specific_additions); missing or empty values fail before the dispatch write. On a blue engagement it also validates and injects customer, platforms, and every owned regular-file tenant reference from scope.json before the write.",
                 "`skills` on a specialist dispatch is a WARNING when missing, never a rejection — neither the CLI nor the backend blocks on it. A specialist picks its skills from what it observes, so the honest list is often known only after the dispatch runs. Set it when the applicable skill is already clear; otherwise name it in the handoff.",
-                "Missing requested model or reasoning is also visible warning debt: the dispatch remains usable, but it is not a fully measured/replayable recipe. Never invent an actual runtime model when the client does not expose it.",
+                "requested_model and requested_reasoning record the recipe YOU selected. An ordinary dispatch carries no launcher-effective or provider-observed model/reasoning — no trusted launcher integration attests them — so the row is an asserted recipe, never measured truth, and caller-supplied actual_/launcher_effective_ fields are dropped rather than stored. Leaving either unset is visible warning debt: the dispatch stays usable but is not replayable. Never invent a runtime model the client does not expose.",
                 "Discover skill names with `vigil assess list-skills` — each value must match a directory under `agent/skills/<name>/`.",
                 "Pair with `agent done` when the dispatch finishes; rows left `in-progress` past the dispatch's actual lifetime corrupt dedup checks.",
             ),

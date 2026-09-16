@@ -14307,7 +14307,12 @@ def test_artifact_cli_registers_payload(
     monkeypatch.setattr(
         module,
         "load_config",
-        lambda *_a, **_k: SimpleNamespace(base_url="http://example.test", engagement_key="eng"),
+        # `engagement_dir` is part of the real `Config`; register canonicalizes the
+        # submitted path against it before POSTing so the response comparison is
+        # canonical-vs-canonical.
+        lambda *_a, **_k: SimpleNamespace(
+            base_url="http://example.test", engagement_key="eng", engagement_dir="/tmp/eng"
+        ),
     )
 
     module._run_register(

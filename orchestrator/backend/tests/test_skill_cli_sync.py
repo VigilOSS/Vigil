@@ -1244,10 +1244,23 @@ _NEGATION_MARKERS = (
 # exactly as it flagged "Use `vigil oob client logs` to correlate callbacks" —
 # the two plainest ways to state the contract were indistinguishable from
 # breaking it, which pushes an author toward vaguer wording to satisfy the lint.
-# A negation token close in front of the correlation claim, with no sentence
-# break between them, is what separates them.
+#
+# Proximity alone cannot decide it. A 60-character window that only had to avoid
+# `.;:` accepted any negation that happened to be nearby, including one that
+# negates a DIFFERENT clause — "should not be overlooked because it correlates
+# callbacks" and "is not preferred, but it correlates each hit" both assert the
+# correlation claim outright and both cleared the window. What separates a
+# disavowal from a claim is GRAMMATICAL GOVERNMENT: the negator has to attach to
+# the correlation verb itself, so only an adverb or two may sit between them and
+# no punctuation may, because a comma or a subordinator ("because", "but") is
+# precisely the boundary at which the negation stops applying.
+
+# `\b` cannot anchor the contracted `n't` — the character before it is a word
+# character — so that family gets its own alternative.
+_CORRELATION_NEGATOR = r"(?:\bcannot\b|\bcan['’]?t\b|\bnever\b|\bnot?\b|\w+n['’]t\b)"
+
 _LOGS_CORRELATION_DISAVOWED_RE = re.compile(
-    r"\b(?:cannot|can't|cant|never|no|not|n't)\b[^.;:]{0,60}?(?:correlat|attribut)",
+    rf"{_CORRELATION_NEGATOR}(?:\s+[\w'’-]+){{0,2}}\s+(?:correlat|attribut)",
     re.IGNORECASE,
 )
 
@@ -1271,6 +1284,10 @@ def _logs_correlation_offence(line: str) -> bool:
         "`vigil oob client logs` does not correlate hits; `vigil oob poll` does",
         "`vigil oob client logs` cannot correlate a callback to a request",
         "`vigil logs oob` is a raw tail and never correlates anything",
+        # An adverb between the negator and the verb still reads as a disavowal;
+        # so does the contracted form, which no `\b`-anchored token can match.
+        "`vigil oob client logs` does not reliably correlate callbacks",
+        "`vigil oob client logs` doesn't correlate hits",
     ],
 )
 def test_a_correct_disavowal_is_not_an_offence(line):
@@ -1289,6 +1306,11 @@ def test_a_correct_disavowal_is_not_an_offence(line):
         "Use `vigil oob client logs` to correlate callbacks",
         "`vigil oob client logs` correlates each hit to the request that caused it",
         "Correlate the callback with `vigil logs oob`",
+        # Negation that modifies a DIFFERENT clause. Both of these assert the
+        # correlation claim outright; the nearby `not` belongs to "overlooked"
+        # and to "preferred", never to "correlates".
+        "`vigil oob client logs` should not be overlooked because it correlates callbacks",
+        "`vigil oob client logs` is not preferred, but it correlates each hit",
     ],
 )
 def test_claiming_a_logs_tail_correlates_is_still_an_offence(line):

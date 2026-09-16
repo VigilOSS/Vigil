@@ -85,6 +85,12 @@ class InstallResult:
     image_built: bool
     client_roster_repair: ClientRosterRepairResult | None = None
     client_entrypoint_repair: ClientEntrypointRepairResult | None = None
+    # The checkout whose bytes were actually copied, already resolved through
+    # `--source`/env/config. The post-install freshness verdict must compare
+    # against THIS root: rediscovering a source afterwards can pick a different
+    # checkout on a box that has two, and then report the just-installed root
+    # stale against a tree it was never installed from.
+    source_root: Path | None = None
 
 
 def _has_engagement_directories(install_root: Path) -> bool:
@@ -752,4 +758,5 @@ def install_from_source(
         image_built=image_built,
         client_roster_repair=client_roster_repair,
         client_entrypoint_repair=client_entrypoint_repair,
+        source_root=source_root,
     )
