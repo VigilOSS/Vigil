@@ -493,7 +493,8 @@ def _render_decisions(lines: list, rows: list, total) -> None:
     lines.extend(["", "## Recent Decisions"])
     lines.append("- point read: `vigil assess fetch dispatch-decisions/<id>`")
     for row in rows:
-        state = "resolved" if row.get("resolved") else "open"
+        resolved = bool(row.get("resolved"))
+        state = "resolved" if resolved else "open"
         surfaced = " surfaced" if row.get("surfaced_to_user") else ""
         payload = row.get("payload")
         detail = (
@@ -507,6 +508,23 @@ def _render_decisions(lines: list, rows: list, total) -> None:
             f"[{state}{surfaced}] ::",
             detail,
         )
+        # `[resolved]` says a call was made, not which one; without the
+        # resolution a resumed operator can only re-ask the question it already
+        # answered, or contradict it. Every resolved row gets the line —
+        # "settled with nothing recorded" is a real state, and the one most
+        # worth seeing — and an unresolved row gets it only when the backend
+        # carries a resolution anyway, which is state to surface, not hide.
+        resolution = row.get("resolution")
+        if resolved or resolution:
+            # Narrowing to dicts the way `payload` does would blank any other
+            # shape the column holds — the loss this line exists to close.
+            append_contained_value(
+                lines,
+                "  - resolution ::",
+                json.dumps(resolution, ensure_ascii=False, sort_keys=True)
+                if resolution
+                else "-",
+            )
     _render_dispatch_more(lines, len(rows), total, "recent decisions")
 
 

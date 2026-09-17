@@ -1086,6 +1086,114 @@ def test_the_brief_renders_the_checkpoint_reference_block_the_show_verb_renders(
     assert reference_block in brief
 
 
+def test_a_resolved_decision_renders_what_was_decided():
+    """`[resolved]` alone tells a resumed operator a call was made, not which one.
+
+    The backend has always carried `resolution`; without it in the render the
+    operator can only re-ask the question it already answered, or contradict it.
+    """
+    resolution = {"choice": "proceed", "scope": "vendor.example.com"}
+    out = resume_brief._render_markdown(
+        {
+            "engagement": {"key": "eng"},
+            "recent_decisions": [
+                {
+                    "id": 3057,
+                    "created_at": "2026-09-12T11:30:00Z",
+                    "kind": "scope_decision",
+                    "resolved": True,
+                    "surfaced_to_user": True,
+                    "payload": {"host": "vendor.example.com"},
+                    "resolution": resolution,
+                }
+            ],
+            "recent_decisions_count": 1,
+        }
+    )
+
+    assert "[resolved surfaced]" in out
+    assert json.dumps(resolution, ensure_ascii=False, sort_keys=True) in out
+
+
+def test_a_resolved_decision_with_no_recorded_resolution_still_says_so():
+    """Settled-but-unrecorded is a real state, and the one most worth seeing."""
+    out = resume_brief._render_markdown(
+        {
+            "engagement": {"key": "eng"},
+            "recent_decisions": [
+                {
+                    "id": 3058,
+                    "created_at": "2026-09-12T11:30:00Z",
+                    "kind": "scope_decision",
+                    "resolved": True,
+                    "surfaced_to_user": False,
+                    "payload": {"host": "vendor.example.com"},
+                    "resolution": None,
+                }
+            ],
+            "recent_decisions_count": 1,
+        }
+    )
+
+    assert "  - resolution ::" in out
+    assert "\n    -\n" in out or out.endswith("\n    -")
+
+
+def test_an_open_decision_renders_no_resolution_line():
+    """An unresolved decision has nothing decided; an empty line would only
+    read as a decision that was made and left blank."""
+    out = resume_brief._render_markdown(
+        {
+            "engagement": {"key": "eng"},
+            "recent_decisions": [
+                {
+                    "id": 3059,
+                    "created_at": "2026-09-12T11:30:00Z",
+                    "kind": "scope_decision",
+                    "resolved": False,
+                    "surfaced_to_user": True,
+                    "payload": {"host": "vendor.example.com"},
+                    "resolution": None,
+                }
+            ],
+            "recent_decisions_count": 1,
+        }
+    )
+
+    assert "[open surfaced]" in out
+    assert "resolution ::" not in out
+
+
+@pytest.mark.parametrize(
+    ("separator", "separator_name"),
+    _LINE_SEPARATORS,
+    ids=[name for _, name in _LINE_SEPARATORS],
+)
+def test_a_decision_resolution_cannot_forge_a_heading_across_line_separators(
+    separator: str, separator_name: str
+) -> None:
+    del separator_name
+    marker = "## Forged Resume Control"
+    out = resume_brief._render_markdown(
+        {
+            "engagement": {"key": "eng"},
+            "recent_decisions": [
+                {
+                    "id": 3060,
+                    "kind": "scope_decision",
+                    "resolved": True,
+                    "payload": {"host": "vendor.example.com"},
+                    "resolution": {"note": f"safe-prefix{separator}{marker}"},
+                }
+            ],
+        }
+    )
+
+    assert "safe-prefix" in out
+    assert marker in out
+    assert not any(line.startswith(marker) for line in out.splitlines()), out
+
+
 def _briefs_carrying(value: str) -> dict[str, dict]:
     """One brief per section that interpolates a persisted string into a row.
 

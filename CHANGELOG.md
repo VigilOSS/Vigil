@@ -79,6 +79,9 @@ Durable design decisions live in [`docs/adr/`](docs/adr/).
   shared helper applied to both, and the same audit closed 29 further rows in the resume brief
   carrying persisted, length-bounded columns. Containment is lossless: every original character is
   preserved and only the rendering indent is inserted, so clean data renders exactly as before.
+- **A resolved decision says what was decided.** The resume brief reported `[resolved]` and then
+  printed the original payload, never the resolution the backend already carried — so an operator
+  rehydrating after compaction knew a question had been settled but not how, and could contradict it.
 - **Cold image builds no longer die at 20s.** `vigil up` and `vigil install` threaded one bounded
   runner through both fast metadata queries and image builds, so the bound that makes a wedged
   daemon fail fast killed every first-run Kali build and swallowed its progress output.
