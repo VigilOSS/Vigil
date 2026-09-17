@@ -1242,32 +1242,59 @@ def _queue(
         print("Initial queue items must not set supersedes", file=sys.stderr)
         sys.exit(1)
 
-    request_payload: dict[str, object] = {
-        "mode": normalized_mode,
-        "items": normalized_items,
-    }
-    if normalized_mode == "reanalysis":
-        request_payload["reason"] = normalized_reason
     command_name = (
         "code-dispatch reanalyze"
         if normalized_mode == "reanalysis"
         else "code-dispatch queue"
     )
+    submit_queue_items(
+        cfg,
+        raw_items=items,
+        normalized_items=normalized_items,
+        mode=normalized_mode,
+        reason=normalized_reason,
+        label=fp.stem,
+        command_name=command_name,
+        source_path=str(fp),
+    )
+
+
+def submit_queue_items(
+    cfg,
+    *,
+    raw_items: list,
+    normalized_items: list[dict],
+    mode: str,
+    reason: str,
+    label: str,
+    command_name: str,
+    source_path: str = "",
+) -> None:
+    """The one audited write path into the backend analysis queue.
+
+    Every caller that creates queue rows goes through here so the submit /
+    response snapshot pair, the batching, the outcome vocabulary and the
+    non-zero exit on a conflict have exactly one implementation — the backend
+    still owns the canonical-attempt and live-lease rules it enforces.
+    """
+    request_payload: dict[str, object] = {"mode": mode, "items": normalized_items}
+    if mode == "reanalysis":
+        request_payload["reason"] = reason
 
     submit_snapshot = write_json_snapshot(
         cfg.engagement_dir,
         category="code-queue-submit",
-        label=fp.stem,
+        label=label,
         payload={
-            "input": items,
+            "input": raw_items,
             "normalized": normalized_items,
-            "mode": normalized_mode,
-            "reason": normalized_reason,
+            "mode": mode,
+            "reason": reason,
         },
-        source_path=str(fp),
+        source_path=source_path,
         metadata={
             "command": command_name,
-            "mode": normalized_mode,
+            "mode": mode,
             "count": len(normalized_items),
         },
     )
@@ -1301,17 +1328,19 @@ def _queue(
                 reported_outcomes.extend(
                     outcome for outcome in outcomes[:remaining] if isinstance(outcome, dict)
                 )
-            label = fp.stem if batch_count == 1 else f"{fp.stem}-batch-{batch_index:04d}"
+            batch_label = (
+                label if batch_count == 1 else f"{label}-batch-{batch_index:04d}"
+            )
             response_snapshots.append(
                 write_json_snapshot(
                     cfg.engagement_dir,
                     category="code-queue-response",
-                    label=label,
+                    label=batch_label,
                     payload=result,
                     source_path=str(submit_snapshot),
                     metadata={
                         "command": command_name,
-                        "mode": normalized_mode,
+                        "mode": mode,
                         "count": len(batch),
                         "batch": batch_index,
                         "batches": batch_count,

@@ -29,6 +29,7 @@ from .state_manager.findings import (
     load_code_repo_snapshot_states,
 )
 from .state_manager import run_accounting
+from .state_manager._common import LEAD_OPEN_STATUSES
 from .variant_scopes import (
     MAX_VARIANT_PARENT_FINDINGS,
     VARIANT_DISPATCH_ROLE as _VARIANT_DISPATCH_ROLE,
@@ -52,6 +53,13 @@ DEFAULT_VARIANT_RECEIPT_PAGE = 100
 ANALYSIS_REPO_ROLE = "analysis"
 REFERENCE_REPO_ROLE = "reference"
 CODE_REPO_ROLES: tuple[str, ...] = (ANALYSIS_REPO_ROLE, REFERENCE_REPO_ROLE)
+# B2: plain-string projection of the canonical lead-disposition StrEnum set for
+# SQL binding. The vocabulary itself stays owned by ``state_manager._common``;
+# this is a rendering of it, never a second list.
+_LEAD_OPEN_STATUS_VALUES: tuple[str, ...] = tuple(
+    sorted(str(value) for value in LEAD_OPEN_STATUSES)
+)
+_LEAD_OPEN_STATUS_PLACEHOLDERS = ",".join("?" for _ in _LEAD_OPEN_STATUS_VALUES)
 _REPORTABLE_FINDING_STATUSES = frozenset(
     {
         "active",
@@ -2403,6 +2411,14 @@ def _record_source_generation(
         ),
     )
     if not staged_paths:
+        _rebase_lead_bindings(
+            connection,
+            engagement_id=engagement_id,
+            repo_id=repo_id,
+            previous_generation=previous_generation,
+            repo_generation=repo_generation,
+            promoted_at=promoted_at,
+        )
         return
     placeholders = ",".join("?" for _ in staged_paths)
     file_rows = connection.execute(
@@ -2446,6 +2462,78 @@ def _record_source_generation(
             )
             for row in file_rows
         ],
+    )
+    _rebase_lead_bindings(
+        connection,
+        engagement_id=engagement_id,
+        repo_id=repo_id,
+        previous_generation=previous_generation,
+        repo_generation=repo_generation,
+        promoted_at=promoted_at,
+    )
+
+
+def _rebase_lead_bindings(
+    connection,
+    *,
+    engagement_id: int,
+    repo_id: int,
+    previous_generation: int,
+    repo_generation: int,
+    promoted_at: str,
+) -> None:
+    """Carry a lead's file/line binding across a generation, or stale it.
+
+    A binding is a pointer into specific bytes. When the new generation holds
+    that exact file content, the pointer is still exactly right and moves
+    forward untouched; when the content changed — or the file left the
+    repository — the line numbers become a guess, so the row is stamped
+    superseded and has to be re-read and re-bound before it is trusted again.
+    Unlike a queue row, it is never discharged: the lead keeps owing an answer
+    either way (see ``_unresolved_code_lead_rows``).
+    """
+    if previous_generation <= 0:
+        return
+    connection.execute(
+        """
+        UPDATE code_lead_bindings
+        SET repo_generation = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE engagement_id = ? AND repo_id = ? AND repo_generation = ?
+          AND unbound_at IS NULL AND source_superseded_at IS NULL
+          AND EXISTS (
+            SELECT 1 FROM code_source_generation_files AS generation_files
+            WHERE generation_files.engagement_id = code_lead_bindings.engagement_id
+              AND generation_files.repo_id = code_lead_bindings.repo_id
+              AND generation_files.repo_generation = ?
+              AND generation_files.file_id = code_lead_bindings.file_id
+              AND generation_files.file_hash = code_lead_bindings.file_hash
+          )
+        """,
+        (
+            repo_generation,
+            engagement_id,
+            repo_id,
+            previous_generation,
+            repo_generation,
+        ),
+    )
+    connection.execute(
+        """
+        UPDATE code_lead_bindings
+        SET source_superseded_at = ?,
+            source_supersession_reason = ?,
+            replacement_repo_generation = ?
+        WHERE engagement_id = ? AND repo_id = ? AND repo_generation = ?
+          AND unbound_at IS NULL AND source_superseded_at IS NULL
+        """,
+        (
+            promoted_at,
+            _SOURCE_GENERATION_REPLACED_REASON,
+            repo_generation,
+            engagement_id,
+            repo_id,
+            previous_generation,
+        ),
     )
 
 
@@ -5209,23 +5297,95 @@ def fetch_queue_items(
 
         for file_id in {int(row["file_id"]) for row in rows}:
             _sync_file_analysis_status(connection, engagement.id, file_id)
-        payload: list[dict[str, Any]] = []
-        for row in rows:
-            item = dict(row)
-            item["agent_name"] = str(item.pop("assigned_agent", ""))
-            item["batch_theme"] = item.get("batch_theme", "")
-            item["slot_types"] = _json_decode(item.get("slot_types_json"), [])
-            item["guidance_hypotheses"] = _json_decode(item.get("guidance_hypotheses_json"), [])
-            item["cross_file_triggers"] = _json_decode(item.get("cross_file_triggers_json"), [])
-            item["file"] = _hydrate_code_file(file_rows[int(row["file_id"])])
-            item["repo"] = _hydrate_code_repo(repo_rows[int(file_rows[int(row["file_id"])]["repo_id"])])
-            item["applicable_vuln_classes"] = _applicable_families_for_file(
-                item["file"].get("slot_types", []),
-                language=str(item["file"].get("language", "")),
-                role=str(item["file"].get("role", "")),
-            )
-            payload.append(item)
+        lead_bindings = _open_lead_bindings_by_file(
+            connection, engagement.id, {int(row["file_id"]) for row in rows}
+        )
+        payload = [
+            _hydrate_claimed_queue_item(row, file_rows, repo_rows, lead_bindings)
+            for row in rows
+        ]
     return payload
+
+
+def _open_lead_bindings_by_file(
+    connection, engagement_id: int, file_ids: set[int]
+) -> dict[int, list[dict[str, Any]]]:
+    """Unanswered prior-art leads pointing into each of ``file_ids``.
+
+    A stale binding is included and labelled rather than hidden: the lead still
+    names this file, and "these line numbers came from source that has since
+    changed" is context a reader can use, while silence is not.
+    """
+    if not file_ids:
+        return {}
+    placeholders = ",".join("?" for _ in file_ids)
+    rows = _fetch_all(
+        connection,
+        f"""
+        SELECT bindings.file_id AS file_id,
+               bindings.note_id AS note_id,
+               notes.title AS lead_title,
+               notes.lead_status AS lead_status,
+               bindings.prior_art_ref AS prior_art_ref,
+               bindings.rationale AS rationale,
+               bindings.line_start AS line_start,
+               bindings.line_end AS line_end,
+               CASE
+                 WHEN {_lead_binding_stale_sql("bindings", "repos")} THEN 'stale' ELSE 'current'
+               END AS binding_status
+        FROM code_lead_bindings AS bindings
+        JOIN intel_notes AS notes
+          ON notes.id = bindings.note_id
+         AND notes.engagement_id = bindings.engagement_id
+        JOIN code_repos AS repos
+          ON repos.id = bindings.repo_id
+         AND repos.engagement_id = bindings.engagement_id
+        WHERE bindings.engagement_id = ?
+          AND bindings.unbound_at IS NULL
+          AND notes.superseded_by_id IS NULL
+          AND bindings.file_id IN ({placeholders})
+          AND COALESCE(notes.lead_status, '') IN ({_LEAD_OPEN_STATUS_PLACEHOLDERS})
+        ORDER BY bindings.file_id, bindings.note_id
+        """,
+        (engagement_id, *sorted(file_ids), *_LEAD_OPEN_STATUS_VALUES),
+    )
+    by_file: dict[int, list[dict[str, Any]]] = {}
+    for row in rows:
+        by_file.setdefault(int(row.pop("file_id")), []).append(row)
+    return by_file
+
+
+def _hydrate_claimed_queue_item(
+    row: Any,
+    file_rows: dict[int, dict[str, Any]],
+    repo_rows: dict[int, dict[str, Any]],
+    lead_bindings: dict[int, list[dict[str, Any]]] | None = None,
+) -> dict[str, Any]:
+    """The owned dispatch context a claim hands back.
+
+    Shared by `fetch` and `adopt-lease` so an adopted item is the same shape as
+    a freshly claimed one — the replacement agent reads the fields it already
+    knows instead of learning a second vocabulary for the same work.
+    """
+    item = dict(row)
+    item["agent_name"] = str(item.pop("assigned_agent", ""))
+    item["batch_theme"] = item.get("batch_theme", "")
+    item["slot_types"] = _json_decode(item.get("slot_types_json"), [])
+    item["guidance_hypotheses"] = _json_decode(item.get("guidance_hypotheses_json"), [])
+    item["cross_file_triggers"] = _json_decode(item.get("cross_file_triggers_json"), [])
+    file_row = file_rows[int(row["file_id"])]
+    item["file"] = _hydrate_code_file(file_row)
+    item["repo"] = _hydrate_code_repo(repo_rows[int(file_row["repo_id"])])
+    item["applicable_vuln_classes"] = _applicable_families_for_file(
+        item["file"].get("slot_types", []),
+        language=str(item["file"].get("language", "")),
+        role=str(item["file"].get("role", "")),
+    )
+    # B2: prior art bound to this file travels with the claim. Nearly every
+    # admitted file already carries a queue row by hunt time (A5), so this is
+    # where a bound lead actually reaches the specialist reading the code.
+    item["prior_art_leads"] = (lead_bindings or {}).get(int(row["file_id"]), [])
+    return item
 
 
 def _normalize_cwe_coverage(cwe_coverage: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
@@ -8513,6 +8673,458 @@ def code_coverage_summary(
     }
 
 
+# =========================================================================
+# B2: prior-art lead → code-location bindings
+# =========================================================================
+#
+# A lead is, and stays, one row in ``intel_notes`` carrying a ``lead_status``.
+# This section adds the half that was missing: *where* in the reviewed source
+# the lead points, so the queue can turn it into work and completion
+# accounting can notice it was never answered. There is deliberately no second
+# lead identity here — every disposition still reads and writes
+# ``intel_notes.lead_status``.
+
+MAX_LEAD_BINDING_PAGE = 500
+DEFAULT_LEAD_BINDING_PAGE = 200
+# Sampled into the completion blocker so the operator can open each lead
+# directly instead of re-deriving the worklist from a bare count.
+LEAD_BLOCKER_SAMPLE = 5
+
+
+def _lead_binding_stale_sql(binding_alias: str, repo_alias: str) -> str:
+    """True when a binding's line range was read from bytes that moved on.
+
+    Either the refresh path stamped the row, or the repository advanced a
+    generation without carrying it forward. Both mean the same thing to a
+    reader: the range has to be re-read before it can be trusted. One
+    expression, so the worklist filter, the claimed-item projection and the
+    completion blocker's stale count cannot come to disagree about which
+    bindings are stale.
+    """
+    return (
+        f"({binding_alias}.source_superseded_at IS NOT NULL"
+        f" OR {binding_alias}.repo_generation != {repo_alias}.active_generation)"
+    )
+
+
+# ``lead_superseded_by_id`` is the lead's own disposition arriving by the intel
+# route: superseding the note IS answering it, so the binding stops carrying an
+# obligation while staying readable and naming the note that replaced it.
+_LEAD_BINDING_SELECT = f"""
+SELECT bindings.*,
+       notes.title AS lead_title,
+       notes.lead_status AS lead_status,
+       notes.superseded_by_id AS lead_superseded_by_id,
+       CASE
+         WHEN bindings.unbound_at IS NOT NULL THEN 'unbound'
+         WHEN {_lead_binding_stale_sql("bindings", "repos")} THEN 'stale'
+         ELSE 'current'
+       END AS binding_status,
+       repos.repo_key AS repo_key,
+       repos.repo_role AS repo_role,
+       files.analysis_priority AS analysis_priority,
+       files.classification AS classification,
+       files.retired_at AS file_retired_at,
+       (
+         SELECT queue.id FROM code_analysis_queue AS queue
+         WHERE queue.engagement_id = bindings.engagement_id
+           AND queue.file_id = bindings.file_id
+           AND queue.repo_generation = repos.active_generation
+           AND queue.source_superseded_at IS NULL
+         ORDER BY queue.id DESC LIMIT 1
+       ) AS queue_item_id,
+       (
+         SELECT queue.status FROM code_analysis_queue AS queue
+         WHERE queue.engagement_id = bindings.engagement_id
+           AND queue.file_id = bindings.file_id
+           AND queue.repo_generation = repos.active_generation
+           AND queue.source_superseded_at IS NULL
+         ORDER BY queue.id DESC LIMIT 1
+       ) AS queue_status
+FROM code_lead_bindings AS bindings
+JOIN intel_notes AS notes
+  ON notes.id = bindings.note_id
+ AND notes.engagement_id = bindings.engagement_id
+JOIN code_repos AS repos
+  ON repos.id = bindings.repo_id
+ AND repos.engagement_id = bindings.engagement_id
+JOIN code_files AS files
+  ON files.id = bindings.file_id
+ AND files.engagement_id = bindings.engagement_id
+"""
+
+
+def _lead_binding_row(row: Any) -> dict[str, Any]:
+    record = dict(row)
+    lead_status = str(record.get("lead_status") or "")
+    repo_role = str(record.get("repo_role") or ANALYSIS_REPO_ROLE)
+    binding_status = str(record["binding_status"])
+    record["queued"] = record.get("queue_item_id") is not None
+    record["queue_status"] = str(record.get("queue_status") or "")
+    # An obligation exists only where the engagement agreed to review the code
+    # (B8) and the lead is still unanswered. Everything else is a citation.
+    record["carries_obligation"] = (
+        repo_role == ANALYSIS_REPO_ROLE
+        and binding_status != "unbound"
+        and lead_status in _LEAD_OPEN_STATUS_VALUES
+        and record.get("lead_superseded_by_id") is None
+    )
+    record["lead_status"] = lead_status
+    record["repo_role"] = repo_role
+    return record
+
+
+def _require_lead_note(connection, engagement_id: int, note_id: int) -> dict[str, Any]:
+    row = connection.execute(
+        "SELECT * FROM intel_notes WHERE engagement_id = ? AND id = ?",
+        (engagement_id, note_id),
+    ).fetchone()
+    if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"intel note {note_id} not found in this engagement",
+        )
+    note = dict(row)
+    if not str(note.get("lead_status") or ""):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"intel note {note_id} is a plain reference note (lead_status is "
+                "null) and owes no work. Promote it first: vigil assess intel "
+                f"update note {note_id} --inline '{{\"lead_status\": \"open\"}}'"
+            ),
+        )
+    if note.get("superseded_by_id") is not None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"intel note {note_id} was superseded by note "
+                f"{int(note['superseded_by_id'])}; bind the canonical lead instead"
+            ),
+        )
+    return note
+
+
+def _require_current_generation_file(
+    connection, engagement_id: int, repo: dict[str, Any], file_path: str
+) -> dict[str, Any]:
+    repo_id = int(repo["id"])
+    active_generation = int(repo.get("active_generation", 0) or 0)
+    row = connection.execute(
+        """
+        SELECT files.*
+        FROM code_files AS files
+        JOIN code_source_generation_files AS generation_files
+          ON generation_files.file_id = files.id
+         AND generation_files.engagement_id = files.engagement_id
+         AND generation_files.repo_id = files.repo_id
+         AND generation_files.repo_generation = ?
+        WHERE files.engagement_id = ? AND files.repo_id = ?
+          AND files.file_path = ? AND files.retired_at IS NULL
+        """,
+        (active_generation, engagement_id, repo_id, file_path),
+    ).fetchone()
+    if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=(
+                f"'{file_path}' is not a file in the current generation "
+                f"({active_generation}) of repository {repo_id}; list the sealed "
+                f"inventory with vigil assess fetch 'code/files?repo_id={repo_id}'"
+            ),
+        )
+    return dict(row)
+
+
+def _validate_lead_binding_lines(
+    file_row: dict[str, Any],
+    line_start: int | None,
+    line_end: int | None,
+) -> tuple[int | None, int | None]:
+    """Whole-file (both None) or an exact range inside the sealed file.
+
+    ``loc`` is the physical line count taken from the sealed snapshot, so a
+    range past it names code that does not exist — a typo worth refusing at
+    write time rather than handing a specialist a dead pointer.
+    """
+    if line_start is None and line_end is None:
+        return None, None
+    if line_start is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="line_end requires line_start",
+        )
+    end = line_start if line_end is None else line_end
+    if end < line_start:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"line_end {end} precedes line_start {line_start}",
+        )
+    loc = int(file_row.get("loc", 0) or 0)
+    if loc and end > loc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"line range {line_start}-{end} falls outside "
+                f"{file_row['file_path']}, which has {loc} line(s) in the "
+                "current generation"
+            ),
+        )
+    return line_start, end
+
+
+def bind_code_lead(
+    engagement_id: int,
+    *,
+    note_id: int,
+    repo_id: int,
+    file_path: str,
+    line_start: int | None = None,
+    line_end: int | None = None,
+    prior_art_ref: str = "",
+    rationale: str = "",
+    bound_by: str = "",
+) -> dict[str, Any]:
+    """Point one tracked lead at one file, optionally at one line range.
+
+    Idempotent per (lead, file): re-binding refines the same row rather than
+    accumulating near-duplicates, which is also how a stale binding is
+    repaired after the snapshot advances.
+    """
+    engagement = _engagement_or_404(engagement_id)
+    with get_connection() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        _require_lead_note(connection, engagement.id, note_id)
+        repo = _get_repo_rows(connection, engagement.id, {repo_id})[repo_id]
+        file_row = _require_current_generation_file(
+            connection, engagement.id, repo, file_path
+        )
+        start, end = _validate_lead_binding_lines(file_row, line_start, line_end)
+        connection.execute(
+            """
+            INSERT INTO code_lead_bindings (
+                engagement_id, note_id, repo_id, file_id, repo_generation,
+                file_path, file_hash, line_start, line_end,
+                prior_art_ref, rationale, bound_by
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(engagement_id, note_id, file_id) DO UPDATE SET
+                repo_id = excluded.repo_id,
+                repo_generation = excluded.repo_generation,
+                file_path = excluded.file_path,
+                file_hash = excluded.file_hash,
+                line_start = excluded.line_start,
+                line_end = excluded.line_end,
+                prior_art_ref = excluded.prior_art_ref,
+                rationale = excluded.rationale,
+                bound_by = excluded.bound_by,
+                unbound_at = NULL,
+                unbound_reason = '',
+                source_superseded_at = NULL,
+                source_supersession_reason = '',
+                replacement_repo_generation = NULL,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (
+                engagement.id,
+                note_id,
+                repo_id,
+                int(file_row["id"]),
+                int(repo.get("active_generation", 0) or 0),
+                str(file_row["file_path"]),
+                str(file_row.get("file_hash") or ""),
+                start,
+                end,
+                prior_art_ref,
+                rationale,
+                bound_by,
+            ),
+        )
+        row = connection.execute(
+            f"{_LEAD_BINDING_SELECT} WHERE bindings.engagement_id = ? "
+            "AND bindings.note_id = ? AND bindings.file_id = ?",
+            (engagement.id, note_id, int(file_row["id"])),
+        ).fetchone()
+    return _lead_binding_row(row)
+
+
+def unbind_code_lead(
+    engagement_id: int, binding_id: int, *, reason: str
+) -> dict[str, Any]:
+    """Retract one binding without touching the lead it points at.
+
+    Soft, never deleted: "this lead turned out not to live here" is itself
+    part of the record, and the lead keeps its own disposition either way. The
+    retraction is equally part of the record, so a second unbind is refused
+    rather than allowed to overwrite the reason and time the first one stored.
+    """
+    engagement = _engagement_or_404(engagement_id)
+    if not reason.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="unbind requires a reason",
+        )
+    with get_connection() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        cursor = connection.execute(
+            """
+            UPDATE code_lead_bindings
+            SET unbound_at = ?,
+                unbound_reason = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE engagement_id = ? AND id = ? AND unbound_at IS NULL
+            """,
+            (_now_iso(), reason, engagement.id, binding_id),
+        )
+        if cursor.rowcount != 1:
+            existing = connection.execute(
+                "SELECT unbound_at, unbound_reason FROM code_lead_bindings "
+                "WHERE engagement_id = ? AND id = ?",
+                (engagement.id, binding_id),
+            ).fetchone()
+            if existing is None:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"code lead binding {binding_id} not found in this engagement",
+                )
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    f"code lead binding {binding_id} was already retracted at "
+                    f"{existing['unbound_at']} ({str(existing['unbound_reason'])!r}); "
+                    "bind the lead again if it belongs here after all"
+                ),
+            )
+        row = connection.execute(
+            f"{_LEAD_BINDING_SELECT} WHERE bindings.engagement_id = ? "
+            "AND bindings.id = ?",
+            (engagement.id, binding_id),
+        ).fetchone()
+    return _lead_binding_row(row)
+
+
+def list_code_lead_bindings(
+    engagement_id: int,
+    *,
+    note_id: int | None = None,
+    repo_id: int | None = None,
+    lead_status: str | None = None,
+    include_superseded: bool = False,
+    limit: int = DEFAULT_LEAD_BINDING_PAGE,
+    offset: int = 0,
+) -> dict[str, Any]:
+    """Page lead-to-code bindings.
+
+    ``include_superseded`` widens the page to stale and retracted rows; by
+    default it is the live worklist, ordered the way an operator works it —
+    unanswered leads first, then by repository and path.
+    """
+    engagement = _engagement_or_404(engagement_id)
+    clauses = ["bindings.engagement_id = ?"]
+    params: list[Any] = [engagement.id]
+    if note_id is not None:
+        clauses.append("bindings.note_id = ?")
+        params.append(note_id)
+    if repo_id is not None:
+        clauses.append("bindings.repo_id = ?")
+        params.append(repo_id)
+    if lead_status is not None:
+        clauses.append("notes.lead_status = ?")
+        params.append(lead_status)
+    if not include_superseded:
+        clauses.append("bindings.unbound_at IS NULL")
+        clauses.append(f"NOT {_lead_binding_stale_sql('bindings', 'repos')}")
+    where = " AND ".join(clauses)
+    with get_connection() as connection:
+        total = _scalar_row(
+            connection,
+            f"""
+            SELECT COUNT(*)
+            FROM code_lead_bindings AS bindings
+            JOIN intel_notes AS notes
+              ON notes.id = bindings.note_id
+             AND notes.engagement_id = bindings.engagement_id
+            JOIN code_repos AS repos
+              ON repos.id = bindings.repo_id
+             AND repos.engagement_id = bindings.engagement_id
+            WHERE {where}
+            """,
+            tuple(params),
+        )
+        rows = connection.execute(
+            f"""
+            {_LEAD_BINDING_SELECT}
+            WHERE {where}
+            ORDER BY
+              CASE
+                WHEN notes.lead_status IN ({_LEAD_OPEN_STATUS_PLACEHOLDERS}) THEN 0
+                ELSE 1
+              END,
+              bindings.repo_id, bindings.file_path, bindings.id
+            LIMIT ? OFFSET ?
+            """,
+            (
+                *params,
+                *_LEAD_OPEN_STATUS_VALUES,
+                max(1, min(limit, MAX_LEAD_BINDING_PAGE)),
+                max(0, offset),
+            ),
+        ).fetchall()
+    return {"total": total, "items": [_lead_binding_row(row) for row in rows]}
+
+
+def _unresolved_code_lead_rows(connection, engagement_id: int) -> list[dict[str, Any]]:
+    """Bindings that still owe an answer: analysis repository, lead not closed.
+
+    A superseded *binding* deliberately does not clear the debt. The
+    obligation belongs to the lead and the binding only says where to look, so
+    a refresh that invalidates the line range has to surface a rebind — never
+    a quietly discharged lead.
+
+    A superseded *note* is the opposite case and does clear it, because the
+    lead itself is the note: `intel list-leads` already reports it as gone and
+    `bind` refuses to point at it, so counting it here would block completion
+    on a lead the intel surface says does not exist. The debt moves to the
+    canonical note, which owes its own binding.
+    """
+    return _fetch_all(
+        connection,
+        f"""
+        SELECT bindings.note_id AS note_id,
+               bindings.repo_id AS repo_id,
+               notes.title AS lead_title,
+               {_lead_binding_stale_sql("bindings", "repos")} AS binding_is_stale
+        FROM code_lead_bindings AS bindings
+        JOIN intel_notes AS notes
+          ON notes.id = bindings.note_id
+         AND notes.engagement_id = bindings.engagement_id
+        JOIN code_repos AS repos
+          ON repos.id = bindings.repo_id
+         AND repos.engagement_id = bindings.engagement_id
+         AND repos.active_generation > 0
+         AND {_analysis_repo_sql("repos")}
+        WHERE bindings.engagement_id = ?
+          AND bindings.unbound_at IS NULL
+          AND notes.superseded_by_id IS NULL
+          AND COALESCE(notes.lead_status, '') IN ({_LEAD_OPEN_STATUS_PLACEHOLDERS})
+        ORDER BY bindings.repo_id, bindings.note_id
+        """,
+        (engagement_id, *_LEAD_OPEN_STATUS_VALUES),
+    )
+
+
+def open_code_lead_binding_counts(engagement_id: int) -> dict[int, dict[str, int]]:
+    """Per-lead binding counts for unanswered leads, for resume hydration."""
+    with get_connection() as connection:
+        rows = _unresolved_code_lead_rows(connection, engagement_id)
+    counts: dict[int, dict[str, int]] = {}
+    for row in rows:
+        entry = counts.setdefault(int(row["note_id"]), {"bindings": 0, "stale": 0})
+        entry["bindings"] += 1
+        if row["binding_is_stale"]:
+            entry["stale"] += 1
+    return counts
+
+
 _CODE_READINESS_PHASES = (
     "classify-map",
     "hunt",
@@ -8574,6 +9186,11 @@ def code_readiness(engagement_id: int, *, target_phase: str) -> dict[str, Any]:
         ]
         suspicious_counts = _current_suspicious_analysis_counts(
             connection, engagement.id
+        )
+        unresolved_lead_rows: list[dict[str, Any]] = (
+            _unresolved_code_lead_rows(connection, engagement.id)
+            if target_phase == "complete"
+            else []
         )
         unresolved_draft_counts: dict[int, int] = {}
         stale_draft_counts: dict[int, int] = {}
@@ -8881,6 +9498,54 @@ def code_readiness(engagement_id: int, *, target_phase: str) -> dict[str, Any]:
                         repo_id=repo_id,
                     )
                 )
+
+            if target_phase == "complete":
+                # A prior-art lead pointed at this repository is code work the
+                # engagement accepted. Completing with it still open would seal
+                # a scan that never answered its own strongest question, so the
+                # seal waits for a terminal disposition — resolved when it led
+                # somewhere, ruled_out when it did not.
+                repo_lead_rows = [
+                    row
+                    for row in unresolved_lead_rows
+                    if int(row["repo_id"]) == repo_id
+                ]
+                if repo_lead_rows:
+                    note_ids = sorted({int(row["note_id"]) for row in repo_lead_rows})
+                    stale_notes = sorted(
+                        {
+                            int(row["note_id"])
+                            for row in repo_lead_rows
+                            if row["binding_is_stale"]
+                        }
+                    )
+                    lead_sample = ", ".join(
+                        f"note {note_id}" for note_id in note_ids[:LEAD_BLOCKER_SAMPLE]
+                    )
+                    if len(note_ids) > LEAD_BLOCKER_SAMPLE:
+                        lead_sample += (
+                            f", and {len(note_ids) - LEAD_BLOCKER_SAMPLE} more"
+                        )
+                    stale_detail = (
+                        f" {len(stale_notes)} of them are bound at a superseded "
+                        "generation and need rebinding before the line range is "
+                        "trustworthy."
+                        if stale_notes
+                        else ""
+                    )
+                    blockers.append(
+                        _readiness_blocker(
+                            "code_leads_unresolved",
+                            (
+                                f"Repository has {len(note_ids)} unanswered prior-art "
+                                f"lead(s) bound to its source ({lead_sample}); record a "
+                                "resolved or ruled_out disposition on each."
+                                f"{stale_detail}"
+                            ),
+                            repo_id=repo_id,
+                            overrideable=True,
+                        )
+                    )
 
             if structural_debt_rows:
                 debt_paths = [str(row["file_path"]) for row in structural_debt_rows]

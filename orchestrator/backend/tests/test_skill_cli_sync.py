@@ -463,6 +463,14 @@ _KNOWN_UNDOCUMENTED_ASSESS: set[str] = {
     # `test_known_undocumented_allowlist_has_no_stale_entries` fails the moment
     # any operator doc names the verb, forcing the entry back out.
     "list-mindsets",
+    # `code-lead` (B2) binds a tracked intel lead to a repository/file/line and
+    # is fully specified by `vigil assess contract code-lead`, its own --help,
+    # and the `code_leads_unresolved` readiness repair line that names it. Its
+    # prose wiring belongs to the prompt sweep, not to the CLI change that
+    # introduced it. Temporary by construction:
+    # `test_known_undocumented_allowlist_has_no_stale_entries` fails the moment
+    # any operator doc names the verb, forcing the entry back out.
+    "code-lead",
 }
 _KNOWN_UNDOCUMENTED_OOB = {
     "restart",  # stop+start convenience; ops doc start/stop/status/test/mint/poll

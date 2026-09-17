@@ -56,6 +56,8 @@ When you are about to copy one of these into a second file, stop and import.
   at column zero and forges a heading. ADR 0019 forbids masking it, so containment is the only lever.
   `operator_checkpoint.py` and `resume_brief.py` render through it.
   See: `agent/scripts/assess/tests/test_operator_checkpoint_render.py`.
+- `agent/scripts/assess/commands/code_dispatch.py:submit_queue_items` owns the audited write into
+  `code_analysis_queue`; `code-dispatch queue/reanalyze` and `code-lead queue` go through it.
 - `orchestrator/backend/app/services/state_manager/coverage.py:PROBE_RESULT_STATUSES` owns result
   outcomes. Only `tested` and `signal` cover a class.
 - `orchestrator/backend/app/services/state_manager/coverage.py:CoverageStatus` owns coverage status;
@@ -146,6 +148,10 @@ A prompt change is **not** prompt-only when the prompt defines an artifact the b
   writes `assessment_dispatch_client_bindings`, append-only by SQLite trigger: a correction stamps
   the prior row's `superseded_by_id`, never an overwrite. `_DISPATCH_SELECT` carries the current
   binding — a dispatch read off that projection reports every specialist as unbound.
+- `code_analysis.py:_record_source_generation` — every generation-bound row type must be handled on
+  promotion. Queue rows, results and triggers are stamped superseded; `_rebase_lead_bindings` carries
+  a lead binding forward only on an identical `file_hash`. A generation-bound table added without a
+  line here claims a currency it does not have.
 - `orchestrator/backend/app/services/state_manager/phase_readiness.py` — its readiness function names
   and HTTP routes are load-bearing for the phase gate, report export, and frontend. Refactor behind
   them or add a front door that delegates to them.

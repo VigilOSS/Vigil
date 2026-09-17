@@ -925,6 +925,10 @@ def build_resume_brief(
     open_leads = _since_filter(
         intel.list_leads(engagement_id, open_only=True), since=since, field="updated_at"
     )[:10]
+    # A lead bound into reviewed source is code work waiting on the operator,
+    # and a stale binding is a line range that must be re-read before it is
+    # trusted. Both are one integer each, so the pointer stays a pointer.
+    lead_binding_counts = code_analysis.open_code_lead_binding_counts(engagement_id)
     intel_section = {
         # Aggregate counts are an absolute snapshot (like finding_counts), so
         # they are NOT since-filtered; the bounded lists below are.
@@ -933,7 +937,17 @@ def build_resume_brief(
         # Project a pointer (title + status), not the note body — keep the brief
         # compact; the operator opens the lead via intel list/search.
         "open_leads": [
-            {"id": row.get("id"), "title": row.get("title"), "lead_status": row.get("lead_status")}
+            {
+                "id": row.get("id"),
+                "title": row.get("title"),
+                "lead_status": row.get("lead_status"),
+                "code_bindings": lead_binding_counts.get(
+                    int(row.get("id") or 0), {}
+                ).get("bindings", 0),
+                "stale_code_bindings": lead_binding_counts.get(
+                    int(row.get("id") or 0), {}
+                ).get("stale", 0),
+            }
             for row in open_leads
         ],
         # Notes the operator tagged coverage/read-first — surfaced by title so a
@@ -986,6 +1000,7 @@ def build_resume_brief(
             command_matches=command_matches,
             stale_dispatches=dispatch_picture.get("stale_in_progress_dispatches") or [],
             stale_threshold_hours=max_age_hours if max_age_hours is not None else _DEFAULT_STALE_THRESHOLD_HOURS,
+            open_code_leads=intel_section["open_leads"],
         ),
     }
 
@@ -998,6 +1013,7 @@ def _recommended_actions(
     command_matches: list[dict[str, Any]],
     stale_dispatches: list[dict[str, Any]],
     stale_threshold_hours: float = 24.0,
+    open_code_leads: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     actions: list[dict[str, Any]] = []
     max_actions = 8
@@ -1026,6 +1042,10 @@ def _recommended_actions(
         add("recent command coverage", "vigil assess command-run list --limit 20")
     if agent_id:
         add("handoff continuation", f"vigil assess agent render-handoff {agent_id}", entity_kind="agent", entity_id=agent_id)
+    if any(row.get("code_bindings") for row in open_code_leads or []):
+        # Point at the read: whether a bound lead needs queueing, rebinding or
+        # closing depends on what the binding already carries.
+        add("open code-bound lead", "vigil assess code-lead list --lead-status open")
     if stale_dispatches:
         threshold_arg = (
             "" if abs(stale_threshold_hours - 24.0) < 1e-9

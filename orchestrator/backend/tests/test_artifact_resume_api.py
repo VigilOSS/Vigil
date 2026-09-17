@@ -805,7 +805,7 @@ def test_resume_brief_surfaces_open_high_cves(client, isolate_settings) -> None:
 
 def test_resume_brief_surfaces_open_leads(client, isolate_settings) -> None:
     """build_resume_brief.intel.open_leads surfaces only open/in_progress leads
-    (not terminal ones, not plain reference notes), projected to title+status."""
+    (not terminal ones, not plain reference notes), projected to a pointer."""
     _write_engagement(isolate_settings["engagements_dir"])
     assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
     intel_base = f"/engagements/{ENGAGEMENT_KEY}/intel"
@@ -831,9 +831,22 @@ def test_resume_brief_surfaces_open_leads(client, isolate_settings) -> None:
     intel = client.get(f"{BASE}/resume-brief").json()["intel"]
     titles = sorted(row["title"] for row in intel["open_leads"])
     assert titles == ["Lead: Axis SSRF untested", "Lead: host-header SSRF hypothesis"], titles
-    # id is included so the operator can disposition the exact row via update-intel.
-    assert all(set(row) == {"id", "title", "lead_status"} for row in intel["open_leads"])
+    # id is included so the operator can disposition the exact row via update-intel;
+    # the two B2 counters say whether the lead is also code work (and whether its
+    # line ranges survived the current snapshot). The note BODY still never
+    # appears here — that is what keeps the brief a pointer.
+    assert all(
+        set(row) == {
+            "id", "title", "lead_status", "code_bindings", "stale_code_bindings"
+        }
+        for row in intel["open_leads"]
+    )
     assert all(isinstance(row["id"], int) for row in intel["open_leads"])
+    # No code repository in this web engagement, so no lead owes code work.
+    assert all(
+        row["code_bindings"] == 0 and row["stale_code_bindings"] == 0
+        for row in intel["open_leads"]
+    )
     assert intel["summary"]["notes"] == 4  # snapshot count includes all notes
 
     # Z-suffixed (offset-aware) cutoff must not crash against naive timestamps.

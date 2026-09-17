@@ -54,6 +54,11 @@ MAX_VARIANT_PARENT_FINDINGS = 1000
 # Mirrors app.services.code_analysis.MAX_VARIANT_RECEIPT_PAGE; pinned by the
 # fetch auto-pagination regression because agent code cannot import the backend.
 MAX_VARIANT_RECEIPT_PAGE = 500
+# Mirrors app.services.code_analysis.MAX_LEAD_BINDING_PAGE; `code-lead` asks for
+# the backend maximum so a worklist is one page whenever it can be, and a short
+# page is reported rather than mistaken for the whole set. Pinned by
+# test_code_lead_binding_page_cap_mirrors_backend.
+MAX_LEAD_BINDING_PAGE = 500
 
 
 SPECIALIST_DISPATCH_MODES: tuple[str, ...] = (
@@ -1837,6 +1842,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "Fetch filters and the active repository generation are applied inside the same serialized SQL claim that changes pending rows to processing. Fetch never rewrites a stale row's generation. The returned agent_name, lease_token, repo_generation, and engagement-contained scratch_dir identify the owned dispatch context; reuse the agent and lease on heartbeat, result, and closeout writes.",
             "Write temporary files under the fetched item's scratch_dir, in preference to any scratch location the client harness offers: it is created per lease, contained in the engagement, and private to this lane, so nothing lands outside the engagement and no second lane can overwrite it. Where work must share a directory with other lanes of the same client, give every filename a lane-unique prefix (the queue item id or agent_name) so concurrent hunters cannot clobber each other's intermediate state.",
             "An empty fetch prints why no current pending row matched and names the filters used; inspect `code-dispatch stats` and the code-files queue join before retrying rather than treating `[]` as unexplained lost work.",
+            "Every claimed item (from `fetch` and from `adopt-lease`) carries `prior_art_leads`: the unanswered prior-art leads bound to that file, each with its note id, prior-art reference, line range and whether the binding is `current` or `stale` for this generation. Read them before starting — that is the research the engagement already did on this exact file. Bind and manage them with `vigil assess code-lead`.",
             "Queue every file admitted by the active generation of an ANALYSIS repository. Classification and priority order claims; they never remove a file from accounting. A skip-tier row closes only through disposition=skipped with a structured reason. A reference repository owes no queue rows and the backend rejects the whole batch before any write if one is named. The role is re-read on every claim, so re-ingesting a repository with `--role reference` stops `fetch` handing out the rows it already holds — without deleting them — and re-ingesting with `--role analysis` makes them claimable again.",
             "A finding/suspicious closeout requires a current same-disposition result for the active lease with inline evidence or evidence_ref. A clean closeout requires non-empty family coverage and review notes; skipped retains its structured skip reason.",
             "Analysis-result retries are idempotent within a lease. Coverage detail derives result-row, evidenced-row, and distinct-function effort from current nonsuperseded records instead of trusting the submitted effort counter alone.",
@@ -2348,6 +2354,42 @@ _CONTRACTS: dict[str, CommandContract] = {
             ("campaign JSON artifact only", "record a durable backend receipt with code-record fuzz-campaign"),
             ("failed campaign marked no-crash", "use campaign_failed or build_failed; failure does not cover an obligation"),
             ("untriaged crashes", "triage every crash before completed_crashes_triaged"),
+        ),
+    ),
+    "code-lead": CommandContract(
+        name="code-lead",
+        goals=("recon", "code-analysis"),
+        # Binding needs an ingested repository to point at, so it starts at
+        # code-ingest even though the lead itself is usually authored in recon.
+        phase=("code-ingest", "code-classify"),
+        summary="Bind a tracked intel lead to a repository/file/line, turn bound files into analysis queue work, and account for the lead at completion.",
+        schema_name="backend CodeLeadBindRequest / CodeLeadUnbindRequest",
+        preferred_invocations=(
+            "vigil assess code-lead bind <lead-note-id> --repo-id <id> --file-path <path> [--line-start N --line-end N] [--prior-art <ref>] [--rationale <text>] [--bound-by <agent>]",
+            "vigil assess code-lead list [--note-id N] [--repo-id N] [--lead-status open|in_progress|resolved|ruled_out] [--include-superseded] [--json]",
+            "vigil assess code-lead queue [--note-id N] [--repo-id N] [--dry-run]",
+            "vigil assess code-lead unbind <binding-id> --reason <why>",
+        ),
+        author_supplied_fields=(
+            "bind: <lead-note-id> --repo-id --file-path (+ --line-start/--line-end when the prior art names a region)",
+            "bind: --prior-art with the CVE id, advisory URL or past-audit reference the lead came from",
+            "unbind: --reason",
+        ),
+        helper_defaults=(
+            ("--line-start / --line-end", "unset (whole-file binding); --line-end alone defaults to --line-start"),
+            ("--prior-art / --rationale / --bound-by", "empty"),
+            ("list --lead-status", "unset (every disposition)"),
+            ("list --include-superseded", "off (current bindings only; on adds stale and retracted rows)"),
+            ("queue --dry-run", "off (on prints the queue items without writing them)"),
+        ),
+        notes=(
+            "A lead IS an intel note with `lead_status` set — record it with `vigil assess intel record note` and close it with `vigil assess intel update note <id> --inline '{\"lead_status\": \"resolved\"}'` (or ruled_out). This verb never writes a disposition; a note with a null lead_status is a plain reference note and `bind` refuses it.",
+            "The binding is generation-bound: it stores the repository generation and the file hash it was read from. A refresh that leaves those exact bytes in place carries the binding forward untouched; any other refresh marks it `stale`, because the line numbers were read from source that no longer exists. Re-read the region and re-run `bind` to repair it — binding the same lead and file refines the same row rather than adding another.",
+            "`queue` creates one pending analysis row per bound file that has no current-generation queue row, at the file's own `analysis_priority`, with `batch_theme=prior-art-lead` and one `guidance_hypotheses` line per lead pointing into it. It goes through the same backend write as `code-dispatch queue`, so live leases, canonical-attempt history and the reference-repository refusal all still apply, and a reported conflict exits non-zero.",
+            "A `reference` repository owes nothing (see `code-ingest --role`): a lead bound into framework source is a citation — no queue row, no completion gate. `list` shows that as `carries_obligation=false`.",
+            "At `complete`, an unanswered lead bound to an analysis repository raises the `code_leads_unresolved` readiness blocker naming each note id. It is overrideable like `files_unclassified` (it is authored judgement, not source identity), but the code track cannot be forced to `complete` at all, so the way past it is a terminal `resolved`/`ruled_out` disposition on each lead.",
+            "`unbind` is the other way out, and it is a recorded decision rather than a loophole: --reason is required, the row is kept and marked retracted, and the lead itself keeps whatever disposition it had. Use it when the lead is real but does not live where it was bound; use a `ruled_out` disposition when the lead itself is answered.",
+            "Every claimed queue item carries `prior_art_leads` — the unanswered leads bound to that file, with their line ranges and whether each binding is current for this generation — so a specialist reads the engagement's own prior art with the file, whether the row came from `code-lead queue` or from the bulk `code-dispatch queue` pass.",
         ),
     ),
     "code-coverage": CommandContract(
@@ -3540,6 +3582,7 @@ _INLINE_DOCUMENTED_NAMESPACES: tuple[str, ...] = (
     "artifact",
     "auth",
     "code-dispatch",
+    "code-lead",
     "exploit",
     "fixture",
     "gau",

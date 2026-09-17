@@ -791,6 +791,33 @@ class FuzzCampaignReceiptRequest(BaseModel):
         return self
 
 
+class CodeLeadBindRequest(BaseModel):
+    """Bind one tracked intel lead to one place in the reviewed source.
+
+    ``file_path`` rather than a file id: prior art names a path, and the
+    backend is the only side that can resolve it against the repository's
+    current sealed generation. Lines are optional - a whole-file binding is a
+    legitimate "the bug class lives in this file" claim.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    note_id: StrictPositiveId
+    repo_id: StrictPositiveId
+    file_path: str = Field(min_length=1, max_length=4096)
+    line_start: int | None = Field(default=None, ge=1)
+    line_end: int | None = Field(default=None, ge=1)
+    prior_art_ref: str = Field(default="", max_length=512)
+    rationale: str = Field(default="", max_length=4096)
+    bound_by: str = Field(default="", max_length=128)
+
+
+class CodeLeadUnbindRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str = Field(min_length=1, max_length=1024)
+
+
 # ---------------------------------------------------------------------------
 # Broadcast helper
 # ---------------------------------------------------------------------------
@@ -1656,6 +1683,78 @@ def get_readiness(
 ) -> dict[str, Any]:
     engagement = get_engagement_or_404(engagement_key)
     return code_analysis.code_readiness(engagement.id, target_phase=target_phase)
+
+
+# ---------------------------------------------------------------------------
+# Prior-art lead bindings
+# ---------------------------------------------------------------------------
+
+@router.post("/lead-bindings", status_code=status.HTTP_201_CREATED)
+async def bind_code_lead(
+    engagement_key: str, request: CodeLeadBindRequest
+) -> dict[str, Any]:
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    record = await anyio.to_thread.run_sync(
+        functools.partial(
+            code_analysis.bind_code_lead,
+            engagement.id,
+            note_id=request.note_id,
+            repo_id=request.repo_id,
+            file_path=request.file_path,
+            line_start=request.line_start,
+            line_end=request.line_end,
+            prior_art_ref=request.prior_art_ref,
+            rationale=request.rationale,
+            bound_by=request.bound_by,
+        )
+    )
+    await _broadcast(engagement.key, "lead_binding", record)
+    return record
+
+
+@router.get("/lead-bindings")
+def list_code_lead_bindings(
+    engagement_key: str,
+    note_id: int | None = Query(default=None, ge=1),
+    repo_id: int | None = Query(default=None, ge=1),
+    lead_status: Literal["open", "in_progress", "resolved", "ruled_out"] | None = Query(
+        default=None
+    ),
+    include_superseded: bool = Query(default=False),
+    limit: int = Query(
+        default=code_analysis.DEFAULT_LEAD_BINDING_PAGE,
+        ge=1,
+        le=code_analysis.MAX_LEAD_BINDING_PAGE,
+    ),
+    offset: int = Query(default=0, ge=0),
+) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    return code_analysis.list_code_lead_bindings(
+        engagement.id,
+        note_id=note_id,
+        repo_id=repo_id,
+        lead_status=lead_status,
+        include_superseded=include_superseded,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.post("/lead-bindings/{binding_id}/unbind")
+async def unbind_code_lead(
+    engagement_key: str, binding_id: int, request: CodeLeadUnbindRequest
+) -> dict[str, Any]:
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    record = await anyio.to_thread.run_sync(
+        functools.partial(
+            code_analysis.unbind_code_lead,
+            engagement.id,
+            binding_id,
+            reason=request.reason,
+        )
+    )
+    await _broadcast(engagement.key, "lead_binding", record)
+    return record
 
 
 # ---------------------------------------------------------------------------

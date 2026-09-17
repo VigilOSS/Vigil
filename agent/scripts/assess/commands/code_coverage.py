@@ -175,6 +175,14 @@ _BLOCKER_REPAIRS = {
         "vigil assess code-ingest <repo-path> --repo-key <key> — a verified "
         "re-ingest, which advances the generation by design"
     ),
+    'code_leads_unresolved': lambda repo_id: (
+        f"`vigil assess code-lead list {_repo_selector(repo_id)} --lead-status open` "
+        "shows each unanswered prior-art lead and where it points; "
+        "`vigil assess code-lead queue` turns any bound file with no queue row "
+        "into analysis work. Close each lead on the note itself: `vigil assess "
+        "intel update note <lead-id> --inline '{\"lead_status\": \"ruled_out\"}'` "
+        "(or resolved when it led to a finding)"
+    ),
 }
 
 

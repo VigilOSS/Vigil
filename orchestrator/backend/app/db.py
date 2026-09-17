@@ -4880,6 +4880,60 @@ def _create_intel_tables(connection: sqlite3.Connection) -> None:
     )
 
 
+def _create_code_lead_binding_table(connection: sqlite3.Connection) -> None:
+    """The seam between a tracked intel lead and the reviewed source.
+
+    Created after BOTH ``_create_code_analysis_tables`` and
+    ``_create_intel_tables`` because it is the only table whose parents span
+    the two subsystems. A lead stays one row in ``intel_notes`` — this table
+    adds *where to look*, never a second lead identity.
+
+    ``repo_generation`` + ``file_hash`` are what stop a line range from
+    silently drifting onto different code: a refresh that leaves the bytes
+    identical carries the binding forward, and any other refresh stamps it
+    superseded so the lines are re-read before they are trusted again.
+    """
+    connection.execute(
+        """
+            CREATE TABLE IF NOT EXISTS code_lead_bindings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                engagement_id INTEGER NOT NULL,
+                note_id INTEGER NOT NULL,
+                repo_id INTEGER NOT NULL,
+                file_id INTEGER NOT NULL,
+                repo_generation INTEGER NOT NULL,
+                file_path TEXT NOT NULL,
+                file_hash TEXT NOT NULL,
+                line_start INTEGER,
+                line_end INTEGER,
+                prior_art_ref TEXT NOT NULL DEFAULT '',
+                rationale TEXT NOT NULL DEFAULT '',
+                bound_by TEXT NOT NULL DEFAULT '',
+                unbound_at TEXT,
+                unbound_reason TEXT NOT NULL DEFAULT '',
+                source_superseded_at TEXT,
+                source_supersession_reason TEXT NOT NULL DEFAULT '',
+                replacement_repo_generation INTEGER,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(engagement_id, note_id, file_id),
+                FOREIGN KEY(engagement_id) REFERENCES engagements(id) ON DELETE CASCADE,
+                FOREIGN KEY(note_id) REFERENCES intel_notes(id) ON DELETE CASCADE,
+                FOREIGN KEY(repo_id) REFERENCES code_repos(id) ON DELETE CASCADE,
+                FOREIGN KEY(file_id) REFERENCES code_files(id) ON DELETE CASCADE
+            )
+            """
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_code_lead_bindings_engagement_repo "
+        "ON code_lead_bindings(engagement_id, repo_id)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_code_lead_bindings_note "
+        "ON code_lead_bindings(engagement_id, note_id)"
+    )
+
+
 def _create_activity_table(connection: sqlite3.Connection) -> None:
 
     # Activity log narrative table replaces the legacy `log.md` scratch
@@ -6508,6 +6562,7 @@ def init_db() -> None:
                 raise
         _create_post_migration_indexes(connection)
         _create_intel_tables(connection)
+        _create_code_lead_binding_table(connection)
         _create_activity_table(connection)
         _create_dispatch_tables(connection)
         if run_accounting_backup is not None:

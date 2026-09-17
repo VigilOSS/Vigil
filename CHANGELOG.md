@@ -54,6 +54,11 @@ Durable design decisions live in [`docs/adr/`](docs/adr/).
   indexed, searchable and citable with full source identity, and are excluded from queue population,
   receipts, variants, fuzz completion and phase readiness. A plugin review no longer has to choose
   between reading the host's code and owning a second large codebase's coverage debt.
+- **`vigil assess code-lead`** binds a tracked intel lead to a repository, file and line range, turns
+  bound files into analysis queue rows (`code-lead queue`), and reports each lead's obligation and
+  staleness state (`code-lead list`). Prior art that was previously a note nobody could act on now
+  reaches the queue and shows up in code completeness as `code_leads_unresolved`. A lead's
+  disposition is still closed on the note itself, so there is one lead primitive, not two.
 - **Framework registration is recorded separately from surface type.**
   `vigil assess record-surface --framework-registration <kind>` names how a host framework registers
   a plugin — service provider, HTTP endpoint, request interceptor, event listener, template
