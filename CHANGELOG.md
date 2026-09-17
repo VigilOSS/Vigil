@@ -89,6 +89,34 @@ Durable design decisions live in [`docs/adr/`](docs/adr/).
   `code-coverage` lists open leases oldest-first with how long each has been silent and how many
   receipts a reset would discard. `reset-stale` remains, but it is no longer the only option, so
   recovering a died-mid-file dispatch does not mean redoing durable work.
+- **FreeMarker templates are structurally indexed.** `.ftl`, `.ftlh` and `.ftlx` now reach language
+  detection and a FreeMarker-aware lightweight extraction covering interpolation sites, escape
+  directives, output contexts, attribute and form-field positions. The extension decides the
+  auto-escaping ambient, because FreeMarker's own output-format-by-extension rule makes `.ftlh`
+  HTML and `.ftlx` XML; a bare `.ftl` inherits an application default this repository cannot see,
+  so it stays reported as unescaped until a directive says otherwise, and an explicit `<#ftl>`
+  header wins over the extension either way. Results are degraded advisory signals by construction
+  and never read as proof that a site is safe. `.kts`, `Pipfile`, `Pipfile.lock` and `poetry.lock`
+  also reach detection, so they stop landing in the unknown-language bucket that made them invisible
+  at ingest.
+- **PowerShell is structurally analysed, not merely detected.** `.ps1`, `.psm1` and `.psd1` reached
+  language detection but had no extractor, so every one of them fell through to the streaming
+  scanner. An extractor now reads `function`, `filter` and `workflow` declarations with either
+  signature form PowerShell accepts — a C-style parameter list after the name, or a `param()` block
+  as the body's first statement — treats a script-level `param()` as the script's own argument
+  surface, and follows `Import-Module`, `using module`/`using namespace` and dot-sourced
+  `.ps1`/`.psm1` as import edges, because dot-sourcing is how most PowerShell codebases share
+  helpers. Comment-based help (`<# ... #>`) is skipped: its `.EXAMPLE` sections quote the very
+  cmdlets the sink table flags, so a documented script was reading as a vulnerable one. One sink
+  table — dynamic evaluation, process execution, URL fetch, download-piped-to-execution, hardcoded
+  credentials — serves both the structural extractor and the bounded streaming scanner, so the two
+  paths cannot report the same file differently.
+- **PHP 8 attributes are captured on both index paths.** Attributes are the route and authorization
+  table of every modern PHP framework, and `_ENTRY_ANNOTATIONS["php"]` is matched against a
+  function's `annotations` — so with them dropped, a controller action could never become an entry
+  point. The structural indexer now reads each `attribute_list` verbatim as `#[...]`, and the
+  streaming scanner stops reading a leading `#[` as a PHP line comment, which had removed the whole
+  line from every detector below it.
 
 ### Fixed
 
@@ -154,6 +182,29 @@ Durable design decisions live in [`docs/adr/`](docs/adr/).
   what was wrong, like the missing-artifact case beside it. A corrupt *per-file* artifact also no
   longer kills the whole command: that is a hole in one file. An unreadable *manifest* still exits
   non-zero, because an inventory you cannot read means nothing is known about what was indexed.
+- **A pointer return type no longer hides a whole C function.** `char *copy_name(...)` parses as
+  `pointer_declarator(function_declarator(...))`, and the C branch read only the direct children of
+  the declarator field — finding neither the name nor the parameters, so the function was dropped
+  from the index entirely, and because sinks are attributed by scanning function bodies, every sink
+  inside it went with it. The byte-identical `.cpp` indexed correctly the whole time, because the
+  C++ branch already walked the declarator chain. `array_declarator` and `parenthesized_declarator`
+  are covered on the same walk, and a function returning a function pointer resolves to the
+  innermost named declarator. This was the commonest shape of allocation helper, in the most
+  memory-unsafe language Vigil supports.
+- **PHP's inclusion constructs are `lfi`/`rfi`, not path traversal.** `include`, `require`,
+  `include_once` and `require_once` sat in the `file_path` sink kind, which carries
+  `path-traversal`. They load and *execute* the named file, so a caller-controlled path is `lfi` —
+  and `rfi` wherever `allow_url_include` is on — and those route to a different skill. They are now
+  their own `file_inclusion` kind carrying `["lfi", "rfi"]`. The patterns moved verbatim, so the
+  audited slice is still 89: `file_path` went from 38 to 34 and `file_inclusion` holds the four. It
+  was the coarser answer for the commonest PHP RCE shape there is.
+- **A PowerShell file no longer fails the whole structural index.** `code-index` has emitted
+  `powershell` for `.ps1`/`.psm1`/`.psd1` since the language table was written, but the backend's
+  canonical language set never listed it, so `code-index sync` rejected the entire submission with
+  `unsupported structural index language` for any repository containing one. A drift test now
+  fails if the agent side can emit a language the backend will not accept. Acceptance was only half
+  of it — those files still had no extractor, and reached the streaming scanner rather than a
+  structural one; see the PowerShell extractor under Added.
 - **Cold image builds no longer die at 20s.** `vigil up` and `vigil install` threaded one bounded
   runner through both fast metadata queries and image builds, so the bound that makes a wedged
   daemon fail fast killed every first-run Kali build and swallowed its progress output.

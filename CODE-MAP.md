@@ -56,6 +56,14 @@ When you are about to copy one of these into a second file, stop and import.
   at column zero and forges a heading. ADR 0019 forbids masking it, so containment is the only lever.
   `operator_checkpoint.py` and `resume_brief.py` render through it.
   See: `agent/scripts/assess/tests/test_operator_checkpoint_render.py`.
+- `agent/scripts/assess/lib/treesitter_index.py:_FREEMARKER_ESCAPING_EXTENSIONS` owns whether a
+  FreeMarker template starts auto-escaped. The FILENAME decides it, so `_index_lightweight` threads
+  `file_path` into `_extract_freemarker` alone; an explicit `<#ftl>` header overrides.
+  See: `agent/scripts/assess/tests/test_freemarker_extraction.py`.
+- `agent/scripts/assess/lib/code_languages.py:CANONICAL_CODE_LANGUAGES` owns every detectable
+  language; `code_analysis.py:_CANONICAL_STRUCTURAL_LANGUAGES` must be a SUPERSET, or one unknown
+  language fails `code-index sync` for the whole repo, and `STRUCTURALLY_ANALYZED_LANGUAGES` must
+  cover every lightweight one. See: `orchestrator/backend/tests/test_structural_language_drift.py`.
 - `code_analysis.py:_lease_activity_sql` owns what "a lease last proved life" means
   (`COALESCE(last_heartbeat_at, consumed_at)`); `reset-stale`, `list --stale-minutes`, adoption
   liveness and the open-lease report all measure from it.

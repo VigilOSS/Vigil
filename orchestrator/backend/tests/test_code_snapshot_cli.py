@@ -476,7 +476,10 @@ def test_ingest_classifies_powershell_extensions(filename: str) -> None:
     assert module._detect_language(filename) == "powershell"
     assert detect_language(filename) == "powershell"
     assert canonical_backend_language("powershell") == "powershell"
-    assert language_for_file(filename) is None
+    # PowerShell now has a lightweight extractor, so ingest classification and
+    # the structural index agree; the backend must still accept the language,
+    # which is what a `.ps1` 400ing `code-index sync` for a whole repository cost.
+    assert language_for_file(filename) == "powershell"
 
 
 def test_git_provenance_uses_safe_flags_and_strips_case_insensitive_git_environment(

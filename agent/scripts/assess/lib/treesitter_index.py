@@ -7,8 +7,10 @@ sites.  All tree-sitter imports are guarded so the module remains importable
 """
 from __future__ import annotations
 
+import bisect
 import re
 import warnings
+from pathlib import Path
 from typing import Any
 
 from assess.lib.code_languages import (
@@ -87,7 +89,7 @@ _TS_SUPPORTED_LANGUAGES = frozenset({
 
 # Lightweight regex/line-based extractors (pure-python, no tree-sitter grammar)
 LIGHTWEIGHT_LANGUAGES = frozenset({
-    "dockerfile", "shell", "lua", "html", "css",
+    "dockerfile", "shell", "powershell", "lua", "html", "css", "freemarker",
 })
 
 # Combined set used by consumers (code_index.py / code_index_sync.py / assess
@@ -255,13 +257,25 @@ _SINK_DEFINITIONS: list[SinkPattern] = [
                    r"\bioutil\.ReadFile\s*\(", r"\bos\.ReadFile\s*\("],
             "ruby": [r"\bFile\.open\s*\(", r"\bFile\.read\s*\(", r"\bIO\.read\s*\(",
                      r"\bFileUtils\.\w+\s*\("],
-            "php": [r"\bfopen\s*\(", r"\bfile_get_contents\s*\(", r"\bfile_put_contents\s*\(",
-                    r"\binclude\b", r"\brequire\b", r"\binclude_once\b", r"\brequire_once\b"],
+            "php": [r"\bfopen\s*\(", r"\bfile_get_contents\s*\(", r"\bfile_put_contents\s*\("],
+        },
+    },
+    {
+        # PHP's inclusion constructs load and EXECUTE the named file, so a
+        # caller-controlled path is `lfi` (and `rfi` wherever `allow_url_include`
+        # is on), not the `path-traversal` that reading one would be. They route
+        # to different skills, so the coarser family was the wrong answer for the
+        # commonest PHP RCE shape there is.
+        "kind": "file_inclusion",
+        "vuln_classes": ["lfi", "rfi"],
+        "patterns": {
+            "php": [r"\binclude\b", r"\brequire\b", r"\binclude_once\b",
+                    r"\brequire_once\b"],
         },
     },
     {
         "kind": "sql_exec",
-        "vuln_classes": ["sql-injection"],
+        "vuln_classes": ["sqli"],
         "patterns": {
             "java": [r"\bcreateStatement\s*\(", r"\.execute\s*\(", r"\.executeQuery\s*\(",
                      r"\.executeUpdate\s*\("],
@@ -408,7 +422,8 @@ _SINK_DEFINITIONS: list[SinkPattern] = [
         "kind": "xml_parse",
         "vuln_classes": ["xxe"],
         "patterns": {
-            "java": [r"\bDocumentBuilderFactory\b", r"\bSAXParserFactory\b", r"\bXMLReader\b"],
+            "java": [r"\bDocumentBuilderFactory\b", r"\bSAXParserFactory\b",
+                     r"\bXMLReader\b", r"\bXMLInputFactory\b"],
             "c": [r"\bxmlParseFile\s*\("],
             "cpp": [r"\bxmlParseFile\s*\("],
             "python": [r"\bxml\.etree\.ElementTree\.parse\s*\(", r"\blxml\.etree\.parse\s*\("],
@@ -1065,6 +1080,74 @@ def _extract_functions_ts(tree: Any, language: str, source: bytes) -> list[dict[
     return functions
 
 
+# Declarator nodes a C function definition can be wrapped in before its
+# `function_declarator` is reached. A pointer return type is by far the
+# commonest: `char *copy_name(...)` parses as
+# `pointer_declarator(function_declarator(...))`.
+_C_DECLARATOR_WRAPPERS = frozenset({
+    "array_declarator",
+    "parenthesized_declarator",
+    "pointer_declarator",
+})
+_C_NAMED_DECLARATOR_PARENTS = _C_DECLARATOR_WRAPPERS | {"function_declarator"}
+
+
+def _c_nested_declarator(node: Any) -> Any:
+    """Return the declarator *node* wraps.
+
+    `parenthesized_declarator` holds its child with no field name, so the field
+    lookup every other wrapper answers to returns nothing there.
+    """
+    nested = node.child_by_field_name("declarator")
+    if nested is not None:
+        return nested
+    return next(iter(node.named_children), None)
+
+
+def _c_function_declarator(declarator: Any) -> Any:
+    """Descend to the `function_declarator` a C definition's declarator wraps.
+
+    Reading only the direct children of the declarator *field* finds neither the
+    name nor the parameters of a pointer-returning function, so the function is
+    dropped from the index entirely -- and because `_detect_sinks` scans function
+    bodies, every sink inside it goes with it. The byte-identical `.cpp` keeps
+    both, because the C++ branch already walks the declarator chain.
+    """
+    node = declarator
+    while node is not None:
+        if node.type in _C_DECLARATOR_WRAPPERS:
+            node = _c_nested_declarator(node)
+            continue
+        # A function returning a function pointer nests a second
+        # `function_declarator`; the named one is always the innermost.
+        inner = (
+            node.child_by_field_name("declarator")
+            if node.type == "function_declarator"
+            else None
+        )
+        if inner is None or inner.type not in _C_NAMED_DECLARATOR_PARENTS:
+            return node
+        node = inner
+    return None
+
+
+def _php_attributes(attribute_list: Any, source: bytes) -> list[str]:
+    """Return each PHP 8 attribute under *attribute_list*, verbatim as `#[...]`.
+
+    Attributes are the route and authorization table of every modern PHP
+    framework, and `_ENTRY_ANNOTATIONS["php"]` is matched against a function's
+    ``annotations``, so an attribute dropped here is a controller action that
+    can never be an entry point.
+    """
+    return [
+        f"#[{_node_text(attribute, source)}]"
+        for group in attribute_list.children
+        if group.type == "attribute_group"
+        for attribute in group.children
+        if attribute.type == "attribute"
+    ]
+
+
 def _parse_function_node(node: Any, language: str, source: bytes) -> dict[str, Any] | None:
     """Parse a single function/method tree-sitter node into a structured dict."""
     start_line, end_line = _node_lines(node)
@@ -1097,7 +1180,7 @@ def _parse_function_node(node: Any, language: str, source: bytes) -> dict[str, A
                 is_declaration=False,
             )
     elif language == "c":
-        decl = node.child_by_field_name("declarator")
+        decl = _c_function_declarator(node.child_by_field_name("declarator"))
         if decl:
             for child in decl.children:
                 if child.type == "identifier":
@@ -1155,9 +1238,10 @@ def _parse_function_node(node: Any, language: str, source: bytes) -> dict[str, A
         if params_node:
             params = _extract_params(params_node, source)
         for child in node.children:
-            txt = _node_text(child, source)
             if child.type in ("visibility_modifier", "static_modifier", "abstract_modifier"):
-                modifiers.append(txt)
+                modifiers.append(_node_text(child, source))
+            elif child.type == "attribute_list":
+                annotations.extend(_php_attributes(child, source))
 
     if not name:
         return None
@@ -1358,7 +1442,13 @@ def _extract_imports_ts(tree: Any, language: str, source: bytes) -> list[str]:
             if m:
                 text = m.group(1)
         elif query_language == "go":
-            text = text.strip().strip('"')
+            # A Go `import_spec` may carry an alias, the blank `_`, or `.`
+            # before its quoted path (`_ "github.com/lib/pq"`), so the path
+            # comes from the spec's own `path` field -- trimming quotes off
+            # the whole spec would leave the alias welded to the path.
+            path_node = node.child_by_field_name("path")
+            if path_node is not None:
+                text = _node_text(path_node, source).strip('"`')
             if text.startswith("."):
                 continue
         elif query_language == "php":
@@ -1415,7 +1505,87 @@ def _detect_top_level_entry_points(
     return entry_points
 
 
+# Call nodes, per grammar family, for the walk from a callable to the call that
+# registers it. Read off the shipped grammars rather than assumed: php names
+# four distinct call nodes, and ruby folds commands into a single `call`.
+_CALL_NODE_TYPES: dict[str, frozenset[str]] = {
+    "c": frozenset({"call_expression"}),
+    "cpp": frozenset({"call_expression"}),
+    "go": frozenset({"call_expression"}),
+    "javascript": frozenset({"call_expression"}),
+    "typescript": frozenset({"call_expression"}),
+    "php": frozenset({
+        "function_call_expression",
+        "member_call_expression",
+        "nullsafe_member_call_expression",
+        "scoped_call_expression",
+    }),
+    "ruby": frozenset({"call"}),
+}
+
+# The walk stops at the first callable it crosses. A closure nested inside a
+# registered callback is registered by nothing; only the callback the route
+# call itself receives is the request surface.
+_CALLABLE_NODE_TYPES: dict[str, frozenset[str]] = {
+    "c": frozenset({"function_definition"}),
+    "cpp": frozenset({"function_definition", "lambda_expression"}),
+    "go": frozenset({"func_literal", "function_declaration", "method_declaration"}),
+    "javascript": _JAVASCRIPT_CALLABLE_TYPES,
+    "typescript": _JAVASCRIPT_CALLABLE_TYPES,
+    "php": frozenset({
+        "anonymous_function",
+        "arrow_function",
+        "function_definition",
+        "method_declaration",
+    }),
+    "ruby": frozenset({"block", "do_block", "lambda", "method", "singleton_method"}),
+}
+
+
+def _registering_call_lines(
+    tree: Any,
+    function: dict[str, Any],
+    language: str,
+    line_count: int,
+) -> list[int]:
+    """1-based first lines of the calls that receive *function* as an argument.
+
+    A callback is registered by the call it is passed to, so that call's own
+    first line is where the framework registration is written -- however many
+    argument lines sit between the two. Prettier's 80-column wrap puts them on
+    different lines for the majority of real Express/Koa/Fastify routes.
+
+    Nested calls are walked through so an adapter (`asyncHandler(fn)`) does not
+    hide the route call above it, and the walk stops at the first enclosing
+    callable, which is what makes this structural rather than positional: a
+    function merely stacked near a registration has no enclosing call at all.
+    """
+    call_types = _CALL_NODE_TYPES.get(language, frozenset())
+    start_byte = function.get("_start_byte")
+    end_byte = function.get("_end_byte")
+    if not call_types or start_byte is None or end_byte is None:
+        return []
+
+    node = tree.root_node.descendant_for_byte_range(start_byte, end_byte)
+    if node is None:
+        return []
+
+    callable_types = _CALLABLE_NODE_TYPES.get(language, frozenset())
+    lines: list[int] = []
+    current = node.parent
+    while current is not None:
+        if current.type in callable_types:
+            break
+        if current.type in call_types:
+            line = current.start_point[0] + 1
+            if 1 <= line <= line_count:
+                lines.append(line)
+        current = current.parent
+    return lines
+
+
 def _detect_entry_points(
+    tree: Any,
     functions: list[dict[str, Any]],
     classes: list[dict[str, Any]],
     language: str,
@@ -1496,13 +1666,28 @@ def _detect_entry_points(
         if matched:
             continue
 
-        # Check source-line patterns within function body
+        # Check source-line patterns across the function's own range plus the
+        # first line of every call that registers it. Those two spans are where
+        # a registration can be written: inside the body or on the signature
+        # line (`func registerStdlib() {`, `void timer_callback(...) {`), or on
+        # the `app.get(` a wrapped callback is an argument to. Attribution is
+        # structural in both directions, so a function merely stacked under a
+        # preceding registration -- which an earlier three-line lookback charged
+        # for its neighbour's match -- is never reported for it.
+        scan_indices = list(
+            range(
+                max(0, func["line_start"] - 1),
+                min(len(source_lines), func["line_end"]),
+            )
+        )
+        scan_indices.extend(
+            line - 1
+            for line in _registering_call_lines(
+                tree, func, language, len(source_lines)
+            )
+        )
         for lp in line_pattern_defs:
-            start_idx = max(0, func["line_start"] - 1)
-            end_idx = min(len(source_lines), func["line_end"])
-            # Also check a few lines before for decorators
-            check_start = max(0, start_idx - 3)
-            for line_no in range(check_start, end_idx):
+            for line_no in scan_indices:
                 if re.search(lp["pattern"], source_lines[line_no]):
                     entry_points.append({
                         "name": func["name"],
@@ -1637,7 +1822,11 @@ def _detect_call_sites(
     for func in functions:
         if func.get("is_declaration", False):
             continue
-        seen_callees: set[str] = set()
+        # Keyed on the line, not the function: a literal `exec("ls")` at the top
+        # of a handler must not hide the `exec($tainted)` fifty lines down, which
+        # is the call the taint scheduler exists to reach. One line repeating a
+        # callee is still one site.
+        seen_callees: set[tuple[str, int]] = set()
 
         param_names: set[str] = set()
         for p in func.get("params", []):
@@ -1658,9 +1847,9 @@ def _detect_call_sites(
                     continue
                 if simple_name == func["name"]:
                     continue
-                if simple_name in seen_callees:
+                if (simple_name, line_idx) in seen_callees:
                     continue
-                seen_callees.add(simple_name)
+                seen_callees.add((simple_name, line_idx))
 
                 passes_params = False
                 if param_names:
@@ -1970,14 +2159,23 @@ def _index_lightweight(
     dispatch = {
         "dockerfile": _extract_dockerfile,
         "shell": _extract_shell,
+        "powershell": _extract_powershell,
         "lua": _extract_lua,
         "html": _extract_html,
         "css": _extract_css,
     }
-    fn = dispatch.get(language)
-    if fn is None:
-        return _empty_index(file_path, language, total_lines=total_lines)
-    funcs, entry_points, sinks, exports, imports = fn(source_lines)
+    if language == "freemarker":
+        # The one lightweight extractor whose result depends on the filename and
+        # not only on the bytes: the extension carries FreeMarker's output format,
+        # which decides whether auto-escaping is on before any directive is read.
+        funcs, entry_points, sinks, exports, imports = _extract_freemarker(
+            source_lines, file_path=file_path
+        )
+    else:
+        fn = dispatch.get(language)
+        if fn is None:
+            return _empty_index(file_path, language, total_lines=total_lines)
+        funcs, entry_points, sinks, exports, imports = fn(source_lines)
     return {
         "file_path": file_path,
         "language": language,
@@ -2110,7 +2308,7 @@ def _extract_dockerfile(
                 "line": block_start,
                 "function": instr,
                 "snippet": _snippet(stripped),
-                "vuln_classes": ["secret-exposure"],
+                "vuln_classes": ["secrets-exposure"],
             })
 
         if instr == "ARG" and _DOCKER_SECRET_NAMES.search(block_text):
@@ -2119,7 +2317,7 @@ def _extract_dockerfile(
                 "line": block_start,
                 "function": instr,
                 "snippet": _snippet(stripped),
-                "vuln_classes": ["secret-exposure"],
+                "vuln_classes": ["secrets-exposure"],
             })
 
         if instr == "ADD":
@@ -2222,7 +2420,7 @@ def _extract_shell(
             sinks.append({
                 "kind": "shell_eval",
                 "line": line_no,
-                "function": _find_enclosing_shell_func(funcs, line_no),
+                "function": _find_enclosing_func(funcs, line_no),
                 "snippet": _snippet(line),
                 "vuln_classes": ["injection"],
             })
@@ -2230,7 +2428,7 @@ def _extract_shell(
             sinks.append({
                 "kind": "remote_pipe_to_shell",
                 "line": line_no,
-                "function": _find_enclosing_shell_func(funcs, line_no),
+                "function": _find_enclosing_func(funcs, line_no),
                 "snippet": _snippet(line),
                 "vuln_classes": ["supply-chain", "injection"],
             })
@@ -2238,7 +2436,7 @@ def _extract_shell(
             sinks.append({
                 "kind": "permissive_chmod",
                 "line": line_no,
-                "function": _find_enclosing_shell_func(funcs, line_no),
+                "function": _find_enclosing_func(funcs, line_no),
                 "snippet": _snippet(line),
                 "vuln_classes": ["privilege-escalation"],
             })
@@ -2246,7 +2444,7 @@ def _extract_shell(
             sinks.append({
                 "kind": "sudo",
                 "line": line_no,
-                "function": _find_enclosing_shell_func(funcs, line_no),
+                "function": _find_enclosing_func(funcs, line_no),
                 "snippet": _snippet(line),
                 "vuln_classes": ["privilege-escalation"],
             })
@@ -2255,7 +2453,7 @@ def _extract_shell(
             sinks.append({
                 "kind": "tainted_command_substitution",
                 "line": line_no,
-                "function": _find_enclosing_shell_func(funcs, line_no),
+                "function": _find_enclosing_func(funcs, line_no),
                 "snippet": _snippet(line),
                 "vuln_classes": ["injection"],
             })
@@ -2265,19 +2463,218 @@ def _extract_shell(
             sinks.append({
                 "kind": "hardcoded_credential",
                 "line": line_no,
-                "function": _find_enclosing_shell_func(funcs, line_no),
+                "function": _find_enclosing_func(funcs, line_no),
                 "snippet": _snippet(line),
-                "vuln_classes": ["secret-exposure"],
+                "vuln_classes": ["secrets-exposure"],
             })
 
     return funcs, entry_points, sinks, exports, imports
 
 
-def _find_enclosing_shell_func(funcs: list[dict[str, Any]], line_no: int) -> str:
+def _find_enclosing_func(funcs: list[dict[str, Any]], line_no: int) -> str:
+    """Name the script-language function a line falls in, or the file scope."""
     for f in funcs:
         if f["line_start"] <= line_no <= f["line_end"]:
             return f["name"]
     return "<script>"
+
+
+# --- PowerShell -------------------------------------------------------------
+
+_PS_FUNC_RE = re.compile(
+    r"^\s*(?:function|filter|workflow)\s+([A-Za-z_][\w-]*(?::[A-Za-z_][\w-]*)?)",
+    re.IGNORECASE,
+)
+_PS_PARAM_BLOCK_RE = re.compile(r"\bparam\s*\(", re.IGNORECASE)
+_PS_FUNC_SIGNATURE_RE = re.compile(
+    r"^\s*(?:function|filter|workflow)\s+[\w:-]+\s*\(", re.IGNORECASE
+)
+_PS_PARAM_NAME_RE = re.compile(r"\$([A-Za-z_]\w*)")
+_PS_IMPORT_RE = re.compile(
+    r"""^\s*(?:Import-Module|using\s+(?:module|namespace))\s+['"]?([^\s'";]+)""",
+    re.IGNORECASE,
+)
+# Dot-sourcing runs another script's contents in the caller's scope, which is
+# both an import edge and how most PowerShell codebases share helpers.
+_PS_DOT_SOURCE_RE = re.compile(
+    r"""^\s*\.\s+['"]?([^\s'";]+\.psm?1)""", re.IGNORECASE
+)
+
+# PowerShell's security-relevant cmdlets, one table serving both the structural
+# extractor below and the bounded streaming scanner, so the two paths cannot
+# report a `.ps1` differently. Each pattern is anchored on a cmdlet or type
+# accelerator rather than a bare verb, because PowerShell's own aliases (`iex`,
+# `iwr`) are the short forms an attacker-facing script actually uses.
+_PS_SINK_PATTERNS: list[tuple[str, str, list[str]]] = [
+    (
+        "dynamic_code_evaluation",
+        r"\b(?:Invoke-Expression|iex)\b|\[scriptblock\]::Create\s*\(|\bAdd-Type\b",
+        ["injection"],
+    ),
+    (
+        "process_exec",
+        r"\b(?:Start-Process|Invoke-Item|Invoke-Command|Start-Job)\b",
+        ["injection"],
+    ),
+    (
+        "url_fetch",
+        r"\b(?:Invoke-WebRequest|Invoke-RestMethod|iwr|irm)\b|\bNet\.WebClient\b",
+        ["ssrf"],
+    ),
+    (
+        "remote_download_to_execution",
+        r"\b(?:DownloadString|DownloadFile|Invoke-WebRequest|Invoke-RestMethod|iwr|irm)\b"
+        r"[^|\r\n]*\|\s*(?:iex|Invoke-Expression)\b",
+        ["injection"],
+    ),
+    (
+        "deserialization",
+        r"\bImport-Clixml\b"
+        r"|\[System\.Management\.Automation\.PSSerializer\]::Deserialize",
+        ["deserialization"],
+    ),
+    (
+        "file_path",
+        r"\b(?:Get-Content|Set-Content|Add-Content|Out-File|Remove-Item|Join-Path)\b",
+        ["path-traversal"],
+    ),
+    (
+        "plaintext_secret",
+        r"\bConvertTo-SecureString\b[^\r\n]*-AsPlainText",
+        ["secrets-exposure"],
+    ),
+    (
+        "certificate_validation_disabled",
+        r"\bServerCertificateValidationCallback\b|-SkipCertificateCheck\b",
+        ["crypto-misuse"],
+    ),
+]
+_PS_LITERAL_ASSIGNMENT_RE = re.compile(r"""\s*\$([A-Za-z_]\w*)\s*=\s*['"][^'"]+['"]""")
+_PS_COMPILED_SINKS = tuple(
+    (kind, re.compile(pattern, re.IGNORECASE), vuln_classes)
+    for kind, pattern, vuln_classes in _PS_SINK_PATTERNS
+)
+
+
+def _ps_balanced_span(text: str, open_paren: int) -> str:
+    """Return what sits between the `(` at *open_paren* and its matching `)`."""
+    depth = 0
+    for index in range(open_paren, len(text)):
+        char = text[index]
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                return text[open_paren + 1 : index]
+    return text[open_paren + 1 :]
+
+
+def _ps_declared_params(block: str) -> list[str]:
+    """Return the parameter names a function declares, either way it can.
+
+    PowerShell accepts both a C-style signature after the name and a `param()`
+    block as the body's first statement; a script's own arguments arrive only
+    through the latter.
+    """
+    signature = _PS_FUNC_SIGNATURE_RE.match(block)
+    if signature is not None:
+        declaration = _ps_balanced_span(block, signature.end() - 1)
+    else:
+        param_block = _PS_PARAM_BLOCK_RE.search(block)
+        if param_block is None:
+            return []
+        declaration = _ps_balanced_span(block, param_block.end() - 1)
+    return _PS_PARAM_NAME_RE.findall(declaration)
+
+
+def _ps_block_end(source_lines: list[str], start_index: int) -> int:
+    """Return the 1-based line on which the block opened at *start_index* closes."""
+    depth = 0
+    opened = False
+    for index in range(start_index, len(source_lines)):
+        for char in source_lines[index]:
+            if char == "{":
+                depth += 1
+                opened = True
+            elif char == "}":
+                depth -= 1
+        if opened and depth <= 0:
+            return index + 1
+    return len(source_lines)
+
+
+def _extract_powershell(
+    source_lines: list[str],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[str]]:
+    funcs: list[dict[str, Any]] = []
+    entry_points: list[dict[str, Any]] = []
+    sinks: list[dict[str, Any]] = []
+    exports: list[dict[str, Any]] = []
+    imports: list[str] = []
+
+    in_block_comment = False
+    for idx, line in enumerate(source_lines):
+        stripped = line.strip()
+        # `<# ... #>` is comment-based help, and its `.EXAMPLE` sections quote
+        # the very cmdlets this extractor flags -- skipping the block is what
+        # keeps a documented script from reading as a vulnerable one.
+        if in_block_comment:
+            in_block_comment = "#>" not in stripped
+            continue
+        if stripped.startswith("<#"):
+            in_block_comment = "#>" not in stripped[2:]
+            continue
+        if stripped.startswith("#"):
+            continue
+        line_no = idx + 1
+
+        declaration = _PS_FUNC_RE.match(line)
+        if declaration is not None:
+            name = declaration.group(1)
+            end_line = _ps_block_end(source_lines, idx)
+            func = _empty_func(name, line_no, end_line)
+            func["params"] = _ps_declared_params("\n".join(source_lines[idx:end_line]))
+            funcs.append(func)
+            exports.append(
+                {"name": name, "kind": "powershell_function", "line": line_no}
+            )
+
+        enclosing = _find_enclosing_func(funcs, line_no)
+        # A `param()` block outside every function is the script's own argument
+        # surface: whatever invokes the script reaches the body through it.
+        if enclosing == "<script>" and _PS_PARAM_BLOCK_RE.match(stripped):
+            entry_points.append({
+                "name": "<script>",
+                "line": line_no,
+                "kind": "script_parameters",
+                "annotation": _snippet(line),
+            })
+
+        imported = _PS_IMPORT_RE.match(line) or _PS_DOT_SOURCE_RE.match(line)
+        if imported is not None:
+            imports.append(imported.group(1))
+
+        for kind, pattern, vuln_classes in _PS_COMPILED_SINKS:
+            if pattern.search(line):
+                sinks.append({
+                    "kind": kind,
+                    "line": line_no,
+                    "function": enclosing,
+                    "snippet": _snippet(line),
+                    "vuln_classes": list(vuln_classes),
+                })
+        credential = _PS_LITERAL_ASSIGNMENT_RE.match(line)
+        if credential and _DOCKER_SECRET_NAMES.search(credential.group(1)):
+            sinks.append({
+                "kind": "hardcoded_credential",
+                "line": line_no,
+                "function": enclosing,
+                "snippet": _snippet(line),
+                "vuln_classes": ["secrets-exposure"],
+            })
+
+    return funcs, entry_points, sinks, exports, imports
 
 
 # --- Lua --------------------------------------------------------------------
@@ -2353,39 +2750,39 @@ def _extract_lua(
             sinks.append({
                 "kind": "redis_call",
                 "line": line_no,
-                "function": _find_enclosing_lua_func(funcs, line_no),
+                "function": _find_enclosing_func(funcs, line_no),
                 "snippet": _snippet(line),
-                "vuln_classes": ["redis-injection"],
+                "vuln_classes": ["injection"],
             })
         if re.search(r"\bredis\.pcall\s*\(", line):
             sinks.append({
                 "kind": "redis_pcall",
                 "line": line_no,
-                "function": _find_enclosing_lua_func(funcs, line_no),
+                "function": _find_enclosing_func(funcs, line_no),
                 "snippet": _snippet(line),
-                "vuln_classes": ["redis-injection"],
+                "vuln_classes": ["injection"],
             })
         if re.search(r"\bKEYS\s*\[", line):
             sinks.append({
                 "kind": "redis_keys_input",
                 "line": line_no,
-                "function": _find_enclosing_lua_func(funcs, line_no),
+                "function": _find_enclosing_func(funcs, line_no),
                 "snippet": _snippet(line),
-                "vuln_classes": ["redis-injection"],
+                "vuln_classes": ["injection"],
             })
         if re.search(r"\bARGV\s*\[", line):
             sinks.append({
                 "kind": "redis_argv_input",
                 "line": line_no,
-                "function": _find_enclosing_lua_func(funcs, line_no),
+                "function": _find_enclosing_func(funcs, line_no),
                 "snippet": _snippet(line),
-                "vuln_classes": ["redis-injection"],
+                "vuln_classes": ["injection"],
             })
         if re.search(r"\b(loadstring|load)\s*\(", line):
             sinks.append({
                 "kind": "dynamic_code_load",
                 "line": line_no,
-                "function": _find_enclosing_lua_func(funcs, line_no),
+                "function": _find_enclosing_func(funcs, line_no),
                 "snippet": _snippet(line),
                 "vuln_classes": ["injection"],
             })
@@ -2393,7 +2790,7 @@ def _extract_lua(
             sinks.append({
                 "kind": "os_execute",
                 "line": line_no,
-                "function": _find_enclosing_lua_func(funcs, line_no),
+                "function": _find_enclosing_func(funcs, line_no),
                 "snippet": _snippet(line),
                 "vuln_classes": ["injection"],
             })
@@ -2401,19 +2798,12 @@ def _extract_lua(
             sinks.append({
                 "kind": "io_popen",
                 "line": line_no,
-                "function": _find_enclosing_lua_func(funcs, line_no),
+                "function": _find_enclosing_func(funcs, line_no),
                 "snippet": _snippet(line),
                 "vuln_classes": ["injection"],
             })
 
     return funcs, entry_points, sinks, exports, imports
-
-
-def _find_enclosing_lua_func(funcs: list[dict[str, Any]], line_no: int) -> str:
-    for f in funcs:
-        if f["line_start"] <= line_no <= f["line_end"]:
-            return f["name"]
-    return "<script>"
 
 
 # --- HTML / templates -------------------------------------------------------
@@ -2588,6 +2978,644 @@ def _extract_css(
     return funcs, entry_points, sinks, exports, imports
 
 
+# --- FreeMarker -------------------------------------------------------------
+
+# Escape and context evidence from a line scanner is advisory. FreeMarker's
+# real escaping depends on the output format in force, the directive stack that
+# encloses a site, and the runtime type of the value -- none of which a regex
+# can settle. Every member of this vocabulary therefore names an *observation*,
+# never a verdict: there is deliberately no value that reads as "safe", and an
+# interpolation stays an XSS sink whatever was observed, because a false clean
+# on a template is worse than no signal at all.
+FREEMARKER_ESCAPE_OBSERVATIONS = (
+    "unverified_escape_observed",
+    "unverified_partial_escape_observed",
+    "unverified_escape_suppressed",
+    "unverified_no_escape_observed",
+)
+
+# Where an interpolation's bytes land in the rendered document. Which escaper
+# would be correct depends on this, so a reviewer needs the context even though
+# it too is regex-derived.
+FREEMARKER_OUTPUT_CONTEXTS = (
+    "html_text",
+    "html_attribute",
+    "url_attribute",
+    "event_handler_attribute",
+    "style_attribute",
+    "html_tag",
+    "html_comment",
+    "script",
+    "style",
+)
+
+_FREEMARKER_ESCAPER_BUILTINS = frozenset({
+    "html", "xhtml", "xml", "rtf", "esc",
+    "js_string", "jsString", "json_string", "jsonString",
+    "url", "urlPath", "url_path",
+})
+_FREEMARKER_ESCAPE_SUPPRESSORS = frozenset({"no_esc", "noEsc"})
+# Directives that change the escaping ambient to the interpolations they
+# enclose. Tracked as a stack so an inner one overrides its parent.
+_FREEMARKER_ESCAPE_SCOPES = frozenset({
+    "escape", "noescape", "outputformat", "autoesc", "noautoesc",
+})
+# FreeMarker's markup output formats -- the ones whose auto-escaper escapes for
+# a markup document. An allowlist, not a denylist of `plaintext`/`undefined`:
+# `JavaScript`, `JSON` and `CSS` are built-in formats that escape for something
+# other than HTML, and an application may register any name it likes, so a
+# denylist reads every format nobody enumerated as escaping. That is a false
+# clean on the exact template that needed the reviewer.
+_FREEMARKER_ESCAPING_FORMATS = frozenset({"html", "xhtml", "xml", "rtf"})
+# FreeMarker's "recognize output format by file extension" feature: ``.ftlh``
+# means HTML and ``.ftlx`` means XML, both escaping output formats, so
+# auto-escaping is on for the whole template before a single directive is read.
+# A bare ``.ftl`` inherits the application's configured default, which is
+# ``undefined`` out of the box and which this file cannot see either way -- so it
+# stays False, and every interpolation in it is reported unescaped until an
+# explicit directive says otherwise. An explicit ``<#ftl ...>`` header still wins
+# over the extension in both directions, because that is FreeMarker's own order.
+_FREEMARKER_ESCAPING_EXTENSIONS = frozenset({".ftlh", ".ftlx"})
+_FREEMARKER_FORM_FIELD_TAGS = frozenset({"button", "input", "select", "textarea"})
+_FREEMARKER_URL_ATTRIBUTES = frozenset({
+    "action", "background", "cite", "codebase", "data", "formaction", "href",
+    "longdesc", "manifest", "poster", "profile", "src", "srcset", "usemap",
+    "xlink:href",
+})
+_FREEMARKER_URL_VULN_CLASSES = ("xss", "open-redirect")
+_FREEMARKER_BUILTIN_RE = re.compile(r"\?([A-Za-z_]\w*)")
+_FREEMARKER_DIRECTIVE_NAME_RE = re.compile(r"^</?[#@]([A-Za-z_][\w.]*)")
+_FREEMARKER_CALLABLE_RE = re.compile(r"^<#(?:macro|function)\s+([A-Za-z_$][\w$]*)\s*")
+# Matched with `re.match(text, offset)`, which anchors on its own; a `^` here
+# would additionally demand the start of the whole source.
+_FREEMARKER_TAG_NAME_RE = re.compile(r"</?([A-Za-z][-\w:]*)")
+_FREEMARKER_ATTRIBUTE_NAME_RE = re.compile(r"[^\s=/>]+")
+_FREEMARKER_STRING_LITERAL_RE = re.compile(r"""(['"])(.*?)\1""")
+_FREEMARKER_OUTPUT_FORMAT_RE = re.compile(r"""output_format\s*=\s*(['"])([^'"]*)\1""")
+_FREEMARKER_AUTO_ESC_RE = re.compile(r"auto_esc\s*=\s*(true|false)")
+_FREEMARKER_EVENT_ATTRIBUTE_RE = re.compile(r"^on[a-z]+$")
+_FREEMARKER_SCALAR_LITERAL_RE = re.compile(r"^(?:-?\d+(?:\.\d+)?|true|false)$")
+# Constructs that evaluate template or Java code chosen at render time: the
+# FreeMarker sandbox-escape primitives, distinct from ordinary interpolation.
+_FREEMARKER_DYNAMIC_EVAL_RE = re.compile(
+    r"\?(?:eval|eval_json|evalJson|interpret|new)\b"
+    r"|\bfreemarker\.template\.utility\.(?:Execute|ObjectConstructor|JythonRuntime)\b"
+)
+# An unterminated `${` would otherwise make every later opener rescan the rest
+# of the file, so the search for a closing brace is bounded. A run longer than
+# this is reported as malformed, which keeps the site visible either way.
+_FREEMARKER_MAX_EXPRESSION_CHARS = 4096
+
+
+def _freemarker_split_top_level(expression: str, separators: str) -> list[str]:
+    """Split *expression* on *separators* outside string literals and brackets."""
+    pieces: list[str] = []
+    quote = ""
+    depth = 0
+    start = 0
+    index = 0
+    while index < len(expression):
+        char = expression[index]
+        if quote:
+            if char == "\\":
+                index += 2
+                continue
+            if char == quote:
+                quote = ""
+        elif char in "\"'":
+            quote = char
+        elif char in "([{":
+            depth += 1
+        elif char in ")]}":
+            depth -= 1
+        elif depth == 0 and char in separators:
+            pieces.append(expression[start:index])
+            start = index + 1
+        index += 1
+    pieces.append(expression[start:])
+    return [piece for piece in (item.strip() for item in pieces) if piece]
+
+
+def _freemarker_interpolation_end(text: str, brace: int) -> int:
+    """Return the offset just past the `}` closing the interpolation, or -1."""
+    limit = min(len(text), brace + _FREEMARKER_MAX_EXPRESSION_CHARS)
+    quote = ""
+    depth = 0
+    index = brace
+    while index < limit:
+        char = text[index]
+        if quote:
+            if char == "\\":
+                index += 2
+                continue
+            if char == quote:
+                quote = ""
+        elif char in "\"'":
+            quote = char
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return index + 1
+        index += 1
+    return -1
+
+
+def _freemarker_attribute_value_end(text: str, start: int, quote: str, length: int) -> int:
+    """Return the offset of the `quote` closing an attribute value, or -1.
+
+    Interpolation spans are stepped over, because a quote inside one belongs to
+    the FreeMarker expression and not to the attribute: `href="${url!""}"` and
+    `href="${msg("key")}"` are two of the commonest idioms in the themes this
+    extractor targets, and stopping at the first matching quote truncates the
+    value mid-`${`, downgrading a URL-context site to malformed noise.
+    """
+    index = start
+    while index < length:
+        char = text[index]
+        if char == quote:
+            return index
+        if char in "$#" and index + 1 < length and text[index + 1] == "{":
+            close = _freemarker_interpolation_end(text, index + 1)
+            if close > 0:
+                index = close
+                continue
+        index += 1
+    return -1
+
+
+def _freemarker_span_interpolations(text: str, start: int, end: int):
+    """Yield ``(open, close, syntax)`` for each interpolation in ``text[start:end]``.
+
+    ``close`` is -1 when the site is unterminated inside the span; the scan then
+    resumes just past the opening marker so the rest of the file is still read.
+    """
+    index = start
+    while index < end:
+        if text[index] in "$#" and index + 1 < end and text[index + 1] == "{":
+            syntax = "expression" if text[index] == "$" else "numeric"
+            close = _freemarker_interpolation_end(text, index + 1)
+            if close < 0 or close > end:
+                yield index, -1, syntax
+                index += 2
+                continue
+            yield index, close, syntax
+            index = close
+            continue
+        index += 1
+
+
+def _freemarker_builtins(expression: str) -> list[str]:
+    """Return the `?builtin` tokens in *expression*, verbatim and in source order."""
+    return [
+        f"?{match.group(1)}"
+        for match in _FREEMARKER_BUILTIN_RE.finditer(expression)
+    ]
+
+
+def _freemarker_observed_escapers(expression: str) -> list[str]:
+    """Return the escaping-related builtins applied anywhere in *expression*."""
+    return [
+        token
+        for token in _freemarker_builtins(expression)
+        if token[1:] in _FREEMARKER_ESCAPER_BUILTINS
+        or token[1:] in _FREEMARKER_ESCAPE_SUPPRESSORS
+    ]
+
+
+def _freemarker_value_operands(expression: str) -> list[str]:
+    """Return the sub-expressions whose escaping decides the rendered bytes.
+
+    Each top-level `+` operand contributes itself; a string literal contributes
+    only the interpolations nested inside it, because FreeMarker evaluates
+    `${...}` within string literals too; a scalar literal contributes nothing.
+    """
+    operands: list[str] = []
+    for operand in _freemarker_split_top_level(expression, "+"):
+        if len(operand) >= 2 and operand[0] in "\"'" and operand[-1] == operand[0]:
+            operands.extend(
+                operand[open_at + 2 : close_at - 1]
+                for open_at, close_at, _syntax in _freemarker_span_interpolations(
+                    operand, 0, len(operand)
+                )
+                if close_at > 0
+            )
+        elif not _FREEMARKER_SCALAR_LITERAL_RE.match(operand):
+            operands.append(operand)
+    return operands
+
+
+def _freemarker_escape_observation(expression: str, *, ambient_escaping: bool) -> str:
+    """Classify the escaping *observed* on one interpolation expression.
+
+    The result is a member of ``FREEMARKER_ESCAPE_OBSERVATIONS``: evidence for a
+    reviewer, never a clearance for the site.
+    """
+    if any(
+        token[1:] in _FREEMARKER_ESCAPE_SUPPRESSORS
+        for token in _freemarker_builtins(expression)
+    ):
+        return "unverified_escape_suppressed"
+    if ambient_escaping:
+        return "unverified_escape_observed"
+    operands = _freemarker_value_operands(expression)
+    escaped = [
+        operand
+        for operand in operands
+        if any(
+            token[1:] in _FREEMARKER_ESCAPER_BUILTINS
+            for token in _freemarker_builtins(operand)
+        )
+    ]
+    if operands and len(escaped) == len(operands):
+        return "unverified_escape_observed"
+    if escaped:
+        return "unverified_partial_escape_observed"
+    return "unverified_no_escape_observed"
+
+
+def _freemarker_scope_escaping(name: str, directive: str) -> bool:
+    """Whether an escape-scope directive turns escaping on for its body."""
+    if name == "escape":
+        # `<#escape x as x>` opens a scope that escapes nothing, so only a
+        # recognized escaper in the replacement expression counts.
+        return any(
+            token[1:] in _FREEMARKER_ESCAPER_BUILTINS
+            for token in _freemarker_builtins(directive)
+        )
+    if name == "outputformat":
+        literal = _FREEMARKER_STRING_LITERAL_RE.search(directive)
+        return (
+            literal is not None
+            and literal.group(2).strip().lower() in _FREEMARKER_ESCAPING_FORMATS
+        )
+    return name == "autoesc"
+
+
+def _freemarker_attribute_context(attribute: str) -> str:
+    """Return the output context an interpolation inside *attribute* lands in."""
+    name = attribute.lower()
+    if _FREEMARKER_EVENT_ATTRIBUTE_RE.match(name):
+        return "event_handler_attribute"
+    if name == "style":
+        return "style_attribute"
+    if name in _FREEMARKER_URL_ATTRIBUTES:
+        return "url_attribute"
+    return "html_attribute"
+
+
+def _freemarker_callable_params(declaration: str) -> list[str]:
+    """Return the parameter names declared after a macro/function name."""
+    body = declaration.rstrip()
+    if body.endswith("/>"):
+        body = body[:-2]
+    elif body.endswith(">"):
+        body = body[:-1]
+    params: list[str] = []
+    for token in _freemarker_split_top_level(body, " \t\n"):
+        name = token.split("=", 1)[0].strip().rstrip(".")
+        if name:
+            params.append(name)
+    return params
+
+
+def _freemarker_directive_end(text: str, start: int, length: int) -> int:
+    """Return the offset just past the `>` closing the directive, or -1."""
+    quote = ""
+    index = start
+    while index < length:
+        char = text[index]
+        if quote:
+            if char == "\\":
+                index += 2
+                continue
+            if char == quote:
+                quote = ""
+        elif char in "\"'":
+            quote = char
+        elif char == ">":
+            return index + 1
+        index += 1
+    return -1
+
+
+def _freemarker_tag_regions(
+    text: str, start: int, length: int
+) -> tuple[int, str, bool, list[tuple[int, int, str, str]], list[tuple[str, str]]]:
+    """Parse the HTML tag at *start* into interpolation regions.
+
+    Returns the offset after the tag, the lowercased start-tag name (empty for an
+    end tag), whether the tag is self-closing, the regions an interpolation can
+    occur in as ``(start, end, attribute, quote)`` -- an empty attribute meaning
+    the tag body itself, where an interpolation builds a tag or attribute name --
+    and the tag's ``(lowercased name, verbatim value)`` attributes.
+    """
+    regions: list[tuple[int, int, str, str]] = []
+    attributes: list[tuple[str, str]] = []
+    is_end_tag = text[start + 1 : start + 2] == "/"
+    name_match = _FREEMARKER_TAG_NAME_RE.match(text, start)
+    tag_name = "" if is_end_tag or name_match is None else name_match.group(1).lower()
+    index = name_match.end() if name_match is not None else start + (2 if is_end_tag else 1)
+    bare_start = index
+    self_closing = False
+    while index < length:
+        char = text[index]
+        if char == ">":
+            index += 1
+            break
+        if text.startswith("/>", index):
+            self_closing = True
+            index += 2
+            break
+        if char.isspace():
+            index += 1
+            continue
+        attribute_match = _FREEMARKER_ATTRIBUTE_NAME_RE.match(text, index)
+        if attribute_match is None:
+            index += 1
+            continue
+        attribute = attribute_match.group(0)
+        index = attribute_match.end()
+        probe = index
+        while probe < length and text[probe].isspace():
+            probe += 1
+        if probe >= length or text[probe] != "=":
+            attributes.append((attribute.lower(), ""))
+            continue
+        probe += 1
+        while probe < length and text[probe].isspace():
+            probe += 1
+        if probe >= length:
+            index = length
+            break
+        quote = text[probe] if text[probe] in "\"'" else ""
+        if quote:
+            value_start = probe + 1
+            value_end = _freemarker_attribute_value_end(text, value_start, quote, length)
+            if value_end < 0:
+                value_end = length
+            index = min(value_end + 1, length)
+        else:
+            value_start = probe
+            value_end = value_start
+            while value_end < length and not text[value_end].isspace() and text[value_end] != ">":
+                value_end += 1
+            index = value_end
+        regions.append((bare_start, value_start - len(quote), "", ""))
+        regions.append((value_start, value_end, attribute, quote))
+        attributes.append((attribute.lower(), text[value_start:value_end]))
+        bare_start = index
+    regions.append((bare_start, index, "", ""))
+    return index, tag_name, self_closing, regions, attributes
+
+
+def _extract_freemarker(
+    source_lines: list[str],
+    *,
+    file_path: str = "",
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[str]]:
+    """Index a FreeMarker template.
+
+    The HTML pass runs first so a `.ftl` yields every signal a `.html` file
+    would; this pass adds the template layer on top -- interpolation sites with
+    the output context they land in and the escaping observed on them, macros
+    and functions, template includes, and form fields.  Context and escaping are
+    regex-derived advisory signals only; see ``FREEMARKER_ESCAPE_OBSERVATIONS``.
+
+    ``file_path`` is read for its extension alone: ``.ftlh`` and ``.ftlx`` carry
+    an implied escaping output format, so the ambient starts on rather than off.
+    See ``_FREEMARKER_ESCAPING_EXTENSIONS``.  An unknown or absent path is
+    treated as a bare ``.ftl``, which is the reporting-heavy direction.
+    """
+    funcs, entry_points, sinks, exports, imports = _extract_html(source_lines)
+
+    # One linear scan over the joined source: interpolations, HTML tags and
+    # FreeMarker directives all cross line boundaries, so a per-line pass cannot
+    # resolve either the output context or the enclosing escape scope.
+    text = "\n".join(source_lines)
+    length = len(text)
+    line_starts = [0]
+    for line in source_lines:
+        line_starts.append(line_starts[-1] + len(line) + 1)
+
+    header_escaping = Path(file_path).suffix.lower() in _FREEMARKER_ESCAPING_EXTENSIONS
+    escape_stack: list[dict[str, Any]] = []
+    callable_stack: list[dict[str, Any]] = []
+    state = "text"
+
+    def line_of(offset: int) -> int:
+        return bisect.bisect_right(line_starts, offset)
+
+    def enclosing() -> str:
+        return callable_stack[-1]["name"] if callable_stack else "<template>"
+
+    def flag(kind: str, line: int, vuln_classes: list[str]) -> None:
+        sinks.append({
+            "kind": kind,
+            "line": line,
+            "function": enclosing(),
+            "snippet": _snippet(source_lines[line - 1]),
+            "vuln_classes": vuln_classes,
+            "detection": "heuristic_template_regex",
+        })
+
+    def close_callable(frame: dict[str, Any], end_line: int) -> None:
+        callable_kind = f"freemarker_{frame['kind']}"
+        func = _empty_func(frame["name"], frame["line"], end_line)
+        func["params"] = frame["params"]
+        func["is_entry_point"] = True
+        funcs.append(func)
+        entry_points.append({
+            "name": frame["name"],
+            "line": frame["line"],
+            "kind": callable_kind,
+            "annotation": "",
+        })
+        exports.append({
+            "name": frame["name"], "kind": callable_kind, "line": frame["line"]
+        })
+
+    def emit(span_start: int, span_end: int, context: str, attribute: str, quote: str) -> None:
+        for open_at, close_at, syntax in _freemarker_span_interpolations(
+            text, span_start, span_end
+        ):
+            line = line_of(open_at)
+            if close_at < 0:
+                flag("malformed_template_interpolation", line, ["xss"])
+                continue
+            expression = text[open_at + 2 : close_at - 1]
+            sinks.append({
+                "kind": "template_interpolation",
+                "line": line,
+                "function": enclosing(),
+                "snippet": _snippet(source_lines[line - 1]),
+                # An interpolation is an XSS sink whatever escaping was observed
+                # on it: `escape_observation` below is evidence, not clearance.
+                "vuln_classes": list(
+                    _FREEMARKER_URL_VULN_CLASSES
+                    if context == "url_attribute"
+                    else ("xss",)
+                ),
+                "detection": "heuristic_template_regex",
+                "interpolation_syntax": syntax,
+                "expression": _snippet(expression),
+                "output_context": context,
+                "attribute": attribute,
+                "attribute_quote": quote,
+                "escape_observation": _freemarker_escape_observation(
+                    expression,
+                    ambient_escaping=(
+                        bool(escape_stack[-1]["escaping"])
+                        if escape_stack
+                        else header_escaping
+                    ),
+                ),
+                "observed_escapers": _freemarker_observed_escapers(expression),
+                "ambient_escape_scopes": [
+                    {"directive": scope["directive"], "line": scope["line"]}
+                    for scope in escape_stack
+                ],
+            })
+            if _FREEMARKER_DYNAMIC_EVAL_RE.search(expression):
+                flag("freemarker_dynamic_evaluation", line, ["ssti", "injection"])
+
+    def handle_directive(start: int) -> int:
+        nonlocal header_escaping
+        end = _freemarker_directive_end(text, start, length)
+        line = line_of(start)
+        if end < 0:
+            flag("malformed_template_directive", line, ["xss"])
+            return length
+        directive = text[start:end]
+        match = _FREEMARKER_DIRECTIVE_NAME_RE.match(directive)
+        name = match.group(1).lower() if match is not None else ""
+        closing = directive.startswith("</")
+        self_closing = directive.rstrip().endswith("/>")
+        if _FREEMARKER_DYNAMIC_EVAL_RE.search(directive):
+            flag("freemarker_dynamic_evaluation", line, ["ssti", "injection"])
+        if name in {"macro", "function"}:
+            if closing:
+                if callable_stack and callable_stack[-1]["kind"] == name:
+                    close_callable(callable_stack.pop(), line)
+                else:
+                    flag("malformed_template_directive", line, ["xss"])
+            else:
+                declared = _FREEMARKER_CALLABLE_RE.match(directive)
+                if declared is not None:
+                    frame = {
+                        "name": declared.group(1),
+                        "kind": name,
+                        "line": line,
+                        "params": _freemarker_callable_params(directive[declared.end():]),
+                    }
+                    if self_closing:
+                        close_callable(frame, line)
+                    else:
+                        callable_stack.append(frame)
+        elif name in _FREEMARKER_ESCAPE_SCOPES:
+            if closing:
+                if escape_stack and escape_stack[-1]["name"] == name:
+                    escape_stack.pop()
+                else:
+                    flag("malformed_template_directive", line, ["xss"])
+            elif not self_closing:
+                escape_stack.append({
+                    "name": name,
+                    "directive": _snippet(directive),
+                    "line": line,
+                    "escaping": _freemarker_scope_escaping(name, directive),
+                })
+        elif name == "ftl" and not closing:
+            auto_esc = _FREEMARKER_AUTO_ESC_RE.search(directive)
+            output_format = _FREEMARKER_OUTPUT_FORMAT_RE.search(directive)
+            if auto_esc is not None:
+                header_escaping = auto_esc.group(1) == "true"
+            elif output_format is not None:
+                header_escaping = (
+                    output_format.group(2).strip().lower()
+                    in _FREEMARKER_ESCAPING_FORMATS
+                )
+        elif name in {"include", "import"} and not closing:
+            literal = _FREEMARKER_STRING_LITERAL_RE.search(directive)
+            if literal is not None:
+                imports.append(literal.group(2))
+        return end
+
+    def handle_tag(start: int) -> int:
+        nonlocal state
+        end, tag_name, self_closing, regions, attributes = _freemarker_tag_regions(
+            text, start, length
+        )
+        for region_start, region_end, attribute, quote in regions:
+            context = (
+                _freemarker_attribute_context(attribute) if attribute else "html_tag"
+            )
+            emit(region_start, region_end, context, attribute, quote)
+        if not self_closing:
+            if tag_name == "script":
+                state = "script"
+            elif tag_name == "style":
+                state = "style"
+        if tag_name in _FREEMARKER_FORM_FIELD_TAGS:
+            values = dict(attributes)
+            field = values.get("name", "")
+            if field:
+                entry_points.append({
+                    "name": field,
+                    "line": line_of(start),
+                    "kind": "html_form_field",
+                    "annotation": values.get("type", ""),
+                })
+        return end
+
+    index = 0
+    while index < length:
+        if text[index] != "<":
+            stop = text.find("<", index)
+            if stop < 0:
+                stop = length
+            emit(index, stop, "html_text" if state == "text" else state, "", "")
+            index = stop
+            continue
+        if text.startswith("<#--", index):
+            closed = text.find("-->", index + 4)
+            index = length if closed < 0 else closed + 3
+            continue
+        if text.startswith(("<#", "</#", "<@", "</@"), index):
+            index = handle_directive(index)
+            continue
+        if state in {"script", "style"}:
+            closer = f"</{state}"
+            if text[index : index + len(closer)].lower() == closer:
+                state = "text"
+                index += len(closer)
+            else:
+                index += 1
+            continue
+        if text.startswith("<!--", index):
+            closed = text.find("-->", index + 4)
+            emit(index + 4, length if closed < 0 else closed, "html_comment", "", "")
+            index = length if closed < 0 else closed + 3
+            continue
+        following = text[index + 1 : index + 2]
+        if following.isalpha() or following == "/" or text.startswith("<${", index):
+            index = handle_tag(index)
+            continue
+        index += 1
+
+    # Scopes still open at EOF are a template the scanner could not balance; the
+    # sites they cover were still indexed, so report the imbalance rather than
+    # dropping it.
+    for scope in escape_stack:
+        flag("malformed_template_directive", scope["line"], ["xss"])
+    for frame in callable_stack:
+        close_callable(frame, len(source_lines))
+        flag("malformed_template_directive", frame["line"], ["xss"])
+
+    return funcs, entry_points, sinks, exports, imports
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -2631,56 +3659,68 @@ _CAPPED_INDEX_LISTS = (
     "security_sources",
 )
 
-_STREAM_SOURCE_PATTERNS: dict[str, list[tuple[str, str, list[str]]]] = {
+# Where a value enters the file. A source is not a vulnerability -- the sink it
+# reaches is -- so these records carry a `kind` and no vuln class. Every one
+# of them used to name a class no taxonomy declares, which made the field a
+# vehicle that could hold nothing true.
+_STREAM_SOURCE_PATTERNS: dict[str, list[tuple[str, str]]] = {
     "python": [
-        ("http_request_input", r"\brequest\.(?:args|form|json|values|files|headers)\b", ["tainted-input"]),
-        ("process_input", r"\b(?:sys\.argv|os\.environ|getenv\s*\(|input\s*\()", ["tainted-input"]),
+        ("http_request_input", r"\brequest\.(?:args|form|json|values|files|headers)\b"),
+        ("process_input", r"\b(?:sys\.argv|os\.environ|getenv\s*\(|input\s*\()"),
     ],
     "javascript": [
-        ("http_request_input", r"\breq\.(?:params|query|body|headers|cookies)\b", ["tainted-input"]),
-        ("process_input", r"\bprocess\.(?:argv|env)\b", ["tainted-input"]),
+        ("http_request_input", r"\breq\.(?:params|query|body|headers|cookies)\b"),
+        ("process_input", r"\bprocess\.(?:argv|env)\b"),
     ],
     "typescript": [
-        ("http_request_input", r"\breq\.(?:params|query|body|headers|cookies)\b", ["tainted-input"]),
-        ("process_input", r"\bprocess\.(?:argv|env)\b", ["tainted-input"]),
+        ("http_request_input", r"\breq\.(?:params|query|body|headers|cookies)\b"),
+        ("process_input", r"\bprocess\.(?:argv|env)\b"),
     ],
     "java": [
-        ("http_request_input", r"\bget(?:Parameter|Header|InputStream)\s*\(", ["tainted-input"]),
-        ("process_input", r"\bSystem\.getenv\s*\(", ["tainted-input"]),
+        ("http_request_input", r"\bget(?:Parameter|Header|InputStream)\s*\("),
+        ("process_input", r"\bSystem\.getenv\s*\("),
     ],
     "go": [
-        ("http_request_input", r"\br\.(?:URL\.Query|FormValue|Header\.Get)\s*\(", ["tainted-input"]),
-        ("process_input", r"\bos\.(?:Args|Getenv)\b", ["tainted-input"]),
+        ("http_request_input", r"\br\.(?:URL\.Query|FormValue|Header\.Get)\s*\("),
+        ("process_input", r"\bos\.(?:Args|Getenv)\b"),
     ],
     "ruby": [
-        ("http_request_input", r"\b(?:params\s*\[|request\.)", ["tainted-input"]),
-        ("process_input", r"\b(?:ENV\s*\[|ARGV\b)", ["tainted-input"]),
+        ("http_request_input", r"\b(?:params\s*\[|request\.)"),
+        ("process_input", r"\b(?:ENV\s*\[|ARGV\b)"),
     ],
     "php": [
-        ("http_request_input", r"\$_(?:GET|POST|REQUEST|COOKIE|FILES|SERVER)\b", ["tainted-input"]),
-        ("process_input", r"\bgetenv\s*\(", ["tainted-input"]),
+        ("http_request_input", r"\$_(?:GET|POST|REQUEST|COOKIE|FILES|SERVER)\b"),
+        ("process_input", r"\bgetenv\s*\("),
     ],
     "c": [
-        ("process_input", r"\b(?:argv\s*\[|getenv\s*\(|read\s*\(|recv\s*\()", ["tainted-input"]),
+        ("process_input", r"\b(?:argv\s*\[|getenv\s*\(|read\s*\(|recv\s*\()"),
     ],
     "cpp": [
-        ("process_input", r"\b(?:argv\s*\[|getenv\s*\(|read\s*\(|recv\s*\()", ["tainted-input"]),
+        ("process_input", r"\b(?:argv\s*\[|getenv\s*\(|read\s*\(|recv\s*\()"),
     ],
     "shell": [
-        ("positional_parameter", r"\$(?:[1-9]|@|\*)\b", ["tainted-input"]),
-        ("environment_input", r"\$\{?[A-Z_][A-Z0-9_]*\}?", ["tainted-input"]),
+        ("positional_parameter", r"\$(?:[1-9]|@|\*)\b"),
+        ("environment_input", r"\$\{?[A-Z_][A-Z0-9_]*\}?"),
+    ],
+    "powershell": [
+        ("script_parameter", r"\$(?:args|PSBoundParameters|MyInvocation)\b"),
+        ("environment_input", r"\$env:[A-Za-z_]\w*"),
+        ("interactive_input", r"\bRead-Host\b"),
     ],
     "dockerfile": [
-        ("build_argument", r"^\s*(?:ARG|ENV)\s+[A-Za-z_][A-Za-z0-9_]*", ["tainted-input"]),
+        ("build_argument", r"^\s*(?:ARG|ENV)\s+[A-Za-z_][A-Za-z0-9_]*"),
     ],
     "lua": [
-        ("script_argument", r"\b(?:ARGV|KEYS)\s*\[", ["tainted-input"]),
+        ("script_argument", r"\b(?:ARGV|KEYS)\s*\["),
     ],
     "html": [
-        ("template_input", r"\{\{[^}\r\n]+\}\}|<%[^%\r\n]+%>", ["tainted-input"]),
+        ("template_input", r"\{\{[^}\r\n]+\}\}|<%[^%\r\n]+%>"),
     ],
     "css": [
-        ("template_input", r"\{\{[^}\r\n]+\}\}|<%[^%\r\n]+%>", ["tainted-input"]),
+        ("template_input", r"\{\{[^}\r\n]+\}\}|<%[^%\r\n]+%>"),
+    ],
+    "freemarker": [
+        ("template_input", r"[$#]\{[^}\r\n]+\}"),
     ],
 }
 
@@ -2697,8 +3737,16 @@ _STREAM_IMPORT_PATTERNS: dict[str, list[str]] = {
     "lua": [r"\brequire\s*\(?\s*['\"][^'\"]+"],
     "dockerfile": [r"^\s*(?:FROM|ADD)\s+[^\r\n]+"],
     "shell": [r"^\s*(?:\.|source)\s+[^\r\n]+"],
+    "powershell": [
+        r"^\s*(?:Import-Module|using\s+(?:module|namespace))\s+[^\r\n]+",
+        r"^\s*\.\s+[^\s\r\n]+\.psm?1",
+    ],
     "html": [r"<(?:script|link|iframe)\b[^>]*(?:src|href)\s*=\s*['\"]?[^'\"\s>]+"],
     "css": [r"@import\s+(?:url\()?\s*['\"]?[^'\"\s)]+"],
+    "freemarker": [
+        r"<#(?:include|import)\s[^\r\n>]*",
+        r"<(?:script|link|iframe)\b[^>]*(?:src|href)\s*=\s*['\"]?[^'\"\s>]+",
+    ],
 }
 
 _STREAM_EXTRA_SINK_PATTERNS: dict[str, list[tuple[str, str, list[str]]]] = {
@@ -2710,6 +3758,9 @@ _STREAM_EXTRA_SINK_PATTERNS: dict[str, list[tuple[str, str, list[str]]]] = {
         ("shell_eval", r"\beval\b", ["injection"]),
         ("remote_pipe_to_shell", r"\b(?:curl|wget)\b[^\r\n|;]*\|\s*(?:sh|bash|zsh)\b", ["supply-chain", "injection"]),
     ],
+    # One table, two readers: the structural extractor compiles these same
+    # strings, so a `.ps1` reports the same sinks whichever path indexed it.
+    "powershell": _PS_SINK_PATTERNS,
     "lua": [
         ("dynamic_code_load", r"\b(?:loadstring|load)\s*\(", ["injection"]),
         ("os_execute", r"\bos\.execute\s*\(", ["injection"]),
@@ -2722,20 +3773,47 @@ _STREAM_EXTRA_SINK_PATTERNS: dict[str, list[tuple[str, str, list[str]]]] = {
         ("css_expression", r"\bexpression\s*\(", ["xss"]),
         ("css_behavior", r"\bbehavior\s*:", ["xss"]),
     ],
+    "freemarker": [
+        ("template_interpolation", r"[$#]\{[^}\r\n]+\}", ["xss"]),
+        ("inline_event_handler", r"\bon[a-z]+\s*=\s*['\"][^'\"]+['\"]", ["xss"]),
+        (
+            "freemarker_dynamic_evaluation",
+            r"\?(?:eval|eval_json|evalJson|interpret|new)\b",
+            ["ssti", "injection"],
+        ),
+    ],
 }
 
 _STREAM_EXTRA_ENTRY_PATTERNS: dict[str, list[tuple[str, str]]] = {
     "shell": [("shell_script", r"^#!")],
+    "powershell": [("script_parameters", r"^\s*param\s*\(")],
     "dockerfile": [
         ("container_cmd", r"^\s*CMD\b"),
         ("container_entrypoint", r"^\s*ENTRYPOINT\b"),
     ],
     "html": [("html_form", r"<form\b[^>]*\baction\s*=")],
+    "freemarker": [
+        ("html_form", r"<form\b[^>]*\baction\s*="),
+        ("freemarker_macro", r"<#(?:macro|function)\s"),
+    ],
 }
 
 
 def _byte_pattern(pattern: str) -> re.Pattern[bytes]:
     return re.compile(pattern.encode("ascii"), re.IGNORECASE)
+
+
+# Languages whose line comments open with `#`. An allowlist, because a leading
+# `#` is *code* in the rest of what this scanner serves: a C preprocessor
+# directive, a FreeMarker `#{...}` numeric interpolation, a Lua length operator.
+# Reading one as a comment drops the whole line from every detector below.
+_HASH_COMMENT_LANGUAGES = frozenset(
+    {"dockerfile", "php", "powershell", "python", "ruby", "shell"}
+)
+# ...and even there, `#` followed by one character is not: `#!` opens a shell
+# script's interpreter line, which is that language's own entry-point signal,
+# and `#[` opens a PHP 8 attribute, which carries the framework route table.
+_HASH_CODE_PREFIXES: dict[str, bytes] = {"php": b"#[", "shell": b"#!"}
 
 
 class StreamingSecurityScanner:
@@ -2776,8 +3854,8 @@ class StreamingSecurityScanner:
         self._truncated: set[str] = set()
         self._sink_patterns = self._compile_sink_patterns()
         self._source_patterns = [
-            (kind, _byte_pattern(pattern), vuln_classes)
-            for kind, pattern, vuln_classes in _STREAM_SOURCE_PATTERNS.get(language, [])
+            (kind, _byte_pattern(pattern))
+            for kind, pattern in _STREAM_SOURCE_PATTERNS.get(language, [])
         ]
         self._entry_patterns = [
             (item["kind"], _byte_pattern(item["pattern"]))
@@ -2839,6 +3917,15 @@ class StreamingSecurityScanner:
                 elif position == len(chunk):
                     self._pending_cr = True
 
+    def _opens_a_comment(self, stripped: bytes) -> bool:
+        """Whether *stripped* — a line's first non-blank bytes — starts a comment."""
+        if stripped.startswith(b"//"):
+            return True
+        if not stripped.startswith(b"#") or self.language not in _HASH_COMMENT_LANGUAGES:
+            return False
+        code_prefix = _HASH_CODE_PREFIXES.get(self.language)
+        return code_prefix is None or not stripped.startswith(code_prefix)
+
     def _append_line_bytes(self, data: bytes) -> None:
         if not data:
             return
@@ -2846,12 +3933,7 @@ class StreamingSecurityScanner:
         if self._line_comment is None:
             stripped = data.lstrip(b" \t\v\f")
             if stripped:
-                hash_comment = self.language not in {"c", "cpp"} and not (
-                    self.language == "shell" and stripped.startswith(b"#!")
-                )
-                self._line_comment = stripped.startswith(b"//") or (
-                    hash_comment and stripped.startswith(b"#")
-                )
+                self._line_comment = self._opens_a_comment(stripped)
         self._line_buffer.extend(data)
         while len(self._line_buffer) >= self.window_bytes:
             window = bytes(self._line_buffer[: self.window_bytes])
@@ -2900,7 +3982,7 @@ class StreamingSecurityScanner:
                         "detection": "heuristic_streaming",
                     },
                 )
-        for kind, pattern, vuln_classes in self._source_patterns:
+        for kind, pattern in self._source_patterns:
             for match in pattern.finditer(window):
                 if match.start() >= accept_before:
                     continue
@@ -2910,7 +3992,6 @@ class StreamingSecurityScanner:
                         "kind": kind,
                         "line": self._line_number,
                         "snippet": self._snippet(window, match.start(), match.end()),
-                        "vuln_classes": vuln_classes,
                         "detection": "heuristic_streaming",
                     },
                 )
@@ -3258,7 +4339,7 @@ def index_file(
         if effective_lang == "cpp":
             functions = _deduplicate_cpp_functions(functions)
         entry_points = _detect_entry_points(
-            functions, classes, effective_lang, source_lines
+            tree, functions, classes, effective_lang, source_lines
         )
         entry_points.extend(
             _detect_top_level_entry_points(tree, effective_lang, source_lines)

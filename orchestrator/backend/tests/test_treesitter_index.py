@@ -61,6 +61,9 @@ _PARSER_DISTRIBUTIONS = {
     ("index.html", "html"),
     ("page.htm", "html"),
     ("card.tpl", "html"),
+    ("themes/base/login/login.ftl", "freemarker"),
+    ("page.ftlh", "freemarker"),
+    ("feed.ftlx", "freemarker"),
     # Dockerfiles are matched by basename, not extension.
     ("Dockerfile", "dockerfile"),
     ("Dockerfile.prod", "dockerfile"),
@@ -79,7 +82,7 @@ def test_supported_languages_includes_new():
 
 
 def test_supported_languages_includes_lightweight():
-    for lang in ("dockerfile", "shell", "lua", "html", "css"):
+    for lang in ("dockerfile", "shell", "lua", "html", "css", "freemarker"):
         assert lang in SUPPORTED_LANGUAGES
 
 
@@ -189,10 +192,48 @@ def test_go_classes():
     assert "Server" in class_names
 
 
+GO_IMPORT_FORMS_SOURCE = b"""\
+package main
+
+import "fmt"
+
+import (
+    "net/http"
+    mux "github.com/gorilla/mux"
+    _ "github.com/lib/pq"
+    . "math"
+    "./relative"
+)
+"""
+
+
 @needs_treesitter
 def test_go_imports():
     idx = index_file("main.go", "go", source=GO_SOURCE)
-    assert len(idx["imports"]) >= 2
+    assert idx["imports"] == ["fmt", "net/http"]
+
+
+@needs_treesitter
+def test_go_imports_keep_the_path_of_aliased_and_blank_specs():
+    """An import path is the spec's quoted path, not the spec minus a quote.
+
+    A named `import_spec` (`mux "..."`, the blank `_ "..."` driver-registration
+    idiom, or a dot import) has no leading quote, so trimming quotes off the
+    whole spec leaves the alias welded to the path. Consumers match these
+    values against declared modules, and a welded token matches nothing —
+    a referenced package reported as unreferenced on a file the index calls
+    complete.
+    """
+    idx = index_file("imports.go", "go", source=GO_IMPORT_FORMS_SOURCE)
+
+    # `./relative` is a filesystem-relative path, not a module: still dropped.
+    assert idx["imports"] == [
+        "fmt",
+        "net/http",
+        "github.com/gorilla/mux",
+        "github.com/lib/pq",
+        "math",
+    ]
 
 
 # ---------------------------------------------------------------------------

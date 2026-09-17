@@ -80,12 +80,20 @@ _REPORTABLE_FINDING_STATUSES = frozenset(
         "reported",
     }
 )
+# Mirrors `agent/scripts/assess/lib/code_languages.py:CANONICAL_CODE_LANGUAGES`,
+# plus spelling aliases the agent never emits (`c++`). It must be a SUPERSET of
+# what ingest can detect: `canonical_structural_language` runs over every file in
+# a repository from `structural_input_identity_digest`, so one file in a language
+# missing here 400s `code-index sync` for the whole repository. Guarded by
+# `orchestrator/backend/tests/test_structural_language_drift.py`.
 _CANONICAL_STRUCTURAL_LANGUAGES = frozenset(
     {
         "",
         "c",
         "c++",
         "cpp",
+        "freemarker",
+        "powershell",
         "python",
         "javascript",
         "typescript",
@@ -10567,6 +10575,8 @@ STRUCTURALLY_ANALYZED_LANGUAGES = frozenset(
         "c",
         "c++",
         "cpp",
+        "freemarker",
+        "powershell",
         "python",
         "javascript",
         "typescript",

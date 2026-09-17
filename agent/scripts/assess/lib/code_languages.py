@@ -44,6 +44,11 @@ LANGUAGE_BY_EXTENSION: dict[str, str] = {
     ".htm": "html",
     ".tpl": "html",
     ".twig": "html",
+    # FreeMarker server templates. ``.ftlh``/``.ftlx`` are the same language
+    # with an implied HTML/XML output format.
+    ".ftl": "freemarker",
+    ".ftlh": "freemarker",
+    ".ftlx": "freemarker",
     ".css": "css",
     ".scss": "css",
     ".xml": "xml",
@@ -81,9 +86,11 @@ STRUCTURAL_SUPPORTED_LANGUAGES = frozenset(
         "php",
         "dockerfile",
         "shell",
+        "powershell",
         "lua",
         "html",
         "css",
+        "freemarker",
     }
 )
 
