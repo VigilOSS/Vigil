@@ -870,28 +870,57 @@ def get_handoff(engagement_id: int, agent_id: str) -> dict[str, Any]:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="handoff not found")
     return _serialize_handoff(row)
 
+# Orderings `list_handoffs` accepts, keyed by its `sort` argument. `created`
+# is the arrival order, and stays the default so every existing caller is
+# unaffected. `checkpoint` ranks by the last checkpoint — the only timestamp
+# `update_handoff` moves, `created_at` being immutable — and exists because the
+# ordering has to happen BEFORE `limit` bites: a "most recently active handoffs"
+# window built by re-sorting a creation-limited page can never contain an
+# old-created row that just checkpointed, because the query already cut it.
+# `last_checkpoint_at` is nullable (it post-dates the table; the migration
+# backfills it from `created_at`), so COALESCE keeps a null row in creation
+# order instead of sinking it below every populated row. Both columns are
+# written as fixed-width second-precision `...Z` strings, so SQLite's BINARY
+# text ordering over them is the chronological one.
+_HANDOFF_SORTS = {
+    "created": "created_at DESC, id DESC",
+    "checkpoint": "COALESCE(last_checkpoint_at, created_at) DESC, id DESC",
+}
+
 def list_handoffs(
     engagement_id: int,
     *,
     role: str = "",
     since: str = "",
+    sort: str = "created",
     limit: int = 100,
     offset: int = 0,
 ) -> list[dict[str, Any]]:
     engagement = _engagement_or_404(engagement_id)
+    order_by = _HANDOFF_SORTS.get((sort or "created").strip().lower())
+    if order_by is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"invalid handoff sort: {sort} "
+                f"(expected one of {', '.join(sorted(_HANDOFF_SORTS))})"
+            ),
+        )
     where = ["engagement_id = ?"]
     params: list[Any] = [engagement.id]
     if role:
         where.append("agent_role = ?")
         params.append(role)
     if since:
+        # `since` is a creation-time window regardless of `sort` — it is the
+        # documented filter on the public read, so it keeps its own meaning.
         where.append("created_at >= ?")
         params.append(since)
     params.append(int(limit))
     params.append(max(int(offset), 0))
     query = (
         f"SELECT * FROM assessment_dispatch_handoffs WHERE {' AND '.join(where)} "
-        "ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?"
+        f"ORDER BY {order_by} LIMIT ? OFFSET ?"
     )
     with _common.get_connection() as connection:
         rows = connection.execute(query, tuple(params)).fetchall()

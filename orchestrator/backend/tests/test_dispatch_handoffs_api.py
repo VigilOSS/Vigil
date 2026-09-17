@@ -7,7 +7,14 @@ and ≤2000 chars, JSON-array fields round-trip, and 409 fires on duplicate
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
+
+import pytest
+from fastapi import HTTPException
+
+from app import db as db_module
+from app.services import state_manager
 
 
 ENGAGEMENT_KEY = "2026-04-28-130000-handoffs"
@@ -329,3 +336,94 @@ def test_handoff_model_still_forbids_unknown_fields_and_bad_status(client, isola
         json=_full_payload(agent_id="HS-BAD", handoff_status="completed"),
     )
     assert bad_status.status_code == 422
+
+
+def _seed_three_handoffs_with_stamped_times(client, isolate_settings) -> int:
+    """Three handoffs whose creation order is the REVERSE of their checkpoint order.
+
+    SORT-A is the oldest created and the most recently checkpointed — the shape
+    the creation ordering cannot surface. SORT-C never checkpointed after its
+    insert (a null `last_checkpoint_at`, which the schema allows), so it pins the
+    creation-time fallback. Returns the engagement id the service layer takes.
+    """
+    _seed(client, isolate_settings)
+    for agent_id in ("SORT-A", "SORT-B", "SORT-C"):
+        _register_dispatch(client, agent_id=agent_id, agent_role="recon-specialist")
+        posted = client.post(
+            f"{BASE}/dispatch-handoffs",
+            json=_full_payload(agent_id=agent_id, agent_role="recon-specialist"),
+        )
+        assert posted.status_code == 201, posted.text
+
+    with sqlite3.connect(str(db_module.database_path())) as connection:
+        for agent_id, created_at, last_checkpoint_at in (
+            ("SORT-A", "2026-09-01T00:00:00Z", "2026-09-30T00:00:00Z"),
+            ("SORT-B", "2026-09-02T00:00:00Z", "2026-09-02T00:00:00Z"),
+            ("SORT-C", "2026-09-03T00:00:00Z", None),
+        ):
+            connection.execute(
+                "UPDATE assessment_dispatch_handoffs "
+                "SET created_at = ?, last_checkpoint_at = ? WHERE agent_id = ?",
+                (created_at, last_checkpoint_at, agent_id),
+            )
+        return int(
+            connection.execute(
+                "SELECT id FROM engagements WHERE key = ?", (ENGAGEMENT_KEY,)
+            ).fetchone()[0]
+        )
+
+
+def test_handoff_list_sorts_by_checkpoint_only_when_asked(client, isolate_settings) -> None:
+    """The opt-in `checkpoint` ordering ranks by the timestamp PATCH actually moves.
+
+    `created_at` is immutable and `update_handoff` writes only
+    `last_checkpoint_at`, so "which handoffs moved most recently" is unanswerable
+    from the arrival order. The default stays the arrival order because every
+    existing reader of this list — the API endpoint, the assess client,
+    reconcile-stale — is written against it.
+    """
+    engagement_id = _seed_three_handoffs_with_stamped_times(client, isolate_settings)
+
+    assert [row["agent_id"] for row in state_manager.list_handoffs(engagement_id)] == [
+        "SORT-C",
+        "SORT-B",
+        "SORT-A",
+    ]
+    # SORT-C's null `last_checkpoint_at` falls back to its creation time rather
+    # than sorting below every populated row.
+    assert [
+        row["agent_id"]
+        for row in state_manager.list_handoffs(engagement_id, sort="checkpoint")
+    ] == ["SORT-A", "SORT-C", "SORT-B"]
+
+
+def test_handoff_list_applies_the_checkpoint_sort_before_the_limit(
+    client, isolate_settings
+) -> None:
+    """Ordering inside the query, not over the returned page.
+
+    A caller that limited first and re-sorted afterwards could never see SORT-A:
+    it is the oldest row created, so the creation ordering cuts it before the
+    caller gets to look at `last_checkpoint_at` at all.
+    """
+    engagement_id = _seed_three_handoffs_with_stamped_times(client, isolate_settings)
+
+    assert [
+        row["agent_id"]
+        for row in state_manager.list_handoffs(engagement_id, sort="checkpoint", limit=1)
+    ] == ["SORT-A"]
+    assert [
+        row["agent_id"] for row in state_manager.list_handoffs(engagement_id, limit=1)
+    ] == ["SORT-C"]
+
+
+def test_handoff_list_rejects_an_unknown_sort(client, isolate_settings) -> None:
+    """An unrecognised ordering is refused, not silently served as the default —
+    a quiet fallback would hand the caller creation order under a name promising
+    checkpoint order, which is the exact defect this argument exists to fix."""
+    engagement_id = _seed_three_handoffs_with_stamped_times(client, isolate_settings)
+
+    with pytest.raises(HTTPException) as exc_info:
+        state_manager.list_handoffs(engagement_id, sort="last_checkpoint_at")
+    assert exc_info.value.status_code == 400
+    assert "invalid handoff sort" in str(exc_info.value.detail)

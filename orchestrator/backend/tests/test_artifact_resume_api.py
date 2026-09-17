@@ -1453,6 +1453,85 @@ def test_resume_brief_stale_in_progress_below_display_window_is_reported(client,
     assert dispatches["stale_in_progress_dispatches_count"] == 1
 
 
+def _record_handoff(client, agent_id: str, *, agent_role: str = "recon-specialist") -> None:
+    """Register a dispatch and its handoff — the pair the brief reads together."""
+    dispatch = client.post(
+        f"{BASE}/dispatches",
+        json={
+            "agent_id": agent_id,
+            "agent_role": agent_role,
+            "task": f"sweep for {agent_id}",
+            "skills": "recon-methodology",
+        },
+    )
+    assert dispatch.status_code == 201, dispatch.text
+    handoff = client.post(
+        f"{BASE}/dispatch-handoffs",
+        json={
+            "agent_id": agent_id,
+            "agent_role": agent_role,
+            "summary": f"{agent_id} checkpointed its sweep.",
+        },
+    )
+    assert handoff.status_code == 201, handoff.text
+
+
+def test_latest_handoffs_rank_by_checkpoint_before_the_scan_cap_bites(
+    client, isolate_settings, monkeypatch
+) -> None:
+    """An old handoff that just checkpointed must still reach "latest handoffs".
+
+    The handoff scan ordered by the immutable `created_at` while `update_handoff`
+    moves only `last_checkpoint_at`, so past `_HANDOFF_SCAN_LIMIT` an
+    old-but-just-updated handoff never entered the candidate set at all — and no
+    amount of re-sorting the scanned map could recover a row the query had
+    already cut. The section literally named "latest handoffs" was therefore
+    missing the latest one. Shrink the scan cap so a five-row fixture exceeds it
+    without seeding a thousand handoffs (same trick as the per-input fetch cap).
+    """
+    from app.services import assessment_memory
+
+    _write_engagement(isolate_settings["engagements_dir"])
+    assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
+    for index in range(5):
+        _record_handoff(client, f"worker-{index}")
+
+    # Stamp deterministic timestamps: worker-0 is the OLDEST created and the
+    # MOST RECENTLY checkpointed — exactly the row a creation-ordered scan lost.
+    # Every write path emits second-precision `...Z` strings, so SQLite's text
+    # ordering over these is the chronological one.
+    with sqlite3.connect(str(db_module.database_path())) as connection:
+        for index in range(5):
+            created_at = f"2026-09-{10 + index:02d}T00:00:00Z"
+            connection.execute(
+                "UPDATE assessment_dispatch_handoffs "
+                "SET created_at = ?, last_checkpoint_at = ? WHERE agent_id = ?",
+                (
+                    created_at,
+                    "2026-09-30T00:00:00Z" if index == 0 else created_at,
+                    f"worker-{index}",
+                ),
+            )
+
+    monkeypatch.setattr(assessment_memory, "_HANDOFF_SCAN_LIMIT", 3)
+    dispatches = client.get(f"{BASE}/resume-brief").json()["dispatches"]
+
+    # Ranked by checkpoint, and the cap now cuts the two LEAST-recently
+    # checkpointed rows rather than the two oldest-created ones.
+    latest_ids = [row["agent_id"] for row in dispatches["latest_handoffs"]]
+    assert latest_ids == ["worker-0", "worker-4", "worker-3"]
+    # The capped window still reports the engagement's true handoff depth.
+    assert dispatches["latest_handoffs_count"] == 5
+
+    # Consumer side of the same reordering: the by-key handoff-gap check now
+    # resolves worker-0's handoff, so its still-in-progress dispatch is no longer
+    # reported as having none. A handoff that has ever been checkpointed ranks at
+    # or above its creation position, so checkpoint order can only improve the
+    # candidate set these by-key lookups draw from.
+    gap_ids = [row["agent_id"] for row in dispatches["handoff_gaps"]]
+    assert "worker-0" not in gap_ids
+
+
 def test_recommended_actions_keep_lifecycle_items_before_inspect_cap() -> None:
     actions = _recommended_actions(
         finding="VA-047",

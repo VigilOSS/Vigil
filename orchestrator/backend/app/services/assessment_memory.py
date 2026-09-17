@@ -224,14 +224,22 @@ def _recent_dispatch_picture(
     # `recent_dispatches` / `latest_handoffs` display lists only — NOT the
     # stale/gap/terminal detection below.
     display_dispatches = state_manager.list_dispatches(engagement_id, limit=_DISPATCH_DISPLAY_LIMIT)
-    # Handoffs keyed by agent_id, scanned as deep as reconcile-stale so a handoff
-    # belonging to an OLD in-progress dispatch (one that has sunk below the
-    # display window) is still resolvable; otherwise it would be mis-reported as
-    # a handoff gap.
-    handoffs = {
-        row.get("agent_id"): row
-        for row in state_manager.list_handoffs(engagement_id, limit=_HANDOFF_SCAN_LIMIT)
-    }
+    # Handoffs scanned as deep as reconcile-stale so a handoff belonging to an
+    # OLD in-progress dispatch (one that has sunk below the display window) is
+    # still resolvable; otherwise it would be mis-reported as a handoff gap.
+    # Ranked by LAST CHECKPOINT rather than creation, because the ordering has to
+    # happen before the scan cap bites: `created_at` is immutable and
+    # `update_handoff` moves only `last_checkpoint_at`, so a creation-ordered
+    # scan cuts a just-checkpointed old handoff out of the candidate set
+    # entirely. That also strictly improves the by-key lookups below — a handoff
+    # that has ever been checkpointed ranks at or above its creation position,
+    # and a live in-progress specialist is exactly the one checkpointing.
+    scanned_handoffs = state_manager.list_handoffs(
+        engagement_id, sort="checkpoint", limit=_HANDOFF_SCAN_LIMIT
+    )
+    # Keyed by agent_id for the gap / stale / terminal lookups, which care only
+    # about presence. `agent_id` is UNIQUE per engagement, so no row is lost.
+    handoffs = {row.get("agent_id"): row for row in scanned_handoffs}
     # A decision is the durable adjudication for a worker that genuinely
     # produced no handoff. Read every matching row directly so a long-running
     # engagement cannot lose older reconciliations behind an API page cap.
@@ -329,22 +337,10 @@ def _recent_dispatch_picture(
             connection, "assessment_dispatch_handoffs", engagement_id
         )
     recent_dispatches = display_dispatches[:_DISPATCH_LIST_RENDER_CAP]
-    # "Latest" means most recently CHECKPOINTED, not most recently created.
-    # `list_handoffs` orders by the immutable `created_at`, while `update_handoff`
-    # moves only `last_checkpoint_at` — so an older specialist that just
-    # checkpointed would fall outside this 10-row window and its update would be
-    # invisible in the section named "latest". The map above is scanned 1000 deep
-    # for exactly this kind of old-but-live handoff, so the ordering is the only
-    # thing that needs fixing, and only here: the map is consumed by KEY
-    # everywhere else, where order is irrelevant.
-    latest_handoffs = sorted(
-        handoffs.values(),
-        key=lambda row: (
-            str(row.get("last_checkpoint_at") or row.get("created_at") or ""),
-            int(row.get("id") or 0),
-        ),
-        reverse=True,
-    )[:_DISPATCH_LIST_RENDER_CAP]
+    # "Latest" means most recently CHECKPOINTED, not most recently created, and
+    # the scan above is already ranked that way by the query — so this window is
+    # a plain slice of it, not a re-sort of a differently-ordered page.
+    latest_handoffs = scanned_handoffs[:_DISPATCH_LIST_RENDER_CAP]
     return {
         "recent_dispatches": recent_dispatches,
         "recent_dispatches_count": dispatch_total,

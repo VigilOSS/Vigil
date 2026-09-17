@@ -86,6 +86,11 @@ Durable design decisions live in [`docs/adr/`](docs/adr/).
 - **A resolved decision says what was decided.** The resume brief reported `[resolved]` and then
   printed the original payload, never the resolution the backend already carried — so an operator
   rehydrating after compaction knew a question had been settled but not how, and could contradict it.
+- **The latest handoff is found before the scan cap, not after.** `latest_handoffs` sorted by
+  checkpoint time over a set already limited to 1,000 rows ordered by immutable creation time, so
+  past that depth an older specialist that had just checkpointed could not appear in the section
+  named "latest". The ordering now happens in the query. No schema or index change was needed, and
+  the default ordering every other consumer relies on is untouched.
 - **Cold image builds no longer die at 20s.** `vigil up` and `vigil install` threaded one bounded
   runner through both fast metadata queries and image builds, so the bound that makes a wedged
   daemon fail fast killed every first-run Kali build and swallowed its progress output.
