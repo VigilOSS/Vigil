@@ -39,6 +39,19 @@ Run `vigil assess prompt-census` for the advisory structural and approximate-byt
 `--read-bytes <n>` when a reader reports a bounded read so the census shows whether that boundary
 missed or cut through the Load First section; this is visibility, never a progress gate.
 
+Three things to know when reading its output. It measures the tree it names in `prompt_root` —
+`vigil assess` execs the *installed* agent tree, so running it inside a checkout measures the
+installed prompts unless you pass `--prompt-root`, and the output names any checkout tree it did
+not measure. A role whose mandatory bundle is an exclusive choice (`exploit-developer`,
+`source-analyzer`) reports one total per track rather than a single figure, because summing both
+halves describes a dispatch that never happens. And `agent/operator-core*.md` is reported
+separately, by measured size only: it is session load, not per-dispatch load, and this ruleset
+sets no budget for it. Nor do the cores set their own consistently today —
+`operator-core-code.md` is the only one that states a figure in its header, and it currently
+declares itself over that figure; `operator-core.md` and `operator-core-blue.md` state none. Read
+the census output as the measurement, and set core budgets after the prompt-reduction pass, at
+what the trimmed files measure — not from a number invented ahead of the trim.
+
 ### 2. Split Load First into MANDATORY vs LOAD-ON-FIRST-USE
 
 Every role's `## Load First` section separates what is loaded unconditionally from what is loaded

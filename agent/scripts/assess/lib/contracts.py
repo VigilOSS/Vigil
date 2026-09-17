@@ -2445,8 +2445,8 @@ _CONTRACTS: dict[str, CommandContract] = {
     "prompt-census": CommandContract(
         name="prompt-census",
         goals=("discovery",),
-        summary="Advisory census of role Load-First structure, approximate standing bytes, and declared partial-read visibility.",
-        schema_name="agent/agents/*.md structural sections plus resolved mandatory file sizes",
+        summary="Advisory census of role Load-First structure, approximate standing bytes, operator-core size, and declared partial-read visibility.",
+        schema_name="agent/agents/*.md structural sections plus resolved mandatory file sizes, and agent/operator-core*.md measured sizes",
         preferred_invocations=(
             "vigil assess prompt-census",
             "vigil assess prompt-census --read-bytes 32000",
@@ -2458,7 +2458,10 @@ _CONTRACTS: dict[str, CommandContract] = {
         ),
         notes=(
             "This command is always advisory and exits successfully when a role is missing an expected Load First/MANDATORY/LOAD-ON-FIRST-USE section; it reports that gap instead of creating a wording or line-count gate.",
-            "approximate_standing_bytes is the role file plus unique regular-file paths named in its mandatory block. Conditional alternatives and dynamic tenant references remain visible as prompt structure rather than being guessed into a false exact total.",
+            "approximate_standing_bytes is the role file plus unique regular-file paths named in its mandatory block. Dynamic tenant references remain visible as prompt structure rather than being guessed into a false exact total.",
+            "A mandatory bullet that names no file but carries indented sub-bullets that each do is an exclusive choice (`agent/agents/exploit-developer.md`'s code/web bundle). Those land in mandatory_alternative_groups, approximate_standing_bytes is null because no single figure is a real dispatch load, and standing_byte_variants carries one total per track.",
+            "operator_cores measures `agent/operator-core*.md` by bytes and lines only. Operator doctrine is loaded once per operator session with no MANDATORY block and no per-dispatch multiplier, so it is reported apart from roles and this command owns no budget for it.",
+            "prompt_root is always reported, and prompt_root_source says whether it came from --prompt-root or from the running script. `vigil assess` execs the INSTALLED agent tree, so running this inside a source checkout measures the installed prompts; unmeasured_checkout_prompt_root names the checkout tree when one is detected so the two are never confused.",
             "--read-bytes reports whether the Load First byte range was not reached, partially read, or complete. It does not claim to observe a provider's context window.",
         ),
     ),

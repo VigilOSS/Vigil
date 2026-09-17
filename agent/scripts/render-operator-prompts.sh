@@ -698,9 +698,10 @@ EOF
 render_claude() {
   # CLAUDE.md is intentionally a thin pointer — AGENTS.md is the single
   # canonical full prompt. Rendering both as full copies caused Cursor /
-  # Claude Code to load ~16.5k tokens 2-4x per turn (engagement wrapper +
-  # agent/CLAUDE.md + agent/AGENTS.md). Keeping CLAUDE.md as a pointer
-  # collapses that to a single load.
+  # Claude Code to load the whole operator prompt 2-4x per turn (engagement
+  # wrapper + agent/CLAUDE.md + agent/AGENTS.md). Keeping CLAUDE.md as a
+  # pointer collapses that to a single load. `vigil assess prompt-census`
+  # reports what one load currently costs; a size named here would go stale.
   {
     cat <<'EOF'
 <!-- GENERATED FILE — DO NOT EDIT. -->

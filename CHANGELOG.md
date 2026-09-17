@@ -61,6 +61,17 @@ Durable design decisions live in [`docs/adr/`](docs/adr/).
   transcript into every dispatch. That is exactly the anchoring `agent/phases/code-phase-2-hunt.md`
   forbids between the Phase 2A pass and the 2C dispatch that re-derives it independently. Codex
   ships the flag off; pinning it here also overrides a global that turns it on.
+- **`vigil assess prompt-census` measures what you think it measures.** It reported a single
+  standing-load figure for `exploit-developer` and `source-analyzer`, both of which declare two
+  mutually-exclusive constraint bundles and load exactly one — so the number it gave was never any
+  real dispatch's load. It now reports one variant per track and leaves the single figure null,
+  because a single figure is the bug. Detection is structural (a MANDATORY bullet naming no file of
+  its own, followed by sub-bullets that each name one), so it survives a prompt rewrite rather than
+  keying off a particular phrasing. The operator cores are measured too, as their own category —
+  `agent/operator-core.md` is the largest prompt in the repo and was invisible to the tool that
+  exists to size prompts. The output now names the tree it measured and says so on stderr when that
+  is not the checkout you are standing in, which is the default whenever `vigil` runs from an
+  installed working root.
 - **Cold image builds no longer die at 20s.** `vigil up` and `vigil install` threaded one bounded
   runner through both fast metadata queries and image builds, so the bound that makes a wedged
   daemon fail fast killed every first-run Kali build and swallowed its progress output.

@@ -2048,8 +2048,11 @@ Artifacts:
     # prompt for both Codex and Claude. When the client kind requires a CLAUDE.md
     # entrypoint, we write it as a thin local pointer to the engagement
     # AGENTS.md rather than a second pointer to agent/CLAUDE.md — that prevents
-    # Cursor / Claude Code from loading the same ~16.5k-token prompt twice per
-    # turn (once via CLAUDE.md, once via AGENTS.md).
+    # Cursor / Claude Code from loading the whole canonical operator prompt twice
+    # per turn (once via CLAUDE.md, once via AGENTS.md). That prompt is the
+    # largest text in the system and keeps growing, so the cost avoided here is
+    # whatever `vigil assess prompt-census` currently measures for the operator
+    # cores rather than a figure pinned in this comment.
     if client_kind in {"codex", "claude", "both"}:
         (eng_dir / "AGENTS.md").write_text(
             f"{_SPECIALIST_STOP_SIGN}\n"
