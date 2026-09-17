@@ -100,7 +100,7 @@ from .orchestrator import (
     stop_orchestrator,
 )
 from .paths import default_runtime_container, resolve_install_root, resolve_source_root
-from .preflight import _preflight_engagement_start, _warn_if_install_stale
+from .preflight import _preflight_engagement_start
 from .quickstart import QuickstartOptions, run_quickstart
 from .runtime import RuntimeOptions, vigil_runtime_resources, build_runtime, runtime_status, start_runtime, stop_runtime
 from .status import collect_doctor_checks, collect_status, print_doctor, print_status
@@ -1570,7 +1570,6 @@ def _exec_assess_passthrough(raw_argv: list[str], idx: int) -> None:
             source_value = value
         i += 1 if inline_value else 2
     install_root = resolve_install_root(root_value)
-    _warn_if_install_stale(install_root)
     assess = install_root / "agent" / "scripts" / "assess.py"
     if not assess.exists():
         source_root = resolve_source_root(source_value, install_root=install_root)

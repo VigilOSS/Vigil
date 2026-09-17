@@ -2979,12 +2979,17 @@ def test_doctor_reports_install_staleness(
     assert "vigil install" in check.detail
 
 
-def test_assess_passthrough_warns_on_stderr_when_install_is_stale(
+def test_assess_passthrough_stays_silent_even_when_the_install_is_stale(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """The passthrough execs the INSTALL ROOT's assess.py, so a lagging root
-    silently exposes an older verb set. Warn on STDERR — callers parse assess
-    JSON from stdout — and never block the exec."""
+    """One warning per engagement, not one per `vigil assess` call.
+
+    The passthrough execs the INSTALL ROOT's assess.py, so a lagging root does
+    silently expose an older verb set — but an operator and its specialists run
+    this path for every finding, fetch and queue closeout, so warning here
+    produced hundreds of identical stderr lines per engagement on the channel
+    real failures use. `vigil engagement start` owns the warning now; it is read
+    once, before anything is in flight. The exec itself is unchanged."""
     from vigil_cli import main as main_module
     from vigil_cli.status import write_install_meta
 
@@ -3007,7 +3012,7 @@ def test_assess_passthrough_warns_on_stderr_when_install_is_stale(
 
     captured = capsys.readouterr()
     assert captured.out == ""  # stdout stays clean for JSON consumers
-    assert "WARN" in captured.err and "run `vigil install`" in captured.err
+    assert captured.err == ""
     assert execs == [[str(assess), "list-skills"]]  # never blocks the exec
 
 

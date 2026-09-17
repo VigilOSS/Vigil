@@ -502,3 +502,48 @@ def test_provider_key_rejects_quoted_empty_and_unwraps_quoted_values(
 
     monkeypatch.setenv("DEEPSEEK_API_KEY", '"sk-inherited"')
     assert _resolve_provider_key(install_root, engagement, "DEEPSEEK_API_KEY") == "sk-inherited"
+
+
+def test_the_assess_passthrough_does_not_warn_about_a_stale_install(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """One warning per engagement, not one per `vigil assess` call.
+
+    The warning used to fire on the assess exec passthrough, which an operator
+    and its specialists run for every finding, fetch, and queue closeout — so a
+    single lagging install root produced hundreds of identical stderr lines in
+    one engagement. Repetition on the channel real failures use is how a warning
+    stops being read. `vigil engagement start` is the one place it is both
+    actionable and read, and it keeps it.
+    """
+    import os
+
+    from vigil_cli import main as main_module
+
+    install_root = tmp_path / "install"
+    (install_root / "agent" / "scripts").mkdir(parents=True)
+    assess = install_root / "agent" / "scripts" / "assess.py"
+    assess.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+
+    monkeypatch.setattr(main_module, "resolve_install_root", lambda _value: install_root)
+    monkeypatch.setattr(
+        preflight_module,
+        "install_staleness",
+        lambda _root: {
+            "state": "stale",
+            "reason": "source_content_changed",
+            "installed_sha": "a" * 40,
+            "current_source_sha": "b" * 40,
+        },
+    )
+    execed: dict[str, object] = {}
+    monkeypatch.setattr(
+        os, "execvpe", lambda path, argv, env: execed.update(path=path, argv=argv)
+    )
+
+    main_module._exec_assess_passthrough(["vigil", "assess", "finding", "list"], 1)
+
+    captured = capsys.readouterr()
+    assert execed["path"] == str(assess), "the passthrough must still exec"
+    assert captured.err == ""
+    assert captured.out == ""

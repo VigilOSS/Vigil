@@ -127,6 +127,13 @@ Durable design decisions live in [`docs/adr/`](docs/adr/).
   and ships only in the runtime image, which code analysis does not use. The row says what is lost
   rather than leaving a bare `MISSING`.
 
+### Changed
+
+- **The stale working-root warning fires once, at engagement start.** It used to repeat on every
+  `vigil assess` passthrough, which trains an operator to ignore it and says nothing new each time.
+  Per-dispatch instruction identity — installed revision plus exact operator and specialist hashes —
+  already records staleness durably for every dispatch, so the repetition added noise, not evidence.
+
 ### Fixed
 
 - **A Codex specialist starts from its dispatch message, not the operator's transcript.**

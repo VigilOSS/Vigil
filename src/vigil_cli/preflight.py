@@ -5,8 +5,13 @@ Two entrypoints exec the generated launcher — ``vigil engagement start``
 same checks. ``main`` imports ``blue``, so this cannot live in either of them;
 it lives here so both can import it without a cycle.
 
-The stale-install warning also fires on the ``vigil assess`` exec passthrough,
-which is the other place a lagging install root silently changes behaviour.
+The stale-install warning fires HERE ONLY. It used to also ride the ``vigil
+assess`` exec passthrough, which an operator and every specialist call for each
+finding, fetch, and queue closeout — so one lagging root emitted hundreds of
+identical stderr lines per engagement, on the channel real failures use. A
+warning that repeats that often stops being read, which costs exactly the run
+that needed it. Engagement start is where it is both actionable (nothing is
+in flight yet) and read.
 """
 from __future__ import annotations
 
@@ -152,13 +157,14 @@ def _warn_if_ripgrep_missing() -> None:
 
 
 def _warn_if_install_stale(install_root: Path) -> None:
-    """Emit one non-fatal STDERR line before execing into a lagging install root.
+    """Emit one non-fatal STDERR line before launching a client into a lagging root.
 
     ``vigil assess ...`` execs the INSTALL ROOT's ``assess.py``, so a working root
     behind its source silently exposes an older verb set — the failure surfaces as
-    "no such verb" rather than "your install lags". Never writes to stdout (callers
-    parse assess JSON there), never raises, and never blocks the exec: the agent
-    stays free to proceed and decide.
+    "no such verb" rather than "your install lags". Saying so once, at engagement
+    start, covers every assess call the session goes on to make. Never writes to
+    stdout (callers parse assess JSON there), never raises, and never blocks the
+    launch: the operator stays free to proceed and decide.
     """
     try:
         staleness = install_staleness(install_root)
