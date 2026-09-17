@@ -1,5 +1,5 @@
 ---
-description: Re-hydrate the engagement's generated operator role after compaction, restart, or handoff
+description: Re-hydrate the engagement's generated operator role in a new session on an existing engagement, or after a restart, handoff, or unsteered compaction
 ---
 
 <!-- GENERATED FILE — DO NOT EDIT. -->

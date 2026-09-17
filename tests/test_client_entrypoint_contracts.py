@@ -127,7 +127,7 @@ def test_claude_settings_materialize_absolute_hooks_for_bare_engagement_sessions
     hooks_dir = agent_root / "scripts" / "hooks"
     hooks_dir.mkdir(parents=True)
     marker = tmp_path / "hook-ran"
-    for name in ("post-tool-log.sh", "scope-check.sh"):
+    for name in ("post-tool-log.sh", "pre-compact.sh"):
         hook = hooks_dir / name
         hook.write_text(
             "#!/usr/bin/env bash\n"
@@ -157,13 +157,12 @@ def test_claude_settings_materialize_absolute_hooks_for_bare_engagement_sessions
                     ("Write", "post-tool-log.sh"),
                 )
             ],
-            "PreToolUse": [
+            "PreCompact": [
                 {
-                    "matcher": "Bash",
                     "hooks": [
                         {
                             "type": "command",
-                            "command": "bash relative/scope-check.sh",
+                            "command": "bash relative/pre-compact.sh",
                         }
                     ],
                 }
@@ -194,7 +193,7 @@ def test_claude_settings_materialize_absolute_hooks_for_bare_engagement_sessions
         for command in commands
     } == {
         str(hooks_dir / "post-tool-log.sh"),
-        str(hooks_dir / "scope-check.sh"),
+        str(hooks_dir / "pre-compact.sh"),
     }
 
     env = os.environ.copy()

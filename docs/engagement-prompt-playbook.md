@@ -15,7 +15,7 @@
 > that corrects it. Those sentences are below.
 >
 > **Where the rest lives.** This file is *mid-session* steering. The prompts you paste to start or resume a
-> session, the nine `vigil-*` client commands, and the compaction / session-end hooks are in
+> session, the seven `vigil-*` client commands, and the compaction / session-end hooks are in
 > [`session-commands.md`](session-commands.md).
 
 ---
@@ -314,7 +314,7 @@ including on a missing rendered file. Never edit the rendered copies.
 | Command | What it is |
 |---|---|
 | `vigil-start` | Open a new authorized engagement from the top of the operator workflow |
-| `vigil-resume` | Re-hydrate the operator seat from the backend after a compaction, restart or handoff |
+| `vigil-resume` | Re-hydrate the operator seat from the backend when a new session opens on an existing engagement, or after a restart or handoff |
 | `vigil-handoff` | Write the next operator a brief grounded in backend state, not recollection |
 | `vigil-compact` | Show the standing compaction contract and audit whether it is being applied |
 | `vigil-hunt-deeper` | §6 Hunt-deeper |
@@ -346,9 +346,12 @@ engagement never carries a stale copy. A command you write yourself in an engage
   matcher, so it fires on manual `/compact` **and** on automatic context-window compaction. Its
   stdout becomes the summarizer's custom instructions, merged with any text you typed after
   `/compact`. An engagement adds its own rules by dropping a `COMPACT.md` in the engagement
-  directory; it is appended to the standing contract, never a replacement. Vigil does not wire
-  Codex's supported compaction events, so Codex operators run `$vigil-compact` and apply the
-  contract by hand.
+  directory; it is appended to the standing contract, never a replacement. That stdout behaviour was
+  verified against Claude Code 2.1.261 and is a third-party implementation detail rather than a
+  published contract, so re-verify it when upgrading the client — `/vigil-compact` audits whether the
+  contract is actually being applied. Vigil does not wire Codex's supported compaction events, so
+  Codex operators run `$vigil-compact` ahead of a compaction to apply the contract by hand, and
+  `$vigil-resume` afterwards to re-hydrate the seat that an unsteered compaction dropped.
 - `agent/scripts/hooks/session-end.sh` is registered as a `SessionEnd` hook on **both** Claude
   and Codex. It records an ordinary activity receipt that the client ended; it never replaces the
   operator's separate **save my place** checkpoint. Treat the receipt as best-effort: a crash,

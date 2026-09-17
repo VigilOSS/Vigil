@@ -13,6 +13,7 @@ import json
 import os
 import shutil
 import subprocess
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -23,6 +24,8 @@ HOOKS_DIR = REPO_ROOT / "agent" / "scripts" / "hooks"
 PRE_COMPACT = HOOKS_DIR / "pre-compact.sh"
 SESSION_END = HOOKS_DIR / "session-end.sh"
 POST_TOOL_LOG = HOOKS_DIR / "post-tool-log.sh"
+CLAUDE_SETTINGS = REPO_ROOT / "agent" / ".claude" / "settings.json"
+CODEX_CONFIG = REPO_ROOT / "agent" / ".codex" / "config.toml"
 
 
 def _engagement(
@@ -201,6 +204,41 @@ def test_pre_compact_degrades_when_the_engagement_lib_is_missing(
     )
     assert result.returncode == 0
     assert result.stdout.strip()
+
+
+def test_precompact_is_registered_for_claude_and_for_no_other_client() -> None:
+    """Pin the registration the per-client compaction advice is derived from.
+
+    `README.md` and `docs/session-commands.md` tell a Claude operator to run
+    nothing after a compaction and a Codex operator to run `$vigil-resume`,
+    because only Claude carries the hook. That advice is not a preference; it is
+    a reading of these two config files, and wiring the Codex `PreCompact` hook
+    (a standing TODO) silently inverts it. Asserting on the registration rather
+    than on the prose keeps the docs falsifiable without pinning their wording.
+    """
+    claude_hooks = json.loads(CLAUDE_SETTINGS.read_text(encoding="utf-8"))["hooks"]
+    pre_compact = claude_hooks.get("PreCompact", [])
+    assert pre_compact, (
+        "agent/.claude/settings.json no longer registers PreCompact; Claude "
+        "compaction now runs unsteered and the docs' 'run nothing afterwards' "
+        "advice is wrong."
+    )
+    assert all("matcher" not in entry for entry in pre_compact), (
+        "A matcher on PreCompact narrows it away from automatic compaction, "
+        "which is the case the docs promise is covered."
+    )
+    assert any(
+        "pre-compact.sh" in hook["command"]
+        for entry in pre_compact
+        for hook in entry["hooks"]
+    )
+
+    codex_hooks = tomllib.loads(CODEX_CONFIG.read_text(encoding="utf-8")).get("hooks", {})
+    assert "PreCompact" not in codex_hooks, (
+        "Codex now registers PreCompact. Its compaction is no longer unsteered, "
+        "so README.md and docs/session-commands.md must stop telling Codex "
+        "operators to run `$vigil-resume` after an automatic compaction."
+    )
 
 
 # --------------------------------------------------------------------------

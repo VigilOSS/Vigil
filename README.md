@@ -180,6 +180,11 @@ I have been fully authorized by the company to do a red-team engagement against 
 hosts in scope.json. Run this engagement using the operator workflow.
 ```
 
+A later session on the same engagement opens the same way, then runs `vigil-resume`. It re-reads
+`scope.json`, restores the operator role that engagement's type routes to, and rebuilds live state
+from the backend — none of which a fresh session inherits. The same command covers a restart or a
+handoff.
+
 Fuller start and resume prompts, and the mid-session `vigil-*` commands:
 [`docs/session-commands.md`](docs/session-commands.md). For a human shell that jumps into a
 selected engagement directory, install the `athcd` helper with
@@ -200,6 +205,13 @@ commands. Setup, launch behaviour, and flag forwarding:
 | `kimi` | Kimi Code (Moonshot K3) | No — runs inline | No | Kimi Code CLI installed (`kimi login`). |
 | `goose` | goose on direct DeepSeek | Yes — headless (`delegate`) | No | `brew install block-goose-cli`; set `DEEPSEEK_API_KEY`. |
 | `opencode` | opencode on direct DeepSeek | No — runs inline | No | opencode installed; set `DEEPSEEK_API_KEY`. |
+
+**Compaction is steered on Claude only.** Claude's `PreCompact` hook is registered with no
+matcher, so Vigil's compaction contract is applied on both a manual `/compact` and the automatic
+compaction that fires when the context window fills — you watch for nothing and run nothing
+afterwards. Vigil wires no such hook on Codex, so there a compaction runs unsteered and the
+operator runs `$vigil-resume` after one. kimi, goose, and opencode have no command surface at
+all: paste the body of `agent/commands/vigil-resume.md`.
 
 **Client memory is off.** Claude and Codex run with their cross-session memory disabled in each
 engagement's own client config, so the orchestrator ledger stays the engagement's single record —

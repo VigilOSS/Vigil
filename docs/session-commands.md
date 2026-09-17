@@ -90,7 +90,7 @@ Seven commands are available. Each has one canonical source under
 | Command | What it does |
 |---|---|
 | `vigil-start` | Opens a new authorized engagement from the top of the operator workflow after checking that it is not already in progress. |
-| `vigil-resume` | Re-hydrates the operator seat from the backend after a compaction, restart, or handoff. |
+| `vigil-resume` | Re-hydrates the operator seat from the backend when a new session opens on an existing engagement, or after a restart or handoff. |
 | `vigil-handoff` | Writes a handoff brief for the next session, grounded in backend state rather than recollection. |
 | `vigil-compact` | Shows the standing compaction contract and audits whether it is actually being applied. |
 | `vigil-hunt-deeper` | Pushes past a shallow stopping point with wider batches, deeper dispatches, and siblings off anything that signals. |
@@ -138,8 +138,16 @@ An engagement can add rules without editing the shared hook by dropping a
 contract under a clear delimiter. It is **additive only**: it cannot rescind a
 standing rule.
 
-Vigil currently ships this hook only for Claude. Codex supports compaction hook
-events, but Vigil leaves them unwired; Codex operators use `$vigil-compact` instead.
+**Only Claude is steered through a compaction, so only Claude needs nothing from
+you.** The hook fires on its own when the context window fills, and `/vigil-compact`
+prints exactly what it will inject if you want to confirm the contract is live.
+
+Codex supports compaction hook events, but Vigil leaves them unwired: there a
+compaction runs unsteered. A Codex operator reads the contract ahead of time with
+`$vigil-compact`, and runs `$vigil-resume` after an automatic compaction to
+re-hydrate the seat the summarizer did not preserve. kimi, goose, and opencode have
+neither the hook nor a command surface — paste the bodies of
+`agent/commands/vigil-compact.md` and `agent/commands/vigil-resume.md`.
 
 ### SessionEnd (Claude and Codex)
 
