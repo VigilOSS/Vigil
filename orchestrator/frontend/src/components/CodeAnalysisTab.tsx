@@ -493,6 +493,15 @@ export function CodeAnalysisTab({
           </article>
         </div>
 
+        {(queueStats?.reference_repo_items?.length ?? 0) > 0 && (
+          <p className="meta-text">
+            Not counted above &mdash; reference repositories are never handed work:{" "}
+            {queueStats?.reference_repo_items
+              .map((repo) => `${repo.repo_key} (${repo.queue_items} row(s))`)
+              .join(", ")}
+          </p>
+        )}
+
         {/* Queue progress bar */}
         {queueStats && queueStats.total > 0 && (
           <div className="code-queue-bar-wrap">

@@ -316,10 +316,30 @@ def _stats(cfg) -> None:
             sum(result.get(k, 0) for k in ('pending', 'processing', 'done', 'error', 'needs_context')),
         )
         print(f"  total: {total}")
+        reference_items = result.get('reference_repo_items') or []
         # Print any extra fields
         for key, val in result.items():
-            if key not in ('pending', 'processing', 'done', 'error', 'needs_context', 'total'):
+            if key not in (
+                'pending', 'processing', 'done', 'error', 'needs_context', 'total',
+                'reference_repo_items',
+            ):
                 print(f"  {key}: {val}")
+        if reference_items:
+            # These rows exist and can never be claimed: `fetch` hands out no
+            # work from a repository that owes no review. Counting them would
+            # describe a queue that never drains; omitting them silently would
+            # lose a demoted repository's rows, so they are named here.
+            print(
+                "\nExcluded from the counts above — a reference repository owns no "
+                "queue obligation and is never handed work:"
+            )
+            for row in reference_items:
+                repo_id = row.get('repo_id')
+                print(
+                    f"  {row.get('repo_key')} (repo {repo_id}): "
+                    f"{row.get('queue_items')} row(s) — see "
+                    f"`vigil assess code-dispatch list --repo-id {repo_id}`"
+                )
         if not total:
             # An all-zero queue reads like lost work. It is not: the queue has
             # exactly one writer, and classification is not it.
@@ -536,6 +556,17 @@ def _list(cfg, filters: dict[str, str], output: str) -> None:
             f"{item.get('queue_mode', ''):<17}{item.get('priority', 0)!s:>4}  "
             f"{item.get('classification', ''):<10}{item.get('batch_theme', ''):<21}"
             f"{item.get('agent_name', ''):<17}{item.get('file_path', '')}"
+        )
+    unclaimable = [
+        item for item in items if str(item.get("repo_role") or "analysis") != "analysis"
+    ]
+    if unclaimable:
+        # The listing keeps these rows so their ids stay recoverable; this line
+        # is what stops a page of them reading as claimable work.
+        print(
+            f"\n{len(unclaimable)} listed row(s) belong to a reference repository "
+            "and are never claimed by `fetch`. Re-ingest with --role analysis to "
+            "review that repository."
         )
     if result.get("has_more"):
         print(f"\nMore rows: re-run with --offset {offset + len(items)}")

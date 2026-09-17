@@ -40,6 +40,10 @@ When you are about to copy one of these into a second file, stop and import.
   `agent/scripts/assess/commands/dispatch/work_items.py` mirrors the backend-side predicate.
 - `agent/scripts/assess/lib/classify_buckets.py:_BUCKETS` owns URL bucket scoring and skip tags.
   Ingest classifies inline; `work-buffer reclassify` reapplies it.
+- `orchestrator/backend/app/services/code_analysis.py:CODE_REPO_ROLES` owns the repository
+  obligation role — `analysis` carries coverage/queue/readiness duties, `reference` carries none;
+  `contracts.py:CODE_REPO_ROLES` is the CLI mirror.
+  See: `orchestrator/backend/tests/test_reference_repo_role.py`.
 - `agent/scripts/assess/lib/contracts.py:FRAMEWORK_REGISTRATION_KINDS` owns the registration
   vocabulary on `assessment_surfaces`; `api/assessment.py` mirrors it as a Literal. Deliberately NOT
   in `agent/scripts/assess/lib/surfaces.py:VALID_SURFACE_TYPES` — registration kind is architecture,
@@ -134,6 +138,10 @@ A prompt change is **not** prompt-only when the prompt defines an artifact the b
 - `agent/scripts/assess/cli.py` — a verb can touch the import block, flat loop, four grouped
   registries, inline `kali` registry, and pre-parse action-help hook. See the recipe in `AGENTS.md`.
 - `agent/scripts/assess/lib/contracts.py:_INLINE_DOCUMENTED_NAMESPACES` — a `<verb> <action>` leaf documented on its parent contract must have that parent listed here, or `vigil assess contract` cannot resolve it.
+- `orchestrator/backend/app/services/code_analysis.py:_analysis_repo_sql` / `_analysis_repo_files_sql`
+  — every query counting an OBLIGATION over `code_files` must carry one, or a `reference` repository
+  regains coverage, queue and readiness duties. Reads must NOT: reference source stays searchable
+  and citable. `code_fuzz_completion.py:fuzz_states` applies it at source.
 - `orchestrator/backend/app/services/state_manager/dispatches.py:record_dispatch_client_binding`
   writes `assessment_dispatch_client_bindings`, append-only by SQLite trigger: a correction stamps
   the prior row's `superseded_by_id`, never an overwrite. `_DISPATCH_SELECT` carries the current

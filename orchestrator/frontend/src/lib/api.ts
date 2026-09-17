@@ -1638,6 +1638,14 @@ export type CodeQueueStats = {
   superseded_history: number;
   invalid_active_identity: number;
   invalid_active_history: number;
+  // Rows the counts above leave out: a reference repository is never handed
+  // work, so its rows can never drain. Named, not dropped.
+  reference_repo_items: Array<{
+    repo_id: number;
+    repo_key: string;
+    name: string;
+    queue_items: number;
+  }>;
 };
 
 export type CodeCoverage = {

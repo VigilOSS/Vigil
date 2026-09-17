@@ -1171,6 +1171,7 @@ def test_code_ingest_posts_backend_contract_fields(monkeypatch, tmp_path: Path) 
                     "changed": 0,
                     "renamed": 0,
                     "retired": 0,
+                    "repo_role": "analysis",
                     "repo_generation": 1,
                     "source_manifest_digest": "d" * 64,
                 }
@@ -1259,6 +1260,7 @@ def test_code_ingest_records_skipped_minified_manifest(monkeypatch, tmp_path: Pa
                     "changed": 0,
                     "renamed": 0,
                     "retired": 0,
+                    "repo_role": "analysis",
                     "repo_generation": 1,
                     "source_manifest_digest": "d" * 64,
                 }
@@ -1360,6 +1362,7 @@ def test_code_ingest_include_path_can_queue_security_relevant_build_artifact(mon
                     "changed": 0,
                     "renamed": 0,
                     "retired": 0,
+                    "repo_role": "analysis",
                     "repo_generation": 1,
                     "source_manifest_digest": "d" * 64,
                 }

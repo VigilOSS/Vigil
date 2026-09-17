@@ -266,6 +266,7 @@ def _bound_ingest_commit() -> dict[str, object]:
         "source_manifest_version": "v1",
         "source_manifest_digest": "d" * 64,
         "retired": 0,
+        "repo_role": "analysis",
     }
 
 

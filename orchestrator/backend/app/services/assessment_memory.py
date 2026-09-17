@@ -9,7 +9,7 @@ from typing import Any
 from fastapi import HTTPException, status
 
 from ..db import get_connection
-from . import artifact_index, intel, operator_checkpoints, state_manager
+from . import artifact_index, code_analysis, intel, operator_checkpoints, state_manager
 from .events import _engagement_or_404
 from .search import canonical_finding_alias
 

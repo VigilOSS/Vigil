@@ -3675,6 +3675,7 @@ def _create_code_analysis_tables(connection: sqlite3.Connection) -> None:
                 commit_hash TEXT NOT NULL DEFAULT '',
                 branch TEXT NOT NULL DEFAULT '',
                 analysis_status TEXT NOT NULL DEFAULT 'ingested',
+                repo_role TEXT NOT NULL DEFAULT 'analysis',
                 threat_model_json TEXT NOT NULL DEFAULT '{}',
                 git_churn_json TEXT NOT NULL DEFAULT '{}',
                 lsp_config_json TEXT NOT NULL DEFAULT '{}',
@@ -4274,6 +4275,10 @@ def _apply_additive_migrations(connection: sqlite3.Connection) -> None:
         "threat_model_generation": "INTEGER",
         "pending_refresh_token": "TEXT NOT NULL DEFAULT ''",
         "pending_refresh_json": "TEXT NOT NULL DEFAULT '{}'",
+        # Every repository ingested before roles existed was ingested to be
+        # reviewed, so the column default backfills them to 'analysis' and the
+        # migration cannot change what an existing engagement's state means.
+        "repo_role": "TEXT NOT NULL DEFAULT 'analysis'",
     }.items():
         if repo_columns and col_name not in repo_columns:
             connection.execute(

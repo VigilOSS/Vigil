@@ -41,6 +41,17 @@ STRUCTURAL_CALLABLE_IDENTITY_SCHEMA = "structural-callable/v1"
 VARIANT_INPUT_IDENTITY_SCHEMA = "variant-input-identity/v1"
 MAX_VARIANT_RECEIPT_PAGE = 500
 DEFAULT_VARIANT_RECEIPT_PAGE = 100
+# B8: the repository role is the obligation axis, orthogonal to snapshot
+# identity and generation. An `analysis` repository is the reviewed subject —
+# every admitted file owes a queue row, a terminal accounting receipt, variant
+# coverage and phase readiness. A `reference` repository is host or framework
+# source loaded purely so a specialist can resolve a symbol and cite it: it
+# stays sealed, indexed, searchable and citable with the same structured source
+# identity, and simply never creates work. Reviewing a plugin must not silently
+# buy coverage over the framework it plugs into.
+ANALYSIS_REPO_ROLE = "analysis"
+REFERENCE_REPO_ROLE = "reference"
+CODE_REPO_ROLES: tuple[str, ...] = (ANALYSIS_REPO_ROLE, REFERENCE_REPO_ROLE)
 _REPORTABLE_FINDING_STATUSES = frozenset(
     {
         "active",
@@ -1704,6 +1715,25 @@ def _current_result_receipt_sql(
     """
 
 
+def _analysis_repo_sql(repos_alias: str) -> str:
+    """Restrict an already-joined ``code_repos`` alias to obligation-owning repos."""
+    return f"{repos_alias}.repo_role = '{ANALYSIS_REPO_ROLE}'"
+
+
+def _analysis_repo_files_sql(files_alias: str) -> str:
+    """Restrict a ``code_files`` alias to files that carry review obligations.
+
+    For queries that never join ``code_repos`` and would otherwise have to grow
+    one just to read the role.
+    """
+    return (
+        f"{files_alias}.repo_id IN ("
+        "SELECT id FROM code_repos"
+        f" WHERE engagement_id = {files_alias}.engagement_id"
+        f" AND {_analysis_repo_sql('code_repos')})"
+    )
+
+
 def _current_terminal_review_exists_sql(*, allow_accounted_skip: bool) -> str:
     accounted_skip = """
         OR (
@@ -1776,6 +1806,7 @@ def _current_suspicious_analysis_counts(
               ON semantic_repo.id = files.repo_id
              AND semantic_repo.engagement_id = files.engagement_id
              AND semantic_repo.active_generation > 0
+             AND {_analysis_repo_sql("semantic_repo")}
             WHERE semantic_attempt.engagement_id = ?
               AND semantic_attempt.repo_generation = semantic_repo.active_generation
               AND semantic_attempt.source_superseded_at IS NULL
@@ -2526,8 +2557,13 @@ def _reopen_file_metadata_review(
         """,
         (engagement_id, file_id),
     )
+    # Retiring the stale conclusions above is right for any repository; opening
+    # a fresh review is not. `POST /analysis-queue` and `requeue` both refuse to
+    # create work in a reference repository, and this third insert has to refuse
+    # for the same reason -- a role read straight from the row it selects from,
+    # so a demoted repository cannot gain a claimable row from a churn update.
     connection.execute(
-        """
+        f"""
         INSERT INTO code_analysis_queue (
             engagement_id, file_id, priority, status, batch_theme,
             slot_types_json, guidance_hypotheses_json, repo_generation, queue_mode
@@ -2535,6 +2571,7 @@ def _reopen_file_metadata_review(
         SELECT ?, ?, ?, 'pending', ?, '[]', '[]', active_generation, ?
         FROM code_repos
         WHERE engagement_id = ? AND id = ?
+          AND {_analysis_repo_sql("code_repos")}
         """,
         (
             engagement_id,
@@ -2713,6 +2750,14 @@ def commit_code_repo_refresh(
                 or SOURCE_MANIFEST_VERSION
             )
             manifest_digest = source_manifest_digest(staged.values(), version=manifest_version)
+            # An ingest that does not name a role keeps the one already
+            # recorded, so re-ingesting a reference repository after an upstream
+            # update cannot silently re-arm its coverage obligation.
+            repo_role = str(
+                metadata.get("repo_role")
+                or repo.get("repo_role")
+                or ANALYSIS_REPO_ROLE
+            )
             current_generation = int(repo.get("active_generation", 0) or 0)
             incoming_snapshot_digest = str(
                 metadata.get("snapshot_digest", repo.get("snapshot_digest", "")) or ""
@@ -2986,7 +3031,8 @@ def commit_code_repo_refresh(
 
             connection.execute(
                 """
-                UPDATE code_repos SET name = ?, language = ?, repo_path = ?, total_files = ?,
+                UPDATE code_repos SET name = ?, language = ?, repo_path = ?, repo_role = ?,
+                    total_files = ?,
                     analyzable_files = ?, total_loc = ?, commit_hash = ?, branch = ?,
                     git_churn_json = ?, active_generation = ?, source_origin_path = ?,
                     source_kind = ?, snapshot_manifest_path = ?, snapshot_digest = ?,
@@ -3006,7 +3052,8 @@ def commit_code_repo_refresh(
                 """,
                 (
                     metadata.get("name", repo["name"]), metadata.get("language", ""),
-                    metadata.get("repo_path", repo["repo_path"]), metadata.get("total_files", len(staged)),
+                    metadata.get("repo_path", repo["repo_path"]), repo_role,
+                    metadata.get("total_files", len(staged)),
                     metadata.get("analyzable_files", len(staged)), metadata.get("total_loc", 0),
                     metadata.get("commit_hash", ""), metadata.get("branch", ""),
                     _json_text(metadata.get("git_churn")), repo_generation,
@@ -3062,6 +3109,7 @@ def commit_code_repo_refresh(
         "repo_id": repo_id, "inserted": inserted, "changed": changed, "renamed": renamed,
         "retired": retired_count, "unchanged": unchanged,
         "repo_generation": repo_generation,
+        "repo_role": repo_role,
         "source_manifest_version": manifest_version,
         "source_manifest_digest": manifest_digest,
         "generation_changed": generation_changed,
@@ -4474,6 +4522,32 @@ def bulk_create_queue_items(
             engagement.id,
             {int(file_row["repo_id"]) for file_row in file_rows.values()},
         )
+        # A reference repository is read, never reviewed, so a queue row for one
+        # of its files would manufacture an obligation the engagement declined
+        # and that readiness deliberately ignores. Refuse the whole batch before
+        # any write, the same way a priority drift is refused.
+        reference_file_counts: dict[int, int] = {}
+        for file_id in submitted_file_ids:
+            repo = repo_rows[int(file_rows[file_id]["repo_id"])]
+            if str(repo.get("repo_role") or ANALYSIS_REPO_ROLE) != ANALYSIS_REPO_ROLE:
+                reference_file_counts[int(repo["id"])] = (
+                    reference_file_counts.get(int(repo["id"]), 0) + 1
+                )
+        if reference_file_counts:
+            named = ", ".join(
+                f"{repo_rows[reference_repo_id]['repo_key']} "
+                f"(repo {reference_repo_id}, {count} file(s))"
+                for reference_repo_id, count in sorted(reference_file_counts.items())
+            )
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"queue request names files in a reference repository: {named}. "
+                    "A reference repository is indexed and citable but owns no "
+                    "review obligation. Scope the batch to the analysis "
+                    "repository, or re-ingest with --role analysis to review it."
+                ),
+            )
         for file_id, priority in zip(
             submitted_file_ids, submitted_priorities, strict=True
         ):
@@ -4745,10 +4819,18 @@ def bulk_create_queue_items(
 
 
 def queue_stats(engagement_id: int) -> dict[str, Any]:
+    """Count the work that is actually claimable, and disclose what is not.
+
+    `fetch` will never hand out a row in a `reference` repository, so counting
+    one here would describe a queue that can never drain. They are excluded
+    from the counts and named in `reference_repo_items` instead -- the same
+    exclude-and-disclose shape `coverage` uses for reference files -- because an
+    operator who demoted a repository still needs to see the rows it holds.
+    """
     engagement = _engagement_or_404(engagement_id)
     with get_connection() as connection:
         rows = connection.execute(
-            """
+            f"""
             WITH ranked AS (
                 SELECT queue.status, queue.assigned_agent, queue.lease_token,
                        ROW_NUMBER() OVER (
@@ -4769,6 +4851,7 @@ def queue_stats(engagement_id: int) -> dict[str, Any]:
                  AND repos.active_generation > 0
                 WHERE queue.engagement_id = ?
                   AND queue.repo_generation = repos.active_generation
+                  AND {_analysis_repo_sql("repos")}
                   AND queue.source_superseded_at IS NULL
             )
             SELECT status, assigned_agent, lease_token, attempt_rank, active_count
@@ -4778,7 +4861,7 @@ def queue_stats(engagement_id: int) -> dict[str, Any]:
         ).fetchall()
         historical_total = _scalar_row(
             connection,
-            """
+            f"""
             SELECT COUNT(*)
             FROM code_analysis_queue AS queue
             JOIN code_files AS files
@@ -4788,9 +4871,43 @@ def queue_stats(engagement_id: int) -> dict[str, Any]:
               ON repos.id = files.repo_id
              AND repos.engagement_id = files.engagement_id
             WHERE queue.engagement_id = ? AND repos.active_generation > 0
+              AND {_analysis_repo_sql("repos")}
             """,
             (engagement.id,),
         )
+        # Only a reference repository that actually holds rows: one that holds
+        # none is excluding nothing and has nothing for an operator to act on.
+        reference_repo_items = [
+            {
+                "repo_id": int(row["id"]),
+                "repo_key": str(row["repo_key"]),
+                "name": str(row["name"]),
+                "queue_items": int(row["queue_items"]),
+            }
+            for row in connection.execute(
+                f"""
+                SELECT repos.id, repos.repo_key, repos.name,
+                       (
+                           SELECT COUNT(*)
+                           FROM code_analysis_queue AS queue
+                           JOIN code_files AS files
+                             ON files.id = queue.file_id
+                            AND files.engagement_id = queue.engagement_id
+                           WHERE queue.engagement_id = repos.engagement_id
+                             AND files.repo_id = repos.id
+                             AND queue.repo_generation = repos.active_generation
+                             AND queue.source_superseded_at IS NULL
+                       ) AS queue_items
+                FROM code_repos AS repos
+                WHERE repos.engagement_id = ?
+                  AND repos.active_generation > 0
+                  AND NOT ({_analysis_repo_sql("repos")})
+                ORDER BY repos.id
+                """,
+                (engagement.id,),
+            ).fetchall()
+            if int(row["queue_items"]) > 0
+        ]
     counts: dict[str, int] = {}
     current_attempt_total = 0
     invalid_active_identity = 0
@@ -4827,6 +4944,7 @@ def queue_stats(engagement_id: int) -> dict[str, Any]:
         "superseded_history": historical_total - current_attempt_total,
         "invalid_active_identity": invalid_active_identity,
         "invalid_active_history": invalid_active_history,
+        "reference_repo_items": reference_repo_items,
     }
 
 
@@ -4839,6 +4957,9 @@ def _hydrate_queue_listing_row(row: Any) -> dict[str, Any]:
         "analysis_priority": int(row["analysis_priority"]),
         "repo_id": int(row["repo_id"]),
         "repo_key": str(row["repo_key"]),
+        # A row in a reference repository is unclaimable but must stay findable
+        # by ID, so the listing names the role rather than dropping the row.
+        "repo_role": str(row["repo_role"] or ANALYSIS_REPO_ROLE),
         "status": str(row["status"]),
         "queue_mode": str(row["queue_mode"] or "initial"),
         "priority": int(row["priority"]),
@@ -4874,11 +4995,20 @@ def list_queue_items(
     """Page the current-generation queue so its row IDs stay recoverable.
 
     Every current-generation, non-source-superseded attempt is listed, including
-    an older active row that overlaps the latest one. `fetch` refuses to claim
-    those and `stats` reports them only as an `invalid_active_history` count, so
-    a listing that dropped them would hide the exact IDs an operator needs to
-    reconcile the history. Ordering matches the claim order `fetch` applies, so a
-    page fed back through `--ids-file` is claimed in the order it was shown.
+    an older active row that overlaps the latest one and a row in a repository
+    demoted to `reference`. `fetch` refuses to claim those and `stats` reports
+    them separately, so a listing that dropped them would hide the exact IDs an
+    operator needs to reconcile the history; each row carries `repo_role` so an
+    unclaimable one is identifiable rather than invisible. Ordering matches the
+    claim order `fetch` applies, so a page fed back through `--ids-file` is
+    claimed in the order it was shown.
+
+    `stale_minutes` narrows the page to processing rows whose lease has not
+    proved life inside that window — the same abandonment measure `reset-stale`
+    and `adopt-lease` apply. Both of those additionally refuse a row that is not
+    the sole canonical latest current-generation attempt, so a listed row can be
+    stale without being recoverable; `stats` reports that history separately as
+    `invalid_active_history`.
     """
     engagement = _engagement_or_404(engagement_id)
     if status_filter is not None and status_filter not in _QUEUE_STATUSES:
@@ -4931,7 +5061,8 @@ def list_queue_items(
     """
     query = f"""
         SELECT queue.*, files.file_path, files.classification,
-               files.analysis_priority, files.repo_id, repos.repo_key
+               files.analysis_priority, files.repo_id, repos.repo_key,
+               repos.repo_role
         {from_where}
         ORDER BY queue.priority DESC, queue.id ASC
     """
@@ -4973,6 +5104,13 @@ def fetch_queue_items(
 
     Uses UPDATE ... WHERE id IN (SELECT ... LIMIT) to prevent two concurrent
     callers from claiming the same rows.
+
+    The role is read here, live, rather than at the rows: demoting a repository
+    to ``reference`` changes no source, so the generation does not move and
+    nothing supersedes the rows it already carries. Retiring them at the
+    demotion would also make the reverse trip lossy, and would still miss a row
+    created afterwards. This is the one place work is handed out, so this is
+    where a repository that owes no review stops receiving agents.
     """
     engagement = _engagement_or_404(engagement_id)
     now = _now_iso()
@@ -5017,6 +5155,7 @@ def fetch_queue_items(
             WHERE queue.engagement_id = ? AND queue.status = 'pending'
               AND queue.assigned_agent = '' AND queue.lease_token = ''
               AND queue.repo_generation = repos.active_generation
+              AND {_analysis_repo_sql("repos")}
               AND queue.source_superseded_at IS NULL
               AND ({_latest_current_queue_attempt_sql("queue", "repos")})
               AND ({_no_superseded_active_attempt_sql("queue", "repos")})
@@ -7448,13 +7587,14 @@ def report_durable_finding_variant_receipt_obligations(
         inventory_files = [
             dict(row)
             for row in connection.execute(
-                """
+                f"""
                 SELECT files.*
                 FROM code_files AS files
                 JOIN code_repos AS repos
                   ON repos.id = files.repo_id
                  AND repos.engagement_id = files.engagement_id
                  AND repos.active_generation > 0
+                 AND {_analysis_repo_sql("repos")}
                 WHERE files.engagement_id = ?
                   AND files.retired_at IS NULL
                 ORDER BY files.repo_id, files.file_path, files.id
@@ -7577,18 +7717,57 @@ def code_coverage_summary(
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
 
+    # Coverage is the obligation view, so it counts only files an analysis
+    # repository owes review for. An explicit --repo-id naming a reference
+    # repository therefore reports zero rather than an obligation the
+    # engagement never accepted; `reference_repos` below names what was left out
+    # so the smaller denominator is never a silent one.
     repo_clause = (
-        " AND repo_id IN (SELECT id FROM code_repos WHERE active_generation > 0)"
+        " AND repo_id IN (SELECT id FROM code_repos WHERE active_generation > 0"
+        f" AND {_analysis_repo_sql('code_repos')})"
         " AND retired_at IS NULL"
     )
     repo_params: tuple[Any, ...] = ()
     if repo_id is not None:
-        repo_clause = " AND repo_id = ? AND retired_at IS NULL"
+        repo_clause = (
+            " AND repo_id = ? AND retired_at IS NULL"
+            " AND repo_id IN (SELECT id FROM code_repos WHERE"
+            f" {_analysis_repo_sql('code_repos')})"
+        )
         repo_params = (repo_id,)
 
     with get_connection() as connection:
         if repo_id is not None:
             _get_published_repo_row(connection, engagement.id, repo_id)
+
+        # -- Reference repositories (counted, never owed) --
+        reference_repos = [
+            {
+                "repo_id": int(row["id"]),
+                "repo_key": str(row["repo_key"]),
+                "name": str(row["name"]),
+                "admitted_files": int(row["admitted_files"]),
+            }
+            for row in connection.execute(
+                f"""
+                SELECT repos.id, repos.repo_key, repos.name,
+                       (
+                           SELECT COUNT(*)
+                           FROM code_files AS files
+                           WHERE files.engagement_id = repos.engagement_id
+                             AND files.repo_id = repos.id
+                             AND files.retired_at IS NULL
+                       ) AS admitted_files
+                FROM code_repos AS repos
+                WHERE repos.engagement_id = ?
+                  AND repos.active_generation > 0
+                  AND NOT ({_analysis_repo_sql("repos")})
+                  {"AND repos.id = ?" if repo_id is not None else ""}
+                ORDER BY repos.id
+                """,
+                (engagement.id, *repo_params),
+            ).fetchall()
+        ]
 
         # -- Total files --
         total_files = _scalar_row(
@@ -7791,6 +7970,7 @@ def code_coverage_summary(
             JOIN code_repos AS repos
               ON repos.id = files.repo_id
              AND repos.engagement_id = files.engagement_id
+             AND {_analysis_repo_sql("repos")}
             WHERE queue.engagement_id = ? AND queue.status = 'needs_context'
               AND repos.active_generation > 0
               AND queue.repo_generation = repos.active_generation
@@ -7813,6 +7993,7 @@ def code_coverage_summary(
             JOIN code_repos AS repos
               ON repos.id = files.repo_id
              AND repos.engagement_id = files.engagement_id
+             AND {_analysis_repo_sql("repos")}
             WHERE results.engagement_id = ? AND results.disposition = 'needs_context'
               AND ({_current_result_receipt_sql(
                   "results", "result_queue", "files", "repos", allow_processing=True
@@ -7833,6 +8014,7 @@ def code_coverage_summary(
             JOIN code_repos AS repos
               ON repos.id = files.repo_id
              AND repos.engagement_id = files.engagement_id
+             AND {_analysis_repo_sql("repos")}
             WHERE queue.engagement_id = ?
               AND queue.status IN ('pending', 'processing')
               AND repos.active_generation > 0
@@ -7851,13 +8033,14 @@ def code_coverage_summary(
             FROM code_files AS files
             WHERE files.engagement_id = ?
               AND ({_invalid_active_history_exists_sql("files")})
+              AND ({_analysis_repo_files_sql("files")})
               {queue_repo_clause}
             """,
             (engagement.id, *repo_params),
         )
         trigger_rows = connection.execute(
             (
-                """
+                f"""
                 SELECT t.status, COUNT(*) AS total
                 FROM code_analysis_triggers AS t
                 JOIN code_files AS sf
@@ -7867,13 +8050,14 @@ def code_coverage_summary(
                   ON repos.id = sf.repo_id
                  AND repos.engagement_id = sf.engagement_id
                  AND repos.active_generation > 0
+                 AND {_analysis_repo_sql("repos")}
                 WHERE t.engagement_id = ?
                   AND t.repo_generation = repos.active_generation
                   AND t.source_superseded_at IS NULL
                 GROUP BY t.status
                 """
                 if repo_id is None
-                else """
+                else f"""
                 SELECT t.status, COUNT(*) AS total
                 FROM code_analysis_triggers t
                 JOIN code_files sf
@@ -7883,6 +8067,7 @@ def code_coverage_summary(
                   ON repos.id = sf.repo_id
                  AND repos.engagement_id = sf.engagement_id
                  AND repos.active_generation > 0
+                 AND {_analysis_repo_sql("repos")}
                 WHERE t.engagement_id = ? AND sf.repo_id = ?
                   AND t.repo_generation = repos.active_generation
                   AND t.source_superseded_at IS NULL
@@ -7905,6 +8090,7 @@ def code_coverage_summary(
             JOIN code_repos AS repos
               ON repos.id = files.repo_id
              AND repos.engagement_id = files.engagement_id
+             AND {_analysis_repo_sql("repos")}
             WHERE queue.engagement_id = ?
               AND queue.status = 'done'
               AND queue.disposition = 'skipped'
@@ -7979,6 +8165,7 @@ def code_coverage_summary(
               ON effort_repos.id = files.repo_id
              AND effort_repos.engagement_id = files.engagement_id
              AND effort_repos.active_generation > 0
+             AND {_analysis_repo_sql("effort_repos")}
             LEFT JOIN code_analysis_queue AS q
               ON q.file_id = files.id
              AND q.engagement_id = files.engagement_id
@@ -8288,6 +8475,9 @@ def code_coverage_summary(
 
     return {
         "total_files": total_files,
+        # Named so a shrunken denominator is never a silent one: these repos are
+        # fully readable and were deliberately excluded from every count above.
+        "reference_repos": reference_repos,
         "by_classification": by_classification,
         "by_status": by_status,
         "findings_summary": {
@@ -8372,7 +8562,16 @@ def code_readiness(engagement_id: int, *, target_phase: str) -> dict[str, Any]:
                 (engagement.id,),
             ).fetchall()
         ]
+        # Findings, snapshot currency and variant parentage still resolve
+        # against every active repository — a finding in framework source is a
+        # real, bindable finding. Only the per-repo obligation loop below is
+        # narrowed to the repositories this engagement agreed to review.
         active_repo_ids = {int(repo["id"]) for repo in repos}
+        analysis_repos = [
+            repo
+            for repo in repos
+            if str(repo.get("repo_role") or ANALYSIS_REPO_ROLE) == ANALYSIS_REPO_ROLE
+        ]
         suspicious_counts = _current_suspicious_analysis_counts(
             connection, engagement.id
         )
@@ -8454,13 +8653,14 @@ def code_readiness(engagement_id: int, *, target_phase: str) -> dict[str, Any]:
                 variant_inventory_files = [
                     dict(row)
                     for row in connection.execute(
-                        """
+                        f"""
                         SELECT files.*
                         FROM code_files AS files
                         JOIN code_repos AS repos
                           ON repos.id = files.repo_id
                          AND repos.engagement_id = files.engagement_id
                          AND repos.active_generation > 0
+                         AND {_analysis_repo_sql("repos")}
                         WHERE files.engagement_id = ?
                           AND files.retired_at IS NULL
                         ORDER BY files.repo_id, files.id
@@ -8479,7 +8679,7 @@ def code_readiness(engagement_id: int, *, target_phase: str) -> dict[str, Any]:
                     file_rows=variant_inventory_files,
                     parent_slugs=variant_parent_slugs_by_repo,
                 )
-        if not repos:
+        if not analysis_repos:
             blockers.append(
                 _readiness_blocker(
                     "no_repositories",
@@ -8487,7 +8687,7 @@ def code_readiness(engagement_id: int, *, target_phase: str) -> dict[str, Any]:
                 )
             )
 
-        for repo in repos:
+        for repo in analysis_repos:
             repo_id = int(repo["id"])
             active_generation = int(repo.get("active_generation", 0) or 0)
             structural_debt_rows: list[Any] = []
@@ -8833,27 +9033,6 @@ def code_readiness(engagement_id: int, *, target_phase: str) -> dict[str, Any]:
                 )
 
             if target_phase in {"fuzz", "complete"}:
-                unresolved_draft_count = unresolved_draft_counts.get(repo_id, 0)
-                if unresolved_draft_count:
-                    stale_draft_count = stale_draft_counts.get(repo_id, 0)
-                    stale_detail = (
-                        f"; {stale_draft_count} have stale snapshot bindings"
-                        if stale_draft_count
-                        else ""
-                    )
-                    blockers.append(
-                        _readiness_blocker(
-                            "draft_code_findings_unresolved",
-                            (
-                                f"Repository has {unresolved_draft_count} unresolved draft "
-                                f"code finding(s){stale_detail}; re-review and rebind when "
-                                "needed, then promote, merge, or kill each "
-                                "draft before leaving verification."
-                            ),
-                            repo_id=repo_id,
-                        )
-                    )
-
                 parent_finding_slugs = variant_parent_slugs_by_repo.get(repo_id, [])
                 if parent_finding_slugs:
                     unready_parent_slugs = (
@@ -8894,6 +9073,32 @@ def code_readiness(engagement_id: int, *, target_phase: str) -> dict[str, Any]:
                                 overrideable=True,
                             )
                         )
+
+        if target_phase in {"fuzz", "complete"}:
+            # Drafts are the engagement's own authored evidence, not an
+            # obligation over a second codebase, so this gate spans every active
+            # repository: a real bug found while reading framework source must
+            # still be promoted, merged or killed rather than silently dropped.
+            for draft_repo_id in sorted(unresolved_draft_counts):
+                unresolved_draft_count = unresolved_draft_counts[draft_repo_id]
+                stale_draft_count = stale_draft_counts.get(draft_repo_id, 0)
+                stale_detail = (
+                    f"; {stale_draft_count} have stale snapshot bindings"
+                    if stale_draft_count
+                    else ""
+                )
+                blockers.append(
+                    _readiness_blocker(
+                        "draft_code_findings_unresolved",
+                        (
+                            f"Repository has {unresolved_draft_count} unresolved draft "
+                            f"code finding(s){stale_detail}; re-review and rebind when "
+                            "needed, then promote, merge, or kill each "
+                            "draft before leaving verification."
+                        ),
+                        repo_id=draft_repo_id,
+                    )
+                )
 
     coverage = code_coverage_summary(engagement.id)
     coverage_gate = coverage.get("gate", {})
@@ -9245,7 +9450,7 @@ def _requeue_selector(item: dict[str, Any], index: int) -> dict[str, Any]:
 
 _REQUEUE_TARGET_COLUMNS = """
     files.id, files.file_path, files.classification,
-    files.analysis_priority, repos.active_generation
+    files.analysis_priority, repos.active_generation, repos.repo_role
 """
 
 
@@ -9730,6 +9935,15 @@ def requeue_triggered_files(
                         f"trigger priority must equal the current analysis_priority "
                         f"{target['priority']} (received {supplied_priority})"
                     )
+            if str(row["repo_role"] or ANALYSIS_REPO_ROLE) != ANALYSIS_REPO_ROLE:
+                # Checked last so it outranks the other refusals: a trigger may
+                # legitimately point into framework source and the specialist
+                # reads and cites it, but turning that into durable work is the
+                # obligation the reference role exists to decline.
+                target["blocked_reason"] = (
+                    "target file is in a reference repository, which owns no "
+                    "review obligation"
+                )
             batch_theme = str(item.get("batch_theme", "")).strip()
             if batch_theme:
                 target["batch_theme"] = batch_theme
@@ -10048,13 +10262,18 @@ def code_coverage_cwe_detail(
     records, plus applicable_families computed from file slot_types."""
     engagement = _engagement_or_404(engagement_id)
 
-    repo_clause = """
-      AND f.repo_id IN (SELECT id FROM code_repos WHERE active_generation > 0)
+    repo_clause = f"""
+      AND f.repo_id IN (SELECT id FROM code_repos WHERE active_generation > 0
+                        AND {_analysis_repo_sql("code_repos")})
       AND f.retired_at IS NULL
     """
     repo_params: tuple[Any, ...] = ()
     if repo_id is not None:
-        repo_clause = " AND f.repo_id = ? AND f.retired_at IS NULL"
+        repo_clause = (
+            " AND f.repo_id = ? AND f.retired_at IS NULL"
+            " AND f.repo_id IN (SELECT id FROM code_repos WHERE"
+            f" {_analysis_repo_sql('code_repos')})"
+        )
         repo_params = (repo_id,)
 
     with get_connection() as connection:
@@ -10250,6 +10469,9 @@ def code_coverage_cwe_detail(
     return {
         "files": files_detail,
         "total_files": summary["total_files"],
+        "reference_repos": summary["reference_repos"],
+        "open_leases": summary["open_leases"],
+        "open_leases_count": summary["open_leases_count"],
         "by_classification": summary["by_classification"],
         "by_status": summary["by_status"],
         "gate": summary["gate"],

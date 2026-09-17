@@ -102,6 +102,12 @@ class CodeRepoCreateRequest(BaseModel):
     name: str = Field(min_length=1, max_length=256)
     language: str = Field(default="", max_length=64)
     repo_path: str = Field(min_length=1, max_length=4096)
+    # Omitted means "keep whatever this repository already declared", which is
+    # what makes a routine re-ingest safe: forgetting the flag can never hand
+    # the engagement a coverage obligation over a reference codebase. A repo
+    # that has never declared a role is `analysis`, so existing state is
+    # unchanged. See ``code_analysis.CODE_REPO_ROLES``.
+    repo_role: Literal["analysis", "reference"] | None = None
     source_origin_path: str = Field(default="", max_length=4096)
     source_kind: Literal["git", "directory", "legacy"] = "legacy"
     snapshot_manifest_path: str = Field(default="", max_length=4096)

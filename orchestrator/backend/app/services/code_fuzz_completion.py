@@ -887,10 +887,17 @@ def fuzz_states(engagement_id: int) -> list[dict[str, Any]]:
     engagement = _engagement_or_404(engagement_id)
     with get_connection() as connection:
         repos = connection.execute(
+            # `repo_role = 'analysis'` belongs HERE, not at the two consumers:
+            # `code/readiness?target_phase=fuzz` and `GET /report-readiness` both
+            # read this list, and a predicate copied into each would be two
+            # places to forget. A `reference` repository is indexed and citable
+            # but carries no review obligation, and "decide whether to fuzz it"
+            # is an obligation over a codebase nobody is reviewing.
             """
             SELECT * FROM code_repos
             WHERE engagement_id = ? AND active_generation > 0
               AND source_snapshot_quality = 'verified'
+              AND repo_role = 'analysis'
             ORDER BY id
             """,
             (engagement.id,),

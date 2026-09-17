@@ -167,7 +167,9 @@ _BLOCKER_REPAIRS = {
         "vigil assess code-dispatch queue <queue-items-json-file> — one row per "
         "admitted file, including skip-tier; "
         f"vigil assess code-dispatch list {_repo_selector(repo_id)} shows what is "
-        "already loaded"
+        "already loaded. If this repository is host/framework source nobody is "
+        "reviewing, re-ingest it with --role reference instead: it stays indexed "
+        "and citable and stops owing coverage"
     ),
     'source_snapshot_unverified': lambda repo_id: (
         "vigil assess code-ingest <repo-path> --repo-key <key> — a verified "
@@ -526,6 +528,21 @@ def _print_coverage(data: dict) -> None:
 
     print("=== Code Analysis Coverage ===")
     print(f"Total files: {total_files}")
+
+    # A reference repository's files are deliberately absent from every count
+    # above. Naming them keeps the smaller denominator explicit instead of
+    # letting an operator read it as a shrinking inventory.
+    reference_repos = data.get('reference_repos') or []
+    if isinstance(reference_repos, list) and reference_repos:
+        print("\nReference repositories (readable; no coverage obligation):")
+        for repo in reference_repos:
+            if not isinstance(repo, dict):
+                continue
+            name = repo.get('name') or repo.get('repo_key') or 'unknown'
+            print(
+                f"  {name} (repo {repo.get('repo_id', '?')}): "
+                f"{repo.get('admitted_files', 0)} indexed file(s)"
+            )
 
     # By Classification
     by_class = data.get('by_classification', {})

@@ -49,6 +49,11 @@ Durable design decisions live in [`docs/adr/`](docs/adr/).
 - **`vigil install` says what actually needs restarting.** It used to print the same "restart
   everything" list every time, including after the ordinary install that changes only prompt text
   and needs no restart. The summary is now derived per consumer, with the exact command for each.
+- **Reference repositories.** `vigil assess code-ingest --role reference` ingests host or framework
+  source for lookup without taking on responsibility for reviewing it. Reference files stay sealed,
+  indexed, searchable and citable with full source identity, and are excluded from queue population,
+  receipts, variants, fuzz completion and phase readiness. A plugin review no longer has to choose
+  between reading the host's code and owning a second large codebase's coverage debt.
 - **Framework registration is recorded separately from surface type.**
   `vigil assess record-surface --framework-registration <kind>` names how a host framework registers
   a plugin — service provider, HTTP endpoint, request interceptor, event listener, template
@@ -97,6 +102,17 @@ Durable design decisions live in [`docs/adr/`](docs/adr/).
   past that depth an older specialist that had just checkpointed could not appear in the section
   named "latest". The ordering now happens in the query. No schema or index change was needed, and
   the default ordering every other consumer relies on is untouched.
+- **A reference repository can no longer be handed analysis work.** Three paths let it happen:
+  the queue-claim query never filtered on `repo_role`, so re-ingesting a repository with
+  `--role reference` left its existing pending rows claimable (the role change does not advance
+  the generation, by design); `queue_stats` counted those rows, so the "is the queue drained"
+  signal the dispatch loop reads could never reach zero once they were excluded from claiming;
+  and a metadata refresh reopened file review on a reference repository with no demotion involved
+  at all, manufacturing fresh claimable rows. The role is now read live at every claim site rather
+  than written onto rows, so promoting a repository back to `analysis` restores its obligations
+  with nothing to undo. `code-dispatch list` still shows every row and now carries `repo_role`:
+  a listing that silently dropped rows would hide the exact IDs an operator needs, and there is no
+  adversary here to hide them from.
 - **Cold image builds no longer die at 20s.** `vigil up` and `vigil install` threaded one bounded
   runner through both fast metadata queries and image builds, so the bound that makes a wedged
   daemon fail fast killed every first-run Kali build and swallowed its progress output.

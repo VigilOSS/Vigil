@@ -724,6 +724,7 @@ def test_code_ingest_plain_directory_uses_canonical_directory_provenance(
                     "repo_generation": 1,
                     "source_manifest_digest": "d" * 64,
                     "retired": 0,
+                    "repo_role": "analysis",
                 }
             if endpoint == "code/repos/7/lsp-config":
                 assert payload["repo_generation"] == 1
@@ -797,6 +798,7 @@ def test_code_ingest_authenticates_complete_exclusion_accounting(
                     "repo_generation": 3,
                     "source_manifest_digest": "d" * 64,
                     "retired": 0,
+                    "repo_role": "analysis",
                 }
             if endpoint == "code/repos/7/lsp-config":
                 return _lsp_publish_response(payload)
@@ -931,6 +933,7 @@ def test_code_ingest_accepts_git_file_and_publishes_read_only_content_addressed_
                     "source_manifest_version": "code-source-manifest/v1",
                     "source_manifest_digest": "e" * 64,
                     "retired": 0,
+                    "repo_role": "analysis",
                 }
             if endpoint == "code/repos/7/lsp-config":
                 assert payload["repo_generation"] == 4

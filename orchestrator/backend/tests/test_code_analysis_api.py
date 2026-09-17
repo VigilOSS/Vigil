@@ -381,6 +381,7 @@ def _verified_repo_payload(
     repo_name: str | None = None,
     git: dict[str, object] | None = None,
     excluded_entries: list[dict[str, object]] | None = None,
+    repo_role: str | None = None,
 ) -> dict[str, object]:
     """Materialize one genuine engagement-owned read-only v2 test snapshot."""
     assert client.get("/engagements").status_code == 200
@@ -444,7 +445,7 @@ def _verified_repo_payload(
     except BaseException:
         builder.abort()
         raise
-    return {
+    payload: dict[str, object] = {
         "repo_key": repo_key,
         "name": repo_name or repo_key,
         "language": "python",
@@ -464,13 +465,25 @@ def _verified_repo_payload(
         "branch": git_provenance["branch"],
         "git_churn": {},
     }
+    # Omitted means "keep the recorded role", which is the ingest default.
+    if repo_role is not None:
+        payload["repo_role"] = repo_role
+    return payload
 
 
-def _create_repo(client, engagement_key: str, repo_key: str = "demo-repo") -> dict[str, object]:
+def _create_repo(
+    client,
+    engagement_key: str,
+    repo_key: str = "demo-repo",
+    *,
+    repo_role: str | None = None,
+) -> dict[str, object]:
     base = f"/engagements/{engagement_key}/assessment/code"
     started = client.post(
         f"{base}/repos/refresh/start",
-        json=_verified_repo_payload(client, engagement_key, repo_key),
+        json=_verified_repo_payload(
+            client, engagement_key, repo_key, repo_role=repo_role
+        ),
     )
     assert started.status_code == 201, started.text
     refresh = started.json()
@@ -611,6 +624,8 @@ def _refresh_repo_files(
     engagement_key: str,
     repo_id: int,
     files: list[dict[str, object]],
+    *,
+    repo_role: str | None = None,
 ) -> list[dict[str, object]]:
     base = f"/engagements/{engagement_key}/assessment/code"
     repo = client.get(f"{base}/repos/{repo_id}").json()
@@ -623,6 +638,7 @@ def _refresh_repo_files(
             files,
             source_origin_path=str(repo["source_origin_path"]),
             repo_name=str(repo["name"]),
+            repo_role=repo_role,
         ),
     )
     assert started.status_code == 201, started.text
@@ -1613,6 +1629,7 @@ def test_changed_generation_preserves_grouped_receipt_queue_and_trigger_history(
         "superseded_history": 1,
         "invalid_active_identity": 0,
         "invalid_active_history": 0,
+        "reference_repo_items": [],
     }
 
     coverage = client.get(f"{base}/coverage?repo_id={repo['id']}&detail=cwe").json()
@@ -4310,6 +4327,7 @@ def test_generation_zero_repo_children_are_hidden_and_immutable_across_public_ap
             "superseded_history": 0,
             "invalid_active_identity": 0,
             "invalid_active_history": 0,
+            "reference_repo_items": [],
         }
     assert client.post(
         f"{base}/analysis-queue/fetch",
@@ -14203,6 +14221,7 @@ def test_initial_queue_retry_never_updates_pending_row_with_lease_identity(
             "superseded_history": 0,
             "invalid_active_identity": 1,
             "invalid_active_history": 0,
+            "reference_repo_items": [],
     }
 
 
@@ -14590,6 +14609,7 @@ def test_queue_stats_projects_latest_attempt_and_reports_preserved_history(
         "superseded_history": 1,
         "invalid_active_identity": 0,
         "invalid_active_history": 0,
+        "reference_repo_items": [],
     }
 
 

@@ -22,6 +22,7 @@ from assess.lib.code_snapshot import (
     validate_repo_key,
 )
 from assess.lib.config import load_config
+from assess.lib.contracts import CODE_REPO_ROLES
 from assess.lib.trusted_exec import (
     git_command,
     trusted_environment,
@@ -117,7 +118,7 @@ def _require_refresh_start_receipt(response: object) -> tuple[int, str]:
 
 def _require_refresh_commit_receipt(
     response: object, *, requested_repo_id: int
-) -> tuple[int, str]:
+) -> tuple[int, str, str]:
     if not isinstance(response, dict):
         raise _refresh_receipt_error(
             "commit code repository refresh", "response object"
@@ -126,6 +127,7 @@ def _require_refresh_commit_receipt(
     repo_generation = response.get("repo_generation")
     source_manifest_digest = response.get("source_manifest_digest")
     retired = response.get("retired")
+    repo_role = response.get("repo_role")
     invalid: list[str] = []
     if (
         not isinstance(returned_repo_id, int)
@@ -146,13 +148,18 @@ def _require_refresh_commit_receipt(
         invalid.append("source_manifest_digest")
     if not isinstance(retired, int) or isinstance(retired, bool) or retired < 0:
         invalid.append("retired")
+    # The role decides whether this ingest bought a coverage obligation, so the
+    # receipt must prove which one was durably written rather than echoing what
+    # the caller asked for.
+    if repo_role not in CODE_REPO_ROLES:
+        invalid.append("repo_role")
     if "deleted" in response:
         invalid.append("deleted is not a supported refresh-result field")
     if invalid:
         raise _refresh_receipt_error(
             "commit code repository refresh", ", ".join(invalid)
         )
-    return repo_generation, source_manifest_digest
+    return repo_generation, source_manifest_digest, repo_role
 
 
 def _which(binary: str, *, source_root: str | os.PathLike[str] | None = None) -> str | None:
@@ -292,6 +299,20 @@ def register(subparsers) -> None:
              "structural indexing.",
     )
     p.add_argument("--repo-key", default=None, help="Explicit repository key (default: stable name+path hash)")
+    p.add_argument(
+        "--role",
+        choices=CODE_REPO_ROLES,
+        default=None,
+        help=(
+            "Repository obligation role. 'analysis' (the default for a new "
+            "repository) is the reviewed subject: every admitted file owes a "
+            "queue row, terminal accounting, variant coverage and phase "
+            "readiness. 'reference' is host/framework source loaded only so a "
+            "specialist can resolve a symbol and cite it — sealed, indexed, "
+            "searchable and citable, but never coverage. Omit on a re-ingest to "
+            "keep the role the repository already has."
+        ),
+    )
     p.add_argument(
         "--include-minified",
         action="store_true",
@@ -1522,6 +1543,10 @@ def run(args) -> None:
                 else {}
             ),
         }
+        # Omitted means "keep the role this repository already declared", so a
+        # routine re-ingest of framework source cannot silently re-arm coverage.
+        if getattr(args, 'role', None) is not None:
+            repo_payload['repo_role'] = args.role
         refresh = client.post('code/repos/refresh/start', repo_payload)
         repo_id, refresh_token = _require_refresh_start_receipt(refresh)
 
@@ -1546,9 +1571,8 @@ def run(args) -> None:
             f'code/repos/{repo_id}/refresh/commit',
             {'refresh_token': refresh_token, 'manifest_complete': True},
         )
-        repo_generation, committed_digest = _require_refresh_commit_receipt(
-            commit,
-            requested_repo_id=repo_id,
+        repo_generation, committed_digest, committed_role = (
+            _require_refresh_commit_receipt(commit, requested_repo_id=repo_id)
         )
 
         ctags_output = (
@@ -1631,6 +1655,11 @@ def run(args) -> None:
     print(f"Snapshot digest: {snapshot.snapshot_digest}")
     print(f"Source manifest digest: {committed_digest}")
     print(f"Repository generation: {repo_generation}")
+    role_note = (
+        "" if committed_role == "analysis"
+        else " (indexed and citable; no coverage, queue or readiness obligation)"
+    )
+    print(f"Repository role: {committed_role}{role_note}")
     _print_skip_census(skip_census, len(files), sys.stdout)
     print(f"Analyzable files: {analyzable_files}")
     if included_skipped:
