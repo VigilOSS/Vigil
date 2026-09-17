@@ -119,7 +119,36 @@ def _preflight_engagement_start(
             "`vigil assess kali` calls will fail until you run `vigil up`.",
             file=sys.stderr,
         )
+    _warn_if_ripgrep_missing()
     _warn_if_install_stale(install_root)
+
+
+def _warn_if_ripgrep_missing() -> None:
+    """Name the one missing tool whose failure mode is silence.
+
+    `agent/shared-constraints-code.md` ranks `rg` second only to the ctags index
+    for code specialists, and uses the ripgrep-only `--type` flag. Claude and
+    OpenCode bundle their own Grep tool, but the Codex and Goose hunters have
+    shell only: on a host without ripgrep every one of their searches is exit
+    127, and a specialist reads that as "no results" rather than "tool missing".
+    A coverage tool that reports clean coverage of code it never searched is the
+    worst shape this failure could take, and nothing else in Vigil checks for it
+    — ripgrep is in no dependency manifest and ships only in the runtime image,
+    which code analysis does not use.
+
+    Advisory, never a refusal: a web engagement reaches no code search at all,
+    and a Claude or OpenCode hunter has its own tool.
+    """
+    if shutil.which("rg") is not None:
+        return
+    print(
+        "[vigil] WARN: ripgrep (`rg`) not found on PATH; it is the code track's "
+        "primary search tool after the ctags index. Codex and Goose specialists "
+        "have shell only, so their searches would exit 127 and read as "
+        "\"no results\" instead of \"tool missing\" — install ripgrep before "
+        "running code analysis on this host.",
+        file=sys.stderr,
+    )
 
 
 def _warn_if_install_stale(install_root: Path) -> None:

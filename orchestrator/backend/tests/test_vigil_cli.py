@@ -4355,6 +4355,77 @@ def test_doctor_reports_missing_binary_without_crashing(tmp_path: Path, monkeypa
     assert "MISSING\tuv" in capsys.readouterr().out
 
 
+def test_doctor_reports_missing_ripgrep_and_says_what_degrades(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`rg` is the code track's primary search tool and nothing checked for it.
+
+    `agent/shared-constraints-code.md` ranks ripgrep second only to the ctags
+    index and uses the ripgrep-only `--type` flag, but Claude and OpenCode ship
+    their own Grep tool while the Codex and Goose hunters have shell only. On a
+    host with no ripgrep those hunters get exit 127 per search, and the failure
+    presents as "no results" rather than "tool missing" — the shape that makes a
+    coverage tool report clean coverage of code it never read. A bare MISSING
+    row would not say that, so the row carries the degradation.
+    """
+    from vigil_cli import main as main_module
+    from vigil_cli import status as status_module
+    from vigil_cli.docker import DockerResult
+
+    def fake_run(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(argv, 0, "ok", "")
+
+    def fake_which(command: str) -> str | None:
+        return None if command == "rg" else f"/usr/bin/{command}"
+
+    def fake_docker(argv: list[str], **_: object) -> DockerResult:
+        if argv[:3] == ["docker", "ps", "--format"]:
+            return DockerResult(0, "", "")
+        return DockerResult(0, "ok", "")
+
+    monkeypatch.setattr(status_module.shutil, "which", fake_which)
+    monkeypatch.setattr(status_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(main_module, "docker_run_command", fake_docker)
+
+    # `tmp_path` has no `agent/` tree, so doctor exits non-zero on that required
+    # row; what this pins is the ripgrep row and its detail being printed.
+    with pytest.raises(SystemExit):
+        main_module.main(["--root", str(tmp_path), "doctor"])
+
+    output = capsys.readouterr().out
+    assert "MISSING\trg\t" in output
+    ripgrep_row = next(line for line in output.splitlines() if line.startswith("MISSING\trg\t"))
+    assert "code" in ripgrep_row
+    assert "codex" in ripgrep_row.lower() and "goose" in ripgrep_row.lower()
+
+
+def test_doctor_does_not_require_ripgrep(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Advisory, like `fzf`: a web engagement never reaches a code search."""
+    from vigil_cli import status as status_module
+    from vigil_cli.docker import DockerResult
+
+    monkeypatch.setattr(
+        status_module.shutil,
+        "which",
+        lambda command: None if command == "rg" else f"/usr/bin/{command}",
+    )
+    monkeypatch.setattr(
+        status_module.subprocess,
+        "run",
+        lambda argv, **_: subprocess.CompletedProcess(argv, 0, "ok", ""),
+    )
+
+    checks = status_module.collect_doctor_checks(
+        tmp_path, runner=lambda argv, **_: DockerResult(0, "ok", "")
+    )
+
+    ripgrep = next(check for check in checks if check.name == "rg")
+    assert ripgrep.status == "MISSING"
+    assert ripgrep.required is False
+
+
 def test_doctor_skips_docker_checks_when_docker_cli_missing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

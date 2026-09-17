@@ -331,6 +331,68 @@ def test_red_start_warns_but_proceeds_when_the_local_stack_is_down(
     assert red_env["started"] == "goose"
 
 
+def test_red_start_warns_when_ripgrep_is_absent(
+    red_env: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Ripgrep is load-bearing for the code track and was never checked anywhere.
+
+    `agent/shared-constraints-code.md` ranks `rg` second only to the ctags index
+    and uses the ripgrep-only `--type` flag. Claude and OpenCode bundle their own
+    Grep tool, but the Codex and Goose hunters have shell only: with no ripgrep
+    on the host every search is exit 127, and the specialist reads that as "no
+    results" rather than "tool missing". That is the dangerous failure shape for
+    a coverage tool — it reports clean coverage of code it never searched.
+
+    Advisory, not a refusal: a web engagement never reaches a code search, and a
+    Claude/OpenCode hunter has its own tool.
+    """
+    monkeypatch.setattr(
+        preflight_module.shutil,
+        "which",
+        lambda name: None if name == "rg" else "/usr/bin/client",
+    )
+
+    _red_start(red_env["install_root"], "goose")  # type: ignore[arg-type]
+
+    stderr = capsys.readouterr().err
+    assert "WARN: ripgrep (`rg`) not found on PATH" in stderr
+    assert "codex" in stderr.lower() and "goose" in stderr.lower()
+    assert "no results" in stderr
+    assert red_env["started"] == "goose"
+
+
+def test_blue_start_warns_when_ripgrep_is_absent(
+    blue_env: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Same module, so the blue launcher must carry it too."""
+    monkeypatch.setattr(
+        preflight_module.shutil,
+        "which",
+        lambda name: None if name == "rg" else "/usr/bin/client",
+    )
+
+    _blue_engage(blue_env["install_root"], "--start", "codex")  # type: ignore[arg-type]
+
+    captured = capsys.readouterr()
+    assert "WARN: ripgrep (`rg`) not found on PATH" in captured.err
+    assert blue_env["started"] == "codex"
+    # Warnings are stderr only; stdout stays the bare engagement path.
+    assert captured.out == f"{blue_env['dir']}\n"
+
+
+def test_a_present_ripgrep_produces_no_warning(
+    red_env: dict[str, object], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The check must stay silent on the hosts that have it."""
+    _red_start(red_env["install_root"], "goose")  # type: ignore[arg-type]
+
+    assert "ripgrep" not in capsys.readouterr().err
+
+
 # ── --skip-preflight bypasses it on both paths ───────────────────────────────
 
 

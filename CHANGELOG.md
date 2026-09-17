@@ -117,6 +117,15 @@ Durable design decisions live in [`docs/adr/`](docs/adr/).
   point. The structural indexer now reads each `attribute_list` verbatim as `#[...]`, and the
   streaming scanner stops reading a leading `#[` as a PHP line comment, which had removed the whole
   line from every detector below it.
+- **`vigil doctor` and the engagement preflight check for ripgrep.** The row is advisory
+  (`required=False`), like `fzf`: useful, not universally installed, and irrelevant to a web
+  engagement. It matters on the code track — `agent/shared-constraints-code.md` ranks `rg` second
+  only to the ctags index and uses the ripgrep-only `--type` flag, and the Codex and Goose hunters
+  have shell only, so on a host without it every search exits 127, which a specialist reads as "no
+  results" rather than "tool missing". That is the failure shape that makes a coverage tool report
+  clean coverage of code it never read. Nothing else checked: ripgrep is in no dependency manifest
+  and ships only in the runtime image, which code analysis does not use. The row says what is lost
+  rather than leaving a bare `MISSING`.
 
 ### Fixed
 

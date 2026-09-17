@@ -75,6 +75,13 @@ first; `--json` gives a machine-readable readiness report. The orchestrator UI i
 `http://127.0.0.1:18000` once the stack is up. Vigil is distributed from source — pin a Git
 revision for reproducible installs, or use `uv tool install --editable .` for development.
 
+**Install ripgrep (`rg`) before running a code engagement.** It is the code track's primary search
+tool after the ctags index, and it is in no dependency manifest — it ships only in the runtime
+image, which code analysis does not use. Claude and opencode bundle their own search tool, but
+Codex and goose specialists have shell only: without `rg` their searches exit 127 and the operator
+reads that as "no results" rather than "tool missing". `vigil doctor` reports it and
+`vigil engagement start` warns on stderr; neither blocks.
+
 ### The two layers: CLI binary vs working root
 
 The **CLI binary** (`vigil` itself) is installed and upgraded with `uv tool install` /

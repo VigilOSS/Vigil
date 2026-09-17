@@ -546,17 +546,36 @@ def _install_staleness_check(install_root: Path) -> Check:
     )
 
 
+# What an operator loses without ripgrep, said on the row rather than left to a
+# bare MISSING. `agent/shared-constraints-code.md` ranks `rg` second only to the
+# ctags index for code specialists and uses the ripgrep-only `--type` flag.
+# Claude and OpenCode bundle their own Grep tool; the Codex and Goose hunters
+# have shell only, so every search on a host without ripgrep is exit 127 — which
+# a specialist reads as "no results", not "tool missing". That is the failure
+# shape that makes a coverage tool report clean coverage of code it never read.
+# Nothing else checks for it: ripgrep is in no dependency manifest and ships
+# only in the runtime image, which code analysis does not use.
+_RIPGREP_DEGRADATION = (
+    "code-track search tool; Codex and Goose specialists have shell only, so "
+    "their searches exit 127 and read as \"no results\" rather than \"tool "
+    "missing\" — install ripgrep before running code analysis here"
+)
+
+
 def collect_doctor_checks(install_root: Path, *, runner: docker.Runner = docker.run_command) -> list[Check]:
     checks: list[Check] = []
     binary_status: dict[str, str] = {}
-    for command in ("uv", "docker", "npm", "codex", "claude", "fzf"):
+    for command in ("uv", "docker", "npm", "codex", "claude", "fzf", "rg"):
         check = _binary_check(command)
         # Docker alone is required: every runtime, orchestrator, and proxy path
         # goes through it. The client binaries are not — Vigil supports five and
         # an operator needs one — and `uv`/`npm` are build-time tools an install
-        # can already have run.
+        # can already have run. `rg` is advisory for the same reason `fzf` is:
+        # useful, not universally installed, and not needed by a web engagement.
         if command == "docker" and check.status != "OK":
             check = replace(check, required=True)
+        elif command == "rg" and check.status != "OK":
+            check = replace(check, detail=_RIPGREP_DEGRADATION)
         checks.append(check)
         binary_status[command] = check.status
     install_root = install_root.expanduser().resolve()
