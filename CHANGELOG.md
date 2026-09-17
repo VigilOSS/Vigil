@@ -11,6 +11,18 @@ Durable design decisions live in [`docs/adr/`](docs/adr/).
 
 - **`vigil update` is gone.** It was a verbatim duplicate of `vigil install` with no behavior of
   its own. Use `vigil install` — it upgrades a working root in place.
+- **The `PreToolUse` command-filtering hook is gone.** `scope-check.sh` matched every shell command
+  against four destructive shapes. It could not do the job: `rm -rf /tmp/x` was blocked but
+  `bash -c "rm -rf /tmp/x"` was not, `git clean -fd` was blocked but `eval`, `sh -c`, `$(echo git)`
+  and a `subprocess.run` list all sailed through, and `find . -delete` and `git reset --hard` were
+  never covered at all — the same wrapped-shell blind spot that condemned the masking layer in
+  ADR 0019. It also cost two silent failures: one spelling of the flags missed four of six orderings,
+  and matching an option value as a run of non-space characters disabled the guard entirely for any
+  repository path containing a space. A guard that fails silently is worse than none, because it is
+  trusted. ADR 0019 records why it is not coming back in that form, and `TODO.md` scopes what a
+  guardrail that acts where commands execute — rather than where they are spelled — would have to
+  answer. Activity logging, compaction and session-end hooks are unaffected, as is the benchmark
+  anti-cheat `PreToolUse` guard, which has a real adversary in the benchmarked model.
 - **Two session commands are gone.** `vigil-escalate-honestly` paraphrased the FP/severity gate a
   session already runs; `vigil-encapsulate-win` told the model to write its own conclusions into
   the shared methodology mid-engagement, which is a human review decision.
@@ -43,10 +55,11 @@ Durable design decisions live in [`docs/adr/`](docs/adr/).
 - **Cold image builds no longer die at 20s.** `vigil up` and `vigil install` threaded one bounded
   runner through both fast metadata queries and image builds, so the bound that makes a wedged
   daemon fail fast killed every first-run Kali build and swallowed its progress output.
-- **The Codex scope guard stays live.** Codex gates project-local hooks behind a per-hash trust
-  review; declining it started a normal-looking session with `scope-check.sh` disabled and no
-  indication anywhere in the UI. Generated Codex launchers now vouch for the hooks Vigil itself
-  wrote. The guard also missed `git -C <path> clean -fd`, which it now refuses.
+- **Codex hooks stay live.** Codex gates project-local hooks behind a per-hash trust review;
+  declining it started a normal-looking session with Vigil's hooks disabled and no indication
+  anywhere in the UI — so the activity log an engagement's audit trail depends on, and the
+  session-end receipt, were silently absent. Generated Codex launchers now vouch for the hooks Vigil
+  itself wrote.
 - **`vigil quickstart` no longer reports `[ok] docker`** on a host with the client binary and no
   running daemon; it shares `vigil doctor`'s daemon probe.
 - **A relay slot is allocated whenever OOB is configured**, not only by the install that first

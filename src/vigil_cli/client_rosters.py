@@ -224,7 +224,7 @@ def ensure_codex_config(
     if not config_src.is_file():
         return
     target_root = rendered_agent_root or agent_root
-    script_names = ("scope-check.sh", "post-tool-log.sh", "session-end.sh")
+    script_names = ("post-tool-log.sh", "session-end.sh")
     rendered_lines: list[str] = []
     for line in config_src.read_text(encoding="utf-8").splitlines(keepends=True):
         script_name = next((name for name in script_names if name in line), None)
@@ -299,7 +299,6 @@ def ensure_claude_settings(
                     continue
                 for script_name in (
                     "post-tool-log.sh",
-                    "scope-check.sh",
                     "pre-compact.sh",
                     "session-end.sh",
                 ):
@@ -323,8 +322,7 @@ def ensure_opencode_plugin(agent_root: Path, opencode_dir: Path) -> None:
     """Copy the standard OpenCode plugin into an engagement cwd when present.
 
     Mirrors ``ensure_claude_settings``: refresh stale copies during repair so a
-    fix to the standard scope-check/activity-log plugin reaches existing
-    engagements too. Written to both ``plugin`` and ``plugins`` (the binary
+    fix to the standard activity-log plugin reaches existing engagements too. Written to both ``plugin`` and ``plugins`` (the binary
     honours either directory name; the singular is predominant).
     """
     plugin_src = agent_root / ".opencode" / "plugin" / "standard-hooks.js"
@@ -363,8 +361,8 @@ def _goose_hook_command(agent_root: Path, target: Path, *, env_prefix: str = "")
 
     Goose's PreToolUse/PostToolUse payload uses the bare shell tool name ``shell`` (goose
     v1.38.0; ``developer__shell`` in older/doc-form builds) with the command at
-    ``tool_input.command``; the shared hook scripts (scope-check.sh, post-tool-log.sh,
-    bench-guard.sh) key on the Claude ``tool_name == "Bash"`` contract.
+    ``tool_input.command``; the shared hook scripts (post-tool-log.sh, bench-guard.sh)
+    key on the Claude ``tool_name == "Bash"`` contract.
     ``goose-hook-adapter.sh`` reshapes Goose's payload to that contract and pipes it to
     ``<target>``, propagating the exit code (2 = block). ``env_prefix`` lets the bench
     bake in ``VIGIL_BENCH_OWN_ENGAGEMENT=<key>`` for the guard's cross-attempt isolation.
@@ -380,15 +378,16 @@ def ensure_goose_standard_hooks(
     *,
     rendered_agent_root: Path | None = None,
 ) -> None:
-    """Write the standard Goose hooks plugin (scope-check + activity-log) into an engagement.
+    """Write the standard Goose hooks plugin (activity log) into an engagement.
 
     Mirrors ``ensure_opencode_plugin``: Goose hooks invoke shell scripts directly, so
-    they reuse the SHARED scope-check.sh (block destructive) on PreToolUse and
-    post-tool-log.sh (activity log for the taint audit) on PostToolUse — both via
-    goose-hook-adapter.sh (payload reshape). Deterministic content → idempotent
-    overwrite, refreshed on repair so a hook-path fix reaches existing engagements.
-    The bench layers its guard-only hook beside this (anticheat._patch_goose_hooks),
-    exactly like the Claude/Codex/OpenCode guard layers on the standard hooks.
+    this reuses the SHARED post-tool-log.sh (activity log for the taint audit) on
+    PostToolUse, via goose-hook-adapter.sh (payload reshape). Deterministic content →
+    idempotent overwrite, refreshed on repair so a hook-path fix reaches existing
+    engagements. There is no standard PreToolUse hook: Vigil does not filter its own
+    operator's commands (ADR 0019). The bench layers its guard-only PreToolUse hook
+    beside this (anticheat._patch_goose_hooks), exactly like the Claude/Codex/OpenCode
+    guard layers on the standard hooks.
     """
     hooks_src = agent_root / "scripts" / "hooks"
     command_agent_root = rendered_agent_root or agent_root
@@ -397,26 +396,13 @@ def ensure_goose_standard_hooks(
         return
     # Goose v1.38.0's tool names are BARE — `shell`, `write`, `edit`, `tree`, `read_image`
     # — NOT `developer__*` (its docs are wrong; verified by a live run). The earlier
-    # `developer__.*` matcher matched NOTHING, so scope-check.sh and post-tool-log.sh never
-    # ran on Goose. Goose matches by regex-SEARCH, so listing the bare names also catches the
-    # doc-form `developer__shell`/`developer__write` of older builds. Match the file tools
-    # too: scope-check stays shell-only (the adapter reshapes a file tool to `fileop <path>`,
-    # which has no destructive-command pattern) but post-tool-log records file writes.
+    # `developer__.*` matcher matched NOTHING, so post-tool-log.sh never ran on Goose.
+    # Goose matches by regex-SEARCH, so listing the bare names also catches the doc-form
+    # `developer__shell`/`developer__write` of older builds. The file tools are in the
+    # matcher so post-tool-log records file writes, not only shell commands.
     matcher = "shell|write|edit|tree|read_image|text_editor"
     config = {
         "hooks": {
-            "PreToolUse": [
-                {
-                    "matcher": matcher,
-                    "hooks": [{
-                        "type": "command",
-                        "command": _goose_hook_command(
-                            command_agent_root, command_hooks_src / "scope-check.sh"
-                        ),
-                        "timeout": 30,
-                    }],
-                }
-            ],
             "PostToolUse": [
                 {
                     "matcher": matcher,

@@ -1,172 +1,18 @@
+"""Target-scope admission contracts: `vigil assess filter-scope` and endpoint ingest.
+
+These cover the in-scope-host boundary (ADR 0019 keeps it: it protects
+third parties who did not consent, not the operator). The `PreToolUse`
+command-filtering hook that this file also used to exercise is gone — see
+ADR 0019, "PreToolUse command-filtering hooks are not reintroduced".
+"""
+
 from __future__ import annotations
 
 import importlib.util
 import json
-import os
-import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-
-import pytest
-
-
-def _run_scope_check(command: str, engagement_dir: Path) -> subprocess.CompletedProcess[str]:
-    repo_root = Path(__file__).resolve().parents[3]
-    script = repo_root / "agent" / "scripts" / "hooks" / "scope-check.sh"
-    payload = {
-        "tool_name": "Bash",
-        "tool_input": {"command": command},
-        "agent_type": "operator",
-    }
-    env = os.environ.copy()
-    env["ENGAGEMENT_DIR"] = str(engagement_dir)
-    return subprocess.run(
-        ["bash", str(script)],
-        input=json.dumps(payload),
-        text=True,
-        capture_output=True,
-        cwd=str(repo_root / "agent"),
-        env=env,
-        check=False,
-    )
-
-
-def test_scope_check_allows_local_only_command(tmp_path: Path) -> None:
-    engagement_dir = tmp_path / "engagement"
-    engagement_dir.mkdir()
-    (engagement_dir / "scope.json").write_text(
-        json.dumps({"hostname": "target.example", "scope": ["target.example"]}),
-        encoding="utf-8",
-    )
-
-    result = _run_scope_check("jq -r '.target' scope.json", engagement_dir)
-
-    assert result.returncode == 0
-
-
-def test_scope_check_allows_host_side_target_command(tmp_path: Path) -> None:
-    engagement_dir = tmp_path / "engagement"
-    engagement_dir.mkdir()
-    (engagement_dir / "scope.json").write_text(
-        json.dumps({"hostname": "target.example", "scope": ["target.example"]}),
-        encoding="utf-8",
-    )
-
-    result = _run_scope_check('python3 -c "print(1)" https://target.example/admin', engagement_dir)
-
-    assert result.returncode == 0
-
-
-def test_scope_check_allows_audited_kali_exec_with_raw_tool_name(tmp_path: Path) -> None:
-    engagement_dir = tmp_path / "engagement"
-    engagement_dir.mkdir()
-    (engagement_dir / "scope.json").write_text(
-        json.dumps({"hostname": "target.example", "scope": ["target.example"]}),
-        encoding="utf-8",
-    )
-
-    result = _run_scope_check(
-        "vigil assess kali exec --technique HEALTH --intent tooling --probe-kind fingerprint --phase recon --timeout 30 -- curl -sS https://target.example",
-        engagement_dir,
-    )
-
-    assert result.returncode == 0
-
-
-def test_scope_check_allows_when_scope_metadata_is_missing(tmp_path: Path) -> None:
-    engagement_dir = tmp_path / "engagement"
-    engagement_dir.mkdir()
-
-    result = _run_scope_check('python3 -c "print(1)" https://target.example/admin', engagement_dir)
-
-    assert result.returncode == 0
-
-
-def test_scope_check_allows_explicitly_out_of_scope_host(tmp_path: Path) -> None:
-    engagement_dir = tmp_path / "engagement"
-    engagement_dir.mkdir()
-    (engagement_dir / "scope.json").write_text(
-        json.dumps(
-            {
-                "hostname": "target.example",
-                "scope_mode": "wildcard",
-                "scope_hosts": ["target.example", "*.target.example"],
-                "out_of_scope_hosts": ["admin.target.example"],
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    result = _run_scope_check('python3 -c "print(1)" https://admin.target.example/panel', engagement_dir)
-
-    assert result.returncode == 0
-
-
-def test_scope_check_blocks_recursive_force_delete(tmp_path: Path) -> None:
-    engagement_dir = tmp_path / "engagement"
-    engagement_dir.mkdir()
-
-    result = _run_scope_check("rm -rf /tmp/vigil-engagement-scratch", engagement_dir)
-
-    assert result.returncode == 2
-    assert "recursive delete" in result.stderr.lower()
-
-
-def test_scope_check_blocks_destructive_disk_operation(tmp_path: Path) -> None:
-    engagement_dir = tmp_path / "engagement"
-    engagement_dir.mkdir()
-
-    result = _run_scope_check("sudo dd if=/dev/zero of=/dev/disk4 bs=1m", engagement_dir)
-
-    assert result.returncode == 2
-    assert "disk operation" in result.stderr.lower()
-
-
-@pytest.mark.parametrize(
-    "command",
-    [
-        "git clean -fdx",
-        "git clean -fxd",
-        "git clean -dfx",
-        "git clean -dxf",
-        "git clean -xfd",
-        "git clean -xdf",
-        "git clean -fd",
-        "git clean -df",
-        "git clean -f -d",
-        "git clean -d -f",
-        "git clean --force -d",
-        "git clean -d --force",
-        "cd /repo && git clean -xfd",
-    ],
-)
-def test_scope_check_blocks_forced_recursive_git_clean(tmp_path: Path, command: str) -> None:
-    engagement_dir = tmp_path / "engagement"
-    engagement_dir.mkdir()
-    result = _run_scope_check(command, engagement_dir)
-    assert result.returncode == 2, f"{command!r} should be blocked"
-    assert "git clean" in result.stderr.lower()
-
-
-@pytest.mark.parametrize(
-    "command",
-    [
-        "git clean -n",
-        "git clean -fdxn",
-        "git clean -f -d --dry-run",
-        "git clean -i",
-        "git clean -f",
-        "git clean -f -e keep.txt",
-        "git status",
-        "git checkout -- .",
-    ],
-)
-def test_scope_check_allows_non_recursive_or_dryrun_git_clean(tmp_path: Path, command: str) -> None:
-    engagement_dir = tmp_path / "engagement"
-    engagement_dir.mkdir()
-    result = _run_scope_check(command, engagement_dir)
-    assert result.returncode == 0, f"{command!r} should be allowed"
 
 
 # ---------------------------------------------------------------------------

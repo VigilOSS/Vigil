@@ -343,7 +343,6 @@ def test_aith_engagement_create_writes_explicit_web_scope(tmp_path: Path, monkey
     claude_settings = (created.path / ".claude" / "settings.json").read_text(encoding="utf-8")
     assert "VIGIL_AGENT_ROOT" not in claude_settings
     assert str(sandbox_root / "scripts" / "hooks" / "post-tool-log.sh") in claude_settings
-    assert str(sandbox_root / "scripts" / "hooks" / "scope-check.sh") in claude_settings
     assert str(sandbox_root / "scripts" / "hooks" / "pre-compact.sh") in claude_settings
     assert str(sandbox_root / "scripts" / "hooks" / "session-end.sh") in claude_settings
     claude_agents = created.path / ".claude" / "agents"
@@ -440,7 +439,6 @@ def test_repair_refreshes_stale_claude_hook_settings(tmp_path: Path) -> None:
         shlex.split(command)[1] for command in repaired_commands
     } == {
         str(sandbox_root / "scripts" / "hooks" / "post-tool-log.sh"),
-        str(sandbox_root / "scripts" / "hooks" / "scope-check.sh"),
         str(sandbox_root / "scripts" / "hooks" / "pre-compact.sh"),
         str(sandbox_root / "scripts" / "hooks" / "session-end.sh"),
     }

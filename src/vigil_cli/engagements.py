@@ -610,7 +610,7 @@ def create_engagement(
             _write_codex_config(agent_root, eng_dir)
         if client_kind in {"claude", "both"}:
             _write_claude_config(agent_root, eng_dir)
-        # OpenCode parity: the standard plugin (scope-check + activity-log) and the
+        # OpenCode parity: the standard plugin (activity-log) and the
         # specialist roster install for every kind that also gets start_opencode.sh
         # (codex/claude/both), so an `--client opencode` run — including `vigil bench`,
         # whose engagement creation routes through here — has the standard logging
@@ -618,7 +618,7 @@ def create_engagement(
         if client_kind in {"codex", "claude", "both"}:
             _write_opencode_config(agent_root, eng_dir)
         # Goose parity: the operator prompt (`.goosehints`), the specialist recipe roster
-        # (`.goose/recipes` link), and the standard hooks plugin (scope-check + activity-log)
+        # (`.goose/recipes` link), and the standard hooks plugin (activity-log)
         # install for every kind that also gets start_goose.sh, so an `--client goose` run —
         # including `vigil bench` — has them in place. The bench layers its guard-only hook
         # beside the standard one (anticheat._patch_goose_hooks). Written AFTER
@@ -2142,8 +2142,8 @@ def _write_opencode_config(agent_root: Path, eng_dir: Path) -> None:
 
     Mirrors ``_write_codex_config`` / ``_write_claude_config``: OpenCode reads
     neither Claude's ``settings.json`` nor Codex's ``config.toml``, so the standard
-    scope-check + activity-log hooks ship as an OpenCode *plugin* copied from the
-    agent-root template ``agent/.opencode/plugin/standard-hooks.js``. The plugin is
+    activity-log hook ships as an OpenCode *plugin* copied from the agent-root
+    template ``agent/.opencode/plugin/standard-hooks.js``. The plugin is
     written to BOTH ``.opencode/plugin/`` and ``.opencode/plugins/`` so it loads
     regardless of which directory name the installed OpenCode honours (the binary
     documents both; the singular ``plugin/`` is predominant). The specialist roster
@@ -2215,9 +2215,9 @@ def _write_goose_config(
       step — the default ``goose run`` agent already holds the ``delegate`` tool.
     - ``.goose/recipes`` — symlink to the generated specialist roster; the operator
       dispatches by name (``delegate source <role>``), resolved via ``GOOSE_RECIPE_PATH``.
-    - ``.agents/plugins/vigil-standard`` — the standard hooks plugin (scope-check +
-      activity-log), running the SHARED shell scripts via the payload adapter. The bench
-      layers its guard-only hook beside it (anticheat._patch_goose_hooks).
+    - ``.agents/plugins/vigil-standard`` — the standard hooks plugin (activity-log),
+      running the SHARED shell script via the payload adapter. The bench layers its
+      guard-only hook beside it (anticheat._patch_goose_hooks).
     """
     agents_md = eng_dir / "AGENTS.md"
     base = agents_md.read_text(encoding="utf-8") if agents_md.is_file() else ""
@@ -2358,12 +2358,12 @@ _LEGACY_SKIP_PERMISSION_ARGS = {
 #
 # Codex 0.154.0 gates project-local `[hooks]` behind a per-hash trust review:
 # the TUI opens on "Hooks need review", and an operator who presses esc or picks
-# "Continue without trusting" lands in an ordinary session where `scope-check.sh`
-# never runs — with nothing in the UI reporting that the guard is off. Scope and
-# ROE enforcement protects third parties (ADR 0019), so it cannot be conditional
-# on a startup keystroke, and a control that fails silently is worse than one
-# that fails loudly: under this flag Codex prints a standing "hooks may run
-# without review" warning for the whole session.
+# "Continue without trusting" lands in an ordinary session where Vigil's
+# `PostToolUse` activity logger and `SessionEnd` receipt never run — with nothing
+# in the UI reporting that the session is recording nothing. Those hooks are what
+# makes the engagement record complete, and an evidence trail that goes silently
+# missing is worse than one that fails loudly: under this flag Codex prints a
+# standing "hooks may run without review" warning for the whole session.
 #
 # "Automation that already vets hook sources" is Codex's own stated use for the
 # flag and is exactly this case — Vigil writes `.codex/config.toml` itself, from

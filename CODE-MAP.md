@@ -155,8 +155,8 @@ A prompt change is **not** prompt-only when the prompt defines an artifact the b
 - `agent/scripts/assess/commands/operator_checkpoint.py` — `vigil assess operator-checkpoint`, the operator's own durable state. References plus one intent note; every reference is existence-checked in the write transaction.
 - `agent/scripts/assess/commands/resume_brief.py` — a **read**. It observes abandoned command runs, jobs and host children and names the verb that reconciles them; the reconciling write is owned solely by `vigil assess kali sweep-orphans`.
 - `agent/scripts/assess/commands/eval_capture.py` — a maintainer/CI tool, deliberately off the operator surface.
-- `agent/scripts/hooks/` — shared host hooks for scope checks, activity logging, compaction, and
-  session end. `goose-hook-adapter.sh` adapts Goose tool names to the same contracts.
+- `agent/scripts/hooks/` — shared host hooks for activity logging, compaction, and session end.
+  Command filtering is deliberately absent (ADR 0019). `goose-hook-adapter.sh` adapts Goose tool names.
 - `agent/schemas/` — the durable JSON payload contracts. See the generated-vs-hand-written invariant above before editing one.
 - `agent/docker/runtime-full/Dockerfile` — the supported target-facing tool surface. All baked inputs participate in image-digest drift checks.
 - `agent/engagements/` — the engagement artifact root. Map the directory's role, never per-engagement contents.

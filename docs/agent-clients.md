@@ -35,11 +35,12 @@ check for a provider key.
   The second flag is not an autonomy setting: Codex treats a project-local
   `[hooks]` block as untrusted until it is reviewed per hook hash, so a session
   opens on "Hooks need review" and an operator who presses esc, or picks
-  "Continue without trusting", runs with `scope-check.sh` disabled and no
-  indication anywhere in the UI. Vigil generates that hooks file itself, from its
-  own installed agent root, so the launcher vouches for it rather than leaving
-  the scope guard to a startup keystroke; Codex shows a standing "hooks may run
-  without review" warning for the whole session in exchange.
+  "Continue without trusting", runs with Vigil's activity-log and session-end
+  receipt hooks disabled and no indication anywhere in the UI. Vigil generates
+  that hooks file itself, from its own installed agent root, so the launcher
+  vouches for it rather than leaving the engagement record to a startup
+  keystroke; Codex shows a standing "hooks may run without review" warning for
+  the whole session in exchange.
   This sets a floor on the Codex version: `--dangerously-bypass-hook-trust`
   arrived with the hook-trust gate, and an older `codex` rejects the flag and
   refuses to start. Verified against 0.154.0; upgrade if a launch fails on an
@@ -51,7 +52,7 @@ check for a provider key.
   a second cross-session store inside an engagement.
 - **kimi** — execs `kimi`, with `--auto` under `--skip-permissions`. Runs the
   operator inline from the same prompt; it has no generated specialist roster or
-  scope-guard hooks, and is not a `vigil bench run --client` option. Its model is
+  activity hooks, and is not a `vigil bench run --client` option. Its model is
   deliberately not pinned.
 
 ## Open-model clients

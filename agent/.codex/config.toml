@@ -8,8 +8,8 @@
 # normal session in which NOTHING runs these hooks and no UI element says so, so
 # the generated `start_codex.sh` passes `--dangerously-bypass-hook-trust`
 # (src/vigil_cli/engagements.py). Editing a command below changes its hash, which
-# is why the launcher flag, not a persisted approval, is what keeps the scope
-# guard live across engagements.
+# is why the launcher flag, not a persisted approval, is what keeps the activity
+# and session-end receipts recording across engagements.
 
 # Keep the engagement record in Vigil's backend ledger, not in a second
 # cross-session store. Mirrors "autoMemoryEnabled": false on the Claude side.
@@ -19,15 +19,6 @@
 memories = false
 
 [hooks]
-
-[[hooks.PreToolUse]]
-matcher = "^Bash$"
-
-[[hooks.PreToolUse.hooks]]
-type = "command"
-command = "bash -c 'if [ -n \"${VIGIL_AGENT_ROOT:-}\" ]; then exec bash \"$VIGIL_AGENT_ROOT/scripts/hooks/scope-check.sh\"; fi; if [ -f scripts/hooks/scope-check.sh ]; then exec bash scripts/hooks/scope-check.sh; fi; if [ -f agent/scripts/hooks/scope-check.sh ]; then exec bash agent/scripts/hooks/scope-check.sh; fi'"
-timeout = 10
-statusMessage = "Checking target scope"
 
 [[hooks.PostToolUse]]
 matcher = "^(Bash|Agent|Write|Edit|apply_patch|mcp__.*)$"
@@ -49,7 +40,7 @@ statusMessage = "Recording tool activity"
 #
 # The 3s timeout below is not a preference. Codex 0.154.0 hard-caps SessionEnd at
 # 3s and warns "clamping SessionEnd hook timeout to 3s" on every launch for any
-# larger value; the PreToolUse/PostToolUse caps are far higher, so only this one
+# larger value; the PostToolUse cap is far higher, so only this one
 # differs from Claude's 10s. 3s is already twice Claude Code's own 1500ms default
 # for the same hook, and session-end.sh claims its marker BEFORE the backend call
 # precisely so a budget cut loses a receipt rather than duplicating a row.

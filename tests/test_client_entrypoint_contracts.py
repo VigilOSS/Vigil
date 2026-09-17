@@ -112,7 +112,7 @@ def _write_agent_sources(agent_root: Path) -> None:
     (agent_root / ".goose" / "recipes" / "recon-specialist.yaml").write_text("name: recon\n")
     hooks = agent_root / "scripts" / "hooks"
     hooks.mkdir(parents=True)
-    for name in ("goose-hook-adapter.sh", "scope-check.sh", "post-tool-log.sh"):
+    for name in ("goose-hook-adapter.sh", "post-tool-log.sh"):
         (hooks / name).write_text("#!/usr/bin/env bash\nexit 0\n")
 
     (agent_root / "AGENTS.md").write_text("# Canonical operator instructions\n")
@@ -370,8 +370,9 @@ def test_physical_client_roster_refresh_rejects_collision_before_any_write(
             [
                 "codex",
                 "--dangerously-bypass-approvals-and-sandbox",
-                # Keeps `scope-check.sh` live without an operator answering
-                # Codex's startup hook-trust review. See _REQUIRED_CLIENT_ARGS.
+                # Keeps the activity-log and session-end hooks live without an
+                # operator answering Codex's startup hook-trust review. See
+                # _REQUIRED_CLIENT_ARGS.
                 "--dangerously-bypass-hook-trust",
                 "--model",
                 "test-model",
@@ -1667,7 +1668,7 @@ def test_codex_config_materializes_absolute_paths_for_all_hooks(tmp_path: Path) 
     shutil.copy2(repo_root / "agent" / ".codex" / "config.toml", source_dir / "config.toml")
     hooks_dir = agent_root / "scripts" / "hooks"
     hooks_dir.mkdir(parents=True)
-    for script in ("scope-check.sh", "post-tool-log.sh", "session-end.sh"):
+    for script in ("post-tool-log.sh", "session-end.sh"):
         (hooks_dir / script).write_text("#!/usr/bin/env bash\nexit 0\n")
 
     engagement_dir = tmp_path / "engagement"
@@ -1684,7 +1685,6 @@ def test_codex_config_materializes_absolute_paths_for_all_hooks(tmp_path: Path) 
         for hook in entry["hooks"]
     ]
     assert commands == [
-        shlex.join(["bash", str(hooks_dir / "scope-check.sh")]),
         shlex.join(["bash", str(hooks_dir / "post-tool-log.sh")]),
         shlex.join(["bash", str(hooks_dir / "session-end.sh")]),
     ]
@@ -1781,14 +1781,15 @@ def test_committed_client_configs_disable_cross_session_memory_for_both_clients(
 def test_codex_launcher_bypasses_hook_trust_regardless_of_permission_mode(
     tmp_path: Path,
 ) -> None:
-    """The Codex scope guard must not depend on an operator answering a prompt.
+    """Codex's engagement record must not depend on an operator answering a prompt.
 
     Codex 0.154.0 treats every project-local `[hooks]` entry as untrusted until
     it is reviewed: the TUI opens on "Hooks need review" and an operator who
     presses esc, or picks "Continue without trusting", gets a session in which
-    `scope-check.sh` never runs and nothing in the UI says so. That silent-off
-    state is the failure mode the bypass removes; the flag itself is loud, Codex
-    prints a standing "hooks may run without review" warning under it.
+    the activity-log and session-end receipt hooks never run and nothing in the
+    UI says so. That silent-off state is the failure mode the bypass removes;
+    the flag itself is loud, Codex prints a standing "hooks may run without
+    review" warning under it.
 
     It is not a permission choice, so it holds for both `--skip-permissions`
     modes. Only the Codex launcher carries it; no other client is affected.
@@ -1822,9 +1823,9 @@ def test_codex_launcher_bypasses_hook_trust_regardless_of_permission_mode(
 def test_entrypoint_repair_backfills_codex_hook_trust_bypass(tmp_path: Path) -> None:
     """Engagements created before the bypass get it on repair.
 
-    Their scope guard is inert until they do, so recognizing the older exec line
+    Their hooks are inert until they do, so recognizing the older exec line
     matters as much as writing the new one: a launcher that failed to parse would
-    be skipped as unrecognized and keep running without the guard.
+    be skipped as unrecognized and keep running without the hooks.
     """
     install_root = tmp_path / "install"
     agent_root = install_root / "agent"
