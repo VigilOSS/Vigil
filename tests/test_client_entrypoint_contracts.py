@@ -1691,6 +1691,47 @@ def test_codex_config_materializes_absolute_paths_for_all_hooks(tmp_path: Path) 
     assert all("VIGIL_AGENT_ROOT" not in command for command in commands)
 
 
+# Codex's `DEFAULT_PROJECT_DOC_MAX_BYTES` (codex-rs/config/src/config_toml.rs).
+# Auto-discovered `AGENTS.md` docs are read until this budget is spent, then
+# truncated mid-file and dropped — with no error and nothing in the UI.
+_CODEX_PROJECT_DOC_MAX_BYTES = 32 * 1024
+
+
+@pytest.mark.parametrize(
+    ("engagement_type", "canonical"),
+    (("web", "AGENTS.md"), ("blue", "AGENTS-blue.md")),
+)
+def test_engagement_codex_project_doc_stays_under_the_silent_truncation_cap(
+    tmp_path: Path, engagement_type: str, canonical: str
+) -> None:
+    """The engagement `AGENTS.md` is the one doc Codex reads without being asked.
+
+    Codex auto-discovers `AGENTS.md` from the project root down to the cwd and
+    stops at 32 KiB total, truncating the file it is mid-way through and
+    skipping the rest. Later docs lose first, and the engagement directory is
+    the last one on that walk, so a pointer that outgrew the budget would cost
+    the operator its entire entrypoint rather than a tail.
+
+    That budget is why the pointer stays a pointer: the canonical prompt is
+    ~97 KiB and is named here, then read deliberately with a file tool, where no
+    cap applies. Inlining it into this file would not just blow the cap, it
+    would also hand every session a copy the operator then reads again.
+    """
+    agent_root = tmp_path / "agent"
+    agent_root.mkdir()
+    (agent_root / canonical).write_text("# canonical operator prompt\n")
+    engagement_dir = agent_root / "engagements" / "cap"
+    engagement_dir.mkdir(parents=True)
+
+    engagements._write_prompt_wrappers(
+        agent_root, engagement_dir, "both", engagement_type=engagement_type
+    )
+
+    project_doc = (engagement_dir / "AGENTS.md").read_bytes()
+    assert str(agent_root / canonical).encode() in project_doc
+    assert len(project_doc) < _CODEX_PROJECT_DOC_MAX_BYTES
+
+
 def test_committed_claude_settings_register_compaction_and_session_end_hooks() -> None:
     """The committed generated settings are what every engagement copy is made from."""
     repo_root = Path(__file__).resolve().parents[1]
@@ -1776,6 +1817,31 @@ def test_committed_client_configs_disable_cross_session_memory_for_both_clients(
         (repo_root / "agent" / ".codex" / "config.toml").read_text(encoding="utf-8")
     )
     assert codex_config["features"]["memories"] is False
+
+
+def test_committed_codex_config_pins_the_clean_room_specialist_spawn() -> None:
+    """A specialist must start from its dispatch message, not the operator transcript.
+
+    Codex's default spawn path (`multi_agent`) does that: with `fork_context`
+    omitted the child starts with only the initial prompt. `multi_agent_v2`
+    replaces that field with `fork_turns`, which defaults to `all` — the
+    parent's entire history. Vigil passes neither field on dispatch, so the
+    inheritance an operator gets is whatever the feature flag selects, and an
+    operator whose global `~/.codex/config.toml` enables v2 would fork the
+    operator transcript into every specialist. That breaks the clean-room
+    dispatch the roster is built on (`agent/operator-core.md` — "inherits only
+    what the operator explicitly hands it", "Specialists never load the
+    operator prompt") and anchors the Phase 2C/2D hunters that
+    `agent/phases/code-phase-2-hunt.md` deliberately keeps blind to the Phase 2A
+    findings they are re-deriving.
+    """
+    import tomllib
+
+    repo_root = Path(__file__).resolve().parents[1]
+    codex_config = tomllib.loads(
+        (repo_root / "agent" / ".codex" / "config.toml").read_text(encoding="utf-8")
+    )
+    assert codex_config["features"]["multi_agent_v2"] is False
 
 
 def test_codex_launcher_bypasses_hook_trust_regardless_of_permission_mode(

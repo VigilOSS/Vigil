@@ -52,6 +52,15 @@ Durable design decisions live in [`docs/adr/`](docs/adr/).
 
 ### Fixed
 
+- **A Codex specialist starts from its dispatch message, not the operator's transcript.**
+  `agent/.codex/config.toml` now pins `multi_agent_v2 = false`. Codex's default spawn path
+  (`multi_agent`) starts a child from the dispatch message alone when `fork_context` is omitted;
+  `multi_agent_v2` replaces that field with `fork_turns`, which defaults to `all` — the parent's
+  entire history. Vigil passes neither field, so the flag alone decided what a specialist inherited,
+  and an operator whose own `~/.codex/config.toml` enabled v2 silently forked the operator
+  transcript into every dispatch. That is exactly the anchoring `agent/phases/code-phase-2-hunt.md`
+  forbids between the Phase 2A pass and the 2C dispatch that re-derives it independently. Codex
+  ships the flag off; pinning it here also overrides a global that turns it on.
 - **Cold image builds no longer die at 20s.** `vigil up` and `vigil install` threaded one bounded
   runner through both fast metadata queries and image builds, so the bound that makes a wedged
   daemon fail fast killed every first-run Kali build and swallowed its progress output.

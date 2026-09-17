@@ -49,7 +49,16 @@ check for a provider key.
   `[features] memories = false`, the Codex counterpart to Claude's
   `autoMemoryEnabled`. Codex ships memories off by default; Vigil pins it so an
   operator whose global `~/.codex/config.toml` enables the feature does not get
-  a second cross-session store inside an engagement.
+  a second cross-session store inside an engagement. The same block pins
+  `multi_agent_v2 = false` for the same reason and a sharper hazard: Codex's
+  default spawn path (`multi_agent`) starts a specialist from the dispatch
+  message alone when `fork_context` is omitted, but v2 replaces that field with
+  `fork_turns`, which defaults to `all` — the operator's entire transcript.
+  Vigil passes neither field, so the flag alone decides what a specialist
+  inherits, and a global config enabling v2 would silently hand every dispatch
+  the operator's history. That is exactly the anchoring
+  `agent/phases/code-phase-2-hunt.md` forbids between the Phase 2A pass and the
+  2C dispatch that has to re-derive it independently.
 - **kimi** — execs `kimi`, with `--auto` under `--skip-permissions`. Runs the
   operator inline from the same prompt; it has no generated specialist roster or
   activity hooks, and is not a `vigil bench run --client` option. Its model is

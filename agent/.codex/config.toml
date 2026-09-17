@@ -18,6 +18,17 @@
 [features]
 memories = false
 
+# Keep specialist dispatch a clean room. Codex's default spawn path
+# (`multi_agent`) starts a child from the dispatch message alone; `multi_agent_v2`
+# swaps that `fork_context` field for `fork_turns`, which DEFAULTS TO `all` — the
+# operator's entire history. Vigil passes neither field, so the flag alone decides
+# what a specialist inherits, and under v2 the Phase 2C/2D hunters that
+# agent/phases/code-phase-2-hunt.md deliberately keeps blind would read the Phase 2A
+# findings they exist to re-derive independently. Codex ships this off by default;
+# pinning it here also overrides an operator whose global ~/.codex/config.toml
+# turns it on.
+multi_agent_v2 = false
+
 [hooks]
 
 [[hooks.PostToolUse]]

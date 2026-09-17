@@ -2207,9 +2207,10 @@ def _write_goose_config(
 
     - ``.goosehints`` — Goose auto-loads this from the cwd. We copy the engagement
       ``AGENTS.md`` (written by ``_write_prompt_wrappers`` just before this call) into it, so
-      Goose gets the SAME engagement-local entrypoint Codex/OpenCode read natively. For a
-      red engagement that ``AGENTS.md`` is a thin POINTER to the workspace-root operator
-      prompt (a blue engagement's is the full rendered prompt); the operator resolves the
+      Goose gets the SAME engagement-local entrypoint Codex/OpenCode read natively. That
+      ``AGENTS.md`` is a thin POINTER for every engagement type — red and blue alike —
+      and ``engagement_type`` only selects which canonical installed prompt it names
+      (``agent/AGENTS.md`` or ``agent/AGENTS-blue.md``); the operator resolves the
       pointer by reading the referenced file — the bench CTF message and the human start
       prompt both say "Read AGENTS.md", which drives that. There is no ``--agent operator``
       step — the default ``goose run`` agent already holds the ``delegate`` tool.
