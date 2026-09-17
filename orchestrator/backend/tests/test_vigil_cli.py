@@ -5363,10 +5363,27 @@ def test_backup_restore_removes_stale_sqlite_wal_sidecars(tmp_path: Path) -> Non
         assert connection.execute("SELECT name FROM sqlite_master WHERE name = 'restored'").fetchone() == ("restored",)
 
 
+def _seed_live_oob_state(install_root: Path) -> None:
+    """Put the root in the population the shared 53/8443 route exists for.
+
+    The OOB tests below drive rendering and the frpc post-flight on that legacy
+    route. `start_oob` refuses it on a root with no slot reserved and no prior
+    OOB state, because starting is the thing that would pin it there; a root
+    whose callbacks are already live on it is warned and started. A rendered
+    `frpc.toml` is the discriminator `has_pre_routing_oob_state` reads.
+    """
+    from vigil_cli.oob_relay import OOB_STATE_RELATIVE_PATH
+
+    state_dir = install_root / OOB_STATE_RELATIVE_PATH
+    state_dir.mkdir(parents=True, exist_ok=True)
+    (state_dir / "frpc.toml").write_text("[common]\n", encoding="utf-8")
+
+
 def test_oob_start_renders_config_and_starts_idempotent_sessions(tmp_path: Path) -> None:
     from vigil_cli.docker import DockerResult
     from vigil_cli.oob import OobOptions, start_oob
 
+    _seed_live_oob_state(tmp_path)
     commands: list[list[str]] = []
 
     def runner(argv: list[str], **_: object) -> DockerResult:
@@ -6178,6 +6195,7 @@ def test_oob_start_post_flight_detects_frpc_conflict(tmp_path: Path) -> None:
     from vigil_cli.docker import DockerResult
     from vigil_cli.oob import OobOptions, start_oob
 
+    _seed_live_oob_state(tmp_path)
     commands: list[list[str]] = []
     kill_commands: list[str] = []
     conflict_log = (
@@ -6226,6 +6244,7 @@ def test_oob_start_post_flight_returns_on_success(tmp_path: Path) -> None:
     from vigil_cli.docker import DockerResult
     from vigil_cli.oob import OobOptions, start_oob
 
+    _seed_live_oob_state(tmp_path)
     success_log = (
         "2026-05-19 10:00:00 [I] [proxy_manager.go:144] [xyz] proxy added: [host-oob host-oob-dns host-oob-rev]\n"
         "2026-05-19 10:00:01 [I] [control.go:172] [xyz] [host-oob-dns] start proxy success\n"
@@ -6311,6 +6330,7 @@ def test_oob_start_post_flight_resets_frpc_log_before_scan(tmp_path: Path) -> No
     from vigil_cli.docker import DockerResult
     from vigil_cli.oob import OobOptions, start_oob
 
+    _seed_live_oob_state(tmp_path)
     log_reset = False
     tail_calls = 0
     stale_conflict_log = "2026-05-19 [W] start error: port already used: listen udp :53\n"

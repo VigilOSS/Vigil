@@ -584,6 +584,7 @@ def test_oob_start_refuses_route_switch_while_unverifiable_client_is_running(
 ) -> None:
     from vigil_cli.docker import DockerResult
     from vigil_cli.oob import OobOptions, start_oob
+    from vigil_cli.oob_relay import allocate_relay_route
 
     commands: list[str] = []
 
@@ -604,16 +605,25 @@ def test_oob_start_refuses_route_switch_while_unverifiable_client_is_running(
             return DockerResult(1, "", "")
         return DockerResult(0, "", "")
 
+    # The install this switches TO holds a real slot; the running client is what
+    # is in question here, not the reservation gate ahead of it.
+    route = allocate_relay_route(
+        tmp_path,
+        slot_name="slot-new",
+        base_domain="oob.example.test",
+        registry_path=tmp_path / "allocations.json",
+    )
     with pytest.raises(SystemExit, match="running OOB client.*cannot be verified"):
         start_oob(
             OobOptions(
                 install_root=tmp_path,
                 frp_host="frp.example.test",
                 frp_token="secret",
-                slot_prefix="slot-new",
-                oob_domain="slot-new.oob.example.test",
-                dns_remote_port=20120,
-                reverse_remote_port=20121,
+                slot_prefix=route.slot_prefix,
+                oob_domain=route.oob_domain,
+                dns_remote_port=route.dns_remote_port,
+                reverse_remote_port=route.reverse_remote_port,
+                relay_route=route,
             ),
             runner=runner,
             frpc_ready_timeout=0,
@@ -867,6 +877,10 @@ def test_oob_start_admits_constrained_pre_wave2_legacy_client_ownership(
             return DockerResult(0, json.dumps(legacy_metadata), "")
         return DockerResult(0, "", "")
 
+    # A pre-wave2 client only exists on a root that was already running OOB
+    # before relay routing existed — the population the shared 53/8443 route is
+    # for, and the one `start_oob` warns rather than refuses.
+    _seed_live_oob_state(tmp_path)
     start_oob(
         OobOptions(
             install_root=tmp_path,
@@ -1404,6 +1418,47 @@ def test_up_refuses_to_reuse_active_oob_sessions_from_another_slot(
         up._start_oob_if_needed(tmp_path, runner=lambda _argv: None)
 
 
+def test_up_skips_oob_for_an_install_that_never_reserved_a_relay_slot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Starting here would be the one thing that makes the remedy unusable.
+
+    `vigil up` skips rather than propagating `start_oob`'s refusal: the runtime,
+    orchestrator and proxy are already up by this point, and OOB is one optional
+    service — a non-zero exit would claim the whole bring-up failed.
+    """
+    from vigil_cli import up
+    from vigil_cli.oob import OobOptions
+
+    monkeypatch.setattr(
+        up,
+        "_oob_options",
+        lambda _root: OobOptions(
+            install_root=tmp_path,
+            frp_host="frp.example.test",
+            frp_token="secret",
+            slot_prefix="legacy",
+            oob_domain="oob.example.test",
+            dns_remote_port=53,
+            reverse_remote_port=8443,
+        ),
+    )
+    monkeypatch.setattr(up, "oob_status", lambda **_kwargs: {"server": False, "frpc": False})
+    monkeypatch.setattr(
+        up,
+        "start_oob",
+        lambda *_args, **_kwargs: pytest.fail(
+            "must not render OOB state for an install with no reserved slot"
+        ),
+    )
+
+    up._start_oob_if_needed(tmp_path, runner=lambda _argv: None)
+
+    out = capsys.readouterr().out
+    assert "no relay slot reserved" in out
+    assert "vigil install" in out
+
+
 def test_doctor_names_the_real_remedy_when_oob_domain_is_unset(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1823,30 +1878,94 @@ def _quiet_oob_runner(commands: list[str]):
     return runner
 
 
-def test_start_oob_warns_when_no_relay_slot_was_ever_reserved(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+def _unreserved_oob_options(install_root: Path):
+    """What `oob_options` resolves for a configured domain with no routing record."""
+    from vigil_cli.oob import OobOptions
+
+    return OobOptions(
+        install_root=install_root,
+        frp_host="frp.example.test",
+        frp_token="secret",
+        slot_prefix="legacy",
+        oob_domain="oob.example.test",
+        dns_remote_port=53,
+        reverse_remote_port=8443,
+    )
+
+
+def test_start_oob_refuses_a_root_that_never_reserved_a_relay_slot(
+    tmp_path: Path,
 ) -> None:
-    """Reaching `oob start` without the allocating install must not be silent.
+    """Reaching `oob start` without the allocating install must not proceed.
 
     With `oob.domain` configured and no routing record, `oob_options` resolves
     the SHARED legacy route — and so does every other install in that state, on
     the same subdomain and the same 53/8443, which makes their callbacks
-    indistinguishable. The documented `vigil install` step cannot be the only
-    guard: nothing stops an operator arriving here without it, and a degraded
-    route looks exactly like a reserved one at startup.
+    indistinguishable. Warning and continuing made that permanent: the rendered
+    `frpc.toml` and active-route marker this start leaves in `/data/oob` are
+    precisely what `has_pre_routing_oob_state` reads as proof the root is
+    already live on the shared route, so the `vigil install` the warning named
+    would then pin the legacy route instead of allocating a slot. Doing what the
+    message says, in the order it says it, is what stopped it working.
     """
-    from vigil_cli.oob import OobOptions, start_oob
+    from vigil_cli.oob import start_oob
 
+    commands: list[str] = []
+    with pytest.raises(SystemExit) as excinfo:
+        start_oob(
+            _unreserved_oob_options(tmp_path),
+            runner=_quiet_oob_runner(commands),
+            frpc_ready_timeout=0,
+        )
+
+    message = str(excinfo.value)
+    assert "no relay slot reserved" in message
+    assert "vigil install" in message
+    assert "53/8443" in message
+    # The refusal is only worth anything before the state it warns about exists.
+    assert commands == []
+
+
+def test_a_refused_oob_start_leaves_vigil_install_free_to_allocate_a_slot(
+    tmp_path: Path,
+) -> None:
+    """The remedy the refusal names has to actually work afterwards."""
+    from vigil_cli.oob import start_oob
+    from vigil_cli.oob_relay import initialize_relay_route
+
+    with pytest.raises(SystemExit):
+        start_oob(
+            _unreserved_oob_options(tmp_path),
+            runner=_quiet_oob_runner([]),
+            frpc_ready_timeout=0,
+        )
+
+    route = initialize_relay_route(
+        tmp_path,
+        slot_name="reserved",
+        base_domain="oob.example.test",
+        registry_path=tmp_path / "allocations.json",
+    )
+    assert route.legacy is False
+    assert (route.dns_remote_port, route.reverse_remote_port) != (53, 8443)
+
+
+def test_start_oob_still_starts_a_root_already_live_on_the_shared_route(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The legacy population keeps its channel; the refusal is not for them.
+
+    `has_pre_routing_oob_state` identifies exactly the installs whose callbacks
+    are already live on 53/8443 and whose correlation would break if their ports
+    moved. Starting again does not change what they are, so it is not the start
+    that traps them — they warn and continue, and `vigil install` pins the same
+    route they are already on.
+    """
+    from vigil_cli.oob import start_oob
+
+    _seed_live_oob_state(tmp_path)
     start_oob(
-        OobOptions(
-            install_root=tmp_path,
-            frp_host="frp.example.test",
-            frp_token="secret",
-            slot_prefix="legacy",
-            oob_domain="oob.example.test",
-            dns_remote_port=53,
-            reverse_remote_port=8443,
-        ),
+        _unreserved_oob_options(tmp_path),
         runner=_quiet_oob_runner([]),
         frpc_ready_timeout=0,
     )

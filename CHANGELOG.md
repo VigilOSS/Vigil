@@ -156,6 +156,14 @@ Durable design decisions live in [`docs/adr/`](docs/adr/).
   exists to size prompts. The output now names the tree it measured and says so on stderr when that
   is not the checkout you are standing in, which is the default whenever `vigil` runs from an
   installed working root.
+- **`vigil oob start` refuses an install that never reserved a relay slot**, instead of warning and
+  then starting on the shared route. Starting was what created the `frpc.toml` and route marker that
+  made the next `vigil install` pin the legacy route rather than allocate — so following the
+  warning's own remedy, in the order it gave it, was exactly what stopped the remedy working. The
+  refusal is narrow: it fires only when there is no routing record **and** no prior OOB state. An
+  install whose callbacks are already live on the shared route is unaffected and still starts, which
+  is the population that route exists for. `vigil up` skips OOB in the same case rather than failing
+  the whole bring-up.
 - **Checkpoint references cannot forge a heading.** `operator-checkpoint show` joined finding slugs,
   dispatch agent ids, command-run ids and artifact ids straight into the render, so a newline inside
   an `agent_id` — which the backend accepts — reached column zero and could impersonate a section in

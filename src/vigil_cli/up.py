@@ -14,9 +14,11 @@ from .install import InstallOptions, install_from_source
 from .mitmproxy import MitmproxyOptions, build_image as build_mitmproxy_image, mitmproxy_image_inputs, start_proxy
 from .oob import (
     OOB_CONFIGURATION_HELP,
+    OOB_UNRESERVED_SLOT_HELP,
     OobOptions,
     oob_options as _oob_options,
     oob_status,
+    requires_relay_slot_reservation,
     start_oob,
 )
 from .orchestrator import OrchestratorOptions, start_orchestrator
@@ -219,6 +221,17 @@ def _start_oob_if_needed(install_root: Path, *, runner: docker.Runner) -> None:
     if not options.frp_host or not options.oob_domain:
         print("oob\tskipped; infrastructure is not configured")
         _print_oob_configuration_help()
+        return
+
+    # `start_oob` refuses this outright; `vigil up` skips it instead, the same
+    # way it skips OOB for any other missing prerequisite — the rest of the
+    # stack is already up and OOB is one optional service, so the command's exit
+    # status should not claim the bring-up failed. Checked here rather than left
+    # to the refusal so the token prompt below never asks for a credential this
+    # run cannot use.
+    if requires_relay_slot_reservation(install_root):
+        print("oob\tskipped; no relay slot reserved for this install")
+        print(OOB_UNRESERVED_SLOT_HELP)
         return
 
     if not options.frp_token:

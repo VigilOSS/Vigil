@@ -14,7 +14,12 @@ from pathlib import Path
 
 from . import config as config_module
 from . import docker
-from .oob_relay import OobRelayRoute, legacy_relay_route, load_relay_route
+from .oob_relay import (
+    OobRelayRoute,
+    has_pre_routing_oob_state,
+    legacy_relay_route,
+    load_relay_route,
+)
 from .paths import default_runtime_container
 
 DEFAULT_FRP_HOST = ""
@@ -95,6 +100,32 @@ OOB_CONFIGURATION_HELP = (
     "effect."
 )
 
+OOB_UNRESERVED_SLOT_HELP = (
+    "Run `vigil install` with `oob.domain` set to reserve this install its own\n"
+    "relay slot, then start OOB."
+)
+
+
+def requires_relay_slot_reservation(install_root: Path) -> bool:
+    """True when starting OOB here would fabricate its own legacy evidence.
+
+    `vigil oob start` cannot run without rendering `frpc.toml`, an active-route
+    marker and per-client files into `/data/oob` — and that state is precisely
+    the discriminator `oob_relay.has_pre_routing_oob_state` reads as proof a
+    root is already live on the shared 53/8443 route. So an install that starts
+    OOB with no slot reserved comes out the other side looking like a legacy
+    install, and the `vigil install` it was told to run then PINS the shared
+    route instead of allocating. The remedy destroyed itself by being followed.
+
+    The refusal is therefore scoped to roots with nothing at stake: no routing
+    record AND no prior OOB state. A root already live on the shared route is
+    the population that route exists for — it is warned, never refused, because
+    moving its ports is what would break its correlation.
+    """
+    return load_relay_route(install_root) is None and not has_pre_routing_oob_state(
+        install_root
+    )
+
 
 def start_oob(
     options: OobOptions,
@@ -112,20 +143,33 @@ def start_oob(
     # A configured domain with no routing record resolves to the SHARED legacy
     # route (ports 53/8443) through `oob_options`, and every other install in
     # that state lands on the same ports and subdomain — callbacks then
-    # correlate to the wrong engagement. Documenting the `vigil install` step
-    # is not enough on its own: nothing stops an operator reaching this command
+    # correlate to the wrong engagement. Documenting the `vigil install` step is
+    # not enough on its own: nothing stops an operator reaching this command
     # without it, and the degraded route is otherwise indistinguishable from a
-    # reserved one at startup. A pinned legacy route (a record that says so) is
-    # a deliberate state and is not warned about here.
+    # reserved one at startup. Refuse BEFORE anything is rendered, for the
+    # reason `requires_relay_slot_reservation` gives. A pinned legacy route (a
+    # record that says so) is a deliberate state and is neither refused nor
+    # warned about.
+    if requires_relay_slot_reservation(options.install_root):
+        raise SystemExit(
+            "OOB start refused: no relay slot reserved for this install — it "
+            "would use the SHARED legacy route "
+            f"({options.oob_domain}, ports {options.dns_remote_port}/"
+            f"{options.reverse_remote_port}), which every other install in this "
+            "state also uses, so callbacks could not be told apart — and the "
+            "state it left behind would pin this root to that route for good.\n"
+            + OOB_UNRESERVED_SLOT_HELP
+        )
     if load_relay_route(options.install_root) is None:
         print(
-            "[vigil] warning: no relay slot reserved for this install — using the "
-            "SHARED legacy route "
+            "[vigil] warning: no relay slot reserved for this install — keeping "
+            "the SHARED legacy route "
             f"({options.oob_domain}, ports {options.dns_remote_port}/"
-            f"{options.reverse_remote_port}). Another install in the same state "
-            "uses it too, and callbacks cannot be told apart. Run `vigil install` "
-            "with `oob.domain` set to reserve this install its own slot, then "
-            "restart OOB.",
+            f"{options.reverse_remote_port}) this root's callbacks are already "
+            "live on. Another install in the same state uses it too, and "
+            "callbacks cannot be told apart. Run `vigil install` to pin this "
+            "route on the record; a dedicated slot would move the ports those "
+            "callbacks come back on.",
             file=sys.stderr,
         )
     _require_runtime(options.container_name, runner=runner)

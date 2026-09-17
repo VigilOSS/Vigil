@@ -17,9 +17,17 @@ vigil oob status --json
 ```
 
 `vigil install` is load-bearing in that order, not a refresh step: the relay
-slot is reserved during install, so starting OOB before one has run with
-`oob.domain` set leaves this install resolving the shared legacy domain on
-ports 53/8443, where a second install lands too.
+slot is reserved during install, and `vigil oob start` refuses to run without
+one (`vigil up` skips OOB instead of failing the bring-up). The refusal is not
+tidiness. Starting would resolve the shared legacy domain on ports 53/8443,
+where a second install lands too — and it would render exactly the `/data/oob`
+state that the next `vigil install` reads as proof this root is already live on
+that shared route, pinning it there instead of allocating. Warning and
+continuing therefore destroyed its own remedy.
+
+A root that **is** already live on the shared route is the population that route
+exists for: it is warned, never refused, and `vigil install` pins the same route
+its callbacks already use.
 
 The FRP token is required. `vigil up` prompts for it on first startup when it is
 missing and stores the value in `vigil config`; non-interactive installs should

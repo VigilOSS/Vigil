@@ -330,9 +330,11 @@ never start them. `vigil oob start` refuses without `oob.frp_host`, `oob.domain`
 infrastructure — the relay itself is yours to run. This install's relay slot — its reserved
 subdomain and port block on the shared relay — is allocated by `vigil install`, and only when
 `oob.domain` is already configured, so configure the keys first or re-run `vigil install` after
-setting them. The one root that keeps the shared legacy route (ports 53/8443) instead is an
-install that was already running OOB before relay slots existed, whose live callbacks would stop
-correlating if its ports moved.
+setting them. `vigil oob start` also refuses a root that has no slot and has never run OOB
+(`vigil up` skips OOB there), because starting would leave the very state that makes the next
+`vigil install` pin the shared route instead of allocating. The one root that keeps the shared
+legacy route (ports 53/8443) instead is an install that was already running OOB before relay
+slots existed, whose live callbacks would stop correlating if its ports moved.
 
 ```bash
 vigil config set oob.frp_host oob-relay.example.com   # also: oob.frp_port, oob.domain, oob.frp_token
