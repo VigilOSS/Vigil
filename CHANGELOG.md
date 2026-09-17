@@ -133,6 +133,12 @@ Durable design decisions live in [`docs/adr/`](docs/adr/).
   `vigil assess` passthrough, which trains an operator to ignore it and says nothing new each time.
   Per-dispatch instruction identity — installed revision plus exact operator and specialist hashes —
   already records staleness durably for every dispatch, so the repetition added noise, not evidence.
+- **`total_assigned_input_local_tokens` was redefined under a stable name.** It used to be standing
+  prompt tokens plus emitted source tokens; it is now emitted source alone, because a role's
+  standing prompt load is authored markdown this workflow does not decide and `vigil assess
+  prompt-census` measures it advisorily instead. The calibration baseline therefore moves from
+  252,884 to 2,354 — roughly 99% of the old figure was standing prompt prose, not a hundredfold
+  efficiency gain. Any baseline compared across this release is comparing two different quantities.
 
 ### Fixed
 

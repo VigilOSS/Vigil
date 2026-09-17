@@ -59,12 +59,17 @@ uv run --directory orchestrator/backend --extra dev pytest \
 ```
 
 `baselines/private-code-evaluation.json` is the committed runner-calibration
-envelope. It binds the exact fixture and recipe identities to seven distinct
+envelope. It binds the exact fixture identity to seven distinct
 production-workflow observations, their observation/platform digests, and
 recomputed medians. Each bounded observation receipt is recomputable from its
-run index, platform fingerprint, retained metrics, and exact fixture, recipe,
-and runtime identities. Ordinary runs load that envelope and require matching
-fixture, recipe, and declared-runtime identity. Requests, mutations, exact
+run index, platform fingerprint, retained metrics, and exact fixture and
+runtime identities. Ordinary runs load that envelope and require matching
+fixture and declared-runtime identity. The envelope deliberately carries no
+prompt or harness-source digest: what the baseline has to still describe is the
+*measured behaviour*, and the comparison below measures it directly. A byte
+digest over authored markdown would only re-report an edit the author just made,
+and it would fail the gate on every prompt and refactor commit (see the Markdown
+prompt/doc testing policy in `AGENTS.md`). Requests, mutations, exact
 dispatch topology, and assigned-input counts remain blocking across platforms;
 only wall-time and latency become informational when the platform fingerprint
 differs. An absent or mismatched calibration is explicitly unavailable and
