@@ -69,6 +69,13 @@ Durable design decisions live in [`docs/adr/`](docs/adr/).
   running as, after launch, when the handle exists. Bindings are append-only and superseding, and
   render in `agent list` and the resume brief, so mid-flight messaging no longer depends on a
   hand-maintained mapping the operator keeps in their head.
+- **Orphaned analysis leases are visible and recoverable.** `code-dispatch list` reports item-level
+  heartbeat age and `--stale-minutes`; `code-dispatch adopt-lease` performs an audited
+  compare-and-swap handover that keeps the dead attempt's accumulated receipts and refuses a lease
+  that is still live; `code-dispatch progress` reports one item's accumulated state; and
+  `code-coverage` lists open leases oldest-first with how long each has been silent and how many
+  receipts a reset would discard. `reset-stale` remains, but it is no longer the only option, so
+  recovering a died-mid-file dispatch does not mean redoing durable work.
 
 ### Fixed
 

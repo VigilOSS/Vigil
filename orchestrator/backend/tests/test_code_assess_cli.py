@@ -186,24 +186,11 @@ def _load_cli_module():
     return cli_module
 
 
+# Derived from the action registry rather than restated: a hand-kept roster
+# silently stops covering the next action added, which is exactly how `list`
+# shipped without an entry here.
 @pytest.mark.parametrize(
-    "action",
-    (
-        "stats",
-        "fetch",
-        "heartbeat",
-        "done",
-        "error",
-        "needs-context",
-        "reset-stale",
-        "retry-error",
-        "retry-needs-context",
-        "queue",
-        "reanalyze",
-        "requeue-triggers",
-        "list-triggers",
-        "resolve-triggers",
-    ),
+    "action", sorted(_load_code_dispatch_module()._ACTION_HELP)
 )
 def test_code_dispatch_action_help_is_explicit(action, capsys):
     module = _load_code_dispatch_module()

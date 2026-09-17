@@ -1,6 +1,6 @@
 ## Activation
 
-**Operator-doctrine budget:** 450 lines; this revision is 450 lines.
+**Operator-doctrine budget:** 450 lines; this revision is 508 lines (over budget).
 
 This file replaces the web-focused core loop from `operator-core.md` for code-analysis
 engagements (same backend, findings table, and CLI tools).
@@ -389,9 +389,11 @@ vigil assess code-coverage --cwe-matrix      # CWE effort state when Phase 2B or
 vigil assess code-coverage --require-transition-ready <next-phase>
 ```
 
-Resume from the current phase. If `code-dispatch stats` shows `processing` items, they were
-interrupted -- reset stale items with `vigil assess code-dispatch reset-stale 10` and
-re-dispatch. Active specialists heartbeat their fetched `agent_name` + `lease_token`; every result
+Resume from the current phase. If `code-dispatch stats` shows `processing` items, inspect them with
+`vigil assess code-dispatch list --stale-minutes 10` before acting: a stale row that already carries
+receipts is adopted (`code-dispatch adopt-lease`, which keeps them), and one that carries none is
+reset (`code-dispatch reset-stale 10`, which discards them). Resetting a row that did real work
+makes its replacement redo it. Active specialists heartbeat their fetched `agent_name` + `lease_token`; every result
 and closeout reuses that ownership pair. If `needs-context` items exist, provide the requested
 context and return them to pending with `code-dispatch retry-needs-context <ids> <reason>`.
 
@@ -470,7 +472,7 @@ degrades, and the engagement produces the exact failure modes seen in prior runs
   identities rather than replacing them
 - Record subagent outputs via `vigil assess` after they pass quality gates
 - Gate phase transitions on mandatory checklists -- reject and re-dispatch when gates fail
-- Manage the analysis queue (list, fetch, dispatch, done, reset-stale, requeue-triggers). `list` is the read-only view: it recovers queue item IDs after the insertion output scrolls, and `requeue-triggers` applies per target, so it exits nonzero and names every blocked target while committing the rest — reconcile each blocked target from `list` rather than re-running the whole batch
+- Manage the analysis queue (list, fetch, dispatch, progress, done, adopt-lease, reset-stale, requeue-triggers). `list` is the read-only view: it recovers queue item IDs after the insertion output scrolls, and `requeue-triggers` applies per target, so it exits nonzero and names every blocked target while committing the rest — reconcile each blocked target from `list` rather than re-running the whole batch
 - Review coverage gaps and CWE effort matrix to decide whether to re-dispatch or accept
 - Extract call graph excerpts and structural index data from `tools/analysis-state/` for dispatch context
 - Run the Phase 2B CWE coverage review loop to close effort gaps systematically

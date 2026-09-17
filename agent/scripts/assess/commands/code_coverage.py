@@ -4,6 +4,10 @@ from __future__ import annotations
 import json
 import sys
 
+# `code-dispatch` owns the lease vocabulary these verbs share; importing its age
+# renderer keeps one reading of "silent for" across the queue table, this report
+# projection, and the resume brief.
+from assess.commands.code_dispatch import _format_lease_age
 from assess.lib.client import AssessmentClient
 from assess.lib.config import load_config
 
@@ -244,6 +248,7 @@ def _run_cwe_matrix(cfg, args) -> bool:
         return quality_passed
 
     _print_cwe_matrix(files)
+    _print_open_leases(result)
     _print_review_quality(result)
 
     quality_passed, _ = _review_quality(result)
@@ -531,6 +536,47 @@ def _print_source_identity(data: dict) -> None:
             print(f"      {_BLOCKER_REPAIRS['structural_index_stale'](repo_id)}")
 
 
+def _print_open_leases(data: dict) -> None:
+    """Name the claimed attempts that never closed, oldest lease first.
+
+    "Queue items still pending or processing" is a count; this is the item-level
+    form of it, because a dispatch that died mid-file is indistinguishable from
+    live work until you can see how long its lease has been silent and how many
+    receipts would be thrown away by resetting it.
+    """
+    leases = data.get("open_leases")
+    if not isinstance(leases, list) or not leases:
+        return
+    total = data.get("open_leases_count", len(leases))
+    print(f"\nOpen Analysis Leases ({total}):")
+    for lease in leases:
+        if not isinstance(lease, dict):
+            continue
+        receipts = int(lease.get("current_result_count", 0) or 0)
+        print(
+            f"  item {lease.get('queue_item_id', '?')} "
+            f"{lease.get('file_path', '?')} ({lease.get('classification', '?')}): "
+            f"held by {lease.get('agent_name') or '-'} / "
+            f"{lease.get('lease_token') or '-'}, silent for "
+            f"{_format_lease_age(lease.get('heartbeat_age_seconds'))}, "
+            f"{receipts} receipt(s) recorded"
+        )
+        for adopted in lease.get("adopted_leases") or []:
+            if isinstance(adopted, dict):
+                print(
+                    f"      adopted from {adopted.get('agent_name', '?')} / "
+                    f"{adopted.get('lease_token', '?')}"
+                )
+    if isinstance(total, int) and total > len(leases):
+        # The backend already bounds the embedded list; the count is absolute.
+        print(f"  ... showing {len(leases)} of {total}")
+    print(
+        "  Recover each with `vigil assess code-dispatch progress <item-id>` "
+        "then `code-dispatch adopt-lease` (keeps the receipts) or "
+        "`code-dispatch reset-stale <minutes>` (discards them)."
+    )
+
+
 def _print_coverage(data: dict) -> None:
     total_files = data.get('total_files', 0)
 
@@ -573,6 +619,7 @@ def _print_coverage(data: dict) -> None:
                 print(f"  {tier:10s}: {tier_data:>4} files")
 
     _print_analysis_status(data)
+    _print_open_leases(data)
     _print_source_identity(data)
 
     # Function-Level

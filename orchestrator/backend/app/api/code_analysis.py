@@ -308,6 +308,27 @@ class QueueHeartbeatRequest(BaseModel):
     lease_token: str = Field(min_length=1, max_length=128)
 
 
+class QueueAdoptLeaseRequest(BaseModel):
+    """B9: compare-and-swap one abandoned analysis lease onto a replacement.
+
+    `expected_agent` / `expected_lease_token` are the identity the caller
+    observed, so the swap can only land on the lease it looked at.
+    `stale_minutes` is the caller's explicit assertion that the lease is dead;
+    it is bounded exactly like `QueueResetStaleRequest.minutes` because both
+    describe the same abandonment window, and the service re-checks it on the
+    database clock inside the swapping transaction.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    item_id: StrictPositiveId
+    expected_agent: str = Field(min_length=1, max_length=128)
+    expected_lease_token: str = Field(min_length=1, max_length=128)
+    agent_name: str = Field(min_length=1, max_length=128)
+    stale_minutes: int = Field(default=10, ge=1, le=1440)
+    reason: str = Field(min_length=1, max_length=2000)
+
+
 class SourceLineSpan(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1112,6 +1133,7 @@ def list_queue_items(
     classification: CodeClassification | None = Query(default=None),
     batch_theme: str | None = Query(default=None, max_length=256),
     queue_mode: CodeQueueMode | None = Query(default=None),
+    stale_minutes: int | None = Query(default=None, ge=1, le=1440),
     limit: int = Query(default=200, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
 ) -> dict[str, Any]:
@@ -1123,6 +1145,7 @@ def list_queue_items(
         classification=classification,
         batch_theme=batch_theme,
         queue_mode=queue_mode,
+        stale_minutes=stale_minutes,
         limit=limit,
         offset=offset,
     )
@@ -1251,6 +1274,54 @@ async def heartbeat_queue_item(engagement_key: str, request: QueueHeartbeatReque
     )
     await _broadcast(engagement.key, "queue_heartbeat", record)
     return record
+
+
+@router.post("/analysis-queue/adopt-lease")
+async def adopt_queue_lease(
+    engagement_key: str, request: QueueAdoptLeaseRequest
+) -> dict[str, Any]:
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    record = await anyio.to_thread.run_sync(
+        functools.partial(
+            code_analysis.adopt_queue_lease,
+            engagement.id,
+            item_id=request.item_id,
+            expected_agent=request.expected_agent,
+            expected_lease_token=request.expected_lease_token,
+            agent_name=request.agent_name,
+            stale_minutes=request.stale_minutes,
+            reason=request.reason,
+        )
+    )
+    await anyio.to_thread.run_sync(
+        functools.partial(
+            _audit_code_mutation,
+            engagement.id,
+            title="code-dispatch adopt-lease",
+            action=(
+                f"item_id={request.item_id} from={request.expected_agent} "
+                f"to={request.agent_name} stale_minutes={request.stale_minutes}"
+            ),
+            actor_name=request.agent_name,
+            result=request.reason,
+            metadata={
+                "item_id": request.item_id,
+                "previous_agent_name": request.expected_agent,
+                "previous_lease_token": request.expected_lease_token,
+                "lease_token": record["item"]["lease_token"],
+                "stale_minutes": request.stale_minutes,
+                "preserved_result_count": record["preserved_result_count"],
+            },
+        )
+    )
+    await _broadcast(engagement.key, "queue_adopt_lease", record)
+    return record
+
+
+@router.get("/analysis-queue/{item_id}/progress")
+def get_queue_item_progress(engagement_key: str, item_id: int) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    return code_analysis.queue_item_progress(engagement.id, item_id)
 
 
 @router.post("/analysis-queue/retry-error")

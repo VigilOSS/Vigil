@@ -794,6 +794,21 @@ def _per_input_coverage_section(
     return {"cells": cell_list, "cells_count": total_cells}
 
 
+# A resumed session must see a code dispatch that stopped mid-file. Its lease is
+# still held and its receipts are still current, so nothing in the finding,
+# surface or dispatch sections reports it — and `reset-stale`, the obvious
+# recovery, would throw those receipts away. Bounded like every other worklist:
+# a capped list beside the absolute count.
+_OPEN_LEASE_RENDER_CAP = 10
+
+
+def _code_analysis_section(engagement_id: int) -> dict[str, Any]:
+    """Open code-analysis leases, as the code service itself defines them."""
+    return code_analysis.open_authoring_leases(
+        engagement_id, limit=_OPEN_LEASE_RENDER_CAP
+    )
+
+
 def build_resume_brief(
     engagement_id: int,
     *,
@@ -955,6 +970,7 @@ def build_resume_brief(
         "read_first_notes": _resume_note_pointers(engagement_id, since=since),
     }
     dispatch_picture = _recent_dispatch_picture(engagement_id, max_age_hours=max_age_hours)
+    code_analysis_section = _code_analysis_section(engagement_id)
     knowledge_drift = _knowledge_drift_section(engagement_id)
     recent_decisions = _recent_decisions(engagement_id, since=since)
     with get_connection() as connection:
@@ -986,6 +1002,7 @@ def build_resume_brief(
         "recent_decisions": recent_decisions,
         "recent_decisions_count": decision_total,
         "operator_checkpoint": operator_checkpoints.current_checkpoint(engagement_id),
+        "code_analysis": code_analysis_section,
         "dispatches": dispatch_picture,
         "command_runs": command_matches,
         "command_runs_page": command_page,
@@ -1000,6 +1017,7 @@ def build_resume_brief(
             command_matches=command_matches,
             stale_dispatches=dispatch_picture.get("stale_in_progress_dispatches") or [],
             stale_threshold_hours=max_age_hours if max_age_hours is not None else _DEFAULT_STALE_THRESHOLD_HOURS,
+            open_code_leases=code_analysis_section.get("open_leases") or [],
             open_code_leads=intel_section["open_leads"],
         ),
     }
@@ -1013,6 +1031,7 @@ def _recommended_actions(
     command_matches: list[dict[str, Any]],
     stale_dispatches: list[dict[str, Any]],
     stale_threshold_hours: float = 24.0,
+    open_code_leases: list[dict[str, Any]] | None = None,
     open_code_leads: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     actions: list[dict[str, Any]] = []
@@ -1042,6 +1061,13 @@ def _recommended_actions(
         add("recent command coverage", "vigil assess command-run list --limit 20")
     if agent_id:
         add("handoff continuation", f"vigil assess agent render-handoff {agent_id}", entity_kind="agent", entity_id=agent_id)
+    if open_code_leases:
+        # Point at the read, not at a mutation: whether an open lease should be
+        # adopted or reset depends on how much durable work it already holds.
+        add(
+            "open code-analysis lease",
+            "vigil assess code-dispatch list --status processing",
+        )
     if any(row.get("code_bindings") for row in open_code_leads or []):
         # Point at the read: whether a bound lead needs queueing, rebinding or
         # closing depends on what the binding already carries.

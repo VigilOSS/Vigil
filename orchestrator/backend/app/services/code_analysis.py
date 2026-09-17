@@ -42,6 +42,15 @@ STRUCTURAL_CALLABLE_IDENTITY_SCHEMA = "structural-callable/v1"
 VARIANT_INPUT_IDENTITY_SCHEMA = "variant-input-identity/v1"
 MAX_VARIANT_RECEIPT_PAGE = 500
 DEFAULT_VARIANT_RECEIPT_PAGE = 100
+# Adoption preserves a queue attempt across owners, and every preserved owner is
+# walked by the readiness and coverage queries. A row abandoned this often is not
+# making progress worth preserving, so the chain is bounded rather than endless.
+MAX_ADOPTED_LEASE_CHAIN = 50
+# Per-item progress renders a capped receipt list beside the true total.
+MAX_PROGRESS_RECEIPTS = 200
+# Open-lease worklists follow the capped-list + absolute-count pattern.
+MAX_OPEN_LEASE_ROWS = 25
+
 # B8: the repository role is the obligation axis, orthogonal to snapshot
 # identity and generation. An `analysis` repository is the reviewed subject —
 # every admitted file owes a queue row, a terminal accounting receipt, variant
@@ -1476,15 +1485,126 @@ def _valid_claimed_terminal_attempt_sql(queue_alias: str) -> str:
     """
 
 
+def _lease_activity_sql(queue_alias: str) -> str:
+    """The one expression that says when a lease last proved it was alive.
+
+    `reset-stale`, the queue listing's heartbeat age and `--stale-minutes`
+    filter, and lease adoption all measure abandonment from here, so the same
+    window always means the same thing across them. (The two recovery verbs
+    then apply their own canonical-attempt guards on top.) `consumed_at` is the
+    fallback because a lease claimed but not yet heartbeated has proven life
+    once.
+    """
+    return f"COALESCE({queue_alias}.last_heartbeat_at, {queue_alias}.consumed_at)"
+
+
+def _lease_activity_age_seconds_sql(queue_alias: str) -> str:
+    """Age of that proof of life in whole seconds, on the database clock.
+
+    The comparison has to use the same clock the stored timestamps came from —
+    a caller's wall clock would drift against the SQLite `datetime('now')` that
+    `reset-stale` selects with. NULL for a row that never held a lease.
+    """
+    return (
+        "CAST(ROUND((julianday('now') - julianday("
+        f"{_lease_activity_sql(queue_alias)})) * 86400.0) AS INTEGER)"
+    )
+
+
+def _attempt_owned_result_sql(
+    queue_alias: str,
+    result_alias: str,
+    *,
+    match_author: bool,
+) -> str:
+    """True when a result row belongs to an owner of this queue attempt.
+
+    Ordinarily that owner is the row's current lease. Adoption transfers a
+    still-open attempt to a replacement agent *without* discarding the receipts
+    the dead lease already wrote, so every adopted lease stays an owner of this
+    attempt's receipts — otherwise preserving them would be pointless, since
+    coverage, readiness and closeout all match receipts to the queue lease.
+    `adopted_leases_json` is '[]' on every row that was never adopted, which
+    makes the second branch inert there.
+
+    `match_author` additionally requires the receipt's `agent_name` to be the
+    agent that held the matched lease. Callers that already demanded an
+    attributable author pass True; callers that only ever matched the lease
+    token pass False, so neither gains a requirement it did not have.
+    """
+    author_clause = (
+        f"\n                AND {result_alias}.agent_name = {queue_alias}.assigned_agent"
+        if match_author
+        else ""
+    )
+    adopted_author_clause = (
+        "\n                      AND json_extract(adopted_lease.value, '$.agent_name')"
+        f"\n                          = {result_alias}.agent_name"
+        if match_author
+        else ""
+    )
+    return f"""
+        (
+            (
+                {result_alias}.lease_token = {queue_alias}.lease_token{author_clause}
+            )
+            OR (
+                json_valid({queue_alias}.adopted_leases_json)
+                AND EXISTS (
+                    SELECT 1
+                    FROM json_each({queue_alias}.adopted_leases_json) AS adopted_lease
+                    WHERE json_extract(adopted_lease.value, '$.lease_token')
+                          = {result_alias}.lease_token{adopted_author_clause}
+                )
+            )
+        )
+    """
+
+
+def _current_attempt_result_count_sql(queue_alias: str) -> str:
+    """Count the receipts this attempt currently carries.
+
+    Exactly the rows `reset-stale` would supersede, so the number answers the
+    question that decides between recovering an abandoned lease and discarding
+    it: how much durable work is stranded in this row.
+    """
+    return f"""
+        SELECT COUNT(*)
+        FROM code_analysis_results AS attempt_result
+        WHERE attempt_result.engagement_id = {queue_alias}.engagement_id
+          AND attempt_result.queue_item_id = {queue_alias}.id
+          AND attempt_result.superseded_at IS NULL
+          AND ({_result_not_replaced_sql("attempt_result")})
+    """
+
+
+def _attempt_lease_tokens(queue_row: dict[str, Any]) -> list[str]:
+    """The lease tokens whose receipts belong to this attempt, current first.
+
+    The Python-side counterpart of :func:`_attempt_owned_result_sql`, for the
+    closeout queries that bind an explicit token list. A row that was never
+    adopted yields exactly its own token, so those checks are unchanged for it.
+    """
+    tokens = [str(queue_row.get("lease_token") or "")]
+    for entry in _json_decode(queue_row.get("adopted_leases_json"), []):
+        if not isinstance(entry, dict):
+            continue
+        token = str(entry.get("lease_token") or "")
+        if token and token not in tokens:
+            tokens.append(token)
+    return tokens
+
+
 def _valid_claimed_result_receipt_sql(
     queue_alias: str,
     result_alias: str,
 ) -> str:
     return f"""
         trim({result_alias}.agent_name) != ''
-        AND {result_alias}.agent_name = {queue_alias}.assigned_agent
         AND trim({result_alias}.lease_token) != ''
-        AND {result_alias}.lease_token = {queue_alias}.lease_token
+        AND ({_attempt_owned_result_sql(
+            queue_alias, result_alias, match_author=True
+        )})
         AND trim({result_alias}.result_fingerprint) != ''
         AND {result_alias}.receipt_binding_status NOT IN (
             'legacy_ambiguous', 'legacy_missing', 'legacy_unbound'
@@ -1533,7 +1653,6 @@ def _successful_terminal_review_row_sql(
                     WHERE contradictory_result.engagement_id = {queue_alias}.engagement_id
                       AND contradictory_result.queue_item_id = {queue_alias}.id
                       AND contradictory_result.file_id = {queue_alias}.file_id
-                      AND contradictory_result.lease_token = {queue_alias}.lease_token
                       AND contradictory_result.repo_generation = {queue_alias}.repo_generation
                       AND contradictory_result.disposition IN ('finding', 'suspicious')
                       AND ({result_is_current("contradictory_result")})
@@ -1550,7 +1669,6 @@ def _successful_terminal_review_row_sql(
                     WHERE completed_result.engagement_id = {queue_alias}.engagement_id
                       AND completed_result.queue_item_id = {queue_alias}.id
                       AND completed_result.file_id = {queue_alias}.file_id
-                      AND completed_result.lease_token = {queue_alias}.lease_token
                       AND completed_result.repo_generation = {queue_alias}.repo_generation
                       AND completed_result.disposition = {queue_alias}.disposition
                       AND ({result_is_current("completed_result")})
@@ -1577,7 +1695,6 @@ def _successful_terminal_review_row_sql(
                     WHERE contradictory_result.engagement_id = {queue_alias}.engagement_id
                       AND contradictory_result.queue_item_id = {queue_alias}.id
                       AND contradictory_result.file_id = {queue_alias}.file_id
-                      AND contradictory_result.lease_token = {queue_alias}.lease_token
                       AND contradictory_result.repo_generation = {queue_alias}.repo_generation
                       AND contradictory_result.disposition IN ('finding', 'suspicious')
                       AND contradictory_result.disposition != {queue_alias}.disposition
@@ -1601,7 +1718,6 @@ def _successful_terminal_review_row_sql(
                 WHERE source_receipt.engagement_id = {queue_alias}.engagement_id
                   AND source_receipt.queue_item_id = {queue_alias}.id
                   AND source_receipt.file_id = {queue_alias}.file_id
-                  AND source_receipt.lease_token = {queue_alias}.lease_token
                   AND source_receipt.repo_generation = {queue_alias}.repo_generation
                   AND source_receipt.disposition = {queue_alias}.disposition
                   AND ({result_is_current("source_receipt")})
@@ -1708,7 +1824,9 @@ def _current_result_receipt_sql(
         AND {result_alias}.engagement_id = {queue_alias}.engagement_id
         AND {result_alias}.queue_item_id = {queue_alias}.id
         AND {result_alias}.file_id = {queue_alias}.file_id
-        AND {result_alias}.lease_token = {queue_alias}.lease_token
+        AND ({_attempt_owned_result_sql(
+            queue_alias, result_alias, match_author=False
+        )})
         AND {result_alias}.repo_generation = {queue_alias}.repo_generation
         AND {queue_alias}.source_superseded_at IS NULL
         AND {queue_alias}.file_id = {files_alias}.id
@@ -5036,6 +5154,26 @@ def queue_stats(engagement_id: int) -> dict[str, Any]:
     }
 
 
+def _adopted_lease_identities(raw: Any) -> list[dict[str, str]]:
+    """Project the stored adoption chain as plain identity pairs.
+
+    Rendered verbatim: agent names and lease tokens are the operator's own
+    audit trail, and the whole point of the chain is to say exactly which lease
+    wrote which receipt.
+    """
+    identities: list[dict[str, str]] = []
+    for entry in _json_decode(raw, []):
+        if not isinstance(entry, dict):
+            continue
+        identities.append(
+            {
+                "agent_name": str(entry.get("agent_name") or ""),
+                "lease_token": str(entry.get("lease_token") or ""),
+            }
+        )
+    return identities
+
+
 def _hydrate_queue_listing_row(row: Any) -> dict[str, Any]:
     return {
         "id": int(row["id"]),
@@ -5063,6 +5201,18 @@ def _hydrate_queue_listing_row(row: Any) -> dict[str, Any]:
         "reanalysis_of_queue_item_id": row["reanalysis_of_queue_item_id"],
         "consumed_at": row["consumed_at"],
         "last_heartbeat_at": row["last_heartbeat_at"],
+        # Ownership truth an operator needs to tell a working lease from an
+        # abandoned one: when it last proved life, how long ago that was on the
+        # database clock, how much durable work the row already carries, and
+        # which earlier leases were adopted into it.
+        "lease_activity_at": row["lease_activity_at"],
+        "heartbeat_age_seconds": (
+            None
+            if row["heartbeat_age_seconds"] is None
+            else int(row["heartbeat_age_seconds"])
+        ),
+        "current_result_count": int(row["current_result_count"] or 0),
+        "adopted_leases": _adopted_lease_identities(row["adopted_leases_json"]),
         "completed_at": row["completed_at"],
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
@@ -5077,6 +5227,7 @@ def list_queue_items(
     classification: str | None = None,
     batch_theme: str | None = None,
     queue_mode: str | None = None,
+    stale_minutes: int | None = None,
     limit: int | None = None,
     offset: int = 0,
 ) -> dict[str, Any]:
@@ -5136,6 +5287,22 @@ def list_queue_items(
     if queue_mode is not None:
         clauses.append("queue.queue_mode = ?")
         params.append(queue_mode)
+    if stale_minutes is not None:
+        if stale_minutes < 1:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="stale_minutes must be at least 1",
+            )
+        # Only a processing row holds a lease that can go stale; a pending row
+        # has no owner to lose. A claimed row with neither timestamp has never
+        # proved life, which `reset-stale` also treats as abandoned.
+        clauses.append("queue.status = 'processing'")
+        clauses.append(
+            f"({_lease_activity_sql('queue')} IS NULL"
+            f" OR datetime({_lease_activity_sql('queue')})"
+            " < datetime('now', ? || ' minutes'))"
+        )
+        params.append(f"-{int(stale_minutes)}")
     from_where = f"""
         FROM code_analysis_queue AS queue
         JOIN code_files AS files
@@ -5150,7 +5317,10 @@ def list_queue_items(
     query = f"""
         SELECT queue.*, files.file_path, files.classification,
                files.analysis_priority, files.repo_id, repos.repo_key,
-               repos.repo_role
+               repos.repo_role,
+               {_lease_activity_sql('queue')} AS lease_activity_at,
+               {_lease_activity_age_seconds_sql('queue')} AS heartbeat_age_seconds,
+               ({_current_attempt_result_count_sql('queue')}) AS current_result_count
         {from_where}
         ORDER BY queue.priority DESC, queue.id ASC
     """
@@ -5373,6 +5543,7 @@ def _hydrate_claimed_queue_item(
     item["slot_types"] = _json_decode(item.get("slot_types_json"), [])
     item["guidance_hypotheses"] = _json_decode(item.get("guidance_hypotheses_json"), [])
     item["cross_file_triggers"] = _json_decode(item.get("cross_file_triggers_json"), [])
+    item["adopted_leases"] = _adopted_lease_identities(item.get("adopted_leases_json"))
     file_row = file_rows[int(row["file_id"])]
     item["file"] = _hydrate_code_file(file_row)
     item["repo"] = _hydrate_code_repo(repo_rows[int(file_row["repo_id"])])
@@ -5815,12 +5986,18 @@ def complete_queue_items(
         file_row = _get_file_rows(connection, engagement.id, {int(queue_row["file_id"])})[
             int(queue_row["file_id"])
         ]
+        # Receipts belong to the ATTEMPT, whose owners are the current lease plus
+        # any lease adopted into it; closing under the current lease alone would
+        # make an adopting agent re-record work adoption exists to preserve.
+        attempt_tokens = _attempt_lease_tokens(queue_row)
+        token_placeholders = ",".join("?" for _ in attempt_tokens)
         candidate_rows = connection.execute(
-            """
+            f"""
             SELECT DISTINCT disposition
             FROM code_analysis_results
             WHERE engagement_id = ? AND queue_item_id = ? AND file_id = ?
-              AND lease_token = ? AND disposition IN ('finding', 'suspicious')
+              AND lease_token IN ({token_placeholders})
+              AND disposition IN ('finding', 'suspicious')
               AND superseded_at IS NULL
               AND NOT EXISTS (
                   SELECT 1 FROM code_analysis_results AS replacement
@@ -5832,7 +6009,7 @@ def complete_queue_items(
                 engagement.id,
                 int(queue_row["id"]),
                 int(queue_row["file_id"]),
-                lease_token,
+                *attempt_tokens,
             ),
         ).fetchall()
         candidate_dispositions = [str(row["disposition"]) for row in candidate_rows]
@@ -5854,11 +6031,12 @@ def complete_queue_items(
             )
         if disposition == "finding":
             finding_results = connection.execute(
-                """
+                f"""
                 SELECT finding_slug
                 FROM code_analysis_results
                 WHERE engagement_id = ? AND queue_item_id = ? AND file_id = ?
-                  AND lease_token = ? AND disposition = 'finding'
+                  AND lease_token IN ({token_placeholders})
+                  AND disposition = 'finding'
                   AND superseded_at IS NULL
                   AND NOT EXISTS (
                       SELECT 1 FROM code_analysis_results AS replacement
@@ -5870,7 +6048,7 @@ def complete_queue_items(
                     engagement.id,
                     int(queue_row["id"]),
                     int(queue_row["file_id"]),
-                    lease_token,
+                    *attempt_tokens,
                 ),
             ).fetchall()
             for finding_result in finding_results:
@@ -5882,11 +6060,12 @@ def complete_queue_items(
                 )
         if disposition in {"finding", "suspicious"}:
             evidenced_result = connection.execute(
-                """
+                f"""
                 SELECT id
                 FROM code_analysis_results
                 WHERE engagement_id = ? AND queue_item_id = ? AND file_id = ?
-                  AND lease_token = ? AND disposition = ? AND superseded_at IS NULL
+                  AND lease_token IN ({token_placeholders})
+                  AND disposition = ? AND superseded_at IS NULL
                   AND NOT EXISTS (
                       SELECT 1 FROM code_analysis_results AS replacement
                       WHERE replacement.supersedes_result_id = code_analysis_results.id
@@ -5898,7 +6077,7 @@ def complete_queue_items(
                     engagement.id,
                     int(queue_row["id"]),
                     int(queue_row["file_id"]),
-                    lease_token,
+                    *attempt_tokens,
                     disposition,
                 ),
             ).fetchone()
@@ -5915,11 +6094,12 @@ def complete_queue_items(
             and disposition != "skipped"
         ):
             source_receipt = connection.execute(
-                """
+                f"""
                 SELECT results.id
                 FROM code_analysis_results AS results
                 WHERE results.engagement_id = ? AND results.queue_item_id = ?
-                  AND results.file_id = ? AND results.lease_token = ?
+                  AND results.file_id = ?
+                  AND results.lease_token IN ({token_placeholders})
                   AND results.repo_generation = ? AND results.disposition = ?
                   AND results.superseded_at IS NULL
                   AND results.receipt_binding_status NOT IN (
@@ -5945,7 +6125,7 @@ def complete_queue_items(
                     engagement.id,
                     int(queue_row["id"]),
                     int(queue_row["file_id"]),
-                    lease_token,
+                    *attempt_tokens,
                     int(queue_row["repo_generation"]),
                     disposition,
                     int(queue_row["file_id"]),
@@ -6099,7 +6279,7 @@ def reset_stale_queue_items(
         stale_rows = connection.execute(
             f"""
             SELECT queue.id, queue.file_id, queue.lease_token,
-                   COALESCE(queue.last_heartbeat_at, queue.consumed_at, '') AS lease_activity_at
+                   COALESCE({_lease_activity_sql("queue")}, '') AS lease_activity_at
             FROM code_analysis_queue AS queue
             JOIN code_files AS files
               ON files.id = queue.file_id
@@ -6114,8 +6294,8 @@ def reset_stale_queue_items(
               AND queue.source_superseded_at IS NULL
               AND ({_latest_current_queue_attempt_sql("queue", "repos")})
               AND ({_no_superseded_active_attempt_sql("queue", "repos")})
-              AND (COALESCE(queue.last_heartbeat_at, queue.consumed_at) IS NULL
-                   OR datetime(COALESCE(queue.last_heartbeat_at, queue.consumed_at))
+              AND ({_lease_activity_sql("queue")} IS NULL
+                   OR datetime({_lease_activity_sql("queue")})
                       < datetime('now', ? || ' minutes'))
             """,
             (engagement.id, f"-{minutes}"),
@@ -6123,9 +6303,10 @@ def reset_stale_queue_items(
         reset_count = 0
         for row in stale_rows:
             cursor = connection.execute(
-                """
+                f"""
                 UPDATE code_analysis_queue
                 SET status = 'pending', assigned_agent = '', lease_token = '',
+                    adopted_leases_json = '[]',
                     consumed_at = NULL, last_heartbeat_at = NULL,
                     priority = CASE
                         WHEN queue_mode = ? THEN priority
@@ -6139,7 +6320,7 @@ def reset_stale_queue_items(
                     updated_at = CURRENT_TIMESTAMP
                 WHERE engagement_id = ? AND id = ? AND status = 'processing'
                   AND lease_token = ?
-                  AND COALESCE(last_heartbeat_at, consumed_at, '') = ?
+                  AND COALESCE({_lease_activity_sql("code_analysis_queue")}, '') = ?
                 """,
                 (
                     _METADATA_REFRESH_REVIEW_MODE,
@@ -6152,12 +6333,17 @@ def reset_stale_queue_items(
             if cursor.rowcount != 1:
                 continue
             reset_count += 1
+            # Every current receipt on this attempt, not just the last owner's:
+            # an adopted attempt carries receipts written under the leases it
+            # inherited, and a reset that left those current would hand them to
+            # whoever claims the row next. Identical for a row never adopted,
+            # whose only current receipts belong to its one lease.
             connection.execute(
                 """
                 UPDATE code_analysis_results SET superseded_at = ?
-                WHERE queue_item_id = ? AND lease_token = ? AND superseded_at IS NULL
+                WHERE queue_item_id = ? AND superseded_at IS NULL
                 """,
-                (_now_iso(), int(row["id"]), str(row["lease_token"] or "")),
+                (_now_iso(), int(row["id"])),
             )
             _sync_file_analysis_status(connection, engagement.id, int(row["file_id"]))
             _sync_trigger_status_for_file(connection, engagement.id, int(row["file_id"]))
@@ -6187,6 +6373,299 @@ def heartbeat_queue_item(
                 detail="Cannot heartbeat: queue lease is no longer owned by this agent",
             )
     return {"item_id": item_id, "last_heartbeat_at": now}
+
+
+def adopt_queue_lease(
+    engagement_id: int,
+    *,
+    item_id: int,
+    expected_agent: str,
+    expected_lease_token: str,
+    agent_name: str,
+    stale_minutes: int,
+    reason: str,
+) -> dict[str, Any]:
+    """Hand one abandoned processing attempt to a replacement agent.
+
+    `reset-stale` is the other recovery and it *discards* the attempt: ownership
+    is cleared, every receipt the dead lease wrote is superseded, and the file
+    returns to pending for someone to analyse from scratch. Adoption makes the
+    opposite trade — every accumulated row value and every receipt survives and
+    only the owner changes — so it must never take a lease that is still alive,
+    or two agents would author receipts for the same file.
+
+    "Still live" is decided by the only signal a lease emits: its last
+    heartbeat, falling back to a claim that has not heartbeated yet
+    (:func:`_lease_activity_sql`, the same expression `reset-stale` selects on).
+    A lease whose proof of life falls inside ``stale_minutes`` is live and the
+    swap is refused. That window is the caller's explicit assertion of death and
+    is re-evaluated on the database clock *inside* the transaction that performs
+    the swap, because a window measured before the transaction could have
+    expired by the time the write lands.
+
+    The caller also pins the identity it observed, so this is a compare-and-swap
+    and not a grab: the UPDATE matches the expected agent, the expected token,
+    the processing status, and the exact activity timestamp read in this
+    transaction. A "dead" agent that heartbeats between the read and the write
+    moves that timestamp and wins the row, instead of losing its work.
+    """
+    engagement = _engagement_or_404(engagement_id)
+    now = _now_iso()
+    with get_connection() as connection:
+        # Serialize against heartbeat and stale-reset writers for the whole
+        # read-check-swap, exactly as `reset_stale_queue_items` does.
+        connection.execute("BEGIN IMMEDIATE")
+        queue_rows = _get_queue_rows(connection, engagement.id, {item_id})
+        _require_queue_status(
+            queue_rows, expected_status="processing", action="adopt the lease on"
+        )
+        _require_queue_lease(
+            queue_rows,
+            agent_name=expected_agent,
+            lease_token=expected_lease_token,
+            action="adopt the lease",
+        )
+        _require_queue_generation(
+            connection, engagement.id, queue_rows, action="adopt the lease"
+        )
+        queue_row = queue_rows[item_id]
+        liveness = connection.execute(
+            f"""
+            SELECT {_lease_activity_sql("queue")} AS lease_activity_at,
+                   {_lease_activity_age_seconds_sql("queue")} AS heartbeat_age_seconds,
+                   CASE
+                       WHEN {_lease_activity_sql("queue")} IS NULL THEN 0
+                       WHEN datetime({_lease_activity_sql("queue")})
+                            < datetime('now', ? || ' minutes') THEN 0
+                       ELSE 1
+                   END AS lease_is_live
+            FROM code_analysis_queue AS queue
+            WHERE queue.engagement_id = ? AND queue.id = ?
+            """,
+            (f"-{int(stale_minutes)}", engagement.id, item_id),
+        ).fetchone()
+        assert liveness is not None
+        if int(liveness["lease_is_live"]):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    f"Cannot adopt queue item {item_id}: the lease held by "
+                    f"{expected_agent} is still live — it last proved life at "
+                    f"{liveness['lease_activity_at']}, inside the declared "
+                    f"{stale_minutes}-minute window. Wait for the window to pass, "
+                    "or let the current owner close the item."
+                ),
+            )
+        adopted_leases = _adopted_lease_identities(queue_row.get("adopted_leases_json"))
+        adopted_leases.append(
+            {"agent_name": expected_agent, "lease_token": expected_lease_token}
+        )
+        if len(adopted_leases) > MAX_ADOPTED_LEASE_CHAIN:
+            # The chain is walked by every readiness and coverage query, and a
+            # row this often abandoned is not making progress worth preserving.
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    f"Queue item {item_id} has already been adopted "
+                    f"{MAX_ADOPTED_LEASE_CHAIN} times; reset it with "
+                    "`code-dispatch reset-stale` and requeue the file instead"
+                ),
+            )
+        lease_token = str(uuid.uuid4())
+        cursor = connection.execute(
+            f"""
+            UPDATE code_analysis_queue
+            SET assigned_agent = ?, lease_token = ?, adopted_leases_json = ?,
+                last_heartbeat_at = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE engagement_id = ? AND id = ? AND status = 'processing'
+              AND assigned_agent = ? AND lease_token = ?
+              AND COALESCE({_lease_activity_sql("code_analysis_queue")}, '') = ?
+            """,
+            (
+                agent_name,
+                lease_token,
+                _json_list_text(adopted_leases),
+                now,
+                engagement.id,
+                item_id,
+                expected_agent,
+                expected_lease_token,
+                str(liveness["lease_activity_at"] or ""),
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "queue lease changed before adoption; re-read "
+                    "`code-dispatch list` and retry"
+                ),
+            )
+        # consumed_at is deliberately left alone: the attempt started when the
+        # dead lease claimed it, and that is what its elapsed work describes.
+        row = connection.execute(
+            "SELECT * FROM code_analysis_queue WHERE engagement_id = ? AND id = ?",
+            (engagement.id, item_id),
+        ).fetchone()
+        file_rows = _get_file_rows(connection, engagement.id, {int(row["file_id"])})
+        repo_rows = _get_repo_rows(
+            connection,
+            engagement.id,
+            {int(file_rows[int(row["file_id"])]["repo_id"])},
+        )
+        item = _hydrate_claimed_queue_item(
+            row,
+            file_rows,
+            repo_rows,
+            _open_lead_bindings_by_file(
+                connection, engagement.id, {int(row["file_id"])}
+            ),
+        )
+        preserved_result_count = _scalar_row(
+            connection,
+            f"""
+            SELECT ({_current_attempt_result_count_sql("queue")})
+            FROM code_analysis_queue AS queue
+            WHERE queue.engagement_id = ? AND queue.id = ?
+            """,
+            (engagement.id, item_id),
+        )
+    return {
+        "item_id": item_id,
+        "stale_minutes": int(stale_minutes),
+        "reason": reason,
+        "previous_agent_name": expected_agent,
+        "previous_lease_token": expected_lease_token,
+        "previous_lease_activity_at": liveness["lease_activity_at"],
+        "previous_lease_age_seconds": (
+            None
+            if liveness["heartbeat_age_seconds"] is None
+            else int(liveness["heartbeat_age_seconds"])
+        ),
+        "preserved_result_count": preserved_result_count,
+        "adopted_leases": adopted_leases,
+        "item": item,
+    }
+
+
+def queue_item_progress(engagement_id: int, item_id: int) -> dict[str, Any]:
+    """What one queue attempt already carries, and what closeout still owes.
+
+    Receipts are durable the moment `code-record analysis` writes them, but
+    nothing read them back per item — so a hunter recording cluster by cluster
+    could not verify its own progress, and a replacement that adopted the lease
+    could not tell which clusters were already reviewed. Every number here is
+    derived from the helpers closeout itself uses, so this preview cannot drift
+    from the rules it previews.
+    """
+    engagement = _engagement_or_404(engagement_id)
+    with get_connection() as connection:
+        queue_row = _get_queue_rows(connection, engagement.id, {item_id})[item_id]
+        file_id = int(queue_row["file_id"])
+        file_row = _get_file_rows(connection, engagement.id, {file_id})[file_id]
+        activity = connection.execute(
+            f"""
+            SELECT {_lease_activity_sql("queue")} AS lease_activity_at,
+                   {_lease_activity_age_seconds_sql("queue")} AS heartbeat_age_seconds
+            FROM code_analysis_queue AS queue
+            WHERE queue.engagement_id = ? AND queue.id = ?
+            """,
+            (engagement.id, item_id),
+        ).fetchone()
+        receipt_rows = connection.execute(
+            f"""
+            SELECT * FROM code_analysis_results AS results
+            WHERE results.engagement_id = ? AND results.queue_item_id = ?
+              AND results.superseded_at IS NULL
+              AND ({_result_not_replaced_sql("results")})
+            ORDER BY results.id ASC
+            """,
+            (engagement.id, item_id),
+        ).fetchall()
+        merged: dict[int, dict[str, dict[str, Any]]] = {}
+        receipts: list[dict[str, Any]] = []
+        for index, receipt_row in enumerate(receipt_rows):
+            entries = _json_decode(receipt_row["cwe_coverage_json"], [])
+            # Coverage merges over EVERY receipt; only the rendered list is
+            # capped, so a long attempt still reports honest family coverage.
+            _merge_cwe_coverage_entries(merged, file_id, entries)
+            if index >= MAX_PROGRESS_RECEIPTS:
+                continue
+            receipts.append(
+                {
+                    "id": int(receipt_row["id"]),
+                    "agent_name": str(receipt_row["agent_name"] or ""),
+                    "lease_token": str(receipt_row["lease_token"] or ""),
+                    "disposition": str(receipt_row["disposition"] or ""),
+                    "receipt_kind": str(receipt_row["receipt_kind"] or ""),
+                    "receipt_binding_status": str(
+                        receipt_row["receipt_binding_status"] or ""
+                    ),
+                    "evidence_present": bool(
+                        str(receipt_row["evidence"] or "").strip()
+                        or str(receipt_row["evidence_ref"] or "").strip()
+                    ),
+                    "callable_count": len(
+                        _json_decode(receipt_row["callable_refs_json"], [])
+                    ),
+                    "reviewed_span_count": len(
+                        _json_decode(receipt_row["reviewed_spans_json"], [])
+                    ),
+                    "cwe_families": [
+                        str(entry.get("family", ""))
+                        for entry in entries
+                        if isinstance(entry, dict) and entry.get("family")
+                    ],
+                    "finding_slug": str(receipt_row["finding_slug"] or ""),
+                    "created_at": receipt_row["created_at"],
+                }
+            )
+        recorded_entries = list(merged.get(file_id, {}).values())
+        recorded_families = sorted(merged.get(file_id, {}))
+        applicable = _applicable_families_for_file(
+            _json_decode(file_row.get("slot_types_json"), []),
+            language=str(file_row.get("language", "")),
+            role=str(file_row.get("role", "")),
+        )
+        integrity = _compute_coverage_integrity(
+            connection,
+            engagement.id,
+            item_id,
+            file_id,
+            _safe_int(file_row.get("total_functions", 0)),
+            recorded_entries,
+        )
+    return {
+        "item_id": item_id,
+        "file_id": file_id,
+        "file_path": str(file_row["file_path"]),
+        "classification": str(file_row.get("classification") or ""),
+        "status": str(queue_row["status"]),
+        "queue_mode": str(queue_row.get("queue_mode") or "initial"),
+        "disposition": str(queue_row.get("disposition") or ""),
+        "agent_name": str(queue_row.get("assigned_agent") or ""),
+        "lease_token": str(queue_row.get("lease_token") or ""),
+        "repo_generation": int(queue_row.get("repo_generation", 0) or 0),
+        "consumed_at": queue_row.get("consumed_at"),
+        "last_heartbeat_at": queue_row.get("last_heartbeat_at"),
+        "lease_activity_at": activity["lease_activity_at"],
+        "heartbeat_age_seconds": (
+            None
+            if activity["heartbeat_age_seconds"] is None
+            else int(activity["heartbeat_age_seconds"])
+        ),
+        "adopted_leases": _adopted_lease_identities(queue_row.get("adopted_leases_json")),
+        "applicable_vuln_classes": applicable,
+        "recorded_cwe_families": recorded_families,
+        "missing_cwe_families": [
+            family for family in applicable if family not in recorded_families
+        ],
+        "receipts": receipts,
+        # The rendered list is capped; the count is the true total, so a long
+        # attempt still reports its real depth.
+        "receipt_count": len(receipt_rows),
+        "coverage_integrity": integrity,
+    }
 
 
 def retry_error_queue_items(
@@ -6220,12 +6699,15 @@ def retry_error_queue_items(
         _require_queue_status(queue_rows, expected_status="error", action="retry")
         _require_queue_generation(connection, engagement.id, queue_rows, action="retry")
         for row in queue_rows.values():
+            # Every current receipt on the attempt, not just the last owner's —
+            # an adopted attempt also carries the receipts it inherited, and the
+            # row is about to be handed back to the fetch rotation.
             connection.execute(
                 """
                 UPDATE code_analysis_results SET superseded_at = ?
-                WHERE queue_item_id = ? AND lease_token = ? AND superseded_at IS NULL
+                WHERE queue_item_id = ? AND superseded_at IS NULL
                 """,
-                (_now_iso(), int(row["id"]), str(row.get("lease_token", ""))),
+                (_now_iso(), int(row["id"])),
             )
         cursor = connection.execute(
             f"""
@@ -6233,6 +6715,7 @@ def retry_error_queue_items(
             SET status = 'pending',
                 assigned_agent = '',
                 lease_token = '',
+                adopted_leases_json = '[]',
                 consumed_at = NULL,
                 last_heartbeat_at = NULL,
                 priority = CASE
@@ -6277,6 +6760,7 @@ def retry_needs_context_queue_items(
             f"""
             UPDATE code_analysis_queue
             SET status = 'pending', assigned_agent = '', lease_token = '',
+                adopted_leases_json = '[]',
                 consumed_at = NULL, last_heartbeat_at = NULL,
                 priority = CASE
                     WHEN queue_mode = ? THEN priority
@@ -6716,7 +7200,6 @@ def create_analysis_result(
             expected_identity = (
                 int(queue_item_id),
                 int(file_row["id"]),
-                lease_token,
                 int(queue_row.get("repo_generation", 0) or 0),
                 receipt_kind,
                 _json_list_text(canonical_callable_refs),
@@ -6725,18 +7208,28 @@ def create_analysis_result(
             actual_identity = (
                 int(superseded_result["queue_item_id"]),
                 int(superseded_result["file_id"]),
-                str(superseded_result["lease_token"]),
                 int(superseded_result["repo_generation"]),
                 str(superseded_result["receipt_kind"]),
                 str(superseded_result["callable_refs_json"]),
                 str(superseded_result["reviewed_spans_json"]),
             )
-            if actual_identity != expected_identity:
+            # The receipt being corrected must belong to this ATTEMPT, not to
+            # this lease: every read of an adopted attempt already treats the
+            # inherited receipts as owned, so pinning the write to the current
+            # token alone refused the adopter the one correction adoption exists
+            # to enable. Same list closeout binds (:func:`_attempt_lease_tokens`),
+            # and for a row that was never adopted it is exactly its own token.
+            if (
+                actual_identity != expected_identity
+                or str(superseded_result["lease_token"])
+                not in _attempt_lease_tokens(queue_row)
+            ):
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT,
                     detail=(
                         "supersedes must identify a current result with the same "
-                        "queue item, lease token, file, source anchors, and repository generation"
+                        "queue item, file, source anchors, and repository generation, "
+                        "recorded under this attempt's lease or one it adopted"
                     ),
                 )
 
@@ -7870,6 +8363,113 @@ def get_threat_model(
 # Coverage
 # =========================================================================
 
+def _open_authoring_lease_rows(
+    connection,
+    engagement_id: int,
+    *,
+    repo_id: int | None = None,
+    limit: int = MAX_OPEN_LEASE_ROWS,
+) -> tuple[list[dict[str, Any]], int]:
+    """Claimed analysis attempts that never reached closeout, oldest first.
+
+    Each row is a dispatch that was authoring durable state when it stopped: the
+    lease is still held, receipts may already be recorded, and nothing has
+    closed the file. Counts alone read as ordinary in-flight work, which is why
+    a died-mid-file dispatch used to be invisible until someone paged the queue.
+
+    Scoped to the canonical latest attempt of an analysis repository — the same
+    row set the `unresolved_active_queue` gate reason counts, so this is its
+    itemization rather than a second definition of open work. Non-canonical
+    active history stays separately reported as `invalid_active_history` and
+    remains addressable by id through `code-dispatch list`.
+    """
+    repo_clause = "" if repo_id is None else " AND files.repo_id = ?"
+    repo_params: tuple[Any, ...] = () if repo_id is None else (repo_id,)
+    from_where = f"""
+        FROM code_analysis_queue AS queue
+        JOIN code_files AS files
+          ON files.id = queue.file_id
+         AND files.engagement_id = queue.engagement_id
+        JOIN code_repos AS repos
+          ON repos.id = files.repo_id
+         AND repos.engagement_id = files.engagement_id
+         AND repos.active_generation > 0
+         AND {_analysis_repo_sql("repos")}
+        WHERE queue.engagement_id = ?
+          AND queue.status = 'processing'
+          AND files.retired_at IS NULL
+          AND queue.repo_generation = repos.active_generation
+          AND queue.source_superseded_at IS NULL
+          AND ({_latest_current_queue_attempt_sql("queue", "repos")})
+          AND ({_no_superseded_active_attempt_sql("queue", "repos")})
+          {repo_clause}
+    """
+    total = _scalar_row(
+        connection,
+        f"SELECT COUNT(*) {from_where}",
+        (engagement_id, *repo_params),
+    )
+    rows = connection.execute(
+        f"""
+        SELECT queue.id AS queue_item_id, queue.file_id, queue.assigned_agent,
+               queue.lease_token, queue.queue_mode, queue.batch_theme,
+               queue.consumed_at, queue.last_heartbeat_at,
+               queue.adopted_leases_json,
+               files.file_path, files.classification, files.repo_id,
+               repos.repo_key,
+               {_lease_activity_sql("queue")} AS lease_activity_at,
+               {_lease_activity_age_seconds_sql("queue")} AS heartbeat_age_seconds,
+               ({_current_attempt_result_count_sql("queue")}) AS current_result_count
+        {from_where}
+        ORDER BY (lease_activity_at IS NULL) DESC, lease_activity_at ASC,
+                 queue.id ASC
+        LIMIT ?
+        """,
+        (engagement_id, *repo_params, int(limit)),
+    ).fetchall()
+    leases = [
+        {
+            "queue_item_id": int(row["queue_item_id"]),
+            "file_id": int(row["file_id"]),
+            "file_path": str(row["file_path"]),
+            "classification": str(row["classification"] or ""),
+            "repo_id": int(row["repo_id"]),
+            "repo_key": str(row["repo_key"]),
+            "queue_mode": str(row["queue_mode"] or "initial"),
+            "batch_theme": str(row["batch_theme"] or ""),
+            "agent_name": str(row["assigned_agent"] or ""),
+            "lease_token": str(row["lease_token"] or ""),
+            "consumed_at": row["consumed_at"],
+            "last_heartbeat_at": row["last_heartbeat_at"],
+            "lease_activity_at": row["lease_activity_at"],
+            "heartbeat_age_seconds": (
+                None
+                if row["heartbeat_age_seconds"] is None
+                else int(row["heartbeat_age_seconds"])
+            ),
+            "current_result_count": int(row["current_result_count"] or 0),
+            "adopted_leases": _adopted_lease_identities(row["adopted_leases_json"]),
+        }
+        for row in rows
+    ]
+    return leases, total
+
+
+def open_authoring_leases(
+    engagement_id: int,
+    *,
+    repo_id: int | None = None,
+    limit: int = MAX_OPEN_LEASE_ROWS,
+) -> dict[str, Any]:
+    """Connection-owning front door for :func:`_open_authoring_lease_rows`."""
+    engagement = _engagement_or_404(engagement_id)
+    with get_connection() as connection:
+        leases, total = _open_authoring_lease_rows(
+            connection, engagement.id, repo_id=repo_id, limit=limit
+        )
+    return {"open_leases": leases, "open_leases_count": total}
+
+
 def code_coverage_summary(
     engagement_id: int,
     *,
@@ -8197,6 +8797,9 @@ def code_coverage_summary(
               {queue_repo_clause}
             """,
             (engagement.id, *repo_params),
+        )
+        open_leases, open_leases_count = _open_authoring_lease_rows(
+            connection, engagement.id, repo_id=repo_id
         )
         trigger_rows = connection.execute(
             (
@@ -8638,6 +9241,11 @@ def code_coverage_summary(
         # Named so a shrunken denominator is never a silent one: these repos are
         # fully readable and were deliberately excluded from every count above.
         "reference_repos": reference_repos,
+        # The item-level form of the "still pending or processing" gate reason:
+        # which claimed attempts never closed, how stale each lease is, and how
+        # many receipts would be discarded by resetting instead of adopting.
+        "open_leases": open_leases,
+        "open_leases_count": open_leases_count,
         "by_classification": by_classification,
         "by_status": by_status,
         "findings_summary": {

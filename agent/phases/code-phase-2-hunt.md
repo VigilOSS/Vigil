@@ -79,7 +79,9 @@ vigil assess code-dispatch stats
 
 **Fetch loop:**
 ```bash
-vigil assess code-dispatch reset-stale 10
+vigil assess code-dispatch list --stale-minutes 10   # which rows are stale, and what each already carries
+vigil assess code-dispatch adopt-lease <item-id> <agent-name> --from-agent <dead-agent> --from-lease <token> --reason "<why>"   # stale row WITH receipts: keeps them
+vigil assess code-dispatch reset-stale 10            # remaining stale rows carrying nothing worth keeping
 vigil assess code-dispatch stats
 
 # Read-only: what is in the queue right now, and the exact ids for a lane
@@ -194,7 +196,9 @@ rather than replacing them with a count. Do not summarize the debt block any oth
 **On return:**
 ```bash
 vigil assess contract code-record analysis   # confirm the shape if the payload was hand-authored
-vigil assess code-record analysis <analysis-json>   # cwe_coverage + cross_file_triggers
+vigil assess code-record analysis <analysis-json>   # cwe_coverage + cross_file_triggers;
+                                                   # record per cluster as each finishes, not at end-of-lane
+vigil assess code-dispatch progress <item-id>      # what this item still owes
 
 # Preview the completion payload before committing queue history when unsure:
 vigil assess code-dispatch done <item-id> <agent-name> <lease-token> <clean|finding|suspicious|skipped> <cwe-coverage-json> ["notes"] --dry-run [--skip-reason <reason>]
@@ -208,7 +212,9 @@ JSON
 vigil assess code-dispatch done <item-id> <agent-name> <lease-token> <clean|finding|suspicious|skipped> /tmp/cwe_<item-id>.json ["notes"] [--skip-reason <reason>]
 vigil assess finding record code-vuln-hunter <finding-json> --agent-id <your-agent_id>
 vigil assess code-dispatch requeue-triggers <triggers-json>   # if analysis returned cross_file_triggers
-vigil assess code-dispatch reset-stale 10   # before fetching the next batch
+vigil assess code-dispatch list --stale-minutes 10   # before fetching the next batch: read first
+vigil assess code-dispatch adopt-lease <item-id> <agent-name> --from-agent <dead-agent> --from-lease <token> --reason "<why>"   # a stale row that already carries receipts
+vigil assess code-dispatch reset-stale 10            # only rows the listing showed carrying nothing
 ```
 
 For a run-accounted hunt, every `suspicious` analysis JSON also names its active
@@ -284,7 +290,8 @@ judgment and continue to 2C/2D. Pending cross-file triggers remain a separate st
 blocker regardless of the quality score.
 
 Otherwise: process any pending cross-file triggers first (`vigil assess code-coverage`, `vigil
-assess code-dispatch reset-stale 10`) -- a trigger may add a file that closes a gap class, shrinking
+assess code-dispatch list --stale-minutes 10`, then `code-dispatch adopt-lease ...` for a stale row
+with receipts or `code-dispatch reset-stale 10` for the rest) -- a trigger may add a file that closes a gap class, shrinking
 the re-dispatch scope. Then group the remaining files by which classes are below threshold and
 dispatch `code-vuln-hunter` in CWE-Directed Re-Analysis Mode:
 

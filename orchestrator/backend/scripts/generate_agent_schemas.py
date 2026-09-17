@@ -871,7 +871,7 @@ def _schema_specs() -> tuple[SchemaSpec, ...]:
                         "description": "Untrusted-input class this vulnerability is reached through, named from the same nine slot types the file classification uses: NETWORK-INPUT, URL-COMPONENT, CMD-ARGUMENT, FILE-CONTENT, ENV-VARIABLE, CALLBACK-DATA, PROTOCOL-FIELD, SERIALIZED-DATA, EXEC-POLICY (see agent/skills/code-architecture-mapping/SKILL.md Step 10 for the canonical table). Unlike the file-level slot_types list, this field is deliberately free text and is not validated: prefer a value from that list, but record a more precise one when the nine do not describe the reached input. It is a label only - it never gates coverage or family derivation, which read the file-level slot_types.",
                     },
                     "supersedes": {
-                        "description": "Optional analysis-result row ID explicitly replaced by this correction. The original must be current and have the same queue item, lease token, file, grouped source anchors, and repository generation.",
+                        "description": "Optional analysis-result row ID explicitly replaced by this correction. The original must be current and have the same queue item, file, grouped source anchors, and repository generation, and have been recorded under this attempt's lease or one it adopted.",
                     },
                     "notes": {
                         "description": "Additional notes, context expansion requests, or follow-up recommendations.",

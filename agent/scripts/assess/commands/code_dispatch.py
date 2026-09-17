@@ -36,6 +36,13 @@ _SKIP_REASONS_HINT = (
     "vendored-dependency",
 )
 
+# Mirrors the backend's QueueAdoptLeaseRequest default and QueueResetStaleRequest
+# bounds so one window definition drives both recovery verbs. Pinned by
+# orchestrator/backend/tests/test_code_lease_adoption.py.
+_DEFAULT_ADOPTION_STALE_MINUTES = 10
+_MIN_ADOPTION_STALE_MINUTES = 1
+_MAX_ADOPTION_STALE_MINUTES = 1440
+
 _ACTION_HELP: dict[str, str] = {
     "stats": (
         "Usage: vigil assess code-dispatch stats\n\n"
@@ -44,11 +51,36 @@ _ACTION_HELP: dict[str, str] = {
     "list": (
         "Usage: vigil assess code-dispatch list [--status STATUS] [--repo-id ID] "
         "[--classification TIER] [--batch-theme THEME] [--queue-mode MODE] "
-        "[--limit N] [--offset N] [--json|--ids-only]\n\n"
+        "[--stale-minutes N] [--limit N] [--offset N] [--json|--ids-only]\n\n"
         "Page the current-generation analysis queue without claiming anything.\n"
         "Rows are ordered exactly as fetch claims them (priority desc, id asc).\n"
+        "Every row carries AGE (seconds since the lease last proved life) and "
+        "RCPT (receipts already recorded against it).\n"
+        "--stale-minutes N narrows the page to processing rows whose lease has "
+        "not proved life inside that window — the same abandonment measure "
+        "`reset-stale N` and `adopt-lease --stale-minutes N` apply, though both "
+        "additionally refuse a row that is not the canonical latest attempt.\n"
         "--json and --ids-only both emit a payload `fetch --ids-file` accepts, so "
         "explicit IDs stay recoverable after the queue-submission output scrolls.\n"
+    ),
+    "adopt-lease": (
+        "Usage: vigil assess code-dispatch adopt-lease <item-id> <agent-name> "
+        "--from-agent NAME --from-lease TOKEN --reason TEXT [--stale-minutes N]\n\n"
+        "Move one abandoned processing lease to a replacement agent, keeping "
+        "every accumulated row value and every receipt the dead lease wrote.\n"
+        "--from-agent/--from-lease are the exact identity `list` showed; the "
+        "swap only lands on that lease.\n"
+        f"--stale-minutes (default {_DEFAULT_ADOPTION_STALE_MINUTES}) is the "
+        "window inside which the lease counts as LIVE; a live lease is "
+        "refused, never adopted.\n"
+        "Use reset-stale instead when the abandoned attempt recorded nothing "
+        "worth keeping — it clears ownership and supersedes its receipts.\n"
+    ),
+    "progress": (
+        "Usage: vigil assess code-dispatch progress <item-id> [--json]\n\n"
+        "Read back what one queue attempt already carries: recorded receipts, "
+        "the CWE families they cover, the families closeout still needs, the "
+        "lease identity chain, and the current coverage-integrity projection.\n"
     ),
     "fetch": (
         "Usage: vigil assess code-dispatch fetch <limit> <agent-name> "
@@ -134,7 +166,7 @@ def register(subparsers) -> None:
     p.add_argument(
         "action",
         choices=tuple(_ACTION_HELP),
-        help="stats|list|fetch|heartbeat|done|error|needs-context|reset-stale|retry-error|retry-needs-context|queue|reanalyze|requeue-triggers|list-triggers|resolve-triggers",
+        help="stats|list|progress|fetch|heartbeat|done|error|needs-context|adopt-lease|reset-stale|retry-error|retry-needs-context|queue|reanalyze|requeue-triggers|list-triggers|resolve-triggers",
     )
     p.add_argument("extra", nargs=argparse.REMAINDER, help="Action-specific arguments")
     p.set_defaults(func=run)
@@ -156,6 +188,28 @@ def run(args) -> None:
     elif action == "list":
         filters, output = _parse_list_filters(extra)
         _list(cfg, filters, output)
+    elif action == "progress":
+        if len(extra) < 1:
+            print("Usage: code-dispatch progress <item-id> [--json]", file=sys.stderr)
+            sys.exit(1)
+        flags = [token for token in extra[1:] if token != "--json"]
+        if flags:
+            print(
+                f"ERROR: unknown code-dispatch progress option: {flags[0]}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        _progress(cfg, extra[0], as_json="--json" in extra[1:])
+    elif action == "adopt-lease":
+        if len(extra) < 2:
+            print(
+                "Usage: code-dispatch adopt-lease <item-id> <agent-name> "
+                "--from-agent NAME --from-lease TOKEN --reason TEXT "
+                "[--stale-minutes N]",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        _adopt_lease(cfg, extra[0], extra[1], _parse_adopt_lease_options(extra[2:]))
     elif action == "fetch":
         if len(extra) < 2:
             print(
@@ -443,10 +497,11 @@ _LIST_FILTER_OPTIONS = (
     ("--classification", "classification"),
     ("--batch-theme", "batch_theme"),
     ("--queue-mode", "queue_mode"),
+    ("--stale-minutes", "stale_minutes"),
     ("--limit", "limit"),
     ("--offset", "offset"),
 )
-_LIST_INT_MINIMUMS = {"repo_id": 1, "limit": 1, "offset": 0}
+_LIST_INT_MINIMUMS = {"repo_id": 1, "stale_minutes": 1, "limit": 1, "offset": 0}
 
 
 def _parse_list_filters(tokens: list[str]) -> tuple[dict[str, str], str]:
@@ -492,6 +547,26 @@ def _parse_list_filters(tokens: list[str]) -> tuple[dict[str, str], str]:
         values[field] = value
         index += 2
     return values, output
+
+
+def _format_lease_age(seconds: object) -> str:
+    """Render a lease age compactly enough to scan a page of rows.
+
+    The exact second count stays in `--json`; the table needs the magnitude that
+    decides whether an operator looks closer, not the precision.
+    """
+    if type(seconds) is not int or seconds < 0:
+        return "-"
+    if seconds < 60:
+        return f"{seconds}s"
+    minutes, remaining_seconds = divmod(seconds, 60)
+    if minutes < 60:
+        return f"{minutes}m"
+    hours, remaining_minutes = divmod(minutes, 60)
+    if hours < 24:
+        return f"{hours}h{remaining_minutes:02d}m"
+    days, remaining_hours = divmod(hours, 24)
+    return f"{days}d{remaining_hours:02d}h"
 
 
 def _warn_if_page_is_partial(result: dict, output: str) -> None:
@@ -548,13 +623,16 @@ def _list(cfg, filters: dict[str, str], output: str) -> None:
         return
     print(
         f"{'ID':>8}  {'STATUS':<13}{'MODE':<17}{'PRI':>4}  {'CLASS':<10}"
-        f"{'THEME':<21}{'AGENT':<17}FILE"
+        f"{'AGE':>8}{'RCPT':>6}  {'THEME':<21}{'AGENT':<17}FILE"
     )
     for item in items:
         print(
             f"{item.get('id', '?')!s:>8}  {item.get('status', ''):<13}"
             f"{item.get('queue_mode', ''):<17}{item.get('priority', 0)!s:>4}  "
-            f"{item.get('classification', ''):<10}{item.get('batch_theme', ''):<21}"
+            f"{item.get('classification', ''):<10}"
+            f"{_format_lease_age(item.get('heartbeat_age_seconds')):>8}"
+            f"{item.get('current_result_count', 0)!s:>6}  "
+            f"{item.get('batch_theme', ''):<21}"
             f"{item.get('agent_name', ''):<17}{item.get('file_path', '')}"
         )
     unclaimable = [
@@ -576,19 +654,225 @@ def _list(cfg, filters: dict[str, str], output: str) -> None:
     )
 
 
+_ADOPT_LEASE_OPTIONS = {
+    "--from-agent": "expected_agent",
+    "--from-lease": "expected_lease_token",
+    "--reason": "reason",
+    "--stale-minutes": "stale_minutes",
+}
+
+
+def _parse_adopt_lease_options(tokens: list[str]) -> dict[str, object]:
+    """Parse the swap identity and the window the caller asserts death over.
+
+    Every field is required except the window, which defaults to the same ten
+    minutes `reset-stale` defaults to — the two verbs act on one definition of
+    an abandoned lease and must not drift apart on its default either.
+    """
+    options: dict[str, object] = {}
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        field = _ADOPT_LEASE_OPTIONS.get(token)
+        if field is None or index + 1 >= len(tokens):
+            print(
+                f"Unknown or incomplete code-dispatch adopt-lease option: {token}",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+        if field in options:
+            print(f"ERROR: {token} was specified more than once", file=sys.stderr)
+            raise SystemExit(1)
+        value = tokens[index + 1]
+        if field == "stale_minutes":
+            if (
+                re.fullmatch(r"[0-9]+", value) is None
+                or not _MIN_ADOPTION_STALE_MINUTES
+                <= int(value)
+                <= _MAX_ADOPTION_STALE_MINUTES
+            ):
+                print(
+                    "ERROR: --stale-minutes requires an integer between "
+                    f"{_MIN_ADOPTION_STALE_MINUTES} and "
+                    f"{_MAX_ADOPTION_STALE_MINUTES}",
+                    file=sys.stderr,
+                )
+                raise SystemExit(1)
+            options[field] = int(value)
+        else:
+            if not value.strip():
+                print(f"ERROR: {token} requires a value", file=sys.stderr)
+                raise SystemExit(1)
+            options[field] = value
+        index += 2
+    missing = [
+        flag
+        for flag, field in _ADOPT_LEASE_OPTIONS.items()
+        if field != "stale_minutes" and field not in options
+    ]
+    if missing:
+        print(
+            "ERROR: code-dispatch adopt-lease requires "
+            f"{', '.join(sorted(missing))}; --from-agent and --from-lease are the "
+            "exact identity `code-dispatch list` showed for the lease you are "
+            "replacing, and --reason records why it is presumed dead",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+    options.setdefault("stale_minutes", _DEFAULT_ADOPTION_STALE_MINUTES)
+    return options
+
+
+def _adopt_lease(
+    cfg, item_id: str, agent_name: str, options: dict[str, object]
+) -> None:
+    """Take over an abandoned lease without discarding what it already wrote."""
+    payload: dict[str, object] = {
+        "item_id": _validate_single_id(item_id),
+        "agent_name": agent_name,
+        **options,
+    }
+    with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
+        result = client.post("code/analysis-queue/adopt-lease", payload)
+
+    if not isinstance(result, dict) or not isinstance(result.get("item"), dict):
+        print("Backend returned a non-object lease adoption response", file=sys.stderr)
+        raise SystemExit(1)
+    item = result["item"]
+    lease_token = str(item.get("lease_token") or "")
+    queue_item_id = item.get("id")
+    if type(queue_item_id) is not int or queue_item_id < 1 or not lease_token:
+        print("Invalid code-analysis claim identity returned by backend", file=sys.stderr)
+        raise SystemExit(1)
+    scratch_relative = _prepare_dispatch_scratch_dir(
+        cfg.engagement_dir, queue_item_id=queue_item_id, lease_token=lease_token
+    )
+    item["scratch_dir"] = scratch_relative.as_posix()
+    # The dead lease's scratch directory is derived from its token, so the
+    # adopter can read whatever intermediate state it left behind.
+    previous_scratch = _dispatch_scratch_relative(
+        queue_item_id=queue_item_id,
+        lease_token=str(result.get("previous_lease_token") or ""),
+    )
+    result["previous_scratch_dir"] = previous_scratch.as_posix()
+    # Snapshot the enriched record, so the audit trail holds the same scratch
+    # identities the adopting agent was handed.
+    snapshot = write_json_snapshot(
+        cfg.engagement_dir,
+        category="code-queue-adopt-lease",
+        label=agent_name,
+        payload=result,
+        metadata={
+            "command": "code-dispatch adopt-lease",
+            "item_id": payload["item_id"],
+            "previous_agent_name": result.get("previous_agent_name", ""),
+            "previous_lease_token": result.get("previous_lease_token", ""),
+        },
+    )
+    # Diagnostics on stderr, the claim record on stdout — same split `fetch`
+    # uses, so the adopted item pipes straight into whatever reads a claim.
+    print(
+        f"Adopted queue item {queue_item_id} from "
+        f"{result.get('previous_agent_name', '?')} "
+        f"(lease {result.get('previous_lease_token', '?')}, last alive "
+        f"{result.get('previous_lease_activity_at') or 'never'}) — "
+        f"preserved {result.get('preserved_result_count', 0)} recorded receipt(s)",
+        file=sys.stderr,
+    )
+    print(f"New lease: {agent_name} / {lease_token}", file=sys.stderr)
+    print(f"Prior lease scratch dir: {previous_scratch.as_posix()}", file=sys.stderr)
+    print(f"Saved audit snapshot: {snapshot.name}", file=sys.stderr)
+    print(json.dumps(result, indent=2, ensure_ascii=False))
+
+
+def _progress(cfg, item_id: str, *, as_json: bool) -> None:
+    """Report what one claimed attempt already carries and still owes."""
+    item_id_value = _validate_single_id(item_id)
+    with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
+        result = client.get(f"code/analysis-queue/{item_id_value}/progress")
+
+    if not isinstance(result, dict):
+        print("Backend returned a non-object queue progress response", file=sys.stderr)
+        raise SystemExit(1)
+    if as_json:
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+        return
+
+    print(
+        f"=== Queue item {result.get('item_id', '?')} "
+        f"({result.get('status', '?')}) {result.get('file_path', '?')} ==="
+    )
+    print(
+        f"  lease: {result.get('agent_name') or '-'} / "
+        f"{result.get('lease_token') or '-'} | last alive "
+        f"{result.get('lease_activity_at') or 'never'} "
+        f"({_format_lease_age(result.get('heartbeat_age_seconds'))} ago)"
+    )
+    for adopted in result.get("adopted_leases") or []:
+        if isinstance(adopted, dict):
+            print(
+                f"  adopted from: {adopted.get('agent_name', '?')} / "
+                f"{adopted.get('lease_token', '?')}"
+            )
+    print(f"  receipts recorded: {result.get('receipt_count', 0)}")
+    for receipt in result.get("receipts") or []:
+        if not isinstance(receipt, dict):
+            continue
+        print(
+            f"    #{receipt.get('id', '?')} {receipt.get('disposition', '?')} "
+            f"{receipt.get('receipt_kind', '?')} "
+            f"evidence={'yes' if receipt.get('evidence_present') else 'no'} "
+            f"callables={receipt.get('callable_count', 0)} "
+            f"spans={receipt.get('reviewed_span_count', 0)} "
+            f"families={', '.join(receipt.get('cwe_families') or []) or '-'} "
+            f"by {receipt.get('agent_name', '?')}"
+        )
+    print(
+        "  cwe families recorded: "
+        f"{', '.join(result.get('recorded_cwe_families') or []) or '-'}"
+    )
+    print(
+        "  cwe families still owed at closeout: "
+        f"{', '.join(result.get('missing_cwe_families') or []) or 'none'}"
+    )
+    integrity = result.get("coverage_integrity")
+    if isinstance(integrity, dict):
+        blockers = integrity.get("authoritative_blockers") or []
+        advisories = integrity.get("advisories") or []
+        print(
+            f"  coverage integrity: "
+            f"{'plausible' if integrity.get('plausible') else 'BLOCKED'} "
+            f"({len(blockers)} blocker(s), {len(advisories)} advisory(ies))"
+        )
+        for warning in [*blockers, *advisories]:
+            print(f"    - {warning}")
+
+
+def _dispatch_scratch_relative(*, queue_item_id: int, lease_token: str) -> Path:
+    """The engagement-relative scratch path a queue item + lease token owns.
+
+    Pure, so a lease that is no longer held still resolves to the directory it
+    wrote into — which is how an adopting agent reaches its predecessor's
+    intermediate state instead of starting the file again.
+    """
+    lease_key = hashlib.sha256(lease_token.encode("utf-8")).hexdigest()[:16]
+    return Path(
+        "tools",
+        "analysis-state",
+        "code-dispatch-scratch",
+        str(queue_item_id),
+        f"lease-{lease_key}",
+    )
+
+
 def _prepare_dispatch_scratch_dir(
     engagement_dir: str | Path,
     *,
     queue_item_id: int,
     lease_token: str,
 ) -> Path:
-    lease_key = hashlib.sha256(lease_token.encode("utf-8")).hexdigest()[:16]
-    relative = Path(
-        "tools",
-        "analysis-state",
-        "code-dispatch-scratch",
-        str(queue_item_id),
-        f"lease-{lease_key}",
+    relative = _dispatch_scratch_relative(
+        queue_item_id=queue_item_id, lease_token=lease_token
     )
     root = Path(engagement_dir).resolve()
     current = root

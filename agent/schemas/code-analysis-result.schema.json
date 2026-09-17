@@ -320,7 +320,7 @@
       ],
       "default": null,
       "title": "Supersedes",
-      "description": "Optional analysis-result row ID explicitly replaced by this correction. The original must be current and have the same queue item, lease token, file, grouped source anchors, and repository generation."
+      "description": "Optional analysis-result row ID explicitly replaced by this correction. The original must be current and have the same queue item, file, grouped source anchors, and repository generation, and have been recorded under this attempt's lease or one it adopted."
     }
   },
   "required": [

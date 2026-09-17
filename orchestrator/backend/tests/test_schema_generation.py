@@ -172,9 +172,9 @@ def test_code_analysis_result_schema_exposes_skip_and_explicit_supersession():
     assert supersedes["exclusiveMinimum"] == 0
     for identity_part in (
         "queue item",
-        "lease token",
         "file",
         "grouped source anchors",
+        "this attempt's lease or one it adopted",
     ):
         assert identity_part in supersedes["description"]
     reviewed_spans = schema["properties"]["reviewed_spans"]

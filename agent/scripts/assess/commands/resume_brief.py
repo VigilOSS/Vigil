@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from urllib.parse import quote, urlencode
 
 from assess.commands import kali_sweep_orphans
+from assess.commands.code_dispatch import _format_lease_age
 from assess.commands.operator_checkpoint import (
     render_checkpoint_reference_lines,
     render_intent_lines,
@@ -304,6 +305,7 @@ def _render_markdown(brief: dict) -> str:
     _render_work_buffer(lines, brief.get("work_buffer") or {})
     _render_attempts(lines, brief.get("attempts") or {})
     _render_per_input_coverage(lines, brief.get("per_input_coverage") or {})
+    _render_code_analysis(lines, brief.get("code_analysis") or {})
     _render_decisions(
         lines,
         brief.get("recent_decisions") or [],
@@ -821,6 +823,44 @@ def _render_per_input_coverage(lines: list, per_input: dict) -> None:
 
     if len(shown) < total:
         lines.append(f"- … showing {len(shown)} of {total} input-cells")
+
+
+def _render_code_analysis(lines: list, code_analysis: dict) -> None:
+    """Render open code-analysis leases. No-op for a web-only engagement.
+
+    A queue row still in `processing` is a dispatch that was authoring durable
+    state when it stopped: the lease is held, receipts may already be recorded,
+    and no closeout ever ran. Nothing else in this brief reports it — the
+    dispatch sections describe `assessment_dispatches`, not the analysis queue —
+    so a resumed session would either re-dispatch the file or reach for
+    `reset-stale`, which discards what the dead lease already wrote.
+    """
+    if not code_analysis:
+        return
+    leases = code_analysis.get("open_leases") or []
+    if not leases:
+        return
+    total = code_analysis.get("open_leases_count", len(leases))
+    lines.extend(["", "## Code Analysis"])
+    lines.append(f"- open analysis leases ({total}):")
+    for lease in leases:
+        if not isinstance(lease, dict):
+            continue
+        lines.append(contain_separators(
+            f"  - item {lease.get('queue_item_id')} "
+            f"{_trim(lease.get('file_path') or '', 80)} "
+            f"[{lease.get('classification') or '-'}] agent={lease.get('agent_name') or '-'} "
+            f"lease={lease.get('lease_token') or '-'} "
+            f"silent={_format_lease_age(lease.get('heartbeat_age_seconds'))} "
+            f"receipts={lease.get('current_result_count', 0)}"
+        ))
+    if isinstance(total, int) and total > len(leases):
+        lines.append(f"  - … showing {len(leases)} of {total}")
+    lines.append(
+        "  - inspect: `vigil assess code-dispatch progress <item-id>`; recover with "
+        "`code-dispatch adopt-lease` (keeps receipts) or `code-dispatch reset-stale` "
+        "(discards them)"
+    )
 
 
 _SEVERITY_RANK = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0}

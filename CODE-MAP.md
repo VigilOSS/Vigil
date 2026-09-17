@@ -56,6 +56,12 @@ When you are about to copy one of these into a second file, stop and import.
   at column zero and forges a heading. ADR 0019 forbids masking it, so containment is the only lever.
   `operator_checkpoint.py` and `resume_brief.py` render through it.
   See: `agent/scripts/assess/tests/test_operator_checkpoint_render.py`.
+- `code_analysis.py:_lease_activity_sql` owns what "a lease last proved life" means
+  (`COALESCE(last_heartbeat_at, consumed_at)`); `reset-stale`, `list --stale-minutes`, adoption
+  liveness and the open-lease report all measure from it.
+- `code_analysis.py:_attempt_owned_result_sql` owns which `(agent, lease)` identities may author a
+  queue attempt's receipts — the current lease PLUS the row's adoption chain. Matching the current
+  lease alone voids everything an adopted attempt inherited.
 - `agent/scripts/assess/commands/code_dispatch.py:submit_queue_items` owns the audited write into
   `code_analysis_queue`; `code-dispatch queue/reanalyze` and `code-lead queue` go through it.
 - `orchestrator/backend/app/services/state_manager/coverage.py:PROBE_RESULT_STATUSES` owns result
@@ -148,6 +154,9 @@ A prompt change is **not** prompt-only when the prompt defines an artifact the b
   writes `assessment_dispatch_client_bindings`, append-only by SQLite trigger: a correction stamps
   the prior row's `superseded_by_id`, never an overwrite. `_DISPATCH_SELECT` carries the current
   binding — a dispatch read off that projection reports every specialist as unbound.
+- Any path returning a `code_analysis_queue` row to `pending` must clear `adopted_leases_json` AND
+  supersede every current receipt, not only the last owner's, or the next claimant inherits receipts
+  it never earned (`reset_stale_queue_items`, `retry_error_queue_items`, `retry_needs_context_queue_items`).
 - `code_analysis.py:_record_source_generation` — every generation-bound row type must be handled on
   promotion. Queue rows, results and triggers are stamped superseded; `_rebase_lead_bindings` carries
   a lead binding forward only on an identical `file_hash`. A generation-bound table added without a

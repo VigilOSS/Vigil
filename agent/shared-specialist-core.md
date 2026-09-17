@@ -226,7 +226,9 @@ operator marks the dispatch complete after your return so checkpointing stays
 separate from lifecycle closure.
 
 `agent handoff` is idempotent — call it as a checkpoint after each major step,
-not only at the end. Why: a dispatch that halts before the final closing call
+not only at the end. Where a role writes durable per-item receipts, those
+receipts are the same kind of checkpoint and carry the same rule: write each
+one as its unit of work finishes, not at end-of-lane. Why: a dispatch that halts before the final closing call
 (e.g. context exhaustion) makes its most recent checkpoint the canonical
 resume point — skip a checkpoint and whatever you did since the last one is
 invisible to the operator and to whoever resumes. Use the exact `agent_id`,

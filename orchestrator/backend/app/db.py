@@ -3836,6 +3836,7 @@ def _create_code_analysis_tables(connection: sqlite3.Connection) -> None:
                 lease_token TEXT NOT NULL DEFAULT '',
                 repo_generation INTEGER NOT NULL DEFAULT 0,
                 last_heartbeat_at TEXT,
+                adopted_leases_json TEXT NOT NULL DEFAULT '[]',
                 disposition TEXT NOT NULL DEFAULT '',
                 analysis_notes TEXT NOT NULL DEFAULT '',
                 skip_reason TEXT NOT NULL DEFAULT '',
@@ -4417,6 +4418,12 @@ def _apply_additive_migrations(connection: sqlite3.Connection) -> None:
         "lease_token": "TEXT NOT NULL DEFAULT ''",
         "repo_generation": "INTEGER NOT NULL DEFAULT 0",
         "last_heartbeat_at": "TEXT",
+        # B9: the lease identities an adopted attempt inherited, oldest first.
+        # Adoption hands a still-open attempt to a replacement agent instead of
+        # discarding what the dead lease recorded, so those identities stay
+        # valid authors of this attempt's receipts. '[]' for every row that was
+        # never adopted, which is why the owner-chain predicate is inert there.
+        "adopted_leases_json": "TEXT NOT NULL DEFAULT '[]'",
         "queue_mode": "TEXT NOT NULL DEFAULT 'initial'",
         "reanalysis_reason": "TEXT NOT NULL DEFAULT ''",
         "reanalysis_of_queue_item_id": "INTEGER",
