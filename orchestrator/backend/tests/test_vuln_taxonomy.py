@@ -328,6 +328,11 @@ SKILLS_WITHOUT_VULN_CLASS: frozenset[str] = frozenset(
         "write-probe-script",
         # Multi-class checklist, no single canonical class dominates.
         "cicd-security",
+        # Dependency derivation: establishes what a build ships and what the
+        # reviewed code reaches. The class of any resulting finding is whatever
+        # the component's own defect is (deserialization, cmdi, xxe, ...), so no
+        # single canonical class owns the methodology.
+        "dependency-analysis",
     }
 )
 

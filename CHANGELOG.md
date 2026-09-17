@@ -59,6 +59,19 @@ Durable design decisions live in [`docs/adr/`](docs/adr/).
   staleness state (`code-lead list`). Prior art that was previously a note nobody could act on now
   reaches the queue and shows up in code completeness as `code_leads_unresolved`. A lead's
   disposition is still closed on the note itself, so there is one lead primitive, not two.
+- **`vigil assess code-dependencies`** derives what a sealed repository actually ships and what the
+  reviewed code reaches, from its own manifests, lockfiles, build configuration and build output.
+  Readers cover Maven, Gradle, npm, Go and Python (`requirements*.txt`, `pyproject.toml`,
+  `poetry.lock`, `Pipfile.lock`). Composer, Bundler, Cargo, pnpm and `Pipfile` are on the recognized
+  roster with no reader, so each is reported as an `unparsed_ecosystem` gap — that ecosystem is present
+  and NOT analyzed, which never collapses into "no dependencies here". Container base images are not
+  read at all. Every value is an `unverified_*` observation with a named origin (`source_manifest` or
+  `build_output`); there is deliberately no vocabulary member that reads as "not shipped", because
+  build files do not settle what a built artifact contains. `--structural-index` correlates against
+  the import index, and a missing index reports `unverified_reachability_unindexed` rather than
+  claiming a component is unreferenced. `--scan-report` correlates an existing Trivy/Grype report
+  against the derived picture without letting a scan row change a shipment observation. Paired with
+  a new `dependency-analysis` skill rather than stretching the mobile or OSINT skills.
 - **Framework registration is recorded separately from surface type.**
   `vigil assess record-surface --framework-registration <kind>` names how a host framework registers
   a plugin — service provider, HTTP endpoint, request interceptor, event listener, template
@@ -125,6 +138,22 @@ Durable design decisions live in [`docs/adr/`](docs/adr/).
   with nothing to undo. `code-dispatch list` still shows every row and now carries `repo_role`:
   a listing that silently dropped rows would hide the exact IDs an operator needs, and there is no
   adversary here to hide them from.
+- **Dependency reachability is scoped to the module that declared the dependency.** It scanned
+  every indexed file in the ecosystem, so in a multi-module repository a dependency declared in
+  `a/package.json` but imported only by `b/` was reported as referenced from `a` — and, worse, a
+  module with no index of its own was reported `unverified_no_reference_observed` because a
+  *different* module happened to have one. That is a negative manufactured from absent evidence,
+  which this vocabulary exists to make impossible. A declaration now reaches its own module and
+  everything beneath it (an aggregator POM, a workspace root), never a sibling; build-output
+  records still search the whole tree, because their bytes are in the artifact regardless of which
+  module ships them.
+- **A malformed structural-index artifact counts as unindexed, not as unreferenced.** An artifact
+  that existed and parsed as JSON but was not an object with an `imports` list — `{}`, a truncated
+  write, an older record shape — kept its `complete` status and silently supplied no imports, so
+  every component came back `unverified_no_reference_observed`. It now degrades to a gap naming
+  what was wrong, like the missing-artifact case beside it. A corrupt *per-file* artifact also no
+  longer kills the whole command: that is a hole in one file. An unreadable *manifest* still exits
+  non-zero, because an inventory you cannot read means nothing is known about what was indexed.
 - **Cold image builds no longer die at 20s.** `vigil up` and `vigil install` threaded one bounded
   runner through both fast metadata queries and image builds, so the bound that makes a wedged
   daemon fail fast killed every first-run Kali build and swallowed its progress output.

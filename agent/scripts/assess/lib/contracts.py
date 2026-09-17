@@ -11,6 +11,12 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from .dependency_picture import (
+    DEPENDENCY_OBSERVATION_ORIGINS,
+    DEPENDENCY_QUALIFIERS,
+    REACHABILITY_OBSERVATIONS,
+    SHIPMENT_OBSERVATIONS,
+)
 from .config import ENGAGEMENT_BINDING_CONTRACT
 from .intel_types import INTEL_TYPES
 from .kali_audit import ALLOWED_PHASES, _enum_reject_message
@@ -1963,6 +1969,47 @@ _CONTRACTS: dict[str, CommandContract] = {
             ("--language to tag unknown files", "--language sets the repo primary language only; use --default-language-for-unknown to stamp unrecognized-extension files"),
             ("ingesting the host framework as analysis just to look symbols up", "use --role reference; it stays indexed and citable and owes no coverage"),
             ("re-ingesting a reference repo with --role analysis to 'refresh' it", "omit --role entirely — it keeps the recorded role; --role analysis is a deliberate promotion that makes every admitted file owe review"),
+        ),
+    ),
+    "code-dependencies": CommandContract(
+        name="code-dependencies",
+        goals=("code-analysis",),
+        phase=("code-ingest", "code-classify"),
+        summary="Derive what a sealed repository actually ships and what the reviewed code reaches, from its own manifests, lockfiles, build configuration and build output.",
+        schema_name="code-dependency-picture/v1 (stdout only; no backend write)",
+        preferred_invocations=(
+            "vigil assess code-dependencies <sealed-source-path>",
+            "vigil assess code-dependencies <sealed-source-path> --structural-index <structural-index-generation>/manifest.json",
+            "vigil assess code-dependencies <sealed-source-path> --structural-index <structural-index-generation>/manifest.json --json",
+            "vigil assess code-dependencies <sealed-source-path> --scan-report <trivy-or-grype.json> --json",
+        ),
+        author_supplied_fields=(
+            "repo_path (positional, required) — the `Sealed source:` path code-ingest printed, not a live working tree",
+            "--structural-index: the manifest.json of a `code-index build` generation; without it every component is reported unverified_reachability_unindexed",
+            "--scan-report: an OPTIONAL Trivy/Grype JSON report to correlate; it never creates a component or changes a shipment observation",
+        ),
+        helper_defaults=(
+            ("--structural-index", "unset (no reachability measurement is attempted)"),
+            ("--scan-report", "unset (source-derived picture only)"),
+            ("--json", "off (grouped text report; on emits the full code-dependency-picture/v1 object)"),
+        ),
+        notes=(
+            "A read. It never calls the backend and never writes engagement state; redirect --json if the picture needs to be kept.",
+            "Two facts make a component a lead: the build ships it AND the reviewed code reaches it. The text report puts that intersection first and groups everything else behind it, because reporting a whole dependency list buries the two or three components that matter.",
+            "EVERY shipment and reachability value is an `unverified_*` OBSERVATION, never a verdict. Build files do not settle what a built artifact contains: a Gradle script is a program, a Maven property can come from a parent POM outside the tree, and a distribution name is not an import name. Each record carries a `detection` marker naming the reader that produced it and the verbatim evidence (file, line, exact text) it came from.",
+            "shipment_observation: " + ", ".join(SHIPMENT_OBSERVATIONS) + ". `unverified_excluded_by_declared_scope` means a build file declared a scope that normally keeps the component out of the artifact — NOT that the bytes are absent. `unverified_relocated_into_shaded_artifact` means a shade/shadow rule republishes it under a prefix no manifest contains. `unverified_present_without_declaration` means bytes are in the tree (a vendored copy, a packaged jar, an installed module) that nothing declares — so nothing updates them either.",
+            "reachability_observation: " + ", ".join(REACHABILITY_OBSERVATIONS) + ". Reachability is measured inside the module that declared the component and every module beneath it — an aggregator POM or workspace root governs its descendants, a sibling module never does — while build output found in the tree, which declares no module, is searched for across the whole index. `unverified_no_reference_observed` means that module's own index, in a language that could import the component, was read and nothing matched; `unverified_reachability_unindexed` means there was nothing to read for that module (no index, a degraded parse, an unreadable or malformed index artifact, or no covering language). The second is the absence of a measurement and is never evidence of anything.",
+            "observation_origin records where the observation came from within this track: " + ", ".join(DEPENDENCY_OBSERVATION_ORIGINS) + ". Inbound CVEs from the web/recon track carry their own provenance on `intel record cve`; this field is not that one.",
+            "qualifiers: " + ", ".join(DEPENDENCY_QUALIFIERS) + ". `unverified_manifest_lock_divergence` is emitted only when the declared range is a form the checker fully understands — a `github:`, `file:` or `workspace:` specifier produces no claim, and silence there means undecidable, not compatible.",
+            "The `gaps` array decides whether the picture can be trusted. `unparsed_ecosystem` names a recognized manifest with no reader (Composer, Bundler, Cargo, pnpm, Pipfile): that ecosystem's components are absent from the PICTURE, not absent from the build. `unmatched_scanner_row` names a scan row this build does not declare or vendor — usually a base image rather than the reviewed artifact. `unresolved_catalog_entry` names a version-catalog alias that resolves to no coordinate, so the `libs.<alias>` sites naming it can never be resolved. `unnamed_requirement_reference` names a requirement installed from a URL, VCS or path that names no distribution. `structural_index_artifact_missing`, `structural_index_artifact_unparseable` and `structural_index_artifact_malformed` each name a file the index manifest promised import evidence for and could not deliver; that file counts as unindexed, never as a file that imports nothing.",
+            "Readers cover Maven, Gradle (build scripts, lockfiles, version catalogs), npm (package.json, package-lock, npm-shrinkwrap, yarn v1), Go (go.mod, go.sum, vendor/modules.txt) and Python (requirements*.txt, pyproject, poetry.lock, Pipfile.lock). Everything else on the roster is reported as a gap.",
+        ),
+        common_mistakes=(
+            ("reading `unverified_no_reference_observed` as 'the code does not use it'", "reflection, service loaders, JNI and dynamic require are invisible to an import index; confirm by hand before acting on it"),
+            ("reasoning from `unverified_reachability_unindexed`", "that value means no measurement was taken — run `code-index build` and re-run with --structural-index"),
+            ("treating `unverified_excluded_by_declared_scope` as proof the jar is absent", "it is what the build file declared; confirm against the built artifact"),
+            ("starting a dependency review from a Trivy/Grype report", "derive from source first; --scan-report is a cross-check, and its unmatched rows are the informative part"),
+            ("running it against a live working tree", "pass the sealed snapshot path so the picture is bound to the generation everything else cites"),
         ),
     ),
     "code-index build": CommandContract(

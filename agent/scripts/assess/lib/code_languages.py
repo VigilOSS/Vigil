@@ -25,6 +25,9 @@ LANGUAGE_BY_EXTENSION: dict[str, str] = {
     ".rs": "rust",
     ".java": "java",
     ".kt": "kotlin",
+    # Gradle's Kotlin DSL. `build.gradle.kts` is the dependency-declaring
+    # surface of a Kotlin-DSL build and is literally Kotlin script.
+    ".kts": "kotlin",
     ".rb": "ruby",
     ".php": "php",
     ".swift": "swift",
@@ -57,6 +60,12 @@ LANGUAGE_BY_BASENAME: dict[str, str] = {
     "Makefile": "makefile",
     "CMakeLists.txt": "cmake",
     "Dockerfile": "dockerfile",
+    # Dependency surfaces whose extension says nothing but whose content is a
+    # language Vigil already names. Classifying them honestly keeps lockfiles
+    # out of the unknown-language bucket that made them invisible at ingest.
+    "Pipfile": "toml",
+    "Pipfile.lock": "json",
+    "poetry.lock": "toml",
 }
 
 STRUCTURAL_SUPPORTED_LANGUAGES = frozenset(

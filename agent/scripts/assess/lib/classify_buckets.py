@@ -31,6 +31,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from . import vuln_taxonomy
+from .dependency_manifests import url_path_fragments
 
 
 # gf-style bucket weights. Higher = more likely to yield exploitable signal.
@@ -579,19 +580,26 @@ _BUCKETS: tuple[tuple[str, int, frozenset[str], tuple[str, ...]], ...] = (
             "/test", "/internal", "/mgmt", "/manage", "/console",
             "/dashboard", "/_profiler", "/phpinfo", "/actuator",
             "/.git", "/.env", "/config", "/backup",
-            # ADDED (override #3): compound/specific only.
+            # ADDED (override #3): compound/specific only. `/package.json` was
+            # listed here originally and is now supplied by the shared
+            # dependency-manifest roster below.
             "/healthz", "/readyz", "/server-status", "/server-info",
-            "/package.json", "/actuator/health", "/actuator/env",
+            "/actuator/health", "/actuator/env",
             "/actuator/mappings", "/actuator/metrics", "/actuator/beans",
             "/prometheus",
-            # ADDED (classify-context-and-surface 2026-06, Part 3 §C.13): build /
-            # dependency manifests + Java deployment descriptor — source/dependency
-            # disclosure, mirroring the existing `/package.json` entry. Leading-slash
-            # form (not the plan's bare `composer.json` shorthand) for the same
-            # boundary precision as `/package.json` (so `/mycomposer.json` does NOT
-            # match). The VCS/IDE dotfiles (`.svn`,`.hg`,...) are in `interestingext`.
-            "/composer.json", "/composer.lock", "/yarn.lock",
-            "/package-lock.json", "/web-inf/web.xml",
+            # Java deployment descriptor — source/dependency disclosure in the
+            # same family as the manifests below, but it declares no
+            # dependencies, so it stays a literal here. Leading-slash form for
+            # boundary precision (so `/myweb.xml` does NOT match). The VCS/IDE
+            # dotfiles (`.svn`,`.hg`,...) are in `interestingext`.
+            "/web-inf/web.xml",
+            # Dependency manifests and lockfiles. The roster is owned by
+            # `dependency_manifests.RECOGNIZED_MANIFESTS` — the same table the
+            # code-side readers walk — so an ecosystem is added in one place and
+            # the web and code tracks cannot drift apart. The hand-typed list
+            # this replaced knew only npm and Composer, so an exposed
+            # `/pom.xml`, `/go.sum` or `/requirements.txt` scored nothing.
+            *url_path_fragments(),
         ),
     ),
     (
