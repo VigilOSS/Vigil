@@ -1004,6 +1004,144 @@ def test_resume_LABEL_fields_cannot_forge_headings_across_line_separators(
     # Contained: nothing that followed a separator reaches column zero.
     assert not any(line.startswith(marker) for line in out.splitlines()), out
     assert not any(line.startswith("##") and marker in line for line in out.splitlines())
+
+
+def _brief_with_dispatch(row: dict) -> dict:
+    return {"engagement_key": "eng", "dispatches": {"recent_dispatches": [row]}}
+
+
+def test_the_brief_names_where_each_recent_dispatch_is_reachable():
+    """A dispatch row and a live client session are different things.
+
+    `agent_id` is a name the operator invented; it says nothing about which
+    session is running that specialist. `agent bind-client-handle` records the
+    binding, and resume is exactly when the operator has lost the mapping they
+    were keeping by hand — so the brief has to carry it.
+    """
+    rendered = resume_brief._render_markdown(
+        _brief_with_dispatch(
+            {
+                "agent_id": "code-hunter-3",
+                "agent_role": "code-vuln-hunter",
+                "status": "in_progress",
+                "dispatched_at": "2026-09-16T10:00:00Z",
+                "task": "Review the parser cluster",
+                "client_binding": {
+                    "asserted_client": "claude",
+                    "asserted_session_namespace": "/Users/op/vigil/engagements/acme",
+                    "asserted_client_handle": "sess-7f21",
+                    "binding_version": 1,
+                },
+                "client_binding_count": 1,
+            }
+        )
+    )
+    assert (
+        "client=claude:/Users/op/vigil/engagements/acme:sess-7f21" in rendered
+    )
+
+
+def test_the_binding_carries_the_namespace_that_makes_the_handle_resolvable():
+    """A session id without its scope cannot be used to reach the session.
+
+    `agent bind-client-handle` makes `--session-namespace` REQUIRED for exactly
+    that reason: a bare handle is ambiguous across clients and machines, so the
+    columns are asserted_client / asserted_session_namespace /
+    asserted_client_handle and all three are one identity. Resume is the moment
+    the binding exists for — an operator who has lost the mapping they were
+    keeping by hand — so rendering two thirds of it here published the
+    ambiguous half of the only field that answers "where is this running".
+    """
+    rendered = resume_brief._render_markdown(
+        _brief_with_dispatch(
+            {
+                "agent_id": "code-hunter-9",
+                "agent_role": "code-vuln-hunter",
+                "status": "in_progress",
+                "dispatched_at": "2026-09-16T10:00:00Z",
+                "task": "Review the session cluster",
+                "client_binding": {
+                    "asserted_client": "claude",
+                    "asserted_session_namespace": "/Users/op/vigil/engagements/acme",
+                    "asserted_client_handle": "sess-7f21",
+                    "binding_version": 1,
+                },
+                "client_binding_count": 1,
+            }
+        )
+    )
+
+    assert "asserted_session_namespace" not in rendered  # the value, not the column
+    assert "/Users/op/vigil/engagements/acme" in rendered
+
+
+def test_an_unbound_dispatch_with_binding_history_does_not_render_a_null_version():
+    """`(vNone of 2)` is not a fact about anything.
+
+    The version suffix describes the CURRENT binding; with no current binding
+    there is no version to name, and interpolating `binding_version` off an
+    empty dict printed `None` into the brief. The count is still worth saying —
+    it is the signal that a history exists — so it is reported as history
+    rather than as a version this dispatch is at.
+    """
+    rendered = resume_brief._render_markdown(
+        _brief_with_dispatch(
+            {
+                "agent_id": "code-hunter-10",
+                "agent_role": "code-vuln-hunter",
+                "status": "in_progress",
+                "dispatched_at": "2026-09-16T10:00:00Z",
+                "task": "Review the crypto cluster",
+                "client_binding": None,
+                "client_binding_count": 2,
+            }
+        )
+    )
+
+    assert "None" not in rendered
+    assert "client=unbound (2 in history)" in rendered
+
+
+def test_an_unbound_dispatch_says_so_rather_than_rendering_nothing():
+    rendered = resume_brief._render_markdown(
+        _brief_with_dispatch(
+            {
+                "agent_id": "code-hunter-4",
+                "agent_role": "code-vuln-hunter",
+                "status": "in_progress",
+                "dispatched_at": "2026-09-16T10:00:00Z",
+                "task": "Review the crypto cluster",
+            }
+        )
+    )
+    assert "client=unbound" in rendered
+
+
+def test_a_corrected_binding_shows_that_earlier_versions_exist():
+    """Bindings are append-only; the count is the at-a-glance signal of a correction."""
+    rendered = resume_brief._render_markdown(
+        _brief_with_dispatch(
+            {
+                "agent_id": "code-hunter-5",
+                "agent_role": "code-vuln-hunter",
+                "status": "in_progress",
+                "dispatched_at": "2026-09-16T10:00:00Z",
+                "task": "Review the auth cluster",
+                "client_binding": {
+                    "asserted_client": "codex",
+                    "asserted_session_namespace": "/srv/work/acme",
+                    "asserted_client_handle": "sess-aa02",
+                    "binding_version": 3,
+                },
+                "client_binding_count": 3,
+            }
+        )
+    )
+    assert "client=codex:/srv/work/acme:sess-aa02 (v3 of 3)" in rendered
+
+
+
+
 def _checkpoint_row(**overrides) -> dict:
     row = {
         "checkpoint_version": 3,

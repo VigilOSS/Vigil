@@ -35,6 +35,13 @@ from ..services.state_manager.coverage import (
 # ``depth_ledger`` FUNCTION under that name, shadowing the submodule attribute, so
 # it is imported directly from the submodule rather than via ``state_manager``.
 from ..services.state_manager.depth_ledger import by_family_coverage
+# Client bindings are a dispatch-package concern that postdates the package's
+# ``__init__`` re-export list; imported from the submodule (as coverage,
+# depth_ledger, and http_flows above are) rather than widening that list.
+from ..services.state_manager.dispatches import (
+    list_dispatch_client_bindings,
+    record_dispatch_client_binding,
+)
 from ..services.state_manager.http_flows import (
     CapturePolicyMirrorError,
     DEFAULT_HTTP_FLOW_LIMIT,
@@ -4250,6 +4257,13 @@ _KNOWN_DISPATCH_MODES: tuple[str, ...] = (
 _REASONING = Literal["low", "medium", "high", "xhigh", "max"]
 _CONFIDENCE = Literal["low", "medium", "high"]
 _HANDOFF_STATUS = Literal["checkpointed", "ready", "blocked", "superseded"]
+# One roster of clients Vigil launches, spelled twice for two different
+# questions. A dispatch row widens it with "unknown" because an ordinary
+# dispatch often cannot name the client it will run in; a client BINDING cannot,
+# because a binding whose client is unknown identifies no session. Pinned
+# together by test_dispatch_client_binding_api so the two cannot drift.
+_LAUNCHED_CLIENT = Literal["claude", "codex", "goose", "kimi", "opencode"]
+_DISPATCH_CLIENT = Literal["claude", "codex", "goose", "kimi", "opencode", "unknown"]
 
 
 class DispatchCreate(BaseModel):
@@ -4263,11 +4277,9 @@ class DispatchCreate(BaseModel):
     status: _DISPATCH_STATUS = "in-progress"
     requested_model: str | None = Field(default=None, max_length=128)
     requested_reasoning: _REASONING | None = None
-    client_name: Literal["claude", "codex", "goose", "kimi", "opencode", "unknown"] = (
-        "unknown"
-    )
-    requested_client: Literal["claude", "codex", "goose", "kimi", "opencode", "unknown"] = "unknown"
-    launcher_effective_client: Literal["claude", "codex", "goose", "kimi", "opencode", "unknown"] = "unknown"
+    client_name: _DISPATCH_CLIENT = "unknown"
+    requested_client: _DISPATCH_CLIENT = "unknown"
+    launcher_effective_client: _DISPATCH_CLIENT = "unknown"
     # Provider observation is deliberately closed to caller attestation until a
     # supported client exposes a stable, client-owned signal at this boundary.
     provider_observed_client: Literal["unknown"] = "unknown"
@@ -4335,6 +4347,39 @@ class DispatchUpdate(BaseModel):
     status: _DISPATCH_STATUS | None = None
     completed_at: str | None = Field(default=None, max_length=64)
     finding_slugs: list[str] | None = None
+
+
+class DispatchClientBindingCreate(BaseModel):
+    """Which live client session a dispatch is running as, asserted post-launch.
+
+    Every field is the OPERATOR'S claim: they read the handle out of their client
+    and typed it here. Nothing in this request is observed by a launcher or a
+    provider, which is why each field says ``asserted_`` and why there is no way
+    to supply ``provider_observed_handle`` — that stays closed to caller
+    attestation exactly like ``DispatchCreate.provider_observed_client``, so the
+    row reports an unmeasured handle instead of an unearned one.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    asserted_client: _LAUNCHED_CLIENT
+    # The scope the handle is unique within — a working directory, a workspace,
+    # a host. A bare session id is ambiguous across clients and machines, so the
+    # namespace is required rather than optional: an unlocatable handle cannot be
+    # used to reach the session, which is the whole purpose of binding one.
+    asserted_session_namespace: str = Field(min_length=1, max_length=512)
+    asserted_client_handle: str = Field(min_length=1, max_length=256)
+    note: str | None = Field(default=None, max_length=1024)
+
+    @field_validator(
+        "asserted_session_namespace", "asserted_client_handle", mode="after"
+    )
+    @classmethod
+    def _reject_blank_identity(cls, value: str) -> str:
+        trimmed = value.strip()
+        if not trimmed:
+            raise ValueError("must not be blank")
+        return trimmed
 
 
 class HandoffCreate(BaseModel):
@@ -4749,6 +4794,73 @@ async def patch_dispatch(
     )
     await _broadcast(engagement.key, "dispatch", record)
     return record
+
+
+@router.post(
+    "/dispatches/{agent_id}/client-bindings", status_code=status.HTTP_201_CREATED
+)
+async def create_dispatch_client_binding(
+    engagement_key: str,
+    agent_id: str,
+    request: DispatchClientBindingCreate,
+) -> dict[str, Any]:
+    """Bind a dispatch to the client session the operator actually launched.
+
+    Deliberately a separate POST rather than a field on ``create_dispatch``: the
+    handle does not exist when the dispatch row is written, so requiring it there
+    would either block the dispatch or invite a fabricated value.
+    """
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    record = await anyio.to_thread.run_sync(
+        functools.partial(
+            record_dispatch_client_binding,
+            engagement.id,
+            agent_id=agent_id,
+            asserted_client=request.asserted_client,
+            asserted_session_namespace=request.asserted_session_namespace,
+            asserted_client_handle=request.asserted_client_handle,
+            note=request.note,
+        )
+    )
+    binding = record["binding"]
+    await anyio.to_thread.run_sync(
+        functools.partial(
+            _audit_assessment_mutation,
+            engagement.id,
+            title="agent bind-client-handle",
+            action=(
+                f"agent_id={agent_id} client={binding['asserted_client']} "
+                f"handle={binding['asserted_client_handle']}"
+            ),
+            actor_name=agent_id,
+            result=f"binding_version={binding['binding_version']}",
+            metadata={
+                "agent_id": agent_id,
+                "binding_version": binding["binding_version"],
+                "asserted_client": binding["asserted_client"],
+                "asserted_session_namespace": binding["asserted_session_namespace"],
+                "asserted_client_handle": binding["asserted_client_handle"],
+                "superseded_binding_id": (record["superseded"] or {}).get("id"),
+            },
+        )
+    )
+    # Broadcast the DISPATCH row, not the binding: what changed for every reader
+    # is which session that dispatch is now reachable at, and the dispatch row
+    # carries the current binding.
+    dispatch_row = await anyio.to_thread.run_sync(
+        functools.partial(state_manager.get_dispatch, engagement.id, agent_id)
+    )
+    await _broadcast(engagement.key, "dispatch", dispatch_row)
+    return record
+
+
+@router.get("/dispatches/{agent_id}/client-bindings")
+def get_dispatch_client_bindings(
+    engagement_key: str, agent_id: str
+) -> list[dict[str, Any]]:
+    """The dispatch's full, append-only binding history, oldest version first."""
+    engagement = get_engagement_or_404(engagement_key)
+    return list_dispatch_client_bindings(engagement.id, agent_id)
 
 
 @router.post("/dispatch-handoffs", status_code=status.HTTP_201_CREATED)

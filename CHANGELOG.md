@@ -49,6 +49,10 @@ Durable design decisions live in [`docs/adr/`](docs/adr/).
 - **`vigil install` says what actually needs restarting.** It used to print the same "restart
   everything" list every time, including after the ordinary install that changes only prompt text
   and needs no restart. The summary is now derived per consumer, with the exact command for each.
+- **`vigil assess agent bind-client-handle`** records which client session a dispatch is actually
+  running as, after launch, when the handle exists. Bindings are append-only and superseding, and
+  render in `agent list` and the resume brief, so mid-flight messaging no longer depends on a
+  hand-maintained mapping the operator keeps in their head.
 
 ### Fixed
 

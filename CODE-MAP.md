@@ -40,6 +40,9 @@ When you are about to copy one of these into a second file, stop and import.
   `agent/scripts/assess/commands/dispatch/work_items.py` mirrors the backend-side predicate.
 - `agent/scripts/assess/lib/classify_buckets.py:_BUCKETS` owns URL bucket scoring and skip tags.
   Ingest classifies inline; `work-buffer reclassify` reapplies it.
+- `orchestrator/backend/app/api/assessment.py:_LAUNCHED_CLIENT` owns the clients a dispatch can be
+  BOUND to; `_DISPATCH_CLIENT` adds `unknown`, `contracts.py:BINDABLE_CLIENTS` mirrors it in the CLI.
+  See: `orchestrator/backend/tests/test_dispatch_client_binding_api.py`.
 - `agent/scripts/assess/lib/render_containment.py:contain_separators` owns how persisted,
   target-influenced text reaches an agent-readable document: lossless, indent-only, so nothing lands
   at column zero and forges a heading. ADR 0019 forbids masking it, so containment is the only lever.
@@ -127,6 +130,10 @@ A prompt change is **not** prompt-only when the prompt defines an artifact the b
 - `agent/scripts/assess/cli.py` — a verb can touch the import block, flat loop, four grouped
   registries, inline `kali` registry, and pre-parse action-help hook. See the recipe in `AGENTS.md`.
 - `agent/scripts/assess/lib/contracts.py:_INLINE_DOCUMENTED_NAMESPACES` — a `<verb> <action>` leaf documented on its parent contract must have that parent listed here, or `vigil assess contract` cannot resolve it.
+- `orchestrator/backend/app/services/state_manager/dispatches.py:record_dispatch_client_binding`
+  writes `assessment_dispatch_client_bindings`, append-only by SQLite trigger: a correction stamps
+  the prior row's `superseded_by_id`, never an overwrite. `_DISPATCH_SELECT` carries the current
+  binding — a dispatch read off that projection reports every specialist as unbound.
 - `orchestrator/backend/app/services/state_manager/phase_readiness.py` — its readiness function names
   and HTTP routes are load-bearing for the phase gate, report export, and frontend. Refactor behind
   them or add a front door that delegates to them.

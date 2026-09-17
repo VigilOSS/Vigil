@@ -117,6 +117,87 @@ FINDING_WORKFLOW_STATUSES: tuple[str, ...] = (
     "recovered", "false_positive", "merged", "reported",
 )
 
+# Clients a dispatch can be bound to by `agent bind-client-handle`. MIRRORS the
+# backend `_LAUNCHED_CLIENT` Literal in orchestrator/backend/app/api/assessment.py,
+# duplicated for the same packaging reason as SUBMISSION_STATUSES above and
+# pinned in sync by test_dispatch_client_binding_api. Deliberately excludes the
+# `unknown` a dispatch row's client fields carry: a binding whose client is
+# unknown names no session the operator could reach.
+BINDABLE_CLIENTS: tuple[str, ...] = (
+    "claude", "codex", "goose", "kimi", "opencode",
+)
+
+# Repository obligation role for `code-ingest --role`. MIRRORS the backend
+# `CODE_REPO_ROLES` in orchestrator/backend/app/services/code_analysis.py,
+# duplicated for the same packaging reason as SUBMISSION_STATUSES above and
+# pinned in sync by test_reference_repo_role. An `analysis` repository is the
+# reviewed subject: its admitted files own queue rows, receipts, variant checks
+# and phase readiness. A `reference` repository is host/framework source loaded
+# purely so a specialist can look a symbol up and cite it — sealed, indexed,
+# searchable and citable, but never an obligation.
+CODE_REPO_ROLES: tuple[str, ...] = (
+    "analysis",
+    "reference",
+)
+
+# Framework/registration kind for `record-surface --framework-registration`.
+# MIRRORS the backend `SurfaceRecordRequest.framework_registration` Literal in
+# orchestrator/backend/app/api/assessment.py, pinned in sync by
+# test_surface_framework_registration.
+#
+# This is the ARCHITECTURE axis and is deliberately orthogonal to the semantic
+# surface type (assess.lib.surfaces.VALID_SURFACE_TYPES), which carries security
+# meaning and stays cross-engagement. The kinds name the *registration
+# mechanism* the host framework uses, not the plugin's purpose: a Keycloak
+# authenticator and a user-storage SPI register identically and are told apart
+# by their surface type, not by a second per-framework label. Each value's text
+# is its worked mapping and renders straight into the command contract, so the
+# mapping never drifts from the vocabulary it documents.
+FRAMEWORK_REGISTRATION_KINDS: dict[str, str] = {
+    "service_provider": (
+        "host instantiates a plugin implementation of a host-defined interface "
+        "(Keycloak Authenticator/UserStorageProvider factory, Java ServiceLoader, "
+        "OSGi component, Spring auto-configured bean)"
+    ),
+    "http_endpoint": (
+        "plugin contributes a route or resource the host serves "
+        "(Keycloak realm/admin REST resource provider, WordPress REST route, "
+        "Django app URLconf include)"
+    ),
+    "request_interceptor": (
+        "plugin inserts into the host request/response pipeline "
+        "(servlet filter, Express middleware, Rails around_action, WordPress "
+        "action hook on request init)"
+    ),
+    "event_listener": (
+        "plugin subscribes to host lifecycle or domain events "
+        "(Keycloak EventListenerProvider, Symfony event subscriber, WordPress "
+        "filter on a domain event)"
+    ),
+    "template_override": (
+        "plugin supplies or replaces host rendering assets "
+        "(Keycloak theme override, WordPress theme template, Drupal Twig override)"
+    ),
+    "scheduled_task": (
+        "plugin registers periodic or background work the host schedules "
+        "(Keycloak ScheduledTask, WP-Cron event, Celery beat entry)"
+    ),
+    "cli_command": (
+        "plugin registers an administrative entrypoint "
+        "(Keycloak CLI extension, Django management command, WP-CLI command)"
+    ),
+    "data_model_extension": (
+        "plugin contributes entities, schema, or migrations to the host data "
+        "model (Keycloak JPA entity provider, WordPress custom post type, "
+        "Django app model)"
+    ),
+    "configuration_binding": (
+        "plugin changes host behaviour by declarative registration alone, with "
+        "no code path of its own (keycloak SPI config, META-INF/services entry, "
+        "Spring spring.factories)"
+    ),
+}
+
 
 # Per-role default `--dispatch-mode` when the flag is omitted. MUST mirror the
 # per-role "Default when omitted" in each role file + operator-core.md's
@@ -4729,6 +4810,7 @@ def _looks_like_verification_payload(payload: Any | None) -> bool:
 AGENT_VERBS: tuple[str, ...] = (
     "render-handoff",
     "start",
+    "bind-client-handle",
     "done",
     "close",
     "reconcile-stale",
@@ -4748,6 +4830,7 @@ def _dispatch_root_contract() -> CommandContract:
         schema_name="(per-action argparse; backend-backed via assessment_dispatches / _dispatch_handoffs / _dispatch_decisions)",
         preferred_invocations=(
             "vigil assess agent start --role <role> --task \"...\" --dispatch-mode <mode> --skills <skills> (--rate-budget <authored> | --no-target-traffic) [--prompt-context-json <context.json> --emit-prompt]",
+            "vigil assess agent bind-client-handle <agent-id> --client <client> --session-namespace <scope> --handle <session-id>",
             "vigil assess agent done <agent-id> --finding-slugs <slug1,slug2>",
             "vigil assess agent handoff --from-json <handoff.json>",
             "vigil assess agent close <agent-id>",
@@ -4765,10 +4848,12 @@ def _dispatch_root_contract() -> CommandContract:
             "a local database path.",
             "Dispatch state lives in the orchestrator backend. `agent start` logs a dispatch, "
             "but does not spawn a specialist. Launch the specialist in the active client using "
-            "the Runtime Identity block printed by `agent start`. `agent done` patches lifecycle "
-            "directly, `agent handoff` writes a repeatable checkpoint, `agent close` consumes a "
-            "ready/blocked handoff into closure, and `agent render-handoff` assembles the blob the "
-            "next dispatch prompt pastes verbatim.",
+            "the Runtime Identity block printed by `agent start`, then run "
+            "`agent bind-client-handle` so the row names the session you launched and a "
+            "mid-flight message no longer depends on a mapping you keep by hand. `agent done` "
+            "patches lifecycle directly, `agent handoff` writes a repeatable checkpoint, "
+            "`agent close` consumes a ready/blocked handoff into closure, and "
+            "`agent render-handoff` assembles the blob the next dispatch prompt pastes verbatim.",
             "`agent start` defaults a missing --dispatch-mode from the role (warn, not block) and accepts a newly-coined mode (advisory warn). "
             "--skills is optional: set it when the applicable skill is already known, otherwise the specialist selects one from the surface and names it in its handoff. The advisory overlap scan is default-on across in-progress and completed rows; it streams paged history, ranks the five displayed rows by relevance/findings produced with deterministic tie-breaks, and prints the total count. Use --allow-duplicate only when the overlap is intentional.",
             "`agent start` also lints --task for a prescriptive 'technique cage' — a step-by-step recipe that caps a specialist's depth (>=2 of: a numbered/bulleted step list, a run of imperative test-verbs, a pre-named vuln class). This is WARN-only and NEVER blocks the dispatch; the fix is to hand the specialist the measured coverage picture instead of a script via `vigil assess coverage --host <h> --for-dispatch` (paste the COVERAGE block) plus an open objective.",
@@ -4984,9 +5069,13 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
             notes=(
                 "This command only writes the backend dispatch row; it does not spawn or "
                 "launch the specialist. After it succeeds, launch the specialist in the active "
-                "client and pass the printed Runtime Identity block. For code roles the helper "
-                "validates one active indexed repository before recording and prints the "
-                "backend-derived Code Source Identity block immediately after Runtime Identity.",
+                "client and pass the printed Runtime Identity block, then run "
+                "`vigil assess agent bind-client-handle <agent-id> ...` so the row names the "
+                "session you launched — the handle cannot be supplied here because it does not "
+                "exist yet, and it is never a precondition for starting a dispatch. For code "
+                "roles the helper validates one active indexed repository before recording and "
+                "prints the backend-derived Code Source Identity block immediately after "
+                "Runtime Identity.",
                 "Every output path prints the exact authored rate budget (or an explicit no-target-traffic declaration). --emit-prompt requires the complete prompt-only object (authorized_phase, target, hunt_scope, mindset_lens, depth_expectation, oob, auth_context, credential_id, prior_state, coverage, cleanup, human_reach_decision, role_specific_additions); missing or empty values fail before the dispatch write. On a blue engagement it also validates and injects customer, platforms, and every owned regular-file tenant reference from scope.json before the write.",
                 "`skills` on a specialist dispatch is a WARNING when missing, never a rejection — neither the CLI nor the backend blocks on it. A specialist picks its skills from what it observes, so the honest list is often known only after the dispatch runs. Set it when the applicable skill is already clear; otherwise name it in the handoff.",
                 "requested_model and requested_reasoning record the recipe YOU selected. An ordinary dispatch carries no launcher-effective or provider-observed model/reasoning — no trusted launcher integration attests them — so the row is an asserted recipe, never measured truth, and caller-supplied actual_/launcher_effective_ fields are dropped rather than stored. Leaving either unset is visible warning debt: the dispatch stays usable but is not replayable. Never invent a runtime model the client does not expose.",
@@ -5008,6 +5097,101 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
                         "--skills 'ssrf-testing,case-dispatching' "
                         "--rate-budget 'rate=4; concurrency=2' "
                         "--prompt-context-json dispatch-context.json --emit-prompt"
+                    ),
+                },
+            ),
+        )
+    if verb == "bind-client-handle":
+        return CommandContract(
+            name="agent bind-client-handle",
+            summary=(
+                "Bind a recorded dispatch to the client session it is actually "
+                "running as, so a mid-flight message can be routed from backend "
+                "state instead of a hand-kept mapping."
+            ),
+            schema_name="backend DispatchClientBindingCreate (POST /dispatches/{agent_id}/client-bindings)",
+            preferred_invocations=(
+                "vigil assess agent bind-client-handle <agent-id> --client <client> "
+                "--session-namespace <scope> --handle <session-id>",
+                "vigil assess agent bind-client-handle <agent-id> --client <client> "
+                "--session-namespace <scope> --handle <session-id> --note \"<why>\"",
+                "vigil assess fetch dispatches/<agent-id>/client-bindings",
+            ),
+            author_supplied_fields=(
+                "<agent-id> (the dispatch from `vigil assess agent start` / `agent list`)",
+                "--client (" + "|".join(BINDABLE_CLIENTS) + ")",
+                "--session-namespace (the scope the handle is unique within: working "
+                "directory, workspace, or host — a bare session id is ambiguous across "
+                "clients and machines)",
+                "--handle (the client's own identifier for the live session)",
+                "--note (optional; why this binding was recorded — most useful on a correction)",
+            ),
+            helper_defaults=(
+                ("binding_version", "1 on the first bind, then N+1 per re-bind"),
+                ("bound_at", "now() at the time the bind runs"),
+                ("provider_observed_handle", "always 'unknown' — see the notes"),
+            ),
+            notes=(
+                "Run this AFTER launching the client, never before. The handle does not exist "
+                "when `agent start` writes the dispatch row, so no flag on `start` could carry "
+                "it and a handle is never a precondition for starting a dispatch.",
+                "Every stored field is YOUR assertion — you read the handle out of your client "
+                "and typed it. The columns are named asserted_client / "
+                "asserted_session_namespace / asserted_client_handle for that reason, and "
+                "provider_observed_handle stays 'unknown' because no supported client exposes a "
+                "stable session id at this boundary. A bound handle is an operator claim about a "
+                "live session, NOT verified provenance, and it changes nothing about the "
+                "dispatch row's own asserted-recipe semantics.",
+                "Binding history is append-only. A correction is a NEW version that stamps the "
+                "previous one's superseded_by_id; nothing is ever overwritten, so the record of "
+                "what was bound when survives every correction. Re-binding the SAME "
+                "client/namespace/handle is refused with 409 rather than adding a duplicate "
+                "version that would bury the real corrections.",
+                "stdout is one JSON object: {\"binding\": <the new binding>, \"superseded\": "
+                "<the binding it replaced, or null>}. Each binding carries id, agent_id, "
+                "binding_version, superseded_by_id, asserted_client, asserted_session_namespace, "
+                "asserted_client_handle, provider_observed_handle, note, bound_at. A supersede "
+                "also prints one stderr line naming both versions, because the retained prior "
+                "binding is the part a reader most often misses.",
+                "Read the whole history with `vigil assess fetch dispatches/<agent-id>/client-bindings` "
+                "(oldest version first). The CURRENT binding and a client_binding_count ride on "
+                "every dispatch read, so `agent list`, `agent get`, and `resume-brief` show which "
+                "session a dispatch is reachable at — and a count above 1 means the binding was "
+                "corrected and the history is worth reading.",
+                "A dispatch with no binding is the normal state between `agent start` and the "
+                "client launch: client_binding is null and client_binding_count is 0.",
+            ),
+            common_mistakes=(
+                (
+                    "treating a bound handle as proof of what ran",
+                    "it is caller-asserted; use the instruction-identity fields "
+                    "(operator_instruction_sha256 / specialist_instruction_sha256 / "
+                    "instruction_identity_status) for the parts the system actually observed",
+                ),
+                (
+                    "re-binding to fix a typo and expecting the bad value to disappear",
+                    "the wrong binding stays readable as a superseded version — that IS the "
+                    "audit record; pass --note to say what was wrong with it",
+                ),
+                (
+                    "--handle with no --session-namespace",
+                    "both are required: a session id without the scope it is unique within "
+                    "cannot be used to reach the session",
+                ),
+            ),
+            examples=(
+                {
+                    "command": (
+                        "vigil assess agent bind-client-handle code-hunter-3 "
+                        "--client claude --session-namespace ~/vigil/engagements/acme "
+                        "--handle 01JQZ4S8K2A0"
+                    ),
+                },
+                {
+                    "command": (
+                        "vigil assess agent bind-client-handle code-hunter-3 "
+                        "--client codex --session-namespace acme-workspace "
+                        "--handle conv_7f31 --note 'claude session died; relaunched in codex'"
                     ),
                 },
             ),

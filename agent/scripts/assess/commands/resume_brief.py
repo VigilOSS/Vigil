@@ -535,11 +535,37 @@ def _render_recent_dispatches(lines: list, rows: list, total) -> None:
     lines.append(f"- recent dispatches ({len(rows)}):")
     for row in rows:
         slugs = ", ".join(row.get("finding_slugs") or []) or "-"
+        binding = row.get("client_binding") or {}
+        # Where this specialist is reachable right now. `agent_id` is a name the
+        # operator chose; it identifies the dispatch row, never the live session.
+        # Resume is exactly when that mapping has been lost, so the brief carries
+        # it. All THREE asserted fields render: `bind-client-handle` requires a
+        # session namespace because a bare handle is ambiguous across clients and
+        # machines, so client+handle alone is the half a reader cannot act on.
+        # A count above 1 means the binding was corrected; every superseded
+        # version stays readable through
+        # `vigil assess fetch dispatches/<agent-id>/client-bindings`.
+        binding_count = int(row.get("client_binding_count") or 0)
+        if binding:
+            client = (
+                f"{binding.get('asserted_client')}:"
+                f"{binding.get('asserted_session_namespace')}:"
+                f"{binding.get('asserted_client_handle')}"
+            )
+            if binding_count > 1:
+                client += f" (v{binding.get('binding_version')} of {binding_count})"
+        else:
+            # The version suffix describes the CURRENT binding, so an unbound row
+            # has no version to name — reading one off an empty binding printed
+            # `(vNone of 2)`. The count still matters: it says a history exists.
+            client = "unbound"
+            if binding_count:
+                client += f" ({binding_count} in history)"
         append_contained_value(
             lines,
             f"  - {row.get('agent_id')} role={row.get('agent_role')} "
             f"status={row.get('status')} dispatched_at={row.get('dispatched_at')} "
-            f"findings={slugs} ::",
+            f"client={client} findings={slugs} ::",
             str(row.get("task") or ""),
         )
     _render_dispatch_more(lines, len(rows), total, "dispatches")

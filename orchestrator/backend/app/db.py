@@ -4907,6 +4907,45 @@ def _create_activity_table(connection: sqlite3.Connection) -> None:
     )
 
 
+def _retire_duplicate_current_client_bindings(
+    connection: sqlite3.Connection,
+) -> None:
+    """Collapse pre-existing fan-out before the uniqueness guard can be built.
+
+    A database written by the unserialized binder may already hold two rows with
+    a NULL ``superseded_by_id`` for one dispatch, which is the state the index
+    below refuses. The highest ``binding_version`` is the operator's latest
+    assertion and stays current; every earlier current row is retired *to* it,
+    which is the same NULL -> NOT NULL stamp the append-only trigger permits, so
+    nothing is rewritten or lost.
+    """
+    duplicates = connection.execute(
+        """
+        SELECT dispatch_id
+        FROM assessment_dispatch_client_bindings
+        WHERE superseded_by_id IS NULL
+        GROUP BY dispatch_id
+        HAVING COUNT(*) > 1
+        """
+    ).fetchall()
+    for (dispatch_id,) in duplicates:
+        survivor = connection.execute(
+            """
+            SELECT id FROM assessment_dispatch_client_bindings
+            WHERE dispatch_id = ? AND superseded_by_id IS NULL
+            ORDER BY binding_version DESC, id DESC LIMIT 1
+            """,
+            (dispatch_id,),
+        ).fetchone()
+        connection.execute(
+            """
+            UPDATE assessment_dispatch_client_bindings SET superseded_by_id = ?
+            WHERE dispatch_id = ? AND superseded_by_id IS NULL AND id != ?
+            """,
+            (int(survivor[0]), dispatch_id, int(survivor[0])),
+        )
+
+
 def _create_dispatch_tables(connection: sqlite3.Connection) -> None:
 
     # Dispatch tracking lives in the orchestrator. Three
@@ -5052,6 +5091,105 @@ def _create_dispatch_tables(connection: sqlite3.Connection) -> None:
             CREATE INDEX IF NOT EXISTS idx_variant_dispatch_scopes_engagement
             ON code_variant_dispatch_scopes(engagement_id, dispatch_id)
             """
+    )
+
+    # Which live client session a dispatch is actually running as. `agent start`
+    # writes the dispatch row BEFORE the operator launches the client, so the
+    # handle does not exist yet and can never be a column on that row; it arrives
+    # post-launch through `agent bind-client-handle`.
+    #
+    # Every value here is CALLER-ASSERTED — the operator read the handle out of
+    # their client and typed it. Nothing attests it, which is why the columns say
+    # `asserted_` and why `provider_observed_handle` exists and stays 'unknown':
+    # the same closed-to-attestation shape `assessment_dispatches`
+    # `provider_observed_client` uses, so the absence of a measured handle is
+    # visible rather than merely missing.
+    #
+    # Storage is append-only: a correction is a NEW row (version N+1) that stamps
+    # the previous current row's `superseded_by_id`, matching the ledger idiom used
+    # by operator checkpoints, submission versions, and finding transitions.
+    # Overwriting the wrong handle in place would erase the record of what was
+    # bound when — and that record is the whole point of binding at all.
+    connection.execute(
+        """
+            CREATE TABLE IF NOT EXISTS assessment_dispatch_client_bindings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                engagement_id INTEGER NOT NULL REFERENCES engagements(id) ON DELETE CASCADE,
+                dispatch_id INTEGER NOT NULL
+                    REFERENCES assessment_dispatches(id) ON DELETE CASCADE,
+                binding_version INTEGER NOT NULL CHECK(binding_version >= 1),
+                superseded_by_id INTEGER
+                    REFERENCES assessment_dispatch_client_bindings(id),
+                asserted_client TEXT NOT NULL,
+                asserted_session_namespace TEXT NOT NULL,
+                asserted_client_handle TEXT NOT NULL,
+                provider_observed_handle TEXT NOT NULL DEFAULT 'unknown',
+                note TEXT,
+                bound_at TEXT NOT NULL,
+                UNIQUE(dispatch_id, binding_version)
+            )
+            """
+    )
+    _retire_duplicate_current_client_bindings(connection)
+    # UNIQUE, and partial on exactly the predicate every dispatch read joins on:
+    # one dispatch has at most one CURRENT binding. The append-only triggers below
+    # guard a row's content, and nothing guarded the count — so an unserialized
+    # bind that raced another could leave two rows with a NULL `superseded_by_id`
+    # and fan the dispatch itself out across `agent list`, `agent get` and the
+    # resume brief. It replaces the non-unique two-column index of the same shape.
+    connection.execute("DROP INDEX IF EXISTS idx_dispatch_client_bindings_current")
+    connection.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_dispatch_client_bindings_one_current "
+        "ON assessment_dispatch_client_bindings(dispatch_id) "
+        "WHERE superseded_by_id IS NULL"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_dispatch_client_bindings_engagement "
+        "ON assessment_dispatch_client_bindings(engagement_id, dispatch_id)"
+    )
+    # Append-only enforced in the schema, not only in the service: the ONLY
+    # permitted update is stamping a NULL `superseded_by_id`. Rewriting an
+    # already-superseded pointer, or editing any other column, is refused.
+    connection.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS assessment_dispatch_client_bindings_append_only_update
+        BEFORE UPDATE ON assessment_dispatch_client_bindings
+        WHEN NOT (
+            OLD.superseded_by_id IS NULL
+            AND NEW.superseded_by_id IS NOT NULL
+            AND NEW.id = OLD.id
+            AND NEW.engagement_id = OLD.engagement_id
+            AND NEW.dispatch_id = OLD.dispatch_id
+            AND NEW.binding_version = OLD.binding_version
+            AND NEW.asserted_client = OLD.asserted_client
+            AND NEW.asserted_session_namespace = OLD.asserted_session_namespace
+            AND NEW.asserted_client_handle = OLD.asserted_client_handle
+            AND NEW.provider_observed_handle = OLD.provider_observed_handle
+            -- ``IS``, not ``=``: `note` is NULL on most bindings, and
+            -- ``NULL = NULL`` is NULL, which would leave the guard unable to
+            -- decide and let the edit through.
+            AND NEW.note IS OLD.note
+            AND NEW.bound_at = OLD.bound_at
+        )
+        BEGIN
+            SELECT RAISE(
+                ABORT,
+                'dispatch client bindings are append-only; bind again to supersede instead of editing'
+            );
+        END
+        """
+    )
+    # The engagement-cascade carve-out mirrors the operator-checkpoint triggers:
+    # deleting the engagement still cascades, but nothing else may delete a row.
+    connection.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS assessment_dispatch_client_bindings_append_only_delete
+        BEFORE DELETE ON assessment_dispatch_client_bindings
+        WHEN EXISTS (SELECT 1 FROM engagements WHERE id = OLD.engagement_id)
+        BEGIN
+            SELECT RAISE(ABORT, 'dispatch client bindings are append-only');
+        END
+        """
     )
 
     connection.execute(

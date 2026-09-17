@@ -9,6 +9,7 @@ from pathlib import Path
 
 from assess.commands import dispatch
 from assess.commands.dispatch._shared import _load_json_arg
+from assess.lib.contracts import BINDABLE_CLIENTS
 from assess.lib.instruction_identity import build_dispatch_instruction_identity
 from assess.lib.tenant_references import (
     TenantReferenceError,
@@ -234,6 +235,59 @@ def register(subparsers) -> None:
     decision.add_argument("--phase", dest="decision_phase", default=None)
     decision.add_argument("--reason", default="")
 
+    bind = actions.add_parser(
+        "bind-client-handle",
+        help=(
+            "Bind a dispatch to the client session it is actually running as "
+            "(post-launch; asserted by you, never observed)."
+        ),
+        description=(
+            "Record which live client session a dispatch is running as, so a "
+            "mid-flight message routes from backend state instead of a mapping "
+            "you keep by hand. Run it AFTER launching the client: the handle "
+            "does not exist when `agent start` writes the row, and it is never a "
+            "precondition for starting a dispatch. Every value is YOUR assertion "
+            "— nothing here is launcher- or provider-observed, and the row says "
+            "so (asserted_* fields; provider_observed_handle stays 'unknown'). "
+            "History is append-only: a correction is a new version that "
+            "supersedes the last one, and re-binding the same values is refused. "
+            "Full contract: `vigil assess contract agent bind-client-handle`."
+        ),
+        allow_abbrev=False,
+    )
+    bind.add_argument("extra", nargs=1, metavar="agent-id")
+    bind.add_argument(
+        "--client",
+        dest="bind_client",
+        required=True,
+        choices=BINDABLE_CLIENTS,
+        help="Client the session runs in.",
+    )
+    bind.add_argument(
+        "--session-namespace",
+        dest="bind_session_namespace",
+        metavar="SCOPE",
+        required=True,
+        help=(
+            "Scope the handle is unique within (working directory, workspace, "
+            "host). A bare session id is ambiguous across clients and machines."
+        ),
+    )
+    bind.add_argument(
+        "--handle",
+        dest="bind_client_handle",
+        metavar="SESSION_ID",
+        required=True,
+        help="The client's own identifier for the live session.",
+    )
+    bind.add_argument(
+        "--note",
+        dest="bind_note",
+        metavar="TEXT",
+        default=None,
+        help="Why this binding was recorded — most useful on a correction.",
+    )
+
     abort = actions.add_parser(
         "abort-duplicate", help="Abort a duplicate dispatch.", allow_abbrev=False
     )
@@ -268,6 +322,8 @@ def run(args) -> None:
         dispatch._get_dispatch(args, _agent_id_extra(args))  # noqa: SLF001
     elif action == "abort-duplicate":
         dispatch._abort_duplicate_dispatch(args, _agent_id_extra(args))  # noqa: SLF001
+    elif action == "bind-client-handle":
+        _bind_client_handle(args)
     else:
         raise SystemExit(f"unknown agent action: {action}")
 
@@ -654,6 +710,48 @@ def _close_via_client(client, agent_id: str, *, reason: str) -> dict:
     return {"dispatch": updated, "decision": decision}
 
 
+def _bind_client_handle(args) -> None:
+    """Record which live client session a dispatch is running as.
+
+    Deliberately separate from `agent start`: the handle does not exist when the
+    dispatch row is written, so demanding it there would either block the
+    dispatch or invite a made-up value. Every field is the operator's assertion —
+    the backend stores it under `asserted_*` names and never treats it as
+    launcher- or provider-observed identity.
+    """
+    agent_id = str(args.extra[0]).strip()
+    if not agent_id:
+        print("agent bind-client-handle: agent id required", file=sys.stderr)
+        sys.exit(1)
+    payload = {
+        "asserted_client": args.bind_client,
+        "asserted_session_namespace": str(args.bind_session_namespace).strip(),
+        "asserted_client_handle": str(args.bind_client_handle).strip(),
+    }
+    note = str(getattr(args, "bind_note", None) or "").strip()
+    if note:
+        payload["note"] = note
+    client, _ = dispatch._client_for(args)  # noqa: SLF001
+    try:
+        record = client.post(f"dispatches/{agent_id}/client-bindings", payload)
+    finally:
+        client.close()
+    print(json.dumps(record, ensure_ascii=False))
+    superseded = record.get("superseded") if isinstance(record, dict) else None
+    if superseded:
+        # A correction is the one case where the JSON alone under-reports what
+        # happened: the prior binding is still the durable record of where this
+        # dispatch was reachable until now, and it is retained, not replaced.
+        binding = record.get("binding") or {}
+        print(
+            f"[agent bind-client-handle] {agent_id}: binding v{binding.get('binding_version')} "
+            f"supersedes v{superseded.get('binding_version')} "
+            f"({superseded.get('asserted_client')}:{superseded.get('asserted_client_handle')}); "
+            "the superseded binding is retained in the history.",
+            file=sys.stderr,
+        )
+
+
 def _start(args) -> None:
     payload = dispatch._build_register_payload(args)  # noqa: SLF001
     client, cfg = dispatch._client_for(args)  # noqa: SLF001
@@ -714,6 +812,17 @@ def _start(args) -> None:
         f"Launch the specialist with {_spawn_command_hint(Path(cfg.engagement_dir), role)} "
         f"and pass it the {blocks} above.",
     ]
+    if not dry_run:
+        # The one moment the operator holds both the dispatch id and the session
+        # they just launched. Naming the bind here is what keeps the mapping in
+        # backend state instead of the operator's head; skipping it costs nothing
+        # but leaves a mid-flight message with no routable address.
+        next_action.append(
+            f"Then bind the session you launched: `vigil assess agent bind-client-handle "
+            f"{row.get('agent_id')} --client <client> --session-namespace <scope> "
+            "--handle <session-id>` (optional, post-launch; "
+            "`vigil assess contract agent bind-client-handle` for the full shape)."
+        )
     print("\n".join([emitted_prompt or "\n".join(identity_lines), "", *next_action]))
 
 

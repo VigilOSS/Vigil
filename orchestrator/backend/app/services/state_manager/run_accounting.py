@@ -2317,10 +2317,17 @@ def list_source_reads(
 
 
 def _serialize_linked_dispatch(row: sqlite3.Row) -> dict[str, Any]:
-    record = dict(row)
-    record["finding_slugs"] = _json_value(
-        record.pop("finding_slugs_json", None), None
-    )
+    """The one dispatch shape, plus this listing's tri-state staleness flag.
+
+    The projection and the serializer are the dispatch module's — a second
+    hand-rolled dispatch record here would report every specialist as unbound
+    and leak the retired legacy columns. Only ``instructions_stale`` is narrowed:
+    "not known" is a real answer for a run's linked dispatch, so it stays a
+    tri-state bool rather than the stored integer.
+    """
+    from .dispatches import _serialize_dispatch
+
+    record = _serialize_dispatch(row)
     stale = record.get("instructions_stale")
     record["instructions_stale"] = bool(stale) if stale is not None else None
     return record
@@ -2330,6 +2337,11 @@ def list_run_dispatches(
     engagement_id: int, *, run_id: int, limit: int, offset: int
 ) -> dict[str, Any]:
     """List every dispatch referenced by a run and its recovery lineage."""
+
+    # Local import: `dispatches` reaches `findings`, which reaches this module —
+    # the same cycle break `depth_ledger` takes for the sibling dispatch
+    # serializer.
+    from .dispatches import _DISPATCH_SELECT
 
     engagement = _engagement_or_404(engagement_id)
     with _common.get_connection() as connection:
@@ -2368,11 +2380,9 @@ def list_run_dispatches(
         if page_ids:
             page_placeholders = ",".join("?" for _ in page_ids)
             rows = connection.execute(
-                f"""
-                SELECT * FROM assessment_dispatches
-                WHERE engagement_id = ? AND id IN ({page_placeholders})
-                ORDER BY id
-                """,
+                f"{_DISPATCH_SELECT} "
+                f"WHERE d.engagement_id = ? AND d.id IN ({page_placeholders}) "
+                "ORDER BY d.id",
                 (engagement.id, *page_ids),
             ).fetchall()
         return {
