@@ -40,6 +40,11 @@ When you are about to copy one of these into a second file, stop and import.
   `agent/scripts/assess/commands/dispatch/work_items.py` mirrors the backend-side predicate.
 - `agent/scripts/assess/lib/classify_buckets.py:_BUCKETS` owns URL bucket scoring and skip tags.
   Ingest classifies inline; `work-buffer reclassify` reapplies it.
+- `agent/scripts/assess/lib/render_containment.py:contain_separators` owns how persisted,
+  target-influenced text reaches an agent-readable document: lossless, indent-only, so nothing lands
+  at column zero and forges a heading. ADR 0019 forbids masking it, so containment is the only lever.
+  `operator_checkpoint.py` and `resume_brief.py` render through it.
+  See: `agent/scripts/assess/tests/test_operator_checkpoint_render.py`.
 - `orchestrator/backend/app/services/state_manager/coverage.py:PROBE_RESULT_STATUSES` owns result
   outcomes. Only `tested` and `signal` cover a class.
 - `orchestrator/backend/app/services/state_manager/coverage.py:CoverageStatus` owns coverage status;

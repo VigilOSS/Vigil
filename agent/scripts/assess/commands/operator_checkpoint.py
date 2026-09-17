@@ -13,11 +13,11 @@ renderers label it that way so a later reader cannot mistake it for a fact.
 from __future__ import annotations
 
 import json
-import re
 
 from assess.lib.client import AssessmentClient, AssessError, require_write_result
 from assess.lib.config import load_config
 from assess.lib.finding_render import warn_untrusted_data
+from assess.lib.render_containment import contain_separators
 
 
 INTENT_LABEL = "intent (UNVERIFIED operator intent — not a finding, not evidence)"
@@ -33,6 +33,14 @@ def render_intent_lines(intent_note: object, *, indent: str = "  ") -> list[str]
     one of the brief's own section boundaries — a resuming agent reads that
     brief as its operating picture, so a forged heading is a correctness bug.
 
+    The note is contained by the SHARED rule, not a note-specific one. It is the
+    longest free-text field in a document whose other 29 rows already render
+    through ``contain_separators``; a second pattern here meant this field
+    admitted separators the reference rows beside it contained. The note is
+    operator-authored, so the path is ADR 0018's at one remove — target output
+    pasted into a note — which is narrower than a reference value but not
+    different in kind.
+
     Containment is applied to the RENDERING only: every line of a multi-line
     note carries a fixed continuation indent so none of it starts at column
     zero. Nothing is trimmed, collapsed, escaped, or dropped — masking the
@@ -40,14 +48,13 @@ def render_intent_lines(intent_note: object, *, indent: str = "  ") -> list[str]
     """
     label = f"{indent}- {INTENT_LABEL}:"
     body = str(intent_note or "")
-    if "\n" not in body and "\r" not in body:
-        return [f"{label} {body}"]
     continuation = f"{indent}    "
-    contained = re.sub(
-        r"(\r\n|\r|\n)",
-        lambda match: f"{match.group(0)}{continuation}",
-        body,
-    )
+    contained = contain_separators(body, indent=continuation)
+    # Equality is the separator test: a note the shared rule did not touch is a
+    # note with no separator in it, so it keeps the inline single-line shape
+    # without this function restating which characters those are.
+    if contained == body:
+        return [f"{label} {body}"]
     return [label, f"{continuation}{contained}"]
 
 
@@ -251,6 +258,36 @@ def render_phase_field(row: dict) -> str:
     return f"web_phase={current} code_phase={code_phase}"
 
 
+def render_checkpoint_reference_lines(row: dict) -> list[str]:
+    """Render the four reference lists — shared with the resume brief.
+
+    A reference is not a safe identifier just because the backend made it
+    resolve: `DispatchCreate.agent_id` is bounded by `max_length` and nothing
+    else, so a dispatch can exist under an id carrying a line separator and
+    `dispatch_agent_ids` then passes the must-resolve check precisely because
+    that row really is there. Rendered raw, whatever follows the separator
+    starts at column zero of a document a resuming agent reads as its operating
+    picture, where a `## ...` line reads as one of that document's own section
+    boundaries.
+
+    Containment covers the whole assembled row, label included, and only
+    inserts the rendering indent after a separator: a reference carrying none
+    renders exactly as it always did, and no character is ever dropped
+    (ADR 0019).
+    """
+    lines: list[str] = []
+    for label, key in (
+        ("findings", "finding_slugs"),
+        ("dispatch agent_ids", "dispatch_agent_ids"),
+        ("command runs", "command_run_ids"),
+        ("artifacts", "artifact_ids"),
+    ):
+        values = row.get(key) or []
+        rendered = ", ".join(str(value) for value in values) if values else "-"
+        lines.append(contain_separators(f"  - {label}: {rendered}"))
+    return lines
+
+
 def render_checkpoint_lines(row: dict) -> list[str]:
     """Shared human render — the intent is always labelled UNVERIFIED."""
 
@@ -265,15 +302,7 @@ def render_checkpoint_lines(row: dict) -> list[str]:
     else:
         header += " (current)"
     lines = [header]
-    for label, key in (
-        ("findings", "finding_slugs"),
-        ("dispatch agent_ids", "dispatch_agent_ids"),
-        ("command runs", "command_run_ids"),
-        ("artifacts", "artifact_ids"),
-    ):
-        values = row.get(key) or []
-        rendered = ", ".join(str(value) for value in values) if values else "-"
-        lines.append(f"  - {label}: {rendered}")
+    lines.extend(render_checkpoint_reference_lines(row))
     lines.extend(render_intent_lines(row.get("intent_note")))
     return lines
 

@@ -72,6 +72,13 @@ Durable design decisions live in [`docs/adr/`](docs/adr/).
   exists to size prompts. The output now names the tree it measured and says so on stderr when that
   is not the checkout you are standing in, which is the default whenever `vigil` runs from an
   installed working root.
+- **Checkpoint references cannot forge a heading.** `operator-checkpoint show` joined finding slugs,
+  dispatch agent ids, command-run ids and artifact ids straight into the render, so a newline inside
+  an `agent_id` — which the backend accepts — reached column zero and could impersonate a section in
+  a document agents read as instructions. The containment the resume brief already used is now a
+  shared helper applied to both, and the same audit closed 29 further rows in the resume brief
+  carrying persisted, length-bounded columns. Containment is lossless: every original character is
+  preserved and only the rendering indent is inserted, so clean data renders exactly as before.
 - **Cold image builds no longer die at 20s.** `vigil up` and `vigil install` threaded one bounded
   runner through both fast metadata queries and image builds, so the bound that makes a wedged
   daemon fail fast killed every first-run Kali build and swallowed its progress output.

@@ -432,10 +432,39 @@ def test_show_contains_bare_carriage_return_lines_without_forging_structure(
         assert f"      {line}" in rendered
 
 
-def test_show_does_not_normalize_unicode_separator_into_a_forged_heading(
-    bind, capsys, operator_checkpoint
+@pytest.mark.parametrize(
+    "separator",
+    ["\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"],
+    ids=[
+        "vertical-tab",
+        "form-feed",
+        "file-separator",
+        "group-separator",
+        "record-separator",
+        "next-line",
+        "unicode-line-separator",
+        "unicode-paragraph-separator",
+    ],
+)
+def test_show_contains_every_boundary_a_reader_splits_lines_on(
+    bind, capsys, operator_checkpoint, separator: str
 ) -> None:
-    note = "safe\u2028# Forged heading"
+    """The note obeys the rule the rest of the document obeys.
+
+    This test used to assert the opposite for U+2028 — that the note passed
+    through byte-identical, uncontained — on the reading that only CR and LF
+    end a line. That reading was wrong twice over. The note was rendered by a
+    note-only pattern while the 29 reference rows beside it in the SAME
+    document went through `contain_separators`, so one field silently admitted
+    what the others contained; and the boundary set is chosen by the reader,
+    not by CommonMark — every separator below ends a line for `str.splitlines()`,
+    which is how a Python consumer of this stdout finds column zero.
+
+    The new invariant is the shared one: every original character survives
+    (ADR 0019 — the separator itself included), and nothing that followed a
+    separator starts a line.
+    """
+    note = f"safe{separator}# Forged heading"
     bind(
         _FakeClient(
             get_response={
@@ -451,8 +480,15 @@ def test_show_does_not_normalize_unicode_separator_into_a_forged_heading(
     )
 
     rendered = capsys.readouterr().out
-    assert "\n# Forged heading" not in rendered
-    assert note in rendered
+    assert "safe" in rendered
+    assert "# Forged heading" in rendered
+    assert separator in rendered
+    assert [
+        line for line in rendered.splitlines() if line.startswith("# Forged heading")
+    ] == [], rendered
+    assert [
+        line for line in rendered.splitlines() if line.startswith("# Operator Checkpoint")
+    ] == ["# Operator Checkpoint"]
 
 
 def test_show_preserves_trailing_spaces_in_operator_intent(
