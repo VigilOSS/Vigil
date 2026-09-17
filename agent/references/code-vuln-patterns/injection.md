@@ -13,20 +13,6 @@ languages: C/C++, Python, JS
 
 ---
 
-## Baseline Patterns (Single-Function / Single-Scope)
-
-Toolchain-catchable patterns. Record as findings if encountered during orientation —
-on unaudited codebases these are real, exploitable bugs that no prior tool run has caught.
-Invest primary analysis time in the LLM-advantage patterns below.
-
-- `system(user_input)` — direct OS command injection
-- `"SELECT * FROM t WHERE id = " + user_input` — SQL concatenation
-- `eval(user_input)` in any language
-- Direct template injection where user data is the template
-- Obvious shell metacharacter injection in single-function scope
-
----
-
 ## What You're Hunting (LLM-Advantage Patterns)
 
 ### 1. Multi-Stage Escaping Composition Errors
@@ -295,7 +281,8 @@ op = ops.get(user_input)  # safe IF user_input is validated
 ```python
 # Data from network/file/database:
 obj = pickle.loads(untrusted_bytes)  # arbitrary code execution
-config = yaml.load(untrusted_yaml, Loader=yaml.FullLoader)  # certain tags execute code
+config = yaml.load(untrusted_yaml, Loader=yaml.UnsafeLoader)  # arbitrary Python objects
+# FullLoader had bypass CVEs pre-PyYAML 5.4 (CVE-2020-1747); prefer SafeLoader
 ```
 
 SAST catches `pickle.loads(request.data)` but may miss `pickle.loads(cache.get(key))`

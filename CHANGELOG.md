@@ -212,6 +212,28 @@ Durable design decisions live in [`docs/adr/`](docs/adr/).
   what was wrong, like the missing-artifact case beside it. A corrupt *per-file* artifact also no
   longer kills the whole command: that is a hole in one file. An unreadable *manifest* still exits
   non-zero, because an inventory you cannot read means nothing is known about what was indexed.
+- **The operator prompt stops pre-explaining gates that already explain themselves.** An operator
+  cannot skip a phase-exit gate — `transition-phase` refuses and its refusal carries the reasoning —
+  so `agent/operator-core.md` no longer restates the variant-pass, chain-construction, depth,
+  intel-closure and severity gates ahead of time, nor the dispatch, handoff and checkpoint semantics
+  that `vigil assess contract` renders from the code. Each cut leaves a pointer naming the command
+  that teaches it, one hop, not a paraphrase. 4,454 bytes off every operator session. Less than
+  hoped: several passages that looked like duplication turned out to be the canonical source that
+  other files cite, and the reference guide for dispatch fields explicitly names the operator core
+  as its own source of truth.
+- **Blue standing prompts stop restating rules they do not own.** `agent/rules/triage.md` and
+  `agent/shared-constraints-blue.md` carried duplicate copies of writing discipline, the
+  resume-hydration command block, confidence labels, UTC discipline and the reference block — in
+  several places character-for-character identical to the file that owns them. Each now points at
+  its owner and keeps only the blue-specific delta: `shared-constraints-blue.md` is 3,029 bytes
+  smaller and `triage.md` 316 bytes larger, a net 2,713 bytes off the standing load of every blue
+  dispatch.
+- **The operator prompt no longer misstates the CVSS severity bands.** It gave them as
+  `high >= 7.0`, `medium 4.0-6.9`, `low < 4.0` — omitting `critical` and `info` entirely, so an
+  operator following it banded a CVSS 9.5 finding as `high`. `report_readiness.py` has always
+  computed `critical >= 9.0` and `info >= 0.1`, and its blocker states the expected band per
+  finding. The prose also named the wrong verb for correcting a mismatch. Found while removing
+  prose that restates what a gate already refuses.
 - **A pointer return type no longer hides a whole C function.** `char *copy_name(...)` parses as
   `pointer_declarator(function_declarator(...))`, and the C branch read only the direct children of
   the declarator field — finding neither the name nor the parameters, so the function was dropped

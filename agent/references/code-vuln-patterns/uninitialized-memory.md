@@ -13,19 +13,6 @@ languages: C/C++, Python, JS
 
 ---
 
-## Baseline Patterns (Single-Function / Single-Scope)
-
-Toolchain-catchable patterns. Record as findings if encountered during orientation —
-on unaudited codebases these are real, exploitable bugs that no prior tool run has caught.
-Invest primary analysis time in the LLM-advantage patterns below.
-
-- Simple `int x; use(x);` in the same function without any intervening assignment
-- Obvious uninitialized local variable used immediately in next statement
-- Compiler `-Wuninitialized` catches: single-function, single-branch reads of unset locals
-- `memcpy` from a clearly uninitialized stack buffer in the same scope
-
----
-
 ## What You're Hunting (LLM-Advantage Patterns)
 
 ### 1. Conditional Initialization — Else-Branch Gap
@@ -254,15 +241,17 @@ pattern mirrors C heap reuse — stale data from prior allocations.
 
 ## Real CVE Examples
 
-### CVE-2017-7184 (Linux kernel — xfrm uninitialized kernel stack leak)
-The XFRM (IPsec) subsystem's netlink handler allocated a response structure on the
-kernel stack and partially populated it from the request. The `xfrm_replay_verify_len`
-function set most fields, but padding bytes and one trailing field were left
-uninitialized when the replay window size was smaller than the maximum. The response
-was then copied to userspace via `nla_put` in a separate function, transmitting the
-full structure including the uninitialized stack bytes. An unprivileged user could
-send crafted XFRM netlink messages to read kernel stack memory, potentially leaking
-KASLR addresses and other sensitive data from prior kernel function frames.
+### CVE-2016-4569 (Linux kernel — ALSA timer struct padding copied to userspace)
+`snd_timer_user_params()` in `sound/core/timer.c` declared a `struct snd_timer_tread`
+on the kernel stack and assigned its members individually. The compiler's alignment
+padding after `event` and after `val` — eight bytes in total — was never written, and
+the whole struct was then handed to userspace through the ALSA timer read interface in
+a different function. Every assigned field is correct, so reading the initialization
+alone shows nothing wrong; the bug is in the bytes *between* the fields, which only the
+struct layout reveals. A local user reads eight bytes of whatever the previous kernel
+call frame left on the stack, per event. The fix is one `memset()` before the
+assignments — the standard remedy whenever a stack struct crosses to a lower trust
+domain field by field.
 
 ### CVE-2021-3501 (Linux kernel — KVM uninitialized stack variable)
 In KVM's handling of VMX instructions, a local variable was conditionally initialized

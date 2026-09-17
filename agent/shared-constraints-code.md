@@ -1,6 +1,6 @@
 # Shared Subagent Constraints -- Code Analysis Mode
 
-**Standing-load budget:** 560 lines; this revision is 540 lines.
+**Standing-load budget:** 560 lines; this revision is 549 lines.
 
 Load this file as part of your Load First set -- together with your role file and
 `agent/shared-specialist-core.md` -- before any source code work. All three load together, not
@@ -436,14 +436,13 @@ reference marked **(REQUIRED)** inside Extended Resources is required once that 
 trigger fires for this dispatch — before the finding/disposition it informs is recorded — not
 before you start reading.
 
-**References are not supplemental depth.** The `agent/references/code-vuln-patterns/` files contain:
-- "What SAST Already Catches (Skip These)" -- so you do not waste time on patterns static tools find
-- "What You're Hunting (LLM-Advantage Patterns)" -- the specific multi-function and semantic patterns only deep analysis can find
-- Language-specific idioms and real CVE examples that ground pattern matching in reality
-
-Reach for the matching reference rather than improvising the pattern when one exists for the code
-in front of you — it encodes CVE-grounded idioms and the SAST-blind-spot split you would otherwise
-have to rediscover per language.
+**A toolchain-catchable pattern is a finding, not a skip.** `strcpy` into a fixed buffer,
+`system(user_input)`, `free(p); *p = 0;` — on an unaudited codebase no prior tool run has caught
+these, so they are real exploitable bugs and you record them when you meet them. What changes is
+where primary analysis time goes, not whether the bug is reported: spend it on the multi-function
+and semantic patterns a tool cannot reach, which is what `agent/references/code-vuln-patterns/`
+calls "What You're Hunting (LLM-Advantage Patterns)". Reach for the matching reference rather than
+improvising — it encodes CVE-grounded idioms and per-class blind spots, not supplemental depth.
 
 ---
 

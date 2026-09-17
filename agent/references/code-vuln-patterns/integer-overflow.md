@@ -12,19 +12,6 @@ languages: C/C++, Python, JS
 
 ---
 
-## Baseline Patterns (Single-Function / Single-Scope)
-
-Toolchain-catchable patterns. Record as findings if encountered during orientation —
-on unaudited codebases these are real, exploitable bugs that no prior tool run has caught.
-Invest primary analysis time in the LLM-advantage patterns below.
-
-- Single-expression overflow: `a + b` without prior check when both are user-controlled
-- Obvious truncation: `int x = (int)large_uint64_value;` in the same scope
-- `malloc(n * sizeof(T))` where `n` is directly from user input without validation
-- Compiler-warned implicit narrowing conversions (same function scope)
-
----
-
 ## What You're Hunting (LLM-Advantage Patterns)
 
 ### 1. Type Transition Chains Across Functions
@@ -240,9 +227,13 @@ INT_MAX would wrap when combined with other header bytes. The validation checked
 value length in isolation, but didn't account for the additional bytes added during
 config entry construction.
 
-### CVE-2016-7167 (cURL integer overflow in URL glob)
-The URL globbing feature (`[1-1000000000]`) computed allocation sizes by multiplying
-the number of generated URLs by the URL template length. Both values were individually
-reasonable, but their product overflowed. The range validation and the URL template
-length validation were in different functions, so no single-function analysis saw the
-dangerous multiplication.
+### CVE-2016-7167 (libcurl integer overflow in escape/unescape)
+`curl_escape()`, `curl_easy_escape()`, `curl_unescape()` and `curl_easy_unescape()` take a
+caller-supplied string length and never validated it. That length feeds the arithmetic that
+sizes the output buffer, so `0xffffffff` — `UINT_MAX`, or a `-1` arriving as signed — wrapped to
+a zero-byte heap allocation that the functions then wrote gigabytes into. The length arrives
+from the application and the allocation happens inside libcurl, so neither side alone sees the
+wrap: the caller believes it passed a length, and the callee believes it received a valid one.
+This is a library API boundary rather than a module boundary, which is the harder version of the
+same problem — the reviewer has to read code they do not own. Affected libcurl 7.11.1 through
+7.50.2; fixed in 7.50.3.

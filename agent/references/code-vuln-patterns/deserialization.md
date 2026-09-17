@@ -11,14 +11,6 @@ languages: C/C++, Python, JS, Java
 
 ---
 
-## Baseline Patterns
-
-- Native language object deserialization on untrusted input
-- Unsafe YAML/pickle/XMLDecoder-style loaders
-- Framework/session/cache decode paths that materialize attacker-influenced objects
-
----
-
 ## What You're Hunting
 
 ### 1. “Only Internal Format” Assumptions
@@ -33,7 +25,9 @@ The code treats a format as trusted because the producer is “supposed” to be
 
 The decode path chooses a class or handler based on a type tag, discriminator, or registry lookup.
 
-- Polymorphic decode by user-controlled type field
+- Polymorphic decode by user-controlled type field — in Java, `ObjectMapper.enableDefaultTyping`
+  or a `@JsonTypeInfo` annotation is the switch that turns a JSON body into arbitrary class
+  instantiation
 - Reflection-based object construction
 - Variant dispatch to privileged handlers
 

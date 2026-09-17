@@ -14,20 +14,6 @@ languages: C/C++, Python, JS
 
 ---
 
-## Baseline Patterns (Single-Function / Single-Scope)
-
-Toolchain-catchable patterns. Record as findings if encountered during orientation —
-on unaudited codebases these are real, exploitable bugs that no prior tool run has caught.
-Invest primary analysis time in the LLM-advantage patterns below.
-
-- Empty catch blocks with no logic (`catch (Exception e) {}`)
-- Unchecked `malloc` return value in the same function
-- Missing error check on `fopen` immediately followed by `fread`
-- Basic unchecked return value from well-known functions in same scope
-- `except: pass` in Python (bare except with no body)
-
----
-
 ## What You're Hunting (LLM-Advantage Patterns)
 
 ### 1. Fail-Open — Error Detected But Execution Continues

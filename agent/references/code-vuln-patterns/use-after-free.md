@@ -12,19 +12,6 @@ languages: C/C++, Python, JS
 
 ---
 
-## Baseline Patterns (Single-Function / Single-Scope)
-
-Toolchain-catchable patterns. Record as findings if encountered during orientation —
-on unaudited codebases these are real, exploitable bugs that no prior tool run has caught.
-Invest primary analysis time in the LLM-advantage patterns below.
-
-- `free(p); *p = 0;` — direct free-then-use in the same function
-- `free(p); free(p);` — double-free in the same function
-- Simple null-after-free violations where the use is in the same basic block
-- Return-after-free within a single function scope
-
----
-
 ## What You're Hunting (LLM-Advantage Patterns)
 
 ### 1. Object Freed in Module A, Referenced in Module B via Callback
@@ -310,24 +297,17 @@ persistent.SetWeak(pointerToCppObj, weakCallback, Nan::WeakCallbackType::kParame
 
 ## Real CVE Examples
 
-### CVE-2023-27535 (cURL — connection reuse UAF)
-The cURL multi-interface reused connections across transfers. When one transfer
-completed and freed its connection data, a queued transfer that had been assigned
-the same connection could dereference the freed connection state. The free happened
-in the transfer-completion cleanup code, and the use happened in the connection-reuse
-matching code — two separate modules with different assumptions about connection
-lifetime.
+### CVE-2021-22901 (cURL — TLS session cache outlives the transfer)
+libcurl's OpenSSL backend stored pointers to the easy handle in the TLS session-ID
+cache. `curl_easy_cleanup()` freed the handle without evicting those cached entries,
+so when a later transfer reused the connection and OpenSSL negotiated a new session,
+libcurl read — and could call a function pointer in — the freed object. The free and
+the use are in different phases with different owners: transfer teardown frees, session
+caching still holds, connection reuse dereferences. CWE-416.
 
-### CVE-2024-32002 (git — recursive clone UAF)
-During recursive cloning with submodules, git could be tricked into freeing a
-repository object while submodule operations still held references to it. The
-parent repository's cleanup logic ran when the parent clone completed, but
-submodule processing (which happened in a different phase) still accessed the
-parent's repository structure. The free and use were in different subsystems
-(clone vs. submodule) with no explicit ownership tracking.
-
-### CVE-2019-5481 (cURL — FTP double-free)
-During FTP wildcard matching, a `conn` structure's path data was freed in the
-wildcard cleanup function and again in the connection close function. Both functions
-believed they owned the path data. On the success path, only one ran. On certain
-error paths (particularly timeout-related), both ran, causing a double-free.
+### CVE-2019-5481 (cURL — krb5 FTP double-free)
+With Kerberos FTP (`CURLOPT_KRBLEVEL`), the server declares a block size that curl
+parses as a 32-bit value and passes to `realloc()`. On the `realloc()` failure path
+— reachable on 32-bit systems by declaring a size near 4 GB — the error handling frees
+the same buffer twice. The bug lives entirely in the failure path, which is the part
+of the code no happy-path test and no single-function review exercises. CWE-415.

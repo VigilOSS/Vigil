@@ -73,10 +73,6 @@ After that a `.jj/` and a `.git/` sit side by side. Plain `git` *read* commands 
 branches / pushes with `jj`, **not** `git` — mixing in `git commit`/`checkout`/`branch`
 desyncs the colocation. To learn more load the Jujutsu skill.
 
-This is a contributor convention, not a requirement for *using* Vigil: an operator who installs
-the CLI and runs engagements never needs `jj`. If you are only consuming the tool, ignore this
-section — and note that plain `git` is fine for a read-only clone you never push from.
-
 # Newcomer walkthrough: clone to first dispatch
 
 This is the shortest path from a fresh clone to a running operator loop. It points at `README.md`

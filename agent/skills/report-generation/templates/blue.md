@@ -4,9 +4,10 @@ Blue incident report template. Loaded by `report-writer` when
 security team (all), counsel/compliance (§3, 7, 11). Exact PII ships in Appendix B
 out-of-band.
 
-Full anti-slop rule set: `agent/rules/triage.md` §21. The operative banned
-blocks are reproduced below. Run the one-screen self-check at the bottom of
-this file before delivering.
+Full anti-slop rule set: `agent/rules/reporting.md` §1 and §11-§20, plus the blue
+additions in `agent/rules/triage.md` §21. The operative banned blocks are
+reproduced below. Run the one-screen self-check at the bottom of this file
+before delivering.
 
 Do NOT import from red: no CVSS, no PoC / exploit-chain / weaponized vocabulary,
 no "Steps to Reproduce" framing (blue cites artifact IDs, not inline payloads),
@@ -61,7 +62,8 @@ Remediation:
   Follow security best practices · Implement proper input validation ·
   Use appropriate access controls
 
-Full list + rationale: `agent/rules/triage.md` §21.
+Full list + rationale: `agent/rules/reporting.md` §11 (§14 for remediation), with
+the blue additions in `agent/rules/triage.md` §21.
 
 AI-tell elimination — do NOT write:
 - Rule-out catalogs ("No evidence found of...", "Defender-positive: nothing detected"). State a material negative in one sentence with the evidence ref.
@@ -172,7 +174,7 @@ L2-handoff rows via the parsed finding field `details.timeline`.
 LIMIT: 400 words PER finding. Split if longer.
 - One subsection per finding, severity descending. `false_positive` EXCLUDED
   (their artifacts stay in the index marked scratch).
-- One root cause = one finding (see `agent/rules/triage.md` §21). Multiple
+- One root cause = one finding (see `agent/rules/reporting.md` §18). Multiple
   impacts list under one root cause; do not split by impact.
 - Render all subfields. Empty field → `[EVIDENCE MISSING]`. Never fabricate.
 -->
@@ -361,8 +363,9 @@ Imperative voice. Every recommendation names control + exact fix + owner team
 Good: "Reduce session-token lifetime to 60 min (currently 24h) — Entra Sign-In
 Frequency policy ID <id> — Identity team, by 2026-06-19."
 
-Remediation patterns that fail the specificity bar: see `agent/rules/triage.md` §21
-(and the FORBIDDEN VOCABULARY block at the top of this file).
+Remediation patterns that fail the specificity bar: see `agent/rules/reporting.md` §14
+and the blue additions in `agent/rules/triage.md` §21 (plus the FORBIDDEN VOCABULARY
+block at the top of this file).
 -->
 
 | Horizon | Recommendation | Owner | Tracker | Due (UTC) |

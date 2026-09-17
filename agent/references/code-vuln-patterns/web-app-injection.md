@@ -13,20 +13,6 @@ languages: Python, JS, Java, Ruby
 
 ---
 
-## Baseline Patterns (Single-Function / Single-Scope)
-
-Toolchain-catchable patterns. Record as findings if encountered during orientation —
-on unaudited codebases these are real, exploitable bugs that no prior tool run has caught.
-Invest primary analysis time in the LLM-advantage patterns below.
-
-- Direct string concatenation in SQL: `"SELECT * FROM users WHERE id=" + user_input`
-- `eval(user_input)` direct usage
-- `os.system(user_input)` direct usage
-- `innerHTML = user_input` without sanitization
-- Direct `pickle.loads(request.body)` in obvious request handler
-
----
-
 ## What You're Hunting (LLM-Advantage Patterns)
 
 ### 1. ORM Bypass Methods

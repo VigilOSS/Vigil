@@ -13,19 +13,6 @@ languages: C/C++, Python, JS
 
 ---
 
-## Baseline Patterns (Single-Function / Single-Scope)
-
-Toolchain-catchable patterns. Record as findings if encountered during orientation —
-on unaudited codebases these are real, exploitable bugs that no prior tool run has caught.
-Invest primary analysis time in the LLM-advantage patterns below.
-
-- `malloc()` return used without NULL check in the same function
-- Direct `*ptr` where `ptr` is visibly NULL from a literal assignment
-- Simple `fopen()` without NULL check followed by `fread()` in same scope
-- Obvious null dereference after failed allocation in a single basic block
-
----
-
 ## What You're Hunting (LLM-Advantage Patterns)
 
 ### 1. Cross-Function Null Propagation
@@ -324,14 +311,17 @@ existed, kernel code paths that dereferenced userspace-controlled pointers (expe
 the kernel's own NULL-check guards) could be exploited. The check and the use were
 split across mm subsystem boundaries.
 
-### CVE-2023-3390 (Linux kernel — Netfilter nft_set null deref on error path)
-In the Netfilter nf_tables subsystem, a set element's transaction object could be
-dereferenced after a failed set update. The allocation occurred in one function,
-and the error-handling code in a separate function assumed the transaction object was
-always valid. When memory pressure caused the allocation to fail, the element was
-added to the set's pending list with a NULL transaction pointer. The commit path in
-a third function then dereferenced the NULL transaction to apply the update, causing
-a kernel crash exploitable for denial of service.
+### CVE-2023-6622 (Linux kernel — nf_tables null deref in `nft_dynset_init`)
+`nft_dynset_init()` in `net/netfilter/nft_dynset.c` dereferenced a pointer it never
+validated, so a crafted nf_tables expression reached the dereference with nothing
+behind it. The value is established during rule construction and consumed during
+expression initialization — two different entry points into the same subsystem — so the
+missing check is only visible by reasoning about which construction paths can reach
+`init` without setting the field. A local user with `CAP_NET_ADMIN`, reachable through
+an unprivileged user namespace, crashes the kernel. This is denial of service and
+nothing more, which is the useful contrast: the same subsystem's use-after-free bugs
+reach privilege escalation, and the difference is whether the bad pointer is null or
+merely stale.
 
 ### CVE-2022-1016 (Linux kernel — nf_tables uninitialized register leading to null deref)
 The nf_tables register initialization logic did not ensure all registers were set

@@ -728,7 +728,7 @@ _BUCKETS: tuple[tuple[str, int, frozenset[str], tuple[str, ...]], ...] = (
         # NEW (classify-context-and-surface 2026-06, Part 3 §A.7) → class
         # `debug-exposure`. Ops dashboards / metrics & registry planes that are
         # routinely deployed unauthenticated: Grafana (`/grafana`,
-        # `/api/datasources` — CVE-2026-27876 family), Jenkins (`/jenkins`),
+        # `/api/datasources` — CVE-2021-43798), Jenkins (`/jenkins`),
         # Jolokia (`/jolokia` — JMX RCE), Hystrix (`/hystrix`), the ELK stack
         # (`/kibana`, `/_cat/`, `/solr/`, `/druid`), Go pprof (`/debug/pprof`),
         # the Docker registry catalog (`/v2/_catalog`), and the GitLab projects

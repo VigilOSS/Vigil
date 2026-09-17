@@ -3,6 +3,12 @@
 The map is maintained prose, so this test does not pin headings or wording. It
 only enforces the file's declared size/line limits and verifies that concrete
 directory-rooted repository paths in code spans still resolve.
+
+Both checks block, and neither is a wording test. `AGENTS.md`'s "Markdown
+prompt/doc testing policy" bans asserting on what the map SAYS -- a byte ceiling
+asserts nothing about wording and cannot be satisfied by rewording, which is why
+the map's own header states the ceiling and says to cut an entry that has stopped
+earning its place rather than to reword one until it fits.
 """
 
 from __future__ import annotations
@@ -33,7 +39,8 @@ def _referenced_paths() -> list[tuple[str, str]]:
 def test_code_map_stays_within_declared_format_limits() -> None:
     content = _CODE_MAP.read_bytes()
     assert len(content) <= _MAX_BYTES, (
-        f"CODE-MAP.md is {len(content)} bytes; limit is {_MAX_BYTES}"
+        f"CODE-MAP.md is {len(content)} bytes; limit is {_MAX_BYTES}. "
+        "Cut an entry that has stopped earning its place -- do not reword to fit."
     )
 
     long_lines = [

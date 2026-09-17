@@ -13,20 +13,6 @@ languages: C/C++, Python, JS, Java, Go
 
 ---
 
-## Baseline Patterns (Single-Function / Single-Scope)
-
-Toolchain-catchable patterns. Record as findings if encountered during orientation —
-on unaudited codebases these are real, exploitable bugs that no prior tool run has caught.
-Invest primary analysis time in the LLM-advantage patterns below.
-
-- Missing `@login_required` on a route (basic linter check)
-- Hardcoded credentials in source
-- `==` instead of constant-time compare for tokens
-- Direct password storage without hashing
-- Missing CSRF token on a form
-
----
-
 ## What You're Hunting (LLM-Advantage Patterns)
 
 ### 1. Middleware/Decorator Ordering Bugs
@@ -453,9 +439,14 @@ constraint would not apply. The route handler still processed the request normal
 the servlet container stripped or ignored the newline. The gap was between how the regex
 engine interpreted the path and how the servlet container routed it.
 
-### CVE-2023-32681 (Requests Library — Auth Header Leak on Redirect)
-Python's `requests` library sent the `Authorization` header when following redirects to a
-different host. An attacker who controlled a redirect target could steal bearer tokens and
-API keys. The auth was correctly applied to the original request, but the redirect handling
-didn't strip credentials when crossing trust boundaries. This is a composition bug between
-the auth layer and the redirect-following layer that no single-function SAST rule would flag.
+### CVE-2023-32681 (Requests Library — `Proxy-Authorization` Leak to the Destination Server)
+Python's `requests` attached the `Proxy-Authorization` header to the request sent *through* an
+HTTPS tunnel, not only to the `CONNECT` that establishes it, so proxy credentials supplied in a
+proxy URL (`https://user:pass@proxy:8080`) reached the destination origin server — which is a
+different party from the proxy they authenticate to. The advisory's matrix marks HTTP→HTTPS and
+HTTPS→HTTPS redirects as leaking. Note what this is *not*: cross-host stripping of the ordinary
+`Authorization` header on redirect was already handled, and reading the code for that check would
+have said the library was safe. The header was built correctly for the proxy hop; nothing removed
+it when the request crossed from the proxy leg to the origin leg. That boundary exists only in the
+composition of the proxy layer and the redirect layer, so no single-function rule sees it.
+Affected `requests` 2.3.0 through 2.30.x; fixed in 2.31.0.

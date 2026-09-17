@@ -11,14 +11,6 @@ languages: Python, JS, Java, Go
 
 ---
 
-## Baseline Patterns
-
-- `return redirect(request.args["next"])`
-- Host allowlist that accepts any string containing the trusted domain
-- Relative-path-only check that misses protocol-relative URLs
-
----
-
 ## What You're Hunting
 
 ### 1. Host Validation by String Prefix/Suffix

@@ -144,7 +144,7 @@ In addition to Rule 1 hedge phrases, replace these filler patterns with their ti
 | Instead of | Write |
 |---|---|
 | `Furthermore` · `Additionally` · `Moreover` | Start with the proof or outcome sentence immediately |
-| `It is worth noting that` · `It should be noted that` | State the fact |
+| `It is worth noting that` · `It should be noted that` · `It is important to note that` | State the fact |
 | `As demonstrated above` · `As mentioned earlier` | `The same request also` · `The response then` · `A second request confirms` |
 | `During the course of our assessment` · `Upon further investigation` | (delete — add nothing) |
 | `In conclusion` · `To summarize` · `with a one-minute proof-of-concept` | (delete — add nothing) |

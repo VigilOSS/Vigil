@@ -10,17 +10,6 @@ languages: C/C++ (frameworks → web-app-auth)
 > see `web-app-auth.md` which provides per-framework code examples and CVEs. This file covers
 > generic/C/C++ auth bypass patterns and cross-framework logic bugs.
 
-## Baseline Patterns (Single-Function / Single-Scope)
-
-Toolchain-catchable patterns. Record as findings if encountered during orientation —
-on unaudited codebases these are real, exploitable bugs that no prior tool run has caught.
-Invest primary analysis time in the LLM-advantage patterns below.
-
-- Missing authentication middleware on route definition
-- Hardcoded credentials in source code
-- `strcmp` for password comparison (timing attack)
-- Missing CSRF token validation on state-changing routes
-
 ## What You're Hunting (LLM-Advantage Patterns)
 
 ### Auth Check on Wrong Operation or Wrong Point

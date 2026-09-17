@@ -143,16 +143,12 @@ and the verifier's evidence_refs check.
 
 ## 4. UTC discipline
 
-All log queries, audit pulls, timeline entries, finding
-`details.timeline` rows, and `activity_entries` timestamps are UTC with
-explicit `Z` or `+00:00` offset.
-
-Convert to local only for human-rendered narrative (report executive summary,
-operator screen status). Mixed-zone queries drop events and turn 5-minute
-phishing-to-login windows into phantom gaps.
-
-ISO-8601 is the only acceptable format in evidence files, command `--intent`
-strings, and JSON payloads.
+Full rule (the local-conversion exception, the phantom-gap failure mode, the
+surfaces it covers) is canonical in `agent/rules/triage.md` §7 — every blue
+specialist already loads that file as an always-active rule, so it is not
+restated here. The one form to carry into every write: ISO-8601 with an
+explicit `Z` or `+00:00` offset, including on `activity_entries` timestamps and
+`--intent` strings.
 
 ---
 
@@ -277,40 +273,24 @@ exclude them from the executive summary.
 outside user's 30-day ASN baseline + impossible-travel from previous session
 3h prior" is.
 
+`metadata` is the API/CLI field you write through `vigil assess log
+--metadata-inline`; the platform skills read the same values back as
+`metadata_json.confidence` / `metadata_json.confidence_rationale`, the SQLite
+column it lands in.
+
 ---
 
 ## 9. Resume hydration before action
 
-On any continuation of an existing engagement, run:
+`agent/rules/resume.md` (in your Load First) owns the scoped variants and the
+post-hydration operator note. Run `vigil assess resume-brief` on any
+continuation before dispatching specialists or proposing containment — the skip cost
+is duplicate dispatches, audit pulls re-run against telemetry already sitting in
+`ir/reports/`, and lost verifier kill rationale.
 
-```bash
-vigil assess resume-brief
-```
-
-before dispatching specialists or proposing containment. Scoped variants for
-narrower hydration:
-
-```bash
-vigil assess resume-brief --finding <finding-slug-or-alias>
-vigil assess resume-brief --q "<keyword-or-customer-slug>"
-vigil assess resume-brief --agent-id <agent-id>
-vigil assess resume-brief --since <iso-datetime>
-vigil assess resume-brief --max-age-hours <N>
-```
-
-`agent/rules/resume.md` is universal; this is the blue-specific reminder.
-Skipping resume-brief produces duplicate dispatches, repeated audit pulls
-already in `ir/reports/`, and lost verifier kill rationale.
-
-After hydration, summarize in one compact operator note:
-
-- Confirmed / suspicious / killed / open findings on this engagement
-- Recent verifier decisions and the disposition + cited evidence
-- Last dispatch owner, skills loaded, result, and handoff gaps
-- Command-run coverage already performed against this tenant / actor / target
-- Indexed artifacts that matter to the next action
-
-Then decide the next action.
+Two blue additions to that note: give every recent verifier decision its
+disposition **and the evidence cited for it**, and scope command-run coverage to
+this tenant / actor / target rather than a host or keyword.
 
 ---
 
@@ -357,80 +337,33 @@ ambiguous scope). A `blocked` handoff names the exact blocker in `next_steps`.
 
 ---
 
-## Artifact Registration as Required Closing Step
+## Artifact Registration and `finding record` — Required Closing Step
 
-Every blue specialist runs the closing sequence before returning. Skipping
-it breaks resume-brief, report readiness, and cross-tier handoff — future
-agents cannot query unindexed local files.
+The ordered steps are owned per role: each blue role's own `### Closing verbs`
+list names which artifact kinds it registers, what it marks scratch, which
+activity entries it writes, and its `render-handoff` self-check; the cross-role
+wrapper (checkpoint cadence, `agent_id` keying, skip consequences) is in
+`agent/shared-specialist-core.md` "Mandatory Closing Sequence — wrapper"; the
+`register` / `mark-scratch` commands and the `--kind` enum are in §3 above.
 
-1. **Register every durable artifact.** Raw pulls under `ir/reports/`, derived
-   analysis under `ir/evidence/`, exported timelines, screenshots, IOC dumps:
+What is blue-specific and lives only here is the `finding record` contract:
 
-   ```bash
-   vigil assess artifact register <path> \
-     --kind <ir_log|ir_evidence|timeline|ioc_dump|containment_proof|ir_closeout> \
-     --finding <finding-slug> \
-     --agent-id <id> \
-     --command-run-id <id>
-   ```
+```bash
+vigil assess finding record <agent-name> <finding-json> --agent-id <your-agent_id>
+```
 
-   When many artifacts were produced in one dispatch, register each durable
-   output separately so every row carries the correct producer, command-run,
-   and finding linkage.
+`--agent-id` is the dispatch id from your Runtime Identity block, not the role
+name in the `<agent-name>` positional. It stores the finding's immutable
+`provenance.agent_id`, and without it the L3 verifier can never reach a terminal
+disposition (`confirmed` / `downgraded` / `false_positive`) — the backend refuses
+a verification it cannot attribute to a dispatch other than the author's. The
+finding JSON must include `details.mitre_techniques`, `details.confidence`, and
+`details.timeline` (UTC ISO-8601 entries with `source_file` citations per
+`agent/rules/ir-evidence.md` rule 3).
 
-2. **Mark transient working notes as scratch.** Anything under `notes/scratch/`,
-   ephemeral CSV slices, intermediate `.jq` filter outputs, throw-away
-   timeline-construction drafts:
-
-   ```bash
-   vigil assess artifact mark-scratch --under notes/scratch/
-   ```
-
-   Or per-artifact:
-
-   ```bash
-   vigil assess artifact mark-scratch <artifact-id>
-   ```
-
-   Scratch artifacts stay in the backend (audit preserved, hash preserved) but
-   are excluded from resume briefs and report rendering.
-
-3. **Emit the handoff JSON with artifact IDs.** Use the artifact IDs returned
-   by `register` or `sync` in the handoff's `evidence_refs`. Never put local
-   paths there — the downstream consumer cannot resolve them.
-
-4. **Record the finding(s).** `vigil assess finding record <agent-name>
-   <finding-json> --agent-id <your-agent_id>` per finding. `--agent-id` is the
-   dispatch id from your Runtime Identity block, not the role name in
-   `<agent-name>`; it stores the finding's immutable `provenance.agent_id`, and
-   without it the L3 verifier can never reach a terminal disposition
-   (`confirmed` / `downgraded` / `false_positive`) — the backend refuses a
-   verification it cannot attribute to a dispatch other than the author's.
-   The JSON must include
-   `details.mitre_techniques`, `details.confidence`, and
-   `details.timeline` (UTC ISO-8601 entries with `source_file` citations
-   per `agent/rules/ir-evidence.md` rule 3).
-
-5. **Record activity entries** for state-changing operator-touching events:
-   `vigil assess log` with `--actor-kind`, `action`, and `--metadata-inline`
-   carrying `{tier, alert_external_id, platform, disposition, confidence,
-   mitre_techniques[]}`.
-
-6. **Call `vigil assess agent handoff --from-json <path>`** with the
-   `agent_id`, `agent_role`, and `phase` from the Runtime Identity block at
-   the top of the dispatch prompt. The handoff row is keyed on `agent_id`;
-   using a different value creates an orphaned row the operator cannot
-   render.
-
-7. **Self-check with `vigil assess agent render-handoff <agent_id>`.** A 404
-   means the `agent_id` in step 6 did not match the registered dispatch — fix
-   and re-handoff before returning.
-
-> **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-specialist-core.md (in your Load First). This role adds only its own closing verbs below.
-
-The seven steps above are the blue-specific closing verbs. Checkpoint after
-each major step (after the initial audit pull, after the correlation pass,
-after the verifier's five-check completes), not only at the end.
+Checkpoint after each major step — after the initial audit pull, after the
+correlation pass, after the verifier's five-check completes — not only at the
+end.
 
 ---
 
@@ -481,15 +414,11 @@ Use `--intent` for purpose only.
 
 ## Reasoning Quality > Response Brevity
 
-Reason fully through the work — narrate observations between host-exec
-calls, work through alternative-explanation hypotheses (devil's-advocate in
-`agent/rules/triage.md` rule 15 is the required form), summarize findings as
-they crystallize. Do not truncate analysis to look efficient.
-
-The closing-sequence discipline is not "be terse"; it is "do not let the
-markdown response replace the backend writes." Both coexist: reasoning in
-the response, structured state (findings, artifacts, handoffs, activity
-entries) in the backend.
+`agent/shared-specialist-core.md` "Reasoning quality > response brevity" owns
+this. Blue substitutions: the calls you narrate between are
+`vigil assess host-exec` calls, and the hypotheses you work through are
+alternative-explanation hypotheses in the devil's-advocate form
+`agent/rules/triage.md` rule 15 requires.
 
 A handoff omitting the cross-platform correlation paragraph because "it was
 in the response" is malformed — the next specialist's render-handoff cannot
@@ -499,23 +428,16 @@ see the response, only the handoff row.
 
 ## Reference Block
 
-- `agent/rules/triage.md` — blue rules: outcome before theory, severity
-  discipline, disposition vocabulary, symmetric evidence bar, smallest probe,
-  containment-proposal shape, DoD per phase.
-- `agent/rules/ir-evidence.md` — attribution gates, multi-signal corroboration,
-  confidence labels on attribution claims, evidence-file conventions, platform-
-  specific event routing surprises.
-- `agent/rules/adversarial-mindset.md` — generative rule; the lens through
-  which alerts get re-read after audit pulls land.
-- `agent/rules/reporting.md` — platform-agnostic reporting discipline; banned
-  hedge phrases, section length limits, severity discipline.
-- `agent/rules/resume.md` — universal resume hydration; `vigil assess
-  resume-brief` before any continuation.
-- `agent/skills/alert-fp-verification/SKILL.md` — five-check protocol and the
-  Multi-Perspective Voting Protocol for `disputed` dispositions.
+The blue rule and skill set — `triage.md`, `ir-evidence.md`,
+`adversarial-mindset.md`, `reporting.md`, `resume.md`,
+`alert-fp-verification/SKILL.md` — is described in your role's `## Load First`
+list and in `agent/rules/triage.md`'s own Reference Block; it is not re-listed
+here. The paths below are the ones this file's contracts depend on that no
+Load First names:
+
 - `agent/references/tenants/<customer>-<platform>.md` — the tenant ref injected
   for this dispatch.
 - `agent/references/runtime-guides/handoff-schema.md` — canonical handoff JSON
-  schema (cross-mode).
+  schema (cross-mode); see "Dispatch Handoff Conventions" above.
 - `agent/references/runtime-guides/command-history-auditing.md` — the coverage-
   vs-duplicate decision table (cross-mode); host-exec rows participate.

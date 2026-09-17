@@ -8,9 +8,12 @@ It is deliberately not an inventory. `ls`, `rg`, and a module's own docstring
 answer "what is this file?" better than a gloss here ever will, and they cannot
 go stale. Implementation detail belongs in the code it describes.
 
-**Size budget: this file stays under 25 KB.** Past that it stops being read, and
-an unread map drifts unnoticed. If an addition would break the budget, something
-here has stopped earning its place — cut it, or push it into a docstring.
+**Size budget: this file stays under 25 KB**, enforced by
+`orchestrator/backend/tests/test_doc_dead_paths.py`. A map is only useful while it
+can be scanned; this one reached 156 KB before it was cut by 87%. If an addition
+would break the budget, something here has stopped earning its place: cut it, or
+push it into a docstring. Rewording until it fits is not the intended response —
+a byte ceiling cannot be satisfied that way.
 
 **Entry format** (enforced by `orchestrator/backend/tests/test_doc_dead_paths.py`):
 

@@ -85,7 +85,9 @@ content slug such as `/solrful-guide` does not.
 
 - **Unauthenticated ops dashboard / data-source abuse:** Grafana data sources
   (`/api/datasources`) can be queried or used to pivot; the proxy can be steered at
-  internal hosts. Tracks the Grafana CVE-2026-27876 family cited by the plan.
+  internal hosts. CVE-2021-43798 is the canonical route: unauthenticated path traversal
+  under `/public/plugins/<plugin_id>/`, exploitable on any instance through its
+  pre-installed plugins, reaching `grafana.db` and the data-source credentials in it.
 - **Data-source / proxy SSRF:** Grafana, Hystrix, and Jolokia all proxy outbound fetches
   that an attacker can redirect at internal services or cloud metadata.
 - **Jolokia JMX-over-HTTP RCE:** an exposed `/jolokia` agent allows MBean reads/writes
@@ -108,7 +110,7 @@ See ADR 0008, `DRIFT.md`, and the focused classifier regressions for the accepte
 
 ## Sources
 
-- [Grafana security advisories — CVE-2026-27876 family](https://grafana.com/security/security-advisories/) — unauthenticated data-source / dashboard exposure (cited by the plan)
+- [Grafana CVE-2021-43798 — plugin path traversal](https://github.com/advisories/GHSA-8pjx-jj86-j47p) — unauthenticated arbitrary file read reaching stored data-source credentials
 - [Jolokia security — JMX-over-HTTP RCE](https://jolokia.org/reference/html/security.html) — exposed agent escalation
 - [Go `net/http/pprof` — profiling endpoint exposure](https://pkg.go.dev/net/http/pprof) — `/debug/pprof` disclosure / DoS
 - [Docker Registry HTTP API V2 — `/v2/_catalog`](https://distribution.github.io/distribution/spec/api/) — open catalog enumeration

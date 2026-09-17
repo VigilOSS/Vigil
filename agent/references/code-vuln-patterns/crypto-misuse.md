@@ -12,20 +12,6 @@ languages: C/C++, Python, JS
 
 ---
 
-## Baseline Patterns (Single-Function / Single-Scope)
-
-Toolchain-catchable patterns. Record as findings if encountered during orientation —
-on unaudited codebases these are real, exploitable bugs that no prior tool run has caught.
-Invest primary analysis time in the LLM-advantage patterns below.
-
-- MD5 or SHA1 used for password hashing
-- ECB mode block cipher usage
-- Hardcoded encryption keys or API secrets in source code
-- DES or RC4 usage (deprecated algorithms)
-- SSL/TLS version < 1.2 explicitly configured
-
----
-
 ## What You're Hunting (LLM-Advantage Patterns)
 
 ### 1. Correct Algorithm, Wrong Mode or Parameters
@@ -320,14 +306,17 @@ const cipher = crypto.createCipheriv('aes-256-cbc', key, iv);
 
 ## Real CVE Examples
 
-### CVE-2020-8169 (cURL — credential leak via DNS over HTTPS)
-cURL's DoH (DNS over HTTPS) implementation sent DNS queries with credentials
-included in certain configurations. The TLS connection to the DoH server was
-properly encrypted, but the URL construction for the DoH query included
-authentication credentials from the original URL. The crypto implementation was
-correct (TLS worked fine), but the security boundary was wrong — credentials
-intended for the target server were sent to the DNS resolver. This is a
-cryptographic misuse pattern: correct encryption to the wrong party.
+### CVE-2022-29217 (PyJWT — asymmetric public key accepted as an HMAC secret)
+PyJWT refused an `ssh-rsa`-prefixed public key where an HMAC secret was expected, but the
+blocklist did not cover the other SSH key formats — `ssh-ed25519`, `ecdsa-sha2-nistp256`. An
+application that passed `jwt.algorithms.get_default_algorithms()` as its accepted set therefore
+let an attacker sign a token with HS256 using the service's *published* verification key as the
+shared secret, and the verifier, handed the same key, accepted it. Every primitive here is
+implemented correctly: the HMAC is a real HMAC over a real key. The misuse is that the algorithm
+is chosen by the token rather than by the verifier, so a value that is public by design becomes a
+secret. The partial blocklist is the tell — a guard that names one key format is a guard whose
+author was enumerating instances, not stating the invariant. Affected PyJWT 1.5.0 through 2.3.x;
+fixed in 2.4.0.
 
 ### CVE-2016-0777 (OpenSSH — roaming buffer leak)
 The OpenSSH client's roaming feature (for resuming interrupted connections) included

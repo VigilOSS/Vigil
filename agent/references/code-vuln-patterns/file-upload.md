@@ -11,14 +11,6 @@ languages: Python, JS, Java, Go
 
 ---
 
-## Baseline Patterns
-
-- Extension-only validation
-- Trusting client-supplied MIME type
-- Saving uploads inside a web-executable directory
-
----
-
 ## What You're Hunting
 
 ### 1. Validation vs Storage Drift
