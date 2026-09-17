@@ -1141,11 +1141,19 @@ _CONTRACTS: dict[str, CommandContract] = {
     "record-surface": CommandContract(
         name="record-surface",
         goals=("discovery",),
-        phase=("recon", "collect", "consume-test", "exploit"),
+        # The code track records surfaces too (operator-core-code routes plugin
+        # and framework registrations here), so the verb has to appear in the
+        # code-phase catalog as well or `list-commands --phase code-classify`
+        # never names the verb those instructions depend on.
+        phase=(
+            "recon", "collect", "consume-test", "exploit",
+            "code-classify", "code-hunt",
+        ),
         summary="Record one discovered or dispositioned assessment surface and emit the matching surface.updated event.",
         schema_name="argparse + backend assessment surface create payload (POST /surfaces)",
         preferred_invocations=(
             "vigil assess record-surface <type> <target> <source> [--rationale <text>] [--evidence-ref <path>] [--status <status>]",
+            "vigil assess record-surface <type> <target> <source> --framework-registration <kind>",
         ),
         author_supplied_fields=(
             "type (surface_type)",
@@ -1154,16 +1162,28 @@ _CONTRACTS: dict[str, CommandContract] = {
             "--rationale",
             "--evidence-ref",
             "--status",
+            "--framework-registration when the code is a plugin/extension the host framework registers",
         ),
-        helper_defaults=(("--status", "discovered"),),
+        helper_defaults=(
+            ("--status", "discovered"),
+            ("--framework-registration", "unset (not a framework registration)"),
+        ),
         notes=(
             "Valid surface types: " + ", ".join(sorted(VALID_SURFACE_TYPES)) + ".",
             "Valid create statuses: " + ", ".join(sorted(CREATABLE_STATUSES)) + ".",
             "The helper validates type/status, posts the canonical surface payload, requires the backend response to contain surface_type and target_descriptor, then emits surface.updated.",
+            "--framework-registration is a SECOND, orthogonal axis: the surface type keeps carrying security meaning, the registration kind carries architecture. Record both on a plugin surface; a Keycloak authenticator is surface_type=auth_entry AND framework_registration=service_provider. Omit it entirely for ordinary target-facing web surfaces.",
+            *(
+                f"--framework-registration {kind}: {worked_mapping}."
+                for kind, worked_mapping in FRAMEWORK_REGISTRATION_KINDS.items()
+            ),
+            "Kinds name the REGISTRATION MECHANISM, not the plugin's purpose, so two very different plugins legitimately share one: a Keycloak authenticator and a user-storage SPI are both service_provider and are told apart by their surface type (auth_entry vs object_reference). That is the design — do not reach for a per-plugin kind.",
+            "Re-recording the same (type, target) updates the row; an omitted --framework-registration never erases a kind already recorded, so a later observation cannot silently drop the architecture label.",
         ),
         common_mistakes=(
             ("inventing an unregistered type", "choose a value from the Valid surface types note"),
             ("using a finding slug as source", "pass the specialist agent/process name as source; link findings separately"),
+            ("inventing a surface type for a plugin construct (keycloak_authenticator, realm_rest_provider)", "keep the shared semantic type and put the architecture on --framework-registration"),
         ),
     ),
     "finding report": CommandContract(

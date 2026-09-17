@@ -2205,6 +2205,7 @@ def _create_assessment_finding_tables(connection: sqlite3.Connection) -> None:
                 evidence_ref TEXT NOT NULL DEFAULT '',
                 status TEXT NOT NULL DEFAULT 'discovered',
                 followup_condition TEXT NOT NULL DEFAULT '',
+                framework_registration TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(engagement_id, surface_type, target_descriptor),
@@ -2212,14 +2213,17 @@ def _create_assessment_finding_tables(connection: sqlite3.Connection) -> None:
             )
             """
     )
-    # Additive migration for existing deployments that predate the
-    # ``partially-covered`` lifecycle state and its companion
-    # ``followup_condition`` column.
+    # Additive migrations for deployments that predate the ``partially-covered``
+    # lifecycle state (``followup_condition``) and the B5 architecture axis
+    # (``framework_registration``). Both default to empty, so an upgraded row
+    # means exactly what it meant before.
     surface_columns = _table_columns(connection, "assessment_surfaces")
-    if surface_columns and "followup_condition" not in surface_columns:
-        connection.execute(
-            "ALTER TABLE assessment_surfaces ADD COLUMN followup_condition TEXT NOT NULL DEFAULT ''"
-        )
+    for column_name in ("followup_condition", "framework_registration"):
+        if surface_columns and column_name not in surface_columns:
+            connection.execute(
+                f"ALTER TABLE assessment_surfaces ADD COLUMN {column_name} "
+                "TEXT NOT NULL DEFAULT ''"
+            )
     connection.execute(
         """
             CREATE TABLE IF NOT EXISTS assessment_findings (

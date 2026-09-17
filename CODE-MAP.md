@@ -40,6 +40,10 @@ When you are about to copy one of these into a second file, stop and import.
   `agent/scripts/assess/commands/dispatch/work_items.py` mirrors the backend-side predicate.
 - `agent/scripts/assess/lib/classify_buckets.py:_BUCKETS` owns URL bucket scoring and skip tags.
   Ingest classifies inline; `work-buffer reclassify` reapplies it.
+- `agent/scripts/assess/lib/contracts.py:FRAMEWORK_REGISTRATION_KINDS` owns the registration
+  vocabulary on `assessment_surfaces`; `api/assessment.py` mirrors it as a Literal. Deliberately NOT
+  in `agent/scripts/assess/lib/surfaces.py:VALID_SURFACE_TYPES` — registration kind is architecture,
+  surface type security meaning. See: `orchestrator/backend/tests/test_surface_framework_registration.py`.
 - `orchestrator/backend/app/api/assessment.py:_LAUNCHED_CLIENT` owns the clients a dispatch can be
   BOUND to; `_DISPATCH_CLIENT` adds `unknown`, `contracts.py:BINDABLE_CLIENTS` mirrors it in the CLI.
   See: `orchestrator/backend/tests/test_dispatch_client_binding_api.py`.

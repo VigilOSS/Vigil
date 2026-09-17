@@ -614,6 +614,24 @@ class SurfaceRecordRequest(BaseModel):
     rationale: str = Field(default="", max_length=4096)
     evidence_ref: str = Field(default="", max_length=1024)
     status: Literal["covered", "deferred", "discovered", "not_applicable"] = "discovered"
+    # The ARCHITECTURE axis, orthogonal to ``surface_type``'s security meaning.
+    # It records how the host framework discovers and runs the code — a Keycloak
+    # authenticator and a user-storage SPI register identically and stay told
+    # apart by their surface type. Empty is the normal value: a target-facing web
+    # surface has no host framework registering it. See the worked mappings in
+    # ``agent/scripts/assess/lib/contracts.py:FRAMEWORK_REGISTRATION_KINDS``.
+    framework_registration: Literal[
+        "",
+        "service_provider",
+        "http_endpoint",
+        "request_interceptor",
+        "event_listener",
+        "template_override",
+        "scheduled_task",
+        "cli_command",
+        "data_model_extension",
+        "configuration_binding",
+    ] = ""
 
 
 class SurfaceUpdateRequest(BaseModel):
@@ -3525,6 +3543,7 @@ async def create_surface(engagement_key: str, request: SurfaceRecordRequest) -> 
             rationale=request.rationale,
             evidence_ref=request.evidence_ref,
             status_value=request.status,
+            framework_registration=request.framework_registration,
         )
     )
     await _broadcast(engagement.key, "surface", record)
