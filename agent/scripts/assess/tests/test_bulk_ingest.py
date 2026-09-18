@@ -149,3 +149,17 @@ def test_coverage_items_bulk_rejects_malformed_success_receipt() -> None:
         )
 
     assert "do not retry automatically" in str(exc.value)
+
+
+def test_the_client_chunk_size_never_exceeds_the_backend_bulk_cap():
+    """The chunk size is only safe while the backend still accepts it.
+
+    Every bulk writer chunks at ``DEFAULT_BULK_WRITE_SIZE`` and the backend caps
+    each request at ``MAX_BULK_ASSESSMENT_WRITE_ITEMS``. If the cap drops below
+    the chunk, every oversized batch 422s — and for artifact registration that
+    turns a whole chunk into an outcome the caller has to reconcile by hand. The
+    assess suite runs on the backend venv, so the cap is importable here.
+    """
+    from app.api.assessment import MAX_BULK_ASSESSMENT_WRITE_ITEMS
+
+    assert DEFAULT_BULK_WRITE_SIZE <= MAX_BULK_ASSESSMENT_WRITE_ITEMS

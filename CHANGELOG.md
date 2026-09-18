@@ -230,8 +230,41 @@ Durable design decisions live in [`docs/adr/`](docs/adr/).
   only at the final `finding verify` write, by which point the proof run had already executed against
   the target; naming the findings up front turns that into one read and names the author in the
   refusal. The authoritative check is unchanged and still runs at verify.
+- **`vigil assess artifact register` takes many paths in one call.** Registration was one path per
+  request and the loop was left to the caller: 14,351 hand-written registrations across the corpus,
+  62% of them within five seconds of the previous one in the same engagement, and a single
+  engagement that registered 3,503 artifacts one at a time. `register` now accepts several
+  positional paths, or a newline-delimited list through `--paths-file` (`-` reads stdin), and sends
+  them to a new `POST /assessment/artifacts/bulk` in chunks of 500. A single path is untouched —
+  same endpoint, same output. Each path is written inside its own SQLite savepoint and reports its
+  own outcome, so a path the backend refuses costs only itself instead of discarding the batch, and
+  bulk-registered artifacts get the same per-artifact activity row as single ones. The accounting is
+  exact rather than reassuring: `requested = registered + failed + unknown + not_attempted`, every
+  non-registered path prints its full reason, a chunk whose request itself fails is reported
+  `unknown` with the remaining chunks deliberately unsent, and the exit status is non-zero unless
+  every path registered.
+- **A stated policy for retiring a CLI verb.** Two renames shipped as hard breaks with nothing
+  written down about how to do it, and the debris — prose naming a spelling the CLI no longer
+  registers, and audit values still minting the old one — was left for whoever tripped over it.
+  `AGENTS.md` now carries a "Remove or rename a `vigil assess` verb" recipe: prefer an
+  `add_parser(aliases=[...])` alias to a break, record both spellings in this file, move the
+  contract surface with the verb, and sweep the strings the CLI *writes* as well as the ones it
+  reads. `README.md` says the operator-facing half — where to look up what a command became.
+  Both state the same boundary: audit rows, activity entries and agent transcripts keep naming the
+  verb that existed when they ran, and no rename rewrites its own history, so a retroactive alias or
+  a display-time backfill is never the answer.
 
 ### Changed
+
+- **Bulk artifact registration no longer echoes the files it registered.** `POST
+  /assessment/artifacts/bulk` returned each path's full `indexed_text` — the whole file — so
+  registering 500 scan outputs answered with a ~100 MB JSON body that `vigil assess artifact
+  register --json` printed onto an agent's stdout, text the caller had read off its own disk one
+  call earlier. The receipt now carries the same compact row `artifact search` returns:
+  `indexed_bytes` and `index_status` still report how much text was indexed and whether indexing
+  succeeded, and `artifact get` still returns the text verbatim. Not the masking ADR 0019 forbids —
+  no value is rewritten, shortened or shaped; this is that ADR's own "token economy is a budgeting
+  concern to solve by not dumping whole identity maps". The single-path route is unchanged.
 
 - **`provenance.code_snapshot` is derived, not transcribed.** For a `file:` finding that authored no
   binding, `finding record` and `finding verify` read the engagement's active repository and bind
@@ -274,6 +307,14 @@ Durable design decisions live in [`docs/adr/`](docs/adr/).
   and a `code` engagement that declared one does. The predicate reads `backend_hosts` as well as
   `hosts`, because an Android engagement keeps its live API roots there while `hosts` stays empty for
   the artifact-only surface.
+- **An over-long handoff summary fails before the network, not after it.** The backend caps
+  `summary` at 2000 characters; the CLI checked nothing, so a specialist authored the whole
+  checkpoint, sent it, and learned the cap from an HTTP 422 — 242 rejections, the largest single
+  4xx class. `agent handoff --from-json` now measures the summary before the request and refuses
+  with the actual character count and a pointer to the structured fields that exist to carry the
+  overflow (`coverage_gaps`, `next_steps`, `runtime_issues`). It never truncates or splits the text:
+  that would ship content the specialist did not write. The cap itself is unchanged, and the backend
+  remains its authority.
 
 ### Fixed
 
@@ -577,6 +618,14 @@ Durable design decisions live in [`docs/adr/`](docs/adr/).
   copy, so a high-severity claim read as unauthenticated and wire-observed when it may have been
   neither: the reader who copied a finding got a stronger report than the reader who read one. Both
   are labelled and formatted exactly as the report labels them, so the two cannot drift.
+- **One verb, one spelling.** Two renames shipped as hard breaks and left call sites naming the
+  spelling that went away: `code-record-analysis` is `code-record analysis`, and `list-command-runs`
+  is `command-run list`. The analysis-results audit row was still *titled* with the old spelling, so
+  the activity table carried two names for one verb and a search for either missed half the history;
+  the code-analysis snapshot manifest stamped the same stale value; and a contract note, an export
+  docstring and four test docstrings told a reader to run a command that no longer exists. Every one
+  of them is on the live spelling. Rows written before this change keep the old title, which is
+  correct — they record what actually ran.
 
 ### Security
 

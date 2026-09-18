@@ -1491,7 +1491,7 @@ async def create_analysis_result(engagement_key: str, request: AnalysisResultRec
         functools.partial(
             _audit_code_mutation,
             engagement.id,
-            title="code-record-analysis",
+            title="code-record analysis",
             action=(
                 f"file_id={record['file_id']} receipt={request.receipt_kind} "
                 f"callables={len(request.callable_refs)} spans={len(request.reviewed_spans)}"

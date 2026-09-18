@@ -2291,6 +2291,262 @@ def test_verification_narrative_artifact_registers_and_is_searchable(client, iso
     assert all(row["kind"] == "verification-narrative" for row in rows)
 
 
+_ARTIFACTS_BULK_URL = "/engagements/2026-03-30-120000-example/assessment/artifacts/bulk"
+
+
+def _write_artifact_files(engagement_dir: Path, *relative_paths: str) -> None:
+    for relative in relative_paths:
+        target = engagement_dir / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(f"# {relative}\n", encoding="utf-8")
+
+
+def test_bulk_artifact_register_lands_every_valid_path(client, isolate_settings):
+    engagement_dir = write_engagement(isolate_settings["engagements_dir"])
+    _write_artifact_files(engagement_dir, "notes/a.md", "notes/b.md", "tools/c.json")
+
+    response = client.post(
+        _ARTIFACTS_BULK_URL,
+        json={
+            "items": [
+                {"path": "notes/a.md", "kind": "note"},
+                {"path": "./notes/b.md", "kind": "note"},
+                {"path": "tools/c.json", "kind": "tooling"},
+            ]
+        },
+    )
+
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert (body["requested"], body["registered"], body["failed"]) == (3, 3, 0)
+    assert body["registered"] + body["failed"] == body["requested"]
+    assert [outcome["index"] for outcome in body["outcomes"]] == [0, 1, 2]
+    assert [outcome["path"] for outcome in body["outcomes"]] == [
+        "notes/a.md",
+        "./notes/b.md",
+        "tools/c.json",
+    ]
+    assert [outcome["relative_path"] for outcome in body["outcomes"]] == [
+        "notes/a.md",
+        "notes/b.md",
+        "tools/c.json",
+    ]
+    assert all(outcome["outcome"] == "registered" for outcome in body["outcomes"])
+    assert all(outcome["detail"] == "" for outcome in body["outcomes"])
+    assert [row["relative_path"] for row in body["artifacts"]] == [
+        "notes/a.md",
+        "notes/b.md",
+        "tools/c.json",
+    ]
+    assert [outcome["artifact_id"] for outcome in body["outcomes"]] == [
+        row["id"] for row in body["artifacts"]
+    ]
+    # The single-path row minus `indexed_text`: what landed, not an echo of the
+    # bytes the caller submitted (~100 MB for a 500-path batch). Not ADR 0019
+    # masking — `indexed_bytes`/`index_status` report the indexing and
+    # `artifact get` returns the text verbatim.
+    assert all(
+        {"sha256", "preview_text", "indexed_bytes", "index_status", "kind"} <= set(row)
+        for row in body["artifacts"]
+    )
+    assert all("indexed_text" not in row for row in body["artifacts"])
+
+    listed = client.get(
+        "/engagements/2026-03-30-120000-example/assessment/artifacts/search",
+        params={"limit": 100},
+    )
+    assert listed.status_code == 200, listed.text
+    assert {row["relative_path"] for row in listed.json()} >= {
+        "notes/a.md",
+        "notes/b.md",
+        "tools/c.json",
+    }
+
+
+def test_bulk_artifact_register_reports_the_refused_path_and_keeps_the_rest(
+    client, isolate_settings, tmp_path
+):
+    engagement_dir = write_engagement(isolate_settings["engagements_dir"])
+    _write_artifact_files(engagement_dir, "notes/keep-one.md", "notes/keep-two.md")
+    outside = tmp_path / "not-in-the-engagement.md"
+    outside.write_text("someone else's file\n", encoding="utf-8")
+
+    response = client.post(
+        _ARTIFACTS_BULK_URL,
+        json={
+            "items": [
+                {"path": "notes/keep-one.md", "kind": "note"},
+                {"path": str(outside), "kind": "note"},
+                {"path": "notes/keep-two.md", "kind": "note"},
+            ]
+        },
+    )
+
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert (body["requested"], body["registered"], body["failed"]) == (3, 2, 1)
+    assert body["registered"] + body["failed"] == body["requested"]
+    refused = body["outcomes"][1]
+    assert refused["outcome"] == "failed"
+    assert refused["path"] == str(outside)
+    assert refused["relative_path"] is None
+    assert refused["artifact_id"] is None
+    assert refused["status_code"] == 400
+    assert "inside the engagement directory" in refused["detail"]
+    assert [row["relative_path"] for row in body["artifacts"]] == [
+        "notes/keep-one.md",
+        "notes/keep-two.md",
+    ]
+
+    listed = client.get(
+        "/engagements/2026-03-30-120000-example/assessment/artifacts/search",
+        params={"limit": 100},
+    )
+    assert {row["relative_path"] for row in listed.json()} == {
+        "notes/keep-one.md",
+        "notes/keep-two.md",
+    }
+
+
+def test_bulk_artifact_register_writes_the_same_activity_row_per_artifact(
+    client, isolate_settings
+):
+    engagement_dir = write_engagement(isolate_settings["engagements_dir"])
+    _write_artifact_files(engagement_dir, "notes/audited-one.md", "notes/audited-two.md")
+
+    single = client.post(
+        "/engagements/2026-03-30-120000-example/assessment/artifacts",
+        json={"path": "notes/audited-one.md", "kind": "note", "producer_agent_role": "recon"},
+    )
+    assert single.status_code == 201, single.text
+
+    bulk = client.post(
+        _ARTIFACTS_BULK_URL,
+        json={
+            "items": [
+                {"path": "notes/audited-two.md", "kind": "note", "producer_agent_role": "recon"}
+            ]
+        },
+    )
+    assert bulk.status_code == 201, bulk.text
+
+    entries = client.get(
+        "/engagements/2026-03-30-120000-example/activity-entries", params={"limit": 1000}
+    )
+    assert entries.status_code == 200, entries.text
+    registrations = [
+        entry for entry in entries.json()["items"] if entry["title"] == "artifact register"
+    ]
+    by_action = {entry["action"]: entry for entry in registrations}
+    assert set(by_action) == {"notes/audited-one.md", "notes/audited-two.md"}
+    single_row = by_action["notes/audited-one.md"]
+    bulk_row = by_action["notes/audited-two.md"]
+    # Activity-ledger parity: a bulk-registered artifact must be as findable as a
+    # singly registered one, so the row differs only in the path it names.
+    assert bulk_row["actor_kind"] == single_row["actor_kind"]
+    assert bulk_row["actor_name"] == single_row["actor_name"] == "recon"
+    assert bulk_row["result"] == single_row["result"] == "note"
+    assert bulk_row["metadata"]["relative_path"] == "notes/audited-two.md"
+    assert bulk_row["metadata"]["artifact_id"] == bulk.json()["artifacts"][0]["id"]
+
+
+
+def test_bulk_artifact_register_rolls_back_only_the_refused_item(client, isolate_settings):
+    """A refusal raised AFTER its own row was written must take only that row.
+
+    The producer-attribution 409 fires after the upsert has already run, so
+    without a per-item savepoint the refused path would keep the partial write
+    (here: a rewritten ``kind``) that the caller was told did not happen.
+    """
+    engagement_dir = write_engagement(isolate_settings["engagements_dir"])
+    _write_artifact_files(engagement_dir, "notes/before.md", "notes/after.md")
+    _proof_receipt(client, "VA-SAVEPOINT")
+    proofs = client.get(
+        "/engagements/2026-03-30-120000-example/assessment/artifacts/search",
+        params={"kind": "proof", "limit": 10},
+    )
+    assert proofs.status_code == 200, proofs.text
+    cited = proofs.json()[0]
+
+    response = client.post(
+        _ARTIFACTS_BULK_URL,
+        json={
+            "items": [
+                {"path": "notes/before.md", "kind": "note"},
+                {
+                    "path": cited["relative_path"],
+                    "kind": "rewritten-by-the-refused-item",
+                    "producer_agent_id": "SOMEONE-ELSE",
+                },
+                {"path": "notes/after.md", "kind": "note"},
+            ]
+        },
+    )
+
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert (body["requested"], body["registered"], body["failed"]) == (3, 2, 1)
+    refused = body["outcomes"][1]
+    assert refused["outcome"] == "failed"
+    assert refused["status_code"] == 409
+    assert "immutable after proof registration" in refused["detail"]
+    assert [row["relative_path"] for row in body["artifacts"]] == [
+        "notes/before.md",
+        "notes/after.md",
+    ]
+
+    unchanged = client.get(
+        f"/engagements/2026-03-30-120000-example/assessment/artifacts/{cited['id']}"
+    )
+    assert unchanged.status_code == 200, unchanged.text
+    assert unchanged.json()["kind"] == "proof"
+    assert unchanged.json()["producer_agent_id"] == cited["producer_agent_id"]
+
+
+def test_bulk_artifact_register_rejects_more_items_than_the_cap(client, isolate_settings):
+    write_engagement(isolate_settings["engagements_dir"])
+
+    response = client.post(
+        _ARTIFACTS_BULK_URL,
+        json={"items": [{"path": f"notes/over-{index}.md"} for index in range(501)]},
+    )
+
+    assert response.status_code == 422, response.text
+
+
+def test_bulk_artifact_register_upserts_an_already_registered_path(client, isolate_settings):
+    engagement_dir = write_engagement(isolate_settings["engagements_dir"])
+    _write_artifact_files(engagement_dir, "notes/again.md", "notes/fresh.md")
+
+    first = client.post(
+        "/engagements/2026-03-30-120000-example/assessment/artifacts",
+        json={"path": "notes/again.md", "kind": "note"},
+    )
+    assert first.status_code == 201, first.text
+
+    response = client.post(
+        _ARTIFACTS_BULK_URL,
+        json={
+            "items": [
+                {"path": "notes/again.md", "kind": "note"},
+                {"path": "notes/fresh.md", "kind": "note"},
+            ]
+        },
+    )
+
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert (body["requested"], body["registered"], body["failed"]) == (2, 2, 0)
+    assert body["artifacts"][0]["id"] == first.json()["id"]
+
+    listed = client.get(
+        "/engagements/2026-03-30-120000-example/assessment/artifacts/search",
+        params={"limit": 100},
+    )
+    paths = [row["relative_path"] for row in listed.json()]
+    assert paths.count("notes/again.md") == 1
+
+
 def test_legacy_finding_status_field_is_rejected(client, isolate_settings):
     write_engagement(isolate_settings["engagements_dir"])
 

@@ -14436,7 +14436,8 @@ def test_artifact_cli_registers_payload(
     module._run_register(
         SimpleNamespace(
             engagement_dir="/tmp/eng",
-            path="notes/VA-047.md",
+            paths=["notes/VA-047.md"],
+            paths_file="",
             kind="note",
             media_type="text/markdown",
             finding="VA-047",

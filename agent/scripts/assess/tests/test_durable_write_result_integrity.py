@@ -100,7 +100,8 @@ def test_artifact_register_rejects_response_for_a_different_path(
         artifact._run_register(
             SimpleNamespace(
                 engagement_dir="/tmp/eng",
-                path="notes/requested.md",
+                paths=["notes/requested.md"],
+                paths_file="",
                 kind="note",
                 media_type="text/markdown",
                 agent_id="",

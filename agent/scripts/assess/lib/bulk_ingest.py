@@ -94,7 +94,12 @@ def _require_coverage_receipt(
     return response
 
 
-def _bulk_endpoint_missing(exc: AssessError) -> bool:
+def bulk_endpoint_missing(exc: AssessError) -> bool:
+    """True when this backend serves no such bulk route (404/405).
+
+    A CLI upgrades independently of the backend process, so a caller that has a
+    bulk endpoint the server does not must fall back per item rather than fail.
+    """
     message = str(exc)
     return message.startswith("HTTP 404") or message.startswith("HTTP 405")
 
@@ -106,6 +111,18 @@ def _bulk_payload_error(exc: AssessError) -> bool:
         or message.startswith("HTTP 413")
         or message.startswith("HTTP 422")
     )
+
+
+def request_rejected_before_any_write(exc: AssessError) -> bool:
+    """True when the backend refused the REQUEST, so nothing in it can be durable.
+
+    404/405 mean the route never ran; 400/413/422 mean the body was rejected
+    ahead of the handler. Every other failure — a 409, a 5xx, a transport error,
+    a timeout after the handler started — leaves the batch's fate genuinely
+    unknown, and a caller told "may have committed" for a plain 422 will go
+    reconcile durable state that was never touched.
+    """
+    return bulk_endpoint_missing(exc) or _bulk_payload_error(exc)
 
 
 def _chunks(items: list[dict[str, Any]], size: int) -> list[list[dict[str, Any]]]:
@@ -124,7 +141,7 @@ def post_request_observations_bulk(
     try:
         response = client.post("request-observations/bulk", {"items": observations})
     except AssessError as exc:
-        should_retry_individually = _bulk_endpoint_missing(exc) or (
+        should_retry_individually = bulk_endpoint_missing(exc) or (
             fallback_individual and _bulk_payload_error(exc)
         )
         if not should_retry_individually:
@@ -173,7 +190,7 @@ def post_coverage_items_bulk(client, items: list[dict[str, Any]], *, warn_prefix
         try:
             response = client.post("coverage-items/bulk", {"items": chunk})
         except AssessError as exc:
-            if not (_bulk_endpoint_missing(exc) or _bulk_payload_error(exc)):
+            if not (bulk_endpoint_missing(exc) or _bulk_payload_error(exc)):
                 print(
                     f"WARN {warn_prefix}: coverage-items bulk POST failed for "
                     f"{len(chunk)} item(s): {exc}; continuing.",

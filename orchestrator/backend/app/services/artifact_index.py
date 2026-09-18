@@ -574,6 +574,76 @@ def register_artifact(
     )
 
 
+def register_artifacts_bulk(
+    engagement_id: int, items: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Register many engagement-local paths in one transaction.
+
+    Each item is written inside its own savepoint, so a path the index refuses —
+    outside the engagement directory, reserved from indexing, verified command
+    output, or an immutable producer attribution — is reported with the reason it
+    was refused instead of discarding every other path's work. ``registered`` and
+    ``failed`` sum to ``requested`` exactly; ``outcomes`` carries one row per
+    submitted item in submission order, and ``artifacts`` the registered rows in
+    that same order — the row ``register_artifact`` returns minus ``indexed_text``,
+    in the same compact shape ``search_artifacts`` returns (see the loop).
+    """
+    outcomes: list[dict[str, Any]] = []
+    artifacts: list[dict[str, Any]] = []
+    # Deliberately NOT one batch-wide transaction. Each register_artifact opens,
+    # reads and digests its file with no size cap, so wrapping 500 of them in a
+    # single BEGIN IMMEDIATE would hold the WAL write lock across every one of
+    # those reads — up to ~100s, during which every other specialist's write
+    # takes the 8s busy_timeout and 503s. Per-path partial success is this
+    # endpoint's whole contract, so batch atomicity is an invariant no reader
+    # relies on; get_connection()'s depth-0 rollback inside _store_artifact
+    # already isolates a path refused after its own upsert.
+    for index, item in enumerate(items):
+        try:
+            record = register_artifact(engagement_id, **item)
+        except HTTPException as refused:
+            outcomes.append(
+                {
+                    "index": index,
+                    "path": str(item.get("path") or ""),
+                    "relative_path": None,
+                    "artifact_id": None,
+                    "outcome": "failed",
+                    "status_code": refused.status_code,
+                    "detail": str(refused.detail),
+                }
+            )
+            continue
+        outcomes.append(
+            {
+                "index": index,
+                "path": str(item.get("path") or ""),
+                "relative_path": record["relative_path"],
+                "artifact_id": record["id"],
+                "outcome": "registered",
+                "status_code": None,
+                "detail": "",
+            }
+        )
+        # The receipt does not echo back the files it registered. `indexed_text`
+        # is each file's whole text — 32 KB average, 56 MB max on this tree — so
+        # a 500-path batch is a ~100 MB response that `artifact register --json`
+        # prints to an agent's stdout, text the caller read off its own disk a
+        # call earlier. Not ADR 0019 masking: nothing is rewritten or shaped,
+        # `indexed_bytes`/`index_status` still report the indexing, and
+        # `artifact get` returns the text verbatim. Same row `search_artifacts`
+        # already returns.
+        record.pop("indexed_text", None)
+        artifacts.append(record)
+    return {
+        "requested": len(items),
+        "registered": len(artifacts),
+        "failed": len(items) - len(artifacts),
+        "outcomes": outcomes,
+        "artifacts": artifacts,
+    }
+
+
 def _verified_command_output_relative_path(relative_path: str) -> str:
     path = Path(str(relative_path))
     if (

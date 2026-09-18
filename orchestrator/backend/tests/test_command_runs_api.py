@@ -4091,7 +4091,7 @@ def test_dedup_window_inserts_new_row_linked_to_predecessor(client, isolate_sett
     id without inserting) collapsed two real subprocess executions into one
     audit row under the CLI's warn-and-continue default — the audit pipeline
     then lied about coverage. New behavior: dedup is a relationship between
-    rows, not a row-merge, so ``list-command-runs`` reflects every execution
+    rows, not a row-merge, so ``command-run list`` reflects every execution
     attempt."""
     _write_engagement(isolate_settings["engagements_dir"])
     payload = _base_payload(

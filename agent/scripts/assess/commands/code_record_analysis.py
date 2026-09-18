@@ -290,7 +290,7 @@ def run(args) -> None:
         label=json_path.stem,
         payload=results,
         source_path=str(json_path),
-        metadata={"command": "code-record-analysis", "count": len(results)},
+        metadata={"command": "code-record analysis", "count": len(results)},
     )
     responses = []
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
@@ -330,7 +330,7 @@ def run(args) -> None:
         label=json_path.stem,
         payload=responses,
         source_path=str(submit_snapshot),
-        metadata={"command": "code-record-analysis", "count": len(results)},
+        metadata={"command": "code-record analysis", "count": len(results)},
     )
 
     print("\n=== Analysis Results Summary ===")

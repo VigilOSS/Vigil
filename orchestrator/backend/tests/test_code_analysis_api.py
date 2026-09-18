@@ -7180,10 +7180,10 @@ def test_analysis_completion_rolls_up_file_coverage(client, isolate_settings):
 
     activity = client.get(
         f"/engagements/{engagement_key}/activity-entries",
-        params={"q": "code-record-analysis"},
+        params={"q": "code-record analysis"},
     )
     assert activity.status_code == 200, activity.text
-    assert any(row["title"] == "code-record-analysis" for row in activity.json()["items"])
+    assert any(row["title"] == "code-record analysis" for row in activity.json()["items"])
 
     activity = client.get(
         f"/engagements/{engagement_key}/activity-entries",

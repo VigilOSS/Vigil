@@ -545,6 +545,13 @@ class ArtifactRegisterRequest(BaseModel):
     related_request_variant_id: int | None = Field(default=None, ge=1)
 
 
+class ArtifactRegisterBulkRequest(BaseModel):
+    items: list[ArtifactRegisterRequest] = Field(
+        min_length=1,
+        max_length=MAX_BULK_ASSESSMENT_WRITE_ITEMS,
+    )
+
+
 class JobCreate(BaseModel):
     """Request body for POST /jobs — opens an assessment_jobs row.
 
@@ -1392,6 +1399,7 @@ _SUMMARY_AFFECTING_RECORD_TYPES = frozenset(
     {
         "access_record",
         "artifact",
+        "artifact_bulk",
         "artifact_refresh",
         "artifact_scratch",
         "artifact_scratch_bulk",
@@ -1893,6 +1901,70 @@ async def register_artifact(engagement_key: str, request: ArtifactRegisterReques
     )
     await _broadcast(engagement.key, "artifact", record)
     return record
+
+
+def _audit_bulk_artifact_registrations(
+    engagement_id: int,
+    items: list[ArtifactRegisterRequest],
+    records: list[dict[str, Any]],
+) -> None:
+    """One activity row per registered artifact, in one threadpool hop."""
+    for item, record in zip(items, records, strict=True):
+        _audit_assessment_mutation(
+            engagement_id,
+            title="artifact register",
+            action=str(record.get("relative_path") or item.path),
+            actor_name=item.producer_agent_role or item.producer_agent_id or "operator",
+            result=record.get("kind", ""),
+            metadata={
+                "artifact_id": record.get("id"),
+                "relative_path": record.get("relative_path"),
+            },
+        )
+
+
+@router.post("/artifacts/bulk", status_code=status.HTTP_201_CREATED)
+async def register_artifacts_bulk(
+    engagement_key: str, request: ArtifactRegisterBulkRequest
+) -> dict[str, Any]:
+    """Register many engagement-local paths in one call, one outcome per path."""
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    result = await anyio.to_thread.run_sync(
+        functools.partial(
+            artifact_index.register_artifacts_bulk,
+            engagement.id,
+            [item.model_dump() for item in request.items],
+        )
+    )
+    # One activity row per registered artifact, identical in shape to the one the
+    # single-path route writes: an artifact registered in bulk has to be exactly
+    # as findable in the ledger as one registered on its own.
+    # All of them in ONE threadpool hop: a 500-path batch scheduling 500 separate
+    # hops spends the caller's read budget on the ledger rather than on the write.
+    registered_items = [
+        item
+        for item, outcome in zip(request.items, result["outcomes"], strict=True)
+        if outcome["outcome"] == "registered"
+    ]
+    await anyio.to_thread.run_sync(
+        functools.partial(
+            _audit_bulk_artifact_registrations,
+            engagement.id,
+            registered_items,
+            result["artifacts"],
+        )
+    )
+    await _broadcast(
+        engagement.key,
+        "artifact_bulk",
+        {
+            "engagement_id": engagement.id,
+            "requested": result["requested"],
+            "registered": result["registered"],
+            "failed": result["failed"],
+        },
+    )
+    return result
 
 
 @router.post("/artifacts/refresh")

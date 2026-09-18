@@ -388,6 +388,18 @@ frpc conflict scan: [`docs/oob-routing.md`](docs/oob-routing.md). Payload-side t
 Every command documents its full flag set under `--help`; runtime tool verbs live under
 `vigil assess kali --help`.
 
+### When a command name changes
+
+Command names are part of the contract, so a rename keeps the old spelling working as an alias
+wherever it honestly can. When a verb is renamed or removed, the change is recorded in
+[`CHANGELOG.md`](CHANGELOG.md) with both spellings and the invocation that replaces it — that is
+where to look up what a command you remember became.
+
+Audit rows, activity entries, and agent transcripts written earlier go on naming the verb that
+existed when they ran. That is deliberate: they record what was actually executed, and no rename
+rewrites its own history. A command name you find only in old records and not in `--help` has been
+renamed or removed; check the changelog rather than expecting the old name to run.
+
 ## Security
 
 Vigil ships a full offensive Kali runtime and drives autonomous specialist agents against live

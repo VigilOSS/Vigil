@@ -5,13 +5,21 @@ import argparse
 import json
 import shlex
 import sys
+from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlencode
 
+from assess.lib.bulk_ingest import (
+    bulk_endpoint_missing,
+    DEFAULT_BULK_WRITE_SIZE,
+    request_rejected_before_any_write,
+)
 from assess.lib.client import (
+    DEFAULT_READ_TIMEOUT_SECONDS,
     AssessmentClient,
     AssessError,
     canonical_artifact_path,
+    require_artifact_bulk_write_response,
     require_artifact_write_response,
     require_write_result,
 )
@@ -21,6 +29,12 @@ from assess.lib.list_output import ListPage, lookahead_limit, page_from_backend,
 
 
 _MAX_SEARCH_LIMIT = 1000
+# Response budget for one bulk registration chunk. The backend opens, reads and
+# hashes every file in the chunk, so the work scales with the batch rather than
+# sitting inside the client's flat 10 s default. A timeout here cannot be retried
+# — the rows may already be durable — so the chunk is given time proportional to
+# what it asked the backend to do.
+_BULK_REGISTER_SECONDS_PER_PATH = 0.2
 
 
 class _RemovedPositionalQueryAction(argparse.Action):
@@ -83,8 +97,28 @@ def register(subparsers) -> None:
     sp_get.set_defaults(func=_run_get)
 
     # -- register -------------------------------------------------------------
-    sp_register = action_sub.add_parser("register", help="Register an engagement-local file in the artifact index.")
-    sp_register.add_argument("path", help="Relative or absolute path to the file (must be inside the engagement dir)")
+    sp_register = action_sub.add_parser(
+        "register",
+        help="Register one or more engagement-local files in the artifact index.",
+        description=(
+            "Register engagement-local files. One path registers exactly as it "
+            "always has; two or more register in one bulk call that reports an "
+            "outcome for every path, so a refused path costs only itself."
+        ),
+    )
+    sp_register.add_argument(
+        "paths",
+        nargs="*",
+        help="Relative or absolute paths to register (each must be inside the engagement dir)",
+    )
+    sp_register.add_argument(
+        "--paths-file",
+        dest="paths_file",
+        default="",
+        metavar="PATH",
+        help="Newline-delimited file of paths to register ('-' reads stdin). Blank lines are "
+             "skipped and the entries are appended after any positional paths.",
+    )
     sp_register.add_argument("--kind", default="")
     sp_register.add_argument("--media-type", default="")
     sp_register.add_argument("--finding", default="", help="Link to finding slug")
@@ -317,29 +351,263 @@ def _run_get(args) -> None:
         client.close()
 
 
+def _register_paths(args) -> list[str]:
+    """Every path to register: the positional ones first, then --paths-file order."""
+    paths = [str(value) for value in (args.paths or [])]
+    source = str(getattr(args, "paths_file", "") or "")
+    if source:
+        if source == "-":
+            text = sys.stdin.read()
+        else:
+            try:
+                text = Path(source).read_text(encoding="utf-8")
+            except OSError as exc:
+                print(f"register artifact: --paths-file {source}: {exc}", file=sys.stderr)
+                sys.exit(1)
+        paths.extend(entry for entry in (line.strip() for line in text.splitlines()) if entry)
+    if not paths:
+        print(
+            "register artifact: at least one path is required — pass paths positionally "
+            "or with --paths-file <PATH> ('-' reads stdin)",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    return paths
+
+
+def _register_payload(args, canonical_path: str) -> dict[str, Any]:
+    return {
+        "path": canonical_path,
+        "kind": args.kind,
+        "media_type": args.media_type,
+        "producer_agent_id": args.agent_id or None,
+        "producer_agent_role": args.agent_role or None,
+        "producer_command_run_id": args.command_run_id,
+        "related_finding_slug": args.finding or None,
+    }
+
+
+def _register_outcome(
+    index: int,
+    path: str,
+    outcome: str,
+    *,
+    detail: str,
+    relative_path: str | None = None,
+    artifact_id: int | None = None,
+) -> dict[str, Any]:
+    return {
+        "index": index,
+        "path": path,
+        "relative_path": relative_path,
+        "artifact_id": artifact_id,
+        "outcome": outcome,
+        "status_code": None,
+        "detail": detail,
+    }
+
+
+def _register_accounting(result: dict[str, Any]) -> list[str]:
+    """The accounting line plus one line per path that did not land, in full."""
+    summary = (
+        f"artifact register: requested={result['requested']} "
+        f"registered={result['registered']} failed={result['failed']}"
+    )
+    for state in ("duplicate", "unknown", "not_attempted"):
+        if result[state]:
+            summary += f" {state}={result[state]}"
+    lines = [summary]
+    lines.extend(
+        f"  {outcome['outcome']} {outcome['path']}: {outcome['detail']}"
+        for outcome in result["outcomes"]
+        if outcome["outcome"] != "registered"
+    )
+    return lines
+
+
 def _run_register(args) -> None:
+    paths = _register_paths(args)
     client, cfg = _client_and_config(args)
     try:
-        canonical_path = _canonical_artifact_path(
-            cfg.engagement_dir, args.path, operation="register artifact"
-        )
-        payload = {
-            "path": canonical_path,
-            "kind": args.kind,
-            "media_type": args.media_type,
-            "producer_agent_id": args.agent_id or None,
-            "producer_agent_role": args.agent_role or None,
-            "producer_command_run_id": args.command_run_id,
-            "related_finding_slug": args.finding or None,
-        }
-        row = require_artifact_write_response(
-            client.post("artifacts", payload),
-            artifact_path=canonical_path,
-            operation="register artifact",
-        )
-        print(json.dumps(row, indent=2, ensure_ascii=False) if args.as_json else _render_rows([row]))
+        if len(paths) == 1:
+            _register_one(client, cfg, args, paths[0])
+        else:
+            _register_many(client, cfg, args, paths)
     finally:
         client.close()
+
+
+def _register_one(client, cfg, args, path: str) -> None:
+    canonical_path = _canonical_artifact_path(
+        cfg.engagement_dir, path, operation="register artifact"
+    )
+    row = require_artifact_write_response(
+        client.post("artifacts", _register_payload(args, canonical_path)),
+        artifact_path=canonical_path,
+        operation="register artifact",
+    )
+    print(json.dumps(row, indent=2, ensure_ascii=False) if args.as_json else _render_rows([row]))
+
+
+def _register_many(client, cfg, args, paths: list[str]) -> None:
+    """Register every path through the bulk endpoint, accounting for each one.
+
+    A path this side cannot canonicalise fails alone and is never sent; a chunk
+    whose POST or receipt fails STOPS the run, because its rows may already be
+    durable — its paths are reported ``unknown`` and the untried remainder
+    ``not_attempted`` rather than retried into duplicates.
+    """
+    outcomes: list[dict[str, Any]] = []
+    # (submission index, path as the caller spelled it, canonical path) per path
+    # that survived canonicalisation — the only ones the backend ever sees.
+    pending: list[tuple[int, str, str]] = []
+    canonical_seen: dict[str, int] = {}
+    for index, path in enumerate(paths):
+        try:
+            canonical_path = canonical_artifact_path(
+                cfg.engagement_dir, path, operation="register artifact"
+            )
+        except AssessError as exc:
+            outcomes.append(_register_outcome(index, path, "failed", detail=str(exc)))
+            continue
+        first_seen = canonical_seen.get(canonical_path)
+        if first_seen is not None:
+            # One file named twice is one artifact, and counting it twice makes
+            # `registered=` a number that does not describe the index. The
+            # requeue-triggers precedent deduplicates for the same reason.
+            outcomes.append(
+                _register_outcome(
+                    index,
+                    path,
+                    "duplicate",
+                    relative_path=canonical_path,
+                    detail=(
+                        f"same canonical path as item {first_seen}; registered once"
+                    ),
+                )
+            )
+            continue
+        canonical_seen[canonical_path] = index
+        pending.append((index, path, canonical_path))
+
+    artifacts: list[dict[str, Any]] = []
+    unsent_from: int | None = None
+    for start in range(0, len(pending), DEFAULT_BULK_WRITE_SIZE):
+        chunk = pending[start:start + DEFAULT_BULK_WRITE_SIZE]
+        canonical_paths = [canonical_path for _index, _path, canonical_path in chunk]
+        try:
+            receipt = require_artifact_bulk_write_response(
+                client.post(
+                    "artifacts/bulk",
+                    {"items": [_register_payload(args, value) for value in canonical_paths]},
+                    read_timeout=max(
+                        DEFAULT_READ_TIMEOUT_SECONDS,
+                        _BULK_REGISTER_SECONDS_PER_PATH * len(chunk),
+                    ),
+                ),
+                artifact_paths=canonical_paths,
+                operation="register artifact",
+            )
+        except AssessError as exc:
+            if bulk_endpoint_missing(exc):
+                # The CLI and the backend upgrade independently, and a backend
+                # process that predates /artifacts/bulk answers 404/405 — the
+                # stale-install case `vigil install` warns about every time it
+                # syncs. Without this the new CLI registers NOTHING against an
+                # old backend, which is strictly worse than the single-path form
+                # it replaced. Same fallback both other bulk clients already use.
+                print(
+                    f"WARN register artifact: this backend has no bulk endpoint "
+                    f"({exc}); registering {len(chunk)} path(s) individually. "
+                    "Run `vigil orchestrator restart` to pick up the bulk route.",
+                    file=sys.stderr,
+                )
+                for item_index, item_path, item_canonical in chunk:
+                    try:
+                        record = require_artifact_write_response(
+                            client.post("artifacts", _register_payload(args, item_canonical)),
+                            artifact_path=item_canonical,
+                            operation="register artifact",
+                        )
+                    except AssessError as single_exc:
+                        outcomes.append(
+                            _register_outcome(
+                                item_index, item_path, "failed", detail=str(single_exc)
+                            )
+                        )
+                        continue
+                    artifacts.append(record)
+                    outcomes.append(
+                        _register_outcome(
+                            item_index,
+                            item_path,
+                            "registered",
+                            detail="",
+                            relative_path=str(record.get("relative_path") or ""),
+                            artifact_id=record.get("id"),
+                        )
+                    )
+                continue
+            # A request the backend refused before its handler ran wrote nothing,
+            # and calling that "may have committed" sends the caller to reconcile
+            # state nothing touched. Anything else is genuinely unknown.
+            if request_rejected_before_any_write(exc):
+                state, detail = "failed", (
+                    f"the bulk registration chunk carrying this path was refused "
+                    f"before any write ({exc})"
+                )
+            else:
+                state, detail = "unknown", (
+                    f"the bulk registration chunk carrying this path did not return a "
+                    f"usable receipt ({exc}); the write may have committed, so inspect "
+                    "durable state and do not retry automatically"
+                )
+            outcomes.extend(
+                _register_outcome(index, path, state, detail=detail)
+                for index, path, _canonical_path in chunk
+            )
+            unsent_from = start + len(chunk)
+            break
+        outcomes.extend(
+            {**outcome, "index": index, "path": path}
+            for (index, path, _canonical_path), outcome in zip(
+                chunk, receipt["outcomes"], strict=True
+            )
+        )
+        artifacts.extend(receipt["artifacts"])
+    if unsent_from is not None:
+        outcomes.extend(
+            _register_outcome(
+                index,
+                path,
+                "not_attempted",
+                detail="not sent: the run stopped at the chunk reported above",
+            )
+            for index, path, _canonical_path in pending[unsent_from:]
+        )
+    outcomes.sort(key=lambda outcome: outcome["index"])
+
+    counts = dict.fromkeys(
+        ("registered", "duplicate", "failed", "unknown", "not_attempted"), 0
+    )
+    for outcome in outcomes:
+        counts[outcome["outcome"]] += 1
+    result = {
+        "requested": len(paths),
+        **counts,
+        "outcomes": outcomes,
+        "artifacts": artifacts,
+    }
+    if args.as_json:
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+    else:
+        if artifacts:
+            print(_render_rows(artifacts))
+        # stderr, like the single-path refusal: `register ... > rows.txt` must
+        # not swallow the reason a path did not land.
+        print("\n".join(_register_accounting(result)), file=sys.stderr)
+    if counts["registered"] + counts["duplicate"] != len(paths):
+        sys.exit(1)
 
 
 def _run_refresh(args) -> None:

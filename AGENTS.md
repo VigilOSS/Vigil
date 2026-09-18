@@ -272,6 +272,64 @@ authoritative registry, but registration shape depends on the command.
    notes in [`CODE-MAP.md`](CODE-MAP.md) (Prompt-to-backend coupling and Easy-to-miss registration
    points) so the CLI, Pydantic model, DB column, and service layer all land together.
 
+## Remove or rename a `vigil assess` verb
+
+A shipped verb is a contract. Its callers are prompts, references, transcripts, and operator muscle
+memory — none of which a compiler checks — so a rename breaks them even when the behavior is
+identical. Removing or renaming one is therefore a change you record, not just a change you make.
+
+1. **Prefer an alias to a hard break, and know when the shape of the rename forbids one.** Two
+   renames are possible and only one of them has an alias mechanism.
+
+   *Verb to verb, both top level.* `sub.add_parser(new, aliases=[old])` keeps the retired spelling
+   routing to the same handler; warn once on stderr. An alias is a registered verb as far as
+   `test_skill_cli_sync.py` is concerned — argparse puts aliases in `choices` as their own keys and
+   `_assess_registries` reads `set(top)` — so it needs an entry in that file's
+   `_KNOWN_UNDOCUMENTED_ASSESS`, because the retired spelling is deliberately absent from the docs
+   and that is exactly what the allowlist is for. Pair the entry with the reason, as the existing
+   ones do.
+
+   *Top level folded into a group action* — `list-command-runs` → `command-run list`,
+   `code-record-analysis` → `code-record analysis`, the two renames the changelog records. There is
+   no alias for this. `_register_subcommand_group` (`agent/scripts/assess/cli.py:98`) takes
+   `name`, `help_text`, `dest` and `leaf_modules` and no `aliases`, and an alias on the `list` leaf
+   would only add `command-run list-command-runs` — it cannot put a hyphenated spelling back at the
+   top level, where the old caller typed it. Keeping the old name means deliberately registering it
+   a second time as its own top-level parser that forwards to the group's handler and warns; that
+   parser is a registered verb too, so it carries the same allowlist obligation. Nothing in the tree
+   does this today: both shipped folds were hard breaks, taken because nothing still referenced the
+   old spelling. Verify that claim (`rg` the old name across `agent/`, `docs/`, `README.md`,
+   `orchestrator/`, and the contract surface) before making the same call, and say in the change
+   that you did.
+
+   Break a name only when keeping it would lie — the old spelling names behavior that no longer
+   exists — or when the fold above makes the shim cost more than the callers are worth. Say which,
+   in the change.
+
+2. **Record it in `CHANGELOG.md`.** `### Removed` for a removal, `### Changed` for a rename, naming
+   both spellings and the invocation that replaces the old one. That entry is where an operator
+   looks up what the verb they remember became.
+
+3. **Move the contract surface with the verb.** `agent/scripts/assess/lib/contracts.py` owns the
+   operator-facing contract: the dict key, `name`, and every `preferred_invocations` / `notes` /
+   `common_mistakes` string that spells the verb. Then sweep the prompt layer under `agent/`,
+   `docs/`, and `README.md` — the new spelling everywhere, including an alias you kept, which stays
+   out of the docs and in the allowlist instead. `orchestrator/backend/tests/test_skill_cli_sync.py`
+   fails in both directions — on prose naming a verb the CLI no longer registers, and on a
+   registered verb nothing documents — so run the backend suite before you call the sweep done.
+
+4. **Sweep the strings the CLI *writes*, not only the ones it reads.** Audit titles, activity-row
+   titles, and snapshot `metadata.command` values are stamped with the verb name and keep minting
+   the old spelling until someone changes them. That is how one verb ends up with two spellings in
+   the activity table.
+
+5. **Leave history alone.** Audit rows, activity entries, command runs, and agent transcripts
+   written before the change go on naming the verb that existed when they ran, and that is correct —
+   they record what was actually executed. Do not add a retroactive alias, a backfill, or a
+   display-time rewrite to make old rows read as the new name; that would make the ledger claim
+   something that never happened. Aliases are for callers that still run, not for records that
+   already did.
+
 ## Add a deterministic oracle
 
 Oracles are pure decision helpers — no LLM, no network, no backend store. They give specialists a

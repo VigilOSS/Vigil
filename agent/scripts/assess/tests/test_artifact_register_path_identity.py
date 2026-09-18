@@ -49,9 +49,11 @@ def _install(monkeypatch, engagement_dir: Path, response: dict) -> _RecordingCli
 
 
 def _register_args(engagement_dir: Path, path: str) -> SimpleNamespace:
+    # One path is still the single-endpoint form; `paths` is the batch positional.
     return SimpleNamespace(
         engagement_dir=str(engagement_dir),
-        path=path,
+        paths=[path],
+        paths_file="",
         kind="note",
         media_type="text/markdown",
         agent_id="",

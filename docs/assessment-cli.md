@@ -78,6 +78,28 @@ vigil assess artifact register <path> [--finding <slug>] [--agent-id <id>] [--co
 The backend computes SHA-256 and links the file to a finding, chain, surface,
 request variant, or command run.
 
+**Registering many files.** Pass every path to one call rather than looping a
+call per file:
+
+```bash
+vigil assess artifact register notes/a.md notes/b.md scans/c.json --kind note
+vigil assess artifact register --paths-file scans/new-artifacts.txt --kind scan
+```
+
+`--paths-file` reads a newline-delimited list, and `-` reads that list from
+stdin. Two or more paths register in one request (chunked at 500); a single path
+takes the original single-path route unchanged. Every path gets its own outcome,
+so a path the backend refuses costs only itself, and the shared flags apply to
+every path in the call — group paths that share attribution. The accounting sums
+exactly (`requested = registered + failed + unknown + not_attempted`), each
+non-registered path prints its own reason, and the exit status is non-zero unless
+every path registered.
+
+`--json` follows the same split: one path prints the artifact row itself, and two
+or more print the accounting envelope with the rows under `artifacts`. A scripted
+consumer that may pass either count has to branch on that — and a `--paths-file`
+holding exactly one line takes the single-path route.
+
 **What gets indexed.** Ordinary registered text is hashed and indexed in full,
 with a 4 KiB preview. Verified command-output rows are different: they index the
 retention owner's bounded 16 KiB sample and report `index_status=partial` when

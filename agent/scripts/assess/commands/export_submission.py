@@ -532,7 +532,7 @@ def _linked_command_runs(client, slug: str) -> list[dict]:
     listing deliberately returns retired history, and only the export path can
     tell "was linked once" from "is evidence now". There is deliberately NO fuzzy
     ``command-runs?q=`` search here: the report-writer agent
-    runs the targeted ``list-command-runs`` search itself and links the exact
+    runs the targeted ``command-run list`` search itself and links the exact
     reproducing run; this command only surfaces what was explicitly linked.
 
     These runs are REFERENCE, not final Evidence — they are handed to the

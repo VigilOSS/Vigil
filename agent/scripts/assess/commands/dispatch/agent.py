@@ -58,6 +58,14 @@ _HANDOFF_PATCHABLE_FIELDS = frozenset(
         "extras",
     }
 )
+# The backend rejects a longer summary with an HTTP 422, which a specialist
+# only sees after authoring the whole checkpoint and sending it. Mirroring the
+# bound here fails the write before the request while the text is still in the
+# author's editor. Characters, not bytes — Pydantic counts characters on a str.
+# KEEP IN SYNC with ``HandoffCreate.summary`` (authoritative) and
+# ``HandoffUpdate.summary`` in ``orchestrator/backend/app/api/assessment.py``.
+_HANDOFF_SUMMARY_MAX_CHARS = 2000
+
 _OVERLAP_PAGE_SIZE = 1000
 _OVERLAP_MAX_PAGES = 1000
 _OVERLAP_DISPLAY_LIMIT = 5
@@ -577,6 +585,19 @@ def _build_handoff_payload(args) -> dict:
     if not str(loaded.get("agent_id") or "").strip():
         print("agent handoff --from-json: agent_id is required", file=sys.stderr)
         sys.exit(1)
+    # Every create payload and every partial-update patch passes through here,
+    # so one check covers both writes. The summary is never trimmed or split:
+    # that would ship text the specialist did not author.
+    summary = loaded.get("summary")
+    if isinstance(summary, str) and len(summary) > _HANDOFF_SUMMARY_MAX_CHARS:
+        print(
+            f"agent handoff --from-json: summary is {len(summary)} characters, over "
+            f"the {_HANDOFF_SUMMARY_MAX_CHARS}-character backend cap. Shorten it and "
+            "move the detail into the structured fields that carry it: "
+            "coverage_gaps, next_steps, runtime_issues.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
     return loaded
 
 
@@ -596,8 +617,8 @@ def _record_handoff(args) -> None:
             existing = client.get_handoff(agent_id)
             if existing is None:
                 print(
-                    "agent handoff: --agent-role and --summary are required when "
-                    f"creating new handoff {agent_id!r}",
+                    "agent handoff --from-json: agent_role and summary are required "
+                    f"keys when creating new handoff {agent_id!r}",
                     file=sys.stderr,
                 )
                 sys.exit(1)

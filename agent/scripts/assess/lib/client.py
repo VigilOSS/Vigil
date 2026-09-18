@@ -32,6 +32,12 @@ class AssessError(Exception):
     pass
 
 
+# Default response budget for one request. Named because a caller that needs to
+# widen it (a write whose server-side cost scales with its payload) has to be
+# able to say "the default, or more" without restating the number.
+DEFAULT_READ_TIMEOUT_SECONDS = 10.0
+
+
 def require_finding_write_response(
     response: dict[str, Any], *, finding_slug: str, operation: str
 ) -> dict[str, Any]:
@@ -132,6 +138,76 @@ def require_artifact_write_response(
         f"{operation}: backend did not return canonical artifact "
         f"id/path for {subject!r}; the write may have committed, so {inspect}"
     )
+
+
+def require_artifact_bulk_write_response(
+    response: dict[str, Any], *, artifact_paths: list[str], operation: str
+) -> dict[str, Any]:
+    """Require a bulk registration receipt to account for every submitted path.
+
+    The per-path outcomes are the whole point of the bulk form: they are what
+    lets a caller act on a batch that landed in part. A receipt whose counts do
+    not sum, whose outcomes do not line up one-for-one with what was sent, or
+    whose registered rows do not name the canonical paths we submitted cannot say
+    WHICH paths landed — and a batch whose membership is unknown is exactly the
+    case where a retry duplicates committed work.
+    """
+
+    def unusable(reason: str) -> AssessError:
+        return AssessError(
+            f"{operation}: backend response {reason}; the write may have "
+            "committed, so inspect durable state and do not retry automatically"
+        )
+
+    require_write_result(
+        response,
+        operation=operation,
+        expected={"requested": len(artifact_paths)},
+        nonnegative_counts=("registered", "failed"),
+    )
+    if response["registered"] + response["failed"] != response["requested"]:
+        raise unusable("counts do not sum to the number of paths submitted")
+    outcomes = response.get("outcomes")
+    artifacts = response.get("artifacts")
+    if not isinstance(outcomes, list) or len(outcomes) != len(artifact_paths):
+        raise unusable("did not report one outcome per submitted path")
+    if not isinstance(artifacts, list) or len(artifacts) != response["registered"]:
+        raise unusable("returned a different number of artifact rows than it registered")
+    # Each entry pairs a registered outcome with the path WE submitted at that
+    # position. Checking the returned row against the outcome's own
+    # ``relative_path`` would compare the response to itself and accept a receipt
+    # that registered a different file than the one asked for.
+    registered: list[tuple[dict[str, Any], str]] = []
+    for index, (outcome, artifact_path) in enumerate(
+        zip(outcomes, artifact_paths, strict=True)
+    ):
+        if (
+            not isinstance(outcome, dict)
+            or outcome.get("index") != index
+            or outcome.get("path") != artifact_path
+        ):
+            raise unusable(
+                f"outcome {index} does not name the path submitted at that position "
+                f"({artifact_path!r})"
+            )
+        if outcome.get("outcome") == "registered":
+            registered.append((outcome, artifact_path))
+        elif outcome.get("outcome") != "failed" or not str(outcome.get("detail") or "").strip():
+            raise unusable(
+                f"outcome {index} for {artifact_path!r} reports neither a "
+                "registration nor a reason it was refused"
+            )
+    if len(registered) != response["registered"]:
+        raise unusable("registered count does not match the outcomes it reported")
+    for (outcome, artifact_path), row in zip(registered, artifacts, strict=True):
+        require_artifact_write_response(
+            row, artifact_path=artifact_path, operation=operation
+        )
+        if outcome.get("artifact_id") != row.get("id"):
+            raise unusable(
+                f"outcome for {artifact_path!r} does not name the row it registered"
+            )
+    return response
 
 
 def require_write_result(
@@ -333,7 +409,7 @@ class AssessmentClient:
         path: str,
         body: bytes | None = None,
         connect_timeout: float = 2.0,
-        read_timeout: float = 10.0,
+        read_timeout: float = DEFAULT_READ_TIMEOUT_SECONDS,
         max_retries: int | None = None,
         accept_409: bool = False,
     ) -> tuple[int, bytes]:
@@ -400,7 +476,7 @@ class AssessmentClient:
         path: str,
         body: bytes | None = None,
         connect_timeout: float = 2.0,
-        read_timeout: float = 10.0,
+        read_timeout: float = DEFAULT_READ_TIMEOUT_SECONDS,
         max_retries: int | None = None,
         accept_409: bool = False,
     ) -> tuple[int, str]:
@@ -497,11 +573,25 @@ class AssessmentClient:
         )
         return body
 
-    def post(self, endpoint: str, payload: dict) -> Any:
-        """POST /assessment/{endpoint}."""
+    def post(self, endpoint: str, payload: dict, *, read_timeout: float | None = None) -> Any:
+        """POST /assessment/{endpoint}.
+
+        ``read_timeout`` widens the default 10 s response budget for a write whose
+        server-side cost scales with the payload — a bulk artifact registration
+        hashes every file it was handed. A timeout there is not a cheap retry: the
+        rows may already be durable, so the caller can only report the batch as
+        uncertain. Giving the request the time it plausibly needs is how that
+        outcome stays rare enough to mean something.
+        """
         path = f"{self._assessment_prefix}/{endpoint}"
         body = json.dumps(payload, ensure_ascii=True).encode("utf-8")
-        status, resp_body = self._request("POST", path, body=body, max_retries=1)
+        status, resp_body = self._request(
+            "POST",
+            path,
+            body=body,
+            max_retries=1,
+            **({} if read_timeout is None else {"read_timeout": read_timeout}),
+        )
         # These assessment mutations have documented top-level array responses.
         # Keep the exceptions exact instead of weakening every write to accept
         # arbitrary JSON values.
