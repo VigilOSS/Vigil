@@ -690,6 +690,9 @@ function SurfaceDrawer({
             <p className="section-title">Metadata</p>
             <div className="kv-grid">
               <KV k="Surface type" v={surface.surface_type} />
+              {/* The architecture axis: how the host framework registers this
+                  code. Empty on an ordinary web surface, and KV drops empties. */}
+              <KV k="Framework registration" v={surface.framework_registration} />
               <KV k="Status" v={surface.status} />
               <KV k="Source" v={surface.source_name} toast={surface.source_name ? toast : undefined} />
               <div className="kv">

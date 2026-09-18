@@ -2183,7 +2183,7 @@ function OverviewPane({ d, proseMode, toast }: { d: Derived; proseMode: ProseMod
           {d.root_cause_role === "root" ? (
             <p>
               Root finding with {d.sibling_count ?? 0} linked sibling outcomes
-              {d.residual_path_count ? `, including ${d.residual_path_count} residual paths` : ""}.
+              {d.residual_path_count ? `, of which ${d.residual_path_count} close an attack path` : ""}.
             </p>
           ) : (
             <>

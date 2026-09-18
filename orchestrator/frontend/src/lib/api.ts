@@ -49,6 +49,12 @@ export type AssessmentSurface = {
   status: string;
   updated_at: string;
   vendor_saas?: boolean;
+  // The ARCHITECTURE axis, orthogonal to `surface_type`'s security meaning: how
+  // the host framework discovers and runs the code. Empty for an ordinary
+  // target-facing web surface, which is why it is optional here. Mirrors the
+  // backend `SurfaceRecordRequest.framework_registration` literal set
+  // (app/api/assessment.py) and agent/scripts/assess/lib/contracts.py.
+  framework_registration?: string;
 };
 
 export type VendorSaasPendingDecision = {
@@ -1538,6 +1544,10 @@ export type CodeRepo = {
   source_manifest_version: string;
   source_manifest_digest: string;
   source_snapshot_quality: "verified" | "legacy-unverified";
+  // `reference` repositories are readable for cross-file context but are never
+  // handed analysis work and never enter the coverage denominator, so the UI
+  // must say which a repo is rather than showing an empty analysis card.
+  repo_role: "analysis" | "reference";
   worktree_dirty: boolean | null;
   lsp_config: {
     ctags?: {
@@ -1650,6 +1660,16 @@ export type CodeQueueStats = {
 
 export type CodeCoverage = {
   total_files: number;
+  // The repositories deliberately excluded from every count in this object.
+  // Named so a shrunken denominator is never a silent one — and unlike
+  // `CodeQueueStats.reference_repo_items`, this lists a reference repo even
+  // when it has no queue rows at all, which is the normal case.
+  reference_repos: Array<{
+    repo_id: number;
+    repo_key: string;
+    name: string;
+    admitted_files: number;
+  }>;
   by_classification: Record<string, { count: number; analyzed: number }>;
   by_status: Record<string, number>;
   findings_summary: {
