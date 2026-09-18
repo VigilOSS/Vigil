@@ -11,14 +11,6 @@ languages: C/C++, Python, JS
 
 ---
 
-## Baseline Patterns
-
-- User-provided URL fetched directly with no allowlist
-- Webhook/test-connection endpoints that return arbitrary response bodies
-- XML/HTML/PDF renderers that fetch remote resources from attacker-controlled URLs
-
----
-
 ## What You're Hunting
 
 ### 1. Parser Differential Bugs

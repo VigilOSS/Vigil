@@ -492,6 +492,20 @@ def _schema_specs() -> tuple[SchemaSpec, ...]:
                             "evidence",
                             "impact",
                         ],
+                        # The client-side mirror of
+                        # ``state_manager.findings._validate_chain_rationale_pair``.
+                        # Expressed as if/then rather than dependentRequired so
+                        # ``chain_required: false`` — a legitimate explicit
+                        # "this stands alone" — is not dragged in with it.
+                        "allOf": [
+                            {
+                                "if": {
+                                    "required": ["chain_required"],
+                                    "properties": {"chain_required": {"const": True}},
+                                },
+                                "then": {"required": ["chain_rationale"]},
+                            },
+                        ],
                         "properties": _FINDING_DETAIL_PROPERTIES,
                     },
                     "provenance": {
@@ -842,7 +856,7 @@ def _schema_specs() -> tuple[SchemaSpec, ...]:
                         "description": "Exact callable identities copied from the current structural index. Each referenced file's coverage is derived from the union of these references on current receipts; cross-file coverage does not close that file's separate lease.",
                     },
                     "reviewed_spans": {
-                        "description": "Exact source line spans reviewed where no structural callable identity applies. A span requires a sealed callable registry publication; omitted callables are unpublished. Each span is validated against the sealed file and cannot substitute for an overlapped registered callable unless every overlapped callable is also supplied as an exact callable_ref. When structural analysis is unsupported or the function dimension is truncated or unavailable, only a whole-file span can prove manual source review. Non-skipped receipts require callable_refs or reviewed_spans.",
+                        "description": "Exact source line spans reviewed where no structural callable identity applies. A span requires a sealed callable registry publication; omitted callables are unpublished. Each span is validated against the sealed file and cannot substitute for an overlapped registered callable unless every overlapped callable is also supplied as an exact callable_ref. When structural analysis is unsupported, when the function dimension is truncated or unavailable, or when the index scanned no function scope at all (its function-scoped dimensions are unavailable), only a whole-file span can prove manual source review. Non-skipped receipts require callable_refs or reviewed_spans.",
                     },
                     "hypothesis": {
                         "description": "The vulnerability hypothesis tested. What could go wrong and why.",
@@ -871,7 +885,7 @@ def _schema_specs() -> tuple[SchemaSpec, ...]:
                         "description": "Untrusted-input class this vulnerability is reached through, named from the same nine slot types the file classification uses: NETWORK-INPUT, URL-COMPONENT, CMD-ARGUMENT, FILE-CONTENT, ENV-VARIABLE, CALLBACK-DATA, PROTOCOL-FIELD, SERIALIZED-DATA, EXEC-POLICY (see agent/skills/code-architecture-mapping/SKILL.md Step 10 for the canonical table). Unlike the file-level slot_types list, this field is deliberately free text and is not validated: prefer a value from that list, but record a more precise one when the nine do not describe the reached input. It is a label only - it never gates coverage or family derivation, which read the file-level slot_types.",
                     },
                     "supersedes": {
-                        "description": "Optional analysis-result row ID explicitly replaced by this correction. The original must be current and have the same queue item, lease token, file, grouped source anchors, and repository generation.",
+                        "description": "Optional analysis-result row ID explicitly replaced by this correction. The original must be current and have the same queue item, file, grouped source anchors, and repository generation, and have been recorded under this attempt's lease or one it adopted.",
                     },
                     "notes": {
                         "description": "Additional notes, context expansion requests, or follow-up recommendations.",

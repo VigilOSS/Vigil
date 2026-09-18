@@ -7,12 +7,15 @@ import sys
 from pathlib import Path
 
 from assess.lib.client import (
+    AssessError,
     AssessmentClient,
     require_artifact_write_response,
     require_finding_write_response,
 )
+from assess.lib.code_snapshot_binding import fill_binding
 from assess.lib.config import load_config
 from assess.lib.contracts import VERIFICATION_TRANSITION_STATUSES, render_contract_epilog
+from assess.lib.exploit_targets import is_source_bound
 from assess.lib.json_inputs import parse_json_argument, parse_optional_inline_json
 from assess.lib.schema_validation import collect_patch_validation_errors, load_schema
 
@@ -70,6 +73,17 @@ def register(subparsers) -> None:
     p.add_argument("--notes", help="Optional verification notes")
     p.add_argument("--source-name", help="Optional source/agent name")
     p.add_argument("--details-inline", help="Inline JSON object merged into the details payload")
+    p.add_argument(
+        "--agent-id",
+        dest="agent_id",
+        default=None,
+        help="Dispatch agent_id of the agent PERFORMING this verification (e.g. VERIFY-1), "
+             "copied verbatim from your Runtime Identity block. Stored as the "
+             "provenance.agent_id of this write, which is the identity the backend resolves "
+             "into the finding's code_snapshot_attestation: without it a code finding's "
+             "stored binding attests to no dispatch at all and reads 'unattested'. It does "
+             "NOT rebind the finding's immutable author.",
+    )
     p.add_argument("--provenance-inline", help="Inline JSON object for provenance metadata")
     p.add_argument(
         "--proof-receipt-id",
@@ -101,6 +115,7 @@ _CONTENT_FLAGS = (
     ("notes", "--notes"),
     ("source_name", "--source-name"),
     ("details_inline", "--details-inline"),
+    ("agent_id", "--agent-id"),
     ("provenance_inline", "--provenance-inline"),
     ("proof_receipt_ids", "--proof-receipt-id"),
     ("counter_check_file", "--counter-check-file"),
@@ -112,6 +127,66 @@ def _looks_like_payload(token: str) -> bool:
     """True when a positional token looks like a JSON payload rather than a slug."""
     t = (token or "").strip()
     return bool(t) and (t.startswith(("{", "[")) or t.endswith(".json") or Path(t).is_file())
+
+
+def _stored_binding_repo_id(finding: dict) -> int | None:
+    """The repository the finding's stored binding already names, if any."""
+    provenance = finding.get("provenance")
+    binding = provenance.get("code_snapshot") if isinstance(provenance, dict) else None
+    repo_id = binding.get("repo_id") if isinstance(binding, dict) else None
+    return int(repo_id) if type(repo_id) is int and repo_id >= 1 else None
+
+
+def _request_for_slug(client, payload: dict, slug: str, *, derive_binding: bool) -> dict:
+    """Return this slug's request, deriving its code-snapshot binding when owed.
+
+    A ``file:`` finding cannot be verified without ``provenance.code_snapshot``,
+    and the binding is the reviewed repository's own current identity — so it is
+    read from the repository rather than transcribed. What the verifier supplies
+    is the identity half: ``--agent-id`` is the dispatch the backend resolves
+    into the stored attestation. An authored ``--provenance-inline`` binding
+    always wins, and a STALE stored binding is never derived — rebinding is the
+    claim that the new bytes were read, so it stays deliberate.
+    ``--payload-file`` is a complete transition document and is sent verbatim.
+    """
+    provenance = payload.get("provenance")
+    if not derive_binding or not isinstance(provenance, dict) or provenance.get("code_snapshot"):
+        return payload
+    try:
+        finding = client.get(f"findings/{slug}")
+    except AssessError:
+        # The derivation is a convenience; the backend owns the gate. A read that
+        # did not answer must not block a write it may have nothing to say about
+        # — the POST below still refuses a file: finding with no binding.
+        return payload
+    if not isinstance(finding, dict) or not is_source_bound(
+        str(finding.get("canonical_location", ""))
+    ):
+        return payload
+    if str(finding.get("code_snapshot_status") or "") == "stale":
+        # A STALE binding means the source moved under a finding that was already
+        # reviewed against older bytes, and re-binding it is the one act that says
+        # "I read the new ones". Deriving that silently would let an
+        # administrative status change (disputed, blocked — neither needs a proof
+        # receipt) clear the report-readiness stale blocker with nobody having
+        # looked. Record-time and legacy-unbound derivation stay automatic;
+        # a REBIND stays deliberate.
+        raise AssessError(
+            f"finding verify: {slug} is bound to a superseded source snapshot. "
+            "Re-read the current sealed bytes, then re-run with an explicit "
+            "--provenance-inline '{\"code_snapshot\": {...}}' copied from Code "
+            "Source Identity. The binding is not derived here on purpose: "
+            "rebinding is the claim that you reviewed the new bytes."
+        )
+    request = dict(payload)
+    request["provenance"] = dict(provenance)
+    fill_binding(
+        request["provenance"],
+        client,
+        repo_id=_stored_binding_repo_id(finding),
+        operation="finding verify",
+    )
+    return request
 
 
 def _provided_content_flags(args) -> list[str]:
@@ -213,6 +288,9 @@ def run(args) -> None:
         if not isinstance(provenance, dict):
             print("provenance JSON must be an object", file=sys.stderr)
             sys.exit(1)
+        verifier_agent_id = (getattr(args, "agent_id", None) or "").strip()
+        if verifier_agent_id:
+            provenance.setdefault("agent_id", verifier_agent_id)
         structured_decisions: dict[str, dict] = {}
         for field_name, path_value, description in (
             (
@@ -356,8 +434,11 @@ def run(args) -> None:
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         for slug in slugs:
             try:
+                request = _request_for_slug(
+                    client, payload, slug, derive_binding=payload_file is None
+                )
                 result = require_finding_write_response(
-                    client.post(f"findings/{slug}/verify", payload),
+                    client.post(f"findings/{slug}/verify", request),
                     finding_slug=slug,
                     operation="finding verify",
                 )

@@ -7,7 +7,7 @@ import sqlite3
 import subprocess
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -23,7 +23,7 @@ from .install_manifest import (
     install_source_content_sha256,
 )
 from .oob import oob_options, oob_status
-from .oob_tenants import load_tenant_route
+from .oob_relay import has_pre_routing_oob_state, load_relay_route
 from .orchestrator import orchestrator_status
 from .paths import default_runtime_container, engagements_root, resolve_orchestrator_base_url
 from .runtime import runtime_mounts_ok, runtime_resource_state, runtime_status
@@ -34,6 +34,13 @@ class Check:
     name: str
     status: str
     detail: str = ""
+    # A prerequisite whose absence means this host cannot run Vigil at all, as
+    # opposed to one whose absence is a legitimate steady state. `MISSING` is
+    # used for both — an unset `oob.frp_token` and a missing Docker CLI produce
+    # the same status string — so the distinction has to live here rather than
+    # in the caller's status filter, which would otherwise have to hard-code
+    # row names to tell "not configured" from "cannot run".
+    required: bool = False
 
 
 def git_head_sha(repo: Path | None) -> str | None:
@@ -368,7 +375,7 @@ def collect_status(
         # `vigil oob status` runs the full health check.
         "oob": oob_status(
             oob_domain=resolved_oob.oob_domain,
-            tenant_prefix=resolved_oob.tenant_prefix,
+            slot_prefix=resolved_oob.slot_prefix,
             dns_remote_port=resolved_oob.dns_remote_port,
             reverse_remote_port=resolved_oob.reverse_remote_port,
             runner=runner,
@@ -414,12 +421,12 @@ def print_status(status: dict[str, object], *, json_output: bool = False) -> Non
     if isinstance(readiness, dict):
         backend_runtime = readiness.get("backend_runtime")
         if isinstance(backend_runtime, dict) and backend_runtime.get("restart_required"):
-            changed = backend_runtime.get("newer_source_files")
+            changed = backend_runtime.get("changed_inputs")
             preview = ", ".join(str(path) for path in changed[:3]) if isinstance(changed, list) else ""
             suffix = f" ({preview})" if preview else ""
             print(
-                "warn\tbackend restart required: source files changed after process start"
-                f"{suffix}; run `vigil orchestrator restart`"
+                "warn\tbackend restart required: build inputs changed since the process "
+                f"started{suffix}; run `vigil orchestrator restart`"
             )
     print(f"runtime\t{runtime['state']}\tmounts_ok={runtime['mounts_ok']}")  # type: ignore[index]
     resources = runtime.get("resources") if isinstance(runtime, dict) else None  # type: ignore[union-attr]
@@ -442,7 +449,7 @@ def print_status(status: dict[str, object], *, json_output: bool = False) -> Non
     print(f"mitmproxy\t{mitm_dict.get('state', '-')}\tca_volume={mitm_dict.get('ca_volume')}{drift_note}")
     print(
         f"oob\t{oob.get('state', '-')}\tclients={len(oob.get('clients') or [])}"
-        f"\ttenant={oob.get('tenant_prefix') or '-'}\tports={oob.get('port_range') or '-'}"
+        f"\tslot={oob.get('slot_prefix') or '-'}\tports={oob.get('port_range') or '-'}"
         f"\tdomain={oob.get('domain') or '-'}"
     )
     print(f"backup\t{backup['latest'] or '-'}")  # type: ignore[index]
@@ -466,7 +473,7 @@ def print_status(status: dict[str, object], *, json_output: bool = False) -> Non
 def _print_install_staleness_warning(staleness: object) -> None:
     """Non-fatal WARN when the working root lags the source it was installed from.
 
-    Two-layer model (I-5): `vigil install`/`update` refreshes the WORKING ROOT
+    Two-layer model (I-5): `vigil install` refreshes the WORKING ROOT
     (code/prompts/skills/scripts); `uv tool upgrade vigil` only refreshes the CLI
     BINARY. A lagging working root makes the new feature set inert, so nudge the
     operator to re-run `vigil install`.
@@ -539,16 +546,59 @@ def _install_staleness_check(install_root: Path) -> Check:
     )
 
 
+# What an operator loses without ripgrep, said on the row rather than left to a
+# bare MISSING. `agent/shared-constraints-code.md` ranks `rg` second only to the
+# ctags index for code specialists and uses the ripgrep-only `--type` flag.
+# Claude and OpenCode bundle their own Grep tool; the Codex and Goose hunters
+# have shell only, so every search on a host without ripgrep is exit 127 — which
+# a specialist reads as "no results", not "tool missing". That is the failure
+# shape that makes a coverage tool report clean coverage of code it never read.
+# Nothing else checks for it: ripgrep is in no dependency manifest and ships
+# only in the runtime image, which code analysis does not use.
+_RIPGREP_DEGRADATION = (
+    "code-track search tool; Codex and Goose specialists have shell only, so "
+    "their searches exit 127 and read as \"no results\" rather than \"tool "
+    "missing\" — install ripgrep before running code analysis here"
+)
+
+
 def collect_doctor_checks(install_root: Path, *, runner: docker.Runner = docker.run_command) -> list[Check]:
     checks: list[Check] = []
     binary_status: dict[str, str] = {}
-    for command in ("uv", "docker", "npm", "codex", "claude", "fzf"):
+    for command in ("uv", "docker", "npm", "codex", "claude", "fzf", "rg"):
         check = _binary_check(command)
+        # Docker alone is required: every runtime, orchestrator, and proxy path
+        # goes through it. The client binaries are not — Vigil supports five and
+        # an operator needs one — and `uv`/`npm` are build-time tools an install
+        # can already have run. `rg` is advisory for the same reason `fzf` is:
+        # useful, not universally installed, and not needed by a web engagement.
+        if command == "docker" and check.status != "OK":
+            check = replace(check, required=True)
+        elif command == "rg" and check.status != "OK":
+            check = replace(check, detail=_RIPGREP_DEGRADATION)
         checks.append(check)
         binary_status[command] = check.status
     install_root = install_root.expanduser().resolve()
-    checks.append(Check("install-root", "OK" if install_root.exists() else "MISSING", str(install_root)))
-    checks.append(Check("agent-dir", "OK" if (install_root / "agent").is_dir() else "MISSING", str(install_root / "agent")))
+    # Required: `vigil doctor` is the post-install health check AGENTS.md points
+    # at after `vigil up`. With no install root or no agent tree there is nothing
+    # to be healthy, and reporting that as advisory made the command exit 0.
+    checks.append(
+        Check(
+            "install-root",
+            "OK" if install_root.exists() else "MISSING",
+            str(install_root),
+            required=not install_root.exists(),
+        )
+    )
+    agent_dir_present = (install_root / "agent").is_dir()
+    checks.append(
+        Check(
+            "agent-dir",
+            "OK" if agent_dir_present else "MISSING",
+            str(install_root / "agent"),
+            required=not agent_dir_present,
+        )
+    )
     data_dir = install_root / "orchestrator" / "backend" / "data"
     checks.append(Check("backend-data", "OK" if data_dir.is_dir() else "MISSING"))
     checks.append(_database_check(data_dir / "orchestrator.sqlite3"))
@@ -590,8 +640,8 @@ def collect_doctor_checks(install_root: Path, *, runner: docker.Runner = docker.
     checks.append(_install_staleness_check(install_root))
     checks.append(_failed_audit_marker_check(install_root))
     checks.append(_host_recon_tools_check())
-    checks.append(_oob_tenant_check(install_root))
-    checks.append(Check("oob.frp_token", "OK" if os.environ.get("VIGIL_FRP_TOKEN") or get_config_value("oob.frp_token") else "MISSING"))
+    checks.append(_oob_relay_check(install_root))
+    checks.append(_oob_token_check())
     return checks
 
 
@@ -601,22 +651,73 @@ def print_doctor(checks: list[Check]) -> None:
         print(f"{check.status}\t{check.name}{suffix}")
 
 
-def _oob_tenant_check(install_root: Path) -> Check:
-    try:
-        route = load_tenant_route(install_root)
-    except SystemExit as exc:
-        return Check("oob.tenant-routing", "FAIL", str(exc))
-    if route is None:
-        return Check(
-            "oob.tenant-routing",
-            "WARN",
-            "legacy install has no tenant metadata; run `vigil install` to pin its current route",
-        )
-    mode = "legacy-pinned" if route.legacy else "tenant"
+
+def _oob_token_check() -> Check:
+    """The FRP shared secret, with the command that sets it.
+
+    A bare MISSING row leaves the operator to guess; `vigil oob start` refuses
+    without this, so the remedy belongs next to the finding.
+    """
+    if os.environ.get("VIGIL_FRP_TOKEN") or get_config_value("oob.frp_token"):
+        return Check("oob.frp_token", "OK")
     return Check(
-        "oob.tenant-routing",
+        "oob.frp_token",
+        "MISSING",
+        "required by `vigil oob start`; set `vigil config set oob.frp_token <token>` "
+        "(or export VIGIL_FRP_TOKEN) — it must match your frps `auth.token`",
+    )
+
+def _oob_relay_check(install_root: Path) -> Check:
+    try:
+        route = load_relay_route(install_root)
+    except SystemExit as exc:
+        return Check("oob.relay-route", "FAIL", str(exc))
+    if route is None:
+        # `vigil install` allocates a route only when oob.domain is already set,
+        # so the remedy depends on whether it is. Naming `vigil install` while
+        # the domain is unset sends the operator round a loop that cannot clear
+        # this warning.
+        configured_domain = (
+            os.environ.get("VIGIL_OOB_DOMAIN")
+            or get_config_value("oob.domain")
+            or ""
+        )
+        if not configured_domain:
+            # The parenthetical answers "will allocating a slot move my live
+            # callbacks?", which only a root already running OOB on the shared
+            # route can ask. Asserting it unconditionally told every fresh root
+            # about state it does not have — the same defect `install.py` carries
+            # the conditional for, and the reason
+            # `oob_relay.has_pre_routing_oob_state` is a public name.
+            kept = (
+                " (a root already running OOB on the shared 53/8443 route keeps that "
+                "route instead)"
+                if has_pre_routing_oob_state(install_root)
+                else ""
+            )
+            return Check(
+                "oob.relay-route",
+                "WARN",
+                "no OOB route allocated; set `vigil config set oob.domain <domain>` "
+                f"then `vigil install`, which reserves this install its own relay slot{kept}",
+            )
+        if has_pre_routing_oob_state(install_root):
+            return Check(
+                "oob.relay-route",
+                "WARN",
+                "no relay-slot metadata; run `vigil install` to pin the shared 53/8443 "
+                "route this root is already running OOB on",
+            )
+        return Check(
+            "oob.relay-route",
+            "WARN",
+            "no relay-slot metadata; run `vigil install` to allocate this install's slot",
+        )
+    mode = "legacy-pinned" if route.legacy else "slot"
+    return Check(
+        "oob.relay-route",
         "OK",
-        f"{mode}={route.tenant_prefix} domain={route.oob_domain} ports={route.dns_remote_port}-{route.reverse_remote_port}",
+        f"{mode}={route.slot_prefix} domain={route.oob_domain} ports={route.dns_remote_port}-{route.reverse_remote_port}",
     )
 
 
@@ -760,6 +861,12 @@ def _orchestrator_readyz_snapshot(install_root: Path) -> tuple[bool, dict[str, o
     url = f"{resolve_orchestrator_base_url(install_root)}/readyz"
     readiness: dict[str, object] = {
         "reachable": False,
+        # Why there was no answer, when there was none. Collapsing every OSError
+        # into `reachable: False` made a refused connection and a backend that
+        # simply did not answer within the timeout indistinguishable, and
+        # `restart_manifest` read the pair as "the process is stopped".
+        "unreachable_reason": None,
+        "unreachable_detail": None,
         "http_status": None,
         "status": None,
         "database_connected": None,
@@ -779,8 +886,28 @@ def _orchestrator_readyz_snapshot(install_root: Path) -> tuple[bool, dict[str, o
         readiness["http_status"] = exc.code
         _merge_readyz_payload(readiness, exc.read())
         return False, readiness
-    except OSError:
+    except OSError as exc:
+        readiness["unreachable_reason"] = _unreachable_reason(exc)
+        readiness["unreachable_detail"] = str(exc) or exc.__class__.__name__
         return False, readiness
+
+
+def _unreachable_reason(exc: OSError) -> str:
+    """Classify a failed `/readyz` probe: `refused`, `timeout`, or `error`.
+
+    `urlopen` wraps connection-level failures in `URLError`, so the OSError that
+    actually describes what happened is one level down in ``reason``. The
+    distinction matters to `restart_manifest`: a refusal means nothing accepted
+    the connection, while a timeout means something did and then went quiet —
+    a live process whose loaded code an install can invalidate.
+    """
+    reason = getattr(exc, "reason", None)
+    inner = reason if isinstance(reason, OSError) else exc
+    if isinstance(inner, TimeoutError):
+        return "timeout"
+    if isinstance(inner, ConnectionRefusedError):
+        return "refused"
+    return "error"
 
 
 def _merge_readyz_payload(readiness: dict[str, object], raw: bytes) -> None:

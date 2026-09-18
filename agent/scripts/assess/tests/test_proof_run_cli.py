@@ -440,3 +440,163 @@ def test_proof_run_begin_owns_queued_to_running_transition(
 
     assert json.loads(capsys.readouterr().out)["status"] == "running"
     assert calls == [("assessment-runs/29", {"status": "running"})]
+
+
+# ── Verifier-independence preflight ──────────────────────────────────────────
+#
+# "The finding author cannot be its own verifier" was only enforced on the
+# final `finding verify` write — after the proof run had already been executed
+# against the target. `--for-finding` moves the same refusal to the top of the
+# proof path, where it costs zero target traffic.
+
+
+def _findings_get(rows: dict[str, dict]):
+    def get(_client, endpoint: str):
+        slug = endpoint.split("/", 1)[1]
+        if slug not in rows:
+            raise AssertionError(f"unexpected finding read {endpoint}")
+        return rows[slug]
+
+    return get
+
+
+def test_proof_run_start_refuses_a_run_the_finding_author_would_own(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    engagement = _engagement(tmp_path)
+    monkeypatch.setattr(config, "_verify_backend", lambda _cfg: None)
+    monkeypatch.setattr(
+        AssessmentClient,
+        "get",
+        _findings_get({"VA-047": {"slug": "VA-047", "provenance": {"agent_id": "HUNT-RUN-1"}}}),
+    )
+
+    def post(_client, _endpoint: str, _payload: dict):
+        raise AssertionError("the run must be refused before any write")
+
+    monkeypatch.setattr(AssessmentClient, "post", post)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(
+            [
+                "--engagement-dir",
+                str(engagement),
+                "proof-run",
+                "start",
+                "verify-va-047",
+                "--kind",
+                "web",
+                "--agent-id",
+                "HUNT-RUN-1",
+                "--for-finding",
+                "VA-047",
+            ]
+        )
+
+    assert exc.value.code == 1
+    stderr = capsys.readouterr().err
+    assert "VA-047" in stderr
+    assert "HUNT-RUN-1" in stderr
+    assert "independent" in stderr
+
+
+def test_proof_run_start_accepts_an_independent_verifier_dispatch(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    engagement = _engagement(tmp_path)
+    monkeypatch.setattr(config, "_verify_backend", lambda _cfg: None)
+    monkeypatch.setattr(
+        AssessmentClient,
+        "get",
+        _findings_get(
+            {
+                "VA-047": {"slug": "VA-047", "provenance": {"agent_id": "HUNT-RUN-1"}},
+                "VA-048": {"slug": "VA-048", "provenance": {"agent_id": "HUNT-RUN-2"}},
+            }
+        ),
+    )
+    posted: list[tuple[str, dict]] = []
+
+    def post(_client, endpoint: str, payload: dict):
+        posted.append((endpoint, payload))
+        return {
+            "id": 31,
+            "run_uuid": payload["run_uuid"],
+            "run_kind": payload["run_kind"],
+            "run_purpose": payload["run_purpose"],
+            "producer_dispatch_id": 9,
+            "producer_dispatch_agent_id": payload["producer_dispatch_agent_id"],
+            "status": "running",
+        }
+
+    monkeypatch.setattr(AssessmentClient, "post", post)
+
+    cli.main(
+        [
+            "--engagement-dir",
+            str(engagement),
+            "proof-run",
+            "start",
+            "verify-va-047",
+            "--kind",
+            "web",
+            "--agent-id",
+            "VERIFY-1",
+            "--for-finding",
+            "VA-047",
+            "--for-finding",
+            "VA-048",
+        ]
+    )
+
+    assert json.loads(capsys.readouterr().out)["status"] == "running"
+    # The preflight is a read: it adds no field to the run the backend stores.
+    assert posted[0][1] == {
+        "run_uuid": "verify-va-047",
+        "run_kind": "web",
+        "run_purpose": "proof",
+        "producer_dispatch_agent_id": "VERIFY-1",
+    }
+
+
+def test_proof_run_start_refuses_a_finding_with_no_resolvable_author(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """An authorless finding cannot establish independence at verify time either,
+    so the preflight says so here rather than letting the proof run burn."""
+    engagement = _engagement(tmp_path)
+    monkeypatch.setattr(config, "_verify_backend", lambda _cfg: None)
+    monkeypatch.setattr(
+        AssessmentClient,
+        "get",
+        _findings_get({"VA-049": {"slug": "VA-049", "provenance": {}}}),
+    )
+    monkeypatch.setattr(
+        AssessmentClient,
+        "post",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("the run must be refused before any write")
+        ),
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(
+            [
+                "--engagement-dir",
+                str(engagement),
+                "proof-run",
+                "start",
+                "verify-va-049",
+                "--kind",
+                "code",
+                "--agent-id",
+                "VERIFY-1",
+                "--for-finding",
+                "VA-049",
+            ]
+        )
+
+    assert exc.value.code == 1
+    stderr = capsys.readouterr().err
+    assert "VA-049" in stderr
+    assert "bind-author" in stderr

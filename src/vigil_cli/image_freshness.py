@@ -1,3 +1,34 @@
+"""Docker image build-input digest, freshness and drift checks.
+
+Freshness here is a **content manifest, not a timestamp**: a sha256 over
+``(relative path, content)`` for every declared build input, stamped onto the
+image at build time as ``IMAGE_INPUTS_LABEL`` and re-derived on every check.
+
+An mtime high-water mark could express neither of the two failures that
+actually happened:
+
+1. It rglobbed ``agent/scripts/assess`` including ``__pycache__/*.pyc``, which
+   every ordinary ``vigil assess`` run rewrites — so ``vigil up`` rebuilt
+   ``vigil-proxy`` forever. Hence the central ``EXCLUDED_INPUT_NAMES`` /
+   ``is_excluded_input`` cache-and-build-artifact exclusion set, which
+   ``install_manifest`` also consumes so the install copier's skip rule and the
+   content digest cannot disagree.
+2. It stat'd only files that still exist, so an upgrade that DELETED an input
+   left the stale image reading as current. ``input_entries`` yields a ``None``
+   file for a declared-but-absent path, which is what makes a deletion move the
+   digest.
+
+``image_inputs_state`` returns ``missing`` / ``unknown`` / ``stale`` /
+``current``. ``unknown`` (an image built before stamping) reads as outdated so a
+caller rebuilds once and moves on rather than erroring: an unstamped image
+cannot be *proven* current.
+
+The label KEY still says "runtime" because already-built ``vigil:latest`` images
+carry it; labels are per-image, so one key serves both the runtime and proxy
+images. The proxy manifest additionally covers the installed canonical
+``vigil_cli/scope_entries.py``, so changing authored-scope parsing invalidates
+the proxy image that imports it.
+"""
 from __future__ import annotations
 
 import hashlib

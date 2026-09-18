@@ -4,8 +4,13 @@ from __future__ import annotations
 import json
 import sys
 
+# `code-dispatch` owns the lease vocabulary these verbs share; importing its age
+# renderer keeps one reading of "silent for" across the queue table, this report
+# projection, and the resume brief.
+from assess.commands.code_dispatch import _format_lease_age
 from assess.lib.client import AssessmentClient
 from assess.lib.config import load_config
+from assess.lib.treesitter_index import FUNCTION_SCOPED_DIMENSIONS
 
 EFFORT_THRESHOLDS = {
     "critical": 70,
@@ -151,21 +156,40 @@ def _repo_selector(repo_id: object) -> str:
 # generation-bound review, index, and threat model.
 _BLOCKER_REPAIRS = {
     'structural_index_stale': lambda repo_id: (
-        f"vigil assess code-index build <snapshot-path> {_repo_selector(repo_id)} "
+        f"vigil assess code-index build <snapshot-dir>/source {_repo_selector(repo_id)} "
         f"then vigil assess code-index sync {_repo_selector(repo_id)} "
         "(rebinds the existing generation; neither advances it)"
     ),
     'structural_index_metadata_incomplete': lambda repo_id: (
-        f"vigil assess code-index build <snapshot-path> {_repo_selector(repo_id)} "
+        f"vigil assess code-index build <snapshot-dir>/source {_repo_selector(repo_id)} "
         f"then vigil assess code-index sync {_repo_selector(repo_id)} "
         "(rebinds the existing generation; neither advances it)"
     ),
     'threat_model_stale': lambda repo_id: (
         "vigil assess code-record threat-model for the current generation"
     ),
+    'admitted_files_unqueued': lambda repo_id: (
+        "vigil assess code-dispatch queue <queue-items-json-file> — one row per "
+        "admitted file, including skip-tier; "
+        f"vigil assess code-dispatch list {_repo_selector(repo_id)} shows what is "
+        "already loaded. If this repository is host/framework source nobody is "
+        "reviewing, re-ingest it with --role reference instead: it stays indexed "
+        "and citable and stops owing coverage"
+    ),
     'source_snapshot_unverified': lambda repo_id: (
         "vigil assess code-ingest <repo-path> --repo-key <key> — a verified "
         "re-ingest, which advances the generation by design"
+    ),
+    'code_leads_unresolved': lambda repo_id: (
+        # The blocker counts every binding whose note is open OR in_progress and
+        # does not exclude stale ones, so a narrower read dead-ends the operator
+        # on a gate that is still firing.
+        f"`vigil assess code-lead list {_repo_selector(repo_id)} --include-superseded` "
+        "shows each unanswered prior-art lead and where it points; "
+        "`vigil assess code-lead queue` turns any bound file with no queue row "
+        "into analysis work. Close each lead on the note itself: `vigil assess "
+        "intel update note <lead-id> --inline '{\"lead_status\": \"ruled_out\"}'` "
+        "(or resolved when it led to a finding)"
     ),
 }
 
@@ -228,6 +252,7 @@ def _run_cwe_matrix(cfg, args) -> bool:
         return quality_passed
 
     _print_cwe_matrix(files)
+    _print_open_leases(result)
     _print_review_quality(result)
 
     quality_passed, _ = _review_quality(result)
@@ -315,10 +340,26 @@ def _print_cwe_matrix(files: list[dict]) -> None:
     print()
 
 
+def _unscanned_structural_scope(file_row: dict) -> bool:
+    """Whether the index declares this file's function-scoped readers unmeasured.
+
+    `FUNCTION_SCOPED_DIMENSIONS` is imported rather than restated: the indexer
+    that publishes the list owns what belongs in it.
+    """
+    unavailable = file_row.get('structural_unavailable_dimensions') or []
+    return bool(set(unavailable) & FUNCTION_SCOPED_DIMENSIONS)
+
+
 def _print_structural_verification(files: list[dict]) -> None:
-    """Cross-check functions_analyzed against total_functions from structural index."""
+    """Cross-check analysed functions against the index, and name what it never read.
+
+    The count check only means anything where there are functions to count, so
+    a file whose scan scope covered no source is reported on its own terms
+    instead of falling through the comparison into the all-clear.
+    """
+    unscanned = [f for f in files if _unscanned_structural_scope(f)]
     has_structural = any(f.get('total_functions', 0) > 0 for f in files)
-    if not has_structural:
+    if not has_structural and not unscanned:
         return
 
     print("\n--- Structural Verification ---")
@@ -351,7 +392,19 @@ def _print_structural_verification(files: list[dict]) -> None:
         print(f"Files with unanalyzed functions: {len(gaps)}")
         for g in gaps:
             print(g)
-    else:
+    if unscanned:
+        # Zero functions means zero scanned spans, so the function-count check
+        # above has nothing to compare and silently passed these files over.
+        print(f"Files whose structural scan scope covered no source: {len(unscanned)}")
+        for f in unscanned:
+            file_path = f.get('file_path', '?')
+            classification = f.get('classification', '')
+            print(
+                f"  {file_path} ({classification}): "
+                f"{', '.join(f.get('structural_unavailable_dimensions') or [])} "
+                "not measured — only whole-file source review can cover it"
+            )
+    if not gaps and not unscanned:
         # max(functions_analyzed) across CWE families matches total_functions,
         # but overlapping functions between families are not deduplicated —
         # this is count-based coverage, not identity-based.
@@ -515,11 +568,67 @@ def _print_source_identity(data: dict) -> None:
             print(f"      {_BLOCKER_REPAIRS['structural_index_stale'](repo_id)}")
 
 
+def _print_open_leases(data: dict) -> None:
+    """Name the claimed attempts that never closed, oldest lease first.
+
+    "Queue items still pending or processing" is a count; this is the item-level
+    form of it, because a dispatch that died mid-file is indistinguishable from
+    live work until you can see how long its lease has been silent and how many
+    receipts would be thrown away by resetting it.
+    """
+    leases = data.get("open_leases")
+    if not isinstance(leases, list) or not leases:
+        return
+    total = data.get("open_leases_count", len(leases))
+    print(f"\nOpen Analysis Leases ({total}):")
+    for lease in leases:
+        if not isinstance(lease, dict):
+            continue
+        receipts = int(lease.get("current_result_count", 0) or 0)
+        print(
+            f"  item {lease.get('queue_item_id', '?')} "
+            f"{lease.get('file_path', '?')} ({lease.get('classification', '?')}): "
+            f"held by {lease.get('agent_name') or '-'} / "
+            f"{lease.get('lease_token') or '-'}, silent for "
+            f"{_format_lease_age(lease.get('heartbeat_age_seconds'))}, "
+            f"{receipts} receipt(s) recorded"
+        )
+        for adopted in lease.get("adopted_leases") or []:
+            if isinstance(adopted, dict):
+                print(
+                    f"      adopted from {adopted.get('agent_name', '?')} / "
+                    f"{adopted.get('lease_token', '?')}"
+                )
+    if isinstance(total, int) and total > len(leases):
+        # The backend already bounds the embedded list; the count is absolute.
+        print(f"  ... showing {len(leases)} of {total}")
+    print(
+        "  Recover each with `vigil assess code-dispatch progress <item-id>` "
+        "then `code-dispatch adopt-lease` (keeps the receipts) or "
+        "`code-dispatch reset-stale <minutes>` (discards them)."
+    )
+
+
 def _print_coverage(data: dict) -> None:
     total_files = data.get('total_files', 0)
 
     print("=== Code Analysis Coverage ===")
     print(f"Total files: {total_files}")
+
+    # A reference repository's files are deliberately absent from every count
+    # above. Naming them keeps the smaller denominator explicit instead of
+    # letting an operator read it as a shrinking inventory.
+    reference_repos = data.get('reference_repos') or []
+    if isinstance(reference_repos, list) and reference_repos:
+        print("\nReference repositories (readable; no coverage obligation):")
+        for repo in reference_repos:
+            if not isinstance(repo, dict):
+                continue
+            name = repo.get('name') or repo.get('repo_key') or 'unknown'
+            print(
+                f"  {name} (repo {repo.get('repo_id', '?')}): "
+                f"{repo.get('admitted_files', 0)} indexed file(s)"
+            )
 
     # By Classification
     by_class = data.get('by_classification', {})
@@ -542,6 +651,7 @@ def _print_coverage(data: dict) -> None:
                 print(f"  {tier:10s}: {tier_data:>4} files")
 
     _print_analysis_status(data)
+    _print_open_leases(data)
     _print_source_identity(data)
 
     # Function-Level

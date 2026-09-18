@@ -604,6 +604,14 @@ a {
   margin-left: auto;
 }
 
+.rpt-table-wrap {
+  /* The table's six columns cannot shrink past their min-content width, so the
+     overflow is contained here instead of being handed to the page body. */
+  width: 100%;
+  max-width: 100%;
+  overflow-x: auto;
+}
+
 .rpt-table {
   width: 100%;
   border-collapse: collapse;
@@ -709,6 +717,56 @@ a {
   overflow-wrap: anywhere;
 }
 
+/* A label is not part of the thing it labels. These headings sit immediately
+   above a command block, and a drag that starts a line high used to prepend
+   "Proof of concept" to the paste. Excluding them from the selection is the
+   markup-level fix; "Copy as Markdown" is where the headings come back for a
+   reader who wants the finding as a document. */
+.rpt-doc-block > h4,
+.rpt-finding-detail > section > h4 {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.rpt-finding-detail-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.rpt-toc-siblings {
+  margin: 4px 0 0;
+}
+
+/* Provenance for the steps above: the command-run ids that produced them.
+   Rendered beside the steps rather than in an appendix, because that is where a
+   reader decides whether to trust them. */
+.rpt-steps-runs {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.rpt-steps-runs-missing {
+  color: var(--warn);
+}
+
+.rpt-ref-list {
+  margin: 0;
+  padding-left: 20px;
+  font-size: 14px;
+}
+
+.rpt-ref-list li {
+  margin: 0 0 4px;
+  word-break: break-word;
+}
+
+.rpt-doc-rootcause {
+  margin: 0;
+  font-size: 13px;
+  color: var(--ink-2);
+}
+
 .rpt-code {
   background: var(--code-bg);
   border: 1px solid var(--code-border);
@@ -719,6 +777,61 @@ a {
   white-space: pre-wrap;
   word-break: break-word;
   margin: 0;
+}
+
+/* A grid/flex item defaults to `min-width: auto`, which means it refuses to
+   shrink below its content's min-content width — and `.rpt-doc` is a single
+   grid column, so ONE unwrappable command block widened every row of the
+   document, title page included. Letting these containers shrink is what keeps
+   the overflow inside the block that has the scrollbar. */
+.rpt-doc > *,
+.rpt-doc-section > *,
+.rpt-doc-finding > *,
+.rpt-finding-detail > *,
+.rpt-doc-block > *,
+.rpt-code {
+  min-width: 0;
+}
+
+/* Commands are copied to be run, so they must never soft-wrap: a soft wrap is
+   invisible in the copied string, and a reader who trusts their eyes cannot
+   tell a wrapped flag from two flags. `pre` + horizontal scroll keeps every
+   line whole on screen; the synthesized curl in lib/poc.ts breaks itself with
+   explicit `\` continuations, which survive the copy. Print has no scrollbar to
+   offer, so there it falls back to wrapping rather than truncating. */
+.rpt-code-command {
+  white-space: pre;
+  word-break: normal;
+  overflow-wrap: normal;
+}
+
+/* ── Draft readiness ──────────────────────────────────────── */
+
+.rpt-readiness {
+  border-left: 3px solid var(--warn);
+}
+
+.rpt-readiness-lede {
+  margin: 0 0 10px;
+  color: var(--ink-2);
+}
+
+.rpt-readiness summary {
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--ink-2);
+}
+
+.rpt-readiness-list {
+  margin: 8px 0 0;
+  padding-left: 20px;
+  font-size: 13px;
+  color: var(--ink-2);
+}
+
+.rpt-readiness-list li {
+  margin: 0 0 4px;
+  word-break: break-word;
 }
 
 /* ── Full report (print document) ─────────────────────────── */
@@ -836,6 +949,91 @@ a {
   margin-bottom: 20px;
 }
 
+/* The recorded attack path. Numbered by the list itself — unlike a finding's
+   steps_to_reproduce, the order here is the backend's (insertion order on
+   assessment_attack_chain_links), not an author's own numbering. */
+.rpt-chain-steps {
+  margin: 0;
+  padding-left: 22px;
+  display: grid;
+  gap: 8px;
+}
+
+.rpt-chain-steps li::marker {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.rpt-chain-ref {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  flex-wrap: wrap;
+  color: inherit;
+  /* `entity_ref` is free-form TEXT up to 1024 chars — a long URL or file path
+     with no break opportunity in it. `flex-wrap` only wraps between the chip and
+     the reference, never inside the reference itself, so without these the row
+     runs off the page (and off the printed sheet, which has no scrollbar).
+     `overflow-wrap` inherits down to the mono span; `min-width: 0` is what lets
+     that span shrink below its own content, which flex items do not do. */
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+.rpt-chain-ref > * {
+  min-width: 0;
+}
+
+a.rpt-chain-ref {
+  text-decoration: none;
+  border-bottom: 1px solid var(--border);
+}
+
+a.rpt-chain-ref:hover {
+  border-bottom-color: var(--accent);
+}
+
+.rpt-chain-note {
+  margin: 2px 0 0;
+  font-size: 13px;
+  color: var(--ink-2);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* Links whose relation is not "step": supporting context, deliberately set
+   apart from the numbered path and labelled with the relation verbatim. */
+.rpt-chain-context {
+  margin: 0;
+  padding: 10px 12px;
+  display: grid;
+  gap: 10px;
+  border-left: 2px solid var(--border);
+  background: var(--panel-soft);
+  border-radius: 0 8px 8px 0;
+}
+
+.rpt-chain-context dt {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+
+.rpt-chain-context dd {
+  margin: 2px 0 0;
+}
+
+.rpt-chain-narrative h4 {
+  margin: 0 0 4px;
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+  user-select: none;
+  -webkit-user-select: none;
+}
+
 .rpt-copy-btn {
   display: inline-flex;
   align-items: center;
@@ -888,6 +1086,12 @@ a {
   border-radius: 8px;
   padding: 12px;
   overflow-x: auto;
+  /* Mirrors .rpt-code. Without these a long line in authored markdown sets the
+     block's min-content width, which a grid/flex child honours — that is what
+     pushed the whole document wider than a 390px viewport. */
+  max-width: 100%;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .md-body pre code {
@@ -1000,6 +1204,13 @@ a {
 
   .rpt-doc-section {
     break-before: auto;
+  }
+
+  /* Paper cannot scroll horizontally, so the no-wrap command block wraps here
+     rather than losing the end of a long line off the page edge. */
+  .rpt-code-command {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
   }
 
   a {

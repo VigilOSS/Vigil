@@ -11,14 +11,6 @@ languages: Python, JS, Java, Go
 
 ---
 
-## Baseline Patterns
-
-- XML parser with entity resolution enabled on untrusted input
-- SOAP/SAML/SVG/Office-document parser using default resolver settings
-- “Billion laughs” style expansion with no limits
-
----
-
 ## What You're Hunting
 
 ### 1. Secure-by-Wrapper, Insecure-by-Callsite
@@ -27,7 +19,9 @@ The project has a safe parser helper, but a later refactor bypasses it.
 
 - Direct parser construction in one code path
 - Safe defaults overwritten for validation/debug modes
-- Streaming parser configured differently than DOM parser
+- Streaming parser configured differently than DOM parser — in Java, `XMLInputFactory`
+  (StAX) sits beside `DocumentBuilderFactory` and `SAXParserFactory` and is hardened
+  through its own properties, so a project that secured the DOM path often left it open
 
 ### 2. Indirect XML Reachability
 

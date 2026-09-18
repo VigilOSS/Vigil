@@ -11,14 +11,6 @@ languages: C/C++, Python, JS
 
 ---
 
-## Baseline Patterns
-
-- Direct `../../etc/passwd` concatenated onto a base directory
-- Zip Slip extraction with no path canonicalization
-- `os.path.join(base, user_input)` with no post-join confinement check
-
----
-
 ## What You're Hunting
 
 ### 1. Canonicalization Order Bugs

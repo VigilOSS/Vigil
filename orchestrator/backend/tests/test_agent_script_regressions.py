@@ -798,6 +798,12 @@ def test_filter_scope_keeps_in_scope_hosts(monkeypatch, tmp_path: Path, capsys) 
             base_url="http://example.test",
         ),
     )
+    # These assertions are about which hosts scope admits, not about the
+    # Vendor-SaaS decision fetch. Unstubbed, `_vendor_saas_decided_hosts`
+    # builds a real `AssessmentClient` against the fake `base_url` above and
+    # burns 3.02s of wall clock in retry backoff (three attempts, 1s then 2s)
+    # before its `except AssessError` branch returns this same empty set.
+    monkeypatch.setattr(module, "_vendor_saas_decided_hosts", lambda _cfg: set())
     module.run(
         SimpleNamespace(
             engagement_dir=engagement_dir,
@@ -856,6 +862,12 @@ def test_filter_scope_excludes_out_of_scope_carve_out(monkeypatch, tmp_path: Pat
             base_url="http://example.test",
         ),
     )
+    # These assertions are about which hosts scope admits, not about the
+    # Vendor-SaaS decision fetch. Unstubbed, `_vendor_saas_decided_hosts`
+    # builds a real `AssessmentClient` against the fake `base_url` above and
+    # burns 3.02s of wall clock in retry backoff (three attempts, 1s then 2s)
+    # before its `except AssessError` branch returns this same empty set.
+    monkeypatch.setattr(module, "_vendor_saas_decided_hosts", lambda _cfg: set())
     module.run(
         SimpleNamespace(
             engagement_dir=engagement_dir,
@@ -1171,6 +1183,7 @@ def test_code_ingest_posts_backend_contract_fields(monkeypatch, tmp_path: Path) 
                     "changed": 0,
                     "renamed": 0,
                     "retired": 0,
+                    "repo_role": "analysis",
                     "repo_generation": 1,
                     "source_manifest_digest": "d" * 64,
                 }
@@ -1259,6 +1272,7 @@ def test_code_ingest_records_skipped_minified_manifest(monkeypatch, tmp_path: Pa
                     "changed": 0,
                     "renamed": 0,
                     "retired": 0,
+                    "repo_role": "analysis",
                     "repo_generation": 1,
                     "source_manifest_digest": "d" * 64,
                 }
@@ -1360,6 +1374,7 @@ def test_code_ingest_include_path_can_queue_security_relevant_build_artifact(mon
                     "changed": 0,
                     "renamed": 0,
                     "retired": 0,
+                    "repo_role": "analysis",
                     "repo_generation": 1,
                     "source_manifest_digest": "d" * 64,
                 }
@@ -1432,21 +1447,20 @@ def test_export_findings_uses_canonical_findings_and_renders_details(monkeypatch
             return [
                 {
                     "slug": "finding-002",
-                    "title": "False positive finding",
+                    "title": "Low severity finding",
                     "severity": "low",
-                    "workflow_status": "false_positive",
-                    "verification_status": "false_positive",
-                    "summary": "Should still be exported",
+                    "workflow_status": "reported",
+                    "verification_status": "downgraded",
+                    "summary": "Already delivered to the program",
                     "details": {},
                 },
                 {
                     "slug": "finding-001",
                     "title": "Parser issue",
                     "severity": "high",
-                    "workflow_status": "merged",
-                    "verification_status": "downgraded",
+                    "workflow_status": "exploited",
+                    "verification_status": "confirmed",
                     "summary": "Summary text",
-                    "merged_into_slug": "finding-010",
                     "details": {
                         "request_method": "POST",
                         "cwe_id": "CWE-79",
@@ -1474,10 +1488,9 @@ def test_export_findings_uses_canonical_findings_and_renders_details(monkeypatch
     findings_md = (engagement_dir / "findings.md").read_text(encoding="utf-8")
 
     assert "Exported 2 findings" in output
-    assert "False positive finding" in findings_md
-    assert "- **Workflow**: false_positive" in findings_md
+    assert "Low severity finding" in findings_md
+    assert "- **Workflow**: reported" in findings_md
     assert "Parser issue" in findings_md
-    assert "- **Merged Into**: finding-010" in findings_md
     assert "- **Location**: POST" not in findings_md
     assert "- **CWE**: CWE-79" in findings_md
     assert "- **Entry Point**: parse_input" in findings_md
@@ -1525,6 +1538,8 @@ def test_export_findings_separates_sections_with_blank_line(monkeypatch, tmp_pat
                     "slug": "finding-aaa",
                     "title": "First",
                     "severity": "high",
+                    "workflow_status": "active",
+                    "verification_status": "confirmed",
                     "summary": "first summary",
                     "details": {},
                 },
@@ -1532,6 +1547,8 @@ def test_export_findings_separates_sections_with_blank_line(monkeypatch, tmp_pat
                     "slug": "finding-bbb",
                     "title": "Second",
                     "severity": "high",
+                    "workflow_status": "active",
+                    "verification_status": "confirmed",
                     "summary": "second summary",
                     "details": {},
                 },
@@ -2658,12 +2675,32 @@ def test_review_exploits_lists_backend_candidates(monkeypatch, tmp_path: Path, c
         ],
     )
 
+    monkeypatch.setattr(
+        module,
+        "load_runtime_proof_owed",
+        lambda cfg, *, limit: [
+            {
+                "slug": "PARKED-001",
+                "severity": "high",
+                "workflow_status": "active",
+                "verification_status": "pending_runtime_proof",
+                "title": "Source-proved, PoC owed",
+                "canonical_location": "file:src/db/query.py:88",
+            }
+        ],
+    )
+
     module.run(SimpleNamespace(engagement_dir=tmp_path))
 
     output = capsys.readouterr().out
     assert "candidate_rule: verified findings only" in output
     assert "ACTIVE-001 | high | active | confirmed | verified_high | Live issue" in output
     assert "CHAIN-001 | info | active | downgraded | verified_chain_required | Chain-only primitive" in output
+    # The runtime-proof-owed queue is the complement of the approval gate and
+    # renders on the same read, so a parked source finding is never invisible
+    # to the phase that would prove it.
+    assert "Runtime proof owed" in output
+    assert "PARKED-001 | high | active | Source-proved, PoC owed" in output
 
 
 def _run_phase_report(monkeypatch, tmp_path: Path, payload: dict):

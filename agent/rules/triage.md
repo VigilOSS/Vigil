@@ -70,8 +70,10 @@ finding linked from `details.chain_required=true`.
   uncertainty remains
 - `blocked` — the required counter-check could not run; record the missing precondition
 
-The seven values above are exhaustive. Custom values like `verified`, `escalated`,
-`partially_verified`, `pending`, or `under_review` break downstream queries.
+`vigil assess contract "finding verify"` prints the live enum and which of its
+values are transition targets — that contract, not this list, is the authority.
+A value it does not print (`verified`, `escalated`, `partially_verified`,
+`pending`, `under_review`) breaks downstream queries.
 
 ## 4. Symmetric evidence bar — verify and FP are the same cost
 
@@ -121,14 +123,15 @@ gets reconstructed without its entry point.
 
 ## 7. UTC throughout
 
-All log queries, audit pulls, timeline entries, and finding `details.timeline`
-rows are written in UTC. Convert to local time only when rendering narrative for a
-human reader (the final report's executive summary, the operator's screen-side
-status). Mixing zones mid-investigation drops events and turns a 5-minute phishing-
-to-login window into a phantom gap.
+All log queries, audit pulls, timeline entries, finding `details.timeline` rows,
+and `activity_entries` timestamps are written in UTC. Convert to local time only
+when rendering narrative for a human reader (the final report's executive
+summary, the operator's screen-side status). Mixing zones mid-investigation drops
+events and turns a 5-minute phishing-to-login window into a phantom gap.
 
 ISO-8601 with explicit `Z` suffix or `+00:00` offset is the only acceptable
-timestamp format in evidence files and `assessment_findings.details_json`.
+timestamp format in evidence files, `assessment_findings.details_json`, command
+`--intent` strings, and JSON payloads.
 
 ## 8. Cross-tenant artifacts never enter the engagement evidence tree
 
@@ -142,17 +145,25 @@ raw cross-tenant log rows into this engagement.
 ## 9. Confidence labels on every finding and every activity entry
 
 Every finding and every `activity_entries` row linked to a finding carries an
-explicit confidence: `low | medium | high` with a one-line rationale.
+explicit `low | medium | high` confidence with a one-line rationale. The operator
+adjudicates labels on findings it reviews, so the definitions live here rather
+than in a specialist-only layer:
 
-| Label | Meaning |
-|-------|---------|
-| `high` | Multi-signal corroboration; legitimate-actor hypothesis excluded; reproduction available |
-| `medium` | Two of three IR-evidence gates pass; one gate incomplete |
-| `low` | Single signal; suggestive but not corroborated |
+| Label | Meaning | Required corroboration |
+|-------|---------|------------------------|
+| `high` | Multi-signal corroboration; legitimate-actor hypothesis excluded; reproduction available | Two IR-evidence gates pass (see `agent/rules/ir-evidence.md`) + reproduction or cross-source signal |
+| `medium` | Two of three IR-evidence gates pass; one gate incomplete | IP outside baseline + corroborating anomaly, user not yet asked |
+| `low` | Single signal; suggestive but not corroborated | Unfamiliar IP only, or timing suggestive but no second control fired |
 
-`metadata_json.confidence` and `metadata_json.confidence_rationale` on activity
-rows; `details.confidence` on findings. A finding without a confidence label
-is malformed and report-writer rejects it.
+The rationale is one sentence naming what makes this `high` vs `medium` vs `low`.
+"Looks suspicious" is not a rationale; "IP outside user's 30-day ASN baseline +
+impossible-travel from previous session 3h prior" is.
+
+The write mechanics a specialist needs — `details.confidence` vs
+`metadata.confidence`, the `--metadata-inline` field, the `metadata_json.*`
+columns the platform skills read back, and the verifier's rejection of an
+unlabeled finding — are in `agent/shared-constraints-blue.md` §8, which every
+blue specialist loads.
 
 ## 10. Smallest probe that answers the question
 
@@ -197,25 +208,20 @@ CWE-style vocabulary and does not apply to IR findings.
 ## 12. Tenant-ref first — missing tenant ref halts the dispatch
 
 Before any platform CLI command runs (GAM, gcloud, az, splunk, crowdstrike,
-defender, etc.), the dispatched specialist loads every tenant ref path injected
-in the dispatch. If a tenant ref is missing, the dispatch
-halts and the specialist returns a `blocked` handoff naming the missing path. Do
-not improvise platform calls without the tenant ref — that is the file that tells
-you which tool config, which admin email, which DWD scopes, and which known-benign
-patterns apply.
+defender, etc.), load every tenant ref path injected in the dispatch. A missing
+tenant ref halts the dispatch with a `blocked` handoff naming the path — an
+improvised platform call has no tool config, admin identity, DWD scopes, or
+known-benign register behind it. The pre-command confirm checklist and the full
+list of what a tenant ref carries are in `agent/shared-constraints-blue.md` §1.
 
 ## 13. Resume-brief before continuation
 
-On any continuation of an existing finding investigation, run:
-
-```bash
-vigil assess resume-brief --finding <finding-slug-or-alias>
-```
-
-before dispatching specialists or proposing containment. `agent/rules/resume.md`
-is universal across modes; this rule is the blue-specific reminder. Skipping the
-resume-brief causes duplicate dispatches against the same finding, loss of kill
-rationale recorded in a prior verifier handoff, and stale phase decisions.
+`agent/rules/resume.md` (in your Load First) owns the hydration rule, its
+scoped-variant flags, and the skip consequences. The blue-specific part: a
+continuation of an existing finding investigation runs
+`vigil assess resume-brief --finding <finding-slug-or-alias>` before dispatching
+specialists or proposing containment, so a prior verifier handoff's kill
+rationale is not re-litigated against the same finding.
 
 ## 14. Cross-source correlation on multi-platform incidents
 
@@ -337,99 +343,70 @@ transition without resolving them.
 
 ## 21. Writing discipline (anti-slop)
 
-Every blue specialist and the report-writer inherits these rules when producing
-any text that lands in a finding, handoff, evidence file, or customer-facing
-report. They are not optional. The report template
-(`agent/skills/report-generation/templates/blue.md`) cross-references this
-section for the operative banned-phrase lists.
+This governs any text a blue specialist or the report-writer puts in a finding,
+handoff, evidence file, or customer-facing report. `agent/rules/reporting.md`
+owns it platform-agnostically — hedge phrases (§1), the filler / transition /
+voice / meta-commentary tables (§11), active voice (§12), specific remediation
+(§14), load-bearing sentences (§15), internal-only content (§17 and §19),
+root-cause consolidation (§18), and the AI-tell list (§20). Where `reporting.md`
+sits in your LOAD-ON-FIRST-USE list rather than your MANDATORY one, authoring
+any of that text is its trigger — load it then. Below is only what blue adds;
+`agent/skills/report-generation/templates/blue.md` reproduces the operative
+banned-phrase blocks at the top of the file for use while writing.
 
-### Hedge phrases that signal unvalidated findings
+### Hedging is a status claim, not a style choice
 
-Hedge phrases signal that the finding has not been validated to the point of
-actionable certainty. If certainty is missing, `verification_status` is `disputed`
-or `unreviewed` — not a hedged `confirmed`.
+A hedge in a blue finding is a `verification_status` claim in disguise: where
+certainty is missing the status is `disputed` or `unreviewed`, never a hedged
+`confirmed`. Beyond reporting.md §1's list, these read as hedges in IR prose:
 
-- `could potentially`
-- `may allow`
-- `may have`
-- `might be`
-- `appears to`
-- `it seems that`
-- `it is possible that`
-- `there is a chance`
-- `could indicate`
-- `could be consistent with`
-- `could lead to`
-- `might be possible`
+- `may have` · `might be` · `appears to` · `it seems that`
+- `it is possible that` · `there is a chance`
+- `could indicate` · `could be consistent with`
 
 Preferred pattern: `<actor> performed <action verb> on <target> at <UTC>,
 observed via <evidence_ref>.`
 
-### Filler phrases to replace with direct statements
+### Blue additions to reporting.md's banned lists
 
-- `Furthermore` · `Additionally` · `Moreover` · `In conclusion` · `To summarize`
-- `It is worth noting that` · `It should be noted that` · `It is important to note that`
-- `As demonstrated above` · `As mentioned earlier`
-- `During the course of our assessment` · `Upon further investigation`
-- `This finding documents...` · `The investigation identified...` · `Analysis revealed...`
-- `This finding describes...` · `This vulnerability allows...`
+- **Filler openers** beyond §11: `This finding documents...` · `The
+  investigation identified...` · `Analysis revealed...`. Short transitions that
+  carry meaning (`The same session also`, `A second feed confirms`) are fine.
+- **Generic remediation** beyond §14: `Improve detection coverage` · `Enhance
+  MFA posture` · `Review and update conditional access policies` · `Implement
+  principle of least privilege` · `Increase awareness training`.
+- **AI tells** beyond §20: a rule-out catalog phrased as control status
+  (`Defender-positive: nothing detected`); a persona where an adversary class
+  belongs (criminal, APT, insider, opportunistic) plus its starting access;
+  restating a listed MITRE technique in prose (`This finding is categorized as
+  T1078.004`). Take §20's prose discipline, not its severity mapping — its CVSS,
+  VRT and CWE header rules govern red external submissions, and
+  `agent/skills/report-generation/templates/blue.md` bans that vocabulary in a
+  blue report outright.
+- **Internal content** beyond §17: engagement keys, jj change IDs, blue finding
+  slugs (`F-001`), and specialist role names (`alert-triage-specialist`,
+  `incident-verifier`, `ir-lead`). Speak in role terms (`the L2 investigation`)
+  or active voice (`we determined`).
+- **Padding** beyond §15: background paragraphs explaining what M365 / AWS /
+  Okta / EDR / SIEM *is*.
 
-If a sentence starts with one of these, delete the lead and state the fact.
-Short transitions that carry meaning (`The same session also`, `A second feed
-confirms`) are fine.
+### Blue-specific requirements
 
-### Generic remediation that fails the specificity bar
-
-Generic advice is not a recommendation. These fail standalone:
-
-- `Improve detection coverage`
-- `Enhance MFA posture`
-- `Review and update conditional access policies`
-- `Implement principle of least privilege`
-- `Increase awareness training`
-- `Follow security best practices`
-- `Implement proper input validation`
-- `Use appropriate access controls`
-
-Every recommendation names the control that failed AND its location, the exact
-fix (specific setting / command / policy change), the owner team, and a due
-date (UTC). Example: `Reduce session-token lifetime to 60 min (currently 24h)
-— Entra Sign-In Frequency policy ID <id> — Identity team, by 2026-06-19.`
-
-### Required patterns
-
-- **Active voice with a named subject.** `Adversary @<actor> hijacked
-  user@<victim>'s session at <UTC>` — not `It was determined that the user's
-  session was hijacked.` If the actor is unknown, name what is known
-  (`An unknown principal from ASN 12345 replayed...`).
-- **Outcome-first openers.** The first sentence of every Impact statement says
-  what the adversary gained or what was at risk. The finding's existence
-  implies "this finding documents X" — skip the implication and state X.
-- **Every sentence load-bearing.** If removing a sentence does not reduce the
-  reader's understanding, remove it. Common padding to delete: background
-  paragraphs explaining what M365 / AWS / Okta / EDR / SIEM *is*; closing
-  paragraphs that recap; restating the finding title in the first sentence
-  of the description.
-- **One root cause, one finding.** If two findings share a single root cause
-  (compromised admin account producing both a mailbox rule and an OAuth
-  grant), they fold into one finding with multiple impacts listed under it.
-  Do not split.
-- **No AI tells.** No cataloguing what was ruled out (`No evidence found of...`,
-  `Defender-positive: nothing detected`) — if a negative result matters, state
-  it in one sentence with the evidence reference. No probe counts, request
-  volumes, or per-step timing in narrative sections. No cartoonish personas
-  (`a hacker in a basement`); name the adversary class (criminal, APT,
-  insider, opportunistic) and starting access, nothing more. No instructing
-  the reader (`It is important that the reader understand...`). No restating
-  header metadata in prose — if MITRE techniques are listed in the finding
-  header, do not say `This finding is categorized as T1078.004` in the
-  description.
-- **No internal-only artifacts in customer-facing prose.** The blue report
-  goes to the tenant. Internal slugs (`F-001`), engagement keys, jj change
-  IDs, `vigil` command output dumps, backend query strings, specialist role
-  names (`alert-triage-specialist`, `incident-verifier`, `ir-lead`) do not
-  appear in customer-facing sections. Speak in role terms (`the L2
-  investigation`) or active voice (`we determined`).
+- **Remediation carries an owner and a date.** Beyond §14's control-and-fix
+  bar, every blue recommendation names the control that failed AND its
+  location, the exact fix (setting / command / policy change), the owner team,
+  and a due date (UTC) — the tenant's own team executes it, so an unowned,
+  undated line does not get done. Example: `Reduce session-token lifetime to 60
+  min (currently 24h) — Entra Sign-In Frequency policy ID <id> — Identity team,
+  by 2026-06-19.`
+- **Name a subject even when the actor is unknown.** `An unknown principal from
+  ASN 12345 replayed...` — passive voice hides whether attribution was
+  attempted, which is exactly what an IR reader is judging.
+- **Impact opens with what the adversary gained or what was at risk**, at the
+  UTC it happened.
+- **One root cause, one finding** (§18) applied to chained IR activity: a
+  compromised admin account producing both a mailbox rule and an OAuth grant is
+  one finding with both impacts listed under it, not two findings.
 
 ### Length discipline
 
@@ -437,9 +414,9 @@ date (UTC). Example: `Reduce session-token lifetime to 60 min (currently 24h)
   investigation handoffs, evidence files, and resume-brief inputs. Pack the
   detail; the verifier and report-writer need it.
 - **Customer-facing reports enforce ceilings** defined in
-  `agent/skills/report-generation/templates/blue.md` §"Section limits (HARD)".
-  If a section needs more space, split the finding or move detail to an
-  artifact — do not exceed the ceiling.
+  `agent/skills/report-generation/templates/blue.md` §"Section limits (HARD)" —
+  not reporting.md §10, which governs the red internal `report.md`. If a
+  section needs more space, split the finding or move detail to an artifact.
 
 ---
 
@@ -454,9 +431,10 @@ date (UTC). Example: `Reduce session-token lifetime to 60 min (currently 24h)
   Devil's advocate) and the Multi-Perspective Voting Protocol that handles
   `disputed` verification statuses.
 - `agent/shared-constraints-blue.md` — cross-cutting blue constraints: tenant
-  scope, read-only-by-default, artifact-index chain of custody, UTC, look-back,
-  host-exec audit pipeline, confidence labels, resume hydration, dispatch handoff
-  conventions.
+  scope and the missing-tenant-ref halt, read-only-by-default and the
+  propose/approve/execute WRITE path, artifact-index chain of custody, host-exec
+  audit pipeline, confidence labels (§8), dispatch handoff conventions, and the
+  blue `finding record` contract.
 - `agent/rules/adversarial-mindset.md` — cross-mode generative rule; the lens
   through which alerts get re-read after the audit pulls land.
 - `agent/rules/reporting.md` — platform-agnostic reporting discipline; banned

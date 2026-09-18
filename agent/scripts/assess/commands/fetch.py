@@ -1,5 +1,8 @@
 """vigil assess fetch — GET assessment endpoint and print JSON.
 
+``--list-routes`` prints the declared catalog below; it is the discovery surface
+for a generic read verb whose whole argument is a route name.
+
 Special-case: ``fetch intel`` hits ``/engagements/{key}/intel/summary`` (the
 engagement-scoped intel summary lives outside ``/assessment/``). ``fetch
 intel/<sub>`` reaches arbitrary intel routes (e.g. ``intel/tech-components``,
@@ -41,15 +44,129 @@ _PAGED_ENGAGEMENT_LIST_ENDPOINTS = {
 }
 _ACTIVITY_LIST_ENDPOINT = "activity-entries"
 
+# The declared catalog of read routes `fetch` exists to reach, as
+# (route, what it returns). This is the ONLY place route names are written: the
+# `endpoint` help points at `--list-routes` rather than repeating a sample set,
+# and the paginated marker is read from the paging tables above. A route an
+# operator cannot name is a route they cannot use — `code/repos/<repo-id>` was
+# unreachable in practice for exactly that reason.
+#
+# Routes are curated, not exhaustive: these are the engagement-owned reads that
+# are safe and useful to pull raw. The backend routers
+# (app/api/assessment.py, app/api/code_analysis.py, app/api/intel.py) remain
+# authoritative — `fetch <route>` still reaches any route they serve.
+_FETCH_ROUTES: tuple[tuple[str, str], ...] = (
+    ("summary", "Engagement rollup: phase, counts, and readiness headline."),
+    ("phase-readiness", "Per-phase gate status for the current engagement."),
+    ("report-readiness", "What still blocks a report-ready verdict."),
+    ("coverage-readiness", "Coverage obligations and their standing."),
+    ("resume-brief", "Rehydration brief for an interrupted engagement."),
+    ("findings", "Recorded findings as compact rows."),
+    ("report-findings", "Findings admitted to the report."),
+    ("finding-groups", "Duplicate/variant groupings by root slug."),
+    ("finding-links", "Typed relationships between findings."),
+    ("attack-chains", "Recorded multi-step attack chains."),
+    ("surfaces", "Catalogued attack surfaces."),
+    ("coverage-items", "Coverage ledger rows."),
+    ("work-items", "Open work queue rows."),
+    ("probe-runs", "Recorded probe attempts and their results."),
+    ("request-variants", "Stored request variants."),
+    ("request-observations", "Observed request/response pairs."),
+    ("command-runs", "Audited command executions."),
+    ("attempts", "Exploit/verification attempts."),
+    ("proof-receipts", "Reproducible proof receipts."),
+    ("artifacts/search?q=<text>", "Indexed engagement artifacts matching a query."),
+    ("targets", "In-scope targets."),
+    ("services", "Discovered services."),
+    ("host-liveness", "Host reachability observations."),
+    ("credentials", "Credentials captured for the engagement."),
+    ("access-records", "Access obtained and how it was reached."),
+    ("blocked-techniques", "Techniques recorded as blocked, with reasons."),
+    ("application-units", "Application units used for depth attribution."),
+    ("assessment-runs", "Assessment run history."),
+    ("dispatches", "Specialist dispatch audit rows."),
+    ("dispatch-handoffs", "Handoffs recorded by finished dispatches."),
+    ("jobs", "Background runtime jobs."),
+    ("oob-probes", "Out-of-band probe registrations and callbacks."),
+    ("http-flows", "Captured proxy flows."),
+    ("capture-policy", "Current proxy capture policy."),
+    ("code/repos", "Ingested repositories: generation, manifest digest, git_churn."),
+    ("code/repos/<repo-id>", "One repository record, git_churn included."),
+    ("code/files", "Sealed source files with classification and priority."),
+    ("code/files/<file-id>", "One sealed file record."),
+    ("code/modules", "Recorded architectural modules."),
+    ("code/threat-model/<repo-id>", "Persisted repository threat model."),
+    ("code/analysis-queue/stats", "Queue status counts and accounting debt."),
+    ("code/triggers", "Cross-file triggers and their resolution state."),
+    ("code/analysis-results", "Source-review receipts."),
+    ("code/variant-checks", "Variant-check receipts."),
+    ("code/readiness", "Code phase readiness detail."),
+    ("code/coverage", "Code coverage projection by file and family."),
+    ("code/fuzz/decisions", "Recorded fuzz required/not-required decisions."),
+    ("code/fuzz/state", "Current fuzz campaign state."),
+    ("code/fuzz/campaign-receipts", "Completed fuzz campaign receipts."),
+    ("intel", "Intel summary (shorthand for intel/summary)."),
+    ("intel/search?q=<text>", "Free-text search across every intel type."),
+    ("intel/credentials", "Credential intel rows."),
+    ("activity-entries", "Engagement activity log."),
+)
+
+
+def _fetch_route_catalog() -> tuple[tuple[str, str], ...]:
+    """The declared routes plus one row per registered intel type.
+
+    Intel routes are generated from INTEL_TYPES so a new intel type is
+    discoverable the moment it is registered, instead of waiting for someone to
+    remember this list.
+    """
+    intel_routes = tuple(
+        (f"intel/{segment}", f"Recorded `{intel_type}` intel rows.")
+        for intel_type, (_schema, segment) in sorted(INTEL_TYPES.items())
+    )
+    return _FETCH_ROUTES + intel_routes
+
+
+def _render_route_catalog() -> str:
+    rows = _fetch_route_catalog()
+    width = max(len(route) for route, _purpose in rows)
+    assessment: list[str] = []
+    engagement: list[str] = []
+    for route, purpose in rows:
+        normalized = route.partition("?")[0].strip("/")
+        paged = (
+            normalized in _PAGED_ASSESSMENT_ENDPOINTS
+            or normalized in _PAGED_ENGAGEMENT_LIST_ENDPOINTS
+            or normalized == _ACTIVITY_LIST_ENDPOINT
+        )
+        line = f"  {route.ljust(width)}  {purpose}"
+        if paged:
+            line += "  [--paginate]"
+        (engagement if _is_engagement_scoped(route) else assessment).append(line)
+    return "\n".join(
+        [
+            "Assessment routes — vigil assess fetch <route>:",
+            *assessment,
+            "",
+            "Engagement-scoped routes — same command, resolved outside /assessment/:",
+            *engagement,
+            "",
+            "Routes marked [--paginate] return one bounded page by default.",
+            "This catalog is curated; `fetch` still reaches any route the backend serves.",
+        ]
+    )
+
 
 def register(subparsers) -> None:
     p = subparsers.add_parser("fetch", help="GET /assessment/{endpoint} or engagement-scoped routes")
     p.add_argument(
         "endpoint",
-        help=(
-            "e.g. findings, report-findings, credentials, summary, coverage-items, "
-            "intel (→ intel/summary), intel/tech-components, activity-entries"
-        ),
+        nargs="?",
+        help="Route to read; run `vigil assess fetch --list-routes` for the catalog.",
+    )
+    p.add_argument(
+        "--list-routes",
+        action="store_true",
+        help="Print the declared catalog of fetchable routes and exit.",
     )
     p.add_argument(
         "--json",
@@ -371,6 +488,17 @@ def _apply_jq(expression: str, json_text: str, *, compact: bool = False) -> str:
 
 
 def run(args) -> None:
+    if getattr(args, "list_routes", False):
+        print(_render_route_catalog())
+        return
+    if not args.endpoint:
+        print(
+            "fetch: an endpoint is required; run `vigil assess fetch --list-routes` "
+            "to see the declared catalog of fetchable routes.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     endpoint = args.endpoint.strip("/")
     point_read_hint = _point_read_hint(endpoint)
     if point_read_hint:

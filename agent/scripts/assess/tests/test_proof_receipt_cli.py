@@ -278,9 +278,12 @@ def test_proof_receipt_create_rejects_unbound_success_receipt(
         {"expected_result": "different expected result"},
         {"observed_result": "different observed result"},
         {"tombstone_reason": "different tombstone reason"},
-        {"evidence_health": "stale"},
     ],
 )
+# `evidence_health` is not on this list: when the request asks for 'healthy' the
+# backend answers with what the cited evidence MEASURES, so a downgrade is an
+# honest answer rather than a changed authored field. A caller-DECLARED health is
+# still held to the echo — see the verbatim test below.
 def test_proof_receipt_create_rejects_success_with_changed_authored_evidence(
     response_override, tmp_path, monkeypatch, capsys
 ) -> None:
@@ -327,3 +330,99 @@ def test_proof_receipt_contract_documents_creation_and_reads() -> None:
     assert contract.name == "proof-receipt"
     assert "create | list | get" in " ".join(contract.author_supplied_fields)
     assert "reusing author-produced evidence" in " ".join(contract.notes)
+
+
+def test_a_derived_health_downgrade_is_reported_not_treated_as_a_lost_write(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """`evidence_health` is measured by the backend, not echoed back.
+
+    The CLI used to assert the response repeated the requested 'healthy'. A
+    command receipt whose cited output no longer measures healthy therefore
+    failed with "the write may have committed" on a write that committed
+    exactly as asked — and left the operator with no idea the receipt was
+    hollow. Report the measurement instead.
+    """
+
+    engagement = _engagement(tmp_path)
+    monkeypatch.setattr(config, "_verify_backend", lambda _cfg: None)
+
+    def post(_client, endpoint: str, payload: dict):
+        return _receipt(
+            run_id=payload["run_id"],
+            evidence_kind=payload["evidence_kind"],
+            expected_result=payload["expected_result"],
+            observed_result=payload["observed_result"],
+            artifact_id=None,
+            source_read_id=None,
+            command_run_id=payload["command_run_id"],
+            evidence_sha256=_SHA,
+            evidence_health="stale",
+            tombstone_reason=payload["tombstone_reason"],
+        )
+
+    monkeypatch.setattr(AssessmentClient, "post", post)
+    cli.main(
+        [
+            "--engagement-dir",
+            str(engagement),
+            "proof-receipt",
+            "create",
+            "--run-id",
+            "17",
+            "--kind",
+            "command",
+            "--command-run-id",
+            "4210",
+            "--observed-result",
+            "the response body carried uid=33(www-data)",
+        ]
+    )
+    captured = capsys.readouterr()
+    assert json.loads(captured.out)["evidence_health"] == "stale"
+    assert "WARN proof-receipt create" in captured.err
+    assert "'stale'" in captured.err
+    assert "terminal `finding verify` will reject it" in captured.err
+
+
+def test_a_caller_declared_health_must_still_come_back_verbatim(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    engagement = _engagement(tmp_path)
+    monkeypatch.setattr(config, "_verify_backend", lambda _cfg: None)
+
+    def post(_client, endpoint: str, payload: dict):
+        return _receipt(
+            run_id=payload["run_id"],
+            evidence_kind=payload["evidence_kind"],
+            expected_result=payload["expected_result"],
+            observed_result=payload["observed_result"],
+            artifact_id=None,
+            source_read_id=None,
+            command_run_id=payload["command_run_id"],
+            evidence_sha256=_SHA,
+            evidence_health="healthy",
+            tombstone_reason=payload["tombstone_reason"],
+        )
+
+    monkeypatch.setattr(AssessmentClient, "post", post)
+    with pytest.raises(SystemExit):
+        cli.main(
+            [
+                "--engagement-dir",
+                str(engagement),
+                "proof-receipt",
+                "create",
+                "--run-id",
+                "17",
+                "--kind",
+                "command",
+                "--command-run-id",
+                "4210",
+                "--observed-result",
+                "the reproducer ran, but its output was rotated away",
+                "--evidence-health",
+                "stale",
+            ]
+        )
+    assert "did not identify the durable result" in capsys.readouterr().err

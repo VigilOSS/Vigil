@@ -4020,6 +4020,11 @@ def test_assessment_client_connection_failure_suggests_orchestrator(monkeypatch)
     from assess.lib import client as client_mod
 
     c = client_mod.AssessmentClient("http://127.0.0.1:18000", "engagement-key")
+    # What is under test is the hint on the exhausted-retries error, not the
+    # wait between attempts. At the shipped 1s base this instance sleeps 1s +
+    # 2s on its way to that error — 3.01s of wall clock for ~0.01s of CPU.
+    # Zeroing it on this throwaway instance keeps all three attempts.
+    c.BACKOFF_BASE = 0
 
     def fail_conn(*_args, **_kwargs):
         raise OSError("connection refused")

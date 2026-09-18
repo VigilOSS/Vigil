@@ -12,6 +12,30 @@ export const SEVERITY_RANK: Record<string, number> = {
   info: 1,
 };
 
+// A `details.references` entry is either a bare string or an object carrying
+// some of {title, id, url}. Both shapes reach the report unchanged, so this
+// resolves one to the label a reader should see and the link it should point at.
+export interface ReferenceLink {
+  label: string;
+  url: string;
+}
+
+export function referenceLink(ref: unknown): ReferenceLink | null {
+  if (typeof ref === "string") {
+    const text = ref.trim();
+    if (!text) return null;
+    return { label: text, url: /^https?:\/\//i.test(text) ? text : "" };
+  }
+  if (ref && typeof ref === "object") {
+    const r = ref as { title?: unknown; id?: unknown; url?: unknown };
+    const title = String(r.title ?? r.id ?? "").trim();
+    const url = String(r.url ?? "").trim();
+    if (!title && !url) return null;
+    return { label: title || url, url };
+  }
+  return null;
+}
+
 export function formatLabel(value: string | null | undefined): string {
   if (!value) return "—";
   return value.replace(/_/g, " ");

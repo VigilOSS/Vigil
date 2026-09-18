@@ -49,6 +49,7 @@ from .engagements import (
     start_engagement,
     write_opencode_reasoning_config,
 )
+from .preflight import _preflight_engagement_start
 
 # Platform → tenant-file suffix. Google Workspace tenant references use the
 # descriptive ``workspace`` suffix, while the CLI keeps the familiar ``gws``
@@ -140,6 +141,12 @@ def register_blue_parser(sub: argparse._SubParsersAction) -> None:
     engage_p.add_argument("--severity", default=None, help="Alert severity hint (low|medium|high|critical|info)")
     engage_p.add_argument("--source", default="operator_chat", help="Alert source (default: operator_chat)")
     engage_p.add_argument("--skip-permissions", action="store_true")
+    engage_p.add_argument(
+        "--skip-preflight",
+        action="store_true",
+        help="With --start, launch the client without the preflight checks (client "
+             "binary, provider key, orchestrator, runtime container, install freshness).",
+    )
     engage_p.add_argument(
         "--start",
         choices=("codex", "claude", "opencode", "goose"),
@@ -484,9 +491,17 @@ def _cmd_engage(args: argparse.Namespace, install_root: Path) -> None:
         # (the eng=$(vigil blue engage …) contract), then launch hints go to
         # stderr — everything is printed and flushed BEFORE start_engagement,
         # which does os.chdir + os.execv and never returns.
+        #
+        # The engagement key goes out first, on stderr, because the preflight
+        # below can refuse: the engagement is already created and durable, so
+        # the operator needs its key to retry with `vigil engagement start`.
+        # The preflight runs BEFORE the stdout path line so a refusal never
+        # leaves a bare path behind for `eng=$(…)` to capture as success.
+        print(f"[vigil blue] engagement: {created.key}", file=sys.stderr)
+        if not getattr(args, "skip_preflight", False):
+            _preflight_engagement_start(install_root, created.path, args.start)
         print(created.path)
         sys.stdout.flush()
-        print(f"[vigil blue] engagement: {created.key}", file=sys.stderr)
         print(f"[vigil blue] launching operator session ({args.start})…", file=sys.stderr)
         print("  Paste the alert into the operator chat; the operator records intake", file=sys.stderr)
         print(

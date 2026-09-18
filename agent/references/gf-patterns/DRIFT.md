@@ -408,3 +408,149 @@ that belong to other buckets).
   forbids. The §C.13 build/dependency manifests (`composer.json`/`composer.lock`/`yarn.lock`/
   `package-lock.json`/`web-inf/web.xml`) shipped on `debug_logic` (mirroring its existing `/package.json`),
   while the VCS/IDE dotfiles shipped on `interestingext`.
+
+## Accepted decisions (2026-09 vocabulary audit)
+
+A 2026-09 sweep instrumented `bucket_matches` / `fragment_in_path` /
+`regex_fragment_in_path` over the whole existing test corpus to measure which curated vocabulary
+entries ever fire (`agent/scripts/assess/tests/test_classify_buckets_vocabulary.py` carries the
+measurement and the per-entry sweep). It surfaced two precision defects and one absent bucket.
+
+### Precision: `_UPLOAD_GENERIC_SHADOWS` gains `img_traversal`
+
+`select_cluster_bucket`'s upload override hands the cluster back to `upload_fields` when the winner
+is a bucket that merely *overlaps* multipart field names. It listed `lfi` and `idor` but not
+`img_traversal`, which shares `image`/`photo`/`thumb`/`thumbnail` with `upload_fields` and outranks
+it 35 > 30. So an `upload`-typed row keyed `image` — an avatar or profile-picture upload, precisely
+the shape the override exists for — clustered `gf:img_traversal` at 35, while the byte-identical
+`file`-keyed row clustered `gf:upload_fields` at 40. The overlap is generic in exactly the way
+`lfi`'s `file`/`document` overlap is: on a multipart POST those names are the form field, not a path
+the server dereferences. `img_traversal` is still RECORDED in the reason chain — the override moves
+the cluster pick only. Pinned in
+`agent/scripts/assess/tests/test_classify_precision_and_context_threading.py`.
+
+### Precision: a bare `?query=` no longer wins `gf:graphql`
+
+`query` is graphql's canonical request key and simultaneously a member of `sqli` (40) and `xss`
+(20); only `rce` (50) outranks graphql (45). So `/api/v2/products/search?query=shoes` and
+`/blog/search?query=x` both clustered `gf:graphql` at 45 with zero GraphQL evidence, indistinguishable
+from a real `/graphql` row. The irony was already self-documented: `/query` was deliberately kept out
+of graphql's PATH fragments because "it would mis-bucket REST search routes at weight 45" (see the
+`graphql` bucket comment and the §6.1 entry above) — and the param key then produced exactly that
+misroute.
+
+Deleting the key was rejected: it loses GraphQL mounted at a non-canonical path. `query` instead
+needs **corroboration**. `_suppress_graphql_on_bare_query` keeps `graphql` whenever a graphql PATH
+fragment fired, a second unambiguous graphql key fired (`mutation`/`subscription`/`operationname`/
+`variables`), the `query` VALUE is a braced selection set, or the producer typed the row `graphql` —
+`classify_type()` types a POST whose body carries a braced `query` value as `graphql`, which is how
+a real `POST /custom {"query":"{me}"}` keeps its routing. Only a row whose entire GraphQL case is
+the bare key loses the match, and it keeps its genuine `sqli`/`xss` matches, so it is re-ranked
+(`45 gf:graphql` → `40 gf:sqli`), never dropped.
+
+**Follow-up: the braced-VALUE corroborator (GraphQL-over-GET).** The first version of the
+corroboration set could only see a POST. `classify_type()` derives the `graphql` type from the path,
+the content-type, or a braced `query` value in the BODY — it never reads the query string — so
+`GET /api/data?query={users{id,email}}` typed `api`, matched no corroborator, and lost its graphql
+routing. That URL is `graphql.md`'s own documented example, and GraphQL-over-GET is a supported
+transport (it is the form GraphiQL issues, and the only form a historical-URL corpus can capture).
+`has_braced_graphql_query_value()` now reads the value of any ambiguous graphql key across all three
+param columns, using the IDENTICAL `{`…`}` heuristic `classify_type()` applies to a body rather than
+a stricter regex: a stricter rule here would make the classifier disagree with the typer on
+identical evidence (the POST typing `graphql` and keeping its match through the producer-type
+escape while the byte-identical GET was suppressed). A JSON filter value (`?query={"status":"open"}`)
+satisfies both — the typer's pre-existing false positive, inherited on purpose rather than forked.
+
+Shape note: this landed as a SUBTRACTIVE predicate (mirroring `_suppress_auth_on_sso_route`) rather
+than the additive `path_has_object_ref` / `path_has_privileged_action` append shape. Every
+corroborating signal already fires `graphql` through `bucket_matches` on the same declaration-ordered
+pass, so an appended match would be dead in all but the producer-type case — and appending also moves
+the entry to the END of the reason chain, perturbing the pinned `gf:graphql+gf:sqli+gf:xss` order.
+Suppression leaves every corroborated row byte-identical.
+
+Every edit in this section moves `CLASSIFIER_VERSION` (the shadow set, the ambiguous-key set and
+`_BUCKETS` itself are all digested). The two LOGIC changes are not visible to any digested table, so
+`_CLASSIFIER_LOGIC_REVISION` moved 1 → 2 for the suppression branch and 2 → 3 for the braced-value
+corroborator (which reads a NEW input — the param values). Operators re-score with
+`vigil assess work-buffer reclassify --reclassify-stale`.
+
+### New bucket: `llm_api` (weight 40) → class `prompt-injection`
+
+`vuln_taxonomy` has declared the `ai-ml` family and its `prompt-injection` / `ai-ml-security` classes
+since the taxonomy was written, but **no gf-bucket mapped to `ai-ml`**, so the web/URL track could
+never route a row there. Measured: `/v1/chat/completions` reached only `25 gf:api-versioning` (from
+the generic `/v<n>/` regex — indistinguishable from any other versioned route), and
+`?system_prompt=` scored **0** and fell back to `path:/api/assistant`. The
+code track already recognised the surface (`code_analysis.ROLE_CONTEXT_VULN_CLASSES` maps the
+`llm`/`prompt`/`rag`/`mcp`/`embedding` role keywords to `ai-ml-security`), so the web track was the
+only one blind to it.
+
+- **Weight 40** — the `auth`/`deserialization`/`sqli` tier. An LLM endpoint carries prompt
+  injection, tool-calling SSRF, system-prompt disclosure and unbounded token spend; it must outrank
+  the `api-versioning` (25) / `api` (20) family-level hints that were swallowing it.
+- **Declared LAST in the weight-40 run** (after `xxe`), so the first-at-max-weight tie-break leaves
+  every pre-existing weight-40 cluster untouched — the additive rule of ADR 0008. Pinned by
+  `agent/scripts/assess/tests/test_classify_llm_api.py`.
+- **Keys:** `user_prompt`/`userprompt`, `system_prompt`/`systemprompt`,
+  `prompt_template`/`prompttemplate`, `system_message`/`systemmessage`, `messages`,
+  `max_tokens`/`maxtokens`, `top_p`/`topp`, `embedding`/`embeddings`, `tool_choice`/`toolchoice`,
+  `function_call`/`functioncall`.
+- **Fragments:** `/completions`, `/embeddings`, `/inference`. Boundary anchoring makes
+  `/completions` already cover `/v1/chat/completions` and
+  `/openai/deployments/<name>/chat/completions`, so a `/chat/completions` fragment would be a
+  redundant sibling.
+- **DELIBERATELY EXCLUDED** (each would flood the bucket with ordinary REST surface): `model` (every
+  product filter and device catalogue carries `?model=`), `system` (`?system=linux`), `temperature`
+  (IoT/thermostat/weather APIs), `tools`/`functions` (generic nouns — and `func`/`function` are
+  already `rce` members at 50, so a bare `functions` would mis-cluster as `gf:rce`); and a bare
+  `/messages` / `/chat` / `/generate` path fragment (inbox, support-chat widget, report exporter).
+- **WITHDRAWN after shipping** — three entries this same analysis should have caught and did not:
+
+  * **The bare `prompt` key.** OIDC Core §3.1.2.1 *defines* `prompt` with the values
+    `none`/`login`/`consent`/`select_account`, and Azure AD, Auth0, Okta, Keycloak and Google all
+    emit it — so at weight 40 the bucket re-clustered the highest-value auth surface in a web
+    engagement as an LLM endpoint. `/oauth2/authorize?client_id=…&response_type=code&prompt=login`
+    became `gf:llm_api`, accruing an unclosable `prompt-injection` coverage item on every SSO entry
+    point and turning the gap recommendation into `llm-api-testing` where `auth-bypass` /
+    `saml-sso-testing` belongs; `/login?prompt=select_account` escaped only on the declaration-order
+    tie-break with `auth` — luck, not design. This is the same analysis that excluded `model`,
+    `system`, `temperature` and bare `tools`/`functions`: `prompt` belongs in that list and was
+    missed by it. Dropped rather than guarded by a subtractive predicate on the
+    `_suppress_auth_on_sso_route` model, because such a predicate has to enumerate IdP authorize
+    routes and their companion vocabulary, and every gap in that enumeration silently recreates the
+    defect on the surface that can least afford it. The formulation "keep the key but require
+    corroboration by another `llm_api` key or fragment" is behaviourally IDENTICAL to dropping it —
+    any corroborator already fires the bucket on the same pass — so it would be pure dead code.
+    The unambiguous compounds carry the recall: no IdP, and no other bucket, claims `user_prompt` /
+    `system_prompt` / `prompt_template`. Accepted cost: a novel `*_prompt` compound that is not a
+    curated whole key (`?chat_prompt=`) no longer reaches the bucket through the capped weak-token
+    tier either. That is the documented boundary; the remedy is a corpus-grounded curated whole-key
+    add, in the tiered shape `AGENTS.md` prescribes, not a re-added generic token.
+  * **The `/v1/messages` and `/v1/responses` fragments.** Version-qualification was claimed as the
+    discriminator — it is not one. REST APIs are conventionally versioned, so `/api/v1/messages` IS
+    the inbox route and `/api/v1/responses` IS the survey-response route; a `/v<n>/` prefix only
+    moves the flood the bare `/messages` exclusion already refused. Both dropped; those rows now
+    land where their evidence points (`/api/v1/messages/1024` → `gf:idor`, via the path object-ref
+    predicate), and a real Anthropic/OpenAI proxy is caught by the request-key set at whatever path
+    it is mounted. `/v1/chat/completions` is unaffected — `/completions` is boundary-anchored and
+    covers it on its own, verified by execution rather than assumed.
+- **Considered and skipped:** a `_FULL_URL_REGEX_BUCKETS` rule for provider hosts
+  (`api.openai.com`, `api.anthropic.com`, `generativelanguage.googleapis.com`). A target's own URLs
+  rarely carry the provider host, and the provider's API is out of scope by definition, so the rule
+  would be speculative rather than corpus-grounded — the opposite of how `cloud_metadata` and
+  `object-storage` earned their full-URL rules (an IMDS address in a proof URL is the payload).
+- **Not yet a `_TYPE_FLOOR` entry:** `classify.py`'s typer has no `llm`/`ai_api` type, and a floor
+  keyed on a type no producer emits is dead (see the `privileged_write` note in the vocabulary
+  sweep's docstring). Add the floor in the same change as the typer, not before.
+- **Skill routing:** `derive_bucket_skills()` resolves bucket → class → skills declaring that class.
+  Both `ai-ml` classes previously resolved to `ai-ml-on-device-security` ALONE — a mobile/on-device
+  model-extraction skill — so mapping a web LLM-API bucket without a web-side skill would have
+  dispatched a web finding to the mobile specialist. `agent/skills/llm-api-testing/SKILL.md` ships
+  with this bucket for that reason, and is referenced from the Signal → Skill trigger table in
+  `agent/skills/case-dispatching/SKILL.md`.
+
+**ADR status:** recorded here rather than as an amendment to ADR 0004 or 0008. Both are
+"Accepted — implemented" records of what shipped in their own waves; editing a historical record to
+mention a later bucket would falsify it. DRIFT.md is the designated per-bucket rationale surface. A
+follow-up ADR becomes warranted if an AI/ML *wave* lands (a typer `llm` type + `_TYPE_FLOOR` entry, a
+tool-calling-SSRF path predicate, provider-host regex rules) rather than this single bucket.

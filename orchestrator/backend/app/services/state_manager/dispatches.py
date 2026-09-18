@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from typing import Any
 from fastapi import HTTPException, status
 
@@ -34,6 +35,38 @@ def _require_terminal_dispatch_status(value: str | None) -> str | None:
         )
     return normalized
 
+# Caller-asserted binding fields, in the order they read on the row. The
+# `client_binding_` prefix is the alias every dispatch read projects them under
+# (see `_DISPATCH_SELECT`), so this tuple drives both the SQL and the unpacking.
+_CLIENT_BINDING_FIELDS: tuple[str, ...] = (
+    "id",
+    "binding_version",
+    "asserted_client",
+    "asserted_session_namespace",
+    "asserted_client_handle",
+    "provider_observed_handle",
+    "note",
+    "bound_at",
+)
+
+# Every dispatch read goes through this projection so the CURRENT client binding
+# rides on the row itself. `agent list`, `agent get`, and the resume brief all
+# read a serialized dispatch and would otherwise need one extra round trip per
+# row to learn which live session — if any — the dispatch was bound to.
+# `client_binding_count` is what makes a re-bind visible at a glance: a row with
+# count 2 has a correction in its history worth reading.
+_DISPATCH_SELECT = (
+    "SELECT d.*, "
+    + ", ".join(
+        f"b.{field} AS client_binding_{field}" for field in _CLIENT_BINDING_FIELDS
+    )
+    + ", (SELECT COUNT(*) FROM assessment_dispatch_client_bindings c "
+    "WHERE c.dispatch_id = d.id) AS client_binding_count "
+    "FROM assessment_dispatches d "
+    "LEFT JOIN assessment_dispatch_client_bindings b "
+    "ON b.dispatch_id = d.id AND b.superseded_by_id IS NULL"
+)
+
 def _serialize_dispatch(row) -> dict[str, Any]:
     data = dict(row)
     # Old engagement databases may retain these retired columns. They are not
@@ -55,7 +88,36 @@ def _serialize_dispatch(row) -> dict[str, Any]:
                 data[key] = None
         else:
             data[key] = None
+    binding = {
+        field: data.pop(f"client_binding_{field}", None)
+        for field in _CLIENT_BINDING_FIELDS
+    }
+    data["client_binding_count"] = int(data.pop("client_binding_count", 0) or 0)
+    # A dispatch with no binding is the normal state right after `agent start`,
+    # not an error: the client has not been launched yet.
+    data["client_binding"] = (
+        _serialize_client_binding(binding, agent_id=str(data.get("agent_id") or ""))
+        if binding["id"] is not None
+        else None
+    )
     return data
+
+def _serialize_client_binding(values: Any, *, agent_id: str) -> dict[str, Any]:
+    """One shape for a binding, read standalone or embedded on a dispatch row.
+
+    ``superseded_by_id`` is absent from the embedded projection because the
+    dispatch join selects only the CURRENT binding, whose pointer is NULL by
+    definition — reading it with a default keeps one serializer for both paths.
+    ``agent_id`` is passed in rather than stored: the bindings table addresses a
+    dispatch by its durable ``dispatch_id``, while every operator-facing surface
+    addresses it by ``agent_id``.
+    """
+    data = dict(values)
+    return {
+        **{field: data.get(field) for field in _CLIENT_BINDING_FIELDS},
+        "agent_id": agent_id,
+        "superseded_by_id": data.get("superseded_by_id"),
+    }
 
 def record_dispatch(
     engagement_id: int,
@@ -232,7 +294,7 @@ def record_dispatch(
                 ),
             )
         row = connection.execute(
-            "SELECT * FROM assessment_dispatches WHERE id = ?",
+            f"{_DISPATCH_SELECT} WHERE d.id = ?",
             (cursor.lastrowid,),
         ).fetchone()
     assert row is not None
@@ -253,7 +315,7 @@ def update_dispatch(
     with _common.get_connection() as connection:
         _ensure_finding_slugs_exist(connection, engagement.id, finding_slugs)
         existing = connection.execute(
-            "SELECT * FROM assessment_dispatches WHERE engagement_id = ? AND agent_id = ?",
+            f"{_DISPATCH_SELECT} WHERE d.engagement_id = ? AND d.agent_id = ?",
             (engagement.id, agent_id),
         ).fetchone()
         if existing is None:
@@ -298,7 +360,7 @@ def update_dispatch(
             tuple(values),
         )
         row = connection.execute(
-            "SELECT * FROM assessment_dispatches WHERE engagement_id = ? AND agent_id = ?",
+            f"{_DISPATCH_SELECT} WHERE d.engagement_id = ? AND d.agent_id = ?",
             (engagement.id, agent_id),
         ).fetchone()
     assert row is not None
@@ -308,7 +370,7 @@ def get_dispatch(engagement_id: int, agent_id: str) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     with _common.get_connection() as connection:
         row = connection.execute(
-            "SELECT * FROM assessment_dispatches WHERE engagement_id = ? AND agent_id = ?",
+            f"{_DISPATCH_SELECT} WHERE d.engagement_id = ? AND d.agent_id = ?",
             (engagement.id, agent_id),
         ).fetchone()
     if row is None:
@@ -326,29 +388,218 @@ def list_dispatches(
     offset: int = 0,
 ) -> list[dict[str, Any]]:
     engagement = _engagement_or_404(engagement_id)
-    where = ["engagement_id = ?"]
+    # `d.` qualifies every predicate: the client-binding join carries its own
+    # engagement_id/id, so an unqualified column name here would be ambiguous.
+    where = ["d.engagement_id = ?"]
     params: list[Any] = [engagement.id]
     if role:
-        where.append("agent_role = ?")
+        where.append("d.agent_role = ?")
         params.append(role)
     if status_value:
-        where.append("status = ?")
+        where.append("d.status = ?")
         params.append(status_value)
     if since:
-        where.append("dispatched_at >= ?")
+        where.append("d.dispatched_at >= ?")
         params.append(since)
     if task_q:
-        where.append("task LIKE ?")
+        where.append("d.task LIKE ?")
         params.append(f"%{task_q}%")
     params.append(int(limit))
     params.append(max(int(offset), 0))
     query = (
-        f"SELECT * FROM assessment_dispatches WHERE {' AND '.join(where)} "
-        "ORDER BY dispatched_at DESC, id DESC LIMIT ? OFFSET ?"
+        f"{_DISPATCH_SELECT} WHERE {' AND '.join(where)} "
+        "ORDER BY d.dispatched_at DESC, d.id DESC LIMIT ? OFFSET ?"
     )
     with _common.get_connection() as connection:
         rows = connection.execute(query, tuple(params)).fetchall()
     return [_serialize_dispatch(row) for row in rows]
+
+def _dispatch_id_or_404(connection, engagement_id: int, agent_id: str) -> int:
+    row = connection.execute(
+        "SELECT id FROM assessment_dispatches WHERE engagement_id = ? AND agent_id = ?",
+        (engagement_id, agent_id),
+    ).fetchone()
+    if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"dispatch not found for agent_id={agent_id!r}",
+        )
+    return int(row["id"])
+
+def _next_client_binding_id(connection) -> int:
+    """The id the next appended binding will carry.
+
+    AUTOINCREMENT's own rule, read rather than waited for: the next rowid is one
+    past the high-water mark it keeps in ``sqlite_sequence``, which is never
+    rewound even by an engagement cascade. Valid only inside the write lock.
+    """
+    row = connection.execute(
+        """
+        SELECT MAX(
+            COALESCE((
+                SELECT seq FROM sqlite_sequence
+                WHERE name = 'assessment_dispatch_client_bindings'
+            ), 0),
+            COALESCE((SELECT MAX(id) FROM assessment_dispatch_client_bindings), 0)
+        ) + 1
+        """
+    ).fetchone()
+    return int(row[0])
+
+
+def _retire_current_binding(connection, *, current_id: int, successor_id: int) -> None:
+    """Stamp one current binding's successor, refusing a swap that matched nothing.
+
+    The append-only trigger permits exactly this update: NULL -> NOT NULL. Binding
+    it to `IS NULL` makes it a compare-and-swap, and a swap that matched no row
+    means this binding was already retired by someone else — so the bind is
+    refused rather than left to append a second current row.
+    """
+    cursor = connection.execute(
+        "UPDATE assessment_dispatch_client_bindings SET superseded_by_id = ? "
+        "WHERE id = ? AND superseded_by_id IS NULL",
+        (successor_id, current_id),
+    )
+    if cursor.rowcount != 1:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"client binding {current_id} was already superseded by a "
+                "concurrent bind; re-read the binding history and bind again"
+            ),
+        )
+
+
+def record_dispatch_client_binding(
+    engagement_id: int,
+    *,
+    agent_id: str,
+    asserted_client: str,
+    asserted_session_namespace: str,
+    asserted_client_handle: str,
+    note: str | None = None,
+    bound_at: str | None = None,
+) -> dict[str, Any]:
+    """Append one client binding to a dispatch and supersede the previous one.
+
+    Nothing is ever rewritten: a correction is a new version whose insert stamps
+    the prior current row's ``superseded_by_id``, so the record of what was bound
+    when survives the correction. Returns both halves of that transition —
+    ``{"binding": <new>, "superseded": <prior or None>}`` — because "which
+    binding did this replace" is the question a reader has next.
+    """
+    engagement = _engagement_or_404(engagement_id)
+    bound_value = bound_at or _common._utcnow_iso_dispatch()
+    note_value = (note or "").strip() or None
+    with _common.get_connection() as connection:
+        # Reading the current binding, deriving the next version and writing both
+        # halves of the transition is one decision, so it takes the write lock for
+        # the whole of it — the same serialization `adopt_queue_lease`,
+        # `reset_stale_queue_items` and the lead binders open. Unserialized, two
+        # binds that read the same current row each appended a row nothing had
+        # retired, and every dispatch read joins on `superseded_by_id IS NULL`.
+        connection.execute("BEGIN IMMEDIATE")
+        dispatch_id = _dispatch_id_or_404(connection, engagement.id, agent_id)
+        current = connection.execute(
+            "SELECT * FROM assessment_dispatch_client_bindings "
+            "WHERE dispatch_id = ? AND superseded_by_id IS NULL",
+            (dispatch_id,),
+        ).fetchone()
+        if current is not None and (
+            str(current["asserted_client"]) == asserted_client
+            and str(current["asserted_session_namespace"]) == asserted_session_namespace
+            and str(current["asserted_client_handle"]) == asserted_client_handle
+        ):
+            # Re-asserting the current binding carries no new information, and an
+            # identical extra version would bury the real corrections in the
+            # history this table exists to preserve.
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    f"dispatch {agent_id!r} is already bound to this client handle "
+                    f"at binding_version={int(current['binding_version'])}; bind a "
+                    "different client, namespace, or handle to supersede it"
+                ),
+            )
+        highest = connection.execute(
+            "SELECT MAX(binding_version) AS version "
+            "FROM assessment_dispatch_client_bindings WHERE dispatch_id = ?",
+            (dispatch_id,),
+        ).fetchone()
+        next_version = int(highest["version"] or 0) + 1
+        # `idx_dispatch_client_bindings_one_current` is checked per statement, so
+        # the predecessor has to be retired BEFORE the successor row exists —
+        # which means knowing the successor's id first. AUTOINCREMENT never reuses
+        # one and this transaction holds the only write lock, so the next id is
+        # knowable, and it is written explicitly rather than inferred afterwards.
+        binding_id = _next_client_binding_id(connection)
+        if current is not None:
+            # The forward reference is legal only until COMMIT, by which point
+            # the row it names exists. The pragma resets itself at that commit.
+            connection.execute("PRAGMA defer_foreign_keys = ON")
+            _retire_current_binding(
+                connection, current_id=int(current["id"]), successor_id=binding_id
+            )
+        try:
+            connection.execute(
+                """
+                INSERT INTO assessment_dispatch_client_bindings (
+                    id, engagement_id, dispatch_id, binding_version, superseded_by_id,
+                    asserted_client, asserted_session_namespace,
+                    asserted_client_handle, note, bound_at
+                ) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)
+                """,
+                (
+                    binding_id,
+                    engagement.id,
+                    dispatch_id,
+                    next_version,
+                    asserted_client,
+                    asserted_session_namespace,
+                    asserted_client_handle,
+                    note_value,
+                    bound_value,
+                ),
+            )
+        except sqlite3.IntegrityError as exc:
+            # UNIQUE(dispatch_id, binding_version): a concurrent bind already
+            # claimed this version. Re-read the history and bind again rather
+            # than guessing which of the two writers the operator meant.
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    f"a concurrent client binding already claimed version "
+                    f"{next_version} for dispatch {agent_id!r}; re-read "
+                    "the binding history and bind again"
+                ),
+            ) from exc
+        rows = connection.execute(
+            "SELECT * FROM assessment_dispatch_client_bindings "
+            "WHERE dispatch_id = ? AND id IN (?, ?)",
+            (dispatch_id, binding_id, int(current["id"]) if current else binding_id),
+        ).fetchall()
+    by_id = {
+        int(row["id"]): _serialize_client_binding(row, agent_id=agent_id)
+        for row in rows
+    }
+    return {
+        "binding": by_id[binding_id],
+        "superseded": by_id.get(int(current["id"])) if current is not None else None,
+    }
+
+def list_dispatch_client_bindings(
+    engagement_id: int, agent_id: str
+) -> list[dict[str, Any]]:
+    """Every client binding recorded for one dispatch, oldest version first."""
+    engagement = _engagement_or_404(engagement_id)
+    with _common.get_connection() as connection:
+        dispatch_id = _dispatch_id_or_404(connection, engagement.id, agent_id)
+        rows = connection.execute(
+            "SELECT * FROM assessment_dispatch_client_bindings "
+            "WHERE dispatch_id = ? ORDER BY binding_version ASC",
+            (dispatch_id,),
+        ).fetchall()
+    return [_serialize_client_binding(row, agent_id=agent_id) for row in rows]
 
 def _serialize_handoff(row) -> dict[str, Any]:
     data = dict(row)
@@ -619,28 +870,57 @@ def get_handoff(engagement_id: int, agent_id: str) -> dict[str, Any]:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="handoff not found")
     return _serialize_handoff(row)
 
+# Orderings `list_handoffs` accepts, keyed by its `sort` argument. `created`
+# is the arrival order, and stays the default so every existing caller is
+# unaffected. `checkpoint` ranks by the last checkpoint — the only timestamp
+# `update_handoff` moves, `created_at` being immutable — and exists because the
+# ordering has to happen BEFORE `limit` bites: a "most recently active handoffs"
+# window built by re-sorting a creation-limited page can never contain an
+# old-created row that just checkpointed, because the query already cut it.
+# `last_checkpoint_at` is nullable (it post-dates the table; the migration
+# backfills it from `created_at`), so COALESCE keeps a null row in creation
+# order instead of sinking it below every populated row. Both columns are
+# written as fixed-width second-precision `...Z` strings, so SQLite's BINARY
+# text ordering over them is the chronological one.
+_HANDOFF_SORTS = {
+    "created": "created_at DESC, id DESC",
+    "checkpoint": "COALESCE(last_checkpoint_at, created_at) DESC, id DESC",
+}
+
 def list_handoffs(
     engagement_id: int,
     *,
     role: str = "",
     since: str = "",
+    sort: str = "created",
     limit: int = 100,
     offset: int = 0,
 ) -> list[dict[str, Any]]:
     engagement = _engagement_or_404(engagement_id)
+    order_by = _HANDOFF_SORTS.get((sort or "created").strip().lower())
+    if order_by is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"invalid handoff sort: {sort} "
+                f"(expected one of {', '.join(sorted(_HANDOFF_SORTS))})"
+            ),
+        )
     where = ["engagement_id = ?"]
     params: list[Any] = [engagement.id]
     if role:
         where.append("agent_role = ?")
         params.append(role)
     if since:
+        # `since` is a creation-time window regardless of `sort` — it is the
+        # documented filter on the public read, so it keeps its own meaning.
         where.append("created_at >= ?")
         params.append(since)
     params.append(int(limit))
     params.append(max(int(offset), 0))
     query = (
         f"SELECT * FROM assessment_dispatch_handoffs WHERE {' AND '.join(where)} "
-        "ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?"
+        f"ORDER BY {order_by} LIMIT ? OFFSET ?"
     )
     with _common.get_connection() as connection:
         rows = connection.execute(query, tuple(params)).fetchall()

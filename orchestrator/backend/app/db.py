@@ -2205,6 +2205,7 @@ def _create_assessment_finding_tables(connection: sqlite3.Connection) -> None:
                 evidence_ref TEXT NOT NULL DEFAULT '',
                 status TEXT NOT NULL DEFAULT 'discovered',
                 followup_condition TEXT NOT NULL DEFAULT '',
+                framework_registration TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(engagement_id, surface_type, target_descriptor),
@@ -2212,14 +2213,17 @@ def _create_assessment_finding_tables(connection: sqlite3.Connection) -> None:
             )
             """
     )
-    # Additive migration for existing deployments that predate the
-    # ``partially-covered`` lifecycle state and its companion
-    # ``followup_condition`` column.
+    # Additive migrations for deployments that predate the ``partially-covered``
+    # lifecycle state (``followup_condition``) and the B5 architecture axis
+    # (``framework_registration``). Both default to empty, so an upgraded row
+    # means exactly what it meant before.
     surface_columns = _table_columns(connection, "assessment_surfaces")
-    if surface_columns and "followup_condition" not in surface_columns:
-        connection.execute(
-            "ALTER TABLE assessment_surfaces ADD COLUMN followup_condition TEXT NOT NULL DEFAULT ''"
-        )
+    for column_name in ("followup_condition", "framework_registration"):
+        if surface_columns and column_name not in surface_columns:
+            connection.execute(
+                f"ALTER TABLE assessment_surfaces ADD COLUMN {column_name} "
+                "TEXT NOT NULL DEFAULT ''"
+            )
     connection.execute(
         """
             CREATE TABLE IF NOT EXISTS assessment_findings (
@@ -3671,6 +3675,7 @@ def _create_code_analysis_tables(connection: sqlite3.Connection) -> None:
                 commit_hash TEXT NOT NULL DEFAULT '',
                 branch TEXT NOT NULL DEFAULT '',
                 analysis_status TEXT NOT NULL DEFAULT 'ingested',
+                repo_role TEXT NOT NULL DEFAULT 'analysis',
                 threat_model_json TEXT NOT NULL DEFAULT '{}',
                 git_churn_json TEXT NOT NULL DEFAULT '{}',
                 lsp_config_json TEXT NOT NULL DEFAULT '{}',
@@ -3831,6 +3836,7 @@ def _create_code_analysis_tables(connection: sqlite3.Connection) -> None:
                 lease_token TEXT NOT NULL DEFAULT '',
                 repo_generation INTEGER NOT NULL DEFAULT 0,
                 last_heartbeat_at TEXT,
+                adopted_leases_json TEXT NOT NULL DEFAULT '[]',
                 disposition TEXT NOT NULL DEFAULT '',
                 analysis_notes TEXT NOT NULL DEFAULT '',
                 skip_reason TEXT NOT NULL DEFAULT '',
@@ -4270,6 +4276,10 @@ def _apply_additive_migrations(connection: sqlite3.Connection) -> None:
         "threat_model_generation": "INTEGER",
         "pending_refresh_token": "TEXT NOT NULL DEFAULT ''",
         "pending_refresh_json": "TEXT NOT NULL DEFAULT '{}'",
+        # Every repository ingested before roles existed was ingested to be
+        # reviewed, so the column default backfills them to 'analysis' and the
+        # migration cannot change what an existing engagement's state means.
+        "repo_role": "TEXT NOT NULL DEFAULT 'analysis'",
     }.items():
         if repo_columns and col_name not in repo_columns:
             connection.execute(
@@ -4408,6 +4418,12 @@ def _apply_additive_migrations(connection: sqlite3.Connection) -> None:
         "lease_token": "TEXT NOT NULL DEFAULT ''",
         "repo_generation": "INTEGER NOT NULL DEFAULT 0",
         "last_heartbeat_at": "TEXT",
+        # B9: the lease identities an adopted attempt inherited, oldest first.
+        # Adoption hands a still-open attempt to a replacement agent instead of
+        # discarding what the dead lease recorded, so those identities stay
+        # valid authors of this attempt's receipts. '[]' for every row that was
+        # never adopted, which is why the owner-chain predicate is inert there.
+        "adopted_leases_json": "TEXT NOT NULL DEFAULT '[]'",
         "queue_mode": "TEXT NOT NULL DEFAULT 'initial'",
         "reanalysis_reason": "TEXT NOT NULL DEFAULT ''",
         "reanalysis_of_queue_item_id": "INTEGER",
@@ -4871,6 +4887,60 @@ def _create_intel_tables(connection: sqlite3.Connection) -> None:
     )
 
 
+def _create_code_lead_binding_table(connection: sqlite3.Connection) -> None:
+    """The seam between a tracked intel lead and the reviewed source.
+
+    Created after BOTH ``_create_code_analysis_tables`` and
+    ``_create_intel_tables`` because it is the only table whose parents span
+    the two subsystems. A lead stays one row in ``intel_notes`` — this table
+    adds *where to look*, never a second lead identity.
+
+    ``repo_generation`` + ``file_hash`` are what stop a line range from
+    silently drifting onto different code: a refresh that leaves the bytes
+    identical carries the binding forward, and any other refresh stamps it
+    superseded so the lines are re-read before they are trusted again.
+    """
+    connection.execute(
+        """
+            CREATE TABLE IF NOT EXISTS code_lead_bindings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                engagement_id INTEGER NOT NULL,
+                note_id INTEGER NOT NULL,
+                repo_id INTEGER NOT NULL,
+                file_id INTEGER NOT NULL,
+                repo_generation INTEGER NOT NULL,
+                file_path TEXT NOT NULL,
+                file_hash TEXT NOT NULL,
+                line_start INTEGER,
+                line_end INTEGER,
+                prior_art_ref TEXT NOT NULL DEFAULT '',
+                rationale TEXT NOT NULL DEFAULT '',
+                bound_by TEXT NOT NULL DEFAULT '',
+                unbound_at TEXT,
+                unbound_reason TEXT NOT NULL DEFAULT '',
+                source_superseded_at TEXT,
+                source_supersession_reason TEXT NOT NULL DEFAULT '',
+                replacement_repo_generation INTEGER,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(engagement_id, note_id, file_id),
+                FOREIGN KEY(engagement_id) REFERENCES engagements(id) ON DELETE CASCADE,
+                FOREIGN KEY(note_id) REFERENCES intel_notes(id) ON DELETE CASCADE,
+                FOREIGN KEY(repo_id) REFERENCES code_repos(id) ON DELETE CASCADE,
+                FOREIGN KEY(file_id) REFERENCES code_files(id) ON DELETE CASCADE
+            )
+            """
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_code_lead_bindings_engagement_repo "
+        "ON code_lead_bindings(engagement_id, repo_id)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_code_lead_bindings_note "
+        "ON code_lead_bindings(engagement_id, note_id)"
+    )
+
+
 def _create_activity_table(connection: sqlite3.Connection) -> None:
 
     # Activity log narrative table replaces the legacy `log.md` scratch
@@ -4905,6 +4975,45 @@ def _create_activity_table(connection: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_activity_entries_actor "
         "ON activity_entries(engagement_id, actor_kind, actor_name)"
     )
+
+
+def _retire_duplicate_current_client_bindings(
+    connection: sqlite3.Connection,
+) -> None:
+    """Collapse pre-existing fan-out before the uniqueness guard can be built.
+
+    A database written by the unserialized binder may already hold two rows with
+    a NULL ``superseded_by_id`` for one dispatch, which is the state the index
+    below refuses. The highest ``binding_version`` is the operator's latest
+    assertion and stays current; every earlier current row is retired *to* it,
+    which is the same NULL -> NOT NULL stamp the append-only trigger permits, so
+    nothing is rewritten or lost.
+    """
+    duplicates = connection.execute(
+        """
+        SELECT dispatch_id
+        FROM assessment_dispatch_client_bindings
+        WHERE superseded_by_id IS NULL
+        GROUP BY dispatch_id
+        HAVING COUNT(*) > 1
+        """
+    ).fetchall()
+    for (dispatch_id,) in duplicates:
+        survivor = connection.execute(
+            """
+            SELECT id FROM assessment_dispatch_client_bindings
+            WHERE dispatch_id = ? AND superseded_by_id IS NULL
+            ORDER BY binding_version DESC, id DESC LIMIT 1
+            """,
+            (dispatch_id,),
+        ).fetchone()
+        connection.execute(
+            """
+            UPDATE assessment_dispatch_client_bindings SET superseded_by_id = ?
+            WHERE dispatch_id = ? AND superseded_by_id IS NULL AND id != ?
+            """,
+            (int(survivor[0]), dispatch_id, int(survivor[0])),
+        )
 
 
 def _create_dispatch_tables(connection: sqlite3.Connection) -> None:
@@ -5054,6 +5163,105 @@ def _create_dispatch_tables(connection: sqlite3.Connection) -> None:
             """
     )
 
+    # Which live client session a dispatch is actually running as. `agent start`
+    # writes the dispatch row BEFORE the operator launches the client, so the
+    # handle does not exist yet and can never be a column on that row; it arrives
+    # post-launch through `agent bind-client-handle`.
+    #
+    # Every value here is CALLER-ASSERTED — the operator read the handle out of
+    # their client and typed it. Nothing attests it, which is why the columns say
+    # `asserted_` and why `provider_observed_handle` exists and stays 'unknown':
+    # the same closed-to-attestation shape `assessment_dispatches`
+    # `provider_observed_client` uses, so the absence of a measured handle is
+    # visible rather than merely missing.
+    #
+    # Storage is append-only: a correction is a NEW row (version N+1) that stamps
+    # the previous current row's `superseded_by_id`, matching the ledger idiom used
+    # by operator checkpoints, submission versions, and finding transitions.
+    # Overwriting the wrong handle in place would erase the record of what was
+    # bound when — and that record is the whole point of binding at all.
+    connection.execute(
+        """
+            CREATE TABLE IF NOT EXISTS assessment_dispatch_client_bindings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                engagement_id INTEGER NOT NULL REFERENCES engagements(id) ON DELETE CASCADE,
+                dispatch_id INTEGER NOT NULL
+                    REFERENCES assessment_dispatches(id) ON DELETE CASCADE,
+                binding_version INTEGER NOT NULL CHECK(binding_version >= 1),
+                superseded_by_id INTEGER
+                    REFERENCES assessment_dispatch_client_bindings(id),
+                asserted_client TEXT NOT NULL,
+                asserted_session_namespace TEXT NOT NULL,
+                asserted_client_handle TEXT NOT NULL,
+                provider_observed_handle TEXT NOT NULL DEFAULT 'unknown',
+                note TEXT,
+                bound_at TEXT NOT NULL,
+                UNIQUE(dispatch_id, binding_version)
+            )
+            """
+    )
+    _retire_duplicate_current_client_bindings(connection)
+    # UNIQUE, and partial on exactly the predicate every dispatch read joins on:
+    # one dispatch has at most one CURRENT binding. The append-only triggers below
+    # guard a row's content, and nothing guarded the count — so an unserialized
+    # bind that raced another could leave two rows with a NULL `superseded_by_id`
+    # and fan the dispatch itself out across `agent list`, `agent get` and the
+    # resume brief. It replaces the non-unique two-column index of the same shape.
+    connection.execute("DROP INDEX IF EXISTS idx_dispatch_client_bindings_current")
+    connection.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_dispatch_client_bindings_one_current "
+        "ON assessment_dispatch_client_bindings(dispatch_id) "
+        "WHERE superseded_by_id IS NULL"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_dispatch_client_bindings_engagement "
+        "ON assessment_dispatch_client_bindings(engagement_id, dispatch_id)"
+    )
+    # Append-only enforced in the schema, not only in the service: the ONLY
+    # permitted update is stamping a NULL `superseded_by_id`. Rewriting an
+    # already-superseded pointer, or editing any other column, is refused.
+    connection.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS assessment_dispatch_client_bindings_append_only_update
+        BEFORE UPDATE ON assessment_dispatch_client_bindings
+        WHEN NOT (
+            OLD.superseded_by_id IS NULL
+            AND NEW.superseded_by_id IS NOT NULL
+            AND NEW.id = OLD.id
+            AND NEW.engagement_id = OLD.engagement_id
+            AND NEW.dispatch_id = OLD.dispatch_id
+            AND NEW.binding_version = OLD.binding_version
+            AND NEW.asserted_client = OLD.asserted_client
+            AND NEW.asserted_session_namespace = OLD.asserted_session_namespace
+            AND NEW.asserted_client_handle = OLD.asserted_client_handle
+            AND NEW.provider_observed_handle = OLD.provider_observed_handle
+            -- ``IS``, not ``=``: `note` is NULL on most bindings, and
+            -- ``NULL = NULL`` is NULL, which would leave the guard unable to
+            -- decide and let the edit through.
+            AND NEW.note IS OLD.note
+            AND NEW.bound_at = OLD.bound_at
+        )
+        BEGIN
+            SELECT RAISE(
+                ABORT,
+                'dispatch client bindings are append-only; bind again to supersede instead of editing'
+            );
+        END
+        """
+    )
+    # The engagement-cascade carve-out mirrors the operator-checkpoint triggers:
+    # deleting the engagement still cascades, but nothing else may delete a row.
+    connection.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS assessment_dispatch_client_bindings_append_only_delete
+        BEFORE DELETE ON assessment_dispatch_client_bindings
+        WHEN EXISTS (SELECT 1 FROM engagements WHERE id = OLD.engagement_id)
+        BEGIN
+            SELECT RAISE(ABORT, 'dispatch client bindings are append-only');
+        END
+        """
+    )
+
     connection.execute(
         """
             CREATE TABLE IF NOT EXISTS assessment_dispatch_handoffs (
@@ -5127,6 +5335,126 @@ def _create_dispatch_tables(connection: sqlite3.Connection) -> None:
     connection.execute(
         "CREATE INDEX IF NOT EXISTS idx_decisions_engagement_kind "
         "ON assessment_dispatch_decisions(engagement_id, kind)"
+    )
+
+    # The operator's own durable checkpoint. Every dispatched specialist writes
+    # an ``assessment_dispatch_handoffs`` row; the operator wrote nothing, so its
+    # state died with the session. This table is that missing row — and it is
+    # deliberately built so it CANNOT hold a new factual claim about the target:
+    # every column except ``intent_note`` is a reference to a row the backend
+    # already holds (phases, finding slugs, dispatch agent ids, command-run ids,
+    # artifact ids), and both phases are server-derived at write time rather
+    # than caller-supplied. ``intent_note`` is the single free-text block and is
+    # rendered everywhere as UNVERIFIED operator intent, never as evidence.
+    #
+    # ``current_phase`` and ``code_phase`` are the two INDEPENDENT engagement
+    # tracks (``scope.json.current_phase`` / ``scope.json.code_phase``), not one
+    # value spelled two ways. ``code_phase`` is NULL for every engagement that
+    # has no code track, which is also what a row written before the column
+    # existed reads back as — honest in both cases, because neither has a
+    # code-track position to report.
+    #
+    # Storage is append-only: a correction is a NEW row (version N+1) that stamps
+    # the previous current row's ``superseded_by_id``, matching the ledger idiom
+    # used by submission versions, sent-reply versions, and finding transitions.
+    # Mutating a wrong entry in place would erase the wrong claim, which is
+    # itself state-truth loss; superseding keeps the correction visible.
+    #
+    # Why not ``assessment_dispatch_decisions``: its ``payload_json`` is
+    # unstructured, so a checkpoint written there could hold any assertion about
+    # the target as though verified, nothing validates that referenced ids exist,
+    # and it is a flat per-decision ledger with no single current row per
+    # engagement. This table is the opposite on all three axes by construction.
+    connection.execute(
+        """
+            CREATE TABLE IF NOT EXISTS assessment_operator_checkpoints (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                engagement_id INTEGER NOT NULL REFERENCES engagements(id) ON DELETE CASCADE,
+                checkpoint_version INTEGER NOT NULL CHECK(checkpoint_version >= 1),
+                superseded_by_id INTEGER REFERENCES assessment_operator_checkpoints(id),
+                current_phase TEXT NOT NULL,
+                code_phase TEXT,
+                finding_slugs_json TEXT NOT NULL DEFAULT '[]',
+                dispatch_agent_ids_json TEXT NOT NULL DEFAULT '[]',
+                command_run_ids_json TEXT NOT NULL DEFAULT '[]',
+                artifact_ids_json TEXT NOT NULL DEFAULT '[]',
+                intent_note TEXT NOT NULL,
+                source TEXT NOT NULL,
+                client_name TEXT NOT NULL DEFAULT 'unknown',
+                created_at TEXT NOT NULL,
+                UNIQUE(engagement_id, checkpoint_version)
+            )
+            """
+    )
+    # Additive migration for deployments whose table predates the code track.
+    # Nullable with no default, so every existing row keeps its web phase and
+    # reports no code-track position rather than inheriting a fabricated one.
+    # The append-only trigger enumerates every column, so a body written before
+    # ``code_phase`` existed cannot guard it; drop the stale trigger here and
+    # let the CREATE TRIGGER below rebuild it against the current column set
+    # (the same drop-on-shape-change guard the command-run FTS triggers use).
+    checkpoint_columns = _table_columns(connection, "assessment_operator_checkpoints")
+    if checkpoint_columns and "code_phase" not in checkpoint_columns:
+        connection.execute(
+            "ALTER TABLE assessment_operator_checkpoints ADD COLUMN code_phase TEXT"
+        )
+        connection.execute(
+            "DROP TRIGGER IF EXISTS assessment_operator_checkpoints_append_only_update"
+        )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_operator_checkpoints_engagement_current "
+        "ON assessment_operator_checkpoints(engagement_id, superseded_by_id)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_operator_checkpoints_engagement_version "
+        "ON assessment_operator_checkpoints(engagement_id, checkpoint_version DESC)"
+    )
+    # Append-only enforced in the schema, not only in the service: the ONLY
+    # permitted update is stamping a NULL ``superseded_by_id``. Rewriting an
+    # already-superseded pointer, or editing any other column, is refused.
+    connection.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS assessment_operator_checkpoints_append_only_update
+        BEFORE UPDATE ON assessment_operator_checkpoints
+        WHEN NOT (
+            OLD.superseded_by_id IS NULL
+            AND NEW.superseded_by_id IS NOT NULL
+            AND NEW.id = OLD.id
+            AND NEW.engagement_id = OLD.engagement_id
+            AND NEW.checkpoint_version = OLD.checkpoint_version
+            AND NEW.current_phase = OLD.current_phase
+            -- ``IS``, not ``=``: ``code_phase`` is NULL on every single-track
+            -- and every pre-migration row, and ``NULL = NULL`` is NULL, which
+            -- would leave the guard unable to decide and let the edit through.
+            AND NEW.code_phase IS OLD.code_phase
+            AND NEW.finding_slugs_json = OLD.finding_slugs_json
+            AND NEW.dispatch_agent_ids_json = OLD.dispatch_agent_ids_json
+            AND NEW.command_run_ids_json = OLD.command_run_ids_json
+            AND NEW.artifact_ids_json = OLD.artifact_ids_json
+            AND NEW.intent_note = OLD.intent_note
+            AND NEW.source = OLD.source
+            AND NEW.client_name = OLD.client_name
+            AND NEW.created_at = OLD.created_at
+        )
+        BEGIN
+            SELECT RAISE(
+                ABORT,
+                'operator checkpoints are append-only; record a new checkpoint instead of editing one'
+            );
+        END
+        """
+    )
+    # The engagement-cascade carve-out mirrors the sent-reply-version triggers:
+    # deleting the engagement still cascades, but nothing else may delete a row.
+    connection.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS assessment_operator_checkpoints_append_only_delete
+        BEFORE DELETE ON assessment_operator_checkpoints
+        WHEN EXISTS (SELECT 1 FROM engagements WHERE id = OLD.engagement_id)
+        BEGIN
+            SELECT RAISE(ABORT, 'operator checkpoints are append-only');
+        END
+        """
     )
 
 
@@ -6241,6 +6569,7 @@ def init_db() -> None:
                 raise
         _create_post_migration_indexes(connection)
         _create_intel_tables(connection)
+        _create_code_lead_binding_table(connection)
         _create_activity_table(connection)
         _create_dispatch_tables(connection)
         if run_accounting_backup is not None:

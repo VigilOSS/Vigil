@@ -96,9 +96,9 @@ For each finding under review:
    second independent payload — but whose byte-by-byte data extraction is unfinished (rate-limited,
    slow, partial) — is a real injection primitive: route it to the theoretical holding area
    (`evidence_type=theoretical` + `details.chain_required=true`, verify `pending_runtime_proof`,
-   record the extraction as `details.required_followup`), NOT a kill. It stays out of
-   report-readiness until an exploit-developer runtime pass completes the extraction and re-verifies
-   it `confirmed`/`downgraded`. This is the disposition that keeps blind injections — the class most
+   record the extraction as `details.required_followup`), NOT a kill. It stays out of the report and
+   BLOCKS report-readiness until an exploit-developer runtime pass completes the extraction and
+   re-verifies it `confirmed`/`downgraded`. This is the disposition that keeps blind injections — the class most
    dependent on slow extraction — from being silently dropped at the gate.
 4. **Run the C1–C7 FP & severity gate** (above) on any debate-skipped runtime-proven finding.
 5. **Recompute the CVSS vector** from the reproduced impact; correct `cvss_vector` / `cvss_score`

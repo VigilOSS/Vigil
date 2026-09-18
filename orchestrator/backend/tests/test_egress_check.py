@@ -219,7 +219,10 @@ def test_artifact_write_response_must_identify_registered_probe(monkeypatch, tmp
     with pytest.raises(Exception, match="canonical artifact") as exc_info:
         mod.run(_args(tmp_path))
 
-    assert "write may have committed" in str(exc_info.value)
+    # The response named our canonical path and then failed to name a row, so the
+    # write is KNOWN to have landed — reporting only "may have committed" is what
+    # makes a duplicate retry look reasonable. Either way it stays non-retryable.
+    assert "committed but response invalid" in str(exc_info.value)
     assert "do not retry automatically" in str(exc_info.value)
     assert "decision" not in recorded
 

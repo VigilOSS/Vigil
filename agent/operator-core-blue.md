@@ -1,4 +1,4 @@
-[operator] Vigil (blue) ready. Ensure 'vigil runtime start' is running. Use 'vigil blue customers' to confirm the tenant ref, then 'vigil blue engage --customer <slug> --platform <p>', cd into the printed engagement directory, start Codex/Claude, and paste the alert into this operator chat.
+[operator] Vigil (blue) ready. Ensure 'vigil runtime start' is running. Use 'vigil blue customers' to confirm the tenant ref, then 'vigil blue engage --customer <slug> --platform <p>', start the client with 'vigil engagement start <key> --client codex' (or claude), and paste the alert into this operator chat.
 
 ## Activation
 
@@ -635,5 +635,9 @@ gated on severity ≥ high) / L4→operator (proposal table) / operator→L4 (ap
 
 Every blue specialist loads `agent/shared-constraints-blue.md` before its
 role-specific skill. It hoists: authorization scope, read-only default,
-artifact-index chain of custody, UTC, 30-day look-back, `host-exec` audit
-pipeline, scope, confidence labels, resume hydration.
+artifact-index chain of custody, `host-exec` audit pipeline, scope,
+confidence labels.
+
+`agent/rules/triage.md` owns UTC (§7) and the 30-day look-back (§6);
+`agent/rules/resume.md` owns resume hydration. Every blue specialist loads both
+as always-active rules.

@@ -13,19 +13,6 @@ languages: C/C++, Python, JS
 
 ---
 
-## Baseline Patterns (Single-Function / Single-Scope)
-
-Toolchain-catchable patterns. Record as findings if encountered during orientation —
-on unaudited codebases these are real, exploitable bugs that no prior tool run has caught.
-Invest primary analysis time in the LLM-advantage patterns below.
-
-- `printf(user_input)` — direct user data as format string
-- `fprintf(fp, user_buf)` — same pattern with file pointer
-- `syslog(priority, user_input)` — direct syslog format control
-- Any single-function case where a taint-tracked variable is the first arg to a printf-family function
-
----
-
 ## What You're Hunting (LLM-Advantage Patterns)
 
 ### 1. Format Strings Constructed Across Functions
@@ -260,9 +247,12 @@ function in a separate module received the raw filename and used it directly as 
 format string. Format specifiers embedded in the filename caused memory corruption,
 enabling arbitrary code execution.
 
-### CVE-2018-16842 (cURL — format string in warning message)
-The `curl` command-line tool's warning message construction used user-supplied URL
-data in a context where it was eventually passed as a format string to a vfprintf-like
-function. The URL was processed through multiple transformation functions before
-reaching the format-string-consuming function, so no single-function taint analysis
-identified the flow.
+### CVE-2012-0809 (sudo — program name as format string in the debug path)
+sudo's `sudo_debug()` used the program name as part of the format string it passed to
+`fprintf()`. The program name is `argv[0]`, which the caller sets — directly, or by
+invoking sudo through a symlink — so format specifiers in it were interpreted rather
+than printed. The taint enters at process start and travels through sudo's debug
+plumbing to a printf-family call in another function, which is why no call-site review
+of `fprintf()` would show a user-controlled format. Exploitation does not require the
+attacker to appear in sudoers, and yields root. Affected sudo 1.8.0 through 1.8.3p1;
+fixed in 1.8.3p2.

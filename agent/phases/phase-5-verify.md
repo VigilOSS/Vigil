@@ -1,6 +1,6 @@
 # Phase 5 — Verify Findings
 
-**Read-on-phase-entry.** When you ENTER Phase 5, Read this doc; re-read it on a method re-anchor. It carries the adversarial review-mode dispatch, the triage-scope rule, the disposition set (confirmed / upgraded / downgraded / killed), the dedup + chain-primitive passes, the exit gate, and the `transition-phase exploit` checkpoint. The Mandatory Phase-Exit variant/sibling pass (Verify → Exploit) and the Phase-Exit Review Dispatches table stay in `AGENTS.md`. Cross-phase machinery stays in `AGENTS.md`.
+**Read-on-phase-entry.** When you ENTER Phase 5, Read this doc; re-read it on a method re-anchor. It carries the adversarial review-mode dispatch, the triage-scope rule, the disposition set (confirmed / upgraded / downgraded / killed / runtime-proof-owed), the dedup + chain-primitive passes, the exit gate, and the `transition-phase exploit` checkpoint. The Mandatory Phase-Exit variant/sibling pass (Verify → Exploit) and the Phase-Exit Review Dispatches table stay in `AGENTS.md`. Cross-phase machinery stays in `AGENTS.md`.
 
 5. **VERIFY FINDINGS** → adversarial review of Phase 4 findings before investing in exploitation. This catches false positives, severity inflation, and weak evidence early — fixing a finding after exploitation wastes far more tokens than catching it here.
    a. Fetch all active findings: `vigil assess fetch findings`
@@ -22,6 +22,7 @@
       - **Upgraded** (`UPGRADE`) → `vigil assess finding update <slug> --severity <higher> --reason "severity upgrade: ..."` then `vigil assess finding verify <slug> --status confirmed --reason "..." --proof-receipt-id <id>`
       - **Downgraded** (`DOWNGRADE`) → `vigil assess finding verify <slug> --status downgraded --reason "..." --new-severity <lower> --proof-receipt-id <id>`
       - **Killed** (`KILL`) → `vigil assess finding verify <slug> --status false_positive --reason "..." --counter-check-file <counter-check.json>`
+      - **Runtime proof owed** (source/static evidence holds, the live PoC has not been run — typically a code-track finding whose `canonical_location` is `file:`) → `vigil assess finding verify <slug> --status pending_runtime_proof --reason "..."`. This is the handoff into Phase 6, not a park-and-forget: the finding keeps its source location, stays out of exploit-candidates, and blocks report-readiness until a runtime pass re-verifies it `confirmed`/`downgraded`. Phase 6 reads the queue from `vigil assess exploit review`.
    e. **Dedup pass**: check for findings with overlapping `canonical_location` and similar `defect_family` across different agent prefixes. Merge the weaker into the stronger:
       `vigil assess finding merge <source-slug> <target-slug> "<reason>"`
    f. **Chain-only primitives stay in the normal finding table**: when a finding is real only as part of a proved or expected escalation path, update it with `vigil assess finding update <slug> ...` so `details.chain_required`, `details.chain_rationale`, and `details.required_followup` are populated. Do not invent a chain-specific workflow status.

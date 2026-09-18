@@ -1,7 +1,7 @@
 ---
 description: void* casts, union abuse, tagged union errors, inheritance downcasts
 skill: code-vulnerability-analysis, code-variant-analysis
-languages: C/C++, Python, JS
+languages: C/C++, Python, JS, Go
 ---
 
 # Type Confusion — Cross-Boundary Type Misinterpretation
@@ -10,20 +10,6 @@ languages: C/C++, Python, JS
 > data access happen in different functions, different modules, or across serialization
 > boundaries. These require reasoning about how type information is lost, reinterpreted,
 > or assumed across call chains and data formats.
-
----
-
-## Baseline Patterns (Single-Function / Single-Scope)
-
-Toolchain-catchable patterns. Record as findings if encountered during orientation —
-on unaudited codebases these are real, exploitable bugs that no prior tool run has caught.
-Invest primary analysis time in the LLM-advantage patterns below.
-
-- Explicit `reinterpret_cast` between obviously incompatible pointer types in same function
-- Simple C-style cast from `float*` to `int*` with immediate dereference
-- Downcasting without `dynamic_cast` where both types are visible in the same TU
-- TypeScript strict-mode type violations at compile time
-- Basic format-string type mismatches (`%d` with a pointer)
 
 ---
 
@@ -270,6 +256,18 @@ const evil = { [Symbol.toPrimitive](hint) {
     if (hint === 'string') return 'admin';  // but stringifies as admin
 }};
 ```
+
+---
+
+## Go Specific Patterns
+
+### unsafe.Pointer Conversions
+`unsafe.Pointer` is Go's `void*`: the one construct that suspends the type and memory
+safety the rest of the language guarantees. A round trip through it — or through
+`reflect.SliceHeader`/`reflect.StringHeader` — reinterprets one type's bytes as another,
+so a length or element size that no longer matches is an out-of-bounds access with no
+runtime check to catch it. Treat every `unsafe.Pointer` as a cast whose destination type
+must be justified at the use site, not at the conversion.
 
 ---
 

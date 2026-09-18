@@ -526,6 +526,41 @@ def test_run_dispatch_listing_includes_producer_and_linked_reader(
     assert records[1]["instructions_stale"] is False
 
 
+def test_run_dispatch_listing_carries_the_current_client_binding(
+    client, isolate_settings
+) -> None:
+    """One dispatch projection, or the operator reads two different dispatches.
+
+    This listing builds an operator-facing dispatch record, so it goes through
+    `_DISPATCH_SELECT` like every other dispatch read — otherwise a run's
+    specialists all report as unbound while `agent list` shows them bound, and
+    the retired legacy columns leak back out here alone.
+    """
+    _seed(client, isolate_settings)
+    run = _create_scan(client, run_uuid="bound-dispatches")
+    bound = client.post(
+        f"{BASE}/dispatches/HUNT-RUN-1/client-bindings",
+        json={
+            "asserted_client": "codex",
+            "asserted_session_namespace": "/Users/op/vigil/engagements/acme",
+            "asserted_client_handle": "conv_9c02",
+        },
+    )
+    assert bound.status_code == 201, bound.text
+
+    records = client.get(
+        f"{BASE}/assessment-runs/{run['id']}/dispatches?limit=20&offset=0"
+    )
+    assert records.status_code == 200, records.text
+    row = next(
+        item for item in records.json()["items"] if item["agent_id"] == "HUNT-RUN-1"
+    )
+    assert row["client_binding_count"] == 1
+    assert row["client_binding"]["asserted_client_handle"] == "conv_9c02"
+    assert row["client_binding"]["binding_version"] == 1
+    assert "model" not in row and "reasoning" not in row
+
+
 def test_scan_lifecycle_inventory_reads_and_parser_debt_are_durable(
     client, isolate_settings
 ) -> None:

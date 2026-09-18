@@ -29,6 +29,7 @@ from .state_manager.findings import (
     load_code_repo_snapshot_states,
 )
 from .state_manager import run_accounting
+from .state_manager._common import LEAD_OPEN_STATUSES
 from .variant_scopes import (
     MAX_VARIANT_PARENT_FINDINGS,
     VARIANT_DISPATCH_ROLE as _VARIANT_DISPATCH_ROLE,
@@ -38,9 +39,47 @@ from .variant_scopes import (
 STRUCTURAL_INPUT_IDENTITY_SCHEMA = "structural-input-identity/v1"
 STRUCTURAL_INDEX_SCHEMA = "structural-index/v6"
 STRUCTURAL_CALLABLE_IDENTITY_SCHEMA = "structural-callable/v1"
+# Dimensions the exact parser can only read inside a callable. When the index
+# declares one of them unavailable, the sink and call-site detectors returned
+# nothing over source they did not fully read, so the file owes the same
+# coverage proof as one with no function registry at all. A cross-tree mirror:
+# the single source of truth is `FUNCTION_SCOPED_DIMENSIONS` in
+# `agent/scripts/assess/lib/treesitter_index.py`, produced there by
+# `_unscanned_scope_dimensions`, and the backend mirrors the agent tree rather
+# than importing from it (CODE-MAP.md). Keep the two lists identical.
+FUNCTION_SCOPED_STRUCTURAL_DIMENSIONS = frozenset(
+    {"call_sites", "dataflow", "security_sinks"}
+)
 VARIANT_INPUT_IDENTITY_SCHEMA = "variant-input-identity/v1"
 MAX_VARIANT_RECEIPT_PAGE = 500
 DEFAULT_VARIANT_RECEIPT_PAGE = 100
+# Adoption preserves a queue attempt across owners, and every preserved owner is
+# walked by the readiness and coverage queries. A row abandoned this often is not
+# making progress worth preserving, so the chain is bounded rather than endless.
+MAX_ADOPTED_LEASE_CHAIN = 50
+# Per-item progress renders a capped receipt list beside the true total.
+MAX_PROGRESS_RECEIPTS = 200
+# Open-lease worklists follow the capped-list + absolute-count pattern.
+MAX_OPEN_LEASE_ROWS = 25
+
+# B8: the repository role is the obligation axis, orthogonal to snapshot
+# identity and generation. An `analysis` repository is the reviewed subject —
+# every admitted file owes a queue row, a terminal accounting receipt, variant
+# coverage and phase readiness. A `reference` repository is host or framework
+# source loaded purely so a specialist can resolve a symbol and cite it: it
+# stays sealed, indexed, searchable and citable with the same structured source
+# identity, and simply never creates work. Reviewing a plugin must not silently
+# buy coverage over the framework it plugs into.
+ANALYSIS_REPO_ROLE = "analysis"
+REFERENCE_REPO_ROLE = "reference"
+CODE_REPO_ROLES: tuple[str, ...] = (ANALYSIS_REPO_ROLE, REFERENCE_REPO_ROLE)
+# B2: plain-string projection of the canonical lead-disposition StrEnum set for
+# SQL binding. The vocabulary itself stays owned by ``state_manager._common``;
+# this is a rendering of it, never a second list.
+_LEAD_OPEN_STATUS_VALUES: tuple[str, ...] = tuple(
+    sorted(str(value) for value in LEAD_OPEN_STATUSES)
+)
+_LEAD_OPEN_STATUS_PLACEHOLDERS = ",".join("?" for _ in _LEAD_OPEN_STATUS_VALUES)
 _REPORTABLE_FINDING_STATUSES = frozenset(
     {
         "active",
@@ -52,12 +91,21 @@ _REPORTABLE_FINDING_STATUSES = frozenset(
         "reported",
     }
 )
+# Mirrors `agent/scripts/assess/lib/code_languages.py:CANONICAL_CODE_LANGUAGES`,
+# plus spelling aliases the agent never emits (`c++`). It must be a SUPERSET of
+# what ingest can detect: `canonical_structural_language` runs over every file in
+# a repository from `structural_input_identity_digest`, so one file in a language
+# missing here 400s `code-index sync` for the whole repository. Guarded by
+# `orchestrator/backend/tests/test_structural_language_drift.py`.
 _CANONICAL_STRUCTURAL_LANGUAGES = frozenset(
     {
         "",
+        "blade",
         "c",
         "c++",
         "cpp",
+        "freemarker",
+        "powershell",
         "python",
         "javascript",
         "typescript",
@@ -862,29 +910,38 @@ def _normalize_analysis_receipt_anchors(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="reviewed span must fall within the sealed file",
             )
-        function_dimension_incomplete = (
+        unavailable_dimensions = set(
+            _json_decode(
+                file_rows[file_id].get("structural_unavailable_dimensions_json"), []
+            )
+        )
+        if (
             str(file_rows[file_id].get("structural_analysis_status") or "")
             == "unsupported"
             or "functions"
             in {
-                *_json_decode(
-                    file_rows[file_id].get("structural_unavailable_dimensions_json"),
-                    [],
-                ),
+                *unavailable_dimensions,
                 *_json_decode(
                     file_rows[file_id].get("structural_truncated_dimensions_json"),
                     [],
                 ),
             }
-        )
-        if function_dimension_incomplete and (
+        ):
+            incomplete_reason = "function registry is incomplete"
+        elif unavailable_dimensions & FUNCTION_SCOPED_STRUCTURAL_DIMENSIONS:
+            # A partial span has nothing to be read against here: the index
+            # never scanned a line of this file for callables or sinks.
+            incomplete_reason = "index scanned no function scope"
+        else:
+            incomplete_reason = ""
+        if incomplete_reason and (
             start_line != 1 or end_line != int(file_rows[file_id]["loc"])
         ):
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail=(
                     "reviewed spans require whole-file coverage while the structural "
-                    "function registry is incomplete"
+                    f"{incomplete_reason}"
                 ),
             )
         identity = (file_id, start_line, end_line, label)
@@ -1457,15 +1514,126 @@ def _valid_claimed_terminal_attempt_sql(queue_alias: str) -> str:
     """
 
 
+def _lease_activity_sql(queue_alias: str) -> str:
+    """The one expression that says when a lease last proved it was alive.
+
+    `reset-stale`, the queue listing's heartbeat age and `--stale-minutes`
+    filter, and lease adoption all measure abandonment from here, so the same
+    window always means the same thing across them. (The two recovery verbs
+    then apply their own canonical-attempt guards on top.) `consumed_at` is the
+    fallback because a lease claimed but not yet heartbeated has proven life
+    once.
+    """
+    return f"COALESCE({queue_alias}.last_heartbeat_at, {queue_alias}.consumed_at)"
+
+
+def _lease_activity_age_seconds_sql(queue_alias: str) -> str:
+    """Age of that proof of life in whole seconds, on the database clock.
+
+    The comparison has to use the same clock the stored timestamps came from —
+    a caller's wall clock would drift against the SQLite `datetime('now')` that
+    `reset-stale` selects with. NULL for a row that never held a lease.
+    """
+    return (
+        "CAST(ROUND((julianday('now') - julianday("
+        f"{_lease_activity_sql(queue_alias)})) * 86400.0) AS INTEGER)"
+    )
+
+
+def _attempt_owned_result_sql(
+    queue_alias: str,
+    result_alias: str,
+    *,
+    match_author: bool,
+) -> str:
+    """True when a result row belongs to an owner of this queue attempt.
+
+    Ordinarily that owner is the row's current lease. Adoption transfers a
+    still-open attempt to a replacement agent *without* discarding the receipts
+    the dead lease already wrote, so every adopted lease stays an owner of this
+    attempt's receipts — otherwise preserving them would be pointless, since
+    coverage, readiness and closeout all match receipts to the queue lease.
+    `adopted_leases_json` is '[]' on every row that was never adopted, which
+    makes the second branch inert there.
+
+    `match_author` additionally requires the receipt's `agent_name` to be the
+    agent that held the matched lease. Callers that already demanded an
+    attributable author pass True; callers that only ever matched the lease
+    token pass False, so neither gains a requirement it did not have.
+    """
+    author_clause = (
+        f"\n                AND {result_alias}.agent_name = {queue_alias}.assigned_agent"
+        if match_author
+        else ""
+    )
+    adopted_author_clause = (
+        "\n                      AND json_extract(adopted_lease.value, '$.agent_name')"
+        f"\n                          = {result_alias}.agent_name"
+        if match_author
+        else ""
+    )
+    return f"""
+        (
+            (
+                {result_alias}.lease_token = {queue_alias}.lease_token{author_clause}
+            )
+            OR (
+                json_valid({queue_alias}.adopted_leases_json)
+                AND EXISTS (
+                    SELECT 1
+                    FROM json_each({queue_alias}.adopted_leases_json) AS adopted_lease
+                    WHERE json_extract(adopted_lease.value, '$.lease_token')
+                          = {result_alias}.lease_token{adopted_author_clause}
+                )
+            )
+        )
+    """
+
+
+def _current_attempt_result_count_sql(queue_alias: str) -> str:
+    """Count the receipts this attempt currently carries.
+
+    Exactly the rows `reset-stale` would supersede, so the number answers the
+    question that decides between recovering an abandoned lease and discarding
+    it: how much durable work is stranded in this row.
+    """
+    return f"""
+        SELECT COUNT(*)
+        FROM code_analysis_results AS attempt_result
+        WHERE attempt_result.engagement_id = {queue_alias}.engagement_id
+          AND attempt_result.queue_item_id = {queue_alias}.id
+          AND attempt_result.superseded_at IS NULL
+          AND ({_result_not_replaced_sql("attempt_result")})
+    """
+
+
+def _attempt_lease_tokens(queue_row: dict[str, Any]) -> list[str]:
+    """The lease tokens whose receipts belong to this attempt, current first.
+
+    The Python-side counterpart of :func:`_attempt_owned_result_sql`, for the
+    closeout queries that bind an explicit token list. A row that was never
+    adopted yields exactly its own token, so those checks are unchanged for it.
+    """
+    tokens = [str(queue_row.get("lease_token") or "")]
+    for entry in _json_decode(queue_row.get("adopted_leases_json"), []):
+        if not isinstance(entry, dict):
+            continue
+        token = str(entry.get("lease_token") or "")
+        if token and token not in tokens:
+            tokens.append(token)
+    return tokens
+
+
 def _valid_claimed_result_receipt_sql(
     queue_alias: str,
     result_alias: str,
 ) -> str:
     return f"""
         trim({result_alias}.agent_name) != ''
-        AND {result_alias}.agent_name = {queue_alias}.assigned_agent
         AND trim({result_alias}.lease_token) != ''
-        AND {result_alias}.lease_token = {queue_alias}.lease_token
+        AND ({_attempt_owned_result_sql(
+            queue_alias, result_alias, match_author=True
+        )})
         AND trim({result_alias}.result_fingerprint) != ''
         AND {result_alias}.receipt_binding_status NOT IN (
             'legacy_ambiguous', 'legacy_missing', 'legacy_unbound'
@@ -1514,7 +1682,6 @@ def _successful_terminal_review_row_sql(
                     WHERE contradictory_result.engagement_id = {queue_alias}.engagement_id
                       AND contradictory_result.queue_item_id = {queue_alias}.id
                       AND contradictory_result.file_id = {queue_alias}.file_id
-                      AND contradictory_result.lease_token = {queue_alias}.lease_token
                       AND contradictory_result.repo_generation = {queue_alias}.repo_generation
                       AND contradictory_result.disposition IN ('finding', 'suspicious')
                       AND ({result_is_current("contradictory_result")})
@@ -1531,7 +1698,6 @@ def _successful_terminal_review_row_sql(
                     WHERE completed_result.engagement_id = {queue_alias}.engagement_id
                       AND completed_result.queue_item_id = {queue_alias}.id
                       AND completed_result.file_id = {queue_alias}.file_id
-                      AND completed_result.lease_token = {queue_alias}.lease_token
                       AND completed_result.repo_generation = {queue_alias}.repo_generation
                       AND completed_result.disposition = {queue_alias}.disposition
                       AND ({result_is_current("completed_result")})
@@ -1558,7 +1724,6 @@ def _successful_terminal_review_row_sql(
                     WHERE contradictory_result.engagement_id = {queue_alias}.engagement_id
                       AND contradictory_result.queue_item_id = {queue_alias}.id
                       AND contradictory_result.file_id = {queue_alias}.file_id
-                      AND contradictory_result.lease_token = {queue_alias}.lease_token
                       AND contradictory_result.repo_generation = {queue_alias}.repo_generation
                       AND contradictory_result.disposition IN ('finding', 'suspicious')
                       AND contradictory_result.disposition != {queue_alias}.disposition
@@ -1582,7 +1747,6 @@ def _successful_terminal_review_row_sql(
                 WHERE source_receipt.engagement_id = {queue_alias}.engagement_id
                   AND source_receipt.queue_item_id = {queue_alias}.id
                   AND source_receipt.file_id = {queue_alias}.file_id
-                  AND source_receipt.lease_token = {queue_alias}.lease_token
                   AND source_receipt.repo_generation = {queue_alias}.repo_generation
                   AND source_receipt.disposition = {queue_alias}.disposition
                   AND ({result_is_current("source_receipt")})
@@ -1689,7 +1853,9 @@ def _current_result_receipt_sql(
         AND {result_alias}.engagement_id = {queue_alias}.engagement_id
         AND {result_alias}.queue_item_id = {queue_alias}.id
         AND {result_alias}.file_id = {queue_alias}.file_id
-        AND {result_alias}.lease_token = {queue_alias}.lease_token
+        AND ({_attempt_owned_result_sql(
+            queue_alias, result_alias, match_author=False
+        )})
         AND {result_alias}.repo_generation = {queue_alias}.repo_generation
         AND {queue_alias}.source_superseded_at IS NULL
         AND {queue_alias}.file_id = {files_alias}.id
@@ -1702,6 +1868,25 @@ def _current_result_receipt_sql(
         AND ({_no_superseded_active_attempt_sql(queue_alias, repos_alias)})
         AND ({status_clause})
     """
+
+
+def _analysis_repo_sql(repos_alias: str) -> str:
+    """Restrict an already-joined ``code_repos`` alias to obligation-owning repos."""
+    return f"{repos_alias}.repo_role = '{ANALYSIS_REPO_ROLE}'"
+
+
+def _analysis_repo_files_sql(files_alias: str) -> str:
+    """Restrict a ``code_files`` alias to files that carry review obligations.
+
+    For queries that never join ``code_repos`` and would otherwise have to grow
+    one just to read the role.
+    """
+    return (
+        f"{files_alias}.repo_id IN ("
+        "SELECT id FROM code_repos"
+        f" WHERE engagement_id = {files_alias}.engagement_id"
+        f" AND {_analysis_repo_sql('code_repos')})"
+    )
 
 
 def _current_terminal_review_exists_sql(*, allow_accounted_skip: bool) -> str:
@@ -1776,6 +1961,7 @@ def _current_suspicious_analysis_counts(
               ON semantic_repo.id = files.repo_id
              AND semantic_repo.engagement_id = files.engagement_id
              AND semantic_repo.active_generation > 0
+             AND {_analysis_repo_sql("semantic_repo")}
             WHERE semantic_attempt.engagement_id = ?
               AND semantic_attempt.repo_generation = semantic_repo.active_generation
               AND semantic_attempt.source_superseded_at IS NULL
@@ -2372,6 +2558,14 @@ def _record_source_generation(
         ),
     )
     if not staged_paths:
+        _rebase_lead_bindings(
+            connection,
+            engagement_id=engagement_id,
+            repo_id=repo_id,
+            previous_generation=previous_generation,
+            repo_generation=repo_generation,
+            promoted_at=promoted_at,
+        )
         return
     placeholders = ",".join("?" for _ in staged_paths)
     file_rows = connection.execute(
@@ -2415,6 +2609,78 @@ def _record_source_generation(
             )
             for row in file_rows
         ],
+    )
+    _rebase_lead_bindings(
+        connection,
+        engagement_id=engagement_id,
+        repo_id=repo_id,
+        previous_generation=previous_generation,
+        repo_generation=repo_generation,
+        promoted_at=promoted_at,
+    )
+
+
+def _rebase_lead_bindings(
+    connection,
+    *,
+    engagement_id: int,
+    repo_id: int,
+    previous_generation: int,
+    repo_generation: int,
+    promoted_at: str,
+) -> None:
+    """Carry a lead's file/line binding across a generation, or stale it.
+
+    A binding is a pointer into specific bytes. When the new generation holds
+    that exact file content, the pointer is still exactly right and moves
+    forward untouched; when the content changed — or the file left the
+    repository — the line numbers become a guess, so the row is stamped
+    superseded and has to be re-read and re-bound before it is trusted again.
+    Unlike a queue row, it is never discharged: the lead keeps owing an answer
+    either way (see ``_unresolved_code_lead_rows``).
+    """
+    if previous_generation <= 0:
+        return
+    connection.execute(
+        """
+        UPDATE code_lead_bindings
+        SET repo_generation = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE engagement_id = ? AND repo_id = ? AND repo_generation = ?
+          AND unbound_at IS NULL AND source_superseded_at IS NULL
+          AND EXISTS (
+            SELECT 1 FROM code_source_generation_files AS generation_files
+            WHERE generation_files.engagement_id = code_lead_bindings.engagement_id
+              AND generation_files.repo_id = code_lead_bindings.repo_id
+              AND generation_files.repo_generation = ?
+              AND generation_files.file_id = code_lead_bindings.file_id
+              AND generation_files.file_hash = code_lead_bindings.file_hash
+          )
+        """,
+        (
+            repo_generation,
+            engagement_id,
+            repo_id,
+            previous_generation,
+            repo_generation,
+        ),
+    )
+    connection.execute(
+        """
+        UPDATE code_lead_bindings
+        SET source_superseded_at = ?,
+            source_supersession_reason = ?,
+            replacement_repo_generation = ?
+        WHERE engagement_id = ? AND repo_id = ? AND repo_generation = ?
+          AND unbound_at IS NULL AND source_superseded_at IS NULL
+        """,
+        (
+            promoted_at,
+            _SOURCE_GENERATION_REPLACED_REASON,
+            repo_generation,
+            engagement_id,
+            repo_id,
+            previous_generation,
+        ),
     )
 
 
@@ -2526,8 +2792,13 @@ def _reopen_file_metadata_review(
         """,
         (engagement_id, file_id),
     )
+    # Retiring the stale conclusions above is right for any repository; opening
+    # a fresh review is not. `POST /analysis-queue` and `requeue` both refuse to
+    # create work in a reference repository, and this third insert has to refuse
+    # for the same reason -- a role read straight from the row it selects from,
+    # so a demoted repository cannot gain a claimable row from a churn update.
     connection.execute(
-        """
+        f"""
         INSERT INTO code_analysis_queue (
             engagement_id, file_id, priority, status, batch_theme,
             slot_types_json, guidance_hypotheses_json, repo_generation, queue_mode
@@ -2535,6 +2806,7 @@ def _reopen_file_metadata_review(
         SELECT ?, ?, ?, 'pending', ?, '[]', '[]', active_generation, ?
         FROM code_repos
         WHERE engagement_id = ? AND id = ?
+          AND {_analysis_repo_sql("code_repos")}
         """,
         (
             engagement_id,
@@ -2713,6 +2985,14 @@ def commit_code_repo_refresh(
                 or SOURCE_MANIFEST_VERSION
             )
             manifest_digest = source_manifest_digest(staged.values(), version=manifest_version)
+            # An ingest that does not name a role keeps the one already
+            # recorded, so re-ingesting a reference repository after an upstream
+            # update cannot silently re-arm its coverage obligation.
+            repo_role = str(
+                metadata.get("repo_role")
+                or repo.get("repo_role")
+                or ANALYSIS_REPO_ROLE
+            )
             current_generation = int(repo.get("active_generation", 0) or 0)
             incoming_snapshot_digest = str(
                 metadata.get("snapshot_digest", repo.get("snapshot_digest", "")) or ""
@@ -2986,7 +3266,8 @@ def commit_code_repo_refresh(
 
             connection.execute(
                 """
-                UPDATE code_repos SET name = ?, language = ?, repo_path = ?, total_files = ?,
+                UPDATE code_repos SET name = ?, language = ?, repo_path = ?, repo_role = ?,
+                    total_files = ?,
                     analyzable_files = ?, total_loc = ?, commit_hash = ?, branch = ?,
                     git_churn_json = ?, active_generation = ?, source_origin_path = ?,
                     source_kind = ?, snapshot_manifest_path = ?, snapshot_digest = ?,
@@ -3006,7 +3287,8 @@ def commit_code_repo_refresh(
                 """,
                 (
                     metadata.get("name", repo["name"]), metadata.get("language", ""),
-                    metadata.get("repo_path", repo["repo_path"]), metadata.get("total_files", len(staged)),
+                    metadata.get("repo_path", repo["repo_path"]), repo_role,
+                    metadata.get("total_files", len(staged)),
                     metadata.get("analyzable_files", len(staged)), metadata.get("total_loc", 0),
                     metadata.get("commit_hash", ""), metadata.get("branch", ""),
                     _json_text(metadata.get("git_churn")), repo_generation,
@@ -3062,6 +3344,7 @@ def commit_code_repo_refresh(
         "repo_id": repo_id, "inserted": inserted, "changed": changed, "renamed": renamed,
         "retired": retired_count, "unchanged": unchanged,
         "repo_generation": repo_generation,
+        "repo_role": repo_role,
         "source_manifest_version": manifest_version,
         "source_manifest_digest": manifest_digest,
         "generation_changed": generation_changed,
@@ -4367,6 +4650,12 @@ def list_code_modules(
 # =========================================================================
 
 _QUEUE_BLOCKED_TERMINAL_STATUSES = frozenset({"error", "needs_context"})
+_QUEUE_STATUSES = frozenset(
+    {"pending", "processing", "done", "error", "needs_context"}
+)
+_QUEUE_MODES = frozenset(
+    {"initial", "reanalysis", "trigger", _METADATA_REFRESH_REVIEW_MODE}
+)
 
 
 def _queue_item_matches(row: dict[str, Any], item: dict[str, Any]) -> bool:
@@ -4468,6 +4757,32 @@ def bulk_create_queue_items(
             engagement.id,
             {int(file_row["repo_id"]) for file_row in file_rows.values()},
         )
+        # A reference repository is read, never reviewed, so a queue row for one
+        # of its files would manufacture an obligation the engagement declined
+        # and that readiness deliberately ignores. Refuse the whole batch before
+        # any write, the same way a priority drift is refused.
+        reference_file_counts: dict[int, int] = {}
+        for file_id in submitted_file_ids:
+            repo = repo_rows[int(file_rows[file_id]["repo_id"])]
+            if str(repo.get("repo_role") or ANALYSIS_REPO_ROLE) != ANALYSIS_REPO_ROLE:
+                reference_file_counts[int(repo["id"])] = (
+                    reference_file_counts.get(int(repo["id"]), 0) + 1
+                )
+        if reference_file_counts:
+            named = ", ".join(
+                f"{repo_rows[reference_repo_id]['repo_key']} "
+                f"(repo {reference_repo_id}, {count} file(s))"
+                for reference_repo_id, count in sorted(reference_file_counts.items())
+            )
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"queue request names files in a reference repository: {named}. "
+                    "A reference repository is indexed and citable but owns no "
+                    "review obligation. Scope the batch to the analysis "
+                    "repository, or re-ingest with --role analysis to review it."
+                ),
+            )
         for file_id, priority in zip(
             submitted_file_ids, submitted_priorities, strict=True
         ):
@@ -4739,10 +5054,18 @@ def bulk_create_queue_items(
 
 
 def queue_stats(engagement_id: int) -> dict[str, Any]:
+    """Count the work that is actually claimable, and disclose what is not.
+
+    `fetch` will never hand out a row in a `reference` repository, so counting
+    one here would describe a queue that can never drain. They are excluded
+    from the counts and named in `reference_repo_items` instead -- the same
+    exclude-and-disclose shape `coverage` uses for reference files -- because an
+    operator who demoted a repository still needs to see the rows it holds.
+    """
     engagement = _engagement_or_404(engagement_id)
     with get_connection() as connection:
         rows = connection.execute(
-            """
+            f"""
             WITH ranked AS (
                 SELECT queue.status, queue.assigned_agent, queue.lease_token,
                        ROW_NUMBER() OVER (
@@ -4763,6 +5086,7 @@ def queue_stats(engagement_id: int) -> dict[str, Any]:
                  AND repos.active_generation > 0
                 WHERE queue.engagement_id = ?
                   AND queue.repo_generation = repos.active_generation
+                  AND {_analysis_repo_sql("repos")}
                   AND queue.source_superseded_at IS NULL
             )
             SELECT status, assigned_agent, lease_token, attempt_rank, active_count
@@ -4772,7 +5096,7 @@ def queue_stats(engagement_id: int) -> dict[str, Any]:
         ).fetchall()
         historical_total = _scalar_row(
             connection,
-            """
+            f"""
             SELECT COUNT(*)
             FROM code_analysis_queue AS queue
             JOIN code_files AS files
@@ -4782,9 +5106,43 @@ def queue_stats(engagement_id: int) -> dict[str, Any]:
               ON repos.id = files.repo_id
              AND repos.engagement_id = files.engagement_id
             WHERE queue.engagement_id = ? AND repos.active_generation > 0
+              AND {_analysis_repo_sql("repos")}
             """,
             (engagement.id,),
         )
+        # Only a reference repository that actually holds rows: one that holds
+        # none is excluding nothing and has nothing for an operator to act on.
+        reference_repo_items = [
+            {
+                "repo_id": int(row["id"]),
+                "repo_key": str(row["repo_key"]),
+                "name": str(row["name"]),
+                "queue_items": int(row["queue_items"]),
+            }
+            for row in connection.execute(
+                f"""
+                SELECT repos.id, repos.repo_key, repos.name,
+                       (
+                           SELECT COUNT(*)
+                           FROM code_analysis_queue AS queue
+                           JOIN code_files AS files
+                             ON files.id = queue.file_id
+                            AND files.engagement_id = queue.engagement_id
+                           WHERE queue.engagement_id = repos.engagement_id
+                             AND files.repo_id = repos.id
+                             AND queue.repo_generation = repos.active_generation
+                             AND queue.source_superseded_at IS NULL
+                       ) AS queue_items
+                FROM code_repos AS repos
+                WHERE repos.engagement_id = ?
+                  AND repos.active_generation > 0
+                  AND NOT ({_analysis_repo_sql("repos")})
+                ORDER BY repos.id
+                """,
+                (engagement.id,),
+            ).fetchall()
+            if int(row["queue_items"]) > 0
+        ]
     counts: dict[str, int] = {}
     current_attempt_total = 0
     invalid_active_identity = 0
@@ -4821,6 +5179,200 @@ def queue_stats(engagement_id: int) -> dict[str, Any]:
         "superseded_history": historical_total - current_attempt_total,
         "invalid_active_identity": invalid_active_identity,
         "invalid_active_history": invalid_active_history,
+        "reference_repo_items": reference_repo_items,
+    }
+
+
+def _adopted_lease_identities(raw: Any) -> list[dict[str, str]]:
+    """Project the stored adoption chain as plain identity pairs.
+
+    Rendered verbatim: agent names and lease tokens are the operator's own
+    audit trail, and the whole point of the chain is to say exactly which lease
+    wrote which receipt.
+    """
+    identities: list[dict[str, str]] = []
+    for entry in _json_decode(raw, []):
+        if not isinstance(entry, dict):
+            continue
+        identities.append(
+            {
+                "agent_name": str(entry.get("agent_name") or ""),
+                "lease_token": str(entry.get("lease_token") or ""),
+            }
+        )
+    return identities
+
+
+def _hydrate_queue_listing_row(row: Any) -> dict[str, Any]:
+    return {
+        "id": int(row["id"]),
+        "file_id": int(row["file_id"]),
+        "file_path": str(row["file_path"]),
+        "classification": str(row["classification"] or ""),
+        "analysis_priority": int(row["analysis_priority"]),
+        "repo_id": int(row["repo_id"]),
+        "repo_key": str(row["repo_key"]),
+        # A row in a reference repository is unclaimable but must stay findable
+        # by ID, so the listing names the role rather than dropping the row.
+        "repo_role": str(row["repo_role"] or ANALYSIS_REPO_ROLE),
+        "status": str(row["status"]),
+        "queue_mode": str(row["queue_mode"] or "initial"),
+        "priority": int(row["priority"]),
+        "batch_theme": str(row["batch_theme"] or ""),
+        "slot_types": _json_decode(row["slot_types_json"], []),
+        "guidance_hypotheses": _json_decode(row["guidance_hypotheses_json"], []),
+        "cross_file_triggers": _json_decode(row["cross_file_triggers_json"], []),
+        "agent_name": str(row["assigned_agent"] or ""),
+        "lease_token": str(row["lease_token"] or ""),
+        "repo_generation": int(row["repo_generation"]),
+        "disposition": str(row["disposition"] or ""),
+        "skip_reason": str(row["skip_reason"] or ""),
+        "reanalysis_of_queue_item_id": row["reanalysis_of_queue_item_id"],
+        "consumed_at": row["consumed_at"],
+        "last_heartbeat_at": row["last_heartbeat_at"],
+        # Ownership truth an operator needs to tell a working lease from an
+        # abandoned one: when it last proved life, how long ago that was on the
+        # database clock, how much durable work the row already carries, and
+        # which earlier leases were adopted into it.
+        "lease_activity_at": row["lease_activity_at"],
+        "heartbeat_age_seconds": (
+            None
+            if row["heartbeat_age_seconds"] is None
+            else int(row["heartbeat_age_seconds"])
+        ),
+        "current_result_count": int(row["current_result_count"] or 0),
+        "adopted_leases": _adopted_lease_identities(row["adopted_leases_json"]),
+        "completed_at": row["completed_at"],
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def list_queue_items(
+    engagement_id: int,
+    *,
+    status_filter: str | None = None,
+    repo_id: int | None = None,
+    classification: str | None = None,
+    batch_theme: str | None = None,
+    queue_mode: str | None = None,
+    stale_minutes: int | None = None,
+    limit: int | None = None,
+    offset: int = 0,
+) -> dict[str, Any]:
+    """Page the current-generation queue so its row IDs stay recoverable.
+
+    Every current-generation, non-source-superseded attempt is listed, including
+    an older active row that overlaps the latest one and a row in a repository
+    demoted to `reference`. `fetch` refuses to claim those and `stats` reports
+    them separately, so a listing that dropped them would hide the exact IDs an
+    operator needs to reconcile the history; each row carries `repo_role` so an
+    unclaimable one is identifiable rather than invisible. Ordering matches the
+    claim order `fetch` applies, so a page fed back through `--ids-file` is
+    claimed in the order it was shown.
+
+    `stale_minutes` narrows the page to processing rows whose lease has not
+    proved life inside that window — the same abandonment measure `reset-stale`
+    and `adopt-lease` apply. Both of those additionally refuse a row that is not
+    the sole canonical latest current-generation attempt, so a listed row can be
+    stale without being recoverable; `stats` reports that history separately as
+    `invalid_active_history`.
+    """
+    engagement = _engagement_or_404(engagement_id)
+    if status_filter is not None and status_filter not in _QUEUE_STATUSES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"invalid queue status: {status_filter}",
+        )
+    if queue_mode is not None and queue_mode not in _QUEUE_MODES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"invalid queue mode: {queue_mode}",
+        )
+    if classification is not None and classification not in _VALID_CLASSIFICATIONS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"invalid classification: {classification}",
+        )
+    clauses = [
+        "queue.engagement_id = ?",
+        "files.retired_at IS NULL",
+        "queue.repo_generation = repos.active_generation",
+        "queue.source_superseded_at IS NULL",
+    ]
+    params: list[Any] = [engagement.id]
+    if status_filter is not None:
+        clauses.append("queue.status = ?")
+        params.append(status_filter)
+    if repo_id is not None:
+        clauses.append("files.repo_id = ?")
+        params.append(_coerce_int(repo_id, field_name="repo_id"))
+    if classification is not None:
+        clauses.append("files.classification = ?")
+        params.append(classification)
+    if batch_theme is not None:
+        clauses.append("queue.batch_theme = ?")
+        params.append(batch_theme)
+    if queue_mode is not None:
+        clauses.append("queue.queue_mode = ?")
+        params.append(queue_mode)
+    if stale_minutes is not None:
+        if stale_minutes < 1:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="stale_minutes must be at least 1",
+            )
+        # Only a processing row holds a lease that can go stale; a pending row
+        # has no owner to lose. A claimed row with neither timestamp has never
+        # proved life, which `reset-stale` also treats as abandoned.
+        clauses.append("queue.status = 'processing'")
+        clauses.append(
+            f"({_lease_activity_sql('queue')} IS NULL"
+            f" OR datetime({_lease_activity_sql('queue')})"
+            " < datetime('now', ? || ' minutes'))"
+        )
+        params.append(f"-{int(stale_minutes)}")
+    from_where = f"""
+        FROM code_analysis_queue AS queue
+        JOIN code_files AS files
+          ON files.id = queue.file_id
+         AND files.engagement_id = queue.engagement_id
+        JOIN code_repos AS repos
+          ON repos.id = files.repo_id
+         AND repos.engagement_id = files.engagement_id
+         AND repos.active_generation > 0
+        WHERE {' AND '.join(clauses)}
+    """
+    query = f"""
+        SELECT queue.*, files.file_path, files.classification,
+               files.analysis_priority, files.repo_id, repos.repo_key,
+               repos.repo_role,
+               {_lease_activity_sql('queue')} AS lease_activity_at,
+               {_lease_activity_age_seconds_sql('queue')} AS heartbeat_age_seconds,
+               ({_current_attempt_result_count_sql('queue')}) AS current_result_count
+        {from_where}
+        ORDER BY queue.priority DESC, queue.id ASC
+    """
+    if offset > 0:
+        # SQLite has no bare OFFSET, so an unbounded listing still needs a
+        # LIMIT to skip rows at all. Dropping the offset instead would return
+        # page one while `has_more` described a page the caller never got.
+        query += f" LIMIT {int(limit) if limit is not None else -1} OFFSET {int(offset)}"
+    elif limit is not None:
+        query += f" LIMIT {int(limit)}"
+    with get_connection() as connection:
+        total = _scalar_row(connection, f"SELECT COUNT(*) {from_where}", tuple(params))
+        rows = connection.execute(query, tuple(params)).fetchall()
+    items = [_hydrate_queue_listing_row(row) for row in rows]
+    return {
+        "total": total,
+        "offset": offset,
+        "count": len(items),
+        "has_more": offset + len(items) < total,
+        # The exact shape `code-dispatch fetch --ids-file` consumes, so a page
+        # of this response is itself a valid ids file.
+        "item_ids": [item["id"] for item in items],
+        "items": items,
     }
 
 
@@ -4832,12 +5384,20 @@ def fetch_queue_items(
     repo_id: int | None = None,
     classification: str | None = None,
     batch_theme: str | None = None,
+    queue_mode: str | None = None,
     item_ids: list[int] | None = None,
 ) -> list[dict[str, Any]]:
     """Atomically claim pending queue items for an agent.
 
     Uses UPDATE ... WHERE id IN (SELECT ... LIMIT) to prevent two concurrent
     callers from claiming the same rows.
+
+    The role is read here, live, rather than at the rows: demoting a repository
+    to ``reference`` changes no source, so the generation does not move and
+    nothing supersedes the rows it already carries. Retiring them at the
+    demotion would also make the reverse trip lossy, and would still miss a row
+    created afterwards. This is the one place work is handed out, so this is
+    where a repository that owes no review stops receiving agents.
     """
     engagement = _engagement_or_404(engagement_id)
     now = _now_iso()
@@ -4852,6 +5412,14 @@ def fetch_queue_items(
     if batch_theme is not None:
         filter_clauses.append("queue.batch_theme = ?")
         filter_params.append(batch_theme)
+    if queue_mode is not None:
+        if queue_mode not in _QUEUE_MODES:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"invalid queue mode: {queue_mode}",
+            )
+        filter_clauses.append("queue.queue_mode = ?")
+        filter_params.append(queue_mode)
     if item_ids is not None:
         normalized_ids = sorted(set(item_ids))
         placeholders = ",".join("?" for _ in normalized_ids)
@@ -4874,6 +5442,7 @@ def fetch_queue_items(
             WHERE queue.engagement_id = ? AND queue.status = 'pending'
               AND queue.assigned_agent = '' AND queue.lease_token = ''
               AND queue.repo_generation = repos.active_generation
+              AND {_analysis_repo_sql("repos")}
               AND queue.source_superseded_at IS NULL
               AND ({_latest_current_queue_attempt_sql("queue", "repos")})
               AND ({_no_superseded_active_attempt_sql("queue", "repos")})
@@ -4927,23 +5496,96 @@ def fetch_queue_items(
 
         for file_id in {int(row["file_id"]) for row in rows}:
             _sync_file_analysis_status(connection, engagement.id, file_id)
-        payload: list[dict[str, Any]] = []
-        for row in rows:
-            item = dict(row)
-            item["agent_name"] = str(item.pop("assigned_agent", ""))
-            item["batch_theme"] = item.get("batch_theme", "")
-            item["slot_types"] = _json_decode(item.get("slot_types_json"), [])
-            item["guidance_hypotheses"] = _json_decode(item.get("guidance_hypotheses_json"), [])
-            item["cross_file_triggers"] = _json_decode(item.get("cross_file_triggers_json"), [])
-            item["file"] = _hydrate_code_file(file_rows[int(row["file_id"])])
-            item["repo"] = _hydrate_code_repo(repo_rows[int(file_rows[int(row["file_id"])]["repo_id"])])
-            item["applicable_vuln_classes"] = _applicable_families_for_file(
-                item["file"].get("slot_types", []),
-                language=str(item["file"].get("language", "")),
-                role=str(item["file"].get("role", "")),
-            )
-            payload.append(item)
+        lead_bindings = _open_lead_bindings_by_file(
+            connection, engagement.id, {int(row["file_id"]) for row in rows}
+        )
+        payload = [
+            _hydrate_claimed_queue_item(row, file_rows, repo_rows, lead_bindings)
+            for row in rows
+        ]
     return payload
+
+
+def _open_lead_bindings_by_file(
+    connection, engagement_id: int, file_ids: set[int]
+) -> dict[int, list[dict[str, Any]]]:
+    """Unanswered prior-art leads pointing into each of ``file_ids``.
+
+    A stale binding is included and labelled rather than hidden: the lead still
+    names this file, and "these line numbers came from source that has since
+    changed" is context a reader can use, while silence is not.
+    """
+    if not file_ids:
+        return {}
+    placeholders = ",".join("?" for _ in file_ids)
+    rows = _fetch_all(
+        connection,
+        f"""
+        SELECT bindings.file_id AS file_id,
+               bindings.note_id AS note_id,
+               notes.title AS lead_title,
+               notes.lead_status AS lead_status,
+               bindings.prior_art_ref AS prior_art_ref,
+               bindings.rationale AS rationale,
+               bindings.line_start AS line_start,
+               bindings.line_end AS line_end,
+               CASE
+                 WHEN {_lead_binding_stale_sql("bindings", "repos")} THEN 'stale' ELSE 'current'
+               END AS binding_status
+        FROM code_lead_bindings AS bindings
+        JOIN intel_notes AS notes
+          ON notes.id = bindings.note_id
+         AND notes.engagement_id = bindings.engagement_id
+        JOIN code_repos AS repos
+          ON repos.id = bindings.repo_id
+         AND repos.engagement_id = bindings.engagement_id
+        WHERE bindings.engagement_id = ?
+          AND bindings.unbound_at IS NULL
+          AND notes.superseded_by_id IS NULL
+          AND bindings.file_id IN ({placeholders})
+          AND COALESCE(notes.lead_status, '') IN ({_LEAD_OPEN_STATUS_PLACEHOLDERS})
+        ORDER BY bindings.file_id, bindings.note_id
+        """,
+        (engagement_id, *sorted(file_ids), *_LEAD_OPEN_STATUS_VALUES),
+    )
+    by_file: dict[int, list[dict[str, Any]]] = {}
+    for row in rows:
+        by_file.setdefault(int(row.pop("file_id")), []).append(row)
+    return by_file
+
+
+def _hydrate_claimed_queue_item(
+    row: Any,
+    file_rows: dict[int, dict[str, Any]],
+    repo_rows: dict[int, dict[str, Any]],
+    lead_bindings: dict[int, list[dict[str, Any]]] | None = None,
+) -> dict[str, Any]:
+    """The owned dispatch context a claim hands back.
+
+    Shared by `fetch` and `adopt-lease` so an adopted item is the same shape as
+    a freshly claimed one — the replacement agent reads the fields it already
+    knows instead of learning a second vocabulary for the same work.
+    """
+    item = dict(row)
+    item["agent_name"] = str(item.pop("assigned_agent", ""))
+    item["batch_theme"] = item.get("batch_theme", "")
+    item["slot_types"] = _json_decode(item.get("slot_types_json"), [])
+    item["guidance_hypotheses"] = _json_decode(item.get("guidance_hypotheses_json"), [])
+    item["cross_file_triggers"] = _json_decode(item.get("cross_file_triggers_json"), [])
+    item["adopted_leases"] = _adopted_lease_identities(item.get("adopted_leases_json"))
+    file_row = file_rows[int(row["file_id"])]
+    item["file"] = _hydrate_code_file(file_row)
+    item["repo"] = _hydrate_code_repo(repo_rows[int(file_row["repo_id"])])
+    item["applicable_vuln_classes"] = _applicable_families_for_file(
+        item["file"].get("slot_types", []),
+        language=str(item["file"].get("language", "")),
+        role=str(item["file"].get("role", "")),
+    )
+    # B2: prior art bound to this file travels with the claim. Nearly every
+    # admitted file already carries a queue row by hunt time (A5), so this is
+    # where a bound lead actually reaches the specialist reading the code.
+    item["prior_art_leads"] = (lead_bindings or {}).get(int(row["file_id"]), [])
+    return item
 
 
 def _normalize_cwe_coverage(cwe_coverage: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
@@ -5373,12 +6015,18 @@ def complete_queue_items(
         file_row = _get_file_rows(connection, engagement.id, {int(queue_row["file_id"])})[
             int(queue_row["file_id"])
         ]
+        # Receipts belong to the ATTEMPT, whose owners are the current lease plus
+        # any lease adopted into it; closing under the current lease alone would
+        # make an adopting agent re-record work adoption exists to preserve.
+        attempt_tokens = _attempt_lease_tokens(queue_row)
+        token_placeholders = ",".join("?" for _ in attempt_tokens)
         candidate_rows = connection.execute(
-            """
+            f"""
             SELECT DISTINCT disposition
             FROM code_analysis_results
             WHERE engagement_id = ? AND queue_item_id = ? AND file_id = ?
-              AND lease_token = ? AND disposition IN ('finding', 'suspicious')
+              AND lease_token IN ({token_placeholders})
+              AND disposition IN ('finding', 'suspicious')
               AND superseded_at IS NULL
               AND NOT EXISTS (
                   SELECT 1 FROM code_analysis_results AS replacement
@@ -5390,7 +6038,7 @@ def complete_queue_items(
                 engagement.id,
                 int(queue_row["id"]),
                 int(queue_row["file_id"]),
-                lease_token,
+                *attempt_tokens,
             ),
         ).fetchall()
         candidate_dispositions = [str(row["disposition"]) for row in candidate_rows]
@@ -5412,11 +6060,12 @@ def complete_queue_items(
             )
         if disposition == "finding":
             finding_results = connection.execute(
-                """
+                f"""
                 SELECT finding_slug
                 FROM code_analysis_results
                 WHERE engagement_id = ? AND queue_item_id = ? AND file_id = ?
-                  AND lease_token = ? AND disposition = 'finding'
+                  AND lease_token IN ({token_placeholders})
+                  AND disposition = 'finding'
                   AND superseded_at IS NULL
                   AND NOT EXISTS (
                       SELECT 1 FROM code_analysis_results AS replacement
@@ -5428,7 +6077,7 @@ def complete_queue_items(
                     engagement.id,
                     int(queue_row["id"]),
                     int(queue_row["file_id"]),
-                    lease_token,
+                    *attempt_tokens,
                 ),
             ).fetchall()
             for finding_result in finding_results:
@@ -5440,11 +6089,12 @@ def complete_queue_items(
                 )
         if disposition in {"finding", "suspicious"}:
             evidenced_result = connection.execute(
-                """
+                f"""
                 SELECT id
                 FROM code_analysis_results
                 WHERE engagement_id = ? AND queue_item_id = ? AND file_id = ?
-                  AND lease_token = ? AND disposition = ? AND superseded_at IS NULL
+                  AND lease_token IN ({token_placeholders})
+                  AND disposition = ? AND superseded_at IS NULL
                   AND NOT EXISTS (
                       SELECT 1 FROM code_analysis_results AS replacement
                       WHERE replacement.supersedes_result_id = code_analysis_results.id
@@ -5456,7 +6106,7 @@ def complete_queue_items(
                     engagement.id,
                     int(queue_row["id"]),
                     int(queue_row["file_id"]),
-                    lease_token,
+                    *attempt_tokens,
                     disposition,
                 ),
             ).fetchone()
@@ -5473,11 +6123,12 @@ def complete_queue_items(
             and disposition != "skipped"
         ):
             source_receipt = connection.execute(
-                """
+                f"""
                 SELECT results.id
                 FROM code_analysis_results AS results
                 WHERE results.engagement_id = ? AND results.queue_item_id = ?
-                  AND results.file_id = ? AND results.lease_token = ?
+                  AND results.file_id = ?
+                  AND results.lease_token IN ({token_placeholders})
                   AND results.repo_generation = ? AND results.disposition = ?
                   AND results.superseded_at IS NULL
                   AND results.receipt_binding_status NOT IN (
@@ -5503,7 +6154,7 @@ def complete_queue_items(
                     engagement.id,
                     int(queue_row["id"]),
                     int(queue_row["file_id"]),
-                    lease_token,
+                    *attempt_tokens,
                     int(queue_row["repo_generation"]),
                     disposition,
                     int(queue_row["file_id"]),
@@ -5657,7 +6308,7 @@ def reset_stale_queue_items(
         stale_rows = connection.execute(
             f"""
             SELECT queue.id, queue.file_id, queue.lease_token,
-                   COALESCE(queue.last_heartbeat_at, queue.consumed_at, '') AS lease_activity_at
+                   COALESCE({_lease_activity_sql("queue")}, '') AS lease_activity_at
             FROM code_analysis_queue AS queue
             JOIN code_files AS files
               ON files.id = queue.file_id
@@ -5672,8 +6323,8 @@ def reset_stale_queue_items(
               AND queue.source_superseded_at IS NULL
               AND ({_latest_current_queue_attempt_sql("queue", "repos")})
               AND ({_no_superseded_active_attempt_sql("queue", "repos")})
-              AND (COALESCE(queue.last_heartbeat_at, queue.consumed_at) IS NULL
-                   OR datetime(COALESCE(queue.last_heartbeat_at, queue.consumed_at))
+              AND ({_lease_activity_sql("queue")} IS NULL
+                   OR datetime({_lease_activity_sql("queue")})
                       < datetime('now', ? || ' minutes'))
             """,
             (engagement.id, f"-{minutes}"),
@@ -5681,9 +6332,10 @@ def reset_stale_queue_items(
         reset_count = 0
         for row in stale_rows:
             cursor = connection.execute(
-                """
+                f"""
                 UPDATE code_analysis_queue
                 SET status = 'pending', assigned_agent = '', lease_token = '',
+                    adopted_leases_json = '[]',
                     consumed_at = NULL, last_heartbeat_at = NULL,
                     priority = CASE
                         WHEN queue_mode = ? THEN priority
@@ -5697,7 +6349,7 @@ def reset_stale_queue_items(
                     updated_at = CURRENT_TIMESTAMP
                 WHERE engagement_id = ? AND id = ? AND status = 'processing'
                   AND lease_token = ?
-                  AND COALESCE(last_heartbeat_at, consumed_at, '') = ?
+                  AND COALESCE({_lease_activity_sql("code_analysis_queue")}, '') = ?
                 """,
                 (
                     _METADATA_REFRESH_REVIEW_MODE,
@@ -5710,12 +6362,17 @@ def reset_stale_queue_items(
             if cursor.rowcount != 1:
                 continue
             reset_count += 1
+            # Every current receipt on this attempt, not just the last owner's:
+            # an adopted attempt carries receipts written under the leases it
+            # inherited, and a reset that left those current would hand them to
+            # whoever claims the row next. Identical for a row never adopted,
+            # whose only current receipts belong to its one lease.
             connection.execute(
                 """
                 UPDATE code_analysis_results SET superseded_at = ?
-                WHERE queue_item_id = ? AND lease_token = ? AND superseded_at IS NULL
+                WHERE queue_item_id = ? AND superseded_at IS NULL
                 """,
-                (_now_iso(), int(row["id"]), str(row["lease_token"] or "")),
+                (_now_iso(), int(row["id"])),
             )
             _sync_file_analysis_status(connection, engagement.id, int(row["file_id"]))
             _sync_trigger_status_for_file(connection, engagement.id, int(row["file_id"]))
@@ -5745,6 +6402,299 @@ def heartbeat_queue_item(
                 detail="Cannot heartbeat: queue lease is no longer owned by this agent",
             )
     return {"item_id": item_id, "last_heartbeat_at": now}
+
+
+def adopt_queue_lease(
+    engagement_id: int,
+    *,
+    item_id: int,
+    expected_agent: str,
+    expected_lease_token: str,
+    agent_name: str,
+    stale_minutes: int,
+    reason: str,
+) -> dict[str, Any]:
+    """Hand one abandoned processing attempt to a replacement agent.
+
+    `reset-stale` is the other recovery and it *discards* the attempt: ownership
+    is cleared, every receipt the dead lease wrote is superseded, and the file
+    returns to pending for someone to analyse from scratch. Adoption makes the
+    opposite trade — every accumulated row value and every receipt survives and
+    only the owner changes — so it must never take a lease that is still alive,
+    or two agents would author receipts for the same file.
+
+    "Still live" is decided by the only signal a lease emits: its last
+    heartbeat, falling back to a claim that has not heartbeated yet
+    (:func:`_lease_activity_sql`, the same expression `reset-stale` selects on).
+    A lease whose proof of life falls inside ``stale_minutes`` is live and the
+    swap is refused. That window is the caller's explicit assertion of death and
+    is re-evaluated on the database clock *inside* the transaction that performs
+    the swap, because a window measured before the transaction could have
+    expired by the time the write lands.
+
+    The caller also pins the identity it observed, so this is a compare-and-swap
+    and not a grab: the UPDATE matches the expected agent, the expected token,
+    the processing status, and the exact activity timestamp read in this
+    transaction. A "dead" agent that heartbeats between the read and the write
+    moves that timestamp and wins the row, instead of losing its work.
+    """
+    engagement = _engagement_or_404(engagement_id)
+    now = _now_iso()
+    with get_connection() as connection:
+        # Serialize against heartbeat and stale-reset writers for the whole
+        # read-check-swap, exactly as `reset_stale_queue_items` does.
+        connection.execute("BEGIN IMMEDIATE")
+        queue_rows = _get_queue_rows(connection, engagement.id, {item_id})
+        _require_queue_status(
+            queue_rows, expected_status="processing", action="adopt the lease on"
+        )
+        _require_queue_lease(
+            queue_rows,
+            agent_name=expected_agent,
+            lease_token=expected_lease_token,
+            action="adopt the lease",
+        )
+        _require_queue_generation(
+            connection, engagement.id, queue_rows, action="adopt the lease"
+        )
+        queue_row = queue_rows[item_id]
+        liveness = connection.execute(
+            f"""
+            SELECT {_lease_activity_sql("queue")} AS lease_activity_at,
+                   {_lease_activity_age_seconds_sql("queue")} AS heartbeat_age_seconds,
+                   CASE
+                       WHEN {_lease_activity_sql("queue")} IS NULL THEN 0
+                       WHEN datetime({_lease_activity_sql("queue")})
+                            < datetime('now', ? || ' minutes') THEN 0
+                       ELSE 1
+                   END AS lease_is_live
+            FROM code_analysis_queue AS queue
+            WHERE queue.engagement_id = ? AND queue.id = ?
+            """,
+            (f"-{int(stale_minutes)}", engagement.id, item_id),
+        ).fetchone()
+        assert liveness is not None
+        if int(liveness["lease_is_live"]):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    f"Cannot adopt queue item {item_id}: the lease held by "
+                    f"{expected_agent} is still live — it last proved life at "
+                    f"{liveness['lease_activity_at']}, inside the declared "
+                    f"{stale_minutes}-minute window. Wait for the window to pass, "
+                    "or let the current owner close the item."
+                ),
+            )
+        adopted_leases = _adopted_lease_identities(queue_row.get("adopted_leases_json"))
+        adopted_leases.append(
+            {"agent_name": expected_agent, "lease_token": expected_lease_token}
+        )
+        if len(adopted_leases) > MAX_ADOPTED_LEASE_CHAIN:
+            # The chain is walked by every readiness and coverage query, and a
+            # row this often abandoned is not making progress worth preserving.
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    f"Queue item {item_id} has already been adopted "
+                    f"{MAX_ADOPTED_LEASE_CHAIN} times; reset it with "
+                    "`code-dispatch reset-stale` and requeue the file instead"
+                ),
+            )
+        lease_token = str(uuid.uuid4())
+        cursor = connection.execute(
+            f"""
+            UPDATE code_analysis_queue
+            SET assigned_agent = ?, lease_token = ?, adopted_leases_json = ?,
+                last_heartbeat_at = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE engagement_id = ? AND id = ? AND status = 'processing'
+              AND assigned_agent = ? AND lease_token = ?
+              AND COALESCE({_lease_activity_sql("code_analysis_queue")}, '') = ?
+            """,
+            (
+                agent_name,
+                lease_token,
+                _json_list_text(adopted_leases),
+                now,
+                engagement.id,
+                item_id,
+                expected_agent,
+                expected_lease_token,
+                str(liveness["lease_activity_at"] or ""),
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "queue lease changed before adoption; re-read "
+                    "`code-dispatch list` and retry"
+                ),
+            )
+        # consumed_at is deliberately left alone: the attempt started when the
+        # dead lease claimed it, and that is what its elapsed work describes.
+        row = connection.execute(
+            "SELECT * FROM code_analysis_queue WHERE engagement_id = ? AND id = ?",
+            (engagement.id, item_id),
+        ).fetchone()
+        file_rows = _get_file_rows(connection, engagement.id, {int(row["file_id"])})
+        repo_rows = _get_repo_rows(
+            connection,
+            engagement.id,
+            {int(file_rows[int(row["file_id"])]["repo_id"])},
+        )
+        item = _hydrate_claimed_queue_item(
+            row,
+            file_rows,
+            repo_rows,
+            _open_lead_bindings_by_file(
+                connection, engagement.id, {int(row["file_id"])}
+            ),
+        )
+        preserved_result_count = _scalar_row(
+            connection,
+            f"""
+            SELECT ({_current_attempt_result_count_sql("queue")})
+            FROM code_analysis_queue AS queue
+            WHERE queue.engagement_id = ? AND queue.id = ?
+            """,
+            (engagement.id, item_id),
+        )
+    return {
+        "item_id": item_id,
+        "stale_minutes": int(stale_minutes),
+        "reason": reason,
+        "previous_agent_name": expected_agent,
+        "previous_lease_token": expected_lease_token,
+        "previous_lease_activity_at": liveness["lease_activity_at"],
+        "previous_lease_age_seconds": (
+            None
+            if liveness["heartbeat_age_seconds"] is None
+            else int(liveness["heartbeat_age_seconds"])
+        ),
+        "preserved_result_count": preserved_result_count,
+        "adopted_leases": adopted_leases,
+        "item": item,
+    }
+
+
+def queue_item_progress(engagement_id: int, item_id: int) -> dict[str, Any]:
+    """What one queue attempt already carries, and what closeout still owes.
+
+    Receipts are durable the moment `code-record analysis` writes them, but
+    nothing read them back per item — so a hunter recording cluster by cluster
+    could not verify its own progress, and a replacement that adopted the lease
+    could not tell which clusters were already reviewed. Every number here is
+    derived from the helpers closeout itself uses, so this preview cannot drift
+    from the rules it previews.
+    """
+    engagement = _engagement_or_404(engagement_id)
+    with get_connection() as connection:
+        queue_row = _get_queue_rows(connection, engagement.id, {item_id})[item_id]
+        file_id = int(queue_row["file_id"])
+        file_row = _get_file_rows(connection, engagement.id, {file_id})[file_id]
+        activity = connection.execute(
+            f"""
+            SELECT {_lease_activity_sql("queue")} AS lease_activity_at,
+                   {_lease_activity_age_seconds_sql("queue")} AS heartbeat_age_seconds
+            FROM code_analysis_queue AS queue
+            WHERE queue.engagement_id = ? AND queue.id = ?
+            """,
+            (engagement.id, item_id),
+        ).fetchone()
+        receipt_rows = connection.execute(
+            f"""
+            SELECT * FROM code_analysis_results AS results
+            WHERE results.engagement_id = ? AND results.queue_item_id = ?
+              AND results.superseded_at IS NULL
+              AND ({_result_not_replaced_sql("results")})
+            ORDER BY results.id ASC
+            """,
+            (engagement.id, item_id),
+        ).fetchall()
+        merged: dict[int, dict[str, dict[str, Any]]] = {}
+        receipts: list[dict[str, Any]] = []
+        for index, receipt_row in enumerate(receipt_rows):
+            entries = _json_decode(receipt_row["cwe_coverage_json"], [])
+            # Coverage merges over EVERY receipt; only the rendered list is
+            # capped, so a long attempt still reports honest family coverage.
+            _merge_cwe_coverage_entries(merged, file_id, entries)
+            if index >= MAX_PROGRESS_RECEIPTS:
+                continue
+            receipts.append(
+                {
+                    "id": int(receipt_row["id"]),
+                    "agent_name": str(receipt_row["agent_name"] or ""),
+                    "lease_token": str(receipt_row["lease_token"] or ""),
+                    "disposition": str(receipt_row["disposition"] or ""),
+                    "receipt_kind": str(receipt_row["receipt_kind"] or ""),
+                    "receipt_binding_status": str(
+                        receipt_row["receipt_binding_status"] or ""
+                    ),
+                    "evidence_present": bool(
+                        str(receipt_row["evidence"] or "").strip()
+                        or str(receipt_row["evidence_ref"] or "").strip()
+                    ),
+                    "callable_count": len(
+                        _json_decode(receipt_row["callable_refs_json"], [])
+                    ),
+                    "reviewed_span_count": len(
+                        _json_decode(receipt_row["reviewed_spans_json"], [])
+                    ),
+                    "cwe_families": [
+                        str(entry.get("family", ""))
+                        for entry in entries
+                        if isinstance(entry, dict) and entry.get("family")
+                    ],
+                    "finding_slug": str(receipt_row["finding_slug"] or ""),
+                    "created_at": receipt_row["created_at"],
+                }
+            )
+        recorded_entries = list(merged.get(file_id, {}).values())
+        recorded_families = sorted(merged.get(file_id, {}))
+        applicable = _applicable_families_for_file(
+            _json_decode(file_row.get("slot_types_json"), []),
+            language=str(file_row.get("language", "")),
+            role=str(file_row.get("role", "")),
+        )
+        integrity = _compute_coverage_integrity(
+            connection,
+            engagement.id,
+            item_id,
+            file_id,
+            _safe_int(file_row.get("total_functions", 0)),
+            recorded_entries,
+        )
+    return {
+        "item_id": item_id,
+        "file_id": file_id,
+        "file_path": str(file_row["file_path"]),
+        "classification": str(file_row.get("classification") or ""),
+        "status": str(queue_row["status"]),
+        "queue_mode": str(queue_row.get("queue_mode") or "initial"),
+        "disposition": str(queue_row.get("disposition") or ""),
+        "agent_name": str(queue_row.get("assigned_agent") or ""),
+        "lease_token": str(queue_row.get("lease_token") or ""),
+        "repo_generation": int(queue_row.get("repo_generation", 0) or 0),
+        "consumed_at": queue_row.get("consumed_at"),
+        "last_heartbeat_at": queue_row.get("last_heartbeat_at"),
+        "lease_activity_at": activity["lease_activity_at"],
+        "heartbeat_age_seconds": (
+            None
+            if activity["heartbeat_age_seconds"] is None
+            else int(activity["heartbeat_age_seconds"])
+        ),
+        "adopted_leases": _adopted_lease_identities(queue_row.get("adopted_leases_json")),
+        "applicable_vuln_classes": applicable,
+        "recorded_cwe_families": recorded_families,
+        "missing_cwe_families": [
+            family for family in applicable if family not in recorded_families
+        ],
+        "receipts": receipts,
+        # The rendered list is capped; the count is the true total, so a long
+        # attempt still reports its real depth.
+        "receipt_count": len(receipt_rows),
+        "coverage_integrity": integrity,
+    }
 
 
 def retry_error_queue_items(
@@ -5778,12 +6728,15 @@ def retry_error_queue_items(
         _require_queue_status(queue_rows, expected_status="error", action="retry")
         _require_queue_generation(connection, engagement.id, queue_rows, action="retry")
         for row in queue_rows.values():
+            # Every current receipt on the attempt, not just the last owner's —
+            # an adopted attempt also carries the receipts it inherited, and the
+            # row is about to be handed back to the fetch rotation.
             connection.execute(
                 """
                 UPDATE code_analysis_results SET superseded_at = ?
-                WHERE queue_item_id = ? AND lease_token = ? AND superseded_at IS NULL
+                WHERE queue_item_id = ? AND superseded_at IS NULL
                 """,
-                (_now_iso(), int(row["id"]), str(row.get("lease_token", ""))),
+                (_now_iso(), int(row["id"])),
             )
         cursor = connection.execute(
             f"""
@@ -5791,6 +6744,7 @@ def retry_error_queue_items(
             SET status = 'pending',
                 assigned_agent = '',
                 lease_token = '',
+                adopted_leases_json = '[]',
                 consumed_at = NULL,
                 last_heartbeat_at = NULL,
                 priority = CASE
@@ -5835,6 +6789,7 @@ def retry_needs_context_queue_items(
             f"""
             UPDATE code_analysis_queue
             SET status = 'pending', assigned_agent = '', lease_token = '',
+                adopted_leases_json = '[]',
                 consumed_at = NULL, last_heartbeat_at = NULL,
                 priority = CASE
                     WHEN queue_mode = ? THEN priority
@@ -6274,7 +7229,6 @@ def create_analysis_result(
             expected_identity = (
                 int(queue_item_id),
                 int(file_row["id"]),
-                lease_token,
                 int(queue_row.get("repo_generation", 0) or 0),
                 receipt_kind,
                 _json_list_text(canonical_callable_refs),
@@ -6283,18 +7237,28 @@ def create_analysis_result(
             actual_identity = (
                 int(superseded_result["queue_item_id"]),
                 int(superseded_result["file_id"]),
-                str(superseded_result["lease_token"]),
                 int(superseded_result["repo_generation"]),
                 str(superseded_result["receipt_kind"]),
                 str(superseded_result["callable_refs_json"]),
                 str(superseded_result["reviewed_spans_json"]),
             )
-            if actual_identity != expected_identity:
+            # The receipt being corrected must belong to this ATTEMPT, not to
+            # this lease: every read of an adopted attempt already treats the
+            # inherited receipts as owned, so pinning the write to the current
+            # token alone refused the adopter the one correction adoption exists
+            # to enable. Same list closeout binds (:func:`_attempt_lease_tokens`),
+            # and for a row that was never adopted it is exactly its own token.
+            if (
+                actual_identity != expected_identity
+                or str(superseded_result["lease_token"])
+                not in _attempt_lease_tokens(queue_row)
+            ):
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT,
                     detail=(
                         "supersedes must identify a current result with the same "
-                        "queue item, lease token, file, source anchors, and repository generation"
+                        "queue item, file, source anchors, and repository generation, "
+                        "recorded under this attempt's lease or one it adopted"
                     ),
                 )
 
@@ -7305,13 +8269,14 @@ def report_durable_finding_variant_receipt_obligations(
         inventory_files = [
             dict(row)
             for row in connection.execute(
-                """
+                f"""
                 SELECT files.*
                 FROM code_files AS files
                 JOIN code_repos AS repos
                   ON repos.id = files.repo_id
                  AND repos.engagement_id = files.engagement_id
                  AND repos.active_generation > 0
+                 AND {_analysis_repo_sql("repos")}
                 WHERE files.engagement_id = ?
                   AND files.retired_at IS NULL
                 ORDER BY files.repo_id, files.file_path, files.id
@@ -7427,6 +8392,113 @@ def get_threat_model(
 # Coverage
 # =========================================================================
 
+def _open_authoring_lease_rows(
+    connection,
+    engagement_id: int,
+    *,
+    repo_id: int | None = None,
+    limit: int = MAX_OPEN_LEASE_ROWS,
+) -> tuple[list[dict[str, Any]], int]:
+    """Claimed analysis attempts that never reached closeout, oldest first.
+
+    Each row is a dispatch that was authoring durable state when it stopped: the
+    lease is still held, receipts may already be recorded, and nothing has
+    closed the file. Counts alone read as ordinary in-flight work, which is why
+    a died-mid-file dispatch used to be invisible until someone paged the queue.
+
+    Scoped to the canonical latest attempt of an analysis repository — the same
+    row set the `unresolved_active_queue` gate reason counts, so this is its
+    itemization rather than a second definition of open work. Non-canonical
+    active history stays separately reported as `invalid_active_history` and
+    remains addressable by id through `code-dispatch list`.
+    """
+    repo_clause = "" if repo_id is None else " AND files.repo_id = ?"
+    repo_params: tuple[Any, ...] = () if repo_id is None else (repo_id,)
+    from_where = f"""
+        FROM code_analysis_queue AS queue
+        JOIN code_files AS files
+          ON files.id = queue.file_id
+         AND files.engagement_id = queue.engagement_id
+        JOIN code_repos AS repos
+          ON repos.id = files.repo_id
+         AND repos.engagement_id = files.engagement_id
+         AND repos.active_generation > 0
+         AND {_analysis_repo_sql("repos")}
+        WHERE queue.engagement_id = ?
+          AND queue.status = 'processing'
+          AND files.retired_at IS NULL
+          AND queue.repo_generation = repos.active_generation
+          AND queue.source_superseded_at IS NULL
+          AND ({_latest_current_queue_attempt_sql("queue", "repos")})
+          AND ({_no_superseded_active_attempt_sql("queue", "repos")})
+          {repo_clause}
+    """
+    total = _scalar_row(
+        connection,
+        f"SELECT COUNT(*) {from_where}",
+        (engagement_id, *repo_params),
+    )
+    rows = connection.execute(
+        f"""
+        SELECT queue.id AS queue_item_id, queue.file_id, queue.assigned_agent,
+               queue.lease_token, queue.queue_mode, queue.batch_theme,
+               queue.consumed_at, queue.last_heartbeat_at,
+               queue.adopted_leases_json,
+               files.file_path, files.classification, files.repo_id,
+               repos.repo_key,
+               {_lease_activity_sql("queue")} AS lease_activity_at,
+               {_lease_activity_age_seconds_sql("queue")} AS heartbeat_age_seconds,
+               ({_current_attempt_result_count_sql("queue")}) AS current_result_count
+        {from_where}
+        ORDER BY (lease_activity_at IS NULL) DESC, lease_activity_at ASC,
+                 queue.id ASC
+        LIMIT ?
+        """,
+        (engagement_id, *repo_params, int(limit)),
+    ).fetchall()
+    leases = [
+        {
+            "queue_item_id": int(row["queue_item_id"]),
+            "file_id": int(row["file_id"]),
+            "file_path": str(row["file_path"]),
+            "classification": str(row["classification"] or ""),
+            "repo_id": int(row["repo_id"]),
+            "repo_key": str(row["repo_key"]),
+            "queue_mode": str(row["queue_mode"] or "initial"),
+            "batch_theme": str(row["batch_theme"] or ""),
+            "agent_name": str(row["assigned_agent"] or ""),
+            "lease_token": str(row["lease_token"] or ""),
+            "consumed_at": row["consumed_at"],
+            "last_heartbeat_at": row["last_heartbeat_at"],
+            "lease_activity_at": row["lease_activity_at"],
+            "heartbeat_age_seconds": (
+                None
+                if row["heartbeat_age_seconds"] is None
+                else int(row["heartbeat_age_seconds"])
+            ),
+            "current_result_count": int(row["current_result_count"] or 0),
+            "adopted_leases": _adopted_lease_identities(row["adopted_leases_json"]),
+        }
+        for row in rows
+    ]
+    return leases, total
+
+
+def open_authoring_leases(
+    engagement_id: int,
+    *,
+    repo_id: int | None = None,
+    limit: int = MAX_OPEN_LEASE_ROWS,
+) -> dict[str, Any]:
+    """Connection-owning front door for :func:`_open_authoring_lease_rows`."""
+    engagement = _engagement_or_404(engagement_id)
+    with get_connection() as connection:
+        leases, total = _open_authoring_lease_rows(
+            connection, engagement.id, repo_id=repo_id, limit=limit
+        )
+    return {"open_leases": leases, "open_leases_count": total}
+
+
 def code_coverage_summary(
     engagement_id: int,
     *,
@@ -7434,18 +8506,57 @@ def code_coverage_summary(
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
 
+    # Coverage is the obligation view, so it counts only files an analysis
+    # repository owes review for. An explicit --repo-id naming a reference
+    # repository therefore reports zero rather than an obligation the
+    # engagement never accepted; `reference_repos` below names what was left out
+    # so the smaller denominator is never a silent one.
     repo_clause = (
-        " AND repo_id IN (SELECT id FROM code_repos WHERE active_generation > 0)"
+        " AND repo_id IN (SELECT id FROM code_repos WHERE active_generation > 0"
+        f" AND {_analysis_repo_sql('code_repos')})"
         " AND retired_at IS NULL"
     )
     repo_params: tuple[Any, ...] = ()
     if repo_id is not None:
-        repo_clause = " AND repo_id = ? AND retired_at IS NULL"
+        repo_clause = (
+            " AND repo_id = ? AND retired_at IS NULL"
+            " AND repo_id IN (SELECT id FROM code_repos WHERE"
+            f" {_analysis_repo_sql('code_repos')})"
+        )
         repo_params = (repo_id,)
 
     with get_connection() as connection:
         if repo_id is not None:
             _get_published_repo_row(connection, engagement.id, repo_id)
+
+        # -- Reference repositories (counted, never owed) --
+        reference_repos = [
+            {
+                "repo_id": int(row["id"]),
+                "repo_key": str(row["repo_key"]),
+                "name": str(row["name"]),
+                "admitted_files": int(row["admitted_files"]),
+            }
+            for row in connection.execute(
+                f"""
+                SELECT repos.id, repos.repo_key, repos.name,
+                       (
+                           SELECT COUNT(*)
+                           FROM code_files AS files
+                           WHERE files.engagement_id = repos.engagement_id
+                             AND files.repo_id = repos.id
+                             AND files.retired_at IS NULL
+                       ) AS admitted_files
+                FROM code_repos AS repos
+                WHERE repos.engagement_id = ?
+                  AND repos.active_generation > 0
+                  AND NOT ({_analysis_repo_sql("repos")})
+                  {"AND repos.id = ?" if repo_id is not None else ""}
+                ORDER BY repos.id
+                """,
+                (engagement.id, *repo_params),
+            ).fetchall()
+        ]
 
         # -- Total files --
         total_files = _scalar_row(
@@ -7648,6 +8759,7 @@ def code_coverage_summary(
             JOIN code_repos AS repos
               ON repos.id = files.repo_id
              AND repos.engagement_id = files.engagement_id
+             AND {_analysis_repo_sql("repos")}
             WHERE queue.engagement_id = ? AND queue.status = 'needs_context'
               AND repos.active_generation > 0
               AND queue.repo_generation = repos.active_generation
@@ -7670,6 +8782,7 @@ def code_coverage_summary(
             JOIN code_repos AS repos
               ON repos.id = files.repo_id
              AND repos.engagement_id = files.engagement_id
+             AND {_analysis_repo_sql("repos")}
             WHERE results.engagement_id = ? AND results.disposition = 'needs_context'
               AND ({_current_result_receipt_sql(
                   "results", "result_queue", "files", "repos", allow_processing=True
@@ -7690,6 +8803,7 @@ def code_coverage_summary(
             JOIN code_repos AS repos
               ON repos.id = files.repo_id
              AND repos.engagement_id = files.engagement_id
+             AND {_analysis_repo_sql("repos")}
             WHERE queue.engagement_id = ?
               AND queue.status IN ('pending', 'processing')
               AND repos.active_generation > 0
@@ -7708,13 +8822,17 @@ def code_coverage_summary(
             FROM code_files AS files
             WHERE files.engagement_id = ?
               AND ({_invalid_active_history_exists_sql("files")})
+              AND ({_analysis_repo_files_sql("files")})
               {queue_repo_clause}
             """,
             (engagement.id, *repo_params),
         )
+        open_leases, open_leases_count = _open_authoring_lease_rows(
+            connection, engagement.id, repo_id=repo_id
+        )
         trigger_rows = connection.execute(
             (
-                """
+                f"""
                 SELECT t.status, COUNT(*) AS total
                 FROM code_analysis_triggers AS t
                 JOIN code_files AS sf
@@ -7724,13 +8842,14 @@ def code_coverage_summary(
                   ON repos.id = sf.repo_id
                  AND repos.engagement_id = sf.engagement_id
                  AND repos.active_generation > 0
+                 AND {_analysis_repo_sql("repos")}
                 WHERE t.engagement_id = ?
                   AND t.repo_generation = repos.active_generation
                   AND t.source_superseded_at IS NULL
                 GROUP BY t.status
                 """
                 if repo_id is None
-                else """
+                else f"""
                 SELECT t.status, COUNT(*) AS total
                 FROM code_analysis_triggers t
                 JOIN code_files sf
@@ -7740,6 +8859,7 @@ def code_coverage_summary(
                   ON repos.id = sf.repo_id
                  AND repos.engagement_id = sf.engagement_id
                  AND repos.active_generation > 0
+                 AND {_analysis_repo_sql("repos")}
                 WHERE t.engagement_id = ? AND sf.repo_id = ?
                   AND t.repo_generation = repos.active_generation
                   AND t.source_superseded_at IS NULL
@@ -7762,6 +8882,7 @@ def code_coverage_summary(
             JOIN code_repos AS repos
               ON repos.id = files.repo_id
              AND repos.engagement_id = files.engagement_id
+             AND {_analysis_repo_sql("repos")}
             WHERE queue.engagement_id = ?
               AND queue.status = 'done'
               AND queue.disposition = 'skipped'
@@ -7836,6 +8957,7 @@ def code_coverage_summary(
               ON effort_repos.id = files.repo_id
              AND effort_repos.engagement_id = files.engagement_id
              AND effort_repos.active_generation > 0
+             AND {_analysis_repo_sql("effort_repos")}
             LEFT JOIN code_analysis_queue AS q
               ON q.file_id = files.id
              AND q.engagement_id = files.engagement_id
@@ -8041,13 +9163,57 @@ def code_coverage_summary(
                 )
             file_func_rows = connection.execute(
                 f"""
-                SELECT id, total_functions FROM code_files
+                SELECT id, total_functions, structural_unavailable_dimensions_json
+                FROM code_files
                 WHERE engagement_id = ? AND id IN ({placeholders})
                 """,
                 (engagement.id, *file_id_list),
             ).fetchall()
             file_total_functions = {
                 int(r["id"]): _safe_int(r["total_functions"]) for r in file_func_rows
+            }
+            # A file whose function-scoped dimensions were never scanned has no
+            # callable to review and no sink map to review against. Counting it
+            # as "nothing to verify" is what let a zero-callable critical file
+            # close with no proof at all.
+            files_with_unscanned_scope = {
+                int(r["id"])
+                for r in file_func_rows
+                if set(
+                    _json_decode(r["structural_unavailable_dimensions_json"], [])
+                )
+                & FUNCTION_SCOPED_STRUCTURAL_DIMENSIONS
+            }
+            # With no callable registry a whole-file span is the only review
+            # proof left, which is exactly what the receipt gate now demands of
+            # these files. A partial span from a review closed before the index
+            # landed proves nothing about the source it never named.
+            whole_file_span_file_ids = {
+                int(row["file_id"])
+                for row in connection.execute(
+                    f"""
+                    SELECT DISTINCT span_files.id AS file_id
+                    FROM code_analysis_results AS results
+                    JOIN json_each(results.reviewed_spans_json) AS span
+                    JOIN code_files AS span_files
+                      ON span_files.id =
+                         CAST(json_extract(span.value, '$.file_id') AS INTEGER)
+                     AND span_files.engagement_id = results.engagement_id
+                    JOIN code_analysis_queue AS result_queue
+                      ON result_queue.id = results.queue_item_id
+                    JOIN code_files AS result_files
+                      ON result_files.id = results.file_id
+                    JOIN code_repos AS result_repos
+                      ON result_repos.id = result_files.repo_id
+                    WHERE results.engagement_id = ?
+                      AND span_files.id IN ({placeholders})
+                      AND CAST(json_extract(span.value, '$.start_line') AS INTEGER) = 1
+                      AND CAST(json_extract(span.value, '$.end_line') AS INTEGER)
+                          >= span_files.loc
+                      AND ({current_result_receipt})
+                    """,
+                    (engagement.id, *file_id_list),
+                ).fetchall()
             }
 
             for fid, meta in file_meta.items():
@@ -8062,7 +9228,9 @@ def code_coverage_summary(
                 if actual["receipt_count"] == 0 and meta["has_coverage_record"]:
                     efforts = file_efforts.get(fid, {})
                     max_effort = max(efforts.values(), default=0.0)
-                    if max_effort >= 60 and total_funcs > 0:
+                    if max_effort >= 60 and (
+                        total_funcs > 0 or fid in files_with_unscanned_scope
+                    ):
                         file_warnings.append(
                             f"effort={max_effort:.0f} with 0 source-review receipts"
                         )
@@ -8118,7 +9286,8 @@ def code_coverage_summary(
                 if not meta["review_completed"]:
                     continue
                 total_funcs = file_total_functions.get(fid, 0)
-                if total_funcs <= 0:
+                scope_unscanned = fid in files_with_unscanned_scope
+                if total_funcs <= 0 and not scope_unscanned:
                     continue  # no structural index to verify against
                 applicable = file_applicable.get(fid, [])
                 if not applicable:
@@ -8132,6 +9301,8 @@ def code_coverage_summary(
                 )
                 if callables_reviewed > 0:
                     continue  # structurally attributable callable review was recorded
+                if scope_unscanned and fid in whole_file_span_file_ids:
+                    continue  # the only review proof this file can carry
                 file_path = str(meta["file_path"])
                 prefix = f"file:{file_path}"
                 if any(loc == prefix or loc.startswith(prefix + ":") for loc in finding_locations):
@@ -8145,6 +9316,14 @@ def code_coverage_summary(
 
     return {
         "total_files": total_files,
+        # Named so a shrunken denominator is never a silent one: these repos are
+        # fully readable and were deliberately excluded from every count above.
+        "reference_repos": reference_repos,
+        # The item-level form of the "still pending or processing" gate reason:
+        # which claimed attempts never closed, how stale each lease is, and how
+        # many receipts would be discarded by resetting instead of adopting.
+        "open_leases": open_leases,
+        "open_leases_count": open_leases_count,
         "by_classification": by_classification,
         "by_status": by_status,
         "findings_summary": {
@@ -8178,6 +9357,458 @@ def code_coverage_summary(
             "uncovered_high_risk_files": uncovered_high_risk_files,
         },
     }
+
+
+# =========================================================================
+# B2: prior-art lead → code-location bindings
+# =========================================================================
+#
+# A lead is, and stays, one row in ``intel_notes`` carrying a ``lead_status``.
+# This section adds the half that was missing: *where* in the reviewed source
+# the lead points, so the queue can turn it into work and completion
+# accounting can notice it was never answered. There is deliberately no second
+# lead identity here — every disposition still reads and writes
+# ``intel_notes.lead_status``.
+
+MAX_LEAD_BINDING_PAGE = 500
+DEFAULT_LEAD_BINDING_PAGE = 200
+# Sampled into the completion blocker so the operator can open each lead
+# directly instead of re-deriving the worklist from a bare count.
+LEAD_BLOCKER_SAMPLE = 5
+
+
+def _lead_binding_stale_sql(binding_alias: str, repo_alias: str) -> str:
+    """True when a binding's line range was read from bytes that moved on.
+
+    Either the refresh path stamped the row, or the repository advanced a
+    generation without carrying it forward. Both mean the same thing to a
+    reader: the range has to be re-read before it can be trusted. One
+    expression, so the worklist filter, the claimed-item projection and the
+    completion blocker's stale count cannot come to disagree about which
+    bindings are stale.
+    """
+    return (
+        f"({binding_alias}.source_superseded_at IS NOT NULL"
+        f" OR {binding_alias}.repo_generation != {repo_alias}.active_generation)"
+    )
+
+
+# ``lead_superseded_by_id`` is the lead's own disposition arriving by the intel
+# route: superseding the note IS answering it, so the binding stops carrying an
+# obligation while staying readable and naming the note that replaced it.
+_LEAD_BINDING_SELECT = f"""
+SELECT bindings.*,
+       notes.title AS lead_title,
+       notes.lead_status AS lead_status,
+       notes.superseded_by_id AS lead_superseded_by_id,
+       CASE
+         WHEN bindings.unbound_at IS NOT NULL THEN 'unbound'
+         WHEN {_lead_binding_stale_sql("bindings", "repos")} THEN 'stale'
+         ELSE 'current'
+       END AS binding_status,
+       repos.repo_key AS repo_key,
+       repos.repo_role AS repo_role,
+       files.analysis_priority AS analysis_priority,
+       files.classification AS classification,
+       files.retired_at AS file_retired_at,
+       (
+         SELECT queue.id FROM code_analysis_queue AS queue
+         WHERE queue.engagement_id = bindings.engagement_id
+           AND queue.file_id = bindings.file_id
+           AND queue.repo_generation = repos.active_generation
+           AND queue.source_superseded_at IS NULL
+         ORDER BY queue.id DESC LIMIT 1
+       ) AS queue_item_id,
+       (
+         SELECT queue.status FROM code_analysis_queue AS queue
+         WHERE queue.engagement_id = bindings.engagement_id
+           AND queue.file_id = bindings.file_id
+           AND queue.repo_generation = repos.active_generation
+           AND queue.source_superseded_at IS NULL
+         ORDER BY queue.id DESC LIMIT 1
+       ) AS queue_status
+FROM code_lead_bindings AS bindings
+JOIN intel_notes AS notes
+  ON notes.id = bindings.note_id
+ AND notes.engagement_id = bindings.engagement_id
+JOIN code_repos AS repos
+  ON repos.id = bindings.repo_id
+ AND repos.engagement_id = bindings.engagement_id
+JOIN code_files AS files
+  ON files.id = bindings.file_id
+ AND files.engagement_id = bindings.engagement_id
+"""
+
+
+def _lead_binding_row(row: Any) -> dict[str, Any]:
+    record = dict(row)
+    lead_status = str(record.get("lead_status") or "")
+    repo_role = str(record.get("repo_role") or ANALYSIS_REPO_ROLE)
+    binding_status = str(record["binding_status"])
+    record["queued"] = record.get("queue_item_id") is not None
+    record["queue_status"] = str(record.get("queue_status") or "")
+    # An obligation exists only where the engagement agreed to review the code
+    # (B8) and the lead is still unanswered. Everything else is a citation.
+    record["carries_obligation"] = (
+        repo_role == ANALYSIS_REPO_ROLE
+        and binding_status != "unbound"
+        and lead_status in _LEAD_OPEN_STATUS_VALUES
+        and record.get("lead_superseded_by_id") is None
+    )
+    record["lead_status"] = lead_status
+    record["repo_role"] = repo_role
+    return record
+
+
+def _require_lead_note(connection, engagement_id: int, note_id: int) -> dict[str, Any]:
+    row = connection.execute(
+        "SELECT * FROM intel_notes WHERE engagement_id = ? AND id = ?",
+        (engagement_id, note_id),
+    ).fetchone()
+    if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"intel note {note_id} not found in this engagement",
+        )
+    note = dict(row)
+    if not str(note.get("lead_status") or ""):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"intel note {note_id} is a plain reference note (lead_status is "
+                "null) and owes no work. Promote it first: vigil assess intel "
+                f"update note {note_id} --inline '{{\"lead_status\": \"open\"}}'"
+            ),
+        )
+    if note.get("superseded_by_id") is not None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"intel note {note_id} was superseded by note "
+                f"{int(note['superseded_by_id'])}; bind the canonical lead instead"
+            ),
+        )
+    return note
+
+
+def _require_current_generation_file(
+    connection, engagement_id: int, repo: dict[str, Any], file_path: str
+) -> dict[str, Any]:
+    repo_id = int(repo["id"])
+    active_generation = int(repo.get("active_generation", 0) or 0)
+    row = connection.execute(
+        """
+        SELECT files.*
+        FROM code_files AS files
+        JOIN code_source_generation_files AS generation_files
+          ON generation_files.file_id = files.id
+         AND generation_files.engagement_id = files.engagement_id
+         AND generation_files.repo_id = files.repo_id
+         AND generation_files.repo_generation = ?
+        WHERE files.engagement_id = ? AND files.repo_id = ?
+          AND files.file_path = ? AND files.retired_at IS NULL
+        """,
+        (active_generation, engagement_id, repo_id, file_path),
+    ).fetchone()
+    if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=(
+                f"'{file_path}' is not a file in the current generation "
+                f"({active_generation}) of repository {repo_id}; list the sealed "
+                f"inventory with vigil assess fetch 'code/files?repo_id={repo_id}'"
+            ),
+        )
+    return dict(row)
+
+
+def _validate_lead_binding_lines(
+    file_row: dict[str, Any],
+    line_start: int | None,
+    line_end: int | None,
+) -> tuple[int | None, int | None]:
+    """Whole-file (both None) or an exact range inside the sealed file.
+
+    ``loc`` is the physical line count taken from the sealed snapshot, so a
+    range past it names code that does not exist — a typo worth refusing at
+    write time rather than handing a specialist a dead pointer.
+    """
+    if line_start is None and line_end is None:
+        return None, None
+    if line_start is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="line_end requires line_start",
+        )
+    end = line_start if line_end is None else line_end
+    if end < line_start:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"line_end {end} precedes line_start {line_start}",
+        )
+    loc = int(file_row.get("loc", 0) or 0)
+    if loc and end > loc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"line range {line_start}-{end} falls outside "
+                f"{file_row['file_path']}, which has {loc} line(s) in the "
+                "current generation"
+            ),
+        )
+    return line_start, end
+
+
+def bind_code_lead(
+    engagement_id: int,
+    *,
+    note_id: int,
+    repo_id: int,
+    file_path: str,
+    line_start: int | None = None,
+    line_end: int | None = None,
+    prior_art_ref: str = "",
+    rationale: str = "",
+    bound_by: str = "",
+) -> dict[str, Any]:
+    """Point one tracked lead at one file, optionally at one line range.
+
+    Idempotent per (lead, file): re-binding refines the same row rather than
+    accumulating near-duplicates, which is also how a stale binding is
+    repaired after the snapshot advances.
+    """
+    engagement = _engagement_or_404(engagement_id)
+    with get_connection() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        _require_lead_note(connection, engagement.id, note_id)
+        repo = _get_repo_rows(connection, engagement.id, {repo_id})[repo_id]
+        file_row = _require_current_generation_file(
+            connection, engagement.id, repo, file_path
+        )
+        start, end = _validate_lead_binding_lines(file_row, line_start, line_end)
+        connection.execute(
+            """
+            INSERT INTO code_lead_bindings (
+                engagement_id, note_id, repo_id, file_id, repo_generation,
+                file_path, file_hash, line_start, line_end,
+                prior_art_ref, rationale, bound_by
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(engagement_id, note_id, file_id) DO UPDATE SET
+                repo_id = excluded.repo_id,
+                repo_generation = excluded.repo_generation,
+                file_path = excluded.file_path,
+                file_hash = excluded.file_hash,
+                line_start = excluded.line_start,
+                line_end = excluded.line_end,
+                prior_art_ref = excluded.prior_art_ref,
+                rationale = excluded.rationale,
+                bound_by = excluded.bound_by,
+                unbound_at = NULL,
+                unbound_reason = '',
+                source_superseded_at = NULL,
+                source_supersession_reason = '',
+                replacement_repo_generation = NULL,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (
+                engagement.id,
+                note_id,
+                repo_id,
+                int(file_row["id"]),
+                int(repo.get("active_generation", 0) or 0),
+                str(file_row["file_path"]),
+                str(file_row.get("file_hash") or ""),
+                start,
+                end,
+                prior_art_ref,
+                rationale,
+                bound_by,
+            ),
+        )
+        row = connection.execute(
+            f"{_LEAD_BINDING_SELECT} WHERE bindings.engagement_id = ? "
+            "AND bindings.note_id = ? AND bindings.file_id = ?",
+            (engagement.id, note_id, int(file_row["id"])),
+        ).fetchone()
+    return _lead_binding_row(row)
+
+
+def unbind_code_lead(
+    engagement_id: int, binding_id: int, *, reason: str
+) -> dict[str, Any]:
+    """Retract one binding without touching the lead it points at.
+
+    Soft, never deleted: "this lead turned out not to live here" is itself
+    part of the record, and the lead keeps its own disposition either way. The
+    retraction is equally part of the record, so a second unbind is refused
+    rather than allowed to overwrite the reason and time the first one stored.
+    """
+    engagement = _engagement_or_404(engagement_id)
+    if not reason.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="unbind requires a reason",
+        )
+    with get_connection() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        cursor = connection.execute(
+            """
+            UPDATE code_lead_bindings
+            SET unbound_at = ?,
+                unbound_reason = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE engagement_id = ? AND id = ? AND unbound_at IS NULL
+            """,
+            (_now_iso(), reason, engagement.id, binding_id),
+        )
+        if cursor.rowcount != 1:
+            existing = connection.execute(
+                "SELECT unbound_at, unbound_reason FROM code_lead_bindings "
+                "WHERE engagement_id = ? AND id = ?",
+                (engagement.id, binding_id),
+            ).fetchone()
+            if existing is None:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"code lead binding {binding_id} not found in this engagement",
+                )
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    f"code lead binding {binding_id} was already retracted at "
+                    f"{existing['unbound_at']} ({str(existing['unbound_reason'])!r}); "
+                    "bind the lead again if it belongs here after all"
+                ),
+            )
+        row = connection.execute(
+            f"{_LEAD_BINDING_SELECT} WHERE bindings.engagement_id = ? "
+            "AND bindings.id = ?",
+            (engagement.id, binding_id),
+        ).fetchone()
+    return _lead_binding_row(row)
+
+
+def list_code_lead_bindings(
+    engagement_id: int,
+    *,
+    note_id: int | None = None,
+    repo_id: int | None = None,
+    lead_status: str | None = None,
+    include_superseded: bool = False,
+    limit: int = DEFAULT_LEAD_BINDING_PAGE,
+    offset: int = 0,
+) -> dict[str, Any]:
+    """Page lead-to-code bindings.
+
+    ``include_superseded`` widens the page to stale and retracted rows; by
+    default it is the live worklist, ordered the way an operator works it —
+    unanswered leads first, then by repository and path.
+    """
+    engagement = _engagement_or_404(engagement_id)
+    clauses = ["bindings.engagement_id = ?"]
+    params: list[Any] = [engagement.id]
+    if note_id is not None:
+        clauses.append("bindings.note_id = ?")
+        params.append(note_id)
+    if repo_id is not None:
+        clauses.append("bindings.repo_id = ?")
+        params.append(repo_id)
+    if lead_status is not None:
+        clauses.append("notes.lead_status = ?")
+        params.append(lead_status)
+    if not include_superseded:
+        clauses.append("bindings.unbound_at IS NULL")
+        clauses.append(f"NOT {_lead_binding_stale_sql('bindings', 'repos')}")
+    where = " AND ".join(clauses)
+    with get_connection() as connection:
+        total = _scalar_row(
+            connection,
+            f"""
+            SELECT COUNT(*)
+            FROM code_lead_bindings AS bindings
+            JOIN intel_notes AS notes
+              ON notes.id = bindings.note_id
+             AND notes.engagement_id = bindings.engagement_id
+            JOIN code_repos AS repos
+              ON repos.id = bindings.repo_id
+             AND repos.engagement_id = bindings.engagement_id
+            WHERE {where}
+            """,
+            tuple(params),
+        )
+        rows = connection.execute(
+            f"""
+            {_LEAD_BINDING_SELECT}
+            WHERE {where}
+            ORDER BY
+              CASE
+                WHEN notes.lead_status IN ({_LEAD_OPEN_STATUS_PLACEHOLDERS}) THEN 0
+                ELSE 1
+              END,
+              bindings.repo_id, bindings.file_path, bindings.id
+            LIMIT ? OFFSET ?
+            """,
+            (
+                *params,
+                *_LEAD_OPEN_STATUS_VALUES,
+                max(1, min(limit, MAX_LEAD_BINDING_PAGE)),
+                max(0, offset),
+            ),
+        ).fetchall()
+    return {"total": total, "items": [_lead_binding_row(row) for row in rows]}
+
+
+def _unresolved_code_lead_rows(connection, engagement_id: int) -> list[dict[str, Any]]:
+    """Bindings that still owe an answer: analysis repository, lead not closed.
+
+    A superseded *binding* deliberately does not clear the debt. The
+    obligation belongs to the lead and the binding only says where to look, so
+    a refresh that invalidates the line range has to surface a rebind — never
+    a quietly discharged lead.
+
+    A superseded *note* is the opposite case and does clear it, because the
+    lead itself is the note: `intel list-leads` already reports it as gone and
+    `bind` refuses to point at it, so counting it here would block completion
+    on a lead the intel surface says does not exist. The debt moves to the
+    canonical note, which owes its own binding.
+    """
+    return _fetch_all(
+        connection,
+        f"""
+        SELECT bindings.note_id AS note_id,
+               bindings.repo_id AS repo_id,
+               notes.title AS lead_title,
+               {_lead_binding_stale_sql("bindings", "repos")} AS binding_is_stale
+        FROM code_lead_bindings AS bindings
+        JOIN intel_notes AS notes
+          ON notes.id = bindings.note_id
+         AND notes.engagement_id = bindings.engagement_id
+        JOIN code_repos AS repos
+          ON repos.id = bindings.repo_id
+         AND repos.engagement_id = bindings.engagement_id
+         AND repos.active_generation > 0
+         AND {_analysis_repo_sql("repos")}
+        WHERE bindings.engagement_id = ?
+          AND bindings.unbound_at IS NULL
+          AND notes.superseded_by_id IS NULL
+          AND COALESCE(notes.lead_status, '') IN ({_LEAD_OPEN_STATUS_PLACEHOLDERS})
+        ORDER BY bindings.repo_id, bindings.note_id
+        """,
+        (engagement_id, *_LEAD_OPEN_STATUS_VALUES),
+    )
+
+
+def open_code_lead_binding_counts(engagement_id: int) -> dict[int, dict[str, int]]:
+    """Per-lead binding counts for unanswered leads, for resume hydration."""
+    with get_connection() as connection:
+        rows = _unresolved_code_lead_rows(connection, engagement_id)
+    counts: dict[int, dict[str, int]] = {}
+    for row in rows:
+        entry = counts.setdefault(int(row["note_id"]), {"bindings": 0, "stale": 0})
+        entry["bindings"] += 1
+        if row["binding_is_stale"]:
+            entry["stale"] += 1
+    return counts
 
 
 _CODE_READINESS_PHASES = (
@@ -8229,9 +9860,23 @@ def code_readiness(engagement_id: int, *, target_phase: str) -> dict[str, Any]:
                 (engagement.id,),
             ).fetchall()
         ]
+        # Findings, snapshot currency and variant parentage still resolve
+        # against every active repository — a finding in framework source is a
+        # real, bindable finding. Only the per-repo obligation loop below is
+        # narrowed to the repositories this engagement agreed to review.
         active_repo_ids = {int(repo["id"]) for repo in repos}
+        analysis_repos = [
+            repo
+            for repo in repos
+            if str(repo.get("repo_role") or ANALYSIS_REPO_ROLE) == ANALYSIS_REPO_ROLE
+        ]
         suspicious_counts = _current_suspicious_analysis_counts(
             connection, engagement.id
+        )
+        unresolved_lead_rows: list[dict[str, Any]] = (
+            _unresolved_code_lead_rows(connection, engagement.id)
+            if target_phase == "complete"
+            else []
         )
         unresolved_draft_counts: dict[int, int] = {}
         stale_draft_counts: dict[int, int] = {}
@@ -8311,13 +9956,14 @@ def code_readiness(engagement_id: int, *, target_phase: str) -> dict[str, Any]:
                 variant_inventory_files = [
                     dict(row)
                     for row in connection.execute(
-                        """
+                        f"""
                         SELECT files.*
                         FROM code_files AS files
                         JOIN code_repos AS repos
                           ON repos.id = files.repo_id
                          AND repos.engagement_id = files.engagement_id
                          AND repos.active_generation > 0
+                         AND {_analysis_repo_sql("repos")}
                         WHERE files.engagement_id = ?
                           AND files.retired_at IS NULL
                         ORDER BY files.repo_id, files.id
@@ -8336,7 +9982,7 @@ def code_readiness(engagement_id: int, *, target_phase: str) -> dict[str, Any]:
                     file_rows=variant_inventory_files,
                     parent_slugs=variant_parent_slugs_by_repo,
                 )
-        if not repos:
+        if not analysis_repos:
             blockers.append(
                 _readiness_blocker(
                     "no_repositories",
@@ -8344,7 +9990,7 @@ def code_readiness(engagement_id: int, *, target_phase: str) -> dict[str, Any]:
                 )
             )
 
-        for repo in repos:
+        for repo in analysis_repos:
             repo_id = int(repo["id"])
             active_generation = int(repo.get("active_generation", 0) or 0)
             structural_debt_rows: list[Any] = []
@@ -8479,6 +10125,41 @@ def code_readiness(engagement_id: int, *, target_phase: str) -> dict[str, Any]:
                 )
 
             if target_phase == "hunt":
+                # A5: the durable queue is what Phase 2 claims work from, so an
+                # admitted file with no current-generation row can never be
+                # dispatched and never reaches accounting. The on-disk queue
+                # artifact is planning input and proves nothing about this.
+                unqueued_files = _scalar_row(
+                    connection,
+                    """
+                    SELECT COUNT(*)
+                    FROM code_files AS files
+                    WHERE files.engagement_id = ? AND files.repo_id = ?
+                      AND files.retired_at IS NULL
+                      AND NOT EXISTS (
+                        SELECT 1
+                        FROM code_analysis_queue AS queue
+                        WHERE queue.engagement_id = files.engagement_id
+                          AND queue.file_id = files.id
+                          AND queue.repo_generation = ?
+                          AND queue.source_superseded_at IS NULL
+                      )
+                    """,
+                    (engagement.id, repo_id, active_generation),
+                )
+                if unqueued_files:
+                    blockers.append(
+                        _readiness_blocker(
+                            "admitted_files_unqueued",
+                            (
+                                f"Repository has {unqueued_files} admitted file(s) with no "
+                                "current-generation analysis queue row; every admitted file "
+                                "needs one before hunting, including skip-tier files."
+                            ),
+                            repo_id=repo_id,
+                            overrideable=True,
+                        )
+                    )
                 continue
 
             unaccounted_files = _scalar_row(
@@ -8503,6 +10184,54 @@ def code_readiness(engagement_id: int, *, target_phase: str) -> dict[str, Any]:
                         repo_id=repo_id,
                     )
                 )
+
+            if target_phase == "complete":
+                # A prior-art lead pointed at this repository is code work the
+                # engagement accepted. Completing with it still open would seal
+                # a scan that never answered its own strongest question, so the
+                # seal waits for a terminal disposition — resolved when it led
+                # somewhere, ruled_out when it did not.
+                repo_lead_rows = [
+                    row
+                    for row in unresolved_lead_rows
+                    if int(row["repo_id"]) == repo_id
+                ]
+                if repo_lead_rows:
+                    note_ids = sorted({int(row["note_id"]) for row in repo_lead_rows})
+                    stale_notes = sorted(
+                        {
+                            int(row["note_id"])
+                            for row in repo_lead_rows
+                            if row["binding_is_stale"]
+                        }
+                    )
+                    lead_sample = ", ".join(
+                        f"note {note_id}" for note_id in note_ids[:LEAD_BLOCKER_SAMPLE]
+                    )
+                    if len(note_ids) > LEAD_BLOCKER_SAMPLE:
+                        lead_sample += (
+                            f", and {len(note_ids) - LEAD_BLOCKER_SAMPLE} more"
+                        )
+                    stale_detail = (
+                        f" {len(stale_notes)} of them are bound at a superseded "
+                        "generation and need rebinding before the line range is "
+                        "trustworthy."
+                        if stale_notes
+                        else ""
+                    )
+                    blockers.append(
+                        _readiness_blocker(
+                            "code_leads_unresolved",
+                            (
+                                f"Repository has {len(note_ids)} unanswered prior-art "
+                                f"lead(s) bound to its source ({lead_sample}); record a "
+                                "resolved or ruled_out disposition on each."
+                                f"{stale_detail}"
+                            ),
+                            repo_id=repo_id,
+                            overrideable=True,
+                        )
+                    )
 
             if structural_debt_rows:
                 debt_paths = [str(row["file_path"]) for row in structural_debt_rows]
@@ -8655,27 +10384,6 @@ def code_readiness(engagement_id: int, *, target_phase: str) -> dict[str, Any]:
                 )
 
             if target_phase in {"fuzz", "complete"}:
-                unresolved_draft_count = unresolved_draft_counts.get(repo_id, 0)
-                if unresolved_draft_count:
-                    stale_draft_count = stale_draft_counts.get(repo_id, 0)
-                    stale_detail = (
-                        f"; {stale_draft_count} have stale snapshot bindings"
-                        if stale_draft_count
-                        else ""
-                    )
-                    blockers.append(
-                        _readiness_blocker(
-                            "draft_code_findings_unresolved",
-                            (
-                                f"Repository has {unresolved_draft_count} unresolved draft "
-                                f"code finding(s){stale_detail}; re-review and rebind when "
-                                "needed, then promote, merge, or kill each "
-                                "draft before leaving verification."
-                            ),
-                            repo_id=repo_id,
-                        )
-                    )
-
                 parent_finding_slugs = variant_parent_slugs_by_repo.get(repo_id, [])
                 if parent_finding_slugs:
                     unready_parent_slugs = (
@@ -8716,6 +10424,32 @@ def code_readiness(engagement_id: int, *, target_phase: str) -> dict[str, Any]:
                                 overrideable=True,
                             )
                         )
+
+        if target_phase in {"fuzz", "complete"}:
+            # Drafts are the engagement's own authored evidence, not an
+            # obligation over a second codebase, so this gate spans every active
+            # repository: a real bug found while reading framework source must
+            # still be promoted, merged or killed rather than silently dropped.
+            for draft_repo_id in sorted(unresolved_draft_counts):
+                unresolved_draft_count = unresolved_draft_counts[draft_repo_id]
+                stale_draft_count = stale_draft_counts.get(draft_repo_id, 0)
+                stale_detail = (
+                    f"; {stale_draft_count} have stale snapshot bindings"
+                    if stale_draft_count
+                    else ""
+                )
+                blockers.append(
+                    _readiness_blocker(
+                        "draft_code_findings_unresolved",
+                        (
+                            f"Repository has {unresolved_draft_count} unresolved draft "
+                            f"code finding(s){stale_detail}; re-review and rebind when "
+                            "needed, then promote, merge, or kill each "
+                            "draft before leaving verification."
+                        ),
+                        repo_id=draft_repo_id,
+                    )
+                )
 
     coverage = code_coverage_summary(engagement.id)
     coverage_gate = coverage.get("gate", {})
@@ -8908,9 +10642,12 @@ SLOT_VULN_CLASSES: dict[str, dict[str, list[str]]] = {
 NATIVE_LANGUAGES = frozenset({"c", "c++", "cpp"})
 STRUCTURALLY_ANALYZED_LANGUAGES = frozenset(
     {
+        "blade",
         "c",
         "c++",
         "cpp",
+        "freemarker",
+        "powershell",
         "python",
         "javascript",
         "typescript",
@@ -9020,446 +10757,623 @@ def _contains_all_values(existing: list[Any], requested: list[Any]) -> bool:
     )
 
 
+class _TriggerTargetBlocked(Exception):
+    """One trigger target cannot be written; every other target still commits."""
+
+
+def _requeue_selector(item: dict[str, Any], index: int) -> dict[str, Any]:
+    """Reduce one requeue input to exactly one target selector.
+
+    Ambiguity is the defect this rejects. An input naming two targets used to
+    resolve to whichever branch was tested first, and an input naming none was
+    dropped in silence while still counting toward the reported total.
+    """
+    selector: dict[str, Any] = {}
+    if item.get("file_id") is not None:
+        selector["file_id"] = _require_strict_positive_id(
+            item["file_id"], field_name=f"items[{index}].file_id"
+        )
+    if item.get("trigger_id") is not None:
+        selector["trigger_id"] = _require_strict_positive_id(
+            item["trigger_id"], field_name=f"items[{index}].trigger_id"
+        )
+    file_path = str(item.get("file_path", "")).strip()
+    if file_path:
+        selector["file_path"] = file_path
+    if len(selector) != 1:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"items[{index}] needs exactly one selector — file_id, trigger_id, "
+                f"or file_path — but named {len(selector)}"
+            ),
+        )
+    if item.get("repo_id") is not None:
+        if "file_path" not in selector:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"items[{index}].repo_id only disambiguates a file_path selector"
+                ),
+            )
+        selector["repo_id"] = _require_strict_positive_id(
+            item["repo_id"], field_name=f"items[{index}].repo_id"
+        )
+    return selector
+
+
+_REQUEUE_TARGET_COLUMNS = """
+    files.id, files.file_path, files.classification,
+    files.analysis_priority, repos.active_generation, repos.repo_role
+"""
+
+
+def _requeue_target_by_file_id(connection, engagement_id: int, file_id: int) -> Any:
+    return connection.execute(
+        f"""
+        SELECT {_REQUEUE_TARGET_COLUMNS}
+        FROM code_files AS files
+        JOIN code_repos AS repos
+          ON repos.id = files.repo_id
+         AND repos.engagement_id = files.engagement_id
+         AND repos.active_generation > 0
+        WHERE files.engagement_id = ? AND files.id = ?
+          AND files.retired_at IS NULL
+        """,
+        (engagement_id, file_id),
+    ).fetchone()
+
+
+def _resolve_requeue_target(
+    connection, engagement_id: int, selector: dict[str, Any]
+) -> tuple[Any, str, str]:
+    """Resolve one selector to its current target file row.
+
+    Returns ``(row, outcome, label)``; ``row`` is None unless ``outcome`` is
+    ``resolved``. The label is what the not_found/ambiguous summaries name.
+    """
+    if "file_id" in selector:
+        file_id = int(selector["file_id"])
+        row = _requeue_target_by_file_id(connection, engagement_id, file_id)
+        return (row, "resolved", "") if row is not None else (None, "not_found", str(file_id))
+
+    if "trigger_id" in selector:
+        trigger_id = int(selector["trigger_id"])
+        label = f"trigger:{trigger_id}"
+        trigger = connection.execute(
+            """
+            SELECT triggers.target_file_id, triggers.target_file_path,
+                   source_files.repo_id AS source_repo_id
+            FROM code_analysis_triggers AS triggers
+            JOIN code_files AS source_files
+              ON source_files.id = triggers.source_file_id
+             AND source_files.engagement_id = triggers.engagement_id
+            JOIN code_repos AS source_repos
+              ON source_repos.id = source_files.repo_id
+             AND source_repos.engagement_id = source_files.engagement_id
+             AND source_repos.active_generation > 0
+            WHERE triggers.engagement_id = ? AND triggers.id = ?
+              AND triggers.repo_generation = source_repos.active_generation
+              AND triggers.source_superseded_at IS NULL
+            """,
+            (engagement_id, trigger_id),
+        ).fetchone()
+        if trigger is None:
+            return None, "not_found", label
+        if trigger["target_file_id"] is not None:
+            row = _requeue_target_by_file_id(
+                connection, engagement_id, int(trigger["target_file_id"])
+            )
+            return (row, "resolved", "") if row is not None else (None, "not_found", label)
+        # An unbound trigger names its target by path inside the source repo,
+        # which is the same repository the requeue insert must land in.
+        selector = {
+            "file_path": str(trigger["target_file_path"]),
+            "repo_id": int(trigger["source_repo_id"]),
+        }
+        row, outcome, _label = _resolve_requeue_target(
+            connection, engagement_id, selector
+        )
+        return row, outcome, label
+
+    file_path = str(selector["file_path"])
+    repo_id = selector.get("repo_id")
+    rows = connection.execute(
+        (
+            f"""
+            SELECT {_REQUEUE_TARGET_COLUMNS}
+            FROM code_files AS files
+            JOIN code_repos AS repos
+              ON repos.id = files.repo_id
+             AND repos.engagement_id = files.engagement_id
+             AND repos.active_generation > 0
+            WHERE files.engagement_id = ? AND files.file_path = ?
+              AND files.retired_at IS NULL
+            """
+            if repo_id is None
+            else f"""
+            SELECT {_REQUEUE_TARGET_COLUMNS}
+            FROM code_files AS files
+            JOIN code_repos AS repos
+              ON repos.id = files.repo_id
+             AND repos.engagement_id = files.engagement_id
+             AND repos.active_generation > 0
+            WHERE files.engagement_id = ? AND files.repo_id = ?
+              AND files.file_path = ?
+              AND files.retired_at IS NULL
+            """
+        ),
+        (engagement_id, file_path)
+        if repo_id is None
+        else (engagement_id, int(repo_id), file_path),
+    ).fetchall()
+    if not rows:
+        return None, "not_found", file_path
+    if len(rows) > 1:
+        return None, "ambiguous", file_path
+    return rows[0], "resolved", ""
+
+
+def _requeue_trigger_payload(
+    item: dict[str, Any], *, file_path: str
+) -> dict[str, Any] | None:
+    """Project one input's free-text trigger context into a queue-row entry."""
+    reason = item.get("reason", "")
+    trigger_ctx = item.get("trigger_context")
+    if not reason and not trigger_ctx:
+        return None
+    payload: dict[str, Any] = {"file_path": file_path, "source": "cross_file_trigger"}
+    if reason:
+        payload["reason"] = str(reason)
+    if isinstance(trigger_ctx, dict):
+        reserved_context_keys = {
+            "file_path",
+            "reason",
+            "source",
+            "trigger_id",
+            "source_file_id",
+            "source_file_path",
+            "source_queue_item_id",
+        }
+        payload.update(
+            {
+                key: value
+                for key, value in trigger_ctx.items()
+                if key not in reserved_context_keys
+            }
+        )
+    return {
+        key: value for key, value in payload.items() if value not in (None, "", [], {})
+    }
+
+
+def _apply_requeue_target(
+    connection,
+    engagement_id: int,
+    file_id: int,
+    target: dict[str, Any],
+) -> tuple[str, int | None, str, bool]:
+    """Write one aggregated target. Returns (outcome, queue_item_id, detail, reopened).
+
+    Raises :class:`_TriggerTargetBlocked` when durable state refuses the write,
+    so the caller can roll back this target alone.
+    """
+    if target["blocked_reason"] is not None:
+        raise _TriggerTargetBlocked(target["blocked_reason"])
+
+    pending_trigger_rows = connection.execute(
+        """
+        SELECT triggers.id, triggers.source_queue_item_id,
+               triggers.source_file_id, source_files.file_path AS source_file_path,
+               triggers.target_file_path, triggers.vuln_class, triggers.reason
+        FROM code_analysis_triggers AS triggers
+        JOIN code_files AS source_files
+          ON source_files.id = triggers.source_file_id
+         AND source_files.engagement_id = triggers.engagement_id
+        JOIN code_repos AS source_repos
+          ON source_repos.id = triggers.repo_id
+         AND source_repos.engagement_id = triggers.engagement_id
+         AND source_repos.active_generation > 0
+        JOIN code_files AS target_files
+          ON target_files.id = ?
+         AND target_files.engagement_id = triggers.engagement_id
+        WHERE triggers.engagement_id = ? AND triggers.status = ?
+          AND triggers.repo_generation = source_repos.active_generation
+          AND triggers.source_superseded_at IS NULL
+          AND (
+              triggers.target_file_id = target_files.id
+              OR (
+                  triggers.target_file_id IS NULL
+                  AND triggers.target_file_path = target_files.file_path
+                  AND source_files.repo_id = target_files.repo_id
+              )
+          )
+        ORDER BY triggers.id
+        """,
+        (file_id, engagement_id, _TRIGGER_STATUS_PENDING),
+    ).fetchall()
+    bucket_triggers = target["cross_file_triggers"]
+    existing_trigger_ids = {
+        int(entry["trigger_id"])
+        for entry in bucket_triggers
+        if isinstance(entry, dict) and entry.get("trigger_id") is not None
+    }
+    for trigger_row in pending_trigger_rows:
+        trigger_id = int(trigger_row["id"])
+        if trigger_id in existing_trigger_ids:
+            continue
+        trigger_payload = {
+            "trigger_id": trigger_id,
+            "file_path": str(trigger_row["target_file_path"]),
+            "source": "code_analysis_trigger",
+            "source_file_id": int(trigger_row["source_file_id"]),
+            "source_file_path": str(trigger_row["source_file_path"]),
+            "vuln_class": str(trigger_row["vuln_class"]),
+            "reason": str(trigger_row["reason"]),
+        }
+        if trigger_row["source_queue_item_id"] is not None:
+            trigger_payload["source_queue_item_id"] = int(
+                trigger_row["source_queue_item_id"]
+            )
+        bucket_triggers.append(trigger_payload)
+        existing_trigger_ids.add(trigger_id)
+
+    current_rows = [
+        dict(queue_row)
+        for queue_row in connection.execute(
+            """
+            SELECT *
+            FROM code_analysis_queue
+            WHERE engagement_id = ? AND file_id = ? AND repo_generation = ?
+            ORDER BY id
+            """,
+            (engagement_id, file_id, int(target["repo_generation"])),
+        ).fetchall()
+    ]
+    latest, active, active_issue = _canonical_queue_attempt_state(current_rows)
+    if active_issue is not None:
+        raise _TriggerTargetBlocked(
+            f"{active_issue} queue history requires operator reconciliation"
+        )
+
+    # A15b: a requeue is added depth on the file's existing lane, not a move to
+    # a synthetic one. Provenance rides in queue_mode='trigger' instead.
+    batch_theme = target["batch_theme"]
+    if batch_theme is None:
+        inherited = active if active is not None else latest
+        batch_theme = str((inherited or {}).get("batch_theme") or "")
+
+    if active is not None:
+        active_status = str(active["status"])
+        existing_slots = _json_decode(active.get("slot_types_json"), [])
+        existing_guidance = _json_decode(active.get("guidance_hypotheses_json"), [])
+        existing_triggers = _json_decode(active.get("cross_file_triggers_json"), [])
+        requested_is_present = (
+            int(active["priority"]) == int(target["priority"])
+            and _contains_all_values(existing_slots, target["slot_types"])
+            and _contains_all_values(existing_guidance, target["guidance_hypotheses"])
+            and _contains_all_values(existing_triggers, target["cross_file_triggers"])
+        )
+        if active_status == "processing":
+            if not requested_is_present:
+                raise _TriggerTargetBlocked(
+                    "file is processing; new trigger context cannot be merged into a "
+                    "live lease"
+                )
+            result = (
+                "already_queued",
+                int(active["id"]),
+                "live lease already carries this context",
+                False,
+            )
+            return _finish_requeue_target(
+                connection, engagement_id, file_id, pending_trigger_rows, result
+            )
+        if str(active.get("assigned_agent") or "") or str(
+            active.get("lease_token") or ""
+        ):
+            raise _TriggerTargetBlocked(
+                "pending queue attempt has an inconsistent lease identity"
+            )
+        if str(active.get("queue_mode") or "initial") == "reanalysis":
+            raise _TriggerTargetBlocked(
+                "pending explicit reanalysis owns this file; close that attempt "
+                "before merging trigger context"
+            )
+        cursor = connection.execute(
+            """
+            UPDATE code_analysis_queue
+            SET priority = ?, batch_theme = ?, slot_types_json = ?,
+                guidance_hypotheses_json = ?, cross_file_triggers_json = ?,
+                queue_mode = 'trigger', updated_at = CURRENT_TIMESTAMP
+            WHERE engagement_id = ? AND id = ? AND status = 'pending'
+              AND assigned_agent = '' AND lease_token = ''
+            """,
+            (
+                int(target["priority"]),
+                batch_theme,
+                _json_list_text(_merge_unique_values(existing_slots, target["slot_types"])),
+                _json_list_text(
+                    _merge_unique_values(existing_guidance, target["guidance_hypotheses"])
+                ),
+                _json_list_text(
+                    _merge_unique_values(existing_triggers, target["cross_file_triggers"])
+                ),
+                engagement_id,
+                int(active["id"]),
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise _TriggerTargetBlocked("pending queue item changed during trigger merge")
+        return _finish_requeue_target(
+            connection,
+            engagement_id,
+            file_id,
+            pending_trigger_rows,
+            (
+                "already_queued",
+                int(active["id"]),
+                "merged into the pending attempt",
+                False,
+            ),
+        )
+
+    latest_contains_request = (
+        latest is not None
+        and int(latest["priority"]) == int(target["priority"])
+        and _contains_all_values(
+            _json_decode(latest.get("slot_types_json"), []), target["slot_types"]
+        )
+        and _contains_all_values(
+            _json_decode(latest.get("guidance_hypotheses_json"), []),
+            target["guidance_hypotheses"],
+        )
+        and _contains_all_values(
+            _json_decode(latest.get("cross_file_triggers_json"), []),
+            target["cross_file_triggers"],
+        )
+    )
+    if (
+        latest is not None
+        and str(latest["status"]) == "done"
+        and latest_contains_request
+        and _has_current_successful_review(connection, engagement_id, file_id)
+    ):
+        # A completed review that already carries this context is not reopened,
+        # so its pending triggers stay pending for an explicit disposition.
+        _sync_trigger_status_for_file(connection, engagement_id, file_id)
+        return (
+            "already_completed",
+            int(latest["id"]),
+            "current review already covers this context",
+            False,
+        )
+
+    cursor = connection.execute(
+        """
+        INSERT INTO code_analysis_queue (
+            engagement_id, file_id, priority,
+            batch_theme, slot_types_json, guidance_hypotheses_json,
+            cross_file_triggers_json, repo_generation, queue_mode
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'trigger')
+        """,
+        (
+            engagement_id,
+            file_id,
+            int(target["priority"]),
+            batch_theme,
+            _json_list_text(target["slot_types"]),
+            _json_list_text(target["guidance_hypotheses"]),
+            _json_list_text(target["cross_file_triggers"]),
+            int(target["repo_generation"]),
+        ),
+    )
+    reopened = latest is not None
+    detail = (
+        "reopened a terminal file with a new trigger attempt"
+        if reopened
+        else "created the first trigger attempt"
+    )
+    return _finish_requeue_target(
+        connection,
+        engagement_id,
+        file_id,
+        pending_trigger_rows,
+        ("inserted", int(cursor.lastrowid), detail, reopened),
+    )
+
+
+def _finish_requeue_target(
+    connection,
+    engagement_id: int,
+    file_id: int,
+    pending_trigger_rows: list[Any],
+    result: tuple[str, int, str, bool],
+) -> tuple[str, int, str, bool]:
+    """Bind the target's pending triggers to the written row and resync rollups."""
+    _outcome, queue_item_id, _detail, _reopened = result
+    pending_trigger_ids = [int(row["id"]) for row in pending_trigger_rows]
+    if pending_trigger_ids:
+        placeholders = ",".join("?" for _ in pending_trigger_ids)
+        connection.execute(
+            f"""
+            UPDATE code_analysis_triggers
+            SET target_file_id = ?, resolved_queue_item_id = ?,
+                status = ?, resolution_note = '',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE engagement_id = ? AND status = ?
+              AND id IN ({placeholders})
+            """,
+            (
+                file_id,
+                queue_item_id,
+                _TRIGGER_STATUS_QUEUED,
+                engagement_id,
+                _TRIGGER_STATUS_PENDING,
+                *pending_trigger_ids,
+            ),
+        )
+    _sync_file_analysis_status(connection, engagement_id, file_id)
+    _sync_trigger_status_for_file(connection, engagement_id, file_id)
+    return result
+
+
 def requeue_triggered_files(
     engagement_id: int,
     items: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    """Create new queue items for triggered files (cross-file analysis triggers).
+    """Turn cross-file triggers into linked current analysis attempts.
 
-    Each item must have at least ``file_path`` (or ``file_id``).  Optional
-    fields: ``priority``, ``batch_theme``, ``slot_types``,
-    ``guidance_hypotheses``.
+    Every input names exactly one target — ``file_id``, ``trigger_id``, or
+    ``file_path`` (with ``repo_id`` to disambiguate) — and receives exactly one
+    outcome. Inputs aggregate per target file, so ``input_trigger_count`` and
+    ``target_count`` are reported separately and the target buckets (inserted,
+    already_queued, already_completed, blocked) sum to ``target_count`` exactly.
+    Each target is written inside its own savepoint: a blocked target is
+    reported with its reason instead of discarding every other target's work.
     """
     engagement = _engagement_or_404(engagement_id)
-    inserted = 0
+    selectors = [_requeue_selector(item, index) for index, item in enumerate(items)]
+    counts = {
+        "inserted": 0,
+        "already_queued": 0,
+        "already_completed": 0,
+        "blocked": 0,
+    }
+    reopened_terminal_files = 0
     not_found: list[str] = []
     ambiguous: list[str] = []
-    already_queued = 0
-    already_completed = 0
+    input_file_ids: list[int | None] = []
+    input_outcomes: list[str] = []
+    target_outcomes: list[dict[str, Any]] = []
     with get_connection() as connection:
         connection.execute("BEGIN IMMEDIATE")
         aggregated: dict[int, dict[str, Any]] = {}
-        for item in items:
-            raw_file_id = item.get("file_id")
-            raw_file_path = str(item.get("file_path", "")).strip()
-            repo_id = item.get("repo_id")
-            validated_repo_id = (
-                _require_strict_positive_id(repo_id, field_name="repo_id")
-                if repo_id is not None
-                else None
+        for item, selector in zip(items, selectors, strict=True):
+            row, outcome, label = _resolve_requeue_target(
+                connection, engagement.id, selector
             )
-
-            file_id: int | None
-            if raw_file_id is not None:
-                validated_file_id = _require_strict_positive_id(
-                    raw_file_id,
-                    field_name="file_id",
-                )
-                row = connection.execute(
-                    """
-                    SELECT files.id, files.file_path, files.classification,
-                           files.analysis_priority, repos.active_generation
-                    FROM code_files AS files
-                    JOIN code_repos AS repos
-                      ON repos.id = files.repo_id
-                     AND repos.engagement_id = files.engagement_id
-                     AND repos.active_generation > 0
-                    WHERE files.engagement_id = ? AND files.id = ?
-                      AND files.retired_at IS NULL
-                    """,
-                    (engagement.id, validated_file_id),
-                ).fetchone()
-                if row is None:
-                    not_found.append(str(raw_file_id))
-                    continue
-                file_id = int(row["id"])
-                raw_file_path = str(row["file_path"])
-            elif raw_file_path:
-                rows = connection.execute(
-                    (
-                        """
-                        SELECT files.id, files.file_path, files.classification,
-                               files.analysis_priority, repos.active_generation
-                        FROM code_files AS files
-                        JOIN code_repos AS repos
-                          ON repos.id = files.repo_id
-                         AND repos.engagement_id = files.engagement_id
-                         AND repos.active_generation > 0
-                        WHERE files.engagement_id = ? AND files.file_path = ?
-                          AND files.retired_at IS NULL
-                        """
-                        if validated_repo_id is None
-                        else """
-                        SELECT files.id, files.file_path, files.classification,
-                               files.analysis_priority, repos.active_generation
-                        FROM code_files AS files
-                        JOIN code_repos AS repos
-                          ON repos.id = files.repo_id
-                         AND repos.engagement_id = files.engagement_id
-                         AND repos.active_generation > 0
-                        WHERE files.engagement_id = ? AND files.repo_id = ?
-                          AND files.file_path = ?
-                          AND files.retired_at IS NULL
-                        """
-                    ),
-                    (engagement.id, raw_file_path)
-                    if validated_repo_id is None
-                    else (engagement.id, validated_repo_id, raw_file_path),
-                ).fetchall()
-                if not rows:
-                    not_found.append(raw_file_path)
-                    continue
-                if len(rows) > 1:
-                    ambiguous.append(raw_file_path)
-                    continue
-                row = rows[0]
-                file_id = int(row["id"])
-            else:
+            if row is None:
+                (not_found if outcome == "not_found" else ambiguous).append(label)
+                input_file_ids.append(None)
+                input_outcomes.append(outcome)
                 continue
-
-            classification = str(row["classification"] or "").strip()
-            if classification not in _VALID_CLASSIFICATIONS:
-                raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT,
-                    detail=f"trigger target file {file_id} must be classified before requeue",
-                )
-            expected_priority = int(row["analysis_priority"])
-            supplied_priority = item.get("priority")
-            if supplied_priority is not None:
-                supplied_priority = _require_strict_priority(
-                    supplied_priority,
-                    field_name="trigger priority",
-                )
-                if supplied_priority != expected_priority:
-                    raise HTTPException(
-                        status_code=status.HTTP_409_CONFLICT,
-                        detail=(
-                            f"trigger priority for file {file_id} must equal current "
-                            f"analysis_priority {expected_priority} "
-                            f"(received {supplied_priority})"
-                        ),
-                    )
-
-            bucket = aggregated.setdefault(
+            file_id = int(row["id"])
+            input_file_ids.append(file_id)
+            input_outcomes.append("")
+            target = aggregated.setdefault(
                 file_id,
                 {
-                    "priority": expected_priority,
+                    "priority": int(row["analysis_priority"]),
                     "repo_generation": int(row["active_generation"]),
-                    "batch_theme": "cross-file-trigger",
+                    "file_path": str(row["file_path"]),
+                    "batch_theme": None,
                     "slot_types": [],
                     "guidance_hypotheses": [],
                     "cross_file_triggers": [],
-                    "file_path": raw_file_path,
+                    "blocked_reason": None,
                 },
             )
+            classification = str(row["classification"] or "").strip()
+            if classification not in _VALID_CLASSIFICATIONS:
+                target["blocked_reason"] = (
+                    "target file must be classified before requeue"
+                )
+            supplied_priority = item.get("priority")
+            if supplied_priority is not None:
+                supplied_priority = _require_strict_priority(
+                    supplied_priority, field_name="trigger priority"
+                )
+                if supplied_priority != target["priority"]:
+                    target["blocked_reason"] = (
+                        f"trigger priority must equal the current analysis_priority "
+                        f"{target['priority']} (received {supplied_priority})"
+                    )
+            if str(row["repo_role"] or ANALYSIS_REPO_ROLE) != ANALYSIS_REPO_ROLE:
+                # Checked last so it outranks the other refusals: a trigger may
+                # legitimately point into framework source and the specialist
+                # reads and cites it, but turning that into durable work is the
+                # obligation the reference role exists to decline.
+                target["blocked_reason"] = (
+                    "target file is in a reference repository, which owns no "
+                    "review obligation"
+                )
             batch_theme = str(item.get("batch_theme", "")).strip()
             if batch_theme:
-                bucket["batch_theme"] = batch_theme
-
-            existing_slots = {str(slot) for slot in bucket["slot_types"]}
-            for slot_name in _normalize_slot_types(
-                item.get("slot_types"),
-                field_name="slot_types",
-            ):
-                if slot_name not in existing_slots:
-                    bucket["slot_types"].append(slot_name)
-                    existing_slots.add(slot_name)
-
-            guidance = _normalize_guidance_hypotheses(
-                item.get("guidance_hypotheses"),
-                field_name="guidance_hypotheses",
+                target["batch_theme"] = batch_theme
+            target["slot_types"] = _merge_unique_values(
+                target["slot_types"],
+                _normalize_slot_types(item.get("slot_types"), field_name="slot_types"),
             )
-            reason = item.get("reason", "")
-            trigger_ctx = item.get("trigger_context")
-            bucket_guidance = bucket["guidance_hypotheses"]
-            for entry in guidance:
-                if entry not in bucket_guidance:
-                    bucket_guidance.append(entry)
+            target["guidance_hypotheses"] = _merge_unique_values(
+                target["guidance_hypotheses"],
+                _normalize_guidance_hypotheses(
+                    item.get("guidance_hypotheses"),
+                    field_name="guidance_hypotheses",
+                ),
+            )
+            trigger_payload = _requeue_trigger_payload(
+                item, file_path=target["file_path"]
+            )
+            if trigger_payload is not None:
+                target["cross_file_triggers"] = _merge_unique_values(
+                    target["cross_file_triggers"], [trigger_payload]
+                )
 
-            if reason or trigger_ctx:
-                trigger_payload: dict[str, Any] = {
-                    "file_path": str(bucket.get("file_path") or raw_file_path),
-                    "source": "cross_file_trigger",
-                }
-                if reason:
-                    trigger_payload["reason"] = str(reason)
-                if isinstance(trigger_ctx, dict):
-                    reserved_context_keys = {
-                        "file_path",
-                        "reason",
-                        "source",
-                        "trigger_id",
-                        "source_file_id",
-                        "source_file_path",
-                        "source_queue_item_id",
+        for file_id, target in aggregated.items():
+            connection.execute("SAVEPOINT requeue_target")
+            try:
+                outcome, queue_item_id, detail, reopened = _apply_requeue_target(
+                    connection, engagement.id, file_id, target
+                )
+            except _TriggerTargetBlocked as blocked:
+                connection.execute("ROLLBACK TO requeue_target")
+                connection.execute("RELEASE requeue_target")
+                counts["blocked"] += 1
+                target_outcomes.append(
+                    {
+                        "file_id": file_id,
+                        "file_path": target["file_path"],
+                        "queue_item_id": None,
+                        "outcome": "blocked",
+                        "detail": str(blocked),
                     }
-                    trigger_payload.update(
-                        {
-                            key: value
-                            for key, value in trigger_ctx.items()
-                            if key not in reserved_context_keys
-                        }
-                    )
-                trigger_payload = {
-                    key: value
-                    for key, value in trigger_payload.items()
-                    if value not in (None, "", [], {})
+                )
+                continue
+            connection.execute("RELEASE requeue_target")
+            counts[outcome] += 1
+            reopened_terminal_files += 1 if reopened else 0
+            target_outcomes.append(
+                {
+                    "file_id": file_id,
+                    "file_path": target["file_path"],
+                    "queue_item_id": queue_item_id,
+                    "outcome": outcome,
+                    "detail": detail,
                 }
-                bucket_triggers = bucket["cross_file_triggers"]
-                signature = json.dumps(trigger_payload, sort_keys=True, default=str)
-                existing_triggers = {
-                    json.dumps(entry, sort_keys=True, default=str)
-                    for entry in bucket_triggers
-                }
-                if signature not in existing_triggers:
-                    bucket_triggers.append(trigger_payload)
+            )
 
-        for file_id, item in aggregated.items():
-            pending_trigger_rows = connection.execute(
-                """
-                SELECT triggers.id, triggers.source_queue_item_id,
-                       triggers.source_file_id, source_files.file_path AS source_file_path,
-                       triggers.target_file_path, triggers.vuln_class, triggers.reason
-                FROM code_analysis_triggers AS triggers
-                JOIN code_files AS source_files
-                  ON source_files.id = triggers.source_file_id
-                 AND source_files.engagement_id = triggers.engagement_id
-                JOIN code_repos AS source_repos
-                  ON source_repos.id = triggers.repo_id
-                 AND source_repos.engagement_id = triggers.engagement_id
-                 AND source_repos.active_generation > 0
-                JOIN code_files AS target_files
-                  ON target_files.id = ?
-                 AND target_files.engagement_id = triggers.engagement_id
-                WHERE triggers.engagement_id = ? AND triggers.status = ?
-                  AND triggers.repo_generation = source_repos.active_generation
-                  AND triggers.source_superseded_at IS NULL
-                  AND (
-                      triggers.target_file_id = target_files.id
-                      OR (
-                          triggers.target_file_id IS NULL
-                          AND triggers.target_file_path = target_files.file_path
-                          AND source_files.repo_id = target_files.repo_id
-                      )
-                  )
-                ORDER BY triggers.id
-                """,
-                (file_id, engagement.id, _TRIGGER_STATUS_PENDING),
-            ).fetchall()
-            bucket_triggers = item["cross_file_triggers"]
-            existing_trigger_ids = {
-                int(entry["trigger_id"])
-                for entry in bucket_triggers
-                if isinstance(entry, dict) and entry.get("trigger_id") is not None
-            }
-            for trigger_row in pending_trigger_rows:
-                trigger_id = int(trigger_row["id"])
-                if trigger_id in existing_trigger_ids:
-                    continue
-                trigger_payload = {
-                    "trigger_id": trigger_id,
-                    "file_path": str(trigger_row["target_file_path"]),
-                    "source": "code_analysis_trigger",
-                    "source_file_id": int(trigger_row["source_file_id"]),
-                    "source_file_path": str(trigger_row["source_file_path"]),
-                    "vuln_class": str(trigger_row["vuln_class"]),
-                    "reason": str(trigger_row["reason"]),
-                }
-                if trigger_row["source_queue_item_id"] is not None:
-                    trigger_payload["source_queue_item_id"] = int(
-                        trigger_row["source_queue_item_id"]
-                    )
-                bucket_triggers.append(trigger_payload)
-                existing_trigger_ids.add(trigger_id)
-
-            current_rows = [
-                dict(queue_row)
-                for queue_row in connection.execute(
-                    """
-                    SELECT *
-                    FROM code_analysis_queue
-                    WHERE engagement_id = ? AND file_id = ? AND repo_generation = ?
-                    ORDER BY id
-                    """,
-                    (engagement.id, file_id, int(item["repo_generation"])),
-                ).fetchall()
-            ]
-            latest, active, active_issue = _canonical_queue_attempt_state(current_rows)
-            if active_issue is not None:
-                raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT,
-                    detail=(
-                        f"trigger target file {file_id} has {active_issue} queue history; "
-                        "reconcile it before requeue"
-                    ),
-                )
-
-            queue_item_id: int
-            if active is not None:
-                active_status = str(active["status"])
-                existing_slots = _json_decode(active.get("slot_types_json"), [])
-                existing_guidance = _json_decode(
-                    active.get("guidance_hypotheses_json"), []
-                )
-                existing_triggers = _json_decode(
-                    active.get("cross_file_triggers_json"), []
-                )
-                requested_is_present = (
-                    int(active["priority"]) == int(item["priority"])
-                    and _contains_all_values(existing_slots, item["slot_types"])
-                    and _contains_all_values(
-                        existing_guidance, item["guidance_hypotheses"]
-                    )
-                    and _contains_all_values(
-                        existing_triggers, item["cross_file_triggers"]
-                    )
-                )
-                if active_status == "processing":
-                    if not requested_is_present:
-                        raise HTTPException(
-                            status_code=status.HTTP_409_CONFLICT,
-                            detail=(
-                                f"trigger target file {file_id} is processing; new trigger "
-                                "context cannot be merged into a live lease"
-                            ),
-                        )
-                    queue_item_id = int(active["id"])
-                    already_queued += 1
-                else:
-                    if str(active.get("assigned_agent") or "") or str(
-                        active.get("lease_token") or ""
-                    ):
-                        raise HTTPException(
-                            status_code=status.HTTP_409_CONFLICT,
-                            detail=(
-                                f"trigger target file {file_id} has an inconsistently leased "
-                                "pending queue attempt"
-                            ),
-                        )
-                    active_mode = str(active.get("queue_mode") or "initial")
-                    if active_mode == "reanalysis":
-                        raise HTTPException(
-                            status_code=status.HTTP_409_CONFLICT,
-                            detail=(
-                                f"trigger target file {file_id} has pending explicit "
-                                "reanalysis; trigger context was not merged"
-                            ),
-                        )
-                    merged_slots = _merge_unique_values(
-                        existing_slots, item["slot_types"]
-                    )
-                    merged_guidance = _merge_unique_values(
-                        existing_guidance, item["guidance_hypotheses"]
-                    )
-                    merged_triggers = _merge_unique_values(
-                        existing_triggers, item["cross_file_triggers"]
-                    )
-                    cursor = connection.execute(
-                        """
-                        UPDATE code_analysis_queue
-                        SET priority = ?, batch_theme = ?, slot_types_json = ?,
-                            guidance_hypotheses_json = ?, cross_file_triggers_json = ?,
-                            queue_mode = 'trigger', updated_at = CURRENT_TIMESTAMP
-                        WHERE engagement_id = ? AND id = ? AND status = 'pending'
-                          AND assigned_agent = '' AND lease_token = ''
-                        """,
-                        (
-                            int(item["priority"]),
-                            str(item["batch_theme"]),
-                            _json_list_text(merged_slots),
-                            _json_list_text(merged_guidance),
-                            _json_list_text(merged_triggers),
-                            engagement.id,
-                            int(active["id"]),
-                        ),
-                    )
-                    if cursor.rowcount != 1:
-                        raise HTTPException(
-                            status_code=status.HTTP_409_CONFLICT,
-                            detail="pending queue item changed during trigger merge",
-                        )
-                    queue_item_id = int(active["id"])
-                    already_queued += 1
-            else:
-                latest_contains_request = (
-                    latest is not None
-                    and int(latest["priority"]) == int(item["priority"])
-                    and _contains_all_values(
-                        _json_decode(latest.get("slot_types_json"), []),
-                        item["slot_types"],
-                    )
-                    and _contains_all_values(
-                        _json_decode(latest.get("guidance_hypotheses_json"), []),
-                        item["guidance_hypotheses"],
-                    )
-                    and _contains_all_values(
-                        _json_decode(latest.get("cross_file_triggers_json"), []),
-                        item["cross_file_triggers"],
-                    )
-                )
-                if (
-                    latest is not None
-                    and str(latest["status"]) == "done"
-                    and latest_contains_request
-                    and _has_current_successful_review(
-                        connection, engagement.id, file_id
-                    )
-                ):
-                    already_completed += 1
-                    _sync_trigger_status_for_file(connection, engagement.id, file_id)
-                    continue
-                cursor = connection.execute(
-                    """
-                    INSERT INTO code_analysis_queue (
-                        engagement_id, file_id, priority,
-                        batch_theme, slot_types_json, guidance_hypotheses_json,
-                        cross_file_triggers_json, repo_generation, queue_mode
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'trigger')
-                    """,
-                    (
-                        engagement.id,
-                        file_id,
-                        int(item["priority"]),
-                        str(item["batch_theme"]),
-                        _json_list_text(item["slot_types"]),
-                        _json_list_text(item["guidance_hypotheses"]),
-                        _json_list_text(item["cross_file_triggers"]),
-                        int(item["repo_generation"]),
-                    ),
-                )
-                inserted += 1
-                queue_item_id = int(cursor.lastrowid)
-
-            pending_trigger_ids = [int(row["id"]) for row in pending_trigger_rows]
-            if pending_trigger_ids:
-                placeholders = ",".join("?" for _ in pending_trigger_ids)
-                connection.execute(
-                    f"""
-                    UPDATE code_analysis_triggers
-                    SET target_file_id = ?, resolved_queue_item_id = ?,
-                        status = ?, resolution_note = '',
-                        updated_at = CURRENT_TIMESTAMP
-                    WHERE engagement_id = ? AND status = ?
-                      AND id IN ({placeholders})
-                    """,
-                    (
-                        file_id,
-                        queue_item_id,
-                        _TRIGGER_STATUS_QUEUED,
-                        engagement.id,
-                        _TRIGGER_STATUS_PENDING,
-                        *pending_trigger_ids,
-                    ),
-                )
-            _sync_file_analysis_status(connection, engagement.id, file_id)
-            _sync_trigger_status_for_file(connection, engagement.id, file_id)
+    outcome_by_file = {row["file_id"]: row["outcome"] for row in target_outcomes}
+    inputs = [
+        {
+            "index": index,
+            "selector": selector,
+            "file_id": file_id,
+            "outcome": outcome or outcome_by_file[file_id],
+        }
+        for index, (selector, file_id, outcome) in enumerate(
+            zip(selectors, input_file_ids, input_outcomes, strict=True)
+        )
+    ]
     return {
-        "inserted": inserted,
-        "total": len(items),
+        "input_trigger_count": len(items),
+        "target_count": len(aggregated),
+        **counts,
+        "reopened_terminal_files": reopened_terminal_files,
         "not_found": not_found,
         "ambiguous": ambiguous,
-        "already_queued": already_queued,
-        "already_completed": already_completed,
+        "outcomes": target_outcomes,
+        "inputs": inputs,
     }
 
 
@@ -9702,13 +11616,18 @@ def code_coverage_cwe_detail(
     records, plus applicable_families computed from file slot_types."""
     engagement = _engagement_or_404(engagement_id)
 
-    repo_clause = """
-      AND f.repo_id IN (SELECT id FROM code_repos WHERE active_generation > 0)
+    repo_clause = f"""
+      AND f.repo_id IN (SELECT id FROM code_repos WHERE active_generation > 0
+                        AND {_analysis_repo_sql("code_repos")})
       AND f.retired_at IS NULL
     """
     repo_params: tuple[Any, ...] = ()
     if repo_id is not None:
-        repo_clause = " AND f.repo_id = ? AND f.retired_at IS NULL"
+        repo_clause = (
+            " AND f.repo_id = ? AND f.retired_at IS NULL"
+            " AND f.repo_id IN (SELECT id FROM code_repos WHERE"
+            f" {_analysis_repo_sql('code_repos')})"
+        )
         repo_params = (repo_id,)
 
     with get_connection() as connection:
@@ -9719,7 +11638,8 @@ def code_coverage_cwe_detail(
             f"""
             SELECT f.id AS file_id, f.file_path, f.classification, f.slot_types_json,
                    f.analysis_status, f.loc, f.language, f.role,
-                   f.total_functions, f.total_entry_points, f.total_sinks, f.total_exports
+                   f.total_functions, f.total_entry_points, f.total_sinks, f.total_exports,
+                   f.structural_unavailable_dimensions_json
             FROM code_files f
             WHERE f.engagement_id = ? AND f.classification IN ('critical', 'high'){repo_clause}
             ORDER BY f.analysis_priority DESC, f.id ASC
@@ -9888,6 +11808,12 @@ def code_coverage_cwe_detail(
                 "total_entry_points": int(fr["total_entry_points"] or 0),
                 "total_sinks": int(fr["total_sinks"] or 0),
                 "total_exports": int(fr["total_exports"] or 0),
+                # A file can report zero of everything because nothing was
+                # scanned; the CWE matrix cannot tell that from a clean read
+                # without the index's own coverage declaration.
+                "structural_unavailable_dimensions": _json_decode(
+                    fr["structural_unavailable_dimensions_json"], []
+                ),
                 "slot_types": slot_types,
                 "applicable_families": applicable,
                 "cwe_coverage": merged_entries,
@@ -9904,6 +11830,9 @@ def code_coverage_cwe_detail(
     return {
         "files": files_detail,
         "total_files": summary["total_files"],
+        "reference_repos": summary["reference_repos"],
+        "open_leases": summary["open_leases"],
+        "open_leases_count": summary["open_leases_count"],
         "by_classification": summary["by_classification"],
         "by_status": summary["by_status"],
         "gate": summary["gate"],

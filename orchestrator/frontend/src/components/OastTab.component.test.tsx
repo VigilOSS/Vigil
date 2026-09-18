@@ -58,7 +58,7 @@ const probe = {
   created_at: "2026-09-12T00:00:00Z",
   updated_at: "2026-09-12T00:00:00Z",
   interaction_count: 0,
-  last_interaction_at: null,
+  last_interaction_at: "",
 };
 
 function deferred<T>() {

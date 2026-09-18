@@ -2009,6 +2009,7 @@ def test_findings_verify_pending_runtime_proof_roundtrips_and_holds(client, isol
                 "evidence": "state param is not bound to a nonce in handler",
                 "impact": "Potential account takeover pending runtime confirmation",
                 "chain_required": True,
+                "chain_rationale": "Only reaches takeover once a runtime pass proves the state is replayable against a live session.",
             },
             "provenance": {
                 **_author_provenance(client, "VA-050"),

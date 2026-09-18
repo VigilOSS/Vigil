@@ -15,14 +15,17 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterator, Protocol
+from typing import Any, Callable, Iterator, Protocol, Sequence
 from urllib.parse import urlparse
 
 from . import docker
 from .client_rosters import (
     ensure_claude_agents_link,
+    ensure_claude_commands_link,
     ensure_claude_settings,
     ensure_codex_agents_link,
+    ensure_codex_config,
+    ensure_codex_skills_link,
     ensure_goose_recipes_link,
     ensure_goose_standard_hooks,
     ensure_opencode_agents_link,
@@ -47,9 +50,17 @@ ENGAGEMENT_DB_SNAPSHOT_MAX_COPIES_ENV = "VIGIL_ENGAGEMENT_DB_SNAPSHOT_MAX_COPIES
 DEFAULT_ENGAGEMENT_DB_SNAPSHOT_MAX_COPIES = 2
 CODE_TARGET_CONTACT_POLICY = "warn-do-not-contact-declared-hosts"
 
-# Engagement types that probe a live HTTP target and so can carry required
-# attribution headers / out-of-scope carve-outs. code/blue have no HTTP target.
+# Engagement types that probe a live HTTP target at creation time and so can be
+# created with required attribution headers / out-of-scope carve-outs already
+# set. code/blue declare no hosts at create, so there is nothing to attribute.
 _HTTP_TARGET_TYPES = {"web", "both", "android"}
+
+# Engagement types that carry offensive host scope at all. Mid-engagement ROE
+# mutations are gated on this plus, for the traffic-shaping ones, an actually
+# declared root — not on the track mix. A code engagement may legitimately
+# declare the hosts its source talks to (ADR 0021), and declaring one never
+# activates the web track (ADR 0022). Blue incident work has no such scope.
+_HOST_SCOPE_TYPES = {"web", "both", "android", "code"}
 
 # Bug-bounty program → the attribution header name that program mandates on all
 # traffic. `--program <name> --researcher <handle>` is sugar over `--header`.
@@ -513,8 +524,10 @@ def create_engagement(
     install_root = options.install_root.expanduser().resolve()
     agent_root = install_root / "agent"
     # Validate and derive everything before taking any side effect: an invalid
-    # option set must not leave behind a DB snapshot or a half-made directory.
+    # option set, or an install root that cannot back an engagement, must not
+    # leave behind a DB snapshot or a half-made directory.
     plan = plan_engagement(options)
+    _require_install_prerequisites(agent_root, options.engagement_type)
 
     root = (
         engagement_root.expanduser().resolve()
@@ -532,90 +545,98 @@ def create_engagement(
         counter += 1
     eng_dir.mkdir(parents=True)
     key = eng_dir.name
+    # Everything below writes into the new directory. A writer that fails part
+    # way through must not leave a scoped-but-unlaunchable engagement behind:
+    # roll the directory back and let the error surface. Steps AFTER this block
+    # (backend sync verification, footers) report on a durable engagement and
+    # must not delete it -- their own messages tell the operator how to recover.
+    try:
+        for subdir in plan.subdirs:
+            (eng_dir / subdir).mkdir()
 
-    for subdir in plan.subdirs:
-        (eng_dir / subdir).mkdir()
+        scope = dict(plan.scope)
+        manifest = dict(plan.manifest)
+        manifest["key"] = key
 
-    scope = dict(plan.scope)
-    manifest = dict(plan.manifest)
-    manifest["key"] = key
-
-    _write_json(eng_dir / "scope.json", scope)
-    _write_json(eng_dir / "engagement.json", manifest)
-    _write_report(
-        eng_dir,
-        options.engagement_type,
-        name=plan.report_name,
-        target=plan.report_target,
-        repos=list(plan.repos),
-        date_label=plan.date_label,
-    )
-    _write_issues_doc(eng_dir)
-    _write_engagement_brief_stub(agent_root, eng_dir)
-    # No auth.json scaffold: credentials live in the centralized store and an
-    # engagement with no credentials reads as anonymous (vigil auth import /
-    # mitmproxy capture populate it). See orchestrator credentials API.
-    _write_json(eng_dir / "sessions" / "index.json", [])
-    # Dispatch tracking + handoff content live in the orchestrator backend
-    # (assessment_dispatches / assessment_dispatch_handoffs /
-    # assessment_dispatch_decisions). Write via
-    # `vigil assess agent start|handoff|decision`.
-    #
-    # AGENT_NAME defaulting to "operator" is handled in
-    # agent/scripts/assess/lib/kali_audit.py (`_resolve_agent_name`) so the env
-    # file only carries `ORCHESTRATOR_BASE_URL`; specialist dispatch wrappers
-    # must export AGENT_NAME=<role> or pass --agent-name explicitly.
-    #
-    # Only seed `.orchestrator.env` when an explicit override is in effect.
-    # The default base URL falls through `resolve_orchestrator_base_url`
-    # (env var → engagement env file → `vigil config get orchestrator_base_url`
-    # → legacy install env files → hardcoded default), so writing the default
-    # into the file would just confuse operators reading it ("do I edit this
-    # to change the port?").
-    # When an override IS configured (via env var, `vigil config`, or a legacy
-    # install-root env file), we snapshot it into the engagement file so the
-    # launcher re-exports it.
-    resolved_base_url = (
-        resolve_orchestrator_base_url(install_root, eng_dir)
-        if contact_backend
-        else DEFAULT_ORCHESTRATOR_BASE_URL
-    )
-    if resolved_base_url and resolved_base_url != DEFAULT_ORCHESTRATOR_BASE_URL:
-        (eng_dir / ".orchestrator.env").write_text(
-            f"ORCHESTRATOR_BASE_URL={resolved_base_url}\n",
-            encoding="utf-8",
+        _write_json(eng_dir / "scope.json", scope)
+        _write_json(eng_dir / "engagement.json", manifest)
+        _write_report(
+            eng_dir,
+            options.engagement_type,
+            name=plan.report_name,
+            target=plan.report_target,
+            repos=list(plan.repos),
+            date_label=plan.date_label,
         )
-    else:
-        # Touch an empty file so launcher loops that test ``-f`` don't trip
-        # on a missing path. The launcher's grep falls through to the
-        # default when the file has no ORCHESTRATOR_BASE_URL line.
-        (eng_dir / ".orchestrator.env").write_text("", encoding="utf-8")
-    # No local work-buffer DB is created: the work buffer lives in the
-    # orchestrator backend (assessment_work_items) and is populated on first
-    # ingest (ADR 0013). Fresh engagements start with an empty backend buffer.
+        _write_issues_doc(eng_dir)
+        _write_engagement_brief_stub(agent_root, eng_dir)
+        # No auth.json scaffold: credentials live in the centralized store and an
+        # engagement with no credentials reads as anonymous (vigil auth import /
+        # mitmproxy capture populate it). See orchestrator credentials API.
+        _write_json(eng_dir / "sessions" / "index.json", [])
+        # Dispatch tracking + handoff content live in the orchestrator backend
+        # (assessment_dispatches / assessment_dispatch_handoffs /
+        # assessment_dispatch_decisions). Write via
+        # `vigil assess agent start|handoff|decision`.
+        #
+        # AGENT_NAME defaulting to "operator" is handled in
+        # agent/scripts/assess/lib/kali_audit.py (`_resolve_agent_name`) so the env
+        # file only carries `ORCHESTRATOR_BASE_URL`; specialist dispatch wrappers
+        # must export AGENT_NAME=<role> or pass --agent-name explicitly.
+        #
+        # Only seed `.orchestrator.env` when an explicit override is in effect.
+        # The default base URL falls through `resolve_orchestrator_base_url`
+        # (env var → engagement env file → `vigil config get orchestrator_base_url`
+        # → legacy install env files → hardcoded default), so writing the default
+        # into the file would just confuse operators reading it ("do I edit this
+        # to change the port?").
+        # When an override IS configured (via env var, `vigil config`, or a legacy
+        # install-root env file), we snapshot it into the engagement file so the
+        # launcher re-exports it.
+        resolved_base_url = (
+            resolve_orchestrator_base_url(install_root, eng_dir)
+            if contact_backend
+            else DEFAULT_ORCHESTRATOR_BASE_URL
+        )
+        if resolved_base_url and resolved_base_url != DEFAULT_ORCHESTRATOR_BASE_URL:
+            (eng_dir / ".orchestrator.env").write_text(
+                f"ORCHESTRATOR_BASE_URL={resolved_base_url}\n",
+                encoding="utf-8",
+            )
+        else:
+            # Touch an empty file so launcher loops that test ``-f`` don't trip
+            # on a missing path. The launcher's grep falls through to the
+            # default when the file has no ORCHESTRATOR_BASE_URL line.
+            (eng_dir / ".orchestrator.env").write_text("", encoding="utf-8")
+        # No local work-buffer DB is created: the work buffer lives in the
+        # orchestrator backend (assessment_work_items) and is populated on first
+        # ingest (ADR 0013). Fresh engagements start with an empty backend buffer.
 
-    client_kind = _install_client_kind(agent_root)
-    _write_prompt_wrappers(agent_root, eng_dir, client_kind, engagement_type=options.engagement_type)
-    if client_kind in {"codex", "both"}:
-        _write_codex_config(agent_root, eng_dir)
-    if client_kind in {"claude", "both"}:
-        _write_claude_config(agent_root, eng_dir)
-    # OpenCode parity: the standard plugin (scope-check + activity-log) and the
-    # specialist roster install for every kind that also gets start_opencode.sh
-    # (codex/claude/both), so an `--client opencode` run — including `vigil bench`,
-    # whose engagement creation routes through here — has the standard logging
-    # plugin in place. The bench then layers its guard-only plugin beside it.
-    if client_kind in {"codex", "claude", "both"}:
-        _write_opencode_config(agent_root, eng_dir)
-    # Goose parity: the operator prompt (`.goosehints`), the specialist recipe roster
-    # (`.goose/recipes` link), and the standard hooks plugin (scope-check + activity-log)
-    # install for every kind that also gets start_goose.sh, so an `--client goose` run —
-    # including `vigil bench` — has them in place. The bench layers its guard-only hook
-    # beside the standard one (anticheat._patch_goose_hooks). Written AFTER
-    # _write_prompt_wrappers so AGENTS.md exists to seed .goosehints.
-    if client_kind in {"codex", "claude", "both"}:
-        _write_goose_config(agent_root, eng_dir)
-    _write_launchers(agent_root, eng_dir, client_kind, skip_permissions=options.skip_permissions)
+        client_kind = _install_client_kind(agent_root)
+        _write_prompt_wrappers(agent_root, eng_dir, client_kind, engagement_type=options.engagement_type)
+        if client_kind in {"codex", "both"}:
+            _write_codex_config(agent_root, eng_dir)
+        if client_kind in {"claude", "both"}:
+            _write_claude_config(agent_root, eng_dir)
+        # OpenCode parity: the standard plugin (activity-log) and the
+        # specialist roster install for every kind that also gets start_opencode.sh
+        # (codex/claude/both), so an `--client opencode` run — including `vigil bench`,
+        # whose engagement creation routes through here — has the standard logging
+        # plugin in place. The bench then layers its guard-only plugin beside it.
+        if client_kind in {"codex", "claude", "both"}:
+            _write_opencode_config(agent_root, eng_dir)
+        # Goose parity: the operator prompt (`.goosehints`), the specialist recipe roster
+        # (`.goose/recipes` link), and the standard hooks plugin (activity-log)
+        # install for every kind that also gets start_goose.sh, so an `--client goose` run —
+        # including `vigil bench` — has them in place. The bench layers its guard-only hook
+        # beside the standard one (anticheat._patch_goose_hooks). Written AFTER
+        # _write_prompt_wrappers so AGENTS.md exists to seed .goosehints.
+        if client_kind in {"codex", "claude", "both"}:
+            _write_goose_config(agent_root, eng_dir)
+        _write_launchers(agent_root, eng_dir, client_kind, skip_permissions=options.skip_permissions)
+    except BaseException:
+        shutil.rmtree(eng_dir, ignore_errors=True)
+        raise
     _emit_bootstrap_scope_summary(scope)
     if contact_backend:
         _verify_backend_install_root(install_root, eng_dir)
@@ -800,18 +821,90 @@ def mutate_scope_file(
     return scope
 
 
-def _mutate_http_scope(
+def _declared_authorization_roots(scope: dict[str, Any]) -> list[str]:
+    """Every authorization root ``scope.json`` declares, across both list keys.
+
+    Android keeps its live API roots under ``backend_hosts`` while ``hosts``
+    stays empty for the artifact-only surface, so a predicate reading ``hosts``
+    alone would call a fully-declared android engagement unscoped.
+    """
+    roots: list[str] = []
+    for list_key in ("hosts", "backend_hosts"):
+        value = scope.get(list_key)
+        if isinstance(value, list):
+            roots.extend(str(item).strip() for item in value if str(item).strip())
+    return roots
+
+
+def _mutate_host_scope(
     install_root: Path,
     key: str,
     mutator: Callable[[dict[str, Any]], object],
 ) -> dict[str, Any]:
+    """Apply the mutation that DECLARES authorization roots.
+
+    Declaring a root is the authorization event itself (ADR 0018), so it cannot
+    be gated on already having one. It is gated only on the engagement having
+    offensive host scope to declare into.
+    """
     scope_path = _engagement_scope_path(install_root, key)
 
     def checked_mutation(scope: dict[str, Any]) -> None:
-        if str(scope.get("engagement_type") or "") not in _HTTP_TARGET_TYPES:
+        engagement_type = str(scope.get("engagement_type") or "")
+        if engagement_type not in _HOST_SCOPE_TYPES:
             raise SystemExit(
-                f"engagement '{key}' is type '{scope.get('engagement_type')}'; required "
-                "headers / out-of-scope apply only to HTTP-target engagements."
+                f"cannot add hosts to engagement '{key}': type "
+                f"'{engagement_type or 'unknown'}' carries no authorization-root scope."
+            )
+        mutator(scope)
+
+    return mutate_scope_file(scope_path, checked_mutation)
+
+
+def _mutate_roe_scope(
+    install_root: Path,
+    key: str,
+    mutation: str,
+    mutator: Callable[[dict[str, Any]], object],
+    *,
+    require_declared_roots: bool,
+) -> dict[str, Any]:
+    """Apply an ROE mutation to an engagement that carries host scope.
+
+    Every ROE mutation is gated on the engagement TYPE: blue incident work has
+    no offensive host scope, so none of these describe anything there.
+
+    ``require_declared_roots`` adds the second gate, and only ADDING traffic
+    shaping asks for it: a required header and an out-of-scope carve-out each
+    describe traffic to declared roots, and an engagement with none has nothing
+    for them to describe — that refusal is how a code engagement is pointed at
+    `add-host` (ADR 0021). Removing ROE state never asks for it. `create`
+    writes required headers, carve-outs and the rate ceiling on any HTTP-target
+    type without requiring a root, and android's ``hosts`` is empty by design
+    (its live API roots are ``backend_hosts``), so a root requirement on the
+    way back out would strand state the operator was allowed to write: they
+    would have to declare an authorization root they do not have in order to
+    delete a header they already set.
+
+    The rate ceiling sits with the removals for the same reason. It has no
+    removal verb, so this is the only way to change a value `create` can
+    already write; and it restrains Vigil's own tooling — a single global token
+    bucket per recon stage — rather than describing any particular root, so
+    refusing a tighter ceiling fails in the wrong direction.
+    """
+    scope_path = _engagement_scope_path(install_root, key)
+
+    def checked_mutation(scope: dict[str, Any]) -> None:
+        engagement_type = str(scope.get("engagement_type") or "")
+        if engagement_type not in _HOST_SCOPE_TYPES:
+            raise SystemExit(
+                f"cannot {mutation} on engagement '{key}': type "
+                f"'{engagement_type or 'unknown'}' carries no authorization-root scope."
+            )
+        if require_declared_roots and not _declared_authorization_roots(scope):
+            raise SystemExit(
+                f"cannot {mutation} on engagement '{key}': it declares no in-scope "
+                f"hosts. Run `vigil engagement add-host {key} <host>` first."
             )
         mutator(scope)
 
@@ -833,7 +926,9 @@ def set_engagement_header(install_root: Path, key: str, header: str) -> dict[str
         headers[name] = value
         scope["required_headers"] = headers
 
-    scope = _mutate_http_scope(install_root, key, update)
+    scope = _mutate_roe_scope(
+        install_root, key, "set a required header", update, require_declared_roots=True
+    )
     return dict(scope["required_headers"])
 
 
@@ -849,7 +944,10 @@ def unset_engagement_header(install_root: Path, key: str, name: str) -> dict[str
         else:
             scope.pop("required_headers", None)
 
-    scope = _mutate_http_scope(install_root, key, update)
+    scope = _mutate_roe_scope(
+        install_root, key, "remove a required header", update,
+        require_declared_roots=False,
+    )
     headers = scope.get("required_headers")
     return dict(headers) if isinstance(headers, dict) else {}
 
@@ -867,7 +965,10 @@ def add_out_of_scope(install_root: Path, key: str, entries: list[str]) -> list[s
                 merged.append(entry)
         scope["out_of_scope"] = merged
 
-    scope = _mutate_http_scope(install_root, key, update)
+    scope = _mutate_roe_scope(
+        install_root, key, "add an out-of-scope carve-out", update,
+        require_declared_roots=True,
+    )
     return list(scope["out_of_scope"])
 
 
@@ -884,7 +985,10 @@ def remove_out_of_scope(install_root: Path, key: str, entry: str) -> list[str]:
         else:
             scope.pop("out_of_scope", None)
 
-    scope = _mutate_http_scope(install_root, key, update)
+    scope = _mutate_roe_scope(
+        install_root, key, "remove an out-of-scope carve-out", update,
+        require_declared_roots=False,
+    )
     remaining = scope.get("out_of_scope")
     return list(remaining) if isinstance(remaining, list) else []
 
@@ -1028,7 +1132,17 @@ def add_engagement_hosts(
                 merged.append(entry)
         scope["hosts"] = merged
 
-    scope = _mutate_http_scope(install_root, key, update)
+    scope = _mutate_host_scope(install_root, key, update)
+    if str(scope.get("engagement_type") or "") == "code":
+        # ADR 0022: the web track is added explicitly, never as a side effect of
+        # another operation. Say so here rather than let the operator read a
+        # successful add-host as "live work is now authorized to start".
+        print(
+            f"[vigil] {key} is a code engagement: declaring an authorization root "
+            "does not activate a web track. Run "
+            f"`vigil engagement add-track {key} web` before any live probe.",
+            file=sys.stderr,
+        )
     return list(scope["hosts"])
 
 
@@ -1042,10 +1156,12 @@ def set_engagement_rate_limit(
     if rate is None:
         raise SystemExit("rate limit value is required.")
 
-    scope = _mutate_http_scope(
+    scope = _mutate_roe_scope(
         install_root,
         key,
+        "set the rate limit",
         lambda current: current.__setitem__("rate_limit", rate),
+        require_declared_roots=False,
     )
     return float(scope["rate_limit"])
 
@@ -1277,7 +1393,7 @@ def start_engagement(install_root: Path, engagement_dir: Path, client: str, extr
     # provider-owned observation.
     os.environ["VIGIL_REQUESTED_CLIENT"] = client
     os.chdir(engagement_dir)
-    os.execv(str(launcher), [str(launcher), *extra_args])
+    os.execv(str(launcher), [str(launcher), *client_launch_argv(client, extra_args)])
 
 
 def _write_json(path: Path, payload: object) -> None:
@@ -1978,13 +2094,33 @@ _ENGAGEMENT_ROE_POINTER = (
 )
 
 
+def _canonical_operator_prompt(agent_root: Path, engagement_type: str) -> Path:
+    """The installed operator prompt this engagement's wrappers must point at."""
+    return agent_root / ("AGENTS-blue.md" if engagement_type == "blue" else "AGENTS.md")
+
+
+def _require_install_prerequisites(agent_root: Path, engagement_type: str) -> None:
+    """Fail before any side effect when the install root cannot back an engagement.
+
+    ``create_engagement`` writes the directory, scope, manifest and launchers in one
+    pass, so a missing installed prompt discovered mid-pass used to leave a scoped
+    engagement with no launchers and no operator prompt — `engagement list` showed it
+    as live, `engagement start` could not launch it, and `vigil install` could not
+    repair it (a launcher-less directory is a `clientless` repair skip). Checking the
+    precondition first turns that unrecoverable state into an actionable refusal.
+    """
+    operator_prompt = _canonical_operator_prompt(agent_root, engagement_type)
+    if not operator_prompt.is_file():
+        raise SystemExit(
+            f"canonical operator prompt not found at {operator_prompt}; "
+            f"run `vigil install {agent_root.parent}` first"
+        )
+
+
 def _write_prompt_wrappers(agent_root: Path, eng_dir: Path, client_kind: str, *, engagement_type: str) -> None:
     install_root = agent_root.parent
-    operator_prompt = agent_root / (
-        "AGENTS-blue.md" if engagement_type == "blue" else "AGENTS.md"
-    )
-    if not operator_prompt.is_file():
-        raise SystemExit(f"canonical operator prompt not found at {operator_prompt}")
+    _require_install_prerequisites(agent_root, engagement_type)
+    operator_prompt = _canonical_operator_prompt(agent_root, engagement_type)
 
     # Specialist context isolation invariant:
     # The per-engagement AGENTS.md/CLAUDE.md written here are operator-only bootstrap pointers.
@@ -2015,8 +2151,11 @@ Artifacts:
     # prompt for both Codex and Claude. When the client kind requires a CLAUDE.md
     # entrypoint, we write it as a thin local pointer to the engagement
     # AGENTS.md rather than a second pointer to agent/CLAUDE.md — that prevents
-    # Cursor / Claude Code from loading the same ~16.5k-token prompt twice per
-    # turn (once via CLAUDE.md, once via AGENTS.md).
+    # Cursor / Claude Code from loading the whole canonical operator prompt twice
+    # per turn (once via CLAUDE.md, once via AGENTS.md). That prompt is the
+    # largest text in the system and keeps growing, so the cost avoided here is
+    # whatever `vigil assess prompt-census` currently measures for the operator
+    # cores rather than a figure pinned in this comment.
     if client_kind in {"codex", "claude", "both"}:
         (eng_dir / "AGENTS.md").write_text(
             f"{_SPECIALIST_STOP_SIGN}\n"
@@ -2039,13 +2178,20 @@ Artifacts:
         )
 
 
-def _write_codex_config(agent_root: Path, eng_dir: Path) -> None:
+def _write_codex_config(
+    agent_root: Path,
+    eng_dir: Path,
+    *,
+    rendered_agent_root: Path | None = None,
+) -> None:
     codex_dir = eng_dir / ".codex"
-    src = agent_root / ".codex" / "config.toml"
-    if src.exists():
-        codex_dir.mkdir(exist_ok=True)
-        shutil.copy2(src, codex_dir / "config.toml")
+    ensure_codex_config(
+        agent_root,
+        codex_dir,
+        rendered_agent_root=rendered_agent_root,
+    )
     ensure_codex_agents_link(agent_root, codex_dir)
+    ensure_codex_skills_link(agent_root, codex_dir)
 
 
 def _write_claude_config(
@@ -2061,6 +2207,7 @@ def _write_claude_config(
         rendered_agent_root=rendered_agent_root,
     )
     ensure_claude_agents_link(agent_root, claude_dir)
+    ensure_claude_commands_link(agent_root, claude_dir)
 
 
 # OpenCode's --dangerously-skip-permissions is honored ONLY for the PRIMARY session.
@@ -2101,8 +2248,8 @@ def _write_opencode_config(agent_root: Path, eng_dir: Path) -> None:
 
     Mirrors ``_write_codex_config`` / ``_write_claude_config``: OpenCode reads
     neither Claude's ``settings.json`` nor Codex's ``config.toml``, so the standard
-    scope-check + activity-log hooks ship as an OpenCode *plugin* copied from the
-    agent-root template ``agent/.opencode/plugin/standard-hooks.js``. The plugin is
+    activity-log hook ships as an OpenCode *plugin* copied from the agent-root
+    template ``agent/.opencode/plugin/standard-hooks.js``. The plugin is
     written to BOTH ``.opencode/plugin/`` and ``.opencode/plugins/`` so it loads
     regardless of which directory name the installed OpenCode honours (the binary
     documents both; the singular ``plugin/`` is predominant). The specialist roster
@@ -2166,17 +2313,18 @@ def _write_goose_config(
 
     - ``.goosehints`` — Goose auto-loads this from the cwd. We copy the engagement
       ``AGENTS.md`` (written by ``_write_prompt_wrappers`` just before this call) into it, so
-      Goose gets the SAME engagement-local entrypoint Codex/OpenCode read natively. For a
-      red engagement that ``AGENTS.md`` is a thin POINTER to the workspace-root operator
-      prompt (a blue engagement's is the full rendered prompt); the operator resolves the
+      Goose gets the SAME engagement-local entrypoint Codex/OpenCode read natively. That
+      ``AGENTS.md`` is a thin POINTER for every engagement type — red and blue alike —
+      and ``engagement_type`` only selects which canonical installed prompt it names
+      (``agent/AGENTS.md`` or ``agent/AGENTS-blue.md``); the operator resolves the
       pointer by reading the referenced file — the bench CTF message and the human start
       prompt both say "Read AGENTS.md", which drives that. There is no ``--agent operator``
       step — the default ``goose run`` agent already holds the ``delegate`` tool.
     - ``.goose/recipes`` — symlink to the generated specialist roster; the operator
       dispatches by name (``delegate source <role>``), resolved via ``GOOSE_RECIPE_PATH``.
-    - ``.agents/plugins/vigil-standard`` — the standard hooks plugin (scope-check +
-      activity-log), running the SHARED shell scripts via the payload adapter. The bench
-      layers its guard-only hook beside it (anticheat._patch_goose_hooks).
+    - ``.agents/plugins/vigil-standard`` — the standard hooks plugin (activity-log),
+      running the SHARED shell script via the payload adapter. The bench layers its
+      guard-only hook beside it (anticheat._patch_goose_hooks).
     """
     agents_md = eng_dir / "AGENTS.md"
     base = agents_md.read_text(encoding="utf-8") if agents_md.is_file() else ""
@@ -2222,7 +2370,7 @@ def write_opencode_reasoning_config(eng_dir: Path, thinking: str) -> None:
 
 # Goose provider env + the #9397 reasoning-content repair proxy bootstrap, injected
 # into start_goose.sh. Goose drives direct DeepSeek through its OpenAI-compatible
-# provider; OPENAI_API_KEY defaults to the sourced DEEPSEEK_API_KEY.
+# provider; the sourced DeepSeek credential becomes Goose's OPENAI_API_KEY.
 #
 # THINKING-MODE STOPGAP (aaif-goose#9397): goose v1.38.0 drops DeepSeek's
 # `reasoning_content` from the 2nd..Nth assistant messages it emits when it splits a
@@ -2238,19 +2386,19 @@ def write_opencode_reasoning_config(eng_dir: Path, thinking: str) -> None:
 # the #9397 400). See docs/goose-bench.md.
 _GOOSE_EXTRA_ENV = (
     "# Goose: direct DeepSeek via the OpenAI-compatible provider. OPENAI_API_KEY\n"
-    "# defaults to the sourced DEEPSEEK_API_KEY; recipe roster + headless hygiene.\n"
+    "# is derived from DEEPSEEK_API_KEY; recipe roster + headless hygiene.\n"
     "# See docs/goose-bench.md.\n"
-    'export GOOSE_PROVIDER="${{GOOSE_PROVIDER:-openai}}"\n'
-    '_VIGIL_DEEPSEEK_HOST="${{OPENAI_HOST:-https://api.deepseek.com}}"\n'
-    'export OPENAI_API_KEY="${{OPENAI_API_KEY:-${{DEEPSEEK_API_KEY:-}}}}"\n'
-    "# Default the model to a thinking V4 id so a bare `vigil engagement start\n"
+    'export GOOSE_PROVIDER="openai"\n'
+    '_VIGIL_DEEPSEEK_HOST="https://api.deepseek.com"\n'
+    'export OPENAI_API_KEY="${{DEEPSEEK_API_KEY:-}}"\n'
+    "# Pin the model to a thinking V4 id so a bare `vigil engagement start\n"
     "# --client goose` (no --model) works; the bench passes --model on the CLI,\n"
     "# which OVERRIDES GOOSE_MODEL. Thinking mode is supported via the repair proxy below.\n"
-    'export GOOSE_MODEL="${{GOOSE_MODEL:-deepseek-v4-pro}}"\n'
-    'export GOOSE_RECIPE_PATH="${{GOOSE_RECIPE_PATH:-$ENGAGEMENT_DIR/.goose/recipes}}"\n'
-    'export GOOSE_DISABLE_KEYRING="${{GOOSE_DISABLE_KEYRING:-1}}"\n'
-    'export GOOSE_MODE="${{GOOSE_MODE:-auto}}"\n'
-    'export GOOSE_DISABLE_SESSION_NAMING="${{GOOSE_DISABLE_SESSION_NAMING:-true}}"\n'
+    'export GOOSE_MODEL="deepseek-v4-pro"\n'
+    'export GOOSE_RECIPE_PATH="$ENGAGEMENT_DIR/.goose/recipes"\n'
+    'export GOOSE_DISABLE_KEYRING="1"\n'
+    'export GOOSE_MODE="auto"\n'
+    'export GOOSE_DISABLE_SESSION_NAMING="true"\n'
     "\n"
     "# --- #9397 reasoning-content repair proxy ---------------------------------\n"
     "# Start the stdlib-only repair proxy in front of DeepSeek, repoint OPENAI_HOST\n"
@@ -2312,6 +2460,78 @@ _LEGACY_SKIP_PERMISSION_ARGS = {
     "codex": ("--full-auto",),
 }
 
+# Arguments every generated launcher for a client carries, independent of the
+# creation-time `--skip-permissions` choice.
+#
+# Codex 0.154.0 gates project-local `[hooks]` behind a per-hash trust review:
+# the TUI opens on "Hooks need review", and an operator who presses esc or picks
+# "Continue without trusting" lands in an ordinary session where Vigil's
+# `PostToolUse` activity logger and `SessionEnd` receipt never run — with nothing
+# in the UI reporting that the session is recording nothing. Those hooks are what
+# makes the engagement record complete, and an evidence trail that goes silently
+# missing is worse than one that fails loudly: under this flag Codex prints a
+# standing "hooks may run without review" warning for the whole session.
+#
+# "Automation that already vets hook sources" is Codex's own stated use for the
+# flag and is exactly this case — Vigil writes `.codex/config.toml` itself, from
+# its own installed agent root, at engagement create/repair time. The bypass is
+# per-invocation and covers every hook Codex has enabled, including any from the
+# operator's global `~/.codex/config.toml`; those are the operator's own hooks,
+# and Vigil does not defend against its own operator (ADR 0019).
+#
+# `vigil bench` passes the same flag for a different reason (an unattended run
+# cannot answer the review at all) — see docs/benchmarking.md.
+_REQUIRED_CLIENT_ARGS: dict[str, tuple[str, ...]] = {
+    "codex": ("--dangerously-bypass-hook-trust",),
+}
+
+# Provider key the generated open-model launchers source from engagement/install
+# env files. Both supported paths are direct DeepSeek. Claude/Codex/Kimi carry
+# their own vendor authentication and need no env export.
+CLIENT_PROVIDER_KEY = {
+    "opencode": "DEEPSEEK_API_KEY",
+    "goose": "DEEPSEEK_API_KEY",
+}
+
+# Clients whose CLI takes the operator message as a FLAG VALUE instead of a trailing
+# positional. Vigil inserts the flag itself (client_launch_argv) so no launcher has to
+# guess which argv element is the prompt.
+CLIENT_MESSAGE_FLAGS = {
+    "opencode": "--prompt",
+    "goose": "-t",
+}
+
+
+def split_operator_message(client_args: Sequence[str]) -> tuple[list[str], str | None]:
+    """Split a client passthrough tail into ``(flags, operator_message)``.
+
+    The message is the trailing token when it is not option-shaped and is not the
+    VALUE of the option-shaped token before it — the rule that stops ``--model opus``
+    from being handed to the model as its operator prompt. An inline assignment such
+    as ``--model=opus`` is already complete, so a following token can be the message.
+    Everything else stays a flag, in order. An operator whose message would be misread
+    (a boolean client flag directly before it) passes it through the client's own flag instead
+    (``-- --prompt "…"`` / ``-- -t "…"``), which this returns untouched.
+    """
+    if not client_args:
+        return [], None
+    last = client_args[-1]
+    if last.startswith("-"):
+        return list(client_args), None
+    previous = client_args[-2] if len(client_args) >= 2 else ""
+    if previous.startswith("-") and "=" not in previous:
+        return list(client_args), None
+    return list(client_args[:-1]), last
+
+
+def client_launch_argv(client: str, client_args: Sequence[str]) -> list[str]:
+    """Place the operator message where ``client`` expects it, flags untouched."""
+    flags, message = split_operator_message(client_args)
+    if message is None:
+        return flags
+    message_flag = CLIENT_MESSAGE_FLAGS.get(client)
+    return [*flags, message_flag, message] if message_flag else [*flags, message]
+
 
 @dataclass(frozen=True, slots=True)
 class ClientEntrypointRepairSkip:
@@ -2338,7 +2558,9 @@ class ClientEntrypointRepairResult:
 
 _ENTRYPOINT_REPAIR_DESTINATIONS = (
     ".codex/config.toml",
+    ".codex/skills",
     ".claude/settings.json",
+    ".claude/commands",
     ".opencode/plugin/standard-hooks.js",
     ".opencode/plugins/standard-hooks.js",
     "opencode.json",
@@ -2372,12 +2594,16 @@ def _write_launchers(agent_root: Path, eng_dir: Path, client_kind: str, *, skip_
     # OpenCode reads the same engagement-local AGENTS.md as Codex (written for every
     # real client kind), so the operator prompt drives it unchanged. We always emit
     # start_opencode.sh so `--client opencode` (engagement start and `vigil bench`)
-    # works regardless of install kind. It execs `opencode run …` (the headless
-    # subcommand) and exports the DeepSeek/OpenRouter provider key from the same env
-    # files the launcher already sources for ORCHESTRATOR_BASE_URL.
+    # works regardless of install kind. It execs OpenCode's DEFAULT command (the TUI),
+    # not `opencode run`: `run` is a one-shot headless invocation that exits after a
+    # single reply, so a launcher built on it can never hold the operator loop that
+    # `vigil engagement start` exists to open. The operator message rides OpenCode's
+    # own `--prompt` (see CLIENT_MESSAGE_FLAGS), which seeds the session exactly like
+    # a trailing prompt seeds claude/codex. Provider keys come from the same env files
+    # the launcher already sources for ORCHESTRATOR_BASE_URL.
     #
     # `--agent operator` is REQUIRED for specialist dispatch to happen at all. With
-    # no `--agent`, `opencode run` uses its built-in default primary "build" agent,
+    # no `--agent`, OpenCode uses its built-in default primary "build" agent,
     # which reads AGENTS.md as mere context and does every probe/analysis inline
     # (the observed "0 specialist dispatches" bug — empty sessions/index.json).
     # Our `operator` wrapper (.opencode/agent/operator.md) is rendered `mode: primary`
@@ -2389,24 +2615,31 @@ def _write_launchers(agent_root: Path, eng_dir: Path, client_kind: str, *, skip_
         _write_launcher(
             agent_root, eng_dir, "opencode",
             _SKIP_PERMISSION_ARGS["opencode"] if skip_permissions else "",
-            exec_cmd="opencode run --agent operator",
-            provider_keys=("DEEPSEEK_API_KEY", "OPENROUTER_API_KEY"),
+            exec_cmd="opencode --agent operator",
+            provider_key=CLIENT_PROVIDER_KEY["opencode"],
         )
     # Goose: the PRIMARY open-model bench client. Like OpenCode it reads the engagement
     # prompt natively (Goose auto-loads `.goosehints`, written by _write_goose_config),
-    # so we always emit start_goose.sh for every real client kind. It execs `goose run`
-    # (headless) with the `developer` builtin (shell+editor) and — crucially — WITHOUT
-    # `--no-profile`, so the default `summon` extension loads and the operator can
-    # `delegate source <role>` to the specialist recipes (verified: --no-profile strips
-    # the delegate tool). The operator message is passed via `-t` (Goose has no
-    # positional prompt). Provider env is the OpenAI-compatible direct-DeepSeek path.
+    # so we always emit start_goose.sh for every real client kind. Both exec forms load
+    # the `developer` builtin (shell+editor) and — crucially — omit `--no-profile`, so
+    # the default `summon` extension loads and the operator can `delegate source <role>`
+    # to the specialist recipes (verified: --no-profile strips the delegate tool).
+    #
+    # Goose splits the session across two subcommands and the launcher must route on
+    # that: `goose run` REFUSES to start without an instruction ("Must provide either
+    # --instructions (-i), --text (-t), or --recipe") and, without `--interactive`,
+    # exits as soon as that instruction is answered; `goose session` is the
+    # instruction-less interactive entrypoint. `--no-session` is deliberately gone —
+    # it suppresses the session file that both `--interactive` continuation and
+    # `goose session --resume` depend on. Provider env is the OpenAI-compatible
+    # direct-DeepSeek path.
     if client_kind in {"codex", "claude", "both"}:
         _write_launcher(
             agent_root, eng_dir, "goose",
             "",  # Goose has no skip-permissions flag; GOOSE_MODE=auto (in extra_env) handles approvals
-            exec_cmd="goose run --no-session --with-builtin developer",
-            provider_keys=("DEEPSEEK_API_KEY",),
-            message_flag="-t",
+            exec_cmd="goose run --interactive --with-builtin developer",
+            uninstructed_cmd="goose session --with-builtin developer",
+            provider_key=CLIENT_PROVIDER_KEY["goose"],
             extra_env=_GOOSE_EXTRA_ENV.format(install_dir="$VIGIL_INSTALL_DIR"),
         )
     # Kimi Code reads the same engagement-local AGENTS.md natively and needs no
@@ -2460,8 +2693,17 @@ def _generated_primary_launcher_permission_mode(
         *_LEGACY_SKIP_PERMISSION_ARGS.get(client, ()),
     )
     permission_arg = "|".join(re.escape(value) for value in permission_args)
+    # The unconditional arguments are OPTIONAL in this pattern even though
+    # `_write_launcher` always emits them: a launcher generated before they
+    # existed must still parse, or repair would report it as unrecognized and
+    # leave it un-backfilled — which for Codex means leaving the scope guard off.
+    required_args = "".join(
+        rf"(?:{re.escape(value)}[ \t]+)?"
+        for value in _REQUIRED_CLIENT_ARGS.get(client, ())
+    )
     exec_pattern = re.compile(
-        rf'^exec {client}[ \t]+(?:(?P<permission>(?:{permission_arg}))[ \t]+)?"\$@"$'
+        rf'^exec {client}[ \t]+(?:(?P<permission>(?:{permission_arg}))[ \t]+)?'
+        rf'{required_args}"\$@"$'
     )
     exec_lines = [line for line in body.splitlines() if line.startswith("exec ")]
     if len(exec_lines) != 1:
@@ -2590,7 +2832,11 @@ def repair_engagement_client_entrypoints(
     permission_overrides: list[str] = []
     for eng_dir, client_kind, skip_permissions, permission_overridden in plans:
         if client_kind in {"codex", "both"}:
-            _write_codex_config(agent_root, eng_dir)
+            _write_codex_config(
+                agent_root,
+                eng_dir,
+                rendered_agent_root=rendered_agent_root,
+            )
         if client_kind in {"claude", "both"}:
             _write_claude_config(
                 agent_root,
@@ -2628,53 +2874,96 @@ def _write_launcher(
     permission_arg: str,
     *,
     exec_cmd: str | None = None,
-    provider_keys: tuple[str, ...] = (),
-    message_flag: str = "",
+    uninstructed_cmd: str | None = None,
+    provider_key: str | None = None,
     extra_env: str = "",
 ) -> None:
-    extra = f" {permission_arg}" if permission_arg else ""
+    # Permission choice first, then the client's unconditional arguments, so the
+    # repair-side exec parser can keep reading the permission slot in one place.
+    extra_args = [permission_arg] if permission_arg else []
+    extra_args.extend(_REQUIRED_CLIENT_ARGS.get(client, ()))
+    extra = "".join(f" {arg}" for arg in extra_args)
     # The command the launcher execs. Defaults to the bare client binary (claude,
-    # codex); a client whose headless entrypoint is a subcommand (opencode → "opencode
-    # run") passes it explicitly. The launcher FILE is still start_<client>.sh.
+    # codex, kimi); a client whose session entrypoint is a subcommand or needs a
+    # pinned agent (opencode, goose) passes it explicitly. The launcher FILE is
+    # still start_<client>.sh.
     exec_cmd = exec_cmd or client
-    # How the operator message reaches the client. Claude/Codex/OpenCode take it as a
-    # trailing POSITIONAL ("$@"); Goose takes it via a flag (`-t <TEXT>`) and has no
-    # positional. When `message_flag` is set, split the trailing message off "$@" and
-    # pass the leading flags (model/provider) through, then the message via the flag.
-    # The launcher always passes >=1 arg (the message), but guard $#==0 for safety.
-    if message_flag:
+    # The launcher never parses "$@": it forwards argv verbatim, and Vigil places the
+    # operator message where the client wants it (a trailing positional, or the
+    # client's own message flag — see CLIENT_MESSAGE_FLAGS / client_launch_argv).
+    # An earlier launcher split "${@: -1}" off as the message, which silently handed
+    # a flag VALUE (`--model x` → "x") to the model as its operator prompt.
+    if uninstructed_cmd:
+        # Goose alone needs two entrypoints: `goose run` refuses to start without an
+        # instruction flag, `goose session` takes none. Route on the exact flag set
+        # goose itself demands, so a bare launch opens a session instead of exiting 1.
+        instruction_flags = " | ".join(
+            (
+                "-t | --text | --text=*",
+                "-i | --instructions | --instructions=*",
+                "--recipe | --recipe=*",
+            )
+        )
         exec_line = (
-            f'if [[ $# -gt 0 ]]; then\n'
-            f'  exec {exec_cmd}{extra} "${{@:1:$(($#-1))}}" {message_flag} "${{@: -1}}"\n'
-            f'else\n'
-            f'  exec {exec_cmd}{extra}\n'
-            f'fi'
+            "instructed=0\n"
+            'for arg in "$@"; do\n'
+            f'  case "$arg" in {instruction_flags}) instructed=1; break ;; esac\n'
+            "done\n"
+            "if (( instructed )); then\n"
+            f'  exec {exec_cmd}{extra} "$@"\n'
+            "else\n"
+            f'  exec {uninstructed_cmd}{extra} "$@"\n'
+            "fi"
         )
     else:
         exec_line = f'exec {exec_cmd}{extra} "$@"'
     # Optional extra environment exports (e.g. Goose's GOOSE_*/OPENAI_* wiring),
     # inserted after the provider-key sourcing block so it can reference the sourced
-    # keys (OPENAI_API_KEY defaults to DEEPSEEK_API_KEY for the openai-compat path).
+    # keys (Goose derives OPENAI_API_KEY from DEEPSEEK_API_KEY for its direct path).
     extra_env_block = f"\n{extra_env.rstrip()}\n" if extra_env else ""
     # Optional provider-key export block (runner clients only). Built as a plain
     # string so its bash ${...} expansions are inserted literally into the f-string
     # template below; empty for claude/codex so their launchers stay byte-for-byte
     # identical to before.
     provider_block = ""
-    if provider_keys:
-        key_list = " ".join(provider_keys)
+    if provider_key:
         provider_block = (
-            "\n# Export provider API keys for the runner client from the same env files\n"
+            "\n# Normalize one dotenv-style value exactly as preflight's `_dotenv_value`\n"
+            "# does: trim, strip one matching pair of surrounding quotes, trim again.\n"
+            "# `KEY=\"\"` must read as unset and a quoted real key must not export its\n"
+            "# quotes. Defined once and used for BOTH the inherited value and each file\n"
+            "# candidate, so the two cannot drift apart.\n"
+            "_vigil_dotenv_value() {\n"
+            '  local v="$1"\n'
+            '  v="${v#"${v%%[![:space:]]*}"}"\n'
+            '  v="${v%"${v##*[![:space:]]}"}"\n'
+            "  case \"$v\" in\n"
+            "    '\"'*'\"') v=\"${v#'\"'}\"; v=\"${v%'\"'}\" ;;\n"
+            "    \"'\"*\"'\") v=\"${v#\"'\"}\"; v=\"${v%\"'\"}\" ;;\n"
+            "  esac\n"
+            '  v="${v#"${v%%[![:space:]]*}"}"\n'
+            '  v="${v%"${v##*[![:space:]]}"}"\n'
+            '  printf %s "$v"\n'
+            "}\n"
+            "\n# An inherited value that normalizes to empty must not shadow the env\n"
+            "# files: otherwise an ambient placeholder wins over a usable key and the\n"
+            "# client fails auth on its first request.\n"
+            f'{provider_key}="$(_vigil_dotenv_value "${{{provider_key}:-}}")"\n'
+            f'if [[ -n "${{{provider_key}}}" ]]; then\n'
+            f"  export {provider_key}\n"
+            "else\n"
+            f"  unset {provider_key}\n"
+            "fi\n"
+            "\n# Export the provider API key for the runner client from the same env files\n"
             "# the launcher already sources for ORCHESTRATOR_BASE_URL (first hit wins;\n"
-            "# a value already in the environment is never overwritten).\n"
+            "# a usable value already in the environment is never overwritten).\n"
             'for env_file in "$ENGAGEMENT_DIR/.orchestrator.env" "$VIGIL_INSTALL_DIR/.orchestrator.env" "$VIGIL_INSTALL_DIR/.env"; do\n'
             '  [[ -f "$env_file" ]] || continue\n'
-            f"  for key in {key_list}; do\n"
-            '    if [[ -z "${!key:-}" ]]; then\n'
-            '      candidate="$(grep -E "^${key}=" "$env_file" | tail -n1 | cut -d= -f2- || true)"\n'
-            '      [[ -n "$candidate" ]] && export "${key}=${candidate}"\n'
-            "    fi\n"
-            "  done\n"
+            f'  if [[ -z "${{{provider_key}:-}}" ]]; then\n'
+            f'    candidate="$(grep -E "^{provider_key}=" "$env_file" | tail -n1 | cut -d= -f2- || true)"\n'
+            '    candidate="$(_vigil_dotenv_value "$candidate")"\n'
+            f'    [[ -n "$candidate" ]] && export {provider_key}="$candidate"\n'
+            "  fi\n"
             "done\n"
         )
     # The launcher exports operator-side env from the per-engagement

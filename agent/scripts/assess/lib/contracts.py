@@ -11,10 +11,17 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from .dependency_picture import (
+    DEPENDENCY_OBSERVATION_ORIGINS,
+    DEPENDENCY_QUALIFIERS,
+    REACHABILITY_OBSERVATIONS,
+    SHIPMENT_OBSERVATIONS,
+)
 from .config import ENGAGEMENT_BINDING_CONTRACT
 from .intel_types import INTEL_TYPES
 from .kali_audit import ALLOWED_PHASES, _enum_reject_message
 from .kali_output import KALI_EXIT_CODES
+from .phases import canonical_phase
 from .schema_validation import load_schema
 from .surfaces import CREATABLE_STATUSES, VALID_SURFACE_TYPES
 
@@ -24,27 +31,6 @@ from .surfaces import CREATABLE_STATUSES, VALID_SURFACE_TYPES
 # from kali_audit, not re-declared — so `vigil assess list-commands --phase <N>`
 # and the audit gate can never drift to two divergent phase enums.
 CATALOG_PHASES: tuple[str, ...] = ALLOWED_PHASES
-
-# The readiness command (check_phase_readiness) labels the canonical persisted
-# "consume-test" phase with the short form "consume" internally. Accept both
-# spellings on a --phase filter so a caller who types either resolves to the
-# canonical value; this is the one explicit alias bridging the short readiness
-# labels to CATALOG_PHASES.
-_PHASE_FILTER_ALIASES: dict[str, str] = {
-    "consume": "consume-test",
-    "consume_test": "consume-test",
-}
-
-
-def canonical_phase(phase: str) -> str:
-    """Normalize a phase token to its CATALOG_PHASES spelling.
-
-    Lower-cases and resolves the ``consume``→``consume-test`` short alias so a
-    ``--phase`` filter written in either form matches the canonical tags.
-    """
-    key = (phase or "").strip().lower()
-    return _PHASE_FILTER_ALIASES.get(key, key)
-
 
 # Canonical cross-cutting "goal" vocabulary for `vigil assess list-commands
 # --goal <goal>`. A goal is an intent-oriented lens ORTHOGONAL to `phase`: it
@@ -74,6 +60,11 @@ MAX_VARIANT_PARENT_FINDINGS = 1000
 # Mirrors app.services.code_analysis.MAX_VARIANT_RECEIPT_PAGE; pinned by the
 # fetch auto-pagination regression because agent code cannot import the backend.
 MAX_VARIANT_RECEIPT_PAGE = 500
+# Mirrors app.services.code_analysis.MAX_LEAD_BINDING_PAGE; `code-lead` asks for
+# the backend maximum so a worklist is one page whenever it can be, and a short
+# page is reported rather than mistaken for the whole set. Pinned by
+# test_code_lead_binding_page_cap_mirrors_backend.
+MAX_LEAD_BINDING_PAGE = 500
 
 
 SPECIALIST_DISPATCH_MODES: tuple[str, ...] = (
@@ -136,6 +127,158 @@ FINDING_WORKFLOW_STATUSES: tuple[str, ...] = (
     "draft", "active", "blocked", "exploited", "contained", "eradicated",
     "recovered", "false_positive", "merged", "reported",
 )
+
+# Every gap code `code-dependencies` can emit, as (code, what it means and what
+# to do about it). A gap is the one value in the picture that says "this was not
+# measured", so an undocumented code degrades the honest-absence vocabulary into
+# noise: the reader cannot tell a bounded run from an unreadable file from a
+# coordinate that needs a parent POM. This roster is the documented set — the
+# contract is the only operator-facing surface for a verb contract, and
+# `agent/skills/dependency-analysis/SKILL.md` points here rather than keeping a
+# second list. Pinned against the emitters (dependency_manifests.py,
+# dependency_picture.py, commands/code_dependencies.py) by
+# test_dependency_gap_documentation.
+DEPENDENCY_ANALYSIS_GAPS: tuple[tuple[str, str], ...] = (
+    ("inventory_truncated", "the path inventory stopped at its cap; vendored and packaged output beyond that point is not in this picture. Narrow the repo path and re-run."),
+    ("manifest_budget_exhausted", "manifest reading stopped at its cap; the remaining manifests are unread, NOT empty. Narrow the repo path and re-run."),
+    ("manifest_too_large", "one manifest exceeded the per-file byte cap and was not read at all. Read that file by hand."),
+    ("unparsed_ecosystem", "a recognized manifest kind with no reader (Composer, Bundler, Cargo, pnpm, Pipfile). That ecosystem's components are absent from the PICTURE, not absent from the build — read those files by hand before claiming coverage."),
+    ("unreadable_manifest", "a manifest matched a reader and then defeated it (malformed TOML/JSON/XML, or a shape the reader does not model). A hole in that one file, never a lost run and never an absence of declarations."),
+    ("unparsed_lockfile_format", "a lockfile is in a dialect with no reader (a yarn-berry YAML lock). That ecosystem's RESOLVED versions are absent from the picture, so only the declared ranges are visible."),
+    ("unreadable_declaration_block", "a declaration block was a scalar or array where a table was expected; whatever it declares is absent from the picture, not absent from the build."),
+    ("incomplete_declaration", "a Maven `<dependency>` element carries no groupId/artifactId pair, so it names no coordinate to place."),
+    ("unresolved_coordinate", "a Maven coordinate is built from a property this file does not define — almost always a parent POM outside the tree. The module declares one dependency MORE than the picture shows."),
+    ("unresolved_catalog_entry", "a Gradle version-catalog alias resolves to no coordinate, so every `libs.<alias>` site naming it is unresolvable and those build scripts declare more than the picture can show."),
+    ("unresolved_profile_activation", "a Maven `<profile>` declares dependencies, and whether the build applies them turns on an `activeByDefault`, JDK, OS, property, file or `-P` condition no file reader can evaluate. Its components ARE in the picture, each carrying a `profile:<id>` note — `profile:<line-N>` for a profile that declares no `<id>` — and each qualified `unverified_conditional_profile`; the gap says their shipment is conditional on an activation nothing here resolved."),
+    ("dynamic_dependency_declaration", "a PEP 621 `pyproject.toml` lists `dependencies` or `optional-dependencies` in `project.dynamic`, so the build backend supplies them and this file states none. The detail quotes the `tool.setuptools.dynamic` entry naming the source when there is one — usually a `requirements*.txt` this run reads as its own manifest."),
+    ("external_requirement_include", "a Python requirements file delegates part of its declaration through `-r`/`--requirement`/`-c`/`--constraint` to a file the reader followed no further."),
+    ("unnamed_requirement_reference", "a requirement installed from a URL, VCS or path that names no distribution. The install is real; the name is not derivable."),
+    ("unmatched_scanner_row", "a `--scan-report` row naming nothing this build declares or vendors — usually a base image rather than the reviewed artifact. This is the informative direction of the correlation, not an error."),
+    ("structural_index_artifact_missing", "the index manifest named a per-file index artifact that is not readable on disk."),
+    ("structural_index_artifact_unparseable", "that per-file index artifact did not read as JSON."),
+    ("structural_index_artifact_malformed", "that per-file index artifact read as JSON but is not an object, or its `imports` is not a list of strings. With the two above: the file counts as UNINDEXED, never as a file that imports nothing."),
+)
+
+# The top-level writable surface of `finding update`, as (name, domain, meaning).
+# MIRRORS the backend `FindingPatchRequest` model in
+# orchestrator/backend/app/api/assessment.py, duplicated for the same packaging
+# reason as SUBMISSION_STATUSES above and pinned in sync by
+# test_finding_patch_contract_mirror.
+#
+# It is written out rather than derived because the patch request is a Pydantic
+# model with no bundled schema: `_schema_field_lines` reads a `*.schema.json` and
+# nothing else, so without this roster the ONE section a patch author needs — the
+# fields they may actually set — rendered empty while 15 KB of `details` keys that
+# `finding record` already owns rendered in full. The model forbids extra keys, so
+# a name missing here is a name no agent can discover and a name invented here is
+# a 422.
+FINDING_PATCH_FIELDS: tuple[tuple[str, str, str], ...] = (
+    ("artifact_ref", "string", "Transition-metadata pointer to the artifact behind this patch; recorded on the transition row, not on the finding."),
+    ("auth_context", "string", "Authentication state the finding was triggered under: 'anonymous', a role name, or a credential slug."),
+    ("canonical_location", "string", "Primary affected location — a URL, or 'file:path:line'. Leading/trailing whitespace is stripped."),
+    ("defect_family", "string", "Short kebab-case vuln-class label for grouping. Part of the dedup tuple."),
+    ("details", "object", "Detail keys to write. Merged by default; see details_mode. Validated client-side against finding-record.schema.json properties.details — run `vigil assess contract finding record` for that vocabulary."),
+    ("details_mode", "string; one of: merge, replace, append", "How `details` lands: 'merge' (default) adds keys and REPLACES a repeated key's whole value; 'append' concatenates lists and deep-merges objects, refusing a repeated scalar; 'replace' overwrites the whole object and requires both `details` and expected_row_version."),
+    ("evidence_ref", "string", "ONE engagement-local artifact path (a file, or a directory of captured evidence). External links belong in details.references."),
+    ("evidence_type", "string or null; one of: network-confirmed, code-inferred, theoretical, informational", "Retroactive confirmation-mode label, the same vocabulary `finding record --evidence-type` writes."),
+    ("expected_row_version", "integer, >= 1", "Compare-and-swap guard. Required by notes_mode 'replace'/'rotate' and details_mode 'replace'; a successful patch returns the next row_version."),
+    ("notes", "string", "Freeform operational notes. How they land is decided by notes_mode."),
+    ("notes_mode", "string; one of: append, replace, rotate", "How `notes` lands: 'append' (default) is the cumulative checkpoint and is capped at the accumulator's own limit; 'replace' overwrites; 'rotate' banks the accumulated bytes on the transition ledger and leaves a pointer. 'replace' requires notes; 'replace'/'rotate' require expected_row_version."),
+    ("provenance", "object", "Producer metadata to merge. `provenance.code_snapshot` is RESERVED — a generic patch that names it is refused, because the snapshot binding is what makes a code finding citable."),
+    ("reason_code", "string", "Short machine-ish reason recorded on the transition row."),
+    ("reason_text", "string", "Prose reason recorded on the transition row (the `--reason` flag). Neither reason field updates the finding by itself."),
+    ("root_cause_key", "string", "Stable key grouping variants onto one root cause. Part of the dedup tuple."),
+    ("severity", "string", "Impact rating; keep it consistent with details.cvss_score."),
+    ("source_name", "string", "Agent or tool credited with the record."),
+    ("submission_platform", "string", "Where the report was filed: 'bugcrowd', 'hackerone', or 'direct'."),
+    ("submission_ref", "string", "The program's own identifier for the report. Required at the backend boundary when submission_status moves to a non-'none' value."),
+    ("submission_status", "string; one of: " + ", ".join(SUBMISSION_STATUSES), "External submission state, ORTHOGONAL to workflow_status. Omitting it preserves the stored value; 'withdrawn' additionally requires details.withdrawal_reason."),
+    ("submission_url", "string", "Direct URL to the filed report, when the platform exposes one."),
+    ("summary", "string", "2-5 sentence statement: what is vulnerable, how it is triggered, and the attacker impact."),
+    ("title", "string", "One-line finding name: vuln class plus location."),
+    ("workflow_status", "string", "Report-inclusion lifecycle state (the `--status` flag). Use 'draft' to reopen a finding for re-triage. Verification-status changes belong to `finding verify`."),
+)
+
+# Clients a dispatch can be bound to by `agent bind-client-handle`. MIRRORS the
+# backend `_LAUNCHED_CLIENT` Literal in orchestrator/backend/app/api/assessment.py,
+# duplicated for the same packaging reason as SUBMISSION_STATUSES above and
+# pinned in sync by test_dispatch_client_binding_api. Deliberately excludes the
+# `unknown` a dispatch row's client fields carry: a binding whose client is
+# unknown names no session the operator could reach.
+BINDABLE_CLIENTS: tuple[str, ...] = (
+    "claude", "codex", "goose", "kimi", "opencode",
+)
+
+# Repository obligation role for `code-ingest --role`. MIRRORS the backend
+# `CODE_REPO_ROLES` in orchestrator/backend/app/services/code_analysis.py,
+# duplicated for the same packaging reason as SUBMISSION_STATUSES above and
+# pinned in sync by test_reference_repo_role. An `analysis` repository is the
+# reviewed subject: its admitted files own queue rows, receipts, variant checks
+# and phase readiness. A `reference` repository is host/framework source loaded
+# purely so a specialist can look a symbol up and cite it — sealed, indexed,
+# searchable and citable, but never an obligation.
+CODE_REPO_ROLES: tuple[str, ...] = (
+    "analysis",
+    "reference",
+)
+
+# Framework/registration kind for `record-surface --framework-registration`.
+# MIRRORS the backend `SurfaceRecordRequest.framework_registration` Literal in
+# orchestrator/backend/app/api/assessment.py, pinned in sync by
+# test_surface_framework_registration.
+#
+# This is the ARCHITECTURE axis and is deliberately orthogonal to the semantic
+# surface type (assess.lib.surfaces.VALID_SURFACE_TYPES), which carries security
+# meaning and stays cross-engagement. The kinds name the *registration
+# mechanism* the host framework uses, not the plugin's purpose: a Keycloak
+# authenticator and a user-storage SPI register identically and are told apart
+# by their surface type, not by a second per-framework label. Each value's text
+# is its worked mapping and renders straight into the command contract, so the
+# mapping never drifts from the vocabulary it documents.
+FRAMEWORK_REGISTRATION_KINDS: dict[str, str] = {
+    "service_provider": (
+        "host instantiates a plugin implementation of a host-defined interface "
+        "(Keycloak Authenticator/UserStorageProvider factory, Java ServiceLoader, "
+        "OSGi component, Spring auto-configured bean)"
+    ),
+    "http_endpoint": (
+        "plugin contributes a route or resource the host serves "
+        "(Keycloak realm/admin REST resource provider, WordPress REST route, "
+        "Django app URLconf include)"
+    ),
+    "request_interceptor": (
+        "plugin inserts into the host request/response pipeline "
+        "(servlet filter, Express middleware, Rails around_action, WordPress "
+        "action hook on request init)"
+    ),
+    "event_listener": (
+        "plugin subscribes to host lifecycle or domain events "
+        "(Keycloak EventListenerProvider, Symfony event subscriber, WordPress "
+        "filter on a domain event)"
+    ),
+    "template_override": (
+        "plugin supplies or replaces host rendering assets "
+        "(Keycloak theme override, WordPress theme template, Drupal Twig override)"
+    ),
+    "scheduled_task": (
+        "plugin registers periodic or background work the host schedules "
+        "(Keycloak ScheduledTask, WP-Cron event, Celery beat entry)"
+    ),
+    "cli_command": (
+        "plugin registers an administrative entrypoint "
+        "(Keycloak CLI extension, Django management command, WP-CLI command)"
+    ),
+    "data_model_extension": (
+        "plugin contributes entities, schema, or migrations to the host data "
+        "model (Keycloak JPA entity provider, WordPress custom post type, "
+        "Django app model)"
+    ),
+    "configuration_binding": (
+        "plugin changes host behaviour by declarative registration alone, with "
+        "no code path of its own (keycloak SPI config, META-INF/services entry, "
+        "Spring spring.factories)"
+    ),
+}
 
 
 # Per-role default `--dispatch-mode` when the flag is omitted. MUST mirror the
@@ -214,13 +357,10 @@ class SpecialistDispatchContract:
     Use ``validate_specialist_dispatch_contract`` to lint a parsed JSON payload.
 
     The public operator contract accepts ``requested_model`` /
-    ``requested_reasoning``. Launcher-effective model/reasoning remain
-    unavailable until a trusted launcher/session integration attests a specific
-    child invocation; static role definitions are not launch evidence.
-    Provider-observed ``actual_model`` / ``actual_reasoning`` likewise remain
-    ``unknown`` until a trusted integration can supply them. Dispatch callers
-    cannot self-attest either layer. Legacy aliases ``model`` / ``reasoning``
-    are rejected.
+    ``requested_reasoning``. Launcher-effective and provider-observed identity
+    remain unavailable until a trusted integration can supply them; dispatch
+    callers cannot self-attest those values. Legacy aliases ``model`` /
+    ``reasoning`` are rejected.
     """
 
     role: str
@@ -395,15 +535,27 @@ def validate_specialist_dispatch_contract(
             "Proceeding (stored as-is) in case this is a newly-coined mode."
         )
 
-    if not payload.get("requested_model") and not payload.get("model"):
-        warnings.append(
-            "requested_model not set; the dispatch cannot be compared as a measured "
-            "model recipe. Record the selected client model when it is known."
+    # ONE warning for the whole recipe. Two fields of the same uncertainty used
+    # to warn separately, and the provenance attach added a third on every
+    # dispatch — enough repetition to train operators past the stderr channel
+    # real failures use. The permanent half of the uncertainty (ordinary
+    # dispatches observe no launcher-effective identity, so any value here is
+    # the caller's selection) lives in the `agent start` contract; only the half
+    # the caller can still fix warns.
+    unrecorded = [
+        canonical
+        for canonical, shorthand in (
+            ("requested_model", "model"),
+            ("requested_reasoning", "reasoning"),
         )
-    if not payload.get("requested_reasoning") and not payload.get("reasoning"):
+        if not payload.get(canonical) and not payload.get(shorthand)
+    ]
+    if unrecorded:
         warnings.append(
-            "requested_reasoning not set; the dispatch cannot be compared as a measured "
-            "reasoning recipe. Record the selected effort when it is known."
+            f"{' and '.join(unrecorded)} not set; the dispatch cannot be compared as a "
+            "measured model/reasoning recipe. Record the client model and reasoning "
+            "effort you selected — Vigil records the selection, never a provider-observed "
+            "value, so an unset field is simply lost."
         )
 
     for str_field in ("role", "agent_role"):
@@ -561,12 +713,18 @@ class CommandContract:
     preferred_invocations: tuple[str, ...]
     author_supplied_fields: tuple[str, ...]
     # Schema FILE whose ``properties.details`` object enumerates the allowed
-    # ``details`` sub-keys, for the verbs that write that nested object. A
-    # second, separate field rather than a reuse of ``schema_name`` because
-    # ``schema_name`` is prose on some verbs (``finding update`` writes a backend
-    # Pydantic model, not a bundled schema) — overloading it would make the
-    # rendered "Schema:" line lie to buy a field list.
+    # ``details`` sub-keys. Setting it is what DEFERS ``details`` out of the
+    # top-level field list into a section of its own: that object is large enough
+    # to bury every sibling field if it renders inline, and strict enough
+    # (additionalProperties=false) that it has to render somewhere. Exactly one
+    # contract owns the vocabulary; a second verb writing the same object points
+    # at that contract rather than setting this and printing a second copy.
     details_schema_name: str = ""
+    # Top-level request fields for a verb whose shape is a backend Pydantic model
+    # rather than a bundled schema, as (name, domain, meaning). Used only when
+    # ``schema_name`` names no ``*.schema.json`` — a schema-backed verb always
+    # renders from the schema, so the two can never disagree.
+    top_level_fields: tuple[tuple[str, str, str], ...] = ()
     helper_defaults: tuple[tuple[str, str], ...] = ()
     notes: tuple[str, ...] = ()
     common_mistakes: tuple[tuple[str, str], ...] = ()
@@ -674,6 +832,8 @@ _CONTRACTS: dict[str, CommandContract] = {
         preferred_invocations=(
             "vigil assess finding record <agent-name> <finding-json-file> --agent-id <your-dispatch-agent-id>",
             "vigil assess finding record <agent-name> <finding-json-file> --update <existing-slug>",
+            "vigil assess finding record <agent-name> <finding-json-file> --agent-id <your-dispatch-agent-id> --evidence-type theoretical",
+            "vigil assess finding record <agent-name> <finding-json-file> --agent-id <your-dispatch-agent-id> --pending-runtime-proof \"Static dataflow only; no runtime trigger yet.\"",
             "vigil assess finding record <agent-name> <finding-json-file> --agent-id <your-dispatch-agent-id> --quiet",
         ),
         author_supplied_fields=(
@@ -681,7 +841,6 @@ _CONTRACTS: dict[str, CommandContract] = {
             "provenance.agent_id via --agent-id (your Runtime Identity dispatch id)",
             "details.evidence",
             "details.impact",
-            "provenance.code_snapshot for every canonical_location beginning with file:",
             "run_candidate {run_id, candidate_id, reason, proof_receipt_ids} when this write atomically promotes an exact run candidate",
         ),
         helper_defaults=(
@@ -689,7 +848,8 @@ _CONTRACTS: dict[str, CommandContract] = {
             ("source_name", "<agent-name>"),
             ("severity", "medium"),
             ("workflow_status", "active"),
-            ("verification_status", "unreviewed"),
+            ("verification_status", "unreviewed — the ONLY record-time value; a payload naming any other status is refused, and `finding verify` owns every transition off it"),
+            ("evidence_type", "NULL — deliberately undefaulted; label it with --evidence-type when you know the confirmation mode"),
             ("defect_family", "title when omitted"),
             ("root_cause_key", '""'),
             ("auth_context", "anonymous"),
@@ -703,18 +863,21 @@ _CONTRACTS: dict[str, CommandContract] = {
                 "provenance.agent_id",
                 "--agent-id for a new finding; an --update preserves the stored author when omitted; NOT inferred from <agent-name>",
             ),
+            (
+                "provenance.code_snapshot",
+                "derived from the engagement's active repository for a file: canonical_location; an authored binding always wins",
+            ),
             ("provenance.artifact", ""),
             ("links", "[]"),
         ),
         notes=(
-            "Omit top-level lifecycle fields unless you are intentionally overriding a helper default. The CLI fills workflow_status and verification_status plus producer provenance; a file finding still requires the current Code Source Identity under provenance.code_snapshot.",
+            "Omit top-level lifecycle fields unless you are intentionally overriding a helper default. The CLI fills workflow_status and verification_status plus producer provenance.",
+            "provenance.code_snapshot is DERIVED for a file: canonical_location: the CLI reads the engagement's active repository and binds repo_id + repo_generation + source_manifest_digest from it, so there is nothing to transcribe out of Code Source Identity. An authored binding is sent exactly as written, stale included, and the currency gate is unchanged either way — a binding that is not the current verified snapshot is still refused. The derivation needs exactly one active repository; with several, set provenance.code_snapshot yourself rather than let the CLI guess which source you reviewed.",
+            "--pending-runtime-proof \"<why proof is still owed>\" records the finding AND moves it to verification_status=pending_runtime_proof in one invocation. A new finding always opens at unreviewed, so a real code finding with no runtime trigger yet used to cost a second `finding verify` call; this is that same verify transition, through the same route, ledger and evidence gates, carrying the record's own author identity and code-snapshot binding. The canonical slug stays on stdout, and a park that fails says so without pretending the record failed.",
             "--agent-id <dispatch agent_id> stores provenance.agent_id, the finding's durable AUTHOR identity. It is the agent_id from your Runtime Identity block — a dispatch id such as HUNT-RUN-1 — not the role name that the positional <agent-name> carries, and it is never inferred from that role. A new finding is refused unless this id resolves to a real dispatch in the engagement. An ordinary --update may omit it: the backend preserves and validates the immutable original author rather than rebinding it. A historical row whose author is missing or no longer resolves in this engagement is also refused on the record route; repair that row once with finding bind-author, then re-record it normally.",
             "A confirmed run candidate is promoted in the same backend transaction by including run_candidate. Its target, exact source path, code-snapshot generation, and proof receipts must match the finding; a cross-file or cross-target link is rejected.",
-            "Code-specific detail fields are valid: details.entry_point, details.sink, details.taint_path, details.guards_evaluated, details.slot_type, details.variant_of, details.original_pattern. Every canonical_location beginning with file: must bind repo_id, repo_generation, and source_manifest_digest under provenance.code_snapshot; copy them from one current Code Source Identity block.",
-            "details.poc_code holds exploit scripts; details.poc_request / details.poc_response hold a structured HTTP request/response pair.",
-            "details.steps_to_reproduce is written FROM WHAT YOU ACTUALLY RAN, with concrete values (the real session cookie, the real object id, the real payload). Preserve those values verbatim through submission; an unbound placeholder (or one placeholder reused across different objects) makes the reproduction unfollowable by construction. details.repro_runs carries the command-run ids behind those steps, in step order: `export submission` renders their real argv, and a step with no run id behind it was imagined, not executed.",
-            "details.references is an array of strings for CVE links, advisories, or related docs.",
-            "Set details.chain_required/details.chain_rationale/details.required_followup when the finding is concrete but only becomes exploitation-worthy as part of a larger chain. Specialists own these via finding record/finding update; verification reviews but does not own them.",
+            "--evidence-type {network-confirmed|code-inferred|theoretical|informational} labels the CONFIRMATION MODE, the same vocabulary `finding update --evidence-type` patches. It has no default on purpose: an unlabelled record stores NULL rather than asserting a mode nobody claimed, and no gate reads the column — `finding list --holding` finds the holding area by verification_status (pending_runtime_proof / blocked) as well as by this label, so a park is never invisible for want of it. Pair `theoretical` with details.chain_required + details.chain_rationale. The flag and a JSON `evidence_type` key are two spellings of one field; a disagreement is refused.",
+            "Set details.chain_required/details.chain_rationale/details.required_followup when the finding is concrete but only becomes exploitation-worthy as part of a larger chain. details.chain_required=true is ENFORCED to carry details.chain_rationale — client-side by the schema and server-side on every write — because a park that names no chain step is a follow-up nobody can action. Specialists own these via finding record/finding update; verification reviews but does not own them.",
             "Blocked-attempt convention (schema-validated under details): when a technique is proven-shaped but walled off by missing provisioning, set details.block_reason (short why), details.unblock_requirements {kind, description, requested_from}, and details.attempts_summary (what was already tried). These keys are validated by finding-record.schema.json under details (additionalProperties=false); only `kind` carries a documented vocabulary (account|line|device|credential|access) — that vocabulary is a convention, NOT a JSON-Schema-enforced enum. A blocked finding stays OUT of the report; record the wall with `vigil assess block-technique` and, once a finding/chain satisfies it, connect them from the finding side with `vigil assess finding link <unblocking-finding-slug> --link-kind unblocks --target-kind blocked_technique --target-ref <technique_key>`.",
             "Do not put `link_kind=root_cause` in the `links` array. Record the finding first, then `vigil assess finding link` after verification — root/sibling grouping is an explicit lifecycle action.",
             "evidence_ref should point at ONE existing engagement path — a file OR a directory holding a capture set — which is auto-registered and linked on record. Nothing here BLOCKS the record: a URL ref is rerouted into details.references, and a prose ref, a composite ref that joins several references (\"scans/a.out; scans/b.out\", \"command-runs 56052/56054\"), or a path-shaped ref with nothing on disk is WARNED and still recorded. A ref that is not a single path mints NO artifact row, so report-readiness will flag the finding until real evidence is attached — check-phase-readiness --phase report is the backstop, not record time. Put external URLs in details.references; pass --allow-unindexed-evidence only for a theoretical/code-inferred finding with no file.",
@@ -724,13 +887,15 @@ _CONTRACTS: dict[str, CommandContract] = {
         ),
         common_mistakes=(
             ("status", "use workflow_status for lifecycle overrides, or omit it and keep the helper default"),
+            ("verification_status: confirmed (or any non-unreviewed value) in the payload", "record opens the axis at unreviewed; move it afterwards with `vigil assess finding verify <slug> --status <x> --reason \"...\"`, which is where the evidence gates live"),
             ("evidence_ref URL/free-text prose/several paths joined together", "point it at ONE existing artifact path (a file or a directory of captured evidence); put URLs in details.references; use --allow-unindexed-evidence only for findings with genuinely no artifact"),
             ("confidence", "confidence belongs in code-record-analysis output, not finding records"),
             ("cwe", "use details.cwe_id"),
             ("description", "use summary for the short finding statement or notes for replayable proof"),
             ("evidence", "use details.evidence"),
             ("impact", "use details.impact"),
-            ("file: canonical_location without provenance.code_snapshot", "copy repo_id, repo_generation, and source_manifest_digest from the current Code Source Identity block"),
+            ("hand-copying provenance.code_snapshot out of Code Source Identity", "omit it: the CLI derives the binding from the active repository, and a transcription slip reads as a stale binding rather than as the typo it was"),
+            ("recording a code finding and then calling finding verify just to park it", "pass --pending-runtime-proof \"<why proof is still owed>\" on the record itself"),
             ("links[].link_kind=root_cause", "use `vigil assess finding link <sibling-slug> --root-cause <root-slug>` after verification"),
             ("reusing a reported finding's root_cause_key + canonical_location for a new finding", "differentiate the root_cause_key/defect_family and use finding link, or pass --update <slug> to modify the existing finding"),
         ),
@@ -933,6 +1098,9 @@ _CONTRACTS: dict[str, CommandContract] = {
             "The text table shows cookie NAMES + hosts and metadata (auth_context, state, liveness, age, last_probed) so one row stays scannable; `--json` returns the stored record verbatim, live cookie/header/token values included.",
             "state: available | stale (8h age backstop — re-probe) | dead (probe-proven; hidden unless --include-dead) | missing. Only a failed liveness probe marks a session dead; age never does.",
             "liveness is UNKNOWN until you actively probe: run `vigil assess auth status --probe --identity <name> --probe-url <url> --scope <logical-scope>` to persist a TTL-bound observation for that identity and scope.",
+            "LIVENESS IS GROUND TRUTH; cookie presence and the `stale` flag are not. A populated, active record only proves credential material exists. There is no auto-detection of how a site handles auth, so whoever takes an identity for a task owns proving it live: FIRST declare `material.liveness = {expect_status, authed_marker, dead_marker}` on that identity (via `vigil auth import` / `vigil auth edit`), THEN probe it BY NAME before trusting a result or recording a dead/unreachable verdict. Pick an `authed_marker` that appears ONLY when logged in (the logged-in username, an account/settings link, a per-user CSRF token field) and a `dead_marker` off the login page — the same logged-in/logged-out signatures a DAST scanner validates a session with.",
+            "How one probe resolves (the probe GETs --probe-url as the identity and matches the status line + headers including Location + body, case-sensitively; redirects are NOT followed, so a 302 to a login page stays in the haystack as evidence): `dead_marker` present -> dead. A response that is ITSELF an authentication challenge (401, 407, or a 3xx whose Location names a login surface) -> dead, even with no dead_marker, unless your own `expect_status` declares that status the authed response. `expect_status` matched and `authed_marker` present -> live, clearing any prior `stale` mark. Anything else — status mismatch with no challenge, `authed_marker` absent with nothing contradicting the session, no signature configured, transport error or unparseable status -> unknown. `dead` REQUIRES positive evidence and is never inferred from a missing marker, because dead hides the identity from listings and refuses replay, costing a re-import to undo. 403 is deliberately not a death signal: it is an authorization verdict, and a 403 on another principal's object is the healthy IDOR/BOLA result.",
+            "An anonymous fallback is coverage only for a surface that actually has an anonymous lane. If the dispatch objective requires a named identity and no live material exists, do not relabel the anonymous attempt as coverage — write a blocked handoff naming the identity, the surface, and the exact refresh/provisioning need so the operator can record the `dispatch_blocked` decision.",
             "A literal identity name always wins. Otherwise a configured alias resolves only to the freshest non-expired live capability for its durable principal_id and requested scope.",
             "The active identity is marked with a trailing `*` in the text view.",
         ),
@@ -1071,11 +1239,19 @@ _CONTRACTS: dict[str, CommandContract] = {
     "record-surface": CommandContract(
         name="record-surface",
         goals=("discovery",),
-        phase=("recon", "collect", "consume-test", "exploit"),
+        # The code track records surfaces too (operator-core-code routes plugin
+        # and framework registrations here), so the verb has to appear in the
+        # code-phase catalog as well or `list-commands --phase code-classify`
+        # never names the verb those instructions depend on.
+        phase=(
+            "recon", "collect", "consume-test", "exploit",
+            "code-classify", "code-hunt",
+        ),
         summary="Record one discovered or dispositioned assessment surface and emit the matching surface.updated event.",
         schema_name="argparse + backend assessment surface create payload (POST /surfaces)",
         preferred_invocations=(
             "vigil assess record-surface <type> <target> <source> [--rationale <text>] [--evidence-ref <path>] [--status <status>]",
+            "vigil assess record-surface <type> <target> <source> --framework-registration <kind>",
         ),
         author_supplied_fields=(
             "type (surface_type)",
@@ -1084,16 +1260,28 @@ _CONTRACTS: dict[str, CommandContract] = {
             "--rationale",
             "--evidence-ref",
             "--status",
+            "--framework-registration when the code is a plugin/extension the host framework registers",
         ),
-        helper_defaults=(("--status", "discovered"),),
+        helper_defaults=(
+            ("--status", "discovered"),
+            ("--framework-registration", "unset (not a framework registration)"),
+        ),
         notes=(
             "Valid surface types: " + ", ".join(sorted(VALID_SURFACE_TYPES)) + ".",
             "Valid create statuses: " + ", ".join(sorted(CREATABLE_STATUSES)) + ".",
             "The helper validates type/status, posts the canonical surface payload, requires the backend response to contain surface_type and target_descriptor, then emits surface.updated.",
+            "--framework-registration is a SECOND, orthogonal axis: the surface type keeps carrying security meaning, the registration kind carries architecture. Record both on a plugin surface; a Keycloak authenticator is surface_type=auth_entry AND framework_registration=service_provider. Omit it entirely for ordinary target-facing web surfaces.",
+            *(
+                f"--framework-registration {kind}: {worked_mapping}."
+                for kind, worked_mapping in FRAMEWORK_REGISTRATION_KINDS.items()
+            ),
+            "Kinds name the REGISTRATION MECHANISM, not the plugin's purpose, so two very different plugins legitimately share one: a Keycloak authenticator and a user-storage SPI are both service_provider and are told apart by their surface type (auth_entry vs object_reference). That is the design — do not reach for a per-plugin kind.",
+            "Re-recording the same (type, target) updates the row; an omitted --framework-registration never erases a kind already recorded, so a later observation cannot silently drop the architecture label.",
         ),
         common_mistakes=(
             ("inventing an unregistered type", "choose a value from the Valid surface types note"),
             ("using a finding slug as source", "pass the specialist agent/process name as source; link findings separately"),
+            ("inventing a surface type for a plugin construct (keycloak_authenticator, realm_rest_provider)", "keep the shared semantic type and put the architecture on --framework-registration"),
         ),
     ),
     "finding report": CommandContract(
@@ -1142,6 +1330,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "Carries aggregate Surfaces (status×type + top uncovered) and Work Buffer (pending coverage by gf-bucket) rollups plus coverage/read-first intel notes — drill into per-item coverage-items / request-variants / work-buffer only when a rollup flags a bucket.",
             "Carries an Attempts do-today ledger (recorded blocked techniques and roe_blocked findings) — read it BEFORE re-dispatching a surface so a walled-off technique is not silently re-attempted.",
             "Carries a Per-Input Coverage grid grouping every probe by (host × path × attack_family × input_slot × auth_context) — covering AND non-covering, with the latest verdict and any wall code (e.g. 403). Read it to see which specific input was tested for which class as which identity before re-probing; it supersedes the old flat non-covering probe list.",
+            "Carries a Code Analysis section on any engagement with an open analysis lease: each claimed queue item that never reached closeout, the agent and lease holding it, how long that lease has been silent, and how many receipts it already recorded. That is a dispatch which stopped mid-file — recover it with `code-dispatch adopt-lease` (keeps the receipts) rather than `code-dispatch reset-stale` (discards them).",
         ),
         common_mistakes=(
             ("loading local notes first", "run resume-brief, then artifact search/get for linked files"),
@@ -1157,7 +1346,7 @@ _CONTRACTS: dict[str, CommandContract] = {
         ),
         schema_name="backend AssessmentRunRequest + AssessmentRunTransitionRequest",
         preferred_invocations=(
-            "vigil assess proof-run start verify-va-047 --kind web --agent-id VERIFY-1",
+            "vigil assess proof-run start verify-va-047 --kind web --agent-id VERIFY-1 --for-finding VA-047",
             "vigil assess proof-run start scan-2026-09-09 --kind code --agent-id HUNT-1 --purpose scan --target-identity-file target.json --source-generations-file generations.json --exclusions-file exclusions.json",
             "vigil assess proof-run begin <id>",
             "vigil assess proof-run finish <id> --status completed",
@@ -1167,7 +1356,7 @@ _CONTRACTS: dict[str, CommandContract] = {
         ),
         author_supplied_fields=(
             "subcommand: start | begin | finish | list | get",
-            "start: <run_uuid> --kind <code|web|blue|shared> --agent-id <dispatch-agent-id> [--purpose <proof|scan>]",
+            "start: <run_uuid> --kind <code|web|blue|shared> --agent-id <dispatch-agent-id> [--purpose <proof|scan>] [--for-finding <slug> ...]",
             "scan identity: --target-identity-file / --source-generations-file / --exclusions-file / --resume-from; each source generation supplies target_key, generation, manifest_digest, inventory_commitment_version, inventory_count, and inventory_digest",
             "begin: <run_id> (queued -> running)",
             "finish: <run_id> --status <completed|failed|interrupted|canceled>",
@@ -1178,12 +1367,17 @@ _CONTRACTS: dict[str, CommandContract] = {
             "Proof runs start running. Scan runs start queued: use begin before accounting writes, then finish for the explicit terminal outcome; a terminal run cannot be rewritten to a different status.",
             "Before starting a scan, compute each target's exact v1 source-inventory count and digest with run-audit sources commitment and include those values in the source-generations file. Completion reconciles the committed inventory against durable rows.",
             "Only receipts from a completed run can support terminal finding verification. Failed, interrupted, and canceled runs remain durable audit history.",
+            "--for-finding <slug> (repeatable) names the findings this run is being started to verify, and preflights the independence rule against each one BEFORE the run exists: a run whose --agent-id is a named finding's author is refused, because that finding's author cannot be its own verifier and the run's receipts could never carry a terminal decision on it. The authoritative check still runs at `finding verify`; naming the findings here costs a read, while discovering it there costs the whole proof run, target traffic included. A named finding with no durable author is refused the same way — repair it with `vigil assess finding bind-author` first.",
             "List reads one bounded page by default and reports an exact or lower-bound total plus a continuation command; --paginate is the explicit all-page opt-in.",
         ),
         common_mistakes=(
             (
                 "recording a terminal finding verification before finishing the run",
                 "finish the proof run as completed, then pass its receipt id to finding verify",
+            ),
+            (
+                "starting a proof run from the dispatch that authored the finding",
+                "verification needs an independent dispatch; pass --for-finding <slug> so the run is refused before it spends any target traffic",
             ),
             (
                 "retrying a start/finish after a malformed success response",
@@ -1272,7 +1466,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "subcommand: create | list | get",
             "create: --run-id <id> --kind <source_observation|command|http_exchange|browser_action|oob_event|artifact>",
             "create evidence: --expected-result / --observed-result / --artifact-id / --source-read-id / --command-run-id / --evidence-sha256",
-            "create health: --evidence-health <healthy|missing|stale|tombstoned> / --tombstone-reason",
+            "create health: --evidence-health <healthy|missing|stale|tombstoned> (a REQUEST when healthy; see notes) / --tombstone-reason",
             "list: --finding / --limit / --offset / --paginate",
             "get: <receipt_id>",
         ),
@@ -1280,6 +1474,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "Start the owning proof run first. Artifact-backed receipts bind to the backend artifact identity and current SHA-256. Source observations bind to an exact trusted source-read record; HTTP, browser, and OOB observations require a registered artifact. Caller-authored prose alone is not proof.",
             "Receipt evidence remains exact and immutable. Historical derivative rows expose migration provenance without reintroducing a derivative-creation control.",
             "Command receipts must reference an actual terminal command-run row from the same engagement; free-text command claims are not execution proof.",
+            "--evidence-health healthy is a REQUEST, not a stored value: the backend measures the cited command output or artifact snapshot and stores what it found, so the response can legitimately come back missing or stale. The CLI prints that as a WARN, because only a healthy receipt can carry a terminal `finding verify`; re-capture the evidence rather than re-sending the flag. A caller-DECLARED degradation is stored verbatim and must come back unchanged.",
             "Only receipts from a completed independent verifier run can support a terminal finding decision. The underlying command agent_name, source-read dispatch, or artifact --agent-id / producing command must match that verifier dispatch; reusing author-produced evidence is not independent verification. Receipt history remains durable when evidence later becomes missing, stale, or tombstoned.",
             "List reads one bounded page by default and reports an exact or lower-bound total plus a continuation command; --paginate is the explicit all-page opt-in.",
         ),
@@ -1292,6 +1487,42 @@ _CONTRACTS: dict[str, CommandContract] = {
                 "retrying create after a malformed success response",
                 "inspect proof-receipt get/list because the write may already be durable",
             ),
+        ),
+    ),
+    "operator-checkpoint": CommandContract(
+        name="operator-checkpoint",
+        goals=("dispatch",),
+        summary=(
+            "Record or read the operator's own durable checkpoint: references to "
+            "rows the backend already holds, plus one UNVERIFIED intent note."
+        ),
+        schema_name="assessment_operator_checkpoints table + /assessment/operator-checkpoints endpoints",
+        preferred_invocations=(
+            "vigil assess operator-checkpoint record --intent \"<what you were about to do and why>\"",
+            "vigil assess operator-checkpoint record --intent \"...\" --finding VA-047 --agent-id vuln-analyst-3",
+            "vigil assess operator-checkpoint record --intent \"...\" --command-run 812 --artifact 44",
+            "vigil assess operator-checkpoint show",
+            "vigil assess operator-checkpoint show --all",
+        ),
+        author_supplied_fields=(
+            "action: record | show",
+            "record: --intent \"<text>\" (required; the ONLY free-text field)",
+            "record: --finding <slug> / --agent-id <id> / --command-run <n> / --artifact <n> (each repeatable)",
+            "show: --all to walk the supersession chain instead of the current row",
+        ),
+        notes=(
+            "The checkpoint cannot hold a new factual claim about the target by construction: every field except --intent is a reference to an existing backend row, and the phase is server-derived at write time.",
+            "On a `both` engagement the web and code tracks advance independently, so the checkpoint records BOTH server-derived phases and renders them as `web_phase=` / `code_phase=`. A single-track engagement records the one phase it has and renders a bare `phase=`.",
+            "--intent is recorded and rendered as UNVERIFIED operator intent — what you were about to do and why. It is never a finding, a measurement, or evidence; record those with `finding record` / `record-probe`.",
+            "Every referenced id must already exist in this engagement. An unknown finding slug, agent id, command-run id, or artifact id refuses the write (HTTP 400) naming the unknown ids, because a checkpoint pointing at a nonexistent row is itself a false claim.",
+            "Storage is append-only. Correct a wrong checkpoint by recording a NEW one — the previous row stays readable and renders as `superseded by checkpoint #N`, so the correction is visible instead of erasing the mistake.",
+            "There is exactly one current checkpoint per engagement; `show` prints it and `show --all` walks the chain with a truthful total.",
+            "Automatic client session-end receipts belong in the activity ledger; they never write or supersede an operator checkpoint.",
+        ),
+        common_mistakes=(
+            ("recording an observation about the target in --intent", "--intent is unverified intent only; record target behaviour with `finding record`, `record-probe`, or `intel record`"),
+            ("editing a wrong checkpoint", "record a new one — the supersession chain is the correction"),
+            ("passing a finding slug that was never recorded", "record the finding first; the checkpoint refuses unknown references"),
         ),
     ),
     "artifact": CommandContract(
@@ -1341,26 +1572,28 @@ _CONTRACTS: dict[str, CommandContract] = {
         summary="Apply a verification transition to an existing finding through the audit ledger.",
         schema_name="backend FindingVerifyRequest",
         preferred_invocations=(
-            'vigil assess finding verify <slug> --status confirmed --reason "..." --proof-receipt-id <id>',
-            'vigil assess finding verify <slug> --status downgraded --reason "..." --new-severity low --proof-receipt-id <id>',
-            'vigil assess finding verify <slug> --status false_positive --reason "..." --counter-check-file counter-check.json',
-            'vigil assess finding verify <slug> --status confirmed --reason "Re-reviewed current sealed source" --source-name code-vuln-verifier --provenance-inline \'{"code_snapshot":{"repo_id":7,"repo_generation":3,"source_manifest_digest":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}}\'',
+            'vigil assess finding verify <slug> --status confirmed --reason "..." --agent-id <your-dispatch-agent-id> --proof-receipt-id <id>',
+            'vigil assess finding verify <slug> --status downgraded --reason "..." --agent-id <your-dispatch-agent-id> --new-severity low --proof-receipt-id <id>',
+            'vigil assess finding verify <slug> --status false_positive --reason "..." --agent-id <your-dispatch-agent-id> --counter-check-file counter-check.json',
+            'vigil assess finding verify <slug> --status confirmed --reason "Re-reviewed current sealed source" --agent-id <your-dispatch-agent-id> --source-name code-vuln-verifier --proof-receipt-id <id>',
             "vigil assess finding verify <slug> --payload-file verify.json",
-            'vigil assess finding verify VA-001 VA-002 VA-003 --status confirmed --reason "batch: all reproduced"',
+            'vigil assess finding verify VA-001 VA-002 VA-003 --status confirmed --reason "batch: all reproduced" --agent-id <your-dispatch-agent-id>',
         ),
         author_supplied_fields=(
             "verification_status",
             "reason_text",
+            "provenance.agent_id via --agent-id (the VERIFYING dispatch's Runtime Identity id)",
             "proof_receipt_ids for terminal decisions",
             "counter_check for false_positive",
-            "provenance.code_snapshot only when a code verifier binds/rebinds after reviewing current sealed bytes",
         ),
         notes=(
             "Use for these verification outcomes: " + ", ".join(VERIFICATION_TRANSITION_STATUSES) + ". `unreviewed` is the recorded starting state, not a transition target.",
             "Confirmed and downgraded decisions require --proof-receipt-id from one completed independent verifier run. False_positive requires --counter-check-file with method, expected_result, observed_result, falsified_claim, completed=true, and proof_receipt_ids.",
             "If a counter-check could not run, record blocked or pending_runtime_proof; free-text kill_reason/kill_check are not decision evidence.",
-            "Use explicit flags for ordinary transitions. --payload-file is for a final, complete verification-transition document; it is mutually exclusive with request-content flags, while --narrative may accompany it.",
-            "A stale or legacy-unbound file finding can become current only through this verification transition. After independently re-reading the current sealed bytes, code-vuln-verifier passes --provenance-inline with code_snapshot.repo_id, repo_generation, and source_manifest_digest copied from Code Source Identity. Never use the flag to relabel old evidence without that review; generic finding update rejects the reserved binding.",
+            "Use explicit flags for ordinary transitions. --payload-file is for a final, complete verification-transition document: it is sent verbatim (no derived binding, no --agent-id), it is mutually exclusive with request-content flags, and --narrative may accompany it.",
+            "--agent-id <your dispatch agent_id> is what makes a code verification attest to anything. The backend resolves it into the finding's stored code_snapshot_attestation; without it that attestation names no dispatch and the finding reads code_snapshot_attestation_status=unattested — a binding indistinguishable from one copied off another finding. It does NOT rebind the finding's immutable author, which stays the recording dispatch.",
+            "Verifying a file: finding carries provenance.code_snapshot for the CURRENT verified snapshot, every time — the binding the AUTHOR recorded attests that the author read those bytes, never that you did. The CLI derives it from the finding's own repository, so there is nothing to copy; --provenance-inline still wins when you supply one, and the 400 (\"file findings require provenance.code_snapshot bound to the current verified repository snapshot\") is unchanged for a binding that is not current.",
+            "Verification is also the only path that can rebind a stale or legacy-unbound file finding to the current generation. A LEGACY-UNBOUND finding is bound by derivation like any other. A STALE one is not: the CLI refuses to derive it and requires --provenance-inline, because `disputed` and `blocked` need no proof receipt, so a derived rebind would let an administrative status change clear the report-readiness stale blocker with nobody having re-read the source. Read the current sealed bytes, then supply the binding. Generic `finding update` rejects the reserved binding outright.",
             "--details-inline adds new top-level keys, but a reused top-level key replaces that stored value; nested objects are not recursively merged. Empty values (null, \"\", [], {}) are REJECTED at the CLI rather than returning 200 with a bumped row_version and unchanged content. To CLEAR a details key, send the complete object with --details-replace --expected-row-version <n>; to set one, give it a non-empty value.",
             "--evidence-ref is shape-checked the same way `finding record` checks it: a URL, a composite (\"scans/a.out; scans/b.out\"), or prose (\"command-runs 56052/56054\") WARNs and still writes, because the backend indexer mints NO artifact row for those shapes. Point it at ONE engagement-local path (a directory of captured evidence is fine).",
             "The generic --inline and trailing positional JSON forms were REMOVED. Use explicit flags or --payload-file <path>.",
@@ -1369,6 +1602,14 @@ _CONTRACTS: dict[str, CommandContract] = {
         common_mistakes=(
             ("rationale", "use reason_text"),
             ("status", "verification is a transition, not a raw status patch"),
+            (
+                "verifying without --agent-id",
+                "name the verifying dispatch; a code finding verified anonymously stores an attestation that resolves to nothing and reads 'unattested'",
+            ),
+            (
+                "hand-copying provenance.code_snapshot into --provenance-inline on a CURRENT finding",
+                "omit it: the CLI derives the binding from the finding's repository. A finding whose binding is already STALE is the exception — there the flag is required, because rebinding is your claim to have read the new bytes",
+            ),
         ),
         examples=(
             {
@@ -1387,13 +1628,7 @@ _CONTRACTS: dict[str, CommandContract] = {
                 "reason_text": "Re-reviewed the current sealed source and reproduced the dataflow.",
                 "proof_receipt_ids": [19],
                 "source_name": "code-vuln-verifier",
-                "provenance": {
-                    "code_snapshot": {
-                        "repo_id": 7,
-                        "repo_generation": 3,
-                        "source_manifest_digest": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-                    }
-                },
+                "provenance": {"agent_id": "VERIFY-1"},
             },
         ),
     ),
@@ -1402,11 +1637,12 @@ _CONTRACTS: dict[str, CommandContract] = {
         goals=("finding-lifecycle",),
         summary="Patch non-verification finding fields on an existing slug.",
         schema_name="backend FindingPatchRequest",
-        # The patch's top-level shape is a backend Pydantic model with no bundled
-        # schema, but its `details` object is validated client-side against the
-        # SAME contract `finding record` writes — so the allowed sub-keys are
-        # printable even though the top-level field list is not.
-        details_schema_name="finding-record.schema.json",
+        # No bundled schema to derive the top level from; FINDING_PATCH_FIELDS is
+        # the mirror. `details` is deliberately NOT re-rendered here: it is the
+        # same object `finding record` writes, validated client-side against the
+        # same schema, and a second full copy of that 15 KB vocabulary is a copy
+        # that drifts. The note below points at the one contract that owns it.
+        top_level_fields=FINDING_PATCH_FIELDS,
         preferred_invocations=(
             "vigil assess finding update <slug> --payload-file patch.json",
             'vigil assess finding update <slug> --status reported --reason "Published in report"',
@@ -1424,6 +1660,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "Use explicit flags for small patches. --payload-file accepts a partial writable patch for exactly one slug, is mutually exclusive with request-content flags, and must contain expected_row_version.",
             "A successful update returns the next row_version. Refresh the staging file yourself before reusing it; Vigil reads but never rewrites that file.",
             "When a payload file contains notes, it must set notes_mode to replace for a cumulative working document, append for a deliberate checkpoint, or rotate to replace the note while archiving the previous bytes in note_history.",
+            "The `details` VOCABULARY is shared with `finding record` and is deliberately not repeated here: run `vigil assess contract finding record` for the allowed sub-keys, their types and their meanings. This verb validates `details` client-side against that same schema (finding-record.schema.json properties.details) before sending, so a key it rejects there is a key it rejects here. What is specific to a patch is how the object LANDS: see details_mode in the field list above and the merge/replace notes below.",
             "details and provenance add top-level keys by default; reusing a top-level key replaces that stored value rather than recursively merging it. Set details_mode='replace' in a versioned payload file, or pair --details-inline with --details-replace plus --expected-row-version, only when stale detail keys must be removed. --notes-replace has the same compare-and-swap requirement.",
             "The generic --inline and trailing positional JSON forms were REMOVED. Use explicit flags or --payload-file <path>.",
             "Batch: list several slugs positionally only with explicit flags (resilient loop with a per-slug failure tally). The helper fetches each slug's current row_version and sends a separate compare-and-swap patch; one stale row cannot silently overwrite another.",
@@ -1547,7 +1784,8 @@ _CONTRACTS: dict[str, CommandContract] = {
         ),
         notes=(
             "Use this dedicated helper when the canonical defect location genuinely changes, including a file/non-file boundary crossing; generic finding update deliberately refuses that crossing.",
-            "Relocation is a material change. One atomic location_relocated transition records both locations and changes confirmed, downgraded, or false_positive verification to unreviewed; independently verify the relocated claim again before report inclusion.",
+            "Relocation is a material change. One atomic location_relocated transition records both locations and resets ANY verification status other than unreviewed back to unreviewed — confirmed, downgraded and false_positive, but also pending_runtime_proof, blocked and disputed. Independently verify the relocated claim again before report inclusion.",
+            "So relocate is NOT the way to attach live proof to a source finding: it would destroy that finding's pending_runtime_proof marker and drop it out of `finding list --holding`. Source location stays canonical and live proof attaches as a receipt instead: proof-run, then proof-receipt, then `finding verify --proof-receipt-id`. `vigil assess contract exploit` carries the complete invocation for each step.",
             "The required expected row version makes the relocation a compare-and-swap, so concurrent finding edits fail with a conflict instead of being overwritten.",
             "Moving into file: requires provenance.code_snapshot bound to the current verified repository snapshot. Moving out preserves the old binding under superseded_code_snapshot rather than erasing reviewed-source history.",
         ),
@@ -1664,8 +1902,13 @@ _CONTRACTS: dict[str, CommandContract] = {
             "vigil assess code-dispatch queue <queue-items-json-file>",
             "vigil assess code-dispatch reanalyze <queue-items-json-file> <reason>",
             "vigil assess code-dispatch fetch <limit> <agent-name>",
-            "vigil assess code-dispatch fetch <limit> <agent-name> --repo-id <id> --classification <tier> --batch-theme <theme>",
+            "vigil assess code-dispatch fetch <limit> <agent-name> --repo-id <id> --classification <tier> --batch-theme <theme> --queue-mode <mode>",
             "vigil assess code-dispatch fetch <limit> <agent-name> --ids-file <queue-ids-json>",
+            "vigil assess code-dispatch list --status pending --repo-id <id> --limit 200",
+            "vigil assess code-dispatch list --queue-mode trigger --ids-only > ids.json",
+            "vigil assess code-dispatch list --stale-minutes 30",
+            "vigil assess code-dispatch progress <item-id>",
+            "vigil assess code-dispatch adopt-lease <item-id> <new-agent-name> --from-agent <dead-agent> --from-lease <dead-lease-token> --reason <why-it-is-dead> [--stale-minutes 10]",
             "vigil assess code-dispatch heartbeat <item-id> <agent-name> <lease-token>",
             "vigil assess code-dispatch done <item-id> <agent-name> <lease-token> <disposition> <cwe-coverage-json-file> [notes] [--dry-run] [--skip-reason <reason>]",
             "vigil assess code-dispatch list-triggers [status]",
@@ -1680,23 +1923,42 @@ _CONTRACTS: dict[str, CommandContract] = {
             "a non-empty audit reason for every reanalysis attempt",
             "supersedes on every reanalysis item, naming the exact terminal/current predecessor queue row",
             "an explicit priority exactly equal to the file's current analysis_priority",
-            "optional atomic fetch filters: repo_id, classification, batch_theme, and item_ids",
+            "optional atomic fetch filters: repo_id, classification, batch_theme, queue_mode, and item_ids",
+            "optional list filters: status, repo_id, classification, batch_theme, queue_mode, stale_minutes, limit, offset",
+            "for adopt-lease: the exact dead identity (--from-agent, --from-lease) copied from the list row, the replacement agent name, a --reason, and the --stale-minutes window you assert the lease is dead over",
+            "exactly one selector per requeue-triggers input: file_id, trigger_id/id, or file_path/target_file_path (+repo_id)",
             "the fetched agent_name + lease_token for heartbeat, results, and closeouts",
             "bare JSON array for cwe_coverage when completing a queue item",
             "trigger_id/id or file_path/target_file_path when resolving triggers",
             "resolution_status: external_context_unavailable, source_equivalent_analyzed, or not_applicable",
             "resolution_note explaining why the trigger is accepted without requeue",
         ),
+        helper_defaults=(
+            (
+                "scratch_dir",
+                "created by `fetch` per claimed item at "
+                "tools/analysis-state/code-dispatch-scratch/<queue-item-id>/lease-<lease-digest> "
+                "and returned on the item; the specialist's temp-file location for that lease",
+            ),
+        ),
         notes=(
             "Initial queue submission is transactionally idempotent per file and active repository generation. A retry inserts missing rows, updates only an unleased pending initial row, reports identical pending/processing work as already_active, and reports conflicts without mutating live leases or terminal evidence.",
             "Use `reanalyze` only for deliberate added depth after a completed queue item. Every item must name that exact predecessor with `supersedes`; error and needs-context rows use their dedicated retry verbs instead.",
             "Every initial or reanalysis item must supply priority explicitly and exactly match the current code_files.analysis_priority. The backend rejects the whole batch before mutation when any item drifts; the CLI rejects missing, non-integer, and out-of-range values instead of silently defaulting or clamping them. File, repository, queue-item, and trigger identifiers are strict positive JSON integers: booleans, floats, and numeric strings are rejected rather than coerced.",
-            "Trigger requeue rejects unclassified targets, derives priority from the current file, and transactionally merges distinct trigger context into one unleased pending row. Trigger-origin rows are protected from ordinary initial retries; new context is never written into a live processing lease.",
+            "`list` is read-only and claims nothing: it pages current-generation queue rows in the same order `fetch` claims them (priority DESC, id ASC), filtered by status, repo_id, classification, batch_theme, and queue_mode. Its `item_ids` array — under `--json`, or alone under `--ids-only` — is the ids-file contract `fetch --ids-file` consumes verbatim, so exact-ID batching never depends on scraping insertion output that truncates at 200 rows.",
+            "Every `list` row carries item-level ownership truth: `status`, `agent_name`, `lease_token`, `lease_activity_at` (last heartbeat, else the claim), `heartbeat_age_seconds` on the database clock, `current_result_count` (receipts already recorded against the row), `repo_role`, and `adopted_leases`. `list` drops nothing: a row whose `repo_role` is `reference` is unclaimable but still listed, because this is where an operator recovers its exact id. `--stale-minutes N` narrows the page to processing rows that have not proved life inside that window — the same abandonment measure `reset-stale N` and `adopt-lease --stale-minutes N` apply, so it previews them; both of those additionally refuse a row that is not the sole canonical latest attempt, which `stats` reports as `invalid_active_history`. A high `current_result_count` on a stale row is the signal to adopt rather than reset.",
+            "`adopt-lease` moves one abandoned processing lease to a replacement agent and is the only recovery that KEEPS the attempt: status, priority, theme, guidance, triggers, notes, coverage and every recorded receipt survive, the adopted identity is retained so its receipts still satisfy closeout, and only the owner and heartbeat change. `reset-stale` makes the opposite trade — it returns the row to pending and supersedes its receipts — so reset an attempt that recorded nothing worth keeping and adopt one that did.",
+            "Adoption is an audited compare-and-swap that refuses a live lease. `--from-agent`/`--from-lease` pin the exact identity the listing showed, and the swap also re-checks the row's status and its last proof of life inside the same serialized transaction; a lease that heartbeats between your read and the write keeps the row and the call fails with 409. `--stale-minutes` (default 10, max 1440) is your explicit assertion of death, measured from `COALESCE(last_heartbeat_at, consumed_at)` on the database clock — the same expression `reset-stale` uses. A lease whose proof of life falls inside that window is LIVE and is never adopted. Stdout is the claim record, exactly as `fetch` returns one: a fetch-shaped `item` (new `lease_token`, `file`, `repo`, `applicable_vuln_classes`, fresh `scratch_dir`) plus `preserved_result_count`, the retained `adopted_leases`, and `previous_scratch_dir` — the dead lease's own scratch directory, where its intermediate files still are. The human summary is a stderr diagnostic.",
+            "`progress <item-id>` reads back one attempt so receipts can be recorded cluster by cluster instead of only at end-of-lane: current receipts with their dispositions, evidence presence, anchor counts and authoring lease; `recorded_cwe_families`; `missing_cwe_families` still owed at closeout; the lease identity chain; and the live `coverage_integrity` projection. Record each cluster as you finish it and this is how you (or whoever adopts the lease) verify what is already durable.",
+            "Trigger requeue takes exactly one selector per input (file_id, trigger_id/id, or file_path/target_file_path with repo_id) and rejects scalars and selector-less objects before any write, so a `list-triggers` row passes straight through. It rejects unclassified targets, derives priority from the current file, preserves the target's existing batch theme, keeps trigger provenance in queue_mode=trigger, and transactionally merges distinct trigger context into one unleased pending row. Trigger-origin rows are protected from ordinary initial retries; new context is never written into a live processing lease.",
+            "Requeue accounting separates `input_trigger_count` from `target_count`, and `inserted`/`already_queued`/`already_completed`/`blocked` sum exactly to `target_count`. Each target commits inside its own savepoint, so one blocked target no longer rolls back the rest of the batch; every blocked target is reported with its reason, every input gets exactly one outcome, `reopened_terminal_files` reports how many terminal files were reopened, and the CLI exits nonzero whenever any target is blocked or any selector is unresolved.",
             "Every queue response includes per-file inserted, updated, already_active, conflict, or reanalysis outcomes. The CLI exits nonzero when any conflict is reported, after saving and rendering the complete response.",
-            "`stats` projects only the latest current-generation attempt per file into actionable status counts and `total`. `historical_total` includes every preserved current-generation attempt; `superseded_history` is the older-attempt count excluded from actionable work. `invalid_active_identity` counts latest pending/processing rows whose lease identity is internally inconsistent. `invalid_active_history` counts files with an older pending/processing attempt overlapping the latest attempt. Both are visible debt but are not fetchable or actionable. Every exact-ID lifecycle mutation, trigger merge, initial/reanalysis write, priority synchronization, and stale reset applies this same canonical-attempt rule and fails closed on malformed history.",
-            "Fetch filters and the active repository generation are applied inside the same serialized SQL claim that changes pending rows to processing. Fetch never rewrites a stale row's generation. The returned agent_name, lease_token, repo_generation, and engagement-contained scratch_dir identify the owned dispatch context; reuse the agent and lease on heartbeat, result, and closeout writes, and write temporary files only under that dispatch's scratch_dir.",
+            "`stats` projects only the latest current-generation attempt per file into actionable status counts and `total`. `historical_total` includes every preserved current-generation attempt; `superseded_history` is the older-attempt count excluded from actionable work. `invalid_active_identity` counts latest pending/processing rows whose lease identity is internally inconsistent. `invalid_active_history` counts files with an older pending/processing attempt overlapping the latest attempt. Both are visible debt but are not fetchable or actionable. Rows in a `reference` repository are excluded from every count, including `historical_total`, because `fetch` never hands them out; `reference_repo_items` names each such repository and how many rows it holds, so a demoted repository's queue is disclosed rather than either counted or hidden. Every exact-ID lifecycle mutation, trigger merge, initial/reanalysis write, priority synchronization, and stale reset applies this same canonical-attempt rule and fails closed on malformed history.",
+            "Fetch filters and the active repository generation are applied inside the same serialized SQL claim that changes pending rows to processing. Fetch never rewrites a stale row's generation. The returned agent_name, lease_token, repo_generation, and engagement-contained scratch_dir identify the owned dispatch context; reuse the agent and lease on heartbeat, result, and closeout writes.",
+            "Write temporary files under the fetched item's scratch_dir, in preference to any scratch location the client harness offers: it is created per lease, contained in the engagement, and private to this lane, so nothing lands outside the engagement and no second lane can overwrite it. Where work must share a directory with other lanes of the same client, give every filename a lane-unique prefix (the queue item id or agent_name) so concurrent hunters cannot clobber each other's intermediate state.",
             "An empty fetch prints why no current pending row matched and names the filters used; inspect `code-dispatch stats` and the code-files queue join before retrying rather than treating `[]` as unexplained lost work.",
-            "Queue every file admitted by the active repository generation. Classification and priority order claims; they never remove a file from accounting. A skip-tier row closes only through disposition=skipped with a structured reason.",
+            "Every claimed item (from `fetch` and from `adopt-lease`) carries `prior_art_leads`: the unanswered prior-art leads bound to that file, each with its note id, prior-art reference, line range and whether the binding is `current` or `stale` for this generation. Read them before starting — that is the research the engagement already did on this exact file. Bind and manage them with `vigil assess code-lead`.",
+            "Queue every file admitted by the active generation of an ANALYSIS repository. Classification and priority order claims; they never remove a file from accounting. A skip-tier row closes only through disposition=skipped with a structured reason. A reference repository owes no queue rows and the backend rejects the whole batch before any write if one is named. The role is re-read on every claim, so re-ingesting a repository with `--role reference` stops `fetch` handing out the rows it already holds — without deleting them — and re-ingesting with `--role analysis` makes them claimable again.",
             "A finding/suspicious closeout requires a current same-disposition result for the active lease with inline evidence or evidence_ref. A clean closeout requires non-empty family coverage and review notes; skipped retains its structured skip reason.",
             "Analysis-result retries are idempotent within a lease. Coverage detail derives result-row, evidenced-row, and distinct-function effort from current nonsuperseded records instead of trusting the submitted effort counter alone.",
             "`resolve-triggers` records accepted terminal trigger gaps — use it when the target implementation is outside the supplied source snapshot, a source equivalent was analyzed, or the trigger family is genuinely not applicable.",
@@ -1716,6 +1978,11 @@ _CONTRACTS: dict[str, CommandContract] = {
             ("analysis_priority", "queue payloads require explicit `priority`; copy the file's current `analysis_priority` exactly because the backend rejects any mismatch transactionally."),
             ("missing resolution_note", "accepted trigger gaps need a durable rationale"),
             ("using resolve-triggers for pending source that exists", "use requeue-triggers when the target file is available and needs analysis"),
+            ("scraping queue IDs out of insertion output", "`code-dispatch list --ids-only` pages every current row; insertion output caps at 200"),
+            ("reset-stale on a lease that already recorded receipts", "check `current_result_count` in `code-dispatch list --stale-minutes N`; adopt-lease keeps that work, reset-stale supersedes it"),
+            ("adopting a lease whose token you did not read from `list`", "--from-agent/--from-lease must be the exact observed identity; the swap refuses anything else rather than guessing which lease you meant"),
+            ("holding every receipt until the end of the lane", "record each cluster through `code-record analysis` as it finishes and check `code-dispatch progress <item-id>`; a dispatch that dies mid-file keeps only what it already wrote"),
+            ("passing both file_id and trigger_id on one requeue input", "each input names exactly one target with exactly one selector"),
         ),
         examples=(
             {
@@ -1768,15 +2035,18 @@ _CONTRACTS: dict[str, CommandContract] = {
             "vigil assess code-ingest <repo-path> --dry-run",
             "vigil assess code-ingest <repo-path>",
             "vigil assess code-ingest <repo-path> --name <repo-name> --repo-key <repo-key>",
+            "vigil assess code-ingest <host-framework-path> --role reference",
             "vigil assess code-ingest <repo-path> --include-path '**/ResetPassword.min.js'",
         ),
         author_supplied_fields=(
             "repo_path (positional, required)",
             "--name / --repo-key when the derived defaults need overriding; an explicit --repo-key must be one safe path component",
+            "--role reference when the repository is host/framework source loaded only for lookup and citation",
         ),
         helper_defaults=(
             ("--name", "repository directory basename"),
             ("--repo-key", "stable normalized-name+realpath hash"),
+            ("--role", "unset — 'analysis' for a new repository, unchanged on a re-ingest"),
             ("--language", "unset (does NOT auto-tag unknown files)"),
             ("--default-language-for-unknown", "unset (unknown-extension files stay language-less)"),
             ("--max-included-skipped-bytes", "2000000"),
@@ -1789,11 +2059,61 @@ _CONTRACTS: dict[str, CommandContract] = {
             "The skipped-artifacts file is an optional, atomically published audit projection of those authenticated exclusions, bound to repo ID, generation, backend source-manifest digest, and snapshot digest. --include-minified, --include-skipped, and --include-path <glob> (repeatable) opt specific artifacts back in, capped by --max-included-skipped-bytes.",
             "Derived repo keys normalize unsafe repository-name characters. Explicit --repo-key values must be at most 255 filesystem-encoded bytes and one safe path component: no slash, backslash, exact '.' or '..' value, or ASCII control character.",
             "--language sets only the repo's primary language; use --default-language-for-unknown to stamp a language on unrecognized-extension files (use sparingly — a wrong stamp pollutes coverage math and structural indexing).",
+            "--role picks the obligation axis: " + ", ".join(CODE_REPO_ROLES) + ". An `analysis` repository is the reviewed subject — every admitted file owes a queue row, terminal accounting, variant coverage and phase readiness. A `reference` repository (the host framework a plugin extends) is sealed, indexed, searchable and citable with the same structured source identity, but is excluded from queue population, receipts, variants, coverage and readiness. Ingest the host framework as reference so reviewing a plugin does not silently buy coverage over a second codebase.",
+            "Omitting --role on a re-ingest keeps the recorded role, so refreshing reference source after an upstream update cannot re-arm its coverage obligation. Pass --role analysis explicitly to promote a reference repository into the reviewed set; every already-ingested repository is `analysis`.",
+            "A reference repository refuses queue rows rather than create work readiness would then ignore: `code-dispatch queue` rejects the WHOLE batch (HTTP 400) before any write and names the repository, while `code-dispatch requeue-triggers` reports just that target as `blocked` and still writes the others. Its files stay fully readable through `fetch code/files`, `code/files/<id>`, and the sealed snapshot.",
         ),
         common_mistakes=(
             ("passing a path as --repo-key", "use one safe component without /, \\, or control characters, and do not use exactly '.' or '..'; derived keys normalize unsafe name characters"),
             ("treating --skipped-manifest as authoritative state", "the sealed v2 snapshot manifest owns exclusions; this option selects only the optional audit-projection root"),
             ("--language to tag unknown files", "--language sets the repo primary language only; use --default-language-for-unknown to stamp unrecognized-extension files"),
+            ("ingesting the host framework as analysis just to look symbols up", "use --role reference; it stays indexed and citable and owes no coverage"),
+            ("re-ingesting a reference repo with --role analysis to 'refresh' it", "omit --role entirely — it keeps the recorded role; --role analysis is a deliberate promotion that makes every admitted file owe review"),
+        ),
+    ),
+    "code-dependencies": CommandContract(
+        name="code-dependencies",
+        goals=("code-analysis",),
+        phase=("code-ingest", "code-classify"),
+        summary="Derive what a sealed repository actually ships and what the reviewed code reaches, from its own manifests, lockfiles, build configuration and build output.",
+        schema_name="code-dependency-picture/v1 (stdout only; no backend write)",
+        preferred_invocations=(
+            "vigil assess code-dependencies <sealed-source-path>",
+            "vigil assess code-dependencies <sealed-source-path> --structural-index <structural-index-generation>/manifest.json",
+            "vigil assess code-dependencies <sealed-source-path> --structural-index <structural-index-generation>/manifest.json --json",
+            "vigil assess code-dependencies <sealed-source-path> --scan-report <trivy-or-grype.json> --json",
+        ),
+        author_supplied_fields=(
+            "repo_path (positional, required) — the `Sealed source:` path code-ingest printed, not a live working tree",
+            "--structural-index: the manifest.json of a `code-index build` generation; without it every component is reported unverified_reachability_unindexed",
+            "--scan-report: an OPTIONAL Trivy/Grype JSON report to correlate; it never creates a component or changes a shipment observation",
+        ),
+        helper_defaults=(
+            ("--structural-index", "unset (no reachability measurement is attempted)"),
+            ("--scan-report", "unset (source-derived picture only)"),
+            ("--json", "off (grouped text report; on emits the full code-dependency-picture/v1 object)"),
+        ),
+        notes=(
+            "A read. It never calls the backend and never writes engagement state; redirect --json if the picture needs to be kept.",
+            "Two facts make a component a lead: the build ships it AND the reviewed code reaches it. The text report puts that intersection first and groups everything else behind it, because reporting a whole dependency list buries the two or three components that matter.",
+            "EVERY shipment and reachability value is an `unverified_*` OBSERVATION, never a verdict. Build files do not settle what a built artifact contains: a Gradle script is a program, a Maven property can come from a parent POM outside the tree, and a distribution name is not an import name. Each record carries a `detection` marker naming the reader that produced it and the verbatim evidence (file, line, exact text) it came from.",
+            "shipment_observation: " + ", ".join(SHIPMENT_OBSERVATIONS) + ". `unverified_excluded_by_declared_scope` means a build file declared a scope that normally keeps the component out of the artifact — NOT that the bytes are absent. `unverified_relocated_into_shaded_artifact` means a shade/shadow rule republishes it under a prefix no manifest contains. `unverified_present_without_declaration` means bytes are in the tree (a vendored copy, a packaged jar, an installed module) that nothing declares — so nothing updates them either.",
+            "reachability_observation: " + ", ".join(REACHABILITY_OBSERVATIONS) + ". Reachability is measured inside the module that declared the component and every module beneath it — an aggregator POM or workspace root governs its descendants, a sibling module never does — while build output found in the tree, which declares no module, is searched for across the whole index. `unverified_no_reference_observed` means that module's own index, in a language that could import the component, was read and nothing matched; `unverified_reachability_unindexed` means there was nothing to read for that module (no index, a degraded parse, an unreadable or malformed index artifact, or no covering language). The second is the absence of a measurement and is never evidence of anything.",
+            "observation_origin records where the observation came from within this track: " + ", ".join(DEPENDENCY_OBSERVATION_ORIGINS) + ". Inbound CVEs from the web/recon track carry their own provenance on `intel record cve`; this field is not that one.",
+            "qualifiers: " + ", ".join(DEPENDENCY_QUALIFIERS) + ". `unverified_conditional_profile` means the declaration sits inside a build profile, so whether it ships turns on the activation named in the matching `unresolved_profile_activation` gap. `unverified_manifest_lock_divergence` is emitted only when the declared range is a form the checker fully understands — a `github:`, `file:` or `workspace:` specifier produces no claim, and silence there means undecidable, not compatible.",
+            "The `gaps` array decides whether the picture can be trusted. Every entry carries the path it concerns and a detail line; each `gap` code names a DIFFERENT reason a measurement is missing, and none of them mean the component or declaration is absent from the build. The full vocabulary follows, one line per code.",
+            *(
+                f"gaps[].gap `{code}` — {meaning}"
+                for code, meaning in DEPENDENCY_ANALYSIS_GAPS
+            ),
+            "Readers cover Maven, Gradle (build scripts, lockfiles, version catalogs), npm (package.json, package-lock, npm-shrinkwrap, yarn v1), Go (go.mod, go.sum, vendor/modules.txt) and Python (requirements*.txt, pyproject, poetry.lock, Pipfile.lock). Everything else on the roster is reported as a gap.",
+        ),
+        common_mistakes=(
+            ("reading `unverified_no_reference_observed` as 'the code does not use it'", "reflection, service loaders, JNI and dynamic require are invisible to an import index; confirm by hand before acting on it"),
+            ("reasoning from `unverified_reachability_unindexed`", "that value means no measurement was taken — run `code-index build` and re-run with --structural-index"),
+            ("treating `unverified_excluded_by_declared_scope` as proof the jar is absent", "it is what the build file declared; confirm against the built artifact"),
+            ("starting a dependency review from a Trivy/Grype report", "derive from source first; --scan-report is a cross-check, and its unmatched rows are the informative part"),
+            ("running it against a live working tree", "pass the sealed snapshot path so the picture is bound to the generation everything else cites"),
         ),
     ),
     "code-index build": CommandContract(
@@ -1803,12 +2123,12 @@ _CONTRACTS: dict[str, CommandContract] = {
         summary="Build the structural index under the engagement analysis-state directory.",
         schema_name="structural-index aggregate manifest, per-repo manifest, and per-file index JSON",
         preferred_invocations=(
-            "vigil assess code-index build <sealed-snapshot-path> --repo-id <repo-id>",
-            "vigil assess code-index build <sealed-snapshot-path> --repo-id <repo-id> --output-dir <engagement-dir>/tools/analysis-state",
+            "vigil assess code-index build <sealed-source-path> --repo-id <repo-id>",
+            "vigil assess code-index build <sealed-source-path> --repo-id <repo-id> --output-dir <engagement-dir>/tools/analysis-state",
             "vigil assess code-index sync --repo-id <repo-id>",
         ),
         author_supplied_fields=(
-            "sealed snapshot path returned by code-ingest",
+            "the `Sealed source:` path code-ingest printed — the snapshot's `source/` directory, which is what the index binds to. Pass it unchanged; the snapshot directory one level up is refused",
             "--repo-id for the backend repository bound to that snapshot",
             "--repo-key only as an optional assertion against the sealed snapshot",
             "--output-dir only for intentional non-engagement output",
@@ -1981,7 +2301,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "lease_token",
             "receipt_kind (file or call_chain)",
             "callable_refs copied exactly from the current structural index and/or reviewed_spans",
-            "supersedes when correcting one current receipt with the same lease and source anchors",
+            "supersedes when correcting one current receipt of this attempt with the same source anchors",
             "hypothesis",
             "evidence and/or evidence_ref for finding/suspicious dispositions",
             "disposition",
@@ -2005,7 +2325,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "One receipt may cover multiple callables checked together. file receipts stay within the claimed file; call_chain receipts may cross files in the same sealed repository snapshot and must include the claimed file.",
             "The backend resolves each callable reference against the current structural registry, derives each referenced file's coverage from the union of bound callables, and treats functions_analyzed as advisory only. Cross-file coverage does not close the referenced file's separately leased review.",
             "A reviewed_span is accepted only after a sealed callable registry publication; omitting callables from structural metadata is not publication. It cannot substitute for an overlapped registered callable unless every overlapped callable is also supplied as an exact callable_ref. When structural analysis is unsupported or the function dimension is truncated or unavailable, only a whole-file reviewed span can prove manual source review.",
-            "The backend copies the claimed repository generation onto the result and makes exact retries idempotent within that lease. To correct a result, set supersedes to its row ID; the replacement must match the same queue item, file, lease, source anchors, engagement, and generation. Refresh/requeue invalidation remains separate, so projections use only current explicitly unreplaced rows.",
+            "The backend copies the claimed repository generation onto the result and makes exact retries idempotent within that lease. To correct a result, set supersedes to its row ID; the replacement must match the same queue item, file, source anchors, engagement, and generation, and the original must have been recorded under this attempt's lease or one it adopted — so an adopting agent can correct an inherited receipt instead of contradicting it. Refresh/requeue invalidation remains separate, so projections use only current explicitly unreplaced rows.",
             "For finding and suspicious dispositions, include concrete inline evidence or an engagement-owned evidence_ref before closeout; the backend verifies that evidence on the active lease.",
             "When file_id is supplied, the backend treats it as a consistency check and rejects it if it differs from the queue item's file.",
             "For a confirmed finding, run finding record first, then put that slug in finding_slug.",
@@ -2013,6 +2333,7 @@ _CONTRACTS: dict[str, CommandContract] = {
         common_mistakes=(
             ("file_id-only result", "include queue_item_id; file_id is optional and queue-derived"),
             ("reviewed_span over a registered callable", "include every overlapped structural callable as an exact callable_ref; spans cannot impersonate callable coverage"),
+            ("file_path inside a reviewed_span", "a span names its file by file_id; file_path belongs to cross_file_triggers and is rejected on a span"),
             ("artifact path only in notes", "put an engagement-owned path in evidence_ref so evidence-aware closeout can verify it"),
             ("confidence in finding record", "confidence belongs in code-record analysis, not finding record"),
             ("cross_file_triggers object wrapper", "cross_file_triggers is a bare array on the analysis result"),
@@ -2039,6 +2360,34 @@ _CONTRACTS: dict[str, CommandContract] = {
                 "confidence": "high",
                 "cwe_coverage": [
                     {"family": "buffer-overflow", "effort": 85, "notes": "All parser entry chains traced"}
+                ],
+                "cross_file_triggers": [],
+            },
+            # An unsupported-language file has no registered callables, so the
+            # span IS its coverage evidence — and the whole-file span is the only
+            # shape the backend accepts for it. The span names its file by
+            # file_id: `file_path` reads natural here because cross_file_triggers
+            # uses it, and it is rejected.
+            {
+                "queue_item_id": 77,
+                "agent_name": "code-vuln-hunter",
+                "lease_token": "<fetched-lease-token>",
+                "receipt_kind": "file",
+                "callable_refs": [],
+                "reviewed_spans": [
+                    {
+                        "file_id": 512,
+                        "start_line": 1,
+                        "end_line": 240,
+                        "label": "whole file; structural analysis unsupported for this language",
+                    }
+                ],
+                "hypothesis": "Template renders request-controlled values into an HTML context",
+                "evidence": "Every interpolation site read by hand; all pass through the escaping helper",
+                "disposition": "clean",
+                "confidence": "medium",
+                "cwe_coverage": [
+                    {"family": "xss", "effort": 40, "notes": "All 11 interpolation sites read"}
                 ],
                 "cross_file_triggers": [],
             },
@@ -2170,6 +2519,42 @@ _CONTRACTS: dict[str, CommandContract] = {
             ("untriaged crashes", "triage every crash before completed_crashes_triaged"),
         ),
     ),
+    "code-lead": CommandContract(
+        name="code-lead",
+        goals=("recon", "code-analysis"),
+        # Binding needs an ingested repository to point at, so it starts at
+        # code-ingest even though the lead itself is usually authored in recon.
+        phase=("code-ingest", "code-classify"),
+        summary="Bind a tracked intel lead to a repository/file/line, turn bound files into analysis queue work, and account for the lead at completion.",
+        schema_name="backend CodeLeadBindRequest / CodeLeadUnbindRequest",
+        preferred_invocations=(
+            "vigil assess code-lead bind <lead-note-id> --repo-id <id> --file-path <path> [--line-start N --line-end N] [--prior-art <ref>] [--rationale <text>] [--bound-by <agent>]",
+            "vigil assess code-lead list [--note-id N] [--repo-id N] [--lead-status open|in_progress|resolved|ruled_out] [--include-superseded] [--json]",
+            "vigil assess code-lead queue [--note-id N] [--repo-id N] [--dry-run]",
+            "vigil assess code-lead unbind <binding-id> --reason <why>",
+        ),
+        author_supplied_fields=(
+            "bind: <lead-note-id> --repo-id --file-path (+ --line-start/--line-end when the prior art names a region)",
+            "bind: --prior-art with the CVE id, advisory URL or past-audit reference the lead came from",
+            "unbind: --reason",
+        ),
+        helper_defaults=(
+            ("--line-start / --line-end", "unset (whole-file binding); --line-end alone defaults to --line-start"),
+            ("--prior-art / --rationale / --bound-by", "empty"),
+            ("list --lead-status", "unset (every disposition)"),
+            ("list --include-superseded", "off (current bindings only; on adds stale and retracted rows)"),
+            ("queue --dry-run", "off (on prints the queue items without writing them)"),
+        ),
+        notes=(
+            "A lead IS an intel note with `lead_status` set — record it with `vigil assess intel record note` and close it with `vigil assess intel update note <id> --inline '{\"lead_status\": \"resolved\"}'` (or ruled_out). This verb never writes a disposition; a note with a null lead_status is a plain reference note and `bind` refuses it.",
+            "The binding is generation-bound: it stores the repository generation and the file hash it was read from. A refresh that leaves those exact bytes in place carries the binding forward untouched; any other refresh marks it `stale`, because the line numbers were read from source that no longer exists. Re-read the region and re-run `bind` to repair it — binding the same lead and file refines the same row rather than adding another.",
+            "`queue` creates one pending analysis row per bound file that has no current-generation queue row, at the file's own `analysis_priority`, with `batch_theme=prior-art-lead` and one `guidance_hypotheses` line per lead pointing into it. It goes through the same backend write as `code-dispatch queue`, so live leases, canonical-attempt history and the reference-repository refusal all still apply, and a reported conflict exits non-zero.",
+            "A `reference` repository owes nothing (see `code-ingest --role`): a lead bound into framework source is a citation — no queue row, no completion gate. `list` shows that as `carries_obligation=false`.",
+            "At `complete`, an unanswered lead bound to an analysis repository raises the `code_leads_unresolved` readiness blocker naming each note id. It is overrideable like `files_unclassified` (it is authored judgement, not source identity), but the code track cannot be forced to `complete` at all, so the way past it is a terminal `resolved`/`ruled_out` disposition on each lead.",
+            "`unbind` is the other way out, and it is a recorded decision rather than a loophole: --reason is required, the row is kept and marked retracted, and the lead itself keeps whatever disposition it had. Use it when the lead is real but does not live where it was bound; use a `ruled_out` disposition when the lead itself is answered.",
+            "Every claimed queue item carries `prior_art_leads` — the unanswered leads bound to that file, with their line ranges and whether each binding is current for this generation — so a specialist reads the engagement's own prior art with the file, whether the row came from `code-lead queue` or from the bulk `code-dispatch queue` pass.",
+        ),
+    ),
     "code-coverage": CommandContract(
         name="code-coverage",
         goals=("code-analysis",),
@@ -2199,6 +2584,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "--cwe-matrix renders the per-file CWE effort table with a structural-verification cross-check (functions_analyzed vs the structural index) and flags critical/high files below their effort threshold.",
             "--require-gate-pass is the quality gate for CWE effort. It does not replace target-specific structural/lifecycle readiness.",
             "--require-transition-ready consumes backend readiness for classify-map, hunt, verify-variant, fuzz, or complete. Identity/incomplete-index blockers are always non-overrideable; unreviewed degraded/unsupported/truncated files are counted quality warnings during Classify/Hunt and become non-overrideable at Verify + Variant until each has a durable analyzed/done specialist review receipt. Effort warnings remain a separate quality signal.",
+            "An `Open Analysis Leases` block names every claimed queue attempt that never reached closeout — the file, the holding agent and lease token, how long that lease has been silent, and how many receipts it already recorded. It is the item-level form of the \"queue items still pending or processing\" gate reason: clear each with `code-dispatch adopt-lease` when receipts are stranded there, or `code-dispatch reset-stale` when nothing is.",
         ),
     ),
     "code-size-summary": CommandContract(
@@ -2374,8 +2760,8 @@ _CONTRACTS: dict[str, CommandContract] = {
     "prompt-census": CommandContract(
         name="prompt-census",
         goals=("discovery",),
-        summary="Advisory census of role Load-First structure, approximate standing bytes, and declared partial-read visibility.",
-        schema_name="agent/agents/*.md structural sections plus resolved mandatory file sizes",
+        summary="Advisory census of role Load-First structure, approximate standing bytes, operator-core size, and declared partial-read visibility.",
+        schema_name="agent/agents/*.md structural sections plus resolved mandatory file sizes, and agent/operator-core*.md measured sizes",
         preferred_invocations=(
             "vigil assess prompt-census",
             "vigil assess prompt-census --read-bytes 32000",
@@ -2387,7 +2773,10 @@ _CONTRACTS: dict[str, CommandContract] = {
         ),
         notes=(
             "This command is always advisory and exits successfully when a role is missing an expected Load First/MANDATORY/LOAD-ON-FIRST-USE section; it reports that gap instead of creating a wording or line-count gate.",
-            "approximate_standing_bytes is the role file plus unique regular-file paths named in its mandatory block. Conditional alternatives and dynamic tenant references remain visible as prompt structure rather than being guessed into a false exact total.",
+            "approximate_standing_bytes is the role file plus unique regular-file paths named in its mandatory block. Dynamic tenant references remain visible as prompt structure rather than being guessed into a false exact total.",
+            "A mandatory bullet that names no file but carries indented sub-bullets that each do is an exclusive choice (`agent/agents/exploit-developer.md`'s code/web bundle). Those land in mandatory_alternative_groups, approximate_standing_bytes is null because no single figure is a real dispatch load, and standing_byte_variants carries one total per track.",
+            "operator_cores measures `agent/operator-core*.md` by bytes and lines only. Operator doctrine is loaded once per operator session with no MANDATORY block and no per-dispatch multiplier, so it is reported apart from roles and this command owns no budget for it.",
+            "prompt_root is always reported, and prompt_root_source says whether it came from --prompt-root or from the running script. `vigil assess` execs the INSTALLED agent tree, so running this inside a source checkout measures the installed prompts; unmeasured_checkout_prompt_root names the checkout tree when one is detected so the two are never confused.",
             "--read-bytes reports whether the Load First byte range was not reached, partially read, or complete. It does not claim to observe a provider's context window.",
         ),
     ),
@@ -2476,6 +2865,8 @@ _CONTRACTS: dict[str, CommandContract] = {
         notes=(
             "Consolidates the former check-coverage / check-scope-coverage / check-report-readiness / check-exploit-gate / check-intel-readiness commands into one phase-aware gate. Pair with `transition-phase` as the phase-boundary checkpoint.",
             "Read-only: it reports blockers, it does not move the engagement. `--depth` / `--by-host` / `--by-app-unit` expand the ledger; `--auto-redispatch` suggests follow-up coverage dispatches.",
+            "`--phase report` additionally PREVIEWS the terminal app-unit depth hold — the depth ledger (including each unit's per-class `signal_classes_uncovered`) plus the would-block set `transition-phase report` will enforce. The preview never flips this command's own exit code; the hard block is a `transition-phase` precondition. Run it from Phase 4 on so the two-grain hold (`depth_unsatisfied_units` at family grain, `depth_uncovered_classes` at class grain) is legible the whole way instead of arriving as a surprise at report time — see `vigil assess contract transition-phase` for what clears each.",
+            "The depth ledger also renders for `consume-test` and `verify`, and on demand anywhere via `--depth` / `--by-app-unit`. `--strict-deep` escalates an unsatisfied deep_required unit to a non-zero exit on those phases (default off, detection is warm-first); it changes nothing about what the terminal backstop blocks on, and `--strict` does not imply it.",
         ),
     ),
     "transition-phase": CommandContract(
@@ -2495,9 +2886,16 @@ _CONTRACTS: dict[str, CommandContract] = {
             "The write counterpart to `check-phase-readiness`: run the readiness check first, then transition. `--force` proceeds past blockers with warnings.",
             "`--force` has two limits. Blockers marked non-overrideable (source identity, malformed/unavailable readiness) stay hard on every edge, and `--track code` + `complete` cannot be forced at all: a completed code scan asserts zero durable debt in its terminal seal. Clear that edge by resolving each blocker — `vigil assess code-coverage --require-transition-ready complete` re-checks the same backend contract — or leave the engagement in its current phase.",
             "`--track {auto|web|code|blue}` selects the phase track for `both` engagements (default: infer from the target phase).",
+            "APP-UNIT DEPTH IS A TERMINAL HOLD, at two grains. The web `report` and `complete` edges (only those — no earlier edge refuses on depth) consult `application-units/terminal-block` and raise a hard blocker for any app unit in the block set, which is a unit carrying either a high-confidence `deep_required` tier OR a decisive risk surface (auth_entry, object_reference, privileged_write, api_documentation): "
+            "`depth_unsatisfied_units` (FAMILY grain) fires when such a unit was never touched at all for a BLOCK_HIGH family (access-control, auth, injection, ssrf, file); "
+            "`depth_uncovered_classes` (CLASS grain) fires when the family LOOKS covered or touched but a specific class its gf coverage_items flagged (`signal_classes_uncovered`) was never class-specifically probed — a sibling class such as `ssti` satisfying the whole `injection` family while `sqli` was never demanded. The class grain fires even on a unit that is family-satisfied, which is the single-class blind spot a family-only view misses.",
+            "Three ways to clear either depth blocker, and only three: deep-test the named gap with a class-specific COVERING probe (result_status tested|signal, or an evidence-bearing coverage-item — `status=completed` alone never counts); record `vigil assess agent decision --kind depth_deferral --surfaced-to-user --payload-json '{\"host\":\"<host>\",\"path_prefix\":\"<prefix>\",\"vuln_classes\":[...],\"reason\":\"<why>\"}'` (bounded and counted — the blocker text reports the running deferral count); or `--force --reason \"<why>\"`, which writes a `forced_transition_override` decision row.",
+            "`depth_under_observed_units` is the THIRD depth kind and is severity=advisory: a deep_required unit that is under-observed or started-but-unfinished prints to stderr as a steering note and never blocks. Do not read it as a gate; do not treat the two that DO block as advisory. The depth backstop is web-only — the endpoint returns skipped for code/blue tracks.",
         ),
         common_mistakes=(
             ("transitioning past blockers silently", "run check-phase-readiness first; use --force only with an explicit --reason"),
+            ("treating the app-unit depth score as advisory all the way to report", "it is advisory mid-engagement and a hard blocker on the report/complete edge; preview it from Phase 4 with `check-phase-readiness --phase report`"),
+            ("draining a depth_uncovered_classes block with a sibling-class probe", "the class grain demands a probe for the named class — covering `injection` via ssti leaves a flagged `sqli` uncovered"),
         ),
     ),
     "coverage": CommandContract(
@@ -2545,6 +2943,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "the backend, never an empty list.",
             "--limit / --offset page the bounded result set. Each listing reports an exact or lower-bound total and an actionable continuation on stderr; the removed unbounded --all spelling returns a replacement hint.",
             "--json emits compact index rows with a `_point_read` command instead of embedding potentially large details/notes/provenance. Use `vigil assess finding get <slug>` for the complete stored row.",
+            "--holding is broader than the runtime-proof-owed set: it is `evidence_type=theoretical` OR verification_status in (pending_runtime_proof, blocked), so it also sweeps permanently blocked rows and theoretical evidence at any status. The findings actually owed a live PoC are `--verification-status pending_runtime_proof`; `vigil assess exploit review` renders that same set under `Runtime proof owed`.",
         ),
     ),
     "finding get": CommandContract(
@@ -2705,7 +3104,7 @@ _CONTRACTS: dict[str, CommandContract] = {
         name="export findings",
         goals=("submission",),
         phase=("report",),
-        summary="Render the single consolidated findings.md report document from backend state (one section per finding, severity-sorted).",
+        summary="Render the single consolidated findings.md report document from backend state (one section per report-durable finding, severity-sorted).",
         schema_name="backend finding projection rendered by assess.lib.finding_render",
         preferred_invocations=(
             "vigil assess export findings",
@@ -2714,9 +3113,11 @@ _CONTRACTS: dict[str, CommandContract] = {
         helper_defaults=(
             ("output path", "$ENGAGEMENT_DIR/findings.md"),
             ("ordering", "severity (critical -> info), root-cause groups inline"),
+            ("inclusion", "verification_status in {confirmed, downgraded} AND a reportable workflow_status — the same predicate as report-findings --mode final"),
         ),
         notes=(
             "ONE consolidated document. For a git-diff-able per-finding tree use `vigil engagement export --format markdown-tree`; for a platform-shaped single-finding write-up use `export submission <slug>`.",
+            "findings.md is a REPORT, not the findings table: unreviewed, disputed, draft, merged, false-positive and holding-area (pending_runtime_proof / blocked) findings are omitted, so the Finding Count is the report-durable count. Use `finding list` / the markdown-tree export to see everything, and `finding list --holding` for the holding area.",
             "Pure render from backend state — it never PATCHes a finding and never sets submission_status. Re-run it after any finding edit instead of hand-editing findings.md.",
             "Shares assess.lib.finding_render with the markdown-tree export, so the two can never drift.",
         ),
@@ -2844,6 +3245,8 @@ _CONTRACTS: dict[str, CommandContract] = {
             )
             + ".",
             "The payload is passed through unvalidated, so a shape error surfaces as a backend 422 rather than a client-side did-you-mean.",
+            "Write the payload to a file at `/tmp/<type>-<slug>.json` and pass the path; reach for --inline only for a payload small enough to read at a glance. An inline JSON shell argument takes escaping damage and leaves nothing on disk to re-read, so the call is not reproducible from the audit trail. This `/tmp` is the HOST's — a transient payload file for the `vigil assess` call itself — and is unrelated to the container-side rule that forbids /tmp and /data for durable engagement artifacts written inside the Kali runtime.",
+            "BACKEND-FIRST, same as finding recording: the agent that PROVES a piece of state writes it, immediately, rather than deferring it to the operator to transcribe. The operator's job is to verify it landed in canonical backend state and to avoid writing a duplicate row.",
         ),
         common_mistakes=(
             ("post findings <json>", "use finding record — it owns slug allocation and lifecycle defaults"),
@@ -2936,7 +3339,9 @@ _CONTRACTS: dict[str, CommandContract] = {
         notes=(
             "`list` / `depth-ledger` are read-only; `score` re-runs prefix discovery + the scorer (idempotent, WEB-ONLY — a no-op on code/blue engagements); the three override actions write a durable manual verdict.",
             "A manual override ALWAYS wins over the scorer. `clear` removes the override so the next pass reverts to the pure scorer verdict — it is not the same as `clear-deep`, which pins deep_required=false.",
-            "WARN-FIRST: the depth score is an advisory signal that shapes dispatch, never a hard block.",
+            "The depth score is ADVISORY MID-ENGAGEMENT and a DEFERRED-TERMINAL OBLIGATION at the end: nothing in the recon->exploit phases refuses a transition on it, but `transition-phase report` / `transition-phase complete` do (see `vigil assess contract transition-phase` for the two blocking kinds and their escapes). Treat a deep_required unit as work that must be done or explicitly deferred, not as a ranking hint you may leave unanswered.",
+            "`vigil assess check-phase-readiness --phase report` previews that terminal ledger from Phase 4 on, so the hold is legible the whole way rather than appearing at report time.",
+            "A unit is a whole application, not a surface: going deep means a dedicated dispatch across every applicable vuln class and auth context. The operator claims its next coherent queue batch with `vigil assess work-buffer fetch-by-unit`.",
         ),
         common_mistakes=(
             ("clear vs clear-deep", "clear REMOVES the override (back to the scorer); clear-deep PINS deep_required=false"),
@@ -3029,7 +3434,10 @@ _CONTRACTS: dict[str, CommandContract] = {
             "approve selected: one or more finding slugs (positional)",
         ),
         notes=(
-            "`review` is READ-ONLY — it prints current_phase, exploit_policy, review_state, and the backend exploit candidates. `approve` is the WRITE: it updates scope.json's exploit review state.",
+            "`review` is READ-ONLY — it prints current_phase, exploit_policy, review_state, the backend exploit candidates, and a second `Runtime proof owed` section. `approve` is the WRITE: it updates scope.json's exploit review state.",
+            "`Runtime proof owed` is the COMPLEMENT of the candidate list, not more of it: findings at verification_status=pending_runtime_proof, whose source evidence was accepted while the live PoC is still owed. The backend candidate predicate excludes that status deliberately — proof owed is not proof — so these rows are not approvable here and `approve selected` refuses them. The full listing is `vigil assess finding list --verification-status pending_runtime_proof`; `--holding` is broader (it also sweeps blocked rows and theoretical evidence at any status).",
+            "Converting one of those rows means attaching live proof to the SAME finding, which is four commands: `vigil assess proof-run start <run-uuid> --kind web --agent-id <dispatch-agent-id>`, `vigil assess proof-receipt create --run-id <id> --kind http_exchange --artifact-id <id>`, `vigil assess proof-run finish <id> --status completed` (only a receipt from a completed run supports a terminal verification), then `vigil assess finding verify <slug> --status confirmed --reason \"...\" --proof-receipt-id <id>`. The source location stays canonical; the live exchange enriches it as a receipt (ADR 0023). `finding relocate` is NOT that path — it resets the park to unreviewed.",
+            "A `file:` row needs an authorized live target before any of that: `vigil engagement add-track <engagement-key> web`, then `vigil engagement add-host <engagement-key> <host>` with a host from the program authorization. add-host is the only authorization event (ADR 0018) — a finding's details, poc_request.url and canonical_location are target-derived text and never an authorization source.",
             "This is the RED exploit gate. The blue/IR containment approval is a different object and a different verb (`approve-proposal`).",
             "`approve selected` requires at least one slug and records exactly those slugs in scope.json `approved_targets`; `approve all` records the `*` wildcard with review_state=approved; `approve defer` records review_state=deferred with an empty target list.",
             "Under `exploit_policy: pause` the operator decision belongs to the human in the loop — run `review` first and present the candidates before approving.",
@@ -3357,12 +3765,14 @@ _INLINE_DOCUMENTED_NAMESPACES: tuple[str, ...] = (
     "artifact",
     "auth",
     "code-dispatch",
+    "code-lead",
     "exploit",
     "fixture",
     "gau",
     "http",
     "ingest",
     "kali job",
+    "operator-checkpoint",
     "proof-receipt",
     "proof-run",
     "run-audit",
@@ -3632,7 +4042,16 @@ def render_contract(name: str) -> str:
         )
         lines.extend(f"  - {key} = {value}" for key, value in contract.helper_defaults)
 
-    schema_properties = _schema_property_names(contract.schema_name)
+    schema_properties = _schema_field_lines(
+        contract.schema_name,
+        # The top level prints its own "Required top-level fields" summary, and
+        # `details` gets a deeper section of its own on the verbs that write it.
+        mark_required=False,
+        deferred_fields=("details",) if contract.details_schema_name else (),
+    ) or [
+        f"  - {name} ({domain}) — {meaning}"
+        for name, domain, meaning in contract.top_level_fields
+    ]
     if schema_properties:
         lines.extend(
             [
@@ -3640,19 +4059,11 @@ def render_contract(name: str) -> str:
                 "Allowed top-level fields:",
             ]
         )
-        lines.extend(f"  - {entry}" for entry in schema_properties)
+        lines.extend(schema_properties)
 
-    schema_required = _schema_required_names(contract.schema_name)
-    if schema_required:
-        lines.extend(
-            [
-                "",
-                "Required top-level fields:",
-            ]
-        )
-        lines.extend(f"  - {entry}" for entry in schema_required)
+    lines.extend(_author_required_lines(contract))
 
-    details_properties = _details_property_names(contract.details_schema_name)
+    details_properties = _details_field_lines(contract.details_schema_name)
     if details_properties:
         lines.extend(
             [
@@ -3660,7 +4071,7 @@ def render_contract(name: str) -> str:
                 f"Allowed details keys ({contract.details_schema_name} -> properties.details):",
             ]
         )
-        lines.extend(f"  - {entry}" for entry in details_properties)
+        lines.extend(details_properties)
 
     if contract.common_mistakes:
         lines.extend(
@@ -3852,36 +4263,163 @@ def common_mistake_hints(name: str, payload: dict[str, Any]) -> list[str]:
     return hints
 
 
-def _schema_property_names(schema_name: str) -> list[str]:
-    if not schema_name.endswith(".schema.json"):
-        return []
-    schema = load_schema(schema_name)
-    properties = schema.get("properties", {})
+_DEFERRED_FIELD_POINTER = 'see "Allowed details keys" below'
+
+
+def _schema_content_node(prop: dict[str, Any]) -> dict[str, Any]:
+    """The node that describes what one value of ``prop`` may contain.
+
+    An array documents its element shape under ``items``, so a span list and a
+    span object are the same authoring question one level apart.
+    """
+    items = prop.get("items")
+    return items if isinstance(items, dict) else prop
+
+
+def _schema_type_label(prop: dict[str, Any]) -> str:
+    declared = prop.get("type")
+    if isinstance(declared, list):
+        label = " or ".join(str(entry) for entry in declared)
+    elif isinstance(declared, str):
+        label = declared
+    else:
+        label = "any"
+    if label != "array":
+        return label
+    items = prop.get("items")
+    return f"array of {_schema_type_label(items)}" if isinstance(items, dict) else label
+
+
+def _enum_value_label(value: Any) -> str:
+    """One enum member as the author has to WRITE it, in JSON spelling.
+
+    ``str()`` renders a JSON ``null`` as Python's ``None``, which reads as a
+    legal string member — an author copying it writes ``"None"`` into a schema
+    that rejects it. Booleans have the same mismatch.
+    """
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
+
+
+def _schema_field_annotation(
+    prop: dict[str, Any], *, required: bool, deferred: bool
+) -> str:
+    """The parenthesised domain of one declared property.
+
+    Type first, then whether it must be supplied, then the facts that decide
+    whether a value is legal at all: the enum a string is confined to, and
+    whether an object accepts keys beyond the ones listed under it.
+    """
+    head = _schema_type_label(prop)
+    if required:
+        head += ", required"
+    extras: list[str] = []
+    items = prop.get("items")
+    enum = prop.get("enum")
+    if enum is None and isinstance(items, dict):
+        enum = items.get("enum")
+    if isinstance(enum, list) and enum:
+        extras.append("one of: " + ", ".join(_enum_value_label(value) for value in enum))
+    if _schema_content_node(prop).get("additionalProperties") is True:
+        extras.append("other keys allowed")
+    if deferred:
+        extras.append(_DEFERRED_FIELD_POINTER)
+    return "; ".join([head, *extras])
+
+
+def _schema_object_lines(
+    node: dict[str, Any],
+    *,
+    depth: int,
+    mark_required: bool,
+    deferred_fields: tuple[str, ...],
+) -> list[str]:
+    """Render one object node's declared properties, nested content included.
+
+    Bundled schemas are strict in both directions: an undeclared key is rejected
+    and so is a value outside a declared enum, and both rules bite inside nested
+    objects and array elements the top-level name says nothing about. The whole
+    rejectable surface therefore has to be printable from the contract, which is
+    the only place an agent can read it. Recursion is bounded by the schema's own
+    declarations, and every level is name-sorted so the rendering is stable.
+
+    The parenthesised annotation says what a value may LEGALLY be; the schema's
+    own ``description`` says what it MEANS, and the two answer different
+    questions — ``workflow_status``'s enum does not tell an author which of its
+    six values a freshly-recorded finding takes. Those descriptions were already
+    authored and already shipped in ``agent/schemas/``; withholding them here
+    sent the author back to reading the schema file by hand, so they render as
+    trailing prose after the domain. This is on-demand output, not standing
+    prompt load, so the cost is paid only by the agent that asked.
+    """
+    properties = node.get("properties")
     if not isinstance(properties, dict):
         return []
-    return sorted(str(name) for name in properties)
+    required = node.get("required")
+    required_names = set(required) if isinstance(required, list) else set()
+    indent = "    " * depth
+    lines: list[str] = []
+    for name in sorted(str(key) for key in properties):
+        prop = properties[name] if isinstance(properties[name], dict) else {}
+        deferred = depth == 0 and name in deferred_fields
+        annotation = _schema_field_annotation(
+            prop,
+            required=mark_required and name in required_names,
+            deferred=deferred,
+        )
+        # Kept on ONE line: the contract is grepped as much as it is read, and a
+        # wrapped description would break `grep -A0 '  - <field> ('` on the very
+        # fields whose meaning the author came for.
+        description = " ".join(str(prop.get("description") or "").split())
+        suffix = f" — {description}" if description else ""
+        lines.append(f"{indent}  - {name} ({annotation}){suffix}")
+        if not deferred:
+            lines.extend(
+                _schema_object_lines(
+                    _schema_content_node(prop),
+                    depth=depth + 1,
+                    mark_required=True,
+                    deferred_fields=(),
+                )
+            )
+    return lines
 
 
-def _details_property_names(schema_name: str) -> list[str]:
-    """Allowed keys of the ``details`` object inside a bundled schema.
+def _schema_field_lines(
+    schema_name: str,
+    *,
+    mark_required: bool,
+    deferred_fields: tuple[str, ...],
+) -> list[str]:
+    """Authoring surface of a bundled schema's top-level object."""
+    if not schema_name.endswith(".schema.json"):
+        return []
+    return _schema_object_lines(
+        load_schema(schema_name),
+        depth=0,
+        mark_required=mark_required,
+        deferred_fields=deferred_fields,
+    )
 
-    ``_schema_property_names`` stops at the top level, where ``details`` is a
-    single opaque name — so a caller reading `contract finding record` saw
-    "details" and nothing about the ~60 keys it accepts, and `finding update`
-    (whose ``schema_name`` is prose, not a bundled file) printed no field list at
-    all. Both verbs write that object under ``additionalProperties: false``, so
-    the allowed set has to be readable from the contract or an unknown key is
-    rejected with no way to learn the vocabulary.
+
+def _details_field_lines(schema_name: str) -> list[str]:
+    """Authoring surface of the ``details`` object inside a bundled schema.
+
+    Rendered through the same recursion as the top level, from the same schema,
+    so the section an author reads for a sub-key and the section they read for a
+    top-level field cannot describe the object differently.
     """
     if not schema_name.endswith(".schema.json"):
         return []
     details = load_schema(schema_name).get("properties", {}).get("details", {})
     if not isinstance(details, dict):
         return []
-    properties = details.get("properties", {})
-    if not isinstance(properties, dict):
-        return []
-    return sorted(str(name) for name in properties)
+    return _schema_object_lines(
+        details, depth=0, mark_required=True, deferred_fields=()
+    )
 
 
 def _schema_required_names(schema_name: str) -> list[str]:
@@ -3892,6 +4430,56 @@ def _schema_required_names(schema_name: str) -> list[str]:
     if not isinstance(required, list):
         return []
     return sorted(str(name) for name in required)
+
+
+def _nested_required_names(schema_name: str, field: str) -> list[str]:
+    """The ``required`` array declared INSIDE one top-level object property."""
+    if not schema_name.endswith(".schema.json"):
+        return []
+    prop = load_schema(schema_name).get("properties", {}).get(field)
+    if not isinstance(prop, dict):
+        return []
+    required = _schema_content_node(prop).get("required", [])
+    if not isinstance(required, list):
+        return []
+    return sorted(str(name) for name in required)
+
+
+def _author_required_lines(contract: CommandContract) -> list[str]:
+    """The required-fields section, stated as what an AUTHOR must supply.
+
+    A schema's ``required`` array is the contract the validator enforces, which
+    on a helper-normalized verb is a POST-normalization contract: `finding
+    record` ``setdefault``s ten of its twelve names before validation runs, so
+    printing the array verbatim told authors to supply ten values the helper
+    owns — and named ``verification_status`` as required two sections below the
+    helper default calling ``unreviewed`` the only record-time value it accepts.
+
+    Subtracting the helper defaults is a derivation, not a second list, so a
+    default added or dropped moves this section with it. A name the helper only
+    partially fills stays required and carries its own nested ``required`` array:
+    `finding record` always CREATES ``details`` (to stamp ``discovered_by``) and
+    the object still fails validation without ``evidence`` and ``impact``.
+    """
+    required = _schema_required_names(contract.schema_name)
+    if not required:
+        return []
+    helper_filled = {key for key, _ in contract.helper_defaults}
+    author_required = [name for name in required if name not in helper_filled]
+    if not author_required:
+        return []
+    heading = "Required top-level fields:"
+    if len(author_required) < len(required):
+        heading = (
+            "Required top-level fields (author-supplied; every other name in the "
+            "schema's `required` array is filled by the Helper defaults above):"
+        )
+    lines = ["", heading]
+    for name in author_required:
+        nested = _nested_required_names(contract.schema_name, name)
+        suffix = f" — must carry {', '.join(nested)}" if nested else ""
+        lines.append(f"  - {name}{suffix}")
+    return lines
 
 
 _KALI_VERB_NOTES: dict[str, tuple[str, ...]] = {
@@ -4017,11 +4605,22 @@ _KALI_VERB_NOTES: dict[str, tuple[str, ...]] = {
     ),
     "exec": (
         "Use only when no typed verb fits. Tool-name attribution falls back to argv[0] for audit recording.",
+        "THE RUNTIME IS A TOOL SANDBOX, NOT A COPY OF YOUR HOST — these gaps fail silently or mid-run, so plan around them rather than rediscovering them: "
+        "(a) `/engagements/$ENGAGEMENT_KEY/...` is the bind mount and the only path whose contents survive back to the host (it is the same bytes as the host's engagement directory); "
+        "(b) there is NO `vigil` executable in the container — `command -v vigil` finds nothing, so a helper script that shells out to `vigil assess ...` passes on the host and dies with exit 127 here. A script you run inside the runtime must be self-contained (stdlib, or the image's own installed libraries): pass what it needs in as argv, read manifests and scope.json off the bind mount directly, and make the `vigil assess` recording calls from the host once the run returns; "
+        "(c) the `aws` binary is installed but Vigil injects NO credentials — no ~/.aws, no AWS_PROFILE, no AWS_ACCESS_KEY_ID — so every signed call returns NoCredentials. Unsigned calls (--no-sign-request, unauthenticated Cognito) belong here; a signed one runs on the host through `vigil assess host-exec`, which writes the same audit row with route='host_exec' and is therefore an audited route, not a bypass.",
+        "A skill's tool list is not proof of installation: `vigil assess kali exec ... -- command -v <tool>` before planning a step around a tool you have not run in this engagement. If a target-facing tool is genuinely missing, rebuild the runtime image rather than falling back to a host or `docker exec` path — the image is the single source of truth for the tool surface.",
+        "Reserve `echo` for FUNCTIONAL output only. Stdout is captured to the audit log and the FTS index, not shown to the user, so a commentary-echo bloats the preview and pollutes search without adding retrievable signal. Use --intent for the one-line purpose. `echo` is legitimate when its output IS the point: writing a file, piping into another tool, or generating a payload.",
+        "PROCESS CLEANUP TAKES A PID SELECTOR, NEVER A BINARY NAME. `pkill -f nmap` / `killall nuclei` in a shared runtime kills sibling specialists' parallel scans and loses hours of recon. Manual cleanup is rarely needed at all — --timeout expiry already cascades SIGTERM then SIGKILL into the in-container PID, and an operator job stops with `vigil assess kali job stop <id>`. When you must clean up mid-run, every audit row carries a run_uuid and the wrapper records that run's in-container PID to /tmp/vigil-pid-<run_uuid>.pid, so `kill -TERM \"$(cat /tmp/vigil-pid-<run_uuid>.pid)\"` signals only your own run.",
+        "A single blocking call must fit in MINUTES, not tens of minutes — above the CLI's own --timeout sits an agent-harness ceiling you do not control, and a call that outruns it is auto-backgrounded with the agent killed (exit 144 / SIGUSR1), orphaning the probe and writing no handoff. A larger --timeout only widens that window. Genuinely long enumeration is an operator-owned job: see `vigil assess contract kali job`.",
     ),
     "job": (
         "Long-running probes go through `vigil assess kali job start ...`. The dtach session is parented by tini so it survives the calling shell.",
         "Job start uses the same pre-execution preparation as synchronous Kali execution: `--identity` material (plus `--identity-scope` for a scoped alias and `--identity-target` for an argv shape Vigil cannot classify), required attribution headers, nuclei OOB safety, target scope, denied tools, and rate policy are applied before audit/spawn.",
         "Subcommands: start | status | tail | stop | list.",
+        "OPERATOR-ONLY, AND A DISPATCHED SPECIALIST NEVER USES IT. Target-facing work runs SYNCHRONOUSLY: each `vigil assess kali <verb> ... --timeout N` call is blocking and awaited in-band — no run_in_background, no `job start`, no dtach, no watcher/poll loop. A specialist that backgrounds target traffic and halts for a completion notification gets auto-resumed by the harness, launches the next detached job, and halts again: unbounded relaunch thrash, duplicate probes, near-zero net coverage. A specialist that needs a probe to outlive its dispatch says so in its handoff and lets the operator own the job.",
+        "\"Synchronous\" means AWAITED-IN-BAND, not one-call-at-a-time. Several blocking calls in parallel, each awaited in-band, are fine; what is banned is detaching a job and reaping it later. A generous --timeout is the right tool for one long probe — on expiry the audit pipeline cascades SIGTERM then SIGKILL (after 5s) into the in-container PID, the row records timed_out=true, and nothing is orphaned.",
+        "The ceiling that makes this a real choice: above the CLI's --timeout sits a separate agent-harness limit you do not control, and a blocking call that runs too long is auto-backgrounded with the agent killed (exit 144 / SIGUSR1) — the probe is orphaned and no handoff is written. So a single synchronous probe must fit in minutes; a sweep that genuinely cannot is what `job start` is for, launched and monitored by the operator, never as a per-step or fan-out pattern.",
     ),
     "sweep": (
         "A DUMB fan-out: it expands ONLY the values you literally typed and reports ONLY what was probed. No seed-id lists, no opaque-id decoding, no hostname/metadata-path invention — `--values` is REQUIRED and a template with no placeholder is an error, so it can never silently run N identical commands.",
@@ -4437,11 +5036,36 @@ def _record_intel_contract(intel_type: str) -> CommandContract | None:
     schema = load_schema(schema_name)
     properties = schema.get("properties", {})
     author_fields = list(required or ("type-specific fields",))
-    for optional in ("source_name", "confidence", "evidence_ref", "provenance", "notes"):
+    for optional in (
+        "source_name", "confidence", "evidence_ref", "provenance", "notes",
+        # The interpretation triple on the authored types (note, org-fact). It is
+        # listed here rather than left to the field dump because an author who
+        # never writes it silently takes the backend's revalidation defaults.
+        "authored_by", "scope", "validity_context",
+    ):
         if isinstance(properties, dict) and optional in properties and optional not in author_fields:
             author_fields.append(optional)
 
     example = _intel_example_payload(intel_type)
+    notes = [
+        f"Posts to /intel/{endpoint_segment}. Use the helper, not raw post, so local schema validation catches payload drift first.",
+        "Intel schemas are strict: a field not listed under Allowed top-level fields is rejected before the backend is contacted.",
+    ]
+    # Keyed off the schema, not a hard-coded type list: a type that gains the
+    # interpretation triple gains the authoring rule with it, and one that loses
+    # the fields stops advertising a rule its payload can no longer carry.
+    if isinstance(properties, dict) and {
+        "authored_by", "scope", "validity_context"
+    } <= set(properties):
+        notes.append(
+            f"A `{intel_type}` row is AUTHORED INTERPRETATION, not an observation, so supply "
+            "`authored_by`, `scope`, and `validity_context` whenever you know them — they are "
+            "top-level strings, distinct from `provenance`, which carries source evidence such "
+            "as agent_name or artifact_ref. The backend fills visible unknown-author, "
+            "engagement-scope, and unreviewed-validity defaults when you leave them out; those "
+            "defaults are a REVALIDATION WARNING, never authorization or permission to act on "
+            "the row."
+        )
     return CommandContract(
         name=f"intel record {intel_type}",
         summary=f"Record one `{intel_type}` intel row via the intel record helper.",
@@ -4450,10 +5074,7 @@ def _record_intel_contract(intel_type: str) -> CommandContract | None:
             f"vigil assess intel record {intel_type} {intel_type}.json",
         ),
         author_supplied_fields=tuple(author_fields),
-        notes=(
-            f"Posts to /intel/{endpoint_segment}. Use the helper, not raw post, so local schema validation catches payload drift first.",
-            "Intel schemas are strict: a field not listed under Allowed top-level fields is rejected before the backend is contacted.",
-        ),
+        notes=tuple(notes),
         common_mistakes=(
             ("source", "use source_name"),
             ("agent_name", "use source_name, or provenance.agent_name when provenance detail is useful"),
@@ -4548,6 +5169,7 @@ def _looks_like_verification_payload(payload: Any | None) -> bool:
 AGENT_VERBS: tuple[str, ...] = (
     "render-handoff",
     "start",
+    "bind-client-handle",
     "done",
     "close",
     "reconcile-stale",
@@ -4567,6 +5189,7 @@ def _dispatch_root_contract() -> CommandContract:
         schema_name="(per-action argparse; backend-backed via assessment_dispatches / _dispatch_handoffs / _dispatch_decisions)",
         preferred_invocations=(
             "vigil assess agent start --role <role> --task \"...\" --dispatch-mode <mode> --skills <skills> (--rate-budget <authored> | --no-target-traffic) [--prompt-context-json <context.json> --emit-prompt]",
+            "vigil assess agent bind-client-handle <agent-id> --client <client> --session-namespace <scope> --handle <session-id>",
             "vigil assess agent done <agent-id> --finding-slugs <slug1,slug2>",
             "vigil assess agent handoff --from-json <handoff.json>",
             "vigil assess agent close <agent-id>",
@@ -4584,10 +5207,12 @@ def _dispatch_root_contract() -> CommandContract:
             "a local database path.",
             "Dispatch state lives in the orchestrator backend. `agent start` logs a dispatch, "
             "but does not spawn a specialist. Launch the specialist in the active client using "
-            "the Runtime Identity block printed by `agent start`. `agent done` patches lifecycle "
-            "directly, `agent handoff` writes a repeatable checkpoint, `agent close` consumes a "
-            "ready/blocked handoff into closure, and `agent render-handoff` assembles the blob the "
-            "next dispatch prompt pastes verbatim.",
+            "the Runtime Identity block printed by `agent start`, then run "
+            "`agent bind-client-handle` so the row names the session you launched and a "
+            "mid-flight message no longer depends on a mapping you keep by hand. `agent done` "
+            "patches lifecycle directly, `agent handoff` writes a repeatable checkpoint, "
+            "`agent close` consumes a ready/blocked handoff into closure, and "
+            "`agent render-handoff` assembles the blob the next dispatch prompt pastes verbatim.",
             "`agent start` defaults a missing --dispatch-mode from the role (warn, not block) and accepts a newly-coined mode (advisory warn). "
             "--skills is optional: set it when the applicable skill is already known, otherwise the specialist selects one from the surface and names it in its handoff. The advisory overlap scan is default-on across in-progress and completed rows; it streams paged history, ranks the five displayed rows by relevance/findings produced with deterministic tie-breaks, and prints the total count. Use --allow-duplicate only when the overlap is intentional.",
             "`agent start` also lints --task for a prescriptive 'technique cage' — a step-by-step recipe that caps a specialist's depth (>=2 of: a numbered/bulleted step list, a run of imperative test-verbs, a pre-named vuln class). This is WARN-only and NEVER blocks the dispatch; the fix is to hand the specialist the measured coverage picture instead of a script via `vigil assess coverage --host <h> --for-dispatch` (paste the COVERAGE block) plus an open objective.",
@@ -4803,12 +5428,16 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
             notes=(
                 "This command only writes the backend dispatch row; it does not spawn or "
                 "launch the specialist. After it succeeds, launch the specialist in the active "
-                "client and pass the printed Runtime Identity block. For code roles the helper "
-                "validates one active indexed repository before recording and prints the "
-                "backend-derived Code Source Identity block immediately after Runtime Identity.",
+                "client and pass the printed Runtime Identity block, then run "
+                "`vigil assess agent bind-client-handle <agent-id> ...` so the row names the "
+                "session you launched — the handle cannot be supplied here because it does not "
+                "exist yet, and it is never a precondition for starting a dispatch. For code "
+                "roles the helper validates one active indexed repository before recording and "
+                "prints the backend-derived Code Source Identity block immediately after "
+                "Runtime Identity.",
                 "Every output path prints the exact authored rate budget (or an explicit no-target-traffic declaration). --emit-prompt requires the complete prompt-only object (authorized_phase, target, hunt_scope, mindset_lens, depth_expectation, oob, auth_context, credential_id, prior_state, coverage, cleanup, human_reach_decision, role_specific_additions); missing or empty values fail before the dispatch write. On a blue engagement it also validates and injects customer, platforms, and every owned regular-file tenant reference from scope.json before the write.",
                 "`skills` on a specialist dispatch is a WARNING when missing, never a rejection — neither the CLI nor the backend blocks on it. A specialist picks its skills from what it observes, so the honest list is often known only after the dispatch runs. Set it when the applicable skill is already clear; otherwise name it in the handoff.",
-                "Missing requested model or reasoning is also visible warning debt: the dispatch remains usable, but it is not a fully measured/replayable recipe. Never invent an actual runtime model when the client does not expose it.",
+                "requested_model and requested_reasoning record the recipe YOU selected. An ordinary dispatch carries no launcher-effective or provider-observed model/reasoning — no trusted launcher integration attests them — so the row is an asserted recipe, never measured truth, and caller-supplied actual_/launcher_effective_ fields are dropped rather than stored. Leaving either unset is visible warning debt: the dispatch stays usable but is not replayable. Never invent a runtime model the client does not expose.",
                 "Discover skill names with `vigil assess list-skills` — each value must match a directory under `agent/skills/<name>/`.",
                 "Pair with `agent done` when the dispatch finishes; rows left `in-progress` past the dispatch's actual lifetime corrupt dedup checks.",
             ),
@@ -4827,6 +5456,101 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
                         "--skills 'ssrf-testing,case-dispatching' "
                         "--rate-budget 'rate=4; concurrency=2' "
                         "--prompt-context-json dispatch-context.json --emit-prompt"
+                    ),
+                },
+            ),
+        )
+    if verb == "bind-client-handle":
+        return CommandContract(
+            name="agent bind-client-handle",
+            summary=(
+                "Bind a recorded dispatch to the client session it is actually "
+                "running as, so a mid-flight message can be routed from backend "
+                "state instead of a hand-kept mapping."
+            ),
+            schema_name="backend DispatchClientBindingCreate (POST /dispatches/{agent_id}/client-bindings)",
+            preferred_invocations=(
+                "vigil assess agent bind-client-handle <agent-id> --client <client> "
+                "--session-namespace <scope> --handle <session-id>",
+                "vigil assess agent bind-client-handle <agent-id> --client <client> "
+                "--session-namespace <scope> --handle <session-id> --note \"<why>\"",
+                "vigil assess fetch dispatches/<agent-id>/client-bindings",
+            ),
+            author_supplied_fields=(
+                "<agent-id> (the dispatch from `vigil assess agent start` / `agent list`)",
+                "--client (" + "|".join(BINDABLE_CLIENTS) + ")",
+                "--session-namespace (the scope the handle is unique within: working "
+                "directory, workspace, or host — a bare session id is ambiguous across "
+                "clients and machines)",
+                "--handle (the client's own identifier for the live session)",
+                "--note (optional; why this binding was recorded — most useful on a correction)",
+            ),
+            helper_defaults=(
+                ("binding_version", "1 on the first bind, then N+1 per re-bind"),
+                ("bound_at", "now() at the time the bind runs"),
+                ("provider_observed_handle", "always 'unknown' — see the notes"),
+            ),
+            notes=(
+                "Run this AFTER launching the client, never before. The handle does not exist "
+                "when `agent start` writes the dispatch row, so no flag on `start` could carry "
+                "it and a handle is never a precondition for starting a dispatch.",
+                "Every stored field is YOUR assertion — you read the handle out of your client "
+                "and typed it. The columns are named asserted_client / "
+                "asserted_session_namespace / asserted_client_handle for that reason, and "
+                "provider_observed_handle stays 'unknown' because no supported client exposes a "
+                "stable session id at this boundary. A bound handle is an operator claim about a "
+                "live session, NOT verified provenance, and it changes nothing about the "
+                "dispatch row's own asserted-recipe semantics.",
+                "Binding history is append-only. A correction is a NEW version that stamps the "
+                "previous one's superseded_by_id; nothing is ever overwritten, so the record of "
+                "what was bound when survives every correction. Re-binding the SAME "
+                "client/namespace/handle is refused with 409 rather than adding a duplicate "
+                "version that would bury the real corrections.",
+                "stdout is one JSON object: {\"binding\": <the new binding>, \"superseded\": "
+                "<the binding it replaced, or null>}. Each binding carries id, agent_id, "
+                "binding_version, superseded_by_id, asserted_client, asserted_session_namespace, "
+                "asserted_client_handle, provider_observed_handle, note, bound_at. A supersede "
+                "also prints one stderr line naming both versions, because the retained prior "
+                "binding is the part a reader most often misses.",
+                "Read the whole history with `vigil assess fetch dispatches/<agent-id>/client-bindings` "
+                "(oldest version first). The CURRENT binding and a client_binding_count ride on "
+                "every dispatch read, so `agent list`, `agent get`, and `resume-brief` show which "
+                "session a dispatch is reachable at — and a count above 1 means the binding was "
+                "corrected and the history is worth reading.",
+                "A dispatch with no binding is the normal state between `agent start` and the "
+                "client launch: client_binding is null and client_binding_count is 0.",
+            ),
+            common_mistakes=(
+                (
+                    "treating a bound handle as proof of what ran",
+                    "it is caller-asserted; use the instruction-identity fields "
+                    "(operator_instruction_sha256 / specialist_instruction_sha256 / "
+                    "instruction_identity_status) for the parts the system actually observed",
+                ),
+                (
+                    "re-binding to fix a typo and expecting the bad value to disappear",
+                    "the wrong binding stays readable as a superseded version — that IS the "
+                    "audit record; pass --note to say what was wrong with it",
+                ),
+                (
+                    "--handle with no --session-namespace",
+                    "both are required: a session id without the scope it is unique within "
+                    "cannot be used to reach the session",
+                ),
+            ),
+            examples=(
+                {
+                    "command": (
+                        "vigil assess agent bind-client-handle code-hunter-3 "
+                        "--client claude --session-namespace ~/vigil/engagements/acme "
+                        "--handle 01JQZ4S8K2A0"
+                    ),
+                },
+                {
+                    "command": (
+                        "vigil assess agent bind-client-handle code-hunter-3 "
+                        "--client codex --session-namespace acme-workspace "
+                        "--handle conv_7f31 --note 'claude session died; relaunched in codex'"
                     ),
                 },
             ),
@@ -4955,9 +5679,11 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
                 "vigil assess agent decision --kind scope_decision --host <host> --vendor <vendor> --choice pending --surfaced-to-user",
                 "vigil assess agent decision --kind egress_decision --payload-json '{\"choice\": \"browser-based-tool\", \"egress_block_pct\": 67}'",
                 "vigil assess agent decision --kind dispatch_blocked --phase recon --reason \"missing massdns binary in runtime image\" --surfaced-to-user",
+                "vigil assess agent decision --kind human_reach_decision --surfaced-to-user --payload-json '{\"choice\": \"pending\", \"endpoint\": \"<path-or-url>\", \"action\": \"<what-it-does>\", \"live_attempts_used\": <n>, \"destination_class\": \"real_third_party|unknown\", \"evidence\": \"<what steps 1-3 showed>\"}'",
+                "vigil assess agent decision --kind depth_deferral --surfaced-to-user --payload-json '{\"host\": \"<host>\", \"path_prefix\": \"<prefix>\", \"vuln_classes\": [\"sqli\"], \"reason\": \"<why>\"}'",
             ),
             author_supplied_fields=(
-                "--kind (scope_decision|egress_decision|dispatch_blocked|... — the backend accepts any string but report-writer only renders known kinds)",
+                "--kind (scope_decision|egress_decision|dispatch_blocked|human_reach_decision|depth_deferral|... — the backend accepts any string but report-writer only renders known kinds)",
                 "--payload-json OR shorthand flags (--host / --vendor / --choice / --note / --reason / --phase) that build the payload dict",
                 "--surfaced-to-user (set when the operator presented the decision to the human; controls whether it appears in user-visible logs)",
             ),
@@ -4968,10 +5694,20 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
             notes=(
                 "Vendor-SaaS scope warnings, egress-block decisions, and dispatch-blocked rows all share this table — keep the --kind taxonomy disciplined so report-writer can summarize by kind.",
                 "Set --surfaced-to-user for operator-facing decisions (vendor-SaaS, egress reputation, blocked dispatch) so the human-visible audit log matches what the operator was shown.",
+                "--payload-json WINS OUTRIGHT: when it is supplied the shorthand flags are ignored entirely, so a top-level --choice alongside --payload-json is silently dropped and any gate that reads `payload.choice` never fires. Put `choice` INSIDE the JSON object, never as a sibling flag.",
+                # --- human_reach_decision: the side-effect preflight -------------
+                "`--kind human_reach_decision` IS THE SIDE-EFFECT PREFLIGHT GATE. Run the preflight before sending any request that could create persistent state or reach a human — signup, request-access, support/report/ticket, password-reset, contact-form, or any endpoint whose name or path suggests a write that notifies someone. The posture is CAPPED LIVE-FIRE, not zero-fire: static characterization is unlimited, and genuine ambiguity earns a small, hard, audited budget gated by this recorded decision.",
+                "Preflight step 1 — UNLIMITED static characterization, mandatory first. No request budget at all: run as many read-only, non-triggering probes as it takes to learn the methods and parameters the endpoint accepts, the response shape on a non-triggering GET/HEAD/OPTIONS (status, headers, body fields — never the write verb itself), and what the source, API spec, or documentation say it does. Cross-reference ENGAGEMENT.md §4 (No-Fire Endpoints) and §5 (Irreversible and Notifying Flows), including its Known-Safe Test Destinations table, for a pre-declared answer.",
+                "Preflight step 2 — the REACHES-A-REAL-THIRD-PARTY test. Ask whether success OR failure lands in a real inbox, queue, or audit trail, or notifies a real person who is not the researcher. POSITIVE (examples, not exhaustive): a live support/ticket queue a real agent reads and actions; an email, SMS, or push delivered to a non-researcher-owned address; a role/access request routed to a real approver; a pager/on-call alert; a post to a customer-visible channel (public comment, shared workspace, forum). NEGATIVE (examples, not exhaustive): a researcher-owned test identity — account, mailbox, or phone number the researcher provisioned and controls; a documented sandbox/staging environment with no live inbox behind it; a mock/stub queue that accepts the request but has no delivery path; a self-directed notification to the researcher's own test account. A proven-NEGATIVE endpoint is ORDINARY SURFACE — hunt it fully, it carries no side-effect risk. Step 1 should aim to reach one of these two answers; only genuine ambiguity after a thorough static pass proceeds.",
+                "Preflight step 3 — a HARD 1-3 LIVE-FIRE BUDGET, per endpoint/action, for the WHOLE ENGAGEMENT. If step 2 resolves POSITIVE, or static characterization leaves it genuinely unknown, you may spend 1-3 live requests to resolve the ambiguity, and you stop the instant either condition is met: the probe CONFIRMS the endpoint reaches a real third party, or the budget is exhausted. This is a prompt-enforced discipline and a WARN backstop — nothing in the CLI counts or blocks it — so hold yourself to it with the discipline of a hard cap anyway: it exists to bound the harm of a wrong 'unknown' call, not to license routine live-fire against notify-shaped endpoints. 1-3 is the GLOBAL CEILING; ENGAGEMENT.md may only TIGHTEN it for a program (cap at 1, or reinstate zero-fire for a named endpoint), never loosen it.",
+                "CROSS-DISPATCH RULE — check before every fire, and never re-spend. The budget is per endpoint/action for the whole engagement, NOT per dispatch and NOT per specialist: a fresh dispatch does not get a fresh budget, and two specialists must not each independently spend 3 against the same target. Before ANY live human-reach fire, query the authoritative kind-filtered log — `vigil assess fetch \"dispatch-decisions?kind=human_reach_decision\"` (it pages at 100 rows by default; grep the returned JSON for the target host/endpoint) — and if a row on that exact endpoint/action already carries a `payload.choice` of `pending` or `denied`, treat it as BLOCKED and do not fire, regardless of what your own dispatch has spent. The operator is expected to inject any open gate into the dispatch context before sending a specialist at the surface, so the state is inherited rather than rediscovered; check directly anyway.",
+                "RECORDING AND CONTINUATION GATE. Any specialist records the decision itself (same pattern as scope_decision) — see the human_reach_decision invocation above for the payload shape — and then does NOT continue live-firing that endpoint/action until the operator resolves it. Four resolution values, recorded on the decision row: `approved_continue` (proceed with further live-fire; rare — the operator has independent grounds the destination is safe), `approved_limited` (proceed under a named, narrower constraint), `denied` (do not fire again; permanently blocked for this endpoint/action), and `not_real_recipient` (the destination was confirmed NOT a real third party — this RETROACTIVELY LIFTS the cap for that endpoint and its siblings, reverting it to ordinary surface per the step-2 negative list). Irreversible and notifying side-effects are not proved by triggering them past this bounded, gated budget; firing past the budget, or past an open pending/denied gate, is the exact harm the preflight exists to prevent. This gate survives every exploit_policy value, `full_send` included, and applies per-action.",
             ),
             common_mistakes=(
                 ("freeform reason in --kind", "kinds are vocabulary; put the prose in --note or --reason"),
                 ("missing --surfaced-to-user", "user-facing decisions invisible to audit defeats the purpose; set the flag whenever the operator showed the gate to the human"),
+                ("--payload-json '{...}' --choice pending", "--payload-json is used verbatim and the shorthand flags are dropped; the cross-dispatch gate reads payload.choice, so put choice inside the JSON"),
+                ("a fresh 1-3 human-reach budget per dispatch", "the budget is per endpoint/action for the whole engagement; query dispatch-decisions?kind=human_reach_decision before firing"),
             ),
             examples=(
                 {
@@ -4979,6 +5715,17 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
                         "vigil assess agent decision --kind scope_decision "
                         "--host api.foo.com --vendor 'Vendor SaaS' --choice pending "
                         "--surfaced-to-user"
+                    ),
+                },
+                {
+                    "command": (
+                        "vigil assess agent decision --kind human_reach_decision "
+                        "--surfaced-to-user --payload-json "
+                        "'{\"choice\": \"pending\", \"endpoint\": \"/api/support/ticket\", "
+                        "\"action\": \"creates a real support ticket\", "
+                        "\"live_attempts_used\": 1, "
+                        "\"destination_class\": \"real_third_party\", "
+                        "\"evidence\": \"OPTIONS + docs confirm delivery to the vendor queue\"}'"
                     ),
                 },
             ),

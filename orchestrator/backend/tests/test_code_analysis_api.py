@@ -381,6 +381,7 @@ def _verified_repo_payload(
     repo_name: str | None = None,
     git: dict[str, object] | None = None,
     excluded_entries: list[dict[str, object]] | None = None,
+    repo_role: str | None = None,
 ) -> dict[str, object]:
     """Materialize one genuine engagement-owned read-only v2 test snapshot."""
     assert client.get("/engagements").status_code == 200
@@ -444,7 +445,7 @@ def _verified_repo_payload(
     except BaseException:
         builder.abort()
         raise
-    return {
+    payload: dict[str, object] = {
         "repo_key": repo_key,
         "name": repo_name or repo_key,
         "language": "python",
@@ -464,13 +465,25 @@ def _verified_repo_payload(
         "branch": git_provenance["branch"],
         "git_churn": {},
     }
+    # Omitted means "keep the recorded role", which is the ingest default.
+    if repo_role is not None:
+        payload["repo_role"] = repo_role
+    return payload
 
 
-def _create_repo(client, engagement_key: str, repo_key: str = "demo-repo") -> dict[str, object]:
+def _create_repo(
+    client,
+    engagement_key: str,
+    repo_key: str = "demo-repo",
+    *,
+    repo_role: str | None = None,
+) -> dict[str, object]:
     base = f"/engagements/{engagement_key}/assessment/code"
     started = client.post(
         f"{base}/repos/refresh/start",
-        json=_verified_repo_payload(client, engagement_key, repo_key),
+        json=_verified_repo_payload(
+            client, engagement_key, repo_key, repo_role=repo_role
+        ),
     )
     assert started.status_code == 201, started.text
     refresh = started.json()
@@ -611,6 +624,8 @@ def _refresh_repo_files(
     engagement_key: str,
     repo_id: int,
     files: list[dict[str, object]],
+    *,
+    repo_role: str | None = None,
 ) -> list[dict[str, object]]:
     base = f"/engagements/{engagement_key}/assessment/code"
     repo = client.get(f"{base}/repos/{repo_id}").json()
@@ -623,6 +638,7 @@ def _refresh_repo_files(
             files,
             source_origin_path=str(repo["source_origin_path"]),
             repo_name=str(repo["name"]),
+            repo_role=repo_role,
         ),
     )
     assert started.status_code == 201, started.text
@@ -1613,6 +1629,7 @@ def test_changed_generation_preserves_grouped_receipt_queue_and_trigger_history(
         "superseded_history": 1,
         "invalid_active_identity": 0,
         "invalid_active_history": 0,
+        "reference_repo_items": [],
     }
 
     coverage = client.get(f"{base}/coverage?repo_id={repo['id']}&detail=cwe").json()
@@ -4310,6 +4327,7 @@ def test_generation_zero_repo_children_are_hidden_and_immutable_across_public_ap
             "superseded_history": 0,
             "invalid_active_identity": 0,
             "invalid_active_history": 0,
+            "reference_repo_items": [],
         }
     assert client.post(
         f"{base}/analysis-queue/fetch",
@@ -9922,12 +9940,14 @@ def test_readiness_separates_snapshot_lifecycle_blockers_from_quality_warnings(
     assert {item["code"] for item in hunt["blockers"]} == {
         "threat_model_stale",
         "files_unclassified",
+        "admitted_files_unqueued",
     }
     assert {
         item["code"]: item["overrideable"] for item in hunt["blockers"]
     } == {
         "threat_model_stale": False,
         "files_unclassified": True,
+        "admitted_files_unqueued": True,
     }
 
     threat = client.post(
@@ -9942,6 +9962,20 @@ def test_readiness_separates_snapshot_lifecycle_blockers_from_quality_warnings(
     assert threat.status_code == 200, threat.text
     for row in files:
         _classify_file(client, engagement_key, int(row["id"]), "low", 10)
+    # A5: classification alone does not open hunt — the durable queue is what
+    # Phase 2 claims from. See tests/test_queue_population_gate.py.
+    classified_only = client.get(f"{base}/readiness?target_phase=hunt").json()
+    assert classified_only["transition_ready"] is False
+    assert [blocker["code"] for blocker in classified_only["blockers"]] == [
+        "admitted_files_unqueued"
+    ]
+    queued = client.post(
+        f"{base}/analysis-queue",
+        json={
+            "items": [{"file_id": row["id"], "priority": 10} for row in files]
+        },
+    )
+    assert queued.status_code == 201, queued.text
     ready = client.get(f"{base}/readiness?target_phase=hunt").json()
     assert ready["transition_ready"] is True
     assert ready["blockers"] == []
@@ -12240,8 +12274,10 @@ def test_fuzz_readiness_keeps_effort_warnings_advisory(client, isolate_settings)
                 {
                     "file_id": row["id"],
                     "source_sha256": row["file_hash"],
+                    # A tree-sitter file with no callable scans nothing, so it
+                    # cannot report a measured entry point under `complete`.
                     "total_functions": 0,
-                    "total_entry_points": 1,
+                    "total_entry_points": 0,
                     "total_sinks": 0,
                     "total_exports": 0,
                 }
@@ -12331,8 +12367,10 @@ def test_fuzz_entry_requires_phase2_root_triage_but_allows_pending_runtime_proof
                 {
                     "file_id": row["id"],
                     "source_sha256": row["file_hash"],
+                    # A tree-sitter file with no callable scans nothing, so it
+                    # cannot report a measured entry point under `complete`.
                     "total_functions": 0,
-                    "total_entry_points": 1,
+                    "total_entry_points": 0,
                     "total_sinks": 0,
                     "total_exports": 0,
                 }
@@ -14187,6 +14225,7 @@ def test_initial_queue_retry_never_updates_pending_row_with_lease_identity(
             "superseded_history": 0,
             "invalid_active_identity": 1,
             "invalid_active_history": 0,
+            "reference_repo_items": [],
     }
 
 
@@ -14574,6 +14613,7 @@ def test_queue_stats_projects_latest_attempt_and_reports_preserved_history(
         "superseded_history": 1,
         "invalid_active_identity": 0,
         "invalid_active_history": 0,
+        "reference_repo_items": [],
     }
 
 
@@ -15046,16 +15086,23 @@ def test_trigger_requeue_rejects_unclassified_and_mismatched_priority(
     endpoint = (
         f"/engagements/{engagement_key}/assessment/code/analysis-queue/requeue"
     )
+    # A15d: a blocked target is reported with its reason and writes nothing;
+    # it no longer decides the fate of every other target in the batch.
     unclassified = client.post(
         endpoint, json={"items": [{"file_id": file_row["id"]}]}
     )
-    assert unclassified.status_code == 409, unclassified.text
+    assert unclassified.status_code == 201, unclassified.text
+    assert unclassified.json()["blocked"] == 1
+    assert unclassified.json()["inserted"] == 0
+    assert "classified" in unclassified.json()["outcomes"][0]["detail"]
     _classify_file(client, engagement_key, int(file_row["id"]), "high", 70)
     mismatched = client.post(
         endpoint,
         json={"items": [{"file_id": file_row["id"], "priority": 71}]},
     )
-    assert mismatched.status_code == 409, mismatched.text
+    assert mismatched.status_code == 201, mismatched.text
+    assert mismatched.json()["blocked"] == 1
+    assert "analysis_priority" in mismatched.json()["outcomes"][0]["detail"]
     with db_module.get_connection() as connection:
         assert connection.execute(
             "SELECT COUNT(*) FROM code_analysis_queue WHERE file_id = ?",
@@ -16628,7 +16675,9 @@ def test_trigger_requeue_rejects_superseded_active_queue_attempt(
         json={"items": [{"file_id": file_id, "reason": "fresh trigger context"}]},
     )
 
-    assert response.status_code == 409, response.text
+    assert response.status_code == 201, response.text
+    assert response.json()["blocked"] == 1
+    assert "reconciliation" in response.json()["outcomes"][0]["detail"]
     with db_module.get_connection() as connection:
         row = connection.execute(
             "SELECT priority, queue_mode, cross_file_triggers_json FROM code_analysis_queue WHERE id = ?",

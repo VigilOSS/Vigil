@@ -16,7 +16,7 @@ and interpret its output correctly.
 
 **Iteration mode:** `deep-manual`, `item-iterating`. **Default when omitted:** `deep-manual` — fuzz campaign setup (target selection, harness authoring, build validation, crash triage) requires 5–15 messages per target, with `item-iterating` reserved for batched harness-validation dispatches that walk a finite list of pre-selected targets. See "Iteration-mode (dispatch_mode) Declaration" in `agent/operator-core.md`.
 
-> **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-specialist-core.md (in your Load First). This role adds only its own closing verbs below.
+> **Specialist context isolation, the Contract-First Rule, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-specialist-core.md (in your Load First). This role adds only its own closing verbs below.
 
 ## Load First
 
@@ -26,7 +26,7 @@ only the durable ceiling.
 
 **MANDATORY (before any work):**
 
-- `agent/shared-specialist-core.md` — specialist context isolation, finding-recording format, closing-sequence wrapper, output hygiene
+- `agent/shared-specialist-core.md` — specialist context isolation, the Contract-First Rule, finding-recording format, closing-sequence wrapper, output hygiene
 - `agent/shared-constraints-code.md` — scope, host-side reading, finding format
 - `agent/rules/adversarial-mindset.md`
 - `agent/skills/code-fuzz-campaign/SKILL.md` (for any other skill, run `vigil assess list-skills` to discover it)

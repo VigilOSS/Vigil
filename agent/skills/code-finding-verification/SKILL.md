@@ -23,7 +23,7 @@ hunting rules are not required to reach or record a verdict.
 Full sealed-source access (same as hunter):
 
 - **Read** — read files beneath `snapshot_path` to verify taint paths, guards, and call chains
-- **Grep** — search beneath `snapshot_path` for callers, guards, build configuration, and related paths
+- **rg** — search beneath `snapshot_path` for callers, guards, build configuration, and related paths
 - **Glob** — find files beneath `snapshot_path` for build-system and module analysis
 - **ctags** — `grep '^<symbol>\t' <ctags_path>` using the generation-bound Code Source Identity path
 
@@ -31,7 +31,7 @@ Use only ingest-time Git provenance/churn supplied in the backend repo envelope.
 contains no `.git`; never run ambient Git against the mutable `source_origin_path`.
 
 Audit trail requirement:
-- Every verification memo must state the concrete Read/Grep/ctags lookups used
+- Every verification memo must state the concrete Read/rg/ctags lookups used
 - If verification results are recorded in machine-readable form, include `audit_metadata.cross_ref_usage` with the actual queries executed
 
 ## Division of Labor
@@ -444,7 +444,7 @@ confirm its counter-hypothesis is cited and concrete, not circumstantial.
 |-------------|---------|---------------|
 | `confirmed` | Supporting evidence across the 5 checks is at least as concrete as the hunter's claim; stated severity holds | Include in report as-is |
 | `downgraded` | Finding survives but at lower severity | Include with adjusted severity + reasoning |
-| `pending_runtime_proof` | Static/code evidence is strong (Checks 1-3 + 5 survive) but the claimed invariant failure still lacks executable or equivalently decisive proof — accepted into the holding area, not yet report-ready. An executable valid supported-API driver counts; absence of an embedding app alone does not force this disposition. | Hold in the theoretical holding area; excluded from report-readiness and exploit-candidates until a controlled proof pass re-verifies it `confirmed`/`downgraded` |
+| `pending_runtime_proof` | Static/code evidence is strong (Checks 1-3 + 5 survive) but the claimed invariant failure still lacks executable or equivalently decisive proof — accepted into the holding area, not yet report-ready. An executable valid supported-API driver counts; absence of an embedding app alone does not force this disposition. | Hold in the theoretical holding area; excluded from the report and from exploit-candidates, and BLOCKS report-readiness, until a controlled proof pass re-verifies it `confirmed`/`downgraded` |
 | `killed` | Counter-evidence across the 5 checks reaches the same bar as the hunter's claim; finding is a false positive | Exclude from report, persist a `false_positive` verification on the canonical finding, record kill reason for audit |
 | `disputed` | Evidence fits neither the PASS bar nor the KILL bar at one or more checks after evidence adjudication | Hold with all arguments and evidence groups pending decisive proof |
 

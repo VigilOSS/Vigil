@@ -623,11 +623,12 @@ def _upsert_surface(
     rationale: str,
     evidence_ref: str,
     status_value: str,
+    framework_registration: str,
 ) -> dict[str, Any]:
     connection.execute(
         """
-        INSERT INTO assessment_surfaces (engagement_id, surface_type, target_descriptor, source_name, rationale, evidence_ref, status)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO assessment_surfaces (engagement_id, surface_type, target_descriptor, source_name, rationale, evidence_ref, status, framework_registration)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(engagement_id, surface_type, target_descriptor) DO UPDATE SET
             source_name = COALESCE(NULLIF(excluded.source_name, ''), assessment_surfaces.source_name),
             rationale = CASE
@@ -636,10 +637,14 @@ def _upsert_surface(
                 ELSE assessment_surfaces.rationale || char(10) || excluded.rationale
             END,
             evidence_ref = COALESCE(NULLIF(excluded.evidence_ref, ''), assessment_surfaces.evidence_ref),
+            framework_registration = COALESCE(
+                NULLIF(excluded.framework_registration, ''),
+                assessment_surfaces.framework_registration
+            ),
             status = excluded.status,
             updated_at = CURRENT_TIMESTAMP
         """,
-        (engagement_id, surface_type, target_descriptor, source_name, rationale, evidence_ref, status_value),
+        (engagement_id, surface_type, target_descriptor, source_name, rationale, evidence_ref, status_value, framework_registration),
     )
     row = connection.execute(
         """
@@ -1706,6 +1711,7 @@ def record_surface(
     rationale: str,
     evidence_ref: str,
     status_value: str,
+    framework_registration: str = "",
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     with _common.get_connection() as connection:
@@ -1718,6 +1724,7 @@ def record_surface(
             rationale=rationale,
             evidence_ref=evidence_ref,
             status_value=status_value,
+            framework_registration=framework_registration,
         )
 
 def list_surfaces(

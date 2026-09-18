@@ -78,20 +78,6 @@ miss obvious and the fix complete. The reasons IDOR ships:
 
 ---
 
-## Baseline Patterns (Single-Function / Single-Scope)
-
-Toolchain-catchable patterns. Record as findings if encountered during orientation —
-on unaudited codebases these are real, exploitable bugs that no prior tool run has caught.
-Invest primary analysis time in the LLM-advantage patterns below.
-
-- Sensitive data in hardcoded strings
-- PII logged directly (if the linter has PII patterns)
-- Missing `@JsonIgnore` on password field (basic annotation check)
-- Debug mode enabled in production (framework-specific linter)
-- Secrets in configuration files (secret scanning)
-
----
-
 ## What You're Hunting (LLM-Advantage Patterns)
 
 > **Why SAST misses IDOR.** IDOR is *semantic*, not *structural*. SAST finds tainted-data-into-sink

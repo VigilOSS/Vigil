@@ -51,10 +51,8 @@ decisions. Resolve:
 - Auth state from the engagement's backend credential store (`vigil auth status`) — use credentials only when a record is populated and marked active
   - **Liveness is ground truth — never trust cookie presence or the `stale` flag as proof a
     session is live.** A populated/active record only means credential material exists, not that
-    it still authenticates. Enumerate what's stored for a host with `vigil assess auth list
-    --host <host> [--include-dead] [--json]` (identity name, `auth_context`, `state`, liveness
-    verdict, age, cookie names only — never raw values (kept scannable, not secret; see
-    "Credentials and Local State Are Self-Owned"); active identity marked `*`).
+    it still authenticates. `vigil assess contract auth` owns the `auth list` enumeration, its
+    columns, and the `available|stale|dead|missing` state vocabulary.
 
     Whoever takes an identity for a task owns proving it live: there is NO auto-detection of
     where a site handles auth. First declare `material.liveness = {expect_status, authed_marker,
@@ -96,14 +94,10 @@ audit pipeline — host-side probes against scoped targets break the runtime's
 network isolation and skip the audit row that operators and downstream specialists
 rely on as a coverage map.
 
-Discovery (in order):
-
-1. Read `agent/skills/kali-exec/SKILL.md` for the verb menu, methodology profiles,
-   sync-vs-async decision, audit-flag mapping, and example invocations per verb.
-2. Use `vigil assess kali --help` and `vigil assess kali <verb> --help` for the live
-   flag set and defaults on a verb you're about to invoke.
-3. Use `vigil assess contract kali <verb>` for the canonical schema, helper
-   defaults, common mistakes, and an example payload.
+Discovery: `agent/skills/kali-exec/SKILL.md` holds the verb menu, methodology
+profiles, and the sync-vs-async decision; `vigil assess contract kali <verb>` holds
+that verb's schema, required flags, helper defaults, common mistakes, and an example
+invocation.
 
 Forbidden because they bypass the audit pipeline: host Bash that runs probes
 against scoped targets, `docker run` / `docker exec` against the runtime, and
@@ -192,29 +186,16 @@ signals only your run. Full rationale: `agent/skills/kali-exec/SKILL.md`
 
 ### Command Metadata
 
-Every target-facing `vigil assess kali` call carries audit metadata as required CLI flags; the
-CLI fails closed when they're missing rather than degrading to a stale env-var default. The
-required set is `--technique`, `--intent`, `--probe-kind`, `--phase`, and `--timeout`, plus
-`--destructive` when the command writes/edits/deletes target state and `--force` to suppress the
-dedup-warning log on an intentional retry (a fresh audit row is written regardless;
-`superseded_by_id` links it to the predecessor).
-
-The persisted row records `command`/`argv` as a faithful copy of exactly what ran — including any
-`--identity` auth material expanded into a `Cookie:`/`Authorization` header. That is by design, not
-a leak; do not redact it or treat it as a finding (see "Credentials and Local State Are Self-Owned"
-above).
+Every target-facing `vigil assess kali` call carries audit metadata as required CLI flags, and the
+CLI fails closed when they're missing rather than degrading to a stale env-var default.
+`vigil assess contract kali <verb>` owns the required set, each flag's purpose, the
+`--technique`/`--probe-kind`/`--phase` enum values, and the `--agent-name` attribution rule;
+`agent/skills/kali-exec/SKILL.md` ("Audit-flag mapping", "Phase tags") is the worked-example form.
 
 Two judgment points that the mechanical layers can't give you: derive `--technique` from the
 skill you loaded (`ssrf-testing` → `SSRF`, `sqli-testing` → `SQLI`; `HEALTH` for runtime/tool
 inventory), and pass `--phase` for the phase the **dispatch was authorized for**, not
 the mutable engagement phase — engagements routinely operate between phases.
-
-Full flag-by-flag purpose, the enum values for `--technique`/`--probe-kind`/`--phase`, and the
-assessment-binding/`--agent-name` attribution rules live in
-`agent/skills/kali-exec/SKILL.md` ("Audit-flag mapping", "Phase tags") and are generated per-verb
-by `vigil assess contract kali <verb>` / `vigil assess list-commands`. Dispatch wrappers must
-export `AGENT_NAME=<role>` or pass `--agent-name <role>` — a silent `operator` attribution breaks
-coverage ownership.
 
 ---
 
@@ -246,10 +227,8 @@ When exploitation requires a reverse-shell listener or tunnel exposure:
 
 ## 2b. Coverage Check Before Probing
 
-Every `vigil assess kali` call records its command, argv, tool, agent, phase,
-technique, intent, probe_kind, destructive flag, exit code, timeout state,
-timings, and an output preview (or artifact ref) to the orchestrator backend.
-Treat that history as a **coverage map** — a record of what's already been
+Every `vigil assess kali` call records its full audit row to the orchestrator
+backend. Treat that history as a **coverage map** — a record of what's already been
 probed so your next probe goes somewhere the engagement hasn't covered yet.
 
 Before issuing a probing, scanning, fuzzing, or credential-testing command,
@@ -259,21 +238,11 @@ search for prior work on this surface:
 vigil assess command-run list --q <keyword> --show-matches
 ```
 
-Default to an unscoped fuzzy search so finding aliases, nearby metadata, every
-agent, and every phase are included; narrow with exact filters only if the broad
-result is overwhelming. Cross-agent and cross-phase context is usually the most
-valuable coverage signal.
-
-Mode-of-search guidance:
-
-- Default (`--q "VA-047 OIDC"`) OR-unions the raw input with every finding
-  alias. Loose; surfaces anything related to the finding even when the topic
-  token is missing. Best for coverage-mapping.
-- `--all` keeps alias expansion but intersects every non-alias token — use when
-  you want "rows that mention VA-047 (in any alias form) AND mention OIDC".
-- `--exact` skips alias expansion entirely; the FTS phrase is searched
-  verbatim. Strictest; use when a recall miss would be worse than a precision
-  miss.
+Default to the unscoped fuzzy search — cross-agent and cross-phase context is
+usually the most valuable coverage signal — and narrow only if the broad result is
+overwhelming. The search modes (`--q` alias-expanding fuzzy default, `--match-all`
+to require every term, `--exact` to skip alias expansion), the filter set, and
+paging are canonical in `vigil assess contract command-run list`.
 
 Read the results as a coverage map, not a reuse gate. Red-team depth comes
 from variants — different SQLi techniques, different SSRF payload encodings,
@@ -317,165 +286,28 @@ truth.
 
 Before sending a request that could **create persistent state or reach a human** —
 signup, request-access, support/report/ticket, password-reset, contact-form, or any
-endpoint whose name or path suggests a write that notifies someone — run this
-procedure.
+endpoint whose name or path suggests a write that notifies someone — run the
+side-effect preflight. The posture is **capped live-fire, not zero-fire**: static
+characterization is unlimited, and genuine ambiguity earns a small, hard, audited
+budget gated by a recorded `human_reach_decision`. That budget is per endpoint/action
+for the **whole engagement**, not per dispatch, and you do not fire past an exhausted
+one, or past a `human_reach_decision` on that endpoint/action whose `payload.choice`
+is `pending` or `denied`.
 
-**Posture: capped live-fire, not zero-fire.** Static characterization (Step 1) is unlimited;
-genuine ambiguity gets a small, hard, audited live-fire budget (Step 3), gated by a durable
-recorded decision — a bounded loosening, not routine live-fire license. Read the whole
-procedure, including the cross-dispatch rule, before relying on the budget.
-
-### Step 1 — mandatory-first, unlimited static characterization
-
-Before any live fire, characterize the endpoint statically. This step carries no
-request budget — run as many read-only, non-triggering probes as needed:
-
-- The HTTP method(s) and parameters the endpoint accepts
-- The response shape on a non-triggering `GET`/`HEAD`/`OPTIONS` (status, headers,
-  body fields) — never the write verb itself
-- What the source, API spec, or documentation say the endpoint does
-- Cross-reference `ENGAGEMENT.md` §4 (No-Fire Endpoints) and §5 (Irreversible and
-  Notifying Flows) for a pre-declared answer, including its Known-Safe Test
-  Destinations table
-
-### Step 2 — the reaches-a-real-third-party test
-
-Ask: does success *or* failure land in a real inbox, queue, audit trail, or notify
-a real person who is not the researcher?
-
-**POSITIVE (reaches a real third party) — examples, not exhaustive:**
-- A live support/ticket queue that a real agent reads and actions
-- An email, SMS, or push notification delivered to a non-researcher-owned address
-- A role/access request routed to a real approver
-- A pager/on-call alert
-- A post to a customer-visible channel (public comment, shared workspace, forum)
-
-**NEGATIVE (does not reach a real third party) — examples, not exhaustive:**
-- A researcher-owned test identity (an account, mailbox, or phone number the
-  researcher provisioned and controls)
-- A documented sandbox/staging environment with no live inbox behind it
-- A mock/stub queue that accepts the request but has no delivery path
-- A self-directed notification to the researcher's own test account
-
-A proven-NEGATIVE endpoint is ordinary surface — hunt it fully; it carries no
-side-effect risk. Step 1's static pass should aim to reach one of these two
-answers; only genuine ambiguity after a thorough static characterization proceeds
-to Step 3.
-
-### Step 3 — hard 1-3 live-fire budget (POSITIVE, or unresolved after Step 1-2)
-
-If Step 2 resolves POSITIVE, or static characterization leaves it genuinely
-**unknown**, you may spend a budget of **1-3 live requests, per endpoint/action,
-across the WHOLE engagement** (not per dispatch — see the cross-dispatch rule
-below) to resolve the ambiguity. Stop the instant either condition is met:
-
-- the probe **confirms** the endpoint reaches a real third party, or
-- the budget (3 attempts) is **exhausted**.
-
-**This budget is a prompt-enforced discipline / WARN backstop, not a hard technical
-cap** — nothing in the CLI counts or blocks it. Hold yourself to it with the same
-discipline as a hard cap anyway: it exists to bound the harm of a wrong "unknown"
-call, not to license routine live-fire testing of notify-shaped endpoints. 1-3 is
-the **global ceiling**; `ENGAGEMENT.md` may only **tighten** it for a program (cap
-at 1 live attempt, or reinstate zero-fire for a named endpoint) — it may never
-loosen it.
-
-### Cross-dispatch rule — check before every fire, do not re-spend
-
-**Before ANY live human-reach fire**, check for an existing `human_reach_decision`
-already recorded against that exact endpoint/action — query the authoritative,
-kind-filtered, paginated decision log:
-`vigil assess fetch "dispatch-decisions?kind=human_reach_decision"` (grep the
-returned JSON for the target host/endpoint to find the matching row). If a
-`human_reach_decision` on that endpoint/action already carries a `payload.choice`
-of `pending` or `denied`, treat it as **blocked — do not fire**, regardless of
-whether your own dispatch has spent any of the nominal 1-3 itself.
-
-**The 1-3 budget is per endpoint/action for the whole engagement, not per dispatch
-and not per specialist** — a fresh dispatch does not get a fresh budget, and two
-specialists must not each independently spend 3 against the same target. The
-operator is expected to inject any open human-reach gate for a surface into the
-dispatch context before sending a specialist at it (see `operator-core.md`
-Dispatch Context Template), so the state is inherited rather than rediscovered —
-but do not rely on that alone; check directly before firing.
-
-### Recording and continuation gate
-
-Any specialist records the decision directly (same pattern as `scope_decision`):
-
-```bash
-vigil assess agent decision --kind human_reach_decision --surfaced-to-user \
-    --payload-json '{"choice": "pending", "endpoint": "<path-or-url>",
-    "action": "<what-it-does>", "live_attempts_used": <n>,
-    "destination_class": "real_third_party|unknown",
-    "evidence": "<what Step 1-3 showed>"}'
-```
-
-Put `choice` inside `--payload-json` as shown — never as a standalone `--choice`
-flag. `--payload-json`, when supplied, is used verbatim and the shorthand flags
-are ignored, so a top-level `--choice` is silently dropped and the cross-dispatch
-gate (which reads `payload.choice`) never fires. Do not continue live-firing that
-endpoint/action until the
-operator resolves the decision. Valid resolutions:
-
-- `approved_continue` — proceed with further live-fire (rare; the operator has
-  independent grounds the destination is safe)
-- `approved_limited` — proceed under a named, narrower constraint
-- `denied` — do not fire again; treat as permanently blocked for this
-  endpoint/action
-- `not_real_recipient` — the destination was confirmed NOT a real third party;
-  this **retroactively lifts the cap** for that endpoint and its siblings (it
-  reverts to ordinary surface, per the negative-example list in Step 2)
-
-Irreversible and notifying side-effects are not proved by triggering them beyond
-this bounded, gated budget — firing past the budget, or past an open
-`pending`/`denied` gate, is the harm this procedure exists to prevent. The
-engagement-specific list of no-fire endpoints and known-safe test destinations
-belongs in the `ENGAGEMENT.md` template (§4, §5); the principle here covers the
-class.
+`vigil assess contract agent decision` owns the procedure — the static pass, the
+reaches-a-real-third-party test, the 1-3 budget, the cross-dispatch check before
+every fire, and the recording/continuation gate. Read it before the first such
+request.
 
 ---
 
 ## Contract-First Rule
 
-Before the **first invocation of any `vigil assess` verb that mutates durable
-state, dispatches a kali tool, or seats work-buffer rows**, run
-`vigil assess contract <verb>` (or `vigil assess contract <verb> <variant>`)
-to read the canonical schema, the required fields, the common mistakes, and
-the example payload. Schema validation errors from guessing waste a full
-round-trip, so reading the contract first is faster than re-running the
-verb after a rejection.
-
-Verbs covered by the rule (all have a contract entry; `vigil assess contract`
-emits the canonical schema and an example):
-
-- `kali <verb>` — `vigil assess contract kali <verb>`
-- `finding record` — `vigil assess contract finding record`
-- `intel record <type>` — `vigil assess contract intel record <type>`
-- `record-surface` — `vigil assess contract record-surface`
-- `agent <subverb>` for sub-verbs that mutate durable dispatch state or
-  emit the canonical handoff blob:
-  `start`, `done`, `handoff`, `decision`,
-  `abort-duplicate`, `render-handoff` — `vigil assess contract agent <subverb>`
-- Lifecycle helpers (`finding verify --status <status>` — including a completed
-  counter-check for `false_positive`, `finding update` — including `--status draft`
-  to reopen, `resolve <surface|coverage-item>`) — `vigil assess contract <verb>`
-
-Verbs **not** covered (skip the contract round-trip — they are read-only or
-have no payload to validate): `fetch`, `list-skills`, `work-buffer clusters`,
-`command-run list`, `command-run get`, `check-phase-readiness`,
-`scope filter`, `work-buffer stats|peek|fetch|done`,
-`dispatch list`, `dispatch get`. Reading the contract for these adds
-latency without preventing any error class.
-
-Treat the contract output as the source of truth for arg ordering, flag
-names, enum values, and required fields. Do not infer field names from
-similar tools — five of the most common dispatch errors in recent
-engagements (`record-surface` arg ordering, `finding record` agent prefix,
-`finding update` guessing a nonexistent `--details-patch` flag instead of
-the real `--details-inline`/`--details-replace`, `kali katana -H`, `kali exec
---probe-kind active`) would each have been prevented by running
-`contract` before the first call.
+Canonical in `agent/shared-specialist-core.md` (in your Load First), which every
+specialist loads on every track: run `vigil assess contract <verb>` before the
+first invocation of any verb that mutates durable state, dispatches a runtime
+tool, or seats work-buffer rows. That file carries the covered/not-covered verb
+rosters and the errors the round-trip prevents.
 
 ---
 
@@ -540,42 +372,22 @@ Finding-ID prefix table, title formula, and the CVSS↔severity band table are c
 `agent/shared-specialist-core.md` "Finding IDs and the `finding record` Contract" — read it
 there, do not re-derive it here.
 
-**Deduplication:** Before recording, query existing findings via `vigil assess fetch findings`. If the same root cause on the same endpoint already exists, update the existing finding rather than creating a new one. Same vulnerability class across multiple parameter values of the same endpoint is one finding, not one per value.
+**Deduplication:** Query existing findings with `vigil assess fetch findings` first. One
+vulnerability class across many parameter values of the same endpoint is **one** finding, not one
+per value — that judgment is yours. The enforced dedup key, what it refuses outright, and
+`--update <slug>` versus `finding link` are in `vigil assess contract finding record`.
 
 Record every finding with:
 ```
 vigil assess finding record <agent-name> <finding-json-file> --agent-id <your-agent_id>
 ```
 
-**`--agent-id` is your DISPATCH id, copied verbatim from the Runtime Identity block at the top of
-your prompt (e.g. `VA-RUN-3`) — not the role name the positional `<agent-name>` carries.** It is
-stored as `provenance.agent_id`, the finding's durable author identity, and it is what lets the
-backend prove a later verifier was a *different* dispatch. Omit it and the finding is stranded at
-`verification_status=unreviewed` forever: every terminal transition (`confirmed`, `downgraded`,
-`false_positive`) is refused with "terminal verification cannot establish an independent verifier".
-Passing the *wrong* id is worse than omitting it — it attributes your finding to another dispatch,
-and the value is immutable once stored, so get it right on the first record.
-
-The JSON payload must match `schemas/finding-record.schema.json`. Findings are always JSON — convert from markdown before recording.
-Run `vigil assess contract finding record` for the canonical field list and examples.
-`finding record` fills the initial finding lifecycle defaults — use those rather than setting lifecycle fields manually.
-
-**CVSS and remediation** go in `details` as structured fields:
-```json
-"details": {
-  "evidence": "...",
-  "impact": "...",
-  "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N",
-  "cvss_score": 9.1,
-  "remediation": "Parameterize all SQL queries; use prepared statements",
-  "steps_to_reproduce": ["Step 1...", "Step 2..."],
-  "repro_runs": [56052, 56054],
-  "request_method": "POST",
-  "cwe_id": "CWE-89"
-}
-```
-
-This keeps CVSS queryable from the API and gives report-writer structured data to format.
+`--agent-id` is your DISPATCH id from the Runtime Identity block (e.g. `VA-RUN-3`), never the role
+name the positional `<agent-name>` carries. The JSON payload must match
+`schemas/finding-record.schema.json` — findings are always JSON, converted from markdown before
+recording. **Run `vigil assess contract finding record` before your first record**: it owns the
+canonical field list, the `details` keys (CVSS vector/score, remediation, CWE, chain metadata),
+the lifecycle defaults, and the exact consequences of omitting or mis-stating `--agent-id`.
 
 **The reproduction is yours to record, not the report-writer's to infer.** Write
 `steps_to_reproduce` from what you actually ran, with concrete values (the real session cookie,
@@ -588,17 +400,11 @@ local state are self-owned (see "Credentials and Local State Are Self-Owned"). P
 values through submission; an unbound placeholder — or one placeholder reused
 across different objects — makes the reproduction unfollowable by construction.
 
-When a finding is only reportable as part of a chain, keep it in the same finding lifecycle and
-set chain metadata in `details` during `finding record` (as part of the finding JSON payload), or on
-an already-recorded finding via `vigil assess finding update <slug> --details-inline '{"chain_required": true, "chain_rationale": "...", "required_followup": ["..."]}'`:
-```json
-"details": {
-  "chain_required": true,
-  "chain_rationale": "This primitive becomes meaningful only after pivoting into the admin export flow.",
-  "required_followup": ["Test sibling privileged write routes", "Attempt authenticated export with stolen token"]
-}
-```
-Use this instead of inventing a special workflow status for chain-only findings.
+When a finding is only reportable as part of a chain, keep it in the same finding lifecycle and set
+`details.chain_required`/`chain_rationale`/`required_followup` — at `finding record` time or later
+via `vigil assess finding update <slug> --details-inline '{...}'` (shapes and enforcement:
+`vigil assess contract finding record`). Never invent a special workflow status for chain-only
+findings.
 
 **Proof-not-collection — one minimal sample is sufficient.** When you have proven access
 to a data set, one minimal sample is all the evidence the finding needs.
@@ -622,14 +428,10 @@ recording to the operator.
 
 ## 5. Surface Candidates
 
-When your output includes `#### Surface Candidates`, record each one directly:
-```
-vigil assess record-surface <type> <target> <source> [--rationale TEXT] [--status STATUS]
-```
-
-Use only the supported `record-surface` types: `account_recovery`, `api_documentation`,
-`auth_entry`, `dynamic_render`, `file_handling`, `object_reference`, `privileged_write`,
-`workflow_token`. Do not invent local taxonomy labels.
+When your output includes `#### Surface Candidates`, record each one directly with
+`vigil assess record-surface <type> <target> <source> ...`. Do not invent local taxonomy labels:
+`vigil assess contract record-surface` lists every registered surface type and create status, the
+argument order, and the orthogonal `--framework-registration` axis.
 
 ---
 
@@ -653,8 +455,11 @@ Convey severity through the `severity` field and the CVSS vector plus calm, prec
 
 Everything else commonly violated — no theoretical findings, kill weak leads fast, the sibling
 rule, credentials require proof, evidence beats volume, precondition analysis governing severity —
-is owned by `agent/rules/hunting.md` and `agent/rules/reporting.md`; read those, not a restatement
-here.
+is owned by `agent/rules/hunting.md`, which every hunting role loads alongside this file (on the
+code track, `agent/shared-constraints-code.md` §5 carries the equivalent bar). Read it there, not a
+restatement here. `agent/rules/reporting.md` owns report *prose* and submission wording and is not
+part of this Load-First set: load it only when you are authoring a confirmed finding's
+report-ready `details` or an external submission.
 
 ---
 
@@ -682,72 +487,24 @@ Record state immediately using `vigil assess` with JSON files:
 - **Credentials:** `vigil assess post credentials <credential-json-file>` — recording a discovered credential (`status=discovered`) automatically flags a candidate finding and, when the secret is a session artifact (a session-hint cookie or a bearer/JWT), mints a usable identity from it and cross-links the two; a plain password records as intel plus a candidate finding only. List every identity a host holds with `vigil assess auth list --host <host> [--include-dead] [--json]`.
 - **Credential tests:** `vigil assess post credential-tests <json-file>`
 - **Access records:** `vigil assess post access-records <json-file>`
-- **Coverage updates:** `covered` is never self-attested — recording a covering probe (below)
-  does not by itself mark a coverage item `covered`; call this verb explicitly whenever you're
-  making that deliberate, rationale-bearing human verdict:
-  `vigil assess resolve coverage-item <id> --status <covered|not_applicable|deferred|blocked|queued|pending> --rationale "..."`.
-  Advances a class-typed coverage item (one per implied vuln-class on a surface; resolve EVERY
-  implied class, not just the cluster winner). `covered`/`not_applicable` require a non-empty
-  rationale. Raw `patch coverage-items/<id>` is redirected here.
-- **Blocked techniques:** `vigil assess block-technique --technique <TECHNIQUE> --target-kind <kind> --target-ref <ref> --reason <why>` (the technique-key auto-derives; override with `--technique-key`; add `--revalidation-context-inline '{"actor":"...","basis":"..."}'` when rechecking a wall). Review current rows with `vigil assess list-blocked-techniques` and append-only retry decisions with `vigil assess list-blocked-techniques --history [--technique-key <key>]`. Prefer this first-class verb over the raw `vigil assess post blocked-techniques <json-file>`.
-- **Captured HTTP traffic:** capture is a per-engagement policy, not a proxy selector — review it
-  with `vigil assess http policy`. Query the canonical full-flow store with `vigil assess http
-  list --host <host> --method <verb> --content-type <family>` (`http show <flow_uid>` for one
-  flow, `http search <text>` for a LIKE query, `http export-har -o <file>` / `http import-har
-  <file>` for HAR round-trips). The three policy states are deliberate:
+- **Coverage updates:** `covered` is never self-attested — recording a covering probe does not by
+  itself mark a coverage item `covered`. `vigil assess resolve coverage-item` is that deliberate,
+  rationale-bearing human verdict (`vigil assess contract resolve`).
+- **Blocked techniques:** `vigil assess block-technique`, reviewed with
+  `vigil assess list-blocked-techniques` (`vigil assess contract block-technique`).
+- **Captured HTTP traffic:** capture is a per-engagement policy, not a proxy selector, and
+  full-flow and raw-body capture are OFF by default. `vigil assess http` queries the flow store and
+  shows or sets that policy (`vigil assess contract http`).
+- **Probe runs (covering and non-covering):** `vigil assess record-probe` is one verb for every
+  probe verdict, and one covering probe is the whole write — never a probe plus a separate drain or
+  surface-advance call. `vigil assess contract record-probe` owns the status vocabulary, the full
+  flag set (`--outcome-assertion`, `--lens`, `--no-drain` among them), and the cascade.
 
-  | State | Behavior |
-  |---|---|
-  | disabled (default) | Always-on compact observation only |
-  | `policy set --enabled` | Adds full-flow metadata/index rows, no bodies |
-  | `--capture-request-bodies` / `--capture-response-bodies` | Also stores those selected body sidecars |
-
-  Full-flow and raw-body capture are OFF by default.
-- **Probe runs (covering and non-covering):** `record-probe` is one verb for every probe
-  verdict — pass the full flag set every time:
-
-  ```
-  vigil assess record-probe --result-status <tested|signal|attempted|blocked|no-signal|error> \
-      --attack-family <class> --target-host <host> --target-path <path> \
-      --input-slot <slot:name> --auth-context <identity> \
-      [--evidence-ref <path>] [--coverage-item-id <id>] [--finding <slug>]
-  ```
-
-  | `--result-status` | Covering? | `--evidence-ref` required? | Means |
-  |---|---|---|---|
-  | `tested` | yes | **yes** | Probe covered the surface; evidence proves it |
-  | `signal` | yes | **yes** | Probe found something notable; evidence proves it |
-  | `attempted` | no | no | Touched but inconclusive — a lead, not a verdict |
-  | `blocked` | no | no | Touched but inconclusive — a lead, not a verdict |
-  | `no-signal` | no | no | Touched but inconclusive — a lead, not a verdict |
-  | `error` | no | no | Touched but inconclusive — a lead, not a verdict |
-
-  A covering verdict (`tested`/`signal`) without `--evidence-ref` is not coverage.
-
-  Pass `--input-slot` and `--auth-context` on **every** call, never defaulted — the resume-brief's
-  `## Per-Input Coverage` grid keys on **(host × path × attack_family × input_slot × auth_context)**.
-  `--input-slot` names the input as `slot:name` (`header:X-Forwarded-Host`, `query:uid`); a
-  non-covering verdict lands in the grid too (by verdict word), not in `## Attempts` (blocked
-  techniques and roe_blocked findings only). Letting `--auth-context` silently default to
-  `anonymous` collapses every identity you actually tested into one cell, hiding the exact
-  cross-identity IDOR/BOLA gap the grid exists to surface — pass the real identity name
-  (`anonymous`, `member`, `admin`, a credential slug from `vigil assess auth list --host <host>`).
-
-  Raw `post probe-runs` is redirected here.
-- **Work-buffer id passing and the auto-cascade.** **Recording one covering probe is now the
-  whole write — do not also make a separate drain or surface-advance call for the same probe.**
-  When a probe traces back to a `vigil assess work-buffer fetch` batch, carry its
-  `coverage_item_id`, `request_variant_id`, and `service_id` in your working notes and pass them
-  into `record-probe` (`--coverage-item-id`, `--request-variant-id`, `--service-id`) so the probe
-  attaches to the exact coverage item and request it satisfies; the work-items linked to the
-  coverage item drain and the mapped surface advances toward `partially-covered` automatically
-  off the FK link. `--work-item-ids`/`--resolve-surface` still exist to override or narrow that
-  default (point the drain at a different set of items, or suppress the automatic surface
-  advance) when the default cascade isn't the right target. If a batch omitted
-  `coverage_item_id`, look up the matching row via `vigil assess fetch coverage-items` before you
-  resolve coverage state. Reach for `vigil assess resolve coverage-item` separately only for the
-  deliberate manual verdict (`covered`/`not_applicable`/`deferred`/`blocked`) a probe doesn't
-  already imply — never to double-record a probe you just recorded.
+  The one thing to carry in your head: pass `--input-slot` and `--auth-context` on **every** call,
+  never defaulted. The resume-brief's `## Per-Input Coverage` grid keys on
+  **(host × path × attack_family × input_slot × auth_context)**, so letting `--auth-context`
+  default to `anonymous` collapses every identity you actually tested into one cell and hides the
+  exact cross-identity IDOR/BOLA gap the grid exists to surface.
 
 Write payloads to `/tmp/<type>-<slug>.json` before calling — inline JSON shell arguments cause
 escaping damage and are not auditable. This is host-side only: a transient JSON payload file for
@@ -834,9 +591,9 @@ When your output includes `#### Intelligence`, write each row as a structured JS
 vigil assess intel record <type> <json-file>
 ```
 
-Valid `<type>` values: `tech-component`, `person`, `email`, `domain`, `cve`, `dns-record`, `social-profile`, `breach-record`, `org-fact`, `note`.
-
-Run `vigil assess contract intel record <type>` before authoring the JSON — intel schemas are strict (`additionalProperties=false`) and reject unknown fields.
+Run `vigil assess contract intel record` for the registered `<type>` values and
+`vigil assess contract intel record <type>` before authoring the JSON — intel schemas are strict
+(`additionalProperties=false`) and reject unknown fields.
 
 The backend deduplicates per-engagement on natural keys: tech stack on Component (+ Version), people on Name, emails on Address, domains on Identity + Kind, CVEs on `cve_id`. Credentials live in the assessment domain (`assessment_credentials`); use `vigil assess post credentials`, not `intel record`.
 
@@ -856,12 +613,8 @@ the operator picks the trait row before dispatch and the specialist
 applies it.
 
 Non-recon roles (vulnerability-analyst, source-analyzer, fuzzer,
-exploit-developer, report-writer) do not need rate-calibration values on every
-dispatch — they consume per-call rate hints from the dispatch context, not
-from this table. Loading the trait table on every specialist dispatch was a
-token tax for roles that never used it; this pointer keeps shared-constraints
-lighter for the 80% case while preserving direct linkage for the recon-class
-roles that do.
+exploit-developer, report-writer) consume per-call rate hints from the dispatch
+context instead, and do not load that table at all.
 
 ---
 

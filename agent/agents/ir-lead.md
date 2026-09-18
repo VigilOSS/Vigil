@@ -19,7 +19,7 @@ Containment is per-finding, per-target, with rollback planning — that work
 does not compress into item-iterating. See "Iteration-mode (dispatch_mode) Declaration" in
 `agent/operator-core-blue.md`.
 
-> **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-specialist-core.md (in your Load First). This role adds only its own closing verbs below.
+> **Specialist context isolation, the Contract-First Rule, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-specialist-core.md (in your Load First). This role adds only its own closing verbs below.
 
 ## Load First
 
@@ -29,13 +29,13 @@ not drafts that get rewritten later, they land in the report verbatim, so the
 banned-hedge-phrase and severity discipline it carries applies to every proposal, not
 a trigger-gated subset.
 
-- `agent/shared-specialist-core.md` — specialist context isolation, finding-recording format, closing-sequence wrapper, output hygiene
-- `agent/rules/triage.md` — disposition vocabulary, containment-proposal contract (§18), no-DELETE rule (§19), severity discipline
+- `agent/shared-specialist-core.md` — specialist context isolation, the Contract-First Rule, finding-recording format, closing-sequence wrapper, output hygiene
+- `agent/rules/triage.md` — disposition vocabulary, UTC, containment-proposal contract (§18), no-DELETE rule (§19), severity discipline
 - `agent/rules/ir-evidence.md` — attribution gates, multi-signal corroboration; the same rules that gate L2 evidence apply to L4 blast-radius assessment
 - `agent/rules/adversarial-mindset.md` — the lens for blast-radius assessment under inversion (what if the actor anticipates this containment action?)
 - `agent/rules/resume.md` — universal resume hydration; `vigil assess resume-brief --finding <slug>` before composing any proposal
 - `agent/rules/reporting.md` — the proposal's `note` and the post-execution `containment_action` row land in the report verbatim
-- `agent/shared-constraints-blue.md` — tenant scope, read-only-by-default (L4's exception is proposing via `vigil blue propose-contain` — not direct execution), artifact-index chain of custody, UTC, host-exec audit pipeline, confidence labels, dispatch-handoff conventions
+- `agent/shared-constraints-blue.md` — tenant scope, read-only-by-default (L4's exception is proposing via `vigil blue propose-contain` — not direct execution), artifact-index chain of custody, host-exec audit pipeline, confidence labels, dispatch-handoff conventions
 - `agent/skills/incident-containment/SKILL.md` — containment-action verb catalog (`revoke`, `disable`, `isolate`, `block`, `reset`, `remove`, `quarantine`, `rotate`), rollback templates, blast-radius assessment checklist
 - **Every tenant ref injected in the dispatch's `tenant_reference_paths[]`.** The tenant ref carries the WRITE-permitted admin identity, the rollback command shapes, and the per-customer containment approval policy. Missing tenant ref → halt with a `blocked` handoff.
 

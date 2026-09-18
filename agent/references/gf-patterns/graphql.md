@@ -29,13 +29,30 @@ These are the primary surfaces for OWASP API1:2023 (BOLA via GraphQL node IDs), 
 These are the canonical GraphQL-over-HTTP request keys (POST body or query-string form).
 `operationname` is the lowercased form of `operationName` after `collect_keys` normalization.
 
+`mutation`, `subscription`, `operationname` and `variables` are unambiguous and fire on their own.
+**`query` alone does not** — it is simultaneously a member of `sqli` (40) and `xss` (20), and only
+`rce` (50) outranks this bucket, so a bare `?query=shoes` on a REST search route used to win
+`gf:graphql` at 45 with no GraphQL evidence at all. `_suppress_graphql_on_bare_query` therefore
+requires a `query`-only row to be **corroborated** by one of:
+
+- a GraphQL path fragment (below), or
+- a second, unambiguous GraphQL request key, or
+- the producer type `graphql` (`classify_type()` assigns it to a POST whose BODY carries a braced
+  `query` value), or
+- a braced selection set as the `query` **value** itself — the GET form of that same evidence,
+  which no producer type can express because `classify_type()` never reads the query string.
+
+An uncorroborated row is only re-ranked, never dropped: it keeps its real `sqli`/`xss` matches and
+moves from `45 gf:graphql` to `40 gf:sqli`.
+
 ## Path patterns that match
 
 `/graphql`, `/graphiql`, `/graphql/v1`, `/graphql/v2`, `/api/graphql`, `/gql`
 
 Note: `/query` is deliberately NOT a path fragment — it would mis-bucket ordinary REST search
-routes (e.g. `/search/query`, `/api/query`) at weight 45. The `query` PARAM key already
-carries that signal for true GraphQL requests.
+routes (e.g. `/search/query`, `/api/query`) at weight 45. The `query` PARAM key carries that
+signal for true GraphQL requests, but only once corroborated (see above) — an uncorroborated
+`query` key would reproduce exactly the misroute this fragment exclusion exists to avoid.
 
 ## Weight and priority interpretation
 
@@ -55,13 +72,19 @@ Path-fragment matches:
 
 Param-key matches:
 
-- `https://target.example/api/data?query={users{id,email}}` — inline GraphQL query
-- `https://target.example/api/search?operationname=GetUser&variables={"id":1}` — named operation
+- `https://target.example/api/data?query={users{id,email}}` — inline GraphQL query over GET.
+  Corroborated by the braced selection set in the VALUE, which is how GraphQL-over-GET (the form a
+  historical-URL corpus captures, and the one GraphiQL itself issues) survives the bare-`query`
+  suppression.
+- `https://target.example/api/search?operationname=GetUser&variables={"id":1}` — named operation;
+  `operationname` and `variables` are unambiguous and need no corroboration.
 
 ## What it does NOT classify
 
 - REST search endpoints with a `q=` or `search=` parameter — those belong in `sqli`/`xss`
-- REST endpoints that happen to use a `query` key for filtering (no path fragment co-fires)
+- REST endpoints that happen to use a `query` key for filtering, e.g.
+  `/api/v2/products/search?query=shoes` — an unbraced value on a non-GraphQL path corroborates
+  nothing, so the row clusters `gf:sqli` and keeps its `xss` match
 - GraphQL-over-WebSocket upgrade paths (those also fire `websocket` at weight 30)
 
 ## Attack classes

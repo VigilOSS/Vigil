@@ -24,8 +24,9 @@ vigil assess code-sourcemap-extract "$DIR/source-maps/<name>"
 # 3. Ingest into backend (use the printed source-map handoff when applicable)
 vigil assess code-ingest "$DIR/source/<repo-name>" --name <repo-name> --language <primary-lang>
 
-# 4. Copy repo_id and the sealed snapshot path from the ingest summary, then index that snapshot
-vigil assess code-index build --repo-id <repo-id> <sealed-snapshot-path>
+# 4. Copy repo_id and the "Sealed source:" path from the ingest summary — it already points at
+#    the snapshot's source/ directory, which is what code-index binds to. Pass it unchanged.
+vigil assess code-index build --repo-id <repo-id> <sealed-source-path>
 
 # 5. Sync structural metadata to backend
 vigil assess code-index sync

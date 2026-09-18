@@ -1,16 +1,35 @@
-# Project-local Codex hooks for Vigil.
-# These mirror the Claude Code hooks in agent/.claude/settings.json.
+# Project-local Codex config for Vigil.
+# These mirror agent/.claude/settings.json.
+#
+# HOOK TRUST. Codex 0.154.0 does not run a project-local hook until its exact
+# command has been trusted: the TUI opens on "Hooks need review" and records an
+# approval as `hooks.state."<config path>:<event>:<i>:<j>".trusted_hash` in the
+# operator's own ~/.codex/config.toml. Declining — or pressing esc — starts a
+# normal session in which NOTHING runs these hooks and no UI element says so, so
+# the generated `start_codex.sh` passes `--dangerously-bypass-hook-trust`
+# (src/vigil_cli/engagements.py). Editing a command below changes its hash, which
+# is why the launcher flag, not a persisted approval, is what keeps the activity
+# and session-end receipts recording across engagements.
+
+# Keep the engagement record in Vigil's backend ledger, not in a second
+# cross-session store. Mirrors "autoMemoryEnabled": false on the Claude side.
+# Codex ships this off by default; pinning it here also overrides an operator
+# whose global ~/.codex/config.toml turns it on.
+[features]
+memories = false
+
+# Keep specialist dispatch a clean room. Codex's default spawn path
+# (`multi_agent`) starts a child from the dispatch message alone; `multi_agent_v2`
+# swaps that `fork_context` field for `fork_turns`, which DEFAULTS TO `all` — the
+# operator's entire history. Vigil passes neither field, so the flag alone decides
+# what a specialist inherits, and under v2 the Phase 2C/2D hunters that
+# agent/phases/code-phase-2-hunt.md deliberately keeps blind would read the Phase 2A
+# findings they exist to re-derive independently. Codex ships this off by default;
+# pinning it here also overrides an operator whose global ~/.codex/config.toml
+# turns it on.
+multi_agent_v2 = false
 
 [hooks]
-
-[[hooks.PreToolUse]]
-matcher = "^Bash$"
-
-[[hooks.PreToolUse.hooks]]
-type = "command"
-command = "bash -c 'if [ -n \"${VIGIL_AGENT_ROOT:-}\" ]; then exec bash \"$VIGIL_AGENT_ROOT/scripts/hooks/scope-check.sh\"; fi; if [ -f scripts/hooks/scope-check.sh ]; then exec bash scripts/hooks/scope-check.sh; fi; if [ -f agent/scripts/hooks/scope-check.sh ]; then exec bash agent/scripts/hooks/scope-check.sh; fi'"
-timeout = 10
-statusMessage = "Checking target scope"
 
 [[hooks.PostToolUse]]
 matcher = "^(Bash|Agent|Write|Edit|apply_patch|mcp__.*)$"
@@ -21,3 +40,25 @@ command = "bash -c 'if [ -n \"${VIGIL_AGENT_ROOT:-}\" ]; then exec bash \"$VIGIL
 timeout = 10
 async = true
 statusMessage = "Recording tool activity"
+
+# Session-end activity receipt. No matcher: SessionEnd has no tool to match on.
+# Codex fires this on client-driven session termination (`clear`, `logout`, normal
+# exit -> `other`); a hard crash / SIGKILL / host timeout fires nothing, which is
+# why session-end.sh is fail-safe and idempotent rather than a durability guarantee.
+#
+# There is deliberately NO Codex PreCompact hook: Codex operators get the
+# `$vigil-compact` skill instead. See docs/engagement-prompt-playbook.md.
+#
+# The 3s timeout below is not a preference. Codex 0.154.0 hard-caps SessionEnd at
+# 3s and warns "clamping SessionEnd hook timeout to 3s" on every launch for any
+# larger value; the PostToolUse cap is far higher, so only this one
+# differs from Claude's 10s. 3s is already twice Claude Code's own 1500ms default
+# for the same hook, and session-end.sh claims its marker BEFORE the backend call
+# precisely so a budget cut loses a receipt rather than duplicating a row.
+[[hooks.SessionEnd]]
+
+[[hooks.SessionEnd.hooks]]
+type = "command"
+command = "bash -c 'if [ -n \"${VIGIL_AGENT_ROOT:-}\" ]; then exec bash \"$VIGIL_AGENT_ROOT/scripts/hooks/session-end.sh\"; fi; if [ -f scripts/hooks/session-end.sh ]; then exec bash scripts/hooks/session-end.sh; fi; if [ -f agent/scripts/hooks/session-end.sh ]; then exec bash agent/scripts/hooks/session-end.sh; fi'"
+timeout = 3
+statusMessage = "Recording session-end activity"

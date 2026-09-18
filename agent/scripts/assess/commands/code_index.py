@@ -39,6 +39,7 @@ from assess.lib.parser_boundary import ParserBoundaryCancelled, index_file
 from assess.lib.treesitter_index import (
     SUPPORTED_LANGUAGES,
     STREAMING_FALLBACK_BASELINE_UNAVAILABLE,
+    UNSCANNED_SCOPE_DEGRADATION_REASON,
     StreamingSecurityScanner,
     language_for_file,
 )
@@ -222,7 +223,14 @@ def _load_json(path: Path, *, label: str) -> dict[str, Any]:
 
 def _load_snapshot(source_path: Path) -> dict[str, Any]:
     if source_path.name != "source":
-        raise ValueError("code-index input must be the sealed snapshot source directory")
+        # Naming the fix, not just the rule: every repair hint that sends an
+        # operator here prints a `<snapshot-path>` placeholder, and the snapshot
+        # directory is the obvious thing to reach for. The index binds to the
+        # sealed source tree inside it.
+        raise ValueError(
+            "code-index input must be the sealed snapshot source directory — "
+            f"pass {source_path}/source, not the snapshot directory itself"
+        )
     digest = source_path.parent.name
     manifest = validate_snapshot(source_path.parent, expected_digest=digest)
     if Path(str(manifest.get("source_path", ""))).resolve() != source_path:
@@ -1030,10 +1038,14 @@ def _validate_analysis_artifact(
                 raise ValueError(f"streaming fallback debt is incomplete for {rel_path}")
         elif not (
             mode in {"tree_sitter", "lightweight_regex"}
-            and
-            available
-            and truncated
-            and indexed.get("degradation_reason") == "artifact_signal_limit"
+            and available
+            and (truncated or indexed.get("unavailable_dimensions"))
+            and indexed.get("degradation_reason")
+            == (
+                "artifact_signal_limit"
+                if truncated
+                else UNSCANNED_SCOPE_DEGRADATION_REASON
+            )
         ):
             raise ValueError(f"degraded structural analysis is inconsistent for {rel_path}")
     counts = indexed.get("signal_counts")

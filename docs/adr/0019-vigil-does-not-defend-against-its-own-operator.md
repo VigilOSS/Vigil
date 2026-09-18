@@ -67,10 +67,13 @@ deleted by citing this ADR:
    is the benchmarked model, and the boundary protects benchmark *integrity*,
    not secrecy. Without it every model score is meaningless. See ADR 0002 and
    ADR 0005.
-2. **Scope and ROE enforcement** (`scope-check.sh`, in-scope host validation,
-   `exploit_policy: pause`, destructive-command blocks). These protect third
-   parties and the engagement's legal boundary — people who did not consent,
-   rather than the operator who did.
+2. **Scope and ROE enforcement** (in-scope host validation, `exploit_policy:
+   pause`). These protect third parties and the engagement's legal boundary —
+   people who did not consent, rather than the operator who did. An earlier
+   revision of this list also named `scope-check.sh` and its destructive-command
+   blocks here. That was wrong on the facts: every filter in that hook guarded
+   the operator's own machine, not a third party, and the hook has since been
+   removed (see below).
 3. **Proof and evidence integrity** (artifact digest revalidation, receipt
    health, transactionally immutable producer attribution, terminal-state
    immutability). These make evidence *trustworthy*. They add information rather
@@ -78,6 +81,34 @@ deleted by citing this ADR:
 4. **The untrusted-target-text boundary** (ADR 0018). The adversary is the
    target, whose text can carry instructions for an agent. That boundary labels
    and delimits; it explicitly does not delete or rewrite, and ADR 0018 says so.
+
+### PreToolUse command-filtering hooks are not reintroduced
+
+`scope-check.sh` was a `PreToolUse` hook that string-matched every shell command
+against four destructive shapes. It is removed and must not come back in that
+form. Two separate reasons, and the second is the one that settles it.
+
+It did not do what this ADR claimed. All four filters protected local state from
+the operator's own agent. That is a defensible goal, but it is not the
+third-party boundary the list above is for.
+
+And it could not do it. A command filter that reads a command *string* is
+defeated by every ordinary way of spelling the same command. Measured against
+the shipped hook: `rm -rf /tmp/x` blocked, `bash -c "rm -rf /tmp/x"` allowed;
+`git clean -fd` blocked, `eval`/`sh -c`/`$(echo git)`/a `subprocess.run` list all
+allowed. `find . -delete` and `git reset --hard` were never covered at all. This
+is the same wrapped-shell blind spot that condemned the masking layer described
+above, and it is not a regex bug: string matching cannot see through the shell.
+
+The cost was not theoretical either. The `git clean` guard alone grew to 40% of
+the file and produced two defects — one that missed four of six flag orderings,
+one that silently disabled the guard for every repository path containing a
+space. Both passed review. A guard whose failure mode is *silence* is worse than
+no guard, because it is trusted.
+
+A future agent-error guardrail must therefore act where the command is executed
+rather than where it is spelled — the client's own permission layer, or a
+constrained execution surface Vigil owns. `TODO.md` carries the scoping.
 
 The distinguishing question is always the same: *who is the adversary, and what
 does this stop them reaching?* If the answer is "the operator, from their own

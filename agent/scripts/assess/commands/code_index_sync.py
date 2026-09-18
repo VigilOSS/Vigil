@@ -24,7 +24,10 @@ from assess.lib.code_structural_identity import (
     structural_input_digest,
 )
 from assess.lib.config import load_config
-from assess.lib.treesitter_index import STREAMING_FALLBACK_BASELINE_UNAVAILABLE
+from assess.lib.treesitter_index import (
+    STREAMING_FALLBACK_BASELINE_UNAVAILABLE,
+    UNSCANNED_SCOPE_DEGRADATION_REASON,
+)
 
 STRUCTURAL_DIMENSIONS = {
     "call_sites",
@@ -246,9 +249,13 @@ def _validated_structural_metadata(
         elif not (
             mode in {"tree_sitter", "lightweight_regex"}
             and available
-            and truncated
-            and reason == "artifact_signal_limit"
-            and not unavailable
+            and (truncated or unavailable)
+            and reason
+            == (
+                "artifact_signal_limit"
+                if truncated
+                else UNSCANNED_SCOPE_DEGRADATION_REASON
+            )
         ):
             raise ValueError(f"bounded parser debt is inconsistent for {rel_path}")
     if not isinstance(counts, dict) or set(counts) != set(SIGNAL_DIMENSIONS) or any(
@@ -272,6 +279,26 @@ def _validated_structural_metadata(
         or any(indexed[field] for field in STRUCTURAL_RECORD_FIELDS)
     ):
         raise ValueError(f"unsupported structural analysis contains signals for {rel_path}")
+    # The backend refuses this shape too, but it refuses one `updates` list per
+    # repository and names no file, so a single artifact like this takes the
+    # whole sync down with an opaque 400. With no callable, the exact parser
+    # handed no line to the function-scoped detectors; any other signal proves
+    # the file still had source to scan, so `complete` claims a measurement
+    # that cannot have happened. No signal at all stays legal -- a blank or
+    # comment-only file really does measure empty.
+    if (
+        status == "complete"
+        and mode == "tree_sitter"
+        and int(indexed["total_functions"]) == 0
+        and (
+            int(indexed["total_exports"])
+            or any(int(counts[dimension]) for dimension in SIGNAL_DIMENSIONS)
+        )
+    ):
+        raise ValueError(
+            "complete structural analysis has no callable scope to have measured "
+            f"the source it clearly scanned for {rel_path}"
+        )
     retained_counts = {
         "entry_points": len(indexed["entry_points"]),
         "imports": max(len(indexed["imports"]), len(indexed["import_targets"])),

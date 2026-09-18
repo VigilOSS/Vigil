@@ -4,8 +4,8 @@
 #
 # Goose's `developer` builtin exposes a shell tool plus file tools. In goose v1.38.0 the
 # tool names are BARE — `shell`, `write`, `edit`, `tree`, `read_image` — NOT `developer__*`
-# (goose's docs are wrong; verified by a live run). The SHARED hook scripts (scope-check.sh
-# / post-tool-log.sh / bench-guard.sh) key on the Claude contract
+# (goose's docs are wrong; verified by a live run). The SHARED hook scripts
+# (post-tool-log.sh / bench-guard.sh) key on the Claude contract
 # {tool_name:"Bash", tool_input:{command}}. This adapter reshapes Goose's payload to that
 # contract and runs <target> with the reshaped JSON on stdin, PROPAGATING the target's exit
 # code (2 => block a PreToolUse tool call):
@@ -22,11 +22,10 @@
 #
 # Fail-CLOSED-ish: if jq is missing/the payload is malformed, emit a payload the guard can
 # still evaluate (the original tool_name with the original command), because
-# bench-guard.sh / scope-check.sh now ALSO accept the raw shell tool names
-# (`shell`/`developer__shell`) — so a reshape failure no longer silently allows a shell
-# cheat. (Goose hooks themselves fail open on a crashing hook; the load-bearing controls
-# remain ADR 0020's attested guest/bundle boundary; the host-side audit is
-# defense in depth.)
+# bench-guard.sh ALSO accepts the raw shell tool names (`shell`/`developer__shell`) — so a
+# reshape failure no longer silently allows a shell cheat. (Goose hooks themselves fail open
+# on a crashing hook; the load-bearing controls remain ADR 0020's attested guest/bundle
+# boundary; the host-side audit is defense in depth.)
 set -uo pipefail
 
 target="${1:-}"
@@ -59,8 +58,8 @@ reshaped="$(printf '%s' "$payload" | jq -c '
     end' 2>/dev/null || true)"
 
 # Reshape failed (jq absent / malformed payload): pass a payload the guard still evaluates.
-# bench-guard.sh / scope-check.sh accept the raw shell tool names ("shell"/"developer__shell")
-# and read .tool_input.command, so a forbidden SHELL command is still caught — NOT silently
+# bench-guard.sh accepts the raw shell tool names ("shell"/"developer__shell") and reads
+# .tool_input.command, so a forbidden SHELL command is still caught — NOT silently
 # allowed.
 [ -z "$reshaped" ] && reshaped="$payload"
 

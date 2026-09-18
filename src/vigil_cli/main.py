@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import difflib
 import ipaddress
+import importlib.metadata
 import json
 import os
 import shlex
@@ -13,7 +15,7 @@ import webbrowser
 from collections.abc import Sequence
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, NoReturn
+from typing import Any, NoReturn, TextIO
 
 from . import auth as auth_module
 from . import backup as backup_module
@@ -21,6 +23,8 @@ from . import bench as bench_module
 from . import blue as blue_module
 from . import config as config_module
 from . import email as email_module
+from . import restart_manifest
+from . import term
 from .docker import run_command as docker_run_command
 from .engagements import (
     PROGRAM_HEADER_PRESETS,
@@ -86,7 +90,7 @@ from .oob import (
     test_oob,
     verify_oob_channel_cached,
 )
-from .oob_tenants import legacy_tenant_route, render_edge_routing
+from .oob_relay import legacy_relay_route, render_edge_routing
 from .orchestrator import (
     OrchestratorOptions,
     build_frontend,
@@ -96,46 +100,131 @@ from .orchestrator import (
     stop_orchestrator,
 )
 from .paths import default_runtime_container, resolve_install_root, resolve_source_root
+from .preflight import _preflight_engagement_start
 from .quickstart import QuickstartOptions, run_quickstart
-from .runtime import RuntimeOptions, vigil_runtime_resources, build_runtime, runtime_image_build_state, runtime_status, start_runtime, stop_runtime
-from .status import collect_doctor_checks, collect_status, install_staleness, print_doctor, print_status
+from .runtime import RuntimeOptions, vigil_runtime_resources, build_runtime, runtime_status, start_runtime, stop_runtime
+from .status import collect_doctor_checks, collect_status, print_doctor, print_status
 from .up import UpOptions, run_up
 
 
-def _print_post_install(result: InstallResult) -> None:
+# The two-layer model is the one thing an operator cannot deduce from the
+# output, and the one thing that makes a stale CLI binary comprehensible. It
+# used to print after EVERY install, which is how a genuinely useful paragraph
+# becomes scenery; it now prints on a first install (where the model is new
+# information) and when the CLI binary is the thing that actually lags.
+_TWO_LAYER_MODEL = (
+    "Two layers: `vigil install` upgrades the WORKING ROOT "
+    "(code/prompts/skills/scripts); `uv tool upgrade vigil` upgrades only the CLI binary. "
+    "`vigil status` warns when the working root differs from its source."
+)
+
+
+def _print_post_install(
+    result: InstallResult,
+    *,
+    states: list[restart_manifest.ConsumerState] | None = None,
+    stream: TextIO | None = None,
+) -> None:
+    """Report what this install actually obliges the operator to do.
+
+    Everything here goes to STDERR. `vigil install` prints the install root on
+    stdout as a machine contract (`root=$(vigil install ~/vigil)`), and this
+    block used to land in that capture — a real bug, not a cosmetic one.
+
+    The list is DERIVED (see `restart_manifest`), never asserted. Only consumers
+    that are provably out of date (`stale`) or that cannot be proven current
+    (`unknown`) are printed, and only when there is a command that fixes them: a
+    stopped service does not need restarting, and an artifact that was never
+    built was not invalidated by this install — `vigil up` builds it on demand.
+    """
+    # Resolved per call, never as a default argument: a default binds `sys.stderr`
+    # at import time, which is the wrong object under any caller that replaces it.
+    stream = sys.stderr if stream is None else stream
     root = result.install_root
-    print()
+    undetermined = ""
+    if states is None:
+        try:
+            states = restart_manifest.consumer_states(root, source_root=result.source_root)
+        except Exception as exc:  # noqa: BLE001 — the install already SUCCEEDED
+            # A summary that cannot be computed must not retroactively fail the
+            # command, and must not claim "nothing to restart" either.
+            states, undetermined = [], str(exc) or exc.__class__.__name__
+    actionable = [
+        state for state in states if state.state in {"stale", "unknown"} and state.remedy
+    ]
+    # `unknown` with NO remedy is a consumer we could not reach at all — the
+    # Docker-down shape, where there is no command worth offering while the
+    # daemon is down. It is dropped from `actionable` for that reason, but it
+    # must never be silently counted as clear: "nothing to restart" would then
+    # assert something this install never checked.
+    unreachable = [
+        state for state in states if state.state == "unknown" and not state.remedy
+    ]
+    cli_lags = any(state.key == "cli" for state in actionable)
+
+    print(file=stream)
     if result.is_upgrade:
-        print("Upgrade complete. Services using the previous install should be restarted:")
-        print("  - Kali runtime:   vigil runtime restart")
-        print("  - Orchestrator:   vigil orchestrator restart")
-        if result.image_built:
-            print("  - Docker image was rebuilt — running containers use the old image until restarted")
+        if undetermined:
+            print(
+                term.row(
+                    "warn",
+                    "Upgrade complete; could not determine what needs restarting",
+                    undetermined,
+                    stream=stream,
+                ),
+                file=stream,
+            )
+        elif not actionable and unreachable:
+            print("Upgrade complete. These could not be checked:", file=stream)
+            for state in unreachable:
+                print(
+                    term.row("info", state.label, state.detail, stream=stream),
+                    file=stream,
+                )
+        elif not actionable:
+            # Only the verdict, never a cause. Consumer state records what each
+            # consumer NEEDS; nothing here measured which files this install
+            # rewrote, and "it changed only files that are read live" was an
+            # inference from the absence of remedies — false, for instance, for
+            # a backend-source upgrade performed while the backend is stopped.
+            print(
+                term.wrap("Upgrade complete — nothing to restart.", stream=stream),
+                file=stream,
+            )
         else:
-            state = runtime_image_build_state(root)
-            if state == "stale":
-                print("  - Docker image:   OUT OF DATE (baked runtime input changed) — run  vigil runtime build")
-            elif state == "missing":
-                print("  - Docker image:   not built yet — run  vigil runtime build")
-            elif state == "current":
-                print("  - Docker image:   up to date — a restart is enough (no rebuild needed)")
-            else:
-                print("  - Docker image:   run  vigil runtime build  only if the runtime Dockerfile or "
-                      "docker/callback_* changed (most code is host-side; restart is enough)")
+            print("Upgrade complete. These need attention:", file=stream)
+            for state in actionable:
+                detail = f"{state.remedy}  ({state.detail})" if state.detail else state.remedy
+                print(
+                    term.row(
+                        "warn" if state.state == "stale" else "info",
+                        state.label,
+                        detail,
+                        stream=stream,
+                    ),
+                    file=stream,
+                )
+            # Naming these alongside the actionable rows keeps the list honest:
+            # an operator reading only the remedies would otherwise take the
+            # unreachable consumers as having been checked and cleared.
+            for state in unreachable:
+                print(
+                    term.row("info", state.label, state.detail, stream=stream),
+                    file=stream,
+                )
     else:
-        print("Install complete. Next steps:")
-        print(f"  1. Configure tokens and API keys in {root / '.env'}")
-        print("  2. Optional OOB: vigil config set oob.frp_token <token>")
-        print("  3. vigil up                      # build/start runtime, orchestrator, and OOB")
-        print("  4. vigil engagement create <target>  # create your first engagement")
-        print("  5. vigil assess kali --help      # discover target-facing CLI verbs")
-    print()
-    print(
-        "Two-layer model: `vigil install`/`update` upgraded the WORKING ROOT "
-        "(code/prompts/skills/scripts). `uv tool upgrade vigil` upgrades only the CLI "
-        "binary. `vigil status` warns when the working root differs from its source."
-    )
-    print()
+        print("Install complete. Next steps:", file=stream)
+        print(f"  1. Configure tokens and API keys in {root / '.env'}", file=stream)
+        print("  2. Optional OOB: set oob.frp_host, oob.domain, and oob.frp_token", file=stream)
+        print("     (set oob.domain and re-run this command to allocate a relay slot)", file=stream)
+        print("  3. vigil up                      # build/start runtime, orchestrator, and OOB", file=stream)
+        print("  4. vigil engagement create <target>  # create your first engagement", file=stream)
+        print("  5. vigil assess kali --help      # discover target-facing CLI verbs", file=stream)
+
+    if cli_lags or not result.is_upgrade:
+        print(file=stream)
+        print(term.wrap(_TWO_LAYER_MODEL, stream=stream), file=stream)
+    print(file=stream)
 
 
 def _print_install_dry_run(result: InstallResult) -> None:
@@ -181,8 +270,24 @@ class _SiblingHintParser(argparse.ArgumentParser):
         super().error(message)
 
 
+
+def _cli_version() -> str:
+    """Installed distribution version, or a marker when there is no metadata.
+
+    The bench participant bundle runs this CLI from a copied source tree with no
+    installed distribution, so resolving the version must never raise — an
+    exception here is built at parser-construction time and would break every
+    invocation, not just `--version`.
+    """
+    try:
+        return importlib.metadata.version("vigil")
+    except importlib.metadata.PackageNotFoundError:
+        return "unknown (running from a source tree without package metadata)"
+
+
 def main(argv: list[str] | None = None) -> None:
     raw_argv = list(sys.argv[1:] if argv is None else argv)
+    raw_argv = _hoist_engagement_start_root(raw_argv)
     command_idx = _top_level_command_index(raw_argv)
     if command_idx is not None and raw_argv[command_idx] == "assess":
         _exec_assess_passthrough(raw_argv, command_idx)
@@ -190,6 +295,15 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="vigil", description="Vigil operator CLI")
     parser.add_argument("--root", help="Install root (default: $VIGIL_INSTALL_DIR or ~/vigil)")
     parser.add_argument("--source", help="Source checkout root for install/upgrade")
+    # The CLI binary and the working root upgrade separately, so reconciling a
+    # stale-install warning starts with knowing which CLI is installed.
+    parser.add_argument(
+        "--version",
+        "-V",
+        action="version",
+        version=f"vigil {_cli_version()}",
+        help="Print the installed CLI version and exit",
+    )
     sub = parser.add_subparsers(
         dest="command", required=True, parser_class=_SiblingHintParser
     )
@@ -215,28 +329,6 @@ def main(argv: list[str] | None = None) -> None:
             "inside legacy physical roster directories without deleting extra files"
         ),
     )
-    update_p = sub.add_parser("update", help="Alias for install")
-    update_p.add_argument("install_dir", nargs="?")
-    update_p.add_argument("--dry-run", action="store_true")
-    update_p.add_argument("--force-image", action="store_true")
-    update_p.add_argument("--skip-image-check", action="store_true")
-    update_p.add_argument(
-        "--repair-ambiguous-client-permissions-as-skip",
-        action="store_true",
-        help=(
-            "Explicitly regenerate configured legacy client entrypoints whose permission "
-            "mode is otherwise ambiguous using skip/dangerous permissions"
-        ),
-    )
-    update_p.add_argument(
-        "--refresh-physical-client-rosters",
-        action="store_true",
-        help=(
-            "Explicitly add or refresh canonical generated client-roster files "
-            "inside legacy physical roster directories without deleting extra files"
-        ),
-    )
-
     quickstart_p = sub.add_parser(
         "quickstart",
         help="Onboarding wizard: probe host prerequisites/recon tools and print the setup checklist",
@@ -275,7 +367,8 @@ def main(argv: list[str] | None = None) -> None:
     quickstart_p.add_argument("--hosts", help="In-scope hosts (comma-separated) for the checklist")
     quickstart_p.add_argument("--json", action="store_true", help="Emit the readiness report as JSON")
 
-    sub.add_parser("doctor")
+    doctor_p = sub.add_parser("doctor")
+    doctor_p.add_argument("--json", action="store_true")
     status_p = sub.add_parser("status")
     status_p.add_argument("--json", action="store_true")
     status_p.add_argument(
@@ -514,7 +607,17 @@ def main(argv: list[str] | None = None) -> None:
                          help="DeepSeek thinking level for --client opencode: off=disabled, "
                               "high=on, max=maximum (default: client default — thinking on). "
                               "Ignored for claude/codex/kimi.")
-    start_p.add_argument("client_args", nargs="*")
+    start_p.add_argument(
+        "--skip-preflight",
+        action="store_true",
+        help="Start the client without the preflight checks (client binary, provider key, "
+             "orchestrator, runtime container, install freshness).",
+    )
+    # Everything this parser does not own is forwarded to the client verbatim
+    # (`--model opus`, `-- "operator message"`). It is collected by parse_known_args
+    # rather than a positional, because a positional would reorder an option away
+    # from its value. See _engagement_start_client_args.
+    start_p.set_defaults(client_args=[])
     open_p = engagement_sub.add_parser("open")
     open_p.add_argument("key", nargs="?")
     open_p.add_argument("--select", action="store_true")
@@ -991,7 +1094,7 @@ def main(argv: list[str] | None = None) -> None:
     oob_status_p.add_argument("--json", action="store_true")
     oob_routing_p = oob_sub.add_parser(
         "routing",
-        help="Render tenant DNS/Caddy/JSON deployment inputs without applying external changes.",
+        help="Render relay-slot DNS/Caddy/JSON deployment inputs without applying external changes.",
     )
     oob_routing_p.add_argument(
         "--format", choices=("all", "json", "caddy", "dns"), default="all",
@@ -1102,8 +1205,29 @@ def main(argv: list[str] | None = None) -> None:
     assess_p = sub.add_parser("assess", add_help=False)
     assess_p.add_argument("assess_args", nargs=argparse.REMAINDER)
 
-    args = parser.parse_args(raw_argv)
-    sync_command = args.command in {"install", "update", "up"}
+    if command_idx is not None and raw_argv[command_idx : command_idx + 2] == [
+        "engagement",
+        "start",
+    ]:
+        # `engagement start` is the one verb that forwards unknown flags to another
+        # program, so it is the one verb parsed leniently. Fill the optional key
+        # position when the caller omitted it: otherwise argparse consumes the first
+        # plain client-argument value (or post-`--` message) as the engagement key.
+        parse_argv = raw_argv
+        no_key_sentinel = "__vigil_engagement_start_without_explicit_key__"
+        inserted_no_key = False
+        start_tail = raw_argv[command_idx + 2 :]
+        if not _engagement_start_has_explicit_key(start_p, start_tail):
+            parse_argv = list(raw_argv)
+            parse_argv.insert(command_idx + 2, no_key_sentinel)
+            inserted_no_key = True
+        args, client_extras = parser.parse_known_args(parse_argv)
+        if inserted_no_key:
+            args.key = None
+        args.client_args = _engagement_start_client_args(start_p, client_extras)
+    else:
+        args = parser.parse_args(raw_argv)
+    sync_command = args.command in {"install", "up"}
     install_value = getattr(args, "install_dir", None) or args.root
     install_root = (
         resolve_install_root(install_value, preserve_path=True)
@@ -1111,7 +1235,7 @@ def main(argv: list[str] | None = None) -> None:
         else resolve_install_root(install_value)
     )
 
-    if args.command in {"install", "update"}:
+    if args.command == "install":
         source_root = resolve_source_root(
             args.source,
             install_root=install_root,
@@ -1138,7 +1262,46 @@ def main(argv: list[str] | None = None) -> None:
         else:
             _print_post_install(result)
     elif args.command == "doctor":
-        print_doctor(collect_doctor_checks(install_root, runner=docker_run_command))
+        checks = collect_doctor_checks(install_root, runner=docker_run_command)
+        # FAIL gates, and so does a MISSING row the collector marked required.
+        # `MISSING` alone cannot decide it: an unset `oob.frp_token` and an
+        # absent Docker CLI carry the same status, and only one of them is a
+        # legitimate steady state. Treating every MISSING as advisory made
+        # `vigil doctor` exit 0 and report `"ok": true` on a host with no Docker
+        # at all — the same dishonesty as the earlier exit-0-on-FAIL.
+        failed = [
+            check
+            for check in checks
+            if check.status == "FAIL" or (check.required and check.status != "OK")
+        ]
+        if args.json:
+            print(
+                json.dumps(
+                    {
+                        "ok": not failed,
+                        "checks": [
+                            {
+                                "name": c.name,
+                                "status": c.status,
+                                "detail": c.detail,
+                                "required": c.required,
+                            }
+                            for c in checks
+                        ],
+                    },
+                    indent=2,
+                )
+            )
+        else:
+            print_doctor(checks)
+        if failed:
+            if not args.json:
+                print(
+                    "[vigil] not ready: "
+                    + ", ".join(f"{c.name} ({c.status})" for c in failed),
+                    file=sys.stderr,
+                )
+            raise SystemExit(1)
     elif args.command == "status":
         status = collect_status(
             install_root,
@@ -1228,49 +1391,162 @@ def main(argv: list[str] | None = None) -> None:
         )
 
 
+def _hoist_engagement_start_root(raw_argv: list[str]) -> list[str]:
+    """Keep the global ``--root`` option global on the lenient start parser.
+
+    ``engagement start`` alone forwards unknown options to a client. Accepting a
+    correctly spelled global flag after that subcommand must not silently turn
+    it into client argv. An explicit ``--`` remains the passthrough boundary.
+    """
+    command_index = _top_level_command_index(raw_argv)
+    if command_index is None or raw_argv[command_index : command_index + 2] != [
+        "engagement",
+        "start",
+    ]:
+        return raw_argv
+
+    hoisted: list[str] = []
+    rest: list[str] = []
+    index = 0
+    passthrough = False
+    start_options_at = command_index + 2
+    while index < len(raw_argv):
+        token = raw_argv[index]
+        if index >= start_options_at and token == "--":
+            passthrough = True
+        option, separator, _value = token.partition("=")
+        is_root_option = (
+            option.startswith("--")
+            and len(option) > 2
+            and "--root".startswith(option)
+        )
+        if index >= start_options_at and not passthrough and is_root_option:
+            if separator:
+                hoisted.append(f"--root={_value}")
+                index += 1
+                continue
+            if index + 1 >= len(raw_argv):
+                raise SystemExit(f"vigil: error: {option} requires a path")
+            hoisted.extend(("--root", raw_argv[index + 1]))
+            index += 2
+            continue
+        rest.append(token)
+        index += 1
+    return [*hoisted, *rest]
+
+
 def _top_level_command_index(raw_argv: list[str]) -> int | None:
     i = 0
     while i < len(raw_argv):
         token = raw_argv[i]
-        if token in {"--root", "--source"}:
-            i += 2
-            continue
-        if token.startswith("--root=") or token.startswith("--source="):
-            i += 1
+        resolved = _global_value_option(token)
+        if resolved is not None:
+            _name, inline_value = resolved
+            i += 1 if inline_value else 2
             continue
         return i
     return None
 
 
-def _warn_if_install_stale(install_root: Path) -> None:
-    """Emit one non-fatal STDERR line when the assess passthrough execs a lagging root.
+def _global_value_option(token: str) -> tuple[str, bool] | None:
+    """Resolve argparse-compatible abbreviations of global value options."""
 
-    ``vigil assess ...`` execs the INSTALL ROOT's ``assess.py``, so a working root
-    behind its source silently exposes an older verb set — the failure surfaces as
-    "no such verb" rather than "your install lags". Never writes to stdout (callers
-    parse assess JSON there), never raises, and never blocks the exec: the agent
-    stays free to proceed and decide.
+    option, separator, _value = token.partition("=")
+    if not option.startswith("--") or len(option) <= 2:
+        return None
+    matches = [name for name in ("--root", "--source") if name.startswith(option)]
+    if len(matches) != 1:
+        return None
+    return matches[0], bool(separator)
+
+
+# A forwarded token this close to one of `engagement start`'s own long options is a
+# typo, not a client flag. Real client flags sit far below it (`--thinking-budget` vs
+# `--thinking` scores 0.74; `--slect` vs `--select` scores 0.93), so the cutoff
+# separates the two cleanly instead of guessing.
+_VIGIL_OPTION_TYPO_RATIO = 0.85
+
+
+def _engagement_start_has_explicit_key(
+    start_parser: argparse.ArgumentParser, tail: list[str]
+) -> bool:
+    """Return whether ``tail`` contains an unambiguous engagement key.
+
+    A key may follow Vigil-owned start options, but it must precede the first
+    unknown option or explicit ``--`` passthrough boundary. Once client argv has
+    begun, a plain token is a flag value or operator message, never a key.
     """
-    try:
-        staleness = install_staleness(install_root)
-    except Exception:  # noqa: BLE001 — a diagnostic must never break the exec
-        return
-    state = str(staleness.get("state") or "")
-    if state not in {"stale", "no-stamp"}:
-        return
-    installed = str(staleness.get("installed_sha") or "unstamped")[:12]
-    current = str(staleness.get("current_source_sha") or "unknown")[:12]
-    if staleness.get("reason") == "source_content_changed_without_revision":
-        detail = f"source files changed without a new revision at {current}"
+    owned_options = {
+        option: action
+        for action in start_parser._actions
+        for option in action.option_strings
+    }
+    index = 0
+    while index < len(tail):
+        token = tail[index]
+        if token == "--":
+            return False
+        if not token.startswith("-"):
+            return True
+        option, separator, _value = token.partition("=")
+        action = owned_options.get(option)
+        if action is None and option.startswith("--"):
+            abbreviated = {
+                id(candidate): candidate
+                for spelling, candidate in owned_options.items()
+                if spelling.startswith("--") and spelling.startswith(option)
+            }
+            if len(abbreviated) == 1:
+                action = next(iter(abbreviated.values()))
+        if action is None:
+            return False
+        index += 1
+        if not separator and action.nargs != 0:
+            index += 1
+    return False
+
+
+def _engagement_start_client_args(
+    start_parser: argparse.ArgumentParser, extras: list[str]
+) -> list[str]:
+    """Validate and return the argv `engagement start` forwards to the client.
+
+    Lenient parsing is what lets `--client claude --model opus` work at all, but it
+    also means a mistyped Vigil flag would be handed to the client instead of
+    rejected. Two things keep that visible: a near-miss of one of this subparser's own
+    options is refused with the intended spelling, and whatever IS forwarded is echoed
+    on stderr so nothing reaches the client unannounced.
+    """
+    if "--" in extras:
+        # Tokens after an explicit `--` are the operator's declared passthrough; only
+        # the ones argparse could plausibly have owned are typo-checked.
+        separator = extras.index("--")
+        ambiguous, forwarded = extras[:separator], extras[:separator] + extras[separator + 1 :]
     else:
-        detail = f"installed {installed}, source {current}"
-    print(
-        f"[vigil] WARN: install root {install_root} is {state} "
-        f"({detail}); "
-        "run `vigil install` to sync it.",
-        file=sys.stderr,
-        flush=True,  # execvpe replaces this process without flushing Python buffers
-    )
+        ambiguous = forwarded = list(extras)
+    vigil_options = [
+        option
+        for action in start_parser._actions
+        for option in action.option_strings
+        if option.startswith("--")
+    ]
+    for token in ambiguous:
+        if not token.startswith("--"):
+            continue
+        near = difflib.get_close_matches(
+            token, vigil_options, n=1, cutoff=_VIGIL_OPTION_TYPO_RATIO
+        )
+        if near:
+            raise SystemExit(
+                f"vigil: error: unrecognized argument {token}; did you mean {near[0]}? "
+                f"Pass it to the client verbatim with `-- {token}`."
+            )
+    if forwarded:
+        print(
+            f"[vigil] forwarding to the client: {shlex.join(forwarded)}",
+            file=sys.stderr,
+        )
+    return forwarded
 
 
 def _exec_assess_passthrough(raw_argv: list[str], idx: int) -> None:
@@ -1278,25 +1554,22 @@ def _exec_assess_passthrough(raw_argv: list[str], idx: int) -> None:
     source_value: str | None = None
     i = 0
     while i < idx:
-        if raw_argv[i] == "--root" and i + 1 < idx:
-            root_value = raw_argv[i + 1]
-            i += 2
-            continue
-        if raw_argv[i] == "--source" and i + 1 < idx:
-            source_value = raw_argv[i + 1]
-            i += 2
-            continue
-        if raw_argv[i].startswith("--root="):
-            root_value = raw_argv[i].split("=", 1)[1]
+        resolved = _global_value_option(raw_argv[i])
+        if resolved is None:
             i += 1
             continue
-        if raw_argv[i].startswith("--source="):
-            source_value = raw_argv[i].split("=", 1)[1]
-            i += 1
-            continue
-        i += 1
+        name, inline_value = resolved
+        value = (
+            raw_argv[i].split("=", 1)[1]
+            if inline_value
+            else raw_argv[i + 1]
+        )
+        if name == "--root":
+            root_value = value
+        else:
+            source_value = value
+        i += 1 if inline_value else 2
     install_root = resolve_install_root(root_value)
-    _warn_if_install_stale(install_root)
     assess = install_root / "agent" / "scripts" / "assess.py"
     if not assess.exists():
         source_root = resolve_source_root(source_value, install_root=install_root)
@@ -1313,7 +1586,12 @@ def _assess_exec_environment(install_root: Path) -> dict[str, str]:
     env = dict(os.environ)
     options = _oob_options(install_root)
     env["VIGIL_OOB_DOMAIN"] = options.oob_domain.strip().rstrip(".")
-    env["VIGIL_OOB_TENANT"] = getattr(options, "tenant_prefix", "legacy")
+    slot_prefix = getattr(options, "slot_prefix", "legacy")
+    env["VIGIL_OOB_SLOT"] = slot_prefix
+    # Pre-rename spelling. `vigil assess` execs the *installed* agent tree, which a
+    # CLI-only upgrade leaves at its older revision, so anything in there still
+    # reading the old name must see the same value rather than nothing.
+    env["VIGIL_OOB_TENANT"] = slot_prefix
     env["VIGIL_OOB_DNS_PORT"] = str(getattr(options, "dns_remote_port", 53))
     env["VIGIL_OOB_REVERSE_PORT"] = str(getattr(options, "reverse_remote_port", 8443))
     return env
@@ -1471,11 +1749,12 @@ def _engagement(args: argparse.Namespace, install_root: Path) -> None:
         print(print_shell_cd_init(args.shell), end="")
     elif command == "start":
         path = _resolve_current_or_selected_engagement(install_root, key=args.key, select=args.select)
-        client_args = args.client_args[1:] if args.client_args[:1] == ["--"] else args.client_args
+        if not args.skip_preflight:
+            _preflight_engagement_start(install_root, path, args.client)
         if args.client == "opencode":
             from .engagements import write_opencode_reasoning_config
             write_opencode_reasoning_config(path, args.thinking)
-        start_engagement(install_root, path, args.client, client_args)
+        start_engagement(install_root, path, args.client, args.client_args)
     elif command == "open":
         path = _resolve_current_or_selected_engagement(install_root, key=args.key, select=args.select)
         webbrowser.open(path.as_uri())
@@ -2364,7 +2643,7 @@ def _print_oob_status(payload: dict[str, object], *, as_json: bool) -> None:
         print(
             f"{payload.get('state')}\thealth={health}\tserver={payload.get('server')}\tfrpc={payload.get('frpc')}"
             f"\tclients={client_count}\trunning={len(running)}\tregistered={registered}/{len(running)}"
-            f"\tdomain_resolves={resolves_str}\ttenant={payload.get('tenant_prefix')}"
+            f"\tdomain_resolves={resolves_str}\tslot={payload.get('slot_prefix')}"
             f"\tports={payload.get('port_range')}\tdomain={payload.get('domain')}"
         )
     issues = payload.get("issues") or []
@@ -2408,7 +2687,7 @@ def _oob(args: argparse.Namespace, install_root: Path) -> None:
     elif args.oob_command == "status":
         payload = oob_status(
             oob_domain=options.oob_domain,
-            tenant_prefix=options.tenant_prefix,
+            slot_prefix=options.slot_prefix,
             dns_remote_port=options.dns_remote_port,
             reverse_remote_port=options.reverse_remote_port,
             runner=docker_run_command,
@@ -2417,7 +2696,7 @@ def _oob(args: argparse.Namespace, install_root: Path) -> None:
     elif args.oob_command == "test":
         test_oob(options, runner=docker_run_command)
     elif args.oob_command == "routing":
-        route = options.tenant_route or legacy_tenant_route(
+        route = options.relay_route or legacy_relay_route(
             install_root, base_domain=options.oob_domain
         )
         rendered = render_edge_routing(route)

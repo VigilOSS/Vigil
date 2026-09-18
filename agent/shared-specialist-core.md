@@ -2,17 +2,18 @@
 
 Load this file first alongside your role file and the family's
 `shared-constraints*.md` (offensive: `agent/shared-constraints.md`; code:
-`agent/shared-constraints-code.md`) — see "Load Sequence" below for how this fits with
-skill/reference loading and target-facing work. This file holds the universal layer shared
-across roles — Specialist Context Isolation, the closing-sequence wrapper, and the finding-ID
-prefix table, title formula, and CVSS↔severity mapping that is the counterpart to the full
-finding-recording contract in `agent/shared-constraints.md` §4.
+`agent/shared-constraints-code.md`; blue: `agent/shared-constraints-blue.md`) — see
+"Load Sequence" below for how this fits with skill/reference loading and target-facing
+work. This file holds the universal layer shared across roles — Specialist Context
+Isolation, the Contract-First Rule, the closing-sequence wrapper, and the finding-ID
+prefix table, title formula, and CVSS↔severity mapping that is the counterpart to your
+track's full finding-recording rules.
 Read it once; do not re-author any of this in a role file.
 
 **Canonical pointer string** — every role file references this content with
 this exact line (use verbatim so all call sites match):
 
-> **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-specialist-core.md (in your Load First). This role adds only its own closing verbs below.
+> **Specialist context isolation, the Contract-First Rule, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-specialist-core.md (in your Load First). This role adds only its own closing verbs below.
 
 ---
 
@@ -96,10 +97,13 @@ Bad: "IDOR vulnerability found." Good: "IDOR in /api/users/{id} allows anonymous
 
 If your CVSS score does not fall within the matching severity range, adjust one or the other before recording.
 
-The recording command, the JSON schema, the Contract-First check, and the full rules (dedup,
-chain metadata, the `notes` replayable-commands requirement) are canonical in
-`agent/shared-constraints.md` §4 ("Finding IDs and Recording") — read them there, do not
-re-derive them here.
+The recording command's canonical payload shape is `vigil assess contract finding record`;
+read it before your first record, per the Contract-First Rule below. The full recording
+rules (dedup, chain metadata, the `notes` replayable-commands requirement) live in
+whichever `shared-constraints*.md` your Load First names — `agent/shared-constraints.md`
+§4 "Finding IDs and Recording", `agent/shared-constraints-code.md` §4 "Findings Use the
+Existing Backend" plus §10 "Recording Format", or `agent/shared-constraints-blue.md`
+"Artifact Registration and `finding record`". Read them there; do not re-derive them here.
 
 ---
 
@@ -170,6 +174,52 @@ it in role prompts.
 
 ---
 
+## Contract-First Rule
+
+Before the **first invocation of any `vigil assess` verb that mutates durable
+state, dispatches a runtime tool, or seats work-buffer rows**, run
+`vigil assess contract <verb>` (or `vigil assess contract <verb> <variant>`)
+to read the canonical schema, the required fields, the common mistakes, and
+the example payload. Schema validation errors from guessing waste a full
+round-trip, so reading the contract first is faster than re-running the
+verb after a rejection.
+
+Verbs covered by the rule — every one has a contract entry; the ones outside
+your track simply never come up:
+
+- `finding record` — `vigil assess contract finding record`
+- Lifecycle helpers (`finding verify --status <status>` — including a completed
+  counter-check for `false_positive`, `finding update` — including `--status draft`
+  to reopen, `resolve <surface|coverage-item>`) — `vigil assess contract <verb>`
+- `agent <subverb>` for sub-verbs that mutate durable dispatch state or
+  emit the canonical handoff blob:
+  `start`, `done`, `handoff`, `decision`,
+  `abort-duplicate`, `render-handoff` — `vigil assess contract agent <subverb>`
+- `intel record <type>` — `vigil assess contract intel record <type>`
+- `record-surface` — `vigil assess contract record-surface`
+- `kali <verb>` — `vigil assess contract kali <verb>`
+- `code-record <subverb>` (`classify`, `analysis`, `modules`, `threat-model`,
+  `variant-check`, `fuzz-decision`, `fuzz-campaign`) —
+  `vigil assess contract code-record <subverb>`
+
+Verbs **not** covered (skip the contract round-trip — they are read-only or
+have no payload to validate): `fetch`, `list-skills`, `work-buffer clusters`,
+`command-run list`, `command-run get`, `check-phase-readiness`,
+`scope filter`, `work-buffer stats|peek|fetch|done`,
+`dispatch list`, `dispatch get`. Reading the contract for these adds
+latency without preventing any error class.
+
+Treat the contract output as the source of truth for arg ordering, flag
+names, enum values, and required fields. Do not infer field names from
+similar tools — five of the most common dispatch errors in recent
+engagements (`record-surface` arg ordering, `finding record` agent prefix,
+`finding update` guessing a nonexistent `--details-patch` flag instead of
+the real `--details-inline`/`--details-replace`, `kali katana -H`, `kali exec
+--probe-kind active`) would each have been prevented by running
+`contract` before the first call.
+
+---
+
 ## Output Hygiene — Backend Is Canonical
 
 The backend stores the canonical, queryable state of the engagement: findings in
@@ -226,7 +276,9 @@ operator marks the dispatch complete after your return so checkpointing stays
 separate from lifecycle closure.
 
 `agent handoff` is idempotent — call it as a checkpoint after each major step,
-not only at the end. Why: a dispatch that halts before the final closing call
+not only at the end. Where a role writes durable per-item receipts, those
+receipts are the same kind of checkpoint and carry the same rule: write each
+one as its unit of work finishes, not at end-of-lane. Why: a dispatch that halts before the final closing call
 (e.g. context exhaustion) makes its most recent checkpoint the canonical
 resume point — skip a checkpoint and whatever you did since the last one is
 invisible to the operator and to whoever resumes. Use the exact `agent_id`,

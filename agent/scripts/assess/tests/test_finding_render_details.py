@@ -33,6 +33,23 @@ def test_render_preserves_parsed_details() -> None:
         assert value in rendered
 
 
+def test_render_names_the_finding_a_merge_absorbed_it_into() -> None:
+    """A merged finding never reaches ``findings.md`` (which renders only the
+    report-durable set), but the markdown-tree ``draft.md`` renders every stored
+    row — and there the consolidation pointer is the whole reason the duplicate
+    is still on disk."""
+    rendered = render_finding(
+        {
+            "slug": "VA-001",
+            "title": "Parser issue",
+            "merged_into_slug": "VA-010",
+            "details": {"evidence": "proof"},
+        }
+    )
+
+    assert "- **Merged Into**: VA-010" in rendered
+
+
 def test_render_marks_persisted_finding_content_as_untrusted() -> None:
     rendered = render_finding(
         {

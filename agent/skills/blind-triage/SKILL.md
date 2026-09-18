@@ -94,8 +94,9 @@ vigil assess agent decision --kind blind_triage_verdict --payload-json \
 
 This writes a `kind='blind_triage_verdict'` row to the `assessment_dispatch_decisions`
 table. `vigil assess transition-phase report` (and `complete`) reads these rows and
-**blocks** with `kind=missing_blind_triage` for any Medium-or-above active finding
-that lacks a recorded verdict whose `verdict` starts `Accept` — so an un-recorded
+**blocks** with `kind=missing_blind_triage` for any Medium-or-above finding in a
+submittable workflow state (`active`, `exploited`, `blocked`, `reported`, ...) that
+lacks a recorded verdict whose `verdict` starts `Accept` — so an un-recorded
 verdict reads identically to no triage at all. The verdict string must start with
 `Accept` (e.g. `Accept@P3`) to clear the gate; any other value records the
 disposition but does not unblock publish.

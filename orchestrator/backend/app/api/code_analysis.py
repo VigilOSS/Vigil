@@ -32,6 +32,13 @@ CodeSlotType: TypeAlias = Literal[
     "EXEC-POLICY",
 ]
 StrictPositiveId: TypeAlias = Annotated[int, Field(strict=True, gt=0)]
+CodeClassification: TypeAlias = Literal["critical", "high", "medium", "low", "skip"]
+CodeQueueStatus: TypeAlias = Literal[
+    "pending", "processing", "done", "error", "needs_context"
+]
+CodeQueueMode: TypeAlias = Literal[
+    "initial", "reanalysis", "trigger", "metadata-refresh"
+]
 StructuralAnalysisStatus: TypeAlias = Literal["complete", "degraded", "unsupported"]
 StructuralAnalysisMode: TypeAlias = Literal[
     "tree_sitter",
@@ -53,6 +60,11 @@ StructuralDimension: TypeAlias = Literal[
 _STREAMING_FALLBACK_UNAVAILABLE_BASELINE = frozenset(
     {"call_sites", "classes", "dataflow", "exports", "functions"}
 )
+# `_detect_sinks` and `_detect_call_sites` read nothing but the spans a callable
+# bounds, so a tree-sitter file with no callable measured none of these. The
+# producer is `_unscanned_scope_dimensions` in
+# `agent/scripts/assess/lib/treesitter_index.py`; keep the two in step.
+_UNSCANNED_SCOPE_DEGRADATION_REASON = "unscanned_function_scope"
 _SHA256_PATTERN = r"^[0-9a-f]{64}$"
 _MAX_REPO_KEY_BYTES = 255
 _MAX_VARIANT_PARENT_FINDINGS = code_analysis.MAX_VARIANT_PARENT_FINDINGS
@@ -95,6 +107,12 @@ class CodeRepoCreateRequest(BaseModel):
     name: str = Field(min_length=1, max_length=256)
     language: str = Field(default="", max_length=64)
     repo_path: str = Field(min_length=1, max_length=4096)
+    # Omitted means "keep whatever this repository already declared", which is
+    # what makes a routine re-ingest safe: forgetting the flag can never hand
+    # the engagement a coverage obligation over a reference codebase. A repo
+    # that has never declared a role is `analysis`, so existing state is
+    # unchanged. See ``code_analysis.CODE_REPO_ROLES``.
+    repo_role: Literal["analysis", "reference"] | None = None
     source_origin_path: str = Field(default="", max_length=4096)
     source_kind: Literal["git", "directory", "legacy"] = "legacy"
     snapshot_manifest_path: str = Field(default="", max_length=4096)
@@ -240,8 +258,9 @@ class QueueFetchRequest(BaseModel):
     limit: int = Field(default=10, ge=1, le=100)
     agent_name: str = Field(min_length=1, max_length=128)
     repo_id: StrictPositiveId | None = None
-    classification: Literal["critical", "high", "medium", "low", "skip"] | None = None
+    classification: CodeClassification | None = None
     batch_theme: str | None = Field(default=None, max_length=256)
+    queue_mode: CodeQueueMode | None = None
     item_ids: list[StrictPositiveId] | None = Field(default=None, min_length=1, max_length=1000)
 
 
@@ -292,6 +311,27 @@ class QueueHeartbeatRequest(BaseModel):
     item_id: StrictPositiveId
     agent_name: str = Field(min_length=1, max_length=128)
     lease_token: str = Field(min_length=1, max_length=128)
+
+
+class QueueAdoptLeaseRequest(BaseModel):
+    """B9: compare-and-swap one abandoned analysis lease onto a replacement.
+
+    `expected_agent` / `expected_lease_token` are the identity the caller
+    observed, so the swap can only land on the lease it looked at.
+    `stale_minutes` is the caller's explicit assertion that the lease is dead;
+    it is bounded exactly like `QueueResetStaleRequest.minutes` because both
+    describe the same abandonment window, and the service re-checks it on the
+    database clock inside the swapping transaction.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    item_id: StrictPositiveId
+    expected_agent: str = Field(min_length=1, max_length=128)
+    expected_lease_token: str = Field(min_length=1, max_length=128)
+    agent_name: str = Field(min_length=1, max_length=128)
+    stale_minutes: int = Field(default=10, ge=1, le=1440)
+    reason: str = Field(min_length=1, max_length=2000)
 
 
 class SourceLineSpan(BaseModel):
@@ -357,9 +397,12 @@ class AnalysisResultRecord(BaseModel):
 
 
 class RequeueItemRecord(BaseModel):
+    """One trigger input. Exactly one selector; the service enforces that."""
+
     model_config = ConfigDict(extra="forbid")
 
     file_id: StrictPositiveId | None = None
+    trigger_id: StrictPositiveId | None = None
     file_path: str = Field(default="", max_length=4096)
     repo_id: StrictPositiveId | None = None
     priority: int | None = Field(default=None, strict=True, ge=0, le=100)
@@ -481,17 +524,24 @@ class StructuralMetadataItem(BaseModel):
                         "dimensions: " + ", ".join(missing_baseline)
                     )
             elif self.structural_analysis_mode in {"tree_sitter", "lightweight_regex"}:
-                if self.structural_degradation_reason != "artifact_signal_limit":
+                if not (
+                    self.structural_artifact_truncated
+                    or self.structural_unavailable_dimensions
+                ):
                     raise ValueError(
-                        "bounded parser degradation requires reason=artifact_signal_limit"
+                        "bounded parser degradation requires a truncated artifact "
+                        "or an unavailable dimension"
                     )
-                if self.structural_unavailable_dimensions:
+                # Truncation is the louder debt -- it dropped records the parser
+                # did read -- so it owns the reason when both apply.
+                expected_reason = (
+                    "artifact_signal_limit"
+                    if self.structural_artifact_truncated
+                    else _UNSCANNED_SCOPE_DEGRADATION_REASON
+                )
+                if self.structural_degradation_reason != expected_reason:
                     raise ValueError(
-                        "bounded parser degradation cannot claim unavailable dimensions"
-                    )
-                if not self.structural_artifact_truncated:
-                    raise ValueError(
-                        "bounded parser degradation requires a truncated artifact"
+                        f"bounded parser degradation requires reason={expected_reason}"
                     )
             else:
                 raise ValueError("degraded structural analysis requires an explicit degraded mode")
@@ -535,6 +585,31 @@ class StructuralMetadataItem(BaseModel):
             raise ValueError(
                 "unavailable structural dimensions require zero totals/signals: "
                 + ", ".join(unavailable_with_values)
+            )
+        # The complement of the rule above: `unavailable` already implies zero, and
+        # this implies the reverse for the one case the payload can prove. With no
+        # callable, the exact parser handed no line to the function-scoped
+        # detectors; any other signal proves the file still had source to scan, so
+        # `complete` claims a measurement that cannot have happened. A file with no
+        # signal at all stays legal -- it is consistent with a blank or comment-only
+        # source, which really does measure empty.
+        if (
+            self.structural_analysis_status == "complete"
+            and self.structural_analysis_mode == "tree_sitter"
+            and not self.total_functions
+            and any(
+                (
+                    self.total_entry_points,
+                    self.total_exports,
+                    self.total_sinks,
+                    *self.structural_signal_counts.model_dump().values(),
+                )
+            )
+        ):
+            raise ValueError(
+                "a tree-sitter file with no callable scope cannot report complete "
+                "function-scoped coverage over source it clearly scanned: name the "
+                "unavailable dimensions"
             )
         if self.structural_artifact_truncated != bool(self.structural_truncated_dimensions):
             raise ValueError(
@@ -772,6 +847,33 @@ class FuzzCampaignReceiptRequest(BaseModel):
         ):
             raise ValueError("completed fuzz campaigns require at least one execution")
         return self
+
+
+class CodeLeadBindRequest(BaseModel):
+    """Bind one tracked intel lead to one place in the reviewed source.
+
+    ``file_path`` rather than a file id: prior art names a path, and the
+    backend is the only side that can resolve it against the repository's
+    current sealed generation. Lines are optional - a whole-file binding is a
+    legitimate "the bug class lives in this file" claim.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    note_id: StrictPositiveId
+    repo_id: StrictPositiveId
+    file_path: str = Field(min_length=1, max_length=4096)
+    line_start: int | None = Field(default=None, ge=1)
+    line_end: int | None = Field(default=None, ge=1)
+    prior_art_ref: str = Field(default="", max_length=512)
+    rationale: str = Field(default="", max_length=4096)
+    bound_by: str = Field(default="", max_length=128)
+
+
+class CodeLeadUnbindRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str = Field(min_length=1, max_length=1024)
 
 
 # ---------------------------------------------------------------------------
@@ -1060,6 +1162,32 @@ async def bulk_create_queue_items(engagement_key: str, request: QueueItemsBulkCr
     return record
 
 
+@router.get("/analysis-queue")
+def list_queue_items(
+    engagement_key: str,
+    status_filter: CodeQueueStatus | None = Query(default=None, alias="status"),
+    repo_id: int | None = Query(default=None),
+    classification: CodeClassification | None = Query(default=None),
+    batch_theme: str | None = Query(default=None, max_length=256),
+    queue_mode: CodeQueueMode | None = Query(default=None),
+    stale_minutes: int | None = Query(default=None, ge=1, le=1440),
+    limit: int = Query(default=200, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
+) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    return code_analysis.list_queue_items(
+        engagement.id,
+        status_filter=status_filter,
+        repo_id=repo_id,
+        classification=classification,
+        batch_theme=batch_theme,
+        queue_mode=queue_mode,
+        stale_minutes=stale_minutes,
+        limit=limit,
+        offset=offset,
+    )
+
+
 @router.get("/analysis-queue/stats")
 def get_queue_stats(engagement_key: str) -> dict[str, Any]:
     engagement = get_engagement_or_404(engagement_key)
@@ -1078,6 +1206,7 @@ async def fetch_queue_items(engagement_key: str, request: QueueFetchRequest) -> 
             repo_id=request.repo_id,
             classification=request.classification,
             batch_theme=request.batch_theme,
+            queue_mode=request.queue_mode,
             item_ids=request.item_ids,
         )
     )
@@ -1182,6 +1311,54 @@ async def heartbeat_queue_item(engagement_key: str, request: QueueHeartbeatReque
     )
     await _broadcast(engagement.key, "queue_heartbeat", record)
     return record
+
+
+@router.post("/analysis-queue/adopt-lease")
+async def adopt_queue_lease(
+    engagement_key: str, request: QueueAdoptLeaseRequest
+) -> dict[str, Any]:
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    record = await anyio.to_thread.run_sync(
+        functools.partial(
+            code_analysis.adopt_queue_lease,
+            engagement.id,
+            item_id=request.item_id,
+            expected_agent=request.expected_agent,
+            expected_lease_token=request.expected_lease_token,
+            agent_name=request.agent_name,
+            stale_minutes=request.stale_minutes,
+            reason=request.reason,
+        )
+    )
+    await anyio.to_thread.run_sync(
+        functools.partial(
+            _audit_code_mutation,
+            engagement.id,
+            title="code-dispatch adopt-lease",
+            action=(
+                f"item_id={request.item_id} from={request.expected_agent} "
+                f"to={request.agent_name} stale_minutes={request.stale_minutes}"
+            ),
+            actor_name=request.agent_name,
+            result=request.reason,
+            metadata={
+                "item_id": request.item_id,
+                "previous_agent_name": request.expected_agent,
+                "previous_lease_token": request.expected_lease_token,
+                "lease_token": record["item"]["lease_token"],
+                "stale_minutes": request.stale_minutes,
+                "preserved_result_count": record["preserved_result_count"],
+            },
+        )
+    )
+    await _broadcast(engagement.key, "queue_adopt_lease", record)
+    return record
+
+
+@router.get("/analysis-queue/{item_id}/progress")
+def get_queue_item_progress(engagement_key: str, item_id: int) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    return code_analysis.queue_item_progress(engagement.id, item_id)
 
 
 @router.post("/analysis-queue/retry-error")
@@ -1614,6 +1791,78 @@ def get_readiness(
 ) -> dict[str, Any]:
     engagement = get_engagement_or_404(engagement_key)
     return code_analysis.code_readiness(engagement.id, target_phase=target_phase)
+
+
+# ---------------------------------------------------------------------------
+# Prior-art lead bindings
+# ---------------------------------------------------------------------------
+
+@router.post("/lead-bindings", status_code=status.HTTP_201_CREATED)
+async def bind_code_lead(
+    engagement_key: str, request: CodeLeadBindRequest
+) -> dict[str, Any]:
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    record = await anyio.to_thread.run_sync(
+        functools.partial(
+            code_analysis.bind_code_lead,
+            engagement.id,
+            note_id=request.note_id,
+            repo_id=request.repo_id,
+            file_path=request.file_path,
+            line_start=request.line_start,
+            line_end=request.line_end,
+            prior_art_ref=request.prior_art_ref,
+            rationale=request.rationale,
+            bound_by=request.bound_by,
+        )
+    )
+    await _broadcast(engagement.key, "lead_binding", record)
+    return record
+
+
+@router.get("/lead-bindings")
+def list_code_lead_bindings(
+    engagement_key: str,
+    note_id: int | None = Query(default=None, ge=1),
+    repo_id: int | None = Query(default=None, ge=1),
+    lead_status: Literal["open", "in_progress", "resolved", "ruled_out"] | None = Query(
+        default=None
+    ),
+    include_superseded: bool = Query(default=False),
+    limit: int = Query(
+        default=code_analysis.DEFAULT_LEAD_BINDING_PAGE,
+        ge=1,
+        le=code_analysis.MAX_LEAD_BINDING_PAGE,
+    ),
+    offset: int = Query(default=0, ge=0),
+) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    return code_analysis.list_code_lead_bindings(
+        engagement.id,
+        note_id=note_id,
+        repo_id=repo_id,
+        lead_status=lead_status,
+        include_superseded=include_superseded,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.post("/lead-bindings/{binding_id}/unbind")
+async def unbind_code_lead(
+    engagement_key: str, binding_id: int, request: CodeLeadUnbindRequest
+) -> dict[str, Any]:
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    record = await anyio.to_thread.run_sync(
+        functools.partial(
+            code_analysis.unbind_code_lead,
+            engagement.id,
+            binding_id,
+            reason=request.reason,
+        )
+    )
+    await _broadcast(engagement.key, "lead_binding", record)
+    return record
 
 
 # ---------------------------------------------------------------------------

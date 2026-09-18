@@ -28,7 +28,7 @@ const engagement: Engagement = {
 
 beforeEach(() => {
   vi.mocked(getDashboardSummary).mockRejectedValue(new Error("summary unavailable"));
-  vi.mocked(deleteEngagement).mockResolvedValue(undefined);
+  vi.mocked(deleteEngagement).mockResolvedValue({ deleted: true, key: "demo", id: 1 });
 });
 
 afterEach(() => {
@@ -77,9 +77,11 @@ describe("EngagementsPage delete dialog", () => {
 
   it("cannot dismiss or reset the destructive dialog while deletion is in flight", async () => {
     let finishDelete!: () => void;
-    vi.mocked(deleteEngagement).mockReturnValue(new Promise<void>((resolve) => {
-      finishDelete = resolve;
-    }));
+    vi.mocked(deleteEngagement).mockReturnValue(
+      new Promise((resolve) => {
+        finishDelete = () => resolve({ deleted: true, key: "demo", id: 1 });
+      }),
+    );
     render(<EngagementsPage engagements={[engagement]} onOpenEngagement={vi.fn()} />);
     fireEvent.click(screen.getByRole("button", { name: "Delete engagement demo" }));
     fireEvent.change(screen.getByRole("textbox", { name: /Type demo to confirm/ }), {

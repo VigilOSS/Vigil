@@ -13,12 +13,10 @@ state that must be resolved before target-facing decisions.
 For a live/deployed attack claim, if the answer to "can an attacker do this right now with real
 harm?" is no, that claimed attacker outcome is not established yet.
 
-**Code-mode reachability:** apply `agent/shared-constraints-code.md` §5. A supported public
-library/framework API, shipped CLI input, or registered plugin callback can establish product
-reachability even when no embedding application is present. That proves only the applicable product
-path: retain the concrete defect, then constrain attacker claims and severity to the consumer/host
-context actually evidenced. The broken security invariant and plausible harmful outcome still need
-proof, and generic caller-selected capability alone still grants no net-new attacker power.
+**Code-mode reachability is not this file's.** Product path versus deployment-specific attacker
+reachability, the net-new-capability test, and how far a library/framework defect may claim impact
+without an embedding consumer are owned end-to-end by `agent/shared-constraints-code.md` §5 — the
+code track's own bundle. Everything below governs live/deployed claims.
 
 For live/deployed claims, proving a vulnerability exists is not enough: demonstrate what the
 attacker **gains** from it. The gap between "vulnerability confirmed" and "attacker outcome
@@ -37,18 +35,11 @@ proved" is where most severity inflation happens.
 - "Session token replayed from a different IP returns 200 with authenticated user data — no IP binding"
 
 For live/deployed claims, the pattern applies to every vulnerability class: confirm the primitive,
-then demonstrate the attacker outcome it enables. For code-mode supported-product defects, the §5
-rule above governs instead: prove the broken security invariant and feasible harm, while keeping an
-unevidenced consumer-specific attacker outcome out of the claim.
+then demonstrate the attacker outcome it enables.
 
 When you capture credentials, tokens, or keys — **use them**. Extract the token, replay it, show what it unlocks. If replay fails, say why (expiry, IP binding, CSRF token required) and mark the finding CHAIN REQUIRED with the specific gap.
 
-A strong-but-unproven finding is parked, not dropped: hold it with `evidence_type=theoretical` + `chain_required=true` at `verification_status=pending_runtime_proof` (see `agent/operator-core.md`), and review the holding area with `vigil assess finding list --holding`. It stays out of the report until a runtime pass proves it.
-
-A deterministic code-mode proof through a supported product path is not "unproven" merely because
-an embedding consumer is unavailable. Record the bounded intrinsic defect under
-`shared-constraints-code.md` §5; park it only when the invariant failure or feasible harm is itself
-still unproved.
+A strong-but-unproven finding is parked, not dropped: hold it with `evidence_type=theoretical` + `chain_required=true` at `verification_status=pending_runtime_proof` (`vigil assess contract finding record`), and review the holding area with `vigil assess finding list --holding`. It stays out of the report until a runtime pass proves it.
 
 **Recording a finding is not grading it.** A finding at `verification_status=unreviewed` is an **open question**, not a graded N/A — the lifecycle default means "not yet judged," not "judged harmless." Do not assert "no P2 here" / "this surface is clean" while any unauth or medium-plus finding is still `unreviewed`: an unreviewed finding is exactly what a clean-bill-of-health claim is supposed to have already resolved. Drive it to a verifier decision before you grade the surface.
 
@@ -61,12 +52,8 @@ reach), that is a constraint on *you*, not a weakness in the finding. Do not low
 severity to match what you were permitted to demonstrate. Grade the **candidate at
 impact-if-true** — the severity it carries if the blocked step succeeds, which the
 surrounding evidence already makes likely — and record the single unblocking test that
-would convert it:
-
-| Field | Value |
-|---|---|
-| `details.roe_blocked` | `true` |
-| `details.required_followup` | the exact next action that would convert the candidate |
+would convert it, as `details.roe_blocked` plus a `details.required_followup` naming the exact
+next action (`vigil assess contract finding record`).
 
 This is distinct from the theoretical/`chain_required` park above (which needs another
 *bug* to land): here the primitive is proved and only the demonstration is walled off by
@@ -80,22 +67,20 @@ theoretical/`chain_required` means the finding needs another *bug* to complete. 
 case is neither — the attempt cannot even start because a precondition is missing: no
 test account in the required group, no access to the physical line/device, no
 additional credential or access grant. The wall may be permanent for this engagement.
-Record it with:
-
-| Field | Purpose |
-|---|---|
-| `details.block_reason` | why the attempt could not proceed |
-| `details.unblock_requirements` | `{kind: account\|line\|device\|credential\|access, description, requested_from}` — what is missing and who/what would need to provision it |
-| `details.attempts_summary` | repeated attempts rolled up here instead of scattered across free-text notes |
+Record it on the finding as `details.block_reason` + `details.unblock_requirements` +
+`details.attempts_summary` (field shapes and the `kind` vocabulary:
+`vigil assess contract finding record`), and record the technique-level wall itself with
+`vigil assess block-technique`.
 
 A `blocked` finding stays OUT of the report — unlike an `roe_blocked` candidate, it is
 not gradeable at impact-if-true, because the primitive itself was never reached. But the
 unblock path is first-class, not a dead end: when a later finding or chain lands that
 would satisfy the block (the missing account gets provisioned, the missing device turns
-up, the missing credential surfaces elsewhere), link the two — `vigil assess finding
-link <blocked-finding-slug> --link-kind unblocked_by --target-kind finding --target-ref
-<finding-that-unblocks-it>` — so the operator, and the next engagement against this
-target, see the connection instead of re-discovering it from scratch.
+up, the missing credential surfaces elsewhere), link the two so the operator, and the
+next engagement against this target, see the connection instead of re-discovering it from
+scratch. Which side is the subject of that link depends on whether the wall is a finding
+or a technique — `vigil assess contract finding link` and `contract block-technique` carry
+both directions and why they differ.
 
 ### Re-derive a blocked record before accepting it
 
@@ -154,14 +139,14 @@ nothing twice is exactly how the deep bug on the third surface gets missed.
 An endpoint whose human-reach status is still **unknown** — the `agent/shared-constraints.md`
 §2d preflight did not resolve it, and no `human_reach_decision` has been recorded —
 is an **open question, not a silent skip**. Do not close a surface as exhausted
-while a notify-shaped endpoint on it sits undetermined; run it through the §2d
-procedure (static characterization, then the bounded live-fire budget if still
-ambiguous) so it lands in the same recorded-verdict system as every other lead.
-A name alone — `send-notification`, `alert-approver`, `ticket-create` — is a
+while a notify-shaped endpoint on it sits undetermined; run it through the procedure
+`vigil assess contract agent decision` owns (static characterization, then the bounded
+live-fire budget if still ambiguous) so it lands in the same recorded-verdict system
+as every other lead. A name alone — `send-notification`, `alert-approver`, `ticket-create` — is a
 hypothesis about behavior, not proof it reaches anyone: an endpoint that only
-*looks* notify-shaped may resolve NEGATIVE under §2d and become ordinary surface,
-and one that looks harmless may resolve POSITIVE. The recorded determination —
-not the name — decides how you treat it.
+*looks* notify-shaped may resolve NEGATIVE under the reaches-a-real-third-party
+test and become ordinary surface, and one that looks harmless may resolve
+POSITIVE. The recorded determination — not the name — decides how you treat it.
 
 ## 6. Evidence beats volume
 
@@ -173,10 +158,8 @@ the extra pull is itself the harm (`agent/shared-constraints.md` §4, "Proof-not
 
 ## 7. Reach for the skill when the signal calls for it
 
-When a skill exists for the technique you're about to run, load it the moment the signal appears —
-it encodes harness specifics and calibration you cannot derive from general knowledge
-(`agent/shared-constraints.md` §3). This is trigger-gated, not a mandatory pre-work gate: you are
-not blocked on having pre-loaded every skill before starting.
+Trigger-gated skill loading is owned by `agent/shared-constraints.md` §3 (code track:
+`agent/shared-constraints-code.md` §8) — read it there.
 
 ## 8. Automation for recon, judgment for validation
 
@@ -218,7 +201,8 @@ Leaked tokens, keys, or config only matter when you show what they actually gran
 
 ## 15. Rotate only when genuinely dry, not when slow
 
-Switch endpoint, method, surface, or hypothesis when a lead is genuinely exhausted — when repeated *varied* attempts (not repeats of the same probe) produce no new information. Slow or difficult is not the same as dry: push through ambiguous responses on a live lead before rotating.
+Rule 5 applied to a single lead: switch endpoint, method, surface, or hypothesis only once
+repeated *varied* attempts (not repeats of the same probe) produce **no new information**.
 
 ## 16. Time is not the constraint — confidence is
 
@@ -314,10 +298,8 @@ to test — a discovered path from `robots.txt` / sitemap / JS, a known
 parameter pulled from source analysis, a specific endpoint — `curl` that
 thing directly via `vigil assess kali exec -- curl ...`. If you have NO
 knowledge and need to discover from scratch, AND brute-force is in scope per
-the engagement VDP, then use the appropriate Kali verb (`ffuf` for paths,
-`arjun` for params, `puredns` for DNS, `sqlmap` for SQLi, `dalfox` for XSS,
-`nuclei` for template-based CVE/misconfig, `httpx`/`whatweb`/`wafw00f` for
-fingerprinting).
+the engagement VDP, then use the appropriate Kali verb — the verb menu is in
+`vigil assess kali --help` and `agent/skills/kali-exec/SKILL.md`.
 
 Before you brute-force a *format* — guessing parameter names, ID shapes, path
 segments, or value encodings — re-read the recon output you already captured,
@@ -398,25 +380,21 @@ and resolver-authz notes in `agent/skills/graphql-testing/SKILL.md` — are this
 one class; this is the general form. Use `vigil assess list-skills` to find the matching skill.)
 
 **(c) An `http=000` / connection-failed / DNS-failure response is a RUNTIME ERROR, not a
-target verdict.** A failed connection tells you nothing about the target. On the kali path
-this now surfaces as `status=transport_error` (never a target verdict like `404`/`patched`/
-`gated`/`not-present`) and auto-retries once on a **host-pinned IP** (`--resolve <host>:443:<IP>`).
-Never record "404 / patched / gated / not-present" from a transport failure: re-run host-pinned
-(or via the host route — `--runtime host` / `VIGIL_RECON_RUNTIME=host`) and let a *real* HTTP
-response — or a clean, fast connection-refused — be the verdict. See
-`agent/references/runtime-guides/docker-desktop-network-hazards.md`.
+target verdict.** A failed connection tells you nothing about the target, so never record
+"404 / patched / gated / not-present" from one. The kali path surfaces it as
+`status=transport_error` (exit 6) and auto-retries once host-pinned; if it persists, re-run via
+the host route (`--runtime host`) and let a *real* HTTP response — or a clean, fast
+connection-refused — be the verdict.
 
 **(d) A WAF / bot-challenge interstitial is PENDING — never a verdict in either direction —
 until a browser proves the origin.** When the bytes are the edge's challenge page rather than
-the origin app's — Imperva (`reese84` cookie / *"Pardon Our Interruption"*), Akamai (`_abck`
-cookie / `AkamaiGHost` / *"Access Denied"*), or Cloudflare (`cf-chl` / *"Just a moment"*) —
-the response belongs to the WAF, not the application behind it. A `200`/`403` (or any
-status/body) that `curl`/`httpx` returns from a WAF-fronted host is a **challenge artifact**:
-it proves neither presence nor absence of a finding and decides nothing about the surface.
-Re-render with `vigil assess kali browser <url>` — headless Chromium executes the challenge JS
-and returns the **real origin** status + DOM; only that rendered origin response is a verdict.
-The kali path surfaces this as `status=waf_challenge` precisely so it cannot close a surface as
-`404`/`patched`/`gated`/`not-present`; do not override it with the challenge's status code.
+the origin app's, the response belongs to the WAF, not the application behind it, and decides
+nothing about the surface. Re-render with `vigil assess kali browser <url>`: headless Chromium
+executes the challenge JS and returns the **real origin** status + DOM, and only that rendered
+origin response is a verdict. The kali path surfaces this as `status=waf_challenge` precisely so
+it cannot close a surface as `404`/`patched`/`gated`/`not-present`; do not override it with the
+challenge's status code. Vendor challenge signatures, and the fingerprint-block case a re-render
+will NOT clear, are in `agent/references/web/waf-bypass-and-safe-testing.md`.
 
 **(e) An auth-gate redirect is a bypass-test LEAD, not a "covered/gated" closure.**
 A `302` to a login or policy page proves the gate *fired* — it says nothing about whether
@@ -531,18 +509,13 @@ and `agent/operator-core.md` Mandatory Phase-Exit Passes). This is not
 from Phase 4 on, so the hold is legible the whole way and never a surprise at
 report time.
 
-Inspect the ledger with `vigil assess app-unit list` and
-`check-phase-readiness --by-app-unit`; re-run discovery after more collection
-with `vigil assess app-unit score`. When you know a unit deserves (or does
-not deserve) a deep pass regardless of the score, set a durable manual
-override with `vigil assess app-unit mark-deep <id> --reason ...` or `vigil
-assess app-unit clear-deep <id> --reason ...` — a manual mark always wins
-over the scorer. Treat a `deep_required` unit as a whole application: a
-dedicated dispatch across every applicable vuln class and auth context, not
-a single surface glance. The Operator can claim its next coherent queue batch
-with `vigil assess work-buffer fetch-by-unit`; inspect `vigil assess contract
-work-buffer` for optional unit/path/class narrowing and explicit sizing before
-dispatching it.
+Treat a `deep_required` unit as a whole application: a dedicated dispatch
+across every applicable vuln class and auth context, not a single surface
+glance. `vigil assess app-unit list` shows the ledger, `app-unit score`
+re-runs discovery, and `app-unit mark-deep` / `clear-deep` pin a manual
+override that always beats the scorer (`vigil assess contract app-unit`);
+claim a unit's next coherent queue batch with `vigil assess work-buffer
+fetch-by-unit` (`vigil assess contract work-buffer`).
 
 ## 26. Attack headers are ordinary injected inputs, not special-cased
 
@@ -564,12 +537,10 @@ This is a starting menu, not a checklist to exhaust mechanically — the same
 governs every other input applies here uniformly; headers are not special. Inject
 the ones plausible for the architecture you observed (a CDN-fronted host →
 `X-Forwarded-*`; a path-rewriting reverse proxy → `X-Original-URL`/`X-Rewrite-URL`),
-then record the attempt the same way you would a query or body probe:
-`vigil assess record-probe --input-slot header:X-Forwarded-Host --result-status
-<tested|signal|attempted|blocked|no-signal|error> ...` — the verdict decides
-covering vs. touched-but-inconclusive (evidence is required only for
-`tested`/`signal`) — full template in `agent/shared-constraints.md` §10. Observed
-security-relevant routing,
+then record the attempt the same way you would a query or body probe — as
+`vigil assess record-probe --input-slot header:<name> ...`, whose verdict decides
+covering vs. touched-but-inconclusive (full flag set: `vigil assess contract
+record-probe`). Observed security-relevant routing,
 identity, and method-override names can arrive as first-class `header:<name>`
 coverage items; manual probes still land in the same per-input grid when no item
 was derived. For exploitation depth once a header vector shows signal, see

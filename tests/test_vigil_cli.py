@@ -682,10 +682,10 @@ def test_legacy_revision_only_install_stamp_keeps_commit_distance(
 def test_assess_stale_warning_explains_unsnapshotted_source_content(
     tmp_path, monkeypatch, capsys
 ) -> None:
-    from vigil_cli import main as main_module
+    from vigil_cli import preflight as preflight_module
 
     monkeypatch.setattr(
-        main_module,
+        preflight_module,
         "install_staleness",
         lambda _root: {
             "state": "stale",
@@ -695,7 +695,7 @@ def test_assess_stale_warning_explains_unsnapshotted_source_content(
         },
     )
 
-    main_module._warn_if_install_stale(tmp_path)
+    preflight_module._warn_if_install_stale(tmp_path)
 
     captured = capsys.readouterr()
     assert captured.out == ""

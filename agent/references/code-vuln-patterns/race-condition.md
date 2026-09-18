@@ -13,19 +13,6 @@ languages: C/C++, Python, JS
 
 ---
 
-## Baseline Patterns (Single-Function / Single-Scope)
-
-Toolchain-catchable patterns. Record as findings if encountered during orientation —
-on unaudited codebases these are real, exploitable bugs that no prior tool run has caught.
-Invest primary analysis time in the LLM-advantage patterns below.
-
-- Basic TOCTOU on file open: `access()` then `open()` in the same function
-- Missing lock around shared variable access (simple data-race detectors)
-- Obvious thread-safety violations in single-function scope
-- `stat()` then `open()` without `O_NOFOLLOW` in the same function
-
----
-
 ## What You're Hunting (LLM-Advantage Patterns)
 
 ### 1. State Machine Transitions With Out-of-Order Events

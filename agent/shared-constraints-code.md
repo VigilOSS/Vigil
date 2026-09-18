@@ -1,6 +1,6 @@
 # Shared Subagent Constraints -- Code Analysis Mode
 
-**Standing-load budget:** 560 lines; this revision is 540 lines.
+**Standing-load budget:** 560 lines; this revision is 549 lines.
 
 Load this file as part of your Load First set -- together with your role file and
 `agent/shared-specialist-core.md` -- before any source code work. All three load together, not
@@ -8,7 +8,7 @@ in a race to be "first"; the one ordered load sequence (Load First batch -> skil
 discovery -> target work) is stated once in `agent/shared-specialist-core.md` "Load Sequence".
 These rules apply to every code analysis specialist agent regardless of role.
 
-> **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-specialist-core.md (in your Load First). This role adds only its own closing verbs below.
+> **Specialist context isolation, the Contract-First Rule, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-specialist-core.md (in your Load First). This role adds only its own closing verbs below.
 
 ---
 
@@ -251,11 +251,13 @@ Use `AV:N` only when the attacker's access path is genuinely network-direct. If 
 
 **Code finding conventions:**
 - `canonical_location` format: `file:<relative-path>:<line-number>` (e.g., `file:lib/url.c:547`)
-- `provenance.code_snapshot` copies `repo_id`, `repo_generation`, and
-  `source_manifest_digest` from the Code Source Identity block. This binding makes the evidence
-  reproducible; `vigil assess finding verify` is the only path that may rebind a legacy/stale
-  finding after a fresh review of the current sealed bytes, while generic finding updates cannot
-  edit it. Run `vigil assess contract finding verify` for the exact `--provenance-inline` shape
+- `provenance.code_snapshot` binds the finding to the exact source reviewed, which is what makes
+  the evidence reproducible. `finding record` and `finding verify` derive it from the active
+  repository, so do not transcribe it; what you supply is `--agent-id`, the dispatch the backend
+  resolves into that binding's attestation. Verification carries the binding on EVERY `file:`
+  finding — the author's binding cannot attest that you read the bytes — and is the only path that
+  may rebind a legacy/stale finding after a fresh review of the current sealed bytes, while generic
+  finding updates cannot edit it. Run `vigil assess contract finding verify` for the shape
 - `defect_family` uses CWE-based names: `buffer-overflow`, `integer-overflow`, `use-after-free`, `injection`, `race-condition`, `crypto-misuse`, `auth-bypass`, `format-string`
 - `details.cwe_id` must be a specific CWE ID (e.g., `CWE-122`, not generic `CWE-119`)
 - `source_name` is your agent name (e.g., `code-vuln-hunter`)
@@ -436,14 +438,13 @@ reference marked **(REQUIRED)** inside Extended Resources is required once that 
 trigger fires for this dispatch — before the finding/disposition it informs is recorded — not
 before you start reading.
 
-**References are not supplemental depth.** The `agent/references/code-vuln-patterns/` files contain:
-- "What SAST Already Catches (Skip These)" -- so you do not waste time on patterns static tools find
-- "What You're Hunting (LLM-Advantage Patterns)" -- the specific multi-function and semantic patterns only deep analysis can find
-- Language-specific idioms and real CVE examples that ground pattern matching in reality
-
-Reach for the matching reference rather than improvising the pattern when one exists for the code
-in front of you — it encodes CVE-grounded idioms and the SAST-blind-spot split you would otherwise
-have to rediscover per language.
+**A toolchain-catchable pattern is a finding, not a skip.** `strcpy` into a fixed buffer,
+`system(user_input)`, `free(p); *p = 0;` — on an unaudited codebase no prior tool run has caught
+these, so they are real exploitable bugs and you record them when you meet them. What changes is
+where primary analysis time goes, not whether the bug is reported: spend it on the multi-function
+and semantic patterns a tool cannot reach, which is what `agent/references/code-vuln-patterns/`
+calls "What You're Hunting (LLM-Advantage Patterns)". Reach for the matching reference rather than
+improvising — it encodes CVE-grounded idioms and per-class blind spots, not supplemental depth.
 
 ---
 

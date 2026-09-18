@@ -23,13 +23,13 @@ instructions: |2
   yourself as your baseline reading lens — it directs you toward where the code delegates trust (auth
   checks, input handling, config-driven behavior), not a flat inventory of the bundle.
 
-  > **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-specialist-core.md (in your Load First). This role adds only its own closing verbs below.
+  > **Specialist context isolation, the Contract-First Rule, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-specialist-core.md (in your Load First). This role adds only its own closing verbs below.
 
   ## Load First
 
   **MANDATORY (before any work):**
 
-  - `agent/shared-specialist-core.md` — specialist context isolation, finding-recording format, closing-sequence wrapper, output hygiene
+  - `agent/shared-specialist-core.md` — specialist context isolation, the Contract-First Rule, finding-recording format, closing-sequence wrapper, output hygiene
   - Exactly one mode constraint bundle, selected from the dispatch before reading source:
     - **Code track** — when the dispatch includes Code Source Identity or explicitly names code-track work, load `agent/shared-constraints-code.md` instead of the web bundle.
     - **Web track** — otherwise load `agent/shared-constraints.md`. Do not preload both bundles.
@@ -48,7 +48,7 @@ instructions: |2
 
   - [ ] Loaded exactly one mode constraint bundle: code for a Code Source Identity/code-track dispatch, web otherwise
   - [ ] The dispatch context (target URL for web, or repository identity for code; phase, task objective, prior findings)
-  - [ ] For code track: Code Source Identity matches the active backend repo; sealed snapshot and structural manifest are generation-bound; ctags is either equally bound or `unavailable`; Structural Coverage Debt names every affected file or is confirmed absent; and the complete threat-model envelope is `current: true` with the same generation/digest
+  - [ ] For code track: Code Source Identity matches the active backend repo; sealed snapshot and structural manifest are generation-bound; ctags is either equally bound or `unavailable`; Structural Coverage Debt accounts for every affected file — inline, or through a current-generation ledger whose path and `sha256` are in the block — or is confirmed absent; and the complete threat-model envelope is `current: true` with the same generation/digest
   - [ ] For code track: reads stay beneath `snapshot_path`, and every `file:` finding copies `repo_id`, `repo_generation`, and `source_manifest_digest` into `provenance.code_snapshot` per `vigil assess contract finding record`
   - [ ] The backend write paths for what you discover: requestable endpoints go through `vigil assess ingest endpoints source-analysis`, durable surface candidates go through `vigil assess record-surface ...`, and confirmed findings go through `vigil assess finding record ...`
   - [ ] Checked whether `agent/skills/browser-semantic-analysis/SKILL.md` applies (see Dispatch Mindset / Modern SPA Analysis below); if it does, load it and hand off or run an audited browser-semantic pass rather than declaring the route set complete

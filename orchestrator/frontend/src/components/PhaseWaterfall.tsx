@@ -1,21 +1,29 @@
 import { useMemo } from "react";
 import type { EventRecord } from "../lib/api";
 
-const PHASES = ["recon", "collect", "consume-test", "exploit", "report"];
+// The canonical web-track roster, in order, with the ONE place a phase is
+// displayed differently from the value the backend stores. Mirrors
+// `agent/scripts/assess/lib/phases.py:WEB_PHASES`; the terminal `complete`
+// state is not a card (it marks every card completed instead).
+// `orchestrator/backend/tests/test_phase_roster.py` pins this literal against
+// that roster, so a new phase cannot land without a card here.
+const PHASES = [
+  { key: "recon", label: "Recon" },
+  { key: "collect", label: "Collect" },
+  { key: "consume-test", label: "Consume & Test" },
+  { key: "verify", label: "Verify" },
+  { key: "exploit", label: "Exploit" },
+  { key: "report", label: "Report" },
+] as const;
+
+const TERMINAL_PHASE = "complete";
+
+const PHASE_KEYS: readonly string[] = PHASES.map((phase) => phase.key);
 
 type PhaseWaterfallProps = {
   events: EventRecord[];
   currentPhase: string;
 };
-
-function phaseLabel(phase: string) {
-  switch (phase) {
-    case "consume-test":
-      return "Consume & Test";
-    default:
-      return phase.charAt(0).toUpperCase() + phase.slice(1);
-  }
-}
 
 function phaseState(events: EventRecord[], phase: string, currentPhase: string) {
   const relevant = events.filter((event) => event.phase === phase);
@@ -26,12 +34,12 @@ function phaseState(events: EventRecord[], phase: string, currentPhase: string) 
     return "active";
   }
 
-  if (currentPhase === "complete") {
+  if (currentPhase === TERMINAL_PHASE) {
     return "completed";
   }
 
-  const currentIndex = PHASES.indexOf(currentPhase);
-  const phaseIndex = PHASES.indexOf(phase);
+  const currentIndex = PHASE_KEYS.indexOf(currentPhase);
+  const phaseIndex = PHASE_KEYS.indexOf(phase);
   if (currentIndex >= 0 && phaseIndex >= 0) {
     if (phaseIndex < currentIndex) return "completed";
     if (phaseIndex === currentIndex) return "active";
@@ -49,7 +57,7 @@ export function PhaseWaterfall({ events, currentPhase }: PhaseWaterfallProps) {
   const { hasStructuredEvents, phaseStates } = useMemo(
     () => ({
       hasStructuredEvents: events.some((event) => event.event_type.startsWith("task.")),
-      phaseStates: PHASES.map((phase) => phaseState(events, phase, currentPhase)),
+      phaseStates: PHASES.map((phase) => phaseState(events, phase.key, currentPhase)),
     }),
     [events, currentPhase],
   );
@@ -58,16 +66,16 @@ export function PhaseWaterfall({ events, currentPhase }: PhaseWaterfallProps) {
       <div className="panel-header">
         <h2>Phase waterfall</h2>
         <p className="meta-text">
-          {hasStructuredEvents ? "Five-phase autonomous workflow" : "Using workflow state because no structured task events were recorded"}
+          {hasStructuredEvents ? `${PHASES.length}-phase autonomous workflow` : "Using workflow state because no structured task events were recorded"}
         </p>
       </div>
       <div className="waterfall">
         {PHASES.map((phase, i) => {
           const state = phaseStates[i];
           return (
-            <article key={phase} className={`phase-card phase-${state}`}>
+            <article key={phase.key} className={`phase-card phase-${state}`}>
               <p className="eyebrow">{state}</p>
-              <h3>{phaseLabel(phase)}</h3>
+              <h3>{phase.label}</h3>
             </article>
           );
         })}

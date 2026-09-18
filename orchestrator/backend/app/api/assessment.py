@@ -16,6 +16,7 @@ from ..retry_state import RETRY_STATES
 from ..services import activity as activity_service
 from ..services import assessment_memory
 from ..services import artifact_index
+from ..services import operator_checkpoints
 from ..services import state_manager
 from ..services.state_manager.coverage import (
     DEFAULT_PROBE_RUN_LIMIT,
@@ -34,6 +35,13 @@ from ..services.state_manager.coverage import (
 # ``depth_ledger`` FUNCTION under that name, shadowing the submodule attribute, so
 # it is imported directly from the submodule rather than via ``state_manager``.
 from ..services.state_manager.depth_ledger import by_family_coverage
+# Client bindings are a dispatch-package concern that postdates the package's
+# ``__init__`` re-export list; imported from the submodule (as coverage,
+# depth_ledger, and http_flows above are) rather than widening that list.
+from ..services.state_manager.dispatches import (
+    list_dispatch_client_bindings,
+    record_dispatch_client_binding,
+)
 from ..services.state_manager.http_flows import (
     CapturePolicyMirrorError,
     DEFAULT_HTTP_FLOW_LIMIT,
@@ -46,27 +54,6 @@ router = APIRouter(prefix="/engagements/{engagement_key}/assessment", tags=["ass
 
 COMMAND_FINALIZE_PREVIEW_MAX_CHARS = 65_536
 MAX_BULK_ASSESSMENT_WRITE_ITEMS = 500
-
-_ALLOWED_PHASES: frozenset[str] = frozenset(
-    {
-        "recon",
-        "collect",
-        "consume-test",
-        "verify",
-        "exploit",
-        "report",
-        "code-ingest",
-        "code-classify",
-        "code-hunt",
-        "code-verify",
-        # Half-phase tags for mid-engagement work between formal phase
-        # transitions. The dispatching agent passes these explicitly when
-        # the snapshot in scope.json does not match what the dispatch was
-        # actually authorized for.
-        "recon-pivot",
-        "exploit-recon",
-    }
-)
 
 
 class WorkItemInput(BaseModel):
@@ -424,7 +411,11 @@ class CommandRunRecordRequest(BaseModel):
     # phase is required from input; the command-run contract has no env-var
     # fallback that the patched MCP server used; the dispatching agent must
     # pass --phase explicitly because scope.json.current_phase is operator
-    # state that does not reflect what the dispatch was authorized for.
+    # state that does not reflect what the dispatch was authorized for. It is
+    # stored as plain TEXT: the roster (`assess.lib.phases.AUDIT_PHASE_TAGS`)
+    # is enforced fail-closed host-side by `kali_audit.ALLOWED_PHASES`, and the
+    # backend stays permissive so historical and externally-written rows keep
+    # reading back.
     phase: str = Field(min_length=1, max_length=64)
     return_code: int | None = None
     timed_out: bool = False
@@ -623,6 +614,24 @@ class SurfaceRecordRequest(BaseModel):
     rationale: str = Field(default="", max_length=4096)
     evidence_ref: str = Field(default="", max_length=1024)
     status: Literal["covered", "deferred", "discovered", "not_applicable"] = "discovered"
+    # The ARCHITECTURE axis, orthogonal to ``surface_type``'s security meaning.
+    # It records how the host framework discovers and runs the code — a Keycloak
+    # authenticator and a user-storage SPI register identically and stay told
+    # apart by their surface type. Empty is the normal value: a target-facing web
+    # surface has no host framework registering it. See the worked mappings in
+    # ``agent/scripts/assess/lib/contracts.py:FRAMEWORK_REGISTRATION_KINDS``.
+    framework_registration: Literal[
+        "",
+        "service_provider",
+        "http_endpoint",
+        "request_interceptor",
+        "event_listener",
+        "template_override",
+        "scheduled_task",
+        "cli_command",
+        "data_model_extension",
+        "configuration_binding",
+    ] = ""
 
 
 class SurfaceUpdateRequest(BaseModel):
@@ -3534,6 +3543,7 @@ async def create_surface(engagement_key: str, request: SurfaceRecordRequest) -> 
             rationale=request.rationale,
             evidence_ref=request.evidence_ref,
             status_value=request.status,
+            framework_registration=request.framework_registration,
         )
     )
     await _broadcast(engagement.key, "surface", record)
@@ -4266,15 +4276,13 @@ _KNOWN_DISPATCH_MODES: tuple[str, ...] = (
 _REASONING = Literal["low", "medium", "high", "xhigh", "max"]
 _CONFIDENCE = Literal["low", "medium", "high"]
 _HANDOFF_STATUS = Literal["checkpointed", "ready", "blocked", "superseded"]
-
-
-# Roles exempt from declaring `skills` on dispatch. The operator coordinates
-# phases rather than executing a single skill, so requiring an explicit skill
-# list on operator dispatches would be misleading. Every other specialist role
-# must declare which skills it loaded so the dispatch row is a truthful audit
-# of the specialist context. Mirrors `_DISPATCH_ROLES_WITHOUT_SKILLS` in
-# `agent/scripts/assess/lib/contracts.py`; keep the two in sync.
-_DISPATCH_ROLES_WITHOUT_SKILLS: frozenset[str] = frozenset({"operator"})
+# One roster of clients Vigil launches, spelled twice for two different
+# questions. A dispatch row widens it with "unknown" because an ordinary
+# dispatch often cannot name the client it will run in; a client BINDING cannot,
+# because a binding whose client is unknown identifies no session. Pinned
+# together by test_dispatch_client_binding_api so the two cannot drift.
+_LAUNCHED_CLIENT = Literal["claude", "codex", "goose", "kimi", "opencode"]
+_DISPATCH_CLIENT = Literal["claude", "codex", "goose", "kimi", "opencode", "unknown"]
 
 
 class DispatchCreate(BaseModel):
@@ -4288,11 +4296,9 @@ class DispatchCreate(BaseModel):
     status: _DISPATCH_STATUS = "in-progress"
     requested_model: str | None = Field(default=None, max_length=128)
     requested_reasoning: _REASONING | None = None
-    client_name: Literal["claude", "codex", "goose", "kimi", "opencode", "unknown"] = (
-        "unknown"
-    )
-    requested_client: Literal["claude", "codex", "goose", "kimi", "opencode", "unknown"] = "unknown"
-    launcher_effective_client: Literal["claude", "codex", "goose", "kimi", "opencode", "unknown"] = "unknown"
+    client_name: _DISPATCH_CLIENT = "unknown"
+    requested_client: _DISPATCH_CLIENT = "unknown"
+    launcher_effective_client: _DISPATCH_CLIENT = "unknown"
     # Provider observation is deliberately closed to caller attestation until a
     # supported client exposes a stable, client-owned signal at this boundary.
     provider_observed_client: Literal["unknown"] = "unknown"
@@ -4360,6 +4366,39 @@ class DispatchUpdate(BaseModel):
     status: _DISPATCH_STATUS | None = None
     completed_at: str | None = Field(default=None, max_length=64)
     finding_slugs: list[str] | None = None
+
+
+class DispatchClientBindingCreate(BaseModel):
+    """Which live client session a dispatch is running as, asserted post-launch.
+
+    Every field is the OPERATOR'S claim: they read the handle out of their client
+    and typed it here. Nothing in this request is observed by a launcher or a
+    provider, which is why each field says ``asserted_`` and why there is no way
+    to supply ``provider_observed_handle`` — that stays closed to caller
+    attestation exactly like ``DispatchCreate.provider_observed_client``, so the
+    row reports an unmeasured handle instead of an unearned one.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    asserted_client: _LAUNCHED_CLIENT
+    # The scope the handle is unique within — a working directory, a workspace,
+    # a host. A bare session id is ambiguous across clients and machines, so the
+    # namespace is required rather than optional: an unlocatable handle cannot be
+    # used to reach the session, which is the whole purpose of binding one.
+    asserted_session_namespace: str = Field(min_length=1, max_length=512)
+    asserted_client_handle: str = Field(min_length=1, max_length=256)
+    note: str | None = Field(default=None, max_length=1024)
+
+    @field_validator(
+        "asserted_session_namespace", "asserted_client_handle", mode="after"
+    )
+    @classmethod
+    def _reject_blank_identity(cls, value: str) -> str:
+        trimmed = value.strip()
+        if not trimmed:
+            raise ValueError("must not be blank")
+        return trimmed
 
 
 class HandoffCreate(BaseModel):
@@ -4676,6 +4715,9 @@ async def create_dispatch(engagement_key: str, request: DispatchCreate) -> dict[
             actual_model="unknown",
             requested_reasoning=request.requested_reasoning,
             actual_reasoning="unknown",
+            launcher_effective_model=None,
+            launcher_effective_reasoning=None,
+            launcher_effective_source=None,
             client_name=request.client_name,
             requested_client=request.requested_client,
             launcher_effective_client=request.launcher_effective_client,
@@ -4771,6 +4813,73 @@ async def patch_dispatch(
     )
     await _broadcast(engagement.key, "dispatch", record)
     return record
+
+
+@router.post(
+    "/dispatches/{agent_id}/client-bindings", status_code=status.HTTP_201_CREATED
+)
+async def create_dispatch_client_binding(
+    engagement_key: str,
+    agent_id: str,
+    request: DispatchClientBindingCreate,
+) -> dict[str, Any]:
+    """Bind a dispatch to the client session the operator actually launched.
+
+    Deliberately a separate POST rather than a field on ``create_dispatch``: the
+    handle does not exist when the dispatch row is written, so requiring it there
+    would either block the dispatch or invite a fabricated value.
+    """
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    record = await anyio.to_thread.run_sync(
+        functools.partial(
+            record_dispatch_client_binding,
+            engagement.id,
+            agent_id=agent_id,
+            asserted_client=request.asserted_client,
+            asserted_session_namespace=request.asserted_session_namespace,
+            asserted_client_handle=request.asserted_client_handle,
+            note=request.note,
+        )
+    )
+    binding = record["binding"]
+    await anyio.to_thread.run_sync(
+        functools.partial(
+            _audit_assessment_mutation,
+            engagement.id,
+            title="agent bind-client-handle",
+            action=(
+                f"agent_id={agent_id} client={binding['asserted_client']} "
+                f"handle={binding['asserted_client_handle']}"
+            ),
+            actor_name=agent_id,
+            result=f"binding_version={binding['binding_version']}",
+            metadata={
+                "agent_id": agent_id,
+                "binding_version": binding["binding_version"],
+                "asserted_client": binding["asserted_client"],
+                "asserted_session_namespace": binding["asserted_session_namespace"],
+                "asserted_client_handle": binding["asserted_client_handle"],
+                "superseded_binding_id": (record["superseded"] or {}).get("id"),
+            },
+        )
+    )
+    # Broadcast the DISPATCH row, not the binding: what changed for every reader
+    # is which session that dispatch is now reachable at, and the dispatch row
+    # carries the current binding.
+    dispatch_row = await anyio.to_thread.run_sync(
+        functools.partial(state_manager.get_dispatch, engagement.id, agent_id)
+    )
+    await _broadcast(engagement.key, "dispatch", dispatch_row)
+    return record
+
+
+@router.get("/dispatches/{agent_id}/client-bindings")
+def get_dispatch_client_bindings(
+    engagement_key: str, agent_id: str
+) -> list[dict[str, Any]]:
+    """The dispatch's full, append-only binding history, oldest version first."""
+    engagement = get_engagement_or_404(engagement_key)
+    return list_dispatch_client_bindings(engagement.id, agent_id)
 
 
 @router.post("/dispatch-handoffs", status_code=status.HTTP_201_CREATED)
@@ -4959,3 +5068,107 @@ async def patch_decision(
     )
     await _broadcast(engagement.key, "dispatch_decision", record)
     return record
+
+
+# The operator's own checkpoint. Deliberately NO ``current_phase`` or
+# ``code_phase`` field: both track phases are server-derived at write time, so a
+# caller cannot assert a phase the engagement is not in — on either of its two
+# independent tracks. The list caps and the note cap are validation bounds —
+# over-long input is REFUSED with a clear error, never silently truncated.
+class OperatorCheckpointCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    intent_note: str = Field(
+        min_length=1,
+        max_length=operator_checkpoints.MAX_INTENT_NOTE_CHARS,
+        description=(
+            "UNVERIFIED operator intent: what you were about to do and why. This "
+            "is the only free-text field on a checkpoint and is never a finding, "
+            "a measurement, or evidence about the target."
+        ),
+    )
+    finding_slugs: list[str] = Field(
+        default_factory=list, max_length=operator_checkpoints.MAX_REFERENCES
+    )
+    dispatch_agent_ids: list[str] = Field(
+        default_factory=list, max_length=operator_checkpoints.MAX_REFERENCES
+    )
+    command_run_ids: list[int] = Field(
+        default_factory=list, max_length=operator_checkpoints.MAX_REFERENCES
+    )
+    artifact_ids: list[int] = Field(
+        default_factory=list, max_length=operator_checkpoints.MAX_REFERENCES
+    )
+
+    @field_validator("intent_note")
+    @classmethod
+    def _intent_note_must_say_something(cls, value: str) -> str:
+        """Refuse a note that is only whitespace; keep a real one byte-for-byte.
+
+        ``min_length=1`` accepts `"   "` and `"\n"`, which a shell expansion of
+        an unset variable produces easily. Recording one is not a harmless
+        no-op: every write supersedes the previous row, so the blank becomes
+        the CURRENT checkpoint and resume hydration — which reads the current
+        one — stops showing the operator's real save-my-place note. The whole
+        point of the record is to survive a context boundary, so losing it to
+        an empty write is the one failure it cannot have.
+
+        Only the check strips. The stored text stays verbatim, because the
+        renderers are deliberately lossless about operator-authored content.
+        """
+        if not value.strip():
+            raise ValueError(
+                "intent_note cannot be blank: record what you were about to do "
+                "and why. A whitespace-only note would supersede the last "
+                "checkpoint and leave resume with nothing to rehydrate from."
+            )
+        return value
+
+
+@router.post("/operator-checkpoints", status_code=status.HTTP_201_CREATED)
+async def create_operator_checkpoint(
+    engagement_key: str, request: OperatorCheckpointCreate
+) -> dict[str, Any]:
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    record = await anyio.to_thread.run_sync(
+        functools.partial(
+            operator_checkpoints.record_checkpoint,
+            engagement.id,
+            intent_note=request.intent_note,
+            finding_slugs=list(request.finding_slugs),
+            dispatch_agent_ids=list(request.dispatch_agent_ids),
+            command_run_ids=list(request.command_run_ids),
+            artifact_ids=list(request.artifact_ids),
+        )
+    )
+    await anyio.to_thread.run_sync(
+        functools.partial(
+            _audit_assessment_mutation,
+            engagement.id,
+            title="operator checkpoint",
+            action=f"checkpoint_version={record['checkpoint_version']}",
+            result=record["current_phase"],
+            metadata={
+                "checkpoint_version": record["checkpoint_version"],
+                "source": record["source"],
+            },
+        )
+    )
+    await _broadcast(engagement.key, "operator_checkpoint", record)
+    return record
+
+
+@router.get("/operator-checkpoints")
+def get_operator_checkpoints(
+    engagement_key: str,
+    include_superseded: bool = Query(default=False),
+    limit: int = Query(default=50, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
+) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    return operator_checkpoints.list_checkpoints(
+        engagement.id,
+        include_superseded=include_superseded,
+        limit=limit,
+        offset=offset,
+    )

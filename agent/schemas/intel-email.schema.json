@@ -28,7 +28,7 @@
       ],
       "default": null,
       "minimum": 1,
-      "description": "intel_people.id of the person this address belongs to. Obtain the ID from 'vigil assess list-intel person --json'."
+      "description": "intel_people.id of the person this address belongs to. Obtain the ID from `vigil assess intel list person --json`."
     },
     "source_name": {
       "type": "string",

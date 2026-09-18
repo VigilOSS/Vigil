@@ -39,16 +39,22 @@ def test_stable_function_names_unchanged():
 
 
 def test_phases_vocabulary():
-    assert pr_mod.PHASES == ("recon", "collect", "consume", "verify", "exploit", "report")
+    assert pr_mod.PHASES == (
+        "recon", "collect", "consume-test", "verify", "exploit", "report",
+    )
     assert pr_mod.PHASE_REQUIRE_STAGE["recon"] == "enum"
     assert pr_mod.PHASE_REQUIRE_STAGE["collect"] == "collection"
-    assert pr_mod.PHASE_REQUIRE_STAGE["consume"] == "consumption"
+    assert pr_mod.PHASE_REQUIRE_STAGE["consume-test"] == "consumption"
     assert pr_mod.PHASE_REQUIRE_STAGE["verify"] is None
 
 
-def test_normalize_phase_accepts_consume_test_alias():
-    assert pr_mod._normalize_phase("consume-test") == "consume"
-    assert pr_mod._normalize_phase("CONSUME") == "consume"
+def test_normalize_phase_resolves_the_short_consume_alias():
+    """The canonical spelling is the persisted ``consume-test``; the short
+    ``consume`` form is accepted on input and resolved here so it never reaches
+    the assembly's branching."""
+    assert pr_mod._normalize_phase("consume") == "consume-test"
+    assert pr_mod._normalize_phase("consume_test") == "consume-test"
+    assert pr_mod._normalize_phase("CONSUME-TEST") == "consume-test"
     with pytest.raises(ValueError):
         pr_mod._normalize_phase("bogus")
 
@@ -58,7 +64,7 @@ def test_normalize_phase_accepts_consume_test_alias():
     [
         ("recon", {"coverage", "per_host_coverage", "intel"}),
         ("collect", {"coverage", "per_host_coverage"}),
-        ("consume", {"coverage", "per_host_coverage", "depth_ledger", "intel"}),
+        ("consume-test", {"coverage", "per_host_coverage", "depth_ledger", "intel"}),
         ("verify", {"coverage", "depth_ledger"}),
         ("exploit", {"coverage"}),
         ("report", {"report_readiness", "intel"}),
@@ -85,10 +91,11 @@ def test_collect_phase_omits_depth_and_intel(client, isolate_settings):
 
 def test_endpoint_serves_phase_readiness(client, isolate_settings):
     _seed(client, isolate_settings)
-    resp = client.get(f"{ASSESSMENT_BASE}/phase-readiness", params={"phase": "consume"})
+    resp = client.get(f"{ASSESSMENT_BASE}/phase-readiness", params={"phase": "consume-test"})
     assert resp.status_code == 200, resp.text
     body = resp.json()
-    assert body["phase"] == "consume"
+    assert body["phase"] == "consume-test"
+    assert body["engagement_key"] == ENGAGEMENT_KEY
     assert "coverage" in body and "depth_ledger" in body and "intel" in body
 
 
@@ -98,11 +105,11 @@ def test_endpoint_unknown_phase_is_422(client, isolate_settings):
     assert resp.status_code == 422, resp.text
 
 
-def test_endpoint_consume_test_alias(client, isolate_settings):
+def test_endpoint_short_consume_alias_resolves_to_the_canonical_phase(client, isolate_settings):
     _seed(client, isolate_settings)
-    resp = client.get(f"{ASSESSMENT_BASE}/phase-readiness", params={"phase": "consume-test"})
+    resp = client.get(f"{ASSESSMENT_BASE}/phase-readiness", params={"phase": "consume"})
     assert resp.status_code == 200, resp.text
-    assert resp.json()["phase"] == "consume"
+    assert resp.json()["phase"] == "consume-test"
 
 
 def test_stable_routes_still_present(client, isolate_settings):
@@ -162,20 +169,24 @@ def test_report_phase_json_ready_reflects_strict_intel_failure():
     assert proj2["ready"] is True
 
 
-def test_cli_phase_choices_accept_consume_test_alias():
+def test_cli_phase_choices_accept_the_persisted_phase_and_its_short_alias():
     """The persisted web phase is 'consume-test'; the CLI must accept it via
-    argparse choices and normalize it to 'consume', else `check-phase-readiness
-    --phase "$current_phase"` fails with usage exit 2 during the consume phase."""
+    argparse choices (else `check-phase-readiness --phase "$current_phase"`
+    fails with usage exit 2 during that phase) AND still accept the short
+    `consume` form, which resolves to the canonical spelling."""
     import argparse
 
     mod = _load_cpr_module()
     assert "consume-test" in mod._CLI_PHASE_CHOICES
-    assert mod._PHASE_ALIASES["consume-test"] == "consume"
+    assert "consume" in mod._CLI_PHASE_CHOICES
+    assert mod._PHASE_ALIASES["consume"] == "consume-test"
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers()
     mod.register(sub)
-    ns = parser.parse_args(["check-phase-readiness", "--phase", "consume-test"])
-    assert ns.phase == "consume-test"
+    for typed in ("consume-test", "consume"):
+        ns = parser.parse_args(["check-phase-readiness", "--phase", typed])
+        assert ns.phase == typed
+        assert mod.canonical_phase(ns.phase) == "consume-test"
 
 
 # ---------------------------------------------------------------------------
@@ -314,6 +325,6 @@ def test_phase_readiness_folds_stage_audit_into_recon_and_collect_only(client, i
         payload = state_manager.phase_readiness(eng_id, phase)
         assert "stage_audit" in payload, phase
         assert payload["stage_audit"]["phase"] == phase
-    for phase in ("consume", "verify", "exploit", "report"):
+    for phase in ("consume-test", "verify", "exploit", "report"):
         payload = state_manager.phase_readiness(eng_id, phase)
         assert "stage_audit" not in payload, phase

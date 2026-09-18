@@ -155,12 +155,21 @@ def _enrich_existing(row: dict, record: dict) -> tuple[dict, dict]:
     # but its corrupt column value is preserved verbatim above (never rewritten).
     classify_query = "{}" if (malformed_field and slot == "query_params") else new_query
     classify_body = "{}" if (malformed_field and slot == "body_params") else new_body
+    # The row's own URL authority, ingest `source` and liveness feed the
+    # boost-only context layer AND the full-URL regex pass (cloud_metadata /
+    # object-storage, whose markers live in the authority or query). Omitting
+    # them here silently under-scored every arjun-discovered parameter by up to
+    # 30 and disabled those two buckets outright — `_create_candidate` below has
+    # always passed them.
     assignment = classify_from_fields(
         case_type=case_type,
         url_path=row.get("url_path") or "",
         query_params=classify_query,
         body_params=classify_body,
         path_params=row.get("path_params") or "{}",
+        url=row.get("url"),
+        source=row.get("source"),
+        live_status=row.get("live_status"),
     )
 
     new_signals = build_signals(params, header_params=header_params)

@@ -1,6 +1,6 @@
 ---
-description: Canonical cross-track vuln-class taxonomy — the single vocabulary the web, code, and blue tracks share. Lists the 63 canonical classes grouped into families, and which surface_types / gf-buckets / techniques / skills map to which class. Source of truth is assess.lib.vuln_taxonomy; this doc is the human-readable view.
-last_reviewed: 2026-07-07
+description: Canonical cross-track vuln-class taxonomy — the single vocabulary the web, code, and blue tracks share. Lists the 66 canonical classes grouped into families, and which surface_types / gf-buckets / techniques / skills map to which class. Source of truth is assess.lib.vuln_taxonomy; this doc is the human-readable view.
+last_reviewed: 2026-09-17
 origin: Vigil
 ---
 
@@ -8,12 +8,13 @@ origin: Vigil
 
 > **Source of truth:** `agent/scripts/assess/lib/vuln_taxonomy.py`. This doc is the
 > human-readable mirror. The drift tests in
-> `orchestrator/backend/tests/test_vuln_taxonomy.py` guarantee the CODE side can't
-> drift from `vuln_taxonomy.py` — they check code against code (a skill, gf-bucket,
-> surface_type, technique, or code family that references a non-canonical class
-> breaks the build). They do **not** parse this `.md`, so it is hand-synced on each
-> review pass (see `last_reviewed:` below); if this file and the module ever
-> disagree, treat the module as authoritative.
+> `orchestrator/backend/tests/test_vuln_taxonomy.py` cover both sides: they check
+> code against code (a skill, gf-bucket, surface_type, technique, or code family
+> that references a non-canonical class breaks the build), and they parse this
+> file's family, class and bucket tables against the module, so the two cannot
+> silently disagree. They read the data, never the prose — keep the narrative
+> current by review (see `last_reviewed:` below). If this file and the module ever
+> disagree, the module is authoritative.
 >
 > **Review cadence:** re-confirm against OWASP WSTG / OWASP ASVS / OWASP API
 > Security Top 10 (2023) / NIST SP 800-115 and the live skill roster each
@@ -29,8 +30,9 @@ family lists. The canonical set is the **union** of the web attack classes and
 the code families, so the code track **aligns by inclusion**: every string the
 code track validates against (`buffer-overflow`, `web-app-auth`, …) is a
 canonical class here, **namespaced** into a code-oriented family
-(`memory-safety`, `crypto`, `error-handling`, `ai-ml`) rather than forked into a
-parallel term. Code-specific classes are marked _(code track)_ below.
+(`memory-safety`, `crypto`, `error-handling`, `ai-ml`, `infrastructure`) rather
+than forked into a parallel term. Code-specific classes are marked _(code track)_
+below.
 
 ## Attack-surface-enumeration anchors
 
@@ -146,6 +148,22 @@ family.
 - `ai-ml-security` — AI/ML security (model/data/inference abuse) _(code track)_.
 - `prompt-injection` — LLM prompt injection.
 
+### infrastructure — Build, container and deployment posture: runtime privilege, exposed services, build supply chain.
+- `privilege-escalation` — Container/host privilege escalation: root runtime, over-permissive modes, build-time sudo _(code track)_.
+- `network-exposure` — Service/port exposed beyond its intended network boundary _(code track)_.
+- `supply-chain` — Build/deploy supply chain: remote or unpinned code and assets executed as trusted _(code track)_.
+
+These three are what `treesitter_index.py`'s Dockerfile / shell / HTML / CSS
+extractors emit. They had no canonical home until 2026-09 because no family was
+about infrastructure, and every candidate remap misroutes on the family
+definitions above: `injection` requires untrusted input reaching an interpreter
+(an `ADD https://…` has none), `rfi` means request-time remote inclusion (a
+build-time fetch has no request), `access-control` presumes a principal and a
+routed function (a Dockerfile with no `USER` has neither), and
+`debug-exposure`/`info-disclosure` mean an HTTP endpoint (`EXPOSE 5432` is a
+declared port). The FAMILY is the fix; a bare class forced into `injection` or
+`disclosure` would reproduce the misroute one level up.
+
 ## surface_type → expected classes
 
 A `surface_type` (`assess.lib.surfaces.VALID_SURFACE_TYPES`) implies the class
@@ -167,7 +185,7 @@ catch-alls (`misconfiguration` / `informational`) map to disclosure-only.
 
 ## gf-bucket → class
 
-The 40 gf-buckets (`assess.lib.classify_buckets._BUCKETS`) are the web-recon
+The 41 gf-buckets (`assess.lib.classify_buckets._BUCKETS`) are the web-recon
 signal, listed here in declaration order (which is also weight-descending and
 governs tie-break precedence when multiple buckets match the same row). A
 bucket with no single class is a **generic family-level hint** the
@@ -186,6 +204,7 @@ recommender treats as low-confidence.
 | `deserialization` | 40 | `deserialization` |
 | `dotnet_handler` | 40 | `deserialization` |
 | `xxe` | 40 | `xxe` |
+| `llm_api` | 40 | `prompt-injection` |
 | `img_traversal` | 35 | `img-traversal` |
 | `oauth-oidc` | 35 | `oauth` |
 | `sso` | 35 | `saml` |
@@ -264,6 +283,7 @@ maps to a canonical class (operational tags map to nothing).
 | `RACE-CONDITION` | `race-condition` |
 | `RATE-LIMIT` | `rate-limit` |
 | `INFO-DISCLOSURE` | `info-disclosure` |
+| `NETWORK-EXPOSURE` | `network-exposure` |
 
 Operational / non-vuln technique tags (no class): `RECON`, `DISCOVERY`,
 `PARAM-DISCOVERY`, `FUZZ`, `OSINT`, `CVE-VALIDATION`, `EXPLOIT-CHAIN`, `META`,
@@ -275,12 +295,15 @@ Which `agent/skills/<name>/SKILL.md` declares each class in its `vuln_class:`
 frontmatter (derived live by `vuln_taxonomy.build_class_to_skills()`). The 11
 web-exclusive classes (`idor`, `sqli`, `ssrf`, `xss`, `ssti`, `lfi`,
 `img-traversal`, `cmdi`, `open-redirect`, `cors`, `file-upload`) are reserved to
-their web skills and never declared by a code skill. Six classes
+their web skills and never declared by a code skill. Nine classes
 (`ldap-injection`, `path-authz`, `ssi-injection`, `xpath-injection`,
-`clickjacking`, `csv-injection`) intentionally have no dedicated skill yet — they
-are tracked in the test's `KNOWN_SKILLLESS_CLASSES` allowlist so the
-completeness drift test stays honest. `ssi-injection` DOES have a gf-bucket
-(`ssi`, extension-based) but still has no dedicated skill.
+`clickjacking`, `csv-injection`, `privilege-escalation`, `network-exposure`,
+`supply-chain`) intentionally have no dedicated skill yet — they are tracked in
+the test's `KNOWN_SKILLLESS_CLASSES` allowlist so the completeness drift test
+stays honest. `ssi-injection` DOES have a gf-bucket (`ssi`, extension-based) but
+still has no dedicated skill, and the three `infrastructure` classes await a real
+build/deployment-hardening skill rather than being bolted onto a skill whose
+scope does not cover them.
 
 | class | skills |
 |---|---|
@@ -345,8 +368,11 @@ completeness drift test stays honest. `ssi-injection` DOES have a gf-bucket
 | `uninitialized-memory` | `code-fuzz-campaign`, `code-variant-analysis`, `code-vulnerability-analysis` |
 | `type-confusion` | `code-fuzz-campaign`, `code-variant-analysis`, `code-vulnerability-analysis`, `heap-rce-evidence-ladder` |
 | `error-handling` | `code-variant-analysis`, `code-vulnerability-analysis` |
-| `ai-ml-security` | `ai-ml-on-device-security` |
-| `prompt-injection` | `ai-ml-on-device-security` |
+| `ai-ml-security` | `ai-ml-on-device-security`, `llm-api-testing` |
+| `prompt-injection` | `ai-ml-on-device-security`, `llm-api-testing` |
+| `privilege-escalation` | _(no dedicated skill — allowlisted)_ |
+| `network-exposure` | _(no dedicated skill — allowlisted)_ |
+| `supply-chain` | _(no dedicated skill — allowlisted)_ |
 
 > The `class → skills` table is a snapshot of derived state; the live answer is
 > `vigil assess list-skills --json` (each offensive skill carries its

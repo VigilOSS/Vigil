@@ -13,17 +13,6 @@ languages: Python, JS, Java
 
 ---
 
-## Baseline Patterns (Single-Function / Single-Scope)
-
-Toolchain-catchable patterns. Record as findings if encountered during orientation —
-on unaudited codebases these are real, exploitable bugs that no prior tool run has caught.
-Invest primary analysis time in the LLM-advantage patterns below.
-
-- API keys hardcoded in source (standard secret detection)
-- Nothing else — this is a new domain with no established SAST rules
-
----
-
 ## What You're Hunting (LLM-Advantage Patterns)
 
 ### 1. Direct Prompt Injection

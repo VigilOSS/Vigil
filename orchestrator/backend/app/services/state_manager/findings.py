@@ -1458,6 +1458,44 @@ def _validate_cvss_pair(
     raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=message)
 
 
+_CHAIN_KEYS = ("chain_required", "chain_rationale")
+
+
+def _validate_chain_rationale_pair(
+    authored_details: dict[str, Any], effective_details: dict[str, Any]
+) -> None:
+    """Reject ``chain_required=true`` with no ``chain_rationale`` behind it.
+
+    ``chain_required`` is what parks a finding as meaningful only inside a
+    chain: it keeps the finding out of the report and hands an exploit-developer
+    pass the follow-up. Without the rationale, the park says nothing about WHICH
+    chain step it enables, and the gap only surfaces at report time as a finding
+    nobody can act on — so hold the two together where they are written, the way
+    ``_validate_cvss_pair`` holds the CVSS pair together.
+
+    Same scoping as that gate: it fires only when the write AUTHORS one of the
+    two keys, and judges the EFFECTIVE MERGED pair — so a patch supplying just
+    the flag is scored against the stored rationale, and a legacy row that
+    already holds an unexplained flag stays editable by any write that does not
+    touch the pair.
+    """
+    if not any(key in authored_details for key in _CHAIN_KEYS):
+        return
+    if effective_details.get("chain_required") is not True:
+        return
+    if str(effective_details.get("chain_rationale") or "").strip():
+        return
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail=(
+            "details.chain_required=true requires details.chain_rationale: name "
+            "the chain step this finding enables and why its standalone impact "
+            "is insufficient. Clear the flag, or supply the rationale in the "
+            "same write."
+        ),
+    )
+
+
 def create_finding(
     engagement_id: int,
     *,
@@ -1747,6 +1785,7 @@ def create_finding(
             effective_details=effective_details,
         )
         _validate_cvss_pair(authored_details, effective_details)
+        _validate_chain_rationale_pair(authored_details, effective_details)
         before_state = _finding_state_snapshot(existing) if existing is not None else None
         before_content = (
             _finding_content_snapshot(existing) if existing is not None else None
@@ -3793,6 +3832,17 @@ def get_finding(engagement_id: int, slug: str) -> dict[str, Any]:
         return record
 
 def list_exploit_candidates(engagement_id: int) -> list[dict[str, Any]]:
+    """Findings an exploit dispatch may be authorized against.
+
+    Track-agnostic by design: a confirmed ``file:`` finding is as exploitable as
+    a confirmed URL one, and ADR 0023 keeps both on a single canonical claim.
+    What is excluded is ``pending_runtime_proof`` — proof owed is not proof, so a
+    parked finding cannot enter the approval gate. Its complement is read
+    separately by ``vigil assess exploit review``; widening this predicate would
+    collapse the two into one queue and let an unproven claim be approved.
+    See: ``tests/test_engagements_api.py`` —
+    ``test_pending_runtime_proof_blocks_report_readiness_and_exploit_candidates``.
+    """
     engagement = _engagement_or_404(engagement_id)
     with _common.get_connection() as connection:
         rows = connection.execute(

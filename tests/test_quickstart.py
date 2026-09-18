@@ -6,9 +6,12 @@ command runs unless `--install-host-tools` is passed (and never under --dry-run)
 """
 from __future__ import annotations
 
+import importlib.metadata
 import json
 import sys
 from pathlib import Path
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
@@ -178,8 +181,210 @@ def test_json_output_shape(capsys):
 
 
 def test_prerequisite_status_reports_presence():
-    rows = prerequisite_status(which=_which_present)
+    # Inject the daemon probe too: docker's row is binary AND daemon, so a test
+    # that injects only `which` would consult the real host and fail wherever no
+    # daemon is running.
+    rows = prerequisite_status(which=_which_present, daemon_available=lambda: True)
     assert all(row.present for row in rows)
-    rows = prerequisite_status(which=_which_missing)
+    rows = prerequisite_status(which=_which_missing, daemon_available=lambda: False)
     assert all(not row.present for row in rows)
     assert [row.binary for row in rows] == ["uv", "git", "docker", "go", "npm"]
+
+
+def test_quickstart_docker_row_reflects_the_daemon_not_just_the_binary() -> None:
+    """A `which` hit is not readiness — the next command runs `docker build`.
+
+    README frames `vigil quickstart` as the host check to run first, and its
+    checklist sends the operator straight to `vigil install`, which builds the
+    runtime image. Reporting `[ok] docker` for a host with the client binary and
+    no reachable daemon greens a host that cannot complete the very next step.
+    `vigil doctor` already probes the daemon; quickstart must use the same probe.
+    """
+    from vigil_cli.quickstart import prerequisite_status
+
+    rows = prerequisite_status(
+        which=lambda binary: f"/usr/bin/{binary}",
+        daemon_available=lambda: False,
+    )
+    docker_row = next(row for row in rows if row.binary == "docker")
+
+    assert docker_row.present is False, "binary present but daemon down is not ready"
+    assert "daemon" in docker_row.detail.lower()
+
+
+def test_quickstart_docker_row_is_ok_when_the_daemon_answers() -> None:
+    from vigil_cli.quickstart import prerequisite_status
+
+    rows = prerequisite_status(
+        which=lambda binary: f"/usr/bin/{binary}",
+        daemon_available=lambda: True,
+    )
+    docker_row = next(row for row in rows if row.binary == "docker")
+
+    assert docker_row.present is True
+    assert docker_row.detail == ""
+
+
+def test_doctor_exits_non_zero_when_a_check_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A readiness command that reports FAIL and exits 0 cannot gate anything.
+
+    README points at `vigil doctor` to confirm a running install is healthy, so
+    a script or CI job has no way to act on a FAIL row today.
+    """
+    from vigil_cli import main as main_module
+    from vigil_cli.status import Check
+
+    monkeypatch.setattr(
+        main_module,
+        "collect_doctor_checks",
+        lambda *_a, **_k: [Check("ok-row", "OK"), Check("docker-daemon", "FAIL")],
+    )
+
+    with pytest.raises(SystemExit) as excinfo:
+        main_module.main(["doctor"])
+
+    assert excinfo.value.code != 0
+
+
+def test_doctor_exits_zero_for_warn_and_optional_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An advisory MISSING does not gate — OOB is legitimately unset."""
+    from vigil_cli import main as main_module
+    from vigil_cli.status import Check
+
+    monkeypatch.setattr(
+        main_module,
+        "collect_doctor_checks",
+        lambda *_a, **_k: [
+            Check("ok-row", "OK"),
+            Check("oob.frp_token", "MISSING"),
+            Check("oob.relay-route", "WARN"),
+        ],
+    )
+
+    main_module.main(["doctor"])  # must not raise
+
+
+def test_doctor_exits_non_zero_when_a_required_prerequisite_is_missing(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A host with no Docker cannot run Vigil, and MISSING is how that reads.
+
+    `MISSING` carries both "not configured, and that is fine" and "this host
+    cannot run Vigil", so a filter that treats the status alone as advisory
+    reported `ok` on a host with no Docker CLI at all — the daemon probe is
+    skipped in that branch, so no FAIL row is ever produced to catch it.
+    """
+    from vigil_cli import main as main_module
+    from vigil_cli.status import Check
+
+    monkeypatch.setattr(
+        main_module,
+        "collect_doctor_checks",
+        lambda *_a, **_k: [
+            Check("docker", "MISSING", "not found", required=True),
+            Check("docker-daemon", "SKIPPED", "docker CLI not found"),
+            Check("oob.frp_token", "MISSING"),
+        ],
+    )
+
+    with pytest.raises(SystemExit) as excinfo:
+        main_module.main(["doctor"])
+
+    assert excinfo.value.code != 0
+    # The gating row is named, so an operator is not left comparing two MISSING
+    # rows to work out which one ended the command.
+    err = capsys.readouterr().err
+    assert "docker (MISSING)" in err
+    assert "oob.frp_token" not in err
+
+
+def test_doctor_marks_docker_and_install_root_required_when_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The required flag is set by the collector, not hard-coded by the caller."""
+    from vigil_cli import status as status_module
+
+    monkeypatch.setattr(
+        status_module,
+        "_binary_check",
+        lambda command: status_module.Check(command, "MISSING", "not found"),
+    )
+
+    checks = {
+        check.name: check
+        for check in status_module.collect_doctor_checks(tmp_path / "absent")
+    }
+
+    assert checks["docker"].required is True
+    assert checks["install-root"].required is True
+    assert checks["agent-dir"].required is True
+    # A client binary is not a prerequisite: Vigil supports five and needs one.
+    assert checks["claude"].required is False
+    assert checks["codex"].required is False
+
+
+def test_doctor_json_is_machine_readable(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`vigil status` has --json; doctor is the readiness command and had none."""
+    from vigil_cli import main as main_module
+    from vigil_cli.status import Check
+
+    monkeypatch.setattr(
+        main_module,
+        "collect_doctor_checks",
+        lambda *_a, **_k: [Check("docker-daemon", "FAIL", "no daemon")],
+    )
+
+    with pytest.raises(SystemExit):
+        main_module.main(["doctor", "--json"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["checks"] == [
+        {
+            "name": "docker-daemon",
+            "status": "FAIL",
+            "detail": "no daemon",
+            "required": False,
+        }
+    ]
+    assert payload["ok"] is False
+
+
+def test_version_flag_reports_the_installed_cli_version(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The two-layer model makes the CLI's own version the first thing to check.
+
+    A newer CLI against a stale working root leaves features silently inert, so
+    reconciling the two layers starts with knowing which CLI is installed.
+    """
+    from vigil_cli import main as main_module
+
+    with pytest.raises(SystemExit) as excinfo:
+        main_module.main(["--version"])
+
+    assert excinfo.value.code == 0
+    assert importlib.metadata.version("vigil") in capsys.readouterr().out
+
+
+def test_version_resolution_survives_a_missing_distribution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No package metadata must not break the whole CLI.
+
+    The bench participant bundle runs `vigil` from a copied source tree with no
+    installed distribution. The version string is built while the parser is
+    constructed, so raising here would fail every invocation, not just
+    `--version`.
+    """
+    from vigil_cli import main as main_module
+
+    def no_metadata(_name: str) -> str:
+        raise importlib.metadata.PackageNotFoundError("vigil")
+
+    monkeypatch.setattr(main_module.importlib.metadata, "version", no_metadata)
+
+    assert "unknown" in main_module._cli_version()

@@ -230,7 +230,9 @@ export function SubmissionsTab({ engagementKey, refreshVersion = 0 }: Submission
 
   const handleLoadMoreFindings = async () => {
     const page = listing?.findings_page;
-    if (!listing || loadingMoreFindings || !page.has_more || page.next_offset == null) return;
+    // `page` is captured before the guard, so it needs its own null check for the
+    // narrowing to hold; `!listing` already made this unreachable at runtime.
+    if (!listing || !page || loadingMoreFindings || !page.has_more || page.next_offset == null) return;
     setLoadingMoreFindings(true);
     setError("");
     const requestGeneration = ++listingRequestGeneration.current;
@@ -257,6 +259,7 @@ export function SubmissionsTab({ engagementKey, refreshVersion = 0 }: Submission
     const page = detail?.eligible_attachments_page;
     if (
       !detail
+      || !page
       || loadingMoreAttachments
       || exporting
       || recovering
@@ -292,7 +295,7 @@ export function SubmissionsTab({ engagementKey, refreshVersion = 0 }: Submission
 
   const handleLoadMoreVersions = async () => {
     const page = detail?.versions_page;
-    if (!detail || loadingMoreVersions || !page.has_more || page.next_offset == null) return;
+    if (!detail || !page || loadingMoreVersions || !page.has_more || page.next_offset == null) return;
     const findingSlug = selectedSlug;
     setLoadingMoreVersions(true);
     setError("");
@@ -320,7 +323,7 @@ export function SubmissionsTab({ engagementKey, refreshVersion = 0 }: Submission
 
   const handleLoadMorePendingVersions = async () => {
     const page = detail?.pending_versions_page;
-    if (!detail || loadingMorePendingVersions || !page.has_more || page.next_offset == null) return;
+    if (!detail || !page || loadingMorePendingVersions || !page.has_more || page.next_offset == null) return;
     const findingSlug = selectedSlug;
     setLoadingMorePendingVersions(true);
     setError("");

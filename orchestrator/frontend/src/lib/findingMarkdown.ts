@@ -25,6 +25,11 @@ export type MarkdownFinding = {
   parameter?: string;
   cwe_id?: string;
   owasp_category?: string;
+  // Severity-defining, and the drawer shows it ("Auth context"): what privilege
+  // the attack needs. Omitted from the copy, a high-severity claim reads as
+  // unauthenticated when it may need an administrator — the reader who copies a
+  // finding gets a stronger report than the reader who reads one.
+  auth_context?: string;
   summary?: string;
   impact?: string;
   evidence?: string;
@@ -49,7 +54,8 @@ function formatHttp(
   const lines: string[] = [];
   if (kind === "req") {
     const req = obj as FindingPocRequest;
-    lines.push(`${(req.method || "GET").toUpperCase()} ${req.url || ""}`.trim());
+    // Verbatim: a case-sensitive-routing probe records `get`/`GeT` on purpose.
+    lines.push(`${req.method || "GET"} ${req.url || ""}`.trim());
   } else {
     const resp = obj as FindingPocResponse;
     if (resp.status != null) lines.push(`HTTP ${resp.status}`);
@@ -78,9 +84,50 @@ function refLabel(ref: FindingReference): string {
   return String(ref);
 }
 
+// A capture is target-controlled text. A fixed ``` fence closes on the first
+// such line inside it, letting a hostile body escape the block and become live
+// Markdown in the operator's clipboard. Outgrow the content instead of escaping
+// it, so the bytes stay exactly as recorded.
+function fenceFor(content: string): string {
+  let longest = 0;
+  for (const run of content.match(/`+/g) ?? []) longest = Math.max(longest, run.length);
+  return "`".repeat(Math.max(3, longest + 1));
+}
+
+/**
+ * The info string a fence may carry, or `""` when the hint cannot be one.
+ *
+ * Twin of `fenceInfo` in orchestrator/report/src/lib/findingMarkdown.ts, and
+ * the reason it exists lives on THIS side: the report twin only ever passes
+ * literals, while this one passes `details.poc_language` — a free-form key a
+ * specialist writes while reading target output, which no schema, prompt or
+ * backend validates on the way here.
+ *
+ * A backtick fence's info string may not contain a backtick (CommonMark 4.5),
+ * so ```` ```js`x` ```` is not a fence — it is a paragraph, and the capture
+ * below it becomes live Markdown in a document the operator is about to file.
+ * A newline in the hint is worse: it splits the opening line, and a hint ending
+ * in ``` closes the block on the line after it opens.
+ *
+ * Only a *language hint* is ever dropped, never a capture. The hint is
+ * presentation — a syntax colour in whatever form the operator pastes into —
+ * so ADR 0019 (do not degrade the operator's own data) is not engaged; the
+ * capture the fence wraps still goes in byte for byte.
+ */
+export function fenceInfo(hint: string): string {
+  return /^[A-Za-z0-9_+#.-]*$/.test(hint) ? hint : "";
+}
+
 export function findingToMarkdown(d: MarkdownFinding): string {
   const lines: string[] = [];
   const push = (s = "") => lines.push(s);
+  // Captures go in verbatim, inside a fence sized to hold them.
+  const pushFenced = (content: string, info = "") => {
+    const fence = fenceFor(content);
+    push(`${fence}${fenceInfo(info)}`);
+    push(content);
+    push(fence);
+  };
 
   push(`## ${d.slug} — ${d.title}`);
 
@@ -100,10 +147,15 @@ export function findingToMarkdown(d: MarkdownFinding): string {
     if (d.parameter) loc += ` · param \`${d.parameter}\``;
     push(loc);
   }
+  // Raw, as the drawer's KV renders it: this twin's page does not title-case
+  // the value, so neither does its clipboard.
+  if (d.auth_context) push(`**Access required:** ${d.auth_context}`);
   if (d.cwe_id) push(`**CWE:** ${d.cwe_id}`);
   if (d.owasp_category) push(`**OWASP:** ${d.owasp_category}`);
   if (d.cvss_vector) push(`**CVSS vector:** \`${d.cvss_vector}\``);
-  if (d.canonical_location || d.cwe_id || d.owasp_category || d.cvss_vector) push();
+  if (d.canonical_location || d.auth_context || d.cwe_id || d.owasp_category || d.cvss_vector) {
+    push();
+  }
 
   if (d.summary && d.summary.trim()) {
     push("### Summary");
@@ -115,11 +167,15 @@ export function findingToMarkdown(d: MarkdownFinding): string {
     push(d.impact.trim());
     push();
   }
-  if (d.evidence && d.evidence.trim()) {
+  // Presence is truthiness, not `.trim()`, and the drawer gates these the same
+  // way. A capture that is nothing but whitespace is a RECORDED capture — the
+  // whole proof on a stripped, padded or blank-response finding, which is why
+  // report/src/lib/poc.ts refuses to call one absent. Testing the trimmed value
+  // dropped the section AND its heading from the clipboard while the page still
+  // showed the bytes (AGENTS.md; ADR 0019).
+  if (d.evidence) {
     push("### Evidence");
-    push("```");
-    push(d.evidence.trim());
-    push("```");
+    pushFenced(d.evidence);
     push();
   }
   // Verbatim: the author's own numbering is what other sections cite, so no
@@ -130,27 +186,21 @@ export function findingToMarkdown(d: MarkdownFinding): string {
     push(stepsText);
     push();
   }
-  if (d.poc_code && d.poc_code.trim()) {
+  if (d.poc_code) {
     push("### Proof of Concept");
-    push("```" + (d.poc_language || ""));
-    push(d.poc_code.trim());
-    push("```");
+    pushFenced(d.poc_code, d.poc_language || "");
     push();
   }
   const reqText = formatHttp(d.poc_request, "req");
-  if (reqText.trim()) {
+  if (reqText) {
     push("### PoC Request");
-    push("```http");
-    push(reqText.trim());
-    push("```");
+    pushFenced(reqText, "http");
     push();
   }
   const respText = formatHttp(d.poc_response, "resp");
-  if (respText.trim()) {
+  if (respText) {
     push("### PoC Response");
-    push("```http");
-    push(respText.trim());
-    push("```");
+    pushFenced(respText, "http");
     push();
   }
   if (d.remediation && d.remediation.trim()) {

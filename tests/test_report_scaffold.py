@@ -98,6 +98,13 @@ def _create(tmp_path, monkeypatch, etype, **extra):
     from vigil_cli import engagements
     from vigil_cli.engagements import CreateEngagementOptions
 
+    # Seed the canonical installed prompts create_engagement now requires up front,
+    # so its precondition stays exercised here rather than stubbed away.
+    agent_root = tmp_path / "agent"
+    agent_root.mkdir(parents=True, exist_ok=True)
+    (agent_root / "AGENTS.md").write_text("# Canonical operator instructions\n")
+    (agent_root / "AGENTS-blue.md").write_text("# Canonical blue operator instructions\n")
+
     for name in (
         "_snapshot_orchestrator_database",
         "_write_prompt_wrappers",

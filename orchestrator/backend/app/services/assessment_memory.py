@@ -9,7 +9,7 @@ from typing import Any
 from fastapi import HTTPException, status
 
 from ..db import get_connection
-from . import artifact_index, intel, state_manager
+from . import artifact_index, code_analysis, intel, operator_checkpoints, state_manager
 from .events import _engagement_or_404
 from .search import canonical_finding_alias
 
@@ -88,9 +88,37 @@ def _limited_findings(
     return [_finding_summary(row) for row in rows]
 
 
+_DECISION_RENDER_CAP = 10
+
+
 def _recent_decisions(engagement_id: int, *, since: str = "") -> list[dict[str, Any]]:
     rows = state_manager.list_decisions(engagement_id, limit=10 if not since else 30)
-    return _since_filter(rows, since=since, field="created_at")[:10]
+    return _since_filter(rows, since=since, field="created_at")[:_DECISION_RENDER_CAP]
+
+
+def _decision_count(connection, engagement_id: int, *, since: str = "") -> int:
+    """Count the same decision window represented by ``recent_decisions``."""
+    if not since:
+        return _row_count(connection, "assessment_dispatch_decisions", engagement_id)
+    rows = connection.execute(
+        "SELECT created_at FROM assessment_dispatch_decisions WHERE engagement_id = ?",
+        (engagement_id,),
+    ).fetchall()
+    timestamps = [{"created_at": row["created_at"]} for row in rows]
+    return len(_since_filter(timestamps, since=since, field="created_at"))
+
+
+def _row_count(connection, table: str, engagement_id: int) -> int:
+    """Absolute row count for one engagement-scoped table.
+
+    The display lists above are capped, so the renderer needs the TRUE total to
+    print an honest "showing N of M" instead of implying the cap is the depth.
+    """
+    row = connection.execute(
+        f"SELECT COUNT(*) AS total FROM {table} WHERE engagement_id = ?",
+        (engagement_id,),
+    ).fetchone()
+    return int(row["total"]) if row is not None else 0
 
 
 def _to_naive_utc(value: dt.datetime | None) -> dt.datetime | None:
@@ -171,20 +199,92 @@ _TERMINAL_NO_HANDOFF_STATUSES = frozenset(
     {"completed", "blocked", "failed", "aborted"}
 )
 
-# Newest-N dispatches shown in the `recent_dispatches` display list. This window
-# drives DISPLAY ONLY — stale/gap/terminal detection is decoupled from it (I-10).
-_DISPATCH_DISPLAY_LIMIT = 25
-# Stale/gap/terminal detection scans every in-progress (and terminal) dispatch,
-# not just the display window. Matches reconcile-stale's scan depth (agent.py
-# `_reconcile_stale`) so the two commands agree on the ROW SET, not just the
-# threshold. The handoffs map is scanned as deep so a handoff for an old
-# in-progress dispatch is still resolvable (else a false handoff gap).
-_DISPATCH_SCAN_LIMIT = 1000
-_HANDOFF_SCAN_LIMIT = 1000
-# Rendered worklists are capped; the true totals ride alongside as `*_count`
-# (the "capped list + absolute count" pattern used elsewhere, e.g.
-# blocked_techniques_count) so a capped list still signals real depth.
+# The single NON-terminal dispatch status, and so the one the stale and
+# handoff-gap checks apply to. Named beside the terminal set because one scan
+# now walks every dispatch and splits it on exactly this distinction.
+_IN_PROGRESS_STATUS = "in-progress"
+
+# Every list this picture publishes is cut to this many rows, and the TRUE total
+# rides alongside as `*_count` — the "capped list + absolute count" pattern used
+# elsewhere in the brief (blocked_techniques_count). The detection scans below
+# are deliberately NOT capped: the cut decides what an operator is shown, never
+# what was measured.
 _DISPATCH_LIST_RENDER_CAP = 10
+
+
+def _dispatch_lifecycle_rows(connection, engagement_id: int) -> list[Any]:
+    """Every dispatch of one engagement, worst-first, lifecycle columns only.
+
+    Exhaustive on purpose. No row cap is honest here: "stale" is a per-role age
+    threshold and "no handoff" is a join, so neither the worklists nor their
+    counts can be derived from a page — and the page this read used to take
+    (newest 1,000 by `dispatched_at`) cut the OLDEST rows, which is precisely
+    what stale means. `agent.py:_reconcile_stale`, the command this picture must
+    agree with, pages the same row set to exhaustion for the same reason.
+
+    Ordered oldest-first because `_DISPATCH_LIST_RENDER_CAP`, not the scan, now
+    decides which rows reach the operator: the ten longest-overdue dispatches
+    are the ten worth showing, where newest-first would have shown the ten that
+    only just crossed their threshold.
+
+    Only the lifecycle columns are read, so exhaustive stays cheap — the full
+    dispatch projection carries a client-binding join and the task prose that
+    none of this needs.
+    """
+    return connection.execute(
+        """
+        SELECT agent_id, agent_role, dispatched_at, completed_at, status
+        FROM assessment_dispatches
+        WHERE engagement_id = ?
+        ORDER BY dispatched_at ASC, id ASC
+        """,
+        (engagement_id,),
+    ).fetchall()
+
+
+def _handoff_status_by_agent(connection, engagement_id: int) -> dict[str, str]:
+    """Handoff status for every agent of one engagement, keyed by ``agent_id``.
+
+    Exhaustive for a harder reason than the dispatch scan: ABSENCE from this map
+    is what the brief reports as a `handoff_gap`, so a partial map does not
+    merely lose a row — it invents a gap for a specialist that had checkpointed.
+    The scan it replaces was a top-1,000 page ordered by checkpoint, which put
+    exactly the quietest live workers on the wrong side of the cut.
+
+    `agent_id` is UNIQUE per engagement, so the key is total; presence is what
+    the callers test, and the status is read only for a stale row's label.
+    """
+    return {
+        str(row["agent_id"]): str(row["handoff_status"] or "")
+        for row in connection.execute(
+            "SELECT agent_id, handoff_status FROM assessment_dispatch_handoffs "
+            "WHERE engagement_id = ?",
+            (engagement_id,),
+        )
+    }
+
+
+def _reconciled_agent_ids(connection, engagement_id: int) -> set[str]:
+    """Agents whose empty-handed exit an operator has already adjudicated.
+
+    A `dispatch_reconciliation` decision is the durable ruling that a worker
+    genuinely produced no handoff, so its dispatch leaves the terminal worklist
+    without anything fabricating a handoff for it.
+    """
+    rows = connection.execute(
+        """
+        SELECT payload_json
+        FROM assessment_dispatch_decisions
+        WHERE engagement_id = ? AND kind = 'dispatch_reconciliation'
+        """,
+        (engagement_id,),
+    ).fetchall()
+    agent_ids: set[str] = set()
+    for row in rows:
+        payload = _json_obj(row["payload_json"])
+        if payload.get("agent_id"):
+            agent_ids.add(str(payload["agent_id"]))
+    return agent_ids
 
 
 def _recent_dispatch_picture(
@@ -192,93 +292,59 @@ def _recent_dispatch_picture(
     *,
     max_age_hours: float | None,
 ) -> dict[str, Any]:
-    # Display window: newest-N dispatches across ALL statuses. Drives the
-    # `recent_dispatches` / `latest_handoffs` display lists only — NOT the
-    # stale/gap/terminal detection below.
-    display_dispatches = state_manager.list_dispatches(engagement_id, limit=_DISPATCH_DISPLAY_LIMIT)
-    # Handoffs keyed by agent_id, scanned as deep as reconcile-stale so a handoff
-    # belonging to an OLD in-progress dispatch (one that has sunk below the
-    # display window) is still resolvable; otherwise it would be mis-reported as
-    # a handoff gap.
-    handoffs = {
-        row.get("agent_id"): row
-        for row in state_manager.list_handoffs(engagement_id, limit=_HANDOFF_SCAN_LIMIT)
-    }
-    # A decision is the durable adjudication for a worker that genuinely
-    # produced no handoff. Read every matching row directly so a long-running
-    # engagement cannot lose older reconciliations behind an API page cap.
+    # Detection and its counts come from ONE connection, so the worklists and
+    # the totals beside them describe the same instant: a handoff written
+    # between two separate reads could otherwise erase a gap from the list while
+    # leaving it in the count.
     with get_connection() as connection:
-        decision_rows = connection.execute(
-            """
-            SELECT payload_json
-            FROM assessment_dispatch_decisions
-            WHERE engagement_id = ? AND kind = 'dispatch_reconciliation'
-            """,
-            (engagement_id,),
-        ).fetchall()
-    reconciled_agent_ids: set[str] = set()
-    for decision_row in decision_rows:
-        payload = _json_obj(decision_row["payload_json"])
-        if payload.get("agent_id"):
-            reconciled_agent_ids.add(str(payload["agent_id"]))
-    now = dt.datetime.now(dt.timezone.utc)
+        lifecycle_rows = _dispatch_lifecycle_rows(connection, engagement_id)
+        handoff_status_by_agent = _handoff_status_by_agent(connection, engagement_id)
+        reconciled_agent_ids = _reconciled_agent_ids(connection, engagement_id)
+        dispatch_total = _row_count(connection, "assessment_dispatches", engagement_id)
+        handoff_total = _row_count(
+            connection, "assessment_dispatch_handoffs", engagement_id
+        )
 
-    # Stale + handoff-gap detection scans EVERY in-progress dispatch, not just the
-    # newest-N display window. An old in-progress dispatch sorts below that window
-    # and used to vanish from the brief entirely — even though `reconcile-stale`
-    # (same thresholds, but a status-filtered scan) still flagged it. Decoupling
-    # the scan from the display list is the I-10 fix: the ROW SET, not the
-    # threshold definition, was the divergence.
-    in_progress = state_manager.list_dispatches(
-        engagement_id, status_value="in-progress", limit=_DISPATCH_SCAN_LIMIT
-    )
+    now = dt.datetime.now(dt.timezone.utc)
     stale: list[dict[str, Any]] = []
     gaps: list[dict[str, Any]] = []
-    for row in in_progress:
-        agent_id = row.get("agent_id")
-        agent_role = row.get("agent_role")
-        handoff = handoffs.get(agent_id)
-        # In-progress with no handoff = running but not yet checkpointed.
-        if not handoff:
-            gaps.append({"agent_id": agent_id, "agent_role": agent_role, "reason": "no_handoff"})
-        started = _parse_iso(row.get("dispatched_at"))
-        age_hours = ((now - started).total_seconds() / 3600.0) if started else None
-        threshold = _stale_threshold_for(agent_role, override=max_age_hours)
-        if age_hours is not None and age_hours >= threshold:
-            stale.append(
-                {
-                    "agent_id": agent_id,
-                    "agent_role": agent_role,
-                    "age_hours": round(age_hours, 2),
-                    "handoff_status": (handoff or {}).get("handoff_status") or "none",
-                    "threshold_hours": threshold,
-                }
-            )
-
-    # Terminal dispatches with no handoff row = silent
-    # state-loss. Scanned via the same status-filtered path (mirrors agent.py's
-    # reconcile-stale) so a terminal row below the display window is not lost.
-    # A dispatch_reconciliation decision removes an honestly-empty worker from
-    # this worklist without fabricating a handoff.
+    # Terminal dispatch with no handoff row = silent state-loss: nothing durable
+    # explains why the worker died. A `dispatch_reconciliation` decision takes an
+    # honestly-empty worker off this worklist without fabricating a handoff.
     terminal_no_handoff: list[dict[str, Any]] = []
-    for terminal_status in sorted(_TERMINAL_NO_HANDOFF_STATUSES):
-        for row in state_manager.list_dispatches(
-            engagement_id, status_value=terminal_status, limit=_DISPATCH_SCAN_LIMIT
-        ):
-            # Defensive: don't trust every backend to have filtered server-side.
-            if str(row.get("status") or "") != terminal_status:
-                continue
-            agent_id = row.get("agent_id")
-            if handoffs.get(agent_id):
-                continue
-            if str(agent_id or "") in reconciled_agent_ids:
+    for row in lifecycle_rows:
+        agent_id = str(row["agent_id"] or "")
+        agent_role = row["agent_role"]
+        row_status = str(row["status"] or "")
+        handoff_status = handoff_status_by_agent.get(agent_id)
+        if row_status == _IN_PROGRESS_STATUS:
+            # In-progress with no handoff = running but not yet checkpointed.
+            if handoff_status is None:
+                gaps.append(
+                    {"agent_id": agent_id, "agent_role": agent_role, "reason": "no_handoff"}
+                )
+            started = _parse_iso(row["dispatched_at"])
+            age_hours = ((now - started).total_seconds() / 3600.0) if started else None
+            threshold = _stale_threshold_for(agent_role, override=max_age_hours)
+            if age_hours is not None and age_hours >= threshold:
+                stale.append(
+                    {
+                        "agent_id": agent_id,
+                        "agent_role": agent_role,
+                        "age_hours": round(age_hours, 2),
+                        "handoff_status": handoff_status or "none",
+                        "threshold_hours": threshold,
+                    }
+                )
+        elif row_status in _TERMINAL_NO_HANDOFF_STATUSES:
+            if handoff_status is not None or agent_id in reconciled_agent_ids:
                 continue
             terminal_no_handoff.append(
                 {
                     "agent_id": agent_id,
-                    "agent_role": row.get("agent_role"),
-                    "status": terminal_status,
-                    "completed_at": row.get("completed_at"),
+                    "agent_role": agent_role,
+                    "status": row_status,
+                    "completed_at": row["completed_at"],
                 }
             )
 
@@ -288,13 +354,27 @@ def _recent_dispatch_picture(
     reported_threshold = (
         float(max_age_hours) if max_age_hours is not None else _DEFAULT_STALE_THRESHOLD_HOURS
     )
-    # Rendered lists stay capped; the TRUE totals ride alongside so a capped list
-    # still signals the real depth of stale/gap/terminal work. The operator is
-    # pointed at `reconcile-stale` (already wired in _recommended_actions) for the
-    # full list + action.
+    # Every list is cut to the render cap and every `*_count` beside it is the
+    # engagement's TRUE total, so the renderer prints an honest "showing N of M"
+    # and the operator is pointed at `reconcile-stale` (wired in
+    # `_recommended_actions`) for the full list plus the action.
+    #
+    # The two display lists are fetched AT the cap rather than sliced down to it:
+    # both orderings are the query's, so asking for more rows than are shown only
+    # decides which rows get thrown away. "Latest handoffs" means most recently
+    # CHECKPOINTED, not most recently created — `created_at` is immutable and
+    # `update_handoff` moves only `last_checkpoint_at`, so a creation-ordered
+    # query cuts a just-checkpointed old handoff out of the window entirely, and
+    # no re-sort afterwards can recover a row the LIMIT already dropped.
     return {
-        "recent_dispatches": display_dispatches[:10],
-        "latest_handoffs": list(handoffs.values())[:10],
+        "recent_dispatches": state_manager.list_dispatches(
+            engagement_id, limit=_DISPATCH_LIST_RENDER_CAP
+        ),
+        "recent_dispatches_count": dispatch_total,
+        "latest_handoffs": state_manager.list_handoffs(
+            engagement_id, sort="checkpoint", limit=_DISPATCH_LIST_RENDER_CAP
+        ),
+        "latest_handoffs_count": handoff_total,
         "stale_in_progress_dispatches": stale[:_DISPATCH_LIST_RENDER_CAP],
         "stale_in_progress_dispatches_count": len(stale),
         "handoff_gaps": gaps[:_DISPATCH_LIST_RENDER_CAP],
@@ -743,6 +823,21 @@ def _per_input_coverage_section(
     return {"cells": cell_list, "cells_count": total_cells}
 
 
+# A resumed session must see a code dispatch that stopped mid-file. Its lease is
+# still held and its receipts are still current, so nothing in the finding,
+# surface or dispatch sections reports it — and `reset-stale`, the obvious
+# recovery, would throw those receipts away. Bounded like every other worklist:
+# a capped list beside the absolute count.
+_OPEN_LEASE_RENDER_CAP = 10
+
+
+def _code_analysis_section(engagement_id: int) -> dict[str, Any]:
+    """Open code-analysis leases, as the code service itself defines them."""
+    return code_analysis.open_authoring_leases(
+        engagement_id, limit=_OPEN_LEASE_RENDER_CAP
+    )
+
+
 def build_resume_brief(
     engagement_id: int,
     *,
@@ -874,6 +969,10 @@ def build_resume_brief(
     open_leads = _since_filter(
         intel.list_leads(engagement_id, open_only=True), since=since, field="updated_at"
     )[:10]
+    # A lead bound into reviewed source is code work waiting on the operator,
+    # and a stale binding is a line range that must be re-read before it is
+    # trusted. Both are one integer each, so the pointer stays a pointer.
+    lead_binding_counts = code_analysis.open_code_lead_binding_counts(engagement_id)
     intel_section = {
         # Aggregate counts are an absolute snapshot (like finding_counts), so
         # they are NOT since-filtered; the bounded lists below are.
@@ -882,7 +981,17 @@ def build_resume_brief(
         # Project a pointer (title + status), not the note body — keep the brief
         # compact; the operator opens the lead via intel list/search.
         "open_leads": [
-            {"id": row.get("id"), "title": row.get("title"), "lead_status": row.get("lead_status")}
+            {
+                "id": row.get("id"),
+                "title": row.get("title"),
+                "lead_status": row.get("lead_status"),
+                "code_bindings": lead_binding_counts.get(
+                    int(row.get("id") or 0), {}
+                ).get("bindings", 0),
+                "stale_code_bindings": lead_binding_counts.get(
+                    int(row.get("id") or 0), {}
+                ).get("stale", 0),
+            }
             for row in open_leads
         ],
         # Notes the operator tagged coverage/read-first — surfaced by title so a
@@ -890,7 +999,11 @@ def build_resume_brief(
         "read_first_notes": _resume_note_pointers(engagement_id, since=since),
     }
     dispatch_picture = _recent_dispatch_picture(engagement_id, max_age_hours=max_age_hours)
+    code_analysis_section = _code_analysis_section(engagement_id)
     knowledge_drift = _knowledge_drift_section(engagement_id)
+    recent_decisions = _recent_decisions(engagement_id, since=since)
+    with get_connection() as connection:
+        decision_total = _decision_count(connection, engagement_id, since=since)
     if agent_id:
         dispatch_picture["selected_dispatch"] = state_manager.get_dispatch(engagement_id, agent_id)
         try:
@@ -915,7 +1028,10 @@ def build_resume_brief(
         "per_input_coverage": per_input_coverage_section,
         "target_finding": target_finding,
         "findings": findings,
-        "recent_decisions": _recent_decisions(engagement_id, since=since),
+        "recent_decisions": recent_decisions,
+        "recent_decisions_count": decision_total,
+        "operator_checkpoint": operator_checkpoints.current_checkpoint(engagement_id),
+        "code_analysis": code_analysis_section,
         "dispatches": dispatch_picture,
         "command_runs": command_matches,
         "command_runs_page": command_page,
@@ -930,6 +1046,8 @@ def build_resume_brief(
             command_matches=command_matches,
             stale_dispatches=dispatch_picture.get("stale_in_progress_dispatches") or [],
             stale_threshold_hours=max_age_hours if max_age_hours is not None else _DEFAULT_STALE_THRESHOLD_HOURS,
+            open_code_leases=code_analysis_section.get("open_leases") or [],
+            open_code_leads=intel_section["open_leads"],
         ),
     }
 
@@ -942,6 +1060,8 @@ def _recommended_actions(
     command_matches: list[dict[str, Any]],
     stale_dispatches: list[dict[str, Any]],
     stale_threshold_hours: float = 24.0,
+    open_code_leases: list[dict[str, Any]] | None = None,
+    open_code_leads: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     actions: list[dict[str, Any]] = []
     max_actions = 8
@@ -970,6 +1090,17 @@ def _recommended_actions(
         add("recent command coverage", "vigil assess command-run list --limit 20")
     if agent_id:
         add("handoff continuation", f"vigil assess agent render-handoff {agent_id}", entity_kind="agent", entity_id=agent_id)
+    if open_code_leases:
+        # Point at the read, not at a mutation: whether an open lease should be
+        # adopted or reset depends on how much durable work it already holds.
+        add(
+            "open code-analysis lease",
+            "vigil assess code-dispatch list --status processing",
+        )
+    if any(row.get("code_bindings") for row in open_code_leads or []):
+        # Point at the read: whether a bound lead needs queueing, rebinding or
+        # closing depends on what the binding already carries.
+        add("open code-bound lead", "vigil assess code-lead list --lead-status open")
     if stale_dispatches:
         threshold_arg = (
             "" if abs(stale_threshold_hours - 24.0) < 1e-9

@@ -1,8 +1,9 @@
 """vigil assess export-findings — generate the single findings.md report doc from backend state.
 
 This produces ONE consolidated report document (one ``## [slug] title`` section
-per finding, severity-sorted, with root-cause grouping inline). For a
-git-diff-able per-finding tree (draft/debate/report.md per finding) use instead:
+per REPORT-DURABLE finding, severity-sorted, with root-cause grouping inline).
+For a git-diff-able per-finding tree over EVERY stored finding (draft/debate/
+report.md per finding) use instead:
 ``vigil engagement export --format markdown-tree``.
 
 The per-finding markdown block is produced by the shared renderer in
@@ -20,6 +21,28 @@ from assess.lib.finding_render import render_finding
 from assess.lib.scope import load_scope
 
 _SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+
+# The report-durable predicate, mirroring the backend's ``_report_finding_records``
+# (mode="final") so the one consolidated report document admits exactly what the
+# report-findings projection does. ``findings.md`` is a REPORT, not a dump of the
+# findings table: an unreviewed guess, a disputed claim, or a parked
+# ``pending_runtime_proof`` holding-area finding rendered here is indistinguishable
+# from a confirmed one, and is the report the operator hands over. Use
+# ``vigil engagement export --format markdown-tree`` for the review tree that
+# deliberately keeps every row (it labels each non-projected finding in place).
+_REPORTABLE_VERIFICATION_STATUSES = frozenset({"confirmed", "downgraded"})
+_REPORTABLE_WORKFLOW_STATUSES = frozenset(
+    {"active", "blocked", "exploited", "contained", "eradicated", "recovered", "reported"}
+)
+
+
+def _is_report_durable(finding: dict) -> bool:
+    return (
+        str(finding.get("verification_status", "")).strip().lower()
+        in _REPORTABLE_VERIFICATION_STATUSES
+        and str(finding.get("workflow_status", "")).strip().lower()
+        in _REPORTABLE_WORKFLOW_STATUSES
+    )
 
 
 def register(subparsers) -> None:
@@ -60,6 +83,8 @@ def run(args) -> None:
         sys.exit(1)
     if not isinstance(groups, list):
         groups = []
+
+    findings = [f for f in findings if isinstance(f, dict) and _is_report_durable(f)]
 
     finding_by_slug = {str(finding.get("slug", "")): finding for finding in findings if finding.get("slug")}
     for group in groups:

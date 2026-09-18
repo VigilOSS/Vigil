@@ -401,6 +401,9 @@ export function CodeAnalysisTab({
             >
               <div className="code-repo-header">
                 <strong>{repo.name}</strong>
+                {/* A reference repo is never handed work, so its analysis status
+                    reads as "nothing happened" unless the role is named. */}
+                {repo.repo_role === "reference" && <span className="badge">reference</span>}
                 <span className={`badge code-status-${repo.analysis_status}`}>
                   {repo.analysis_status.replace(/_/g, " ")}
                 </span>
@@ -493,6 +496,15 @@ export function CodeAnalysisTab({
           </article>
         </div>
 
+        {(queueStats?.reference_repo_items?.length ?? 0) > 0 && (
+          <p className="meta-text">
+            Not counted above &mdash; reference repositories are never handed work:{" "}
+            {queueStats?.reference_repo_items
+              .map((repo) => `${repo.repo_key} (${repo.queue_items} row(s))`)
+              .join(", ")}
+          </p>
+        )}
+
         {/* Queue progress bar */}
         {queueStats && queueStats.total > 0 && (
           <div className="code-queue-bar-wrap">
@@ -553,6 +565,19 @@ export function CodeAnalysisTab({
                   </div>
                 )}
               </div>
+              {(coverage.reference_repos?.length ?? 0) > 0 && (
+                // The queue-side note above only names a reference repo that
+                // happens to hold queue rows. This one names them all, which is
+                // the case that matters: files that are readable, deliberately
+                // excluded from every count above, and otherwise invisible.
+                <p className="meta-text">
+                  Excluded from these counts &mdash; reference repositories are read for
+                  context but never owe review:{" "}
+                  {coverage.reference_repos
+                    .map((repo) => `${repo.repo_key} (${repo.admitted_files} file(s))`)
+                    .join(", ")}
+                </p>
+              )}
             </article>
           )}
 

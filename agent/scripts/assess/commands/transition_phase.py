@@ -15,36 +15,15 @@ import sys
 
 from assess.lib.client import AssessError, AssessmentClient
 from assess.lib.config import Config, load_config
+from assess.lib.phases import (
+    BLUE_TRANSITION_PHASES as BLUE_PHASES,
+    CODE_TRANSITION_PHASES as CODE_PHASES,
+    WEB_TRANSITION_PHASES as WEB_PHASES,
+)
 from assess.lib.scope import mutate_scope
 
-WEB_PHASES = [
-    "recon",
-    "collect",
-    "consume-test",
-    "verify",
-    "exploit",
-    "report",
-    "complete",
-]
-
-CODE_PHASES = [
-    "ingest",
-    "classify-map",
-    "hunt",
-    "verify-variant",
-    "fuzz",
-    "complete",
-]
-
-BLUE_PHASES = [
-    "intake",
-    "triage",
-    "investigate",
-    "verify",
-    "respond",
-    "report",
-    "complete",
-]
+# The three ordered rosters (terminal `complete` included) come from
+# `assess.lib.phases`, the single source of truth for phase vocabulary.
 
 WEB_TRANSITION_ORDER = {phase: i for i, phase in enumerate(WEB_PHASES)}
 CODE_TRANSITION_ORDER = {phase: i for i, phase in enumerate(CODE_PHASES)}
@@ -664,14 +643,26 @@ def _chain_construction_blockers(client: AssessmentClient) -> list[dict[str, str
     return blockers
 
 
+# Workflow states a finding can actually be submitted from — the same set
+# ``export_submission._REPORTABLE_STATUSES`` gates on. ``draft`` / ``merged`` /
+# ``false_positive`` are not submissions and never carry a triage obligation.
+_SUBMITTABLE_WORKFLOW_STATUSES = frozenset(
+    {"active", "blocked", "exploited", "contained", "eradicated", "recovered", "reported"}
+)
+
+
 def _blind_triage_blockers(client: AssessmentClient) -> list[dict[str, str]]:
     """Gate the terminal report/complete edge on a recorded blind-triage Accept
-    verdict for every Medium-or-above ACTIVE finding (FIX E3).
+    verdict for every Medium-or-above SUBMITTABLE finding (FIX E3).
 
     Mirrors the ``missing_variant_pass`` Verify->Exploit gate exactly: it
-    enumerates the at-risk findings (here: severity in {medium,high,critical},
-    ``workflow_status == active``, same query shape as the ``confirmed_high``
-    set), then checks a structured durable signal rather than prose. The signal
+    enumerates the at-risk findings — severity in {medium,high,critical} in a
+    SUBMITTABLE workflow state — then checks a structured durable signal rather
+    than prose. "Submittable" is ``export_submission``'s own reportable set, not
+    ``active`` alone: a finding an exploit-developer drove to ``exploited`` is
+    the most over-claimable submission there is, and ``reported`` has to be in
+    the set or the ``complete`` edge is vacuous, because publication moves a
+    finding to ``reported`` before that edge is ever reached. The signal
     is a ``kind='blind_triage_verdict'`` decision row (written by the operator
     via ``vigil assess agent decision --kind blind_triage_verdict
     --payload-json {finding_slug, verdict, ...}``) whose ``verdict`` starts
@@ -697,7 +688,8 @@ def _blind_triage_blockers(client: AssessmentClient) -> list[dict[str, str]]:
     medium_or_above = [
         f for f in findings
         if f.get("severity") in ("medium", "high", "critical")
-        and f.get("workflow_status") == "active"
+        and str(f.get("workflow_status") or "").strip().lower()
+        in _SUBMITTABLE_WORKFLOW_STATUSES
     ]
     if not medium_or_above:
         return blockers
@@ -733,7 +725,7 @@ def _blind_triage_blockers(client: AssessmentClient) -> list[dict[str, str]]:
         blockers.append({
             "kind": "missing_blind_triage",
             "detail": (
-                f"{len(missing)} Medium-or-above active finding(s) have no recorded "
+                f"{len(missing)} Medium-or-above submittable finding(s) have no recorded "
                 f"blind-triage Accept verdict: {sample}"
                 + (" ..." if len(missing) > 5 else "")
                 + " — run blind-triage Pass 2 (agent/skills/blind-triage/SKILL.md) "

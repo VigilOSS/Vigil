@@ -52,6 +52,8 @@ _PARSER_DISTRIBUTIONS = {
     ("native.hh", "cpp"),
     ("module.mjs", "javascript"),
     ("legacy.cjs", "javascript"),
+    ("config.mts", "typescript"),
+    ("legacy.cts", "typescript"),
     # Lightweight (regex-based) extractors are now first-class languages.
     ("style.css", "css"),
     ("theme.scss", "css"),
@@ -61,6 +63,15 @@ _PARSER_DISTRIBUTIONS = {
     ("index.html", "html"),
     ("page.htm", "html"),
     ("card.tpl", "html"),
+    ("themes/base/login/login.ftl", "freemarker"),
+    ("page.ftlh", "freemarker"),
+    ("feed.ftlx", "freemarker"),
+    # Compound suffix: `Path(...).suffix` only ever returns `.php`, so this
+    # rule has to run before the single-suffix table or every Blade template
+    # is handed to the PHP grammar.
+    ("resources/views/home/default.blade.php", "blade"),
+    ("profile.Blade.PHP", "blade"),
+    ("index.php", "php"),
     # Dockerfiles are matched by basename, not extension.
     ("Dockerfile", "dockerfile"),
     ("Dockerfile.prod", "dockerfile"),
@@ -79,7 +90,7 @@ def test_supported_languages_includes_new():
 
 
 def test_supported_languages_includes_lightweight():
-    for lang in ("dockerfile", "shell", "lua", "html", "css"):
+    for lang in ("blade", "dockerfile", "shell", "lua", "html", "css", "freemarker"):
         assert lang in SUPPORTED_LANGUAGES
 
 
@@ -160,7 +171,7 @@ def test_go_entry_points():
 def test_go_sinks():
     idx = index_file("main.go", "go", source=GO_SOURCE)
     sink_kinds = {s["kind"] for s in idx["security_sinks"]}
-    assert "xss_output" in sink_kinds or "url_fetch" in sink_kinds or len(idx["security_sinks"]) >= 0
+    assert sink_kinds == {"xss_output"}
 
 
 @needs_treesitter
@@ -189,10 +200,48 @@ def test_go_classes():
     assert "Server" in class_names
 
 
+GO_IMPORT_FORMS_SOURCE = b"""\
+package main
+
+import "fmt"
+
+import (
+    "net/http"
+    mux "github.com/gorilla/mux"
+    _ "github.com/lib/pq"
+    . "math"
+    "./relative"
+)
+"""
+
+
 @needs_treesitter
 def test_go_imports():
     idx = index_file("main.go", "go", source=GO_SOURCE)
-    assert len(idx["imports"]) >= 2
+    assert idx["imports"] == ["fmt", "net/http"]
+
+
+@needs_treesitter
+def test_go_imports_keep_the_path_of_aliased_and_blank_specs():
+    """An import path is the spec's quoted path, not the spec minus a quote.
+
+    A named `import_spec` (`mux "..."`, the blank `_ "..."` driver-registration
+    idiom, or a dot import) has no leading quote, so trimming quotes off the
+    whole spec leaves the alias welded to the path. Consumers match these
+    values against declared modules, and a welded token matches nothing —
+    a referenced package reported as unreferenced on a file the index calls
+    complete.
+    """
+    idx = index_file("imports.go", "go", source=GO_IMPORT_FORMS_SOURCE)
+
+    # `./relative` is a filesystem-relative path, not a module: still dropped.
+    assert idx["imports"] == [
+        "fmt",
+        "net/http",
+        "github.com/gorilla/mux",
+        "github.com/lib/pq",
+        "math",
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -741,8 +790,10 @@ def test_php_sinks():
 @needs_treesitter
 def test_php_entry_points():
     idx = index_file("app.php", "php", source=PHP_SOURCE)
-    ep_names = {e["name"] for e in idx["entry_points"]}
-    assert "__construct" not in ep_names or len(idx["entry_points"]) >= 0
+    # PHP_SOURCE registers nothing the catalogue reads: no `#[Route]` attribute,
+    # no magic method, no `Route::`/`$app->`/`$router->` call. An empty result is
+    # the honest one, and a positive assertion here would be asserting a gap.
+    assert idx["entry_points"] == []
 
 
 # ---------------------------------------------------------------------------
@@ -1000,6 +1051,60 @@ def test_html_extractor_form_and_template_sinks():
     assert "template_interpolation" in kinds
     assert "inline_event_handler" in kinds
     assert any(e["kind"] == "html_form" for e in idx["entry_points"])
+
+
+def test_two_callables_sharing_a_name_and_line_get_distinct_identities():
+    """`code-index sync` keys a callable on (qualified_name, start, end).
+
+    Minified and obfuscated sources reuse short names across scopes and put the
+    whole program on one line, so two genuinely different functions collide on
+    that tuple. The sync then refuses the WHOLE repository over one file -- it
+    builds a single payload per repo -- so an obfuscated vendored script blocks
+    every other file's structural metadata. Observed on DVWA's
+    `vulnerabilities/javascript/source/high.js`, which is not `.min.js` and sits
+    in no skipped directory.
+    """
+    source = b"function b(c,d){function h(j){return j}return h}function k(){function h(){return 1}return h}\n"
+    idx = index_file("high.js", "javascript", source=source)
+
+    named = [f for f in idx["functions"] if f["name"] == "h"]
+    assert len(named) == 2, "both nested `h` callables are still extracted"
+
+    identities = [
+        (f["qualified_name"], f["line_start"], f["line_end"]) for f in idx["functions"]
+    ]
+    assert len(identities) == len(set(identities)), (
+        f"callable identities must be unique within a file: {identities}"
+    )
+    # The authored name is preserved for citation; only the identity is qualified.
+    assert {f["name"] for f in named} == {"h"}
+
+
+def test_commented_out_html_markup_is_not_surface():
+    """A comment is dead markup, so it must not register reachability.
+
+    An HTML comment spans lines, so the per-line prefix test the other extractors
+    use cannot see it. Before the mask, a commented-out form was an `html_form`
+    entry point and a commented-out remote script was a supply-chain sink with a
+    phantom import -- a reachability claim on code that never runs, feeding
+    `entry_point_proximity`. Blade and FreeMarker delegate here and inherit it.
+    """
+    source = b"""\
+<!-- <form action="/legacy" method="post"></form> -->
+<!--
+  <script src="http://cdn.evil.example/a.js"></script>
+-->
+<!-- old --> <form action="/live" method="post"></form>
+<div data-note="a --> b"><form action="/tricky"></form></div>
+"""
+    idx = index_file("page.html", "html", source=source)
+
+    actions = sorted(e.get("annotation", "") for e in idx["entry_points"] if e["kind"] == "html_form")
+    assert actions == ["/live", "/tricky"], "commented-out forms must not register"
+    # The mask preserves columns, so a real tag sharing a line with a closed
+    # comment is still found, and a bare `-->` inside an attribute is not a close.
+    assert "external_script_load" not in _sink_kinds(idx)
+    assert idx["import_targets"] == []
 
 
 def test_css_extractor_external_import_and_expression():

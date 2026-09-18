@@ -1,6 +1,6 @@
 ## Activation
 
-**Operator-doctrine budget:** 450 lines; this revision is 450 lines.
+**Operator-doctrine budget:** 450 lines; this revision is 513 lines (over budget).
 
 This file replaces the web-focused core loop from `operator-core.md` for code-analysis
 engagements (same backend, findings table, and CLI tools).
@@ -238,7 +238,8 @@ Every code analysis dispatch must include:
   after Runtime Identity; do not rebuild its generation, digest, snapshot, index, or ctags paths
   from memory.
 - A **Structural Coverage Debt** block when any scoped file artifact is degraded, unsupported, or
-  truncated, using the exact top-of-dispatch shape below
+  truncated, using the exact top-of-dispatch shape below — inline per file, or above 25 files the
+  ledger form defined there
 - **Current phase** and **specific task objective**
 - **Which skill(s) to load** (selected via `vigil assess list-skills`)
 - For Phase 3 `code-variant-hunter` only, the named **Variant Receipt Authority** block defined in
@@ -288,6 +289,33 @@ file is `complete` and untruncated:
 <repo-relative-path>: status=<degraded|unsupported>; mode=<mode>; reason=<reason-or-none>; unavailable=<dimensions>; truncated=<dimensions-or-none>
 ```
 
+**Above 25 debt files, move the rows to a ledger and cite it.** This block sits above the source in
+the dispatch, so a repository with hundreds of unsupported files puts more metadata in front of the
+specialist than there is code behind it — the debt stops being read at exactly the scale that makes
+it matter. The exact per-file lines are never dropped; they move to a generation-bound artifact and
+the dispatch carries the pointer plus what the specialist has to act on without opening it:
+
+```text
+## Structural Coverage Debt
+ledger: <repo-relative-artifact-path>; sha256=<digest-from-artifact-register>; generation=<generation>; manifest=<manifest-digest>
+counts: degraded=<n>; unsupported=<n>; truncated=<n>; total=<n>
+extensions: <.ext>=<n>; <.ext>=<n>; ...
+<repo-relative-path>: status=...; mode=...; reason=...; unavailable=...; truncated=...   # security-relevant exceptions only, one per line, in the single-file shape above
+```
+
+- The ledger file holds one canonical line per debt file, in the single-file shape above and no
+  other. Register it with `vigil assess artifact register <path>` and copy the backend-derived
+  `sha256`; a hand-computed digest proves nothing about what the specialist will open.
+- `generation` and `manifest` must equal Code Source Identity's. A ledger from a superseded
+  generation describes files this dispatch is not reviewing.
+- **Security-relevant exceptions stay inline, always**, in addition to the ledger: every debt file
+  that is in this dispatch's own file batch, and every one the threat-model envelope names as a
+  product surface or trust boundary. Those are the files whose missing structure changes how this
+  specialist works, so they must be legible without a second read.
+- `counts` and `extensions` describe the ledger, not a substitute for it. Counts alone would hide
+  which language went unindexed, which is the one thing the operator needs to route direct
+  sealed-source review.
+
 On the lens-carrying roles (`code-architect`, `code-vuln-hunter`, `code-variant-hunter`, and
 `source-analyzer` when it runs alongside web testing), put the Dispatch Mindset block immediately
 after Structural Coverage Debt when present, otherwise after Variant Receipt Authority when present,
@@ -314,8 +342,10 @@ Before every dispatch, verify:
 - [ ] Agent identity named and repository specified
 - [ ] Code Source Identity block taken from `agent start --code-repo-id <id>` output; snapshot,
       structural index, and ctags bindings all name that same generation and manifest digest
-- [ ] Structural Coverage Debt block included for every scoped degraded/unsupported/truncated file;
-      direct sealed-source review is part of the objective and absent/capped index arrays are not
+- [ ] Structural Coverage Debt block accounts for every scoped degraded/unsupported/truncated file
+      — inline, or through a current-generation ledger whose path, `sha256`, counts, and extension
+      breakdown are in the block and whose security-relevant exceptions are still inline; direct
+      sealed-source review is part of the objective and absent/capped index arrays are not
       treated as negative evidence
 - [ ] For every Phase 2–4 dispatch, complete current threat-model envelope included with
       `current: true` and generation/digest equal to Code Source Identity; any clipped summary is
@@ -331,6 +361,10 @@ Before every dispatch, verify:
 - [ ] Full skill path(s) `agent/skills/<name>/SKILL.md` included in the dispatch prompt with explicit enforcement: "You MUST read and follow `agent/skills/<name>/SKILL.md` before beginning work; if a skill contradicts this prompt, the skill wins for procedural steps."
 - [ ] Bare skill `name(s)` (not paths) passed to `--skills` on `vigil assess agent start` for audit — the validator resolves names against `agent/skills/<name>/SKILL.md`
 - [ ] For lens-carrying roles (`code-architect`/`code-vuln-hunter`/`code-variant-hunter`/`source-analyzer`): Dispatch Mindset block set — `hunt_scope` (`wide` for Phase 1/2A, `deep` for 2B/2C/2D/3) and, on DEEP/SYNTHESIS/VARIANT passes, exactly ONE `mindset lens` under `agent/rules/mindsets/` matching the flagged signal (`chain-impact.md` for Phase 2D). WIDE survey passes carry baseline + `developer.md`, no family lens.
+- [ ] Model and reasoning chosen by the dispatch policy in `agent/operator-core.md` Core Loop step
+      3 (FORMULATE PLAN) and passed as `--model`/`--reasoning` on `agent start`. The audit row
+      records what the caller declared; it is not an observation of the spawned process, so the
+      declaration and the runtime wrapper's pin have to be set to the same thing deliberately
 - [ ] Supporting context clipped to the relevant files and chains; no unrelated JSON dumps
 - [ ] Log and queue checked for duplicate dispatch -- never dispatch the same agent for the same
       file batch twice; for a CWE-directed re-dispatch, state the new directives explicitly so it
@@ -355,9 +389,11 @@ vigil assess code-coverage --cwe-matrix      # CWE effort state when Phase 2B or
 vigil assess code-coverage --require-transition-ready <next-phase>
 ```
 
-Resume from the current phase. If `code-dispatch stats` shows `processing` items, they were
-interrupted -- reset stale items with `vigil assess code-dispatch reset-stale 10` and
-re-dispatch. Active specialists heartbeat their fetched `agent_name` + `lease_token`; every result
+Resume from the current phase. If `code-dispatch stats` shows `processing` items, inspect them with
+`vigil assess code-dispatch list --stale-minutes 10` before acting: a stale row that already carries
+receipts is adopted (`code-dispatch adopt-lease`, which keeps them), and one that carries none is
+reset (`code-dispatch reset-stale 10`, which discards them). Resetting a row that did real work
+makes its replacement redo it. Active specialists heartbeat their fetched `agent_name` + `lease_token`; every result
 and closeout reuses that ownership pair. If `needs-context` items exist, provide the requested
 context and return them to pending with `code-dispatch retry-needs-context <ids> <reason>`.
 
@@ -394,8 +430,9 @@ When source code is obtained mid-engagement (exposed .git, source maps, backup d
    Ingestion never changes engagement type or authorization as a side effect.
 2. Download/reconstruct source to `$DIR/source/<name>/`
 3. Run `vigil assess code-ingest "$DIR/source/<name>"`
-4. Use the ingest result's repo ID and sealed snapshot path with
-   `vigil assess code-index build --repo-id <repo-id> <snapshot-path>`, then run
+4. Use the ingest result's repo ID and its `Sealed source:` path — already the snapshot's
+   `source/` directory — with
+   `vigil assess code-index build --repo-id <repo-id> <sealed-source-path>`, then run
    `vigil assess code-index sync` (the script bootstraps bundled tree-sitter packages through `uv`
    on first run)
 5. Code analysis phases run in parallel with ongoing web testing
@@ -404,7 +441,12 @@ When source code is obtained mid-engagement (exposed .git, source maps, backup d
 When a standalone code engagement gains an authorized live target, explicitly run
 `vigil engagement add-track <engagement-key> web`, then add each authorization root with
 `vigil engagement add-host <engagement-key> <host>` before the first probe. The new web track starts
-at recon while the existing code phase is preserved.
+at recon while the existing code phase is preserved. Both are authorization calls you make: the host
+comes from the program you were authorized against, never from a finding's `details`. What triggers
+them is `vigil assess exploit review`'s `Runtime proof owed` section — findings verified
+`pending_runtime_proof`, whose source evidence holds but whose live PoC is owed. Running that pass
+and recording its proof receipt belongs to an exploit-developer dispatch on the web track
+(`agent/phases/phase-6-exploit.md`).
 
 Until that web track is active and authorized, CODE-phase specialists follow the declared-target
 advisory in `shared-constraints-code.md`: ordinary research network access remains available, while
@@ -435,7 +477,7 @@ degrades, and the engagement produces the exact failure modes seen in prior runs
   identities rather than replacing them
 - Record subagent outputs via `vigil assess` after they pass quality gates
 - Gate phase transitions on mandatory checklists -- reject and re-dispatch when gates fail
-- Manage the analysis queue (fetch, dispatch, done, reset-stale, requeue-triggers)
+- Manage the analysis queue (list, fetch, dispatch, progress, done, adopt-lease, reset-stale, requeue-triggers). `list` is the read-only view: it recovers queue item IDs after the insertion output scrolls, and `requeue-triggers` applies per target, so it exits nonzero and names every blocked target while committing the rest — reconcile each blocked target from `list` rather than re-running the whole batch
 - Review coverage gaps and CWE effort matrix to decide whether to re-dispatch or accept
 - Extract call graph excerpts and structural index data from `tools/analysis-state/` for dispatch context
 - Run the Phase 2B CWE coverage review loop to close effort gaps systematically

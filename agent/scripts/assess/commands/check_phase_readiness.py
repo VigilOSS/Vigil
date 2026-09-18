@@ -63,37 +63,27 @@ from assess.lib import coverage_checks as cc
 from assess.lib.client import AssessError, AssessmentClient
 from assess.lib.config import load_config
 from assess.lib.exploit_targets import resolve_approved_target_slugs
-from assess.lib.kali_audit import ALLOWED_PHASES as _CANONICAL_PHASES
+from assess.lib.phases import PHASE_INPUT_ALIASES, WEB_PHASES, canonical_phase
 from assess.lib.scope import load_scope
 
 
-# This command handles the WEB engagement phases and labels the canonical
-# persisted "consume-test" phase (the spelling in kali_audit.ALLOWED_PHASES —
-# the one enum both this command and the command catalog key off) with the
-# short internal form "consume". `_CANONICAL_CONSUME` names that canonical
-# spelling explicitly so the alias below is a documented bridge to the shared
-# enum rather than a second, silently-divergent phase vocabulary.
-_CANONICAL_CONSUME = "consume-test"
-assert _CANONICAL_CONSUME in _CANONICAL_PHASES, (
-    "check-phase-readiness consume alias drifted from kali_audit.ALLOWED_PHASES"
-)
+# This command handles the WEB engagement phases, in the canonical spellings
+# from `assess.lib.phases` — the same values `transition-phase` persists to
+# scope.json and the audit enum tags command runs with. The short `consume`
+# form callers may type is resolved at the argparse boundary by
+# `canonical_phase`; it never reaches the branching below.
+PHASES = WEB_PHASES
 
-PHASES = ("recon", "collect", "consume", "verify", "exploit", "report")
-
-# Explicit consume↔consume-test alias: the canonical enum spells the phase
-# "consume-test", this command's internal short form is "consume". Keep the
-# legacy underscore variant too. Derived from `_CANONICAL_CONSUME` so the two
-# enums cannot diverge.
-_PHASE_ALIASES = {_CANONICAL_CONSUME: "consume", "consume_test": "consume"}
+_PHASE_ALIASES = PHASE_INPUT_ALIASES
 
 _CLI_PHASE_CHOICES = (*PHASES, *_PHASE_ALIASES)
 
-_INTEL_PHASES = frozenset({"recon", "consume", "report"})
+_INTEL_PHASES = frozenset({"recon", "consume-test", "report"})
 
 _PHASE_REQUIRE_STAGE: dict[str, str | None] = {
     "recon": "enum",
     "collect": "collection",
-    "consume": "consumption",
+    "consume-test": "consumption",
     "verify": None,
     "exploit": None,
     "report": None,
@@ -105,9 +95,11 @@ _PHASE_REQUIRE_STAGE: dict[str, str | None] = {
 # NEVER changes this advisory command's exit code — the hard block lives on the
 # transition-phase precondition. (`complete` is not a phase of this command, so
 # it is not listed; its block is previewed under `report`.)
-_DEPTH_PHASES = frozenset({"consume", "verify", "report"})
+_DEPTH_PHASES = frozenset({"consume-test", "verify", "report"})
 
-_COVERAGE_PHASES = frozenset({"recon", "collect", "consume", "verify", "exploit"})
+_COVERAGE_PHASES = frozenset(
+    {"recon", "collect", "consume-test", "verify", "exploit"}
+)
 
 
 def register(subparsers: argparse._SubParsersAction) -> None:
@@ -124,8 +116,8 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         dest="phase",
         choices=_CLI_PHASE_CHOICES,
         required=True,
-        help="Engagement phase to check readiness for (accepts the persisted "
-             "consume-test alias for consume).",
+        help="Engagement phase to check readiness for (the `consume` short "
+             "form resolves to the canonical `consume-test`).",
     )
     p.add_argument(
         "--depth",
@@ -231,7 +223,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
 
 def run(args: argparse.Namespace) -> None:
     cfg = load_config(args.engagement_dir)
-    phase = _PHASE_ALIASES.get(args.phase, args.phase)
+    phase = canonical_phase(args.phase)
 
     projection: dict[str, Any] = {"phase": phase, "engagement_key": cfg.engagement_key}
     text_lines: list[str] = []
@@ -264,7 +256,7 @@ def run(args: argparse.Namespace) -> None:
             text_lines.extend(cov_ok)
         else:
             text_lines.extend(cov_blockers)
-            if phase == "consume":
+            if phase == "consume-test":
                 exit_nonzero = True
 
         # P-1 (item 2.1) — recon-pipeline stage-completion audit. The backend

@@ -24,7 +24,8 @@ Phase composition:
 
   * ``recon``   → coverage gate + per-host outcomes + intel advisory
   * ``collect`` → coverage gate + per-host outcomes
-  * ``consume`` → coverage gate + per-host outcomes + the depth ledger + intel
+  * ``consume-test`` → coverage gate + per-host outcomes + the depth ledger
+                    + intel
   * ``verify``  → coverage gate + the depth ledger (carry-over)
   * ``exploit`` → coverage gate (the exploit projection is resolved CLI-side
                   from scope.json, which the backend does not read here)
@@ -45,12 +46,26 @@ from .coverage import coverage_readiness, per_host_coverage
 from .depth_ledger import depth_ledger
 from .report_readiness import report_readiness
 
-PHASES: tuple[str, ...] = ("recon", "collect", "consume", "verify", "exploit", "report")
+# The canonical web-track roster, in order. It MIRRORS
+# ``agent/scripts/assess/lib/phases.py:WEB_PHASES`` — the backend does not
+# depend on the agent tree, so the copy is deliberate and
+# ``orchestrator/backend/tests/test_phase_roster.py`` pins the two together.
+# These are the spellings ``transition-phase`` persists to ``scope.json``; the
+# short ``consume`` form is an INPUT alias only (see ``_normalize_phase``) and
+# never appears in stored state or in the branching below.
+PHASES: tuple[str, ...] = ("recon", "collect", "consume-test", "verify", "exploit", "report")
+
+#: Caller-supplied spellings resolved to a canonical roster value. Mirrors
+#: ``phases.PHASE_INPUT_ALIASES``.
+PHASE_INPUT_ALIASES: dict[str, str] = {
+    "consume": "consume-test",
+    "consume_test": "consume-test",
+}
 
 PHASE_REQUIRE_STAGE: dict[str, str | None] = {
     "recon": "enum",
     "collect": "collection",
-    "consume": "consumption",
+    "consume-test": "consumption",
     "verify": None,
     "exploit": None,
     "report": None,
@@ -306,7 +321,8 @@ def _intel_readiness(engagement_id: int) -> dict[str, Any]:
 def phase_readiness(engagement_id: int, phase: str) -> dict[str, Any]:
     """Assemble the per-phase readiness payload by calling the existing gates.
 
-    The phase is normalized (``consume-test`` → ``consume``). An unknown phase
+    The phase is normalized (the short ``consume`` form resolves to the
+    canonical ``consume-test``). An unknown phase
     raises ``ValueError`` (the API turns it into a 422). The returned payload
     always carries::
 
@@ -333,7 +349,7 @@ def phase_readiness(engagement_id: int, phase: str) -> dict[str, Any]:
     out: dict[str, Any] = {
         "track": "web",
         "phase": normalized,
-        "engagement_key": getattr(engagement, "engagement_key", ""),
+        "engagement_key": engagement.key,
         "require_stage": PHASE_REQUIRE_STAGE.get(normalized),
     }
 
@@ -351,7 +367,7 @@ def phase_readiness(engagement_id: int, phase: str) -> dict[str, Any]:
     out["ready"] = bool(coverage.get("ready", False))
     out["blockers"] = list(coverage.get("blockers") or [])
 
-    if normalized in ("recon", "collect", "consume"):
+    if normalized in ("recon", "collect", "consume-test"):
         out["per_host_coverage"] = per_host_coverage(engagement_id)
 
     # P-1: fold the command-run stage-completion audit into the phases that own
@@ -360,10 +376,10 @@ def phase_readiness(engagement_id: int, phase: str) -> dict[str, Any]:
     if normalized in PHASE_EXPECTED_STAGES:
         out["stage_audit"] = stage_completion_audit(engagement_id, normalized)
 
-    if normalized in ("consume", "verify"):
+    if normalized in ("consume-test", "verify"):
         out["depth_ledger"] = depth_ledger(engagement_id)
 
-    if normalized in ("recon", "consume"):
+    if normalized in ("recon", "consume-test"):
         out["intel"] = _intel_readiness(engagement_id)
 
     return out
@@ -371,8 +387,7 @@ def phase_readiness(engagement_id: int, phase: str) -> dict[str, Any]:
 
 def _normalize_phase(phase: str) -> str:
     raw = str(phase or "").strip().lower()
-    if raw in ("consume-test", "consume_test"):
-        raw = "consume"
+    raw = PHASE_INPUT_ALIASES.get(raw, raw)
     if raw not in PHASES:
         raise ValueError(
             f"unknown phase {phase!r}; expected one of {', '.join(PHASES)}"
@@ -384,6 +399,7 @@ __all__ = [
     "phase_readiness",
     "stage_completion_audit",
     "PHASES",
+    "PHASE_INPUT_ALIASES",
     "PHASE_REQUIRE_STAGE",
     "PHASE_EXPECTED_STAGES",
 ]

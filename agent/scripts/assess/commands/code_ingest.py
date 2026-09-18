@@ -22,6 +22,7 @@ from assess.lib.code_snapshot import (
     validate_repo_key,
 )
 from assess.lib.config import load_config
+from assess.lib.contracts import CODE_REPO_ROLES
 from assess.lib.trusted_exec import (
     git_command,
     trusted_environment,
@@ -77,9 +78,6 @@ _COLLAPSED_ADMISSION_RATIO = 0.25
 _COLLAPSED_ADMISSION_MIN_SKIPPED = 100
 
 
-_C_EXTENSIONS = frozenset({'.c', '.h', '.cpp', '.cc', '.cxx', '.hpp', '.hh'})
-_PYTHON_EXTENSIONS = frozenset({'.py', '.pyx', '.pyi'})
-_JS_TS_EXTENSIONS = frozenset({'.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs'})
 _GIT_LOG_TIMEOUT_SECONDS = 120
 _GIT_REV_LIST_TIMEOUT_SECONDS = 30
 _GIT_LARGE_HISTORY_COMMIT_THRESHOLD = 50_000
@@ -117,7 +115,7 @@ def _require_refresh_start_receipt(response: object) -> tuple[int, str]:
 
 def _require_refresh_commit_receipt(
     response: object, *, requested_repo_id: int
-) -> tuple[int, str]:
+) -> tuple[int, str, str]:
     if not isinstance(response, dict):
         raise _refresh_receipt_error(
             "commit code repository refresh", "response object"
@@ -126,6 +124,7 @@ def _require_refresh_commit_receipt(
     repo_generation = response.get("repo_generation")
     source_manifest_digest = response.get("source_manifest_digest")
     retired = response.get("retired")
+    repo_role = response.get("repo_role")
     invalid: list[str] = []
     if (
         not isinstance(returned_repo_id, int)
@@ -146,13 +145,18 @@ def _require_refresh_commit_receipt(
         invalid.append("source_manifest_digest")
     if not isinstance(retired, int) or isinstance(retired, bool) or retired < 0:
         invalid.append("retired")
+    # The role decides whether this ingest bought a coverage obligation, so the
+    # receipt must prove which one was durably written rather than echoing what
+    # the caller asked for.
+    if repo_role not in CODE_REPO_ROLES:
+        invalid.append("repo_role")
     if "deleted" in response:
         invalid.append("deleted is not a supported refresh-result field")
     if invalid:
         raise _refresh_receipt_error(
             "commit code repository refresh", ", ".join(invalid)
         )
-    return repo_generation, source_manifest_digest
+    return repo_generation, source_manifest_digest, repo_role
 
 
 def _which(binary: str, *, source_root: str | os.PathLike[str] | None = None) -> str | None:
@@ -292,6 +296,20 @@ def register(subparsers) -> None:
              "structural indexing.",
     )
     p.add_argument("--repo-key", default=None, help="Explicit repository key (default: stable name+path hash)")
+    p.add_argument(
+        "--role",
+        choices=CODE_REPO_ROLES,
+        default=None,
+        help=(
+            "Repository obligation role. 'analysis' (the default for a new "
+            "repository) is the reviewed subject: every admitted file owes a "
+            "queue row, terminal accounting, variant coverage and phase "
+            "readiness. 'reference' is host/framework source loaded only so a "
+            "specialist can resolve a symbol and cite it — sealed, indexed, "
+            "searchable and citable, but never coverage. Omit on a re-ingest to "
+            "keep the role the repository already has."
+        ),
+    )
     p.add_argument(
         "--include-minified",
         action="store_true",
@@ -1186,6 +1204,23 @@ def _git_security_history_args(commit_count: int | None) -> list[str]:
     return ['--all']
 
 
+def _analyzed_churn(
+    churn_scores: dict[str, int], files: list[dict[str, object]]
+) -> tuple[dict[str, int], int]:
+    """Churn restricted to the files this generation analyzes, plus what that dropped.
+
+    `git log` reports every path in the window, so raw churn names build
+    artifacts, vendored bundles, and files deleted before HEAD — none of which
+    this ingest admitted. The count of what was set aside is returned with it so
+    the caller can say so instead of silently presenting a shorter list.
+    """
+    analyzed_paths = {str(record["file_path"]) for record in files}
+    analyzed = {
+        path: score for path, score in churn_scores.items() if path in analyzed_paths
+    }
+    return analyzed, len(churn_scores) - len(analyzed)
+
+
 def _git_churn_scores(repo_path: str, since: str = _GIT_CHURN_LOOKBACK) -> dict[str, int]:
     """Compute per-file churn scores from git log --numstat over a bounded time window."""
     churn: dict[str, int] = {}
@@ -1417,6 +1452,16 @@ def run(args) -> None:
 
     skipped = sum(record.get("kind") != "directory" for record in skipped_records)
     skip_census = _skip_reason_census(skipped_records)
+    # Churn comes from `git log` over the WHOLE history, so it names paths this
+    # ingest never admitted — skipped build artifacts and vendored bundles, and
+    # files deleted before HEAD. Ranking those alongside analyzed source told
+    # the operator a minified stylesheet and two lockfiles were where the change
+    # was concentrated, one screen after listing them as skipped. Restrict every
+    # ranking to files this generation actually analyzes, and say how much was
+    # set aside rather than quietly shrinking the list. Per-file
+    # `git_churn_score` is unaffected: those records only exist for admitted
+    # files already.
+    analyzed_churn_scores, unanalyzed_churn_paths = _analyzed_churn(churn_scores, files)
     # Language support controls structural indexing, not whether sealed source
     # remains reviewable through direct source analysis.
     analyzable_files = len(files)
@@ -1485,8 +1530,20 @@ def run(args) -> None:
             'total_loc': total_loc,
             'commit_hash': str(git_provenance['head']),
             'branch': str(git_provenance['branch']),
-            'git_churn': {'churn_scores': dict(sorted(churn_scores.items(), key=lambda x: -x[1])[:30])} if churn_scores else {},
+            'git_churn': (
+                {
+                    'churn_scores': dict(
+                        sorted(analyzed_churn_scores.items(), key=lambda x: -x[1])[:30]
+                    )
+                }
+                if analyzed_churn_scores
+                else {}
+            ),
         }
+        # Omitted means "keep the role this repository already declared", so a
+        # routine re-ingest of framework source cannot silently re-arm coverage.
+        if getattr(args, 'role', None) is not None:
+            repo_payload['repo_role'] = args.role
         refresh = client.post('code/repos/refresh/start', repo_payload)
         repo_id, refresh_token = _require_refresh_start_receipt(refresh)
 
@@ -1511,9 +1568,8 @@ def run(args) -> None:
             f'code/repos/{repo_id}/refresh/commit',
             {'refresh_token': refresh_token, 'manifest_complete': True},
         )
-        repo_generation, committed_digest = _require_refresh_commit_receipt(
-            commit,
-            requested_repo_id=repo_id,
+        repo_generation, committed_digest, committed_role = (
+            _require_refresh_commit_receipt(commit, requested_repo_id=repo_id)
         )
 
         ctags_output = (
@@ -1596,6 +1652,11 @@ def run(args) -> None:
     print(f"Snapshot digest: {snapshot.snapshot_digest}")
     print(f"Source manifest digest: {committed_digest}")
     print(f"Repository generation: {repo_generation}")
+    role_note = (
+        "" if committed_role == "analysis"
+        else " (indexed and citable; no coverage, queue or readiness obligation)"
+    )
+    print(f"Repository role: {committed_role}{role_note}")
     _print_skip_census(skip_census, len(files), sys.stdout)
     print(f"Analyzable files: {analyzable_files}")
     if included_skipped:
@@ -1604,13 +1665,26 @@ def run(args) -> None:
         print(f"Skipped artifact manifest: {skipped_manifest}")
     print(f"Total LOC: {total_loc:,}")
 
-    if churn_scores:
-        # Top 10 highest-churn files
-        sorted_churn = sorted(churn_scores.items(), key=lambda x: x[1], reverse=True)[:10]
-        print("\nTop 10 highest-churn files (last year):")
+    if analyzed_churn_scores:
+        # Top 10 highest-churn ANALYZED files
+        sorted_churn = sorted(
+            analyzed_churn_scores.items(), key=lambda x: x[1], reverse=True
+        )[:10]
+        print("\nTop 10 highest-churn analyzed files (last year):")
         for path, score in sorted_churn:
             marker = " [security-history]" if path in security_files else ""
             print(f"  {score:>6}  {path}{marker}")
+        if unanalyzed_churn_paths:
+            print(
+                f"  ({unanalyzed_churn_paths} churning paths excluded: skipped "
+                "artifacts, or files not present in this generation)"
+            )
+    elif churn_scores:
+        print(
+            f"\nNo analyzed file changed in the last year "
+            f"({len(churn_scores)} churning paths are all skipped artifacts or "
+            "absent from this generation)."
+        )
 
     if security_files:
         print(f"\nFiles with security-related commit history: {len(security_files)}")

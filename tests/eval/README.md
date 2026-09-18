@@ -9,22 +9,18 @@ external network.
 
 ## How to run
 
-The eval tests live under `tests/eval/` (repo root) but the backend virtual
-environment is required because `assess.lib.*` is imported from
-`agent/scripts/`.  Use one of the following forms — both are equivalent:
+The eval tests live under `tests/eval/` (repo root), but the backend virtual
+environment and dev extra provide their runtime and pytest dependencies. Run
+them from any directory with a Jujutsu-rooted absolute path:
 
 ```bash
-# From the repo root
-uv run --directory orchestrator/backend pytest "$(git rev-parse --show-toplevel)/tests/eval"
-
-# Or with an explicit relative path from orchestrator/backend
-uv run --directory orchestrator/backend pytest ../../tests/eval
+uv run --directory orchestrator/backend --extra dev pytest "$(jj root)/tests/eval"
 ```
 
 **Do NOT use `cd orchestrator/backend && pytest tests/eval`** — `pytest
 tests/eval` resolves relative to the current working directory, so it looks
-for `orchestrator/backend/tests/eval` (which does not exist) and silently
-collects zero tests, producing a false-green result.
+for `orchestrator/backend/tests/eval` (which does not exist). Also avoid `uv run`
+without `--extra dev`; a clean backend environment may not contain pytest.
 
 ## What the tests do
 
@@ -36,7 +32,10 @@ modes:
 - `soft` — a `UserWarning` is emitted and the test **continues**.
 
 Assertions supported: `min_findings`, `max_findings`, `expected_cwes`,
-`expected_severities`, `severity_distribution`, `attacker_outcome_present`.
+`expected_severities`, `severity_distribution`, `attacker_outcome_present`, and
+`white_box_finding_contract`. The white-box contract requires an exact code-finding
+identity set, the expected source snapshot, and per-finding provenance, location,
+proof, and verifier metadata.
 
 ## Wave 0 production lifecycle reference
 
@@ -60,12 +59,17 @@ uv run --directory orchestrator/backend --extra dev pytest \
 ```
 
 `baselines/private-code-evaluation.json` is the committed runner-calibration
-envelope. It binds the exact fixture and recipe identities to seven distinct
+envelope. It binds the exact fixture identity to seven distinct
 production-workflow observations, their observation/platform digests, and
 recomputed medians. Each bounded observation receipt is recomputable from its
-run index, platform fingerprint, retained metrics, and exact fixture, recipe,
-and runtime identities. Ordinary runs load that envelope and require matching
-fixture, recipe, and declared-runtime identity. Requests, mutations, exact
+run index, platform fingerprint, retained metrics, and exact fixture and
+runtime identities. Ordinary runs load that envelope and require matching
+fixture and declared-runtime identity. The envelope deliberately carries no
+prompt or harness-source digest: what the baseline has to still describe is the
+*measured behaviour*, and the comparison below measures it directly. A byte
+digest over authored markdown would only re-report an edit the author just made,
+and it would fail the gate on every prompt and refactor commit (see the Markdown
+prompt/doc testing policy in `AGENTS.md`). Requests, mutations, exact
 dispatch topology, and assigned-input counts remain blocking across platforms;
 only wall-time and latency become informational when the platform fingerprint
 differs. An absent or mismatched calibration is explicitly unavailable and

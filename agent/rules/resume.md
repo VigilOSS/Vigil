@@ -11,6 +11,15 @@ true:
 - The current phase is past initialization
 - Findings, dispatch rows, activity entries, or command runs may already exist
 - You are unsure whether the engagement is fresh
+- The session was compacted, truncated, or restarted
+
+**Compaction is a context boundary, so it is a resume trigger.** On Claude the
+`PreCompact` hook steers the summarizer; on Codex there is no compaction hook at
+all, so nothing shapes what survives. Either way the durable recovery is the same
+and it is this rule: record `vigil assess operator-checkpoint` before a long
+dispatch wave, and run resume hydration after any boundary. A Codex operator who
+waits until compaction has fired has nothing left to steer — the checkpoint is
+what carries the seat across, not the summary.
 
 Run the core resume hydration before target-facing commands, specialist dispatch, phase
 transitions, finding writes, or report work:
@@ -29,13 +38,16 @@ vigil assess resume-brief --since <iso-datetime>   # what's new since the last b
 vigil assess resume-brief --max-age-hours <N>      # override the per-role stale threshold
 ```
 
-The brief includes finding queues, recent decisions, a **Surfaces** rollup
-(counts by status×type plus the top still-uncovered surfaces), a **Work Buffer**
-rollup (pending coverage obligations counted by gf-bucket), stale dispatches,
-handoff gaps, relevant command-history matches, indexed artifacts, and an
-**Intel** section (open high-severity CVEs, open leads that still need a
-disposition, and any notes you tagged `coverage` / `read-first`). Use the
-drill-down commands it prints for exact evidence:
+The brief includes your own **Operator Checkpoint** (the last thing you recorded
+you were about to do), finding queues, a **Recent Decisions** ledger, a
+**Surfaces** rollup (counts by status×type plus the top still-uncovered
+surfaces), a **Work Buffer** rollup (pending coverage obligations counted by
+gf-bucket), stale dispatches, handoff gaps, the newest dispatch and handoff rows,
+relevant command-history matches, indexed artifacts, and an **Intel** section
+(open high-severity CVEs, open leads that still need a disposition, and any notes
+you tagged `coverage` / `read-first`). Capped lists print `… showing N of M`, so
+read the M before assuming the list is the whole picture. Use the drill-down
+commands it prints for exact evidence:
 
 ```bash
 vigil assess command-run get <id>
@@ -43,7 +55,32 @@ vigil assess artifact search --q <query>
 vigil assess artifact get <id>
 vigil assess agent render-handoff <agent-id>
 vigil assess check-phase-readiness --phase report   # advisory (red engagements): open CVEs/leads + dangling finding links + report blockers
+vigil assess operator-checkpoint show --all        # your own checkpoint chain, including superseded (corrected) entries
 ```
+
+`resume-brief` is a READ. It OBSERVES abandoned command runs, jobs, and owned
+host processes without writing; when it finds any it prints a WARN naming the
+exact reconciling command. Run that command before new target-facing work so the
+audit trail stops claiming a dead run is still going:
+
+```bash
+vigil assess kali sweep-orphans --scope all
+```
+
+Close the loop at the other end: before a phase transition, before a long
+dispatch wave, and at session end, record your own checkpoint so the next
+session resumes from a row instead of a guess.
+
+```bash
+vigil assess operator-checkpoint record --intent "what I was about to do and why" --finding <slug> --agent-id <agent-id>
+```
+
+The checkpoint stores only REFERENCES to rows the backend already holds (unknown
+finding / agent / command-run / artifact ids refuse the write, naming them), and
+`--intent` is the single free-text field — recorded and rendered as **UNVERIFIED
+operator intent**, never as a finding or as evidence. It is append-only: correct
+a wrong checkpoint by recording a new one, and the superseded entry stays
+readable.
 
 Use command history as a coverage map, not as a reuse gate. If you cite a prior run
 instead of re-running, fetch it with `vigil assess command-run get <id>` first because
@@ -64,6 +101,7 @@ finding, chain, dispatch/agent, surface, request variant, or command run.
 After hydration, summarize the resume state in one compact operator note:
 - confirmed, suspicious, killed, and open findings
 - intel that changes targeting or exploitability — and any open high CVEs or open leads from the brief's Intel section that still need to be tested or ruled out (before report, `vigil assess check-phase-readiness --phase report` lists these plus any exploited-but-unlinked CVE or dangling finding link)
+- your last operator checkpoint's intent, and whether it still describes the right next action
 - recent operator decisions and null results
 - last dispatch owner, skills, result, and handoff gaps
 - command-run coverage already performed against the host or keyword

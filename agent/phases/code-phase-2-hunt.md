@@ -68,42 +68,48 @@ Dispatch it under the `code-variant-hunter.md` **Phase 2 discovery mode** contra
 selects the mode, historical CVE/patch evidence supplies the seed, both Variant Receipt Authority
 fields stay absent, and the handoff remains explicitly non-covering with no variant-check receipts.
 
-**Queue setup:**
+**The queue is already loaded.** Phase 1's on-return sequence runs `code-dispatch queue`, and hunt
+readiness refuses transition while any admitted current-generation file has no queue row -- so
+arriving here unqueued is not a reachable state. Its payload contract lives with that step in
+`agent/phases/code-phase-1-classify-map.md`. Start from `stats`, not from a second load:
+
 ```bash
-vigil assess code-dispatch queue "$DIR/tools/analysis-state/file-analysis-queue.json"
 vigil assess code-dispatch stats
 ```
 
-Broad-hunt queue items are file-level only (no `context_id`). Each item carries `file_id` and
-`file_path` plus `priority` (exactly equal to classification `analysis_priority` under the
-architecture-mapping skill's `Priority Scoring` contract), `batch_theme`,
-`slot_types`, and `guidance_hypotheses`. `code-dispatch queue` normalizes the artifact before
-posting -- include both `file_id` and `file_path` so the queue stays human-readable and the
-normalizer can resolve either one; `repo_id` is a disambiguation helper only, not a queue field.
-Priority is required: the CLI rejects missing/out-of-range values rather than defaulting or
-clamping them, and the backend rejects the whole batch before mutation if any value differs from
-the file's current `analysis_priority`. Reanalysis uses the same exact-priority invariant.
-The backend owns initial-queue idempotency per file/current generation: a retry inserts missing
-rows, safely refreshes only unleased pending metadata, reports identical active work, and refuses
-to mutate a live lease or terminal evidence. Review the printed per-file outcomes; the CLI exits
-nonzero after rendering any conflict.
-
 **Fetch loop:**
 ```bash
-vigil assess code-dispatch reset-stale 10
+vigil assess code-dispatch list --stale-minutes 10   # which rows are stale, and what each already carries
+vigil assess code-dispatch adopt-lease <item-id> <agent-name> --from-agent <dead-agent> --from-lease <token> --reason "<why>"   # stale row WITH receipts: keeps them
+vigil assess code-dispatch reset-stale 10            # remaining stale rows carrying nothing worth keeping
 vigil assess code-dispatch stats
+
+# Read-only: what is in the queue right now, and the exact ids for a lane
+vigil assess code-dispatch list --repo-id <repo-id> --status pending
+vigil assess code-dispatch list --repo-id <repo-id> --batch-theme <theme> --status pending --ids-only > ids.json
 
 # Claims up to 10 queue rows atomically (a queue-claim convenience, not a dispatch batch size)
 vigil assess code-dispatch fetch 10 code-vuln-hunter
 
-# Narrow a lane atomically by repo/class/theme or explicit queue ids
+# Narrow a lane atomically by repo/class/theme/queue-mode or explicit queue ids
 vigil assess code-dispatch fetch 10 code-vuln-hunter --repo-id <repo-id> --classification high --batch-theme <theme>
-vigil assess code-dispatch fetch 10 code-vuln-hunter --ids-file <queue-ids-json>
+vigil assess code-dispatch fetch 10 code-vuln-hunter --queue-mode trigger
+vigil assess code-dispatch fetch 10 code-vuln-hunter --ids-file ids.json
 ```
 
+`list` claims nothing and pages in the order `fetch` claims, so it is how you recover the ids for an
+explicit-id batch: the insertion output caps at 200 rows and scrolls away, and its ids were
+previously unrecoverable through any supported surface. Write `--ids-only` straight to the ids file
+-- it is the same contract `fetch --ids-file` reads, so never scrape ids out of presentation text.
+Two things make that file a *claim* set rather than an inventory: pass `--status pending`, because
+`list` deliberately reports every current attempt while `fetch` only claims unleased pending rows;
+and read its stderr, because a page that stopped at `--limit` says so there and nowhere else.
+Requeued cross-file-trigger rows keep `queue_mode=trigger`, which is how you find them in either
+command after they leave their original theme's lane.
+
 Pass lane filters to `fetch` instead of claiming broadly and filtering the response -- repository,
-classification, theme, and explicit-id predicates run inside the serialized claim query, leaving
-unrelated pending work available. Preserve each returned `agent_name`, `lease_token`, and
+classification, theme, queue-mode, and explicit-id predicates run inside the serialized claim query,
+leaving unrelated pending work available. Preserve each returned `agent_name`, `lease_token`, and
 `repo_generation` for results, heartbeats, and closeout.
 
 Split the claimed batch into the smaller per-dispatch sizes above whenever code volume, framework
@@ -144,6 +150,12 @@ one oversized mixed batch to a single agent.
   principals -- sources the hunter should NOT treat as attacker-controlled, and the single biggest
   false-positive suppressor). Pass the complete bound envelope and add a 3-8 bullet summary for
   orientation; do not replace the envelope with those bullets.
+- **Lease scratch directory** -- pass the `scratch_dir` that `code-dispatch fetch` returned for
+  this lease, and tell the hunter to write temporary files there in preference to any scratch
+  location its own client harness offers. The lease namespace is what keeps two hunters working the
+  same repository from overwriting each other; a client-provided scratch path is shared per session,
+  not per lease. Inside any directory the client harness also writes to, require lane-unique
+  filenames for the same reason.
 - **Root-cause candidate capture** -- ask the hunter to put shared utilities/guards it suspects
   cause several findings in handoff `extras.root_cause_candidates`, for the Phase 4 grouping pass.
 - **CWE pattern references** -- trigger-gated, not pre-loaded: when a slot type or code pattern in
@@ -176,12 +188,17 @@ the file batch is a starting point, not a cage, while the mutable origin is neve
 
 **Context budget rule**: every field above stays sized to help the hunter navigate, not to
 outweigh the source files -- compress structural index / call graph / threat model content before
-dispatch if it is crowding out the code under review.
+dispatch if it is crowding out the code under review. Structural Coverage Debt has its own
+compression, and only that one: past 25 debt files it moves to the generation-bound ledger defined
+in `agent/operator-core-code.md` ("Structural Coverage Debt"), which keeps every exact per-file line
+rather than replacing them with a count. Do not summarize the debt block any other way.
 
 **On return:**
 ```bash
 vigil assess contract code-record analysis   # confirm the shape if the payload was hand-authored
-vigil assess code-record analysis <analysis-json>   # cwe_coverage + cross_file_triggers
+vigil assess code-record analysis <analysis-json>   # cwe_coverage + cross_file_triggers;
+                                                   # record per cluster as each finishes, not at end-of-lane
+vigil assess code-dispatch progress <item-id>      # what this item still owes
 
 # Preview the completion payload before committing queue history when unsure:
 vigil assess code-dispatch done <item-id> <agent-name> <lease-token> <clean|finding|suspicious|skipped> <cwe-coverage-json> ["notes"] --dry-run [--skip-reason <reason>]
@@ -195,7 +212,9 @@ JSON
 vigil assess code-dispatch done <item-id> <agent-name> <lease-token> <clean|finding|suspicious|skipped> /tmp/cwe_<item-id>.json ["notes"] [--skip-reason <reason>]
 vigil assess finding record code-vuln-hunter <finding-json> --agent-id <your-agent_id>
 vigil assess code-dispatch requeue-triggers <triggers-json>   # if analysis returned cross_file_triggers
-vigil assess code-dispatch reset-stale 10   # before fetching the next batch
+vigil assess code-dispatch list --stale-minutes 10   # before fetching the next batch: read first
+vigil assess code-dispatch adopt-lease <item-id> <agent-name> --from-agent <dead-agent> --from-lease <token> --reason "<why>"   # a stale row that already carries receipts
+vigil assess code-dispatch reset-stale 10            # only rows the listing showed carrying nothing
 ```
 
 For a run-accounted hunt, every `suspicious` analysis JSON also names its active
@@ -231,8 +250,17 @@ never `code-dispatch done needs_context`, since incomplete work must carry expli
 metadata instead of looking complete in the queue history.
 
 **Cross-file triggers:** Process `cross_file_triggers` with `code-dispatch requeue-triggers`, which
-queues the target files if not already queued or completed. Unprocessed triggers are
-gate-blocking: the phase does not pass until each is queued or already completed.
+queues the target files if not already queued or completed. A `list-triggers` row is directly
+consumable as input; each input names exactly one target with exactly one selector. Unprocessed
+triggers are gate-blocking: the phase does not pass until each is queued or already completed.
+
+Requeue applies per target, not per batch. Unblocked targets commit even when a sibling target is
+refused, so a blocked target is a reason to reconcile that one file -- not to re-run the batch. The
+command exits nonzero and names every blocked target with its reason on stderr; read the response's
+`input_trigger_count` (trigger rows you submitted) against `target_count` (distinct files), whose
+`inserted`/`already_queued`/`already_completed`/`blocked` buckets sum exactly. Reconcile a blocked
+target through `code-dispatch list --queue-mode trigger` and the reason given, then requeue only
+that target.
 
 **Findings-density signal:** If a single file yields >= 2 findings AND is > 500 LOC, note it for
 the Phase 2C adversarial pass -- density signals the original hunter was anchored by its first
@@ -262,7 +290,8 @@ judgment and continue to 2C/2D. Pending cross-file triggers remain a separate st
 blocker regardless of the quality score.
 
 Otherwise: process any pending cross-file triggers first (`vigil assess code-coverage`, `vigil
-assess code-dispatch reset-stale 10`) -- a trigger may add a file that closes a gap class, shrinking
+assess code-dispatch list --stale-minutes 10`, then `code-dispatch adopt-lease ...` for a stale row
+with receipts or `code-dispatch reset-stale 10` for the rest) -- a trigger may add a file that closes a gap class, shrinking
 the re-dispatch scope. Then group the remaining files by which classes are below threshold and
 dispatch `code-vuln-hunter` in CWE-Directed Re-Analysis Mode:
 

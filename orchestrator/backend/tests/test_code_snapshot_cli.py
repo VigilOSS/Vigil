@@ -453,6 +453,8 @@ def test_trusted_tool_resolution_ignores_repo_relative_and_empty_path_entries(
         ("native.hh", "cpp"),
         ("module.mjs", "javascript"),
         ("legacy.cjs", "javascript"),
+        ("config.mts", "typescript"),
+        ("legacy.cts", "typescript"),
         ("Dockerfile.prod", "dockerfile"),
     ],
 )
@@ -467,6 +469,23 @@ def test_ingest_language_detection_matches_structural_index(
     assert language_for_file(filename) == expected
 
 
+@pytest.mark.parametrize(
+    "filename",
+    ["profile.blade.php", "resources/views/home/default.blade.php"],
+)
+def test_ingest_classifies_blade_templates_ahead_of_the_php_suffix(filename: str) -> None:
+    module = _load_command("code_ingest.py", f"test_ingest_language_{filename}")
+    from assess.lib.code_languages import canonical_backend_language, detect_language
+    from assess.lib.treesitter_index import language_for_file
+
+    assert module._detect_language(filename) == "blade"
+    assert detect_language(filename) == "blade"
+    assert canonical_backend_language("blade") == "blade"
+    assert language_for_file(filename) == "blade"
+    # The single-suffix rule still owns every other `.php` file.
+    assert module._detect_language("app/Http/Controllers/UserController.php") == "php"
+
+
 @pytest.mark.parametrize("filename", ["Inspect.ps1", "Module.PSM1", "Data.psd1"])
 def test_ingest_classifies_powershell_extensions(filename: str) -> None:
     module = _load_command("code_ingest.py", f"test_ingest_language_{filename}")
@@ -476,7 +495,10 @@ def test_ingest_classifies_powershell_extensions(filename: str) -> None:
     assert module._detect_language(filename) == "powershell"
     assert detect_language(filename) == "powershell"
     assert canonical_backend_language("powershell") == "powershell"
-    assert language_for_file(filename) is None
+    # PowerShell now has a lightweight extractor, so ingest classification and
+    # the structural index agree; the backend must still accept the language,
+    # which is what a `.ps1` 400ing `code-index sync` for a whole repository cost.
+    assert language_for_file(filename) == "powershell"
 
 
 def test_git_provenance_uses_safe_flags_and_strips_case_insensitive_git_environment(
@@ -724,6 +746,7 @@ def test_code_ingest_plain_directory_uses_canonical_directory_provenance(
                     "repo_generation": 1,
                     "source_manifest_digest": "d" * 64,
                     "retired": 0,
+                    "repo_role": "analysis",
                 }
             if endpoint == "code/repos/7/lsp-config":
                 assert payload["repo_generation"] == 1
@@ -797,6 +820,7 @@ def test_code_ingest_authenticates_complete_exclusion_accounting(
                     "repo_generation": 3,
                     "source_manifest_digest": "d" * 64,
                     "retired": 0,
+                    "repo_role": "analysis",
                 }
             if endpoint == "code/repos/7/lsp-config":
                 return _lsp_publish_response(payload)
@@ -931,6 +955,7 @@ def test_code_ingest_accepts_git_file_and_publishes_read_only_content_addressed_
                     "source_manifest_version": "code-source-manifest/v1",
                     "source_manifest_digest": "e" * 64,
                     "retired": 0,
+                    "repo_role": "analysis",
                 }
             if endpoint == "code/repos/7/lsp-config":
                 assert payload["repo_generation"] == 4
@@ -4569,7 +4594,9 @@ def test_javascript_complete_index_never_augments_ast_with_line_regex_callables(
         source=b"const parsedByAst = value => value;\n",
     )
 
-    assert indexed["analysis_status"] == "complete"
+    # No callable means no span was ever handed to the sink reader, so the file
+    # declares that debt instead of claiming a clean read it never made.
+    assert indexed["analysis_status"] == "degraded"
     assert indexed["functions"] == []
 
 
@@ -4703,6 +4730,7 @@ def test_full_parser_signal_cap_is_explicit_debt_without_losing_availability(
         },
         source_size=100,
         analysis_mode="tree_sitter",
+        unscanned_dimensions=set(),
     )
 
     assert indexed["structural_index_available"] is True
@@ -4757,7 +4785,9 @@ def test_exact_parser_attaches_bounded_security_source_detection(
         source=b"value = request.args['command']\n",
     )
 
-    assert indexed["analysis_status"] == "complete"
+    # Sources are a whole-file scan, so they survive a file with no callable --
+    # which is separately declared as an unscanned function scope.
+    assert indexed["analysis_status"] == "degraded"
     assert indexed["analysis_mode"] == "tree_sitter"
     assert indexed["signal_counts"]["security_sources"] == 1
     assert indexed["security_sources"][0]["line"] == 1

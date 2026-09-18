@@ -87,6 +87,7 @@ def build_image(
     *,
     force: bool = False,
     runner: docker.Runner | None = None,
+    build_runner: docker.Runner | None = None,
 ) -> None:
     """Build the proxy image. ``--force`` rebuilds even if the tag exists."""
     install_root = install_root.expanduser().resolve()
@@ -105,9 +106,13 @@ def build_image(
     # unstamped image can never be proven current -- which resurrects the
     # rebuild-every-time loop this freshness work exists to remove. Builds
     # therefore stream (unbounded), exactly as `build_runtime` already does.
-    # An injected runner is used for both, so tests keep a single seam.
+    # A caller that has already split the two passes `build_runner` as well, and
+    # then neither role borrows the other's behaviour: `run_command_streaming`
+    # returns empty stdout by design, so using it for the label query below
+    # reports every image unstamped and rebuilds it on every run. A caller that
+    # passes only `runner` keeps the single test seam — both roles use it.
     meta_runner = runner or docker.run_command
-    build_runner = runner or docker.run_command_streaming
+    image_build_runner = build_runner or runner or docker.run_command_streaming
     inputs = mitmproxy_image_inputs(install_root)
     if not force and not image_freshness.image_outdated(
         image, inputs, root=install_root, runner=meta_runner
@@ -131,7 +136,7 @@ def build_image(
             str(build_context / "Dockerfile"),
             str(build_context),
         ]
-        docker.require_success(build_runner(argv), argv)
+        docker.require_success(image_build_runner(argv), argv)
     print(f"mitmproxy\timage built\t{image}")
 
 
@@ -157,6 +162,7 @@ def start_proxy(
     options: MitmproxyOptions,
     *,
     runner: docker.Runner | None = None,
+    build_runner: docker.Runner | None = None,
     verify_port: bool = True,
     verify_running: bool = True,
     force_rebuild: bool = False,
@@ -168,13 +174,25 @@ def start_proxy(
     if not engagements_root.is_dir():
         raise SystemExit(f"Engagements root does not exist: {engagements_root}")
 
-    # `runner` stays raw on the build call so build_image can pick the
-    # unbounded streaming runner; every other docker call here is a fast query.
+    # `runner` is the METADATA runner and must capture stdout: everything below
+    # except the build reads a docker query's output — the image label, `docker
+    # ps`, the log tail. Handing it a streaming runner (which returns empty
+    # stdout by design) makes a current image look unstamped and rebuilds it,
+    # and makes the post-start liveness check see no container and declare the
+    # proxy it just started already dead. A caller with a separate unbounded
+    # runner for the build passes `build_runner`; `runner` stays raw on the
+    # build call so `build_image` can still pick the streaming default itself.
     exec_runner = runner or docker.run_command
     if force_rebuild or image_freshness.image_outdated(
         options.image, mitmproxy_image_inputs(install_root), root=install_root, runner=exec_runner
     ):
-        build_image(install_root, options.image, force=force_rebuild, runner=runner)
+        build_image(
+            install_root,
+            options.image,
+            force=force_rebuild,
+            runner=runner,
+            build_runner=build_runner,
+        )
 
     if docker.container_running(options.container_name, runner=exec_runner):
         print(f"mitmproxy\tstopping\tcontainer={options.container_name}")

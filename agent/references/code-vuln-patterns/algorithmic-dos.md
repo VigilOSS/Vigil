@@ -14,20 +14,6 @@ languages: C/C++, Python, JS
 
 ---
 
-## Baseline Patterns (Single-Function / Single-Scope)
-
-Toolchain-catchable patterns. Record as findings if encountered during orientation —
-on unaudited codebases these are real, exploitable bugs that no prior tool run has caught.
-Invest primary analysis time in the LLM-advantage patterns below.
-
-- Basic XML External Entity (XXE) expansion (billion laughs with known entity pattern)
-- Obvious `while(true)` infinite loops with no break condition
-- Simple missing `Content-Length` / upload size limits in framework config
-- `eval()` on user input (more injection than DoS, but tools flag it)
-- Direct recursion without a base case in a single function
-
----
-
 ## What You're Hunting (LLM-Advantage Patterns)
 
 ### 1. Hash Collision DoS (HashDoS)

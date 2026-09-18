@@ -9,9 +9,16 @@ from types import SimpleNamespace
 from urllib.parse import quote, urlencode
 
 from assess.commands import kali_sweep_orphans
+from assess.commands.code_dispatch import _format_lease_age
+from assess.commands.operator_checkpoint import (
+    render_checkpoint_reference_lines,
+    render_intent_lines,
+    render_phase_field,
+)
 from assess.lib.client import AssessError, AssessmentClient, default_runtime_container
 from assess.lib.config import load_config
 from assess.lib.finding_render import UNTRUSTED_DATA_NOTICE, blocked_reason_summary
+from assess.lib.render_containment import append_contained_value, contain_separators
 
 _COVERING_STATUSES = {"tested", "signal"}
 _DEGRADED_OUTPUT_RETENTION = {
@@ -23,6 +30,11 @@ _DEGRADED_OUTPUT_RETENTION = {
     "unmeasured",
     "untrusted",
 }
+
+
+# The write-shaped verb that actually reconciles what the dry-run observes.
+# resume-brief names it verbatim rather than performing the write itself.
+_SWEEP_ORPHANS_COMMAND = "vigil assess kali sweep-orphans --scope all"
 
 
 def _orphan_attention(output: str) -> str:
@@ -45,6 +57,12 @@ def _orphan_attention(output: str) -> str:
     # ``skipped_unverifiable`` (liveness/pid/PATCH/pending-recovery failures),
     # NOT the conflated ``skipped``, mirroring how host_processes already keys
     # on its bad states (unverifiable/failed) rather than a catch-all (I-05).
+    # Under the dry run the counters read as "would": `finalized` is the row the
+    # sweep WOULD reconcile to lost and `recovered_pending`/`reaped` are the
+    # recoveries it WOULD perform, so those are the genuinely actionable states
+    # and each section names them alongside the states that are actionable in
+    # either mode. `recovered_degraded` stays listed because the wet run still
+    # reports it and the attention line carries its ids.
     sections = (
         (
             "command_runs",
@@ -54,13 +72,19 @@ def _orphan_attention(output: str) -> str:
                 "skipped_unverifiable",
                 "pending_recovery_failed",
                 "recovered_degraded",
+                "recovered_pending",
+                "finalized",
             ),
         ),
-        ("jobs", payload.get("jobs_summary"), ("still_running", "skipped_unverifiable")),
+        (
+            "jobs",
+            payload.get("jobs_summary"),
+            ("still_running", "skipped_unverifiable", "finalized"),
+        ),
         (
             "host_processes",
             payload.get("host_processes_summary"),
-            ("unverifiable", "failed"),
+            ("unverifiable", "failed", "reaped"),
         ),
     )
     rendered: list[str] = []
@@ -163,11 +187,14 @@ def register(subparsers) -> None:
 
 def run(args) -> None:
     cfg = load_config(args.engagement_dir)
-    # Resume hydration is a state-truth boundary: reconcile abandoned command
-    # runs, jobs, and precisely-owned host children before projecting the
-    # operating picture. The one-hour cutoff keeps this bounded and avoids
-    # touching legitimate recent work; sweep output is internal plumbing, not
-    # part of the resume-brief response contract.
+    # `resume-brief` is a READ. It OBSERVES abandoned command runs, jobs, and
+    # precisely-owned host children (dry_run=True) and names the write-shaped
+    # verb that reconciles them; it does not reconcile them itself. A
+    # read-shaped command that silently wrote was a hazard the moment a hook or
+    # another command could invoke it automatically. The reconciling write stays
+    # owned by `vigil assess kali sweep-orphans`, which says on the tin that it
+    # writes; the one-hour cutoff keeps the observation bounded and the sweep's
+    # own stdout is internal plumbing, not part of the response contract.
     try:
         sweep_output = io.StringIO()
         with redirect_stdout(sweep_output):
@@ -177,18 +204,23 @@ def run(args) -> None:
                     scope="all",
                     max_age_seconds=3600,
                     container_name=default_runtime_container(),
-                    dry_run=False,
+                    dry_run=True,
                 )
             )
         attention = _orphan_attention(sweep_output.getvalue())
         if attention:
             print(
-                f"WARN: resume-brief orphan reconciliation needs attention: {attention}",
+                "WARN: resume-brief observed unreconciled orphans "
+                f"(nothing was written): {attention}",
+                file=sys.stderr,
+            )
+            print(
+                f"WARN: reconcile them with `{_SWEEP_ORPHANS_COMMAND}`",
                 file=sys.stderr,
             )
     except (AssessError, OSError, SystemExit) as exc:
         print(
-            f"WARN: resume-brief orphan reconciliation failed: {exc}",
+            f"WARN: resume-brief orphan observation failed: {exc}",
             file=sys.stderr,
         )
     params = []
@@ -242,16 +274,17 @@ def _render_markdown(brief: dict) -> str:
         f"- hosts: {engagement.get('host_count', 0)}",
     ]
     if query.get("q") or query.get("finding") or query.get("agent_id") or query.get("since"):
-        lines.append(
+        lines.append(contain_separators(
             f"- query: q={query.get('q') or '-'} finding={query.get('finding') or '-'} "
             f"agent_id={query.get('agent_id') or '-'} since={query.get('since') or '-'}"
-        )
+        ))
+    _render_operator_checkpoint(lines, brief.get("operator_checkpoint"))
     lines.extend(["", "## Finding Counts"])
     counts = brief.get("finding_counts") or {}
     for key in ("workflow", "verification_status", "severity", "source"):
         values = counts.get(key) or {}
         compact = ", ".join(f"{name}={count}" for name, count in sorted(values.items())) or "-"
-        lines.append(f"- {key}: {compact}")
+        lines.append(contain_separators(f"- {key}: {compact}"))
     target = brief.get("target_finding")
     if target:
         lines.extend(["", "## Target Finding", _finding_line(target)])
@@ -272,6 +305,12 @@ def _render_markdown(brief: dict) -> str:
     _render_work_buffer(lines, brief.get("work_buffer") or {})
     _render_attempts(lines, brief.get("attempts") or {})
     _render_per_input_coverage(lines, brief.get("per_input_coverage") or {})
+    _render_code_analysis(lines, brief.get("code_analysis") or {})
+    _render_decisions(
+        lines,
+        brief.get("recent_decisions") or [],
+        brief.get("recent_decisions_count"),
+    )
     lines.extend(["", "## Dispatches"])
     dispatches = brief.get("dispatches") or {}
     # The lists are capped by the backend; the *_count fields carry the TRUE
@@ -279,34 +318,45 @@ def _render_markdown(brief: dict) -> str:
     # (I-10). Surface a "showing N of M" hint whenever the list was truncated.
     stale_rows = dispatches.get("stale_in_progress_dispatches") or []
     for row in stale_rows:
-        lines.append(f"- stale: {row.get('agent_id')} role={row.get('agent_role')} age_h={row.get('age_hours')} handoff={row.get('handoff_status')}")
+        lines.append(contain_separators(f"- stale: {row.get('agent_id')} role={row.get('agent_role')} age_h={row.get('age_hours')} handoff={row.get('handoff_status')}"))
     _render_dispatch_more(lines, len(stale_rows), dispatches.get("stale_in_progress_dispatches_count"), "stale in-progress dispatches")
     gap_rows = dispatches.get("handoff_gaps") or []
     for row in gap_rows:
-        lines.append(f"- gap: {row.get('agent_id')} role={row.get('agent_role')} reason={row.get('reason')}")
+        lines.append(contain_separators(f"- gap: {row.get('agent_id')} role={row.get('agent_role')} reason={row.get('reason')}"))
     _render_dispatch_more(lines, len(gap_rows), dispatches.get("handoff_gaps_count"), "handoff gaps")
     terminal_rows = dispatches.get("terminal_no_handoff") or []
     for row in terminal_rows:
-        lines.append(
+        lines.append(contain_separators(
             f"- terminal-no-handoff: {row.get('agent_id')} role={row.get('agent_role')} "
             f"status={row.get('status')} completed_at={row.get('completed_at')} "
             "(silent state-loss — no handoff was ever written)"
-        )
+        ))
     _render_dispatch_more(lines, len(terminal_rows), dispatches.get("terminal_no_handoff_count"), "terminal handoff-less dispatches")
     if not (stale_rows or gap_rows or terminal_rows):
         lines.append(
             "- no stale in-progress dispatches, handoff gaps, or terminal "
             "handoff-less dispatches across the engagement"
         )
+    _render_recent_dispatches(
+        lines,
+        dispatches.get("recent_dispatches") or [],
+        dispatches.get("recent_dispatches_count"),
+    )
+    _render_latest_handoffs(
+        lines,
+        dispatches.get("latest_handoffs") or [],
+        dispatches.get("latest_handoffs_count"),
+    )
     selected = dispatches.get("selected_dispatch")
     if selected:
         lines.extend(["", "## Selected Dispatch"])
-        lines.append(
+        lines.append(contain_separators(
             f"- agent_id: {selected.get('agent_id')} role={selected.get('agent_role')} "
             f"status={selected.get('status')} dispatched_at={selected.get('dispatched_at')}"
-        )
+        ))
         lines.extend(
-            [
+            contain_separators(line)
+            for line in (
                 f"- requested: model={selected.get('requested_model') or 'unknown'} "
                 f"reasoning={selected.get('requested_reasoning') or 'unknown'}",
                 "- launcher-effective: "
@@ -315,46 +365,48 @@ def _render_markdown(brief: dict) -> str:
                 f"source={selected.get('launcher_effective_source') or 'unknown'}",
                 f"- provider-observed: model={selected.get('actual_model') or 'unknown'} "
                 f"reasoning={selected.get('actual_reasoning') or 'unknown'}",
-            ]
+            )
         )
         if selected.get("task"):
-            lines.append(f"- task: {_trim(str(selected.get('task') or ''), 200)}")
+            append_contained_value(lines, "- task:", selected.get("task"))
         if selected.get("finding_slugs"):
-            lines.append(f"- finding_slugs: {', '.join(selected.get('finding_slugs') or [])}")
+            lines.append(contain_separators(f"- finding_slugs: {', '.join(selected.get('finding_slugs') or [])}"))
     selected_handoff = dispatches.get("selected_handoff")
     if selected_handoff:
         lines.extend(["", "## Selected Handoff"])
-        lines.append(
+        lines.append(contain_separators(
             f"- agent_id: {selected_handoff.get('agent_id')} "
             f"status={selected_handoff.get('handoff_status')} "
             f"version={selected_handoff.get('handoff_version')} "
             f"last_checkpoint_at={selected_handoff.get('last_checkpoint_at')}"
-        )
+        ))
         if selected_handoff.get("summary"):
-            lines.append(f"- summary: {_trim(str(selected_handoff.get('summary') or ''), 400)}")
+            append_contained_value(
+                lines, "- summary:", selected_handoff.get("summary")
+            )
         if selected_handoff.get("finding_slugs"):
-            lines.append(f"- finding_slugs: {', '.join(selected_handoff.get('finding_slugs') or [])}")
+            lines.append(contain_separators(f"- finding_slugs: {', '.join(selected_handoff.get('finding_slugs') or [])}"))
         for step in (selected_handoff.get("next_steps") or [])[:3]:
             if isinstance(step, dict):
-                lines.append(
+                lines.append(contain_separators(
                     f"- next: {step.get('action') or '-'} → {step.get('target') or '-'} "
                     f"({step.get('recommended_agent') or '-'})"
-                )
+                ))
     lines.extend(["", "## Command Runs"])
     for row in brief.get("command_runs") or []:
         output_truth = _command_output_truth(row)
-        lines.append(
+        lines.append(contain_separators(
             f"- #{row.get('id')} {row.get('created_at')} "
             f"{row.get('tool_bin') or row.get('tool_name')} {row.get('agent_name')} "
             f":: {_trim(row.get('intent') or row.get('command') or '', 120)}"
             f"{output_truth}"
-        )
+        ))
     if not brief.get("command_runs"):
         lines.append("- none")
     _render_page_truth(lines, brief.get("command_runs_page"), "command runs")
     lines.extend(["", "## Artifacts"])
     for row in brief.get("artifacts") or []:
-        lines.append(f"- #{row.get('id')} {row.get('kind')} present={row.get('present')} {row.get('relative_path')}")
+        lines.append(contain_separators(f"- #{row.get('id')} {row.get('kind')} present={row.get('present')} {row.get('relative_path')}"))
     if not brief.get("artifacts"):
         lines.append("- none")
     _render_page_truth(lines, brief.get("artifacts_page"), "artifacts")
@@ -364,40 +416,179 @@ def _render_markdown(brief: dict) -> str:
         lines.extend(["", "## Intel"])
         summary = intel.get("summary") or {}
         compact = ", ".join(f"{name}={count}" for name, count in sorted(summary.items()) if count) or "-"
-        lines.append(f"- counts: {compact}")
+        lines.append(contain_separators(f"- counts: {compact}"))
         open_cves = intel.get("open_high_cves") or []
         lines.append(f"- open high CVEs ({len(open_cves)}):")
         if not open_cves:
             lines.append("  - none")
         for row in open_cves:
             link = row.get("linked_finding_slug") or "UNLINKED"
-            lines.append(
+            lines.append(contain_separators(
                 f"  - id={row.get('id')} {row.get('cve_id')} cvss {row.get('cvss_score')} "
                 f"[{row.get('validation_status')}] → {link}"
                 + (f" ({_trim(row.get('affected_component') or '', 60)})" if row.get("affected_component") else "")
-            )
+            ))
         open_leads = intel.get("open_leads") or []
         lines.append(f"- open leads ({len(open_leads)}):")
         if not open_leads:
             lines.append("  - none")
         for row in open_leads:
-            lines.append(f"  - id={row.get('id')} [{row.get('lead_status')}] {_trim(row.get('title') or '', 100)}")
+            lines.append(contain_separators(f"  - id={row.get('id')} [{row.get('lead_status')}] {_trim(row.get('title') or '', 100)}"))
         read_first = intel.get("read_first_notes") or []
         if read_first:
             lines.append(f"- read-first / coverage notes ({len(read_first)}):")
             for row in read_first:
                 tags = ", ".join(row.get("tags") or []) or "-"
                 status_suffix = f" [{row.get('lead_status')}]" if row.get("lead_status") else ""
-                lines.append(
+                lines.append(contain_separators(
                     f"  - id={row.get('id')} ({tags}){status_suffix} {_trim(row.get('title') or '', 100)}"
-                )
+                ))
     lines.extend(["", "## Next Actions"])
     for row in brief.get("recommended_next_actions") or []:
         entity = ""
         if row.get("entity_kind") and row.get("entity_id") is not None:
             entity = f" [{row.get('entity_kind')} {row.get('entity_id')}]"
-        lines.append(f"- {row.get('reason')}{entity}: `{row.get('command')}`")
+        lines.append(contain_separators(f"- {row.get('reason')}{entity}: `{row.get('command')}`"))
     return "\n".join(lines)
+
+
+def _render_operator_checkpoint(lines: list, checkpoint: object) -> None:
+    """Render the operator's own last checkpoint, intent clearly UNVERIFIED.
+
+    Specialists leave handoff rows; before `operator-checkpoint` the operator
+    left nothing, so a resumed session had to guess what it had been doing. The
+    intent line is the one free-text field on that row and is labelled so it can
+    never be read back as a finding or as evidence."""
+    if not isinstance(checkpoint, dict) or not checkpoint:
+        return
+    lines.extend(["", "## Operator Checkpoint"])
+    # Shared with `operator-checkpoint show` so the two renders cannot drift on
+    # which tracks a combined engagement reports.
+    header = (
+        f"- checkpoint #{checkpoint.get('checkpoint_version')} "
+        f"{render_phase_field(checkpoint)} "
+        f"source={checkpoint.get('source') or 'unknown'} "
+        f"at={checkpoint.get('created_at') or 'unknown'}"
+    )
+    lines.append(header)
+    # Shared with `operator-checkpoint show` so the two renders cannot drift on
+    # the reference lists or on the containment that keeps a reference value
+    # from forging one of this brief's own section boundaries.
+    lines.extend(render_checkpoint_reference_lines(checkpoint))
+    # Shared with `operator-checkpoint show` so the two renders cannot drift on
+    # the UNVERIFIED label or on the containment that keeps a multi-line note
+    # from forging one of this brief's own section boundaries.
+    lines.extend(render_intent_lines(checkpoint.get("intent_note")))
+    lines.append(
+        "  - full chain: `vigil assess operator-checkpoint show --all`"
+    )
+
+
+def _render_decisions(lines: list, rows: list, total) -> None:
+    """Render the recent operator decision ledger.
+
+    The backend has always carried `recent_decisions` and both the resume rule
+    and the operator prompt promise "recent decisions" in the brief — the
+    markdown path (the one the agent actually reads) never rendered them."""
+    if not rows:
+        return
+    lines.extend(["", "## Recent Decisions"])
+    lines.append("- point read: `vigil assess fetch dispatch-decisions/<id>`")
+    for row in rows:
+        resolved = bool(row.get("resolved"))
+        state = "resolved" if resolved else "open"
+        surfaced = " surfaced" if row.get("surfaced_to_user") else ""
+        payload = row.get("payload")
+        detail = (
+            json.dumps(payload, ensure_ascii=False, sort_keys=True)
+            if isinstance(payload, dict) and payload
+            else "-"
+        )
+        append_contained_value(
+            lines,
+            f"- #{row.get('id')} {row.get('created_at')} {row.get('kind')} "
+            f"[{state}{surfaced}] ::",
+            detail,
+        )
+        # `[resolved]` says a call was made, not which one; without the
+        # resolution a resumed operator can only re-ask the question it already
+        # answered, or contradict it. Every resolved row gets the line —
+        # "settled with nothing recorded" is a real state, and the one most
+        # worth seeing — and an unresolved row gets it only when the backend
+        # carries a resolution anyway, which is state to surface, not hide.
+        resolution = row.get("resolution")
+        if resolved or resolution:
+            # Narrowing to dicts the way `payload` does would blank any other
+            # shape the column holds — the loss this line exists to close.
+            append_contained_value(
+                lines,
+                "  - resolution ::",
+                json.dumps(resolution, ensure_ascii=False, sort_keys=True)
+                if resolution
+                else "-",
+            )
+    _render_dispatch_more(lines, len(rows), total, "recent decisions")
+
+
+def _render_recent_dispatches(lines: list, rows: list, total) -> None:
+    """Render the newest dispatch rows across every status."""
+    if not rows:
+        return
+    lines.append(f"- recent dispatches ({len(rows)}):")
+    for row in rows:
+        slugs = ", ".join(row.get("finding_slugs") or []) or "-"
+        binding = row.get("client_binding") or {}
+        # Where this specialist is reachable right now. `agent_id` is a name the
+        # operator chose; it identifies the dispatch row, never the live session.
+        # Resume is exactly when that mapping has been lost, so the brief carries
+        # it. All THREE asserted fields render: `bind-client-handle` requires a
+        # session namespace because a bare handle is ambiguous across clients and
+        # machines, so client+handle alone is the half a reader cannot act on.
+        # A count above 1 means the binding was corrected; every superseded
+        # version stays readable through
+        # `vigil assess fetch dispatches/<agent-id>/client-bindings`.
+        binding_count = int(row.get("client_binding_count") or 0)
+        if binding:
+            client = (
+                f"{binding.get('asserted_client')}:"
+                f"{binding.get('asserted_session_namespace')}:"
+                f"{binding.get('asserted_client_handle')}"
+            )
+            if binding_count > 1:
+                client += f" (v{binding.get('binding_version')} of {binding_count})"
+        else:
+            # The version suffix describes the CURRENT binding, so an unbound row
+            # has no version to name — reading one off an empty binding printed
+            # `(vNone of 2)`. The count still matters: it says a history exists.
+            client = "unbound"
+            if binding_count:
+                client += f" ({binding_count} in history)"
+        append_contained_value(
+            lines,
+            f"  - {row.get('agent_id')} role={row.get('agent_role')} "
+            f"status={row.get('status')} dispatched_at={row.get('dispatched_at')} "
+            f"client={client} findings={slugs} ::",
+            str(row.get("task") or ""),
+        )
+    _render_dispatch_more(lines, len(rows), total, "dispatches")
+
+
+def _render_latest_handoffs(lines: list, rows: list, total) -> None:
+    """Render the newest specialist handoff rows — the "what was done" ledger."""
+    if not rows:
+        return
+    lines.append(f"- latest handoffs ({len(rows)}):")
+    for row in rows:
+        slugs = ", ".join(row.get("finding_slugs") or []) or "-"
+        append_contained_value(
+            lines,
+            f"  - {row.get('agent_id')} role={row.get('agent_role')} "
+            f"status={row.get('handoff_status')} v{row.get('handoff_version')} "
+            f"last_checkpoint_at={row.get('last_checkpoint_at')} findings={slugs} "
+            "::",
+            str(row.get("summary") or ""),
+        )
+    _render_dispatch_more(lines, len(rows), total, "handoffs")
 
 
 def _render_page_truth(lines: list[str], page: object, noun: str) -> None:
@@ -416,10 +607,10 @@ def _render_knowledge_drift(lines: list, drift: dict) -> None:
     lines.extend(["", "## Knowledge Drift (advisory)"])
     if drift.get("detector_status") != "complete":
         detail = _trim(drift.get("detector_detail") or "unknown detector error", 300)
-        lines.append(
+        lines.append(contain_separators(
             "- unlinked-markdown detector unavailable; do not infer that no "
             f"unlinked prose exists: {detail}"
-        )
+        ))
         return
     rows = drift.get("unlinked_markdown_notes") or []
     total = drift.get("unlinked_markdown_note_count")
@@ -434,7 +625,9 @@ def _render_knowledge_drift(lines: list, drift: dict) -> None:
         detail = _trim(row.get("detail") or "", 300)
         artifact_id = row.get("artifact_id")
         prefix = f"#{artifact_id} " if artifact_id is not None else ""
-        lines.append(f"  - {prefix}{path}" + (f" :: {detail}" if detail else ""))
+        lines.append(
+            contain_separators(f"  - {prefix}{path}" + (f" :: {detail}" if detail else ""))
+        )
     if drift.get("truncated") or len(rows) < total:
         lines.append(f"  - … showing {len(rows)} of {total}")
 
@@ -486,12 +679,12 @@ def _render_surfaces(lines: list, surfaces: dict) -> None:
     lines.append(f"- total: {surfaces.get('total', 0)} (open: {surfaces.get('open_count', 0)})")
     by_status = surfaces.get("by_status") or {}
     compact = ", ".join(f"{name}={count}" for name, count in sorted(by_status.items())) or "-"
-    lines.append(f"- by status: {compact}")
+    lines.append(contain_separators(f"- by status: {compact}"))
     rollup = surfaces.get("by_status_type") or []
     if rollup:
         lines.append("- by status×type:")
         for entry in rollup[:_SURFACE_ROLLUP_LIMIT]:
-            lines.append(f"  - {entry.get('status')}/{entry.get('surface_type')}: {entry.get('count')}")
+            lines.append(contain_separators(f"  - {entry.get('status')}/{entry.get('surface_type')}: {entry.get('count')}"))
         if len(rollup) > _SURFACE_ROLLUP_LIMIT:
             lines.append(f"  - … showing {_SURFACE_ROLLUP_LIMIT} of {len(rollup)} combinations")
     top = surfaces.get("top_uncovered") or []
@@ -500,10 +693,10 @@ def _render_surfaces(lines: list, surfaces: dict) -> None:
         lines.append("  - none")
     for entry in top:
         src = f" [{entry.get('source_name')}]" if entry.get("source_name") else ""
-        lines.append(
+        lines.append(contain_separators(
             f"  - {entry.get('status')} {entry.get('surface_type')}: "
             f"{_trim(entry.get('target_descriptor') or '', 100)}{src}"
-        )
+        ))
 
 
 def _render_work_buffer(lines: list, work_buffer: dict) -> None:
@@ -519,7 +712,7 @@ def _render_work_buffer(lines: list, work_buffer: dict) -> None:
     lines.append("- pending by gf-bucket:")
     items = list(by_bucket.items())
     for name, count in items[:_WORK_BUFFER_BUCKET_LIMIT]:
-        lines.append(f"  - {name}: {count}")
+        lines.append(contain_separators(f"  - {name}: {count}"))
     if len(items) > _WORK_BUFFER_BUCKET_LIMIT:
         lines.append(f"  - … showing {_WORK_BUFFER_BUCKET_LIMIT} of {len(items)} buckets")
 
@@ -559,7 +752,7 @@ def _render_attempts(lines: list, attempts: dict) -> None:
         notes = _trim(row.get("notes") or "", 120)
         if notes:
             line += f" — unblock: {notes}"
-        lines.append(line)
+        lines.append(contain_separators(line))
     _render_attempts_more(lines, len(shown_blocked), blocked_count)
 
     roe_count = attempts.get("roe_blocked_findings_count", len(roe))
@@ -611,7 +804,7 @@ def _render_per_input_coverage(lines: list, per_input: dict) -> None:
         groups.setdefault(_trim(host_path, 80), []).append(cell)
 
     for host_path, group in groups.items():
-        lines.append(f"- {host_path}:")
+        lines.append(contain_separators(f"- {host_path}:"))
         for cell in group:
             family = cell.get("attack_family") or "-"
             slot = _trim(cell.get("input_slot") or "-", 48)
@@ -626,10 +819,48 @@ def _render_per_input_coverage(lines: list, per_input: dict) -> None:
             lens = _trim(cell.get("lens") or "", 40)
             if lens:
                 line += f" — {lens}"
-            lines.append(line)
+            lines.append(contain_separators(line))
 
     if len(shown) < total:
         lines.append(f"- … showing {len(shown)} of {total} input-cells")
+
+
+def _render_code_analysis(lines: list, code_analysis: dict) -> None:
+    """Render open code-analysis leases. No-op for a web-only engagement.
+
+    A queue row still in `processing` is a dispatch that was authoring durable
+    state when it stopped: the lease is held, receipts may already be recorded,
+    and no closeout ever ran. Nothing else in this brief reports it — the
+    dispatch sections describe `assessment_dispatches`, not the analysis queue —
+    so a resumed session would either re-dispatch the file or reach for
+    `reset-stale`, which discards what the dead lease already wrote.
+    """
+    if not code_analysis:
+        return
+    leases = code_analysis.get("open_leases") or []
+    if not leases:
+        return
+    total = code_analysis.get("open_leases_count", len(leases))
+    lines.extend(["", "## Code Analysis"])
+    lines.append(f"- open analysis leases ({total}):")
+    for lease in leases:
+        if not isinstance(lease, dict):
+            continue
+        lines.append(contain_separators(
+            f"  - item {lease.get('queue_item_id')} "
+            f"{_trim(lease.get('file_path') or '', 80)} "
+            f"[{lease.get('classification') or '-'}] agent={lease.get('agent_name') or '-'} "
+            f"lease={lease.get('lease_token') or '-'} "
+            f"silent={_format_lease_age(lease.get('heartbeat_age_seconds'))} "
+            f"receipts={lease.get('current_result_count', 0)}"
+        ))
+    if isinstance(total, int) and total > len(leases):
+        lines.append(f"  - … showing {len(leases)} of {total}")
+    lines.append(
+        "  - inspect: `vigil assess code-dispatch progress <item-id>`; recover with "
+        "`code-dispatch adopt-lease` (keeps receipts) or `code-dispatch reset-stale` "
+        "(discards them)"
+    )
 
 
 _SEVERITY_RANK = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0}
@@ -667,9 +898,25 @@ def _finding_line(row: dict) -> str:
     blocked = blocked_reason_summary(row)
     if blocked:
         line += f" — {_trim(blocked, 160)}"
-    return line
+    # Contained here rather than at each of the three call sites (target
+    # finding, findings buckets, roe-blocked attempts) so no caller can forget.
+    return contain_separators(line)
 
 
 def _trim(value: str, limit: int) -> str:
+    """Bound one field to a one-row preview. This is NOT containment.
+
+    The newline-to-space collapse is a LAYOUT decision — these fields render
+    mid-row (`- #12 … :: <intent>`), so a preview that wrapped would break the
+    one-record-per-row shape the brief is read at. It is not a security
+    boundary and must never be mistaken for one: it leaves bare CR, VT/FF, the
+    C0 separator controls, NEL and U+2028/U+2029 exactly as they were, and it
+    truncates, which containment never does.
+
+    `render_containment.contain_separators` is the boundary, and every call
+    site here passes its assembled line through it — grep `_trim(` to check
+    that stays true. Splitting the two is deliberate: the layout bound applies
+    to a chosen subset of fields, containment applies to every rendered line.
+    """
     text = str(value).replace("\n", " ").strip()
     return text if len(text) <= limit else text[: limit - 3] + "..."

@@ -189,6 +189,12 @@ def _doc_files() -> list[Path]:
       catches a render step that ever transforms a verb,
     - the reference library + rules,
     - the top-level user docs (README, CODE-MAP, root maintainer AGENTS.md),
+    - the ``docs/`` operator and maintainer pages that name concrete
+      invocations — the assessment-CLI reference, the session-command
+      reference, agent clients, authentication, blue engagements, code
+      analysis, OOB routing, operations, and install integrity. These are
+      living user-facing docs: a verb renamed out from under one of them is
+      exactly the copy-paste failure this lint exists to catch,
     - the editor-rule pointer (.cursor) and the eval harness README.
 
     Deliberately EXCLUDED (historical release notes and per-engagement work
@@ -219,6 +225,15 @@ def _doc_files() -> list[Path]:
         _REPO_ROOT / "agent" / "AGENTS.md",
         _REPO_ROOT / "agent" / "shared-specialist-core.md",
         _REPO_ROOT / "README.md",
+        _REPO_ROOT / "docs" / "assessment-cli.md",
+        _REPO_ROOT / "docs" / "session-commands.md",
+        _REPO_ROOT / "docs" / "agent-clients.md",
+        _REPO_ROOT / "docs" / "authentication.md",
+        _REPO_ROOT / "docs" / "blue-engagements.md",
+        _REPO_ROOT / "docs" / "code-analysis.md",
+        _REPO_ROOT / "docs" / "oob-routing.md",
+        _REPO_ROOT / "docs" / "operations.md",
+        _REPO_ROOT / "docs" / "install-integrity.md",
         _REPO_ROOT / "CODE-MAP.md",
         _REPO_ROOT / "AGENTS.md",
         _REPO_ROOT / ".cursor" / "rules" / "operator.md",
@@ -448,6 +463,14 @@ _KNOWN_UNDOCUMENTED_ASSESS: set[str] = {
     # `test_known_undocumented_allowlist_has_no_stale_entries` fails the moment
     # any operator doc names the verb, forcing the entry back out.
     "list-mindsets",
+    # `code-lead` (B2) binds a tracked intel lead to a repository/file/line and
+    # is fully specified by `vigil assess contract code-lead`, its own --help,
+    # and the `code_leads_unresolved` readiness repair line that names it. Its
+    # prose wiring belongs to the prompt sweep, not to the CLI change that
+    # introduced it. Temporary by construction:
+    # `test_known_undocumented_allowlist_has_no_stale_entries` fails the moment
+    # any operator doc names the verb, forcing the entry back out.
+    "code-lead",
 }
 _KNOWN_UNDOCUMENTED_OOB = {
     "restart",  # stop+start convenience; ops doc start/stop/status/test/mint/poll
@@ -599,6 +622,7 @@ _EXPECTED_FLAGS = {
     "finding verify": {
         "--status",
         "--reason",
+        "--agent-id",
         "--narrative",
         "--evidence-ref",
         "--new-severity",
@@ -1198,10 +1222,10 @@ def test_runtime_string_assess_flags_are_registered(
 # --------------------------------------------------------------------------
 # A logs tail is named with one of these tokens.
 _LOGS_VERB_RE = re.compile(r"vigil oob client logs|vigil logs oob")
-# Disclaimers that correctly mark a logs tail as NON-correlation. A line that
-# mentions a logs verb together with "correlat" is only acceptable when it
-# carries one of these markers (case-insensitive). These keywords mirror the
-# vocabulary the post-QA prose already uses to disavow correlation.
+# Disclaimers that correctly mark a logs tail as NON-correlation. These name the
+# "raw tail / infra debugging" framing specifically; plain grammatical negation
+# is handled by _LOGS_CORRELATION_DISAVOWED_RE below, because an allowlist of
+# phrasings cannot decide whether a sentence asserts correlation or denies it.
 _NEGATION_MARKERS = (
     "not correlation",
     "not the correlation",
@@ -1223,6 +1247,85 @@ _NEGATION_MARKERS = (
 )
 
 
+# The contract is about WHO correlates, so the check has to see negation, not a
+# fixed set of sentences. The marker list alone flagged "`vigil oob client logs`
+# does not correlate hits" and "... cannot correlate a callback to a request"
+# exactly as it flagged "Use `vigil oob client logs` to correlate callbacks" —
+# the two plainest ways to state the contract were indistinguishable from
+# breaking it, which pushes an author toward vaguer wording to satisfy the lint.
+#
+# Proximity alone cannot decide it. A 60-character window that only had to avoid
+# `.;:` accepted any negation that happened to be nearby, including one that
+# negates a DIFFERENT clause — "should not be overlooked because it correlates
+# callbacks" and "is not preferred, but it correlates each hit" both assert the
+# correlation claim outright and both cleared the window. What separates a
+# disavowal from a claim is GRAMMATICAL GOVERNMENT: the negator has to attach to
+# the correlation verb itself, so only an adverb or two may sit between them and
+# no punctuation may, because a comma or a subordinator ("because", "but") is
+# precisely the boundary at which the negation stops applying.
+
+# `\b` cannot anchor the contracted `n't` — the character before it is a word
+# character — so that family gets its own alternative.
+_CORRELATION_NEGATOR = r"(?:\bcannot\b|\bcan['’]?t\b|\bnever\b|\bnot?\b|\w+n['’]t\b)"
+
+_LOGS_CORRELATION_DISAVOWED_RE = re.compile(
+    rf"{_CORRELATION_NEGATOR}(?:\s+[\w'’-]+){{0,2}}\s+(?:correlat|attribut)",
+    re.IGNORECASE,
+)
+
+
+def _logs_correlation_offence(line: str) -> bool:
+    """True when a line ties a logs tail to correlation without disavowing it."""
+    if not _LOGS_VERB_RE.search(line):
+        return False
+    lowered = line.lower()
+    if "correlat" not in lowered:
+        return False
+    if any(marker in lowered for marker in _NEGATION_MARKERS):
+        return False
+    return not _LOGS_CORRELATION_DISAVOWED_RE.search(line)
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "`vigil oob client logs` cannot attribute callbacks; use `vigil oob poll` to correlate them",
+        "`vigil oob client logs` does not correlate hits; `vigil oob poll` does",
+        "`vigil oob client logs` cannot correlate a callback to a request",
+        "`vigil logs oob` is a raw tail and never correlates anything",
+        # An adverb between the negator and the verb still reads as a disavowal;
+        # so does the contracted form, which no `\b`-anchored token can match.
+        "`vigil oob client logs` does not reliably correlate callbacks",
+        "`vigil oob client logs` doesn't correlate hits",
+    ],
+)
+def test_a_correct_disavowal_is_not_an_offence(line):
+    """Stating the contract plainly must not fail the lint that guards it.
+
+    Every line here says the logs tail does NOT correlate — which is exactly
+    what the contract requires prose to say — and the keyword allowlist
+    rejected the first three.
+    """
+    assert not _logs_correlation_offence(line)
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "Use `vigil oob client logs` to correlate callbacks",
+        "`vigil oob client logs` correlates each hit to the request that caused it",
+        "Correlate the callback with `vigil logs oob`",
+        # Negation that modifies a DIFFERENT clause. Both of these assert the
+        # correlation claim outright; the nearby `not` belongs to "overlooked"
+        # and to "preferred", never to "correlates".
+        "`vigil oob client logs` should not be overlooked because it correlates callbacks",
+        "`vigil oob client logs` is not preferred, but it correlates each hit",
+    ],
+)
+def test_claiming_a_logs_tail_correlates_is_still_an_offence(line):
+    assert _logs_correlation_offence(line)
+
+
 def test_logs_tail_never_described_as_correlation(doc_files):
     """No file may assert that `vigil oob client logs` / `vigil logs oob`
     *returns correlated* hits. Correlation is exclusively `vigil oob poll`."""
@@ -1230,14 +1333,8 @@ def test_logs_tail_never_described_as_correlation(doc_files):
     for path in doc_files:
         rel = path.relative_to(_REPO_ROOT).as_posix()
         for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
-            if not _LOGS_VERB_RE.search(line):
-                continue
-            lowered = line.lower()
-            if "correlat" not in lowered:
-                continue
-            if any(marker in lowered for marker in _NEGATION_MARKERS):
-                continue
-            offenders.append(f"{rel}:{lineno}: {line.strip()}")
+            if _logs_correlation_offence(line):
+                offenders.append(f"{rel}:{lineno}: {line.strip()}")
     assert not offenders, (
         "A logs tail (`vigil oob client logs` / `vigil logs oob`) is described "
         "alongside correlation without disavowing it. Correlation is only "
