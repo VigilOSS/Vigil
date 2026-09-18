@@ -275,6 +275,15 @@ _SCOPE_TABLES: dict[str, dict[str, str]] = {
 # is in the artifact.
 _OPTIONAL_SCOPES: frozenset[str] = frozenset({"optionalDependencies", "optional"})
 
+# A `profile:<id>` note means the manifest reader found the declaration inside a
+# build profile. `dependency_manifests` stamps it; the picture reads it back
+# rather than re-parsing, so the two cannot disagree about what is conditional.
+_PROFILE_NOTE_PREFIX = "profile:"
+
+
+def _profile_notes(notes: Iterable[str]) -> list[str]:
+    return [note for note in notes if note.startswith(_PROFILE_NOTE_PREFIX)]
+
 # Poetry and PEP 621 group names that conventionally hold non-shipping tooling.
 # This is a naming convention, not a declaration, so a group outside the set is
 # left undetermined rather than assumed to ship.
@@ -1083,12 +1092,20 @@ def build_dependency_picture(
                 shipment = _RELOCATED
             elif shipment == _SHIPS and "optional" in record.declaration_notes:
                 shipment = _UNDETERMINED
+            elif shipment == _SHIPS and _profile_notes(record.declaration_notes):
+                # A profile dependency ships only when its profile activates, and
+                # activation is undecidable from the manifest alone -- JDK, OS,
+                # property, or file existence. Same conditionality as `optional`,
+                # same answer; the manifest reader emits the activation gap.
+                shipment = _UNDETERMINED
 
         qualifiers = set(record.qualifiers)
         if relocations:
             qualifiers.add("unverified_relocation_declared")
         if "optional" in record.declaration_notes or record.declared_scope in _OPTIONAL_SCOPES:
             qualifiers.add("unverified_optional_declaration")
+        if _profile_notes(record.declaration_notes):
+            qualifiers.add("unverified_conditional_profile")
         if record.manifest_path in aggregator_manifests:
             qualifiers.add("unverified_aggregator_module")
         if not record.version:

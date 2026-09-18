@@ -272,6 +272,127 @@ def test_maven_shade_relocations_are_captured_with_both_prefixes() -> None:
     assert relocation.shaded_prefix == "com.example.shaded.guava"
 
 
+PROFILE_POM = """\
+<project>
+  <groupId>com.example</groupId>
+  <artifactId>app</artifactId>
+  <version>1.0.0</version>
+  <properties>
+    <log4j.version>2.14.1</log4j.version>
+  </properties>
+  <dependencies>
+    <dependency>
+      <groupId>org.slf4j</groupId>
+      <artifactId>slf4j-api</artifactId>
+      <version>2.0.12</version>
+    </dependency>
+  </dependencies>
+  <profiles>
+    <profile>
+      <id>production</id>
+      <activation>
+        <activeByDefault>true</activeByDefault>
+      </activation>
+      <dependencies>
+        <dependency>
+          <groupId>org.apache.logging.log4j</groupId>
+          <artifactId>log4j-core</artifactId>
+          <version>${log4j.version}</version>
+        </dependency>
+      </dependencies>
+    </profile>
+    <profile>
+      <id>native</id>
+      <activation>
+        <property>
+          <name>env</name>
+          <value>native</value>
+        </property>
+      </activation>
+      <properties>
+        <netty.version>4.1.100.Final</netty.version>
+      </properties>
+      <dependencyManagement>
+        <dependencies>
+          <dependency>
+            <groupId>io.netty</groupId>
+            <artifactId>netty-transport-native-epoll</artifactId>
+            <version>${netty.version}</version>
+          </dependency>
+        </dependencies>
+      </dependencyManagement>
+    </profile>
+  </profiles>
+</project>
+"""
+
+
+def test_maven_profile_dependencies_are_read_rather_than_dropped() -> None:
+    # A production profile is where a log4j or a JDBC driver is usually
+    # declared. Reading only the root <dependencies> leaves those libraries
+    # absent from the picture entirely -- not scoped out, not flagged, gone.
+    deps = _by_coordinate(_parse("pom.xml", PROFILE_POM))
+
+    log4j = deps["org.apache.logging.log4j:log4j-core"]
+    assert log4j.version == "2.14.1"
+    assert log4j.declaration == "direct"
+    assert "profile:production" in log4j.qualifiers
+
+
+def test_maven_profile_dependency_management_keeps_its_declaration_kind() -> None:
+    # A profile's dependencyManagement is version policy the same way the root
+    # block is, and the profile's own <properties> are what resolve it.
+    deps = _by_coordinate(_parse("pom.xml", PROFILE_POM))
+
+    netty = deps["io.netty:netty-transport-native-epoll"]
+    assert netty.declaration == "managed"
+    assert netty.version == "4.1.100.Final"
+    assert netty.version_source == "property"
+    assert "profile:native" in netty.qualifiers
+
+
+def test_maven_profile_activation_is_disclosed_as_a_gap() -> None:
+    # Whether a profile is active depends on a JDK, an OS, a property, a file
+    # or a -P flag, none of which a file reader can settle. The rows it
+    # contributes are therefore conditional, and saying so is what keeps the
+    # `ships by default scope` beside them honest.
+    parse = _parse("pom.xml", PROFILE_POM)
+    reported = [gap for gap in parse.gaps if gap.gap == "unresolved_profile_activation"]
+
+    assert len(reported) == 2
+    assert any(
+        "production" in gap.detail and "activeByDefault" in gap.detail for gap in reported
+    )
+    assert any("native" in gap.detail and "property" in gap.detail for gap in reported)
+
+
+PROFILE_POM_WITHOUT_DEPENDENCIES = """\
+<project>
+  <artifactId>app</artifactId>
+  <profiles>
+    <profile>
+      <id>docs</id>
+      <build>
+        <plugins>
+          <plugin><artifactId>maven-javadoc-plugin</artifactId></plugin>
+        </plugins>
+      </build>
+    </profile>
+  </profiles>
+</project>
+"""
+
+
+def test_maven_profile_that_declares_no_dependency_reports_no_gap() -> None:
+    # A profile that only flips a plugin setting settles nothing about the
+    # dependency picture, and a gap for it is noise in the one section an
+    # operator has to read line by line.
+    parse = _parse("pom.xml", PROFILE_POM_WITHOUT_DEPENDENCIES)
+
+    assert parse.dependencies == ()
+    assert parse.gaps == ()
+
+
 def test_malformed_pom_reports_a_gap_instead_of_raising() -> None:
     parse = _parse("pom.xml", "<project><dependencies>\n<dependency>\n")
 
@@ -335,6 +456,41 @@ def test_gradle_map_notation_is_read_like_string_notation() -> None:
     postgres = deps["org.postgresql:postgresql"]
     assert postgres.version == "42.7.1"
     assert postgres.declared_scope == "runtimeOnly"
+
+
+BUILD_GRADLE_KTS_NAMED_ARGUMENTS = """\
+dependencies {
+    implementation(group = "org.example", name = "lib", version = "1.2")
+    runtimeOnly(name = "postgresql", group = "org.postgresql", version = "42.7.1")
+    testImplementation("org.junit.jupiter:junit-jupiter:5.10.0")
+}
+"""
+
+
+def test_gradle_kotlin_named_arguments_are_read_like_groovy_map_notation() -> None:
+    # The Kotlin DSL spells the same declaration `group = "..."` where Groovy
+    # spells it `group: "..."`. A reader that knows only the colon returns
+    # nothing at all for a build.gradle.kts written that way -- no dependency
+    # and no gap, which reads as a module that declares nothing.
+    deps = _by_coordinate(_parse("build.gradle.kts", BUILD_GRADLE_KTS_NAMED_ARGUMENTS))
+
+    assert deps["org.example:lib"].version == "1.2"
+    assert deps["org.example:lib"].declared_scope == "implementation"
+    # Named arguments are order-independent and Gradle accepts them that way.
+    assert deps["org.postgresql:postgresql"].version == "42.7.1"
+    assert deps["org.postgresql:postgresql"].declared_scope == "runtimeOnly"
+    assert deps["org.junit.jupiter:junit-jupiter"].version == "5.10.0"
+
+
+def test_gradle_exclude_named_arguments_are_not_read_as_a_declaration() -> None:
+    # `exclude` is not a configuration, so a line naming a group inside one
+    # must not become a component.
+    parse = _parse(
+        "build.gradle.kts",
+        'dependencies {\n    exclude(group = "org.slf4j", module = "slf4j-log4j12")\n}\n',
+    )
+
+    assert parse.dependencies == ()
 
 
 def test_gradle_version_catalog_alias_is_not_resolved_to_a_guess() -> None:
@@ -659,13 +815,13 @@ def test_go_mod_separates_direct_from_indirect() -> None:
     assert deps["github.com/gorilla/mux"].declaration == "direct"
     assert deps["golang.org/x/crypto"].declaration == "transitive"
     assert deps["github.com/lib/pq"].declaration == "direct"
-    assert deps["github.com/gorilla/mux"].version == "v1.8.1"
+    assert deps["github.com/lib/pq"].version == "v1.10.9"
 
 
 def test_go_mod_replace_directive_is_recorded_on_the_dependency() -> None:
     deps = _by_coordinate(_parse("go.mod", GO_MOD))
 
-    assert "replaced" in deps["github.com/gorilla/mux"].qualifiers
+    assert "replaced_by:./internal/mux" in deps["github.com/gorilla/mux"].qualifiers
 
 
 def test_go_mod_project_module_is_not_a_dependency_of_itself() -> None:
@@ -699,8 +855,63 @@ def test_go_mod_block_form_replace_is_read_like_the_single_line_form() -> None:
     deps = _by_coordinate(_parse("go.mod", GO_MOD_BLOCK_REPLACE))
 
     assert set(deps) == {"github.com/gorilla/mux", "golang.org/x/crypto"}
-    assert "replaced" in deps["github.com/gorilla/mux"].qualifiers
-    assert "replaced" in deps["golang.org/x/crypto"].qualifiers
+    assert "replaced_by:./internal/mux" in deps["github.com/gorilla/mux"].qualifiers
+    assert (
+        "replaced_by:golang.org/x/crypto@v0.20.0"
+        in deps["golang.org/x/crypto"].qualifiers
+    )
+
+
+GO_MOD_REPLACEMENTS = """\
+module github.com/example/service
+
+go 1.22
+
+require (
+\tgithub.com/foo/bar v1.2.3
+\tgithub.com/baz/qux v0.1.0
+\tgithub.com/keep/asis v2.0.0
+)
+
+replace github.com/foo/bar => ./internal/bar
+
+replace (
+\tgithub.com/baz/qux v0.1.0 => github.com/fork/qux v0.9.9
+\tgithub.com/keep/asis v1.0.0 => github.com/fork/asis v1.0.1
+)
+"""
+
+
+def test_go_local_replacement_target_is_recorded_and_its_version_is_not_claimed() -> None:
+    # `=> ./internal/bar` means the build compiles a directory in this tree.
+    # Reporting v1.2.3 anyway pins every CVE lookup to bytes the build never
+    # uses, and discarding the target leaves no way to notice that at all.
+    deps = _by_coordinate(_parse("go.mod", GO_MOD_REPLACEMENTS))
+
+    bar = deps["github.com/foo/bar"]
+    assert "replaced_by:./internal/bar" in bar.qualifiers
+    assert bar.version == ""
+    assert bar.version_source == "unresolved"
+
+
+def test_go_module_replacement_reports_the_version_the_build_uses() -> None:
+    deps = _by_coordinate(_parse("go.mod", GO_MOD_REPLACEMENTS))
+
+    qux = deps["github.com/baz/qux"]
+    assert "replaced_by:github.com/fork/qux@v0.9.9" in qux.qualifiers
+    assert qux.version == "v0.9.9"
+    assert qux.version_source == "replace"
+
+
+def test_go_version_scoped_replace_does_not_reach_another_version() -> None:
+    # `replace m v1.0.0 => ...` applies to that version alone. Applying it to
+    # the v2.0.0 the module actually requires reports a substitution the build
+    # does not perform.
+    deps = _by_coordinate(_parse("go.mod", GO_MOD_REPLACEMENTS))
+
+    asis = deps["github.com/keep/asis"]
+    assert asis.version == "v2.0.0"
+    assert [q for q in asis.qualifiers if q.startswith("replaced_by:")] == []
 
 
 GO_SUM = """\
@@ -813,6 +1024,84 @@ def test_a_location_naming_no_distribution_is_disclosed_rather_than_dropped() ->
     assert any("./libs/local" in gap.detail for gap in reported)
 
 
+REQUIREMENTS_COMPACT_DIRECTIVES = """\
+-rbase.txt
+-cconstraints.txt
+--requirement=extra.txt
+--constraint pins.txt
+flask==3.0.0
+"""
+
+
+def test_compact_and_equals_include_directives_are_reported_like_the_spaced_form() -> None:
+    # pip documents `-r, --requirement <file>` and accepts `-rbase.txt` and
+    # `--requirement=base.txt` for it. Letting those fall through to the
+    # generic option skip makes the referenced file vanish: the picture then
+    # shows one flask and no sign that four other files complete the
+    # declaration.
+    parse = _parse("requirements.txt", REQUIREMENTS_COMPACT_DIRECTIVES)
+    reported = [gap for gap in parse.gaps if gap.gap == "external_requirement_include"]
+
+    assert {dep.coordinate for dep in parse.dependencies} == {"flask"}
+    assert {gap.detail for gap in reported} == {
+        "-rbase.txt",
+        "-cconstraints.txt",
+        "--requirement=extra.txt",
+        "--constraint pins.txt",
+    }
+
+
+def test_an_unrelated_option_is_still_skipped_rather_than_read_as_an_include() -> None:
+    # The include rule keys on pip's own flag names; widening it to anything
+    # starting with `-r` or `-c` would report an index URL as a requirements
+    # file the operator then goes looking for.
+    parse = _parse(
+        "requirements.txt",
+        "--index-url https://pypi.example/simple\n--require-hashes\n--no-binary :all:\n",
+    )
+
+    assert parse.gaps == ()
+    assert parse.dependencies == ()
+
+
+REQUIREMENTS_EDITABLE = """\
+-e git+https://github.test/acme/widget.git@v1#egg=widget
+--editable git+ssh://git@github.test/acme/telemetry.git#egg=telemetry[grpc]
+-e ./libs/internal
+-e https://example.test/pkg-1.0.tar.gz
+"""
+
+
+def test_an_editable_vcs_requirement_is_named_by_the_distribution_it_declares() -> None:
+    # pip's `-e` takes a path OR a VCS URL. Recording the URL as the coordinate
+    # publishes a component that exists in no registry, matches no import, and
+    # can never merge with the lockfile or import observation for `widget`.
+    deps = _by_coordinate(_parse("requirements.txt", REQUIREMENTS_EDITABLE))
+
+    widget = deps["widget"]
+    assert widget.version == ""
+    assert widget.version_source == "unresolved"
+    assert "editable" in widget.qualifiers
+    assert "direct_reference" in widget.qualifiers
+    assert "extras:grpc" in deps["telemetry"].qualifiers
+
+
+def test_an_editable_local_path_stays_the_local_checkout_it_is() -> None:
+    deps = _by_coordinate(_parse("requirements.txt", REQUIREMENTS_EDITABLE))
+
+    local = deps["./libs/internal"]
+    assert local.declaration == "local"
+    assert "editable" in local.qualifiers
+
+
+def test_an_editable_location_naming_no_distribution_is_disclosed() -> None:
+    parse = _parse("requirements.txt", REQUIREMENTS_EDITABLE)
+    reported = [gap for gap in parse.gaps if gap.gap == "unnamed_requirement_reference"]
+
+    assert len(reported) == 1
+    assert "pkg-1.0.tar.gz" in reported[0].detail
+
+
 PYPROJECT = """\
 [build-system]
 requires = ["setuptools>=68", "wheel"]
@@ -842,6 +1131,60 @@ def test_pyproject_keeps_build_runtime_and_group_declarations_apart() -> None:
     assert deps["setuptools"].declared_scope == "build-system.requires"
     assert deps["httpx"].declared_scope == "tool.poetry.dependencies"
     assert deps["ruff"].declared_scope == "tool.poetry.group.dev.dependencies"
+
+
+PYPROJECT_DYNAMIC = """\
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "storefront"
+version = "1.0.0"
+dynamic = ["dependencies", "optional-dependencies"]
+
+[tool.setuptools.dynamic]
+dependencies = {file = ["requirements.txt"]}
+optional-dependencies.dev = {file = ["requirements-dev.txt"]}
+"""
+
+
+def test_pyproject_dynamic_dependencies_are_disclosed_not_read_as_none() -> None:
+    # `dynamic = ["dependencies"]` means the runtime requirements are declared
+    # somewhere this file only points at, so `project.dependencies` is absent.
+    # Without the disclosure the project reads as declaring nothing beyond its
+    # build backend, and a whole runtime dependency set goes missing with no
+    # gap to find it by.
+    parse = _parse("pyproject.toml", PYPROJECT_DYNAMIC)
+    reported = [gap for gap in parse.gaps if gap.gap == "dynamic_dependency_declaration"]
+
+    assert {dep.coordinate for dep in parse.dependencies} == {"setuptools"}
+    assert len(reported) == 2
+    assert any(
+        "project.dependencies" in gap.detail and "requirements.txt" in gap.detail
+        for gap in reported
+    )
+    assert any("project.optional-dependencies" in gap.detail for gap in reported)
+
+
+def test_pyproject_dynamic_without_a_named_source_still_reports_the_hole() -> None:
+    parse = _parse(
+        "pyproject.toml", '[project]\nname = "storefront"\ndynamic = ["dependencies"]\n'
+    )
+
+    assert [gap.gap for gap in parse.gaps] == ["dynamic_dependency_declaration"]
+
+
+def test_pyproject_dynamic_version_alone_is_not_a_dependency_gap() -> None:
+    # `dynamic = ["version"]` settles nothing about dependencies. A gap there
+    # would fire on a large share of real projects and teach the operator to
+    # skim the one section that has to be read line by line.
+    parse = _parse(
+        "pyproject.toml",
+        '[project]\nname = "storefront"\ndynamic = ["version"]\ndependencies = ["requests"]\n',
+    )
+
+    assert parse.gaps == ()
 
 
 PYPROJECT_OPTIONAL_POETRY_EXTRA = """\

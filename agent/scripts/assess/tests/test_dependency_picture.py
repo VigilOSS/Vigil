@@ -178,6 +178,32 @@ def test_optional_dependency_shipment_is_left_undetermined() -> None:
     assert "unverified_optional_declaration" in fsevents.qualifiers
 
 
+def test_a_maven_profile_dependency_is_not_read_as_shipping_by_default() -> None:
+    # A profile dependency ships only when its profile activates, and activation
+    # is undecidable from the POM alone (JDK, OS, property, file existence). That
+    # is the same conditionality `optional` carries, so it gets the same answer --
+    # otherwise a build-profile-only library reads as shipping in every build.
+    picture = _picture(
+        {
+            "pom.xml": (
+                "<project><modelVersion>4.0.0</modelVersion>"
+                "<profiles><profile><id>production</id>"
+                "<activation><activeByDefault>true</activeByDefault></activation>"
+                "<dependencies><dependency>"
+                "<groupId>org.apache.logging.log4j</groupId>"
+                "<artifactId>log4j-core</artifactId><version>2.14.1</version>"
+                "</dependency></dependencies></profile></profiles></project>"
+            )
+        }
+    )
+
+    log4j = _observation(picture, "org.apache.logging.log4j:log4j-core")
+    assert log4j.shipment_observation == "unverified_shipment_undetermined"
+    assert "unverified_conditional_profile" in log4j.qualifiers
+    # The profile that carries it stays nameable, so the operator can decide.
+    assert "profile:production" in log4j.declaration_notes
+
+
 def test_a_poetry_optional_extra_is_not_read_as_shipping_by_default() -> None:
     # `optional = true` means the package is installed only when an extra asks
     # for it, which is the same statement `optionalDependencies` makes in npm

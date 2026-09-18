@@ -9,15 +9,50 @@
 // skipped so a sparse finding doesn't render a wall of empty headings.
 
 import type { ReportFinding } from "../types";
-import { referenceLink } from "./format";
+import { formatLabel, referenceLink } from "./format";
 import { asPocRequest, asPocResponse, pocCurl, pocResponseText } from "./poc";
 
 export { stepsText } from "./steps";
 import { reproRunIds, stepsText } from "./steps";
 
+/**
+ * A code fence `content` cannot close.
+ *
+ * CommonMark ends a fenced block at the first line whose fence is at least as
+ * long as the opening one, so a fixed ``` fence ends wherever the content
+ * happens to contain three backticks. The content here is target-derived:
+ * `evidence_detail`, a recorded `body_excerpt`, `poc_code`. A hostile response
+ * body that includes a ``` line therefore breaks OUT of the evidence block, and
+ * every byte after it becomes live Markdown in a document the operator is about
+ * to paste into a submission form — the target gets to write headings, links
+ * and plausible report prose beside the operator's own words, and a reader
+ * cannot tell which is which. That is the untrusted-target-text boundary
+ * (ADR 0018) failing in the direction it exists to prevent.
+ *
+ * Nothing is escaped or removed to fix it — ADR 0019 rules that out, and the
+ * evidence has to stay byte-exact anyway. Instead the delimiter outgrows the
+ * content: one backtick longer than the longest run present, which by
+ * construction no run in the content can match.
+ */
+function fenceFor(content: string): string {
+  let longest = 0;
+  for (const run of content.match(/`+/g) ?? []) longest = Math.max(longest, run.length);
+  return "`".repeat(Math.max(3, longest + 1));
+}
+
 export function findingToMarkdown(d: ReportFinding): string {
   const lines: string[] = [];
   const push = (s = "") => lines.push(s);
+  // Captures go in verbatim, inside a fence sized to hold them. The Full Report
+  // renders the same values in a <pre> exactly as recorded, and a copy button
+  // that hands back something else makes the page and its own clipboard
+  // disagree about what the target did.
+  const pushFenced = (content: string, info = "") => {
+    const fence = fenceFor(content);
+    push(`${fence}${info}`);
+    push(content);
+    push(fence);
+  };
 
   const heading = [d.slug, d.title].filter(Boolean).join(" — ") || "Finding";
   push(`## ${heading}`);
@@ -40,6 +75,14 @@ export function findingToMarkdown(d: ReportFinding): string {
   // input enters, and where it reaches something dangerous.
   if (d.entry_point) metaParts.push(`**Entry point:** \`${d.entry_point}\``);
   if (d.sink) metaParts.push(`**Sink:** \`${d.sink}\``);
+  // Severity-defining context, and the Full Report shows both: what privilege
+  // the attack needs, and whether the proof was observed on the wire or inferred
+  // from source. Omitted from the copy, a high-severity claim reads as
+  // unauthenticated and observed when it may be neither — the reader who copies
+  // a finding gets a stronger report than the reader who reads one. Labelled
+  // and formatted as the report labels them so the two cannot drift.
+  if (d.auth_context) metaParts.push(`**Access required:** ${formatLabel(d.auth_context)}`);
+  if (d.evidence_type) metaParts.push(`**Evidence type:** ${formatLabel(d.evidence_type)}`);
   if (d.cwe_id) metaParts.push(`**CWE:** ${d.cwe_id}`);
   if (d.owasp_category) metaParts.push(`**OWASP:** ${d.owasp_category}`);
   if (d.cvss_vector) metaParts.push(`**CVSS vector:** \`${d.cvss_vector}\``);
@@ -60,9 +103,7 @@ export function findingToMarkdown(d: ReportFinding): string {
   }
   if (d.evidence_detail && d.evidence_detail.trim()) {
     push("### Evidence");
-    push("```");
-    push(d.evidence_detail.trim());
-    push("```");
+    pushFenced(d.evidence_detail);
     push();
   }
   const steps = stepsText(d.steps_to_reproduce);
@@ -81,24 +122,18 @@ export function findingToMarkdown(d: ReportFinding): string {
   const curl = pocCurl(asPocRequest(d.poc_request));
   if (curl) {
     push("### Reproduction Request");
-    push("```sh");
-    push(curl);
-    push("```");
+    pushFenced(curl, "sh");
     push();
   }
   const responseText = pocResponseText(asPocResponse(d.poc_response));
   if (responseText) {
     push("### Observed Response");
-    push("```http");
-    push(responseText);
-    push("```");
+    pushFenced(responseText, "http");
     push();
   }
   if (d.poc_code && d.poc_code.trim()) {
     push("### Proof of Concept");
-    push("```");
-    push(d.poc_code.trim());
-    push("```");
+    pushFenced(d.poc_code);
     push();
   }
   if (d.remediation && d.remediation.trim()) {

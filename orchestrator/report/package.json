@@ -8,7 +8,7 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
-    "test": "test_artifact=\"${TMPDIR:-/tmp}/vigil-report-poc.test.$$.cjs\" && trap 'rm -f \"$test_artifact\"' EXIT && esbuild src/lib/poc.test.ts --bundle --platform=node --format=cjs --outfile=\"$test_artifact\" && node --test \"$test_artifact\""
+    "test": "test_dir=\"${TMPDIR:-/tmp}/vigil-report-tests.$$\" && trap 'rm -rf \"$test_dir\"' EXIT && esbuild src/lib/*.test.ts --bundle --platform=node --format=cjs --outdir=\"$test_dir\" --out-extension:.js=.cjs && node --test \"$test_dir\"/*.test.cjs"
   },
   "dependencies": {
     "lucide-react": "^1.17.0",

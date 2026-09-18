@@ -29,6 +29,33 @@ export interface PocResponse {
   body_excerpt?: string;
 }
 
+/**
+ * Headers curl puts on the wire that the recorded request never sent.
+ *
+ * curl adds `User-Agent` and `Accept` to every request, and adds
+ * `Content-Type: application/x-www-form-urlencoded` the moment a body is
+ * attached. None of those were in the record, and each one can change which
+ * parser, body binder, router or WAF rule the request meets: a GET-with-body
+ * parser differential is decided by whether a Content-Type arrives at all. A
+ * pasted reproduction that quietly carries three headers the finding did not
+ * use is reproducing a different request (ADR 0018 — the record is the
+ * evidence; this module transcribes it, it does not add to it).
+ *
+ * `Host` and `Content-Length` are NOT on this list. Those curl derives from the
+ * URL and from the body the record supplies, so they reproduce the recorded
+ * request rather than inventing anything, and removing `Host` would emit a
+ * request no HTTP/1.1 server has to accept.
+ *
+ * `-H 'Name:'` — a name, a colon, and nothing after it — is curl's syntax for
+ * REMOVING a header it would otherwise send. Its near neighbour `-H 'Name;'` is
+ * a different feature that SENDS `Name:` with an empty value, which is still a
+ * header the target never saw; it does not belong here.
+ */
+const CURL_SYNTHESIZED_HEADERS = ["User-Agent", "Accept"] as const;
+
+/** The same, for headers curl only synthesizes once a body is attached. */
+const CURL_SYNTHESIZED_BODY_HEADERS = ["Content-Type"] as const;
+
 /** POSIX single-quote a value so the shell reproduces it byte for byte. */
 export function shellQuote(value: string): string {
   // Close the quote, emit an escaped literal quote, reopen. This is the only
@@ -86,7 +113,11 @@ export function asPocResponse(value: unknown): PocResponse | null {
   const status = typeof raw.status === "number" && Number.isFinite(raw.status) ? raw.status : undefined;
   const headers = asRecord(raw.headers);
   const body = typeof raw.body_excerpt === "string" ? raw.body_excerpt : "";
-  if (status === undefined && Object.keys(headers).length === 0 && !body.trim()) return null;
+  // Presence is an empty string, not an empty `trim()`. A response body that is
+  // nothing but whitespace is a RECORDED body — it is the entire proof on a
+  // finding about a stripped, padded or blank response — and treating it as
+  // absent dropped the evidence block from a report that still made the claim.
+  if (status === undefined && Object.keys(headers).length === 0 && !body) return null;
   return { status, headers, body_excerpt: body };
 }
 
@@ -134,6 +165,23 @@ export function pocCurl(request: PocRequest | null | undefined): string {
   for (const [name, value] of Object.entries(headers)) {
     flags.push(`-H ${shellQuote(`${name}: ${value}`)}`);
   }
+  // Then remove every default curl would otherwise invent on top of them.
+  //
+  // The match is case-insensitive because `user-agent: x` displaces curl's own
+  // `User-Agent` just as `User-Agent: x` does — suppressing a header the record
+  // already supplies would delete it. The match is NOT trimmed, for the mirror
+  // reason: curl compares the name exactly as written, so a recorded
+  // ` User-Agent` (that leading space is the request-smuggling probe, and
+  // asRecord deliberately keeps it) is sent BESIDE curl's own default rather
+  // than replacing it. Both have to go out, and only one of them is evidence.
+  const recordedNames = new Set(Object.keys(headers).map((name) => name.toLowerCase()));
+  const synthesized = body
+    ? [...CURL_SYNTHESIZED_HEADERS, ...CURL_SYNTHESIZED_BODY_HEADERS]
+    : CURL_SYNTHESIZED_HEADERS;
+  for (const name of synthesized) {
+    if (recordedNames.has(name.toLowerCase())) continue;
+    flags.push(`-H ${shellQuote(`${name}:`)}`);
+  }
   if (body) flags.push(`--data-raw ${shellQuote(body)}`);
   if (flags.length === 0) return head;
   return [head, ...flags].join(" \\\n  ");
@@ -146,6 +194,15 @@ export function pocCurl(request: PocRequest | null | undefined): string {
  * code and nothing else, so a full status line would be invented detail. Headers
  * and body stay separated by the blank line the HTTP grammar puts there, so a
  * reader never has to split them by hand.
+ *
+ * `body_excerpt` is emitted byte for byte, trailing bytes included. This block
+ * is the only place a reader ever sees those bytes, and on a whitespace-
+ * sensitive finding they ARE the finding: a body ending in extra CRLFs, a
+ * trailing space before a multipart boundary, a response that is nothing but
+ * whitespace. Trimming them left the report asserting a parser differential
+ * while deleting the difference — tidier output at the cost of the proof, which
+ * is mutating the operator's capture (AGENTS.md; ADR 0019). Visual separation
+ * is the `<pre>` block's job, not this string's.
  */
 export function pocResponseText(response: PocResponse | null | undefined): string {
   if (!response) return "";
@@ -154,7 +211,7 @@ export function pocResponseText(response: PocResponse | null | undefined): strin
   for (const [name, value] of Object.entries(response.headers ?? {})) {
     lines.push(`${name}: ${value}`);
   }
-  const body = (response.body_excerpt ?? "").replace(/\s+$/, "");
+  const body = response.body_excerpt ?? "";
   if (body) {
     if (lines.length > 0) lines.push("");
     lines.push(body);

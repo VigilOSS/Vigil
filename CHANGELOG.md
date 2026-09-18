@@ -408,11 +408,15 @@ Durable design decisions live in [`docs/adr/`](docs/adr/).
   slow-to-answer orchestrator could vanish from the summary right after an install replaced the code
   it is running. A refusal, a timeout, and an unreadable answer are now separate, and only local
   process evidence (the pidfile, and the port the probe actually used) can establish `not-running`.
-- **The post-install verdict compares against the source it installed from.** `vigil install
-  --source X` resolved X, copied its bytes, and then let the freshness check rediscover a source
-  through environment, config, the running package, and the current directory. With two checkouts on
-  the box the just-installed root could be reported stale against a tree it was never installed
-  from, and the suggested remedy would repeat the mismatch.
+- **The post-install verdict compares against the source it installed from, and its remedies name
+  that source.** `vigil install --source X` resolved X, copied its bytes, and then let the freshness
+  check rediscover a source through environment, config, the running package, and the current
+  directory. With two checkouts on the box the just-installed root could be reported stale against a
+  tree it was never installed from. Every consumer that compares against a checkout — the CLI binary
+  AND the working root — now receives the one resolved source, and the commands they print are
+  pinned to it (`vigil --source X install`, shell-quoted) instead of a bare `vigil install` that
+  re-runs the same discovery. An operator who does exactly what the summary says can no longer
+  overwrite a just-synchronised working root from the wrong checkout.
 - **The clean install summary no longer asserts a cause it did not measure.** It said the install
   had changed only files that are read live; nothing recorded which files the install changed, and a
   backend-source upgrade performed while the backend is stopped reaches the same branch.

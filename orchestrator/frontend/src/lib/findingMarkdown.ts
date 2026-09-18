@@ -49,7 +49,8 @@ function formatHttp(
   const lines: string[] = [];
   if (kind === "req") {
     const req = obj as FindingPocRequest;
-    lines.push(`${(req.method || "GET").toUpperCase()} ${req.url || ""}`.trim());
+    // Verbatim: a case-sensitive-routing probe records `get`/`GeT` on purpose.
+    lines.push(`${req.method || "GET"} ${req.url || ""}`.trim());
   } else {
     const resp = obj as FindingPocResponse;
     if (resp.status != null) lines.push(`HTTP ${resp.status}`);
@@ -78,9 +79,26 @@ function refLabel(ref: FindingReference): string {
   return String(ref);
 }
 
+// A capture is target-controlled text. A fixed ``` fence closes on the first
+// such line inside it, letting a hostile body escape the block and become live
+// Markdown in the operator's clipboard. Outgrow the content instead of escaping
+// it, so the bytes stay exactly as recorded.
+function fenceFor(content: string): string {
+  let longest = 0;
+  for (const run of content.match(/`+/g) ?? []) longest = Math.max(longest, run.length);
+  return "`".repeat(Math.max(3, longest + 1));
+}
+
 export function findingToMarkdown(d: MarkdownFinding): string {
   const lines: string[] = [];
   const push = (s = "") => lines.push(s);
+  // Captures go in verbatim, inside a fence sized to hold them.
+  const pushFenced = (content: string, info = "") => {
+    const fence = fenceFor(content);
+    push(`${fence}${info}`);
+    push(content);
+    push(fence);
+  };
 
   push(`## ${d.slug} — ${d.title}`);
 
@@ -117,9 +135,7 @@ export function findingToMarkdown(d: MarkdownFinding): string {
   }
   if (d.evidence && d.evidence.trim()) {
     push("### Evidence");
-    push("```");
-    push(d.evidence.trim());
-    push("```");
+    pushFenced(d.evidence);
     push();
   }
   // Verbatim: the author's own numbering is what other sections cite, so no
@@ -132,25 +148,19 @@ export function findingToMarkdown(d: MarkdownFinding): string {
   }
   if (d.poc_code && d.poc_code.trim()) {
     push("### Proof of Concept");
-    push("```" + (d.poc_language || ""));
-    push(d.poc_code.trim());
-    push("```");
+    pushFenced(d.poc_code, d.poc_language || "");
     push();
   }
   const reqText = formatHttp(d.poc_request, "req");
   if (reqText.trim()) {
     push("### PoC Request");
-    push("```http");
-    push(reqText.trim());
-    push("```");
+    pushFenced(reqText, "http");
     push();
   }
   const respText = formatHttp(d.poc_response, "resp");
   if (respText.trim()) {
     push("### PoC Response");
-    push("```http");
-    push(respText.trim());
-    push("```");
+    pushFenced(respText, "http");
     push();
   }
   if (d.remediation && d.remediation.trim()) {

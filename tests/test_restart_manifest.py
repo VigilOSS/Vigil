@@ -499,8 +499,9 @@ def test_the_cli_is_stale_when_the_source_package_differs(
     assert state.state == "stale"
     # The re-run is part of the remedy: replacing the binary changes what the
     # consumers judged THROUGH it should be compared against, and nothing
-    # re-runs this summary on its own.
-    assert state.remedy == "uv tool upgrade vigil && vigil install"
+    # re-runs this summary on its own. It reinstalls from the checkout this
+    # verdict was computed against, not from whichever one discovery finds.
+    assert state.remedy == f"uv tool upgrade vigil && vigil --source {fake_source} install"
 
 
 def test_the_cli_is_unknown_without_a_resolvable_source(tmp_path: Path) -> None:
@@ -1189,10 +1190,14 @@ def test_the_cli_remedy_reruns_the_install_that_recomputes_everything() -> None:
 
     running = Path("/opt/venv/vigil_cli")
     state = rm.ConsumerState(
-        key="cli", label=rm._CLI_LABEL, state="stale", remedy=rm._CLI_STALE_REMEDY, detail=""
+        key="cli",
+        label=rm._CLI_LABEL,
+        state="stale",
+        remedy=rm._cli_stale_remedy(Path("/checkout")),
+        detail="",
     )
     assert "uv tool upgrade vigil" in state.remedy
-    assert "vigil install" in state.remedy, (
+    assert "vigil --source /checkout install" in state.remedy, (
         "after the binary moves, the working root's verdicts must be recomputed"
     )
     del running
@@ -1314,6 +1319,197 @@ def test_consumer_states_still_discovers_a_source_when_none_is_supplied(
     )
     restart_manifest.consumer_states(tmp_path / "root", runner=_fake_runner())
     assert seen == [discovered]
+
+
+def test_the_cli_remedy_reinstalls_from_the_source_it_was_judged_against(
+    tmp_path: Path,
+) -> None:
+    """A bare `vigil install` re-resolves its source and can pick a different one.
+
+    `paths.resolve_source_root` tries `--source`, then `VIGIL_SOURCE_DIR`, then
+    `source.dir`, then the running checkout, then the current directory, then a
+    cached clone — and only the FIRST of those is what this verdict compared
+    against. So on a box with two checkouts the printed remedy can copy tree A
+    over a working root that was just synchronised from tree B: the operator
+    does exactly what the summary said and ends up further from correct than
+    before it was printed.
+    """
+    import shlex
+
+    installed_from = _fake_cli_source(tmp_path / "chosen", "VERSION = 'chosen'\n")
+
+    state = restart_manifest.cli_state(source_root=installed_from)
+
+    assert state.state == "stale"
+    assert state.remedy == (
+        "uv tool upgrade vigil && vigil --source "
+        f"{shlex.quote(str(installed_from))} install"
+    )
+
+
+def test_the_reinstall_remedy_stays_bare_when_no_source_was_resolved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With nothing to name, the remedy must not invent a `--source`."""
+    monkeypatch.setattr(
+        "vigil_cli.status._resolve_source_root_offline", lambda _root: None
+    )
+    monkeypatch.setattr(
+        "vigil_cli.status.install_staleness", lambda *_a, **_k: {"state": "stale"}
+    )
+
+    states = _states(tmp_path / "root", runner=_fake_runner())
+
+    assert states["agent-tree"].remedy == "vigil install"
+
+
+def test_the_reinstall_remedy_survives_a_checkout_path_with_a_space(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The remedy is pasted into a shell, so an unquoted path is a broken command.
+
+    `~/Library/Mobile Documents` and `/Volumes/My Passport` are ordinary places
+    to keep a checkout, and a shipped guard in this repository was once disabled
+    outright by exactly that assumption.
+    """
+    installed_from = _fake_cli_source(tmp_path / "two words", "VERSION = 'x'\n")
+    monkeypatch.setattr(
+        "vigil_cli.status.install_staleness", lambda *_a, **_k: {"state": "stale"}
+    )
+
+    states = _states(
+        tmp_path / "root", runner=_fake_runner(), source_root=installed_from
+    )
+
+    assert states["agent-tree"].remedy == f"vigil --source '{installed_from}' install"
+
+
+def test_the_working_root_is_judged_against_the_source_it_was_installed_from(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`_agent_tree_state` is the second consumer that compares against a checkout.
+
+    `install_staleness` rediscovers one when it is not given one, so the working
+    root `vigil install --source B` has just written is compared against
+    whichever checkout discovery lands on — and reported stale against a tree it
+    was never installed from.
+    """
+    installed_from = _fake_cli_source(tmp_path / "chosen", "VERSION = 'chosen'\n")
+    other_checkout = _fake_cli_source(tmp_path / "other", "VERSION = 'other'\n")
+    seen: list[Path | None] = []
+
+    def _record(_install_root: Path, *, source_root: Path | None = None) -> dict[str, object]:
+        seen.append(source_root)
+        return {"state": "current"}
+
+    monkeypatch.setattr("vigil_cli.status.install_staleness", _record)
+    monkeypatch.setattr(
+        "vigil_cli.status._resolve_source_root_offline", lambda _root: other_checkout
+    )
+
+    restart_manifest.consumer_states(
+        tmp_path / "root", runner=_fake_runner(), source_root=installed_from
+    )
+
+    assert seen == [installed_from]
+
+
+def test_the_working_root_remedy_names_the_source_it_was_judged_against(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Both stale-ish working-root verdicts prescribe the same pinned reinstall.
+
+    `no-stamp` matters as much as `stale`: an install predating content stamping
+    is exactly the one an operator is most likely to repair from the wrong tree.
+    """
+    import shlex
+
+    installed_from = _fake_cli_source(tmp_path / "chosen", "VERSION = 'chosen'\n")
+    expected = f"vigil --source {shlex.quote(str(installed_from))} install"
+
+    for reported in ("stale", "no-stamp"):
+        monkeypatch.setattr(
+            "vigil_cli.status.install_staleness",
+            lambda *_a, _reported=reported, **_k: {"state": _reported},
+        )
+        states = _states(
+            tmp_path / "root", runner=_fake_runner(), source_root=installed_from
+        )
+        assert states["agent-tree"].remedy == expected, reported
+
+
+def test_the_undeterminable_proxy_detail_names_the_same_pinned_reinstall(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The third consumer: a detail that spells a command is a remedy too.
+
+    This row tells the operator which command makes its verdict determinable. A
+    bare `vigil install` there sends them to the same wrong checkout the two
+    real remedies were just pinned away from, and a summary that prints two
+    different reinstall commands for one install is worse than either alone.
+    """
+    import shlex
+
+    installed_from = _fake_cli_source(tmp_path / "chosen", "VERSION = 'chosen'\n")
+    monkeypatch.setattr(
+        restart_manifest.image_freshness, "image_inputs_state", lambda *a, **k: "current"
+    )
+    monkeypatch.setattr(restart_manifest.docker, "container_running", lambda *a, **k: False)
+
+    # Driven through `consumer_states`, not the helper: the defect this pins is
+    # the WIRING, and a direct call passing `source_root` by hand proves only
+    # that the parameter exists.
+    states = _states(
+        tmp_path / "root", runner=_fake_runner(), source_root=installed_from
+    )
+
+    assert states["cli"].state == "stale"
+    assert states["proxy-image"].state == "unknown"
+    assert (
+        f"vigil --source {shlex.quote(str(installed_from))} install"
+        in states["proxy-image"].detail
+    )
+
+
+def test_the_pinned_reinstall_remedy_is_a_command_the_cli_actually_accepts(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A remedy is a promise that this exact string runs and does that exact thing.
+
+    `--source` is a TOP-LEVEL option, so `vigil install --source X` is an
+    argparse error, not a slower spelling. Rendering the remedy and running it
+    is the only check that survives someone moving the option onto the
+    subparser: a wrong remedy is worse than a bare one, because the operator
+    only learns it was wrong after the install they were told to run fails.
+    """
+    import shlex
+
+    from vigil_cli import main as main_module
+    from vigil_cli.install import InstallResult
+
+    named = tmp_path / "chosen"
+    for root in (named, tmp_path / "other"):
+        (root / "agent").mkdir(parents=True)
+        (root / "orchestrator").mkdir(parents=True)
+    monkeypatch.setenv("VIGIL_SOURCE_DIR", str(tmp_path / "other"))
+    monkeypatch.setenv("VIGIL_CONFIG", str(tmp_path / "config.json"))
+
+    seen: list[Path] = []
+
+    def _capture(options: object) -> InstallResult:
+        seen.append(options.source_root)  # type: ignore[attr-defined]
+        return InstallResult(install_root=tmp_path / "root", is_upgrade=True, image_built=False)
+
+    monkeypatch.setattr(main_module, "install_from_source", _capture)
+    monkeypatch.setattr(main_module, "_print_post_install", lambda *a, **k: None)
+
+    remedy = restart_manifest._install_remedy(named)
+    argv = shlex.split(remedy)
+    assert argv[0] == "vigil"
+    monkeypatch.setattr("sys.argv", [*argv, str(tmp_path / "root")])
+    main_module.main()
+
+    assert seen == [named], "the remedy must reinstall from the checkout it names"
 
 
 def test_the_clean_summary_asserts_no_cause_it_did_not_measure() -> None:

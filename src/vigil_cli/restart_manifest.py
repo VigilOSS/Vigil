@@ -38,6 +38,7 @@ choosing which rows are worth an operator's attention belongs to the caller.
 from __future__ import annotations
 
 import re
+import shlex
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -292,10 +293,36 @@ def _write_stamp(stamp: Path, digest: str) -> None:
 # --- per-consumer state -------------------------------------------------------
 
 _CLI_LABEL = "vigil CLI binary"
-# The re-run is part of the remedy, not an optional extra. Several consumers are
-# judged THROUGH the running binary, so replacing it changes what they should be
-# compared against — and nothing re-runs this summary on its own.
-_CLI_STALE_REMEDY = "uv tool upgrade vigil && vigil install"
+
+
+def _install_remedy(source_root: Path | None) -> str:
+    """``vigil install``, pinned to the checkout the verdict was computed from.
+
+    A bare ``vigil install`` re-resolves its own source through
+    :func:`paths.resolve_source_root` — ``--source``, then ``VIGIL_SOURCE_DIR``,
+    then ``source.dir``, then the running checkout, then the current directory,
+    then a cached clone — and only the FIRST of those is what these verdicts
+    compared against. On a box with two checkouts the unpinned remedy therefore
+    copies a DIFFERENT tree over the working root than the one just reported
+    stale, so an operator who does exactly what the summary said ends up further
+    from correct than before it was printed. Naming the root reproduces the
+    comparison; quoting it keeps a checkout under ``Mobile Documents`` working.
+
+    ``--source`` is a top-level option, so it precedes the subcommand.
+    """
+    if source_root is None:
+        return "vigil install"
+    return f"vigil --source {shlex.quote(str(source_root))} install"
+
+
+def _cli_stale_remedy(source_root: Path | None) -> str:
+    """Upgrade the binary, then re-run the install that recomputes everything.
+
+    The re-run is part of the remedy, not an optional extra. Several consumers
+    are judged THROUGH the running binary, so replacing it changes what they
+    should be compared against — and nothing re-runs this summary on its own.
+    """
+    return f"uv tool upgrade vigil && {_install_remedy(source_root)}"
 
 
 def cli_state(*, source_root: Path | None) -> ConsumerState:
@@ -348,7 +375,7 @@ def cli_state(*, source_root: Path | None) -> ConsumerState:
         key="cli",
         label=_CLI_LABEL,
         state="stale",
-        remedy=_CLI_STALE_REMEDY,
+        remedy=_cli_stale_remedy(source_root),
         detail=f"the installed binary at {running} predates {source_package}",
     )
 
@@ -605,7 +632,12 @@ def _runtime_image_state(
 
 
 def _proxy_image_state(
-    install_root: Path, *, runner: docker.Runner, docker_ok: bool, cli_stale: bool = False
+    install_root: Path,
+    *,
+    runner: docker.Runner,
+    docker_ok: bool,
+    cli_stale: bool = False,
+    source_root: Path | None = None,
 ) -> ConsumerState:
     from .mitmproxy import mitmproxy_image_inputs
 
@@ -627,7 +659,7 @@ def _proxy_image_state(
             remedy="",
             detail=(
                 "its baked scope parser comes from the CLI binary; re-check after "
-                "`uv tool upgrade vigil && vigil install`"
+                f"`{_cli_stale_remedy(source_root)}`"
             ),
         )
 
@@ -744,7 +776,7 @@ def _runtime_container_state(*, runner: docker.Runner, docker_ok: bool) -> Consu
     )
 
 
-def _agent_tree_state(install_root: Path) -> ConsumerState:
+def _agent_tree_state(install_root: Path, *, source_root: Path | None) -> ConsumerState:
     """The residual: does the working root itself still match its source?
 
     This is the ONE consumer that normally needs no restart — ``vigil assess``
@@ -752,11 +784,17 @@ def _agent_tree_state(install_root: Path) -> ConsumerState:
     so a prompt or skill edit is live the moment ``vigil install`` copies it. It
     is listed anyway because the install that FAILED to land is the case an
     operator cannot otherwise see.
+
+    ``source_root`` is the same checkout :func:`cli_state` is judged against, for
+    the same reason: ``install_staleness`` rediscovers one when it is not given
+    one, and the tree discovery lands on is not necessarily the tree this
+    install copied. Comparing the just-synchronised working root against a
+    sibling checkout reports it stale and prescribes overwriting it.
     """
     from .status import install_staleness
 
     try:
-        staleness = install_staleness(install_root)
+        staleness = install_staleness(install_root, source_root=source_root)
     except Exception:  # noqa: BLE001 — a summary must never break an install
         staleness = {"state": "unknown"}
     state = str(staleness.get("state") or "unknown")
@@ -773,7 +811,7 @@ def _agent_tree_state(install_root: Path) -> ConsumerState:
             key="agent-tree",
             label="working root",
             state="stale",
-            remedy="vigil install",
+            remedy=_install_remedy(source_root),
             detail="installed content differs from the live source",
         )
     if state == "no-stamp":
@@ -781,7 +819,7 @@ def _agent_tree_state(install_root: Path) -> ConsumerState:
             key="agent-tree",
             label="working root",
             state="unknown",
-            remedy="vigil install",
+            remedy=_install_remedy(source_root),
             detail="this install predates content stamping",
         )
     return ConsumerState(
@@ -831,9 +869,15 @@ def consumer_states(
     # the daemon timeout, and — the reason it is here rather than an
     # optimisation — the only thing that separates "no image" from "no answer".
     docker_ok = docker.daemon_available(runner=runner)
-    cli = cli_state(
-        source_root=source_root if source_root is not None else _resolve_source_root_offline(install_root)
+    # Resolved ONCE, then handed to every consumer that compares against a
+    # checkout or names one in a command. Each such consumer used to rediscover
+    # its own, so one summary could judge the CLI against the installed source
+    # and the working root against a sibling — and print two different reinstall
+    # commands for one install.
+    resolved_source = (
+        source_root if source_root is not None else _resolve_source_root_offline(install_root)
     )
+    cli = cli_state(source_root=resolved_source)
     return [
         cli,
         _backend_state(install_root),
@@ -841,9 +885,13 @@ def consumer_states(
         _report_state(install_root),
         _runtime_image_state(install_root, runner=runner, docker_ok=docker_ok),
         _proxy_image_state(
-            install_root, runner=runner, docker_ok=docker_ok, cli_stale=cli.state == "stale"
+            install_root,
+            runner=runner,
+            docker_ok=docker_ok,
+            cli_stale=cli.state == "stale",
+            source_root=resolved_source,
         ),
         _runtime_container_state(runner=runner, docker_ok=docker_ok),
         _proxy_container_state(runner=runner, docker_ok=docker_ok),
-        _agent_tree_state(install_root),
+        _agent_tree_state(install_root, source_root=resolved_source),
     ]

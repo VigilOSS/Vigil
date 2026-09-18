@@ -707,6 +707,7 @@ def _maven_dependency(
     *,
     declaration: str,
     gaps: list[AnalysisGap],
+    qualifiers: tuple[str, ...] = (),
 ) -> DeclaredDependency | None:
     declared_group = node.value("groupId")
     declared_artifact = node.value("artifactId")
@@ -746,9 +747,9 @@ def _maven_dependency(
         version_source = "unresolved"
     else:
         version_source = "property" if interpolated else "manifest"
-    qualifiers: list[str] = []
+    notes = list(qualifiers)
     if node.value("optional").lower() == "true":
-        qualifiers.append("optional")
+        notes.append("optional")
     return _dependency(
         context,
         coordinate=f"{group}:{artifact}",
@@ -759,7 +760,104 @@ def _maven_dependency(
         declared_scope=node.value("scope") or "compile",
         declaration=declaration,
         evidence=(context.evidence(node.line, context.line_span(node.line, node.end_line)),),
-        qualifiers=tuple(qualifiers),
+        qualifiers=tuple(notes),
+    )
+
+
+def _maven_profile_activation(profile: _XmlNode) -> str:
+    """The condition this profile's declarations hang on, in the POM's own words.
+
+    Maven activates a profile on `activeByDefault`, a JDK range, an OS, a
+    property, the presence of a file, or a `-P` flag on the command line. None
+    of those are decidable from the file, so the condition is quoted rather
+    than evaluated.
+    """
+
+    activation = profile.first("activation")
+    if activation is None:
+        return "no <activation>; active only when -P names it"
+    stated = []
+    for child in activation.children:
+        text = " ".join(child.text.split())
+        stated.append(f"<{child.tag}>{text}" if text else f"<{child.tag}>")
+    return ", ".join(stated) or "an empty <activation>"
+
+
+def _maven_declaration_blocks(
+    context: _ReaderContext,
+    container: _XmlNode,
+    properties: dict[str, str],
+    *,
+    declaration: str,
+    gaps: list[AnalysisGap],
+    qualifiers: tuple[str, ...] = (),
+) -> list[DeclaredDependency]:
+    """Every `<dependency>` in the `<dependencies>` blocks `container` owns."""
+
+    found: list[DeclaredDependency] = []
+    for block in container.all("dependencies"):
+        for node in block.all("dependency"):
+            parsed = _maven_dependency(
+                context,
+                node,
+                properties,
+                declaration=declaration,
+                gaps=gaps,
+                qualifiers=qualifiers,
+            )
+            if parsed is not None:
+                found.append(parsed)
+    return found
+
+
+def _maven_declarations(
+    context: _ReaderContext,
+    container: _XmlNode,
+    properties: dict[str, str],
+    *,
+    gaps: list[AnalysisGap],
+    qualifiers: tuple[str, ...] = (),
+) -> list[DeclaredDependency]:
+    """A POM or profile's own declarations: its version policy, then its needs."""
+
+    found: list[DeclaredDependency] = []
+    management = container.first("dependencyManagement")
+    if management is not None:
+        found.extend(
+            _maven_declaration_blocks(
+                context,
+                management,
+                properties,
+                declaration="managed",
+                gaps=gaps,
+                qualifiers=qualifiers,
+            )
+        )
+    found.extend(
+        _maven_declaration_blocks(
+            context,
+            container,
+            properties,
+            declaration="direct",
+            gaps=gaps,
+            qualifiers=qualifiers,
+        )
+    )
+    return found
+
+
+def _maven_declared_dependency_count(container: _XmlNode) -> int:
+    """How many `<dependency>` elements a container states, resolvable or not.
+
+    Counted from the tree rather than from the records, so a profile whose only
+    dependency needs a parent POM still discloses its activation instead of
+    looking like a profile that declares nothing.
+    """
+
+    management = container.first("dependencyManagement")
+    owners = (container, management) if management is not None else (container,)
+    return sum(
+        len(block.all("dependency")) for owner in owners for block in owner.all("dependencies")
     )
 
 
@@ -777,22 +875,46 @@ def _read_maven_pom(context: _ReaderContext) -> ManifestParse:
 
     dependencies: list[DeclaredDependency] = []
     gaps: list[AnalysisGap] = []
-    management = root.first("dependencyManagement")
-    if management is not None:
-        for block in management.all("dependencies"):
-            for node in block.all("dependency"):
-                managed = _maven_dependency(
-                    context, node, properties, declaration="managed", gaps=gaps
-                )
-                if managed is not None:
-                    dependencies.append(managed)
-    for block in root.all("dependencies"):
-        for node in block.all("dependency"):
-            direct = _maven_dependency(
-                context, node, properties, declaration="direct", gaps=gaps
+    dependencies.extend(_maven_declarations(context, root, properties, gaps=gaps))
+
+    # A production profile is where a log4j, a JDBC driver or a native
+    # transport is usually declared, and a root-only traversal reports none of
+    # them -- not scoped out, not flagged, absent. They are read here with the
+    # profile named on every record, and the activation, which no file reader
+    # can evaluate, is disclosed as a gap beside them.
+    profiles = root.first("profiles")
+    for profile in profiles.all("profile") if profiles is not None else ():
+        declared = _maven_declared_dependency_count(profile)
+        if not declared:
+            continue
+        identifier = profile.value("id") or f"the profile opened on line {profile.line}"
+        profile_properties = dict(properties)
+        block = profile.first("properties")
+        if block is not None:
+            profile_properties.update(
+                {child.tag: child.text.strip() for child in block.children}
             )
-            if direct is not None:
-                dependencies.append(direct)
+        dependencies.extend(
+            _maven_declarations(
+                context,
+                profile,
+                profile_properties,
+                gaps=gaps,
+                qualifiers=(f"profile:{identifier}",),
+            )
+        )
+        gaps.append(
+            AnalysisGap(
+                path=context.path,
+                gap="unresolved_profile_activation",
+                detail=(
+                    f"line {profile.line}: profile `{identifier}` declares "
+                    f"{declared} dependency element(s) under "
+                    f"{_maven_profile_activation(profile)}; whether the build "
+                    "applies them is not decidable from this file"
+                ),
+            )
+        )
 
     relocations: list[Relocation] = []
     for plugin in root.descendants("plugin"):
@@ -883,8 +1005,15 @@ _GRADLE_STRING_RE = re.compile(
 _GRADLE_ALIAS_RE = re.compile(
     r"^\s*(?P<configuration>[A-Za-z][A-Za-z0-9_]*)\s*[(\s]\s*(?P<alias>libs\.[A-Za-z0-9_.]+)"
 )
-_GRADLE_MAP_RE = re.compile(r"^\s*(?P<configuration>[A-Za-z][A-Za-z0-9_]*)\s*[(\s]*group\s*:")
-_GRADLE_MAP_FIELD_RE = re.compile(r"\b(group|name|version)\s*:\s*['\"]([^'\"]*)['\"]")
+# Groovy spells the coordinate map `group: 'x', name: 'y'`; the Kotlin DSL
+# spells the same declaration with named arguments, `group = "x", name = "y"`,
+# and orders them however the author liked. Accepting only the colon returns
+# nothing at all for a `build.gradle.kts` written that way -- no dependency and
+# no gap, which reads as a module that declares nothing.
+_GRADLE_MAP_RE = re.compile(
+    r"^\s*(?P<configuration>[A-Za-z][A-Za-z0-9_]*)\s*[(\s]*(?:group|name)\s*[:=]"
+)
+_GRADLE_MAP_FIELD_RE = re.compile(r"\b(group|name|version)\s*[:=]\s*['\"]([^'\"]*)['\"]")
 _GRADLE_RELOCATE_RE = re.compile(
     r"relocate\s*\(?\s*['\"]([^'\"]+)['\"]\s*,\s*['\"]([^'\"]+)['\"]"
 )
@@ -1277,11 +1406,65 @@ _GO_REQUIRE_RE = re.compile(r"^\s*(?P<module>[^\s]+)\s+(?P<version>v[^\s]+)(?P<r
 # module being replaced is whatever stands to the left of the arrow in either
 # form. Anchoring on the `replace` keyword alone reads the block's opening
 # parenthesis as the replaced module and leaves the real ones unmarked.
-_GO_REPLACE_RE = re.compile(r"^\s*(?:replace\s+)?(?P<module>[^\s(]+)(?:\s+\S+)?\s*=>")
+#
+# Both sides matter. The left may carry a version, and then the directive
+# applies to that version alone; the right names what the build actually
+# compiles, and go.mod requires a version there unless the target is a
+# filesystem path. Keeping only the left reports the registry version of bytes
+# the build never uses.
+_GO_REPLACE_RE = re.compile(
+    r"^\s*(?:replace\s+)?(?P<module>[^\s(]+)"
+    r"(?:\s+(?P<replaced_version>v\S+))?"
+    r"\s*=>\s*(?P<target>\S+)"
+    r"(?:\s+(?P<version>v\S+))?"
+)
+
+
+@dataclass(frozen=True)
+class _GoReplacement:
+    """One `replace` directive: what it matches, and what it substitutes."""
+
+    module: str
+    replaced_version: str
+    target: str
+    version: str
+
+    @property
+    def note(self) -> str:
+        target = f"{self.target}@{self.version}" if self.version else self.target
+        return f"replaced_by:{target}"
+
+
+def _go_replacement(match: re.Match[str]) -> _GoReplacement:
+    return _GoReplacement(
+        module=match.group("module"),
+        replaced_version=match.group("replaced_version") or "",
+        target=match.group("target"),
+        version=match.group("version") or "",
+    )
+
+
+def _go_replacement_for(
+    replacements: Sequence[_GoReplacement], module: str, version: str
+) -> _GoReplacement | None:
+    """The directive that governs this requirement, if one does.
+
+    A version on the left of the arrow narrows the directive to exactly that
+    version, so applying it to any other one reports a substitution the build
+    does not perform.
+    """
+
+    for replacement in replacements:
+        if replacement.module != module:
+            continue
+        if replacement.replaced_version and replacement.replaced_version != version:
+            continue
+        return replacement
+    return None
 
 
 def _read_go_mod(context: _ReaderContext) -> ManifestParse:
-    replaced: set[str] = set()
+    replacements: list[_GoReplacement] = []
     requires: list[tuple[int, str, str, bool]] = []
     in_require = False
     in_replace = False
@@ -1303,12 +1486,12 @@ def _read_go_mod(context: _ReaderContext) -> ManifestParse:
                 continue
             entry = _GO_REPLACE_RE.match(stripped)
             if entry is not None:
-                replaced.add(entry.group("module"))
+                replacements.append(_go_replacement(entry))
             continue
         if stripped.startswith("replace "):
             replace_match = _GO_REPLACE_RE.match(stripped)
             if replace_match is not None:
-                replaced.add(replace_match.group("module"))
+                replacements.append(_go_replacement(replace_match))
             continue
         if stripped.startswith("require ("):
             in_require = True
@@ -1332,20 +1515,28 @@ def _read_go_mod(context: _ReaderContext) -> ManifestParse:
                 "// indirect" in raw,
             )
         )
-    dependencies = tuple(
-        _dependency(
-            context,
-            coordinate=name,
-            version=version,
-            version_source="manifest",
-            declared_scope="require-indirect" if indirect else "require",
-            declaration="transitive" if indirect else "direct",
-            evidence=(context.evidence_at(number),),
-            qualifiers=("replaced",) if name in replaced else (),
+    dependencies: list[DeclaredDependency] = []
+    for number, name, version, indirect in requires:
+        replacement = _go_replacement_for(replacements, name, version)
+        dependencies.append(
+            _dependency(
+                context,
+                coordinate=name,
+                # The replacement's version is what the build compiles. go.mod
+                # demands one on the right of the arrow unless the target is a
+                # directory in this tree, so a target without one is a local
+                # checkout: nothing identifies those bytes, and repeating the
+                # required version would pin every lookup to a release the
+                # build never reads.
+                version=replacement.version if replacement is not None else version,
+                version_source="replace" if replacement is not None else "manifest",
+                declared_scope="require-indirect" if indirect else "require",
+                declaration="transitive" if indirect else "direct",
+                evidence=(context.evidence_at(number),),
+                qualifiers=(replacement.note,) if replacement is not None else (),
+            )
         )
-        for number, name, version, indirect in requires
-    )
-    return context.parse(dependencies=dependencies)
+    return context.parse(dependencies=tuple(dependencies))
 
 
 def _read_go_sum(context: _ReaderContext) -> ManifestParse:
@@ -1424,7 +1615,23 @@ _PEP508_DIRECT_RE = re.compile(
     r"(?:\[(?P<extras>[^\]]*)\])?"
     r"\s*@\s*(?P<url>\S+)"
 )
-_EGG_FRAGMENT_RE = re.compile(r"#egg=(?P<name>[A-Za-z0-9][A-Za-z0-9._-]*)")
+_EGG_FRAGMENT_RE = re.compile(
+    r"#egg=(?P<name>[A-Za-z0-9][A-Za-z0-9._-]*)(?:\[(?P<extras>[^\]]*)\])?"
+)
+# pip documents `-r, --requirement <file>` and `-c, --constraint <file>`, and
+# accepts each in the compact (`-rbase.txt`), separated (`-r base.txt`) and
+# equals (`--requirement=base.txt`) spellings. Only the separated form used to
+# be recognized, so the other two fell through the generic option skip and the
+# file they delegate to left the picture entirely.
+_REQUIREMENT_INCLUDE_RE = re.compile(
+    r"^(?:-[rc]\s*|--(?:requirement|constraint)\s*[=\s]\s*)\S"
+)
+# `-e` takes a path OR a VCS URL. The compact `-e<value>` spelling is NOT
+# accepted here: optparse would read `-extra-index-url ...` as one, and an
+# index URL is not an editable checkout.
+_REQUIREMENT_EDITABLE_RE = re.compile(
+    r"^(?:-e\s+|--editable\s*[=\s]\s*)(?P<target>\S.*)$"
+)
 
 
 def normalize_python_name(name: str) -> str:
@@ -1497,7 +1704,9 @@ def _direct_reference_name(statement: str) -> tuple[bool, str, str]:
     if not located and "://" not in text.partition("#")[0]:
         return False, "", ""
     egg = _EGG_FRAGMENT_RE.search(text)
-    return True, egg.group("name") if egg is not None else "", ""
+    if egg is None:
+        return True, "", ""
+    return True, egg.group("name"), egg.group("extras") or ""
 
 
 def _read_python_requirements(context: _ReaderContext) -> ManifestParse:
@@ -1508,7 +1717,7 @@ def _read_python_requirements(context: _ReaderContext) -> ManifestParse:
         line = raw.split(" #", 1)[0].strip()
         if not line or line.startswith("#"):
             continue
-        if line.startswith(("-r ", "--requirement ", "-c ", "--constraint ")):
+        if _REQUIREMENT_INCLUDE_RE.match(line):
             # Part of the declaration lives elsewhere. Dropping it silently
             # would make this file look complete when it is not.
             gaps.append(
@@ -1519,17 +1728,56 @@ def _read_python_requirements(context: _ReaderContext) -> ManifestParse:
                 )
             )
             continue
-        if line.startswith(("-e ", "--editable ")):
-            dependencies.append(
-                _dependency(
-                    context,
-                    coordinate=line.split(None, 1)[1].strip(),
-                    declared_scope="requirements",
-                    declaration="local",
-                    evidence=(context.evidence_at(number),),
-                    qualifiers=("editable_local",),
+        editable = _REQUIREMENT_EDITABLE_RE.match(line)
+        if editable is not None:
+            target = editable.group("target").strip()
+            _, name, extras = _direct_reference_name(target)
+            if name:
+                # An editable VCS checkout installs the distribution its
+                # fragment names. Recording the URL as the coordinate publishes
+                # a component that exists in no registry, matches no import,
+                # and can never merge with the lockfile or import observation
+                # for the package it actually is.
+                notes = ["editable", "direct_reference"]
+                notes.extend(
+                    f"extras:{extra.strip()}"
+                    for extra in extras.split(",")
+                    if extra.strip()
                 )
-            )
+                dependencies.append(
+                    _dependency(
+                        context,
+                        coordinate=normalize_python_name(name),
+                        declared_scope="requirements",
+                        evidence=(context.evidence_at(number),),
+                        qualifiers=tuple(notes),
+                    )
+                )
+            elif "://" in target or target.startswith(_DIRECT_REFERENCE_SCHEMES):
+                gaps.append(
+                    AnalysisGap(
+                        path=context.path,
+                        gap="unnamed_requirement_reference",
+                        detail=(
+                            f"line {number}: {line} installs from a location and "
+                            "names no distribution; what it installs is absent from "
+                            "the picture, not absent from the environment"
+                        ),
+                    )
+                )
+            else:
+                # A path is its own identity here: there is no distribution
+                # name to recover, and the checkout is what the reviewer opens.
+                dependencies.append(
+                    _dependency(
+                        context,
+                        coordinate=target,
+                        declared_scope="requirements",
+                        declaration="local",
+                        evidence=(context.evidence_at(number),),
+                        qualifiers=("editable",),
+                    )
+                )
             continue
         if line.startswith("-"):
             continue
@@ -1551,6 +1799,34 @@ def _read_python_requirements(context: _ReaderContext) -> ManifestParse:
                 )
             )
     return context.parse(dependencies=tuple(dependencies), gaps=tuple(gaps))
+
+
+# The two PEP 621 fields whose absence would otherwise read as "this project
+# declares nothing". `dynamic` lists the fields the build backend supplies at
+# build time, so `project.dependencies` is legitimately missing from the file
+# and its runtime requirements are stated somewhere this reader is not looking.
+_DYNAMIC_DEPENDENCY_FIELDS: tuple[str, ...] = ("dependencies", "optional-dependencies")
+
+
+def _dynamic_declaration_source(tool: dict[str, Any], field: str) -> str:
+    """Where a dynamic field says its declarations come from, in the file's words.
+
+    setuptools is the one backend that names the source in the same file
+    (`tool.setuptools.dynamic`), and a `file` entry usually points at a
+    `requirements*.txt` this roster reads on its own. Quoting the entry tells
+    the operator which file completes the declaration; evaluating it is not
+    this reader's to do -- it reads one file's bytes and touches no others.
+    """
+
+    setuptools = tool.get("setuptools")
+    dynamic = setuptools.get("dynamic") if isinstance(setuptools, dict) else None
+    entry = dynamic.get(field) if isinstance(dynamic, dict) else None
+    if entry is None:
+        return (
+            "no `tool.setuptools.dynamic` entry names where it comes from, so only "
+            "the build backend knows"
+        )
+    return f"`tool.setuptools.dynamic.{field}` names {json.dumps(entry, sort_keys=True)}"
 
 
 def _poetry_constraint(value: Any) -> str:
@@ -1611,7 +1887,27 @@ def _read_python_pyproject(context: _ReaderContext) -> ManifestParse:
             ("project", "optional-dependencies", str(group)),
         )
 
-    poetry = block(block(data, "tool", ("tool",)), "poetry", ("tool", "poetry"))
+    dynamic = project.get("dynamic")
+    tool = block(data, "tool", ("tool",))
+    for field_name in _DYNAMIC_DEPENDENCY_FIELDS:
+        if field_name not in (dynamic if isinstance(dynamic, list) else ()):
+            continue
+        span = key_lines.get(("project", "dynamic"))
+        gaps.append(
+            AnalysisGap(
+                path=context.path,
+                gap="dynamic_dependency_declaration",
+                detail=(
+                    f"{f'line {span[0]}: ' if span else ''}`project.{field_name}` is "
+                    f"declared dynamic, so this file lists none of it; "
+                    f"{_dynamic_declaration_source(tool, field_name)}. Those "
+                    "requirements are absent from this manifest's records, not "
+                    "absent from the project"
+                ),
+            )
+        )
+
+    poetry = block(tool, "poetry", ("tool", "poetry"))
 
     def add_table(table: Any, scope: str, path: tuple[str, ...]) -> None:
         if not isinstance(table, dict):
