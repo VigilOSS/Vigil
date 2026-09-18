@@ -1450,9 +1450,8 @@ export function FindingsTab({
                 onClick={() => toggle(workflowFilters, setWorkflowFilters, s)}
               >
                 {/*
-                  Use the same human-readable map as the row pills
-                  (e.g. "false_positive" -> "False positive" rather
-                  than the old "Suppressed"). Falls back to a
+                  Same human-readable map as the row pills ("false_positive" ->
+                  "False positive", not the old "Suppressed"). Falls back to a
                   _-stripped value for statuses we don't label.
                 */}
                 {WORKFLOW_LABELS[s] || s.replace(/_/g, " ")}

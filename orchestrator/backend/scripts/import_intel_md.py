@@ -56,9 +56,8 @@ if str(_BACKEND_ROOT) not in sys.path:
 
 
 def _configure_environment(install_root: Path) -> None:
-    """Point ``app.config.settings`` at the installed data dir *before*
-    ``app`` is imported. ``Settings`` reads env vars in its class body, so
-    we set them here and only then import the db/services modules.
+    """Point ``app.config.settings`` at the installed data dir before ``app``
+    is imported — ``Settings`` reads env vars in its class body, so order matters.
     """
     data_dir = install_root / "orchestrator" / "backend" / "data"
     # Accept both the new and legacy env var names; the old orchestrator

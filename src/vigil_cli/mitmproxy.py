@@ -251,9 +251,8 @@ def start_proxy(
                 f"Re-run `vigil mitmproxy build --force` if the addon imports changed."
             )
         raise SystemExit(f"mitmproxy container started but port {options.port} is not reachable on 127.0.0.1")
-    # The port can come up before the addon finishes its lifespan. If the
-    # addon crashes a second later, the user sees "started" then nothing
-    # works. Verify the container is still running.
+    # The port can come up before the addon finishes its lifespan; if it
+    # crashes a second later, the user sees "started" then nothing works.
     if verify_running and not docker.container_running(options.container_name, runner=exec_runner):
         tail = _container_log_tail(options.container_name, runner=exec_runner)
         raise SystemExit(

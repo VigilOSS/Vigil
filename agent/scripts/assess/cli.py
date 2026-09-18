@@ -154,7 +154,6 @@ def main(argv: list[str] | None = None) -> None:
 
     sub = parser.add_subparsers(dest="command")
 
-    # Import subcommand modules; registration follows below.
     from assess.commands import (
         agent,
         anomaly_score,
@@ -329,9 +328,9 @@ def main(argv: list[str] | None = None) -> None:
         mod.register(sub)
 
     # Grouped namespacing: re-shelve finding / intel / export / command-run
-    # verbs under a subcommand parent (mirrors the `kali` / `work-buffer` pattern).
-    # Each leaf module registers its short action name (`record`, `verify`, …)
-    # onto the parent's action subparser; behavior is unchanged (pure re-parent).
+    # verbs under a subcommand parent, mirroring the `kali` / `work-buffer`
+    # pattern (see _register_subcommand_group above). Behavior is unchanged —
+    # a pure re-parent, each leaf keeping its exact argument parser.
     _register_subcommand_group(
         sub,
         name="finding",

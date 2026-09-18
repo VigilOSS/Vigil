@@ -305,7 +305,6 @@ def run(args) -> None:
 
     spec = json.loads(Path(spec_file).read_text(encoding="utf-8"))
 
-    # Detect version
     openapi_ver = spec.get("openapi", "")
     swagger_ver = spec.get("swagger", "")
     if openapi_ver:
@@ -471,7 +470,6 @@ def run(args) -> None:
                                 body_params.update(_schema_property_names(schema, spec))
                             break
 
-                # Build URL with query params
                 url_with_query = full_url
                 if query_params:
                     qs = "&".join(f"{k}={v}" for k, v in query_params.items())

@@ -8,7 +8,7 @@
 // (label + count + percent + colored swatch) follows static-reports'
 // SeverityDonut.
 //
-// Translated from their Tailwind/hard-coded palette to our plain CSS: segment
+// Palette maps to plain CSS instead of their Tailwind/hard-coded hex: segment
 // colors come straight from the `--sev-*` theme vars (they resolve in both
 // light and dark), the background ring uses `--border`, and label text uses
 // `--ink` / `--muted`. Presentation-only — all data arrives via props so a

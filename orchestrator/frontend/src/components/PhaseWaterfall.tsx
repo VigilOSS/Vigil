@@ -50,10 +50,8 @@ function phaseState(events: EventRecord[], phase: string, currentPhase: string) 
 
 export function PhaseWaterfall({ events, currentPhase }: PhaseWaterfallProps) {
   // Memoize the multi-pass scans of the whole events array (hasStructuredEvents
-  // + a phaseState() filter per phase). On the 2s WebSocket refresh these
-  // recompute only when `events` / `currentPhase` actually change identity, so
-  // an unrelated refresh is a cache hit. Output is identical to the prior
-  // inline computation.
+  // + a phaseState() filter per phase), so on the 2s WebSocket refresh these
+  // only recompute when `events` / `currentPhase` actually change identity.
   const { hasStructuredEvents, phaseStates } = useMemo(
     () => ({
       hasStructuredEvents: events.some((event) => event.event_type.startsWith("task.")),

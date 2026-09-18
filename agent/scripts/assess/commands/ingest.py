@@ -6,7 +6,7 @@ modules keep their own ``run`` entry points, which the internal recon/gau/js
 pipelines still call directly (not via the CLI string), so this registration
 change is purely a top-level re-shelving.
 
-Note: ``ingest httpx`` targets the backend host-liveness ledger, not the work
+``ingest httpx`` targets the backend host-liveness ledger, not the work
 buffer — it is grouped here for discoverability but writes a different table.
 """
 from __future__ import annotations

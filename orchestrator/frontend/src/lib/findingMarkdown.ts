@@ -1,9 +1,9 @@
 // Copy-finding-as-markdown (UI/UX adoption wave, Tier 1c).
 //
 // Ported shape: reference-project static-reports ReportView.findingToMarkdown(), adapted
-// to OUR finding fields. Produces a clean, portable markdown document an
-// operator can paste into a ticket, report, or chat. Empty sections are
-// skipped so a sparse finding doesn't render a wall of empty headings.
+// to OUR finding fields. Produces a portable markdown document an operator
+// can paste into a ticket, report, or chat. Empty sections are skipped so a
+// sparse finding doesn't render a wall of empty headings.
 //
 // This lives in lib/ (not the component) so it stays unit-testable and free of
 // React. It accepts a structural subset of FindingsTab's `Derived` shape — the
@@ -25,10 +25,10 @@ export type MarkdownFinding = {
   parameter?: string;
   cwe_id?: string;
   owasp_category?: string;
-  // Severity-defining, and the drawer shows it ("Auth context"): what privilege
-  // the attack needs. Omitted from the copy, a high-severity claim reads as
-  // unauthenticated when it may need an administrator — the reader who copies a
-  // finding gets a stronger report than the reader who reads one.
+  // Severity-defining (shown in the drawer as "Auth context"): what privilege
+  // the attack needs. Omitted here, a high-severity claim would read as
+  // unauthenticated even when it needs an administrator — overstating the
+  // finding to whoever reads the copy instead of the drawer.
   auth_context?: string;
   summary?: string;
   impact?: string;
@@ -222,7 +222,6 @@ export function findingToMarkdown(d: MarkdownFinding): string {
     push();
   }
 
-  // Trim trailing blank lines.
   while (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
   return lines.join("\n");
 }

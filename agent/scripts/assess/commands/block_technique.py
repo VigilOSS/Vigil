@@ -151,16 +151,13 @@ _MAX_TECHNIQUE_KEY_LEN = 256
 def _derive_technique_key(technique: str, target_kind: str, target_ref: str) -> str:
     """Stable, deterministic upsert key from the three identity fields.
 
-    Lower-cased and non-alphanumeric-collapsed so the SAME block re-recorded
-    (same technique on the same target) upserts the row rather than creating a
-    duplicate. Kept human-legible (``ssrf:host:api-example-com``) so an operator
-    scanning ``list-blocked-techniques`` can read it.
+    Lower-cased and non-alphanumeric-collapsed so re-recording the same block
+    (same technique on the same target) upserts instead of duplicating. Kept
+    human-legible (``ssrf:host:api-example-com``) for `list-blocked-techniques`.
 
-    A long ``target_ref`` (e.g. a full endpoint URL, which the API permits up to
-    1024 chars) can push the derived key past the backend's 256-char
-    ``technique_key`` limit and 422 the POST. When that happens the key is
-    bounded to a readable prefix plus a short deterministic hash of the full
-    key, so it still fits, stays unique, and remains stable across re-records.
+    A ``target_ref`` up to 1024 chars (e.g. a full endpoint URL) can push the
+    key past the backend's 256-char ``technique_key`` limit and 422 the POST;
+    see the bounding below.
     """
     parts = [technique, target_kind, target_ref]
     slugged = [

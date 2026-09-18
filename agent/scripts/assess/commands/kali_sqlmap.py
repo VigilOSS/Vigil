@@ -52,9 +52,9 @@ def register(subparsers) -> None:
     p.add_argument("-r", dest="request_file", default="", help="HTTP request file.")
     p.add_argument("--data", dest="post_data", default="", help="POST data string.")
     p.add_argument("--method", dest="method", default="", help="HTTP method.")
-    # Note: --technique here is sqlmap's own flag (BEUSTQ); it's distinct
-    # from the audit-flag --technique that add_required_kali_flags registers.
-    # We rename the destination to sql_technique so they don't collide.
+    # sqlmap's own --technique (BEUSTQ) collides with the audit --technique flag
+    # that add_required_kali_flags registers; rename the destination to
+    # sql_technique so they don't collide.
     p.add_argument(
         "--sql-technique",
         dest="sql_technique",

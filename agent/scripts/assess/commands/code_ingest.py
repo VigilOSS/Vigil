@@ -397,11 +397,9 @@ def _skip_file_reason(
         if ext == '.map':
             return 'source_map'
         return f'skipped_extension:{ext}'
-    # Check for compound extensions like .min.js, .bundle.js
     lower_name = filename.lower()
     if lower_name.endswith(('.min.js', '.bundle.js', '.min.css', '.bundle.css')):
         return 'minified_or_bundle'
-    # Check for .woff variants
     if lower_name.endswith(('.woff', '.woff2')):
         return 'skipped_extension:font'
     for part in PurePosixPath(rel_path.replace(os.sep, "/")).parts[:-1]:
@@ -1372,7 +1370,6 @@ def run(args) -> None:
         churn_scores = _git_churn_scores(repo_path)
         security_files = _git_security_files(repo_path, security_history_args)
 
-    # Walk the directory tree
     files: list[dict[str, object]] = []
     total_loc = 0
     skipped = 0
@@ -1508,7 +1505,6 @@ def run(args) -> None:
             print(f"Cannot publish source snapshot: {exc}", file=sys.stderr)
             sys.exit(1)
 
-    # POST to backend
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         # Stage a complete generation. The backend only promotes it after every
         # batch arrives, so a crash or transport failure cannot expose a
@@ -1547,7 +1543,6 @@ def run(args) -> None:
         refresh = client.post('code/repos/refresh/start', repo_payload)
         repo_id, refresh_token = _require_refresh_start_receipt(refresh)
 
-        # Bulk-create files in batches
         batch_size = 200
         created_count = 0
         for i in range(0, len(files), batch_size):
@@ -1645,7 +1640,6 @@ def run(args) -> None:
             file=sys.stderr,
         )
 
-    # Print summary
     print("\n=== Code Ingest Summary ===")
     print(f"Repository: {repo_name} (id: {repo_id})")
     print(f"Sealed source: {snapshot.source_path}")
@@ -1666,7 +1660,6 @@ def run(args) -> None:
     print(f"Total LOC: {total_loc:,}")
 
     if analyzed_churn_scores:
-        # Top 10 highest-churn ANALYZED files
         sorted_churn = sorted(
             analyzed_churn_scores.items(), key=lambda x: x[1], reverse=True
         )[:10]

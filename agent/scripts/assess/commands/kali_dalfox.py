@@ -1,16 +1,15 @@
 """vigil assess kali dalfox — typed wrapper around dalfox inside the runtime.
 
-Parameter→XSS confirmation. dalfox fires reflection-aware XSS payloads at a
-parameterized URL (or a list of them), verifies whether the reflection actually
-executes (DOM/HTML/attribute context), and is WAF-aware. The intended chain is
-AFTER `arjun` surfaces hidden params: arjun isolates the injectable parameter,
-dalfox confirms whether it is XSS-exploitable.
+Parameter→XSS confirmation: fires reflection-aware XSS payloads at a
+parameterized URL (or list), verifies the reflection actually executes
+(DOM/HTML/attribute context), and is WAF-aware. Intended chain: `arjun`
+surfaces hidden params first, then dalfox confirms which are XSS-exploitable.
 
 Reflective by DEFAULT — no blind/OOB payloads fire unless the operator opts in
-with `--blind <callback>` (which sends payloads to an out-of-band collector and
-can store a persisted payload, so pair it with `--destructive`). dalfox is in the
-required-header INJECTABLE set (curl-style ``-H``), so a required-headers program
-marker rides every probe automatically.
+with `--blind <callback>` (sends payloads to an out-of-band collector and can
+store a persisted payload, so pair it with `--destructive`). dalfox is in the
+required-header INJECTABLE set (curl-style ``-H``), so a required-headers
+program marker rides every probe automatically.
 """
 from __future__ import annotations
 

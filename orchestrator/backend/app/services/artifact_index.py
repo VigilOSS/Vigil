@@ -170,9 +170,9 @@ def _file_payload(
     legitimately point ``evidence_ref`` at a directory holding a whole capture
     set. An ``is_file()`` predicate here reported every one of those as
     ``present=False``, which report-readiness surfaces as "the file is missing on
-    disk" against directories that were sitting there full of live evidence. A
-    directory has no single body to hash or preview, so those fields stay empty —
-    but it is unambiguously present.
+    disk" against directories full of live evidence. A directory has no single
+    body to hash or preview, so those fields stay empty — but it is
+    unambiguously present.
     """
     try:
         descriptor = _open_registered_artifact(root, relative_path)
@@ -577,16 +577,16 @@ def register_artifact(
 def register_artifacts_bulk(
     engagement_id: int, items: list[dict[str, Any]]
 ) -> dict[str, Any]:
-    """Register many engagement-local paths in one transaction.
+    """Register many engagement-local paths, each in its own savepoint.
 
-    Each item is written inside its own savepoint, so a path the index refuses —
-    outside the engagement directory, reserved from indexing, verified command
-    output, or an immutable producer attribution — is reported with the reason it
-    was refused instead of discarding every other path's work. ``registered`` and
-    ``failed`` sum to ``requested`` exactly; ``outcomes`` carries one row per
-    submitted item in submission order, and ``artifacts`` the registered rows in
-    that same order — the row ``register_artifact`` returns minus ``indexed_text``,
-    in the same compact shape ``search_artifacts`` returns (see the loop).
+    A path the index refuses — outside the engagement directory, reserved
+    from indexing, verified command output, or an immutable producer
+    attribution — is reported with the reason it was refused instead of
+    discarding every other path's work. ``registered`` and ``failed`` sum to
+    ``requested`` exactly; ``outcomes`` carries one row per submitted item in
+    submission order, and ``artifacts`` the registered rows in that same
+    order — the row ``register_artifact`` returns minus ``indexed_text``, in
+    the same compact shape ``search_artifacts`` returns.
     """
     outcomes: list[dict[str, Any]] = []
     artifacts: list[dict[str, Any]] = []
@@ -1126,7 +1126,7 @@ def _path_ref(value: Any) -> str | None:
 
     Used by ``register_reference_if_local`` so a finding/transition/chain
     write with ``evidence_ref`` set automatically lands an artifact row when
-    the value is a file path.  Rejects sentence-text and multi-path composites
+    the value is a file path. Rejects sentence-text and multi-path composites
     so callers don't silently create ghost artifact rows: a composite ref
     ("scans/a.out; scans/b.out", "command-runs 56052/56054/56061") minted a
     PERMANENT artifact row for a path that can never exist and then linked it

@@ -17,7 +17,7 @@ from assess.lib.kali import (
 # asnmap's data path is gated behind a ProjectDiscovery Cloud (PDCP) API key.
 # Without it the tool exits 0 with EMPTY output — indistinguishable from "this
 # ASN genuinely announces no CIDRs" — which silently poisons the downstream
-# cero TLS-SAN feed. We detect the missing key and fail loud instead.
+# cero TLS-SAN feed. Detect the missing key and fail loud instead.
 _PDCP_FALLBACK_GUIDANCE = (
     "asnmap requires a ProjectDiscovery Cloud (PDCP) API key; without it it exits 0 with\n"
     "empty output (looks identical to 'this ASN announces no CIDRs').\n"
@@ -34,9 +34,9 @@ def _runtime_has_pdcp_key(container_name: str | None = None):
     """Probe the runtime for a PDCP API key.
 
     Returns True if PDCP_API_KEY (env) or a non-empty pdcp credentials file is
-    present in the container, False if definitively absent, or None if the probe
-    itself could not run (docker unreachable / container down) — in which case
-    the caller should not block, only warn.
+    present, False if definitively absent, or None if the probe itself could
+    not run (docker unreachable / container down) — the caller should then
+    only warn, not block.
     """
     # Resolve at call time so VIGIL_RUNTIME_CONTAINER is honoured even if it was
     # set after import; default stays "vigil" when unset.

@@ -34,10 +34,9 @@ def run(args) -> None:
     name = args.name
     variant = getattr(args, "variant", None)
     if variant:
-        # From argparse `variant` is a list (nargs="*"); a two-token group is
-        # `finding record` and the per-type intel form is three tokens:
-        # `intel record tech-component`. Accept a bare string too (callers that
-        # build a Namespace directly may pass a single variant token).
+        # argparse gives `variant` as a list (nargs="*"): two tokens for
+        # `finding record`, three for `intel record tech-component`. Accept a
+        # bare string too, for callers that build a Namespace directly.
         parts = [variant] if isinstance(variant, str) else list(variant)
         name = " ".join([name, *parts])
     try:

@@ -2967,8 +2967,8 @@ def _host_matches_deny_pattern(host: str, pattern: str) -> bool:
     silently ERASES coverage obligations while an over-broad allow only adds
     them. Apex-expanding a literal carve-out is what dropped 155 of 176
     deep-required app units in a prior run: a single literal apex carve-out
-    swallowed every explicitly in-scope wildcard product host
-    product host, leaving only the non-product hosts behind.
+    swallowed every explicitly in-scope wildcard product host, leaving only
+    the non-product hosts behind.
     """
     apex = _scope_pattern_apex(pattern)
     if not apex or not host:
@@ -3153,7 +3153,7 @@ def update_coverage_item_status(
         # I-09: resolving a coverage item to covered/not_applicable drains the
         # FK-linked pending/processing work items — the SAME drain the covering
         # probe path runs (``_pending_work_item_ids_for_coverage_item`` +
-        # ``mark_work_items_done`` at :1393-1403). Without it, work buffered for an
+        # ``mark_work_items_done`` in ``record_probe_run``). Without it, work buffered for an
         # endpoint slot the operator has explicitly closed stays dispatchable
         # forever. ``get_connection`` is re-entrant and commits at the outermost
         # depth, so the drain commits atomically with this status write.

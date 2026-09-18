@@ -25,9 +25,9 @@ def register(subparsers) -> None:
     p.add_argument("--list", dest="target_list", default="", help="File of newline-separated domains.")
     p.add_argument("--subs", dest="subs", action="store_true", help="Include subdomains.")
     p.add_argument("--threads", dest="threads", default="", help="Worker threads.")
-    # gau's own flag is `--timeout`, but the audit scaffolding already owns
-    # `--timeout`. Expose `--gau-timeout` and translate to gau's `--timeout` in
-    # run() (mirrors sqlmap's `--sql-technique` -> `--technique` rename).
+    # gau's `--timeout` collides with the audit scaffolding's own `--timeout`.
+    # Expose `--gau-timeout` and translate it in run() (mirrors sqlmap's
+    # `--sql-technique` -> `--technique` rename).
     p.add_argument("--gau-timeout", dest="timeout_http", default="", help="gau per-request timeout (seconds).")
     p.add_argument("--retries", dest="retries", default="", help="Retries per request.")
     p.add_argument("--blacklist", dest="blacklist", default="", help="Comma-separated extension blacklist.")
@@ -66,9 +66,8 @@ def run(args) -> None:
     if args.date_to:
         cmd.extend(["--to", str(args.date_to)])
     if args.output:
-        # gau's CLI uses `--o` (double-dash, single-letter long flag), not
-        # the conventional `-o` short flag. Pass the long form so the
-        # underlying tool actually parses the value.
+        # gau's CLI uses `--o` (double-dash), not the conventional `-o` short
+        # flag; pass the long form or gau won't parse the value.
         cmd.extend(["--o", args.output])
     if args.target_list:
         cmd.extend(["--list", args.target_list])

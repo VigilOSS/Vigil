@@ -1,7 +1,7 @@
 """Durable shared run accounting, inventory, debt, and comparison.
 
 This module extends the Phase 2 proof-run identity without coupling the generic
-run ledger to the code-analysis monolith.  It records facts produced elsewhere;
+run ledger to the code-analysis monolith. It records facts produced elsewhere;
 it never launches tools, models, or target-facing work.
 """
 from __future__ import annotations
@@ -3456,7 +3456,7 @@ def record_run_tool_signal(
                     "a command proof bound to the exact command run"
                 ),
             )
-        # Command/source row ids remain on the signal and proof records.  The
+        # Command/source row ids remain on the signal and proof records. The
         # candidate digest uses their stable content identity so independent
         # scans can classify an exact repeat as persisting.
         candidate_identity = "candidate:v1:" + _sha256(

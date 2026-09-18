@@ -30,8 +30,8 @@ import os
 import sys
 import urllib.request
 
-# --- Pin upstream to a tagged release (NOT `master`) so the lookup is reproducible. ---
-# --- Bump this one constant + re-run to upgrade. ---
+# Pin upstream to a tagged release (NOT `master`) for reproducibility.
+# Bump this one constant + re-run to upgrade.
 VRT_TAG = "v1.19"
 
 BASE = f"https://raw.githubusercontent.com/bugcrowd/vulnerability-rating-taxonomy/{VRT_TAG}"

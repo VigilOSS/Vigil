@@ -276,8 +276,8 @@ export function OverviewTab({ engagementKey, events, assessmentSummary, findings
               <ChartSkeleton variant="donut" height={140} label="Severity mix" />
             </div>
           ) : (
-            // Older backends omit finding_severities — hide the donut column
-            // gracefully and let the stat bar take the full row.
+            // Older backends omit finding_severities — skip the donut column and
+            // let the stat bar take the full row.
             findingSeverities && (
               <div className="overview-charts-donut">
                 {/* No centerLabel: the donut's own total (sum of segments) is

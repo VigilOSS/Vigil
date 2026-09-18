@@ -807,8 +807,7 @@ def _per_input_coverage_section(
     # absolute total below still reports true breadth regardless of the cap.
     cell_list = all_cells if row_limit <= 0 else all_cells[:row_limit]
 
-    # Absolute distinct-cell total (NOT since-filtered), like the other counts —
-    # so a capped/filtered grid still signals the true number of probed inputs.
+    # NOT since-filtered, unlike the cell list above.
     total_cells = connection.execute(
         """
         SELECT COUNT(*) FROM (

@@ -19,9 +19,8 @@ from assess.lib.kali import (
 def _operator_passed_output_module(args) -> bool:
     """True when the operator already supplied an output module via --extra-args.
 
-    The typed verb has no -om flag, so the only way to override the default JSON
-    output module is through the raw passthrough. Honor that so the default
-    injection stays idempotent and never double-adds -om.
+    The typed verb has no -om flag, so passthrough is the only way to override
+    the default JSON output module. Honor that so the injection stays idempotent.
     """
     extra = getattr(args, "extra_args", "") or ""
     if not extra:
@@ -146,13 +145,12 @@ def run(args) -> None:
         )
         raise AssessError("--allow-deadly without --destructive")
 
-    # Default to machine-parseable JSON output. bbot's final txt output is
-    # crash-truncated (I-011 / CR-24: v2.6.0 dnsresolve crash-loop truncates the
-    # txt to ~250 B), so harvest DNS_NAME events from output.json instead. Default
-    # the output dir when the operator did not set one so output.json has a
-    # deterministic home. Both injections are idempotent: skip -om if the operator
-    # supplied their own output module via --extra-args, and never override an
-    # explicit -o.
+    # Default to machine-parseable JSON output: the v2.6.0 dnsresolve crash-loop
+    # (I-011 / CR-24, see _default_output_dir) truncates the final txt to ~250 B,
+    # so DNS_NAME events are harvested from output.json. Both injections are
+    # idempotent:
+    # skip -om if the operator supplied their own output module via --extra-args,
+    # and never override an explicit -o.
     output_dir = args.output_dir or _default_output_dir()
     inject_json_module = not _operator_passed_output_module(args)
 

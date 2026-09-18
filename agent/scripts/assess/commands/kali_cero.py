@@ -22,11 +22,10 @@ def register(subparsers) -> None:
         help="Run cero inside the runtime container with audit recording (TLS SAN scraper).",
     )
     add_required_kali_flags(p)
-    # NOTE: argparse short flag `-d` is intentionally NOT bound here. cero's
-    # native `-d` flag is a toggle (filter results to valid domain names only),
-    # not a target argument. The wrapper exposes the target via `--target` /
-    # `--domain` (single host or CIDR) and `-l` / `--input-list` (file of
-    # targets), and surfaces cero's `-d` toggle as `--only-domains`.
+    # `-d` is intentionally NOT bound to argparse here: cero's native `-d` is a
+    # toggle (filter results to valid domain names only), not a target argument.
+    # The target is `--target`/`--domain` or `-l`/`--input-list`; cero's `-d`
+    # toggle is exposed as `--only-domains`.
     p.add_argument("--target", "--domain", dest="domain", default="", help="Single domain or CIDR target.")
     p.add_argument(
         "-l",
@@ -97,8 +96,8 @@ def _target_entries(args) -> list[str]:
     """Collect cero's target entries from the single-target arg + the -l file.
 
     The -l file is read HOST-side, best-effort: a missing/unreadable file (cero
-    runs in-container, so the path may not exist host-side) simply contributes no
-    file entries — the guard is a WARN, never a hard dependency on the file.
+    runs in-container, so the path may not exist host-side) just contributes no
+    file entries — the fan-out guard warns, it never hard-depends on the file.
     """
     entries: list[str] = []
     if args.domain:
@@ -118,11 +117,10 @@ def _warn_excessive_target_ips(args) -> None:
     cero is dispatched via kali_exec, which is in-container-only, so the route is
     fixed to ``container``. (A host path for cero is a separate, larger change.)
 
-    The runtime is resolved ONCE here and threaded explicitly into the guard so the
-    Docker-Desktop gate is decided by a single, visible ``detect_runtime()`` call
-    rather than by a hidden re-detect inside ``warn_excessive_target_ips``. This
-    keeps the guard's behaviour deterministic and independently testable (the guard
-    never falls back to a fresh global detection that a caller can't observe).
+    The runtime is resolved ONCE here and threaded explicitly into the guard, so
+    the Docker-Desktop gate comes from a single, visible ``detect_runtime()``
+    call rather than a hidden re-detect inside ``warn_excessive_target_ips`` —
+    keeping the guard deterministic and independently testable.
     """
     runtime = runtime_route.detect_runtime()
     n = runtime_route.count_distinct_target_ips(_target_entries(args))
@@ -137,9 +135,8 @@ def run(args) -> None:
     cero_argv = _build_cero_argv(args)
     extend_cmd_with_extra_args(cero_argv, args)
 
-    # CR-22 — WARN (never raise) when the distinct target-IP fan-out is too large
-    # for the in-container path on macOS Docker Desktop. cero always runs
-    # in-container here (kali_exec is container-only), so the route is fixed.
+    # CR-22 — WARN (never raise) when target-IP fan-out is too large for the
+    # in-container path on macOS Docker Desktop.
     _warn_excessive_target_ips(args)
 
     if args.input_list:

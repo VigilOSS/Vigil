@@ -1,16 +1,15 @@
 """vigil assess kali tlsx — typed wrapper around tlsx inside the runtime.
 
 Bulk TLS certificate harvester: opens TLS handshakes against hosts/IPs and
-pulls Subject Alternative Name (SAN), Common Name (CN), subject-org and issuer
-fields off the served cert. The SAN/CN harvest expands the subdomain set with
-names that never appear in CT logs (private-CA certs), and the issuer/org +
-JARM/JA3 fingerprints drive cert pivoting (find sibling hosts that share a cert
-or TLS stack). Complements `cero` (which also scrapes SANs) — tlsx adds the
-structured per-field JSON output and the fingerprints.
+pulls SAN, CN, subject-org and issuer fields off the served cert. SAN/CN
+expand the subdomain set with names that never appear in CT logs (private-CA
+certs); issuer/org + JARM/JA3 fingerprints drive cert pivoting (find sibling
+hosts sharing a cert or TLS stack). Complements `cero` (also scrapes SANs) —
+tlsx adds structured per-field JSON output and the fingerprints.
 
-tlsx speaks raw TLS, not HTTP, so it carries no attribution header and is in the
-required-header SKIP set (see `kali_output._REQUIRED_HEADER_SKIP`) — same posture
-as nmap. Read-only handshakes: leave `--destructive` off.
+tlsx speaks raw TLS, not HTTP, so it carries no attribution header and is in
+the required-header SKIP set (see `kali_output._REQUIRED_HEADER_SKIP`) — same
+posture as nmap. Read-only handshakes: leave `--destructive` off.
 """
 from __future__ import annotations
 
@@ -67,9 +66,8 @@ def run(args) -> None:
     if args.ports:
         cmd.extend(["-p", str(args.ports)])
 
-    # Field selection. When the operator names no field, default to the SAN+CN
-    # subdomain-harvest profile (the verb's primary purpose). Issuer/org and the
-    # JARM/JA3 fingerprints are opt-in for cert pivoting.
+    # Default to the SAN+CN subdomain-harvest profile when the operator names
+    # no field. Issuer/org and JARM/JA3 are opt-in for cert pivoting.
     field_flags: list[str] = []
     if args.san:
         field_flags.append("-san")
@@ -88,9 +86,9 @@ def run(args) -> None:
         field_flags = ["-san", "-cn"]
     cmd.extend(field_flags)
 
-    # `-resp-only` yields a clean value list for subdomain expansion. Default it
-    # ON for the bare SAN/CN harvest, but NOT when the operator asked for JSON
-    # (the structured form already carries the fields) or full `-cert` dumps.
+    # `-resp-only` yields a clean value list for subdomain expansion. Default
+    # it on for the bare SAN/CN harvest, but not for JSON (already structured)
+    # or full `-cert` dumps.
     resp_only = args.resp_only or (default_profile and not args.json_out)
     if resp_only and not args.json_out and not args.cert:
         cmd.append("-resp-only")
@@ -99,8 +97,8 @@ def run(args) -> None:
         cmd.extend(["-c", str(args.concurrency)])
     if args.json_out:
         cmd.append("-json")
-    # Silent by default so the value list is clean; -json/-cert dumps stay verbose
-    # only if the operator opts out via --extra-args.
+    # Silent by default so the value list is clean; -json/-cert dumps stay
+    # verbose only if the operator opts out via --extra-args.
     if args.silent or (not args.json_out):
         cmd.append("-silent")
     if args.output:

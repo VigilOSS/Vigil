@@ -200,10 +200,10 @@ def _print_help_when_missing(args) -> None:
 
 
 def _run_start(args) -> None:
-    # --technique has no argparse choices= (CLI-1 reconciliation), so validate it
-    # here through the exact same enum check + scoped formatter the typed verbs'
-    # _validate_inputs uses, so `kali job start --technique FINGERPRINT` errors
-    # identically to `kali exec --technique FINGERPRINT`.
+    # --technique has no argparse choices= (CLI-1); validate it here via the same
+    # enum check + scoped formatter _validate_inputs uses, so `kali job start
+    # --technique FINGERPRINT` errors identically to `kali exec --technique
+    # FINGERPRINT`.
     technique = args.technique or ""
     if not technique:
         raise AssessError("--technique is required")

@@ -137,12 +137,12 @@ def _run_identity_probe(
     SAME injection code the runtime uses, never reinvented here. curl runs with
     ``-i`` (response status line + headers, INCLUDING ``Location``, + body) and no
     ``-L`` so a 302 to a login page is preserved in the haystack as a signal rather
-    than chased, plus ``--suppress-connect-headers`` so an egress proxy's CONNECT
-    block never enters that haystack. The numeric status is read from the trailing
-    ``-w`` ``VIGIL_HTTP_CODE=`` marker; the remaining stdout IS the haystack matched
-    against the operator-configured ``material.liveness`` signature. Any exec /
-    transport failure or unparseable status yields ``liveness="unknown"`` with a
-    populated ``error`` (never a false verdict).
+    than chased, plus ``--suppress-connect-headers`` to keep an egress proxy's
+    CONNECT reply out of that haystack. The numeric status is read from the
+    trailing ``-w`` ``VIGIL_HTTP_CODE=`` marker; the remaining stdout IS the
+    haystack matched against the operator-configured ``material.liveness``
+    signature. Any exec / transport failure or unparseable status yields
+    ``liveness="unknown"`` with a populated ``error`` (never a false verdict).
     """
     from pathlib import Path
 

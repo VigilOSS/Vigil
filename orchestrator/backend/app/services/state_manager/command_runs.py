@@ -2825,7 +2825,7 @@ def foreign_lane_target_facing_recency(
     """Return all-history foreign target-facing execution timing in one row.
 
     The advisory is intentionally non-enforcing, but it runs before every
-    target-facing sync and async command.  Keeping its target-facing predicate
+    target-facing sync and async command. Keeping its target-facing predicate
     and count in the command-run service avoids replaying bounded list pages in
     each client execution path.
     """

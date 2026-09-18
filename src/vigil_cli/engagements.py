@@ -201,15 +201,10 @@ class CreateEngagementOptions:
     # out-of-scope carve-outs, written into scope.json for HTTP-target engagements.
     required_headers: dict[str, str] = field(default_factory=dict)
     out_of_scope: list[str] = field(default_factory=list)
-    # Optional PER-INVOCATION / GLOBAL request-rate ceiling (req/s) for the recon
-    # pipeline's bulk web stages (httpx liveness, katana crawl, js-mining body-
-    # fetch). httpx -rate-limit / katana -rl are single global token buckets, so
-    # the cap bounds the aggregate stage rate over the whole in-scope host set and
-    # bounds per-host only as a side effect; it does NOT cover the recon-
-    # specialist's nuclei/ffuf/nmap/whatweb/nikto probes or gau body-fetches. None
-    # preserves today's behavior (per-tool defaults; agent discretion — no hard
-    # gate). Written into scope.json's ``rate_limit`` only when set, for
-    # HTTP-target engagements.
+    # Optional PER-INVOCATION / GLOBAL request-rate ceiling (req/s); see
+    # `resolve_rate_limit` for the full rationale (token-bucket semantics, why
+    # sub-1 values are rejected, what it does and doesn't cover). Written into
+    # scope.json's ``rate_limit`` only when set, for HTTP-target engagements.
     rate_limit: float | None = None
     # Blue-only fields (ignored unless engagement_type == "blue"):
     customer: str | None = None

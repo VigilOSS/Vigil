@@ -8972,7 +8972,6 @@ def code_coverage_summary(
             """,
             (engagement.id, *repo_params),
         ).fetchall()
-        # Accumulate max effort per family per file
         file_efforts: dict[int, dict[str, float]] = {}
         file_not_applicable: dict[int, set[str]] = {}
         file_meta: dict[int, dict[str, Any]] = {}
@@ -11633,7 +11632,6 @@ def code_coverage_cwe_detail(
     with get_connection() as connection:
         if repo_id is not None:
             _get_published_repo_row(connection, engagement.id, repo_id)
-        # Fetch critical/high files with their slot_types
         file_rows = connection.execute(
             f"""
             SELECT f.id AS file_id, f.file_path, f.classification, f.slot_types_json,
@@ -11647,7 +11645,6 @@ def code_coverage_cwe_detail(
             (engagement.id, *repo_params),
         ).fetchall()
 
-        # Fetch all done queue items for these files to accumulate cwe_coverage
         file_ids = [int(r["file_id"]) for r in file_rows]
         cwe_by_file: dict[int, dict[str, dict[str, Any]]] = {}  # file_id -> family -> merged entry
         result_effort_by_file: dict[int, dict[str, int]] = {}

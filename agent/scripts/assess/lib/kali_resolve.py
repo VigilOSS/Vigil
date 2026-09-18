@@ -14,10 +14,8 @@ The durable fix has two halves, both implemented here and wired from
    Docker Desktop, resolve the target host on the HOST (``socket.getaddrinfo``) and
    inject ``--resolve <host>:<port>:<ip>`` into the tool argv so the in-container
    HTTP request bypasses the broken container resolver entirely. ONLY curl is
-   pinned — ``--resolve host:port:ip`` is a curl-specific feature. httpx, nuclei,
-   katana and ffuf are deliberately NOT pinned: their Go flag parser rejects
-   ``--resolve`` ("flag provided but not defined: -resolve", exit 2) and aborts the
-   run before the probe fires; see ``RESOLVE_PIN_TOOLS``.
+   pinned — the other HTTP tools' Go flag parser rejects ``--resolve`` outright;
+   see ``RESOLVE_PIN_TOOLS`` for the per-tool detail.
 
 2. **Post-run host-resolved retry input** (:func:`resolve_host_ips`): when the
    false-negative guard in ``kali_exec`` detects the ``http=000`` /
@@ -63,17 +61,12 @@ from .kali_audit import _extract_target_anchor, _extract_target_url
 # target verdict), directing the operator to re-run via the host path — the
 # safety property holds without the broken pin, exactly as for ffuf below.
 #
-# ffuf in particular (I-10): the image's ffuf (v2.x) has no ``--resolve`` flag —
-# its Go flag parser errors with "flag provided but not defined: -resolve" and
-# exits 2 WITHOUT firing the probe, so a pin would turn a recoverable
-# Docker-Desktop resolver flap into a hard, silent total failure of every pinned
-# ffuf run. ffuf also supports the ``FUZZ`` keyword in the host position (vhost
-# fuzzing), where there is no single fixed host to pin, so a URL-rewrite +
-# ``Host:``/``-sni`` translation would silently corrupt those runs. ffuf stays
-# an http-prober (``is_http_prober``), so the post-run http=000 false-negative
-# guard still arms for it and records a TRANSPORT ERROR (not a target verdict),
-# directing the operator to re-run via the host path — the safety property holds
-# without the broken pin.
+# ffuf in particular (I-10): the image's ffuf (v2.x) has no ``--resolve`` flag
+# either, and rejects it the same way. It also supports the ``FUZZ`` keyword in the
+# host position (vhost fuzzing), where there is no single fixed host to pin, so
+# a URL-rewrite + ``Host:``/``-sni`` translation would silently corrupt those
+# runs. Pinning stays off; the post-run guard covers ffuf exactly as for the
+# others.
 RESOLVE_PIN_TOOLS: frozenset[str] = frozenset({"curl"})
 
 # Operator escape hatch. Truthy disables host-resolve + --resolve pinning even on

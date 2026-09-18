@@ -104,10 +104,10 @@ def auth_runtime_snapshot(engagement_dir: str) -> dict[str, Any]:
         "exists": material_present,
         "mode": mode,
         "state": state,
-        # Presence != liveness. This snapshot never sends a request, so it can only
-        # honestly report liveness as "unknown"; an actual live/dead verdict comes
-        # from `vigil assess auth status --probe`, which GETs an authed URL as the
-        # identity. (`state="available"` above only means material is present.)
+        # Never probes, so it can only honestly report "unknown" here — and
+        # `state="available"` above means only that material is PRESENT, not that
+        # it works. A live/dead verdict comes from `vigil assess auth status
+        # --probe`, which GETs an authed URL as the identity.
         "liveness": "unknown",
         "use_for_requests": use_for_requests,
         "active_use": active_use,

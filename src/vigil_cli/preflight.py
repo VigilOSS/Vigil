@@ -132,17 +132,15 @@ def _warn_if_ripgrep_missing() -> None:
     """Name the one missing tool whose failure mode is silence.
 
     `agent/shared-constraints-code.md` ranks `rg` second only to the ctags index
-    for code specialists, and uses the ripgrep-only `--type` flag. Claude and
-    OpenCode bundle their own Grep tool, but the Codex and Goose hunters have
-    shell only: on a host without ripgrep every one of their searches is exit
-    127, and a specialist reads that as "no results" rather than "tool missing".
-    A coverage tool that reports clean coverage of code it never searched is the
-    worst shape this failure could take, and nothing else in Vigil checks for it
-    — ripgrep is in no dependency manifest and ships only in the runtime image,
+    for code specialists, and uses the ripgrep-only `--type` flag. Codex and
+    Goose specialists have shell only, so a missing `rg` turns every search
+    into exit 127, read as "no results" rather than "tool missing" — the worst
+    shape a coverage gap can take, and nothing else in Vigil checks for it:
+    ripgrep is in no dependency manifest and ships only in the runtime image,
     which code analysis does not use.
 
     Advisory, never a refusal: a web engagement reaches no code search at all,
-    and a Claude or OpenCode hunter has its own tool.
+    and a Claude or OpenCode hunter has its own Grep tool.
     """
     if shutil.which("rg") is not None:
         return

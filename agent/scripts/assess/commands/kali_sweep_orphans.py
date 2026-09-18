@@ -254,14 +254,8 @@ def _job_age_seconds(row: dict, now: _dt.datetime) -> float | None:
 
 
 def _run_uuid_from_stdout_path(stdout_path: str | None) -> str | None:
-    """Legacy fallback: parse ``run_uuid`` out of ``stdout_path``.
-
-    The wrapper in ``kali.py:_build_docker_exec`` writes the in-container PID
-    to ``/tmp/vigil-pid-<run_uuid>.pid`` and ``stdout_path`` is recorded as
-    ``<eng-dir>/scans/kali/<run_uuid>.out``. ``run_uuid`` is now the canonical
-    DB column (``assessment_command_runs.run_uuid``), but rows written before
-    that plumbing existed only carry it implicitly via ``stdout_path``. This
-    helper is kept as a fallback for those legacy rows.
+    """Legacy fallback: parse ``run_uuid`` out of ``stdout_path`` (see module
+    docstring) for rows written before that column existed.
 
     Returns None when the path is missing, empty, or does not match the
     expected layout (legacy rows, custom paths). Callers treat None as "pid
@@ -278,13 +272,10 @@ def _run_uuid_from_stdout_path(stdout_path: str | None) -> str | None:
 
 def _resolve_run_uuid(row: dict) -> str | None:
     """Pick ``run_uuid`` from the DB column when present, else fall back to
-    parsing ``stdout_path``. The DB column is the primary source because it
-    is independent of the artifact-dir layout — the regex returns None for
-    any row whose stdout_path was reconfigured to a non-default location.
-
-    The fallback exists for rows written before the CLI propagated
-    ``run_uuid`` into the POST payload; once those rows finalize naturally
-    or are reaped here, the fallback becomes dead code."""
+    parsing ``stdout_path`` (:func:`_run_uuid_from_stdout_path`). The DB column
+    is primary because it's independent of the artifact-dir layout — the regex
+    returns None for any row whose stdout_path was reconfigured. Once legacy
+    rows finalize or are reaped here, the fallback becomes dead code."""
     direct = row.get("run_uuid")
     if isinstance(direct, str) and direct.strip():
         return direct.strip()
@@ -292,12 +283,10 @@ def _resolve_run_uuid(row: dict) -> str | None:
 
 
 def _read_container_pid_result(container_name: str, run_uuid: str) -> _PidReadResult:
-    """Read the wrapper-recorded PID, preserving the rich diagnostic ``reason``
-    the dry-run output keys on. Delegates to the shared
-    ``kali_runtime_exec._cat_container_pid_file`` core (which emits the same
-    reason tags) and re-wraps its ``(pid, reason)`` tuple into the local
-    ``_PidReadResult`` — no behavioural change, just no duplicated
-    cat/parse/path logic."""
+    """Read the wrapper-recorded PID, preserving the diagnostic ``reason`` the
+    dry-run output keys on. Delegates to the shared
+    ``kali_runtime_exec._cat_container_pid_file`` core and re-wraps its
+    ``(pid, reason)`` tuple into the local ``_PidReadResult``."""
     pid, reason = _cat_container_pid_file(container_name, _container_pid_file(run_uuid))
     return _PidReadResult(pid, reason)
 

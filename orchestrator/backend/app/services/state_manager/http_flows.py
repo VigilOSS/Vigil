@@ -903,15 +903,14 @@ def flows_from_har(
                 "timing_ms": int(timing) if isinstance(timing, (int, float)) else None,
                 "started_at": started_at or None,
                 # DROP any imported ``request_variant_id``: it is a SOURCE-engagement
-                # database id. A HAR exported from a DIFFERENT engagement (or an older
-                # snapshot of this one) carries a variant id that either does not exist
-                # in the destination — hitting the ``request_variant_id`` FK
-                # (IntegrityError → import fails) — or, worse, collides with an
-                # UNRELATED local variant sharing that id (silent cross-variant linkage
-                # corruption). The HAR alone gives no way to resolve it within the
-                # destination engagement, so we import the flow UNLINKED rather than
-                # risk either failure. (The live-capture ingest path keeps its
-                # variant id — that one is resolved within the capturing engagement.)
+                # database id. A HAR from a different engagement (or an older snapshot
+                # of this one) carries a variant id that either doesn't exist in the
+                # destination — hitting the ``request_variant_id`` FK (IntegrityError →
+                # import fails) — or, worse, collides with an UNRELATED local variant
+                # sharing that id (silent cross-variant linkage corruption). The HAR
+                # gives no way to resolve it here, so the flow imports UNLINKED rather
+                # than risk either failure. (The live-capture ingest path keeps its
+                # variant id, resolved within the capturing engagement.)
                 "request_variant_id": None,
             }
         )

@@ -761,12 +761,10 @@ def job_stop(
                 _signal_job_pid(container_name, pid, "KILL")
                 wait_result = _wait_for_pid_exit(container_name, pid, timeout_seconds=5.0)
             if wait_result is True:
-                # PID gone. The wrapper publishes the tool's wait()-status as the
-                # marker. A natural exit (rc < 128) means the tool finished on its
-                # own in the kill window — record its real code. A 128+signal
-                # status (rc >= 128: our SIGTERM=143 / SIGKILL=137) means WE
-                # terminated it → 'killed'. No marker yet (we won the race) → also
-                # 'killed'.
+                # PID gone. rc < 128 means the tool exited naturally in the kill
+                # window — record its real code. rc >= 128 (our signal, see
+                # _build_job_wrapper) or no marker yet (we won the race) means WE
+                # terminated it → 'killed'.
                 rc = _read_exit_marker(record)
                 if rc is not None and rc < 128:
                     final_status = "completed" if rc == 0 else "failed"

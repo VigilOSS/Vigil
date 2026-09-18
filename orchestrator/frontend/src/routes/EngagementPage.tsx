@@ -311,7 +311,8 @@ export function EngagementPage({
         refreshEvents(),
         getAssessmentSummary(engagementKey).then(setAssessmentSummary),
         // Intel summary is cheap and drives the Intel tab count + left-rail
-        // per-type counts. 501s while B1 is in flight collapse to null.
+        // per-type counts. Any failure collapses to null rather than blocking
+        // the rest of the refresh.
         getIntelSummary(engagementKey).then(setIntelSummary).catch(() => setIntelSummary(null)),
         // Activity entry count for the Log tab badge. Fetch the first page
         // only — we just need `total`.

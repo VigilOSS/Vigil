@@ -305,9 +305,9 @@ def _warn_on_structural_invalidation(result: object) -> None:
     """Say so when a classification changed a repo's structural-index binding.
 
     A `language` that names a different parser genuinely invalidates
-    tree-sitter-derived facts, and the backend acts on that. Silently, until
-    now: one restated language on one file out of hundreds could leave a repo
-    undispatchable with nothing in the classify output to say so.
+    tree-sitter-derived facts, and the backend acts on that. Until now this
+    failed silently: one restated language on one file out of hundreds could
+    leave a repo undispatchable with nothing in the classify output to say so.
     """
     if not isinstance(result, dict):
         return

@@ -258,15 +258,16 @@ def oob_status(
     domain does not resolve (broken Route53 delegation). So with ``deep=True``
     (the default, used by ``vigil oob status``) this also checks, for each RUNNING
     client, whether it actually registered an interactsh payload, and whether the
-    OOB domain resolves and its two-label public HTTP route reaches this relay slot,
-    then derives a ``health``
-    (`ok`/`degraded`/`down`) + human ``issues``.
+    OOB domain resolves and its two-label public HTTP route reaches this relay
+    slot, then derives a ``health`` (``ok``/``degraded``/``down``) + human
+    ``issues``.
 
-    ``deep=False`` skips those per-client log reads and the DNS/HTTP probes for the
-    lightweight aggregate callers (`vigil status`, `vigil up`): registration is
-    reported as unknown (``None``) and health reflects only session liveness, so
-    those hot paths keep their original cost. ``domain`` is always resolved to the
-    default when not supplied so the verdict is never silently a false ``ok``.
+    ``deep=False`` skips those per-client log reads and the DNS/HTTP probes for
+    the lightweight aggregate callers (`vigil status`, `vigil up`): registration
+    is reported as unknown (``None``) and health reflects only session liveness,
+    so those hot paths keep their original cost. ``domain`` is always resolved to
+    the default when not supplied so the verdict is never silently a false
+    ``ok``.
     """
     container_name = container_name or default_runtime_container()
     domain = oob_domain or DEFAULT_OOB_DOMAIN
@@ -1354,8 +1355,8 @@ def read_client_log(
 ) -> str:
     """Read recent parser-candidate interactions from the client log.
 
-    This uses the SAME source
-    ``vigil oob client logs`` reads (``/data/oob/clients/<name>.log``).
+    Reads the SAME source ``vigil oob client logs`` reads
+    (``/data/oob/clients/<name>.log``).
 
     A verbose interactsh callback expands to dozens of raw request/response
     lines. A physical-line tail therefore lets a DNS burst evict a nearby HTTP

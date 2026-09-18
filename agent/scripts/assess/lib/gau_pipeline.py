@@ -167,11 +167,10 @@ def resolve_pipeline_paths(
 ) -> GauOutputPaths:
     """Build the canonical path set for the pipeline relative to the engagement dir.
 
-    Layout: `<engagement>/scans/gau-pipeline/<target_slug>/<cache_key_slug>/`.
-    Each (target, corpus-flag-set) tuple gets its own directory so multiple
-    targets in the same engagement, or the same target run with different
-    `--subs`/`--providers`, never share `gau_output.txt`, intermediate
-    artifacts, or `bodies/`.
+    Layout: `<engagement>/scans/gau-pipeline/<target_slug>/<cache_key_slug>/`
+    — one directory per (target, corpus-flag-set) pair, so runs never share
+    `gau_output.txt`, intermediate artifacts, or `bodies/`. See
+    :class:`GauOutputPaths` for why that separation matters.
     """
     eng_dir = Path(cfg.engagement_dir).resolve()
     target_slug = slug_target(target)

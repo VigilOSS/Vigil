@@ -77,18 +77,14 @@ _ROW_STATES = {
 def is_terminal(stream: TextIO) -> bool:
     """True when `stream` is an interactive terminal that can render a layout.
 
-    This is the *width* gate, and it is deliberately not the colour gate.
-    ``NO_COLOR`` says the operator does not want escape codes; it does not say
-    their terminal stopped being 80 columns wide, and answering it by also
-    switching wrapping off would hand them back the mid-word breaks
-    (``vigil insta``/``ll``) this module exists to prevent. ``TERM=dumb`` is
-    different in kind — it says the terminal cannot be laid out at all — so it
-    disables both.
+    This is the *width* gate, not the colour gate: ``NO_COLOR`` opts out of
+    escape codes only, not wrapping, so only ``TERM=dumb`` (terminal cannot be
+    laid out at all) disables both.
 
     Never raises: a stream with no ``isatty`` (a test double, a captured
-    buffer) or one whose ``isatty`` raises (a closed or detached file) is
-    treated as not-a-terminal. Presentation is decoration, and decoration must
-    never be the reason a command dies.
+    buffer) or one whose ``isatty`` raises (a closed or detached file) counts
+    as not-a-terminal — presentation is decoration, and decoration must never
+    be why a command dies.
     """
     if os.environ.get("TERM") == "dumb":
         return False
@@ -129,15 +125,14 @@ def wrap(text: str, *, indent: str = "", stream: TextIO = sys.stderr) -> str:
     """Fill `text` to the terminal width, or return the single line off a TTY.
 
     `indent` prefixes continuation lines only, so a wrapped diagnostic stays
-    visually hung under its ``[vigil] `` marker. Words are never broken and
-    hyphens are never split points: the tokens being wrapped here are commands
-    and config keys an operator has to copy verbatim.
+    visually hung under its ``[vigil] `` marker. Words and hyphens are never
+    split: the tokens wrapped here are commands and config keys an operator
+    has to copy verbatim.
 
-    Off a TTY the text is returned exactly as given — one record, one line —
-    because that is what a pipe, a redirected log, and a model reading `vigil`
-    output all parse against. Gated on :func:`is_terminal`, not
-    :func:`supports_style`: an operator who set ``NO_COLOR`` asked for no
-    colour, not for their 80-column terminal to break commands mid-word.
+    Off a TTY the text returns exactly as given — one record, one line — for a
+    pipe, a redirected log, or a model reading `vigil` output to parse. Gated
+    on :func:`is_terminal`, not :func:`supports_style`, since ``NO_COLOR``
+    opts out of colour, not of wrapping.
     """
     if not is_terminal(stream):
         return text
@@ -166,11 +161,10 @@ def row(state: str, label: str, detail: str = "", *, stream: TextIO = sys.stderr
             f"unknown row state {state!r}; expected one of {', '.join(sorted(_ROW_STATES))}"
         ) from None
     if not is_terminal(stream):
-        # `is_terminal`, not `supports_style`: this chooses a LAYOUT — a glyph
-        # row versus the machine `key<TAB>value` record. NO_COLOR asks for no
-        # colour, not for the machine shape, and the `paint` calls below already
-        # self-gate, so a NO_COLOR terminal gets an uncoloured glyph row while a
-        # pipe still gets bytes identical to before.
+        # `is_terminal`, not `supports_style`: this chooses the LAYOUT (glyph
+        # row vs. machine `key<TAB>value`), not the colour — `paint` below
+        # already self-gates on NO_COLOR, so a NO_COLOR terminal still gets a
+        # glyph row, just uncoloured.
         return f"{word}\t{label}\t{detail}" if detail else f"{word}\t{label}"
     rendered = f"{paint(glyph, color, stream=stream)} {label}"
     if detail:

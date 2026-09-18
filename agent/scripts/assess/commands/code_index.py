@@ -223,10 +223,10 @@ def _load_json(path: Path, *, label: str) -> dict[str, Any]:
 
 def _load_snapshot(source_path: Path) -> dict[str, Any]:
     if source_path.name != "source":
-        # Naming the fix, not just the rule: every repair hint that sends an
-        # operator here prints a `<snapshot-path>` placeholder, and the snapshot
-        # directory is the obvious thing to reach for. The index binds to the
-        # sealed source tree inside it.
+        # Repair hints that send an operator here print a `<snapshot-path>`
+        # placeholder, and the snapshot directory is the obvious (wrong) guess.
+        # The index binds to the sealed source tree inside it, not the
+        # snapshot directory itself.
         raise ValueError(
             "code-index input must be the sealed snapshot source directory — "
             f"pass {source_path}/source, not the snapshot directory itself"

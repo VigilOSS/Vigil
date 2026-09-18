@@ -2185,22 +2185,21 @@ def create_finding(
                 proof_receipt_ids=list(run_candidate["proof_receipt_ids"]),
             )
     if evidence_ref:
-        # NOTE (atomicity): this runs in a separate transaction from the finding
-        # INSERT/UPDATE above, and intentionally so. ``_register_artifact_reference``
-        # opens its OWN ``get_connection()`` to write the artifact-index row, and
-        # the database is WAL (single writer); the nested connection inherits
-        # sqlite3's default 5 s busy-timeout, so calling it inside the still-open
-        # ``BEGIN IMMEDIATE`` finding transaction would block ~5 s and then hit
-        # "database is locked". So the index write cannot be folded into the
-        # finding transaction. The ``evidence_artifact_id`` back-fill below could in
-        # principle ride the finding transaction, but only by registering the
-        # artifact first; the registration is the uncloseable separate writer, and
-        # the report-readiness ``finding_evidence_unindexed`` gate keys on the
-        # presence of that index row (controlled by the registration), not on
+        # This runs in a separate transaction from the finding INSERT/UPDATE
+        # above: ``_register_artifact_reference`` opens its OWN
+        # ``get_connection()`` to write the artifact-index row, and the database
+        # is WAL (single writer) with sqlite3's default 5 s busy-timeout, so
+        # calling it inside the still-open ``BEGIN IMMEDIATE`` finding
+        # transaction would block ~5 s and then hit "database is locked". The
+        # ``evidence_artifact_id`` back-fill below could in principle ride the
+        # finding transaction, but only by registering the artifact first — the
+        # registration is the uncloseable separate writer, and the
+        # report-readiness ``finding_evidence_unindexed`` gate keys on the
+        # presence of that index row (from the registration), not on
         # ``evidence_artifact_id``. A crash after registration but before this
-        # back-fill leaves ``evidence_artifact_id`` NULL but the artifact indexed,
-        # which does NOT raise a false ``finding_evidence_unindexed`` and self-heals
-        # on the next record/verify write. Keeping the back-fill separate here.
+        # back-fill leaves ``evidence_artifact_id`` NULL but the artifact
+        # indexed, which does NOT raise a false ``finding_evidence_unindexed``
+        # and self-heals on the next record/verify write.
         artifact_id = _common._register_artifact_reference(
             engagement.id,
             evidence_ref,
@@ -2279,15 +2278,15 @@ def update_finding(
     evidence_type: str | None = None,
     submission_status: str | None = None,
 ) -> dict[str, Any]:
-    # Severity / workflow_status / verification_status
-    # are partial-update fields: ``None`` means "preserve the existing value".
-    # Passing a value sets the matching ``explicit_*_override`` flag so the caller
-    # can deliberately overwrite; ``None`` leaves the override False, and
-    # ``create_finding`` then coalesces the (default) incoming value against the
-    # semantically-matched existing row via ``_coalesce_*`` / ``_stronger_severity``
-    # — i.e. the existing stronger/sticky value is preserved. The defaults below
-    # therefore only take effect when there is NO existing finding to match (a true
-    # create). Previously these were required ``str`` with no default, so the
+    # severity / workflow_status / verification_status are partial-update fields:
+    # ``None`` means "preserve the existing value". Passing a value sets the
+    # matching ``explicit_*_override`` flag so the caller can deliberately
+    # overwrite; ``None`` leaves the override False, and ``create_finding`` then
+    # coalesces the (default) incoming value against the semantically-matched
+    # existing row via ``_coalesce_*`` / ``_stronger_severity`` — i.e. the existing
+    # stronger/sticky value is preserved. The defaults below therefore only take
+    # effect when there is NO existing finding to match (a true create).
+    # Previously these were required ``str`` with no default, so the
     # ``is not None`` guards were always True and every call hard-overwrote the
     # lifecycle columns — silently downgrading confirmed/reported findings.
     result = create_finding(

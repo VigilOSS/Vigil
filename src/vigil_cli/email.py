@@ -76,11 +76,10 @@ MAX_CANDIDATE_WINDOW = 10_000
 DEFAULT_READ_TIMEOUT_SECONDS = 90.0
 
 # Reads recent messages across each account's Inbox plus provider archive,
-# Important, and Spam/Junk folders, filtered host-side after collection.  The
-# synthetic
-# cross-account ``Mail.inbox`` is used only as a fallback because including it
-# alongside account folders creates duplicate views and can consume the scan
-# window before an archive-only OTP is reached.
+# Important, and Spam/Junk folders, filtered host-side after collection. The
+# synthetic cross-account ``Mail.inbox`` is used only as a fallback because
+# including it alongside account folders creates duplicate views and can
+# consume the scan window before an archive-only OTP is reached.
 _READ_MESSAGES_JXA = r"""
 function run(argv) {
   const cfg = JSON.parse(argv[0] || "{}");

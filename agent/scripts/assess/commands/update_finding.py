@@ -423,14 +423,11 @@ def run(args) -> None:
             )
             sys.exit(1)
 
-    # Validate `details` against the record contract, in PATCH mode so a partial
-    # update is not required to carry every field. The top-level patch shape is
-    # already strict server-side (`FindingPatchRequest` forbids extras), but
-    # `details` is an opaque `dict[str, Any]` there, so nothing checked it: a
-    # misspelled or mistyped key patched in cleanly, persisted, and then read as
-    # absent — surfacing much later as a missing field on an export gate, naming
-    # content the author could see they had written. It now gets a did-you-mean at
-    # author time instead.
+    # Validate `details` against the record contract (see `_FINDING_SCHEMA` above),
+    # in PATCH mode so a partial update is not required to carry every field. The
+    # top-level patch shape is already strict server-side (`FindingPatchRequest`
+    # forbids extras), but `details` is an opaque `dict[str, Any]` there, so
+    # nothing checked it until now — this gets a did-you-mean at author time.
     #
     # `provenance` is deliberately NOT validated here. Its schema admits only
     # `agent_name`/`artifact`, while the report-generation skill instructs

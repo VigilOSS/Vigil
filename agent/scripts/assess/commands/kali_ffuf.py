@@ -13,7 +13,7 @@ from assess.lib.kali import (
 )
 
 # Pre-flight budget guard (kali_cli argparse seam); imported directly so this
-# unit need not touch the shared kali facade module.
+# unit doesn't need the shared kali facade module.
 from assess.lib.kali_cli import coerce_float, preflight_timeout_guard
 
 
@@ -91,10 +91,10 @@ def run(args) -> None:
         cmd.extend(["-of", args.output_format])
     extend_cmd_with_extra_args(cmd, args)
 
-    # Pre-flight -maxtime vs --timeout guard (I-9b#1). ffuf's own -maxtime caps the
-    # whole job; if the wrapper --timeout is smaller the fuzz is SIGTERM-killed
+    # Pre-flight -maxtime vs --timeout guard (I-9b#1). ffuf's -maxtime caps the
+    # whole job; if the wrapper --timeout is smaller, the fuzz is SIGTERM-killed
     # before that cap and its partial output reads as a clean negative. Auto-raise
-    # --timeout to fit the declared budget (boost-only) so the fuzz can finish.
+    # --timeout (boost-only) to fit the declared budget so the fuzz can finish.
     maxtime = coerce_float(getattr(args, "maxtime", ""), 0.0)
     if maxtime > 0:
         args.timeout = preflight_timeout_guard(

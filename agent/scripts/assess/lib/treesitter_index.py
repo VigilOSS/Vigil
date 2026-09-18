@@ -1313,7 +1313,6 @@ def _parse_function_node(node: Any, language: str, source: bytes) -> dict[str, A
         params_node = node.child_by_field_name("parameters")
         if params_node:
             params = _extract_params(params_node, source)
-        # Check for decorators
         parent = node.parent
         if parent and parent.type == "decorated_definition":
             for child in parent.children:
@@ -1743,7 +1742,6 @@ def _detect_entry_points(
     for func in functions:
         matched = False
 
-        # Check annotations / decorators
         for ann_def in annotation_defs:
             for ann in func.get("annotations", []):
                 if re.search(ann_def["pattern"], ann):
@@ -1765,7 +1763,6 @@ def _detect_entry_points(
         # Check method name patterns (Java servlet overrides, main, etc.)
         for mdef in method_name_defs:
             if func["name"] == mdef["name"]:
-                # For servlet methods, verify class extends HttpServlet/Filter
                 if mdef["kind"] in ("servlet_override", "filter_override"):
                     cls = class_for_line.get(func["line_start"])
                     if cls and cls.get("extends") in ("HttpServlet", "Filter", "GenericServlet"):
@@ -2577,7 +2574,6 @@ def _extract_dockerfile(
         instr = m.group(1).upper()
         block_start = i + 1
         block_text_parts = [m.group(2)]
-        # Consume continuation lines
         while raw.rstrip().endswith("\\") and i + 1 < n:
             i += 1
             raw = source_lines[i]
@@ -3047,7 +3043,6 @@ def _extract_lua(
     exports: list[dict[str, Any]] = []
     imports: list[str] = []
 
-    # Find function starts
     starts: list[tuple[str, list[str], int]] = []
     for idx, line in enumerate(source_lines):
         stripped = line.lstrip()
@@ -3059,17 +3054,15 @@ def _extract_lua(
             params = [p.strip() for p in m.group(2).split(",") if p.strip()]
             starts.append((name, params, idx + 1))
 
-    # Approximate function end by scanning for matching `end` at the same indent
+    # Approximate function end by counting nested block-openers against `end`.
     for k, (name, params, start_line) in enumerate(starts):
         next_start = starts[k + 1][2] - 1 if k + 1 < len(starts) else len(source_lines)
         end_line = next_start
-        # Walk forward, counting block keywords vs `end`
         depth = 1
         for j in range(start_line, len(source_lines)):
             line = source_lines[j]
-            # Strip line comments
             code = re.sub(r"--.*$", "", line)
-            # Block-opening keywords that require an `end`
+            # These keywords each open a block that requires a matching `end`.
             depth += len(re.findall(r"\b(?:function|if|for|while|do)\b", code))
             depth -= len(re.findall(r"\bend\b", code))
             if depth <= 0:
@@ -3093,7 +3086,6 @@ def _extract_lua(
         if stripped.startswith("--"):
             continue
         line_no = idx + 1
-        # require("...")
         req_m = re.search(r"""require\s*\(?\s*['"]([^'"]+)['"]""", line)
         if req_m:
             imports.append(req_m.group(1))
@@ -3219,7 +3211,6 @@ def _extract_html(
     # snippets from the real line so evidence still reads as authored.
     for idx, (line, raw_line) in enumerate(zip(_mask_html_comments(source_lines), source_lines)):
         line_no = idx + 1
-        # Forms -> entry points
         for m in _HTML_FORM_RE.finditer(line):
             action = m.group(1)
             entry_points.append({
@@ -3229,7 +3220,6 @@ def _extract_html(
                 "annotation": action,
             })
             funcs.append(_empty_func(f"form:{action}", line_no, line_no))
-        # External scripts -> imports + supply-chain sink if remote
         for m in _HTML_SCRIPT_SRC_RE.finditer(line):
             src = m.group(1)
             imports.append(src)
@@ -3249,10 +3239,8 @@ def _extract_html(
                     "snippet": _snippet(raw_line),
                     "vuln_classes": ["supply-chain"],
                 })
-        # link hrefs (stylesheets / preload)
         for m in _HTML_LINK_HREF_RE.finditer(line):
             imports.append(m.group(1))
-        # iframe srcs
         for m in _HTML_IFRAME_SRC_RE.finditer(line):
             imports.append(m.group(1))
             sinks.append({
@@ -3262,7 +3250,6 @@ def _extract_html(
                 "snippet": _snippet(raw_line),
                 "vuln_classes": ["clickjacking", "xss"],
             })
-        # Inline event handlers
         if _HTML_INLINE_HANDLER_RE.search(line):
             sinks.append({
                 "kind": "inline_event_handler",
@@ -3271,7 +3258,6 @@ def _extract_html(
                 "snippet": _snippet(raw_line),
                 "vuln_classes": ["xss"],
             })
-        # javascript: URLs
         if _HTML_JS_URL_RE.search(line):
             sinks.append({
                 "kind": "javascript_url",
@@ -3280,7 +3266,6 @@ def _extract_html(
                 "snippet": _snippet(raw_line),
                 "vuln_classes": ["xss"],
             })
-        # Template interpolation
         if _HTML_MUSTACHE_RE.search(line):
             sinks.append({
                 "kind": "template_interpolation",
@@ -4850,7 +4835,6 @@ def index_file(
         )
         return indexed
 
-    # For .tsx files, use the tsx parser variant
     parse_lang = language
     if file_path.endswith(".tsx"):
         parse_lang = "tsx"

@@ -17,10 +17,10 @@ def _derive_module_key(name: str) -> str:
     return key.strip("_") or "unknown"
 
 
-# Generic names like 'auth_module_1', 'module_2', 'unknown_module' indicate the
-# agent emitting modules did not pick meaningful identifiers. Reject these at
-# the CLI so the backend never accumulates undescriptive rows that
-# code-architect / report-writer cannot map to a real subsystem.
+# Generic labels like 'auth_module_1', 'module_2', 'unknown_module' mean the
+# agent didn't pick a meaningful identifier. Reject them here so the backend
+# never accumulates rows code-architect / report-writer can't map to a real
+# subsystem.
 _GENERIC_MODULE_PATTERNS = (
     re.compile(r"^module_\d+$"),
     re.compile(r"^[a-z]+_module_\d+$"),
@@ -127,7 +127,6 @@ def run(args) -> None:
         print("No modules to submit.", file=sys.stderr)
         sys.exit(0)
 
-    # Validate and normalize required fields
     for i, mod in enumerate(modules):
         if not isinstance(mod, dict):
             print(f"Item {i} is not a JSON object", file=sys.stderr)
@@ -141,9 +140,7 @@ def run(args) -> None:
             mod['_auto_derived_module_key'] = True
             print(f"Auto-derived module_key '{mod['module_key']}' from name '{name}'", file=sys.stderr)
 
-        # Reject generic auto-pattern labels: 'auth_module_1', 'module_2',
-        # 'unknown_module'. These come from agents that did not pick
-        # meaningful identifiers and end up unmappable downstream.
+        # Reject the generic auto-pattern labels (see _GENERIC_MODULE_PATTERNS above).
         for label_field in ("module_key", "name"):
             value = mod.get(label_field, "")
             if isinstance(value, str) and _is_generic_label(value):

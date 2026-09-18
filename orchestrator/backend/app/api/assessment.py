@@ -3790,7 +3790,7 @@ async def merge_findings_endpoint(engagement_key: str, request: MergeFindingsReq
     """Merge a source finding into a target finding.
 
     The source finding's status becomes 'merged' and its evidence, notes, and
-    links are folded into the target.  The stronger severity and status win.
+    links are folded into the target. The stronger severity and status win.
     """
     engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
     record = await anyio.to_thread.run_sync(

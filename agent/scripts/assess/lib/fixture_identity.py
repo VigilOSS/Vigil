@@ -1,16 +1,15 @@
 """Dynamic fixture and session identity records for engagement-owned PoCs.
 
 Engagement scripts often need the id returned by the object they just created
-(``organization``, ``person``, ``subscription``, ...). Keeping those values in
-the script makes a rotated test tenant silently target a deleted fixture.  This
-module provides a small, backend-independent manifest that scripts can update
-from the response they just observed and resolve by a named session/fixture
-alias.
+(``organization``, ``person``, ``subscription``, ...). Hardcoding those values
+makes a rotated test tenant silently target a deleted fixture. This manifest
+lets a script record an id from the response it just observed and resolve it
+later by a named session/fixture alias.
 
-The manifest is deliberately not a credential store.  It contains identifiers
-and provenance only; session cookies/tokens remain in the credential store.
-Writes use a same-directory temporary file followed by ``os.replace`` so a
-crashed PoC cannot leave a partially-written manifest for the next run.
+It is not a credential store: only identifiers and provenance are kept, and
+session cookies/tokens stay in the credential store. Writes go through a
+same-directory temporary file plus ``os.replace`` so a crashed PoC cannot
+leave a partially-written manifest.
 """
 from __future__ import annotations
 

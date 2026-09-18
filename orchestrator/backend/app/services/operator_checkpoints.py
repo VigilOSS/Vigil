@@ -217,8 +217,7 @@ def record_checkpoint(
             )
         ]
         if unknown:
-            # A checkpoint pointing at a row that does not exist is a false
-            # claim about engagement state, so it is refused rather than stored.
+            # A reference to a nonexistent row is itself a false claim; refuse rather than store.
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=(

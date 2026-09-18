@@ -22,9 +22,8 @@ def register(subparsers) -> None:
     )
     add_required_kali_flags(p)
     add_passthrough_args_flag(p)
-    # Note: nikto's native flag is `-h <host>`, but `-h` collides with argparse's
-    # built-in --help. Expose --host as the canonical flag and translate to `-h`
-    # at runtime so the underlying tool sees its expected arg.
+    # nikto's native flag is `-h <host>`, but `-h` collides with argparse's
+    # built-in --help. Expose --host and translate to `-h` at runtime.
     p.add_argument("--host", dest="host", required=True, help="Target host (URL or hostname).")
     p.add_argument("-ssl", dest="ssl", action="store_true", help="Force SSL.")
     p.add_argument("-nossl", dest="nossl", action="store_true", help="Disable SSL.")

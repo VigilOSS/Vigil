@@ -246,10 +246,10 @@ from .assessment_summary import (
 
 # Private / monkeypatched names, re-exported by object reference so identity is
 # preserved. Importing them here keeps ``state_manager.X`` working for legacy
-# access. NOTE: this re-export is NOT the patch-effective location for
-# ``_engagement_or_404``. Every submodule (and ``_common`` itself) binds the
+# access. This re-export is NOT the patch-effective location for
+# ``_engagement_or_404``: every submodule (and ``_common`` itself) binds the
 # name locally via ``from ..events import _engagement_or_404``, so the only
-# canonical patch target that all callers observe is
+# canonical patch target all callers observe is
 # ``app.services.events._engagement_or_404`` — patching the ``_common`` (or this
 # package-level) alias would not affect those local bindings.
 from ._common import (  # noqa: F401

@@ -85,8 +85,8 @@ def _enum_reject_message(
         # operator word dilutes the ratio. Fall back to a conservative
         # substring/prefix check: an allowed token of length >= 3 that is wholly
         # contained in the bad value (or vice-versa) is a strong "you wrote the
-        # long form of what we abbreviate" signal. Still additive (the full list
-        # is always appended) and tight enough that unrelated tokens do not hit.
+        # long form of what we abbreviate" signal. Tight enough that unrelated
+        # tokens do not hit.
         upper_matches = [
             key
             for key in canonical_by_upper
@@ -516,11 +516,9 @@ def _resolve_agent_name(
     remembering to set an attribution.
 
     WARN (only when ``warn=True``): a single concise stderr line nudging
-    ``--agent-name <role>`` fires ONLY when the run falls through to the
-    "operator" default while ``phase`` is a specialist-only phase
-    (``exploit``/``verify``). It deliberately does NOT fire in
-    ``recon``/``consume-test`` where operators legitimately run mechanical
-    probes, so routine operator calls stay silent.
+    ``--agent-name <role>`` fires only when the run falls through to the
+    "operator" default in a specialist-only phase — see
+    :data:`_SPECIALIST_ONLY_PHASES` for which phases and why.
     """
     if explicit:
         return explicit

@@ -414,7 +414,7 @@ FINDING_DETAIL_CORE_PROPERTIES: dict[str, dict[str, Any]] = {
 
 # Workflow-owned fields evolve independently from the cross-workflow core. Keep
 # their namespace and version explicit here, while retaining the established flat
-# wire shape so existing records and callers do not need a data migration.  The
+# wire shape so existing records and callers do not need a data migration. The
 # annotation is also projected into the generated agent schema.
 FINDING_DETAIL_EXTENSION_PROPERTIES: dict[str, dict[str, dict[str, Any]]] = {
     "web/v1": {

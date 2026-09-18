@@ -107,11 +107,11 @@ from .status import collect_doctor_checks, collect_status, print_doctor, print_s
 from .up import UpOptions, run_up
 
 
-# The two-layer model is the one thing an operator cannot deduce from the
-# output, and the one thing that makes a stale CLI binary comprehensible. It
-# used to print after EVERY install, which is how a genuinely useful paragraph
-# becomes scenery; it now prints on a first install (where the model is new
-# information) and when the CLI binary is the thing that actually lags.
+# The operator cannot deduce the two-layer model from the CLI's output, and
+# without it a stale CLI binary is not comprehensible. It used to print after
+# EVERY install, turning a genuinely useful paragraph into scenery; it now
+# prints only on a first install (new information) or when the CLI binary
+# itself lags.
 _TWO_LAYER_MODEL = (
     "Two layers: `vigil install` upgrades the WORKING ROOT "
     "(code/prompts/skills/scripts); `uv tool upgrade vigil` upgrades only the CLI binary. "

@@ -360,12 +360,8 @@ def _run_report_phase(
         text_lines.extend(rr_blockers)
     text_lines.extend(rr_advisories)
 
-    # Depth-harness PREVIEW (coverage-grain unbundle / ADR 0012). ``report`` is a
-    # depth phase (`report in _DEPTH_PHASES`) for rendering: surface the depth
-    # ledger (incl. per-class `signal_classes_uncovered`) and the would-block set
-    # so the terminal depth block is legible here, BEFORE `transition-phase
-    # report` enforces it. This NEVER flips this command's exit code — the hard
-    # block is a transition-phase precondition, not this advisory.
+    # Depth-harness PREVIEW (see _DEPTH_PHASES above): surface the depth ledger,
+    # incl. per-class `signal_classes_uncovered`, and the would-block set.
     if "report" in _DEPTH_PHASES:
         ledger = backend.get("depth_ledger")
         if ledger is None:

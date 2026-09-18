@@ -371,7 +371,6 @@ def _stats(cfg) -> None:
         )
         print(f"  total: {total}")
         reference_items = result.get('reference_repo_items') or []
-        # Print any extra fields
         for key, val in result.items():
             if key not in (
                 'pending', 'processing', 'done', 'error', 'needs_context', 'total',
@@ -1469,10 +1468,12 @@ def _queue(
     mode: str = "initial",
     reason: str = "",
 ) -> None:
-    """Queue analysis items. Items can include batch_theme, slot_types, and
-    guidance_hypotheses fields alongside the existing format — those are
-    normalized (explicit priority validated, string lists flattened) before
-    being posted to the backend."""
+    """Queue analysis items into the backend analysis queue.
+
+    Items may include batch_theme, slot_types, and guidance_hypotheses fields
+    alongside the existing format; these are normalized (explicit priority
+    validated, string lists flattened) before posting.
+    """
     fp = Path(queue_items_file)
     if not fp.is_file():
         print(f"Queue items JSON file not found: {queue_items_file}", file=sys.stderr)
@@ -1493,7 +1494,6 @@ def _queue(
         sys.exit(1)
     items = json.loads(raw_items)
     if isinstance(items, dict):
-        # Single item wrapped
         items = [items]
     if not isinstance(items, list):
         print("Queue items file must contain a JSON array or object", file=sys.stderr)

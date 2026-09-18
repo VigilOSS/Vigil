@@ -165,11 +165,11 @@ type CodeAnalysisTabProps = {
 };
 
 // C50 added `skipped` (with `skip_reason`) to the code-analysis queue
-// dispositions. Keep this list in sync with `_VALID_DISPOSITIONS` in
-// `orchestrator/backend/app/services/code_analysis.py` — UI drift here
-// means operators who skipped a result (test fixture, generated code,
-// minified, vendored dep) see an unstyled badge and the disposition
-// filter chip is missing from the chip row.
+// dispositions. Keep this list in sync with `_VALID_ANALYSIS_RESULT_DISPOSITIONS`
+// in `orchestrator/backend/app/services/code_analysis.py` — that is the set this
+// mirrors; `_VALID_DISPOSITIONS` is the queue-side set and omits `needs_context`.
+// Drift means a skipped result (test fixture, generated code, minified, vendored
+// dep) gets an unstyled badge and no filter chip.
 const DISPOSITION_ORDER = ["finding", "suspicious", "needs_context", "clean", "skipped"];
 const CONFIDENCE_ORDER = ["high", "medium", "low"];
 
@@ -193,7 +193,6 @@ export function CodeAnalysisTab({
   const [workflowFilters, setWorkflowFilters] = useState<Set<string>>(new Set());
   const searchRef = useRef<HTMLInputElement | null>(null);
 
-  // Pre-compute per-result corpus once
   const corpora = useMemo(() => {
     const map = new Map<number, string>();
     for (const r of results) map.set(r.id, buildCorpus(r));
@@ -247,7 +246,8 @@ export function CodeAnalysisTab({
     [corpora],
   );
 
-  // Counts computed from the full results set (stable chip labels)
+  // Computed from the full results set so filter-chip counts stay stable
+  // regardless of the active filters.
   const dispositionCounts = useMemo(() => {
     const c: Record<string, number> = {};
     for (const r of results) c[r.disposition] = (c[r.disposition] ?? 0) + 1;
@@ -401,8 +401,8 @@ export function CodeAnalysisTab({
             >
               <div className="code-repo-header">
                 <strong>{repo.name}</strong>
-                {/* A reference repo is never handed work, so its analysis status
-                    reads as "nothing happened" unless the role is named. */}
+                {/* A reference repo is never handed work, so without this
+                    badge its analysis status reads as "nothing happened". */}
                 {repo.repo_role === "reference" && <span className="badge">reference</span>}
                 <span className={`badge code-status-${repo.analysis_status}`}>
                   {repo.analysis_status.replace(/_/g, " ")}
@@ -566,10 +566,10 @@ export function CodeAnalysisTab({
                 )}
               </div>
               {(coverage.reference_repos?.length ?? 0) > 0 && (
-                // The queue-side note above only names a reference repo that
-                // happens to hold queue rows. This one names them all, which is
-                // the case that matters: files that are readable, deliberately
-                // excluded from every count above, and otherwise invisible.
+                // Unlike the queue-side note above (only repos with queue rows),
+                // this names every reference repo: files that are readable,
+                // deliberately excluded from every count above, and otherwise
+                // invisible.
                 <p className="meta-text">
                   Excluded from these counts &mdash; reference repositories are read for
                   context but never owe review:{" "}

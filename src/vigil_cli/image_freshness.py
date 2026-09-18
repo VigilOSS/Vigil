@@ -40,9 +40,8 @@ from . import docker
 _PROXY_CONTAINER_NAME = "vigil-proxy"
 _PROXY_IMAGE = "vigil-proxy:latest"
 
-# Docker label carrying the sha256 of the exact inputs an image was built from.
-# Stamped at build time, re-derived and compared on every freshness check, so a
-# rebuild is triggered by CONTENT, never by a timestamp.
+# Sha256 of an image's exact build inputs (see module docstring), stamped at
+# build time and re-derived on every check.
 #
 # The label KEY still reads "runtime" because that is what already-built
 # `vigil:latest` images carry; renaming it would make every existing image read
@@ -51,10 +50,7 @@ _PROXY_IMAGE = "vigil-proxy:latest"
 IMAGE_INPUTS_LABEL = "com.vigil.runtime-inputs-sha256"
 
 # Build artifacts and caches that live INSIDE a source tree but are NOT build
-# inputs. `__pycache__`/`*.pyc` are the load-bearing entries: every ordinary
-# `vigil assess` run rewrites bytecode under the install root, so the previous
-# mtime high-water mark over `agent/scripts/assess` was newer than the proxy
-# image within minutes of every build and `vigil up` rebuilt it forever.
+# inputs (see module docstring for the `__pycache__` rebuild-loop history).
 #
 # This set is shared with `install.py`, which must make the same source-vs-junk
 # call when it syncs a tree; the two cannot be allowed to disagree about what
@@ -103,8 +99,7 @@ def input_entries(inputs: list[Path], *, root: Path) -> list[tuple[str, Path | N
     Declared order is preserved for the listed paths; a listed DIRECTORY expands
     to its files in sorted relative-path order. A listed path that does not exist
     (or a directory with no files) yields ``None`` so the digest still records it
-    — that is what makes a DELETION change the digest instead of silently
-    vanishing from an mtime high-water mark.
+    — this is what makes a deletion move the digest (see module docstring).
     """
     entries: list[tuple[str, Path | None]] = []
     for path in inputs:

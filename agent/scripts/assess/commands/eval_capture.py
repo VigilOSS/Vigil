@@ -64,7 +64,7 @@ _MAX_FINDINGS_HEADROOM = 3
 _SCHEMA_NAME = "finding-record.schema.json"
 
 
-# Standalone maintainer/CI invocation (eval-capture is off the operator surface).
+# Standalone invocation examples (see the module docstring for why).
 _MAINTAINER_EXAMPLES = (
     "Examples (maintainer/CI tool — invoke the module directly, not `vigil assess`):\n"
     "  python agent/scripts/assess/commands/eval_capture.py --engagement-dir <dir> "
@@ -110,9 +110,9 @@ def _add_capture_arguments(p) -> None:
 
 
 def register(subparsers) -> None:
-    """Retained subparser hook. NOTE: eval-capture is intentionally NOT wired into
-    the operator ``vigil assess`` CLI (see the module docstring); it is a dev/CI
-    tool invoked through the standalone :func:`main` entrypoint below."""
+    """Retained subparser hook, not wired into the operator ``vigil assess`` CLI
+    (see the module docstring). Real invocation is the standalone :func:`main`
+    entrypoint below."""
     p = subparsers.add_parser(
         "eval-capture",
         help="Snapshot backend findings into a golden eval fixture (zero-token replay)",

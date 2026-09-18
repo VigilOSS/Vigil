@@ -1,18 +1,17 @@
 """Backend bridge to the canonical vuln-class taxonomy.
 
-The single source of truth for vuln classes + families is
-``agent/scripts/assess/lib/vuln_taxonomy.py``. The depth ledger (§5.3) must
-derive class/family names from THAT module rather than fork the vocabulary, so
-this bridge locates the agent ``assess`` package on disk and re-exports the
-taxonomy. Importing it as the proper ``assess.lib.vuln_taxonomy`` package makes
-``build_class_to_skills`` (which does a relative import of ``frontmatter``)
-resolve correctly.
+``agent/scripts/assess/lib/vuln_taxonomy.py`` is the single source of truth
+for vuln classes and families; the depth ledger (§5.3) must derive class/
+family names from it rather than fork the vocabulary. This bridge locates the
+agent ``assess`` package on disk and re-exports the taxonomy, importing it as
+the proper ``assess.lib.vuln_taxonomy`` package so ``build_class_to_skills``
+(which does a relative import of ``frontmatter``) resolves correctly.
 
 This is the ONE place that reaches across the repo tree, kept tiny and explicit
 so the depth ledger imports a stable symbol regardless of CWD. If the agent
-tree is ever unavailable (e.g. a backend-only deployment), the import raises at
-ledger-call time, never at module import — the caller treats it as "taxonomy
-unavailable" rather than crashing the API process.
+tree is unavailable (e.g. a backend-only deployment), the import raises at
+ledger-call time rather than at module import, so the caller treats it as
+"taxonomy unavailable" instead of crashing the API process.
 """
 from __future__ import annotations
 

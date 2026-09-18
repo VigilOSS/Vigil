@@ -98,9 +98,8 @@ def _row_to_dict(row: Any) -> dict[str, Any]:
     if "tags_json" in data:
         data["tags"] = _decode_json(data.pop("tags_json") or "[]", [])
     # Default ``canonical_id`` to the row's own id when ``superseded_by_id``
-    # is unset — list helpers overwrite this when they walk a longer chain.
-    # This keeps every returned dict carrying the field even on insert paths
-    # where no chain walk happened.
+    # is unset, so every dict carries the field even on insert paths that
+    # never walk the chain. List helpers overwrite it when they do walk it.
     if "id" in data and "canonical_id" not in data:
         if "superseded_by_id" in data and data.get("superseded_by_id"):
             # Caller will walk; leave None so the omission is visible.
@@ -797,10 +796,8 @@ def _list_rows(
 # ── Update + supersede ─────────────────────────────────────
 
 
-# Map intel type slug -> (table, allowed updatable columns).
-# Columns marked here must already exist on the table; the helpers reject
-# any field that is not in this set so misspellings surface immediately
-# instead of silently no-oping.
+# Map intel type slug -> table name. (Updatable columns per type live
+# separately in ``_INTEL_UPDATABLE_FIELDS`` below.)
 _INTEL_TABLE_BY_TYPE: dict[str, str] = {
     "tech-component": "intel_tech_components",
     "person": "intel_people",
@@ -826,6 +823,8 @@ _INTEL_RATIONALE_COLUMN: dict[str, str] = {
 }
 
 
+# Allowed PATCH fields per intel type. The helpers reject any field outside
+# this set so misspellings surface immediately instead of silently no-oping.
 _INTEL_UPDATABLE_FIELDS: dict[str, set[str]] = {
     "tech-component": {
         "component", "version", "source_name", "confidence", "evidence_ref",
@@ -1289,16 +1288,16 @@ def _supersede_to_existing(
 ) -> dict[str, Any]:
     """Point a stale intel row at an EXISTING same-type canonical row.
 
-    Unlike the payload path this never calls a ``record_*`` helper: the target
-    row already exists, so re-upserting it on its natural key would destructively
-    overwrite the canonical's own fields. Here we only set ``superseded_by_id``
-    on the stale row, leaving the canonical untouched. Used when an operator has
-    two rows for the same entity and wants the stale one to defer to the
-    surviving canonical (e.g. a re-fingerprint that landed under a slightly
-    different natural key).
+    Unlike the payload path, this never calls a ``record_*`` helper: the
+    target row already exists, so re-upserting it on its natural key would
+    overwrite the canonical's own fields. Only ``superseded_by_id`` on the
+    stale row is set, leaving the canonical untouched. Used when an operator
+    has two rows for the same entity (e.g. a re-fingerprint under a slightly
+    different natural key) and wants the stale one to defer to the
+    surviving canonical.
 
-    Guards mirror the payload path: existence of both rows, self-collision, and
-    the shared transitive cycle walk (``_supersede_chain_reaches``).
+    Guards mirror the payload path: existence of both rows, self-collision,
+    and the shared cycle walk (``_supersede_chain_reaches``).
     """
     # ``--to-existing`` repoints an existing row; it does not create one, so a
     # replacement payload is mutually exclusive with it.
@@ -1812,10 +1811,12 @@ LEAD_STATUS_VALUES = frozenset({"open", "in_progress", "resolved", "ruled_out"})
 
 
 def _validate_lead_status(value: Any) -> None:
-    """Reject an invalid lead_status on every write path. The POST path already
-    validates via the Pydantic Literal, but PATCH (_coerce_update_values) and
-    supersede (record_note) bypass it — an unguarded typo would silently drop a
-    lead from the open-lead worklist."""
+    """Reject an invalid lead_status.
+
+    POST validates via the Pydantic Literal, but PATCH
+    (``_coerce_update_values``) and supersede (``record_note``) bypass it —
+    an unguarded typo would silently drop a lead from the open-lead worklist.
+    """
     if value is not None and value not in LEAD_STATUS_VALUES:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

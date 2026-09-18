@@ -518,14 +518,9 @@ def _identity_header_pairs(
         # cookie captured for a DIFFERENT host never rides this request.
         cookie_map.update(host_scoped)
     elif not host_cookie_hosts(material):
-        # This identity has NO captured per-host buckets at all (a manual/legacy
-        # identity whose only cookies live in the flat ``cookies`` view): fall
-        # back to that flat view. When per-host buckets DO exist but none match
-        # this request host (or a list-mode run left ``request_host`` empty) we
-        # deliberately OMIT cookies rather than fall back — ``material["cookies"]``
-        # is a DISPLAY-ONLY union across every captured host, so injecting it here
-        # would bleed another host's uniquely-named session cookies into this
-        # unrelated target (cross-host session bleed).
+        # No per-host buckets at all (manual/legacy identity): fall back to the
+        # flat ``cookies`` view. When buckets DO exist but none match this host,
+        # cookies are omitted instead — see docstring (cross-host session bleed).
         cookies = material.get("cookies")
         if isinstance(cookies, dict):
             cookie_map.update({str(k): str(v) for k, v in cookies.items()})

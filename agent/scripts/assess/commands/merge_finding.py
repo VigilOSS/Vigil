@@ -37,7 +37,6 @@ def run(args) -> None:
             expected={"slug": args.target_slug},
         )
 
-    # Emit event
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         client.post_event({
             "event_type": "finding.merged",

@@ -396,11 +396,11 @@ def run(args: argparse.Namespace) -> None:
             print(f"gau-js-endpoints: {exc}", file=sys.stderr)
             sys.exit(1)
         bodies_dir = paths.bodies_dir
-    # Note: a cross-target target-mismatch check is no longer needed at the
-    # default-path branch — the namespaced layout makes it impossible for
-    # the default `<target>/<cache_key>/bodies/` to contain bodies for a
-    # different target. The `--bodies-dir` override is still on the
-    # operator's honor system, since they explicitly pointed there.
+    # A cross-target mismatch check is no longer needed on the default-path
+    # branch — the namespaced layout makes it impossible for the default
+    # `<target>/<cache_key>/bodies/` to contain bodies for a different target.
+    # The `--bodies-dir` override is still on the operator's honor system,
+    # since they explicitly pointed there.
 
     js_bodies = _list_js_bodies(bodies_dir, int(args.max_bodies))
 

@@ -221,7 +221,6 @@ def _mutate_neighbor(value: str, vtype: str, max_n: int) -> list[str]:
                 variants.append(c)
 
     elif vtype == "uuid":
-        # Increment last hex digit group
         parts = value.split("-")
         if len(parts) == 5:
             try:
@@ -237,7 +236,6 @@ def _mutate_neighbor(value: str, vtype: str, max_n: int) -> list[str]:
                 )
             except ValueError:
                 pass
-        # Swap two chars in first segment
         if len(parts[0]) >= 4:
             s = list(parts[0])
             s[0], s[1] = s[1], s[0]
@@ -247,7 +245,6 @@ def _mutate_neighbor(value: str, vtype: str, max_n: int) -> list[str]:
                 variants.append(adj)
 
     elif vtype in ("short_token", "opaque"):
-        # Append a digit suffix.
         variants.extend([value + "1", value + "2"])
         # Bump the last character — only meaningful for a non-empty value.
         # ``classify_value("")`` returns "opaque", so guard explicitly rather

@@ -69,7 +69,6 @@ def run(args) -> None:
             positive_ids=("id",),
         )
 
-    # Emit event
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         client.post_event({
             "event_type": "surface.updated",

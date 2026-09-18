@@ -367,9 +367,9 @@ def _is_suppressed_workflow_status(workflow_status: str) -> bool:
 
 def _serialize_finding_record(row: dict[str, Any] | Any) -> dict[str, Any]:
     record = dict(row)
-    # Read-path serialization must not crash on invalid DB values.
-    # Validation belongs on write paths; here we pass through raw data
-    # so the frontend can still display the finding.
+    # Read-path serialization must not crash on invalid DB values. Validation
+    # belongs on write paths; here we pass through raw data so the frontend
+    # can still display the finding.
     try:
         record["workflow_status"] = _row_workflow_status(record)
     except HTTPException:
@@ -382,7 +382,7 @@ def _serialize_finding_record(row: dict[str, Any] | Any) -> dict[str, Any]:
         ).strip().lower()
     # submission_status is a separate axis from workflow_status; surface it on
     # every read projection, defaulting to 'none' when absent (legacy rows /
-    # synthetic dicts). Read path must not crash on an invalid DB value.
+    # synthetic dicts).
     try:
         record["submission_status"] = _normalize_submission_status(record.get("submission_status"))
     except HTTPException:

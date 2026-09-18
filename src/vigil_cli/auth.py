@@ -601,13 +601,10 @@ def _authed_request_headers(
 ) -> dict[str, str]:
     """Build the request headers for a host-side authed probe from identity material.
 
-    Cookies are host-scoped the same way ``vigil assess kali <tool> --identity`` injects
-    them: the matching ``host_cookies`` bucket is used ALONE, falling back to the
-    flat ``cookies`` view ONLY for identities with no per-host buckets at all.
-    When buckets exist but none match the probed host we omit cookies entirely —
-    the flat view is a display-only UNION across every captured host, so injecting
-    it would bleed another host's session cookies onto this host (cross-host
-    session bleed). Plus the identity's headers and a bearer token when present.
+    Cookies are host-scoped the same way :func:`export_curl_args` selects them
+    (host_cookies bucket alone, flat fallback only with no per-host buckets, same
+    cross-host session bleed it avoids). Plus the identity's headers and a bearer
+    token when present.
     """
     headers: dict[str, str] = {}
     for key, value in (material.get("headers") or {}).items():
@@ -933,9 +930,10 @@ def _parse_probe_blob(
     text instead, taking the ORIGIN's status line (:func:`_origin_status_match`)
     rather than the first one in the blob. Returns
     ``{status, status_line, user_id, deleted}`` where ``status`` is the int HTTP
-    code (or ``None`` when unparseable) and ``deleted`` is True when the RESPONSE tore the session down (``<anchor>=deleted``
-    Set-Cookie for one of the operator-declared ``anchor_cookies``), which is a
-    server logout regardless of the status code.
+    code (or ``None`` when unparseable) and ``deleted`` is True when the
+    RESPONSE tore the session down (``<anchor>=deleted`` Set-Cookie for one of
+    the operator-declared ``anchor_cookies``), which is a server logout
+    regardless of the status code.
     """
     raw = raw or ""
     m = _origin_status_match(raw)

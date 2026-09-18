@@ -387,14 +387,9 @@ def start_runtime(
     validate_tools: bool = True,
     allow_existing: bool = False,
 ) -> None:
-    # Never let the SHARED (host-bridged, 8 GB, /data-mounted) runtime lifecycle
-    # touch a per-attempt bench Kali runtime. A bench attempt sets
-    # VIGIL_RUNTIME_CONTAINER=vbench-kali-<id>, which `default_runtime_container()`
-    # feeds into RuntimeOptions.container_name — so a bare `vigil runtime
-    # start`/`restart` run inside the operator's env would otherwise resolve to the
-    # bench kali and recreate it on the host `bridge` (dropping its FRONT-net
-    # membership -> `target-<id>` stops resolving, and breaking ADR-0005 isolation).
-    # Refuse deterministically with a directive pointing at the right tool.
+    # Never let the SHARED runtime lifecycle touch a per-attempt bench Kali
+    # runtime (see BENCH_RUNTIME_NAME_PREFIX above for why). Refuse
+    # deterministically with a directive pointing at the right tool.
     if is_bench_runtime_name(options.container_name):
         raise SystemExit(
             f"Refusing to start/recreate the shared runtime on a per-attempt bench "

@@ -36,7 +36,7 @@ from assess.lib.kali import (
 
 # The pre-flight budget guard lives in the kali_cli argparse seam (which the kali
 # facade re-exports the rest of this verb's helpers from); import it directly so
-# this unit need not touch the shared facade module.
+# this unit doesn't need the shared facade module.
 from assess.lib.kali_cli import coerce_float, preflight_timeout_guard
 
 # Static / binary extensions excluded from crawling by default (injected as

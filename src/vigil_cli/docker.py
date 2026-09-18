@@ -18,14 +18,13 @@ class DockerResult:
 Runner = Callable[..., DockerResult]
 HOST_GATEWAY_ARG = "--add-host=host.docker.internal:host-gateway"
 
-# Fast Docker metadata queries (image/container inspects, ``docker info``,
-# ``docker ps``) and the DETACHED ``docker run -d`` start all return promptly
-# against a healthy daemon. When the Docker daemon/VM is wedged — a common
-# Docker Desktop failure mode on macOS — an un-bounded ``subprocess.run`` blocks
-# forever, hanging ``vigil runtime start``/``status``, ``vigil up`` and
-# ``vigil doctor`` with no output. Bounding every such call makes an
-# unresponsive daemon degrade to a clear error instead of a hang (I-02). Image
-# BUILDS deliberately route through ``run_command_streaming`` (NO timeout) —
+# Metadata queries (image/container inspects, ``docker info``, ``docker ps``)
+# and a DETACHED ``docker run -d`` start all return promptly against a healthy
+# daemon. When the daemon/VM is wedged — a common Docker Desktop failure mode
+# on macOS — an unbounded ``subprocess.run`` blocks forever, hanging ``vigil
+# runtime start``/``status``, ``vigil up`` and ``vigil doctor`` with no output.
+# Bounding every such call turns an unresponsive daemon into a clear error
+# (I-02). Image BUILDS route through ``run_command_streaming`` (NO timeout) —
 # a cold build legitimately runs for minutes — so this bound never touches them.
 _DEFAULT_TIMEOUT_SECONDS = 20.0
 # Distinct from Docker's own exit codes (125 run-failure / 126 not-executable /
@@ -67,7 +66,7 @@ def run_command(argv: list[str], *, cwd: Path | None = None, env: dict[str, str]
     except FileNotFoundError as exc:
         return DockerResult(127, "", str(exc))
     except subprocess.TimeoutExpired:
-        # Never surface a hang. A wedged daemon becomes a non-zero result that
+        # Never surface a hang: a wedged daemon becomes a non-zero result that
         # every metadata helper already treats as "unavailable/empty", and that
         # callers can recognise as a timeout via ``TIMEOUT_RETURNCODE``.
         return DockerResult(

@@ -462,8 +462,12 @@ def _render_operator_checkpoint(lines: list, checkpoint: object) -> None:
     if not isinstance(checkpoint, dict) or not checkpoint:
         return
     lines.extend(["", "## Operator Checkpoint"])
-    # Shared with `operator-checkpoint show` so the two renders cannot drift on
-    # which tracks a combined engagement reports.
+    # `render_phase_field` inside the header, and the reference-list and intent
+    # renders below, are shared with `operator-checkpoint show` so the two views
+    # cannot drift — on which tracks a combined engagement reports, on the
+    # reference lists, and on the
+    # UNVERIFIED label / containment that keeps a reference or multi-line note
+    # from forging one of this brief's own section boundaries.
     header = (
         f"- checkpoint #{checkpoint.get('checkpoint_version')} "
         f"{render_phase_field(checkpoint)} "
@@ -471,13 +475,7 @@ def _render_operator_checkpoint(lines: list, checkpoint: object) -> None:
         f"at={checkpoint.get('created_at') or 'unknown'}"
     )
     lines.append(header)
-    # Shared with `operator-checkpoint show` so the two renders cannot drift on
-    # the reference lists or on the containment that keeps a reference value
-    # from forging one of this brief's own section boundaries.
     lines.extend(render_checkpoint_reference_lines(checkpoint))
-    # Shared with `operator-checkpoint show` so the two renders cannot drift on
-    # the UNVERIFIED label or on the containment that keeps a multi-line note
-    # from forging one of this brief's own section boundaries.
     lines.extend(render_intent_lines(checkpoint.get("intent_note")))
     lines.append(
         "  - full chain: `vigil assess operator-checkpoint show --all`"

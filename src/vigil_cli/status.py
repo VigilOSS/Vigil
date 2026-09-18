@@ -473,10 +473,8 @@ def print_status(status: dict[str, object], *, json_output: bool = False) -> Non
 def _print_install_staleness_warning(staleness: object) -> None:
     """Non-fatal WARN when the working root lags the source it was installed from.
 
-    Two-layer model (I-5): `vigil install` refreshes the WORKING ROOT
-    (code/prompts/skills/scripts); `uv tool upgrade vigil` only refreshes the CLI
-    BINARY. A lagging working root makes the new feature set inert, so nudge the
-    operator to re-run `vigil install`.
+    Two-layer model, see :func:`install_staleness` (I-5). Nudges the operator to
+    re-run `vigil install` rather than failing anything.
     """
     if not isinstance(staleness, dict):
         return

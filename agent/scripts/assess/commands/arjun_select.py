@@ -349,8 +349,6 @@ def run(args: argparse.Namespace) -> None:
     summary = {
         "verb": "arjun-select",
         "out": str(out_path),
-        # Per-method sidecar files: scan each with its own `-m` so POST/JSON body
-        # surfaces are not silently scanned under GET (or vice versa).
         "method_outputs": method_outputs,
         "selected_by_method": {m: len(u) for m, u in sorted(by_method.items())},
         "scanned_rows": len(rows),

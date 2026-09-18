@@ -446,7 +446,6 @@ def _print_vuln_class_summary(data: dict) -> None:
     """Print a vulnerability class coverage summary from CWE effort data."""
     files = data.get('files', [])
     if not files:
-        # No per-file CWE data — gracefully skip
         return
 
     total = 0
@@ -630,7 +629,6 @@ def _print_coverage(data: dict) -> None:
                 f"{repo.get('admitted_files', 0)} indexed file(s)"
             )
 
-    # By Classification
     by_class = data.get('by_classification', {})
     if by_class:
         print("\nBy Classification:")
@@ -647,14 +645,12 @@ def _print_coverage(data: dict) -> None:
                 else:
                     print(f"  {tier:10s}: {count:>4} files |    0 analyzed |   0.0%")
             elif isinstance(tier_data, int):
-                # Simple count format
                 print(f"  {tier:10s}: {tier_data:>4} files")
 
     _print_analysis_status(data)
     _print_open_leases(data)
     _print_source_identity(data)
 
-    # Function-Level
     func_level = data.get('function_level', {})
     if func_level:
         total_ctx = func_level.get('total_contexts', 0)
@@ -665,7 +661,6 @@ def _print_coverage(data: dict) -> None:
         print(f"  Total contexts: {total_ctx}")
         print(f"  Analyzed: {analyzed_ctx} | Needs context: {needs_ctx} | Pending: {pending_ctx}")
 
-    # Findings
     findings = data.get('findings_summary', {})
     if findings:
         total_findings = findings.get('total_code_findings', 0)

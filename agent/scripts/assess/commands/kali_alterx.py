@@ -20,9 +20,8 @@ _DISABLE_UPDATE_CHECK_FLAG = "-disable-update-check"
 def _operator_passed_disable_update_check(args) -> bool:
     """True when the operator already supplied -disable-update-check via --extra-args.
 
-    The typed verb has no dedicated flag for it, so the only way an operator can
-    pass it explicitly is through the raw passthrough. Honor that so the default
-    injection stays idempotent and never double-adds the flag.
+    The typed verb has no dedicated flag for it, so passthrough is the only way to
+    pass it explicitly. Honor that so the default injection stays idempotent.
     """
     extra = getattr(args, "extra_args", "") or ""
     if not extra:

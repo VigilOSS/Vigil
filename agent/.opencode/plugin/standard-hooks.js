@@ -1,6 +1,6 @@
 // GENERATED-EQUIVALENT source-of-truth — edited here, copied verbatim into each
 // engagement by `vigil engagement create` (_write_opencode_config). Do not add
-// engagement-specific values; this file is the template the CLI ships unchanged.
+// engagement-specific values; the CLI ships this file unchanged.
 //
 // Vigil standard OpenCode hooks. Mirrors the Claude `.claude/settings.json` and
 // Codex `.codex/config.toml` standard hooks for the OpenCode runtime, which reads
@@ -26,9 +26,9 @@
 import { execFileSync } from "node:child_process"
 
 // Resolve a hook script under the agent root. start_opencode.sh exports
-// $VIGIL_AGENT_ROOT; fall back to a relative path so a launcher-less run still
-// finds the hooks when the cwd is (under) the agent root. Returns "" when the
-// root is unknown, which makes the corresponding hook a no-op.
+// $VIGIL_AGENT_ROOT; without it, fall back to a relative path so a
+// launcher-less run still finds the hooks when cwd is under the agent root.
+// Returns "" when the root is unknown, making the hook a no-op.
 function resolveHook(name) {
   const root = process.env.VIGIL_AGENT_ROOT
   if (root) return root.replace(/\/+$/, "") + "/scripts/hooks/" + name
@@ -36,8 +36,8 @@ function resolveHook(name) {
 }
 
 export const VigilStandardHooks = async () => ({
-  // PostToolUse-equivalent: record the command into the backend activity log so
-  // the taint audit (which scans activity_entries) can see it. Best-effort.
+  // PostToolUse-equivalent, feeding the taint audit's activity_entries scan.
+  // Best-effort.
   "tool.execute.after": async (input, output) => {
     const tool = String((input && input.tool) || "").toLowerCase()
     if (tool !== "bash") return
@@ -64,7 +64,7 @@ export const VigilStandardHooks = async () => ({
         stdio: ["pipe", "ignore", "ignore"],
       })
     } catch (e) {
-      // logging is best-effort; never block the run on a logging failure
+      // best-effort; never block the run on a logging failure
     }
   },
 })

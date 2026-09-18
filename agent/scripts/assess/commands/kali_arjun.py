@@ -42,7 +42,7 @@ from assess.lib.kali import (
 )
 
 # Pre-flight budget helpers (kali_cli argparse seam); imported directly so this
-# unit need not touch the shared kali facade module.
+# unit doesn't need the shared kali facade module.
 from assess.lib.kali_cli import (
     coerce_float,
     estimate_list_sweep_seconds,
@@ -410,13 +410,10 @@ def run(args) -> None:
         args.import_file, engagement_dir=safe_engagement_dir(args)
     ) if args.import_file else 0
 
-    # Pre-flight sizing estimate (I-20(b)). A slow arjun (low --rate-limit ×
-    # --stable multi-pass × high -T) over a large or junk -i list cannot complete
-    # under the wrapper --timeout — it is SIGTERM-killed after a few targets and
-    # its 0/partial params masquerade as a clean "no hidden params" negative. Warn
-    # BEFORE the run (the estimate is a worst-case heads-up, so warn-only — never
-    # auto-raise a fuzzy estimate). The complementary post-run guard below catches
-    # the case the estimate under-counts.
+    # Pre-flight sizing estimate (I-20(b)): warn before the run if a slow arjun
+    # (low --rate-limit × --stable multi-pass × high -T) over a large -i list
+    # can't finish under --timeout. Warn-only — never auto-raise a fuzzy
+    # estimate; the post-run guard below catches what this under-counts.
     if total > 1:
         est = estimate_list_sweep_seconds(
             targets=total,
@@ -439,19 +436,14 @@ def run(args) -> None:
             ),
         )
 
-    # Pre-create the -oJ parent dir so arjun can write its output on a first run
-    # against a novel target (arjun does not create parent dirs and crashes at
-    # export otherwise). Best-effort; the post-run guard still backfills.
+    # Pre-create the -oJ parent dir (see _precreate_json_parent).
     _precreate_json_parent(args, json_path)
 
     result = kali_exec(cmd, tool_name="arjun", **kali_args_to_kwargs(args))
 
-    # Incomplete-run guard. A slow arjun (low --rate-limit × --stable multi-pass
-    # × high -T) over a large or junk (-i) list is SIGTERM-killed after only a
-    # few targets, and its 0/partial params then masquerade as a clean "no hidden
-    # params" negative. When the run did not finish AND the list had >1 target,
-    # surface the incompleteness loudly so it is never read as a verdict. (See
-    # the "size to finish" doctrine in references/tools/recon/arjun.md.)
+    # Incomplete-run guard: surface a SIGTERM-killed run loudly so its 0/partial
+    # params are never read as a clean "no hidden params" verdict. (See the
+    # "size to finish" doctrine in references/tools/recon/arjun.md.)
     note = incomplete_list_run_warning(
         tool="arjun",
         total_targets=total,
@@ -463,10 +455,8 @@ def run(args) -> None:
     if note:
         print(f"WARN {note}", file=sys.stderr)
 
-    # Arjun writes NO -oJ file when it discovers 0 params; guarantee the
-    # artifact exists so the run is always captured and ingest-arjun always finds
-    # a file. When the run was incomplete, write the sentinel (not a bare {}) so
-    # an empty artifact is never misread as a clean negative. Best-effort.
+    # Guarantee the -oJ artifact exists, incomplete-sentineled if `note` fired
+    # (see _ensure_json_artifact).
     _ensure_json_artifact(args, json_path, incomplete=bool(note))
 
     emit_result(result)

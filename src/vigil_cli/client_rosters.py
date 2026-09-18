@@ -322,8 +322,9 @@ def ensure_opencode_plugin(agent_root: Path, opencode_dir: Path) -> None:
     """Copy the standard OpenCode plugin into an engagement cwd when present.
 
     Mirrors ``ensure_claude_settings``: refresh stale copies during repair so a
-    fix to the standard activity-log plugin reaches existing engagements too. Written to both ``plugin`` and ``plugins`` (the binary
-    honours either directory name; the singular is predominant).
+    fix to the standard activity-log plugin reaches existing engagements too.
+    Written to both ``plugin`` and ``plugins`` (the binary honours either
+    directory name; the singular is predominant).
     """
     plugin_src = agent_root / ".opencode" / "plugin" / "standard-hooks.js"
     if not plugin_src.is_file():

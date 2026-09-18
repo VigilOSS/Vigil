@@ -214,8 +214,8 @@ def _render_template(*, name: str, purpose: str) -> str:
     and the `vigil oob mint` blind-callback hook are present but commented so the
     file runs as-is yet shows the agent exactly where to extend it.
     """
-    # NOTE: kept intentionally small. The template is a starting point the agent
-    # edits — the SKILL.md worked example shows the differential/active shapes.
+    # Kept intentionally small — a starting point the agent edits; the SKILL.md
+    # worked example shows the differential/active shapes.
     return f'''#!/usr/bin/env python3
 """{purpose}
 

@@ -1820,7 +1820,7 @@ export function listCodeAnalysisResults(engagementKey: string, params?: { file_i
 // `orchestrator/backend/app/api/intel_schemas.py`. Keep these in lock-step
 // with the pydantic response classes; the JSON schemas under
 // `agent/schemas/intel-*.schema.json` are the request-side view of the
-// same contract. Fetcher functions land in Phase B1.
+// same contract. The Phase B1 fetchers below are implemented, not stubs.
 
 export type IntelProvenance = {
   agent_name?: string;
@@ -2005,9 +2005,9 @@ export type ListActivityEntriesResponse = {
 };
 
 // ── Intel & Activity fetchers ───────────────────────────
-// These hit the route stubs wired by Phase B1. Until the backend bodies
-// land, each endpoint 501s — callers therefore must always handle the
-// error path and fall back to an empty-state render.
+// The backend bodies these call are implemented in `app/api/intel.py`; an
+// engagement with no intel returns 200 with zero counts, not an error. Callers
+// still catch, so one failing intel fetch cannot block the rest of a refresh.
 
 export function getIntelSummary(engagementKey: string) {
   return request<IntelSummary>(`/engagements/${engagementKey}/intel/summary`);

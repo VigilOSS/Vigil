@@ -313,11 +313,8 @@ def _out_of_scope_covers(
             host = _entry_host(entry)
             if host and _scope_match_score(host, hostname) is not None:
                 return True
-            # Host-less/unparseable URL-form (e.g. bare "://"): there is no host
-            # to bind the carve-out to, so it is host-blind. SKIP it rather than
-            # dropping every host in the engagement — a single unparseable entry
-            # must never wipe out the whole engagement's capture. Path-level
-            # scoping is still honored on the IP-aware surfaces (scope.host_admitted).
+            # Host-less/unparseable URL-form (e.g. bare "://") is host-blind —
+            # skip it (see docstring); never let one bad entry drop the engagement.
             continue
         if "/" in entry:
             network = _parse_cidr(entry)
@@ -337,12 +334,10 @@ def _out_of_scope_covers(
                 if host_ip in network:
                     return True
                 continue
-            # A slash-bearing entry that is NOT a valid CIDR is a host/path or
+            # A slash-bearing entry that is not a valid CIDR is a host/path or
             # host-relative carve-out (e.g. "example.com/admin", "/api/internal").
-            # The proxy can only filter by HOST, so reduce it to its host
-            # component and match as a host pattern. A leading-slash / host-less
-            # path ("/api/internal") has no host to bind → SKIP it (host-blind);
-            # never drop the whole engagement's traffic on an unbindable entry.
+            # The proxy filters by HOST only, so reduce it to its host component;
+            # a host-less path ("/api/internal") is host-blind — skip it.
             host = entry.split("/", 1)[0].strip()
             if host and _scope_match_score(host, hostname) is not None:
                 return True

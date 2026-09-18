@@ -25,7 +25,7 @@ from assess.lib.kali import (
 )
 
 # Pre-flight budget helpers (kali_cli argparse seam); imported directly so this
-# unit need not touch the shared kali facade module.
+# unit doesn't need the shared kali facade module.
 from assess.lib.kali_cli import (
     coerce_float,
     estimate_list_sweep_seconds,
@@ -57,8 +57,7 @@ def _operator_passed_exclude_tags(args) -> bool:
     """True when the operator supplied an exclude-tags flag via --extra-args.
 
     The typed -exclude-tags/-etags flag is handled by argparse; this covers the
-    raw passthrough path so the default injection stays idempotent and never
-    double-adds an exclude-tags flag.
+    raw passthrough path so the default injection stays idempotent.
     """
     extra = getattr(args, "extra_args", "") or ""
     if not extra:
@@ -347,10 +346,9 @@ def run(args) -> None:
         cmd.extend(["-t", args.templates])
     if args.tags:
         cmd.extend(["-tags", args.tags])
-    # Default-inject a politeness/safety exclude-tags guard so broad sweeps do
-    # not fire DoS/fuzz/intrusive/brute-force templates against production-like
-    # in-scope targets (CR-27). Idempotent + operator-overridable: skip when the
-    # operator supplied -exclude-tags/-etags as a typed flag OR via --extra-args.
+    # Default-inject the CR-27 exclude-tags guard (see module comment above).
+    # Idempotent + operator-overridable: skip when the operator supplied
+    # -exclude-tags/-etags as a typed flag OR via --extra-args.
     exclude_tags = (getattr(args, "exclude_tags", "") or "").strip()
     if exclude_tags:
         cmd.extend(["-exclude-tags", exclude_tags])

@@ -183,8 +183,8 @@ def detect_runtime(*, runner=None, force: bool = False) -> RuntimeInfo:
     named_desktop = _looks_like_docker_desktop(info_text)
 
     if plat == "darwin":
-        # Darwin Docker is ~always Docker Desktop; if docker info named it, great,
-        # but absence of the probe must NOT disable the guard on a Mac.
+        # Darwin Docker is ~always Docker Desktop, so both arms are true: a named
+        # probe confirms it, and absence of the probe must NOT disable the guard.
         is_desktop = True if not info_text else (named_desktop or True)
     else:
         # Native Linux / remote Docker: only Docker Desktop when explicitly named.

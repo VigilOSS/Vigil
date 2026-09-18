@@ -173,11 +173,8 @@ def _build_docker_exec(
         "docker",
         "exec",
     ]
-    # Surface ENGAGEMENT_KEY inside the runtime so skill examples like
-    # `nuclei -l /engagements/$ENGAGEMENT_KEY/scans/...` expand correctly
-    # under the wrapper shell. Without this, the variable expanded to the
-    # empty string and output landed at `/engagements//scans/...`. Shared with
-    # the async dtach argv via _engagement_env_args so the two cannot drift.
+    # See _engagement_env_args: without this, output lands at
+    # `/engagements//scans/...` instead of the engagement path.
     docker_argv.extend(_engagement_env_args(engagement_key))
     # Identity material for --identity-env, carried the one way that reaches a
     # shell SCRIPT FILE's own requests.

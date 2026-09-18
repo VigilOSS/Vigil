@@ -86,21 +86,19 @@ def resolution_failures(
     """In-scope hosts that ENTERED a dnsx resolve but produced no A/AAAA record.
 
     dnsx runs ``-silent``, so a host whose name is known/observed (passive enum,
-    Certificate Transparency, brute-validated) but yields no address from the
-    resolve pass — e.g. a CNAME pointing off-network, or a dangling CNAME, which
-    is a subdomain-takeover lead — is dropped from the ``-o`` output with no
-    trace. Diffing the resolver INPUT host-set against the resolved OUTPUT
-    host-set recovers that "resolved to nothing" gap as an explicit, sorted,
-    de-duplicated list so the caller can surface it as a resolution-FAILURE
-    signal instead of a silent drop (I-6 / I-006 class: could-not-resolve read as
-    does-not-exist).
+    Certificate Transparency, brute-validated) but yields no address — e.g. a
+    CNAME pointing off-network, or a dangling CNAME (a subdomain-takeover lead)
+    — is dropped from the ``-o`` output with no trace. Diffing the resolver
+    INPUT host-set against the resolved OUTPUT host-set recovers that gap as a
+    sorted, de-duplicated resolution-FAILURE signal instead of a silent drop
+    (I-6 / I-006 class: could-not-resolve read as does-not-exist).
 
-    Hosts are compared case-insensitively with a trailing dot stripped so the two
-    sides match regardless of source formatting; blanks/comments are ignored.
+    Hosts are compared case-insensitively with a trailing dot stripped;
+    blanks/comments are ignored.
 
-    This is NOT the unbounded-permutation-brute hazard guard (a separate code
-    path): raw brute guesses never reach this resolve input — puredns validates
-    them against its trusted resolvers first, so only observed/validated names are
+    Not the unbounded-permutation-brute hazard guard (a separate code path):
+    raw brute guesses never reach this resolve input — puredns validates them
+    against its trusted resolvers first, so only observed/validated names are
     diffed here.
     """
     resolved = {h for h in map(_norm_resolve_host, resolved_output) if h}

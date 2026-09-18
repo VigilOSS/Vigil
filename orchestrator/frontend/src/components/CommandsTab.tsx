@@ -1479,10 +1479,9 @@ function Drawer({
               uuid
             </button>
           </div>
-          {/* Maximize was retired with the move to a centred modal —
-              the modal already fills the viewport, so there's no
-              meaningful "expand" operation left. The modal's own ×
-              close button (upper-right) handles the dismiss. */}
+          {/* Maximize was retired with the move to a centred modal — it
+              already fills the viewport, so there's no "expand" left; the
+              modal's own × (upper-right) handles dismiss. */}
         </div>
         <h2
           id={titleId}

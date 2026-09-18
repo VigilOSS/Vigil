@@ -242,7 +242,6 @@ def run(args) -> None:
 
     raw = json.loads(json_path.read_text(encoding="utf-8"))
 
-    # Accept either a single object or an array
     if isinstance(raw, dict):
         results = [raw]
     elif isinstance(raw, list):
@@ -255,7 +254,6 @@ def run(args) -> None:
         print("No analysis results to submit.", file=sys.stderr)
         sys.exit(0)
 
-    # Validate required fields
     required = {"queue_item_id", "agent_name", "lease_token", "disposition"}
     for i, result in enumerate(results):
         if not isinstance(result, dict):
@@ -337,7 +335,6 @@ def run(args) -> None:
     print(f"Results recorded: {created}")
     print(f"Audit snapshots: {submit_snapshot.name}, {response_snapshot.name}")
 
-    # Count dispositions
     dispositions = {}
     for r in results:
         d = r.get("disposition", "unknown")
