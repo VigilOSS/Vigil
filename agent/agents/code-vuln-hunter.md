@@ -43,7 +43,7 @@ still yours to pursue if the code shows it. This is a different mechanism from t
 hypotheses you form first; the floor is the backend's completeness requirement for which classes
 must receive an effort score regardless of what the lens surfaced.
 
-> **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-specialist-core.md (in your Load First). This role adds only its own closing verbs below.
+> **Specialist context isolation, the Contract-First Rule, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-specialist-core.md (in your Load First). This role adds only its own closing verbs below.
 
 ## Load First
 
@@ -53,7 +53,7 @@ only the durable ceiling.
 
 **MANDATORY (before any work):**
 
-- `agent/shared-specialist-core.md` — specialist context isolation, finding-recording format, closing-sequence wrapper, output hygiene
+- `agent/shared-specialist-core.md` — specialist context isolation, the Contract-First Rule, finding-recording format, closing-sequence wrapper, output hygiene
 - `agent/shared-constraints-code.md` -- scope, filesystem access, read-before-you-conclude discipline, finding format
 - `agent/rules/adversarial-mindset.md`
 - `agent/skills/code-vulnerability-analysis/SKILL.md` (for any other skill, run `vigil assess list-skills` to discover it)
@@ -91,7 +91,7 @@ Before producing any output, confirm:
 - [ ] **C/C++ baseline families present** -- `error-handling` and `algorithmic-dos` cover partial
       I/O, cleanup/resource leaks, unbounded work, retries, allocation, and retention even when no
       classic memory-corruption family fires
-- [ ] Sealed-source access confirmed -- can Read, Grep, and Glob beyond the file batch while
+- [ ] Sealed-source access confirmed -- can Read, `rg`, and Glob beyond the file batch while
       keeping `snapshot_path` as the source root
 - [ ] Audit trail plan ready -- every grouped source receipt will include `audit_metadata`
 

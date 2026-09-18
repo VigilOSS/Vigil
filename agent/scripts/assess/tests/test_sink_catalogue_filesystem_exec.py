@@ -9,7 +9,7 @@ and ``test_case_table_covers_every_live_pattern_in_the_assigned_slice``
 proves the two lists together account for all 89 patterns, so the catalogue
 cannot silently regain a dead pattern or lose a live one.
 
-Taxonomy note. Two defects this audit recorded have since been fixed in the
+Taxonomy note. Three defects this audit recorded have since been fixed in the
 catalogue, and the tests below now pin the corrected values so a regression
 fails loudly rather than being re-documented:
 
@@ -20,6 +20,13 @@ fails loudly rather than being re-documented:
   They are now their own ``file_inclusion`` kind carrying ``["lfi", "rfi"]``
   (vuln_taxonomy.py:92-93). The patterns moved verbatim, so the slice is
   still 89: ``file_path`` went 38 -> 34 and ``file_inclusion`` holds the 4.
+
+* Ruby's command-substitution pattern was ``\b`[^`]*` ``. ``\b`` holds only at
+  a word/non-word transition and a backtick is never a word character, so the
+  anchor demanded a word character immediately to its left -- which idiomatic
+  Ruby (``out = `ssh ...` ``) never writes. It was pinned DEAD; the anchor is
+  gone and it has a real case in ``CASES`` instead, so the slice moved 81/8 to
+  82/7 without changing its 89 patterns.
 
 ``file_path`` keeps the constructs that really are traversal
 (``fopen``/``file_get_contents``/``file_put_contents``).
@@ -378,6 +385,11 @@ class ReportController
   def run_popen(cmd)
     IO.popen(cmd)
   end
+
+  def run_remote(host)
+    out = `ssh #{host} uptime`
+    out
+  end
 end
 """
 
@@ -656,6 +668,7 @@ CASES: list[tuple[str, str, str, str, list[str] | None]] = [
     ("process_exec", "ruby", r"\bexec\s*\(", "    exec(cmd)", ["injection"]),
     ("process_exec", "ruby", r"\bOpen3\.\w+\s*\(", "Open3.capture2(cmd)", ["injection"]),
     ("process_exec", "ruby", r"\bIO\.popen\s*\(", "IO.popen(cmd)", ["injection"]),
+    ("process_exec", "ruby", r"`[^`]*`", "`ssh #{host} uptime`", ["injection"]),
     # ---- process_exec : php (treesitter_index.py:296-297) ----
     ("process_exec", "php", r"\bexec\s*\(", "        exec($cmd);", ["injection"]),
     ("process_exec", "php", r"\bsystem\s*\(", "system($cmd)", ["injection"]),
@@ -823,14 +836,6 @@ _EXCLUDED: dict[tuple[str, str, str], str] = {
     ("process_exec", "java", r"\bRuntime\.\w*exec\s*\("):
         "dead: Runtime.exec() is an instance method; the only valid call form is Runtime.getRuntime().exec(...), and '().' between 'Runtime.' and 'exec(' is not matched by \\w*",
 
-    # --- process_exec / ruby: \b immediately before a backtick can only
-    # match when a word character directly precedes the backtick with no
-    # separator. Verified: `` `#{cmd}` `` preceded by "= " (idiomatic Ruby
-    # command substitution assignment) produces no sink at all -- a space,
-    # "=", "(" or start-of-line before a backtick is never a word/non-word
-    # boundary transition into a non-word backtick.
-    ("process_exec", "ruby", r"\b`[^`]*`"):
-        "dead: \\b before a backtick requires a word char with no separator immediately before it; idiomatic Ruby always precedes a backtick with whitespace, '=', '(' or start-of-line, none of which yields a boundary",
 }
 
 
@@ -859,8 +864,8 @@ def test_case_table_covers_every_live_pattern_in_the_assigned_slice() -> None:
     # `file_inclusion` kind (4), so the totals only redistribute.
     # file_path=34, file_inclusion=4, sql_exec=22, process_exec=29 -> 89.
     assert len(all_patterns) == 89
-    assert len(tested) == 81
-    assert len(excluded) == 8
+    assert len(tested) == 82
+    assert len(excluded) == 7
 
 
 def test_case_table_has_no_duplicate_rows() -> None:

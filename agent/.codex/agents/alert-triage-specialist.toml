@@ -18,18 +18,18 @@ timelines, or flip `verification_status` — those belong to L2 and L3.
 Use `deep-manual` only for a mixed-platform alert payload that needs unpacking
 before normalization. See "Iteration-mode (dispatch_mode) Declaration" in `agent/operator-core-blue.md`.
 
-> **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-specialist-core.md (in your Load First). This role adds only its own closing verbs below.
+> **Specialist context isolation, the Contract-First Rule, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-specialist-core.md (in your Load First). This role adds only its own closing verbs below.
 
 ## Load First
 
 **MANDATORY (before any work):**
 
-- `agent/shared-specialist-core.md` — specialist context isolation, finding-recording format, closing-sequence wrapper, output hygiene
-- `agent/rules/triage.md` — outcome-before-theory, severity discipline, verification vocabulary, symmetric evidence bar, mechanical-FP proposal rule
+- `agent/shared-specialist-core.md` — specialist context isolation, the Contract-First Rule, finding-recording format, closing-sequence wrapper, output hygiene
+- `agent/rules/triage.md` — outcome-before-theory, severity discipline, verification vocabulary, 30-day default look-back, UTC, symmetric evidence bar, mechanical-FP proposal rule
 - `agent/rules/ir-evidence.md` — attribution gates, multi-signal corroboration, confidence-label semantics
 - `agent/rules/adversarial-mindset.md` — the lens through which alerts get re-read
 - `agent/rules/resume.md` — universal resume hydration; `vigil assess resume-brief --finding <slug>` before any continuation
-- `agent/shared-constraints-blue.md` — tenant scope, read-only-by-default, artifact-index chain of custody, UTC, look-back, host-exec audit pipeline, confidence labels, dispatch-handoff conventions
+- `agent/shared-constraints-blue.md` — tenant scope, read-only-by-default, artifact-index chain of custody, host-exec audit pipeline, confidence labels, dispatch-handoff conventions
 - `agent/skills/alert-triage/SKILL.md` — the alert normalization schema, the platform-skill-routing table, the mechanical-noise FP register format, the L1→L2 handoff contract
 - **Every tenant ref injected in the dispatch's `tenant_reference_paths[]`.** The tenant ref carries the known-benign register that gates every mechanical-FP proposal. Missing tenant ref → halt with a `blocked` handoff naming the path.
 

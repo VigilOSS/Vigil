@@ -50,9 +50,17 @@ ENGAGEMENT_DB_SNAPSHOT_MAX_COPIES_ENV = "VIGIL_ENGAGEMENT_DB_SNAPSHOT_MAX_COPIES
 DEFAULT_ENGAGEMENT_DB_SNAPSHOT_MAX_COPIES = 2
 CODE_TARGET_CONTACT_POLICY = "warn-do-not-contact-declared-hosts"
 
-# Engagement types that probe a live HTTP target and so can carry required
-# attribution headers / out-of-scope carve-outs. code/blue have no HTTP target.
+# Engagement types that probe a live HTTP target at creation time and so can be
+# created with required attribution headers / out-of-scope carve-outs already
+# set. code/blue declare no hosts at create, so there is nothing to attribute.
 _HTTP_TARGET_TYPES = {"web", "both", "android"}
+
+# Engagement types that carry offensive host scope at all. Mid-engagement ROE
+# mutations are gated on this plus, for the traffic-shaping ones, an actually
+# declared root — not on the track mix. A code engagement may legitimately
+# declare the hosts its source talks to (ADR 0021), and declaring one never
+# activates the web track (ADR 0022). Blue incident work has no such scope.
+_HOST_SCOPE_TYPES = {"web", "both", "android", "code"}
 
 # Bug-bounty program → the attribution header name that program mandates on all
 # traffic. `--program <name> --researcher <handle>` is sugar over `--header`.
@@ -813,18 +821,90 @@ def mutate_scope_file(
     return scope
 
 
-def _mutate_http_scope(
+def _declared_authorization_roots(scope: dict[str, Any]) -> list[str]:
+    """Every authorization root ``scope.json`` declares, across both list keys.
+
+    Android keeps its live API roots under ``backend_hosts`` while ``hosts``
+    stays empty for the artifact-only surface, so a predicate reading ``hosts``
+    alone would call a fully-declared android engagement unscoped.
+    """
+    roots: list[str] = []
+    for list_key in ("hosts", "backend_hosts"):
+        value = scope.get(list_key)
+        if isinstance(value, list):
+            roots.extend(str(item).strip() for item in value if str(item).strip())
+    return roots
+
+
+def _mutate_host_scope(
     install_root: Path,
     key: str,
     mutator: Callable[[dict[str, Any]], object],
 ) -> dict[str, Any]:
+    """Apply the mutation that DECLARES authorization roots.
+
+    Declaring a root is the authorization event itself (ADR 0018), so it cannot
+    be gated on already having one. It is gated only on the engagement having
+    offensive host scope to declare into.
+    """
     scope_path = _engagement_scope_path(install_root, key)
 
     def checked_mutation(scope: dict[str, Any]) -> None:
-        if str(scope.get("engagement_type") or "") not in _HTTP_TARGET_TYPES:
+        engagement_type = str(scope.get("engagement_type") or "")
+        if engagement_type not in _HOST_SCOPE_TYPES:
             raise SystemExit(
-                f"engagement '{key}' is type '{scope.get('engagement_type')}'; required "
-                "headers / out-of-scope apply only to HTTP-target engagements."
+                f"cannot add hosts to engagement '{key}': type "
+                f"'{engagement_type or 'unknown'}' carries no authorization-root scope."
+            )
+        mutator(scope)
+
+    return mutate_scope_file(scope_path, checked_mutation)
+
+
+def _mutate_roe_scope(
+    install_root: Path,
+    key: str,
+    mutation: str,
+    mutator: Callable[[dict[str, Any]], object],
+    *,
+    require_declared_roots: bool,
+) -> dict[str, Any]:
+    """Apply an ROE mutation to an engagement that carries host scope.
+
+    Every ROE mutation is gated on the engagement TYPE: blue incident work has
+    no offensive host scope, so none of these describe anything there.
+
+    ``require_declared_roots`` adds the second gate, and only ADDING traffic
+    shaping asks for it: a required header and an out-of-scope carve-out each
+    describe traffic to declared roots, and an engagement with none has nothing
+    for them to describe — that refusal is how a code engagement is pointed at
+    `add-host` (ADR 0021). Removing ROE state never asks for it. `create`
+    writes required headers, carve-outs and the rate ceiling on any HTTP-target
+    type without requiring a root, and android's ``hosts`` is empty by design
+    (its live API roots are ``backend_hosts``), so a root requirement on the
+    way back out would strand state the operator was allowed to write: they
+    would have to declare an authorization root they do not have in order to
+    delete a header they already set.
+
+    The rate ceiling sits with the removals for the same reason. It has no
+    removal verb, so this is the only way to change a value `create` can
+    already write; and it restrains Vigil's own tooling — a single global token
+    bucket per recon stage — rather than describing any particular root, so
+    refusing a tighter ceiling fails in the wrong direction.
+    """
+    scope_path = _engagement_scope_path(install_root, key)
+
+    def checked_mutation(scope: dict[str, Any]) -> None:
+        engagement_type = str(scope.get("engagement_type") or "")
+        if engagement_type not in _HOST_SCOPE_TYPES:
+            raise SystemExit(
+                f"cannot {mutation} on engagement '{key}': type "
+                f"'{engagement_type or 'unknown'}' carries no authorization-root scope."
+            )
+        if require_declared_roots and not _declared_authorization_roots(scope):
+            raise SystemExit(
+                f"cannot {mutation} on engagement '{key}': it declares no in-scope "
+                f"hosts. Run `vigil engagement add-host {key} <host>` first."
             )
         mutator(scope)
 
@@ -846,7 +926,9 @@ def set_engagement_header(install_root: Path, key: str, header: str) -> dict[str
         headers[name] = value
         scope["required_headers"] = headers
 
-    scope = _mutate_http_scope(install_root, key, update)
+    scope = _mutate_roe_scope(
+        install_root, key, "set a required header", update, require_declared_roots=True
+    )
     return dict(scope["required_headers"])
 
 
@@ -862,7 +944,10 @@ def unset_engagement_header(install_root: Path, key: str, name: str) -> dict[str
         else:
             scope.pop("required_headers", None)
 
-    scope = _mutate_http_scope(install_root, key, update)
+    scope = _mutate_roe_scope(
+        install_root, key, "remove a required header", update,
+        require_declared_roots=False,
+    )
     headers = scope.get("required_headers")
     return dict(headers) if isinstance(headers, dict) else {}
 
@@ -880,7 +965,10 @@ def add_out_of_scope(install_root: Path, key: str, entries: list[str]) -> list[s
                 merged.append(entry)
         scope["out_of_scope"] = merged
 
-    scope = _mutate_http_scope(install_root, key, update)
+    scope = _mutate_roe_scope(
+        install_root, key, "add an out-of-scope carve-out", update,
+        require_declared_roots=True,
+    )
     return list(scope["out_of_scope"])
 
 
@@ -897,7 +985,10 @@ def remove_out_of_scope(install_root: Path, key: str, entry: str) -> list[str]:
         else:
             scope.pop("out_of_scope", None)
 
-    scope = _mutate_http_scope(install_root, key, update)
+    scope = _mutate_roe_scope(
+        install_root, key, "remove an out-of-scope carve-out", update,
+        require_declared_roots=False,
+    )
     remaining = scope.get("out_of_scope")
     return list(remaining) if isinstance(remaining, list) else []
 
@@ -1041,7 +1132,17 @@ def add_engagement_hosts(
                 merged.append(entry)
         scope["hosts"] = merged
 
-    scope = _mutate_http_scope(install_root, key, update)
+    scope = _mutate_host_scope(install_root, key, update)
+    if str(scope.get("engagement_type") or "") == "code":
+        # ADR 0022: the web track is added explicitly, never as a side effect of
+        # another operation. Say so here rather than let the operator read a
+        # successful add-host as "live work is now authorized to start".
+        print(
+            f"[vigil] {key} is a code engagement: declaring an authorization root "
+            "does not activate a web track. Run "
+            f"`vigil engagement add-track {key} web` before any live probe.",
+            file=sys.stderr,
+        )
     return list(scope["hosts"])
 
 
@@ -1055,10 +1156,12 @@ def set_engagement_rate_limit(
     if rate is None:
         raise SystemExit("rate limit value is required.")
 
-    scope = _mutate_http_scope(
+    scope = _mutate_roe_scope(
         install_root,
         key,
+        "set the rate limit",
         lambda current: current.__setitem__("rate_limit", rate),
+        require_declared_roots=False,
     )
     return float(scope["rate_limit"])
 

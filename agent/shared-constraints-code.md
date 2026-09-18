@@ -8,7 +8,7 @@ in a race to be "first"; the one ordered load sequence (Load First batch -> skil
 discovery -> target work) is stated once in `agent/shared-specialist-core.md` "Load Sequence".
 These rules apply to every code analysis specialist agent regardless of role.
 
-> **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-specialist-core.md (in your Load First). This role adds only its own closing verbs below.
+> **Specialist context isolation, the Contract-First Rule, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-specialist-core.md (in your Load First). This role adds only its own closing verbs below.
 
 ---
 

@@ -59,10 +59,6 @@ When you are about to copy one of these into a second file, stop and import.
   at column zero and forges a heading. ADR 0019 forbids masking it, so containment is the only lever.
   `operator_checkpoint.py` and `resume_brief.py` render through it.
   See: `agent/scripts/assess/tests/test_operator_checkpoint_render.py`.
-- `agent/scripts/assess/lib/treesitter_index.py:_FREEMARKER_ESCAPING_EXTENSIONS` owns whether a
-  FreeMarker template starts auto-escaped. The FILENAME decides it, so `_index_lightweight` threads
-  `file_path` into `_extract_freemarker` alone; an explicit `<#ftl>` header overrides.
-  See: `agent/scripts/assess/tests/test_freemarker_extraction.py`.
 - `agent/scripts/assess/lib/code_languages.py:CANONICAL_CODE_LANGUAGES` owns every detectable
   language; `code_analysis.py:_CANONICAL_STRUCTURAL_LANGUAGES` must be a SUPERSET, or one unknown
   language fails `code-index sync` for the whole repo, and `STRUCTURALLY_ANALYZED_LANGUAGES` must
@@ -87,6 +83,9 @@ When you are about to copy one of these into a second file, stop and import.
   the standalone CLI mirror is `agent/scripts/assess/commands/resolve.py:_COVERAGE_STATUSES`.
 - `orchestrator/backend/app/services/state_manager/_common.py:SUBMISSION_STATUSES` owns submission
   status; `agent/scripts/assess/lib/contracts.py:SUBMISSION_STATUSES` is the CLI mirror.
+- `orchestrator/backend/app/api/assessment.py:FindingPatchRequest` owns patchable finding fields;
+  `contracts.py:FINDING_PATCH_FIELDS` mirrors it. See:
+  `orchestrator/backend/tests/test_finding_patch_contract_mirror.py`.
 - `orchestrator/backend/app/services/state_manager/_common.py:VERIFICATION_STATUSES` owns finding
   verification status; `agent/scripts/assess/lib/contracts.py:VERIFICATION_STATUSES` mirrors it.
 - `orchestrator/backend/app/retry_state.py:RETRY_STATES` owns blocked-technique retries; unknown
@@ -102,6 +101,9 @@ When you are about to copy one of these into a second file, stop and import.
 - `agent/scripts/assess/lib/findings.py:_AGENT_PREFIX_MAP` and
   `orchestrator/backend/app/services/state_manager/findings.py:_FINDING_PREFIX_BY_SOURCE` jointly
   own finding prefixes; operator prompt prefix tables mirror both.
+- `orchestrator/backend/app/api/report_export.py`'s five `_*_FIELDS` rosters own what the
+  client-delivered HTML carries; `orchestrator/report/src/types.ts` is the other half, index signature
+  dropped so a renderer reaching past them is a type error. See: `AGENTS.md` report-template section.
 - `agent/scripts/assess/lib/contracts.py` owns executable CLI metadata and phase discovery.
   `contract.py` and `list_commands.py` render it live; a wrong phase makes a verb undiscoverable.
 - `src/vigil_cli/engagements.py:CLIENT_PROVIDER_KEYS` and `CLIENT_MESSAGE_FLAGS` own client launch
@@ -112,7 +114,6 @@ When you are about to copy one of these into a second file, stop and import.
   Presenters consume its rows; do not derive freshness beside it. See: `AGENTS.md` freshness section.
 - `src/vigil_cli/install_manifest.py` and `src/vigil_cli/install_fs.py` own managed install paths,
   pinned/no-follow operations, and content digests.
-- `agent/scripts/assess/lib/params.py:header_schema_from_headers` owns value-free header schemas.
 - `agent/scripts/assess/lib/scope.py:ingest_scope_filter` must run on every new file-to-buffer ingest
   path. Arjun and proxy ingestion reuse already-filtered URLs.
 - `orchestrator/backend/app/services/state_manager/work_buffer.py:_scope_excluded_hosts` owns
@@ -210,7 +211,6 @@ A prompt change is **not** prompt-only when the prompt defines an artifact the b
   `agent/scripts/assess/lib/finding_render.py`.
 - `agent/scripts/assess/commands/operator_checkpoint.py` — `vigil assess operator-checkpoint`, the operator's own durable state. References plus one intent note; every reference is existence-checked in the write transaction.
 - `agent/scripts/assess/commands/resume_brief.py` — a **read**. It observes abandoned command runs, jobs and host children and names the verb that reconciles them; the reconciling write is owned solely by `vigil assess kali sweep-orphans`.
-- `agent/scripts/assess/commands/eval_capture.py` — a maintainer/CI tool, deliberately off the operator surface.
 - `agent/scripts/hooks/` — shared host hooks for activity logging, compaction, and session end.
   Command filtering is deliberately absent (ADR 0019). `goose-hook-adapter.sh` adapts Goose tool names.
 - `agent/schemas/` — the durable JSON payload contracts. See the generated-vs-hand-written invariant above before editing one.

@@ -169,6 +169,7 @@ class SessionController {
         session_start();
         if (password_verify($request->password, $user->password)) {
             if (Auth::check()) {
+                $_SESSION["user"] = $user->id;
                 return response()->json(["ok" => true]);
             }
         }
@@ -505,6 +506,9 @@ CASES: tuple[Case, ...] = (
     Case("auth-php-session-start", "auth", "php", r"\bsession_start\s*\(",
          "auth.php", AUTH_PHP,
          "session_start();", _AUTH_VULN_CLASSES),
+    Case("auth-php-session-superglobal", "auth", "php", r"\$_SESSION\b",
+         "auth.php", AUTH_PHP,
+         '$_SESSION["user"] = $user->id;', _AUTH_VULN_CLASSES),
 
     # -- xss_output --
     Case("xss-java-getwriter-write", "xss_output", "java",
@@ -841,14 +845,14 @@ end
     assert _sinks_of_kind(result, "redirect") == []
 
 
-def test_php_session_superglobal_never_matches_its_own_pattern() -> None:
-    """`\\b\\$_SESSION\\b` (treesitter_index.py:380) has a leading `\\b`
-    immediately before the literal `$`. `\\b` only holds at a transition
-    between a `\\w` and a non-`\\w` character; `$` is never `\\w`, so the
-    leading `\\b` can only match if the character immediately to its left is
-    itself a word character -- which never happens before a PHP variable
-    sigil in valid syntax (it is always preceded by whitespace or
-    punctuation). This regex cannot fire on any syntactically valid PHP.
+def test_php_session_superglobal_matches_the_sigil_it_is_written_for() -> None:
+    """Regression for a leading `\\b` that could never be satisfied.
+
+    `\\b` holds only at a `\\w`/non-`\\w` transition, and `$` is never `\\w`,
+    so `\\b\\$_SESSION\\b` required a word character immediately to the left of
+    the sigil -- which valid PHP never writes. The pattern matched `a$_SESSION`
+    and nothing else. The anchor is gone; both halves are asserted here so the
+    fix cannot silently revert to the unmatchable form.
     """
     source = """\
 <?php
@@ -860,8 +864,55 @@ class SessionReader {
 """
     result = _index("SessionReader.php", "php", source)
     assert result["analysis_mode"] == "tree_sitter"
-    assert _sinks_of_kind(result, "auth") == []
-    assert re.search(r"\b\$_SESSION\b", '$_SESSION["user"]') is None
+    assert [sink["line"] for sink in _sinks_of_kind(result, "auth")] == [
+        _line_of(source, '$_SESSION["user"]')
+    ]
+    assert not _unmatchable_word_anchors()
+
+
+# `\w`-style classes and the zero-width assertions: an escape that is not a
+# literal character, so a `\b` in front of one is perfectly satisfiable.
+_NON_LITERAL_ESCAPES = frozenset("wdsWDSbBAZzGN")
+# Likewise for regex syntax: a group, a class or another anchor is not the
+# literal this test reasons about.
+_REGEX_SYNTAX_STARTS = frozenset("[(^$.*+?{|")
+
+
+def _literal_required_after_word_boundary(pattern: str) -> str | None:
+    """The single literal character *pattern* demands right after a leading `\b`."""
+    if not pattern.startswith("\\b"):
+        return None
+    rest = pattern[2:]
+    if not rest:
+        return None
+    if rest[0] == "\\":
+        if len(rest) < 2 or rest[1] in _NON_LITERAL_ESCAPES:
+            return None
+        return rest[1]
+    if rest[0] in _REGEX_SYNTAX_STARTS:
+        return None
+    return rest[0]
+
+
+def _unmatchable_word_anchors() -> list[tuple[str, str, str]]:
+    """Every sink pattern whose leading `\b` can never hold.
+
+    `\b` matches only at a word/non-word transition, so a `\b` immediately in
+    front of a non-word literal demands a word character to that literal's
+    left. Valid PHP never writes one before the `$` sigil and idiomatic Ruby
+    never writes one before a command-substitution backtick; both patterns
+    shipped anchored and matched nothing at all. What is pinned here is the
+    shape rather than those two instances, so the next one fails on arrival.
+    """
+    return [
+        (str(definition["kind"]), language, pattern)
+        for definition in treesitter_index._SINK_DEFINITIONS
+        for language, patterns in definition["patterns"].items()
+        for pattern in patterns
+        if (literal := _literal_required_after_word_boundary(pattern)) is not None
+        and not literal.isalnum()
+        and literal != "_"
+    ]
 
 
 def test_ruby_devise_macro_call_sits_outside_any_method_body() -> None:
@@ -1010,10 +1061,6 @@ _EXCLUDED_PATTERNS: dict[tuple[str, str, str], str] = {
         "class-body `devise :database_authenticatable, ...` macro call, "
         "outside any method; case-sensitivity also excludes `Devise::...`. "
         "See test_ruby_devise_macro_call_sits_outside_any_method_body.",
-    ("auth", "php", r"\b\$_SESSION\b"):
-        "DEAD -- regex bug: the leading \\b before a literal $ can never be "
-        "satisfied in valid PHP. "
-        "See test_php_session_superglobal_never_matches_its_own_pattern.",
     ("xml_parse", "python", r"\bxml\.etree\.ElementTree\.parse\s*\("):
         "DEAD in practice -- only matches the unaliased fully-qualified "
         "spelling; idiomatic code aliases the import. "
@@ -1081,5 +1128,5 @@ def test_case_table_covers_every_live_pattern_in_the_assigned_families() -> None
     # java `xml_parse` then gained `\bXMLInputFactory\b` (StAX), closing the
     # one Java XML entry point the family had no pattern for.
     assert len(catalogue) == 81
-    assert len(covered) == 68
-    assert len(excluded) == 13
+    assert len(covered) == 69
+    assert len(excluded) == 12

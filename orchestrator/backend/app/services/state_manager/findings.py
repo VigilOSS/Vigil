@@ -3832,6 +3832,17 @@ def get_finding(engagement_id: int, slug: str) -> dict[str, Any]:
         return record
 
 def list_exploit_candidates(engagement_id: int) -> list[dict[str, Any]]:
+    """Findings an exploit dispatch may be authorized against.
+
+    Track-agnostic by design: a confirmed ``file:`` finding is as exploitable as
+    a confirmed URL one, and ADR 0023 keeps both on a single canonical claim.
+    What is excluded is ``pending_runtime_proof`` — proof owed is not proof, so a
+    parked finding cannot enter the approval gate. Its complement is read
+    separately by ``vigil assess exploit review``; widening this predicate would
+    collapse the two into one queue and let an unproven claim be approved.
+    See: ``tests/test_engagements_api.py`` —
+    ``test_pending_runtime_proof_blocks_report_readiness_and_exploit_candidates``.
+    """
     engagement = _engagement_or_404(engagement_id)
     with _common.get_connection() as connection:
         rows = connection.execute(

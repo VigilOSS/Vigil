@@ -136,6 +136,7 @@ in addition to the specialist's default skill. This prevents new skills from goi
 | Redirect parameter (`next`, `return_to`, `url`, `redirect_uri`) | `open-redirect-testing` | vulnerability-analyst |
 | MongoDB/CouchDB tech fingerprint (ObjectId format, Mongoose errors) | `nosql-injection` | vulnerability-analyst |
 | XML input accepted (SOAP, SVG upload, RSS, SAML) | `xxe-testing` | vulnerability-analyst |
+| LLM/agent endpoint (`gf:llm_api` cluster, `/v1/chat/completions`, `/embeddings`, `/inference`, or a `messages`/`system_prompt`/`max_tokens`/`tool_choice` parameter — a bare `?prompt=` is an OIDC parameter, not an LLM one) | `llm-api-testing` | vulnerability-analyst |
 
 **Operator obligation**: When fetching work items, scan the URL patterns and intel for these
 signals. If a signal matches, name the skill in the dispatch prompt. The specialist loads what

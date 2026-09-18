@@ -60,6 +60,11 @@ StructuralDimension: TypeAlias = Literal[
 _STREAMING_FALLBACK_UNAVAILABLE_BASELINE = frozenset(
     {"call_sites", "classes", "dataflow", "exports", "functions"}
 )
+# `_detect_sinks` and `_detect_call_sites` read nothing but the spans a callable
+# bounds, so a tree-sitter file with no callable measured none of these. The
+# producer is `_unscanned_scope_dimensions` in
+# `agent/scripts/assess/lib/treesitter_index.py`; keep the two in step.
+_UNSCANNED_SCOPE_DEGRADATION_REASON = "unscanned_function_scope"
 _SHA256_PATTERN = r"^[0-9a-f]{64}$"
 _MAX_REPO_KEY_BYTES = 255
 _MAX_VARIANT_PARENT_FINDINGS = code_analysis.MAX_VARIANT_PARENT_FINDINGS
@@ -519,17 +524,24 @@ class StructuralMetadataItem(BaseModel):
                         "dimensions: " + ", ".join(missing_baseline)
                     )
             elif self.structural_analysis_mode in {"tree_sitter", "lightweight_regex"}:
-                if self.structural_degradation_reason != "artifact_signal_limit":
+                if not (
+                    self.structural_artifact_truncated
+                    or self.structural_unavailable_dimensions
+                ):
                     raise ValueError(
-                        "bounded parser degradation requires reason=artifact_signal_limit"
+                        "bounded parser degradation requires a truncated artifact "
+                        "or an unavailable dimension"
                     )
-                if self.structural_unavailable_dimensions:
+                # Truncation is the louder debt -- it dropped records the parser
+                # did read -- so it owns the reason when both apply.
+                expected_reason = (
+                    "artifact_signal_limit"
+                    if self.structural_artifact_truncated
+                    else _UNSCANNED_SCOPE_DEGRADATION_REASON
+                )
+                if self.structural_degradation_reason != expected_reason:
                     raise ValueError(
-                        "bounded parser degradation cannot claim unavailable dimensions"
-                    )
-                if not self.structural_artifact_truncated:
-                    raise ValueError(
-                        "bounded parser degradation requires a truncated artifact"
+                        f"bounded parser degradation requires reason={expected_reason}"
                     )
             else:
                 raise ValueError("degraded structural analysis requires an explicit degraded mode")
@@ -573,6 +585,31 @@ class StructuralMetadataItem(BaseModel):
             raise ValueError(
                 "unavailable structural dimensions require zero totals/signals: "
                 + ", ".join(unavailable_with_values)
+            )
+        # The complement of the rule above: `unavailable` already implies zero, and
+        # this implies the reverse for the one case the payload can prove. With no
+        # callable, the exact parser handed no line to the function-scoped
+        # detectors; any other signal proves the file still had source to scan, so
+        # `complete` claims a measurement that cannot have happened. A file with no
+        # signal at all stays legal -- it is consistent with a blank or comment-only
+        # source, which really does measure empty.
+        if (
+            self.structural_analysis_status == "complete"
+            and self.structural_analysis_mode == "tree_sitter"
+            and not self.total_functions
+            and any(
+                (
+                    self.total_entry_points,
+                    self.total_exports,
+                    self.total_sinks,
+                    *self.structural_signal_counts.model_dump().values(),
+                )
+            )
+        ):
+            raise ValueError(
+                "a tree-sitter file with no callable scope cannot report complete "
+                "function-scoped coverage over source it clearly scanned: name the "
+                "unavailable dimensions"
             )
         if self.structural_artifact_truncated != bool(self.structural_truncated_dimensions):
             raise ValueError(

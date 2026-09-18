@@ -376,6 +376,9 @@ def test_readiness_repair_names_the_lead_worklist_and_the_closing_verb(capsys):
     )
 
     out = capsys.readouterr().out
-    assert "vigil assess code-lead list --repo-id 4 --lead-status open" in out
+    # The gate counts open AND in_progress leads, stale bindings included, so the
+    # repair read must not filter either away.
+    assert "vigil assess code-lead list --repo-id 4 --include-superseded" in out
+    assert "--lead-status" not in out
     assert "intel update note" in out
     assert "ruled_out" in out

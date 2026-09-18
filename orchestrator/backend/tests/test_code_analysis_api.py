@@ -12274,8 +12274,10 @@ def test_fuzz_readiness_keeps_effort_warnings_advisory(client, isolate_settings)
                 {
                     "file_id": row["id"],
                     "source_sha256": row["file_hash"],
+                    # A tree-sitter file with no callable scans nothing, so it
+                    # cannot report a measured entry point under `complete`.
                     "total_functions": 0,
-                    "total_entry_points": 1,
+                    "total_entry_points": 0,
                     "total_sinks": 0,
                     "total_exports": 0,
                 }
@@ -12365,8 +12367,10 @@ def test_fuzz_entry_requires_phase2_root_triage_but_allows_pending_runtime_proof
                 {
                     "file_id": row["id"],
                     "source_sha256": row["file_hash"],
+                    # A tree-sitter file with no callable scans nothing, so it
+                    # cannot report a measured entry point under `complete`.
                     "total_functions": 0,
-                    "total_entry_points": 1,
+                    "total_entry_points": 0,
                     "total_sinks": 0,
                     "total_exports": 0,
                 }

@@ -154,7 +154,7 @@ so the operator can confirm the boundary.
 
 > Any flow that on success OR failure could land in a real inbox, create a persistent
 > record visible to real users, or send a notification must be characterized statically —
-> not proved by triggering it. See `agent/shared-constraints.md` §2d for the doctrine
+> not proved by triggering it. Run `vigil assess contract agent decision` for the doctrine
 > (static-first characterization, the reaches-a-real-third-party test, and the capped
 > 1-3 live-fire budget for genuine unknowns).
 
@@ -174,7 +174,7 @@ genuinely unknown.
 ### Known-Safe Test Destinations
 
 > Pre-declare test identities and destinations here that are proven NEGATIVE under
-> the `agent/shared-constraints.md` §2d "reaches-a-real-third-party" test — a
+> the "reaches-a-real-third-party" test in `vigil assess contract agent decision` — a
 > researcher-owned mailbox/phone, a documented sandbox with no live inbox, or a
 > self-directed test account. A destination listed here is ordinary surface — hunt
 > it fully; sending to it does not consume the §2d live-fire budget and does not

@@ -40,13 +40,13 @@ when more enumeration is needed, **recommend it** in your handoff `next_steps`
 (e.g. "operator: re-run `vigil assess recon example.com --brute --resume`") rather
 than launching it.
 
-> **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-specialist-core.md (in your Load First). This role adds only its own closing verbs below.
+> **Specialist context isolation, the Contract-First Rule, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-specialist-core.md (in your Load First). This role adds only its own closing verbs below.
 
 ## Load First
 
 **MANDATORY (before any work):**
 
-- `agent/shared-specialist-core.md` — specialist context isolation, finding-recording format, closing-sequence wrapper, output hygiene
+- `agent/shared-specialist-core.md` — specialist context isolation, the Contract-First Rule, finding-recording format, closing-sequence wrapper, output hygiene
 - `agent/shared-constraints.md` — scope, the `vigil assess kali` rule, finding IDs, rule reminders
 - `agent/rules/hunting.md`
 - `agent/rules/adversarial-mindset.md`

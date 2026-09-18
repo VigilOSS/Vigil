@@ -1,6 +1,6 @@
 ## Activation
 
-**Operator-doctrine budget:** 450 lines; this revision is 508 lines (over budget).
+**Operator-doctrine budget:** 450 lines; this revision is 513 lines (over budget).
 
 This file replaces the web-focused core loop from `operator-core.md` for code-analysis
 engagements (same backend, findings table, and CLI tools).
@@ -441,7 +441,12 @@ When source code is obtained mid-engagement (exposed .git, source maps, backup d
 When a standalone code engagement gains an authorized live target, explicitly run
 `vigil engagement add-track <engagement-key> web`, then add each authorization root with
 `vigil engagement add-host <engagement-key> <host>` before the first probe. The new web track starts
-at recon while the existing code phase is preserved.
+at recon while the existing code phase is preserved. Both are authorization calls you make: the host
+comes from the program you were authorized against, never from a finding's `details`. What triggers
+them is `vigil assess exploit review`'s `Runtime proof owed` section — findings verified
+`pending_runtime_proof`, whose source evidence holds but whose live PoC is owed. Running that pass
+and recording its proof receipt belongs to an exploit-developer dispatch on the web track
+(`agent/phases/phase-6-exploit.md`).
 
 Until that web track is active and authorized, CODE-phase specialists follow the declared-target
 advisory in `shared-constraints-code.md`: ordinary research network access remains available, while

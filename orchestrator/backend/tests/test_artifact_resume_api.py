@@ -1413,9 +1413,9 @@ def test_resume_brief_surfaces_completed_handoff_gap_until_decision_reconciles_i
 
 
 def test_resume_brief_stale_in_progress_below_display_window_is_reported(client, isolate_settings) -> None:
-    """I-10: an OLD in-progress dispatch that sorts BELOW the newest-25 display
+    """I-10: an OLD in-progress dispatch that sorts BELOW the newest-N display
     window must still be reported as stale (and counted). Pre-fix, stale/gap
-    detection scanned only that newest-25 window, so a stale row beneath it
+    detection scanned only that display window, so a stale row beneath it
     silently vanished from resume-brief — even though `reconcile-stale` (which
     scans in-progress with the SAME thresholds) still flagged it. The divergence
     was the ROW SET, not the threshold."""
@@ -1423,7 +1423,7 @@ def test_resume_brief_stale_in_progress_below_display_window_is_reported(client,
     assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
 
     # Dispatched "now" → age ~0h, well under the 24h default → NOT stale. 30 of
-    # them push any older dispatch out of the newest-25 display window.
+    # them push any older dispatch out of the newest-N display window.
     recent_iso = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     for index in range(30):
         resp = client.post(
@@ -1439,7 +1439,7 @@ def test_resume_brief_stale_in_progress_below_display_window_is_reported(client,
         assert resp.status_code == 201, resp.text
 
     # One OLD in-progress dispatch: far past the 24h threshold and, having the
-    # oldest dispatched_at, sorted at the very bottom (below the newest-25).
+    # oldest dispatched_at, sorted at the very bottom (below the display window).
     old = client.post(
         f"{BASE}/dispatches",
         json={
@@ -1489,18 +1489,18 @@ def _record_handoff(client, agent_id: str, *, agent_role: str = "recon-specialis
     assert handoff.status_code == 201, handoff.text
 
 
-def test_latest_handoffs_rank_by_checkpoint_before_the_scan_cap_bites(
+def test_latest_handoffs_rank_by_checkpoint_before_the_window_cap_bites(
     client, isolate_settings, monkeypatch
 ) -> None:
     """An old handoff that just checkpointed must still reach "latest handoffs".
 
-    The handoff scan ordered by the immutable `created_at` while `update_handoff`
-    moves only `last_checkpoint_at`, so past `_HANDOFF_SCAN_LIMIT` an
-    old-but-just-updated handoff never entered the candidate set at all — and no
-    amount of re-sorting the scanned map could recover a row the query had
-    already cut. The section literally named "latest handoffs" was therefore
-    missing the latest one. Shrink the scan cap so a five-row fixture exceeds it
-    without seeding a thousand handoffs (same trick as the per-input fetch cap).
+    The query ordered by the immutable `created_at` while `update_handoff` moves
+    only `last_checkpoint_at`, so past the window cap an old-but-just-updated
+    handoff never entered the result at all — and no amount of re-sorting
+    afterwards can recover a row the `LIMIT` already dropped. The section
+    literally named "latest handoffs" was therefore missing the latest one.
+    Shrink the render cap so a five-row fixture exceeds it without seeding
+    eleven handoffs (same trick as the per-input fetch cap).
     """
     from app.services import assessment_memory
 
@@ -1526,7 +1526,7 @@ def test_latest_handoffs_rank_by_checkpoint_before_the_scan_cap_bites(
                 ),
             )
 
-    monkeypatch.setattr(assessment_memory, "_HANDOFF_SCAN_LIMIT", 3)
+    monkeypatch.setattr(assessment_memory, "_DISPATCH_LIST_RENDER_CAP", 3)
     dispatches = client.get(f"{BASE}/resume-brief").json()["dispatches"]
 
     # Ranked by checkpoint, and the cap now cuts the two LEAST-recently
@@ -1536,13 +1536,148 @@ def test_latest_handoffs_rank_by_checkpoint_before_the_scan_cap_bites(
     # The capped window still reports the engagement's true handoff depth.
     assert dispatches["latest_handoffs_count"] == 5
 
-    # Consumer side of the same reordering: the by-key handoff-gap check now
-    # resolves worker-0's handoff, so its still-in-progress dispatch is no longer
-    # reported as having none. A handoff that has ever been checkpointed ranks at
-    # or above its creation position, so checkpoint order can only improve the
-    # candidate set these by-key lookups draw from.
-    gap_ids = [row["agent_id"] for row in dispatches["handoff_gaps"]]
-    assert "worker-0" not in gap_ids
+
+# --- lifecycle detection past the retired 1,000-row scan cap ------------------
+#
+# `_recent_dispatch_picture` used to read the in-progress, terminal and handoff
+# listings with a hard `LIMIT 1000`, then publish `len()` of those capped scans
+# as `*_count`. Both halves were wrong past a thousand rows: the dispatch
+# listings are ordered `dispatched_at DESC`, so the cap cut the OLDEST rows —
+# precisely the ones "stale" means — and the handoff map it looked gaps up in
+# was itself a top-1,000 page, so a live specialist whose handoff sank below it
+# was reported as a handoff gap that did not exist. The fixtures below are one
+# row past that cap; they seed straight into SQLite because a thousand POSTs per
+# test would trade a second of inserts for a minute of HTTP.
+
+_PAST_SCAN_CAP = 1001
+
+
+def _engagement_row_id(connection) -> int:
+    row = connection.execute(
+        "SELECT id FROM engagements WHERE key = ?", (ENGAGEMENT_KEY,)
+    ).fetchone()
+    assert row is not None, "engagement must be synced before seeding its rows"
+    return int(row[0])
+
+
+def _minutes_before(base: dt.datetime, minutes: int) -> str:
+    return (base - dt.timedelta(minutes=minutes)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _seed_paired_in_progress_backlog(count: int) -> str:
+    """Seed `count` in-progress dispatches, each with its own handoff row.
+
+    The two orderings are deliberately opposed, because that is what makes a
+    shared row cap fabricate a gap: dispatches rank `dispatched_at DESC` and
+    handoffs `last_checkpoint_at DESC`, so `worker-0000` is the NEWEST dispatch
+    and the LEAST-recently checkpointed handoff — the one dispatch a capped scan
+    keeps whose handoff a capped scan drops. The oldest dispatch (returned, and
+    far past every stale threshold) is the mirror case: the row the cap cuts is
+    the one the stale check exists to find.
+    """
+    base = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
+    oldest = f"worker-{count - 1:04d}"
+    dispatch_rows = []
+    handoff_rows = []
+    for index in range(count):
+        agent_id = f"worker-{index:04d}"
+        dispatch_rows.append(
+            (
+                agent_id,
+                # Newest first, and every row bar the last is well under the 24h
+                # default threshold so exactly one dispatch is genuinely stale.
+                "2026-01-01T00:00:00Z" if agent_id == oldest else _minutes_before(base, index),
+            )
+        )
+        handoff_rows.append((agent_id, _minutes_before(base, count - index)))
+    with sqlite3.connect(str(db_module.database_path())) as connection:
+        engagement_id = _engagement_row_id(connection)
+        connection.executemany(
+            "INSERT INTO assessment_dispatches "
+            "(engagement_id, agent_id, agent_role, task, dispatched_at, status) "
+            "VALUES (?, ?, 'recon-specialist', 'sweep', ?, 'in-progress')",
+            [(engagement_id, agent_id, ts) for agent_id, ts in dispatch_rows],
+        )
+        connection.executemany(
+            "INSERT INTO assessment_dispatch_handoffs "
+            "(engagement_id, agent_id, agent_role, summary, created_at, last_checkpoint_at) "
+            "VALUES (?, ?, 'recon-specialist', 'checkpointed', ?, ?)",
+            [(engagement_id, agent_id, ts, ts) for agent_id, ts in handoff_rows],
+        )
+    return oldest
+
+
+def test_no_handoff_gap_is_fabricated_past_the_scan_cap(client, isolate_settings) -> None:
+    """Every in-progress dispatch here HAS a handoff; none may be reported gapped.
+
+    The capped handoff scan was a top-1,000 page ordered by checkpoint, so the
+    thousand-and-first specialist's handoff simply was not in the map the gap
+    check looked it up in — and the brief invented a `handoff_gap` for a worker
+    that had checkpointed. Under ADR 0015 that is worse than a missing row: it
+    is an instrument reporting a measurement it never made.
+    """
+    _write_engagement(isolate_settings["engagements_dir"])
+    assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
+    _seed_paired_in_progress_backlog(_PAST_SCAN_CAP)
+
+    dispatches = client.get(f"{BASE}/resume-brief").json()["dispatches"]
+
+    assert dispatches["handoff_gaps"] == []
+    assert dispatches["handoff_gaps_count"] == 0
+    assert dispatches["latest_handoffs_count"] == _PAST_SCAN_CAP
+
+
+def test_stale_in_progress_dispatch_below_the_scan_cap_is_found_and_counted(
+    client, isolate_settings
+) -> None:
+    """The cap cut `dispatched_at DESC`, i.e. exactly the rows "stale" means.
+
+    One dispatch of the backlog is months old; the other thousand are minutes
+    old. A thousand-row scan of the newest rows therefore reported zero stale
+    dispatches for an engagement that had one, and `reconcile-stale` — which
+    pages the same listing to exhaustion — disagreed.
+    """
+    _write_engagement(isolate_settings["engagements_dir"])
+    assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
+    oldest = _seed_paired_in_progress_backlog(_PAST_SCAN_CAP)
+
+    dispatches = client.get(f"{BASE}/resume-brief").json()["dispatches"]
+
+    assert [row["agent_id"] for row in dispatches["stale_in_progress_dispatches"]] == [oldest]
+    assert dispatches["stale_in_progress_dispatches_count"] == 1
+    # It has a handoff, so the stale entry must name that handoff's status
+    # rather than the "none" a cut lookup would have produced.
+    assert dispatches["stale_in_progress_dispatches"][0]["handoff_status"] == "checkpointed"
+
+
+def test_terminal_no_handoff_count_is_the_true_total_past_the_scan_cap(
+    client, isolate_settings
+) -> None:
+    """A capped list is honest only while the count beside it is not capped too.
+
+    `terminal_no_handoff_count` was `len()` of the same thousand-row scan the
+    ten-row display list was sliced from, so the brief's "showing 10 of N" hint
+    under-reported silent state-loss by every row past the cap.
+    """
+    _write_engagement(isolate_settings["engagements_dir"])
+    assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
+    base = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
+    with sqlite3.connect(str(db_module.database_path())) as connection:
+        engagement_id = _engagement_row_id(connection)
+        connection.executemany(
+            "INSERT INTO assessment_dispatches "
+            "(engagement_id, agent_id, agent_role, task, dispatched_at, completed_at, status) "
+            "VALUES (?, ?, 'recon-specialist', 'sweep', ?, ?, 'completed')",
+            [
+                (engagement_id, f"dead-{index:04d}", _minutes_before(base, index), _minutes_before(base, index))
+                for index in range(_PAST_SCAN_CAP)
+            ],
+        )
+
+    dispatches = client.get(f"{BASE}/resume-brief").json()["dispatches"]
+
+    assert dispatches["terminal_no_handoff_count"] == _PAST_SCAN_CAP
+    assert len(dispatches["terminal_no_handoff"]) == 10
 
 
 def test_recommended_actions_keep_lifecycle_items_before_inspect_cap() -> None:

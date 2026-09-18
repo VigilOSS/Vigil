@@ -4,7 +4,9 @@
 // renders identically in dev and production.
 //
 // Coverage: one engagement, 6 findings spanning critical→info, one root-cause
-// group (root + sibling), the rest standalone, and two attack chains.
+// group (root + sibling), the rest standalone, and two attack chains with the
+// structured links behind them (finding steps, a non-`step` supporting link,
+// and one step whose finding is not in this report — the draft-only case).
 
 import type { ReportData } from "./types";
 
@@ -88,9 +90,7 @@ const siblingFinding = f({
   auth_context: "unauthenticated",
   evidence_type: "network-confirmed",
   root_cause_effect: "eliminates_attack_path",
-  root_cause_slug: "VA-001",
   root_cause_note: "Reachable only because the VA-001 guard never runs; no separate authorization defect of its own.",
-  sibling_order: 1,
 });
 
 const standalone = [
@@ -177,6 +177,9 @@ export const devData: ReportData = {
     scope_hosts: ["acme.example", "api.acme.example"],
     created_at: "2026-06-01T09:00:00Z",
   },
+  // The four finding rollups are derived by the backend from the findings this
+  // report actually carries, so they add up to `finding_groups` below and to
+  // nothing else — the fixture models that rather than a triage-wide count.
   summary: {
     finding_count: 6,
     finding_severities: { critical: 1, high: 2, medium: 1, low: 1, info: 1 },
@@ -185,13 +188,6 @@ export const devData: ReportData = {
     attack_chain_count: 2,
     open_surface_count: 11,
     credential_count: 3,
-    access_count: 2,
-    target_count: 2,
-    service_count: 4,
-    coverage_count: 18,
-    probe_count: 142,
-    report_blocker_count: 0,
-    coverage_blocker_count: 0,
   },
   finding_groups: {
     mode: "draft",
@@ -209,6 +205,59 @@ export const devData: ReportData = {
     standalone_count: standalone.length,
     finding_count: 6,
   },
+  // `relation`/`entity_kind` are free-form TEXT with no enum behind them; only
+  // `relation: "step"` carries meaning (report_readiness gates on it), so the
+  // fixture deliberately mixes a step path with a relation the renderer has
+  // never heard of. Order here is the order the backend ships them in, which is
+  // the order they were recorded — the report renders it as the path.
+  attack_chain_links: [
+    {
+      chain_key: "chain-admin-takeover",
+      relation: "step",
+      entity_kind: "finding",
+      entity_ref: "VA-001",
+      notes: "Guard never runs, so the admin router answers anonymously.",
+    },
+    {
+      chain_key: "chain-admin-takeover",
+      relation: "step",
+      entity_kind: "finding",
+      entity_ref: "VA-002",
+      notes: "Same unguarded router reaches the CSV export.",
+    },
+    {
+      chain_key: "chain-admin-takeover",
+      relation: "supporting-evidence",
+      entity_kind: "artifact",
+      entity_ref: "notes/admin-takeover.md",
+      notes: "Full request/response capture for both steps.",
+    },
+    {
+      chain_key: "chain-session-theft",
+      relation: "step",
+      entity_kind: "finding",
+      entity_ref: "VA-003",
+      notes: "",
+    },
+    {
+      chain_key: "chain-session-theft",
+      relation: "step",
+      entity_kind: "finding",
+      entity_ref: "VA-004",
+      notes: "Cookie is readable from the injected script because HttpOnly is absent.",
+    },
+    {
+      // A step whose finding is NOT in this report. report_readiness blocks
+      // exactly this before a `final` export, so it can only occur in a draft —
+      // which is what the fixture is. The renderer names it verbatim rather
+      // than dropping the step out of the path.
+      chain_key: "chain-session-theft",
+      relation: "step",
+      entity_kind: "finding",
+      entity_ref: "VA-009",
+      notes: "Recorded step whose finding has not been triaged into the report yet.",
+    },
+  ],
   attack_chains: [
     {
       chain_key: "chain-admin-takeover",

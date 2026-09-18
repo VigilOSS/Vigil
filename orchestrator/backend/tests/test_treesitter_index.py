@@ -52,6 +52,8 @@ _PARSER_DISTRIBUTIONS = {
     ("native.hh", "cpp"),
     ("module.mjs", "javascript"),
     ("legacy.cjs", "javascript"),
+    ("config.mts", "typescript"),
+    ("legacy.cts", "typescript"),
     # Lightweight (regex-based) extractors are now first-class languages.
     ("style.css", "css"),
     ("theme.scss", "css"),
@@ -64,6 +66,12 @@ _PARSER_DISTRIBUTIONS = {
     ("themes/base/login/login.ftl", "freemarker"),
     ("page.ftlh", "freemarker"),
     ("feed.ftlx", "freemarker"),
+    # Compound suffix: `Path(...).suffix` only ever returns `.php`, so this
+    # rule has to run before the single-suffix table or every Blade template
+    # is handed to the PHP grammar.
+    ("resources/views/home/default.blade.php", "blade"),
+    ("profile.Blade.PHP", "blade"),
+    ("index.php", "php"),
     # Dockerfiles are matched by basename, not extension.
     ("Dockerfile", "dockerfile"),
     ("Dockerfile.prod", "dockerfile"),
@@ -82,7 +90,7 @@ def test_supported_languages_includes_new():
 
 
 def test_supported_languages_includes_lightweight():
-    for lang in ("dockerfile", "shell", "lua", "html", "css", "freemarker"):
+    for lang in ("blade", "dockerfile", "shell", "lua", "html", "css", "freemarker"):
         assert lang in SUPPORTED_LANGUAGES
 
 
@@ -163,7 +171,7 @@ def test_go_entry_points():
 def test_go_sinks():
     idx = index_file("main.go", "go", source=GO_SOURCE)
     sink_kinds = {s["kind"] for s in idx["security_sinks"]}
-    assert "xss_output" in sink_kinds or "url_fetch" in sink_kinds or len(idx["security_sinks"]) >= 0
+    assert sink_kinds == {"xss_output"}
 
 
 @needs_treesitter
@@ -782,8 +790,10 @@ def test_php_sinks():
 @needs_treesitter
 def test_php_entry_points():
     idx = index_file("app.php", "php", source=PHP_SOURCE)
-    ep_names = {e["name"] for e in idx["entry_points"]}
-    assert "__construct" not in ep_names or len(idx["entry_points"]) >= 0
+    # PHP_SOURCE registers nothing the catalogue reads: no `#[Route]` attribute,
+    # no magic method, no `Route::`/`$app->`/`$router->` call. An empty result is
+    # the honest one, and a positive assertion here would be asserting a gap.
+    assert idx["entry_points"] == []
 
 
 # ---------------------------------------------------------------------------
@@ -1041,6 +1051,33 @@ def test_html_extractor_form_and_template_sinks():
     assert "template_interpolation" in kinds
     assert "inline_event_handler" in kinds
     assert any(e["kind"] == "html_form" for e in idx["entry_points"])
+
+
+def test_commented_out_html_markup_is_not_surface():
+    """A comment is dead markup, so it must not register reachability.
+
+    An HTML comment spans lines, so the per-line prefix test the other extractors
+    use cannot see it. Before the mask, a commented-out form was an `html_form`
+    entry point and a commented-out remote script was a supply-chain sink with a
+    phantom import -- a reachability claim on code that never runs, feeding
+    `entry_point_proximity`. Blade and FreeMarker delegate here and inherit it.
+    """
+    source = b"""\
+<!-- <form action="/legacy" method="post"></form> -->
+<!--
+  <script src="http://cdn.evil.example/a.js"></script>
+-->
+<!-- old --> <form action="/live" method="post"></form>
+<div data-note="a --> b"><form action="/tricky"></form></div>
+"""
+    idx = index_file("page.html", "html", source=source)
+
+    actions = sorted(e.get("annotation", "") for e in idx["entry_points"] if e["kind"] == "html_form")
+    assert actions == ["/live", "/tricky"], "commented-out forms must not register"
+    # The mask preserves columns, so a real tag sharing a line with a closed
+    # comment is still found, and a bare `-->` inside an attribute is not a close.
+    assert "external_script_load" not in _sink_kinds(idx)
+    assert idx["import_targets"] == []
 
 
 def test_css_extractor_external_import_and_expression():

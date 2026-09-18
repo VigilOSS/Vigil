@@ -308,6 +308,78 @@ _BUCKETS: tuple[tuple[str, int, frozenset[str], tuple[str, ...]], ...] = (
         ("/soap", ".wsdl"),
     ),
     (
+        "llm_api",
+        # NEW (2026-09) → class `prompt-injection`. LLM / agent API surfaces.
+        # `vuln_taxonomy` declared the `ai-ml` family and its `prompt-injection`
+        # / `ai-ml-security` classes from the start, but NO bucket mapped to it,
+        # so the web/URL track could never route a row there: `/v1/chat/
+        # completions` reached only `25 gf:api-versioning` (from the generic
+        # `/v<n>/` regex), and `?system_prompt=` scored a hard 0.
+        #
+        # Weight 40 — the tier of `auth`/`deserialization`/`sqli`: an LLM
+        # endpoint is a first-class application surface carrying prompt
+        # injection, tool-calling SSRF, system-prompt disclosure and unbounded
+        # token spend, and it must outrank the `api-versioning` (25) / `api` (20)
+        # family-level hints that were swallowing it. DECLARED LAST in the
+        # weight-40 run (after `xxe`) so the first-at-max-weight tie-break leaves
+        # every pre-existing weight-40 cluster untouched (ADR 0008's additive
+        # rule); `test_classify_llm_api.py` pins that position.
+        #
+        # Keys are the request vocabulary that DISCRIMINATES, not every word that
+        # co-occurs with AI. Deliberately EXCLUDED: `model` (would swallow half
+        # the REST surface in any corpus — every `?model=` product filter),
+        # `system` (`?system=linux`), `temperature` (IoT/thermostat/weather
+        # APIs), and `tools`/`functions` (generic, and `func`/`function` are
+        # already `rce` members at 50, so a bare `functions` would mis-cluster to
+        # `gf:rce`). The compound tool-calling keys `tool_choice`/`function_call`
+        # ARE listed — they name the tool-calling-SSRF surface unambiguously.
+        # Both `snake_case` and concatenated (camelCase-lowercased, per
+        # `collect_keys`) forms are listed, mirroring the curated compound
+        # families on `rce`/`ssrf`/`redirect`.
+        #
+        # The BARE `prompt` key belongs to that excluded list and was initially
+        # missed: OIDC Core §3.1.2.1 DEFINES `prompt` (`none`/`login`/`consent`/
+        # `select_account`), and Azure AD, Auth0, Okta, Keycloak and Google all
+        # emit it — so at weight 40 it re-clustered every SSO entry point, the
+        # highest-value auth surface in a web engagement, as an LLM endpoint
+        # (`/oauth2/authorize?...&prompt=login` → `gf:llm_api`, an unclosable
+        # `prompt-injection` coverage item, and a `llm-api-testing` gap
+        # recommendation where `auth-bypass`/`saml-sso-testing` belongs).
+        # `/login?prompt=select_account` escaped only because `auth` is declared
+        # FIRST at the same weight — a tie-break, not a design. Dropped rather
+        # than guarded by a subtractive predicate (the
+        # `_suppress_auth_on_sso_route` shape): such a predicate must enumerate
+        # IdP authorize routes and their companion vocabulary, and every gap in
+        # that enumeration silently recreates the defect on the surface that can
+        # least afford it. The compounds carry the recall and are unambiguous —
+        # no IdP, and no other bucket, claims `user_prompt`/`system_prompt`/
+        # `prompt_template`.
+        #
+        # Fragments are boundary-anchored (`fragment_in_path`), so `/completions`
+        # already covers `/v1/chat/completions` and `/openai/deployments/x/chat/
+        # completions` — a separate `/chat/completions` would be a redundant
+        # sibling. A BARE `/messages` / `/chat` / `/generate` is deliberately NOT
+        # a fragment: those flood any app with an inbox, a support-chat widget,
+        # or a report exporter. Neither are the version-qualified `/v1/messages`
+        # and `/v1/responses`, for the SAME reason: REST APIs are conventionally
+        # versioned, so `/api/v1/messages` IS the inbox route and
+        # `/api/v1/responses` IS the survey-response route — version-qualifying a
+        # generic collection noun buys no discrimination, it only moves the flood
+        # behind a `/v<n>/` prefix. A real Anthropic/OpenAI proxy is caught by the
+        # request-key set (`messages`, `max_tokens`, `system_prompt`) instead.
+        40,
+        frozenset({
+            "user_prompt", "userprompt",
+            "system_prompt", "systemprompt",
+            "prompt_template", "prompttemplate",
+            "system_message", "systemmessage",
+            "messages", "max_tokens", "maxtokens", "top_p", "topp",
+            "embedding", "embeddings",
+            "tool_choice", "toolchoice", "function_call", "functioncall",
+        }),
+        ("/completions", "/embeddings", "/inference"),
+    ),
+    (
         "img_traversal",
         # NEW (review-and-merge): image-serving endpoints that take a path
         # fragment are a classic LFI variant — `/img?src=../../etc/passwd`
@@ -1377,7 +1449,19 @@ def reason_tag_of(terminal_reason: str | None) -> str:
         return head[len("skipped:"):].strip() or "untagged"
     return "untagged"
 
-_UPLOAD_GENERIC_SHADOWS = frozenset({"lfi", "idor"})
+# Buckets whose keys OVERLAP `upload_fields`'s multipart field names generically
+# enough that, on an `upload`-typed row, they are shadowing the upload surface
+# rather than naming a second one. `select_cluster_bucket` hands the cluster back
+# to `upload_fields` when one of these is the winner.
+#
+# `img_traversal` joined the set in the 2026-09 vocabulary audit: it shares
+# `image`/`photo`/`thumb`/`thumbnail` with `upload_fields` and outranks it 35 >
+# 30, so an avatar / profile-picture upload — precisely the shape this override
+# exists for — clustered `gf:img_traversal` while the byte-identical `file`-keyed
+# row clustered `gf:upload_fields`. The overlap is generic in exactly the way
+# `lfi`'s `file`/`document` overlap is: on a multipart POST those names are the
+# form field, not a path the server will dereference.
+_UPLOAD_GENERIC_SHADOWS = frozenset({"lfi", "idor", "img_traversal"})
 
 _INTERESTINGEXT_WEIGHT: int = next(
     weight for name, weight, _, _ in _BUCKETS if name == "interestingext"
@@ -1534,6 +1618,23 @@ def classify_row(
     # a `/login` page → auth wins). So: drop auth IFF an sso PATH fragment fired,
     # the path has no `/saml/acs`|`/saml/sso`, and no auth param key fired.
     matches = _suppress_auth_on_sso_route(matches, url_path_lower, keys)
+
+    # Bare-`query` graphql disambiguation. `query` is graphql's canonical request
+    # key and also an `sqli`/`xss` member, so on an ordinary REST search route it
+    # won `gf:graphql` at 45 with no GraphQL evidence at all. Keep graphql only
+    # when a graphql path fragment, a second unambiguous graphql key, a braced
+    # `query` VALUE, or the producer `type` corroborates it; the row keeps its
+    # sqli/xss matches either way, so this re-ranks a misroute rather than
+    # dropping a surface.
+    matches = _suppress_graphql_on_bare_query(
+        case_type,
+        matches,
+        url_path_lower,
+        keys,
+        has_braced_query_value=has_braced_graphql_query_value(
+            row["query_params"], row["body_params"], row["path_params"]
+        ),
+    )
 
     # Path-embedded object references (`/users/1024/profile`, `/files/<uuid>`,
     # `/efi/{id}`) carry an IDOR surface even when no query/body parameter names
@@ -1877,6 +1978,128 @@ _SSO_PATH_FRAGMENTS: tuple[str, ...] = next(
 )
 _AUTH_SAML_FRAGMENTS: tuple[str, ...] = ("/saml/acs", "/saml/sso")
 
+# GraphQL request keys, split by how much they discriminate. Resolved from
+# `_BUCKETS` so they cannot drift from the bucket definition.
+#
+# `query` is graphql's canonical request key AND the single most overloaded key
+# in the whole table: it is also a member of `sqli` (40) and `xss` (20), and only
+# `rce` (50) outranks graphql (45). So a bare `?query=` on an ordinary REST
+# search route won `gf:graphql` at the second-highest weight in the table with
+# zero GraphQL evidence — indistinguishable from a real `/graphql` row. The irony
+# is self-documented in the `graphql` bucket comment: `/query` was deliberately
+# kept OUT of the PATH fragments because "it would mis-bucket REST search routes
+# at weight 45", and the param key then produced exactly that misroute.
+#
+# Deleting the key is the wrong fix — it loses GraphQL mounted at a
+# non-canonical path. `query` instead needs CORROBORATION, which
+# `_suppress_graphql_on_bare_query` applies.
+_GRAPHQL_KEY_SET: frozenset[str] = next(
+    key_set for name, _w, key_set, _p in _BUCKETS if name == "graphql"
+)
+_GRAPHQL_PATH_FRAGMENTS: tuple[str, ...] = next(
+    path_fragments for name, _w, _k, path_fragments in _BUCKETS if name == "graphql"
+)
+# The graphql request keys that need corroboration. Named (rather than inlined
+# in the predicate) so it is a DIGESTED table: adding or removing an ambiguous
+# key moves `CLASSIFIER_VERSION` on its own, without relying on a maintainer also
+# remembering the `_CLASSIFIER_LOGIC_REVISION` hatch.
+_GRAPHQL_AMBIGUOUS_KEYS: frozenset[str] = frozenset({"query"})
+# The rest are unambiguous on their own: no other bucket claims them and they
+# appear in no ordinary REST vocabulary.
+_GRAPHQL_UNAMBIGUOUS_KEYS: frozenset[str] = _GRAPHQL_KEY_SET - _GRAPHQL_AMBIGUOUS_KEYS
+
+
+def has_braced_graphql_query_value(*columns: str | None) -> bool:
+    """Does an ambiguous graphql key carry a braced selection set as its VALUE?
+
+    The corroborating signal for GraphQL-over-GET. `classify_type()` derives the
+    `graphql` producer type from the path, the content-type, or a braced `query`
+    value in the BODY — it never reads the query string — so a GET carrying the
+    identical evidence types `api` and reaches
+    `_suppress_graphql_on_bare_query` with no corroborator at all. GraphQL-over-
+    GET is a supported transport (it is how a GraphiQL IDE issues its own
+    requests, and the only form a historical-URL corpus can capture), so the
+    value has to be read here.
+
+    The test is DELIBERATELY the same `"{" in value and "}" in value` heuristic
+    `classify_type()` applies to a body, not a stricter one. A stricter rule here
+    would make the classifier disagree with the typer on identical evidence: the
+    POST would type `graphql` and keep its match through the producer-type
+    escape, while the byte-identical GET was suppressed. A JSON filter value
+    (`?query={"status":"open"}`) satisfies both — that is the typer's
+    pre-existing false positive, inherited on purpose rather than forked.
+
+    Keys are expanded through `expand_compound_key` exactly as `collect_keys`
+    does, so `filter[query]` is read the same way the key-set match reads it.
+    """
+    for raw in columns:
+        if not raw:
+            continue
+        try:
+            decoded = json.loads(raw)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if not isinstance(decoded, dict):
+            continue
+        for key, value in decoded.items():
+            if not expand_compound_key(str(key).lower()) & _GRAPHQL_AMBIGUOUS_KEYS:
+                continue
+            if isinstance(value, str) and "{" in value and "}" in value:
+                return True
+    return False
+
+
+def _suppress_graphql_on_bare_query(
+    case_type: str,
+    matches: list[tuple[str, int]],
+    url_path_lower: str,
+    keys: set[str],
+    *,
+    has_braced_query_value: bool,
+) -> list[tuple[str, int]]:
+    """Drop a `query`-only `graphql` match that nothing corroborates.
+
+    Subtractive precision predicate, mirroring `_suppress_auth_on_sso_route`:
+    `graphql` stays whenever ANY independent GraphQL signal is present —
+
+      * a graphql PATH fragment (`/graphql`, `/gql`, …) fired, or
+      * a second, unambiguous graphql request key fired (`mutation`,
+        `subscription`, `operationname`, `variables`), or
+      * the producer typed the row `graphql` — `classify_type()` types a POST
+        whose body carries a braced `query` value as `graphql`, which is how a
+        real `POST /custom {"query":"{me}"}` keeps its routing, or
+      * the `query` VALUE is itself a braced selection set
+        (`?query={users{id,email}}`) — the GET form of that same evidence, which
+        no producer type can express (see `has_braced_graphql_query_value`).
+
+    — and is removed only when the row's entire GraphQL case is the bare `query`
+    key. The row keeps its genuine `sqli`/`xss` matches, so it is re-ranked, never
+    dropped: `/api/v2/products/search?query=shoes` moves from `45 gf:graphql` to
+    `40 gf:sqli`.
+
+    A subtractive predicate rather than the additive `path_has_object_ref` /
+    `path_has_privileged_action` shape, because every PATH/KEY corroborating
+    signal above ALREADY fires `graphql` through `bucket_matches` on the same
+    declaration-ordered pass — an appended match would be dead in all but the
+    producer-type and braced-value cases, and appending also moves the entry to
+    the END of the reason chain, perturbing the pinned
+    `gf:graphql+gf:sqli+gf:xss` order. Suppression leaves every corroborated row
+    byte-identical.
+    """
+    if not any(name == "graphql" for name, _ in matches):
+        return matches
+    if not keys & _GRAPHQL_AMBIGUOUS_KEYS:
+        return matches
+    if keys & _GRAPHQL_UNAMBIGUOUS_KEYS:
+        return matches
+    if case_type == "graphql":
+        return matches
+    if has_braced_query_value:
+        return matches
+    if any(fragment_in_path(f, url_path_lower) for f in _GRAPHQL_PATH_FRAGMENTS):
+        return matches
+    return [(name, weight) for name, weight in matches if name != "graphql"]
+
 
 def _suppress_auth_on_sso_route(
     matches: list[tuple[str, int]],
@@ -2049,7 +2272,12 @@ def classify_from_fields(
 # literal to the scoring logic. It is the escape hatch that keeps the stamp from
 # silently falling out of sync with a pure-logic edit; a data-table edit already
 # bumps the digest on its own, so this only needs a bump for logic-only changes.
-_CLASSIFIER_LOGIC_REVISION: int = 1
+# 2 (2026-09): `_suppress_graphql_on_bare_query` — a new `classify_row` branch,
+# not a data-table edit, so the digest cannot see it without this bump.
+# 3 (2026-09): that predicate's braced-`query`-VALUE corroborator
+# (`has_braced_graphql_query_value`). It reads a new INPUT — the param values,
+# which no digested table describes — so no `_BUCKETS` edit can stand in for it.
+_CLASSIFIER_LOGIC_REVISION: int = 3
 
 _CLASSIFIER_VERSION_INPUTS: dict[str, Any] = {
     # Headline bucket / floor / inert tables.
@@ -2061,6 +2289,7 @@ _CLASSIFIER_VERSION_INPUTS: dict[str, Any] = {
     "privileged_action_verbs": _PRIVILEGED_ACTION_VERBS,
     "full_url_regex_buckets": _FULL_URL_REGEX_BUCKETS,
     "auth_saml_fragments": _AUTH_SAML_FRAGMENTS,
+    "graphql_ambiguous_keys": _GRAPHQL_AMBIGUOUS_KEYS,
     "upload_generic_shadows": _UPLOAD_GENERIC_SHADOWS,
     # Object-ref / cluster-normalization tables + regexes.
     "placeholder_tokens": _PLACEHOLDER_TOKENS,

@@ -23,7 +23,10 @@ from assess.lib.list_output import (
 )
 
 
-_MAX_BACKEND_LIMIT = 1000
+# Mirrors the backend cap on GET /findings (MAX_ASSESSMENT_LIST_LIMIT in
+# orchestrator/backend/app/services/state_manager/coverage.py). Naming a lower
+# ceiling here silently truncates a listing the backend would have served whole.
+_MAX_BACKEND_LIMIT = 5000
 _JSON_LIST_FIELDS = (
     "id",
     "slug",

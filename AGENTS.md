@@ -12,9 +12,9 @@ Read alongside this file:
 
 # Code quality
 
-This is production security tooling held to a top-tier bar: the standard is what a leading
-autonomous-offensive-security company (XBOW, Horizon3, Armadin) would ship and maintain for years —
-not a prototype. Every change should leave the codebase clearer than it found it.
+This is production security tooling, not a prototype. Hold every change to what a serious
+autonomous-offensive-security team would ship and still want to maintain in five years, and leave
+the codebase clearer than you found it.
 
 - **Correctness over speed.** Verify behavior (the right test scope, or a real run) before calling
   something done — never hedge a passing result or bury a failure. "Probably works" is not finished.
@@ -28,36 +28,33 @@ not a prototype. Every change should leave the codebase clearer than it found it
 - **Tests fail first.** For a behavior change or bug fix, write the smallest focused regression and
   run it before production edits. The failure must demonstrate the missing behavior—not a collection,
   import, fixture, or syntax error—then make it green and run the impacted suite.
-- **Coverage is the mission; difficulty never narrows scope.** This is threat-hunting tooling — the
-  goal is *precision and deep coverage* so a real finding is never missed. Never drop, defer, or
-  down-scope a detection/classification improvement because the correct mechanism is more code or
-  harder to build; implement the behaviorally-correct, robust version. The *only* reason to reshape a
-  change is correctness — an additive/boost-only invariant, a pinned regression, or a mechanism that
-  would misclassify (e.g. naively splitting compound param keys routes every `?return_url=` to SSRF
-  because `url` is a high-weight key). When correctness forces a reshape, you change *how* the
-  improvement lands (e.g. curated whole-keys + a capped weak-signal tier), not *whether* it lands. A
-  simpler mechanism that misroutes or misses signal is not an acceptable trade for less code.
+- **Coverage is the mission; difficulty never narrows scope.** The goal is precision and deep
+  coverage so a real finding is never missed. Never drop, defer, or down-scope a
+  detection/classification improvement because the correct mechanism is more code — build the
+  behaviorally-correct version. Correctness is the only reason to reshape one: an additive/boost-only
+  invariant, a pinned regression, or a mechanism that would misclassify (naively splitting compound
+  param keys sends every `?return_url=` to SSRF, because `url` is a high-weight key). Then you change
+  *how* the improvement lands — curated whole-keys plus a capped weak-signal tier — never *whether*.
+  Less code is not worth a mechanism that misroutes or misses signal.
 - **Never hide Vigil's data from Vigil's operator.** Credentials, tokens, cookies, `Authorization`
-  headers, proxy URLs and raw argv render verbatim — in the frontend, in CLI and `--json` output, in
-  agent-readable stdout, and in exports. Do not add masking, redaction, `[masked]`/`***`
-  substitution, secret-shaped regexes, reveal toggles, redaction profiles, or
-  length/prefix/shape projections (`Bearer (length=40)`). Vigil runs on the operator's machine,
-  against authorized targets, with the engagement's own credentials; there is no adversary on the
-  operator's side of that boundary, so such a control has no true positive to find and only its
-  false positives are observable — a previous masker silently truncated whole command lines out of
-  the audit view. [ADR 0019](docs/adr/0019-vigil-does-not-defend-against-its-own-operator.md) is the
-  authority, and it carves out the four controls that *do* have a real adversary and must not be
-  removed by citing it: benchmark anti-cheat, scope/ROE enforcement, proof and evidence integrity,
-  and the untrusted-target-text boundary (ADR 0018). Before adding any control that withholds data,
-  name the adversary it excludes; if the answer is "the operator, from their own data", it is
-  theater and the evidence cost is the only real effect.
+  headers, proxy URLs and raw argv render verbatim — frontend, CLI, `--json`, agent-readable stdout,
+  and exports. Add no masking, redaction, `[masked]`/`***` substitution, secret-shaped regexes,
+  reveal toggles, redaction profiles, or length/prefix/shape projections (`Bearer (length=40)`).
+  Vigil runs on the operator's machine, against authorized targets, with the engagement's own
+  credentials, so such a control has no true positive to find and only its false positives are
+  observable — a previous masker silently truncated whole command lines out of the audit view.
+  [ADR 0019](docs/adr/0019-vigil-does-not-defend-against-its-own-operator.md) is the authority. It
+  carves out the four controls that *do* have a real adversary and must not be removed by citing it:
+  benchmark anti-cheat, scope/ROE enforcement, proof and evidence integrity, and the
+  untrusted-target-text boundary (ADR 0018). Before adding any control that withholds data, name the
+  adversary it excludes; "the operator, from their own data" means it is theater.
 
 # Explaining work (breakdowns & planning)
 
-When asked for a breakdown, an explanation, or to justify a change, answer at BOTH altitudes:
-a **high-level** framing (why it matters for Vigil's mission — precision, deep coverage, trustworthy
-state over vibe) and a **low-level** view (the concrete files/mechanics), and argue each change on how
-it helps quality and depth. Do not answer at one altitude only — a single-altitude answer is incomplete.
+When asked for a breakdown, an explanation, or a justification, answer at BOTH altitudes: the
+**high-level** framing (why it matters for Vigil's mission — precision, deep coverage, trustworthy
+state over vibe) and the **low-level** view (the concrete files and mechanics). Argue each change on
+how it helps quality and depth; one altitude alone is an incomplete answer.
 
 # Version control: Jujutsu (jj)
 
@@ -305,6 +302,42 @@ reproducible verdict (anomaly ranking, payload classification, reachability) the
    the lib the single source of truth and have consumers import it — see Single sources of truth in
    [`CODE-MAP.md`](CODE-MAP.md) before copying a constant into a second file.
 
+## Add a language, sink family, or entry-point pattern
+
+The structural index is `agent/scripts/assess/lib/treesitter_index.py`. Its catalogues are
+module-level dicts keyed by language, so an addition is usually one table entry plus its
+registrations — but the registrations span two trees and the catalogue tests carry exact counts.
+
+**A new language or extension:**
+
+1. `agent/scripts/assess/lib/code_languages.py` — `detect_language`, and
+   `STRUCTURAL_SUPPORTED_LANGUAGES` for a new language code. A compound suffix (`.blade.php`) needs
+   its rule *before* the `Path(name).suffix` lookup, which only ever sees the last extension.
+2. `agent/scripts/assess/lib/treesitter_index.py` — the extractor plus `LIGHTWEIGHT_LANGUAGES` and
+   its dispatch, and an entry in each `_STREAM_*_PATTERNS` table. Without the streaming entries the
+   degraded path reports nothing rather than reporting a gap.
+3. `orchestrator/backend/app/services/code_analysis.py` — **both** language sets.
+   `_CANONICAL_STRUCTURAL_LANGUAGES` gates the request: a value missing here 400s `code-index sync`
+   for the whole repository. `STRUCTURALLY_ANALYZED_LANGUAGES` grants the baseline vuln families;
+   a language in it with no extractor is a set that lies. `test_structural_language_drift.py` exists
+   because `.ps1` shipped in exactly that state.
+4. Tests that enumerate languages: `test_treesitter_index.py`, `test_code_snapshot_cli.py`, and
+   `test_dependency_manifests.py`. Add a behavior test for the extractor itself.
+
+**A new sink family, entry-point pattern, or taint source** is an entry in `_SINK_DEFINITIONS`,
+`_ENTRY_*`/`_GLOBAL_ENTRY_LINE_PATTERNS`, or `_STREAM_SOURCE_PATTERNS`. Two rules bind it:
+
+- Every `vuln_classes` string must already exist in `agent/scripts/assess/lib/vuln_taxonomy.py`.
+  `test_indexer_scan_scope.py` AST-sweeps the module for invented classes. A security *source*
+  deliberately carries no vuln class.
+- The catalogue sweeps assert an exact pattern count and demand every pattern be either exercised by
+  a case with a working fixture or listed in that file's exclusion table with a prose reason — never
+  both, never neither. They are `test_entry_point_catalogue.py`, `test_streaming_catalogue.py`, and
+  the three `test_sink_catalogue_*.py` files. Expect to update a count in the same change.
+
+Fixtures are inline source constants in those test modules; the repository tracks no sample source
+files. Update `CODE-MAP.md` only if the change moves a boundary — it is near its size budget.
+
 ## Add an eval case
 
 The eval harness replays captured engagement outputs (JSON finding arrays) as offline, deterministic
@@ -502,7 +535,11 @@ edit through that ruleset in addition to the **Prompt edit checklist** above.
 
 # Tests & verification
 
-The verification surface is **not one command**: 4 pytest scopes + a render-check + a schema-check + lint/types + the bench rungs. All four pytest scopes use the backend venv; the other gates have their own prerequisites and costs. CI (`.github/workflows/ci.yml`) is authoritative for the blocking gates — backend pytest, the markdown-vs-CLI sync-lint, the deterministic eval, the root `tests/` suite, the assess CLI suite, the frontend build, ruff, and mypy.
+The verification surface is **not one command**: four pytest scopes, a render-check, a schema-check,
+lint/types, and the bench rungs. All four pytest scopes run on the backend venv; the other gates have
+their own prerequisites and costs. `.github/workflows/ci.yml` is authoritative for what blocks —
+backend pytest (the markdown-vs-CLI sync-lint rides inside it), the deterministic eval, the root
+`tests/` suite, the assess CLI suite, the frontend build, ruff, and mypy.
 
 > **Never run a bare `pytest` from the repo root, and always go through the backend venv.** Scope every run to one suite — duplicate `test_vigil_cli.py` basenames in `tests/` and `agent/scripts/assess/tests/` collide under a single collection. The backend venv (`uv run --directory orchestrator/backend --extra dev …`) is the one interpreter that can collect every suite; the root `.venv` hard-errors on `tests/eval` (unconditional `import yaml`), and `uv run` *without* `--extra dev` fails to spawn pytest in a clean env.
 
@@ -591,9 +628,14 @@ npm test           # vitest component tests + the node --test suites
 
 `orchestrator/report/` is a separate Vite app that builds the single-file
 `dist/template.html` the backend injects an engagement payload into. Its
-`src/types.ts` mirrors `report_readiness._report_record` plus the three other
-projections `report_export._assemble_report_payload` calls; change one side and
-the other moves with it.
+`src/types.ts` and the field allow-lists in `report_export.py` are two halves of
+one contract: the exported HTML is delivered to the *client*, so the export
+narrows every projection it calls to the fields the template renders. Change one
+side and the other moves with it — and derive the allow-list from what the
+components read, not only from what `types.ts` declares. The narrowing belongs
+at that delivery boundary and never in the projections themselves: they also
+back `GET report-findings` and `vigil assess finding report --json`, where
+ADR 0019 requires every column verbatim.
 
 ```bash
 cd orchestrator/report

@@ -38,7 +38,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-LAST_REVIEWED = "2026-07-07"
+LAST_REVIEWED = "2026-09-17"
 
 
 FAMILIES: dict[str, str] = {
@@ -55,6 +55,7 @@ FAMILIES: dict[str, str] = {
     "memory-safety": "Native memory-safety (code track): overflow, UAF, type confusion.",
     "error-handling": "Robustness / fault handling (code track).",
     "ai-ml": "AI/ML-specific security (prompt injection, model abuse).",
+    "infrastructure": "Build, container and deployment posture: runtime privilege, exposed services, build supply chain.",
 }
 
 
@@ -122,12 +123,27 @@ VULN_CLASSES: dict[str, tuple[str, str]] = {
     "error-handling": ("error-handling", "Error/exception handling defects (code track)."),
     "ai-ml-security": ("ai-ml", "AI/ML security (model/data/inference abuse, code track)."),
     "prompt-injection": ("ai-ml", "LLM prompt injection."),
+    # infrastructure (2026-09): the three classes `treesitter_index.py`'s
+    # Dockerfile / shell / HTML / CSS extractors emit. They had no canonical home
+    # because no family was about infrastructure, and every candidate remap
+    # misroutes on the FAMILIES definitions above: `injection` requires untrusted
+    # input reaching an interpreter (an `ADD https://…` has none), `rfi` means
+    # request-time remote inclusion (a build-time fetch has no request),
+    # `access-control` presumes a principal and a routed function (a Dockerfile
+    # with no `USER` has neither), and `debug-exposure`/`info-disclosure` mean an
+    # HTTP endpoint (`EXPOSE 5432` is a declared port). The FAMILY is the fix; a
+    # bare class forced into `injection` or `disclosure` would reproduce the
+    # misroute one level up.
+    "privilege-escalation": ("infrastructure", "Container/host privilege escalation: root runtime, over-permissive modes, build-time sudo."),
+    "network-exposure": ("infrastructure", "Service/port exposed beyond its intended network boundary."),
+    "supply-chain": ("infrastructure", "Build/deploy supply chain: remote or unpinned code and assets executed as trusted."),
 }
 
 
 GF_BUCKET_TO_CLASS: dict[str, str | None] = {
     "rce": "cmdi",
     "graphql": "graphql-injection",
+    "llm_api": "prompt-injection",
     "ssrf": "ssrf",
     "cloud_metadata": "ssrf",
     "sqli": "sqli",
@@ -239,6 +255,7 @@ TECHNIQUE_TO_CLASS: dict[str, str | None] = {
     "DEBUG-EXPOSURE": "debug-exposure",
     "PROMPT-INJECTION": "prompt-injection",
     "AI-ML-SECURITY": "ai-ml-security",
+    "NETWORK-EXPOSURE": "network-exposure",
     "RECON": None,
     "DISCOVERY": None,
     "PARAM-DISCOVERY": None,
@@ -276,6 +293,8 @@ TECHNIQUE_EXEMPT_CLASSES: frozenset[str] = frozenset(
         "web-app-data-exposure",  # coarse code-track rollup; tag INFO-DISCLOSURE/SECRETS-EXPOSURE instead
         "error-handling",  # code-track robustness; a black-box error page is INFO-DISCLOSURE/DEBUG-EXPOSURE
         "img-traversal",  # gf-bucket refinement of path-traversal; the probe technique IS PATH-TRAVERSAL
+        "privilege-escalation",  # container/build hardening read out of a Dockerfile or shell script; a real breakout is tagged EXPLOIT-CHAIN
+        "supply-chain",  # build-time provenance read out of a Dockerfile/CI config; no request-time probe carries it
     }
 )
 

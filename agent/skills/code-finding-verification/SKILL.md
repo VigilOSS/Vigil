@@ -23,7 +23,7 @@ hunting rules are not required to reach or record a verdict.
 Full sealed-source access (same as hunter):
 
 - **Read** — read files beneath `snapshot_path` to verify taint paths, guards, and call chains
-- **Grep** — search beneath `snapshot_path` for callers, guards, build configuration, and related paths
+- **rg** — search beneath `snapshot_path` for callers, guards, build configuration, and related paths
 - **Glob** — find files beneath `snapshot_path` for build-system and module analysis
 - **ctags** — `grep '^<symbol>\t' <ctags_path>` using the generation-bound Code Source Identity path
 
@@ -31,7 +31,7 @@ Use only ingest-time Git provenance/churn supplied in the backend repo envelope.
 contains no `.git`; never run ambient Git against the mutable `source_origin_path`.
 
 Audit trail requirement:
-- Every verification memo must state the concrete Read/Grep/ctags lookups used
+- Every verification memo must state the concrete Read/rg/ctags lookups used
 - If verification results are recorded in machine-readable form, include `audit_metadata.cross_ref_usage` with the actual queries executed
 
 ## Division of Labor

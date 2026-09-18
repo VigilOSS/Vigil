@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib
 import os
+import shutil
 import sqlite3
 import sys
 from contextlib import contextmanager
@@ -51,8 +52,20 @@ def test_sqlite_lock_contention_is_a_retryable_503(client, monkeypatch) -> None:
 # content), so every install bumps the mtime of every backend `.py`. An mtime
 # high-water mark therefore reports a restart is required after an install that
 # changed nothing, and stays silent when a NEW DEPENDENCY lands — the one change
-# that genuinely cannot work without a restart. Both are asserted against the
-# real tree: nothing but a timestamp (or a byte the digest must see) moves.
+# that genuinely cannot work without a restart. Both are asserted against a real
+# tree on disk: nothing but a timestamp (or a byte the digest must see) moves.
+#
+# The tree is a COPY of the backend's declared inputs, not the checkout itself.
+# `/readyz` re-digests `_BACKEND_SOURCE_ROOT` on every request and those globals
+# are pinned at import, so a test that dirtied the real `app/config.py` or
+# `pyproject.toml` to prove drift is seen also dirtied them for every sibling
+# xdist worker probing `/readyz` at that moment — two read-only tests in this
+# module failed on bytes they never wrote, which is the `-n auto` "no test
+# writes into the checkout" invariant (`pyproject.toml` addopts) breaking. A
+# copy keeps the real-tree property the digests are built on, and it also drops
+# two hazards the try/finally never covered: a mutated `pyproject.toml` makes
+# the next `uv run` rebuild the package, and a `Ctrl-C` inside the `try` left
+# the checkout dirty.
 
 
 def _backend_package_root():
@@ -61,44 +74,70 @@ def _backend_package_root():
     return BACKEND_ROOT
 
 
-def test_readyz_ignores_an_install_that_only_rewrites_mtimes(client) -> None:
+@pytest.fixture
+def backend_input_copy(tmp_path, monkeypatch) -> Path:
+    """Point `/readyz`'s input digests at a throwaway copy of the backend tree.
+
+    Returns the copied package root: `app/` plus the dependency manifests, the
+    exact set `_declared_backend_inputs` walks. The startup snapshot is taken
+    from the copy AFTER the redirect and BEFORE any mutation, so an untouched
+    copy reads as `restart_required: false` just like an untouched checkout.
+    """
+    from app import main
+
+    package_root = _backend_package_root()
+    copy_root = tmp_path / "backend-inputs"
+    shutil.copytree(
+        package_root / "app",
+        copy_root / "app",
+        ignore=shutil.ignore_patterns("__pycache__"),
+    )
+    for name in main._BACKEND_DEPENDENCY_MANIFESTS:
+        shutil.copyfile(package_root / name, copy_root / name)
+    monkeypatch.setattr(main, "_BACKEND_SOURCE_ROOT", copy_root / "app")
+    monkeypatch.setattr(main, "_BACKEND_PACKAGE_ROOT", copy_root)
+    # Built the way the module builds its own: declared inputs (now the copy)
+    # merged with the cross-tree modules this process really imported, which
+    # `_backend_runtime_snapshot` still re-reads from the live install root.
+    monkeypatch.setattr(
+        main,
+        "_BACKEND_STARTUP_INPUTS",
+        {**main._declared_backend_inputs(), **main._loaded_cross_tree_inputs()},
+    )
+    return copy_root
+
+
+def test_readyz_ignores_an_install_that_only_rewrites_mtimes(
+    client, backend_input_copy
+) -> None:
     """A byte-identical backend file with a fresh mtime is NOT a restart."""
-    import os
+    os.utime(backend_input_copy / "app" / "config.py", None)  # content untouched
 
-    target = _backend_package_root() / "app" / "config.py"
-    before = target.stat()
-    try:
-        os.utime(target, None)  # content untouched; mtime is now newer than start
-        runtime = client.get("/readyz").json()["backend_runtime"]
-        assert runtime["restart_required"] is False, runtime.get("changed_inputs")
-    finally:
-        os.utime(target, ns=(before.st_atime_ns, before.st_mtime_ns))
+    runtime = client.get("/readyz").json()["backend_runtime"]
+
+    assert runtime["restart_required"] is False, runtime.get("changed_inputs")
 
 
-def test_readyz_flags_a_changed_dependency_manifest(client) -> None:
+def test_readyz_flags_a_changed_dependency_manifest(client, backend_input_copy) -> None:
     """A new dependency in `pyproject.toml` needs a restart and must be seen."""
-    target = _backend_package_root() / "pyproject.toml"
-    original = target.read_bytes()
-    try:
-        target.write_bytes(original + b'\n# a new dependency landed here\n')
-        runtime = client.get("/readyz").json()["backend_runtime"]
-        assert runtime["restart_required"] is True
-        assert "pyproject.toml" in runtime["changed_inputs"]
-    finally:
-        target.write_bytes(original)
+    target = backend_input_copy / "pyproject.toml"
+    target.write_bytes(target.read_bytes() + b"\n# a new dependency landed here\n")
+
+    runtime = client.get("/readyz").json()["backend_runtime"]
+
+    assert runtime["restart_required"] is True
+    assert "pyproject.toml" in runtime["changed_inputs"]
 
 
-def test_readyz_flags_changed_backend_source_content(client) -> None:
+def test_readyz_flags_changed_backend_source_content(client, backend_input_copy) -> None:
     """A real content change under `app/` still reports a required restart."""
-    target = _backend_package_root() / "app" / "config.py"
-    original = target.read_bytes()
-    try:
-        target.write_bytes(original + b"\n# changed\n")
-        runtime = client.get("/readyz").json()["backend_runtime"]
-        assert runtime["restart_required"] is True
-        assert "app/config.py" in runtime["changed_inputs"]
-    finally:
-        target.write_bytes(original)
+    target = backend_input_copy / "app" / "config.py"
+    target.write_bytes(target.read_bytes() + b"\n# changed\n")
+
+    runtime = client.get("/readyz").json()["backend_runtime"]
+
+    assert runtime["restart_required"] is True
+    assert "app/config.py" in runtime["changed_inputs"]
 
 
 def test_readyz_exposes_both_startup_and_current_input_digests(client) -> None:

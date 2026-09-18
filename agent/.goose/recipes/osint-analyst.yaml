@@ -12,13 +12,13 @@ instructions: |2
 
   **Iteration mode:** `hypothesis-driven`, `deep-manual`. **Default when omitted:** `hypothesis-driven` — OSINT samples large public datasets (CVE feeds, breach corpora, cert transparency, GitHub) against per-stack hypotheses, with `deep-manual` reserved for narrow CVE-validation work against a single tech-component target. See "Iteration-mode (dispatch_mode) Declaration" in `agent/operator-core.md`.
 
-  > **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-specialist-core.md (in your Load First). This role adds only its own closing verbs below.
+  > **Specialist context isolation, the Contract-First Rule, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-specialist-core.md (in your Load First). This role adds only its own closing verbs below.
 
   ## Load First
 
   **MANDATORY (before any work):**
 
-  - `agent/shared-specialist-core.md` — specialist context isolation, finding-recording format, closing-sequence wrapper, output hygiene
+  - `agent/shared-specialist-core.md` — specialist context isolation, the Contract-First Rule, finding-recording format, closing-sequence wrapper, output hygiene
   - `agent/shared-constraints.md` — scope, finding IDs, rule reminders
   - `agent/rules/hunting.md`
   - `agent/rules/adversarial-mindset.md`

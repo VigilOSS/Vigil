@@ -1002,9 +1002,15 @@ def test_inline_documented_namespace_action_resolves_to_its_parent(name: str) ->
 
 def test_details_writing_contracts_publish_the_allowed_details_keys() -> None:
     # `details` is validated under additionalProperties:false, so an unknown key
-    # is rejected outright. Both verbs that write it must print the vocabulary.
-    for name in ("finding record", "finding update"):
-        rendered = contracts.render_contract(name)
-        assert "Allowed details keys" in rendered, name
-        for key in ("attacker_trace", "cvss_vector", "repro_runs"):
-            assert f"  - {key}" in rendered, f"{key} missing from {name} contract"
+    # is rejected outright and the vocabulary has to be printable. It is ONE
+    # vocabulary written through two doors, so `finding record` publishes it and
+    # `finding update` — which validates against the same schema — points there
+    # rather than carrying a second 15 KB copy that can drift.
+    record = contracts.render_contract("finding record")
+    assert "Allowed details keys" in record
+    for key in ("attacker_trace", "cvss_vector", "repro_runs"):
+        assert f"  - {key}" in record, f"{key} missing from finding record contract"
+
+    update = contracts.render_contract("finding update")
+    assert "Allowed details keys" not in update
+    assert "vigil assess contract finding record" in update

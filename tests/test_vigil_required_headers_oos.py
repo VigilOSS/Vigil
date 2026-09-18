@@ -364,31 +364,235 @@ def test_add_host_canonicalizes_supported_host_wildcard_ip_cidr_and_url(tmp_path
     assert json.loads((engagement / "scope.json").read_text())["hosts"] == hosts
 
 
-def test_http_scope_mutation_supports_android_but_not_code(tmp_path):
-    from vigil_cli import engagements
-
-    assert hasattr(engagements, "add_engagement_hosts"), "canonical add-host is missing"
-    add_engagement_hosts = engagements.add_engagement_hosts
-    engagements_root = engagements.engagements_root
+def _make_typed_engagement(tmp_path: Path, key: str, scope: dict) -> Path:
+    from vigil_cli.engagements import engagements_root
 
     root = engagements_root(tmp_path)
     root.mkdir(parents=True, exist_ok=True)
-    android = root / "android1"
-    android.mkdir()
-    (android / "scope.json").write_text(
-        json.dumps({"engagement_type": "android", "status": "in_progress"})
+    eng = root / key
+    eng.mkdir()
+    (eng / "scope.json").write_text(json.dumps(scope))
+    return eng
+
+
+def test_add_host_declares_roots_on_every_host_scoped_type(tmp_path):
+    """`add-host` is the authorization-declaring act, so it is gated on the
+    engagement HAVING host scope — never on whether a live track is active."""
+    from vigil_cli.engagements import add_engagement_hosts
+
+    _make_typed_engagement(
+        tmp_path, "android1", {"engagement_type": "android", "status": "in_progress"}
     )
-    assert add_engagement_hosts(tmp_path, "android1", ["api.mobile.example"] ) == [
+    assert add_engagement_hosts(tmp_path, "android1", ["api.mobile.example"]) == [
         "api.mobile.example"
     ]
 
-    code = root / "code1"
-    code.mkdir()
-    (code / "scope.json").write_text(
-        json.dumps({"engagement_type": "code", "status": "in_progress"})
+    _make_typed_engagement(
+        tmp_path,
+        "code1",
+        {"engagement_type": "code", "hosts": [], "status": "in_progress"},
     )
-    with pytest.raises(SystemExit, match="HTTP-target"):
-        add_engagement_hosts(tmp_path, "code1", ["api.example"])
+    assert add_engagement_hosts(tmp_path, "code1", ["api.example"]) == ["api.example"]
+
+
+def test_add_host_on_a_code_engagement_points_at_add_track(tmp_path, capsys):
+    """Declaring a root is not activating a track (ADR 0022), so the code-track
+    operator is told the command that does."""
+    from vigil_cli.engagements import add_engagement_hosts
+
+    eng = _make_typed_engagement(
+        tmp_path,
+        "code1",
+        {"engagement_type": "code", "hosts": [], "status": "in_progress"},
+    )
+    add_engagement_hosts(tmp_path, "code1", ["api.example"])
+
+    assert json.loads((eng / "scope.json").read_text())["engagement_type"] == "code"
+    assert "vigil engagement add-track code1 web" in capsys.readouterr().err
+
+
+def test_add_host_is_refused_on_an_engagement_with_no_host_scope(tmp_path):
+    from vigil_cli.engagements import add_engagement_hosts
+
+    _make_typed_engagement(
+        tmp_path, "blue1", {"engagement_type": "blue", "hosts": [], "status": "in_progress"}
+    )
+    with pytest.raises(SystemExit, match="cannot add hosts.*'blue'"):
+        add_engagement_hosts(tmp_path, "blue1", ["api.example"])
+
+
+@pytest.mark.parametrize(
+    ("helper", "args"),
+    [
+        ("set_engagement_header", ("X-Bug-Bounty: acme",)),
+        ("add_out_of_scope", (["a.target.example"],)),
+    ],
+)
+def test_adding_live_traffic_roe_is_gated_on_declared_hosts_not_engagement_type(
+    tmp_path, helper, args
+):
+    """A required header and a carve-out describe traffic to declared hosts.
+    With none declared the refusal names the mutation and the command that fixes
+    it, instead of a headers/out-of-scope type lecture."""
+    from vigil_cli import engagements
+
+    _make_typed_engagement(
+        tmp_path,
+        "code1",
+        {"engagement_type": "code", "hosts": [], "status": "in_progress"},
+    )
+    with pytest.raises(SystemExit) as excinfo:
+        getattr(engagements, helper)(tmp_path, "code1", *args)
+    message = str(excinfo.value)
+    assert "vigil engagement add-host code1 <host>" in message
+    assert "declares no in-scope hosts" in message
+
+
+@pytest.mark.parametrize(
+    ("helper", "args"),
+    [
+        ("unset_engagement_header", ("X-Bug-Bounty",)),
+        ("remove_out_of_scope", ("a.target.example",)),
+        ("set_engagement_rate_limit", (5,)),
+    ],
+)
+def test_roe_state_written_at_create_stays_mutable_with_no_declared_hosts(
+    tmp_path, helper, args
+):
+    """`create` writes ROE state on any HTTP-target type without requiring a
+    declared root, and android is the one such type whose `hosts` is empty by
+    design. Requiring a root to REMOVE that state would strand it: the operator
+    would have to declare an authorization root they do not have in order to
+    delete a header they already set. Removing ROE state, and tightening the
+    rate ceiling (which has no removal verb at all), are gated on the engagement
+    type alone."""
+    from vigil_cli import engagements
+
+    eng = _make_typed_engagement(
+        tmp_path,
+        "android1",
+        {
+            "engagement_type": "android",
+            "scope_mode": "artifact-only",
+            "hosts": [],
+            "required_headers": {"X-Bug-Bounty": "acme"},
+            "out_of_scope": ["a.target.example"],
+            "rate_limit": 10.0,
+            "status": "in_progress",
+        },
+    )
+    getattr(engagements, helper)(tmp_path, "android1", *args)
+
+    scope = json.loads((eng / "scope.json").read_text())
+    assert scope.get("required_headers", {}) == (
+        {} if helper == "unset_engagement_header" else {"X-Bug-Bounty": "acme"}
+    )
+    assert scope.get("out_of_scope", []) == (
+        [] if helper == "remove_out_of_scope" else ["a.target.example"]
+    )
+    assert scope["rate_limit"] == (5.0 if helper == "set_engagement_rate_limit" else 10.0)
+
+
+def test_android_created_with_roe_and_no_hosts_can_still_remove_it(tmp_path):
+    """The exact create -> unset sequence, through the real planner.
+
+    android is the one type `create` accepts ROE flags for while leaving both
+    host lists empty (its roots are `backend_hosts`, supplied by `--hosts`).
+    Building the scope with `plan_engagement` rather than by hand is what keeps
+    this honest: if `create` ever stops writing ROE state on a host-less
+    android engagement, this test stops proving anything and says so.
+    """
+    from vigil_cli.engagements import (
+        CreateEngagementOptions,
+        plan_engagement,
+        remove_out_of_scope,
+        unset_engagement_header,
+    )
+
+    plan = plan_engagement(
+        CreateEngagementOptions(
+            install_root=tmp_path,
+            engagement_type="android",
+            name="com.acme.app",
+            android_package="com.acme.app",
+            required_headers={"X-Bug-Bounty": "acme-researcher"},
+            out_of_scope=["a.target.example"],
+        )
+    )
+    assert plan.scope["hosts"] == []
+    assert plan.scope["backend_hosts"] == []
+    assert plan.scope["required_headers"] == {"X-Bug-Bounty": "acme-researcher"}
+
+    _make_typed_engagement(tmp_path, "android1", plan.scope)
+
+    assert unset_engagement_header(tmp_path, "android1", "X-Bug-Bounty") == {}
+    assert remove_out_of_scope(tmp_path, "android1", "a.target.example") == []
+
+
+@pytest.mark.parametrize(
+    ("helper", "args"),
+    [
+        ("set_engagement_header", ("X-Bug-Bounty: acme",)),
+        ("unset_engagement_header", ("X-Bug-Bounty",)),
+        ("add_out_of_scope", (["a.target.example"],)),
+        ("remove_out_of_scope", ("a.target.example",)),
+        ("set_engagement_rate_limit", (5,)),
+    ],
+)
+def test_no_roe_mutation_reaches_an_engagement_without_host_scope(
+    tmp_path, helper, args
+):
+    """Blue incident work carries no offensive host scope at all, so every ROE
+    mutation is refused on the TYPE, not on what it happens to declare."""
+    from vigil_cli import engagements
+
+    _make_typed_engagement(
+        tmp_path,
+        "blue1",
+        {
+            "engagement_type": "blue",
+            "hosts": [],
+            "required_headers": {"X-Bug-Bounty": "acme"},
+            "out_of_scope": ["a.target.example"],
+            "status": "in_progress",
+        },
+    )
+    with pytest.raises(SystemExit, match="'blue' carries no authorization-root scope"):
+        getattr(engagements, helper)(tmp_path, "blue1", *args)
+
+
+def test_live_traffic_roe_reaches_a_code_engagement_that_declared_a_host(tmp_path):
+    from vigil_cli.engagements import add_engagement_hosts, set_engagement_header
+
+    eng = _make_typed_engagement(
+        tmp_path,
+        "code1",
+        {"engagement_type": "code", "hosts": [], "status": "in_progress"},
+    )
+    add_engagement_hosts(tmp_path, "code1", ["api.example"])
+    assert set_engagement_header(tmp_path, "code1", "X-Bug-Bounty: acme") == {
+        "X-Bug-Bounty": "acme"
+    }
+    assert json.loads((eng / "scope.json").read_text())["engagement_type"] == "code"
+
+
+def test_android_backend_hosts_are_declared_host_scope(tmp_path):
+    """Android keeps its live API roots in `backend_hosts` while `hosts` stays
+    empty for the artifact-only surface; a `hosts`-only predicate would call a
+    fully-declared android engagement unscoped."""
+    from vigil_cli.engagements import set_engagement_rate_limit
+
+    _make_typed_engagement(
+        tmp_path,
+        "android1",
+        {
+            "engagement_type": "android",
+            "hosts": [],
+            "backend_hosts": ["api.mobile.example"],
+            "status": "in_progress",
+        },
+    )
+    assert set_engagement_rate_limit(tmp_path, "android1", 5) == 5.0
 
 
 @pytest.mark.parametrize(
@@ -485,16 +689,19 @@ def test_scope_management_waits_for_shared_scope_json_lock(tmp_path):
     assert updated["required_headers"] == {"X-Test": "value"}
 
 
-def test_management_rejects_non_http_engagement(tmp_path):
+def test_management_rejects_an_engagement_with_no_host_scope(tmp_path):
     from vigil_cli.engagements import engagements_root, set_engagement_header
 
     root = engagements_root(tmp_path)
     root.mkdir(parents=True, exist_ok=True)
-    eng = root / "codeproj"
+    eng = root / "blueproj"
     eng.mkdir()
-    (eng / "scope.json").write_text(json.dumps({"engagement_type": "code", "status": "in_progress"}))
-    with pytest.raises(SystemExit):
-        set_engagement_header(tmp_path, "codeproj", "X-Bug-Bounty: acme-researcher")
+    (eng / "scope.json").write_text(json.dumps({"engagement_type": "blue", "status": "in_progress"}))
+    with pytest.raises(
+        SystemExit,
+        match="cannot set a required header on engagement 'blueproj': type 'blue'",
+    ):
+        set_engagement_header(tmp_path, "blueproj", "X-Bug-Bounty: acme-researcher")
 
 
 def test_unset_missing_header_errors(tmp_path):

@@ -23,13 +23,13 @@ instructions: |2
   yourself as your baseline reading lens — it directs you toward where the code delegates trust (auth
   checks, input handling, config-driven behavior), not a flat inventory of the bundle.
 
-  > **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-specialist-core.md (in your Load First). This role adds only its own closing verbs below.
+  > **Specialist context isolation, the Contract-First Rule, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-specialist-core.md (in your Load First). This role adds only its own closing verbs below.
 
   ## Load First
 
   **MANDATORY (before any work):**
 
-  - `agent/shared-specialist-core.md` — specialist context isolation, finding-recording format, closing-sequence wrapper, output hygiene
+  - `agent/shared-specialist-core.md` — specialist context isolation, the Contract-First Rule, finding-recording format, closing-sequence wrapper, output hygiene
   - Exactly one mode constraint bundle, selected from the dispatch before reading source:
     - **Code track** — when the dispatch includes Code Source Identity or explicitly names code-track work, load `agent/shared-constraints-code.md` instead of the web bundle.
     - **Web track** — otherwise load `agent/shared-constraints.md`. Do not preload both bundles.

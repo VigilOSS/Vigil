@@ -126,6 +126,92 @@ Durable design decisions live in [`docs/adr/`](docs/adr/).
   clean coverage of code it never read. Nothing else checked: ripgrep is in no dependency manifest
   and ships only in the runtime image, which code analysis does not use. The row says what is lost
   rather than leaving a bare `MISSING`.
+- **Blade templates are structurally indexed.** `.blade.php` resolves to a new `blade` language
+  through the first compound-suffix lookup in the language table; `Path.suffix` returns only `.php`,
+  so every Laravel view was handed to the PHP grammar, which reads `{{ }}` and `{!! !!}` as inline
+  text and reported nothing. The extractor runs the HTML pass for forms, scripts and inline handlers,
+  then reads Blade's own constructs: `{!! !!}` is an `unescaped_output` sink, `{{ }}` a
+  `template_interpolation` one, `{{-- --}}` is skipped, and `@{{ }}` is excluded because it is
+  Blade's escape for a client framework. Each sink records `unverified_escape_observed` or
+  `unverified_no_escape_observed` — an observation, never a clearance, because `e()` escapes for HTML
+  text and not for an attribute or a script body. `@extends`/`@include*`/`@component`/`@each` build
+  the view graph and `@section`/`@yield` export slot names. The backend counts `blade` as
+  structurally analyzed, and `.mts`/`.cts` now reach TypeScript.
+- **PHP closures, route files and magic methods reach the index.** `_CALLABLE_NODE_TYPES["php"]`
+  named anonymous and arrow functions but nothing extracted them, so a
+  `Route::get('/x', function () {...})` handler and every line of its body were read by no detector
+  at all; and top-level `Route::` / `$app->` / `$router->` in `routes/*.php` never reached the
+  entry-point pass, which ran only inside function bodies. Closures now extract under the name of
+  whatever binds them, file-scope route patterns are matched with the duplicate suppressed when a
+  named handler already covers the line, and eight more magic methods (`__unserialize`, `__serialize`,
+  `__sleep`, `__toString`, `__invoke`, `__call`, `__get`, `__set`) register as entry points, because
+  an attacker-controlled `unserialize()` lands there and the runtime, not the application, is the
+  caller. Request-input detection widened past the superglobals to the request object (`$request->`,
+  `Input::`, `Request::`), which is what idiomatic Laravel, Symfony and CodeIgniter write.
+- **A file whose index found no callable now reports what it could not measure.** A `routes/web.php`,
+  a Blade view or a module-level script parsed cleanly, bounded no scan span, and reported
+  `security_sinks: []` — an unmade measurement rendered as a clean negative, which ADR 0015 forbids.
+  Such a file now reports `analysis_status: degraded`, `degradation_reason: unscanned_function_scope`
+  and `unavailable_dimensions: [call_sites, dataflow, security_sinks]`, adding `entry_points` when it
+  found none of those either. A file with no scannable line at all is excluded, because there the
+  empty result genuinely is the measurement. Truncation still owns the reason when both apply. The
+  backend rejects a tree-sitter file claiming complete function-scoped coverage with zero callables
+  but non-zero sinks or entry points, requires a whole-file span to prove manual review of one, and
+  stops counting them as "nothing to verify" — which is what let a zero-callable critical file close
+  with no review proof at all. `code-coverage`'s structural verification names them per file.
+- **LLM and agent API endpoints route to a skill of their own.** A new `llm_api` URL bucket (weight
+  40, 20 parameter keys, five path fragments including `/completions`, `/v1/messages` and
+  `/embeddings`) maps to `prompt-injection`, and a new `agent/skills/llm-api-testing/SKILL.md` covers
+  dialect fingerprinting, system-prompt disclosure, direct and indirect injection, tool-calling
+  actions, tenancy boundaries and cost abuse. The taxonomy declared the `ai-ml` family from the
+  start, but no bucket mapped to it: `/v1/chat/completions` scored only `25 gf:api-versioning` and a
+  bare `?prompt=` scored zero. The skill had to ship with the bucket, because both `ai-ml` classes
+  previously resolved to the mobile `ai-ml-on-device-security` skill alone. The bucket is declared
+  last in the weight-40 run, so no pre-existing row re-clusters; the classifier revision is stamped
+  `2`, so re-score an existing engagement with
+  `vigil assess work-buffer reclassify --reclassify-stale`.
+- **An `infrastructure` vuln-class family.** `privilege-escalation`, `network-exposure` and
+  `supply-chain` were emitted by the Dockerfile and shell extractors with no canonical home, held in
+  a test exception so the "no invented class" invariant could stay enforced for everything else.
+  Each remap was wrong one level up: `injection` presumes untrusted input reaching an interpreter and
+  an `ADD https://…` has none, `access-control` presumes a principal and a routed function and a
+  `USER`-less Dockerfile has neither, `debug-exposure` means an HTTP endpoint and `EXPOSE 5432` is a
+  declared port. `NETWORK-EXPOSURE` joins the Kali technique enum; the other two are probe-exempt,
+  because they are read out of a Dockerfile or CI config and a real breakout is `EXPLOIT-CHAIN`.
+- **A finding can be parked as owed a runtime proof.** `finding verify --status
+  pending_runtime_proof` marks a source-bound finding whose static evidence holds but whose live PoC
+  has not been run. It stays out of exploit candidates — proof owed is not proof — which is exactly
+  why it used to be invisible to the phase that would prove it. `vigil assess exploit review` now
+  prints a `Runtime proof owed` section beside the candidates, with the attach sequence
+  (`proof-run start` → `proof-receipt create` → `finding verify --proof-receipt-id`) and, when any
+  owed row is `file:`-bound, the `engagement add-track web` / `add-host` prerequisite — the host
+  comes from the program authorization, never from the finding's own target-derived text. Proof
+  attaches to the same finding as a receipt: `finding relocate` would reset the marker and drop the
+  row out of `finding list --holding`, and `contract finding relocate` now says so.
+- **The delivered report renders the recorded attack path, not just its narrative.** Appendix A
+  carried each chain's prose only; the `assessment_attack_chain_links` rows existed but never reached
+  the export. Steps now render as a numbered list, re-sorted by insertion order because the schema
+  carries no step-order column, with each `finding` step linking to that finding's own section by
+  severity, report ID and title. Links with any other `relation` render as labelled supporting
+  context rather than being dropped, since `relation` and `entity_kind` are free-form text. A step
+  whose finding is not in the report is named verbatim, which can only happen in a draft — readiness
+  blocks it in a final. Link notes render as plain text, never Markdown (ADR 0018). A chain with no
+  recorded links renders exactly as before.
+- **`vigil engagement add-host` works on a `code` engagement.** A code engagement may legitimately
+  declare the hosts its source talks to (ADR 0021), and declaring a root is the authorization event
+  itself (ADR 0018), so it cannot be gated on already having one. It prints a notice that this does
+  not activate the web track and names `vigil engagement add-track <key> web` (ADR 0022). `blue` is
+  still refused.
+- **Contracts say what the caller may actually set.** `vigil assess contract finding update` renders
+  the 24 patchable top-level fields; it previously set `details_schema_name`, so the one section a
+  patch author needs rendered empty while 15 KB of `details` keys that `finding record` already owns
+  rendered in full — and the model forbids extra keys, so a name missing there was a name no agent
+  could discover. A new backend test pins the roster to `FindingPatchRequest`. The required-fields
+  section now lists only what the author supplies, subtracting the helper defaults: `finding record`
+  fills ten of its twelve required names itself, and named `verification_status` as required two
+  sections below the default that calls `unreviewed` the only record-time value it accepts.
+  `vigil assess contract code-dependencies` documents all 16 gap codes, where a prose note named
+  eight.
 
 ### Changed
 
@@ -139,6 +225,24 @@ Durable design decisions live in [`docs/adr/`](docs/adr/).
   prompt-census` measures it advisorily instead. The calibration baseline therefore moves from
   252,884 to 2,354 — roughly 99% of the old figure was standing prompt prose, not a hundredfold
   efficiency gain. Any baseline compared across this release is comparing two different quantities.
+- **A delivered report carries only the fields its template renders.** The exported HTML is the one
+  Vigil artifact whose reader is the client rather than the operator, and its data node embedded
+  whole SQL rows: `SELECT *` on `assessment_findings` carried `notes`, `provenance`, the raw
+  `details` object and the `submission_*` columns into every delivered report, none of which the
+  template renders and all of which a reader sees with View Source. Five field rosters in
+  `report_export.py` now project each record, and a field is copied verbatim or dropped outright —
+  nothing is masked, truncated or reduced to a shape, so this is not the masking ADR 0019 forbids.
+  The narrowing lives at the delivery boundary and never inside the projections, which also back
+  `GET report-findings` and `vigil assess finding report --json`, where the operator must keep every
+  column. `report_readiness` is draft-only for the same reason: a final export cannot be produced
+  while blockers stand, and its advisories quote internal QA doubt about the engagement's own
+  evidence.
+- **Traffic-shaping ROE commands are gated on declared hosts, not engagement type.** Required
+  headers, out-of-scope carve-outs and the rate limit now refuse until the engagement declares an
+  in-scope host, and accept once it does — so a `web` engagement with no hosts no longer takes them,
+  and a `code` engagement that declared one does. The predicate reads `backend_hosts` as well as
+  `hosts`, because an Android engagement keeps its live API roots there while `hosts` stays empty for
+  the artifact-only surface.
 
 ### Fixed
 
@@ -364,6 +468,38 @@ Durable design decisions live in [`docs/adr/`](docs/adr/).
 - **The code pre-dispatch checklist covers model and reasoning.** They are required by the shared
   operator core and were missing from the code-specific checklist, so the omission surfaced only as
   repeated warnings on the stderr channel that real failures use.
+- **Three classifier call sites scored rows with half the classifier disabled.** `ingest_arjun.py`,
+  the `work-buffer` retype pass and the `coverage_checks.py` fallback each called the classifier
+  without the `url` / `source` / `live_status` context the boost layer and the full-URL regex pass
+  need. Arjun-discovered parameters were under-scored by up to 30 and could never reach
+  `cloud_metadata` or `object-storage` at all, whose markers live in the URL authority and query; the
+  retype pass disagreed with the classification it was replacing.
+- **A bare `?query=` no longer clusters as GraphQL.** `query` is a graphql key and outranks `sqli`,
+  so `/api/v2/products/search?query=shoes` read as `45 gf:graphql`. The match is now suppressed
+  unless something corroborates it — a graphql path fragment, a second unambiguous key
+  (`mutation`, `subscription`, `operationName`, `variables`), or a typed graphql body. It is a
+  re-rank and not a drop: the row keeps its `sqli` and `xss` matches and becomes `40 gf:sqli`.
+- **An image upload no longer clusters as path traversal.** `img_traversal` shares `image`, `photo`,
+  `thumb` and `thumbnail` with `upload_fields` and outranks it 35 to 30, so an avatar upload — the
+  exact shape the upload shadow exists for — clustered `gf:img_traversal` while the byte-identical
+  `file`-keyed row clustered `gf:upload_fields`. Only the cluster pick moves; `img_traversal` stays
+  in the reason chain.
+- **A PHP session check was detected by a pattern that could never match.** The auth signal was
+  `\b\$_SESSION\b`, and the leading `\b` demanded a word character immediately before the sigil,
+  which valid PHP never writes — so it matched only `a$_SESSION` and every `$_SESSION` guard read as
+  no auth signal at all.
+- **`resume-brief` finds every stale dispatch and invents no handoff gaps.** Both scans stopped at
+  1,000 rows. The dispatch scan was newest-first, so the cap cut the oldest rows — precisely what
+  stale means — and past 1,000 in-progress dispatches the brief reported zero stale while
+  `reconcile-stale` flagged them. The handoff map was a top-1,000 page, so a live specialist whose
+  handoff sank below the cut was reported as a gap that did not exist: an instrument reporting a
+  measurement it never made. Both now read exhaustively in one connection, so the `*_count` totals
+  are real, and the displayed lists are ordered oldest-first — the ten longest-overdue dispatches
+  rather than the ten that just crossed the threshold.
+- **The `code_leads_unresolved` blocker names a command that shows the rows.** Its remediation
+  pointed at `code-lead list --lead-status open`, but the blocker counts bindings noted `open` or
+  `in_progress` and does not exclude superseded ones, so the narrower read dead-ended the operator on
+  a gate that was still firing.
 
 ## [1.0.0] - 2026-09-12
 

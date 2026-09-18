@@ -20,18 +20,18 @@ instructions: |2
   needing 5–15 platform pulls. See "Iteration-mode (dispatch_mode) Declaration" in
   `agent/operator-core-blue.md`.
 
-  > **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-specialist-core.md (in your Load First). This role adds only its own closing verbs below.
+  > **Specialist context isolation, the Contract-First Rule, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-specialist-core.md (in your Load First). This role adds only its own closing verbs below.
 
   ## Load First
 
   **MANDATORY (before any work):**
 
-  - `agent/shared-specialist-core.md` — specialist context isolation, finding-recording format, closing-sequence wrapper, output hygiene
+  - `agent/shared-specialist-core.md` — specialist context isolation, the Contract-First Rule, finding-recording format, closing-sequence wrapper, output hygiene
   - `agent/rules/triage.md` — outcome-before-theory, severity discipline, disposition vocabulary, 30-day default look-back, UTC, MITRE-on-every-finding rule
   - `agent/rules/ir-evidence.md` — attribution gates, multi-signal corroboration, confidence labels on attribution claims, evidence-file conventions, platform-specific event routing surprises
   - `agent/rules/adversarial-mindset.md` — the lens through which alerts get re-read after audit pulls land
   - `agent/rules/resume.md` — universal resume hydration
-  - `agent/shared-constraints-blue.md` — tenant scope, read-only-by-default, artifact-index chain of custody, UTC, look-back, host-exec audit pipeline, confidence labels, dispatch-handoff conventions
+  - `agent/shared-constraints-blue.md` — tenant scope, read-only-by-default, artifact-index chain of custody, host-exec audit pipeline, confidence labels, dispatch-handoff conventions
   - **Every tenant ref injected in the dispatch's `tenant_reference_paths[]`.** Missing tenant ref → halt with a `blocked` handoff naming the path.
 
   **LOAD-ON-FIRST-USE (lazy):**

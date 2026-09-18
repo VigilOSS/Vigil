@@ -78,9 +78,6 @@ _COLLAPSED_ADMISSION_RATIO = 0.25
 _COLLAPSED_ADMISSION_MIN_SKIPPED = 100
 
 
-_C_EXTENSIONS = frozenset({'.c', '.h', '.cpp', '.cc', '.cxx', '.hpp', '.hh'})
-_PYTHON_EXTENSIONS = frozenset({'.py', '.pyx', '.pyi'})
-_JS_TS_EXTENSIONS = frozenset({'.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs'})
 _GIT_LOG_TIMEOUT_SECONDS = 120
 _GIT_REV_LIST_TIMEOUT_SECONDS = 30
 _GIT_LARGE_HISTORY_COMMIT_THRESHOLD = 50_000

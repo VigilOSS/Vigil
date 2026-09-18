@@ -39,6 +39,7 @@ from assess.lib.parser_boundary import ParserBoundaryCancelled, index_file
 from assess.lib.treesitter_index import (
     SUPPORTED_LANGUAGES,
     STREAMING_FALLBACK_BASELINE_UNAVAILABLE,
+    UNSCANNED_SCOPE_DEGRADATION_REASON,
     StreamingSecurityScanner,
     language_for_file,
 )
@@ -1037,10 +1038,14 @@ def _validate_analysis_artifact(
                 raise ValueError(f"streaming fallback debt is incomplete for {rel_path}")
         elif not (
             mode in {"tree_sitter", "lightweight_regex"}
-            and
-            available
-            and truncated
-            and indexed.get("degradation_reason") == "artifact_signal_limit"
+            and available
+            and (truncated or indexed.get("unavailable_dimensions"))
+            and indexed.get("degradation_reason")
+            == (
+                "artifact_signal_limit"
+                if truncated
+                else UNSCANNED_SCOPE_DEGRADATION_REASON
+            )
         ):
             raise ValueError(f"degraded structural analysis is inconsistent for {rel_path}")
     counts = indexed.get("signal_counts")

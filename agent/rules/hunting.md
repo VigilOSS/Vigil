@@ -139,14 +139,14 @@ nothing twice is exactly how the deep bug on the third surface gets missed.
 An endpoint whose human-reach status is still **unknown** — the `agent/shared-constraints.md`
 §2d preflight did not resolve it, and no `human_reach_decision` has been recorded —
 is an **open question, not a silent skip**. Do not close a surface as exhausted
-while a notify-shaped endpoint on it sits undetermined; run it through the §2d
-procedure (static characterization, then the bounded live-fire budget if still
-ambiguous) so it lands in the same recorded-verdict system as every other lead.
-A name alone — `send-notification`, `alert-approver`, `ticket-create` — is a
+while a notify-shaped endpoint on it sits undetermined; run it through the procedure
+`vigil assess contract agent decision` owns (static characterization, then the bounded
+live-fire budget if still ambiguous) so it lands in the same recorded-verdict system
+as every other lead. A name alone — `send-notification`, `alert-approver`, `ticket-create` — is a
 hypothesis about behavior, not proof it reaches anyone: an endpoint that only
-*looks* notify-shaped may resolve NEGATIVE under §2d and become ordinary surface,
-and one that looks harmless may resolve POSITIVE. The recorded determination —
-not the name — decides how you treat it.
+*looks* notify-shaped may resolve NEGATIVE under the reaches-a-real-third-party
+test and become ordinary surface, and one that looks harmless may resolve
+POSITIVE. The recorded determination — not the name — decides how you treat it.
 
 ## 6. Evidence beats volume
 

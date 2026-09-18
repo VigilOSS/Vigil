@@ -949,6 +949,91 @@ a {
   margin-bottom: 20px;
 }
 
+/* The recorded attack path. Numbered by the list itself — unlike a finding's
+   steps_to_reproduce, the order here is the backend's (insertion order on
+   assessment_attack_chain_links), not an author's own numbering. */
+.rpt-chain-steps {
+  margin: 0;
+  padding-left: 22px;
+  display: grid;
+  gap: 8px;
+}
+
+.rpt-chain-steps li::marker {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.rpt-chain-ref {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  flex-wrap: wrap;
+  color: inherit;
+  /* `entity_ref` is free-form TEXT up to 1024 chars — a long URL or file path
+     with no break opportunity in it. `flex-wrap` only wraps between the chip and
+     the reference, never inside the reference itself, so without these the row
+     runs off the page (and off the printed sheet, which has no scrollbar).
+     `overflow-wrap` inherits down to the mono span; `min-width: 0` is what lets
+     that span shrink below its own content, which flex items do not do. */
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+.rpt-chain-ref > * {
+  min-width: 0;
+}
+
+a.rpt-chain-ref {
+  text-decoration: none;
+  border-bottom: 1px solid var(--border);
+}
+
+a.rpt-chain-ref:hover {
+  border-bottom-color: var(--accent);
+}
+
+.rpt-chain-note {
+  margin: 2px 0 0;
+  font-size: 13px;
+  color: var(--ink-2);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* Links whose relation is not "step": supporting context, deliberately set
+   apart from the numbered path and labelled with the relation verbatim. */
+.rpt-chain-context {
+  margin: 0;
+  padding: 10px 12px;
+  display: grid;
+  gap: 10px;
+  border-left: 2px solid var(--border);
+  background: var(--panel-soft);
+  border-radius: 0 8px 8px 0;
+}
+
+.rpt-chain-context dt {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+
+.rpt-chain-context dd {
+  margin: 2px 0 0;
+}
+
+.rpt-chain-narrative h4 {
+  margin: 0 0 4px;
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+  user-select: none;
+  -webkit-user-select: none;
+}
+
 .rpt-copy-btn {
   display: inline-flex;
   align-items: center;

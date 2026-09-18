@@ -558,15 +558,6 @@ function render($view, $path)
 # --- 9. Emitted vuln classes across every table ----------------------------
 
 
-# Classes the code track emits that the canonical taxonomy has no home for.
-# Each is a real finding family (`vuln_taxonomy.py` has no container-hardening,
-# build-supply-chain, or exposed-surface class), so remapping one onto an
-# existing class would misroute the hunter rather than fix anything. They are
-# named here so the invariant is enforced for everything else and this
-# exception is visible in CI instead of silent.
-UNHOMED_VULN_CLASSES = {"network-exposure", "privilege-escalation", "supply-chain"}
-
-
 def _emitted_vuln_classes() -> set[str]:
     """Every vuln class the indexer can put on a record.
 
@@ -595,10 +586,10 @@ def _emitted_vuln_classes() -> set[str]:
 def test_no_indexer_table_invents_a_vuln_class() -> None:
     invented = sorted(_emitted_vuln_classes() - set(vuln_taxonomy.VULN_CLASSES))
 
-    assert invented == sorted(UNHOMED_VULN_CLASSES), (
+    assert invented == [], (
         "a vuln class outside the canonical taxonomy reaches the hunter as an "
         "unknown string: it matches no skill and satisfies no coverage "
-        f"expectation. New offenders: {sorted(set(invented) - UNHOMED_VULN_CLASSES)}"
+        f"expectation. Offenders: {invented}"
     )
 
 
@@ -617,3 +608,332 @@ def test_a_security_source_carries_no_vuln_class() -> None:
     assert all(
         "vuln_classes" not in source for source in observed["security_sources"]
     ), observed["security_sources"]
+
+
+# --- 10. Scan scope that covered no source at all ---------------------------
+
+# The classic PHP view: executable statements at file scope, no callable and no
+# framework registration anywhere, so nothing bounds a scan and nothing the
+# entry-point catalogue keys on exists either.
+PHP_TOP_LEVEL_TEMPLATE = b"""<?php
+$name = $_GET["name"];
+echo "<h1>" . $name . "</h1>";
+"""
+
+MODULE_LEVEL_PYTHON = b"""import os
+
+os.system("backup " + os.environ["TARGET"])
+"""
+
+
+@pytest.mark.parametrize(
+    ("file_path", "language", "source"),
+    [
+        ("public/legacy.php", "php", PHP_TOP_LEVEL_TEMPLATE),
+        ("deploy.py", "python", MODULE_LEVEL_PYTHON),
+    ],
+)
+def test_a_file_with_no_scanned_function_never_reports_clean_sinks(
+    file_path: str, language: str, source: bytes
+) -> None:
+    """Zero function nodes means `_detect_sinks` was handed nothing at all.
+
+    Each fixture carries an executable sink or route outside any function, so
+    `security_sinks: []` under `analysis_status: "complete"` is a measurement
+    the indexer never made (ADR 0015).
+    """
+    indexed = index_file(file_path, language, source)
+
+    assert indexed["total_functions"] == 0
+    assert indexed["security_sinks"] == []
+    assert indexed["analysis_status"] == "degraded"
+    assert indexed["degradation_reason"] == (
+        treesitter_index.UNSCANNED_SCOPE_DEGRADATION_REASON
+    )
+    assert indexed["unavailable_dimensions"] == [
+        "call_sites",
+        "dataflow",
+        "entry_points",
+        "security_sinks",
+    ]
+
+
+LARAVEL_ROUTES = b"""<?php
+use Illuminate\\Support\\Facades\\Route;
+
+Route::get('/users', 'UserController@index');
+Route::post('/users', 'UserController@store');
+Route::get('/run', fn () => system($_GET['cmd']));
+"""
+
+BLADE_TEMPLATE = b"""<div class="profile">
+  @foreach ($users as $user)
+    <p>{!! $user->bio !!}</p>
+  @endforeach
+</div>
+"""
+
+
+def test_a_laravel_route_file_is_measured_rather_than_declared_unavailable() -> None:
+    """The same file, once the readers reach it.
+
+    Every route registration is a direct program child the global entry
+    pattern reads, and the arrow-function handler is a callable that bounds a
+    real sink scan. Turning an honest gap into a measurement is the point --
+    so the gap must actually close, not merely stop being declared: every
+    route is named individually (a set of kinds still passes with two of the
+    three dropped) and the handler's sink is reported.
+    """
+    indexed = index_file("routes/web.php", "php", LARAVEL_ROUTES)
+
+    assert indexed["analysis_status"] == "complete"
+    assert indexed["unavailable_dimensions"] == []
+    assert [(entry["line"], entry["kind"]) for entry in indexed["entry_points"]] == [
+        (_line_carrying("Route::get('/run'", LARAVEL_ROUTES), "laravel_route"),
+        (_line_carrying("Route::get('/users'", LARAVEL_ROUTES), "laravel_route"),
+        (_line_carrying("Route::post('/users'", LARAVEL_ROUTES), "laravel_route"),
+    ]
+    assert [
+        (sink["kind"], sink["function"], sink["line"]) for sink in indexed["security_sinks"]
+    ] == [
+        ("process_exec", "<anonymous@6:19>", _line_carrying("system(", LARAVEL_ROUTES))
+    ]
+
+
+# A closure that bounds no scan of its own: `function () {}` contributes one
+# segment, `{}`, which carries nothing either detector can read. The two
+# file-scope statements below are the file's whole security surface and no
+# reader touches them.
+LARAVEL_ROUTES_WITH_EMPTY_CLOSURE = b"""<?php
+use Illuminate\\Support\\Facades\\Route;
+
+Route::get('/health', function () {});
+Route::get('/users', 'UserController@index');
+DB::statement("SELECT * FROM users WHERE name = '" . $_GET['q'] . "'");
+eval($_REQUEST['code']);
+"""
+
+
+def test_an_empty_closure_does_not_buy_a_measurement_of_the_whole_file() -> None:
+    """One callable is not a scan of the file the callable sits in.
+
+    The honesty flag was all-or-nothing: any callable yielding any scan line
+    declared all three function-scoped dimensions measured for the whole file.
+    A PHP closure is a callable, so `function () {}` -- which reads nothing --
+    turned this file's `security_sinks: []` from a declared gap into a claimed
+    clean. Both statements below stay unread either way; only the declaration
+    tells the reader which it is (ADR 0015).
+    """
+    indexed = index_file("routes/web.php", "php", LARAVEL_ROUTES_WITH_EMPTY_CLOSURE)
+
+    assert indexed["total_functions"] == 1
+    assert indexed["security_sinks"] == []
+    assert indexed["analysis_status"] == "degraded"
+    assert indexed["degradation_reason"] == (
+        treesitter_index.UNSCANNED_SCOPE_DEGRADATION_REASON
+    )
+    assert set(indexed["unavailable_dimensions"]) >= (
+        treesitter_index.FUNCTION_SCOPED_DIMENSIONS
+    )
+
+
+def test_a_blade_template_is_read_by_its_own_extractor() -> None:
+    """Handed to the PHP grammar a Blade template parsed as inline text and
+    measured nothing. `.blade.php` now resolves to its own lightweight
+    language, whose readers are whole-file line scans.
+    """
+    assert structural_language_for_file("resources/views/profile.blade.php") == "blade"
+
+    indexed = index_file(
+        "resources/views/profile.blade.php", "blade", BLADE_TEMPLATE
+    )
+
+    assert indexed["analysis_status"] == "complete"
+    assert indexed["unavailable_dimensions"] == []
+    assert [sink["kind"] for sink in indexed["security_sinks"]] == ["unescaped_output"]
+    assert [source["kind"] for source in indexed["security_sources"]] == [
+        "template_input"
+    ]
+
+
+def test_a_function_that_holds_no_sink_is_still_a_measured_negative() -> None:
+    """The common case: real callables, scanned, genuinely clean."""
+    indexed = index_file(
+        "math.py",
+        "python",
+        b"def add(a, b):\n    return a + b\n\n\ndef mul(a, b):\n    return a * b\n",
+    )
+
+    assert indexed["total_functions"] == 2
+    assert indexed["security_sinks"] == []
+    assert indexed["analysis_status"] == "complete"
+    assert indexed["unavailable_dimensions"] == []
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        pytest.param(b"", id="empty"),
+        pytest.param(b"\n\n\n", id="blank-lines"),
+        pytest.param(b"# nothing here\n# but prose\n", id="comment-only"),
+    ],
+)
+def test_a_file_with_no_scannable_source_is_not_coverage_debt(source: bytes) -> None:
+    """No line could have carried a sink, so the empty result is the truth.
+
+    Calling these unavailable would put every placeholder module into the
+    structural-debt surface and bury the files that really were not read.
+    """
+    indexed = index_file("pkg/__init__.py", "python", source)
+
+    assert indexed["analysis_status"] == "complete"
+    assert indexed["unavailable_dimensions"] == []
+
+
+def test_a_top_level_main_guard_keeps_the_entry_dimension_measured() -> None:
+    """Python's guard pattern is scanned over program children, not functions.
+
+    Only the dimensions whose detector never ran may be declared unavailable;
+    an entry point that was actually found must stay reported.
+    """
+    indexed = index_file(
+        "cli.py",
+        "python",
+        b"import os\n\nif __name__ == '__main__':\n    os.system('go')\n",
+    )
+
+    assert [entry["kind"] for entry in indexed["entry_points"]] == ["main_guard"]
+    assert indexed["analysis_status"] == "degraded"
+    assert indexed["unavailable_dimensions"] == [
+        "call_sites",
+        "dataflow",
+        "security_sinks",
+    ]
+
+
+def test_a_header_of_declarations_scans_no_body() -> None:
+    """`_detect_sinks` skips declarations, so a prototype header measures nothing."""
+    indexed = index_file(
+        "api.h",
+        "c",
+        b"#ifndef API_H\n#define API_H\nint run_command(const char *cmd);\n#endif\n",
+    )
+
+    assert indexed["security_sinks"] == []
+    assert "security_sinks" in indexed["unavailable_dimensions"]
+
+
+# --- 11. Readers that scan raw lines must skip commented-out source ---------
+
+COMMENTED_OUT_JS_EXPORTS = b"""\
+// export const handler = async (event) => ({ statusCode: 200 });
+// module.exports = handler;
+"""
+
+COMMENTED_OUT_PY_EXPORTS = b'# __all__ = ["handler"]\n'
+
+
+@pytest.mark.parametrize(
+    ("file_path", "language", "source"),
+    [
+        ("handler.js", "javascript", COMMENTED_OUT_JS_EXPORTS),
+        ("legacy.py", "python", COMMENTED_OUT_PY_EXPORTS),
+    ],
+)
+def test_a_commented_out_export_is_not_an_export(
+    file_path: str, language: str, source: bytes
+) -> None:
+    """`_detect_exports` scans raw lines, like `_detect_sinks` and
+    `_detect_call_sites` -- but without their comment guard.
+
+    A fully commented-out module therefore published `total_functions: 0` with
+    a non-zero export count, which is precisely the shape the backend rejects:
+    no callable scope but signals proving there was source to scan. One dead
+    file then 400s the whole repository's `code-index sync`, because the sync
+    sends one `updates` list per repo and the rejection names no file.
+    """
+    indexed = index_file(file_path, language, source)
+
+    assert indexed["exports"] == []
+    assert indexed["total_exports"] == 0
+    assert indexed["analysis_status"] == "complete"
+    assert indexed["unavailable_dimensions"] == []
+
+
+COMMENTED_OUT_ROUTES = b"""<?php
+// Route::get('/debug', 'DebugController@index');
+# Route::post('/legacy', 'LegacyController@store');
+/* Route::put('/old', 'OldController@update'); */
+Route::get('/users', 'UserController@index');
+"""
+
+
+def test_a_commented_out_route_is_not_an_entry_point() -> None:
+    """`_detect_top_level_entry_points` reads the root's named children, and a
+    `comment` node is a named child in every shipped grammar.
+
+    Python's and Ruby's global patterns are `^\\s*`-anchored and were immune;
+    PHP's are not, so three dead registrations became live entry points. That
+    inflates `total_entry_points` and feeds `entry_point_proximity`, putting a
+    reachability claim on code that does not run.
+    """
+    indexed = index_file("routes/web.php", "php", COMMENTED_OUT_ROUTES)
+
+    assert [(entry["line"], entry["kind"]) for entry in indexed["entry_points"]] == [
+        (_line_carrying("Route::get('/users'", COMMENTED_OUT_ROUTES), "laravel_route")
+    ]
+    assert indexed["signal_counts"]["entry_points"] == 1
+
+
+# --- 12. "Does this file contain any source at all" is language-aware -------
+
+C_MACRO_HEADER = b"""\
+#include <stdio.h>
+#define RUN(cmd) system(cmd)
+#define FETCH(url) popen(url, "r")
+"""
+
+
+def test_a_c_preprocessor_directive_is_source_not_commentary() -> None:
+    """`#` opens a comment in Python, Ruby, PHP and shell -- and a preprocessor
+    directive in C and C++.
+
+    The prefix list was written for a per-line sink skip, where a false skip
+    costs one line. Reused to decide whether a whole file holds *any* source,
+    it declared a header defining `system`/`popen` wrappers empty, and an empty
+    file measures its own emptiness: `complete`, no unavailable dimension,
+    `security_sinks: []`. Nothing read a line of it.
+    """
+    indexed = index_file("macros.h", "c", C_MACRO_HEADER)
+
+    assert indexed["security_sinks"] == []
+    assert indexed["analysis_status"] == "degraded"
+    assert set(indexed["unavailable_dimensions"]) >= (
+        treesitter_index.FUNCTION_SCOPED_DIMENSIONS
+    )
+
+
+@pytest.mark.parametrize(
+    ("file_path", "language", "source"),
+    [
+        pytest.param(
+            "notes.c", "c", b"/* a note\n   continued over two lines */\n", id="c-block"
+        ),
+        pytest.param(
+            "notes.py", "python", b'"""Only a module docstring."""\n', id="py-docstring"
+        ),
+        pytest.param("notes.c", "c", b"// only a note\n", id="c-line"),
+        pytest.param("notes.py", "python", b"# only a note\n", id="py-line"),
+    ],
+)
+def test_a_file_that_is_only_commentary_is_never_coverage_debt(
+    file_path: str, language: str, source: bytes
+) -> None:
+    """The inverse of the same defect: `/* ... */` and a Python docstring have
+    no line prefix at all, so files made of nothing else were declared debt
+    while a `//`-only file was not. The grammar already labels every comment.
+    """
+    indexed = index_file(file_path, language, source)
+
+    assert indexed["analysis_status"] == "complete"
+    assert indexed["unavailable_dimensions"] == []

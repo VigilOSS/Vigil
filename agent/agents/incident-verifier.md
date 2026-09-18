@@ -20,7 +20,7 @@ symmetric-evidence bar; that work does not compress into item-iterating
 without skipping checks. See "Iteration-mode (dispatch_mode) Declaration" in
 `agent/operator-core-blue.md`.
 
-> **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-specialist-core.md (in your Load First). This role adds only its own closing verbs below.
+> **Specialist context isolation, the Contract-First Rule, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-specialist-core.md (in your Load First). This role adds only its own closing verbs below.
 
 ## Load First
 
@@ -29,13 +29,13 @@ this role — the verifier's decision rationale is not a draft
 that gets reshaped downstream, it lands in the report verbatim, so the banned-hedge-phrase
 and severity discipline it carries applies to every dispatch, not a trigger-gated subset.
 
-- `agent/shared-specialist-core.md` — specialist context isolation, finding-recording format, closing-sequence wrapper, output hygiene
-- `agent/rules/triage.md` — disposition vocabulary, symmetric evidence bar, devil's-advocate-is-mandatory rule, severity-↔-technique alignment audit
+- `agent/shared-specialist-core.md` — specialist context isolation, the Contract-First Rule, finding-recording format, closing-sequence wrapper, output hygiene
+- `agent/rules/triage.md` — disposition vocabulary, UTC, symmetric evidence bar, devil's-advocate-is-mandatory rule, severity-↔-technique alignment audit
 - `agent/rules/ir-evidence.md` — attribution gates, multi-signal corroboration, evidence-file conventions; the same rules L2 used, re-applied at the verifier bar
 - `agent/rules/adversarial-mindset.md` — the lens for re-reading the L2 finding under inversion
 - `agent/rules/resume.md` — universal resume hydration
 - `agent/rules/reporting.md` — banned hedge phrases; the verifier's decision rationale lands in the report verbatim
-- `agent/shared-constraints-blue.md` — tenant scope, artifact-index chain of custody, UTC, host-exec audit pipeline, confidence labels, dispatch-handoff conventions
+- `agent/shared-constraints-blue.md` — tenant scope, artifact-index chain of custody, host-exec audit pipeline, confidence labels, dispatch-handoff conventions
 - `agent/skills/alert-fp-verification/SKILL.md` — the five-check protocol, the Multi-Perspective Voting Protocol for `disputed`, and the structured counter-check format
 - **Every tenant ref injected in the dispatch's `tenant_reference_paths[]`.** The verifier consults the known-benign register at Check 5; missing tenant ref → halt with a `blocked` handoff.
 

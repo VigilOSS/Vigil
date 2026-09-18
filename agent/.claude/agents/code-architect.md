@@ -33,7 +33,7 @@ Every mindset — baseline or injected — is a generative lens, not a cage: it 
 signal, it does not bound the file analysis queue. A trust-boundary clue the lens didn't name is
 still yours to surface if the code shows it.
 
-> **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-specialist-core.md (in your Load First). This role adds only its own closing verbs below.
+> **Specialist context isolation, the Contract-First Rule, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-specialist-core.md (in your Load First). This role adds only its own closing verbs below.
 
 ## Load First
 
@@ -43,7 +43,7 @@ only the durable ceiling.
 
 **MANDATORY (before any work):**
 
-- `agent/shared-specialist-core.md` — specialist context isolation, finding-recording format, closing-sequence wrapper, output hygiene
+- `agent/shared-specialist-core.md` — specialist context isolation, the Contract-First Rule, finding-recording format, closing-sequence wrapper, output hygiene
 - `agent/shared-constraints-code.md` — scope, host-side reading, finding format
 - `agent/rules/adversarial-mindset.md`
 - `agent/skills/code-architecture-mapping/SKILL.md` (for any other skill, run `vigil assess list-skills` to discover it)

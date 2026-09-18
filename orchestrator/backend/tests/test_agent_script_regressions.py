@@ -2675,12 +2675,32 @@ def test_review_exploits_lists_backend_candidates(monkeypatch, tmp_path: Path, c
         ],
     )
 
+    monkeypatch.setattr(
+        module,
+        "load_runtime_proof_owed",
+        lambda cfg, *, limit: [
+            {
+                "slug": "PARKED-001",
+                "severity": "high",
+                "workflow_status": "active",
+                "verification_status": "pending_runtime_proof",
+                "title": "Source-proved, PoC owed",
+                "canonical_location": "file:src/db/query.py:88",
+            }
+        ],
+    )
+
     module.run(SimpleNamespace(engagement_dir=tmp_path))
 
     output = capsys.readouterr().out
     assert "candidate_rule: verified findings only" in output
     assert "ACTIVE-001 | high | active | confirmed | verified_high | Live issue" in output
     assert "CHAIN-001 | info | active | downgraded | verified_chain_required | Chain-only primitive" in output
+    # The runtime-proof-owed queue is the complement of the approval gate and
+    # renders on the same read, so a parked source finding is never invisible
+    # to the phase that would prove it.
+    assert "Runtime proof owed" in output
+    assert "PARKED-001 | high | active | Source-proved, PoC owed" in output
 
 
 def _run_phase_report(monkeypatch, tmp_path: Path, payload: dict):

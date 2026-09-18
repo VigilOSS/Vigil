@@ -21,6 +21,11 @@ LANGUAGE_BY_EXTENSION: dict[str, str] = {
     ".cjs": "javascript",
     ".ts": "typescript",
     ".tsx": "typescript",
+    # TypeScript's explicit module-kind extensions, the `.mjs`/`.cjs` pair's
+    # typed siblings. Node resolves them as ESM/CJS; tree-sitter reads them as
+    # TypeScript like any other.
+    ".mts": "typescript",
+    ".cts": "typescript",
     ".go": "go",
     ".rs": "rust",
     ".java": "java",
@@ -61,6 +66,15 @@ LANGUAGE_BY_EXTENSION: dict[str, str] = {
     ".rst": "rst",
 }
 
+# Suffixes the `Path(name).suffix` lookup below can never see, because it only
+# ever returns the last extension. A Blade template is `.blade.php`, and
+# reading it as PHP hands a template full of `{{ }}`/`{!! !!}` directives to
+# the PHP grammar, which parses them as inline text and reports nothing.
+# Matched before the single-suffix table, longest key first.
+LANGUAGE_BY_COMPOUND_SUFFIX: dict[str, str] = {
+    ".blade.php": "blade",
+}
+
 LANGUAGE_BY_BASENAME: dict[str, str] = {
     "Makefile": "makefile",
     "CMakeLists.txt": "cmake",
@@ -84,6 +98,7 @@ STRUCTURAL_SUPPORTED_LANGUAGES = frozenset(
         "go",
         "ruby",
         "php",
+        "blade",
         "dockerfile",
         "shell",
         "powershell",
@@ -98,6 +113,7 @@ CANONICAL_CODE_LANGUAGES = frozenset(
     {
         "",
         *LANGUAGE_BY_EXTENSION.values(),
+        *LANGUAGE_BY_COMPOUND_SUFFIX.values(),
         *LANGUAGE_BY_BASENAME.values(),
     }
 )
@@ -105,6 +121,12 @@ CANONICAL_CODE_LANGUAGES = frozenset(
 CODE_LANGUAGE_ALIASES = {
     "c++": "cpp",
 }
+
+# Longest first, so a future `.foo.blade.php` cannot be decided by a shorter
+# sibling key that happens to be scanned earlier.
+_COMPOUND_SUFFIXES: tuple[tuple[str, str], ...] = tuple(
+    sorted(LANGUAGE_BY_COMPOUND_SUFFIX.items(), key=lambda item: -len(item[0]))
+)
 
 
 def detect_language(file_path: str) -> str | None:
@@ -116,6 +138,10 @@ def detect_language(file_path: str) -> str | None:
     named = LANGUAGE_BY_BASENAME.get(name)
     if named is not None:
         return named
+    lowered = name.lower()
+    for suffix, language in _COMPOUND_SUFFIXES:
+        if lowered.endswith(suffix) and lowered != suffix:
+            return language
     return LANGUAGE_BY_EXTENSION.get(Path(name).suffix.lower())
 
 

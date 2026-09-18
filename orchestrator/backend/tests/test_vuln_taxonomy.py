@@ -42,6 +42,24 @@ KNOWN_SKILLLESS_CLASSES: frozenset[str] = frozenset(
         "ssi-injection",
         "clickjacking",
         "csv-injection",
+        # Added (infrastructure family, 2026-09): the three build/deploy classes
+        # the structural indexer emits. Vigil has no build-hardening or
+        # deployment-review skill, and the skills that look adjacent are not
+        # honest owners: `code-vulnerability-analysis`/`code-variant-analysis`
+        # are Trail-of-Bits taint-tracing over application source, not Dockerfile
+        # or CI config review; `cicd-security` is a GitHub-Actions checklist
+        # whose own allowlist entry below records that no single class dominates
+        # it; `sdk-supply-chain-security` is mobile-SDK scoped, so declaring
+        # `supply-chain` there would route a `RUN curl | sh` to a mobile
+        # specialist; `container-escape-detection` is an inside-the-container
+        # escape procedure, not a review of a `USER`-less Dockerfile. Per
+        # AGENTS.md ("do not invent a class to clear the test" — the same rule
+        # read the other way), these are allowlisted until a real
+        # build/deployment-hardening skill is written, rather than bolted onto a
+        # skill whose scope does not cover them.
+        "privilege-escalation",
+        "network-exposure",
+        "supply-chain",
     }
 )
 
@@ -373,3 +391,132 @@ def test_vuln_classless_allowlist_has_no_stale_entries():
         elif name in declared:
             stale.append(f"{name} (now declares vuln_class — drop from allowlist)")
     assert not stale, "Stale SKILLS_WITHOUT_VULN_CLASS entries:\n  " + "\n  ".join(stale)
+
+
+# ---------------------------------------------------------------------------
+# The infrastructure family (2026-09): the indexer's build/deploy classes.
+#
+# `treesitter_index.py`'s lightweight Dockerfile / shell / HTML / CSS / streaming
+# extractors emit `privilege-escalation`, `network-exposure` and `supply-chain`.
+# None had a canonical home, because none of the 13 families was about
+# infrastructure, build, or deployment — every candidate remap misroutes on the
+# families' own definitions (`injection` needs untrusted input reaching an
+# interpreter; `rfi` means request-time remote inclusion; `access-control`
+# presumes a principal and a routed function; `debug-exposure` means an HTTP
+# endpoint, not a declared port). `test_indexer_scan_scope.py` had to hold them
+# in an `UNHOMED_VULN_CLASSES` exception so the "no invented class" invariant
+# could stay enforced for everything else.
+# ---------------------------------------------------------------------------
+
+def test_infrastructure_family_homes_the_indexers_build_and_deploy_classes():
+    """The three classes the structural indexer emits are canonical, and all
+    three sit in the infrastructure family — not forced into `injection` or
+    `disclosure`, which would reproduce the misroute one level up."""
+    assert "infrastructure" in vuln_taxonomy.FAMILIES
+    for cls in ("privilege-escalation", "network-exposure", "supply-chain"):
+        assert vuln_taxonomy.is_valid_class(cls), cls
+        assert vuln_taxonomy.family_of(cls) == "infrastructure", cls
+
+
+# ---------------------------------------------------------------------------
+# The reference mirror.
+#
+# `agent/references/runtime-guides/vuln-taxonomy.md` reproduces this module's
+# FAMILIES / VULN_CLASSES / gf-bucket tables for specialists to read at runtime.
+# The three tests below enforce that sync — the doc was hand-synced with
+# nothing checking it until they landed. They check the DATA the mirror
+# carries — family names, class membership, the declared class count, and the
+# bucket/weight table — never its prose, headings or wording, which AGENTS.md's
+# markdown-testing policy puts off limits. A reworded sentence stays free; a
+# class that exists in code and not in the doc does not.
+# ---------------------------------------------------------------------------
+
+_TAXONOMY_DOC = (
+    _REPO_ROOT / "agent" / "references" / "runtime-guides" / "vuln-taxonomy.md"
+)
+
+
+def _doc_section(heading: str) -> list[str]:
+    """Lines between a `## <heading>` line and the next `## ` line."""
+    lines = _TAXONOMY_DOC.read_text(encoding="utf-8").splitlines()
+    out: list[str] = []
+    inside = False
+    for line in lines:
+        if line.startswith("## "):
+            if inside:
+                break
+            inside = line[3:].strip().startswith(heading)
+            continue
+        if inside:
+            out.append(line)
+    return out
+
+
+def _doc_family_classes() -> dict[str, set[str]]:
+    """`{family: {class, ...}}` as the mirror's `## Families` section declares it."""
+    import re
+
+    families: dict[str, set[str]] = {}
+    current: str | None = None
+    for line in _doc_section("Families"):
+        head = re.match(r"^### ([a-z0-9-]+) ", line)
+        if head:
+            current = head.group(1)
+            families.setdefault(current, set())
+            continue
+        bullet = re.match(r"^- `([a-z0-9-]+)` ", line)
+        if bullet and current:
+            families[current].add(bullet.group(1))
+    return families
+
+
+def test_reference_mirror_declares_the_same_families_and_classes():
+    doc = _doc_family_classes()
+    assert set(doc) == set(vuln_taxonomy.FAMILIES), (
+        "agent/references/runtime-guides/vuln-taxonomy.md lists different "
+        "families than vuln_taxonomy.FAMILIES (the module is authoritative):\n"
+        f"  only in doc:    {sorted(set(doc) - set(vuln_taxonomy.FAMILIES))}\n"
+        f"  only in module: {sorted(set(vuln_taxonomy.FAMILIES) - set(doc))}"
+    )
+    expected: dict[str, set[str]] = {fam: set() for fam in vuln_taxonomy.FAMILIES}
+    for cls, (fam, _desc) in vuln_taxonomy.VULN_CLASSES.items():
+        expected[fam].add(cls)
+    mismatched = {
+        fam: (sorted(doc[fam] - expected[fam]), sorted(expected[fam] - doc[fam]))
+        for fam in expected
+        if doc[fam] != expected[fam]
+    }
+    assert not mismatched, (
+        "the reference mirror's per-family class lists have drifted from "
+        "VULN_CLASSES (family -> (only-in-doc, only-in-module)):\n  "
+        + "\n  ".join(f"{fam}: {delta}" for fam, delta in sorted(mismatched.items()))
+    )
+
+
+def test_reference_mirror_frontmatter_states_the_real_class_count():
+    import re
+
+    text = _TAXONOMY_DOC.read_text(encoding="utf-8")
+    match = re.search(r"Lists the (\d+) canonical classes", text)
+    assert match, "the mirror's frontmatter no longer states a class count"
+    assert int(match.group(1)) == len(vuln_taxonomy.VULN_CLASSES), (
+        f"the mirror advertises {match.group(1)} canonical classes; "
+        f"VULN_CLASSES holds {len(vuln_taxonomy.VULN_CLASSES)}"
+    )
+
+
+def test_reference_mirror_bucket_table_matches_the_bucket_definitions():
+    import re
+
+    rows: dict[str, int] = {}
+    for line in _doc_section("gf-bucket"):
+        row = re.match(r"^\| `([a-z0-9_-]+)` \| (\d+) \|", line)
+        if row:
+            rows[row.group(1)] = int(row.group(2))
+    expected = {name: weight for name, weight, _k, _p in classify_buckets._BUCKETS}
+    assert rows == expected, (
+        "the reference mirror's gf-bucket table has drifted from "
+        "classify_buckets._BUCKETS (name -> weight):\n"
+        f"  only in doc:    {sorted(set(rows.items()) - set(expected.items()))}\n"
+        f"  only in module: {sorted(set(expected.items()) - set(rows.items()))}"
+    )

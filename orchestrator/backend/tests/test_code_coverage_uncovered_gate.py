@@ -17,8 +17,11 @@ from __future__ import annotations
 
 from app import db as db_module
 
+from tests.test_structural_scan_scope_honesty import UNSCANNED_SCOPE_DIMENSIONS
+
 from tests.test_code_analysis_api import (
     _claim_file_for_analysis,
+    _complete_structural_payload,
     _classify_file,
     _create_files,
     _create_repo,
@@ -396,3 +399,147 @@ def test_low_effort_with_evidenced_callable_is_warn_not_uncovered(client, isolat
     gate = _gate(client, key, repo["id"])
     assert gate["effort_warnings"], "low effort should still raise an effort WARN"
     assert _uncovered_paths(gate) == set()
+
+
+# ---------------------------------------------------------------------------
+# A structural index that scanned no function scope is not "nothing to verify".
+# ---------------------------------------------------------------------------
+
+
+def _publish_unscanned_scope(client, key, repo_id, files, parser):
+    """Publish the shape a zero-callable tree-sitter file really produces."""
+    base = f"/engagements/{key}/assessment/code"
+    binding = client.get(f"{base}/repos/{repo_id}").json()
+    payload = _complete_structural_payload(
+        repo_id=int(repo_id),
+        repo_generation=int(binding["active_generation"]),
+        source_manifest_digest=str(binding["source_manifest_digest"]),
+        updates=[
+            {
+                "file_id": row["id"],
+                "source_sha256": row["file_hash"],
+                "total_functions": 0,
+                "total_entry_points": 0,
+                "total_sinks": 0,
+                "total_exports": 0,
+                "callables": [],
+            }
+            for row in files
+        ],
+    )
+    update = next(
+        item for item in payload["updates"] if item["file_id"] == parser["id"]
+    )
+    update.update(
+        {
+            "structural_analysis_status": "degraded",
+            "structural_analysis_mode": "tree_sitter",
+            "structural_degradation_reason": "unscanned_function_scope",
+            "structural_unavailable_dimensions": UNSCANNED_SCOPE_DIMENSIONS,
+        }
+    )
+    payload.update(
+        {
+            "degraded_files": 1,
+            "degraded_file_paths": [str(parser["file_path"])],
+            "analysis_status_counts": {
+                "complete": len(files) - 1,
+                "degraded": 1,
+                "unsupported": 0,
+            },
+        }
+    )
+    response = client.post(f"{base}/files/bulk-structural-metadata", json=payload)
+    assert response.status_code == 200, response.text
+
+
+def test_unscanned_function_scope_is_not_exempt_from_the_uncovered_gate(
+    client, isolate_settings
+):
+    """A partial span closed before the index landed is the surviving route.
+
+    Recording now forces a whole-file span on such a file, but a review closed
+    against no structural metadata keeps its partial span when a later
+    `code-index sync` declares the scan scope unavailable. The zero-function
+    skip read that as "nothing to verify against" and exempted the file.
+    """
+    key = "2026-09-17-uncov-unscanned"
+    write_engagement(isolate_settings["engagements_dir"], key)
+    repo = _create_repo(client, key, repo_key=f"{key}-repo")
+    files = _create_files(client, key, int(repo["id"]))
+    parser = next(f for f in files if f["file_path"] == "src/parser.py")
+    _classify_file(client, key, int(parser["id"]), "critical", 100)
+    queue_item = _claim_file_for_analysis(client, key, int(parser["id"]))
+    done = _complete(client, key, queue_item, _network_input_coverage(default_effort=80))
+    assert done.status_code == 200, done.text
+    _publish_unscanned_scope(client, key, int(repo["id"]), files, parser)
+
+    assert _uncovered_paths(_gate(client, key, repo["id"])) == {"src/parser.py"}
+
+
+def test_a_whole_file_span_clears_an_unscanned_function_scope(client, isolate_settings):
+    key = "2026-09-17-uncov-unscanned-span"
+    write_engagement(isolate_settings["engagements_dir"], key)
+    repo = _create_repo(client, key, repo_key=f"{key}-repo")
+    files = _create_files(client, key, int(repo["id"]))
+    parser = next(f for f in files if f["file_path"] == "src/parser.py")
+    _publish_unscanned_scope(client, key, int(repo["id"]), files, parser)
+    _classify_file(client, key, int(parser["id"]), "critical", 100)
+    queue_item = _claim_file_for_analysis(client, key, int(parser["id"]))
+    _record_fixture_source_receipt(
+        client,
+        key,
+        queue_item,
+        disposition="clean",
+        reviewed_spans=[
+            {
+                "file_id": queue_item["file_id"],
+                "start_line": 1,
+                "end_line": int(parser["loc"]),
+                "label": "whole-file manual review",
+            }
+        ],
+    )
+    done = _complete(client, key, queue_item, _network_input_coverage(default_effort=80))
+    assert done.status_code == 200, done.text
+
+    assert _uncovered_paths(_gate(client, key, repo["id"])) == set()
+
+
+def test_a_partial_span_from_line_one_does_not_clear_an_unscanned_scope(
+    client, isolate_settings
+):
+    """Whole-file means the whole file, not merely starting at line 1.
+
+    A review closed before the index landed keeps whatever span it recorded,
+    and that span is the only proof such a file can carry. Accepting one that
+    starts at line 1 but stops short would let a single reviewed line stand in
+    for source the index never scanned -- the escape valve reopened.
+    """
+    key = "2026-09-17-uncov-unscanned-partial"
+    write_engagement(isolate_settings["engagements_dir"], key)
+    repo = _create_repo(client, key, repo_key=f"{key}-repo")
+    files = _create_files(client, key, int(repo["id"]))
+    parser = next(f for f in files if f["file_path"] == "src/parser.py")
+    _classify_file(client, key, int(parser["id"]), "critical", 100)
+    queue_item = _claim_file_for_analysis(client, key, int(parser["id"]))
+    assert int(parser["loc"]) > 1
+    _record_fixture_source_receipt(
+        client,
+        key,
+        queue_item,
+        disposition="clean",
+        reviewed_spans=[
+            {
+                "file_id": queue_item["file_id"],
+                "start_line": 1,
+                "end_line": int(parser["loc"]) - 1,
+                "label": "read from the top, stopped one line short",
+            }
+        ],
+    )
+    done = _complete(client, key, queue_item, _network_input_coverage(default_effort=80))
+    assert done.status_code == 200, done.text
+    _publish_unscanned_scope(client, key, int(repo["id"]), files, parser)
+
+    assert _uncovered_paths(_gate(client, key, repo["id"])) == {"src/parser.py"}

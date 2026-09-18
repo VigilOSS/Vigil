@@ -39,6 +39,17 @@ from .variant_scopes import (
 STRUCTURAL_INPUT_IDENTITY_SCHEMA = "structural-input-identity/v1"
 STRUCTURAL_INDEX_SCHEMA = "structural-index/v6"
 STRUCTURAL_CALLABLE_IDENTITY_SCHEMA = "structural-callable/v1"
+# Dimensions the exact parser can only read inside a callable. When the index
+# declares one of them unavailable, the sink and call-site detectors returned
+# nothing over source they did not fully read, so the file owes the same
+# coverage proof as one with no function registry at all. A cross-tree mirror:
+# the single source of truth is `FUNCTION_SCOPED_DIMENSIONS` in
+# `agent/scripts/assess/lib/treesitter_index.py`, produced there by
+# `_unscanned_scope_dimensions`, and the backend mirrors the agent tree rather
+# than importing from it (CODE-MAP.md). Keep the two lists identical.
+FUNCTION_SCOPED_STRUCTURAL_DIMENSIONS = frozenset(
+    {"call_sites", "dataflow", "security_sinks"}
+)
 VARIANT_INPUT_IDENTITY_SCHEMA = "variant-input-identity/v1"
 MAX_VARIANT_RECEIPT_PAGE = 500
 DEFAULT_VARIANT_RECEIPT_PAGE = 100
@@ -89,6 +100,7 @@ _REPORTABLE_FINDING_STATUSES = frozenset(
 _CANONICAL_STRUCTURAL_LANGUAGES = frozenset(
     {
         "",
+        "blade",
         "c",
         "c++",
         "cpp",
@@ -898,29 +910,38 @@ def _normalize_analysis_receipt_anchors(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="reviewed span must fall within the sealed file",
             )
-        function_dimension_incomplete = (
+        unavailable_dimensions = set(
+            _json_decode(
+                file_rows[file_id].get("structural_unavailable_dimensions_json"), []
+            )
+        )
+        if (
             str(file_rows[file_id].get("structural_analysis_status") or "")
             == "unsupported"
             or "functions"
             in {
-                *_json_decode(
-                    file_rows[file_id].get("structural_unavailable_dimensions_json"),
-                    [],
-                ),
+                *unavailable_dimensions,
                 *_json_decode(
                     file_rows[file_id].get("structural_truncated_dimensions_json"),
                     [],
                 ),
             }
-        )
-        if function_dimension_incomplete and (
+        ):
+            incomplete_reason = "function registry is incomplete"
+        elif unavailable_dimensions & FUNCTION_SCOPED_STRUCTURAL_DIMENSIONS:
+            # A partial span has nothing to be read against here: the index
+            # never scanned a line of this file for callables or sinks.
+            incomplete_reason = "index scanned no function scope"
+        else:
+            incomplete_reason = ""
+        if incomplete_reason and (
             start_line != 1 or end_line != int(file_rows[file_id]["loc"])
         ):
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail=(
                     "reviewed spans require whole-file coverage while the structural "
-                    "function registry is incomplete"
+                    f"{incomplete_reason}"
                 ),
             )
         identity = (file_id, start_line, end_line, label)
@@ -9142,13 +9163,57 @@ def code_coverage_summary(
                 )
             file_func_rows = connection.execute(
                 f"""
-                SELECT id, total_functions FROM code_files
+                SELECT id, total_functions, structural_unavailable_dimensions_json
+                FROM code_files
                 WHERE engagement_id = ? AND id IN ({placeholders})
                 """,
                 (engagement.id, *file_id_list),
             ).fetchall()
             file_total_functions = {
                 int(r["id"]): _safe_int(r["total_functions"]) for r in file_func_rows
+            }
+            # A file whose function-scoped dimensions were never scanned has no
+            # callable to review and no sink map to review against. Counting it
+            # as "nothing to verify" is what let a zero-callable critical file
+            # close with no proof at all.
+            files_with_unscanned_scope = {
+                int(r["id"])
+                for r in file_func_rows
+                if set(
+                    _json_decode(r["structural_unavailable_dimensions_json"], [])
+                )
+                & FUNCTION_SCOPED_STRUCTURAL_DIMENSIONS
+            }
+            # With no callable registry a whole-file span is the only review
+            # proof left, which is exactly what the receipt gate now demands of
+            # these files. A partial span from a review closed before the index
+            # landed proves nothing about the source it never named.
+            whole_file_span_file_ids = {
+                int(row["file_id"])
+                for row in connection.execute(
+                    f"""
+                    SELECT DISTINCT span_files.id AS file_id
+                    FROM code_analysis_results AS results
+                    JOIN json_each(results.reviewed_spans_json) AS span
+                    JOIN code_files AS span_files
+                      ON span_files.id =
+                         CAST(json_extract(span.value, '$.file_id') AS INTEGER)
+                     AND span_files.engagement_id = results.engagement_id
+                    JOIN code_analysis_queue AS result_queue
+                      ON result_queue.id = results.queue_item_id
+                    JOIN code_files AS result_files
+                      ON result_files.id = results.file_id
+                    JOIN code_repos AS result_repos
+                      ON result_repos.id = result_files.repo_id
+                    WHERE results.engagement_id = ?
+                      AND span_files.id IN ({placeholders})
+                      AND CAST(json_extract(span.value, '$.start_line') AS INTEGER) = 1
+                      AND CAST(json_extract(span.value, '$.end_line') AS INTEGER)
+                          >= span_files.loc
+                      AND ({current_result_receipt})
+                    """,
+                    (engagement.id, *file_id_list),
+                ).fetchall()
             }
 
             for fid, meta in file_meta.items():
@@ -9163,7 +9228,9 @@ def code_coverage_summary(
                 if actual["receipt_count"] == 0 and meta["has_coverage_record"]:
                     efforts = file_efforts.get(fid, {})
                     max_effort = max(efforts.values(), default=0.0)
-                    if max_effort >= 60 and total_funcs > 0:
+                    if max_effort >= 60 and (
+                        total_funcs > 0 or fid in files_with_unscanned_scope
+                    ):
                         file_warnings.append(
                             f"effort={max_effort:.0f} with 0 source-review receipts"
                         )
@@ -9219,7 +9286,8 @@ def code_coverage_summary(
                 if not meta["review_completed"]:
                     continue
                 total_funcs = file_total_functions.get(fid, 0)
-                if total_funcs <= 0:
+                scope_unscanned = fid in files_with_unscanned_scope
+                if total_funcs <= 0 and not scope_unscanned:
                     continue  # no structural index to verify against
                 applicable = file_applicable.get(fid, [])
                 if not applicable:
@@ -9233,6 +9301,8 @@ def code_coverage_summary(
                 )
                 if callables_reviewed > 0:
                     continue  # structurally attributable callable review was recorded
+                if scope_unscanned and fid in whole_file_span_file_ids:
+                    continue  # the only review proof this file can carry
                 file_path = str(meta["file_path"])
                 prefix = f"file:{file_path}"
                 if any(loc == prefix or loc.startswith(prefix + ":") for loc in finding_locations):
@@ -10572,6 +10642,7 @@ SLOT_VULN_CLASSES: dict[str, dict[str, list[str]]] = {
 NATIVE_LANGUAGES = frozenset({"c", "c++", "cpp"})
 STRUCTURALLY_ANALYZED_LANGUAGES = frozenset(
     {
+        "blade",
         "c",
         "c++",
         "cpp",
@@ -11567,7 +11638,8 @@ def code_coverage_cwe_detail(
             f"""
             SELECT f.id AS file_id, f.file_path, f.classification, f.slot_types_json,
                    f.analysis_status, f.loc, f.language, f.role,
-                   f.total_functions, f.total_entry_points, f.total_sinks, f.total_exports
+                   f.total_functions, f.total_entry_points, f.total_sinks, f.total_exports,
+                   f.structural_unavailable_dimensions_json
             FROM code_files f
             WHERE f.engagement_id = ? AND f.classification IN ('critical', 'high'){repo_clause}
             ORDER BY f.analysis_priority DESC, f.id ASC
@@ -11736,6 +11808,12 @@ def code_coverage_cwe_detail(
                 "total_entry_points": int(fr["total_entry_points"] or 0),
                 "total_sinks": int(fr["total_sinks"] or 0),
                 "total_exports": int(fr["total_exports"] or 0),
+                # A file can report zero of everything because nothing was
+                # scanned; the CWE matrix cannot tell that from a clean read
+                # without the index's own coverage declaration.
+                "structural_unavailable_dimensions": _json_decode(
+                    fr["structural_unavailable_dimensions_json"], []
+                ),
                 "slot_types": slot_types,
                 "applicable_families": applicable,
                 "cwe_coverage": merged_entries,

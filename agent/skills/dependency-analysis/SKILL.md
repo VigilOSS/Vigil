@@ -105,24 +105,25 @@ import in a test helper is not the same as one in a request handler.
 
 ### 4. Read the gaps as findings about the review, not about the code
 
-The `gaps in this picture` section is the part that decides whether the picture can
-be trusted:
+The `gaps in this picture` section decides whether the picture can be trusted. Every
+code in it names a different reason a measurement is MISSING, and none of them means
+the component or declaration is absent from the build — so a gap is never a clean
+result and never a component you can rule out. Run
+`vigil assess contract code-dependencies` for the vocabulary; it is the one roster,
+kept in step with what the command emits.
 
-- `unparsed_ecosystem` — a recognized manifest with no reader (Composer, Bundler,
-  Cargo, pnpm, Pipfile). That ecosystem's components are **absent from the picture,
-  not absent from the build**. Read those files by hand before claiming coverage.
-- `external_requirement_include` — part of a Python declaration lives in a file the
-  reader followed no further.
-- `unmatched_scanner_row` — a scanner row naming nothing this build declares or
-  vendors. That is the interesting direction: it usually means the scan covered a
-  base image or a different artifact than the repository builds.
-- `unresolved_catalog_entry` — a Gradle version-catalog alias that resolves to no
-  coordinate. Every `libs.<alias>` site naming it is unresolvable, so those build
-  scripts declare more than the picture can show.
-- `unnamed_requirement_reference` — a requirement installed from a URL, VCS or path
-  that names no distribution. The install is real; the name is not derivable.
-- `manifest_too_large`, `manifest_budget_exhausted`, `inventory_truncated` — bounds
-  the run hit. Narrow the path and re-run.
+What each family asks of you: an unread file (a missing reader, a dialect with no
+reader, a manifest that defeated its reader) gets opened by hand before you claim
+coverage of that ecosystem. An unresolved coordinate means the module declares MORE
+than the picture shows — resolve it from the parent build or record it as
+unresolved, never present the picture as that module's full dependency set. A bound
+you hit is a re-run on a narrower path, not a smaller answer. An unreadable index
+artifact makes that file unindexed, so rebuild the index before treating any
+reachability value in its module as measured. A scanner row matching nothing is the
+informative direction of the correlation — read those rows.
+
+Completion is not "the gaps section is short": it is that every gap was read by hand
+or deferred with a stated reason in the handoff.
 
 ### 5. The adversarial cases, and what each looks like in the output
 
@@ -178,7 +179,7 @@ cross-check.
 ## Completion Criteria
 
 - The derivation ran against the sealed snapshot with a structural index present.
-- Every `unparsed_ecosystem` gap has been read by hand or explicitly deferred with a
+- Every gap in the picture has been read by hand or explicitly deferred with a stated
   reason.
 - Every shipped-and-reachable component has a version the build resolves, or an
   `unverified_version_unresolved` qualifier with a stated reason it could not be

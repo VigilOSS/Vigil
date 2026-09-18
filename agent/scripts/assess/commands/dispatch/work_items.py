@@ -597,7 +597,16 @@ def _reclassify_retype(client, *, batch: int, retype_all: bool) -> None:
             "body_params": row.get("body_params"),
             "path_params": row.get("path_params"),
         }
-        assignment = _classify_row(mirror)
+        # Thread the same context kwargs the `_reclassify` branch passes: the
+        # hand-built mirror carries only the fields the TYPER needs, so without
+        # these the retype pass scored every row with the boost layer and the
+        # full-URL regex buckets disabled.
+        assignment = _classify_row(
+            mirror,
+            url=_reclassify_row_get(row, "url"),
+            source=_reclassify_row_get(row, "source"),
+            live_status=_reclassify_row_get(row, "live_status"),
+        )
 
         # queue_key embeds the type only for variant:/service:/coverage: keys,
         # where it is the trailing ':'-segment. Only rewrite when the trailing

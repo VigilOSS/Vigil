@@ -33,6 +33,8 @@ disappears from the review ledger.
 
 Use the helper contracts as the durable shape source before authoring or reviewing Phase 1 machine artifacts: `vigil assess contract code-record classify`, `vigil assess contract code-record modules`, `vigil assess contract code-record threat-model`, and `vigil assess contract code-dispatch`. Point dispatches at those contracts instead of embedding copied JSON templates, because the CLI contract stays aligned with backend validation and catches field-name drift.
 
+**The dependency picture is part of the map.** `vigil assess code-dependencies` reconciles manifests, lockfiles, build configuration and vendored trees against what the build actually ships, and reports what it could not resolve as named gap codes rather than as silence — run `vigil assess contract code-dependencies` for the gap roster. Dispatch it with `agent/skills/dependency-analysis/SKILL.md`, which owns the judgment: which gaps are worth chasing, and how a declared dependency differs from a shipped one. A component the reviewed project activates but never declares is exactly the shape this catches and classification alone does not.
+
 **Deliverables from code-architect:**
 
 1. **File classifications** -- every file tagged with a classification tier and

@@ -10,6 +10,7 @@ import sys
 from assess.commands.code_dispatch import _format_lease_age
 from assess.lib.client import AssessmentClient
 from assess.lib.config import load_config
+from assess.lib.treesitter_index import FUNCTION_SCOPED_DIMENSIONS
 
 EFFORT_THRESHOLDS = {
     "critical": 70,
@@ -180,7 +181,10 @@ _BLOCKER_REPAIRS = {
         "re-ingest, which advances the generation by design"
     ),
     'code_leads_unresolved': lambda repo_id: (
-        f"`vigil assess code-lead list {_repo_selector(repo_id)} --lead-status open` "
+        # The blocker counts every binding whose note is open OR in_progress and
+        # does not exclude stale ones, so a narrower read dead-ends the operator
+        # on a gate that is still firing.
+        f"`vigil assess code-lead list {_repo_selector(repo_id)} --include-superseded` "
         "shows each unanswered prior-art lead and where it points; "
         "`vigil assess code-lead queue` turns any bound file with no queue row "
         "into analysis work. Close each lead on the note itself: `vigil assess "
@@ -336,10 +340,26 @@ def _print_cwe_matrix(files: list[dict]) -> None:
     print()
 
 
+def _unscanned_structural_scope(file_row: dict) -> bool:
+    """Whether the index declares this file's function-scoped readers unmeasured.
+
+    `FUNCTION_SCOPED_DIMENSIONS` is imported rather than restated: the indexer
+    that publishes the list owns what belongs in it.
+    """
+    unavailable = file_row.get('structural_unavailable_dimensions') or []
+    return bool(set(unavailable) & FUNCTION_SCOPED_DIMENSIONS)
+
+
 def _print_structural_verification(files: list[dict]) -> None:
-    """Cross-check functions_analyzed against total_functions from structural index."""
+    """Cross-check analysed functions against the index, and name what it never read.
+
+    The count check only means anything where there are functions to count, so
+    a file whose scan scope covered no source is reported on its own terms
+    instead of falling through the comparison into the all-clear.
+    """
+    unscanned = [f for f in files if _unscanned_structural_scope(f)]
     has_structural = any(f.get('total_functions', 0) > 0 for f in files)
-    if not has_structural:
+    if not has_structural and not unscanned:
         return
 
     print("\n--- Structural Verification ---")
@@ -372,7 +392,19 @@ def _print_structural_verification(files: list[dict]) -> None:
         print(f"Files with unanalyzed functions: {len(gaps)}")
         for g in gaps:
             print(g)
-    else:
+    if unscanned:
+        # Zero functions means zero scanned spans, so the function-count check
+        # above has nothing to compare and silently passed these files over.
+        print(f"Files whose structural scan scope covered no source: {len(unscanned)}")
+        for f in unscanned:
+            file_path = f.get('file_path', '?')
+            classification = f.get('classification', '')
+            print(
+                f"  {file_path} ({classification}): "
+                f"{', '.join(f.get('structural_unavailable_dimensions') or [])} "
+                "not measured — only whole-file source review can cover it"
+            )
+    if not gaps and not unscanned:
         # max(functions_analyzed) across CWE families matches total_functions,
         # but overlapping functions between families are not deduplicated —
         # this is count-based coverage, not identity-based.

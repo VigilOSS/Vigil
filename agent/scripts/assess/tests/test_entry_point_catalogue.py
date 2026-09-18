@@ -2,7 +2,7 @@
 
 Covers the four entry-point tables in `assess.lib.treesitter_index` that this
 suite owns: ``_ENTRY_ANNOTATIONS``, ``_ENTRY_METHOD_NAMES``,
-``_ENTRY_LINE_PATTERNS`` and ``_GLOBAL_ENTRY_LINE_PATTERNS`` (68 entries
+``_ENTRY_LINE_PATTERNS`` and ``_GLOBAL_ENTRY_LINE_PATTERNS`` (79 entries
 total). Every pattern is classified LIVE / DEAD / REDUNDANT / OBSOLETE /
 MISROUTED by executing the real indexer against idiomatic 2026 fixtures; only
 LIVE patterns get a positive test here (see the DEAD/MISROUTED allow-list on
@@ -472,7 +472,9 @@ if $PROGRAM_NAME == __FILE__
 end
 """
 
-# _ENTRY_METHOD_NAMES["php"] -- magic methods
+# _ENTRY_METHOD_NAMES["php"] -- magic methods. Every one of them is invoked by
+# the PHP runtime rather than by the application, which is what makes the set
+# the landing surface for an attacker-controlled `unserialize()`.
 PHP_MAGIC_METHODS_SRC = """\
 <?php
 class UserValueObject
@@ -490,14 +492,52 @@ class UserValueObject
     {
         $this->reconnect();
     }
+
+    public function __unserialize(array $data): void
+    {
+        $this->id = $data['id'];
+    }
+
+    public function __serialize(): array
+    {
+        return ['id' => $this->id];
+    }
+
+    public function __sleep()
+    {
+        return ['id'];
+    }
+
+    public function __toString(): string
+    {
+        return $this->name;
+    }
+
+    public function __invoke($argument)
+    {
+        return $this->render($argument);
+    }
+
+    public function __call($method, $arguments)
+    {
+        return $this->forward($method, $arguments);
+    }
+
+    public function __get($property)
+    {
+        return $this->attributes[$property];
+    }
+
+    public function __set($property, $value)
+    {
+        $this->attributes[$property] = $value;
+    }
 }
 """
 
-# _ENTRY_LINE_PATTERNS["php"] -- Slim/generic-router registration only
-# survives when it happens inside a *named* method: PHP closures (the more
-# common Slim 4 `return function (App $app) {...}` routes.php idiom) are
-# never extracted as function nodes at all (proven separately below), so a
-# bootstrap/registrar class is the only idiom that reaches this pattern.
+# _ENTRY_LINE_PATTERNS["php"] -- registration inside a *named* method, the
+# registrar/bootstrap-class idiom. The closure-based Slim 4 idiom reaches the
+# same patterns through its own callable and is proven separately below.
 # Each registrar method gets its own fixture (not one class with both
 # methods) for the same reason as the Go fixtures above: under the old
 # three-line lookback, registerRouter's window leaked `$app->get(...)` from
@@ -526,8 +566,11 @@ class RouteRegistrar
 }
 """
 
-# DEAD proof: idiomatic Laravel routes/web.php -- pure top-level statements,
-# no enclosing function anywhere in the file.
+# LIVE on two independent mechanisms: the inline closure handler is a callable
+# whose registering call (`Route::get(`) the function-scoped pattern reaches,
+# and the controller-array registration below it is a direct program child the
+# _GLOBAL_ENTRY_LINE_PATTERNS pass reads. Neither fired before PHP closures
+# became callables and php gained a global-pattern key.
 PHP_LARAVEL_ROUTES_SRC = """\
 <?php
 
@@ -540,8 +583,9 @@ Route::get('/', function () {
 Route::get('/users/{id}', [UserController::class, 'show']);
 """
 
-# DEAD proof: the more common Slim 4 closure-returning routes.php -- also no
-# function nodes, for a different reason (PHP closures aren't extracted).
+# The Slim 4 `return function (App $app) {...}` routes.php idiom: the returned
+# closure is the callable, and `$app->get(...)` inside its own body is what the
+# function-scoped line pattern scans.
 PHP_SLIM_CLOSURE_ROUTES_SRC = """\
 <?php
 
@@ -550,6 +594,16 @@ use Slim\\App;
 return function (App $app) {
     $app->get('/users/{id}', \\App\\Controller\\UserController::class . ':show');
 };
+"""
+
+# _GLOBAL_ENTRY_LINE_PATTERNS["php"] -- a Slim/generic bootstrap that names
+# already-defined controller actions, so no callable exists anywhere for the
+# function-scoped pass and only the top-level statement scan can see it.
+PHP_TOP_LEVEL_REGISTRAR_SRC = """\
+<?php
+
+$app->get('/users', [UserController::class, 'index']);
+$router->post('/widgets', [WidgetController::class, 'store']);
 """
 
 # _ENTRY_ANNOTATIONS["php"]["#[Route]"] -- a PHP 8 attribute route
@@ -853,9 +907,17 @@ LIVE_CASES: list[tuple[str, str, str, str, str, str, str]] = [
     ("method_names", "go", "init", GO_SRC, "main.go", "func init() {", "init_function"),
     # -- _ENTRY_METHOD_NAMES["ruby"] (1 of 1) --
     ("method_names", "ruby", "call", RUBY_RACK_SRC, "rack_app.rb", "def call(env)", "rack_call"),
-    # -- _ENTRY_METHOD_NAMES["php"] (2 of 3; __construct is MISROUTED) --
+    # -- _ENTRY_METHOD_NAMES["php"] (10 of 11; __construct is MISROUTED) --
     ("method_names", "php", "__destruct", PHP_MAGIC_METHODS_SRC, "value_object.php", "public function __destruct", "destructor"),
     ("method_names", "php", "__wakeup", PHP_MAGIC_METHODS_SRC, "value_object.php", "public function __wakeup", "deserialization_hook"),
+    ("method_names", "php", "__unserialize", PHP_MAGIC_METHODS_SRC, "value_object.php", "public function __unserialize", "deserialization_hook"),
+    ("method_names", "php", "__serialize", PHP_MAGIC_METHODS_SRC, "value_object.php", "public function __serialize", "serialization_hook"),
+    ("method_names", "php", "__sleep", PHP_MAGIC_METHODS_SRC, "value_object.php", "public function __sleep", "serialization_hook"),
+    ("method_names", "php", "__toString", PHP_MAGIC_METHODS_SRC, "value_object.php", "public function __toString", "string_conversion_hook"),
+    ("method_names", "php", "__invoke", PHP_MAGIC_METHODS_SRC, "value_object.php", "public function __invoke", "invocation_hook"),
+    ("method_names", "php", "__call", PHP_MAGIC_METHODS_SRC, "value_object.php", "public function __call", "magic_call_hook"),
+    ("method_names", "php", "__get", PHP_MAGIC_METHODS_SRC, "value_object.php", "public function __get", "property_read_hook"),
+    ("method_names", "php", "__set", PHP_MAGIC_METHODS_SRC, "value_object.php", "public function __set", "property_write_hook"),
     # -- _ENTRY_LINE_PATTERNS["javascript"] (10 of 10) --
     ("line_patterns", "javascript", r"\bapp\.get\s*\(", JS_EXPRESS_SRC, "server.js", "app.get('/users'", "express_route"),
     ("line_patterns", "javascript", r"\bapp\.post\s*\(", JS_EXPRESS_SRC, "server.js", "app.post('/users'", "express_route"),
@@ -895,13 +957,24 @@ LIVE_CASES: list[tuple[str, str, str, str, str, str, str]] = [
     ("line_patterns", "go", r"\bmux\.HandleFunc\s*\(", GO_SERVEMUX_SRC, "servemux.go", "func registerServeMux() {", "mux_handler"),
     ("line_patterns", "go", r"\br\.HandleFunc\s*\(", GO_GORILLA_SRC, "gorilla.go", "func registerGorilla() {", "gorilla_router"),
     # -- _ENTRY_LINE_PATTERNS["ruby"]: 0 of 4 are LIVE, all excluded --
-    # -- _ENTRY_LINE_PATTERNS["php"] (2 of 3; Route::\w+ is DEAD) --
+    # -- _ENTRY_LINE_PATTERNS["php"] (3 of 3) --
+    # The entry's "line" is the CLOSURE's line_start: a Laravel route file's
+    # handler is an anonymous function, and `_registering_call_lines` walks up
+    # from it to the `Route::get(` it is an argument to.
+    ("line_patterns", "php", r"\bRoute::\w+\s*\(", PHP_LARAVEL_ROUTES_SRC, "web.php", "Route::get('/', function ()", "laravel_route"),
     ("line_patterns", "php", r"\$app->\w+\s*\(", PHP_APP_REGISTRAR_SRC, "app_registrar.php", "registerApp", "slim_route"),
     ("line_patterns", "php", r"\$router->\w+\s*\(", PHP_ROUTER_REGISTRAR_SRC, "router_registrar.php", "registerRouter", "framework_route"),
-    # -- _GLOBAL_ENTRY_LINE_PATTERNS (3 of 3) --
+    # -- _GLOBAL_ENTRY_LINE_PATTERNS (6 of 6) --
     ("global_line_patterns", "python", r"^\s*if\s+__name__\s*==\s*['\"]__main__['\"]", PY_FLASK_SRC, "flask_app.py", 'if __name__ == "__main__":', "main_guard"),
     ("global_line_patterns", "ruby", r"^\s*if\s+__FILE__\s*==\s*\$0", RUBY_MAIN_GUARD_1_SRC, "script1.rb", "if __FILE__ == $0", "main_guard"),
     ("global_line_patterns", "ruby", r"^\s*if\s+\$PROGRAM_NAME\s*==\s*__FILE__", RUBY_MAIN_GUARD_2_SRC, "script2.rb", "if $PROGRAM_NAME == __FILE__", "main_guard"),
+    # php reuses the same list object as _ENTRY_LINE_PATTERNS["php"], read over
+    # top-level statements instead of function spans. Each row needs a
+    # registration with NO inline callable, or the function-scoped pass owns it
+    # and the top-level pass deliberately stands down.
+    ("global_line_patterns", "php", r"\bRoute::\w+\s*\(", PHP_LARAVEL_ROUTES_SRC, "web.php", "Route::get('/users/{id}'", "laravel_route"),
+    ("global_line_patterns", "php", r"\$app->\w+\s*\(", PHP_TOP_LEVEL_REGISTRAR_SRC, "index.php", "$app->get('/users'", "slim_route"),
+    ("global_line_patterns", "php", r"\$router->\w+\s*\(", PHP_TOP_LEVEL_REGISTRAR_SRC, "index.php", "$router->post('/widgets'", "framework_route"),
 ]
 
 
@@ -1182,29 +1255,35 @@ def test_express_route_naming_an_existing_handler_is_never_seen() -> None:
     assert result["entry_points"] == []
 
 
-def test_laravel_route_file_has_no_function_to_scan() -> None:
-    """DEAD: `Route::\\w+\\s*\\(` (treesitter_index.py _ENTRY_LINE_PATTERNS
-    ``php``) requires an enclosing function. Idiomatic Laravel route files
-    (`routes/web.php`, `routes/api.php`) are pure top-level statements --
-    Laravel's own convention never wraps them in a named function.
+def test_a_laravel_route_file_registers_every_route_exactly_once() -> None:
+    """Both halves of the php entry surface, on one real route file.
+
+    The inline-closure route is attributed to its handler (the closure, now a
+    callable), and the controller-array route -- which has no callable at all
+    -- is attributed to the top-level statement. The top-level pass stands
+    down on the first of those, so one registration never yields two records.
     """
     result = _index(PHP_LARAVEL_ROUTES_SRC, "web.php", "php")
 
-    assert result["functions"] == []
-    assert result["entry_points"] == []
+    assert [func["name"] for func in result["functions"]] == ["<anonymous@5:16>"]
+    assert [
+        (entry["name"], entry["kind"], entry["line"])
+        for entry in result["entry_points"]
+    ] == [
+        ("<anonymous@5:16>", "laravel_route", _line_of("Route::get('/', function ()", PHP_LARAVEL_ROUTES_SRC)),
+        ("<top-level>", "laravel_route", _line_of("Route::get('/users/{id}'", PHP_LARAVEL_ROUTES_SRC)),
+    ]
 
 
-def test_slim_closure_routes_have_no_function_to_scan_either() -> None:
-    """DEAD via a second, independent mechanism: the more common Slim 4
-    `return function (App $app) {...}` routes.php idiom also produces zero
-    functions, because PHP closures (`anonymous_function_creation_expression`)
-    are not part of the function-extraction query at all -- not just because
-    they are top-level.
+def test_slim_closure_routes_register_through_their_returned_closure() -> None:
+    """The second mechanism, independent of the top-level statement scan: the
+    returned closure is the callable, and `$app->get(...)` sits inside its own
+    body, which is the span the function-scoped line patterns already read.
     """
     result = _index(PHP_SLIM_CLOSURE_ROUTES_SRC, "routes.php", "php")
 
-    assert result["functions"] == []
-    assert result["entry_points"] == []
+    assert [func["name"] for func in result["functions"]] == ["<anonymous@5:7>"]
+    assert [entry["kind"] for entry in result["entry_points"]] == ["slim_route"]
 
 
 def test_php_attribute_route_also_survives_the_streaming_comment_rule() -> None:
@@ -1274,12 +1353,6 @@ EXCLUDED_PATTERNS: dict[tuple[str, str, str], str] = {
         "call on a variable named e/g/app for any reason (errgroup.Wait(), "
         "a loaded Config). Verified in "
         "test_go_framework_route_pattern_fires_on_ordinary_non_web_code.",
-    ("line_patterns", "php", r"\bRoute::\w+\s*\("):
-        "DEAD -- idiomatic Laravel route files (routes/web.php, "
-        "routes/api.php) are pure top-level statements with no enclosing "
-        "function; Laravel's own convention never wraps route "
-        "registration in a named function. Verified in "
-        "test_laravel_route_file_has_no_function_to_scan.",
 }
 
 
@@ -1322,9 +1395,9 @@ def test_catalogue_sweep_covers_every_entry_point_pattern() -> None:
         | _real_line_pattern_keys()
         | _real_global_line_pattern_keys()
     )
-    assert len(real_keys) == 68, (
-        f"expected 68 entry-point catalogue entries (17 annotations + "
-        f"12 method names + 36 line patterns + 3 global line patterns), "
+    assert len(real_keys) == 79, (
+        f"expected 79 entry-point catalogue entries (17 annotations + "
+        f"20 method names + 36 line patterns + 6 global line patterns), "
         f"found {len(real_keys)} -- the catalogue has drifted; update this "
         f"suite's LIVE_CASES/EXCLUDED_PATTERNS to match"
     )

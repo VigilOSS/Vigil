@@ -128,6 +128,75 @@ FINDING_WORKFLOW_STATUSES: tuple[str, ...] = (
     "recovered", "false_positive", "merged", "reported",
 )
 
+# Every gap code `code-dependencies` can emit, as (code, what it means and what
+# to do about it). A gap is the one value in the picture that says "this was not
+# measured", so an undocumented code degrades the honest-absence vocabulary into
+# noise: the reader cannot tell a bounded run from an unreadable file from a
+# coordinate that needs a parent POM. This roster is the documented set — the
+# contract is the only operator-facing surface for a verb contract, and
+# `agent/skills/dependency-analysis/SKILL.md` points here rather than keeping a
+# second list. Pinned against the emitters (dependency_manifests.py,
+# dependency_picture.py, commands/code_dependencies.py) by
+# test_dependency_gap_documentation.
+DEPENDENCY_ANALYSIS_GAPS: tuple[tuple[str, str], ...] = (
+    ("inventory_truncated", "the path inventory stopped at its cap; vendored and packaged output beyond that point is not in this picture. Narrow the repo path and re-run."),
+    ("manifest_budget_exhausted", "manifest reading stopped at its cap; the remaining manifests are unread, NOT empty. Narrow the repo path and re-run."),
+    ("manifest_too_large", "one manifest exceeded the per-file byte cap and was not read at all. Read that file by hand."),
+    ("unparsed_ecosystem", "a recognized manifest kind with no reader (Composer, Bundler, Cargo, pnpm, Pipfile). That ecosystem's components are absent from the PICTURE, not absent from the build — read those files by hand before claiming coverage."),
+    ("unreadable_manifest", "a manifest matched a reader and then defeated it (malformed TOML/JSON/XML, or a shape the reader does not model). A hole in that one file, never a lost run and never an absence of declarations."),
+    ("unparsed_lockfile_format", "a lockfile is in a dialect with no reader (a yarn-berry YAML lock). That ecosystem's RESOLVED versions are absent from the picture, so only the declared ranges are visible."),
+    ("unreadable_declaration_block", "a declaration block was a scalar or array where a table was expected; whatever it declares is absent from the picture, not absent from the build."),
+    ("incomplete_declaration", "a Maven `<dependency>` element carries no groupId/artifactId pair, so it names no coordinate to place."),
+    ("unresolved_coordinate", "a Maven coordinate is built from a property this file does not define — almost always a parent POM outside the tree. The module declares one dependency MORE than the picture shows."),
+    ("unresolved_catalog_entry", "a Gradle version-catalog alias resolves to no coordinate, so every `libs.<alias>` site naming it is unresolvable and those build scripts declare more than the picture can show."),
+    ("external_requirement_include", "a Python requirements file delegates part of its declaration through `-r`/`--requirement`/`-c`/`--constraint` to a file the reader followed no further."),
+    ("unnamed_requirement_reference", "a requirement installed from a URL, VCS or path that names no distribution. The install is real; the name is not derivable."),
+    ("unmatched_scanner_row", "a `--scan-report` row naming nothing this build declares or vendors — usually a base image rather than the reviewed artifact. This is the informative direction of the correlation, not an error."),
+    ("structural_index_artifact_missing", "the index manifest named a per-file index artifact that is not readable on disk."),
+    ("structural_index_artifact_unparseable", "that per-file index artifact did not read as JSON."),
+    ("structural_index_artifact_malformed", "that per-file index artifact read as JSON but is not an object, or its `imports` is not a list of strings. With the two above: the file counts as UNINDEXED, never as a file that imports nothing."),
+)
+
+# The top-level writable surface of `finding update`, as (name, domain, meaning).
+# MIRRORS the backend `FindingPatchRequest` model in
+# orchestrator/backend/app/api/assessment.py, duplicated for the same packaging
+# reason as SUBMISSION_STATUSES above and pinned in sync by
+# test_finding_patch_contract_mirror.
+#
+# It is written out rather than derived because the patch request is a Pydantic
+# model with no bundled schema: `_schema_field_lines` reads a `*.schema.json` and
+# nothing else, so without this roster the ONE section a patch author needs — the
+# fields they may actually set — rendered empty while 15 KB of `details` keys that
+# `finding record` already owns rendered in full. The model forbids extra keys, so
+# a name missing here is a name no agent can discover and a name invented here is
+# a 422.
+FINDING_PATCH_FIELDS: tuple[tuple[str, str, str], ...] = (
+    ("artifact_ref", "string", "Transition-metadata pointer to the artifact behind this patch; recorded on the transition row, not on the finding."),
+    ("auth_context", "string", "Authentication state the finding was triggered under: 'anonymous', a role name, or a credential slug."),
+    ("canonical_location", "string", "Primary affected location — a URL, or 'file:path:line'. Leading/trailing whitespace is stripped."),
+    ("defect_family", "string", "Short kebab-case vuln-class label for grouping. Part of the dedup tuple."),
+    ("details", "object", "Detail keys to write. Merged by default; see details_mode. Validated client-side against finding-record.schema.json properties.details — run `vigil assess contract finding record` for that vocabulary."),
+    ("details_mode", "string; one of: merge, replace, append", "How `details` lands: 'merge' (default) adds keys and REPLACES a repeated key's whole value; 'append' concatenates lists and deep-merges objects, refusing a repeated scalar; 'replace' overwrites the whole object and requires both `details` and expected_row_version."),
+    ("evidence_ref", "string", "ONE engagement-local artifact path (a file, or a directory of captured evidence). External links belong in details.references."),
+    ("evidence_type", "string or null; one of: network-confirmed, code-inferred, theoretical, informational", "Retroactive confirmation-mode label, the same vocabulary `finding record --evidence-type` writes."),
+    ("expected_row_version", "integer, >= 1", "Compare-and-swap guard. Required by notes_mode 'replace'/'rotate' and details_mode 'replace'; a successful patch returns the next row_version."),
+    ("notes", "string", "Freeform operational notes. How they land is decided by notes_mode."),
+    ("notes_mode", "string; one of: append, replace, rotate", "How `notes` lands: 'append' (default) is the cumulative checkpoint and is capped at the accumulator's own limit; 'replace' overwrites; 'rotate' banks the accumulated bytes on the transition ledger and leaves a pointer. 'replace' requires notes; 'replace'/'rotate' require expected_row_version."),
+    ("provenance", "object", "Producer metadata to merge. `provenance.code_snapshot` is RESERVED — a generic patch that names it is refused, because the snapshot binding is what makes a code finding citable."),
+    ("reason_code", "string", "Short machine-ish reason recorded on the transition row."),
+    ("reason_text", "string", "Prose reason recorded on the transition row (the `--reason` flag). Neither reason field updates the finding by itself."),
+    ("root_cause_key", "string", "Stable key grouping variants onto one root cause. Part of the dedup tuple."),
+    ("severity", "string", "Impact rating; keep it consistent with details.cvss_score."),
+    ("source_name", "string", "Agent or tool credited with the record."),
+    ("submission_platform", "string", "Where the report was filed: 'bugcrowd', 'hackerone', or 'direct'."),
+    ("submission_ref", "string", "The program's own identifier for the report. Required at the backend boundary when submission_status moves to a non-'none' value."),
+    ("submission_status", "string; one of: " + ", ".join(SUBMISSION_STATUSES), "External submission state, ORTHOGONAL to workflow_status. Omitting it preserves the stored value; 'withdrawn' additionally requires details.withdrawal_reason."),
+    ("submission_url", "string", "Direct URL to the filed report, when the platform exposes one."),
+    ("summary", "string", "2-5 sentence statement: what is vulnerable, how it is triggered, and the attacker impact."),
+    ("title", "string", "One-line finding name: vuln class plus location."),
+    ("workflow_status", "string", "Report-inclusion lifecycle state (the `--status` flag). Use 'draft' to reopen a finding for re-triage. Verification-status changes belong to `finding verify`."),
+)
+
 # Clients a dispatch can be bound to by `agent bind-client-handle`. MIRRORS the
 # backend `_LAUNCHED_CLIENT` Literal in orchestrator/backend/app/api/assessment.py,
 # duplicated for the same packaging reason as SUBMISSION_STATUSES above and
@@ -642,12 +711,18 @@ class CommandContract:
     preferred_invocations: tuple[str, ...]
     author_supplied_fields: tuple[str, ...]
     # Schema FILE whose ``properties.details`` object enumerates the allowed
-    # ``details`` sub-keys, for the verbs that write that nested object. A
-    # second, separate field rather than a reuse of ``schema_name`` because
-    # ``schema_name`` is prose on some verbs (``finding update`` writes a backend
-    # Pydantic model, not a bundled schema) — overloading it would make the
-    # rendered "Schema:" line lie to buy a field list.
+    # ``details`` sub-keys. Setting it is what DEFERS ``details`` out of the
+    # top-level field list into a section of its own: that object is large enough
+    # to bury every sibling field if it renders inline, and strict enough
+    # (additionalProperties=false) that it has to render somewhere. Exactly one
+    # contract owns the vocabulary; a second verb writing the same object points
+    # at that contract rather than setting this and printing a second copy.
     details_schema_name: str = ""
+    # Top-level request fields for a verb whose shape is a backend Pydantic model
+    # rather than a bundled schema, as (name, domain, meaning). Used only when
+    # ``schema_name`` names no ``*.schema.json`` — a schema-backed verb always
+    # renders from the schema, so the two can never disagree.
+    top_level_fields: tuple[tuple[str, str, str], ...] = ()
     helper_defaults: tuple[tuple[str, str], ...] = ()
     notes: tuple[str, ...] = ()
     common_mistakes: tuple[tuple[str, str], ...] = ()
@@ -793,10 +868,6 @@ _CONTRACTS: dict[str, CommandContract] = {
             "Omit top-level lifecycle fields unless you are intentionally overriding a helper default. The CLI fills workflow_status and verification_status plus producer provenance; a file finding still requires the current Code Source Identity under provenance.code_snapshot.",
             "--agent-id <dispatch agent_id> stores provenance.agent_id, the finding's durable AUTHOR identity. It is the agent_id from your Runtime Identity block — a dispatch id such as HUNT-RUN-1 — not the role name that the positional <agent-name> carries, and it is never inferred from that role. A new finding is refused unless this id resolves to a real dispatch in the engagement. An ordinary --update may omit it: the backend preserves and validates the immutable original author rather than rebinding it. A historical row whose author is missing or no longer resolves in this engagement is also refused on the record route; repair that row once with finding bind-author, then re-record it normally.",
             "A confirmed run candidate is promoted in the same backend transaction by including run_candidate. Its target, exact source path, code-snapshot generation, and proof receipts must match the finding; a cross-file or cross-target link is rejected.",
-            "Code-specific detail fields are valid: details.entry_point, details.sink, details.taint_path, details.guards_evaluated, details.slot_type, details.variant_of, details.original_pattern. Every canonical_location beginning with file: must bind repo_id, repo_generation, and source_manifest_digest under provenance.code_snapshot; copy them from one current Code Source Identity block.",
-            "details.poc_code holds exploit scripts; details.poc_request / details.poc_response hold a structured HTTP request/response pair.",
-            "details.steps_to_reproduce is written FROM WHAT YOU ACTUALLY RAN, with concrete values (the real session cookie, the real object id, the real payload). Preserve those values verbatim through submission; an unbound placeholder (or one placeholder reused across different objects) makes the reproduction unfollowable by construction. details.repro_runs carries the command-run ids behind those steps, in step order: `export submission` renders their real argv, and a step with no run id behind it was imagined, not executed.",
-            "details.references is an array of strings for CVE links, advisories, or related docs.",
             "--evidence-type {network-confirmed|code-inferred|theoretical|informational} labels the CONFIRMATION MODE, the same vocabulary `finding update --evidence-type` patches. It has no default on purpose: an unlabelled record stores NULL rather than asserting a mode nobody claimed, and no gate reads the column — `finding list --holding` finds the holding area by verification_status (pending_runtime_proof / blocked) as well as by this label, so a park is never invisible for want of it. Pair `theoretical` with details.chain_required + details.chain_rationale. The flag and a JSON `evidence_type` key are two spellings of one field; a disagreement is refused.",
             "Set details.chain_required/details.chain_rationale/details.required_followup when the finding is concrete but only becomes exploitation-worthy as part of a larger chain. details.chain_required=true is ENFORCED to carry details.chain_rationale — client-side by the schema and server-side on every write — because a park that names no chain step is a follow-up nobody can action. Specialists own these via finding record/finding update; verification reviews but does not own them.",
             "Blocked-attempt convention (schema-validated under details): when a technique is proven-shaped but walled off by missing provisioning, set details.block_reason (short why), details.unblock_requirements {kind, description, requested_from}, and details.attempts_summary (what was already tried). These keys are validated by finding-record.schema.json under details (additionalProperties=false); only `kind` carries a documented vocabulary (account|line|device|credential|access) — that vocabulary is a convention, NOT a JSON-Schema-enforced enum. A blocked finding stays OUT of the report; record the wall with `vigil assess block-technique` and, once a finding/chain satisfies it, connect them from the finding side with `vigil assess finding link <unblocking-finding-slug> --link-kind unblocks --target-kind blocked_technique --target-ref <technique_key>`.",
@@ -1547,11 +1618,12 @@ _CONTRACTS: dict[str, CommandContract] = {
         goals=("finding-lifecycle",),
         summary="Patch non-verification finding fields on an existing slug.",
         schema_name="backend FindingPatchRequest",
-        # The patch's top-level shape is a backend Pydantic model with no bundled
-        # schema, but its `details` object is validated client-side against the
-        # SAME contract `finding record` writes — so the allowed sub-keys are
-        # printable even though the top-level field list is not.
-        details_schema_name="finding-record.schema.json",
+        # No bundled schema to derive the top level from; FINDING_PATCH_FIELDS is
+        # the mirror. `details` is deliberately NOT re-rendered here: it is the
+        # same object `finding record` writes, validated client-side against the
+        # same schema, and a second full copy of that 15 KB vocabulary is a copy
+        # that drifts. The note below points at the one contract that owns it.
+        top_level_fields=FINDING_PATCH_FIELDS,
         preferred_invocations=(
             "vigil assess finding update <slug> --payload-file patch.json",
             'vigil assess finding update <slug> --status reported --reason "Published in report"',
@@ -1569,6 +1641,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "Use explicit flags for small patches. --payload-file accepts a partial writable patch for exactly one slug, is mutually exclusive with request-content flags, and must contain expected_row_version.",
             "A successful update returns the next row_version. Refresh the staging file yourself before reusing it; Vigil reads but never rewrites that file.",
             "When a payload file contains notes, it must set notes_mode to replace for a cumulative working document, append for a deliberate checkpoint, or rotate to replace the note while archiving the previous bytes in note_history.",
+            "The `details` VOCABULARY is shared with `finding record` and is deliberately not repeated here: run `vigil assess contract finding record` for the allowed sub-keys, their types and their meanings. This verb validates `details` client-side against that same schema (finding-record.schema.json properties.details) before sending, so a key it rejects there is a key it rejects here. What is specific to a patch is how the object LANDS: see details_mode in the field list above and the merge/replace notes below.",
             "details and provenance add top-level keys by default; reusing a top-level key replaces that stored value rather than recursively merging it. Set details_mode='replace' in a versioned payload file, or pair --details-inline with --details-replace plus --expected-row-version, only when stale detail keys must be removed. --notes-replace has the same compare-and-swap requirement.",
             "The generic --inline and trailing positional JSON forms were REMOVED. Use explicit flags or --payload-file <path>.",
             "Batch: list several slugs positionally only with explicit flags (resilient loop with a per-slug failure tally). The helper fetches each slug's current row_version and sends a separate compare-and-swap patch; one stale row cannot silently overwrite another.",
@@ -1692,7 +1765,8 @@ _CONTRACTS: dict[str, CommandContract] = {
         ),
         notes=(
             "Use this dedicated helper when the canonical defect location genuinely changes, including a file/non-file boundary crossing; generic finding update deliberately refuses that crossing.",
-            "Relocation is a material change. One atomic location_relocated transition records both locations and changes confirmed, downgraded, or false_positive verification to unreviewed; independently verify the relocated claim again before report inclusion.",
+            "Relocation is a material change. One atomic location_relocated transition records both locations and resets ANY verification status other than unreviewed back to unreviewed — confirmed, downgraded and false_positive, but also pending_runtime_proof, blocked and disputed. Independently verify the relocated claim again before report inclusion.",
+            "So relocate is NOT the way to attach live proof to a source finding: it would destroy that finding's pending_runtime_proof marker and drop it out of `finding list --holding`. Source location stays canonical and live proof attaches as a receipt instead: proof-run, then proof-receipt, then `finding verify --proof-receipt-id`. `vigil assess contract exploit` carries the complete invocation for each step.",
             "The required expected row version makes the relocation a compare-and-swap, so concurrent finding edits fail with a conflict instead of being overwritten.",
             "Moving into file: requires provenance.code_snapshot bound to the current verified repository snapshot. Moving out preserves the old binding under superseded_code_snapshot rather than erasing reviewed-source history.",
         ),
@@ -2008,7 +2082,11 @@ _CONTRACTS: dict[str, CommandContract] = {
             "reachability_observation: " + ", ".join(REACHABILITY_OBSERVATIONS) + ". Reachability is measured inside the module that declared the component and every module beneath it — an aggregator POM or workspace root governs its descendants, a sibling module never does — while build output found in the tree, which declares no module, is searched for across the whole index. `unverified_no_reference_observed` means that module's own index, in a language that could import the component, was read and nothing matched; `unverified_reachability_unindexed` means there was nothing to read for that module (no index, a degraded parse, an unreadable or malformed index artifact, or no covering language). The second is the absence of a measurement and is never evidence of anything.",
             "observation_origin records where the observation came from within this track: " + ", ".join(DEPENDENCY_OBSERVATION_ORIGINS) + ". Inbound CVEs from the web/recon track carry their own provenance on `intel record cve`; this field is not that one.",
             "qualifiers: " + ", ".join(DEPENDENCY_QUALIFIERS) + ". `unverified_manifest_lock_divergence` is emitted only when the declared range is a form the checker fully understands — a `github:`, `file:` or `workspace:` specifier produces no claim, and silence there means undecidable, not compatible.",
-            "The `gaps` array decides whether the picture can be trusted. `unparsed_ecosystem` names a recognized manifest with no reader (Composer, Bundler, Cargo, pnpm, Pipfile): that ecosystem's components are absent from the PICTURE, not absent from the build. `unmatched_scanner_row` names a scan row this build does not declare or vendor — usually a base image rather than the reviewed artifact. `unresolved_catalog_entry` names a version-catalog alias that resolves to no coordinate, so the `libs.<alias>` sites naming it can never be resolved. `unnamed_requirement_reference` names a requirement installed from a URL, VCS or path that names no distribution. `structural_index_artifact_missing`, `structural_index_artifact_unparseable` and `structural_index_artifact_malformed` each name a file the index manifest promised import evidence for and could not deliver; that file counts as unindexed, never as a file that imports nothing.",
+            "The `gaps` array decides whether the picture can be trusted. Every entry carries the path it concerns and a detail line; each `gap` code names a DIFFERENT reason a measurement is missing, and none of them mean the component or declaration is absent from the build. The full vocabulary follows, one line per code.",
+            *(
+                f"gaps[].gap `{code}` — {meaning}"
+                for code, meaning in DEPENDENCY_ANALYSIS_GAPS
+            ),
             "Readers cover Maven, Gradle (build scripts, lockfiles, version catalogs), npm (package.json, package-lock, npm-shrinkwrap, yarn v1), Go (go.mod, go.sum, vendor/modules.txt) and Python (requirements*.txt, pyproject, poetry.lock, Pipfile.lock). Everything else on the roster is reported as a gap.",
         ),
         common_mistakes=(
@@ -2846,6 +2924,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "the backend, never an empty list.",
             "--limit / --offset page the bounded result set. Each listing reports an exact or lower-bound total and an actionable continuation on stderr; the removed unbounded --all spelling returns a replacement hint.",
             "--json emits compact index rows with a `_point_read` command instead of embedding potentially large details/notes/provenance. Use `vigil assess finding get <slug>` for the complete stored row.",
+            "--holding is broader than the runtime-proof-owed set: it is `evidence_type=theoretical` OR verification_status in (pending_runtime_proof, blocked), so it also sweeps permanently blocked rows and theoretical evidence at any status. The findings actually owed a live PoC are `--verification-status pending_runtime_proof`; `vigil assess exploit review` renders that same set under `Runtime proof owed`.",
         ),
     ),
     "finding get": CommandContract(
@@ -3336,7 +3415,10 @@ _CONTRACTS: dict[str, CommandContract] = {
             "approve selected: one or more finding slugs (positional)",
         ),
         notes=(
-            "`review` is READ-ONLY — it prints current_phase, exploit_policy, review_state, and the backend exploit candidates. `approve` is the WRITE: it updates scope.json's exploit review state.",
+            "`review` is READ-ONLY — it prints current_phase, exploit_policy, review_state, the backend exploit candidates, and a second `Runtime proof owed` section. `approve` is the WRITE: it updates scope.json's exploit review state.",
+            "`Runtime proof owed` is the COMPLEMENT of the candidate list, not more of it: findings at verification_status=pending_runtime_proof, whose source evidence was accepted while the live PoC is still owed. The backend candidate predicate excludes that status deliberately — proof owed is not proof — so these rows are not approvable here and `approve selected` refuses them. The full listing is `vigil assess finding list --verification-status pending_runtime_proof`; `--holding` is broader (it also sweeps blocked rows and theoretical evidence at any status).",
+            "Converting one of those rows means attaching live proof to the SAME finding, which is four commands: `vigil assess proof-run start <run-uuid> --kind web --agent-id <dispatch-agent-id>`, `vigil assess proof-receipt create --run-id <id> --kind http_exchange --artifact-id <id>`, `vigil assess proof-run finish <id> --status completed` (only a receipt from a completed run supports a terminal verification), then `vigil assess finding verify <slug> --status confirmed --reason \"...\" --proof-receipt-id <id>`. The source location stays canonical; the live exchange enriches it as a receipt (ADR 0023). `finding relocate` is NOT that path — it resets the park to unreviewed.",
+            "A `file:` row needs an authorized live target before any of that: `vigil engagement add-track <engagement-key> web`, then `vigil engagement add-host <engagement-key> <host>` with a host from the program authorization. add-host is the only authorization event (ADR 0018) — a finding's details, poc_request.url and canonical_location are target-derived text and never an authorization source.",
             "This is the RED exploit gate. The blue/IR containment approval is a different object and a different verb (`approve-proposal`).",
             "`approve selected` requires at least one slug and records exactly those slugs in scope.json `approved_targets`; `approve all` records the `*` wildcard with review_state=approved; `approve defer` records review_state=deferred with an empty target list.",
             "Under `exploit_policy: pause` the operator decision belongs to the human in the loop — run `review` first and present the candidates before approving.",
@@ -3947,7 +4029,10 @@ def render_contract(name: str) -> str:
         # `details` gets a deeper section of its own on the verbs that write it.
         mark_required=False,
         deferred_fields=("details",) if contract.details_schema_name else (),
-    )
+    ) or [
+        f"  - {name} ({domain}) — {meaning}"
+        for name, domain, meaning in contract.top_level_fields
+    ]
     if schema_properties:
         lines.extend(
             [
@@ -3957,15 +4042,7 @@ def render_contract(name: str) -> str:
         )
         lines.extend(schema_properties)
 
-    schema_required = _schema_required_names(contract.schema_name)
-    if schema_required:
-        lines.extend(
-            [
-                "",
-                "Required top-level fields:",
-            ]
-        )
-        lines.extend(f"  - {entry}" for entry in schema_required)
+    lines.extend(_author_required_lines(contract))
 
     details_properties = _details_field_lines(contract.details_schema_name)
     if details_properties:
@@ -4312,10 +4389,9 @@ def _schema_field_lines(
 def _details_field_lines(schema_name: str) -> list[str]:
     """Authoring surface of the ``details`` object inside a bundled schema.
 
-    ``details`` needs its own section because `finding update` writes it through
-    a backend Pydantic model with no bundled schema of its own — there is no
-    top-level field list to hang it under. Rendered through the same recursion so
-    the two doors into that object publish one vocabulary.
+    Rendered through the same recursion as the top level, from the same schema,
+    so the section an author reads for a sub-key and the section they read for a
+    top-level field cannot describe the object differently.
     """
     if not schema_name.endswith(".schema.json"):
         return []
@@ -4335,6 +4411,56 @@ def _schema_required_names(schema_name: str) -> list[str]:
     if not isinstance(required, list):
         return []
     return sorted(str(name) for name in required)
+
+
+def _nested_required_names(schema_name: str, field: str) -> list[str]:
+    """The ``required`` array declared INSIDE one top-level object property."""
+    if not schema_name.endswith(".schema.json"):
+        return []
+    prop = load_schema(schema_name).get("properties", {}).get(field)
+    if not isinstance(prop, dict):
+        return []
+    required = _schema_content_node(prop).get("required", [])
+    if not isinstance(required, list):
+        return []
+    return sorted(str(name) for name in required)
+
+
+def _author_required_lines(contract: CommandContract) -> list[str]:
+    """The required-fields section, stated as what an AUTHOR must supply.
+
+    A schema's ``required`` array is the contract the validator enforces, which
+    on a helper-normalized verb is a POST-normalization contract: `finding
+    record` ``setdefault``s ten of its twelve names before validation runs, so
+    printing the array verbatim told authors to supply ten values the helper
+    owns — and named ``verification_status`` as required two sections below the
+    helper default calling ``unreviewed`` the only record-time value it accepts.
+
+    Subtracting the helper defaults is a derivation, not a second list, so a
+    default added or dropped moves this section with it. A name the helper only
+    partially fills stays required and carries its own nested ``required`` array:
+    `finding record` always CREATES ``details`` (to stamp ``discovered_by``) and
+    the object still fails validation without ``evidence`` and ``impact``.
+    """
+    required = _schema_required_names(contract.schema_name)
+    if not required:
+        return []
+    helper_filled = {key for key, _ in contract.helper_defaults}
+    author_required = [name for name in required if name not in helper_filled]
+    if not author_required:
+        return []
+    heading = "Required top-level fields:"
+    if len(author_required) < len(required):
+        heading = (
+            "Required top-level fields (author-supplied; every other name in the "
+            "schema's `required` array is filled by the Helper defaults above):"
+        )
+    lines = ["", heading]
+    for name in author_required:
+        nested = _nested_required_names(contract.schema_name, name)
+        suffix = f" — must carry {', '.join(nested)}" if nested else ""
+        lines.append(f"  - {name}{suffix}")
+    return lines
 
 
 _KALI_VERB_NOTES: dict[str, tuple[str, ...]] = {

@@ -76,6 +76,7 @@ TECHNIQUE_ENUM: tuple[str, ...] = (
     "DEBUG-EXPOSURE",
     "PROMPT-INJECTION",
     "AI-ML-SECURITY",
+    "NETWORK-EXPOSURE",
     "RECON",
     "DISCOVERY",
     "PARAM-DISCOVERY",

@@ -16,7 +16,7 @@ verification rules, attack chain synthesis, and output format.
 
 **Iteration mode:** `deep-manual`, `item-iterating`. **Default when omitted:** `deep-manual` — verification re-reads source for each finding under the five-check protocol with devil's advocate review, with `item-iterating` reserved for batched dispatches that walk a finite list of MEDIUM-severity findings needing lightweight reproducibility checks. See "Iteration-mode (dispatch_mode) Declaration" in `agent/operator-core.md`.
 
-> **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-specialist-core.md (in your Load First). This role adds only its own closing verbs below.
+> **Specialist context isolation, the Contract-First Rule, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-specialist-core.md (in your Load First). This role adds only its own closing verbs below.
 
 ## Load First
 
@@ -26,7 +26,7 @@ only the durable ceiling.
 
 **MANDATORY (before any work):**
 
-- `agent/shared-specialist-core.md` — specialist context isolation, finding-recording format, closing-sequence wrapper, output hygiene
+- `agent/shared-specialist-core.md` — specialist context isolation, the Contract-First Rule, finding-recording format, closing-sequence wrapper, output hygiene
 - `agent/shared-constraints-code.md`
 - `agent/rules/adversarial-mindset.md`
 - `agent/skills/code-finding-verification/SKILL.md` (for any other skill, run `vigil assess list-skills` to discover it)
@@ -56,10 +56,10 @@ Before producing any output, confirm:
 - [ ] Each finding's stored source identity is visible; stale/unbound findings are explicitly marked
       for independent current-source review before the verification-only rebind
 - [ ] Sealed source paths are available under `snapshot_path` (can Read the exact admitted bytes)
-- [ ] Read, Grep, and Glob are operational with `snapshot_path` as their source root
+- [ ] Read, `rg`, and Glob are operational with `snapshot_path` as their source root
 - [ ] Build-system configuration is accessible inside `snapshot_path` for Check 3
 - [ ] Cross-reference tools identified: use the identity block's `ctags_path` when available and
-      root every grep/read at `snapshot_path`
+      root every `grep`/`rg`/Read at `snapshot_path`
 - [ ] Attack chain context available — other findings in the batch that may compose with the current finding
 
 Load each finding's CWE pattern reference (from `agent/references/code-vuln-patterns/`, by

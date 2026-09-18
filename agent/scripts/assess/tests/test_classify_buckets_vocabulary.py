@@ -1,11 +1,20 @@
 """Vocabulary-recall sweep for the gf-style bucket classifier.
 
-`assess.lib.classify_buckets` is a hand-curated table of 40 buckets holding
-432 parameter-key entries, 269 path-fragment entries, and 11 regex entries
-(712 curated vocabulary entries total; all four counts verified by importing
+`assess.lib.classify_buckets` is a hand-curated table of 41 buckets holding
+451 parameter-key entries, 272 path-fragment entries, and 11 regex entries
+(734 curated vocabulary entries total; all four counts verified by importing
 `_BUCKETS`/`_REGEX_BUCKET_RULES` directly and summing -- see
-`test_classifier_vocabulary_totals_match_the_measured_baseline` below). A
-2026-09 empirical sweep instrumented `bucket_matches`/`fragment_in_path`/
+`test_classifier_vocabulary_totals_match_the_measured_baseline` below).
+
+Those totals are the POST-audit shape. The sweep below was measured against
+the pre-audit table (40 buckets / 432 keys / 269 fragments / 11 regexes = 712
+entries); the 22-entry delta is the `llm_api` bucket (19 keys + 3 fragments)
+that the audit added, every one of whose entries carries its own sweep row
+here. The bucket shipped with three MORE entries than it now carries -- the
+bare `prompt` key and the `/v1/messages` / `/v1/responses` fragments were
+withdrawn once each was shown to name a non-LLM surface (see "Withdrawn
+`llm_api` vocabulary" below). A 2026-09 empirical sweep instrumented
+`bucket_matches`/`fragment_in_path`/
 `regex_fragment_in_path` and ran the full existing test corpus that touches
 this module (386 backend-suite tests + 2,527 assess-suite tests, all green)
 to record which of those 712 entries ever actually fire. The result: 180/712
@@ -81,26 +90,60 @@ allow-list the meta-test at the bottom of this file checks against):
     `_REGEX_CASES` below. They are exactly the two buckets excused in the
     meta-test's allow-list.
 
-Two MISROUTED findings surfaced while building this sweep are intentionally
-NOT pinned as passing assertions anywhere in this file (a test that asserted
-them would cement broken behaviour):
+Two MISROUTED findings surfaced while building this sweep. Both are now
+FIXED, and both fixes are pinned -- here and, behaviourally, in
+`test_classify_precision_and_context_threading.py`:
 
-  1. `_UPLOAD_GENERIC_SHADOWS = frozenset({"lfi", "idor"})`
-     (classify_buckets.py:1380) omits `"img_traversal"`. An `upload`-typed
-     row whose only field name is `image`/`photo` (an extremely common
-     avatar/profile-picture upload shape) clusters `gf:img_traversal` at
-     score 35, while the byte-identical `file`/`document` shape correctly
-     clusters `gf:upload_fields` at score 40 via `select_cluster_bucket()`'s
-     shadow override (classify_buckets.py:1691). Verified by execution (see
-     the audit's final report, not asserted here).
+  1. `_UPLOAD_GENERIC_SHADOWS` omitted `"img_traversal"`, so an `upload`-typed
+     row whose only field name was `image`/`photo` (an extremely common
+     avatar/profile-picture upload shape) clustered `gf:img_traversal` at
+     score 35, while the byte-identical `file`/`document` shape clustered
+     `gf:upload_fields` at 40 via `select_cluster_bucket()`'s shadow override.
+     `img_traversal` joined the shadow set; it is still RECORDED in the reason
+     chain, the override moves the cluster pick only.
   2. A bare `?query=` on an ordinary, non-GraphQL REST search endpoint (e.g.
-     `/api/v1/products/search?query=widget`) clusters `gf:graphql` (weight
-     45, the second-highest bucket in the whole table) purely because
-     `query` is graphql's canonical request key -- even with zero other
-     GraphQL signal. `query` correctly also lands in `matched_buckets` for
-     `sqli`/`xss` (a real, intentional multi-bucket signal -- pinned by
-     `test_query_key_is_multi_bucket_signal_without_asserting_its_misrouted_winner`
-     below), but the `cluster_key` pick itself is a precision defect.
+     `/api/v1/products/search?query=widget`) clustered `gf:graphql` (weight
+     45, the second-highest bucket in the whole table) purely because `query`
+     is graphql's canonical request key -- with zero other GraphQL signal.
+     `_suppress_graphql_on_bare_query` now requires corroboration (a graphql
+     path fragment, a second unambiguous graphql key, a braced `query` VALUE,
+     or a `graphql` producer type); the row keeps its real `sqli`/`xss`
+     matches, so it is re-ranked (`45 gf:graphql` -> `40 gf:sqli`), never
+     dropped. Pinned by
+     `test_bare_query_key_is_multi_bucket_and_no_longer_misroutes_to_graphql`
+     below.
+
+     The braced-VALUE corroborator is a follow-up: the first version of the
+     predicate could only see a POST, because `classify_type()` derives the
+     `graphql` producer type from the path, the content-type, or a braced
+     `query` value in the BODY and never reads the query string. That
+     regressed GraphQL-over-GET -- including `graphql.md`'s own documented
+     example, `/api/data?query={users{id,email}}`.
+
+Withdrawn `llm_api` vocabulary. Three of the bucket's shipped entries named a
+NON-LLM surface and were removed; each now carries a negative pin in
+`test_classify_llm_api.py` instead of a sweep row here:
+
+  * the bare `prompt` KEY. OIDC Core S3.1.2.1 defines `prompt`
+    (`none`/`login`/`consent`/`select_account`) and every major IdP emits it,
+    so at weight 40 it re-clustered SSO entry points as LLM endpoints
+    (`/oauth2/authorize?...&prompt=login` -> `gf:llm_api`).
+    `/login?prompt=select_account` escaped only on the declaration-order
+    tie-break with `auth`. This is the same analysis that already excluded
+    `model`, `system`, `temperature` and bare `tools`/`functions` from the
+    bucket -- `prompt` was simply missed by it. The unambiguous compounds
+    (`user_prompt`, `system_prompt`, `prompt_template`) are kept and still
+    swept below.
+  * the `/v1/messages` and `/v1/responses` FRAGMENTS. REST APIs are
+    conventionally versioned, so `/api/v1/messages` IS the inbox route and
+    `/api/v1/responses` IS the survey-response route: version-qualifying a
+    generic collection noun buys no discrimination over the bare `/messages`
+    the bucket already (correctly) refuses. `/completions` is boundary-
+    anchored and still covers `/v1/chat/completions` on its own.
+
+Every fix and the `llm_api` addition are recorded in
+`agent/references/gf-patterns/DRIFT.md` ("Accepted decisions (2026-09
+vocabulary audit)").
 """
 from __future__ import annotations
 
@@ -133,9 +176,9 @@ def test_classifier_vocabulary_totals_match_the_measured_baseline() -> None:
     If this test ever fails, `_BUCKETS`/`_REGEX_BUCKET_RULES` changed shape
     and the recall sweep below (and its numbers) need re-deriving.
     """
-    assert len(cb._BUCKETS) == 40
-    assert sum(len(key_set) for _, _, key_set, _ in cb._BUCKETS) == 432
-    assert sum(len(frags) for _, _, _, frags in cb._BUCKETS) == 269
+    assert len(cb._BUCKETS) == 41
+    assert sum(len(key_set) for _, _, key_set, _ in cb._BUCKETS) == 451
+    assert sum(len(frags) for _, _, _, frags in cb._BUCKETS) == 272
     assert sum(len(rules) for rules in cb._REGEX_BUCKET_RULES.values()) == 11
     assert set(cb._REGEX_BUCKET_RULES) == {"api-versioning", "cloud_metadata", "object-storage"}
 
@@ -288,6 +331,25 @@ _KEY_CASES: tuple[tuple[str, int, str], ...] = (
     ('lfi', 40, 'template'),
     ('lfi', 40, 'template_path'),
     ('lfi', 40, 'templatepath'),
+    ('llm_api', 40, 'embedding'),
+    ('llm_api', 40, 'embeddings'),
+    ('llm_api', 40, 'function_call'),
+    ('llm_api', 40, 'functioncall'),
+    ('llm_api', 40, 'max_tokens'),
+    ('llm_api', 40, 'maxtokens'),
+    ('llm_api', 40, 'messages'),
+    ('llm_api', 40, 'prompt_template'),
+    ('llm_api', 40, 'prompttemplate'),
+    ('llm_api', 40, 'system_message'),
+    ('llm_api', 40, 'system_prompt'),
+    ('llm_api', 40, 'systemmessage'),
+    ('llm_api', 40, 'systemprompt'),
+    ('llm_api', 40, 'tool_choice'),
+    ('llm_api', 40, 'toolchoice'),
+    ('llm_api', 40, 'top_p'),
+    ('llm_api', 40, 'topp'),
+    ('llm_api', 40, 'user_prompt'),
+    ('llm_api', 40, 'userprompt'),
     ('mass-assignment', 30, 'access_level'),
     ('mass-assignment', 30, 'accesslevel'),
     ('mass-assignment', 30, 'account_type'),
@@ -651,6 +713,9 @@ _FRAGMENT_CASES: tuple[tuple[str, int, str], ...] = (
     ('interestingext', 10, '.terraform'),
     ('jwt', 30, '/bearer'),
     ('jwt', 30, '/refresh-token'),
+    ('llm_api', 40, '/completions'),
+    ('llm_api', 40, '/embeddings'),
+    ('llm_api', 40, '/inference'),
     ('nosqli', 35, '/_msearch'),
     ('oauth-oidc', 35, '/.well-known/jwks.json'),
     ('oauth-oidc', 35, '/.well-known/oauth-authorization-server'),
@@ -854,15 +919,16 @@ def test_shared_wp_admin_fragment_wordpress_wins_the_weight_tie() -> None:
     assert set(result["matched_buckets"]) >= {"wordpress", "cms_db_admin"}
 
 
-def test_query_key_is_multi_bucket_signal_without_asserting_its_misrouted_winner() -> None:
+def test_bare_query_key_is_multi_bucket_and_no_longer_misroutes_to_graphql() -> None:
     """`query` is a literal member of `graphql` (w=45), `sqli` (w=40), and
-    `xss` (w=20). This pins the correct, intentional part of that overlap --
-    all three buckets are recorded -- WITHOUT asserting which one wins
-    `cluster_key`: on a non-GraphQL search endpoint, `gf:graphql` winning is
-    a real precision defect (see the module docstring's misroute #2 and the
-    audit's final report), not behaviour this suite should cement."""
+    `xss` (w=20). The `sqli`/`xss` overlap is a real, intentional multi-bucket
+    signal and stays; the `graphql` membership needs corroboration, which a
+    plain REST search route does not supply, so `sqli` wins the cluster (see
+    the module docstring's misroute #2)."""
     result = _classify(url_path="/api/v1/products/search", query="widget")
-    assert set(result["matched_buckets"]) >= {"graphql", "sqli", "xss"}
+    assert set(result["matched_buckets"]) >= {"sqli", "xss"}
+    assert "graphql" not in result["matched_buckets"], result
+    assert result["cluster_key"] == "gf:sqli"
 
 
 # ---------------------------------------------------------------------------

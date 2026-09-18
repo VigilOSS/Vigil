@@ -444,12 +444,19 @@ def _pending_buckets_for_host(
             continue
         bucket = _bucket_of_cluster_key(str(row.get("cluster_key") or ""))
         if not bucket:
+            # Pass the row's context so this fallback agrees with the stored
+            # classification: `cloud_metadata` / `object-storage` carry their
+            # signal in the URL authority or query, which the url_path-only pass
+            # cannot see at all.
             assignment = classify_from_fields(
                 case_type=str(row.get("type") or "unknown"),
                 url_path=str(row.get("url_path") or ""),
                 query_params=str(row.get("query_params") or "{}"),
                 body_params=str(row.get("body_params") or "{}"),
                 path_params=str(row.get("path_params") or "{}"),
+                url=row.get("url"),
+                source=row.get("source"),
+                live_status=row.get("live_status"),
             )
             bucket = _bucket_of_cluster_key(str(assignment.get("cluster_key") or ""))
         tally[bucket] = tally.get(bucket, 0) + 1

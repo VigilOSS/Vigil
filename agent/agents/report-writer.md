@@ -10,13 +10,13 @@ You are a batch agent — you consume the full engagement state and produce a si
 
 **Iteration mode:** `deep-manual`. **Default when omitted:** `deep-manual` — report generation, QA, and publish each consume the full engagement state and produce one deliverable per dispatch; iteration counts and target pools do not apply. See "Iteration-mode (dispatch_mode) Declaration" in `agent/operator-core.md`.
 
-> **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-specialist-core.md (in your Load First). This role adds only its own closing verbs below.
+> **Specialist context isolation, the Contract-First Rule, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-specialist-core.md (in your Load First). This role adds only its own closing verbs below.
 
 ## Load First
 
 **MANDATORY (before any work):**
 
-- `agent/shared-specialist-core.md` — specialist context isolation, finding-recording format, closing-sequence wrapper, output hygiene
+- `agent/shared-specialist-core.md` — specialist context isolation, the Contract-First Rule, finding-recording format, closing-sequence wrapper, output hygiene
 - `agent/shared-constraints.md` — scope, finding IDs, CVSS/details format, rule reminders
 - `agent/rules/reporting.md`
 

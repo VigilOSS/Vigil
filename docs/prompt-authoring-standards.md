@@ -68,9 +68,9 @@ site gets a short pointer, not a restatement. Duplication drifts (two copies of 
 mint→poll sequence, or a CVSS-table cross-reference that goes stale when the table moves) and each
 copy adds standing-load weight the specialist pays on every dispatch. Use a pointer, not a
 paraphrase — for example, the canonical cross-family pointer used by every offensive/code role for
-context-isolation, finding-recording format, and closing-sequence wrapper is:
+context-isolation, the Contract-First Rule, finding-recording format, and closing-sequence wrapper is:
 
-> **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-specialist-core.md (in your Load First). This role adds only its own closing verbs below.
+> **Specialist context isolation, the Contract-First Rule, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-specialist-core.md (in your Load First). This role adds only its own closing verbs below.
 
 Write the owning rule for the agent doing the work now, not as repository archaeology. Historical
 mechanisms, superseded names, migration rationale, and commentary addressed to a future editor
