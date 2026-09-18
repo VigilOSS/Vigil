@@ -183,7 +183,10 @@ def run_quickstart(
     ]
     manual = [tool for tool, present, command in tool_rows if not present and command is None]
 
-    target, hosts = _resolve_engagement_inputs(options, interactive)
+    # `--target`/`--hosts` (if supplied) only template the copy-paste next-step
+    # checklist. quickstart probes host readiness and mutates nothing engagement-
+    # related, so it never prompts for an engagement target of its own.
+    target, hosts = options.target, options.hosts
 
     executed: list[tuple[InstallStep, bool]] = []
     ran_installs = False
@@ -210,20 +213,6 @@ def run_quickstart(
     # the wizard's job is to surface them, not to block on a still-installing
     # Docker Desktop. Exit non-zero only when an install command we RAN failed.
     return 0
-
-
-def _resolve_engagement_inputs(
-    options: QuickstartOptions, interactive: bool
-) -> tuple[str | None, str | None]:
-    target = options.target
-    hosts = options.hosts
-    if target is None and interactive and not options.assume_yes:
-        answer = _ask_optional("First engagement target URL/host (blank to skip)")
-        target = answer or None
-        if target and hosts is None:
-            hosts_answer = _ask_optional("In-scope hosts (comma-separated, blank to infer)")
-            hosts = hosts_answer or None
-    return target, hosts
 
 
 def _execute_plan(plan: list[InstallStep], runner: Runner) -> list[tuple[InstallStep, bool]]:
@@ -354,11 +343,6 @@ def _read_line() -> str:
         return input()
     except EOFError:
         return ""
-
-
-def _ask_optional(label: str) -> str:
-    print(f"{label}: ", end="", file=sys.stderr, flush=True)
-    return _read_line().strip()
 
 
 def _confirm(prompt: str) -> bool:

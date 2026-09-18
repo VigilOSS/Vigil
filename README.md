@@ -55,6 +55,8 @@ response.
 ```bash
 # 1. Install the CLI
 uv tool install --from git+https://github.com/vigil-oss/vigil.git vigil
+# ...or over SSH, if you authenticate to GitHub with a key
+uv tool install --from git+ssh://git@github.com/vigil-oss/vigil.git vigil
 
 # 2. Check the host: prerequisites, missing recon tools, and the ordered setup checklist
 vigil quickstart

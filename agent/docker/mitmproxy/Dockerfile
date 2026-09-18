@@ -1,6 +1,9 @@
 FROM python:3.12-slim
 
-RUN pip install --no-cache-dir mitmproxy
+# Pin to the same mitmproxy the runtime image builds (runtime-full Dockerfile
+# ARG MITMPROXY_VERSION) — this container is the engagement's MITM boundary, so
+# an unpinned install would float the most sensitive dependency in the tree.
+RUN pip install --no-cache-dir "mitmproxy==12.2.2"
 
 # proxy_addon imports from assess.lib. The whole assess
 # package lands on /opt and PYTHONPATH points there so the addon can
