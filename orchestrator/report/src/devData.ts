@@ -43,7 +43,32 @@ const rootFinding = f({
   owasp_category: "A01:2021 Broken Access Control",
   cvss_score: 9.8,
   cvss_vector: "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+  auth_context: "unauthenticated",
+  evidence_type: "network-confirmed",
   poc_code: "curl -i https://acme.example/api/v1/admin/users",
+  // The command-run ids behind the steps above, so the dev preview exercises the
+  // backed-reproduction case alongside VA-003's unbacked one.
+  repro_runs: ["56052", "56054"],
+  // Structured HTTP proof. The quote and ampersand in the URL are deliberate:
+  // they are what the synthesized curl's shell quoting has to survive.
+  poc_request: {
+    method: "GET",
+    url: "https://acme.example/api/v1/admin/users?filter=role'+OR+1=1--+-&limit=500",
+    headers: {
+      Accept: "application/json",
+      "X-Forwarded-For": "127.0.0.1",
+    },
+    body: "",
+  },
+  poc_response: {
+    status: 200,
+    headers: { "Content-Type": "application/json" },
+    body_excerpt: '{"users":[{"id":1,"email":"root@acme.example","role":"admin"}]}',
+  },
+  references: [
+    { title: "CWE-862: Missing Authorization", url: "https://cwe.mitre.org/data/definitions/862.html" },
+    "OWASP ASVS V4.1.1",
+  ],
 });
 
 const siblingFinding = f({
@@ -60,8 +85,11 @@ const siblingFinding = f({
   cwe_id: "CWE-862",
   owasp_category: "A01:2021 Broken Access Control",
   cvss_score: 7.5,
+  auth_context: "unauthenticated",
+  evidence_type: "network-confirmed",
   root_cause_effect: "eliminates_attack_path",
-  root_cause_relationship: "shares_root_cause",
+  root_cause_slug: "VA-001",
+  root_cause_note: "Reachable only because the VA-001 guard never runs; no separate authorization defect of its own.",
   sibling_order: 1,
 });
 
@@ -84,6 +112,19 @@ const standalone = [
     cwe_id: "CWE-79",
     owasp_category: "A03:2021 Injection",
     cvss_score: 6.1,
+    auth_context: "unauthenticated",
+    evidence_type: "code-inferred",
+    // Taint source and taint sink — the location of a code finding. Deliberately
+    // left with no repro_runs so the dev preview also shows the draft-mode
+    // "no command run is recorded behind these steps" case.
+    entry_point: "src/routes/search.ts:34 (req.query.q)",
+    sink: "src/views/results.ejs:18 (unescaped <%- %> interpolation)",
+    poc_request: {
+      method: "POST",
+      url: "https://acme.example/search",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: "q=%3Cscript%3Ealert(document.domain)%3C%2Fscript%3E",
+    },
   }),
   f({
     report_id: "004",
@@ -189,8 +230,23 @@ export const devData: ReportData = {
     },
   ],
   report_readiness: {
-    ready: true,
-    blocker_count: 0,
-    blockers: [],
+    ready: false,
+    blocker_count: 1,
+    blockers: [
+      {
+        kind: "unreviewed_findings",
+        detail: "VA-006 is still unreviewed; triage it or withdraw it before a final report.",
+        slug: "VA-006",
+      },
+    ],
+    advisory_count: 1,
+    advisories: [
+      {
+        kind: "finding_repro_runs_missing",
+        detail:
+          "VA-003 has authored steps_to_reproduce but no details.repro_runs, so no command run stands behind the steps.",
+        slug: "VA-003",
+      },
+    ],
   },
 };

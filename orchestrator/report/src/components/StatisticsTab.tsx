@@ -1,9 +1,53 @@
-import type { ReportData } from "../types";
+import type { ReportData, ReportReadinessItem } from "../types";
 import { SeverityDonut } from "./SeverityDonut";
 import { formatDateTime, formatLabel, SEVERITY_RANK } from "../lib/format";
 
 interface Props {
   data: ReportData;
+}
+
+// Readiness in a DRAFT only. `report_readiness` was reaching the browser in
+// every export and no component read it, so a draft with unresolved QA blockers
+// looked exactly like a finished one — the footer's fixed disclaimer was the
+// whole signal. A `final` export cannot be produced while blockers stand
+// (report_export.py returns 409), so rendering this outside draft mode would be
+// showing the reader a gate that has already been passed.
+function ReadinessNotice({ data }: Props) {
+  if (data.mode !== "draft") return null;
+  const readiness = data.report_readiness;
+  const blockers = readiness?.blockers ?? [];
+  const advisories = readiness?.advisories ?? [];
+  if (blockers.length === 0 && advisories.length === 0) return null;
+
+  const renderItem = (item: ReportReadinessItem, index: number) => (
+    <li key={`${item.kind ?? "item"}-${index}`}>
+      <span className="rpt-mono">{item.kind ?? "unknown"}</span>
+      {item.detail ? ` — ${item.detail}` : ""}
+    </li>
+  );
+
+  return (
+    <section className="rpt-panel rpt-readiness">
+      <h2 className="rpt-panel-title">Draft readiness</h2>
+      <p className="rpt-readiness-lede">
+        {blockers.length > 0
+          ? `${blockers.length} blocker${blockers.length === 1 ? "" : "s"} must be cleared before this engagement can produce a final report.`
+          : "No blockers outstanding; the items below are advisory."}
+      </p>
+      {blockers.length > 0 && (
+        <details open>
+          <summary>Blockers ({blockers.length})</summary>
+          <ul className="rpt-readiness-list">{blockers.map(renderItem)}</ul>
+        </details>
+      )}
+      {advisories.length > 0 && (
+        <details>
+          <summary>Advisories ({advisories.length})</summary>
+          <ul className="rpt-readiness-list">{advisories.map(renderItem)}</ul>
+        </details>
+      )}
+    </section>
+  );
 }
 
 interface StatCard {
@@ -93,6 +137,8 @@ export function StatisticsTab({ data }: Props) {
           </div>
         </dl>
       </section>
+
+      <ReadinessNotice data={data} />
 
       <section className="rpt-stat-grid">
         {cards.map((card) => (

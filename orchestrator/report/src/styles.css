@@ -604,6 +604,14 @@ a {
   margin-left: auto;
 }
 
+.rpt-table-wrap {
+  /* The table's six columns cannot shrink past their min-content width, so the
+     overflow is contained here instead of being handed to the page body. */
+  width: 100%;
+  max-width: 100%;
+  overflow-x: auto;
+}
+
 .rpt-table {
   width: 100%;
   border-collapse: collapse;
@@ -709,6 +717,56 @@ a {
   overflow-wrap: anywhere;
 }
 
+/* A label is not part of the thing it labels. These headings sit immediately
+   above a command block, and a drag that starts a line high used to prepend
+   "Proof of concept" to the paste. Excluding them from the selection is the
+   markup-level fix; "Copy as Markdown" is where the headings come back for a
+   reader who wants the finding as a document. */
+.rpt-doc-block > h4,
+.rpt-finding-detail > section > h4 {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.rpt-finding-detail-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.rpt-toc-siblings {
+  margin: 4px 0 0;
+}
+
+/* Provenance for the steps above: the command-run ids that produced them.
+   Rendered beside the steps rather than in an appendix, because that is where a
+   reader decides whether to trust them. */
+.rpt-steps-runs {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.rpt-steps-runs-missing {
+  color: var(--warn);
+}
+
+.rpt-ref-list {
+  margin: 0;
+  padding-left: 20px;
+  font-size: 14px;
+}
+
+.rpt-ref-list li {
+  margin: 0 0 4px;
+  word-break: break-word;
+}
+
+.rpt-doc-rootcause {
+  margin: 0;
+  font-size: 13px;
+  color: var(--ink-2);
+}
+
 .rpt-code {
   background: var(--code-bg);
   border: 1px solid var(--code-border);
@@ -719,6 +777,61 @@ a {
   white-space: pre-wrap;
   word-break: break-word;
   margin: 0;
+}
+
+/* A grid/flex item defaults to `min-width: auto`, which means it refuses to
+   shrink below its content's min-content width — and `.rpt-doc` is a single
+   grid column, so ONE unwrappable command block widened every row of the
+   document, title page included. Letting these containers shrink is what keeps
+   the overflow inside the block that has the scrollbar. */
+.rpt-doc > *,
+.rpt-doc-section > *,
+.rpt-doc-finding > *,
+.rpt-finding-detail > *,
+.rpt-doc-block > *,
+.rpt-code {
+  min-width: 0;
+}
+
+/* Commands are copied to be run, so they must never soft-wrap: a soft wrap is
+   invisible in the copied string, and a reader who trusts their eyes cannot
+   tell a wrapped flag from two flags. `pre` + horizontal scroll keeps every
+   line whole on screen; the synthesized curl in lib/poc.ts breaks itself with
+   explicit `\` continuations, which survive the copy. Print has no scrollbar to
+   offer, so there it falls back to wrapping rather than truncating. */
+.rpt-code-command {
+  white-space: pre;
+  word-break: normal;
+  overflow-wrap: normal;
+}
+
+/* ── Draft readiness ──────────────────────────────────────── */
+
+.rpt-readiness {
+  border-left: 3px solid var(--warn);
+}
+
+.rpt-readiness-lede {
+  margin: 0 0 10px;
+  color: var(--ink-2);
+}
+
+.rpt-readiness summary {
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--ink-2);
+}
+
+.rpt-readiness-list {
+  margin: 8px 0 0;
+  padding-left: 20px;
+  font-size: 13px;
+  color: var(--ink-2);
+}
+
+.rpt-readiness-list li {
+  margin: 0 0 4px;
+  word-break: break-word;
 }
 
 /* ── Full report (print document) ─────────────────────────── */
@@ -888,6 +1001,12 @@ a {
   border-radius: 8px;
   padding: 12px;
   overflow-x: auto;
+  /* Mirrors .rpt-code. Without these a long line in authored markdown sets the
+     block's min-content width, which a grid/flex child honours — that is what
+     pushed the whole document wider than a 390px viewport. */
+  max-width: 100%;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .md-body pre code {
@@ -1000,6 +1119,13 @@ a {
 
   .rpt-doc-section {
     break-before: auto;
+  }
+
+  /* Paper cannot scroll horizontally, so the no-wrap command block wraps here
+     rather than losing the end of a long line off the page edge. */
+  .rpt-code-command {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
   }
 
   a {

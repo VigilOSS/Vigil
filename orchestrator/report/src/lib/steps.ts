@@ -22,3 +22,17 @@ export function stepsText(value: unknown): string {
   }
   return "";
 }
+
+// `details.repro_runs` carries the command-run ids that actually produced the
+// steps above, in step order (report_readiness._report_record projects it beside
+// them). It is the only thing separating a transcribed reproduction from a
+// plausible reconstruction — the two read identically as prose — which is why
+// the backend raises `finding_repro_runs_missing` when steps arrive without it.
+// Normalized here the same way as the steps themselves, because the projection's
+// shape must never be the reason a renderer throws.
+export function reproRunIds(value: unknown): string[] {
+  const raw = Array.isArray(value) ? value : typeof value === "string" ? [value] : [];
+  return raw
+    .map((item) => (typeof item === "string" ? item : String(item ?? "")).trim())
+    .filter((item) => item.length > 0);
+}

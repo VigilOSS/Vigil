@@ -9,20 +9,11 @@
 // skipped so a sparse finding doesn't render a wall of empty headings.
 
 import type { ReportFinding } from "../types";
+import { referenceLink } from "./format";
+import { asPocRequest, asPocResponse, pocCurl, pocResponseText } from "./poc";
 
 export { stepsText } from "./steps";
-import { stepsText } from "./steps";
-
-function refLabel(ref: unknown): string {
-  if (typeof ref === "string") return ref.trim();
-  if (ref && typeof ref === "object") {
-    const r = ref as { title?: string; id?: string; url?: string };
-    const title = r.title || r.id || "";
-    if (title && r.url) return `${title} — ${r.url}`;
-    return r.url || title || "";
-  }
-  return String(ref);
-}
+import { reproRunIds, stepsText } from "./steps";
 
 export function findingToMarkdown(d: ReportFinding): string {
   const lines: string[] = [];
@@ -45,6 +36,10 @@ export function findingToMarkdown(d: ReportFinding): string {
 
   const metaParts: string[] = [];
   if (d.canonical_location) metaParts.push(`**Location:** \`${d.canonical_location}\``);
+  // For a code finding these two ARE the location: where attacker-controlled
+  // input enters, and where it reaches something dangerous.
+  if (d.entry_point) metaParts.push(`**Entry point:** \`${d.entry_point}\``);
+  if (d.sink) metaParts.push(`**Sink:** \`${d.sink}\``);
   if (d.cwe_id) metaParts.push(`**CWE:** ${d.cwe_id}`);
   if (d.owasp_category) metaParts.push(`**OWASP:** ${d.owasp_category}`);
   if (d.cvss_vector) metaParts.push(`**CVSS vector:** \`${d.cvss_vector}\``);
@@ -75,6 +70,29 @@ export function findingToMarkdown(d: ReportFinding): string {
     push("### Steps to Reproduce");
     push(steps);
     push();
+    const runs = reproRunIds(d.repro_runs);
+    if (runs.length > 0) {
+      push(`Command runs behind these steps: ${runs.map((id) => `\`#${id}\``).join(", ")}`);
+      push();
+    }
+  }
+  // Fenced as `sh` so a paste into a submission form keeps it a command block
+  // rather than letting the platform's markdown reflow it into prose.
+  const curl = pocCurl(asPocRequest(d.poc_request));
+  if (curl) {
+    push("### Reproduction Request");
+    push("```sh");
+    push(curl);
+    push("```");
+    push();
+  }
+  const responseText = pocResponseText(asPocResponse(d.poc_response));
+  if (responseText) {
+    push("### Observed Response");
+    push("```http");
+    push(responseText);
+    push("```");
+    push();
   }
   if (d.poc_code && d.poc_code.trim()) {
     push("### Proof of Concept");
@@ -89,12 +107,14 @@ export function findingToMarkdown(d: ReportFinding): string {
     push();
   }
   if (Array.isArray(d.references) && d.references.length > 0) {
-    push("### References");
-    d.references.forEach((r) => {
-      const label = refLabel(r);
-      if (label) push(`- ${label}`);
-    });
-    push();
+    const links = d.references.map(referenceLink).filter((link) => link !== null);
+    if (links.length > 0) {
+      push("### References");
+      links.forEach((link) => {
+        push(link.url && link.url !== link.label ? `- ${link.label} — ${link.url}` : `- ${link.label}`);
+      });
+      push();
+    }
   }
 
   while (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();

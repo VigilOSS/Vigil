@@ -56,6 +56,11 @@ export interface ReportFinding {
   workflow_status?: string;
   verification_status?: string;
   canonical_location?: string;
+  // Severity-defining context a reader needs before the severity means anything:
+  // what privilege the attack requires, and whether the proof was observed on
+  // the wire or inferred from source.
+  auth_context?: string;
+  evidence_type?: string;
   summary?: string;
   impact?: string;
   evidence_detail?: string;
@@ -65,6 +70,10 @@ export interface ReportFinding {
   // The backend projection normalizes to a list, but renderers accept both so a
   // raw record never breaks them; see lib/steps.ts.
   steps_to_reproduce?: string | string[];
+  // The command-run ids behind those steps, in step order. Projected beside them
+  // so a reader can tell a reproduction that was executed from one that was
+  // written; see lib/steps.ts:reproRunIds.
+  repro_runs?: string | string[];
   cwe_id?: string;
   owasp_category?: string;
   cvss_score?: number | null;
@@ -72,11 +81,21 @@ export interface ReportFinding {
   entry_point?: string;
   sink?: string;
   poc_code?: string;
+  // Structured HTTP proof, shaped by the `web/v1` extension of
+  // agent/schemas/finding-record.schema.json: request is
+  // {method,url,headers,body}, response is {status,headers,body_excerpt}.
+  // Typed as `unknown` and narrowed in lib/poc.ts rather than trusted here —
+  // these are free-form JSON columns, and a renderer must not throw on one.
+  poc_request?: unknown;
+  poc_response?: unknown;
   references?: unknown[];
   source_name?: string;
-  // Root-cause link metadata present on siblings only.
+  // Root-cause link metadata present on siblings only, written by
+  // links.py:_root_cause_link_metadata. `root_cause_effect` says what fixing the
+  // root buys for THIS sibling (`eliminates_finding` / `eliminates_attack_path`).
   root_cause_effect?: string;
-  root_cause_relationship?: string;
+  root_cause_slug?: string;
+  root_cause_note?: string;
   sibling_order?: number | null;
   [key: string]: unknown;
 }
@@ -111,10 +130,22 @@ export interface ReportAttackChain {
   [key: string]: unknown;
 }
 
+export interface ReportReadinessItem {
+  kind?: string;
+  detail?: string;
+  slug?: string;
+  [key: string]: unknown;
+}
+
+// report_readiness() returns blockers AND advisories (a blocker stops a `final`
+// export; an advisory never does). Both were previously undeclared on the
+// advisory side, so the payload carried data the contract did not admit existed.
 export interface ReportReadiness {
   ready: boolean;
   blocker_count: number;
-  blockers: Array<{ kind?: string; detail?: string; [key: string]: unknown }>;
+  blockers: ReportReadinessItem[];
+  advisory_count?: number;
+  advisories?: ReportReadinessItem[];
   [key: string]: unknown;
 }
 

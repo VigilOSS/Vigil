@@ -5,8 +5,10 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
-    "preview": "vite preview"
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "test": "test_artifact=\"${TMPDIR:-/tmp}/vigil-report-poc.test.$$.cjs\" && trap 'rm -f \"$test_artifact\"' EXIT && esbuild src/lib/poc.test.ts --bundle --platform=node --format=cjs --outfile=\"$test_artifact\" && node --test \"$test_artifact\""
   },
   "dependencies": {
     "lucide-react": "^1.17.0",
@@ -16,6 +18,7 @@
     "remark-gfm": "^4.0.1"
   },
   "devDependencies": {
+    "@types/node": "^22.20.3",
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",
     "@vitejs/plugin-react": "^5.0.2",
