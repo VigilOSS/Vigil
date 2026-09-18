@@ -798,6 +798,12 @@ def test_filter_scope_keeps_in_scope_hosts(monkeypatch, tmp_path: Path, capsys) 
             base_url="http://example.test",
         ),
     )
+    # These assertions are about which hosts scope admits, not about the
+    # Vendor-SaaS decision fetch. Unstubbed, `_vendor_saas_decided_hosts`
+    # builds a real `AssessmentClient` against the fake `base_url` above and
+    # burns 3.02s of wall clock in retry backoff (three attempts, 1s then 2s)
+    # before its `except AssessError` branch returns this same empty set.
+    monkeypatch.setattr(module, "_vendor_saas_decided_hosts", lambda _cfg: set())
     module.run(
         SimpleNamespace(
             engagement_dir=engagement_dir,
@@ -856,6 +862,12 @@ def test_filter_scope_excludes_out_of_scope_carve_out(monkeypatch, tmp_path: Pat
             base_url="http://example.test",
         ),
     )
+    # These assertions are about which hosts scope admits, not about the
+    # Vendor-SaaS decision fetch. Unstubbed, `_vendor_saas_decided_hosts`
+    # builds a real `AssessmentClient` against the fake `base_url` above and
+    # burns 3.02s of wall clock in retry backoff (three attempts, 1s then 2s)
+    # before its `except AssessError` branch returns this same empty set.
+    monkeypatch.setattr(module, "_vendor_saas_decided_hosts", lambda _cfg: set())
     module.run(
         SimpleNamespace(
             engagement_dir=engagement_dir,

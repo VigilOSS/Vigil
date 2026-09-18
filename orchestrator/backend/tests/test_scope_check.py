@@ -43,6 +43,20 @@ def _load_filter_scope_module():
     return module
 
 
+def _stub_decided_hosts(monkeypatch, module) -> None:
+    """Return no recorded scope decisions without dialling the orchestrator.
+
+    These tests are about which hosts scope admits, not about the Vendor-SaaS
+    decision fetch. Left unstubbed, ``_vendor_saas_decided_hosts`` builds a real
+    ``AssessmentClient`` against the fake ``base_url`` above and spends 3.02s of
+    wall clock per test in ``AssessmentClient``'s retry backoff (three attempts,
+    1s then 2s) before its ``except AssessError`` branch returns this same empty
+    set — and how fast it gets there depends on the host's DNS. Stubbing it is
+    the same idiom ``test_filter_scope_allows_same_file_output`` already uses.
+    """
+    monkeypatch.setattr(module, "_vendor_saas_decided_hosts", lambda _cfg: set())
+
+
 def _run_filter_scope(monkeypatch, engagement_dir: Path, lines: list[str], capsys):
     module = _load_filter_scope_module()
     input_file = engagement_dir / "input.txt"
@@ -55,6 +69,7 @@ def _run_filter_scope(monkeypatch, engagement_dir: Path, lines: list[str], capsy
             engagement_key="eng",
             base_url="http://example.test",),
     )
+    _stub_decided_hosts(monkeypatch, module)
     module.run(
         SimpleNamespace(
             engagement_dir=str(engagement_dir),
@@ -139,6 +154,7 @@ def test_filter_scope_streams_stdin(monkeypatch, tmp_path: Path, capsys) -> None
             return self._gen
 
     monkeypatch.setattr(module.sys, "stdin", _Stream(_gen()))
+    _stub_decided_hosts(monkeypatch, module)
 
     module.run(
         SimpleNamespace(

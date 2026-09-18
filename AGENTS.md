@@ -504,7 +504,7 @@ VIGIL_REPO=$(git rev-parse --show-toplevel)   # or: VIGIL_REPO=$(jj root)
 
 | Suite / gate | Command | Cost |
 |---|---|---|
-| Backend (incl. sync-lint) | `uv run --directory orchestrator/backend --extra dev pytest` | free |
+| Backend (incl. sync-lint) | `uv run --directory orchestrator/backend --extra dev pytest` | free, ~1 min |
 | Root CLI / bench harness (excluding eval) | `uv run --directory orchestrator/backend --extra dev pytest "$VIGIL_REPO/tests" --ignore="$VIGIL_REPO/tests/eval"` | free |
 | Assess CLI | `uv run --directory orchestrator/backend --extra dev pytest "$VIGIL_REPO/agent/scripts/assess/tests"` | free |
 | Deterministic eval | `uv run --directory orchestrator/backend --extra dev pytest "$VIGIL_REPO/tests/eval"` | free |
@@ -515,6 +515,13 @@ VIGIL_REPO=$(git rev-parse --show-toplevel)   # or: VIGIL_REPO=$(jj root)
 | Bench selftest (pipeline, no LLM) | `vigil bench selftest` | free |
 | Bench run (live agent) | `vigil bench run --launch auto …` | **BILLED** — see Live tests |
 
+- **The backend suite runs in parallel by default.** `addopts` in
+  `orchestrator/backend/pyproject.toml` carries `-n auto` (pytest-xdist, one worker per CPU),
+  which is why that row is ~1 minute rather than ~5. Add **`-n 0`** to force a single process —
+  required for `--pdb`, and for reading `--durations` as CPU rather than wall time. The suite is
+  process-parallel safe because every test gets its own temp tree (`isolate_settings`), the one
+  stub HTTP server binds port 0, and no test writes into the checkout; keep all three true when
+  adding tests.
 - **Integration tests are deselected by default** (`-m 'not integration'` in both pyprojects); opt in with `pytest -m integration` only after rebuilding the runtime image (`test_oob_correlate.py`, backend `test_runtime_tooling_contract.py`, `test_kali_cli.py`).
 - **Pre-push: mirror the blocking CI gates locally.** Before pushing a branch, run the gates CI blocks on — all four pytest rows above (backend, root `tests/`, assess CLI, deterministic eval; the sync-lint rides inside backend pytest), `uvx ruff check .`, and `uvx --with-editable . mypy src/vigil_cli`. CI runs on a clean checkout, so it catches drift a warm local venv hides.
 - **CI covers all four pytest scopes.** `backend-tests`, `eval`, `root-tests`, and `assess-tests`

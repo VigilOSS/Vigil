@@ -11002,11 +11002,33 @@ def test_host_exec_registry_write_failure_quiesces_fast_leader_descendants(
             process_identity=ownership.process_identity,
         )
 
-    def fail_registry_after_leader_exit(*_args, **_kwargs):
+    def wait_for_recorded_child_pid() -> str:
+        """Wait until the grandchild's pid file *holds* its pid.
+
+        The grandchild does `open(path, "w").write(str(os.getpid()))`, which
+        creates the file before the digits land in it. Waiting on `.exists()`
+        can therefore return while the file is still empty — near-impossible
+        when this test runs alone, routine when the suite runs across one
+        worker per CPU and the grandchild loses the race for a timeslice. Both
+        the registry-write failure below (which must not fire until the
+        grandchild is genuinely running) and the `int()` conversion afterwards
+        need the content, not the inode.
+        """
         deadline = time.monotonic() + 5
-        while not child_pid_path.exists() and time.monotonic() < deadline:
+        while time.monotonic() < deadline:
+            try:
+                recorded = child_pid_path.read_text(encoding="ascii").strip()
+            except OSError:
+                recorded = ""
+            if recorded:
+                return recorded
             time.sleep(0.01)
-        assert child_pid_path.exists()
+        raise AssertionError(
+            f"grandchild never recorded its pid in {child_pid_path}"
+        )
+
+    def fail_registry_after_leader_exit(*_args, **_kwargs):
+        wait_for_recorded_child_pid()
         spawned[0].wait(timeout=5)
         raise RuntimeError("registry write failed after leader exit")
 
@@ -11044,7 +11066,7 @@ def test_host_exec_registry_write_failure_quiesces_fast_leader_descendants(
                 engagement_dir=str(tmp_path),
                 run_uuid=run_uuid,
             )
-        child_pid = int(child_pid_path.read_text(encoding="ascii"))
+        child_pid = int(wait_for_recorded_child_pid())
         assert module.host_processes._pid_exists(child_pid) is False
         stdout_path = tmp_path / "scans" / "host-exec" / f"{run_uuid}.out"
         assert b"LATE-DESCENDANT" not in stdout_path.read_bytes()

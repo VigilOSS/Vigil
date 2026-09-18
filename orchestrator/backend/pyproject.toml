@@ -17,6 +17,7 @@ dev = [
     "httpx>=0.27,<1",
     "psutil==7.2.2",
     "pytest>=8,<9",
+    "pytest-xdist>=3,<4",
     "tree-sitter==0.26.0",
     "tree-sitter-java==0.23.5",
     "tree-sitter-c==0.24.2",
@@ -39,4 +40,10 @@ where = ["."]
 markers = [
     "integration: end-to-end tests that require a live runtime container; deselected by default and run via `pytest -m integration` after image rebuild.",
 ]
-addopts = "-m 'not integration'"
+# `-n auto` runs the suite across one worker per CPU (pytest-xdist). The suite
+# is process-parallel safe: every test gets its own temp tree from the
+# `isolate_settings` fixture, the only HTTP server it starts binds port 0, and
+# nothing writes into the checkout. Serial is ~4.5x slower for the same result.
+# Pass `-n 0` to force single-process execution when debugging (needed for
+# `--pdb`, and for reading `--durations` as CPU rather than wall time).
+addopts = "-m 'not integration' -n auto"
