@@ -1328,6 +1328,14 @@ def test_verify_finding_narrative_relative_path_resolves_under_engagement_dir(
         def __init__(self, base_url: str, engagement_key: str) -> None:
             pass
 
+        def get(self, endpoint: str):
+            assert endpoint == "findings/VA-001"
+            return {
+                "slug": "VA-001",
+                "canonical_location": "https://target.example/search?q",
+                "provenance": {},
+            }
+
         def post(self, endpoint: str, payload: dict):
             posts.append(endpoint)
             if endpoint == "findings/VA-001/verify":
@@ -2742,6 +2750,14 @@ def test_verify_finding_builds_false_positive_payload_from_flags(monkeypatch, tm
         def __init__(self, base_url: str, engagement_key: str) -> None:
             self.base_url = base_url
             self.engagement_key = engagement_key
+
+        def get(self, endpoint: str):
+            assert endpoint == "findings/VA-001"
+            return {
+                "slug": "VA-001",
+                "canonical_location": "https://target.example/search?q",
+                "provenance": {},
+            }
 
         def post(self, endpoint: str, payload: dict):
             captured["endpoint"] = endpoint

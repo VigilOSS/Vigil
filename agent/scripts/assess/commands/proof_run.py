@@ -32,6 +32,19 @@ def register(subparsers) -> None:
     start.add_argument("--kind", required=True, choices=sorted(_RUN_KINDS))
     start.add_argument("--agent-id", required=True, help="Producing dispatch agent id.")
     start.add_argument("--purpose", choices=sorted(_RUN_PURPOSES), default="proof")
+    start.add_argument(
+        "--for-finding",
+        dest="for_findings",
+        action="append",
+        metavar="SLUG",
+        default=[],
+        help="Finding this run is being started to verify (repeatable). Each slug's author "
+             "is read BEFORE the run is created and refused when it is the --agent-id "
+             "dispatch: a finding's author cannot be its own verifier, so receipts from "
+             "such a run could never carry a terminal decision. Naming the findings here "
+             "costs a read; discovering it at `finding verify` costs the whole proof run, "
+             "target traffic included.",
+    )
     start.add_argument("--target-identity-file")
     start.add_argument("--source-generations-file")
     start.add_argument("--exclusions-file")
@@ -160,6 +173,53 @@ def _load_json_file(
     return value
 
 
+def _require_independent_verifier(
+    client, agent_id: str, finding_slugs: list[str]
+) -> None:
+    """Refuse a proof run the named findings' author would own.
+
+    ``record_finding_verification_evidence`` enforces this at the final write,
+    where it is authoritative and stays exactly as strict. By then the run has
+    executed against the target, so the identical refusal is worth repeating at
+    the point it costs nothing but a read.
+    """
+
+    for slug in finding_slugs:
+        try:
+            finding = client.get(f"findings/{slug}")
+        except AssessError as exc:
+            if "HTTP 404" not in str(exc):
+                raise
+            finding = None
+        if not isinstance(finding, dict) or not finding.get("slug"):
+            raise AssessError(
+                f"proof-run start: --for-finding {slug} does not resolve to a finding "
+                "in this engagement"
+            )
+        provenance = finding.get("provenance")
+        author = (
+            str(provenance.get("agent_id") or "").strip()
+            if isinstance(provenance, dict)
+            else ""
+        )
+        if not author:
+            raise AssessError(
+                f"proof-run start: REFUSED — {slug} has no durable author "
+                "(provenance.agent_id), so no run can establish an independent verifier "
+                "for it. Repair it once with `vigil assess finding bind-author` before "
+                "spending proof effort on it."
+            )
+        if author == agent_id:
+            raise AssessError(
+                f"proof-run start: REFUSED — {slug} was authored by dispatch {author!r}, "
+                "which is the dispatch this run would produce evidence under. A finding's "
+                "author cannot be its own verifier, so this run's receipts could never "
+                "carry a terminal decision on it. Start the run from an independent "
+                "verifier dispatch, or drop --for-finding "
+                f"{slug} if this run is not verifying it."
+            )
+
+
 def _run_start(args) -> None:
     purpose = str(args.purpose)
     payload = {
@@ -202,6 +262,11 @@ def _run_start(args) -> None:
             raise AssessError("proof-run start: --resume-from must be positive")
         payload["resumed_from_run_id"] = int(args.resume_from)
     with _client(args) as client:
+        _require_independent_verifier(
+            client,
+            payload["producer_dispatch_agent_id"],
+            [str(slug) for slug in (getattr(args, "for_findings", None) or [])],
+        )
         response = client.post("assessment-runs", payload)
     expected_status = "queued" if purpose == "scan" else "running"
     row = _require_run(

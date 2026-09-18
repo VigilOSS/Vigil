@@ -833,6 +833,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "vigil assess finding record <agent-name> <finding-json-file> --agent-id <your-dispatch-agent-id>",
             "vigil assess finding record <agent-name> <finding-json-file> --update <existing-slug>",
             "vigil assess finding record <agent-name> <finding-json-file> --agent-id <your-dispatch-agent-id> --evidence-type theoretical",
+            "vigil assess finding record <agent-name> <finding-json-file> --agent-id <your-dispatch-agent-id> --pending-runtime-proof \"Static dataflow only; no runtime trigger yet.\"",
             "vigil assess finding record <agent-name> <finding-json-file> --agent-id <your-dispatch-agent-id> --quiet",
         ),
         author_supplied_fields=(
@@ -840,7 +841,6 @@ _CONTRACTS: dict[str, CommandContract] = {
             "provenance.agent_id via --agent-id (your Runtime Identity dispatch id)",
             "details.evidence",
             "details.impact",
-            "provenance.code_snapshot for every canonical_location beginning with file:",
             "run_candidate {run_id, candidate_id, reason, proof_receipt_ids} when this write atomically promotes an exact run candidate",
         ),
         helper_defaults=(
@@ -863,11 +863,17 @@ _CONTRACTS: dict[str, CommandContract] = {
                 "provenance.agent_id",
                 "--agent-id for a new finding; an --update preserves the stored author when omitted; NOT inferred from <agent-name>",
             ),
+            (
+                "provenance.code_snapshot",
+                "derived from the engagement's active repository for a file: canonical_location; an authored binding always wins",
+            ),
             ("provenance.artifact", ""),
             ("links", "[]"),
         ),
         notes=(
-            "Omit top-level lifecycle fields unless you are intentionally overriding a helper default. The CLI fills workflow_status and verification_status plus producer provenance; a file finding still requires the current Code Source Identity under provenance.code_snapshot.",
+            "Omit top-level lifecycle fields unless you are intentionally overriding a helper default. The CLI fills workflow_status and verification_status plus producer provenance.",
+            "provenance.code_snapshot is DERIVED for a file: canonical_location: the CLI reads the engagement's active repository and binds repo_id + repo_generation + source_manifest_digest from it, so there is nothing to transcribe out of Code Source Identity. An authored binding is sent exactly as written, stale included, and the currency gate is unchanged either way — a binding that is not the current verified snapshot is still refused. The derivation needs exactly one active repository; with several, set provenance.code_snapshot yourself rather than let the CLI guess which source you reviewed.",
+            "--pending-runtime-proof \"<why proof is still owed>\" records the finding AND moves it to verification_status=pending_runtime_proof in one invocation. A new finding always opens at unreviewed, so a real code finding with no runtime trigger yet used to cost a second `finding verify` call; this is that same verify transition, through the same route, ledger and evidence gates, carrying the record's own author identity and code-snapshot binding. The canonical slug stays on stdout, and a park that fails says so without pretending the record failed.",
             "--agent-id <dispatch agent_id> stores provenance.agent_id, the finding's durable AUTHOR identity. It is the agent_id from your Runtime Identity block — a dispatch id such as HUNT-RUN-1 — not the role name that the positional <agent-name> carries, and it is never inferred from that role. A new finding is refused unless this id resolves to a real dispatch in the engagement. An ordinary --update may omit it: the backend preserves and validates the immutable original author rather than rebinding it. A historical row whose author is missing or no longer resolves in this engagement is also refused on the record route; repair that row once with finding bind-author, then re-record it normally.",
             "A confirmed run candidate is promoted in the same backend transaction by including run_candidate. Its target, exact source path, code-snapshot generation, and proof receipts must match the finding; a cross-file or cross-target link is rejected.",
             "--evidence-type {network-confirmed|code-inferred|theoretical|informational} labels the CONFIRMATION MODE, the same vocabulary `finding update --evidence-type` patches. It has no default on purpose: an unlabelled record stores NULL rather than asserting a mode nobody claimed, and no gate reads the column — `finding list --holding` finds the holding area by verification_status (pending_runtime_proof / blocked) as well as by this label, so a park is never invisible for want of it. Pair `theoretical` with details.chain_required + details.chain_rationale. The flag and a JSON `evidence_type` key are two spellings of one field; a disagreement is refused.",
@@ -888,7 +894,8 @@ _CONTRACTS: dict[str, CommandContract] = {
             ("description", "use summary for the short finding statement or notes for replayable proof"),
             ("evidence", "use details.evidence"),
             ("impact", "use details.impact"),
-            ("file: canonical_location without provenance.code_snapshot", "copy repo_id, repo_generation, and source_manifest_digest from the current Code Source Identity block"),
+            ("hand-copying provenance.code_snapshot out of Code Source Identity", "omit it: the CLI derives the binding from the active repository, and a transcription slip reads as a stale binding rather than as the typo it was"),
+            ("recording a code finding and then calling finding verify just to park it", "pass --pending-runtime-proof \"<why proof is still owed>\" on the record itself"),
             ("links[].link_kind=root_cause", "use `vigil assess finding link <sibling-slug> --root-cause <root-slug>` after verification"),
             ("reusing a reported finding's root_cause_key + canonical_location for a new finding", "differentiate the root_cause_key/defect_family and use finding link, or pass --update <slug> to modify the existing finding"),
         ),
@@ -1339,7 +1346,7 @@ _CONTRACTS: dict[str, CommandContract] = {
         ),
         schema_name="backend AssessmentRunRequest + AssessmentRunTransitionRequest",
         preferred_invocations=(
-            "vigil assess proof-run start verify-va-047 --kind web --agent-id VERIFY-1",
+            "vigil assess proof-run start verify-va-047 --kind web --agent-id VERIFY-1 --for-finding VA-047",
             "vigil assess proof-run start scan-2026-09-09 --kind code --agent-id HUNT-1 --purpose scan --target-identity-file target.json --source-generations-file generations.json --exclusions-file exclusions.json",
             "vigil assess proof-run begin <id>",
             "vigil assess proof-run finish <id> --status completed",
@@ -1349,7 +1356,7 @@ _CONTRACTS: dict[str, CommandContract] = {
         ),
         author_supplied_fields=(
             "subcommand: start | begin | finish | list | get",
-            "start: <run_uuid> --kind <code|web|blue|shared> --agent-id <dispatch-agent-id> [--purpose <proof|scan>]",
+            "start: <run_uuid> --kind <code|web|blue|shared> --agent-id <dispatch-agent-id> [--purpose <proof|scan>] [--for-finding <slug> ...]",
             "scan identity: --target-identity-file / --source-generations-file / --exclusions-file / --resume-from; each source generation supplies target_key, generation, manifest_digest, inventory_commitment_version, inventory_count, and inventory_digest",
             "begin: <run_id> (queued -> running)",
             "finish: <run_id> --status <completed|failed|interrupted|canceled>",
@@ -1360,12 +1367,17 @@ _CONTRACTS: dict[str, CommandContract] = {
             "Proof runs start running. Scan runs start queued: use begin before accounting writes, then finish for the explicit terminal outcome; a terminal run cannot be rewritten to a different status.",
             "Before starting a scan, compute each target's exact v1 source-inventory count and digest with run-audit sources commitment and include those values in the source-generations file. Completion reconciles the committed inventory against durable rows.",
             "Only receipts from a completed run can support terminal finding verification. Failed, interrupted, and canceled runs remain durable audit history.",
+            "--for-finding <slug> (repeatable) names the findings this run is being started to verify, and preflights the independence rule against each one BEFORE the run exists: a run whose --agent-id is a named finding's author is refused, because that finding's author cannot be its own verifier and the run's receipts could never carry a terminal decision on it. The authoritative check still runs at `finding verify`; naming the findings here costs a read, while discovering it there costs the whole proof run, target traffic included. A named finding with no durable author is refused the same way — repair it with `vigil assess finding bind-author` first.",
             "List reads one bounded page by default and reports an exact or lower-bound total plus a continuation command; --paginate is the explicit all-page opt-in.",
         ),
         common_mistakes=(
             (
                 "recording a terminal finding verification before finishing the run",
                 "finish the proof run as completed, then pass its receipt id to finding verify",
+            ),
+            (
+                "starting a proof run from the dispatch that authored the finding",
+                "verification needs an independent dispatch; pass --for-finding <slug> so the run is refused before it spends any target traffic",
             ),
             (
                 "retrying a start/finish after a malformed success response",
@@ -1560,27 +1572,28 @@ _CONTRACTS: dict[str, CommandContract] = {
         summary="Apply a verification transition to an existing finding through the audit ledger.",
         schema_name="backend FindingVerifyRequest",
         preferred_invocations=(
-            'vigil assess finding verify <slug> --status confirmed --reason "..." --proof-receipt-id <id>',
-            'vigil assess finding verify <slug> --status downgraded --reason "..." --new-severity low --proof-receipt-id <id>',
-            'vigil assess finding verify <slug> --status false_positive --reason "..." --counter-check-file counter-check.json',
-            'vigil assess finding verify <slug> --status confirmed --reason "Re-reviewed current sealed source" --source-name code-vuln-verifier --provenance-inline \'{"code_snapshot":{"repo_id":7,"repo_generation":3,"source_manifest_digest":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}}\'',
+            'vigil assess finding verify <slug> --status confirmed --reason "..." --agent-id <your-dispatch-agent-id> --proof-receipt-id <id>',
+            'vigil assess finding verify <slug> --status downgraded --reason "..." --agent-id <your-dispatch-agent-id> --new-severity low --proof-receipt-id <id>',
+            'vigil assess finding verify <slug> --status false_positive --reason "..." --agent-id <your-dispatch-agent-id> --counter-check-file counter-check.json',
+            'vigil assess finding verify <slug> --status confirmed --reason "Re-reviewed current sealed source" --agent-id <your-dispatch-agent-id> --source-name code-vuln-verifier --proof-receipt-id <id>',
             "vigil assess finding verify <slug> --payload-file verify.json",
-            'vigil assess finding verify VA-001 VA-002 VA-003 --status confirmed --reason "batch: all reproduced"',
+            'vigil assess finding verify VA-001 VA-002 VA-003 --status confirmed --reason "batch: all reproduced" --agent-id <your-dispatch-agent-id>',
         ),
         author_supplied_fields=(
             "verification_status",
             "reason_text",
+            "provenance.agent_id via --agent-id (the VERIFYING dispatch's Runtime Identity id)",
             "proof_receipt_ids for terminal decisions",
             "counter_check for false_positive",
-            "provenance.code_snapshot for EVERY finding whose canonical_location begins with file:, current or stale",
         ),
         notes=(
             "Use for these verification outcomes: " + ", ".join(VERIFICATION_TRANSITION_STATUSES) + ". `unreviewed` is the recorded starting state, not a transition target.",
             "Confirmed and downgraded decisions require --proof-receipt-id from one completed independent verifier run. False_positive requires --counter-check-file with method, expected_result, observed_result, falsified_claim, completed=true, and proof_receipt_ids.",
             "If a counter-check could not run, record blocked or pending_runtime_proof; free-text kill_reason/kill_check are not decision evidence.",
-            "Use explicit flags for ordinary transitions. --payload-file is for a final, complete verification-transition document; it is mutually exclusive with request-content flags, while --narrative may accompany it.",
-            "Verifying a file: finding REQUIRES --provenance-inline with code_snapshot.repo_id, repo_generation, and source_manifest_digest copied from Code Source Identity — every time, not only when rebinding a stale one. The binding the AUTHOR recorded attests that the author read those bytes; it cannot also attest that you did. Omitting it is a 400 (\"file findings require provenance.code_snapshot bound to the current verified repository snapshot\"), and the write does not land.",
-            "Verification is also the only path that can rebind a stale or legacy-unbound file finding to the current generation. Read the current sealed bytes first; never use the flag to relabel old evidence. Generic `finding update` rejects the reserved binding outright.",
+            "Use explicit flags for ordinary transitions. --payload-file is for a final, complete verification-transition document: it is sent verbatim (no derived binding, no --agent-id), it is mutually exclusive with request-content flags, and --narrative may accompany it.",
+            "--agent-id <your dispatch agent_id> is what makes a code verification attest to anything. The backend resolves it into the finding's stored code_snapshot_attestation; without it that attestation names no dispatch and the finding reads code_snapshot_attestation_status=unattested — a binding indistinguishable from one copied off another finding. It does NOT rebind the finding's immutable author, which stays the recording dispatch.",
+            "Verifying a file: finding carries provenance.code_snapshot for the CURRENT verified snapshot, every time — the binding the AUTHOR recorded attests that the author read those bytes, never that you did. The CLI derives it from the finding's own repository, so there is nothing to copy; --provenance-inline still wins when you supply one, and the 400 (\"file findings require provenance.code_snapshot bound to the current verified repository snapshot\") is unchanged for a binding that is not current.",
+            "Verification is also the only path that can rebind a stale or legacy-unbound file finding to the current generation. A LEGACY-UNBOUND finding is bound by derivation like any other. A STALE one is not: the CLI refuses to derive it and requires --provenance-inline, because `disputed` and `blocked` need no proof receipt, so a derived rebind would let an administrative status change clear the report-readiness stale blocker with nobody having re-read the source. Read the current sealed bytes, then supply the binding. Generic `finding update` rejects the reserved binding outright.",
             "--details-inline adds new top-level keys, but a reused top-level key replaces that stored value; nested objects are not recursively merged. Empty values (null, \"\", [], {}) are REJECTED at the CLI rather than returning 200 with a bumped row_version and unchanged content. To CLEAR a details key, send the complete object with --details-replace --expected-row-version <n>; to set one, give it a non-empty value.",
             "--evidence-ref is shape-checked the same way `finding record` checks it: a URL, a composite (\"scans/a.out; scans/b.out\"), or prose (\"command-runs 56052/56054\") WARNs and still writes, because the backend indexer mints NO artifact row for those shapes. Point it at ONE engagement-local path (a directory of captured evidence is fine).",
             "The generic --inline and trailing positional JSON forms were REMOVED. Use explicit flags or --payload-file <path>.",
@@ -1590,8 +1603,12 @@ _CONTRACTS: dict[str, CommandContract] = {
             ("rationale", "use reason_text"),
             ("status", "verification is a transition, not a raw status patch"),
             (
-                "verifying a file: finding without --provenance-inline",
-                "copy repo_id, repo_generation, and source_manifest_digest from the current Code Source Identity block; the author's stored binding is not carried forward",
+                "verifying without --agent-id",
+                "name the verifying dispatch; a code finding verified anonymously stores an attestation that resolves to nothing and reads 'unattested'",
+            ),
+            (
+                "hand-copying provenance.code_snapshot into --provenance-inline on a CURRENT finding",
+                "omit it: the CLI derives the binding from the finding's repository. A finding whose binding is already STALE is the exception — there the flag is required, because rebinding is your claim to have read the new bytes",
             ),
         ),
         examples=(
@@ -1611,13 +1628,7 @@ _CONTRACTS: dict[str, CommandContract] = {
                 "reason_text": "Re-reviewed the current sealed source and reproduced the dataflow.",
                 "proof_receipt_ids": [19],
                 "source_name": "code-vuln-verifier",
-                "provenance": {
-                    "code_snapshot": {
-                        "repo_id": 7,
-                        "repo_generation": 3,
-                        "source_manifest_digest": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-                    }
-                },
+                "provenance": {"agent_id": "VERIFY-1"},
             },
         ),
     ),

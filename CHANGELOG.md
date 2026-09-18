@@ -212,9 +212,40 @@ Durable design decisions live in [`docs/adr/`](docs/adr/).
   sections below the default that calls `unreviewed` the only record-time value it accepts.
   `vigil assess contract code-dependencies` documents all 18 gap codes, where a prose note named
   eight.
+- **`vigil assess finding record --pending-runtime-proof "<why proof is owed>"`** records a finding
+  and parks it at `verification_status=pending_runtime_proof` in one invocation. A new finding always
+  opens at `unreviewed` and only `finding verify` may move it, so a code finding whose runtime
+  trigger is still owed always cost two calls. The park is that same verify transition through the
+  same route, ledger and evidence gates, carrying the record's own author identity and code-snapshot
+  binding; only the round trip is gone. A park that fails says the record landed rather than reading
+  as a failed record.
+- **`vigil assess finding verify --agent-id <dispatch-agent-id>`** names the dispatch performing the
+  verification. That id is what the backend resolves into a code finding's stored
+  `code_snapshot_attestation`, and verify had no way to carry it at all — so the documented
+  invocation stored an attestation naming no dispatch, and every verified code finding read
+  `code_snapshot_attestation_status=unattested`: a binding indistinguishable from one copied off
+  another finding. It does not rebind the finding's immutable author.
+- **`vigil assess proof-run start --for-finding <slug>`** (repeatable) preflights verifier
+  independence before the run exists. "The finding's author cannot be its own verifier" was enforced
+  only at the final `finding verify` write, by which point the proof run had already executed against
+  the target; naming the findings up front turns that into one read and names the author in the
+  refusal. The authoritative check is unchanged and still runs at verify.
 
 ### Changed
 
+- **`provenance.code_snapshot` is derived, not transcribed.** For a `file:` finding that authored no
+  binding, `finding record` and `finding verify` read the engagement's active repository and bind
+  `repo_id` + `repo_generation` + `source_manifest_digest` from it. Nobody copies three values out of
+  a Code Source Identity block any more — where a slip read as a stale binding rather than as the
+  typo it was — and transcription never attested to anything in the first place; `--agent-id` is what
+  the attestation is built from. An authored binding still wins, and the currency gate is untouched: a
+  binding that is not the current verified snapshot is refused exactly as before. Derivation stops at
+  a finding whose stored binding has gone STALE — `disputed` and `blocked` need no proof receipt, so
+  deriving there would let an administrative status change clear the report-readiness stale blocker
+  with nobody having re-read the source. A rebind still takes an explicit `--provenance-inline`,
+  because that is the claim that you read the new bytes.
+  Where several active repositories exist the CLI refuses rather than guess which source was reviewed,
+  and `--payload-file` is still sent verbatim.
 - **The stale working-root warning fires once, at engagement start.** It used to repeat on every
   `vigil assess` passthrough, which trains an operator to ignore it and says nothing new each time.
   Per-dispatch instruction identity — installed revision plus exact operator and specialist hashes —

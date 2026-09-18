@@ -622,6 +622,7 @@ _EXPECTED_FLAGS = {
     "finding verify": {
         "--status",
         "--reason",
+        "--agent-id",
         "--narrative",
         "--evidence-ref",
         "--new-severity",

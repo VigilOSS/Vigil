@@ -14,8 +14,10 @@ from assess.lib.client import (
     AssessmentClient,
     require_finding_write_response,
 )
+from assess.lib.code_snapshot_binding import fill_binding
 from assess.lib.config import load_config
 from assess.lib.contracts import common_mistake_hints, render_contract
+from assess.lib.exploit_targets import is_source_bound
 from assess.lib.findings import finding_lock_path, next_finding_id
 from assess.lib.locking import file_lock
 from assess.lib.schema_validation import collect_validation_errors, load_schema
@@ -97,6 +99,18 @@ def register(subparsers) -> None:
             "mode nobody claimed. May also be set as `evidence_type` in the JSON "
             "payload; the two must agree."
         ),
+    )
+    p.add_argument(
+        "--pending-runtime-proof",
+        dest="pending_runtime_proof_reason",
+        metavar="REASON",
+        default="",
+        help="Record the finding and park it at verification_status=pending_runtime_proof in "
+             "the same invocation, with REASON as the transition rationale. A new finding "
+             "always opens at 'unreviewed', so a code finding that is real but has no runtime "
+             "trigger yet otherwise costs a second `finding verify` call. The park carries the "
+             "same author identity and code-snapshot binding as the record, and the ledger "
+             "records the same transition it would have; only the round trip is removed.",
     )
     p.add_argument(
         "--quiet",
@@ -554,6 +568,60 @@ def _print_duplicate_advisories(response: object, *, quiet: bool) -> None:
         print(f"finding record: duplicate advisory — {detail}", file=sys.stderr)
 
 
+def _fill_derivable_provenance(payload: dict, *, base_url: str, engagement_key: str) -> None:
+    """Derive ``provenance.code_snapshot`` for a file finding that authored none.
+
+    The binding is the repository's own current identity, so the author was only
+    ever transcribing it out of Code Source Identity — and a transcription error
+    reads as a stale binding rather than as the mistake it is. An authored
+    binding is left exactly as written, stale included, so the currency gate
+    still sees what the author claimed.
+    """
+    if not is_source_bound(str(payload.get("canonical_location", ""))):
+        return
+    provenance = payload["provenance"]
+    if provenance.get("code_snapshot"):
+        return
+    with AssessmentClient(base_url, engagement_key) as client:
+        fill_binding(provenance, client, operation="finding record")
+
+
+def _park_pending_runtime_proof(
+    finding_slug: str,
+    reason: str,
+    *,
+    provenance: dict,
+    agent_name: str,
+    base_url: str,
+    engagement_key: str,
+) -> None:
+    """Move the freshly-recorded finding to ``pending_runtime_proof``.
+
+    Record pins the axis to ``unreviewed`` so that every later disposition goes
+    through ``finding verify`` and its evidence gates. This is that same verify
+    transition, through the same route and the same ledger — it just does not
+    make the caller spend a second invocation to reach the one status that needs
+    no evidence beyond the reason it is owed.
+    """
+    payload = {
+        "verification_status": "pending_runtime_proof",
+        "reason_text": reason,
+        "source_name": agent_name,
+        "provenance": provenance,
+    }
+    with AssessmentClient(base_url, engagement_key) as client:
+        response = client.post(f"findings/{finding_slug}/verify", payload)
+    require_finding_write_response(
+        response,
+        finding_slug=finding_slug,
+        operation="finding record --pending-runtime-proof",
+    )
+    print(
+        f"finding record: {finding_slug} recorded and parked at pending_runtime_proof.",
+        file=sys.stderr,
+    )
+
+
 def _report_validation_errors(payload: dict, errors: list[str]) -> None:
     print("finding payload invalid after helper defaults:", file=sys.stderr)
     for error in errors:
@@ -613,6 +681,9 @@ def run(args) -> None:
             candidate_slug=candidate_slug,
             dispatch_agent_id=(getattr(args, "agent_id", "") or "").strip(),
             evidence_type=(getattr(args, "evidence_type", "") or "").strip(),
+        )
+        _fill_derivable_provenance(
+            payload, base_url=cfg.base_url, engagement_key=cfg.engagement_key
         )
         validation_errors = collect_validation_errors(payload, _FINDING_SCHEMA)
         if validation_errors:
@@ -693,4 +764,27 @@ def run(args) -> None:
             "summary": f"Recorded {finding_slug}",
         })
 
+    # The record is durable by now, so the canonical slug goes out before the
+    # park: a park that fails must not read as a record that never happened.
     print(finding_slug)
+
+    park_reason = (getattr(args, "pending_runtime_proof_reason", "") or "").strip()
+    if park_reason:
+        try:
+            _park_pending_runtime_proof(
+                finding_slug,
+                park_reason,
+                provenance=payload["provenance"],
+                agent_name=agent_name,
+                base_url=cfg.base_url,
+                engagement_key=cfg.engagement_key,
+            )
+        except AssessError as exc:
+            print(
+                f"finding record: {finding_slug} WAS recorded, but parking it at "
+                f"pending_runtime_proof failed: {exc}\n"
+                f"  - Retry only the park: `vigil assess finding verify {finding_slug} "
+                f'--status pending_runtime_proof --reason "{park_reason}"`.',
+                file=sys.stderr,
+            )
+            sys.exit(1)
