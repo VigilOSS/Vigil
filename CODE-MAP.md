@@ -72,9 +72,9 @@ When you are about to copy one of these into a second file, stop and import.
 - `agent/scripts/assess/lib/dependency_manifests.py:RECOGNIZED_MANIFESTS` owns the manifest roster
   and each file's reader; `classify_buckets.py:_BUCKETS` derives its `debug_logic` fragments from
   `url_path_fragments()`. A rostered kind with no reader is an `unparsed_ecosystem` GAP, not an absence.
-- `dependency_picture.py:SHIPMENT_OBSERVATIONS` / `REACHABILITY_OBSERVATIONS` own the dependency
-  observation vocabularies: every member is `unverified_*`, and "looked and saw nothing" stays
-  distinct from "could not look".
+- `dependency_picture.py:SHIPMENT_OBSERVATIONS` / `REACHABILITY_OBSERVATIONS` /
+  `DEPENDENCY_QUALIFIERS` own the dependency observation vocabularies: every member is
+  `unverified_*`, and "looked and saw nothing" stays distinct from "could not look".
 - `agent/scripts/assess/commands/code_dispatch.py:submit_queue_items` owns the audited write into
   `code_analysis_queue`; `code-dispatch queue/reanalyze` and `code-lead queue` go through it.
 - `orchestrator/backend/app/services/state_manager/coverage.py:PROBE_RESULT_STATUSES` owns result

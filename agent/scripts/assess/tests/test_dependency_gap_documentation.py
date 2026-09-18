@@ -23,6 +23,7 @@ from pathlib import Path
 import pytest
 
 from assess.lib import contracts
+from assess.lib.dependency_manifests import AnalysisGap
 
 
 _ASSESS_ROOT = Path(contracts.__file__).resolve().parents[1]
@@ -87,6 +88,32 @@ def test_gap_sources_exist():
     # assertion below vacuously true.
     for source in _GAP_SOURCES:
         assert source.is_file(), source
+
+
+def test_gap_sources_name_every_module_that_constructs_a_gap():
+    # _GAP_SOURCES is a hand-written list, so a fourth module emitting gaps
+    # would be swept by nothing and its codes would pass undocumented. The
+    # roster is checked against the tree rather than trusted.
+    constructing = {
+        path.relative_to(_ASSESS_ROOT).as_posix()
+        for path in _ASSESS_ROOT.rglob("*.py")
+        if "tests/" not in path.relative_to(_ASSESS_ROOT).as_posix()
+        and "AnalysisGap(" in path.read_text(encoding="utf-8")
+    }
+    rostered = {source.relative_to(_ASSESS_ROOT).as_posix() for source in _GAP_SOURCES}
+
+    assert constructing == rostered, (
+        "these modules construct an AnalysisGap outside the swept roster; add "
+        "them to _GAP_SOURCES or this test proves nothing about their codes"
+    )
+
+
+def test_a_gap_cannot_be_constructed_positionally():
+    # The sweep reads `gap="<literal>"` KEYWORDS, so `AnalysisGap(path, "code",
+    # detail)` would emit a code this test can never see. Keyword-only
+    # construction makes that spelling impossible rather than merely unusual.
+    with pytest.raises(TypeError):
+        AnalysisGap("manifest.json", "unparsed_ecosystem", "detail")  # type: ignore[misc]
 
 
 def test_every_emitted_gap_code_is_documented():

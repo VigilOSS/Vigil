@@ -2317,6 +2317,30 @@ def finalize_command_run(
                 ).fetchone()
                 assert row is not None
                 serialized = _serialize_command_run(row, include_output=True)
+
+        if (
+            str(serialized.get("route") or "") != "host_exec"
+            and str(serialized.get("status") or "") in _common.COMMAND_RUN_TERMINAL_STATUSES
+        ):
+            # The row — and with it these artifact rows — was opened BEFORE the
+            # command ran, so the files it names did not exist yet and indexed as
+            # absent. This is the first point at which the bytes exist, so read
+            # them now. Without it every audited container run leaves its own
+            # output indexed as missing, and a command proof receipt citing the
+            # run is born ``missing`` until someone runs `artifact refresh` by
+            # hand. host_exec keeps its own verified-descriptor path above, which
+            # must not be reopened by pathname.
+            for output_path in (
+                serialized.get("stdout_path"),
+                serialized.get("stderr_path"),
+            ):
+                _common._register_artifact_reference(
+                    engagement.id,
+                    str(output_path or ""),
+                    kind="command-run-output",
+                    producer_command_run_id=int(serialized["id"]),
+                    producer_agent_role=str(serialized.get("agent_name") or ""),
+                )
         return serialized
     finally:
         _close_published_outputs(published_outputs)

@@ -330,6 +330,14 @@ test("a recorded GET with a body reaches the wire without an invented Content-Ty
 
 test("a request with no recorded headers sends no headers curl made up", async () => {
   const raw = await wireFor((url) => pocCurl(asPocRequest({ url })));
+  // Anchor the negative: `inventedHeaders` returning [] is also what a request
+  // that never reached the socket looks like. `Host` is the one header curl
+  // DERIVES rather than invents (see CURL_SYNTHESIZED_HEADERS), so its presence
+  // proves a real request arrived and the emptiness above means something.
+  assert.ok(
+    wireHeaders(raw).some((line) => /^host:/i.test(line)),
+    `no request reached the socket: ${JSON.stringify(raw)}`,
+  );
   assert.deepEqual(inventedHeaders(raw, []), []);
 });
 

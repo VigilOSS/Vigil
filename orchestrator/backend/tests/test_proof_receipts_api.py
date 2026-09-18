@@ -1325,3 +1325,80 @@ def test_assessment_runs_have_explicit_terminal_transitions_and_point_reads(
         row["producer_dispatch_agent_id"] == "VERIFY-1"
         for row in listing.json()[:2]
     )
+
+
+def test_a_measured_empty_stderr_file_still_proves_the_command_output(
+    client, isolate_settings
+) -> None:
+    """An empty stderr is a MEASUREMENT, not an absence of one.
+
+    Every audited `vigil assess kali` run writes both streams to files under the
+    engagement root, and almost every successful one writes zero bytes to
+    stderr. The command row records ``stderr_bytes = 0`` and, because there are
+    no bytes, an empty ``stderr_sha256``. Reading that empty digest as "not
+    measured" made the receipt permanently ``stale``, so no real runtime command
+    could ever back a terminal verification.
+    """
+
+    engagement_dir = _seed(client, isolate_settings)
+    output_dir = engagement_dir / "scans" / "kali"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    stdout_path = output_dir / "empty-stderr.out"
+    stderr_path = output_dir / "empty-stderr.err"
+    stdout_path.write_text("uid=33(www-data)\n", encoding="utf-8")
+    stderr_path.write_bytes(b"")
+
+    run = _run(client)
+    command = client.post(
+        f"{BASE}/command-runs",
+        json={
+            "command": "curl -s http://target/vulnerabilities/exec/",
+            "argv": ["curl", "-s", "http://target/vulnerabilities/exec/"],
+            "tool_name": "curl",
+            "agent_name": "VERIFY-1",
+            "phase": "verify",
+            "return_code": 0,
+            "timed_out": False,
+            "success": True,
+            "started_at": "2026-09-18T12:00:00Z",
+            "completed_at": "2026-09-18T12:00:01Z",
+            "duration_ms": 1000,
+            "stdout": stdout_path.read_text(encoding="utf-8"),
+            "stderr": "",
+            "stdout_path": str(stdout_path),
+            "stderr_path": str(stderr_path),
+            "run_uuid": "command-empty-stderr",
+        },
+    )
+    assert command.status_code == 201, command.text
+    assert command.json()["stderr_bytes"] == 0
+    assert command.json()["stderr_sha256"] == ""
+
+    refreshed = client.post(f"{BASE}/artifacts/refresh")
+    assert refreshed.status_code == 200, refreshed.text
+
+    receipt = client.post(
+        f"{BASE}/proof-receipts",
+        json={
+            "run_id": run["id"],
+            "evidence_kind": "command",
+            "command_run_id": command.json()["id"],
+            "expected_result": "the injected command runs",
+            "observed_result": "the response body carries uid=33(www-data)",
+        },
+    )
+    assert receipt.status_code == 201, receipt.text
+    assert receipt.json()["evidence_health"] == "healthy"
+
+    fetched = client.get(f"{BASE}/proof-receipts/{receipt.json()['id']}")
+    assert fetched.status_code == 200, fetched.text
+    assert fetched.json()["evidence_health"] == "healthy"
+
+    # A stderr file that GREW past the measured zero bytes is a different fact,
+    # and stays degraded.
+    stderr_path.write_text("boom\n", encoding="utf-8")
+    grown_refresh = client.post(f"{BASE}/artifacts/refresh")
+    assert grown_refresh.status_code == 200, grown_refresh.text
+    grown = client.get(f"{BASE}/proof-receipts/{receipt.json()['id']}")
+    assert grown.status_code == 200, grown.text
+    assert grown.json()["evidence_health"] == "stale"

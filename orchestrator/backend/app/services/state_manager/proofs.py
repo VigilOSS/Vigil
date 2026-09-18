@@ -267,6 +267,19 @@ def _command_output_evidence_healths(
                     or not bool(artifact["present"])
                 ):
                     artifact_health.append("missing")
+                elif not expected_sha256 and byte_count == 0:
+                    # A stream measured at ZERO bytes records no digest, because
+                    # there are no bytes to digest. That empty digest is the
+                    # measurement, not the absence of one — reading it as
+                    # unmeasured left every real audited run permanently stale
+                    # (almost all of them write nothing to stderr). The retained
+                    # file still has to agree: bytes that appeared after the
+                    # measurement are a different fact.
+                    artifact_health.append(
+                        "healthy"
+                        if int(artifact["size_bytes"] or 0) == 0
+                        else "stale"
+                    )
                 elif (
                     not expected_sha256
                     or str(artifact["integrity_status"] or "") == "mismatch"

@@ -9,6 +9,9 @@ contains.
 """
 from __future__ import annotations
 
+import ast
+from pathlib import Path
+
 import pytest
 
 from assess.lib import dependency_manifests as dm
@@ -21,6 +24,7 @@ from test_dependency_manifests import (
     GRADLE_LOCKFILE,
     PACKAGE_JSON,
     PACKAGE_LOCK_V3,
+    PROFILE_POM,
     SERVICE_POM,
     VERSION_CATALOG,
 )
@@ -82,8 +86,58 @@ def test_looking_and_finding_nothing_is_spelled_differently_from_not_looking() -
     assert "unverified_reachability_unindexed" in dp.REACHABILITY_OBSERVATIONS
 
 
-def test_every_observation_carries_a_detection_marker_and_its_evidence() -> None:
-    picture = _picture({"services/api/pom.xml": SERVICE_POM})
+def _emitted_qualifier_codes() -> set[str]:
+    """Every qualifier literal the derivation adds, read from the source.
+
+    Derived rather than restated, for the same reason
+    ``test_dependency_gap_documentation`` derives the gap roster: a qualifier
+    that reaches ``--json`` and the text report but never joins
+    ``DEPENDENCY_QUALIFIERS`` is invisible to ``vigil assess contract
+    code-dependencies``, which renders that tuple and nothing else. An operator
+    then meets a machine-readable code the published vocabulary denies exists.
+    """
+
+    source = Path(dp.__file__).resolve()
+    codes: set[str] = set()
+    for node in ast.walk(ast.parse(source.read_text(encoding="utf-8"))):
+        if not isinstance(node, ast.Call) or len(node.args) != 1:
+            continue
+        function = node.func
+        if not isinstance(function, ast.Attribute) or function.attr != "add":
+            continue
+        target = function.value
+        if not isinstance(target, ast.Name) and not (
+            isinstance(target, ast.Attribute) and target.attr == "qualifiers"
+        ):
+            continue
+        if isinstance(target, ast.Name) and target.id != "qualifiers":
+            continue
+        argument = node.args[0]
+        if isinstance(argument, ast.Constant) and isinstance(argument.value, str):
+            codes.add(argument.value)
+    return codes
+
+
+def test_every_emitted_qualifier_is_in_the_published_vocabulary() -> None:
+    emitted = _emitted_qualifier_codes()
+
+    assert emitted, "derivation found no qualifier literals at all"
+    assert emitted == set(dp.DEPENDENCY_QUALIFIERS), (
+        "DEPENDENCY_QUALIFIERS and the qualifiers this module emits have "
+        "drifted; the contract renders the tuple, so a member missing from it "
+        "is a code no operator can look up"
+    )
+
+
+# SERVICE_POM alone declares no `<profiles>`, so a sweep over it exercises no
+# conditional record at all and a qualifier only a profile can produce joins the
+# emitted vocabulary unnoticed. The profile POM is swept beside it for exactly
+# that reason.
+@pytest.mark.parametrize(
+    "manifest", [SERVICE_POM, PROFILE_POM], ids=["no-profiles", "profiles"]
+)
+def test_every_observation_carries_a_detection_marker_and_its_evidence(manifest) -> None:
+    picture = _picture({"services/api/pom.xml": manifest})
 
     assert picture.observations
     for obs in picture.observations:
@@ -202,6 +256,104 @@ def test_a_maven_profile_dependency_is_not_read_as_shipping_by_default() -> None
     assert "unverified_conditional_profile" in log4j.qualifiers
     # The profile that carries it stays nameable, so the operator can decide.
     assert "profile:production" in log4j.declaration_notes
+
+
+def _override_pom(root_version: str, profile_version: str) -> str:
+    return (
+        "<project><modelVersion>4.0.0</modelVersion>"
+        "<groupId>com.example</groupId><artifactId>app</artifactId>"
+        "<version>1.0.0</version>"
+        "<dependencies><dependency>"
+        "<groupId>org.apache.logging.log4j</groupId>"
+        f"<artifactId>log4j-core</artifactId><version>{root_version}</version>"
+        "</dependency></dependencies>"
+        "<profiles><profile><id>production</id>"
+        "<activation><activeByDefault>true</activeByDefault></activation>"
+        "<dependencies><dependency>"
+        "<groupId>org.apache.logging.log4j</groupId>"
+        f"<artifactId>log4j-core</artifactId><version>{profile_version}</version>"
+        "</dependency></dependencies>"
+        "</profile></profiles></project>"
+    )
+
+
+def test_a_profile_restating_a_root_declaration_is_one_component_not_two() -> None:
+    # Re-declaring a root dependency inside a profile is the standard Maven
+    # override idiom. Two rows for it disagree with each other -- same
+    # coordinate, same version, same file, one shipping and one undetermined --
+    # and the conditional one is the false half: the component is declared
+    # outside every profile, so it is in the build whether the profile activates
+    # or not. A reviewer given both has to work out which row to believe, which
+    # is the failure this module exists to avoid.
+    picture = _picture({"pom.xml": _override_pom("2.14.1", "2.14.1")})
+
+    log4j = _observation(picture, "org.apache.logging.log4j:log4j-core")
+    assert log4j.shipment_observation == "unverified_ships_by_default_scope"
+    assert "unverified_conditional_profile" not in log4j.qualifiers
+    # The restatement is still evidence, and only the operator can decide what
+    # it means -- so it is carried, never discarded.
+    assert len(log4j.evidence) == 2
+
+
+def test_a_profile_declaring_another_version_keeps_its_own_conditional_row() -> None:
+    # Here the profile states a version the root never named, so the two rows
+    # are two components rather than one told twice, and the profile's is
+    # genuinely conditional on an activation nothing here resolves.
+    picture = _picture({"pom.xml": _override_pom("2.14.1", "2.17.1")})
+
+    root = _observation(picture, "org.apache.logging.log4j:log4j-core", version="2.14.1")
+    profiled = _observation(
+        picture, "org.apache.logging.log4j:log4j-core", version="2.17.1"
+    )
+    assert root.shipment_observation == "unverified_ships_by_default_scope"
+    assert profiled.shipment_observation == "unverified_shipment_undetermined"
+    assert "unverified_conditional_profile" in profiled.qualifiers
+
+
+PROFILE_MANAGED_VERSION_POM = """\
+<project>
+  <groupId>com.example</groupId>
+  <artifactId>app</artifactId>
+  <version>1.0.0</version>
+  <dependencies>
+    <dependency>
+      <groupId>io.netty</groupId>
+      <artifactId>netty-transport-native-epoll</artifactId>
+    </dependency>
+  </dependencies>
+  <profiles>
+    <profile>
+      <id>native</id>
+      <activation><property><name>env</name><value>native</value></property></activation>
+      <dependencyManagement>
+        <dependencies>
+          <dependency>
+            <groupId>io.netty</groupId>
+            <artifactId>netty-transport-native-epoll</artifactId>
+            <version>4.1.100.Final</version>
+          </dependency>
+        </dependencies>
+      </dependencyManagement>
+    </profile>
+  </profiles>
+</project>
+"""
+
+
+def test_a_version_a_profile_supplies_keeps_the_profile_it_came_from() -> None:
+    # The declaration is complete only because a PROFILE's dependencyManagement
+    # finished it, so 4.1.100.Final is the version that build resolves and no
+    # other. Consuming the policy entry for its version while dropping the notes
+    # that said where it came from publishes a conditional resolution as an
+    # unconditional one -- the single row an operator reads then states a
+    # version that holds under one activation as the version, full stop.
+    picture = _picture({"pom.xml": PROFILE_MANAGED_VERSION_POM})
+
+    netty = _observation(picture, "io.netty:netty-transport-native-epoll")
+    assert netty.version == "4.1.100.Final"
+    assert "profile:native" in netty.declaration_notes
+    assert "unverified_conditional_profile" in netty.qualifiers
+    assert netty.shipment_observation == "unverified_shipment_undetermined"
 
 
 def test_a_poetry_optional_extra_is_not_read_as_shipping_by_default() -> None:

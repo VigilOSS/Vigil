@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from urllib.parse import urlencode
 
 from assess.lib.client import AssessmentClient, AssessError, require_write_result
@@ -153,7 +154,12 @@ def _run_create(args) -> None:
         "command_run_id": payload["command_run_id"],
         "tombstone_reason": payload["tombstone_reason"],
     }
-    if payload["artifact_id"] is None or payload["evidence_health"] != "healthy":
+    if payload["evidence_health"] != "healthy":
+        # A caller-declared degradation IS caller-owned, so it must come back
+        # verbatim. 'healthy' is only a request: the backend measures the cited
+        # command output or artifact snapshot and answers with what it found.
+        # Asserting the echo there turned an honest downgrade into a
+        # "write may have committed" error on a write that committed correctly.
         expected["evidence_health"] = payload["evidence_health"]
     if payload["evidence_sha256"] and payload["artifact_id"] is None:
         expected["evidence_sha256"] = payload["evidence_sha256"]
@@ -168,6 +174,17 @@ def _run_create(args) -> None:
         operation="create",
         requested_run_id=int(payload["run_id"]),
     )
+    health = str(row.get("evidence_health") or "")
+    if payload["evidence_health"] == "healthy" and health != "healthy":
+        # Say it at write time. Only a healthy receipt can carry a terminal
+        # verification, and the alternative is finding that out later from a
+        # report-readiness blocker with no hint of which write was hollow.
+        print(
+            f"WARN proof-receipt create: recorded, but the cited evidence measures "
+            f"as {health!r}, not 'healthy'; a terminal `finding verify` will reject "
+            "it. Re-capture the evidence, or register/refresh its artifact.",
+            file=sys.stderr,
+        )
     print(json.dumps(row, indent=2, ensure_ascii=False))
 
 

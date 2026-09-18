@@ -1053,6 +1053,33 @@ def test_html_extractor_form_and_template_sinks():
     assert any(e["kind"] == "html_form" for e in idx["entry_points"])
 
 
+def test_two_callables_sharing_a_name_and_line_get_distinct_identities():
+    """`code-index sync` keys a callable on (qualified_name, start, end).
+
+    Minified and obfuscated sources reuse short names across scopes and put the
+    whole program on one line, so two genuinely different functions collide on
+    that tuple. The sync then refuses the WHOLE repository over one file -- it
+    builds a single payload per repo -- so an obfuscated vendored script blocks
+    every other file's structural metadata. Observed on DVWA's
+    `vulnerabilities/javascript/source/high.js`, which is not `.min.js` and sits
+    in no skipped directory.
+    """
+    source = b"function b(c,d){function h(j){return j}return h}function k(){function h(){return 1}return h}\n"
+    idx = index_file("high.js", "javascript", source=source)
+
+    named = [f for f in idx["functions"] if f["name"] == "h"]
+    assert len(named) == 2, "both nested `h` callables are still extracted"
+
+    identities = [
+        (f["qualified_name"], f["line_start"], f["line_end"]) for f in idx["functions"]
+    ]
+    assert len(identities) == len(set(identities)), (
+        f"callable identities must be unique within a file: {identities}"
+    )
+    # The authored name is preserved for citation; only the identity is qualified.
+    assert {f["name"] for f in named} == {"h"}
+
+
 def test_commented_out_html_markup_is_not_surface():
     """A comment is dead markup, so it must not register reachability.
 

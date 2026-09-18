@@ -149,7 +149,7 @@ DEPENDENCY_ANALYSIS_GAPS: tuple[tuple[str, str], ...] = (
     ("incomplete_declaration", "a Maven `<dependency>` element carries no groupId/artifactId pair, so it names no coordinate to place."),
     ("unresolved_coordinate", "a Maven coordinate is built from a property this file does not define — almost always a parent POM outside the tree. The module declares one dependency MORE than the picture shows."),
     ("unresolved_catalog_entry", "a Gradle version-catalog alias resolves to no coordinate, so every `libs.<alias>` site naming it is unresolvable and those build scripts declare more than the picture can show."),
-    ("unresolved_profile_activation", "a Maven `<profile>` declares dependencies, and whether the build applies them turns on an `activeByDefault`, JDK, OS, property, file or `-P` condition no file reader can evaluate. Its components ARE in the picture, each carrying a `profile:<id>` note; the gap says their shipment is conditional on an activation nothing here resolved."),
+    ("unresolved_profile_activation", "a Maven `<profile>` declares dependencies, and whether the build applies them turns on an `activeByDefault`, JDK, OS, property, file or `-P` condition no file reader can evaluate. Its components ARE in the picture, each carrying a `profile:<id>` note — `profile:<line-N>` for a profile that declares no `<id>` — and each qualified `unverified_conditional_profile`; the gap says their shipment is conditional on an activation nothing here resolved."),
     ("dynamic_dependency_declaration", "a PEP 621 `pyproject.toml` lists `dependencies` or `optional-dependencies` in `project.dynamic`, so the build backend supplies them and this file states none. The detail quotes the `tool.setuptools.dynamic` entry naming the source when there is one — usually a `requirements*.txt` this run reads as its own manifest."),
     ("external_requirement_include", "a Python requirements file delegates part of its declaration through `-r`/`--requirement`/`-c`/`--constraint` to a file the reader followed no further."),
     ("unnamed_requirement_reference", "a requirement installed from a URL, VCS or path that names no distribution. The install is real; the name is not derivable."),
@@ -1571,14 +1571,15 @@ _CONTRACTS: dict[str, CommandContract] = {
             "reason_text",
             "proof_receipt_ids for terminal decisions",
             "counter_check for false_positive",
-            "provenance.code_snapshot only when a code verifier binds/rebinds after reviewing current sealed bytes",
+            "provenance.code_snapshot for EVERY finding whose canonical_location begins with file:, current or stale",
         ),
         notes=(
             "Use for these verification outcomes: " + ", ".join(VERIFICATION_TRANSITION_STATUSES) + ". `unreviewed` is the recorded starting state, not a transition target.",
             "Confirmed and downgraded decisions require --proof-receipt-id from one completed independent verifier run. False_positive requires --counter-check-file with method, expected_result, observed_result, falsified_claim, completed=true, and proof_receipt_ids.",
             "If a counter-check could not run, record blocked or pending_runtime_proof; free-text kill_reason/kill_check are not decision evidence.",
             "Use explicit flags for ordinary transitions. --payload-file is for a final, complete verification-transition document; it is mutually exclusive with request-content flags, while --narrative may accompany it.",
-            "A stale or legacy-unbound file finding can become current only through this verification transition. After independently re-reading the current sealed bytes, code-vuln-verifier passes --provenance-inline with code_snapshot.repo_id, repo_generation, and source_manifest_digest copied from Code Source Identity. Never use the flag to relabel old evidence without that review; generic finding update rejects the reserved binding.",
+            "Verifying a file: finding REQUIRES --provenance-inline with code_snapshot.repo_id, repo_generation, and source_manifest_digest copied from Code Source Identity — every time, not only when rebinding a stale one. The binding the AUTHOR recorded attests that the author read those bytes; it cannot also attest that you did. Omitting it is a 400 (\"file findings require provenance.code_snapshot bound to the current verified repository snapshot\"), and the write does not land.",
+            "Verification is also the only path that can rebind a stale or legacy-unbound file finding to the current generation. Read the current sealed bytes first; never use the flag to relabel old evidence. Generic `finding update` rejects the reserved binding outright.",
             "--details-inline adds new top-level keys, but a reused top-level key replaces that stored value; nested objects are not recursively merged. Empty values (null, \"\", [], {}) are REJECTED at the CLI rather than returning 200 with a bumped row_version and unchanged content. To CLEAR a details key, send the complete object with --details-replace --expected-row-version <n>; to set one, give it a non-empty value.",
             "--evidence-ref is shape-checked the same way `finding record` checks it: a URL, a composite (\"scans/a.out; scans/b.out\"), or prose (\"command-runs 56052/56054\") WARNs and still writes, because the backend indexer mints NO artifact row for those shapes. Point it at ONE engagement-local path (a directory of captured evidence is fine).",
             "The generic --inline and trailing positional JSON forms were REMOVED. Use explicit flags or --payload-file <path>.",
@@ -1587,6 +1588,10 @@ _CONTRACTS: dict[str, CommandContract] = {
         common_mistakes=(
             ("rationale", "use reason_text"),
             ("status", "verification is a transition, not a raw status patch"),
+            (
+                "verifying a file: finding without --provenance-inline",
+                "copy repo_id, repo_generation, and source_manifest_digest from the current Code Source Identity block; the author's stored binding is not carried forward",
+            ),
         ),
         examples=(
             {
@@ -2083,7 +2088,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "shipment_observation: " + ", ".join(SHIPMENT_OBSERVATIONS) + ". `unverified_excluded_by_declared_scope` means a build file declared a scope that normally keeps the component out of the artifact — NOT that the bytes are absent. `unverified_relocated_into_shaded_artifact` means a shade/shadow rule republishes it under a prefix no manifest contains. `unverified_present_without_declaration` means bytes are in the tree (a vendored copy, a packaged jar, an installed module) that nothing declares — so nothing updates them either.",
             "reachability_observation: " + ", ".join(REACHABILITY_OBSERVATIONS) + ". Reachability is measured inside the module that declared the component and every module beneath it — an aggregator POM or workspace root governs its descendants, a sibling module never does — while build output found in the tree, which declares no module, is searched for across the whole index. `unverified_no_reference_observed` means that module's own index, in a language that could import the component, was read and nothing matched; `unverified_reachability_unindexed` means there was nothing to read for that module (no index, a degraded parse, an unreadable or malformed index artifact, or no covering language). The second is the absence of a measurement and is never evidence of anything.",
             "observation_origin records where the observation came from within this track: " + ", ".join(DEPENDENCY_OBSERVATION_ORIGINS) + ". Inbound CVEs from the web/recon track carry their own provenance on `intel record cve`; this field is not that one.",
-            "qualifiers: " + ", ".join(DEPENDENCY_QUALIFIERS) + ". `unverified_manifest_lock_divergence` is emitted only when the declared range is a form the checker fully understands — a `github:`, `file:` or `workspace:` specifier produces no claim, and silence there means undecidable, not compatible.",
+            "qualifiers: " + ", ".join(DEPENDENCY_QUALIFIERS) + ". `unverified_conditional_profile` means the declaration sits inside a build profile, so whether it ships turns on the activation named in the matching `unresolved_profile_activation` gap. `unverified_manifest_lock_divergence` is emitted only when the declared range is a form the checker fully understands — a `github:`, `file:` or `workspace:` specifier produces no claim, and silence there means undecidable, not compatible.",
             "The `gaps` array decides whether the picture can be trusted. Every entry carries the path it concerns and a detail line; each `gap` code names a DIFFERENT reason a measurement is missing, and none of them mean the component or declaration is absent from the build. The full vocabulary follows, one line per code.",
             *(
                 f"gaps[].gap `{code}` — {meaning}"

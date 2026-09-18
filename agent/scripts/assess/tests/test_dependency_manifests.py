@@ -366,6 +366,109 @@ def test_maven_profile_activation_is_disclosed_as_a_gap() -> None:
     assert any("native" in gap.detail and "property" in gap.detail for gap in reported)
 
 
+PROFILE_POM_WITHOUT_AN_ID = """\
+<project>
+  <artifactId>app</artifactId>
+  <profiles>
+    <profile>
+      <activation>
+        <property>
+          <name>env</name>
+          <value>prod</value>
+        </property>
+        <os><family>unix</family></os>
+        <file><exists>${basedir}/prod.marker</exists></file>
+      </activation>
+      <dependencies>
+        <dependency>
+          <groupId>org.apache.logging.log4j</groupId>
+          <artifactId>log4j-core</artifactId>
+          <version>2.14.1</version>
+        </dependency>
+        <dependency>
+          <groupId>org.postgresql</groupId>
+          <artifactId>postgresql</artifactId>
+          <version>42.7.1</version>
+        </dependency>
+      </dependencies>
+    </profile>
+  </profiles>
+</project>
+"""
+
+
+def test_a_profile_with_no_id_is_named_by_a_stable_machine_readable_placeholder() -> None:
+    # `<id>` is optional, and the note is the value `dependency_picture` reads
+    # back to decide a record is conditional -- the contract calls it a
+    # `profile:<id>` note. A sentence of prose in that slot ("the profile opened
+    # on line 4") is not a value: it cannot be matched, and it changes whenever
+    # anything above it in the file moves by a line.
+    deps = _by_coordinate(_parse("pom.xml", PROFILE_POM_WITHOUT_AN_ID))
+
+    assert "profile:<line-4>" in deps["org.apache.logging.log4j:log4j-core"].qualifiers
+    assert "profile:<line-4>" in deps["org.postgresql:postgresql"].qualifiers
+
+
+def test_an_id_less_profile_gap_names_the_same_placeholder_the_records_carry() -> None:
+    parse = _parse("pom.xml", PROFILE_POM_WITHOUT_AN_ID)
+
+    assert [gap.gap for gap in parse.gaps] == ["unresolved_profile_activation"]
+    assert "`<line-4>`" in parse.gaps[0].detail
+
+
+def test_the_profile_gap_counts_every_dependency_element_the_profile_states() -> None:
+    # The count is what tells an operator how much of the picture hangs on one
+    # activation, and it is read from the tree rather than the records so a
+    # coordinate needing a parent POM still counts.
+    parse = _parse("pom.xml", PROFILE_POM_WITHOUT_AN_ID)
+
+    assert "2 dependency element(s)" in parse.gaps[0].detail
+
+
+def test_a_nested_activation_condition_is_quoted_in_the_pom_s_own_words() -> None:
+    # `<property><name>env</name><value>prod</value></property>` rendered as a
+    # bare `<property>` tells the operator a property decides it and never which
+    # one -- so the one line that exists to say what to check says nothing
+    # checkable, on exactly the conditions (property, OS, file) that are not
+    # `activeByDefault`.
+    detail = _parse("pom.xml", PROFILE_POM_WITHOUT_AN_ID).gaps[0].detail
+
+    assert "<name>env" in detail
+    assert "<value>prod" in detail
+    assert "<family>unix" in detail
+    assert "<exists>${basedir}/prod.marker" in detail
+
+
+PROFILE_POM_WITH_A_COMMA_IN_ITS_ID = """\
+<project>
+  <artifactId>app</artifactId>
+  <profiles>
+    <profile>
+      <id>prod,eu</id>
+      <dependencies>
+        <dependency>
+          <groupId>org.postgresql</groupId>
+          <artifactId>postgresql</artifactId>
+          <version>42.7.1</version>
+        </dependency>
+      </dependencies>
+    </profile>
+  </profiles>
+</project>
+"""
+
+
+def test_a_profile_id_is_recorded_exactly_as_the_pom_spells_it() -> None:
+    # Including a comma, which the text report's `, `-joined notes line renders
+    # ambiguously. The id is the operator's own data and the record is what
+    # `--json` publishes and what `dependency_picture` matches on, so it is not
+    # reshaped to suit a renderer (ADR 0019); a sanitizer here would report a
+    # profile the POM does not contain.
+    deps = _by_coordinate(_parse("pom.xml", PROFILE_POM_WITH_A_COMMA_IN_ITS_ID))
+
+    assert "profile:prod,eu" in deps["org.postgresql:postgresql"].qualifiers
+
+
 PROFILE_POM_WITHOUT_DEPENDENCIES = """\
 <project>
   <artifactId>app</artifactId>
@@ -482,15 +585,135 @@ def test_gradle_kotlin_named_arguments_are_read_like_groovy_map_notation() -> No
     assert deps["org.junit.jupiter:junit-jupiter"].version == "5.10.0"
 
 
-def test_gradle_exclude_named_arguments_are_not_read_as_a_declaration() -> None:
-    # `exclude` is not a configuration, so a line naming a group inside one
-    # must not become a component.
+def test_gradle_named_arguments_under_a_non_configuration_are_not_a_declaration() -> None:
+    # The map reader keys on the `group`/`name` pair, so anything that takes the
+    # same named arguments reaches it. `artifact(...)` inside a publication or a
+    # resolution rule names a real coordinate and declares no dependency of this
+    # module; without the configuration check it becomes a component the build
+    # never resolves. (`exclude` does NOT prove this guard: it spells its second
+    # argument `module`, which the field reader does not collect, so the line
+    # yields no name and is dropped whether the guard is there or not.)
     parse = _parse(
         "build.gradle.kts",
-        'dependencies {\n    exclude(group = "org.slf4j", module = "slf4j-log4j12")\n}\n',
+        'dependencies {\n    artifact(group = "org.slf4j", name = "slf4j-log4j12")\n}\n',
     )
 
     assert parse.dependencies == ()
+
+
+BUILD_GRADLE_KTS_MULTILINE_CALL = """\
+dependencies {
+    implementation(
+        group = "org.example",
+        name = "lib",
+        version = "1.2"
+    )
+    runtimeOnly(
+        "org.postgresql:postgresql:42.7.1"
+    )
+}
+"""
+
+
+def test_gradle_named_arguments_split_across_lines_are_read_as_one_declaration() -> None:
+    # The Kotlin DSL formatter wraps a three-argument call, and ktlint's default
+    # style does it at two. A line scanner sees `implementation(` alone, matches
+    # nothing, and moves on: no dependency AND no gap, which is the exact
+    # silence this module exists to prevent -- a declared library reads as a
+    # module that declares nothing.
+    parse = _parse("build.gradle.kts", BUILD_GRADLE_KTS_MULTILINE_CALL)
+    deps = _by_coordinate(parse)
+
+    assert deps["org.example:lib"].version == "1.2"
+    assert deps["org.example:lib"].declared_scope == "implementation"
+    assert deps["org.postgresql:postgresql"].version == "42.7.1"
+    # The citation covers the whole statement, not the opening parenthesis.
+    evidence = deps["org.example:lib"].evidence[0]
+    assert evidence.line == 2
+    assert 'name = "lib"' in evidence.text
+
+
+BUILD_GRADLE_COMMENTED_OUT = """\
+dependencies {
+    /*
+    implementation 'org.apache.logging.log4j:log4j-core:2.14.1'
+    */
+    implementation 'org.slf4j:slf4j-api:2.0.12' /* pinned by platform */
+    // implementation 'com.example:disabled:1.0'
+    implementation 'org.example:kept:1.0' // keep
+    relocate 'com.google.common', 'com.example.shaded.guava' /* not a shade rule here */
+}
+"""
+
+
+def test_gradle_declarations_inside_a_block_comment_are_not_read_as_live() -> None:
+    # A commented-out dependency is the opposite of a dependency: it is the
+    # version the build stopped using. Reporting it puts a component in the
+    # picture that the artifact does not contain and, worse, attaches a CVE
+    # lookup to a version nothing resolves -- while the row carries the same
+    # `unverified_ships_by_default_scope` every real declaration does.
+    parse = _parse("build.gradle", BUILD_GRADLE_COMMENTED_OUT)
+    deps = _by_coordinate(parse)
+
+    assert set(deps) == {"org.slf4j:slf4j-api", "org.example:kept"}
+
+
+def test_gradle_keeps_a_declaration_that_only_trails_a_comment() -> None:
+    parse = _parse("build.gradle", BUILD_GRADLE_COMMENTED_OUT)
+    deps = _by_coordinate(parse)
+
+    assert deps["org.slf4j:slf4j-api"].version == "2.0.12"
+    assert deps["org.example:kept"].version == "1.0"
+
+
+def test_a_declaration_in_an_unterminated_call_at_end_of_file_is_still_read() -> None:
+    # A truncated or partially-written script still declares what it declares.
+    # Dropping the statement in progress because the closing parenthesis never
+    # arrived loses a library with no gap to find it by.
+    parse = _parse(
+        "build.gradle.kts",
+        'dependencies {\n    implementation(\n        group = "org.example",\n'
+        '        name = "lib",\n        version = "1.2"\n',
+    )
+
+    assert _by_coordinate(parse)["org.example:lib"].version == "1.2"
+
+
+def test_one_unclosed_parenthesis_does_not_swallow_the_rest_of_the_script() -> None:
+    # The join has to give up somewhere. A `(` this reader mis-read -- a Groovy
+    # spelling it does not model, a string form it does not track -- would
+    # otherwise consume every line beneath it into one statement, and a script
+    # that declares thirty libraries would report none of them.
+    filler = "\n".join(f"    // filler {n}" for n in range(30))
+    parse = _parse(
+        "build.gradle.kts",
+        f'plugins {{ id("java" }}\n{filler}\n'
+        '    implementation("org.example:lib:1.0")\n',
+    )
+
+    assert _by_coordinate(parse)["org.example:lib"].version == "1.0"
+
+
+BUILD_GRADLE_KTS_REPOSITORY_URL = """\
+repositories {
+    maven(url = "https://repo.example/m2")
+}
+
+dependencies {
+    implementation("org.example:lib:1.0")
+}
+"""
+
+
+def test_a_repository_url_is_not_mistaken_for_a_line_comment() -> None:
+    # `//` inside a quoted string is not a comment. Cutting there drops the
+    # closing parenthesis of `maven(url = "...")`, and the reader then treats
+    # every following line as the continuation of an unfinished call -- so the
+    # declarations under it are read as part of a repository block and vanish,
+    # with no gap, from a file that plainly declares them.
+    parse = _parse("build.gradle.kts", BUILD_GRADLE_KTS_REPOSITORY_URL)
+
+    assert _by_coordinate(parse)["org.example:lib"].version == "1.0"
 
 
 def test_gradle_version_catalog_alias_is_not_resolved_to_a_guess() -> None:
@@ -914,6 +1137,79 @@ def test_go_version_scoped_replace_does_not_reach_another_version() -> None:
     assert [q for q in asis.qualifiers if q.startswith("replaced_by:")] == []
 
 
+GO_MOD_VERSION_SCOPED_FIRST = """\
+module github.com/example/service
+
+go 1.22
+
+require github.com/a/b v1.0.0
+
+replace (
+\tgithub.com/a/b v1.0.0 => github.com/exact/b v1.0.1
+\tgithub.com/a/b => github.com/fork/b v9.9.9
+)
+"""
+
+GO_MOD_VERSION_SCOPED_SECOND = """\
+module github.com/example/service
+
+go 1.22
+
+require github.com/a/b v1.0.0
+
+replace (
+\tgithub.com/a/b => github.com/fork/b v9.9.9
+\tgithub.com/a/b v1.0.0 => github.com/exact/b v1.0.1
+)
+"""
+
+
+@pytest.mark.parametrize(
+    "manifest",
+    [GO_MOD_VERSION_SCOPED_FIRST, GO_MOD_VERSION_SCOPED_SECOND],
+    ids=["exact-listed-first", "wildcard-listed-first"],
+)
+def test_go_version_scoped_replace_beats_a_wildcard_whatever_the_file_order(
+    manifest: str,
+) -> None:
+    # `cmd/go` looks the requirement up by {path, version} and only then by
+    # {path, ""}, so the version-scoped directive applies no matter which line
+    # the file lists first. Taking whichever matched first reports v9.9.9 for a
+    # build that compiles exact/b v1.0.1 -- a wrong version on a component,
+    # which is the same error class a version-scoped directive exists to avoid.
+    deps = _by_coordinate(_parse("go.mod", manifest))
+
+    entry = deps["github.com/a/b"]
+    assert entry.version == "v1.0.1"
+    assert entry.version_source == "replace"
+    assert "replaced_by:github.com/exact/b@v1.0.1" in entry.qualifiers
+
+
+GO_MOD_VERSIONLESS_MODULE_TARGET = """\
+module github.com/example/service
+
+go 1.22
+
+require github.com/a/b v1.0.0
+
+replace github.com/a/b => github.com/fork/b
+"""
+
+
+def test_go_versionless_module_target_does_not_blank_the_declared_version() -> None:
+    # go.mod accepts a version-less right side only for a directory path. A
+    # module path without one is malformed, and reading it as a local checkout
+    # discards a version the file DOES state -- the requirement then reports no
+    # version at all, so every lookup that keys on one silently covers nothing.
+    deps = _by_coordinate(_parse("go.mod", GO_MOD_VERSIONLESS_MODULE_TARGET))
+
+    entry = deps["github.com/a/b"]
+    assert entry.version == "v1.0.0"
+    # The directive is still disclosed: it is what the file says, and only the
+    # operator can decide what a malformed replace means for this build.
+    assert "replaced_by:github.com/fork/b" in entry.qualifiers
+
+
 GO_SUM = """\
 github.com/gorilla/mux v1.8.1 h1:abc=
 github.com/gorilla/mux v1.8.1/go.mod h1:def=
@@ -1022,6 +1318,45 @@ def test_a_location_naming_no_distribution_is_disclosed_rather_than_dropped() ->
     assert len(reported) == 2
     assert any("pkg-1.0.tar.gz" in gap.detail for gap in reported)
     assert any("./libs/local" in gap.detail for gap in reported)
+
+
+REQUIREMENTS_EGG_FRAGMENTS = """\
+git+https://github.test/acme/widget.git@v1#subdirectory=packages/widget&egg=widget
+https://example.test/bundle.zip#egg=My_Widget
+https://example.test/other.zip?a=1&egg=notthisone#egg=real-name
+"""
+
+
+def test_an_egg_name_is_read_wherever_it_sits_in_the_fragment() -> None:
+    # pip parses the whole fragment as `key=value` pairs joined by `&`, so
+    # `#subdirectory=...&egg=widget` names `widget` exactly as `#egg=widget`
+    # does -- and that spelling is the documented one for a VCS checkout of a
+    # package in a monorepo subdirectory. Requiring the literal `#egg=` reports
+    # a real, named, installed distribution as a location naming nothing.
+    deps = _by_coordinate(_parse("requirements.txt", REQUIREMENTS_EGG_FRAGMENTS))
+
+    assert "widget" in deps
+    assert "direct_reference" in deps["widget"].qualifiers
+
+
+def test_an_egg_name_is_normalized_like_every_other_distribution() -> None:
+    # One distribution, one identity: `My_Widget` and `my-widget` are the same
+    # package to pip, and two spellings here are two unlinked rows -- one of
+    # which no reachability prefix and no scanner row will ever match.
+    deps = _by_coordinate(_parse("requirements.txt", REQUIREMENTS_EGG_FRAGMENTS))
+
+    assert "my-widget" in deps
+    assert "My_Widget" not in deps
+
+
+def test_an_egg_in_the_query_string_is_not_read_as_the_fragment_s() -> None:
+    # `egg=` is a fragment key. One in the query string belongs to the server,
+    # not to pip, and reading it would name a distribution the file never
+    # requested while shadowing the one it did.
+    deps = _by_coordinate(_parse("requirements.txt", REQUIREMENTS_EGG_FRAGMENTS))
+
+    assert "real-name" in deps
+    assert "notthisone" not in deps
 
 
 REQUIREMENTS_COMPACT_DIRECTIVES = """\
@@ -1173,6 +1508,92 @@ def test_pyproject_dynamic_without_a_named_source_still_reports_the_hole() -> No
     )
 
     assert [gap.gap for gap in parse.gaps] == ["dynamic_dependency_declaration"]
+
+
+def test_the_dynamic_gap_cites_the_line_that_declared_the_field_dynamic() -> None:
+    # The gap sends the operator to a file to read by hand, and a pyproject.toml
+    # can carry several hundred lines. Without the citation the one instruction
+    # it gives is "look somewhere in this file".
+    parse = _parse("pyproject.toml", PYPROJECT_DYNAMIC)
+
+    assert parse.gaps
+    assert all(gap.detail.startswith("line 8: ") for gap in parse.gaps)
+
+
+PYPROJECT_DYNAMIC_WITH_A_TOML_DATE = """\
+[project]
+name = "storefront"
+dynamic = ["dependencies"]
+
+[project.optional-dependencies]
+dev = ["pytest==8.0.0"]
+
+[tool.setuptools.dynamic]
+dependencies = {file = ["requirements.txt"], generated = 2024-01-01T00:00:00Z}
+"""
+
+
+def test_a_toml_date_beside_a_dynamic_entry_costs_only_that_sentence() -> None:
+    # TOML has a native datetime and `json.dumps` raises TypeError on one. The
+    # raise escaped the quoting helper, so the reader's catch-all downgraded the
+    # WHOLE file to `unreadable_manifest` -- every other requirement in it gone,
+    # over one unquotable word in one gap's prose.
+    parse = _parse("pyproject.toml", PYPROJECT_DYNAMIC_WITH_A_TOML_DATE)
+
+    assert {dep.coordinate for dep in parse.dependencies} == {"pytest"}
+    assert [gap.gap for gap in parse.gaps] == ["dynamic_dependency_declaration"]
+    assert "requirements.txt" in parse.gaps[0].detail
+    assert "2024-01-01" in parse.gaps[0].detail
+
+
+PYPROJECT_POETRY_TWO_DYNAMIC = """\
+[project]
+name = "storefront"
+version = "1.0.0"
+dynamic = ["dependencies"]
+
+[tool.poetry.dependencies]
+python = "^3.11"
+requests = "^2.31.0"
+"""
+
+
+def test_poetry_dynamic_dependencies_filled_in_the_same_file_report_no_hole() -> None:
+    # Poetry >= 2.0's documented layout IS `[project] dynamic = ["dependencies"]`
+    # beside a populated `[tool.poetry.dependencies]`. The reader records
+    # `requests` from that table and then said the requirements were "absent
+    # from this manifest's records" -- a gap asserting a hole in the file it had
+    # just read through. A gap that is false where the vocabulary is honest is
+    # how the honest-absence vocabulary stops being read at all.
+    parse = _parse("pyproject.toml", PYPROJECT_POETRY_TWO_DYNAMIC)
+
+    assert {dep.coordinate for dep in parse.dependencies} == {"requests"}
+    assert parse.gaps == ()
+
+
+def test_a_field_that_is_dynamic_and_also_listed_statically_reports_no_hole() -> None:
+    parse = _parse(
+        "pyproject.toml",
+        '[project]\nname = "storefront"\ndynamic = ["dependencies"]\n'
+        'dependencies = ["requests>=2"]\n',
+    )
+
+    assert {dep.coordinate for dep in parse.dependencies} == {"requests"}
+    assert parse.gaps == ()
+
+
+def test_a_dynamic_field_no_table_fills_still_reports_the_hole() -> None:
+    # The gap is what keeps a whole runtime requirement set from vanishing
+    # silently, so suppressing it must turn on a record actually existing for
+    # THAT field -- not on the file having declared something somewhere.
+    parse = _parse(
+        "pyproject.toml",
+        '[project]\nname = "storefront"\ndynamic = ["optional-dependencies"]\n'
+        'dependencies = ["requests>=2"]\n',
+    )
+
+    assert [gap.gap for gap in parse.gaps] == ["dynamic_dependency_declaration"]
+    assert "optional-dependencies" in parse.gaps[0].detail
 
 
 def test_pyproject_dynamic_version_alone_is_not_a_dependency_gap() -> None:

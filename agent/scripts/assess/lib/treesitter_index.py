@@ -2367,6 +2367,33 @@ def _enrich_qualified_names(
             if cls["line_start"] <= func["line_start"] <= func["line_end"] <= cls["line_end"]:
                 func["qualified_name"] = f"{cls['name']}.{func['name']}"
 
+    _disambiguate_qualified_names(functions)
+
+
+def _disambiguate_qualified_names(functions: list[dict[str, Any]]) -> None:
+    """Make `(qualified_name, line_start, line_end)` unique within a file.
+
+    `code-index sync` keys a callable on that tuple and refuses the WHOLE
+    repository when two rows share one, because it builds a single payload per
+    repo. Minified and obfuscated sources defeat it honestly: they reuse short
+    names across scopes and put the program on one line, so two real functions
+    collide. Qualifying the loser with its byte offset -- the same
+    `@line:col` shape the extractors already use for anonymous callables --
+    keeps both rows and leaves `name` as authored for citation.
+    """
+    seen: dict[tuple[str, int, int], int] = {}
+    for func in sorted(functions, key=lambda f: f.get("_start_byte", 0)):
+        identity = (func["qualified_name"], func["line_start"], func["line_end"])
+        if identity not in seen:
+            seen[identity] = 1
+            continue
+        offset = func.get("_start_byte")
+        suffix = offset if offset is not None else seen[identity]
+        seen[identity] += 1
+        func["qualified_name"] = (
+            f"{func['qualified_name']}@{func['line_start']}:{suffix}"
+        )
+
 
 def _cpp_function_identity(function: dict[str, Any]) -> tuple[Any, ...]:
     qualified_name = re.sub(

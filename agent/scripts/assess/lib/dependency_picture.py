@@ -94,6 +94,7 @@ DEPENDENCY_QUALIFIERS: tuple[str, ...] = (
     "unverified_manifest_lock_divergence",
     "unverified_duplicate_version_in_lock",
     "unverified_optional_declaration",
+    "unverified_conditional_profile",
     "unverified_relocation_declared",
     "unverified_aggregator_module",
     "unverified_version_unresolved",
@@ -585,6 +586,12 @@ def _apply_managed_versions(
     one it stops being its own observation; one that nothing consumes stays
     visible, because an entry no module uses still tells a reviewer what the
     project intended.
+
+    The entry's own notes travel with the version it supplied. A declaration
+    that only a PROFILE's `dependencyManagement` completes resolves to that
+    version under that activation and to nothing at all without it, so dropping
+    the `profile:<id>` note republishes a conditional resolution as the plain
+    one -- a version an operator would read as settled.
     """
     consumed: set[int] = set()
     for record in records:
@@ -608,8 +615,47 @@ def _apply_managed_versions(
         record.version = entry.version
         record.version_source = "managed"
         record.evidence.extend(entry.evidence)
+        record.declaration_notes.extend(
+            note for note in entry.declaration_notes if note not in record.declaration_notes
+        )
         consumed.add(index)
     return [entry for index, entry in enumerate(managed) if index not in consumed]
+
+
+def _collapse_profile_redeclarations(records: list[_Record]) -> list[_Record]:
+    """Fold a profile's restatement of a component into the unconditional one.
+
+    Re-declaring a root `<dependency>` inside a profile is the standard Maven
+    override idiom, and the two statements are one component. Published as two
+    rows they contradict each other -- same coordinate, same version, same
+    scope, same file, one `ships by default scope` and one `shipment
+    undetermined` -- and the conditional row is the false half: the component is
+    declared outside every profile, so the build ships it whether or not one
+    activates. A reviewer handed both has to decide which row to believe, which
+    is the judgement this module exists to make for them.
+
+    The profile's citation travels onto the surviving row, because the
+    restatement is evidence about this component and what it means is the
+    operator's call. A profile that states a different version or a different
+    scope keeps its own row: that is a statement the unconditional declaration
+    never made, and it really does hang on an activation.
+    """
+
+    unconditional: dict[tuple[str, str, str, str, str], int] = {}
+    for index, record in enumerate(records):
+        if _profile_notes(record.declaration_notes):
+            continue
+        unconditional.setdefault((*record.key, record.version, record.declared_scope), index)
+    folded: set[int] = set()
+    for index, record in enumerate(records):
+        if not _profile_notes(record.declaration_notes):
+            continue
+        target = unconditional.get((*record.key, record.version, record.declared_scope))
+        if target is None:
+            continue
+        records[target].evidence.extend(record.evidence)
+        folded.add(index)
+    return [record for index, record in enumerate(records) if index not in folded]
 
 
 def _merge_manifest_and_lock(records: list[_Record]) -> list[_Record]:
@@ -1048,6 +1094,7 @@ def build_dependency_picture(
             (managed if dependency.declaration == "managed" else records).append(record)
 
     unconsumed_policy = _apply_managed_versions(records, managed)
+    records = _collapse_profile_redeclarations(records)
     records.extend(unconsumed_policy)
     records = _merge_manifest_and_lock(records)
     records.extend(_build_output_records(present_paths, records))

@@ -210,7 +210,7 @@ Durable design decisions live in [`docs/adr/`](docs/adr/).
   section now lists only what the author supplies, subtracting the helper defaults: `finding record`
   fills ten of its twelve required names itself, and named `verification_status` as required two
   sections below the default that calls `unreviewed` the only record-time value it accepts.
-  `vigil assess contract code-dependencies` documents all 16 gap codes, where a prose note named
+  `vigil assess contract code-dependencies` documents all 18 gap codes, where a prose note named
   eight.
 
 ### Changed
@@ -245,6 +245,28 @@ Durable design decisions live in [`docs/adr/`](docs/adr/).
   the artifact-only surface.
 
 ### Fixed
+
+- **A live command proof can now actually back a terminal verification.** Three defects in the
+  runtime-proof path compounded, and between them no `vigil assess kali` run could ever produce a
+  healthy proof receipt. The audit row is opened *before* the command runs, so the artifact rows for
+  its stdout/stderr files were minted while those files did not exist yet and stayed indexed as
+  absent; finalize — the first moment the bytes exist and have been hashed — never re-read them, so
+  every receipt citing an audited run was born `missing` until someone ran `artifact refresh` by
+  hand. Past that, a stream measured at zero bytes records no digest, and the empty digest was read
+  as "not measured" rather than as the measurement it is, which left almost every successful run
+  permanently `stale` on its empty stderr. And `proof-receipt create` asserted the response echoed
+  the requested `evidence_health`, so an honest backend downgrade surfaced as "the write may have
+  committed" on a write that had committed correctly. Finalize now indexes the files the run wrote
+  (host-exec keeps its own verified-descriptor path), a zero-byte stream is healthy when the
+  retained file is also zero bytes and stale when bytes appeared after the fact, and the CLI holds
+  only a caller-*declared* health to the echo — reporting a measured downgrade as a WARN naming the
+  consequence.
+- **`vigil assess contract finding verify` now states the code-snapshot requirement it actually
+  has.** The contract described `provenance.code_snapshot` as needed "only when a code verifier
+  binds/rebinds", but the backend requires it on *every* verification of a `file:` finding: the
+  author's stored binding attests that the author read those bytes and cannot also attest that the
+  verifier did. Omitting it is a 400 and the write does not land. The verb now says so, with the
+  failure mode and its remedy.
 
 - **A Codex specialist starts from its dispatch message, not the operator's transcript.**
   `agent/.codex/config.toml` now pins `multi_agent_v2 = false`. Codex's default spawn path
@@ -504,6 +526,40 @@ Durable design decisions live in [`docs/adr/`](docs/adr/).
   pointed at `code-lead list --lead-status open`, but the blocker counts bindings noted `open` or
   `in_progress` and does not exclude superseded ones, so the narrower read dead-ended the operator on
   a gate that was still firing.
+- **A copied reproduction is the request the finding recorded, byte for byte.** Three edits had crept
+  between the record and the `curl` a reader pastes. The synthesized command carried curl's own
+  `User-Agent` and `Accept`, plus `Content-Type: application/x-www-form-urlencoded` whenever a body
+  was attached — three headers the recorded request never sent, each able to change which parser,
+  body binder, router or WAF rule the request meets (a GET-with-body parser differential turns on
+  whether a `Content-Type` arrives at all). Each is now suppressed with `-H 'Name:'` unless the
+  record supplies it, matched case-insensitively and untrimmed, so a recorded ` User-Agent` — the
+  leading space IS the smuggling probe — does not travel beside curl's default. The method is
+  emitted as recorded rather than upper-cased, because a case-sensitive-routing probe records `get`
+  on purpose. And the observed response is emitted with its trailing bytes intact: stripping them
+  left a report asserting a whitespace-sensitive differential while deleting the difference, and a
+  response body that is nothing but whitespace is now a recorded body rather than an absent one.
+  `Host` and `Content-Length` are untouched — curl derives those from the URL and the recorded body,
+  so they reproduce the record rather than adding to it.
+- **Copy as Markdown carries the two fields that set a finding's severity.** `auth_context` and
+  `evidence_type` render in the Full Report and in the frontend drawer but were dropped from the
+  copy, so a high-severity claim read as unauthenticated and wire-observed when it may have been
+  neither: the reader who copied a finding got a stronger report than the reader who read one. Both
+  are labelled and formatted exactly as the report labels them, so the two cannot drift.
+
+### Security
+
+- **A target's response body can no longer break out of the evidence block of a delivered report.**
+  Every fenced block in the Markdown export and in Copy as Markdown opened with a fixed ` ``` `, and
+  CommonMark closes a fenced block at the first line whose fence is at least as long. The content
+  inside is target-derived — `evidence_detail`, a recorded `body_excerpt`, `poc_code` — so a response
+  body containing a ` ``` ` line escaped the block, and every byte after it became live Markdown in a
+  document the operator was about to paste into a submission form: the target writes headings, links
+  and plausible report prose beside the operator's own words, and the reader cannot tell which is
+  which. That is the untrusted-target-text boundary ([ADR 0018](docs/adr/0018-target-derived-text-is-untrusted-data.md))
+  failing in exactly the direction it exists to prevent, in the one Vigil artifact whose reader is
+  the client. Nothing is escaped, trimmed or removed to fix it — ADR 0019 rules that out and the
+  evidence has to stay byte-exact — the delimiter outgrows the content instead: one backtick longer
+  than the longest run present, which by construction no run inside can match.
 
 ## [1.0.0] - 2026-09-12
 

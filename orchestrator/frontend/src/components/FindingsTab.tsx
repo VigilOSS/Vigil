@@ -229,7 +229,11 @@ function formatHttp(
   const lines: string[] = [];
   if (kind === "req") {
     const req = obj as FindingPocRequest;
-    lines.push(`${(req.method || "GET").toUpperCase()} ${req.url || ""}`.trim());
+    // Verbatim: a case-sensitive-routing probe records `get`/`GeT` on purpose,
+    // and upper-casing it showed the operator a request their own finding did
+    // not make. lib/findingMarkdown.ts's twin of this formatter has always kept
+    // the recorded case (and a test pinning it), so the page was the lossy half.
+    lines.push(`${req.method || "GET"} ${req.url || ""}`.trim());
   } else if (kind === "resp") {
     const resp = obj as FindingPocResponse;
     if (resp.status != null) lines.push(`HTTP ${resp.status}`);
@@ -2308,7 +2312,13 @@ function OverviewPane({ d, proseMode, toast }: { d: Derived; proseMode: ProseMod
   );
 }
 
-function PocPane({ d, proseMode, toast }: { d: Derived; proseMode: ProseMode; toast: ToastFn }) {
+// Exported for FindingsTab.component.test.tsx: this pane renders the operator's
+// own captures, and what it shows has to match what its copy chips hand back.
+export function PocPane({
+  d,
+  proseMode,
+  toast,
+}: { d: Derived; proseMode: ProseMode; toast: ToastFn }) {
   // A single authored block arrives as one element; a list arrives as several.
   // Joining on a newline reproduces either shape as written, so what is copied
   // out of here is byte-identical to what the finding holds.
@@ -2324,16 +2334,28 @@ function PocPane({ d, proseMode, toast }: { d: Derived; proseMode: ProseMode; to
   const reqText = d.poc_request ? formatHttp(d.poc_request, "req") : "";
   const respText = d.poc_response ? formatHttp(d.poc_response, "resp") : "";
 
+  // Evidence is a CAPTURE, so the bytes rendered here and the bytes the copy
+  // chip hands back are the recorded ones. Trimming made this pane lossier than
+  // its own Copy-as-Markdown, and dropped a whitespace-only capture from the
+  // page entirely while the PoC tab badge above still counted it — yet a
+  // padded, stripped or blank response IS the finding on a whitespace-sensitive
+  // parser differential (AGENTS.md: never degrade the operator's own data;
+  // ADR 0019; and see report/src/lib/poc.ts, which settled the same question).
+  const ev = d.evidence || "";
   // Pick a render mode for evidence: raw HTTP exchanges get the mono
   // .pre treatment; short prose gets a compact blockquote; longer
-  // prose keeps NotesBody's paragraph layout but inside a callout.
-  const ev = (d.evidence || "").trim();
+  // prose keeps NotesBody's paragraph layout but inside a callout. The probe is
+  // trimmed because LAYOUT is all it decides — a capture that opens with a
+  // blank line is still an HTTP exchange — but nothing rendered or copied is.
+  const evProbe = ev.trim();
   const looksLikeHttp =
-    /^HTTP\/\d\.\d\b/i.test(ev) ||
-    /^(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+\S+\s+HTTP\/\d/i.test(ev);
-  const evidenceMode: "http" | "quote" | "prose" = looksLikeHttp
+    /^HTTP\/\d\.\d\b/i.test(evProbe) ||
+    /^(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+\S+\s+HTTP\/\d/i.test(evProbe);
+  // A capture that is nothing but whitespace takes the <pre> too: it is the
+  // only renderer here that shows the bytes rather than swallowing them.
+  const evidenceMode: "http" | "quote" | "prose" = looksLikeHttp || evProbe.length === 0
     ? "http"
-    : ev.length > 0 && ev.length < 200 && !ev.includes("\n\n")
+    : evProbe.length < 200 && !evProbe.includes("\n\n")
     ? "quote"
     : "prose";
 

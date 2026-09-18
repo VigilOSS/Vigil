@@ -40,6 +40,29 @@ function fenceFor(content: string): string {
   return "`".repeat(Math.max(3, longest + 1));
 }
 
+/**
+ * The info string a fence may carry, or `""` when the hint cannot be one.
+ *
+ * A backtick fence's info string may not contain a backtick (CommonMark 4.5),
+ * so ```` ```js`x` ```` is not a fence — it is a paragraph, and every byte the
+ * projection meant to put inside the block becomes live Markdown instead. A
+ * newline in the hint is worse still: it splits the opening line, and a hint
+ * ending in ``` closes the block on the line after it opens.
+ *
+ * Only a *language hint* is dropped here, never a capture. The hint is
+ * presentation — a syntax colour in whatever form the operator pastes into —
+ * so losing it costs nothing that could be evidence, and ADR 0019 (do not
+ * degrade the operator's own data) is not engaged. The capture the fence wraps
+ * still goes in byte for byte.
+ *
+ * This twin only ever passes literals. Its sibling in orchestrator/frontend
+ * passes `details.poc_language`, which is a free-form key no schema, prompt or
+ * backend validates, so the guard lives in both and neither can drift.
+ */
+export function fenceInfo(hint: string): string {
+  return /^[A-Za-z0-9_+#.-]*$/.test(hint) ? hint : "";
+}
+
 export function findingToMarkdown(d: ReportFinding): string {
   const lines: string[] = [];
   const push = (s = "") => lines.push(s);
@@ -49,7 +72,7 @@ export function findingToMarkdown(d: ReportFinding): string {
   // disagree about what the target did.
   const pushFenced = (content: string, info = "") => {
     const fence = fenceFor(content);
-    push(`${fence}${info}`);
+    push(`${fence}${fenceInfo(info)}`);
     push(content);
     push(fence);
   };
@@ -101,7 +124,13 @@ export function findingToMarkdown(d: ReportFinding): string {
     push(d.impact.trim());
     push();
   }
-  if (d.evidence_detail && d.evidence_detail.trim()) {
+  // Presence is truthiness, not `.trim()`. A capture that is nothing but
+  // whitespace is a RECORDED capture — it is the whole proof on a stripped,
+  // padded or blank-response finding, which is why `lib/poc.ts` refuses to call
+  // one absent — and `FullReport.tsx` renders it in a <pre> either way. Testing
+  // the trimmed value dropped the section AND its heading from the copy while
+  // the page still showed the bytes (AGENTS.md; ADR 0019).
+  if (d.evidence_detail) {
     push("### Evidence");
     pushFenced(d.evidence_detail);
     push();
@@ -131,7 +160,7 @@ export function findingToMarkdown(d: ReportFinding): string {
     pushFenced(responseText, "http");
     push();
   }
-  if (d.poc_code && d.poc_code.trim()) {
+  if (d.poc_code) {
     push("### Proof of Concept");
     pushFenced(d.poc_code);
     push();
