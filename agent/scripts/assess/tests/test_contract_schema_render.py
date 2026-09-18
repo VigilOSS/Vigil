@@ -10,8 +10,12 @@ analysis receipt alike.
 """
 from __future__ import annotations
 
+import re
+from pathlib import Path
+
 import pytest
 
+from assess.commands import transition_phase
 from assess.lib import contracts
 from assess.lib.intel_types import INTEL_TYPES
 
@@ -111,3 +115,66 @@ def test_schema_field_rendering_is_deterministic() -> None:
     assert contracts.render_contract("intel record cve") == contracts.render_contract(
         "intel record cve"
     )
+
+
+def test_a_field_publishes_the_schema_description_after_its_domain() -> None:
+    # The parenthesised domain says what a value may legally BE; the schema's
+    # own description says what it MEANS, and 79% of declared properties carry
+    # one. Rendering only the domain sent the author to read the schema file by
+    # hand for the half of the answer the contract already had.
+    rendered = contracts.render_contract("intel record note")
+
+    assert (
+        "  - title (string) — Short, unique title per engagement — serves as the "
+        "natural dedup key"
+    ) in rendered
+    # Nested properties are equally invisible without this, so the description
+    # follows the recursion rather than stopping at the top level.
+    assert (
+        "      - evidence_quote (string) — Verbatim excerpt that supports this note."
+    ) in rendered
+
+
+def test_a_description_is_rendered_on_one_line() -> None:
+    # The contract is grepped as much as read: a wrapped description would break
+    # `grep '  - <field> ('` on exactly the fields whose meaning was sought.
+    rendered = contracts.render_contract("finding record")
+
+    steps = [
+        line for line in rendered.splitlines()
+        if line.strip().startswith("- steps_to_reproduce (")
+    ]
+    assert len(steps) == 1
+    assert "Write them FROM WHAT YOU ACTUALLY RAN" in steps[0]
+
+
+def test_a_null_enum_member_renders_in_json_spelling() -> None:
+    # `str(None)` prints `None`, which reads as a legal string member — an author
+    # copying it writes "None" into a schema that rejects it.
+    rendered = contracts.render_contract("intel record note")
+
+    assert (
+        "  - lead_status (string or null; one of: open, in_progress, resolved, "
+        "ruled_out, null)"
+    ) in rendered
+    assert ", None)" not in rendered
+
+
+def test_every_depth_blocker_kind_transition_phase_raises_is_named_in_a_contract() -> None:
+    # `transition-phase` refuses the terminal report/complete edge on app-unit
+    # depth, but the `app-unit` contract used to call that score "advisory,
+    # never a hard block" — the contract contradicted the code, and the three
+    # kinds appeared in no contract at all. Derive the kinds from the command
+    # that raises them so a new one cannot land undocumented.
+    source = (
+        Path(transition_phase.__file__).read_text(encoding="utf-8")
+    )
+    kinds = set(re.findall(r'"kind":\s*"(depth_\w+)"', source))
+    assert kinds, "no depth blocker kinds found in transition_phase.py"
+
+    published = "\n".join(
+        contracts.render_contract(name)
+        for name in ("transition-phase", "check-phase-readiness", "app-unit")
+    )
+    for kind in sorted(kinds):
+        assert kind in published, kind

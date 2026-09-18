@@ -1014,6 +1014,9 @@ _CONTRACTS: dict[str, CommandContract] = {
             "The text table shows cookie NAMES + hosts and metadata (auth_context, state, liveness, age, last_probed) so one row stays scannable; `--json` returns the stored record verbatim, live cookie/header/token values included.",
             "state: available | stale (8h age backstop — re-probe) | dead (probe-proven; hidden unless --include-dead) | missing. Only a failed liveness probe marks a session dead; age never does.",
             "liveness is UNKNOWN until you actively probe: run `vigil assess auth status --probe --identity <name> --probe-url <url> --scope <logical-scope>` to persist a TTL-bound observation for that identity and scope.",
+            "LIVENESS IS GROUND TRUTH; cookie presence and the `stale` flag are not. A populated, active record only proves credential material exists. There is no auto-detection of how a site handles auth, so whoever takes an identity for a task owns proving it live: FIRST declare `material.liveness = {expect_status, authed_marker, dead_marker}` on that identity (via `vigil auth import` / `vigil auth edit`), THEN probe it BY NAME before trusting a result or recording a dead/unreachable verdict. Pick an `authed_marker` that appears ONLY when logged in (the logged-in username, an account/settings link, a per-user CSRF token field) and a `dead_marker` off the login page — the same logged-in/logged-out signatures a DAST scanner validates a session with.",
+            "How one probe resolves (the probe GETs --probe-url as the identity and matches the status line + headers including Location + body, case-sensitively; redirects are NOT followed, so a 302 to a login page stays in the haystack as evidence): `dead_marker` present -> dead. A response that is ITSELF an authentication challenge (401, 407, or a 3xx whose Location names a login surface) -> dead, even with no dead_marker, unless your own `expect_status` declares that status the authed response. `expect_status` matched and `authed_marker` present -> live, clearing any prior `stale` mark. Anything else — status mismatch with no challenge, `authed_marker` absent with nothing contradicting the session, no signature configured, transport error or unparseable status -> unknown. `dead` REQUIRES positive evidence and is never inferred from a missing marker, because dead hides the identity from listings and refuses replay, costing a re-import to undo. 403 is deliberately not a death signal: it is an authorization verdict, and a 403 on another principal's object is the healthy IDOR/BOLA result.",
+            "An anonymous fallback is coverage only for a surface that actually has an anonymous lane. If the dispatch objective requires a named identity and no live material exists, do not relabel the anonymous attempt as coverage — write a blocked handoff naming the identity, the surface, and the exact refresh/provisioning need so the operator can record the `dispatch_blocked` decision.",
             "A literal identity name always wins. Otherwise a configured alias resolves only to the freshest non-expired live capability for its durable principal_id and requested scope.",
             "The active identity is marked with a trailing `*` in the text view.",
         ),
@@ -2761,6 +2764,8 @@ _CONTRACTS: dict[str, CommandContract] = {
         notes=(
             "Consolidates the former check-coverage / check-scope-coverage / check-report-readiness / check-exploit-gate / check-intel-readiness commands into one phase-aware gate. Pair with `transition-phase` as the phase-boundary checkpoint.",
             "Read-only: it reports blockers, it does not move the engagement. `--depth` / `--by-host` / `--by-app-unit` expand the ledger; `--auto-redispatch` suggests follow-up coverage dispatches.",
+            "`--phase report` additionally PREVIEWS the terminal app-unit depth hold — the depth ledger (including each unit's per-class `signal_classes_uncovered`) plus the would-block set `transition-phase report` will enforce. The preview never flips this command's own exit code; the hard block is a `transition-phase` precondition. Run it from Phase 4 on so the two-grain hold (`depth_unsatisfied_units` at family grain, `depth_uncovered_classes` at class grain) is legible the whole way instead of arriving as a surprise at report time — see `vigil assess contract transition-phase` for what clears each.",
+            "The depth ledger also renders for `consume-test` and `verify`, and on demand anywhere via `--depth` / `--by-app-unit`. `--strict-deep` escalates an unsatisfied deep_required unit to a non-zero exit on those phases (default off, detection is warm-first); it changes nothing about what the terminal backstop blocks on, and `--strict` does not imply it.",
         ),
     ),
     "transition-phase": CommandContract(
@@ -2780,9 +2785,16 @@ _CONTRACTS: dict[str, CommandContract] = {
             "The write counterpart to `check-phase-readiness`: run the readiness check first, then transition. `--force` proceeds past blockers with warnings.",
             "`--force` has two limits. Blockers marked non-overrideable (source identity, malformed/unavailable readiness) stay hard on every edge, and `--track code` + `complete` cannot be forced at all: a completed code scan asserts zero durable debt in its terminal seal. Clear that edge by resolving each blocker — `vigil assess code-coverage --require-transition-ready complete` re-checks the same backend contract — or leave the engagement in its current phase.",
             "`--track {auto|web|code|blue}` selects the phase track for `both` engagements (default: infer from the target phase).",
+            "APP-UNIT DEPTH IS A TERMINAL HOLD, at two grains. The web `report` and `complete` edges (only those — no earlier edge refuses on depth) consult `application-units/terminal-block` and raise a hard blocker for any app unit in the block set, which is a unit carrying either a high-confidence `deep_required` tier OR a decisive risk surface (auth_entry, object_reference, privileged_write, api_documentation): "
+            "`depth_unsatisfied_units` (FAMILY grain) fires when such a unit was never touched at all for a BLOCK_HIGH family (access-control, auth, injection, ssrf, file); "
+            "`depth_uncovered_classes` (CLASS grain) fires when the family LOOKS covered or touched but a specific class its gf coverage_items flagged (`signal_classes_uncovered`) was never class-specifically probed — a sibling class such as `ssti` satisfying the whole `injection` family while `sqli` was never demanded. The class grain fires even on a unit that is family-satisfied, which is the single-class blind spot a family-only view misses.",
+            "Three ways to clear either depth blocker, and only three: deep-test the named gap with a class-specific COVERING probe (result_status tested|signal, or an evidence-bearing coverage-item — `status=completed` alone never counts); record `vigil assess agent decision --kind depth_deferral --surfaced-to-user --payload-json '{\"host\":\"<host>\",\"path_prefix\":\"<prefix>\",\"vuln_classes\":[...],\"reason\":\"<why>\"}'` (bounded and counted — the blocker text reports the running deferral count); or `--force --reason \"<why>\"`, which writes a `forced_transition_override` decision row.",
+            "`depth_under_observed_units` is the THIRD depth kind and is severity=advisory: a deep_required unit that is under-observed or started-but-unfinished prints to stderr as a steering note and never blocks. Do not read it as a gate; do not treat the two that DO block as advisory. The depth backstop is web-only — the endpoint returns skipped for code/blue tracks.",
         ),
         common_mistakes=(
             ("transitioning past blockers silently", "run check-phase-readiness first; use --force only with an explicit --reason"),
+            ("treating the app-unit depth score as advisory all the way to report", "it is advisory mid-engagement and a hard blocker on the report/complete edge; preview it from Phase 4 with `check-phase-readiness --phase report`"),
+            ("draining a depth_uncovered_classes block with a sibling-class probe", "the class grain demands a probe for the named class — covering `injection` via ssti leaves a flagged `sqli` uncovered"),
         ),
     ),
     "coverage": CommandContract(
@@ -3129,6 +3141,8 @@ _CONTRACTS: dict[str, CommandContract] = {
             )
             + ".",
             "The payload is passed through unvalidated, so a shape error surfaces as a backend 422 rather than a client-side did-you-mean.",
+            "Write the payload to a file at `/tmp/<type>-<slug>.json` and pass the path; reach for --inline only for a payload small enough to read at a glance. An inline JSON shell argument takes escaping damage and leaves nothing on disk to re-read, so the call is not reproducible from the audit trail. This `/tmp` is the HOST's — a transient payload file for the `vigil assess` call itself — and is unrelated to the container-side rule that forbids /tmp and /data for durable engagement artifacts written inside the Kali runtime.",
+            "BACKEND-FIRST, same as finding recording: the agent that PROVES a piece of state writes it, immediately, rather than deferring it to the operator to transcribe. The operator's job is to verify it landed in canonical backend state and to avoid writing a duplicate row.",
         ),
         common_mistakes=(
             ("post findings <json>", "use finding record — it owns slug allocation and lifecycle defaults"),
@@ -3221,7 +3235,9 @@ _CONTRACTS: dict[str, CommandContract] = {
         notes=(
             "`list` / `depth-ledger` are read-only; `score` re-runs prefix discovery + the scorer (idempotent, WEB-ONLY — a no-op on code/blue engagements); the three override actions write a durable manual verdict.",
             "A manual override ALWAYS wins over the scorer. `clear` removes the override so the next pass reverts to the pure scorer verdict — it is not the same as `clear-deep`, which pins deep_required=false.",
-            "WARN-FIRST: the depth score is an advisory signal that shapes dispatch, never a hard block.",
+            "The depth score is ADVISORY MID-ENGAGEMENT and a DEFERRED-TERMINAL OBLIGATION at the end: nothing in the recon->exploit phases refuses a transition on it, but `transition-phase report` / `transition-phase complete` do (see `vigil assess contract transition-phase` for the two blocking kinds and their escapes). Treat a deep_required unit as work that must be done or explicitly deferred, not as a ranking hint you may leave unanswered.",
+            "`vigil assess check-phase-readiness --phase report` previews that terminal ledger from Phase 4 on, so the hold is legible the whole way rather than appearing at report time.",
+            "A unit is a whole application, not a surface: going deep means a dedicated dispatch across every applicable vuln class and auth context. The operator claims its next coherent queue batch with `vigil assess work-buffer fetch-by-unit`.",
         ),
         common_mistakes=(
             ("clear vs clear-deep", "clear REMOVES the override (back to the scorer); clear-deep PINS deep_required=false"),
@@ -4172,6 +4188,20 @@ def _schema_type_label(prop: dict[str, Any]) -> str:
     return f"array of {_schema_type_label(items)}" if isinstance(items, dict) else label
 
 
+def _enum_value_label(value: Any) -> str:
+    """One enum member as the author has to WRITE it, in JSON spelling.
+
+    ``str()`` renders a JSON ``null`` as Python's ``None``, which reads as a
+    legal string member — an author copying it writes ``"None"`` into a schema
+    that rejects it. Booleans have the same mismatch.
+    """
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
+
+
 def _schema_field_annotation(
     prop: dict[str, Any], *, required: bool, deferred: bool
 ) -> str:
@@ -4190,7 +4220,7 @@ def _schema_field_annotation(
     if enum is None and isinstance(items, dict):
         enum = items.get("enum")
     if isinstance(enum, list) and enum:
-        extras.append("one of: " + ", ".join(str(value) for value in enum))
+        extras.append("one of: " + ", ".join(_enum_value_label(value) for value in enum))
     if _schema_content_node(prop).get("additionalProperties") is True:
         extras.append("other keys allowed")
     if deferred:
@@ -4213,6 +4243,15 @@ def _schema_object_lines(
     rejectable surface therefore has to be printable from the contract, which is
     the only place an agent can read it. Recursion is bounded by the schema's own
     declarations, and every level is name-sorted so the rendering is stable.
+
+    The parenthesised annotation says what a value may LEGALLY be; the schema's
+    own ``description`` says what it MEANS, and the two answer different
+    questions — ``workflow_status``'s enum does not tell an author which of its
+    six values a freshly-recorded finding takes. Those descriptions were already
+    authored and already shipped in ``agent/schemas/``; withholding them here
+    sent the author back to reading the schema file by hand, so they render as
+    trailing prose after the domain. This is on-demand output, not standing
+    prompt load, so the cost is paid only by the agent that asked.
     """
     properties = node.get("properties")
     if not isinstance(properties, dict):
@@ -4229,7 +4268,12 @@ def _schema_object_lines(
             required=mark_required and name in required_names,
             deferred=deferred,
         )
-        lines.append(f"{indent}  - {name} ({annotation})")
+        # Kept on ONE line: the contract is grepped as much as it is read, and a
+        # wrapped description would break `grep -A0 '  - <field> ('` on the very
+        # fields whose meaning the author came for.
+        description = " ".join(str(prop.get("description") or "").split())
+        suffix = f" — {description}" if description else ""
+        lines.append(f"{indent}  - {name} ({annotation}){suffix}")
         if not deferred:
             lines.extend(
                 _schema_object_lines(
@@ -4410,11 +4454,22 @@ _KALI_VERB_NOTES: dict[str, tuple[str, ...]] = {
     ),
     "exec": (
         "Use only when no typed verb fits. Tool-name attribution falls back to argv[0] for audit recording.",
+        "THE RUNTIME IS A TOOL SANDBOX, NOT A COPY OF YOUR HOST — these gaps fail silently or mid-run, so plan around them rather than rediscovering them: "
+        "(a) `/engagements/$ENGAGEMENT_KEY/...` is the bind mount and the only path whose contents survive back to the host (it is the same bytes as the host's engagement directory); "
+        "(b) there is NO `vigil` executable in the container — `command -v vigil` finds nothing, so a helper script that shells out to `vigil assess ...` passes on the host and dies with exit 127 here. A script you run inside the runtime must be self-contained (stdlib, or the image's own installed libraries): pass what it needs in as argv, read manifests and scope.json off the bind mount directly, and make the `vigil assess` recording calls from the host once the run returns; "
+        "(c) the `aws` binary is installed but Vigil injects NO credentials — no ~/.aws, no AWS_PROFILE, no AWS_ACCESS_KEY_ID — so every signed call returns NoCredentials. Unsigned calls (--no-sign-request, unauthenticated Cognito) belong here; a signed one runs on the host through `vigil assess host-exec`, which writes the same audit row with route='host_exec' and is therefore an audited route, not a bypass.",
+        "A skill's tool list is not proof of installation: `vigil assess kali exec ... -- command -v <tool>` before planning a step around a tool you have not run in this engagement. If a target-facing tool is genuinely missing, rebuild the runtime image rather than falling back to a host or `docker exec` path — the image is the single source of truth for the tool surface.",
+        "Reserve `echo` for FUNCTIONAL output only. Stdout is captured to the audit log and the FTS index, not shown to the user, so a commentary-echo bloats the preview and pollutes search without adding retrievable signal. Use --intent for the one-line purpose. `echo` is legitimate when its output IS the point: writing a file, piping into another tool, or generating a payload.",
+        "PROCESS CLEANUP TAKES A PID SELECTOR, NEVER A BINARY NAME. `pkill -f nmap` / `killall nuclei` in a shared runtime kills sibling specialists' parallel scans and loses hours of recon. Manual cleanup is rarely needed at all — --timeout expiry already cascades SIGTERM then SIGKILL into the in-container PID, and an operator job stops with `vigil assess kali job stop <id>`. When you must clean up mid-run, every audit row carries a run_uuid and the wrapper records that run's in-container PID to /tmp/vigil-pid-<run_uuid>.pid, so `kill -TERM \"$(cat /tmp/vigil-pid-<run_uuid>.pid)\"` signals only your own run.",
+        "A single blocking call must fit in MINUTES, not tens of minutes — above the CLI's own --timeout sits an agent-harness ceiling you do not control, and a call that outruns it is auto-backgrounded with the agent killed (exit 144 / SIGUSR1), orphaning the probe and writing no handoff. A larger --timeout only widens that window. Genuinely long enumeration is an operator-owned job: see `vigil assess contract kali job`.",
     ),
     "job": (
         "Long-running probes go through `vigil assess kali job start ...`. The dtach session is parented by tini so it survives the calling shell.",
         "Job start uses the same pre-execution preparation as synchronous Kali execution: `--identity` material (plus `--identity-scope` for a scoped alias and `--identity-target` for an argv shape Vigil cannot classify), required attribution headers, nuclei OOB safety, target scope, denied tools, and rate policy are applied before audit/spawn.",
         "Subcommands: start | status | tail | stop | list.",
+        "OPERATOR-ONLY, AND A DISPATCHED SPECIALIST NEVER USES IT. Target-facing work runs SYNCHRONOUSLY: each `vigil assess kali <verb> ... --timeout N` call is blocking and awaited in-band — no run_in_background, no `job start`, no dtach, no watcher/poll loop. A specialist that backgrounds target traffic and halts for a completion notification gets auto-resumed by the harness, launches the next detached job, and halts again: unbounded relaunch thrash, duplicate probes, near-zero net coverage. A specialist that needs a probe to outlive its dispatch says so in its handoff and lets the operator own the job.",
+        "\"Synchronous\" means AWAITED-IN-BAND, not one-call-at-a-time. Several blocking calls in parallel, each awaited in-band, are fine; what is banned is detaching a job and reaping it later. A generous --timeout is the right tool for one long probe — on expiry the audit pipeline cascades SIGTERM then SIGKILL (after 5s) into the in-container PID, the row records timed_out=true, and nothing is orphaned.",
+        "The ceiling that makes this a real choice: above the CLI's --timeout sits a separate agent-harness limit you do not control, and a blocking call that runs too long is auto-backgrounded with the agent killed (exit 144 / SIGUSR1) — the probe is orphaned and no handoff is written. So a single synchronous probe must fit in minutes; a sweep that genuinely cannot is what `job start` is for, launched and monitored by the operator, never as a per-step or fan-out pattern.",
     ),
     "sweep": (
         "A DUMB fan-out: it expands ONLY the values you literally typed and reports ONLY what was probed. No seed-id lists, no opaque-id decoding, no hostname/metadata-path invention — `--values` is REQUIRED and a template with no placeholder is an error, so it can never silently run N identical commands.",
@@ -4830,11 +4885,36 @@ def _record_intel_contract(intel_type: str) -> CommandContract | None:
     schema = load_schema(schema_name)
     properties = schema.get("properties", {})
     author_fields = list(required or ("type-specific fields",))
-    for optional in ("source_name", "confidence", "evidence_ref", "provenance", "notes"):
+    for optional in (
+        "source_name", "confidence", "evidence_ref", "provenance", "notes",
+        # The interpretation triple on the authored types (note, org-fact). It is
+        # listed here rather than left to the field dump because an author who
+        # never writes it silently takes the backend's revalidation defaults.
+        "authored_by", "scope", "validity_context",
+    ):
         if isinstance(properties, dict) and optional in properties and optional not in author_fields:
             author_fields.append(optional)
 
     example = _intel_example_payload(intel_type)
+    notes = [
+        f"Posts to /intel/{endpoint_segment}. Use the helper, not raw post, so local schema validation catches payload drift first.",
+        "Intel schemas are strict: a field not listed under Allowed top-level fields is rejected before the backend is contacted.",
+    ]
+    # Keyed off the schema, not a hard-coded type list: a type that gains the
+    # interpretation triple gains the authoring rule with it, and one that loses
+    # the fields stops advertising a rule its payload can no longer carry.
+    if isinstance(properties, dict) and {
+        "authored_by", "scope", "validity_context"
+    } <= set(properties):
+        notes.append(
+            f"A `{intel_type}` row is AUTHORED INTERPRETATION, not an observation, so supply "
+            "`authored_by`, `scope`, and `validity_context` whenever you know them — they are "
+            "top-level strings, distinct from `provenance`, which carries source evidence such "
+            "as agent_name or artifact_ref. The backend fills visible unknown-author, "
+            "engagement-scope, and unreviewed-validity defaults when you leave them out; those "
+            "defaults are a REVALIDATION WARNING, never authorization or permission to act on "
+            "the row."
+        )
     return CommandContract(
         name=f"intel record {intel_type}",
         summary=f"Record one `{intel_type}` intel row via the intel record helper.",
@@ -4843,10 +4923,7 @@ def _record_intel_contract(intel_type: str) -> CommandContract | None:
             f"vigil assess intel record {intel_type} {intel_type}.json",
         ),
         author_supplied_fields=tuple(author_fields),
-        notes=(
-            f"Posts to /intel/{endpoint_segment}. Use the helper, not raw post, so local schema validation catches payload drift first.",
-            "Intel schemas are strict: a field not listed under Allowed top-level fields is rejected before the backend is contacted.",
-        ),
+        notes=tuple(notes),
         common_mistakes=(
             ("source", "use source_name"),
             ("agent_name", "use source_name, or provenance.agent_name when provenance detail is useful"),
@@ -5451,9 +5528,11 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
                 "vigil assess agent decision --kind scope_decision --host <host> --vendor <vendor> --choice pending --surfaced-to-user",
                 "vigil assess agent decision --kind egress_decision --payload-json '{\"choice\": \"browser-based-tool\", \"egress_block_pct\": 67}'",
                 "vigil assess agent decision --kind dispatch_blocked --phase recon --reason \"missing massdns binary in runtime image\" --surfaced-to-user",
+                "vigil assess agent decision --kind human_reach_decision --surfaced-to-user --payload-json '{\"choice\": \"pending\", \"endpoint\": \"<path-or-url>\", \"action\": \"<what-it-does>\", \"live_attempts_used\": <n>, \"destination_class\": \"real_third_party|unknown\", \"evidence\": \"<what steps 1-3 showed>\"}'",
+                "vigil assess agent decision --kind depth_deferral --surfaced-to-user --payload-json '{\"host\": \"<host>\", \"path_prefix\": \"<prefix>\", \"vuln_classes\": [\"sqli\"], \"reason\": \"<why>\"}'",
             ),
             author_supplied_fields=(
-                "--kind (scope_decision|egress_decision|dispatch_blocked|... — the backend accepts any string but report-writer only renders known kinds)",
+                "--kind (scope_decision|egress_decision|dispatch_blocked|human_reach_decision|depth_deferral|... — the backend accepts any string but report-writer only renders known kinds)",
                 "--payload-json OR shorthand flags (--host / --vendor / --choice / --note / --reason / --phase) that build the payload dict",
                 "--surfaced-to-user (set when the operator presented the decision to the human; controls whether it appears in user-visible logs)",
             ),
@@ -5464,10 +5543,20 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
             notes=(
                 "Vendor-SaaS scope warnings, egress-block decisions, and dispatch-blocked rows all share this table — keep the --kind taxonomy disciplined so report-writer can summarize by kind.",
                 "Set --surfaced-to-user for operator-facing decisions (vendor-SaaS, egress reputation, blocked dispatch) so the human-visible audit log matches what the operator was shown.",
+                "--payload-json WINS OUTRIGHT: when it is supplied the shorthand flags are ignored entirely, so a top-level --choice alongside --payload-json is silently dropped and any gate that reads `payload.choice` never fires. Put `choice` INSIDE the JSON object, never as a sibling flag.",
+                # --- human_reach_decision: the side-effect preflight -------------
+                "`--kind human_reach_decision` IS THE SIDE-EFFECT PREFLIGHT GATE. Run the preflight before sending any request that could create persistent state or reach a human — signup, request-access, support/report/ticket, password-reset, contact-form, or any endpoint whose name or path suggests a write that notifies someone. The posture is CAPPED LIVE-FIRE, not zero-fire: static characterization is unlimited, and genuine ambiguity earns a small, hard, audited budget gated by this recorded decision.",
+                "Preflight step 1 — UNLIMITED static characterization, mandatory first. No request budget at all: run as many read-only, non-triggering probes as it takes to learn the methods and parameters the endpoint accepts, the response shape on a non-triggering GET/HEAD/OPTIONS (status, headers, body fields — never the write verb itself), and what the source, API spec, or documentation say it does. Cross-reference ENGAGEMENT.md §4 (No-Fire Endpoints) and §5 (Irreversible and Notifying Flows), including its Known-Safe Test Destinations table, for a pre-declared answer.",
+                "Preflight step 2 — the REACHES-A-REAL-THIRD-PARTY test. Ask whether success OR failure lands in a real inbox, queue, or audit trail, or notifies a real person who is not the researcher. POSITIVE (examples, not exhaustive): a live support/ticket queue a real agent reads and actions; an email, SMS, or push delivered to a non-researcher-owned address; a role/access request routed to a real approver; a pager/on-call alert; a post to a customer-visible channel (public comment, shared workspace, forum). NEGATIVE (examples, not exhaustive): a researcher-owned test identity — account, mailbox, or phone number the researcher provisioned and controls; a documented sandbox/staging environment with no live inbox behind it; a mock/stub queue that accepts the request but has no delivery path; a self-directed notification to the researcher's own test account. A proven-NEGATIVE endpoint is ORDINARY SURFACE — hunt it fully, it carries no side-effect risk. Step 1 should aim to reach one of these two answers; only genuine ambiguity after a thorough static pass proceeds.",
+                "Preflight step 3 — a HARD 1-3 LIVE-FIRE BUDGET, per endpoint/action, for the WHOLE ENGAGEMENT. If step 2 resolves POSITIVE, or static characterization leaves it genuinely unknown, you may spend 1-3 live requests to resolve the ambiguity, and you stop the instant either condition is met: the probe CONFIRMS the endpoint reaches a real third party, or the budget is exhausted. This is a prompt-enforced discipline and a WARN backstop — nothing in the CLI counts or blocks it — so hold yourself to it with the discipline of a hard cap anyway: it exists to bound the harm of a wrong 'unknown' call, not to license routine live-fire against notify-shaped endpoints. 1-3 is the GLOBAL CEILING; ENGAGEMENT.md may only TIGHTEN it for a program (cap at 1, or reinstate zero-fire for a named endpoint), never loosen it.",
+                "CROSS-DISPATCH RULE — check before every fire, and never re-spend. The budget is per endpoint/action for the whole engagement, NOT per dispatch and NOT per specialist: a fresh dispatch does not get a fresh budget, and two specialists must not each independently spend 3 against the same target. Before ANY live human-reach fire, query the authoritative kind-filtered log — `vigil assess fetch \"dispatch-decisions?kind=human_reach_decision\"` (it pages at 100 rows by default; grep the returned JSON for the target host/endpoint) — and if a row on that exact endpoint/action already carries a `payload.choice` of `pending` or `denied`, treat it as BLOCKED and do not fire, regardless of what your own dispatch has spent. The operator is expected to inject any open gate into the dispatch context before sending a specialist at the surface, so the state is inherited rather than rediscovered; check directly anyway.",
+                "RECORDING AND CONTINUATION GATE. Any specialist records the decision itself (same pattern as scope_decision) — see the human_reach_decision invocation above for the payload shape — and then does NOT continue live-firing that endpoint/action until the operator resolves it. Four resolution values, recorded on the decision row: `approved_continue` (proceed with further live-fire; rare — the operator has independent grounds the destination is safe), `approved_limited` (proceed under a named, narrower constraint), `denied` (do not fire again; permanently blocked for this endpoint/action), and `not_real_recipient` (the destination was confirmed NOT a real third party — this RETROACTIVELY LIFTS the cap for that endpoint and its siblings, reverting it to ordinary surface per the step-2 negative list). Irreversible and notifying side-effects are not proved by triggering them past this bounded, gated budget; firing past the budget, or past an open pending/denied gate, is the exact harm the preflight exists to prevent. This gate survives every exploit_policy value, `full_send` included, and applies per-action.",
             ),
             common_mistakes=(
                 ("freeform reason in --kind", "kinds are vocabulary; put the prose in --note or --reason"),
                 ("missing --surfaced-to-user", "user-facing decisions invisible to audit defeats the purpose; set the flag whenever the operator showed the gate to the human"),
+                ("--payload-json '{...}' --choice pending", "--payload-json is used verbatim and the shorthand flags are dropped; the cross-dispatch gate reads payload.choice, so put choice inside the JSON"),
+                ("a fresh 1-3 human-reach budget per dispatch", "the budget is per endpoint/action for the whole engagement; query dispatch-decisions?kind=human_reach_decision before firing"),
             ),
             examples=(
                 {
@@ -5475,6 +5564,17 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
                         "vigil assess agent decision --kind scope_decision "
                         "--host api.foo.com --vendor 'Vendor SaaS' --choice pending "
                         "--surfaced-to-user"
+                    ),
+                },
+                {
+                    "command": (
+                        "vigil assess agent decision --kind human_reach_decision "
+                        "--surfaced-to-user --payload-json "
+                        "'{\"choice\": \"pending\", \"endpoint\": \"/api/support/ticket\", "
+                        "\"action\": \"creates a real support ticket\", "
+                        "\"live_attempts_used\": 1, "
+                        "\"destination_class\": \"real_third_party\", "
+                        "\"evidence\": \"OPTIONS + docs confirm delivery to the vendor queue\"}'"
                     ),
                 },
             ),

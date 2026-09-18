@@ -434,6 +434,17 @@ uv run --directory orchestrator/backend python scripts/generate_agent_schemas.py
 - `agent/rules/*.md` owns always-active behavior, not payload or endpoint contracts.
 - `vigil assess` helpers own durable payload and lifecycle truth; prompts point to those helpers.
 
+**The operator cores are operator-only. A dispatched specialist never loads them**, nor the
+generated `agent/AGENTS*.md`. So a rule present in `operator-core.md` is NOT a duplicate of the
+same rule in `shared-constraints*.md`, `rules/*.md`, or `agents/*.md` — those are the specialist's
+only copy. Before deleting prompt text as duplicated, derive which roles load each copy and confirm
+the surviving one reaches the same roles. Repo-wide grep is not that check.
+
+Likewise, several sections are **delegation referents**: `shared-constraints.md` and
+`adversarial-mindset.md` point at `rules/hunting.md` §2 instead of restating it, and 30+ skills cite
+it by name. Deleting a section other files delegate to removes the referent, not a copy. Grep for
+citations of a heading before removing it.
+
 ## Editing rules
 
 - Put workflow in operator cores, cross-role rules in shared constraints, and role-specific guidance
