@@ -577,12 +577,37 @@ npm install
 npm run dev
 ```
 
-Build the frontend before handing off significant UI changes:
+Build the frontend before handing off significant UI changes. `npm run build` runs
+`tsc --noEmit` before `vite build`, because Vite transpiles per file through esbuild
+and checks no types on its own — a type error reaches the bundle otherwise:
 
 ```bash
 cd orchestrator/frontend
-npm run build
+npm run build      # typecheck + bundle
+npm test           # vitest component tests + the node --test suites
 ```
+
+# Orchestrator report template
+
+`orchestrator/report/` is a separate Vite app that builds the single-file
+`dist/template.html` the backend injects an engagement payload into. Its
+`src/types.ts` mirrors `report_readiness._report_record` plus the three other
+projections `report_export._assemble_report_payload` calls; change one side and
+the other moves with it.
+
+```bash
+cd orchestrator/report
+npm run build      # typecheck + bundle to dist/template.html
+npm test           # shell-quoting tests for the copy-and-run PoC
+```
+
+The report renders a `curl` invocation built from attacker-influenced finding
+data, and a reader is expected to paste it into a terminal. Quoting it is
+therefore a security boundary (ADR 0018), not formatting: `src/lib/poc.ts` owns
+it and `src/lib/poc.test.ts` asserts the argv a real `bash` produces. Evidence
+and PoC blocks render verbatim in `<pre>`, never through markdown — markdown
+rewrites `__init__.py`, eats `>` transcript markers and collapses HTTP pairs onto
+one line, which is mutating the operator's capture.
 
 # Runtime validation
 

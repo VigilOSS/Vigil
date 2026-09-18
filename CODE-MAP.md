@@ -256,7 +256,7 @@ A prompt change is **not** prompt-only when the prompt defines an artifact the b
   owns the tab contract; `orchestrator/frontend/src/lib/api.ts` owns REST helpers and types;
   `orchestrator/frontend/src/lib/theme.ts` and `orchestrator/frontend/src/app.css` own presentation.
 - `orchestrator/frontend/src/components/RunsTab.tsx` — renders every value verbatim: no masking, no reveal toggle. See: ADR 0019.
-- `orchestrator/report/` — a **third** Vite app (`vigil-report`), separate from the operator SPA and not built by CI.
+- `orchestrator/report/` — a **third** Vite app (`vigil-report`), separate from the operator SPA. `orchestrator/report/src/lib/poc.ts` owns the copy-and-run `curl` quoting.
 - `orchestrator/tests/` — two bash end-to-end scripts, not a pytest suite.
 - `agent/scripts/assess/tests/` — the assess-CLI pytest suite (~90 modules). Its `conftest.py` already puts `agent/scripts` on `sys.path`; new assess-CLI tests belong here, not in the backend suite.
 - `tests/` — the root CLI and bench-harness suite. `tests/eval/` is the deterministic, zero-LLM eval replay harness and has its own README.

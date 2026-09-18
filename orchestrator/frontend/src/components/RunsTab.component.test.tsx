@@ -90,7 +90,7 @@ function arrangeSuccessfulAudit() {
   });
   vi.mocked(listAssessmentRunChildren).mockImplementation(
     async (_engagement, _runId, section, params) => {
-      if (section === "sources" && (params.offset ?? 0) === 0) {
+      if (section === "sources" && (params?.offset ?? 0) === 0) {
         return {
           items: [{ id: 1, path: "src/first.py" }],
           total: 2,

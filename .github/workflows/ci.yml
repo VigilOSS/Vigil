@@ -20,8 +20,15 @@ name: ci
 #                     so a readiness-contract break names itself instead of
 #                     hiding in a 1400-test run.
 #   - code-readiness: target-specific assess transition/readiness contract tests.
-#   - frontend-build: installs the locked frontend dependencies and compiles the
-#                     code-analysis readiness consumer.
+#   - frontend-build: installs the locked frontend dependencies, typechecks the
+#                     whole `src` tree (`tsc --noEmit`, wired into `npm run
+#                     build`) and compiles it. `vite build` transpiles per-file
+#                     via esbuild and checks no types on its own, so without the
+#                     `tsc` step this job compiled type errors happily.
+#   - report-build  : the same two gates for the single-file report template
+#                     (`orchestrator/report`), plus its `poc.ts` shell-quoting
+#                     tests. That package ships the HTML handed to a client and
+#                     had no CI gate of any kind before.
 #   - ruff / mypy   : lint (`uvx ruff check .`) and types
 #                     (`uvx --with-editable . mypy src/vigil_cli`). The tree is
 #                     now lint- and type-clean, so these are blocking gates:
@@ -146,8 +153,33 @@ jobs:
           cache-dependency-path: orchestrator/frontend/package-lock.json
       - name: Install locked frontend dependencies
         run: npm ci
-      - name: Build frontend
+      - name: Build frontend (typecheck + bundle)
         run: npm run build
+      - name: Run frontend tests
+        run: npm test
+
+  report-build:
+    name: report template build (blocking)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: orchestrator/report
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: orchestrator/report/package-lock.json
+      - name: Install locked report dependencies
+        run: npm ci
+      - name: Build report template (typecheck + bundle)
+        run: npm run build
+      # The report synthesizes a `curl` command from attacker-influenced finding
+      # data and a reader is expected to paste it into a shell, so the quoting is
+      # a security boundary (ADR 0018) and is asserted against a real bash.
+      - name: Run report tests
+        run: npm test
 
   ruff:
     name: ruff (blocking)
