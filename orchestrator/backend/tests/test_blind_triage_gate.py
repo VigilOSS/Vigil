@@ -222,6 +222,71 @@ def test_non_accept_verdict_does_not_clear_block(monkeypatch, tmp_path, capsys):
     assert "missing_blind_triage" in capsys.readouterr().err
 
 
+def test_report_blocks_when_an_exploited_finding_has_no_blind_verdict(
+    monkeypatch, tmp_path, capsys
+):
+    """A Medium+ finding driven to `exploited` is still a submission.
+
+    The gate used to key on ``workflow_status == 'active'`` alone, so the
+    findings with the strongest claims — the ones an exploit-developer pass
+    proved out and moved to ``exploited`` — were the ones that walked past the
+    blind pass. ``export submission`` accepts every reportable workflow status,
+    so the gate has to enumerate the same set.
+    """
+    module = _load_transition_module("tp_blind_exploited")
+    exploited = dict(_MEDIUM_ACTIVE, slug="rce-1", severity="critical", workflow_status="exploited")
+    eng, _ = _setup_env(
+        monkeypatch, module, tmp_path,
+        scope={"engagement_type": "web", "current_phase": "exploit"},
+        findings=[exploited],
+        decisions_by_kind={"blind_triage_verdict": []},
+    )
+    with pytest.raises(SystemExit):
+        module.run(_args(eng, "report"))
+    err = capsys.readouterr().err
+    assert "missing_blind_triage" in err
+    assert "rce-1" in err
+
+
+def test_complete_blocks_when_a_published_finding_has_no_blind_verdict(
+    monkeypatch, tmp_path, capsys
+):
+    """The `complete` backstop has to see `reported` findings.
+
+    Publication moves a finding to ``reported`` BEFORE ``transition-phase
+    complete`` runs (phase-8 step e), so an ``active``-only gate could never
+    catch an un-triaged submission at the edge that exists to catch it.
+    """
+    module = _load_transition_module("tp_blind_reported")
+    reported = dict(_MEDIUM_ACTIVE, slug="ssrf-3", workflow_status="reported")
+    eng, _ = _setup_env(
+        monkeypatch, module, tmp_path,
+        scope={"engagement_type": "web", "current_phase": "report"},
+        findings=[reported],
+        decisions_by_kind={"blind_triage_verdict": []},
+    )
+    with pytest.raises(SystemExit):
+        module.run(_args(eng, "complete"))
+    assert "missing_blind_triage" in capsys.readouterr().err
+
+
+def test_draft_and_false_positive_findings_never_block(monkeypatch, tmp_path, capsys):
+    """Only submittable workflow states are at risk; a parked or killed row is not."""
+    module = _load_transition_module("tp_blind_unsubmittable")
+    eng, _ = _setup_env(
+        monkeypatch, module, tmp_path,
+        scope={"engagement_type": "web", "current_phase": "exploit"},
+        findings=[
+            dict(_MEDIUM_ACTIVE, slug="draft-1", workflow_status="draft"),
+            dict(_MEDIUM_ACTIVE, slug="fp-1", workflow_status="false_positive"),
+            dict(_MEDIUM_ACTIVE, slug="merged-1", workflow_status="merged"),
+        ],
+        decisions_by_kind={"blind_triage_verdict": []},
+    )
+    module.run(_args(eng, "report"))
+    assert "missing_blind_triage" not in capsys.readouterr().err
+
+
 def test_low_severity_finding_does_not_block(monkeypatch, tmp_path, capsys):
     module = _load_transition_module("tp_blind_low_sev")
     low = dict(_MEDIUM_ACTIVE, slug="info-1", severity="low")

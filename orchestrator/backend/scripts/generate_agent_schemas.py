@@ -492,6 +492,20 @@ def _schema_specs() -> tuple[SchemaSpec, ...]:
                             "evidence",
                             "impact",
                         ],
+                        # The client-side mirror of
+                        # ``state_manager.findings._validate_chain_rationale_pair``.
+                        # Expressed as if/then rather than dependentRequired so
+                        # ``chain_required: false`` — a legitimate explicit
+                        # "this stands alone" — is not dragged in with it.
+                        "allOf": [
+                            {
+                                "if": {
+                                    "required": ["chain_required"],
+                                    "properties": {"chain_required": {"const": True}},
+                                },
+                                "then": {"required": ["chain_rationale"]},
+                            },
+                        ],
                         "properties": _FINDING_DETAIL_PROPERTIES,
                     },
                     "provenance": {

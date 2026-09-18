@@ -132,7 +132,7 @@ FINDING_DETAIL_CORE_PROPERTIES: dict[str, dict[str, Any]] = {
     },
     "chain_rationale": {
         "type": "string",
-        "description": "Required when chain_required is true: explain which chain step this enables and why standalone impact is insufficient.",
+        "description": "REQUIRED (enforced on write, and by this schema) when chain_required is true: explain which chain step this enables and why standalone impact is insufficient.",
     },
     "required_followup": {
         "type": "array",

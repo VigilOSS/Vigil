@@ -22,6 +22,11 @@ from assess.lib.schema_validation import collect_validation_errors, load_schema
 from assess.lib.evidence_ref import evidence_ref_exists, is_single_path_shaped
 
 
+# The confirmation-mode vocabulary, mirroring the backend request models and
+# `finding update --evidence-type`. Nullable by design — see the flag help.
+_EVIDENCE_TYPES = ("network-confirmed", "code-inferred", "theoretical", "informational")
+
+
 def register(subparsers) -> None:
     p = subparsers.add_parser(
         "record",
@@ -77,6 +82,23 @@ def register(subparsers) -> None:
              "historical rows with missing or invalid authors must first use finding bind-author.",
     )
     p.add_argument(
+        "--evidence-type",
+        dest="evidence_type",
+        default="",
+        choices=_EVIDENCE_TYPES,
+        help=(
+            "C44: classify this finding's confirmation mode, the same vocabulary "
+            "`finding update --evidence-type` patches. network-confirmed = captured "
+            "HTTP request/response; code-inferred = pattern present in source, no "
+            "runtime proof; theoretical = chain-dependent (pair with "
+            "details.chain_required + details.chain_rationale); informational = "
+            "observation with no proven attack path. Deliberately has NO default: "
+            "an unlabelled record stores NULL rather than asserting a confirmation "
+            "mode nobody claimed. May also be set as `evidence_type` in the JSON "
+            "payload; the two must agree."
+        ),
+    )
+    p.add_argument(
         "--quiet",
         action="store_true",
         help="Suppress non-error warnings and duplicate advisories; the canonical slug remains on stdout.",
@@ -85,6 +107,14 @@ def register(subparsers) -> None:
 
 
 _FINDING_SCHEMA = load_schema("finding-record.schema.json")
+
+# `finding-record.schema.json` lists every verification status because it also
+# validates STORED and captured records, so it cannot refuse a record-time value
+# the create request model rejects. Record opens the axis; `finding verify` owns
+# every move off it, and owns the evidence gates that make those moves mean
+# something — a payload that opened at `confirmed` used to clear client
+# validation and come back an opaque 422.
+_RECORD_TIME_VERIFICATION_STATUS = "unreviewed"
 
 
 def _require_atomic_candidate_response(
@@ -120,19 +150,66 @@ def _require_atomic_candidate_response(
     return response
 
 
+def _refuse_non_initial_verification_status(payload: dict) -> None:
+    """Refuse a record that opens at anything but ``unreviewed``.
+
+    The backend pins the create request model to ``Literal["unreviewed"]`` so
+    that every later disposition goes through ``finding verify`` and its
+    evidence gates. Say that here, naming the verb, instead of letting the
+    payload pass the schema and come back a 422 that names neither.
+    """
+    incoming = str(payload.get("verification_status") or "").strip()
+    if not incoming or incoming == _RECORD_TIME_VERIFICATION_STATUS:
+        return
+    slug = str(payload.get("slug") or "<slug>")
+    print(
+        f"finding record: REFUSED — verification_status={incoming!r} cannot be set at record "
+        f"time; a new finding always opens at {_RECORD_TIME_VERIFICATION_STATUS!r}.\n"
+        f"  - Record it first, then move the axis with its evidence: "
+        f"`vigil assess finding verify {slug} --status {incoming} --reason \"...\"`.",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+
+def _apply_evidence_type(payload: dict, evidence_type: str) -> None:
+    """Land ``--evidence-type`` on the payload, refusing a contradicted label.
+
+    No default: an unlabelled record stores NULL rather than asserting a
+    confirmation mode nobody claimed. The flag and the JSON key are two
+    spellings of one field, so a disagreement is an authoring error — the same
+    stance ``--update`` takes on a slug embedded in the payload.
+    """
+    flag = (evidence_type or "").strip()
+    if not flag:
+        return
+    embedded = str(payload.get("evidence_type") or "").strip()
+    if embedded and embedded != flag:
+        print(
+            f"finding record: REFUSED — --evidence-type {flag!r} contradicts "
+            f"evidence_type {embedded!r} in the JSON payload. Set it in one place.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    payload["evidence_type"] = flag
+
+
 def _normalize_payload(
     payload: dict,
     *,
     agent_name: str,
     candidate_slug: str,
     dispatch_agent_id: str = "",
+    evidence_type: str = "",
 ) -> dict:
     normalized = dict(payload)
     normalized["slug"] = candidate_slug
     normalized.setdefault("source_name", agent_name)
     normalized.setdefault("severity", "medium")
     normalized.setdefault("workflow_status", "active")
-    normalized.setdefault("verification_status", "unreviewed")
+    _refuse_non_initial_verification_status(normalized)
+    normalized.setdefault("verification_status", _RECORD_TIME_VERIFICATION_STATUS)
+    _apply_evidence_type(normalized, evidence_type)
     normalized.setdefault("defect_family", normalized.get("title", candidate_slug))
     normalized.setdefault("root_cause_key", "")
     normalized.setdefault("auth_context", "anonymous")
@@ -535,6 +612,7 @@ def run(args) -> None:
             agent_name=agent_name,
             candidate_slug=candidate_slug,
             dispatch_agent_id=(getattr(args, "agent_id", "") or "").strip(),
+            evidence_type=(getattr(args, "evidence_type", "") or "").strip(),
         )
         validation_errors = collect_validation_errors(payload, _FINDING_SCHEMA)
         if validation_errors:

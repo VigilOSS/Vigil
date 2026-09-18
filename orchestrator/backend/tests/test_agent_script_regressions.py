@@ -1447,21 +1447,20 @@ def test_export_findings_uses_canonical_findings_and_renders_details(monkeypatch
             return [
                 {
                     "slug": "finding-002",
-                    "title": "False positive finding",
+                    "title": "Low severity finding",
                     "severity": "low",
-                    "workflow_status": "false_positive",
-                    "verification_status": "false_positive",
-                    "summary": "Should still be exported",
+                    "workflow_status": "reported",
+                    "verification_status": "downgraded",
+                    "summary": "Already delivered to the program",
                     "details": {},
                 },
                 {
                     "slug": "finding-001",
                     "title": "Parser issue",
                     "severity": "high",
-                    "workflow_status": "merged",
-                    "verification_status": "downgraded",
+                    "workflow_status": "exploited",
+                    "verification_status": "confirmed",
                     "summary": "Summary text",
-                    "merged_into_slug": "finding-010",
                     "details": {
                         "request_method": "POST",
                         "cwe_id": "CWE-79",
@@ -1489,10 +1488,9 @@ def test_export_findings_uses_canonical_findings_and_renders_details(monkeypatch
     findings_md = (engagement_dir / "findings.md").read_text(encoding="utf-8")
 
     assert "Exported 2 findings" in output
-    assert "False positive finding" in findings_md
-    assert "- **Workflow**: false_positive" in findings_md
+    assert "Low severity finding" in findings_md
+    assert "- **Workflow**: reported" in findings_md
     assert "Parser issue" in findings_md
-    assert "- **Merged Into**: finding-010" in findings_md
     assert "- **Location**: POST" not in findings_md
     assert "- **CWE**: CWE-79" in findings_md
     assert "- **Entry Point**: parse_input" in findings_md
@@ -1540,6 +1538,8 @@ def test_export_findings_separates_sections_with_blank_line(monkeypatch, tmp_pat
                     "slug": "finding-aaa",
                     "title": "First",
                     "severity": "high",
+                    "workflow_status": "active",
+                    "verification_status": "confirmed",
                     "summary": "first summary",
                     "details": {},
                 },
@@ -1547,6 +1547,8 @@ def test_export_findings_separates_sections_with_blank_line(monkeypatch, tmp_pat
                     "slug": "finding-bbb",
                     "title": "Second",
                     "severity": "high",
+                    "workflow_status": "active",
+                    "verification_status": "confirmed",
                     "summary": "second summary",
                     "details": {},
                 },

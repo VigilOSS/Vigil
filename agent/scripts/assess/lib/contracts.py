@@ -755,6 +755,7 @@ _CONTRACTS: dict[str, CommandContract] = {
         preferred_invocations=(
             "vigil assess finding record <agent-name> <finding-json-file> --agent-id <your-dispatch-agent-id>",
             "vigil assess finding record <agent-name> <finding-json-file> --update <existing-slug>",
+            "vigil assess finding record <agent-name> <finding-json-file> --agent-id <your-dispatch-agent-id> --evidence-type theoretical",
             "vigil assess finding record <agent-name> <finding-json-file> --agent-id <your-dispatch-agent-id> --quiet",
         ),
         author_supplied_fields=(
@@ -770,7 +771,8 @@ _CONTRACTS: dict[str, CommandContract] = {
             ("source_name", "<agent-name>"),
             ("severity", "medium"),
             ("workflow_status", "active"),
-            ("verification_status", "unreviewed"),
+            ("verification_status", "unreviewed — the ONLY record-time value; a payload naming any other status is refused, and `finding verify` owns every transition off it"),
+            ("evidence_type", "NULL — deliberately undefaulted; label it with --evidence-type when you know the confirmation mode"),
             ("defect_family", "title when omitted"),
             ("root_cause_key", '""'),
             ("auth_context", "anonymous"),
@@ -795,7 +797,8 @@ _CONTRACTS: dict[str, CommandContract] = {
             "details.poc_code holds exploit scripts; details.poc_request / details.poc_response hold a structured HTTP request/response pair.",
             "details.steps_to_reproduce is written FROM WHAT YOU ACTUALLY RAN, with concrete values (the real session cookie, the real object id, the real payload). Preserve those values verbatim through submission; an unbound placeholder (or one placeholder reused across different objects) makes the reproduction unfollowable by construction. details.repro_runs carries the command-run ids behind those steps, in step order: `export submission` renders their real argv, and a step with no run id behind it was imagined, not executed.",
             "details.references is an array of strings for CVE links, advisories, or related docs.",
-            "Set details.chain_required/details.chain_rationale/details.required_followup when the finding is concrete but only becomes exploitation-worthy as part of a larger chain. Specialists own these via finding record/finding update; verification reviews but does not own them.",
+            "--evidence-type {network-confirmed|code-inferred|theoretical|informational} labels the CONFIRMATION MODE, the same vocabulary `finding update --evidence-type` patches. It has no default on purpose: an unlabelled record stores NULL rather than asserting a mode nobody claimed, and no gate reads the column — `finding list --holding` finds the holding area by verification_status (pending_runtime_proof / blocked) as well as by this label, so a park is never invisible for want of it. Pair `theoretical` with details.chain_required + details.chain_rationale. The flag and a JSON `evidence_type` key are two spellings of one field; a disagreement is refused.",
+            "Set details.chain_required/details.chain_rationale/details.required_followup when the finding is concrete but only becomes exploitation-worthy as part of a larger chain. details.chain_required=true is ENFORCED to carry details.chain_rationale — client-side by the schema and server-side on every write — because a park that names no chain step is a follow-up nobody can action. Specialists own these via finding record/finding update; verification reviews but does not own them.",
             "Blocked-attempt convention (schema-validated under details): when a technique is proven-shaped but walled off by missing provisioning, set details.block_reason (short why), details.unblock_requirements {kind, description, requested_from}, and details.attempts_summary (what was already tried). These keys are validated by finding-record.schema.json under details (additionalProperties=false); only `kind` carries a documented vocabulary (account|line|device|credential|access) — that vocabulary is a convention, NOT a JSON-Schema-enforced enum. A blocked finding stays OUT of the report; record the wall with `vigil assess block-technique` and, once a finding/chain satisfies it, connect them from the finding side with `vigil assess finding link <unblocking-finding-slug> --link-kind unblocks --target-kind blocked_technique --target-ref <technique_key>`.",
             "Do not put `link_kind=root_cause` in the `links` array. Record the finding first, then `vigil assess finding link` after verification — root/sibling grouping is an explicit lifecycle action.",
             "evidence_ref should point at ONE existing engagement path — a file OR a directory holding a capture set — which is auto-registered and linked on record. Nothing here BLOCKS the record: a URL ref is rerouted into details.references, and a prose ref, a composite ref that joins several references (\"scans/a.out; scans/b.out\", \"command-runs 56052/56054\"), or a path-shaped ref with nothing on disk is WARNED and still recorded. A ref that is not a single path mints NO artifact row, so report-readiness will flag the finding until real evidence is attached — check-phase-readiness --phase report is the backstop, not record time. Put external URLs in details.references; pass --allow-unindexed-evidence only for a theoretical/code-inferred finding with no file.",
@@ -805,6 +808,7 @@ _CONTRACTS: dict[str, CommandContract] = {
         ),
         common_mistakes=(
             ("status", "use workflow_status for lifecycle overrides, or omit it and keep the helper default"),
+            ("verification_status: confirmed (or any non-unreviewed value) in the payload", "record opens the axis at unreviewed; move it afterwards with `vigil assess finding verify <slug> --status <x> --reason \"...\"`, which is where the evidence gates live"),
             ("evidence_ref URL/free-text prose/several paths joined together", "point it at ONE existing artifact path (a file or a directory of captured evidence); put URLs in details.references; use --allow-unindexed-evidence only for findings with genuinely no artifact"),
             ("confidence", "confidence belongs in code-record-analysis output, not finding records"),
             ("cwe", "use details.cwe_id"),
@@ -3002,7 +3006,7 @@ _CONTRACTS: dict[str, CommandContract] = {
         name="export findings",
         goals=("submission",),
         phase=("report",),
-        summary="Render the single consolidated findings.md report document from backend state (one section per finding, severity-sorted).",
+        summary="Render the single consolidated findings.md report document from backend state (one section per report-durable finding, severity-sorted).",
         schema_name="backend finding projection rendered by assess.lib.finding_render",
         preferred_invocations=(
             "vigil assess export findings",
@@ -3011,9 +3015,11 @@ _CONTRACTS: dict[str, CommandContract] = {
         helper_defaults=(
             ("output path", "$ENGAGEMENT_DIR/findings.md"),
             ("ordering", "severity (critical -> info), root-cause groups inline"),
+            ("inclusion", "verification_status in {confirmed, downgraded} AND a reportable workflow_status — the same predicate as report-findings --mode final"),
         ),
         notes=(
             "ONE consolidated document. For a git-diff-able per-finding tree use `vigil engagement export --format markdown-tree`; for a platform-shaped single-finding write-up use `export submission <slug>`.",
+            "findings.md is a REPORT, not the findings table: unreviewed, disputed, draft, merged, false-positive and holding-area (pending_runtime_proof / blocked) findings are omitted, so the Finding Count is the report-durable count. Use `finding list` / the markdown-tree export to see everything, and `finding list --holding` for the holding area.",
             "Pure render from backend state — it never PATCHes a finding and never sets submission_status. Re-run it after any finding edit instead of hand-editing findings.md.",
             "Shares assess.lib.finding_render with the markdown-tree export, so the two can never drift.",
         ),
