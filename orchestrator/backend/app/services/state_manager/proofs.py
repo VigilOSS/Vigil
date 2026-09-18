@@ -272,7 +272,11 @@ def _command_output_evidence_healths(
                     # there are no bytes to digest. That empty digest is the
                     # measurement, not the absence of one — reading it as
                     # unmeasured left every real audited run permanently stale
-                    # (almost all of them write nothing to stderr). The retained
+                    # (almost all of them write nothing to stderr). What tells
+                    # the two apart is output_retention_status, filtered above,
+                    # NOT the zero itself: only 'artifact'/'retained' reach here,
+                    # and a caller that could not read its spill lands
+                    # 'unmeasured'/'partially_measured' instead. The retained
                     # file still has to agree: bytes that appeared after the
                     # measurement are a different fact.
                     artifact_health.append(

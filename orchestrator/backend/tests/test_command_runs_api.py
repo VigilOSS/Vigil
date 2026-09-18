@@ -4926,3 +4926,78 @@ def test_finalize_indexes_the_output_files_the_run_actually_wrote(
     assert int(stdout_row["size_bytes"]) == len(stdout_bytes)
     assert bool(stderr_row["present"])
     assert int(stderr_row["size_bytes"]) == 0
+
+
+def test_finalize_survives_an_output_file_it_cannot_read(client, isolate_settings):
+    """Indexing the bytes is best effort; the finalize receipt is not.
+
+    Re-reading the output files at finalize opens them for real, so a spill a
+    background child is still writing, or one the indexer cannot open at all,
+    now raises where the pre-exec registration only ever met a file that did not
+    exist. The audit row has already committed terminal by that point, so
+    letting that raise turns a finalize that worked into a 409 whose retry is
+    refused as a double-finalize — the same "the write may have committed" lie
+    the proof-receipt CLI was just fixed to stop telling. The index stays honest
+    on its own: the row keeps ``present=0``, so a receipt citing this run reads
+    ``missing``, which is exactly what happened.
+    """
+
+    engagement_dir = _write_engagement(isolate_settings["engagements_dir"])
+    run_uuid = "unreadable-output"
+    output_dir = engagement_dir / "scans" / "kali"
+    output_dir.mkdir(parents=True)
+    stdout_path = output_dir / f"{run_uuid}.out"
+    stderr_path = output_dir / f"{run_uuid}.err"
+
+    created = _post(
+        client,
+        _base_payload(
+            command="curl -s http://target/",
+            argv=["curl", "-s", "http://target/"],
+            tool_name="execute_command",
+            run_uuid=run_uuid,
+            status="running",
+            return_code=None,
+            success=None,
+            completed_at="",
+            stdout="",
+            stderr="",
+            stdout_path=str(stdout_path),
+            stderr_path=str(stderr_path),
+        ),
+    )
+    assert created.status_code == 201, created.text
+
+    stdout_path.write_bytes(b"uid=33(www-data)\n")
+    stderr_path.write_bytes(b"")
+    os.chmod(stdout_path, 0o000)
+    try:
+        finalized = client.patch(
+            f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/{created.json()['id']}",
+            json={
+                "status": "completed",
+                "return_code": 0,
+                "ended_at": "2026-04-17T12:00:05Z",
+                "stdout_preview": "uid=33(www-data)",
+                "stderr_preview": "",
+            },
+        )
+    finally:
+        os.chmod(stdout_path, 0o600)
+    assert finalized.status_code == 200, finalized.text
+    assert finalized.json()["status"] == "completed"
+
+    with db_module.get_connection() as connection:
+        rows = {
+            str(row["relative_path"]): row
+            for row in connection.execute(
+                """
+                SELECT relative_path, present FROM assessment_artifacts
+                WHERE engagement_id = (SELECT id FROM engagements WHERE key = ?)
+                  AND producer_command_run_id = ?
+                """,
+                (ENGAGEMENT_KEY, created.json()["id"]),
+            ).fetchall()
+        }
+    assert not bool(rows[f"scans/kali/{run_uuid}.out"]["present"])
+    assert bool(rows[f"scans/kali/{run_uuid}.err"]["present"])

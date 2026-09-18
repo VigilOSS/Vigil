@@ -247,8 +247,9 @@ Durable design decisions live in [`docs/adr/`](docs/adr/).
 ### Fixed
 
 - **A live command proof can now actually back a terminal verification.** Three defects in the
-  runtime-proof path compounded, and between them no `vigil assess kali` run could ever produce a
-  healthy proof receipt. The audit row is opened *before* the command runs, so the artifact rows for
+  runtime-proof path compounded, and between them almost no `vigil assess kali` run could produce a
+  healthy proof receipt — a run had to write bytes to BOTH streams and then be followed by a manual
+  `artifact refresh`. The audit row is opened *before* the command runs, so the artifact rows for
   its stdout/stderr files were minted while those files did not exist yet and stayed indexed as
   absent; finalize — the first moment the bytes exist and have been hashed — never re-read them, so
   every receipt citing an audited run was born `missing` until someone ran `artifact refresh` by

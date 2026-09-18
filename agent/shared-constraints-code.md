@@ -253,9 +253,11 @@ Use `AV:N` only when the attacker's access path is genuinely network-direct. If 
 - `canonical_location` format: `file:<relative-path>:<line-number>` (e.g., `file:lib/url.c:547`)
 - `provenance.code_snapshot` copies `repo_id`, `repo_generation`, and
   `source_manifest_digest` from the Code Source Identity block. This binding makes the evidence
-  reproducible; `vigil assess finding verify` is the only path that may rebind a legacy/stale
-  finding after a fresh review of the current sealed bytes, while generic finding updates cannot
-  edit it. Run `vigil assess contract finding verify` for the exact `--provenance-inline` shape
+  reproducible; `vigil assess finding verify` requires it on EVERY `file:` finding — the author's
+  binding cannot attest that you read the bytes — and is also the only path that may rebind a
+  legacy/stale finding after a fresh review of the current sealed bytes, while generic finding
+  updates cannot edit it. Run `vigil assess contract finding verify` for the exact
+  `--provenance-inline` shape
 - `defect_family` uses CWE-based names: `buffer-overflow`, `integer-overflow`, `use-after-free`, `injection`, `race-condition`, `crypto-misuse`, `auth-bypass`, `format-string`
 - `details.cwe_id` must be a specific CWE ID (e.g., `CWE-122`, not generic `CWE-119`)
 - `source_name` is your agent name (e.g., `code-vuln-hunter`)

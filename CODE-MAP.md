@@ -187,7 +187,9 @@ A prompt change is **not** prompt-only when the prompt defines an artifact the b
 - `orchestrator/backend/app/services/code_analysis.py` allowlists fields persisted by repo/file
   updates and structural sync. A new column must land here, in the DB, and in the API together.
 - `agent/scripts/assess/commands/code_index_sync.py` — a structural field populated from tree-sitter output must be added here too, or the index artifact and the backend row disagree.
-- `agent/scripts/assess/commands/check_phase_readiness.py` — the one phase-aware readiness command; five standalone check verbs folded into it. Reusable bodies live in `agent/scripts/assess/lib/coverage_checks.py`.
+- `state_manager/command_runs.py` registers a run's output artifacts TWICE, both gated on
+  `route != "host_exec"`: pre-exec in `create_command_run` (files absent, so they index absent)
+  and again in `finalize_command_run`, the first read of the bytes. A third route needs both.
 - `orchestrator/backend/app/main.py` registers each API router explicitly; a new router is inert
   until it is added there.
 

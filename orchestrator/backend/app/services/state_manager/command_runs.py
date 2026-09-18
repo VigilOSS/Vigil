@@ -2334,13 +2334,27 @@ def finalize_command_run(
                 serialized.get("stdout_path"),
                 serialized.get("stderr_path"),
             ):
-                _common._register_artifact_reference(
-                    engagement.id,
-                    str(output_path or ""),
-                    kind="command-run-output",
-                    producer_command_run_id=int(serialized["id"]),
-                    producer_agent_role=str(serialized.get("agent_name") or ""),
-                )
+                try:
+                    _common._register_artifact_reference(
+                        engagement.id,
+                        str(output_path or ""),
+                        kind="command-run-output",
+                        producer_command_run_id=int(serialized["id"]),
+                        producer_agent_role=str(serialized.get("agent_name") or ""),
+                    )
+                except HTTPException:
+                    # Indexing the bytes is best effort; the finalize receipt is
+                    # not. Unlike the pre-exec registration, which only ever met
+                    # a file that did not exist, this one OPENS the spill — a
+                    # stream a background child is still writing, or one that
+                    # cannot be opened at all, raises here. The row has already
+                    # committed terminal, so raising would answer a finalize that
+                    # worked with a 409 whose retry is then refused as a double
+                    # finalize. The index stays honest without it: the row keeps
+                    # the last reading that succeeded — for a pre-exec row, the
+                    # absent file — so a receipt citing this run reads ``missing``
+                    # rather than claiming bytes nobody could read.
+                    continue
         return serialized
     finally:
         _close_published_outputs(published_outputs)
