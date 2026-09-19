@@ -2037,7 +2037,7 @@ def test_code_index_sync_repo_id_scopes_aggregate_to_matching_manifest(
                 "items": [dict(repo_b["backend_file"])],
             }
 
-        def post(self, endpoint: str, payload: dict[str, object]):
+        def post(self, endpoint: str, payload: dict[str, object], **_kwargs):
             self.posts.append((endpoint, payload))
             return {
                 key: payload[key]

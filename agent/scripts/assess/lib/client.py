@@ -424,8 +424,20 @@ class AssessmentClient:
         retries = max_retries if max_retries is not None else self.MAX_RETRIES
         headers = {"Content-Type": "application/json"} if body else {}
 
+        # A pooled keep-alive socket can be reaped by the server (uvicorn's
+        # timeout_keep_alive) during a long client-side gap between requests —
+        # e.g. a bulk write whose payload takes seconds to assemble after the
+        # reads that warmed the connection. Reusing that reaped socket fails
+        # with BrokenPipe/RemoteDisconnected before the request was dispatched,
+        # so it never committed and one re-send on a fresh connection is safe
+        # even when max_retries is 1. Scoped to a *reused* socket and to
+        # connection drops (not read timeouts) so a slow-but-committed write is
+        # never re-sent.
         last_error: Exception | None = None
-        for attempt in range(retries):
+        stale_conn_retry_used = False
+        attempt = 0
+        while attempt < retries:
+            reused_conn = self._conn is not None
             try:
                 conn = self._get_conn(connect_timeout)
                 conn.timeout = read_timeout
@@ -442,6 +454,7 @@ class AssessmentClient:
                 if resp.status in self.RETRYABLE_STATUSES and attempt < retries - 1:
                     self._reset_conn()
                     time.sleep(self.BACKOFF_BASE * (2 ** attempt))
+                    attempt += 1
                     continue
 
                 # Non-retryable error — report it
@@ -460,10 +473,27 @@ class AssessmentClient:
                 raise
             except (ConnectionError, socket.error, http.client.HTTPException, OSError) as exc:
                 last_error = exc
+                stale_keepalive_drop = reused_conn and isinstance(
+                    exc,
+                    (
+                        BrokenPipeError,
+                        ConnectionResetError,
+                        ConnectionAbortedError,
+                        http.client.RemoteDisconnected,
+                    ),
+                )
                 self._reset_conn()
+                if stale_keepalive_drop and not stale_conn_retry_used:
+                    # Idle pooled socket closed before committing this request;
+                    # re-send on a fresh connection without spending a normal
+                    # retry slot.
+                    stale_conn_retry_used = True
+                    continue
                 if attempt < retries - 1:
                     time.sleep(self.BACKOFF_BASE * (2 ** attempt))
+                    attempt += 1
                     continue
+                break
 
         raise AssessError(
             f"Failed after {retries} attempts: {last_error}\n"

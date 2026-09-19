@@ -3427,7 +3427,7 @@ def test_code_index_sync_validates_all_files_before_bound_cas_post(
                 return _file_page(rows)
             raise AssertionError(endpoint)
 
-        def post(self, endpoint: str, payload: dict):
+        def post(self, endpoint: str, payload: dict, **_kwargs):
             posted.append((endpoint, payload))
             return {
                 key: payload[key]

@@ -509,7 +509,7 @@ def test_code_index_sync_rejects_response_without_bound_repo_identity(
     }
     client = _ContextClient({"updated": 1})
     client.get = lambda _endpoint: [{"id": 7}]
-    client.post = lambda _endpoint, _payload: client.response
+    client.post = lambda _endpoint, _payload, **_kwargs: client.response
     monkeypatch.setattr(code_index_sync, "AssessmentClient", lambda *_args: client)
     monkeypatch.setattr(code_index_sync, "load_config", _config)
     monkeypatch.setattr(code_index_sync, "_load_manifest", lambda _path: {})

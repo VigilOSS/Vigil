@@ -7,7 +7,12 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from assess.lib.client import AssessmentClient, AssessError, require_write_result
+from assess.lib.client import (
+    DEFAULT_READ_TIMEOUT_SECONDS,
+    AssessmentClient,
+    AssessError,
+    require_write_result,
+)
 from assess.lib.code_snapshot import (
     MAX_JSON_ARTIFACT_BYTES,
     RootedSourceTree,
@@ -57,6 +62,11 @@ STRUCTURAL_RECORD_FIELDS = (
     "exports",
     "classes",
 )
+# The bulk write is one all-or-none transaction per repo, so its server-side
+# cost scales with the file count; widen the response budget past the 10s
+# default the same way bulk artifact registration does.
+_BULK_SYNC_SECONDS_PER_FILE = 0.02
+
 UNAVAILABLE_RECORD_FIELDS = {
     "functions": ("functions",),
     "entry_points": ("entry_points",),
@@ -654,7 +664,14 @@ def run(args) -> None:
         total_updated = 0
         total_skipped = 0
         for payload in prepared:
-            result = client.post("code/files/bulk-structural-metadata", payload)
+            result = client.post(
+                "code/files/bulk-structural-metadata",
+                payload,
+                read_timeout=max(
+                    DEFAULT_READ_TIMEOUT_SECONDS,
+                    _BULK_SYNC_SECONDS_PER_FILE * len(payload["updates"]),
+                ),
+            )
             result = require_write_result(
                 result,
                 operation="sync structural metadata",
