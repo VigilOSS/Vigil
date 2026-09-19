@@ -492,7 +492,8 @@ maintain tests that assert markdown prompt/doc wording, headings, or exact strin
 
 The Claude `PreCompact` hook's stdout is currently used as summarizer instructions. That behavior
 was verified against Claude Code 2.1.261 but is a third-party implementation detail, not a published
-contract; re-verify it when upgrading the client. Codex compaction steering is not shipped.
+contract; re-verify it when upgrading the client. Codex uses its documented `compact_prompt` and
+`SessionStart(compact)` surfaces instead of depending on `PreCompact` stdout.
 
 # Assess schema regeneration
 

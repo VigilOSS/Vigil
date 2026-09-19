@@ -29,6 +29,7 @@ from .client_rosters import (
     ensure_goose_recipes_link,
     ensure_goose_standard_hooks,
     ensure_opencode_agents_link,
+    refresh_codex_compact_prompt,
     unsafe_symlink_destination,
 )
 from .paths import (
@@ -1035,6 +1036,17 @@ def add_engagement_track(
     if requested not in {"web", "code"}:
         raise SystemExit(f"cannot add track '{track}'; choose web or code.")
     scope_path = _engagement_scope_path(install_root, key)
+    engagement_dir = scope_path.parent
+    codex_config = engagement_dir / ".codex" / "config.toml"
+    if codex_config.is_file():
+        unsafe_destination = unsafe_symlink_destination(
+            engagement_dir, (".codex/config.toml",)
+        )
+        if unsafe_destination is not None:
+            raise SystemExit(
+                f"unsafe Codex config path for engagement '{key}': "
+                f"{unsafe_destination} contains a symlink."
+            )
 
     def update(scope: dict[str, Any]) -> None:
         current_type = str(scope.get("engagement_type") or "")
@@ -1070,6 +1082,8 @@ def add_engagement_track(
         )
 
     scope = mutate_scope_file(scope_path, update)
+    if codex_config.is_file():
+        refresh_codex_compact_prompt(install_root / "agent", engagement_dir / ".codex")
     return _track_state(scope)
 
 

@@ -29,6 +29,11 @@ Durable design decisions live in [`docs/adr/`](docs/adr/).
 
 ### Added
 
+- **Claude and Codex now auto-compact at a 510,000-token window.** Claude applies the limit through
+  `CLAUDE_CODE_AUTO_COMPACT_WINDOW` and steers the summary through `PreCompact`. Codex renders the
+  same contract into `compact_prompt` and runs a `SessionStart(compact)` hook to re-hydrate the
+  immediate continuation. Manual and automatic compaction no longer require a follow-up
+  `vigil-resume`.
 - **`vigil --version`** reports the CLI binary's version (`vigil status` still reports the working
   root's).
 - **`vigil doctor --json`**, and `doctor` now exits non-zero on a `FAIL` row or on a missing

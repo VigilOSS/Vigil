@@ -11,6 +11,15 @@
 # is why the launcher flag, not a persisted approval, is what keeps the activity
 # and session-end receipts recording across engagements.
 
+# Compact once the active history reaches roughly half of a one-million-token
+# context. Codex accepts an absolute token threshold, not a percentage.
+model_auto_compact_token_limit = 510000
+
+# `ensure_codex_config` replaces this sentinel with the mode-aware output of the
+# canonical pre-compact.sh contract for each engagement. Keep one source of
+# compaction truth rather than maintaining a second Codex-only prompt here.
+compact_prompt = "__VIGIL_RENDER_COMPACT_PROMPT__"
+
 # Keep the engagement record in Vigil's backend ledger, not in a second
 # cross-session store. Mirrors "autoMemoryEnabled": false on the Claude side.
 # Codex ships this off by default; pinning it here also overrides an operator
@@ -41,13 +50,24 @@ timeout = 10
 async = true
 statusMessage = "Recording tool activity"
 
+[[hooks.SessionStart]]
+matcher = "^compact$"
+
+[[hooks.SessionStart.hooks]]
+type = "command"
+command = "bash -c 'if [ -n \"${VIGIL_AGENT_ROOT:-}\" ]; then exec bash \"$VIGIL_AGENT_ROOT/scripts/hooks/post-compact-resume.sh\"; fi; if [ -f scripts/hooks/post-compact-resume.sh ]; then exec bash scripts/hooks/post-compact-resume.sh; fi; if [ -f agent/scripts/hooks/post-compact-resume.sh ]; then exec bash agent/scripts/hooks/post-compact-resume.sh; fi'"
+timeout = 30
+additionalContextLimit = 5000
+statusMessage = "Rehydrating Vigil operator state"
+
 # Session-end activity receipt. No matcher: SessionEnd has no tool to match on.
 # Codex fires this on client-driven session termination (`clear`, `logout`, normal
 # exit -> `other`); a hard crash / SIGKILL / host timeout fires nothing, which is
 # why session-end.sh is fail-safe and idempotent rather than a durability guarantee.
 #
-# There is deliberately NO Codex PreCompact hook: Codex operators get the
-# `$vigil-compact` skill instead. See docs/engagement-prompt-playbook.md.
+# Codex's PreCompact stdout is ignored, so compaction steering comes from the
+# rendered `compact_prompt` above. SessionStart(compact) supplies the other half:
+# automatic authoritative-state hydration before the immediate continuation.
 #
 # The 3s timeout below is not a preference. Codex 0.154.0 hard-caps SessionEnd at
 # 3s and warns "clamping SessionEnd hook timeout to 3s" on every launch for any

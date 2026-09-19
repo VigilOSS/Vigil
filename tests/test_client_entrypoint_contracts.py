@@ -1665,10 +1665,8 @@ def test_codex_config_materializes_absolute_paths_for_all_hooks(tmp_path: Path) 
     source_dir = agent_root / ".codex"
     source_dir.mkdir(parents=True)
     shutil.copy2(repo_root / "agent" / ".codex" / "config.toml", source_dir / "config.toml")
+    shutil.copytree(repo_root / "agent" / "scripts", agent_root / "scripts")
     hooks_dir = agent_root / "scripts" / "hooks"
-    hooks_dir.mkdir(parents=True)
-    for script in ("post-tool-log.sh", "session-end.sh"):
-        (hooks_dir / script).write_text("#!/usr/bin/env bash\nexit 0\n")
 
     engagement_dir = tmp_path / "engagement"
     engagement_dir.mkdir()
@@ -1677,6 +1675,9 @@ def test_codex_config_materializes_absolute_paths_for_all_hooks(tmp_path: Path) 
     config = tomllib.loads(
         (engagement_dir / ".codex" / "config.toml").read_text(encoding="utf-8")
     )
+    assert config["model_auto_compact_token_limit"] == 510_000
+    assert "# Vigil compaction contract" in config["compact_prompt"]
+    assert "vigil assess resume-brief" in config["compact_prompt"]
     commands = [
         hook["command"]
         for event in config["hooks"].values()
@@ -1685,9 +1686,70 @@ def test_codex_config_materializes_absolute_paths_for_all_hooks(tmp_path: Path) 
     ]
     assert commands == [
         shlex.join(["bash", str(hooks_dir / "post-tool-log.sh")]),
+        shlex.join(["bash", str(hooks_dir / "post-compact-resume.sh")]),
         shlex.join(["bash", str(hooks_dir / "session-end.sh")]),
     ]
     assert all("VIGIL_AGENT_ROOT" not in command for command in commands)
+
+
+def test_codex_compact_prompt_refresh_preserves_engagement_local_hooks(
+    tmp_path: Path,
+) -> None:
+    """A mode change must not erase benchmark anti-cheat or other local hooks."""
+    repo_root = Path(__file__).resolve().parents[1]
+    engagement_dir = tmp_path / "engagement"
+    codex_dir = engagement_dir / ".codex"
+    codex_dir.mkdir(parents=True)
+    (engagement_dir / "scope.json").write_text(
+        '{"engagement_type":"both","status":"in_progress"}\n', encoding="utf-8"
+    )
+    guard_block = (
+        "[hooks]\n"
+        "[[hooks.PreToolUse]]\n"
+        'matcher = "^Bash$"\n'
+        "[[hooks.PreToolUse.hooks]]\n"
+        'type = "command"\n'
+        'command = "bash /tmp/bench-guard.sh"\n'
+    )
+    config_path = codex_dir / "config.toml"
+    config_path.write_text(
+        'compact_prompt_extra = "keep me"\n'
+        'compact_prompt = "old web prompt"\n\n'
+        + guard_block
+        + '\n[local]\ncompact_prompt = "nested value"\n'
+    )
+
+    client_rosters.refresh_codex_compact_prompt(repo_root / "agent", codex_dir)
+
+    refreshed = config_path.read_text(encoding="utf-8")
+    assert "old web prompt" not in refreshed
+    assert "combined web and source-code engagement" in refreshed
+    assert 'compact_prompt_extra = "keep me"' in refreshed
+    assert 'compact_prompt = "nested value"' in refreshed
+    assert guard_block in refreshed
+
+
+def test_codex_compact_prompt_refresh_rejects_a_symlinked_client_directory(
+    tmp_path: Path,
+) -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    engagement_dir = tmp_path / "engagement"
+    engagement_dir.mkdir()
+    (engagement_dir / "scope.json").write_text(
+        '{"engagement_type":"both","status":"in_progress"}\n', encoding="utf-8"
+    )
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    outside_config = outside / "config.toml"
+    outside_config.write_text('compact_prompt = "outside"\n')
+    (engagement_dir / ".codex").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(RuntimeError, match="symlink"):
+        client_rosters.refresh_codex_compact_prompt(
+            repo_root / "agent", engagement_dir / ".codex"
+        )
+
+    assert outside_config.read_text() == 'compact_prompt = "outside"\n'
 
 
 # Codex's `DEFAULT_PROJECT_DOC_MAX_BYTES` (codex-rs/config/src/config_toml.rs).
@@ -1749,8 +1811,8 @@ def test_committed_claude_settings_register_compaction_and_session_end_hooks() -
     assert hooks["SessionEnd"][0]["hooks"][0]["timeout"] >= 5
 
 
-def test_committed_codex_config_registers_session_end_but_no_compaction_hook() -> None:
-    """Codex gets the session-end receipt hook, deliberately no PreCompact."""
+def test_committed_codex_config_registers_compaction_resume_and_session_end() -> None:
+    """The template steers compaction and rehydrates its immediate continuation."""
     import tomllib
 
     repo_root = Path(__file__).resolve().parents[1]
@@ -1759,6 +1821,14 @@ def test_committed_codex_config_registers_session_end_but_no_compaction_hook() -
     )
     hooks = config["hooks"]
     assert "PreCompact" not in hooks
+    assert config["model_auto_compact_token_limit"] == 510_000
+    assert config["compact_prompt"] == "__VIGIL_RENDER_COMPACT_PROMPT__"
+    session_start = hooks["SessionStart"]
+    assert len(session_start) == 1
+    assert session_start[0]["matcher"] == "^compact$"
+    resume_command = session_start[0]["hooks"][0]
+    assert "post-compact-resume.sh" in resume_command["command"]
+    assert resume_command["timeout"] == 30
     session_end = hooks["SessionEnd"]
     assert len(session_end) == 1
     command = session_end[0]["hooks"][0]

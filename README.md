@@ -208,12 +208,10 @@ commands. Setup, launch behaviour, and flag forwarding:
 | `goose` | goose on direct DeepSeek | Yes — headless (`delegate`) | No | `brew install block-goose-cli`; set `DEEPSEEK_API_KEY`. |
 | `opencode` | opencode on direct DeepSeek | No — runs inline | No | opencode installed; set `DEEPSEEK_API_KEY`. |
 
-**Compaction is steered on Claude only.** Claude's `PreCompact` hook is registered with no
-matcher, so Vigil's compaction contract is applied on both a manual `/compact` and the automatic
-compaction that fires when the context window fills — you watch for nothing and run nothing
-afterwards. Vigil wires no such hook on Codex, so there a compaction runs unsteered and the
-operator runs `$vigil-resume` after one. kimi, goose, and opencode have no command surface at
-all: paste the body of `agent/commands/vigil-resume.md`.
+**Claude and Codex compact automatically at a 510,000-token window; `/compact` runs it early.**
+Vigil steers Claude through `PreCompact` and Codex through `compact_prompt`; Codex then re-hydrates
+backend state automatically. Neither path needs `vigil-resume`. For the model-window cap and clients
+without hooks, see [`docs/session-commands.md`](docs/session-commands.md#compaction-claude-and-codex).
 
 **Client memory is off.** Claude and Codex run with their cross-session memory disabled in each
 engagement's own client config, so the orchestrator ledger stays the engagement's single record —

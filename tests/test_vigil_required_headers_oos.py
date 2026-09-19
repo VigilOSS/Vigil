@@ -233,6 +233,46 @@ def test_add_track_preserves_existing_phase_and_initializes_only_new_track(tmp_p
     assert updated_web["track_transitions"][0]["actor"] == "operator"
 
 
+def test_add_track_refreshes_a_present_codex_compaction_contract(
+    tmp_path, monkeypatch
+):
+    from vigil_cli import engagements
+
+    eng = _make_engagement(tmp_path)
+    codex_dir = eng / ".codex"
+    codex_dir.mkdir()
+    (codex_dir / "config.toml").write_text("compact_prompt = 'web'\n")
+    refreshes = []
+    monkeypatch.setattr(
+        engagements,
+        "refresh_codex_compact_prompt",
+        lambda agent_root, codex_dir: refreshes.append(
+            (agent_root, codex_dir)
+        ),
+    )
+
+    engagements.add_engagement_track(tmp_path, "eng1", "code")
+
+    assert refreshes == [(tmp_path / "agent", eng / ".codex")]
+
+
+def test_add_track_rejects_a_symlinked_codex_config_before_scope_changes(tmp_path):
+    from vigil_cli import engagements
+
+    eng = _make_engagement(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    outside_config = outside / "config.toml"
+    outside_config.write_text('compact_prompt = "outside"\n')
+    (eng / ".codex").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(SystemExit, match="unsafe Codex config path"):
+        engagements.add_engagement_track(tmp_path, "eng1", "code")
+
+    assert json.loads((eng / "scope.json").read_text())["engagement_type"] == "web"
+    assert outside_config.read_text() == 'compact_prompt = "outside"\n'
+
+
 def test_add_track_is_idempotent_but_rejects_unrelated_transitions(tmp_path):
     from vigil_cli import engagements
 

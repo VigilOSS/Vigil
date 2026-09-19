@@ -5,6 +5,7 @@ import os
 import shlex
 import shutil
 import stat
+import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -213,6 +214,83 @@ def ensure_codex_skills_link(agent_root: Path, codex_dir: Path) -> None:
     _ensure_entry_links(agent_root / ".codex" / "skills", codex_dir / "skills")
 
 
+def _render_codex_compact_prompt(
+    agent_root: Path,
+    engagement_dir: Path,
+    *,
+    rendered_agent_root: Path | None = None,
+) -> str:
+    target_root = rendered_agent_root or agent_root
+    compact_hook = target_root / "scripts" / "hooks" / "pre-compact.sh"
+    payload = json.dumps(
+        {
+            "hook_event_name": "PreCompact",
+            "trigger": "manual-or-auto",
+            "cwd": str(engagement_dir),
+            "include_engagement_additions": False,
+        }
+    )
+    rendered = subprocess.run(
+        ["bash", str(compact_hook)],
+        cwd=engagement_dir,
+        input=payload,
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    compact_prompt = rendered.stdout.strip()
+    if rendered.returncode != 0 or not compact_prompt:
+        detail = rendered.stderr.strip() or "hook emitted no contract"
+        raise RuntimeError(f"failed to render Codex compact_prompt: {detail}")
+    return compact_prompt
+
+
+def refresh_codex_compact_prompt(
+    agent_root: Path,
+    codex_dir: Path,
+    *,
+    rendered_agent_root: Path | None = None,
+) -> None:
+    """Refresh only the mode-aware prompt, preserving engagement-local config."""
+    config_path = codex_dir / "config.toml"
+    unsafe_destination = unsafe_symlink_destination(
+        codex_dir.parent, (".codex/config.toml",)
+    )
+    if unsafe_destination is not None:
+        raise RuntimeError(
+            f"refusing to refresh Codex compact_prompt through symlink: "
+            f"{unsafe_destination}"
+        )
+    if not config_path.is_file():
+        return
+    compact_prompt = _render_codex_compact_prompt(
+        agent_root,
+        codex_dir.parent,
+        rendered_agent_root=rendered_agent_root,
+    )
+    replacement = f"compact_prompt = {json.dumps(compact_prompt)}"
+    original = config_path.read_text(encoding="utf-8")
+    rendered_lines: list[str] = []
+    replaced = False
+    in_root_table = True
+    for line in original.splitlines(keepends=True):
+        stripped = line.strip()
+        if stripped.startswith("["):
+            in_root_table = False
+        key = line.split("=", 1)[0].strip() if "=" in line else ""
+        if in_root_table and not replaced and key == "compact_prompt":
+            newline = "\n" if line.endswith("\n") else ""
+            line = replacement + newline
+            replaced = True
+        rendered_lines.append(line)
+    refreshed = "".join(rendered_lines)
+    if not replaced:
+        refreshed = replacement + "\n" + refreshed
+    if refreshed != original:
+        config_path.write_text(refreshed, encoding="utf-8")
+
+
 def ensure_codex_config(
     agent_root: Path,
     codex_dir: Path,
@@ -224,7 +302,11 @@ def ensure_codex_config(
     if not config_src.is_file():
         return
     target_root = rendered_agent_root or agent_root
-    script_names = ("post-tool-log.sh", "session-end.sh")
+    script_names = (
+        "post-tool-log.sh",
+        "post-compact-resume.sh",
+        "session-end.sh",
+    )
     rendered_lines: list[str] = []
     for line in config_src.read_text(encoding="utf-8").splitlines(keepends=True):
         script_name = next((name for name in script_names if name in line), None)
@@ -236,6 +318,18 @@ def ensure_codex_config(
             line = f"command = {json.dumps(command)}{newline}"
         rendered_lines.append(line)
     config_text = "".join(rendered_lines)
+
+    compact_prompt_sentinel = "__VIGIL_RENDER_COMPACT_PROMPT__"
+    if compact_prompt_sentinel in config_text:
+        engagement_dir = codex_dir.parent
+        compact_prompt = _render_codex_compact_prompt(
+            agent_root,
+            engagement_dir,
+            rendered_agent_root=rendered_agent_root,
+        )
+        config_text = config_text.replace(
+            json.dumps(compact_prompt_sentinel), json.dumps(compact_prompt)
+        )
 
     codex_dir.mkdir(parents=True, exist_ok=True)
     config_dest = codex_dir / "config.toml"

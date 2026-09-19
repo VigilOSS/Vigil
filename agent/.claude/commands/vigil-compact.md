@@ -27,7 +27,7 @@ Run the hook now and show the operator exactly what will be injected:
 Report to the operator, in three lines:
 
 1. whether the contract resolved and printed non-empty output — empty output means the
-   contract is **not** available and any compaction is running unsteered;
+   contract is **not** available;
 2. anything in the printed contract that is stale for this engagement;
 3. that the source of truth is `agent/scripts/hooks/pre-compact.sh`, and that this engagement
    may add its own rules in a `COMPACT.md` in the engagement directory without editing the

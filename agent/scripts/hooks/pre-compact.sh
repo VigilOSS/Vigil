@@ -36,8 +36,10 @@
 # AFTER the standing contract — additive only; it cannot rescind a standing rule.
 # Absent file = no-op.
 #
-# Codex gets no compaction hook by decision (see docs/engagement-prompt-playbook.md);
-# its operators run the `$vigil-compact` skill instead.
+# Codex cannot consume this stdout from PreCompact. Its engagement installer
+# renders the standing output into Codex's stable `compact_prompt`, excluding
+# mutable COMPACT.md content; the post-compaction hook injects the current local
+# additions instead. This script remains the source for both clients' contract.
 #
 # Fail-safe: this script never blocks a compaction. Every failure path exits 0
 # with (at worst) a note on stderr. Compaction proceeding unsteered is bad;
@@ -52,6 +54,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 TRIGGER=$(printf '%s' "$INPUT" | jq -r '.trigger // empty' 2>/dev/null || true)
 [ -z "$TRIGGER" ] && TRIGGER="unknown"
+
+INCLUDE_ENGAGEMENT_ADDITIONS=$(
+  printf '%s' "$INPUT" |
+    jq -r 'if .include_engagement_additions == false then "false" else "true" end' \
+      2>/dev/null || true
+)
+[ -z "$INCLUDE_ENGAGEMENT_ADDITIONS" ] && INCLUDE_ENGAGEMENT_ADDITIONS="true"
 
 HOOK_CWD=$(printf '%s' "$INPUT" | jq -r '.cwd // empty' 2>/dev/null || true)
 [ -z "$HOOK_CWD" ] && HOOK_CWD="$(pwd)"
@@ -221,7 +230,8 @@ Operator discipline (dispatch instead of probing, the lane budget, the phase-exi
 passes) is the first thing that decays after a compaction.
 CONTRACT
 
-if [ -n "$ENG_DIR" ] && [ -f "$ENG_DIR/COMPACT.md" ]; then
+if [ "$INCLUDE_ENGAGEMENT_ADDITIONS" = "true" ] && \
+   [ -n "$ENG_DIR" ] && [ -f "$ENG_DIR/COMPACT.md" ]; then
   printf '\n---\n\n'
   printf '## Engagement-local additions (%s)\n\n' "$ENG_DIR/COMPACT.md"
   printf 'These ADD to the standing contract above. They do not replace or rescind it.\n\n'

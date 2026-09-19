@@ -349,9 +349,10 @@ engagement never carries a stale copy. A command you write yourself in an engage
   directory; it is appended to the standing contract, never a replacement. That stdout behaviour was
   verified against Claude Code 2.1.261 and is a third-party implementation detail rather than a
   published contract, so re-verify it when upgrading the client — `/vigil-compact` audits whether the
-  contract is actually being applied. Vigil does not wire Codex's supported compaction events, so
-  Codex operators run `$vigil-compact` ahead of a compaction to apply the contract by hand, and
-  `$vigil-resume` afterwards to re-hydrate the seat that an unsteered compaction dropped.
+  contract is actually being applied. Codex's engagement config renders the same canonical output
+  into `compact_prompt`, then a `SessionStart(compact)` hook injects the automatic resume boundary
+  before the immediate continuation. Codex operators therefore need neither a pre-compaction
+  `$vigil-compact` invocation nor a post-compaction `$vigil-resume` invocation.
 - `agent/scripts/hooks/session-end.sh` is registered as a `SessionEnd` hook on **both** Claude
   and Codex. It records an ordinary activity receipt that the client ended; it never replaces the
   operator's separate **save my place** checkpoint. Treat the receipt as best-effort: a crash,

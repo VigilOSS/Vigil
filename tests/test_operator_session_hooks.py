@@ -22,6 +22,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 HOOKS_DIR = REPO_ROOT / "agent" / "scripts" / "hooks"
 PRE_COMPACT = HOOKS_DIR / "pre-compact.sh"
+POST_COMPACT_RESUME = HOOKS_DIR / "post-compact-resume.sh"
 SESSION_END = HOOKS_DIR / "session-end.sh"
 POST_TOOL_LOG = HOOKS_DIR / "post-tool-log.sh"
 CLAUDE_SETTINGS = REPO_ROOT / "agent" / ".claude" / "settings.json"
@@ -108,6 +109,28 @@ def test_pre_compact_appends_engagement_local_compact_md(tmp_path: Path) -> None
     assert len(result.stdout) > len(addition)
 
 
+def test_pre_compact_can_render_a_stable_prompt_without_local_additions(
+    tmp_path: Path,
+) -> None:
+    """Codex's saved compact_prompt must not freeze a mutable COMPACT.md."""
+    engagement_dir = _engagement(tmp_path)
+    (engagement_dir / "COMPACT.md").write_text("STALE-LOCAL-RULE\n", encoding="utf-8")
+
+    result = _run_hook(
+        PRE_COMPACT,
+        {
+            "trigger": "manual-or-auto",
+            "cwd": str(engagement_dir),
+            "include_engagement_additions": False,
+        },
+        cwd=engagement_dir,
+    )
+
+    assert result.returncode == 0
+    assert "vigil assess resume-brief" in result.stdout
+    assert "STALE-LOCAL-RULE" not in result.stdout
+
+
 @pytest.mark.parametrize(
     ("engagement_type", "web_readiness", "code_readiness"),
     [
@@ -189,6 +212,57 @@ def test_pre_compact_still_emits_the_contract_outside_any_engagement(
     assert result.stdout.strip()
 
 
+# --------------------------------------------------------------------------
+# post-compact-resume.sh
+# --------------------------------------------------------------------------
+
+
+def test_post_compact_resume_rehydrates_a_live_engagement(tmp_path: Path) -> None:
+    engagement_dir = _engagement(tmp_path, engagement_type="web")
+    (engagement_dir / "COMPACT.md").write_text(
+        "Preserve the engagement-local sentinel: COBALT-ORCHID.\n",
+        encoding="utf-8",
+    )
+
+    result = _run_hook(
+        POST_COMPACT_RESUME,
+        {
+            "source": "compact",
+            "cwd": str(engagement_dir),
+            "hook_event_name": "SessionStart",
+        },
+        cwd=engagement_dir,
+    )
+
+    assert result.returncode == 0
+    assert "Vigil post-compaction rehydration is mandatory" in result.stdout
+    assert "vigil assess resume-brief" in result.stdout
+    assert "agent/rules/resume.md" in result.stdout
+    assert "AGENTS.md" in result.stdout
+    assert "COMPACT.md" in result.stdout
+    assert "COBALT-ORCHID" in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("source", "status"),
+    [("startup", "in_progress"), ("compact", "closed")],
+    ids=("ordinary-start", "closed-engagement"),
+)
+def test_post_compact_resume_is_silent_outside_a_live_compaction(
+    tmp_path: Path, source: str, status: str
+) -> None:
+    engagement_dir = _engagement(tmp_path, status=status)
+
+    result = _run_hook(
+        POST_COMPACT_RESUME,
+        {"source": source, "cwd": str(engagement_dir)},
+        cwd=engagement_dir,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == ""
+
+
 def test_pre_compact_degrades_when_the_engagement_lib_is_missing(
     tmp_path: Path,
 ) -> None:
@@ -206,17 +280,11 @@ def test_pre_compact_degrades_when_the_engagement_lib_is_missing(
     assert result.stdout.strip()
 
 
-def test_precompact_is_registered_for_claude_and_for_no_other_client() -> None:
-    """Pin the registration the per-client compaction advice is derived from.
-
-    `README.md` and `docs/session-commands.md` tell a Claude operator to run
-    nothing after a compaction and a Codex operator to run `$vigil-resume`,
-    because only Claude carries the hook. That advice is not a preference; it is
-    a reading of these two config files, and wiring the Codex `PreCompact` hook
-    (a standing TODO) silently inverts it. Asserting on the registration rather
-    than on the prose keeps the docs falsifiable without pinning their wording.
-    """
-    claude_hooks = json.loads(CLAUDE_SETTINGS.read_text(encoding="utf-8"))["hooks"]
+def test_compaction_steering_is_registered_for_claude_and_codex() -> None:
+    """Pin each client's distinct, documented compaction mechanism."""
+    claude_settings = json.loads(CLAUDE_SETTINGS.read_text(encoding="utf-8"))
+    assert claude_settings["env"]["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] == "510000"
+    claude_hooks = claude_settings["hooks"]
     pre_compact = claude_hooks.get("PreCompact", [])
     assert pre_compact, (
         "agent/.claude/settings.json no longer registers PreCompact; Claude "
@@ -233,12 +301,18 @@ def test_precompact_is_registered_for_claude_and_for_no_other_client() -> None:
         for hook in entry["hooks"]
     )
 
-    codex_hooks = tomllib.loads(CODEX_CONFIG.read_text(encoding="utf-8")).get("hooks", {})
+    codex_config = tomllib.loads(CODEX_CONFIG.read_text(encoding="utf-8"))
+    codex_hooks = codex_config.get("hooks", {})
     assert "PreCompact" not in codex_hooks, (
-        "Codex now registers PreCompact. Its compaction is no longer unsteered, "
-        "so README.md and docs/session-commands.md must stop telling Codex "
-        "operators to run `$vigil-resume` after an automatic compaction."
+        "Codex ignores PreCompact stdout, so registering the canonical renderer "
+        "there would look wired while leaving its summarizer unsteered."
     )
+    assert codex_config["compact_prompt"] == "__VIGIL_RENDER_COMPACT_PROMPT__"
+    assert codex_config["model_auto_compact_token_limit"] == 510_000
+    session_start = codex_hooks["SessionStart"]
+    assert len(session_start) == 1
+    assert session_start[0]["matcher"] == "^compact$"
+    assert "post-compact-resume.sh" in session_start[0]["hooks"][0]["command"]
 
 
 # --------------------------------------------------------------------------

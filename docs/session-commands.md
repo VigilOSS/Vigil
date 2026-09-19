@@ -105,6 +105,10 @@ Seven commands are available. Each has one canonical source under
 | `codex` | Project skills, `.codex/skills/<name>/SKILL.md` | `$vigil-resume` |
 | `opencode`, `goose`, `kimi` | None | Paste the body of `agent/commands/<name>.md` |
 
+Create or select the engagement type before starting; command text never changes it. For Codex,
+`$vigil-start <focus>` supplies optional focus within the mode already stored in
+`scope.json.engagement_type`.
+
 opencode, goose, and kimi have no equivalent project-command surface. The content
 is identical — only the invocation differs — so their operators paste the command
 body or run the verbs it names directly.
@@ -118,10 +122,13 @@ filters them.
 
 ## Hooks
 
-### PreCompact (Claude)
+### Compaction (Claude and Codex)
 
-Registered with no matcher, so it fires on both manual `/compact` and automatic
-context-window compaction. It resolves the engagement type and prints a mode-aware
+Both clients use a 510,000-token auto-compact window; a smaller model context caps that value.
+`/compact` triggers the same steered flow early.
+
+Claude's `PreCompact` hook is registered with no matcher, so it fires on both manual `/compact`
+and automatic context-window compaction. It resolves the engagement type and prints a mode-aware
 Vigil compaction contract: preserve the applicable ROE/scope, workflow phase and
 exit state, in-flight ownership, evidence status, decisions, and unmasked auth
 state. Its core hydration block names `resume-brief`, `operator-checkpoint show`,
@@ -133,20 +140,26 @@ code, blue, or Android workflow.
 The hook never exits non-zero — a compaction that cannot run would leave the
 session wedged.
 
-An engagement can add rules without editing the shared hook by dropping a
-`COMPACT.md` in its engagement directory. It is appended after the standing
-contract under a clear delimiter. It is **additive only**: it cannot rescind a
-standing rule.
+An engagement can add rules without editing shared configuration by dropping a
+`COMPACT.md` in its directory. Claude appends its current contents to the
+summarizer contract; Codex injects them into the immediate post-compaction
+continuation, so additions and edits do not wait for reinstall. They are
+**additive only** and cannot rescind a standing rule.
 
-**Only Claude is steered through a compaction, so only Claude needs nothing from
-you.** The hook fires on its own when the context window fills, and `/vigil-compact`
-prints exactly what it will inject if you want to confirm the contract is live.
+Claude's unfiltered `PreCompact` hook supplies the contract as summarizer instructions.
+Codex cannot use `PreCompact` stdout for that purpose, so each engagement's installer
+renders the same canonical hook output into Codex's stable `compact_prompt` setting.
+Codex then runs `post-compact-resume.sh` through a `SessionStart` hook matching
+`compact`; its developer context reaches the immediate continuation after both manual
+and automatic compaction, including an automatic compaction in the middle of a turn.
+The resumed operator re-hydrates authoritative backend state without waiting for the
+human to invoke `$vigil-resume`.
 
-Codex supports compaction hook events, but Vigil leaves them unwired: there a
-compaction runs unsteered. A Codex operator reads the contract ahead of time with
-`$vigil-compact`, and runs `$vigil-resume` after an automatic compaction to
-re-hydrate the seat the summarizer did not preserve. kimi, goose, and opencode have
-neither the hook nor a command surface — paste the bodies of
+Claude sets `CLAUDE_CODE_AUTO_COMPACT_WINDOW`; Codex sets
+`model_auto_compact_token_limit`. Both use an absolute token count, so 510,000 is the
+configured approximation of 51% of a one-million-token context. `/vigil-compact` and
+`$vigil-compact` audit the respective client wiring. kimi, goose, and opencode have
+neither compaction integration nor a command surface — paste the bodies of
 `agent/commands/vigil-compact.md` and `agent/commands/vigil-resume.md`.
 
 ### SessionEnd (Claude and Codex)

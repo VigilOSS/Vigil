@@ -1,6 +1,6 @@
 ---
 name: vigil-resume
-description: Re-hydrate the engagement's generated operator role in a new session on an existing engagement, or after a restart, handoff, or unsteered compaction
+description: Re-hydrate the engagement's generated operator role in a new session on an existing engagement, or after a restart or handoff
 ---
 
 Resume the Vigil engagement in the current directory. Its generated operator contract decides the
