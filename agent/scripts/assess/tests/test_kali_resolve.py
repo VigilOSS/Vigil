@@ -255,3 +255,18 @@ def test_unpinned_probers_keep_the_transport_error_safety_net(tool):
     (not a target verdict) when the container resolver actually flaps — the
     safety property holds without the broken pin."""
     assert is_http_prober(tool) is True
+
+
+def test_apply_resolve_pin_skips_loopback_targets_for_extra_hosts(monkeypatch):
+    # A local *.com.local replica resolves to 127.0.0.1 on the host; a --resolve
+    # pin there would point the container at itself and override the docker
+    # extra_hosts mapping that routes the name to the host for every tool. No pin
+    # is emitted — in-container DNS (the injected /etc/hosts entry) resolves it.
+    monkeypatch.setattr(kali_resolve, "resolve_host_ips", lambda _h: ["127.0.0.1"])
+    cmd = ["curl", "-sk", "https://app.acme.example/"]
+
+    pinned = kali_resolve.apply_resolve_pin(cmd, "curl", runtime=_docker_desktop())
+
+    assert pinned is None
+    assert "--resolve" not in cmd
+    assert "--connect-to" not in cmd

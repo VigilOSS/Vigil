@@ -240,6 +240,14 @@ def apply_resolve_pin(
         return None
     ipv4 = [address for address in resolved if ipaddress.ip_address(address).version == 4]
     pin_ip = secrets.choice(ipv4 or resolved)
+    # A local replica host (e.g. a *.com.local name at 127.0.0.1 in the host
+    # /etc/hosts) is reached in-container through the docker extra_hosts mapping
+    # runtime.local_replica_hosts injects at container start, which points the
+    # name at the host gateway for ALL tools. A --resolve to loopback here would
+    # point the container at ITSELF and override that mapping, so leave the argv
+    # to in-container DNS.
+    if ipaddress.ip_address(pin_ip).is_loopback:
+        return None
     cmd.extend(["--resolve", f"{host}:{port}:{pin_ip}"])
     return pin_ip
 

@@ -236,5 +236,24 @@ def container_mounts(name: str, *, runner: Runner = run_command) -> dict[str, st
     return mounts
 
 
+def container_extra_hosts(name: str, *, runner: Runner = run_command) -> set[str]:
+    """Return the host names baked into a container's ``--add-host`` mappings.
+
+    ``extra_hosts`` are fixed at container creation, so this reads what the live
+    container was created with (its ``HostConfig.ExtraHosts``) to decide whether a
+    newly scoped local host still needs a recreate. Each entry is ``host:ip``;
+    only the host label is returned. Empty on any inspect failure."""
+    template = "{{range .HostConfig.ExtraHosts}}{{println .}}{{end}}"
+    result = runner(["docker", "inspect", "-f", template, name])
+    if result.returncode != 0:
+        return set()
+    hosts: set[str] = set()
+    for raw_line in result.stdout.splitlines():
+        host, sep, _ip = raw_line.strip().rpartition(":")
+        if sep and host:
+            hosts.add(host)
+    return hosts
+
+
 def volume_exists(name: str, *, runner: Runner = run_command) -> bool:
     return runner(["docker", "volume", "inspect", name]).returncode == 0

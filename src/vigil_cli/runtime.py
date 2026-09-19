@@ -23,6 +23,7 @@ from .paths import (
     read_env_file,
     resolve_orchestrator_base_url,
 )
+from .scope_entries import classify_scope_entry
 
 
 HEAVY_TIER_HOST_GB_THRESHOLD = 32
@@ -388,6 +389,96 @@ def _surface_egress_choice(egress: RuntimeEgress) -> None:
         )
 
 
+# A local replica host suffix. ``*.com.local`` / ``*.us.local`` names resolve to
+# loopback in the host /etc/hosts, which inside the runtime container is the
+# container itself — they reach the real host only through an ``extra_hosts``
+# mapping to the host gateway (below).
+_LOCAL_REPLICA_SUFFIX = ".local"
+
+
+def local_replica_hosts(install_root: Path) -> list[str]:
+    """Exact ``.local`` replica host names declared across all live engagements.
+
+    A local replica resolves to loopback, which inside the runtime container is
+    the container itself. Each such host is wired into the container's
+    ``/etc/hosts`` via ``--add-host <host>:host-gateway`` so EVERY tool — not
+    just curl — resolves it to the host machine. The runtime is shared across
+    engagements (like the proxy), so the set is the union across all of them.
+    Wildcard ``*.<domain>`` roots are excluded: ``extra_hosts`` / ``/etc/hosts``
+    cannot express a wildcard, so only exact names are injected.
+    """
+    engagements_dir = install_root / "agent" / "engagements"
+    if not engagements_dir.is_dir():
+        return []
+    hosts: set[str] = set()
+    for scope_path in sorted(engagements_dir.glob("*/scope.json")):
+        try:
+            scope = json.loads(scope_path.read_text())
+        except (OSError, ValueError):
+            continue
+        if not isinstance(scope, dict) or str(scope.get("status") or "") == "archived":
+            continue
+        raw_hosts = scope.get("hosts")
+        if not isinstance(raw_hosts, list):
+            continue
+        for raw in raw_hosts:
+            classified = classify_scope_entry(str(raw))
+            if not classified or classified["entry_kind"] not in ("bare_host", "url"):
+                continue
+            host = classified["host"]
+            if host.endswith(_LOCAL_REPLICA_SUFFIX):
+                hosts.add(host)
+    return sorted(hosts)
+
+
+def _extra_host_run_args(hosts: list[str]) -> list[str]:
+    """``--add-host`` argv wiring each local replica host to the host gateway."""
+    return [f"--add-host={host}:host-gateway" for host in hosts]
+
+
+def _print_local_host_restart_notice(hosts: list[str]) -> None:
+    listed = ", ".join(hosts)
+    print(
+        f"runtime\t{len(hosts)} local replica host(s) not reachable in the running "
+        f"runtime: {listed}",
+        file=sys.stderr,
+    )
+    print(
+        "  Local .local hosts are wired into the runtime only at container "
+        "creation. Run `vigil runtime restart` to pick them up — first ensure no "
+        "other engagement is running against the shared runtime, as a restart "
+        "terminates any in-flight `vigil assess kali` sessions.",
+        file=sys.stderr,
+    )
+
+
+def warn_if_local_hosts_need_restart(
+    install_root: Path,
+    *,
+    container_name: str | None = None,
+    runner: docker.Runner = docker.run_command,
+) -> list[str]:
+    """Warn (and return the list) when scoped ``.local`` hosts are missing from
+    the RUNNING runtime.
+
+    ``extra_hosts`` are fixed at container creation, so a local host scoped after
+    the runtime came up is not reachable until it is recreated. A stopped runtime
+    picks the hosts up on its next start, and a host already injected is covered —
+    both return an empty list without a notice.
+    """
+    name = container_name or default_runtime_container()
+    if not docker.container_running(name, runner=runner):
+        return []
+    wanted = local_replica_hosts(install_root)
+    if not wanted:
+        return []
+    injected = docker.container_extra_hosts(name, runner=runner)
+    missing = [host for host in wanted if host not in injected]
+    if missing:
+        _print_local_host_restart_notice(missing)
+    return missing
+
+
 def start_runtime(
     options: RuntimeOptions,
     *,
@@ -454,6 +545,12 @@ def start_runtime(
         # env vars so a `.env` key edit followed by `vigil up` takes effect without
         # a recreate. Fail-open (WARN only) — never blocks an already-running runtime.
         generate_subfinder_provider_config(options.container_name, runner=runner)
+        # extra_hosts are fixed at creation, so a .local replica scoped since this
+        # container came up is unreachable until a recreate — surface that rather
+        # than let a tool silently fail to resolve it.
+        warn_if_local_hosts_need_restart(
+            install_root, container_name=options.container_name, runner=runner
+        )
         if not allow_existing:
             raise SystemExit(_already_running_message(options.container_name, install_root))
         return
@@ -493,6 +590,10 @@ def start_runtime(
         f"{engagements_dir}:/engagements",
         docker.HOST_GATEWAY_ARG,
     ]
+    # Wire every in-scope .local replica host to the host gateway so ALL tools —
+    # not just curl's --resolve path — resolve them to the host machine.
+    local_hosts = local_replica_hosts(install_root)
+    argv.extend(_extra_host_run_args(local_hosts))
     if env_file.exists():
         argv.extend(["--env-file", str(env_file)])
     # Opt-in egress separation: no-op argv when both knobs are unset, so the
@@ -514,6 +615,11 @@ def start_runtime(
     # Translate the SUBFINDER_* keys (delivered via --env-file above) into
     # subfinder's on-disk provider-config.yaml inside the container. Fail-open.
     generate_subfinder_provider_config(options.container_name, runner=runner)
+    if local_hosts:
+        print(
+            f"runtime\twired {len(local_hosts)} local replica host(s) to the host gateway",
+            file=sys.stderr,
+        )
 
 
 def stop_runtime(container_name: str | None = None, *, runner: docker.Runner = docker.run_command) -> None:

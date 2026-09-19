@@ -102,7 +102,7 @@ from .orchestrator import (
 from .paths import default_runtime_container, resolve_install_root, resolve_source_root
 from .preflight import _preflight_engagement_start
 from .quickstart import QuickstartOptions, run_quickstart
-from .runtime import RuntimeOptions, vigil_runtime_resources, build_runtime, runtime_status, start_runtime, stop_runtime
+from .runtime import RuntimeOptions, vigil_runtime_resources, build_runtime, runtime_status, start_runtime, stop_runtime, warn_if_local_hosts_need_restart
 from .status import collect_doctor_checks, collect_status, print_doctor, print_status
 from .up import UpOptions, run_up
 
@@ -1740,6 +1740,11 @@ def _engagement(args: argparse.Namespace, install_root: Path) -> None:
                 "scope change remains durable."
             )
         request_proxy_reload(eng_dir.parent)
+        if command == "add-host":
+            # A newly scoped .local replica reaches the runtime only via an
+            # extra_hosts mapping fixed at container creation; prompt for a
+            # restart when one is not already wired into the running runtime.
+            warn_if_local_hosts_need_restart(install_root)
         print(json.dumps(mutation_result, indent=2, sort_keys=True))
     elif command == "path":
         print(_resolve_current_or_selected_engagement(install_root, key=args.key, select=args.select))
