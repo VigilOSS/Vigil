@@ -111,6 +111,8 @@ export function CoverageTab({
 
   const coverageStatuses = summary?.coverage_statuses ?? {};
   const totalCoverage = Object.values(coverageStatuses).reduce((a, b) => a + b, 0);
+  const loadedCoverage = coverageItems.length;
+  const coverageIsPartial = totalCoverage > loadedCoverage;
   const statusKeys = useMemo(() => Object.keys(coverageStatuses), [coverageStatuses]);
 
   // Build lookup: service_id → target host / surface name
@@ -433,6 +435,12 @@ export function CoverageTab({
         ) : (
           <p className="meta-text">No coverage data recorded yet.</p>
         )}
+        {coverageIsPartial && (
+          <p className="data-boundary-note" role="status">
+            Showing the first {loadedCoverage.toLocaleString()} of {totalCoverage.toLocaleString()} items.
+            Filters below apply only to the loaded rows.
+          </p>
+        )}
       </section>
 
       {/* Unified attack surface */}
@@ -443,6 +451,7 @@ export function CoverageTab({
             {targets.length} host{targets.length !== 1 ? "s" : ""}, {filteredItems.length}
             {hasAnyFilter ? ` of ${coverageItems.length}` : ""} item
             {filteredItems.length !== 1 ? "s" : ""}
+            {coverageIsPartial ? " loaded" : ""}
           </p>
         </div>
 

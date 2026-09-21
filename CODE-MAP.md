@@ -237,12 +237,16 @@ A prompt change is **not** prompt-only when the prompt defines an artifact the b
 
 - `orchestrator/backend/app/main.py` — FastAPI bootstrap. Routers are registered explicitly here.
 - `orchestrator/backend/app/db.py` — the SQLite persistence boundary and the single schema owner.
-- `orchestrator/backend/app/api/assessment.py` — the canonical live-state interface for recon, surfaces, coverage, readiness, findings, chains, credentials, dispatch/handoff registry writes, bulk ingestion, and command-run audit.
-- `orchestrator/backend/app/api/code_analysis.py` — atomic repo refresh (the only repo/file ingest write
-  path), lease-owned queue work, and generation-bound compare-and-swap for threat models and structural
-  indexes. Also the read-only paginated queue listing (`GET analysis-queue`): its `item_ids` page is the
-  ids-file contract `code-dispatch fetch --ids-file` consumes, so the two must keep one ordering and one
-  current-generation filter.
+- `orchestrator/backend/app/api/assessment.py` — the canonical live-state interface for recon,
+  surfaces, coverage, readiness, findings, chains, credentials, dispatch/handoff registry writes,
+  bulk ingestion, and command-run audit. Finding history has a compact `projection=summary` list
+  and a lossless transition point read.
+- `orchestrator/backend/app/api/intel.py` — per-engagement intel reads and writes. `/resolve` maps
+  untyped finding intel ids through the canonical search index without guessing across entity tables;
+  it reports resolved, missing, unsupported, dangling, and ambiguous ids.
+- `orchestrator/backend/app/api/code_analysis.py` — the only repo/file ingest write, lease-owned queue
+  work, generation-bound compare-and-swap, and paginated queue reads. Its `item_ids` page and
+  `code-dispatch fetch --ids-file` share ordering and current-generation filtering.
 - `orchestrator/backend/app/api/submissions.py` — the immutable submission-version and sent-reply API shared by the CLI and the web UI.
 - `orchestrator/backend/app/services/state_manager/` — the live-state service package, re-exported
   through `__init__.py` so public `state_manager.<fn>` paths remain stable.
@@ -251,17 +255,11 @@ A prompt change is **not** prompt-only when the prompt defines an artifact the b
 - `orchestrator/backend/app/services/operator_checkpoints.py` — writes `assessment_operator_checkpoints`, an append-only table enforced by SQLite triggers. The only permitted mutation is stamping a null `superseded_by_id`.
 - `orchestrator/backend/app/services/state_manager/run_accounting.py` — run identity, lifecycle, source inventory, obligations, and generation-bound receipt links shared by code, web and blue. `proofs.py` separately owns immutable evidence receipts. See: ADR 0028.
 - `orchestrator/backend/app/services/engagements.py` — filesystem-to-DB sync. Explicit deletes are tombstoned so a later sync cannot resurrect them from leftover files.
-- `orchestrator/backend/tests/` — the backend contract suite, including the doc-sync guards (`test_skill_cli_sync.py`, `test_coverage_probe_cli_sync.py`, `test_doc_dead_paths.py`). Markdown wording is reviewed through diffs, not pinned by tests.
 
 ### Frontend and the rest
 
 - `orchestrator/frontend/` — the operator SPA. `orchestrator/frontend/src/components/TabBar.tsx`
   owns the tab contract; `orchestrator/frontend/src/lib/api.ts` owns REST helpers and types;
   `orchestrator/frontend/src/lib/theme.ts` and `orchestrator/frontend/src/app.css` own presentation.
-- `orchestrator/frontend/src/components/RunsTab.tsx` — renders every value verbatim: no masking, no reveal toggle. See: ADR 0019.
 - `orchestrator/report/` — a **third** Vite app (`vigil-report`), separate from the operator SPA. `orchestrator/report/src/lib/poc.ts` owns the copy-and-run `curl` quoting.
-- `orchestrator/tests/` — two bash end-to-end scripts, not a pytest suite.
-- `agent/scripts/assess/tests/` — the assess-CLI pytest suite (~90 modules). Its `conftest.py` already puts `agent/scripts` on `sys.path`; new assess-CLI tests belong here, not in the backend suite.
-- `tests/` — the root CLI and bench-harness suite. `tests/eval/` is the deterministic, zero-LLM eval replay harness and has its own README.
-- `docs/` — user and maintainer documentation. `docs/adr/` holds the architecture decision records this map cites.
 - `tools/` — repo-root maintainer scripts that regenerate the reporting lookup tables. Distinct from `<engagement>/tools/analysis-state/`, which is engagement-local code-analysis artifact state.

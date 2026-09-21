@@ -42,8 +42,11 @@ export function TaskTimeline({ events }: TaskTimelineProps) {
   return (
     <section className="panel">
       <div className="panel-header">
-        <h2>Activity log</h2>
-        <p className="meta-text">{activityEvents.length} event{activityEvents.length !== 1 ? "s" : ""}</p>
+        <h2>Recent events</h2>
+        <p className="meta-text">
+          {activityEvents.length} event{activityEvents.length !== 1 ? "s" : ""}
+          {events.length >= 200 ? " · latest 200 loaded" : ""}
+        </p>
       </div>
       <div className="timeline" style={{ display: "flex", flexDirection: "column" }}>
         {pageEvents.map((event) => (

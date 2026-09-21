@@ -119,6 +119,16 @@ def get_intel_by_url(
     return IntelByUrlResponse(**merged)
 
 
+@router.get("/resolve")
+def resolve_intel_ids(
+    engagement_key: str,
+    ids: list[str] = Query(min_length=1, max_length=100),
+) -> list[dict[str, Any]]:
+    """Resolve untyped finding intel ids without guessing across entity tables."""
+    engagement = get_engagement_or_404(engagement_key)
+    return intel_service.resolve_intel_ids(engagement.id, ids)
+
+
 @router.get("/credentials")
 def list_intel_credentials(
     engagement_key: str,

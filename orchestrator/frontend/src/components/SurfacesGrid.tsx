@@ -63,9 +63,8 @@ export default function SurfacesGrid({
         flex: 2,
         minWidth: 220,
         valueGetter: (p) => p.data?.target_descriptor || "",
-        wrapText: true,
-        autoHeight: true,
-        cellClass: "ag-mono ag-wrap-cell",
+        tooltipValueGetter: (p) => p.data?.target_descriptor || "",
+        cellClass: "ag-mono ag-clip-cell",
       },
       {
         headerName: "Type",
@@ -94,9 +93,8 @@ export default function SurfacesGrid({
         flex: 2,
         minWidth: 200,
         valueGetter: (p) => p.data?.rationale || "—",
-        wrapText: true,
-        autoHeight: true,
-        cellClass: "ag-wrap-cell",
+        tooltipValueGetter: (p) => p.data?.rationale || "",
+        cellClass: "ag-clip-cell",
         cellStyle: { color: "var(--ink-2)" },
       },
       {

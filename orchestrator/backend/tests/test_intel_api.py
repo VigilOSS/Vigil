@@ -26,6 +26,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.db import get_connection
+from app.services.engagements import get_engagement_or_404
 from tests.test_engagements_api import write_engagement
 
 
@@ -963,6 +965,97 @@ def test_intel_search_filters_by_lead_status_and_provenance(client, isolate_sett
 
     invalid = client.get(f"{INTEL_BASE}/search", params={"lead_status": "typo"})
     assert invalid.status_code == 422, invalid.text
+
+
+def test_intel_resolve_ids_returns_scoped_record_and_missing_status(client, isolate_settings):
+    _seed_engagement(client, isolate_settings)
+    created = client.post(
+        f"{INTEL_BASE}/notes",
+        json={"title": "OAuth boundary research", "lead_status": "open"},
+    )
+    assert created.status_code == 201, created.text
+    intel_id = created.json()["id"]
+
+    response = client.get(
+        f"{INTEL_BASE}/resolve",
+        params=[("ids", intel_id), ("ids", 999999), ("ids", "legacy:vendor:key")],
+    )
+
+    assert response.status_code == 200, response.text
+    resolved, missing, unsupported = response.json()
+    assert resolved == {
+        "requested_id": intel_id,
+        "resolution": "resolved",
+        "matches": [
+            {
+                "id": intel_id,
+                "entity_type": "note",
+                "title": "OAuth boundary research",
+                "summary": "",
+                "status": "open",
+            }
+        ],
+    }
+    assert missing == {
+        "requested_id": 999999,
+        "resolution": "missing",
+        "matches": [],
+    }
+    assert unsupported == {
+        "requested_id": "legacy:vendor:key",
+        "resolution": "unsupported",
+        "matches": [],
+    }
+
+
+def test_intel_resolve_ids_reports_ambiguous_and_dangling_index_rows(client, isolate_settings):
+    _seed_engagement(client, isolate_settings)
+    note = client.post(
+        f"{INTEL_BASE}/notes",
+        json={"title": "Shared numeric id", "lead_status": "resolved"},
+    )
+    cve = client.post(
+        f"{INTEL_BASE}/cves",
+        json={
+            "cve_id": "CVE-2026-4242",
+            "affected_component": "edge",
+            "validation_status": "version_match",
+        },
+    )
+    assert note.status_code == 201, note.text
+    assert cve.status_code == 201, cve.text
+    assert note.json()["id"] == cve.json()["id"]
+    shared_id = note.json()["id"]
+
+    ambiguous = client.get(f"{INTEL_BASE}/resolve", params={"ids": shared_id})
+    assert ambiguous.status_code == 200, ambiguous.text
+    [result] = ambiguous.json()
+    assert result["resolution"] == "ambiguous"
+    assert {match["entity_type"] for match in result["matches"]} == {"note", "cve"}
+
+    engagement_id = get_engagement_or_404(ENGAGEMENT_KEY).id
+    with get_connection() as connection:
+        connection.execute(
+            "DELETE FROM intel_notes WHERE engagement_id = ? AND id = ?",
+            (engagement_id, shared_id),
+        )
+    dangling = client.get(f"{INTEL_BASE}/resolve", params={"ids": shared_id})
+    assert dangling.status_code == 200, dangling.text
+    [result] = dangling.json()
+    assert result["resolution"] == "ambiguous"
+    note_match = next(match for match in result["matches"] if match["entity_type"] == "note")
+    assert note_match["status"] == "dangling"
+
+    with get_connection() as connection:
+        connection.execute(
+            "DELETE FROM intel_cves WHERE engagement_id = ? AND id = ?",
+            (engagement_id, shared_id),
+        )
+    all_dangling = client.get(f"{INTEL_BASE}/resolve", params={"ids": shared_id})
+    assert all_dangling.status_code == 200, all_dangling.text
+    [result] = all_dangling.json()
+    assert result["resolution"] == "dangling"
+    assert {match["status"] for match in result["matches"]} == {"dangling"}
 
 
 # ──────────────────────────────────────────────────────────────

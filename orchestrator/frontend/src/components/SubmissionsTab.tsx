@@ -207,6 +207,15 @@ export function SubmissionsTab({ engagementKey, refreshVersion = 0 }: Submission
   );
   const platform = workspacePlatform(detail, selectedFinding);
   const externalHref = safeExternalHref(selectedFinding?.submission_url ?? "");
+  const hasExternalRecord = Boolean(
+    selectedFinding
+    && (
+      (selectedFinding.submission_status && selectedFinding.submission_status !== "none")
+      || selectedFinding.submission_platform
+      || selectedFinding.submission_ref
+      || selectedFinding.submission_url
+    ),
+  );
   const selectedCount = selectedAttachments.size;
   const detailedFailedVersionIds = new Set(
     detail?.pending_versions
@@ -506,7 +515,7 @@ export function SubmissionsTab({ engagementKey, refreshVersion = 0 }: Submission
             >
               <span className={`submission-severity severity-${finding.severity}`} aria-hidden="true" />
               <span className="submission-finding-copy">
-                <strong>{finding.title}</strong>
+                <strong title={finding.title}>{finding.title}</strong>
                 <span>
                   <code>{finding.slug}</code>
                   <span>{finding.verification_status.replace(/_/g, " ")}</span>
@@ -543,7 +552,7 @@ export function SubmissionsTab({ engagementKey, refreshVersion = 0 }: Submission
         <header className="submission-titlebar">
           <div>
             <p className="eyebrow">{selectedFinding?.slug ?? selectedSlug}</p>
-            <h2>Reviewed submission</h2>
+            <h2 title={selectedFinding?.title}>{selectedFinding?.title ?? "Submission review"}</h2>
             <p>
               {PLATFORM_LABELS[platform]} · backend finding row {selectedFinding?.row_version ?? "—"}
             </p>
@@ -556,7 +565,7 @@ export function SubmissionsTab({ engagementKey, refreshVersion = 0 }: Submission
           </div>
         </header>
 
-        {selectedFinding && (
+        {selectedFinding && hasExternalRecord && (
           <section
             className="submission-external-record"
             aria-label="External submission record"

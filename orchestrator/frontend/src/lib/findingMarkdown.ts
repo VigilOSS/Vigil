@@ -9,7 +9,7 @@
 // React. It accepts a structural subset of FindingsTab's `Derived` shape — the
 // `Derived` type satisfies `MarkdownFinding` without an explicit cast.
 
-import type { FindingPocRequest, FindingPocResponse, FindingReference } from "./api";
+import type { FindingPocRequest, FindingPocResponse } from "./api";
 
 export type MarkdownFinding = {
   slug: string;
@@ -31,20 +31,19 @@ export type MarkdownFinding = {
   // finding to whoever reads the copy instead of the drawer.
   auth_context?: string;
   summary?: string;
-  impact?: string;
   evidence?: string;
   steps_to_reproduce?: string[];
   poc_code?: string;
   poc_language?: string;
   poc_request?: FindingPocRequest | string;
   poc_response?: FindingPocResponse | string;
+  attack_scenario?: string;
+  impact?: string;
   remediation?: string;
-  notes?: string;
-  references?: FindingReference[];
 };
 
 // Local HTTP formatter — mirrors FindingsTab.formatHttp so request/response
-// fences read the same in the markdown export as they do in the PoC pane.
+// fences read the same in the markdown export as they do in Submission.
 function formatHttp(
   obj: FindingPocRequest | FindingPocResponse | string | undefined,
   kind: "req" | "resp",
@@ -72,16 +71,6 @@ function formatHttp(
     lines.push(body);
   }
   return lines.join("\n");
-}
-
-function refLabel(ref: FindingReference): string {
-  if (typeof ref === "string") return ref.trim();
-  if (ref && typeof ref === "object") {
-    const title = ref.title || ref.id || "";
-    if (title && ref.url) return `${title} — ${ref.url}`;
-    return ref.url || title || "";
-  }
-  return String(ref);
 }
 
 // A capture is target-controlled text. A fixed ``` fence closes on the first
@@ -162,22 +151,6 @@ export function findingToMarkdown(d: MarkdownFinding): string {
     push(d.summary.trim());
     push();
   }
-  if (d.impact && d.impact.trim()) {
-    push("### Impact");
-    push(d.impact.trim());
-    push();
-  }
-  // Presence is truthiness, not `.trim()`, and the drawer gates these the same
-  // way. A capture that is nothing but whitespace is a RECORDED capture — the
-  // whole proof on a stripped, padded or blank-response finding, which is why
-  // report/src/lib/poc.ts refuses to call one absent. Testing the trimmed value
-  // dropped the section AND its heading from the clipboard while the page still
-  // showed the bytes (AGENTS.md; ADR 0019).
-  if (d.evidence) {
-    push("### Evidence");
-    pushFenced(d.evidence);
-    push();
-  }
   // Verbatim: the author's own numbering is what other sections cite, so no
   // counter is imposed here.
   const stepsText = (d.steps_to_reproduce ?? []).join("\n").trim();
@@ -186,39 +159,47 @@ export function findingToMarkdown(d: MarkdownFinding): string {
     push(stepsText);
     push();
   }
+  const reqText = formatHttp(d.poc_request, "req");
+  const respText = formatHttp(d.poc_response, "resp");
+  const hasEvidence = Boolean(d.evidence || d.poc_code || reqText || respText);
+  // Presence is truthiness, not `.trim()`, and the drawer gates these the same
+  // way. A capture that is nothing but whitespace is a RECORDED capture — the
+  // whole proof on a stripped, padded or blank-response finding, which is why
+  // report/src/lib/poc.ts refuses to call one absent. Supporting captures stay
+  // nested under Evidence so the clipboard and Submission pane share one shape.
+  if (hasEvidence) push("### Evidence");
+  if (d.evidence) {
+    pushFenced(d.evidence);
+    push();
+  }
   if (d.poc_code) {
-    push("### Proof of Concept");
+    push("#### Payload");
     pushFenced(d.poc_code, d.poc_language || "");
     push();
   }
-  const reqText = formatHttp(d.poc_request, "req");
   if (reqText) {
-    push("### PoC Request");
+    push("#### Request");
     pushFenced(reqText, "http");
     push();
   }
-  const respText = formatHttp(d.poc_response, "resp");
   if (respText) {
-    push("### PoC Response");
+    push("#### Response");
     pushFenced(respText, "http");
+    push();
+  }
+  if (d.attack_scenario && d.attack_scenario.trim()) {
+    push("### Attack Scenario");
+    push(d.attack_scenario.trim());
+    push();
+  }
+  if (d.impact && d.impact.trim()) {
+    push("### Impact");
+    push(d.impact.trim());
     push();
   }
   if (d.remediation && d.remediation.trim()) {
     push("### Remediation");
     push(d.remediation.trim());
-    push();
-  }
-  if (d.notes && d.notes.trim()) {
-    push("### Notes");
-    push(d.notes.trim());
-    push();
-  }
-  if (d.references && d.references.length > 0) {
-    push("### References");
-    d.references.forEach((r) => {
-      const label = refLabel(r);
-      if (label) push(`- ${label}`);
-    });
     push();
   }
 

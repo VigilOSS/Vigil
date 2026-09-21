@@ -87,7 +87,7 @@ describe("HttpTab live evidence", () => {
     );
 
     render(<ToastProvider><HttpTab engagementKey="demo" refreshVersion={0} /></ToastProvider>);
-    fireEvent.click(await screen.findByRole("button", { name: "Flows" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Captured traffic" }));
 
     expect(await screen.findByText(/flow limit reached · results may be incomplete/i)).toBeTruthy();
   });
@@ -120,7 +120,7 @@ describe("HttpTab live evidence", () => {
     vi.mocked(listHttpFlows).mockRejectedValue(new Error("flow ledger unavailable"));
 
     render(<ToastProvider><HttpTab engagementKey="demo" refreshVersion={0} /></ToastProvider>);
-    fireEvent.click(await screen.findByRole("button", { name: "Flows" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Captured traffic" }));
 
     const alerts = await screen.findAllByRole("alert");
     expect(alerts.some((alert) => alert.textContent?.includes("flow ledger unavailable"))).toBe(true);
@@ -149,7 +149,7 @@ describe("HttpTab live evidence", () => {
       .mockRejectedValueOnce(new Error("flow refresh unavailable"));
 
     const view = render(<ToastProvider><HttpTab engagementKey="demo" refreshVersion={0} /></ToastProvider>);
-    fireEvent.click(await screen.findByRole("button", { name: "Flows" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Captured traffic" }));
     expect(await screen.findByText("flow grid")).toBeTruthy();
     view.rerender(<ToastProvider><HttpTab engagementKey="demo" refreshVersion={1} /></ToastProvider>);
 
@@ -166,7 +166,7 @@ describe("HttpTab live evidence", () => {
       .mockResolvedValueOnce([]);
 
     const view = render(<ToastProvider><HttpTab engagementKey="demo" refreshVersion={0} /></ToastProvider>);
-    fireEvent.click(await screen.findByRole("button", { name: "Flows" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Captured traffic" }));
     await waitFor(() => expect(listHttpFlows).toHaveBeenCalledTimes(1));
     view.rerender(<ToastProvider><HttpTab engagementKey="demo" refreshVersion={1} /></ToastProvider>);
     firstFlows.resolve([]);

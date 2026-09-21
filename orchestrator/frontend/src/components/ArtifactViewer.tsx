@@ -1,6 +1,5 @@
 import type { ReactNode } from "react";
 import type { Artifact, ArtifactContent } from "../lib/api";
-import { UntrustedDataNotice } from "./drawer/DrawerKit";
 
 type ArtifactViewerProps = {
   artifacts: Artifact[];
@@ -256,8 +255,8 @@ export function ArtifactViewer({
   return (
     <section className="panel artifact-panel">
       <div className="panel-header">
-        <h2>Artifacts</h2>
-        <p className="meta-text">Documents and engagement outputs</p>
+        <h2>Engagement files</h2>
+        <p className="meta-text">Root working documents; indexed evidence lives in the artifact ledger</p>
       </div>
       <div className="artifact-layout">
         <aside className="artifact-list">
@@ -286,7 +285,6 @@ export function ArtifactViewer({
                 <strong>{selectedArtifact.name}</strong>
                 <span className="meta-text">{selectedArtifact.media_type}</span>
               </div>
-              <UntrustedDataNotice />
               <ArtifactBody artifact={selectedArtifact} />
             </>
           ) : (

@@ -25,7 +25,6 @@ import {
   lifecyclePresentation,
   normalizedComparison,
 } from "../lib/runAudit";
-import { UntrustedDataNotice } from "./drawer/DrawerKit";
 import { TableSkeleton } from "./Skeletons";
 
 const RUN_PAGE_SIZE = 200;
@@ -337,8 +336,6 @@ export function RunsTab({
           Code, web, blue, and shared work use the same durable evidence trail.
         </p>
       </section>
-      <UntrustedDataNotice />
-
       <div className="run-audit-layout">
         <aside className="panel run-audit-rail" aria-label="Assessment runs">
           <div className="run-rail-heading">

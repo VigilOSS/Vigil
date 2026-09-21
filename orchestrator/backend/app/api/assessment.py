@@ -2777,13 +2777,35 @@ def get_finding_transitions(
     finding_slug: str,
     limit: int = Query(default=100, ge=1, le=MAX_ASSESSMENT_LIST_LIMIT),
     offset: int = Query(default=0, ge=0),
+    projection: Literal["full", "summary"] = "full",
 ) -> list[dict[str, Any]]:
     engagement = get_engagement_or_404(engagement_key)
+    if projection == "summary":
+        return state_manager.list_finding_transition_summaries(
+            engagement.id,
+            slug=finding_slug,
+            limit=limit,
+            offset=offset,
+        )
     return state_manager.list_finding_transitions(
         engagement.id,
         slug=finding_slug,
         limit=limit,
         offset=offset,
+    )
+
+
+@router.get("/findings/{finding_slug}/transitions/{transition_id}")
+def get_finding_transition(
+    engagement_key: str,
+    finding_slug: str,
+    transition_id: int,
+) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    return state_manager.get_finding_transition(
+        engagement.id,
+        slug=finding_slug,
+        transition_id=transition_id,
     )
 
 

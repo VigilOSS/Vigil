@@ -81,14 +81,17 @@ type EngagementPageProps = {
   // idempotent (compare-before-set guards against a redundant render).
   initialTab?: string;
   initialFindingSlug?: string;
-  // Drawer-tab (poc/code/links/history/intel) for a deep-linked finding.
+  // Drawer tab for a deep-linked finding.
   initialDrawerTab?: string;
+  initialIntelType?: string;
+  initialIntelId?: number;
   initialRunId?: number;
   initialRunSection?: string;
   initialRunObject?: string;
 };
 
 const ASSESSMENT_WIDE_FETCH_LIMIT = 5000;
+const RECENT_EVENT_LIMIT = 200;
 
 function formatStatusLabel(value: string | undefined) {
   return (value ?? "unknown").replace(/_/g, " ");
@@ -121,6 +124,8 @@ export function EngagementPage({
   initialTab,
   initialFindingSlug,
   initialDrawerTab,
+  initialIntelType,
+  initialIntelId,
   initialRunId,
   initialRunSection,
   initialRunObject,
@@ -142,6 +147,12 @@ export function EngagementPage({
   // pending slug above.
   const [pendingDrawerTab, setPendingDrawerTab] = useState<string | undefined>(
     coerceTabKey(initialTab) === "findings" ? initialDrawerTab : undefined,
+  );
+  const [pendingIntelType, setPendingIntelType] = useState<string | undefined>(
+    coerceTabKey(initialTab) === "intel" ? initialIntelType : undefined,
+  );
+  const [pendingIntelId, setPendingIntelId] = useState<number | undefined>(
+    coerceTabKey(initialTab) === "intel" ? initialIntelId : undefined,
   );
   const [sessions, setSessions] = useState<EngagementSession[]>([]);
   const [events, setEvents] = useState<EventRecord[]>([]);
@@ -218,7 +229,7 @@ export function EngagementPage({
   }
 
   function refreshEvents() {
-    return listEvents(engagementKey).then(setEvents);
+    return listEvents(engagementKey, RECENT_EVENT_LIMIT).then(setEvents);
   }
 
   async function refreshCodeAnalysis() {
@@ -510,7 +521,8 @@ export function EngagementPage({
         if (payload.type === "event.created") {
           setEvents((current) => {
             const nextEvent = payload.event as EventRecord;
-            return current.at(-1)?.id === nextEvent.id ? current : [...current, nextEvent];
+            if (current.at(-1)?.id === nextEvent.id) return current;
+            return [...current, nextEvent].slice(-RECENT_EVENT_LIMIT);
           });
         }
         throttledRefresh();
@@ -583,6 +595,14 @@ export function EngagementPage({
     setPendingDrawerTab((current) => (current === nextDrawerTab ? current : nextDrawerTab));
   }, [initialTab, initialFindingSlug, initialDrawerTab]);
 
+  useEffect(() => {
+    const nextTab = coerceTabKey(initialTab);
+    const nextType = nextTab === "intel" ? initialIntelType : undefined;
+    const nextId = nextTab === "intel" ? initialIntelId : undefined;
+    setPendingIntelType((current) => (current === nextType ? current : nextType));
+    setPendingIntelId((current) => (current === nextId ? current : nextId));
+  }, [initialTab, initialIntelType, initialIntelId]);
+
   const displayEvents = events;
   const displayFindings = assessmentFindings.length > 0 ? assessmentFindings : (assessmentSummary?.top_findings ?? []);
   const chains = assessmentChains.length > 0 ? assessmentChains : (assessmentSummary?.attack_chains ?? []);
@@ -615,6 +635,10 @@ export function EngagementPage({
     if (tab !== "findings") {
       setPendingFindingSlug(undefined);
       setPendingDrawerTab(undefined);
+    }
+    if (tab !== "intel") {
+      setPendingIntelType(undefined);
+      setPendingIntelId(undefined);
     }
     writeEngagementHash(engagementKey, tab);
   };
@@ -781,7 +805,16 @@ export function EngagementPage({
           )}
 
           {activeTab === "intel" && (
-            <IntelTab engagementKey={engagementKey} summary={intelSummary} />
+            <IntelTab
+              engagementKey={engagementKey}
+              summary={intelSummary}
+              initialIntelType={pendingIntelType}
+              initialIntelId={pendingIntelId}
+              onInitialRecordConsumed={() => {
+                setPendingIntelType(undefined);
+                setPendingIntelId(undefined);
+              }}
+            />
           )}
 
           {activeTab === "surfaces" && (

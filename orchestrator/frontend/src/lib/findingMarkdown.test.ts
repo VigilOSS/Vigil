@@ -149,7 +149,7 @@ test("the copied metadata carries the access the drawer displays", () => {
 });
 
 test("a capture that is only whitespace is still copied, heading and all", () => {
-  // The drawer gates Evidence and Payload on plain truthiness, and the PoC tab
+  // The drawer gates Evidence and Payload on plain truthiness, and Submission
   // badge counts `d.evidence` the same way, so a padded or stripped capture is
   // on the page. Testing `.trim()` here dropped the section AND its heading
   // from the clipboard, which is the divergence lib/poc.ts in the report package
@@ -163,9 +163,45 @@ test("a capture that is only whitespace is still copied, heading and all", () =>
     } as never);
     const label = JSON.stringify(capture);
     assert.ok(md.includes("### Evidence"), `the Evidence heading was dropped for ${label}`);
-    assert.ok(md.includes("### Proof of Concept"), `the PoC heading was dropped for ${label}`);
+    assert.ok(md.includes("#### Payload"), `the payload heading was dropped for ${label}`);
     const blocks = fencedBlocks(md);
     assert.equal(blocks.length, 2, `expected two fenced captures for ${label}, got ${blocks.length}`);
     for (const block of blocks) assert.equal(block.content, capture);
   }
+});
+
+test("the copied body follows the canonical submission order", () => {
+  const md = findingToMarkdown({
+    slug: "VA-007",
+    title: "Canonical submission",
+    severity: "high",
+    workflowLabel: "Verified",
+    verificationLabel: "Confirmed",
+    verificationKey: "confirmed",
+    summary: "Summary body",
+    steps_to_reproduce: ["1. Reproduce"],
+    evidence: "Evidence body",
+    poc_code: "curl https://target.example",
+    poc_request: "GET / HTTP/1.1",
+    poc_response: "HTTP/1.1 200 OK",
+    attack_scenario: "Attack scenario body",
+    impact: "Impact body",
+    remediation: "Remediation body",
+  });
+
+  const headings = [
+    "### Summary",
+    "### Steps to Reproduce",
+    "### Evidence",
+    "#### Payload",
+    "#### Request",
+    "#### Response",
+    "### Attack Scenario",
+    "### Impact",
+    "### Remediation",
+  ];
+  for (let index = 1; index < headings.length; index += 1) {
+    assert.ok(md.indexOf(headings[index - 1]) < md.indexOf(headings[index]), md);
+  }
+  assert.doesNotMatch(md, /### Proof of Concept|### PoC Request|### PoC Response/);
 });

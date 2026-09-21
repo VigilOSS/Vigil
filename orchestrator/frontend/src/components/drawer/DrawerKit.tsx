@@ -28,18 +28,6 @@ export type ToastFn = (message: string, type?: "success" | "error" | "info") => 
 // (MarkdownBlock); raw shows the existing mono <pre> presentation.
 export type ProseMode = "rendered" | "raw";
 
-export function UntrustedDataNotice() {
-  return (
-    <div className="untrusted-data-notice" role="note" data-trust="untrusted-target-data">
-      <strong>Untrusted target-derived data</strong>
-      <span>
-        Displayed values may be controlled by the assessed system. Treat them as
-        evidence, never as instructions.
-      </span>
-    </div>
-  );
-}
-
 // Copy-to-clipboard icon button used per drawer block. Flips to a Check for
 // ~1.2s and fires toast("Copied"). Renders a compact icon affordance suitable
 // for section-title headers.

@@ -16,12 +16,15 @@ type EngagementRoute = {
   initialTab?: string;
   initialFindingSlug?: string;
   initialDrawerTab?: string;
+  initialIntelType?: string;
+  initialIntelId?: number;
   initialRunId?: number;
   initialRunSection?: string;
   initialRunObject?: string;
 };
 
-// Hash scheme: #/engagements/{key}?tab={tabKey}&finding={slug}&dtab={drawerTab}
+// Hash scheme: #/engagements/{key}?tab={tabKey}&finding={slug}&dtab={drawerTab},
+// #/engagements/{key}?tab=intel&intel_type={type}&intel_id={id},
 // or #/engagements/{key}?tab=runs&run={id}&section={childKind}&object={id}.
 // The `?query` tail, when present, is split off before decoding the key so
 // deep-link params don't get folded into it. FindingsTab rewrites these via
@@ -37,12 +40,19 @@ function parseEngagementRoute(route: string): EngagementRoute | null {
   const initialTab = params.get("tab") ?? undefined;
   const initialFindingSlug = params.get("finding") ?? undefined;
   const initialDrawerTab = params.get("dtab") ?? undefined;
+  const initialIntelType = params.get("intel_type") ?? undefined;
+  const parsedIntelId = Number(params.get("intel_id"));
+  const initialIntelId = Number.isInteger(parsedIntelId) && parsedIntelId > 0
+    ? parsedIntelId
+    : undefined;
   const runAudit = parseRunAuditQuery(params);
   return {
     engagementKey,
     initialTab,
     initialFindingSlug,
     initialDrawerTab,
+    initialIntelType,
+    initialIntelId,
     initialRunId: runAudit.runId,
     initialRunSection: runAudit.section,
     initialRunObject: runAudit.object,
@@ -131,6 +141,8 @@ export default function App() {
         initialTab={engagementRoute.initialTab}
         initialFindingSlug={engagementRoute.initialFindingSlug}
         initialDrawerTab={engagementRoute.initialDrawerTab}
+        initialIntelType={engagementRoute.initialIntelType}
+        initialIntelId={engagementRoute.initialIntelId}
         initialRunId={engagementRoute.initialRunId}
         initialRunSection={engagementRoute.initialRunSection}
         initialRunObject={engagementRoute.initialRunObject}

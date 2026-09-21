@@ -79,8 +79,11 @@ deleted by citing this ADR:
    immutability). These make evidence *trustworthy*. They add information rather
    than removing it, which is the precise inverse of masking.
 4. **The untrusted-target-text boundary** (ADR 0018). The adversary is the
-   target, whose text can carry instructions for an agent. That boundary labels
-   and delimits; it explicitly does not delete or rewrite, and ADR 0018 says so.
+   target, whose text can carry instructions for an agent or forge structure in
+   an export. Prompt-facing renderers delimit it and receiving instructions deny
+   it authority; HTML, Markdown, link, image, and export renderers keep their
+   technical containment. This does not require repetitive visible warning labels
+   in the operator frontend, and it never deletes or rewrites the underlying data.
 
 ### PreToolUse command-filtering hooks are not reintroduced
 
@@ -126,7 +129,8 @@ a non-consenting third party, it is a control and it stays.
   same as any terminal. It is not Vigil's to make.
 - This supersedes the closing line of ADR 0018's Consequences, which anticipated
   UI masking and export redaction as separate presentation choices. They are not
-  available choices; the untrusted-data boundary in ADR 0018 stands unchanged.
+  available choices. ADR 0018 retains prompt and rendering containment while making
+  clear that ambient frontend warning labels are not a security boundary.
 
 ## Alternatives considered
 

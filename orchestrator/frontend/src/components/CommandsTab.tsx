@@ -9,7 +9,6 @@ import {
 } from "../lib/api";
 import { useBodyScrollLock, useModalFocus } from "../lib/modalScrollLock";
 import { Skeleton, TableSkeleton } from "./Skeletons";
-import { UntrustedDataNotice } from "./drawer/DrawerKit";
 
 // ag-grid is heavy (~470 kB). Lazy-load the grid so it lands in a
 // code-split chunk and never bloats the main entry bundle. The Suspense
@@ -1528,7 +1527,6 @@ function Drawer({
         ))}
       </div>
       <div className="drawer-body">
-        <UntrustedDataNotice />
         {tab === "overview" && <OverviewPane d={d} />}
         {tab === "stdout" && (
           <StreamPane

@@ -30,7 +30,7 @@ import {
 import { useBodyScrollLock, useModalFocus } from "../lib/modalScrollLock";
 import { useToast } from "../contexts/ToastContext";
 import { CodeBlock, RelTime } from "./formatting";
-import { KV, ProseSection, UntrustedDataNotice } from "./drawer/DrawerKit";
+import { KV, ProseSection } from "./drawer/DrawerKit";
 import { TableSkeleton } from "./Skeletons";
 
 const HttpGrid = lazy(() => import("./HttpGrid"));
@@ -449,7 +449,7 @@ export function HttpTab({ engagementKey, refreshVersion }: HttpTabProps) {
       {/* Variants table */}
       <section className="panel">
         <div className="panel-header">
-          <h2>Request variants</h2>
+          <h2>Endpoints</h2>
           <p className="meta-text">
             {filtered.length} variant{filtered.length === 1 ? "" : "s"}
             {observationsLoaded
@@ -526,7 +526,7 @@ function HttpViewToggle({
         onClick={() => onChange("variants")}
         aria-pressed={view === "variants"}
       >
-        Variants
+        Endpoints
       </button>
       <button
         type="button"
@@ -534,7 +534,7 @@ function HttpViewToggle({
         onClick={() => onChange("flows")}
         aria-pressed={view === "flows"}
       >
-        Flows
+        Captured traffic
       </button>
     </div>
   );
@@ -617,7 +617,6 @@ function HttpDrawer({
         </div>
 
         <div className="drawer-body">
-          <UntrustedDataNotice />
           <div className="section">
             <p className="section-title">Metadata</p>
             <div className="kv-grid">
@@ -1179,7 +1178,7 @@ function HttpFlowsView({
       {/* Flows table */}
       <section className="panel">
         <div className="panel-header">
-          <h2>HTTP flows</h2>
+          <h2>Captured traffic</h2>
           <p className="meta-text">
             {results.length} flow{results.length === 1 ? "" : "s"}
             {truncatedCount ? ` · ${truncatedCount} truncated` : ""}
@@ -1499,7 +1498,6 @@ function FlowDrawer({
         </div>
 
         <div className="drawer-body">
-          <UntrustedDataNotice />
           <div className="section">
             <p className="section-title">Metadata</p>
             <div className="kv-grid">

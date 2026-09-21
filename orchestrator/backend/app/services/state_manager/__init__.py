@@ -44,7 +44,9 @@ from .findings import (
     repair_finding_author,
     list_findings,
     get_finding,
+    get_finding_transition,
     list_exploit_candidates,
+    list_finding_transition_summaries,
     list_finding_transitions,
 )
 from .proofs import (
@@ -288,7 +290,9 @@ __all__ = [
     "repair_finding_author",
     "list_findings",
     "get_finding",
+    "get_finding_transition",
     "list_exploit_candidates",
+    "list_finding_transition_summaries",
     "list_finding_transitions",
     "EVIDENCE_HEALTH_VALUES",
     "PROOF_EVIDENCE_KINDS",

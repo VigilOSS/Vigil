@@ -3,7 +3,7 @@ from __future__ import annotations
 import functools
 
 import anyio
-from fastapi import APIRouter, status
+from fastapi import APIRouter, Query, status
 from pydantic import BaseModel, Field
 
 from ..models.event import Event
@@ -71,9 +71,15 @@ async def create_event(engagement_key: str, request: CreateEventRequest) -> Even
 
 
 @router.get("", response_model=list[EventResponse])
-def list_events(engagement_key: str) -> list[EventResponse]:
+def list_events(
+    engagement_key: str,
+    limit: int | None = Query(default=None, ge=1, le=1000),
+) -> list[EventResponse]:
     engagement = get_engagement_or_404(engagement_key)
-    return [_event_response(event) for event in list_events_for_engagement(engagement.id)]
+    events = list_events_for_engagement(engagement.id)
+    if limit is not None:
+        events = events[-limit:]
+    return [_event_response(event) for event in events]
 
 
 @router.get("/summary")

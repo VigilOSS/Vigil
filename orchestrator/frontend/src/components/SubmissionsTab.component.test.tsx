@@ -172,10 +172,14 @@ describe("SubmissionsTab", () => {
     await waitFor(() => expect(listSubmissions).toHaveBeenCalledTimes(2));
 
     await act(async () => resolveFresh(freshListing));
-    expect(await screen.findByText("Fresh submission finding")).toBeTruthy();
+    expect(
+      await screen.findByRole("heading", { level: 2, name: "Fresh submission finding" }),
+    ).toBeTruthy();
     await act(async () => resolveStale(staleListing));
 
-    expect(screen.getByText("Fresh submission finding")).toBeTruthy();
+    expect(
+      screen.getByRole("heading", { level: 2, name: "Fresh submission finding" }),
+    ).toBeTruthy();
     expect(screen.queryByText("Stale submission finding")).toBeNull();
   });
 
@@ -226,7 +230,7 @@ describe("SubmissionsTab", () => {
     const { rerender } = render(
       <SubmissionsTab engagementKey="engagement one" refreshVersion={0} />,
     );
-    await screen.findByText("Missing authorization on admin API");
+    await screen.findByRole("button", { name: /Missing authorization on admin API/ });
     fireEvent.click(screen.getByRole("button", { name: "Load more findings" }));
     const secondButton = await screen.findByRole("button", { name: /Second finding/ });
     fireEvent.click(secondButton);
@@ -246,7 +250,10 @@ describe("SubmissionsTab", () => {
 
     render(<SubmissionsTab engagementKey="engagement one" />);
 
-    expect(await screen.findByText("Missing authorization on admin API")).toBeTruthy();
+    expect(
+      await screen.findByRole("heading", { level: 2, name: "Missing authorization on admin API" }),
+    ).toBeTruthy();
+    expect(screen.queryByLabelText("External submission record")).toBeNull();
     expect(await screen.findByText("Reviewed body.")).toBeTruthy();
     expect(screen.getByText("No attachments selected")).toBeTruthy();
     expect(

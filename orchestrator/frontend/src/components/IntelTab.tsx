@@ -23,7 +23,6 @@ import {
   ProseModeToggle,
   ProseSection,
   SectionHead,
-  UntrustedDataNotice,
 } from "./drawer/DrawerKit";
 import type { ProseMode, ToastFn } from "./drawer/DrawerKit";
 import { useToast } from "../contexts/ToastContext";
@@ -33,6 +32,9 @@ import { TableSkeleton } from "./Skeletons";
 type IntelTabProps = {
   engagementKey: string;
   summary: IntelSummary | null;
+  initialIntelType?: string;
+  initialIntelId?: number;
+  onInitialRecordConsumed?: () => void;
 };
 
 // ── Entity types ─────────────────────────────────────────────────────
@@ -58,6 +60,10 @@ const ENTITY_FILTERS: FilterSpec[] = [
   { key: "org_fact", label: "Org", singular: "org fact" },
   { key: "note", label: "Notes", singular: "note" },
 ];
+
+function isIntelEntityType(value: string | undefined): value is IntelEntityType {
+  return Boolean(value && ENTITY_FILTERS.some((spec) => spec.key === value && spec.key !== "credentials"));
+}
 
 const ENTITY_LABEL = new Map<string, string>(
   ENTITY_FILTERS.map((spec) => [spec.key, spec.label]),
@@ -594,7 +600,13 @@ function DetailModal({
 }
 
 // ── Component ────────────────────────────────────────────────────────
-export function IntelTab({ engagementKey, summary }: IntelTabProps) {
+export function IntelTab({
+  engagementKey,
+  summary,
+  initialIntelType,
+  initialIntelId,
+  onInitialRecordConsumed,
+}: IntelTabProps) {
   // Per-entity caches (each entity is loaded lazily). Using a Map means we
   // only refetch an entity when its cache is cold.
   const [cache, setCache] = useState<Map<EntityFilter, Record<string, unknown>[]>>(
@@ -635,6 +647,7 @@ export function IntelTab({ engagementKey, summary }: IntelTabProps) {
   const [detailOpen, setDetailOpen] = useState(false);
   const rowRefs = useRef<Map<string, HTMLButtonElement>>(new Map());
   const lastFocusIdRef = useRef<string | null>(null);
+  const consumedInitialRecordRef = useRef<string | null>(null);
 
   // Column widths for the Intel list. Separate storage key from the
   // Findings list so the two don't collide.
@@ -732,6 +745,46 @@ export function IntelTab({ engagementKey, summary }: IntelTabProps) {
     for (const d of derivedList) m.set(d.id, d);
     return m;
   }, [derivedList]);
+
+  const writeIntelHash = useCallback((record?: Derived) => {
+    const base = `#/engagements/${encodeURIComponent(engagementKey)}`;
+    const params = new URLSearchParams({ tab: "intel" });
+    if (record) {
+      params.set("intel_type", record.entity);
+      params.set("intel_id", String(record.raw.id));
+    }
+    const next = `${base}?${params.toString()}`;
+    if (window.location.hash !== next) {
+      window.history.replaceState(null, "", next);
+      // replaceState is intentionally history-neutral but also silent. Keep
+      // App's parsed route synchronized so revisiting this exact deep link is
+      // not mistaken for the already-consumed route.
+      window.dispatchEvent(new HashChangeEvent("hashchange"));
+    }
+  }, [engagementKey]);
+
+  const openRecord = useCallback((record: Derived) => {
+    setSelectedId(record.id);
+    lastFocusIdRef.current = record.id;
+    setDetailOpen(true);
+    writeIntelHash(record);
+  }, [writeIntelHash]);
+
+  useEffect(() => {
+    if (!isIntelEntityType(initialIntelType) || initialIntelId == null) {
+      consumedInitialRecordRef.current = null;
+      return;
+    }
+    const key = `${initialIntelType}:${initialIntelId}`;
+    if (consumedInitialRecordRef.current === key) return;
+    const target = derivedById.get(key);
+    if (!target) return;
+    consumedInitialRecordRef.current = key;
+    setSelectedId(target.id);
+    lastFocusIdRef.current = target.id;
+    setDetailOpen(true);
+    onInitialRecordConsumed?.();
+  }, [initialIntelType, initialIntelId, derivedById, onInitialRecordConsumed]);
 
   // Filtering.
   const parsedQuery = useMemo(() => parseQuery(query), [query]);
@@ -1198,7 +1251,6 @@ export function IntelTab({ engagementKey, summary }: IntelTabProps) {
         <div className="panel findings-toolbar-panel" style={{ padding: 14, display: "grid", gap: 14 }}>
           {fts !== null && (
             <div>
-              <UntrustedDataNotice />
               <p className="section-title">
                 FTS results <span className="count">{fts.length}</span>
               </p>
@@ -1330,11 +1382,7 @@ export function IntelTab({ engagementKey, summary }: IntelTabProps) {
                     key={d.id}
                     d={d}
                     selected={selectedId === d.id}
-                    onClick={() => {
-                      setSelectedId(d.id);
-                      lastFocusIdRef.current = d.id;
-                      setDetailOpen(true);
-                    }}
+                    onClick={() => openRecord(d)}
                     freeTerms={parsedQuery.freeTerms}
                     gridTemplate={listGridTemplate}
                     registerRef={(id, el) => {
@@ -1388,6 +1436,7 @@ export function IntelTab({ engagementKey, summary }: IntelTabProps) {
         <DetailModal
           onClose={() => {
             setDetailOpen(false);
+            writeIntelHash();
             const el =
               lastFocusIdRef.current != null
                 ? rowRefs.current.get(lastFocusIdRef.current)
@@ -1413,10 +1462,9 @@ export function IntelTab({ engagementKey, summary }: IntelTabProps) {
         <CommandPalette
           derivedList={derivedList}
           onSelect={(id) => {
-            setSelectedId(id);
-            lastFocusIdRef.current = id;
+            const record = derivedById.get(id);
+            if (record) openRecord(record);
             setCmdOpen(false);
-            setDetailOpen(true);
           }}
           onClose={() => setCmdOpen(false)}
         />
@@ -1643,7 +1691,6 @@ function Drawer({ d, titleId }: DrawerProps) {
         {showProseToggle && <ProseModeToggle mode={proseMode} onChange={setProseMode} />}
       </div>
       <div className="drawer-body">
-        <UntrustedDataNotice />
         {tab === "overview" && <OverviewPane d={d} proseMode={proseMode} toast={toast} />}
         {tab === "references" && <ReferencesPane d={d} toast={toast} />}
         {tab === "provenance" && <ProvenancePane d={d} />}

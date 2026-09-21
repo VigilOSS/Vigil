@@ -17,7 +17,7 @@ import { getOobProbe, listOobProbes } from "../lib/api";
 import { useBodyScrollLock, useModalFocus } from "../lib/modalScrollLock";
 import { useToast } from "../contexts/ToastContext";
 import { CodeBlock, RelTime } from "./formatting";
-import { KV, ProseSection, UntrustedDataNotice } from "./drawer/DrawerKit";
+import { KV, ProseSection } from "./drawer/DrawerKit";
 import { Skeleton, TableSkeleton } from "./Skeletons";
 
 const OastGrid = lazy(() => import("./OastGrid"));
@@ -535,7 +535,6 @@ function OastDrawer({
         </div>
 
         <div className="drawer-body">
-          <UntrustedDataNotice />
           <div className="section">
             <p className="section-title">Metadata</p>
             <div className="kv-grid">

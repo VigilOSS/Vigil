@@ -7,20 +7,22 @@ import type {
   AssessmentFindingGroup,
   AssessmentFindingLink,
   AssessmentFindingTransition,
+  AssessmentFindingTransitionSummary,
   AssessmentVerificationAudit,
   FindingDetails,
   FindingPocRequest,
   FindingPocResponse,
   FindingProvenance,
   FindingReference,
+  IntelResolutionResult,
 } from "../lib/api";
 import { Check, Copy, Link as LinkIcon, List, Table2 } from "lucide-react";
-import { listAssessmentFindingGroups, listAssessmentFindingLinks, listAssessmentFindingTransitions } from "../lib/api";
+import { getAssessmentFindingTransition, listAssessmentFindingGroups, listAssessmentFindingLinks, listAssessmentFindingTransitions, resolveIntelIds } from "../lib/api";
 import { JsonTree } from "./ArtifactViewer";
 import { JsonView } from "./JsonView";
 import { useBodyScrollLock, useModalFocus } from "../lib/modalScrollLock";
-import { CodeBlock, NotesBody, isCurlLike } from "./formatting";
-import { KV, Prose, ProseModeToggle, SectionHead, UntrustedDataNotice } from "./drawer/DrawerKit";
+import { CodeBlock, isCurlLike } from "./formatting";
+import { KV, Prose, ProseModeToggle, SectionHead } from "./drawer/DrawerKit";
 import type { ProseMode, ToastFn } from "./drawer/DrawerKit";
 import { Skeleton, TableSkeleton } from "./Skeletons";
 
@@ -90,6 +92,7 @@ const KNOWN_DETAIL_KEYS = new Set<string>([
   "kill_reason",
   "kill_check",
   "impact",
+  "attack_scenario",
   "cvss_vector",
   "cvss_score",
   "remediation",
@@ -97,11 +100,15 @@ const KNOWN_DETAIL_KEYS = new Set<string>([
   "chain_required",
   "chain_rationale",
   "required_followup",
+  "block_reason",
+  "unblock_requirements",
+  "attempts_summary",
   "poc_code",
   "poc_language",
   "poc_request",
   "poc_response",
   "references",
+  "related_intel_ids",
   "slot_type",
   "entry_point",
   "sink",
@@ -134,6 +141,13 @@ function parseProvenance(
 ): FindingProvenance | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   return value;
+}
+
+function hasFindingProvenance(provenance: FindingProvenance | null): boolean {
+  return Boolean(
+    provenance &&
+    (provenance.agent_name || provenance.captured_at || provenance.artifact_ref || provenance.evidence_quote),
+  );
 }
 
 function verificationKey(finding: FindingLike): string {
@@ -345,6 +359,7 @@ export type Derived = {
   cvss_vector?: string;
   cvss_score?: number;
   impact?: string;
+  attack_scenario?: string;
   remediation?: string;
   evidence?: string;
   kill_reason?: string;
@@ -358,9 +373,13 @@ export type Derived = {
   poc_request?: FindingPocRequest | string;
   poc_response?: FindingPocResponse | string;
   references: FindingReference[];
+  related_intel_ids?: Array<string | number>;
   chain_required?: boolean;
   chain_rationale?: string;
   required_followup?: string[];
+  block_reason?: string;
+  unblock_requirements?: Record<string, unknown>;
+  attempts_summary?: string;
   slot_type?: string;
   entry_point?: string;
   sink?: string;
@@ -423,9 +442,12 @@ function buildSearchCorpus(d: Omit<Derived, "searchCorpus">): string {
     d.request_method,
     d.discovered_by,
     d.impact,
+    d.attack_scenario,
     d.remediation,
     d.evidence,
     d.kill_reason,
+    d.block_reason,
+    d.attempts_summary,
     d.root_cause_key,
     d.root_cause_role,
     d.root_cause_slug,
@@ -623,7 +645,7 @@ export function FindingsTab({
   const [findingLinksError, setFindingLinksError] = useState<string | null>(null);
   const [findingGroupsLoading, setFindingGroupsLoading] = useState(false);
   const [findingGroupsError, setFindingGroupsError] = useState<string | null>(null);
-  const [transitions, setTransitions] = useState<AssessmentFindingTransition[]>([]);
+  const [transitions, setTransitions] = useState<AssessmentFindingTransitionSummary[]>([]);
   const [transitionsLoading, setTransitionsLoading] = useState(false);
   const [transitionsError, setTransitionsError] = useState<string | null>(null);
 
@@ -841,6 +863,7 @@ export function FindingsTab({
         cvss_vector: details.cvss_vector,
         cvss_score: typeof details.cvss_score === "number" ? details.cvss_score : undefined,
         impact: details.impact,
+        attack_scenario: typeof details.attack_scenario === "string" ? details.attack_scenario : undefined,
         remediation: details.remediation,
         evidence: details.evidence,
         kill_reason: details.kill_reason,
@@ -848,7 +871,7 @@ export function FindingsTab({
         // Coerce list-typed detail fields: agents occasionally record these as
         // a single string instead of an array (e.g. a numbered multi-step block).
         // Without coercion the search-corpus builder's `(x || []).join(...)` and
-        // the PoC pane's `.map(...)` throw on a truthy non-array, which crashes
+        // the Submission pane's `.map(...)` throw on a truthy non-array, which crashes
         // the entire derivedList useMemo and white-screens the Findings tab.
         steps_to_reproduce: toStringArray(details.steps_to_reproduce),
         parameter: details.parameter,
@@ -859,9 +882,17 @@ export function FindingsTab({
         poc_request: details.poc_request,
         poc_response: details.poc_response,
         references: details.references || [],
+        related_intel_ids: Array.isArray(details.related_intel_ids)
+          ? details.related_intel_ids.filter(
+              (id): id is string | number => typeof id === "string" || typeof id === "number",
+            )
+          : undefined,
         chain_required: details.chain_required,
         chain_rationale: details.chain_rationale,
         required_followup: toStringArray(details.required_followup),
+        block_reason: typeof details.block_reason === "string" ? details.block_reason : undefined,
+        unblock_requirements: asObject(details.unblock_requirements),
+        attempts_summary: typeof details.attempts_summary === "string" ? details.attempts_summary : undefined,
         slot_type: details.slot_type,
         entry_point: details.entry_point,
         sink: details.sink,
@@ -1581,6 +1612,7 @@ export function FindingsTab({
           titleId="findings-detail-modal-title"
         >
           <Drawer
+            engagementKey={engagementKey}
             d={selectedDerived}
             derivedBySlug={derivedBySlug}
             chainsByKey={chainsByKey}
@@ -1589,7 +1621,7 @@ export function FindingsTab({
             transitionsLoading={transitionsLoading}
             transitionsError={transitionsError}
             onSelect={(slug) => {
-              // Cross-link selection (e.g. from LinksPane). Keep the
+              // Cross-link selection from Relationships. Keep the
               // modal open so the operator can navigate through related
               // findings without re-clicking.
               setSelected(slug);
@@ -1825,11 +1857,12 @@ function FindingMiniRow({
 // ── Drawer ────────────────────────────────────────────────────────────
 
 type DrawerProps = {
+  engagementKey: string;
   d: Derived;
   derivedBySlug: Map<string, Derived>;
   chainsByKey: Map<string, AssessmentAttackChainDetail>;
   chainMembersByKey: Map<string, Derived[]>;
-  transitions: AssessmentFindingTransition[];
+  transitions: AssessmentFindingTransitionSummary[];
   transitionsLoading: boolean;
   transitionsError: string | null;
   onSelect: (slug: string | null) => void;
@@ -1844,47 +1877,30 @@ type DrawerProps = {
   titleId?: string;
 };
 
-type TabId = "overview" | "poc" | "code" | "links" | "history" | "intel";
+type TabId = "overview" | "submission" | "work" | "relationships" | "code" | "history";
 
 const DRAWER_TAB_IDS: readonly TabId[] = [
   "overview",
-  "poc",
+  "submission",
+  "work",
+  "relationships",
   "code",
-  "links",
   "history",
-  "intel",
 ] as const;
 
 function isDrawerTabId(value: string | undefined): value is TabId {
   return value != null && (DRAWER_TAB_IDS as readonly string[]).includes(value);
 }
 
-// Which drawer tabs are visible for a finding. Mirrors the `hidden` rules in
-// Drawer's `tabs` array (code/links/intel are conditionally hidden; overview /
-// poc / history are always shown). Used to validate a deep-linked ?dtab= so we
+// Which drawer tabs are visible for a finding. Code is the only conditional
+// workspace; the five core reading modes stay stable across findings. Used to
+// validate a deep-linked ?dtab= so we
 // only honor a tab that actually exists for the finding.
 function drawerTabVisible(d: Derived, tab: TabId): boolean {
   switch (tab) {
     case "code":
       return !!d.slot_type;
-    case "links": {
-      const count =
-        d.links.filter((l) => l.target_kind === "finding").length +
-        d.links.filter((l) => l.target_kind === "chain").length;
-      return count > 0;
-    }
-    case "intel": {
-      const hasProvenance = !!(
-        d.provenance &&
-        (d.provenance.agent_name ||
-          d.provenance.captured_at ||
-          d.provenance.artifact_ref ||
-          d.provenance.evidence_quote)
-      );
-      return (d.references?.length ?? 0) + (hasProvenance ? 1 : 0) > 0;
-    }
     default:
-      // overview / poc / history are always visible.
       return true;
   }
 }
@@ -1894,6 +1910,7 @@ function drawerTabVisible(d: Derived, tab: TabId): boolean {
 // with the Intel + Surface drawers.
 
 function Drawer({
+  engagementKey,
   d,
   derivedBySlug,
   chainsByKey,
@@ -1940,44 +1957,26 @@ function Drawer({
     .map((l) => chainsByKey.get(l.target_ref))
     .filter((c): c is AssessmentAttackChainDetail => Boolean(c));
 
-  // Steps to reproduce moved from Overview to PoC (Issue 3b): the tab
-  // count mirrors what PocPane actually renders so the badge stays
-  // honest. Count a non-empty steps_to_reproduce array as one section.
-  // Non-empty after joining, so an authored block that is only whitespace does
-  // not inflate the PoC badge.
+  // Counts describe meaningful records, not every field rendered in a pane.
   const hasStepsForCount = (d.steps_to_reproduce ?? []).join("").trim().length > 0;
-  const pocCount =
+  const submissionCount =
     [d.poc_code, d.poc_request, d.poc_response, d.evidence].filter(Boolean)
       .length + (hasStepsForCount ? 1 : 0);
   const codeCount = d.slot_type ? 1 : 0;
-  const linksCount = linkedFindings.length + linkedChains.length;
+  const relationshipsCount =
+    linkedFindings.length +
+    linkedChains.length +
+    (d.references?.length ?? 0) +
+    (d.related_intel_ids?.length ?? 0);
   const historyCount = transitions.length;
-  // The Intel tab is VISIBLE when there are references OR any provenance
-  // field (so a provenance-only finding still gets the tab). The empty
-  // provenance object is dropped here too (fixes VA-004, which used to show
-  // an Intel tab for an empty provenance object with no refs).
-  const hasProvenance = !!(
-    d.provenance &&
-    (d.provenance.agent_name ||
-      d.provenance.captured_at ||
-      d.provenance.artifact_ref ||
-      d.provenance.evidence_quote)
-  );
-  const intelVisible = (d.references?.length ?? 0) > 0 || hasProvenance;
-  // The badge counts ONLY references — provenance is a single supplementary
-  // block, not an "intel item", so folding it in made the badge misleading
-  // (e.g. "Intel 3" for 2 refs + provenance).
-  const intelBadge = d.references?.length ?? 0;
 
   const tabs: { id: TabId; label: string; count?: number; hidden?: boolean }[] = [
     { id: "overview", label: "Overview" },
-    // "PoC" rather than "Proof of Concept": the audience knows the acronym
-    // and the long label crowds the tab bar at ~1100px.
-    { id: "poc", label: "PoC", count: pocCount },
+    { id: "submission", label: "Submission", count: submissionCount || undefined },
+    { id: "work", label: "Work" },
+    { id: "relationships", label: "Relationships", count: relationshipsCount || undefined },
     { id: "code", label: "Code", count: codeCount, hidden: !d.slot_type },
-    { id: "links", label: "Links", count: linksCount, hidden: linksCount === 0 },
     { id: "history", label: "History", count: historyCount },
-    { id: "intel", label: "Intel", count: intelBadge || undefined, hidden: !intelVisible },
   ];
   const visibleTabs = tabs.filter((t) => !t.hidden);
 
@@ -1997,7 +1996,7 @@ function Drawer({
       void navigator.clipboard?.writeText(findingToMarkdown(d));
       setMdCopied(true);
       window.setTimeout(() => setMdCopied(false), 1500);
-      toast("Copied finding as Markdown", "success");
+      toast("Copied submission as Markdown", "success");
     } catch {
       // ignore
     }
@@ -2037,8 +2036,8 @@ function Drawer({
               type="button"
               className="copy-btn"
               onClick={copyMarkdown}
-              title="Copy finding as Markdown"
-              aria-label="Copy finding as Markdown"
+              title="Copy submission as Markdown"
+              aria-label="Copy submission as Markdown"
             >
               {mdCopied ? <Check size={13} /> : <Copy size={13} />}
             </button>
@@ -2104,7 +2103,7 @@ function Drawer({
         {/* Prose view-mode toggle — a single drawer-wide control (Eye =
             rendered markdown, Code = raw mono <pre>) applied to every prose
             section. Only meaningful on tabs that render prose. */}
-        {(tab === "overview" || tab === "poc") && (
+        {(tab === "overview" || tab === "submission" || tab === "work" || tab === "relationships") && (
           <div className="prose-mode-wrap">
             <span className="prose-mode-label">View</span>
             <ProseModeToggle mode={proseMode} onChange={setProseMode} />
@@ -2112,28 +2111,32 @@ function Drawer({
         )}
       </div>
       <div className="drawer-body">
-        <UntrustedDataNotice />
         {tab === "overview" && <OverviewPane d={d} proseMode={proseMode} toast={toast} />}
-        {tab === "poc" && <PocPane d={d} proseMode={proseMode} toast={toast} />}
+        {tab === "submission" && <SubmissionPane d={d} proseMode={proseMode} toast={toast} />}
+        {tab === "work" && <WorkPane d={d} proseMode={proseMode} toast={toast} />}
         {tab === "code" && <CodePane d={d} toast={toast} />}
-        {tab === "links" && (
-          <LinksPane
+        {tab === "relationships" && (
+          <RelationshipsPane
+            engagementKey={engagementKey}
             d={d}
             derivedBySlug={derivedBySlug}
             linkedFindings={linkedFindings}
             linkedChains={linkedChains}
             chainMembersByKey={chainMembersByKey}
             onSelect={(slug) => onSelect(slug)}
+            toast={toast}
+            proseMode={proseMode}
           />
         )}
         {tab === "history" && (
           <HistoryPane
+            engagementKey={engagementKey}
+            findingSlug={d.slug}
             transitions={transitions}
             loading={transitionsLoading}
             error={transitionsError}
           />
         )}
-        {tab === "intel" && <IntelPane d={d} toast={toast} />}
       </div>
     </aside>
   );
@@ -2144,176 +2147,154 @@ function Drawer({
 // CopyChip / SectionHead / Prose / KV + the ToastFn / ProseMode types are
 // imported from ./drawer/DrawerKit (shared with the Intel + Surface drawers).
 
+function previewWords(text: string, limit: number): { text: string; truncated: boolean } {
+  const words = text.trim().split(/\s+/).filter(Boolean);
+  if (words.length <= limit) return { text: text.trim(), truncated: false };
+  return { text: `${words.slice(0, limit).join(" ")}…`, truncated: true };
+}
+
 function OverviewPane({ d, proseMode, toast }: { d: Derived; proseMode: ProseMode; toast: ToastFn }) {
-  const additionalDetailKeys = Object.keys(d.details).filter(
-    (key) => !KNOWN_DETAIL_KEYS.has(key),
-  );
+  const summary = previewWords(d.summary || "", 60);
+  const followupCount = d.required_followup?.length ?? 0;
   return (
     <>
-      {d.summary && (
+      {summary.text && (
         <div className="section">
-          <SectionHead title="Summary" copyText={d.summary} toast={toast} />
-          <Prose text={d.summary} mode={proseMode} />
-        </div>
-      )}
-      {d.impact && (
-        <div className="callout impact">
-          <SectionHead title="Impact" copyText={d.impact} toast={toast} />
-          <Prose text={d.impact} mode={proseMode} />
-        </div>
-      )}
-      {d.remediation && (
-        <div className="callout remediation">
-          <SectionHead title="Remediation" copyText={d.remediation} toast={toast} />
-          <Prose text={d.remediation} mode={proseMode} />
-        </div>
-      )}
-      {/* Notes is analyst commentary — it belongs near Summary/Impact/
-          Remediation, not buried after admin Metadata. Render it right
-          after Remediation, ahead of Root Cause Group / Metadata. */}
-      {d.notes && (
-        <div className="section">
-          <SectionHead title="Notes" copyText={d.notes} toast={toast} />
-          {/* Notes follow the drawer-wide prose toggle: rendered markdown by
-              default, raw mono <pre> when toggled. NotesBody is retained for
-              non-drawer usages (e.g. IntelTab). */}
-          <Prose text={d.notes} mode={proseMode} />
-        </div>
-      )}
-      {d.root_cause_role && (
-        <div className="section root-cause-section">
-          <p className="section-title">Root Cause Group</p>
-          {d.root_cause_role === "root" ? (
-            <p>
-              Root finding with {d.sibling_count ?? 0} linked sibling outcomes
-              {d.residual_path_count ? `, of which ${d.residual_path_count} close an attack path` : ""}.
-            </p>
-          ) : (
-            <>
-              <p>
-                Sibling of <code>{d.root_cause_slug}</code>.{" "}
-                {d.root_cause_effect === "eliminates_attack_path"
-                  ? "Fixing the root eliminates this attack path, but this finding remains a residual remediation item."
-                  : "Fixing the root eliminates this finding."}
-              </p>
-              {d.root_cause_note && <p className="meta-text">{d.root_cause_note}</p>}
-            </>
-          )}
-        </div>
-      )}
-      {d.kill_reason && (
-        <div className="callout kill">
-          <p className="section-title">
-            Kill reason · check {d.kill_check ?? "?"}
-          </p>
-          <p>{d.kill_reason}</p>
+          <SectionHead title="At a glance" copyText={d.summary} toast={toast} />
+          <Prose text={summary.text} mode={proseMode} />
+          {summary.truncated && <p className="section-hint">Full summary is in Submission.</p>}
         </div>
       )}
       <div className="section">
-        <p className="section-title">Metadata</p>
+        <p className="section-title">Key facts</p>
         <div className="kv-grid">
           <KV k="Location" v={d.canonical_location} mono toast={toast} />
           <KV k="Method" v={d.request_method} />
           <KV k="Parameter" v={d.parameter} mono />
           <KV k="Auth context" v={d.auth_context} />
           <KV k="Source" v={d.source_name} />
-          <KV k="Discovered by" v={d.discovered_by} mono />
           <KV k="Defect family" v={d.defect_family} />
-          <KV k="Dedupe key" v={d.root_cause_key} mono />
-          {/* OWASP stays — it's not in the hero. CWE / CVSS score / CVSS
-              vector are dropped here: the hero already surfaces cwe_id (tag)
-              and cvss_score (cvss-chip), so repeating them is duplication. */}
           <KV k="OWASP" v={d.owasp_category} />
-          {d.merged_into_slug && (
-            <KV k="Merged into" v={d.merged_into_slug} mono />
-          )}
+          <KV k="Updated" v={relTime(d.updated_at)} />
+        </div>
+      </div>
+      {(d.block_reason || followupCount > 0 || d.root_cause_role) && (
+        <div className="overview-attention" aria-label="Current attention">
+          <p className="section-title">Current attention</p>
+          <div className="attention-items">
+            {d.block_reason && <span className="pill pill-blocked">Blocked</span>}
+            {followupCount > 0 && (
+              <span className="pill pill-active">{followupCount} follow-up{followupCount === 1 ? "" : "s"}</span>
+            )}
+            {d.root_cause_role === "root" && (
+              <span className="pill pill-unreviewed">Root · {d.sibling_count ?? 0} siblings</span>
+            )}
+            {d.root_cause_role === "sibling" && (
+              <span className="pill pill-unreviewed">Linked to {d.root_cause_slug}</span>
+            )}
+          </div>
+        </div>
+      )}
+      <details className="detail-disclosure">
+        <summary>Advanced metadata</summary>
+        <div className="kv-grid">
+          <KV k="Discovered by" v={d.discovered_by} mono />
+          <KV k="Deduplication key" v={d.root_cause_key} mono />
+          <KV k="Merged into" v={d.merged_into_slug ?? undefined} mono />
           <KV k="Evidence ref" v={d.evidence_ref} mono />
           <KV k="Source binding" v={d.code_snapshot_status} />
           <KV k="Source repo" v={d.provenance?.code_snapshot?.repo_id} mono />
           <KV k="Source generation" v={d.provenance?.code_snapshot?.repo_generation} mono />
-          <KV
-            k="Source manifest"
-            v={d.provenance?.code_snapshot?.source_manifest_digest}
-            mono
-            toast={toast}
-          />
+          <KV k="Source manifest" v={d.provenance?.code_snapshot?.source_manifest_digest} mono toast={toast} />
+          <KV k="CVSS vector" v={d.cvss_vector} mono />
         </div>
-      </div>
-      {(d.chain_required !== undefined || d.chain_rationale) && (
-        <div className="section">
-          <p className="section-title">Chain context</p>
-          {d.chain_required !== undefined && (
-            <p>
-              <span
-                className={`pill ${d.chain_required ? "pill-active" : "pill-unreviewed"}`}
-              >
-                {d.chain_required ? "Chain required" : "Standalone"}
-              </span>
-            </p>
-          )}
-          {d.chain_rationale && <p>{d.chain_rationale}</p>}
-        </div>
-      )}
-      {/* Steps to reproduce now live in the Proof of Concept pane so
-       * reproduction steps read contiguously with Evidence / Payload /
-       * Request / Response. Required follow-up stays here because it's
-       * a remediation pointer, not a reproduction artifact. */}
-      {d.required_followup && d.required_followup.length > 0 && (
-        <div className="section">
-          <SectionHead
-            title="Required follow-up"
-            copyText={d.required_followup.map((s, i) => `${i + 1}. ${s}`).join("\n")}
-            toast={toast}
-          />
-          <ul className="steps">
-            {d.required_followup.map((s, i) => (
-              <li key={i}>{s}</li>
-            ))}
-          </ul>
-        </div>
-      )}
-      {(d.variant_of || d.original_pattern) && (
-        <div className="section">
-          <SectionHead
-            title="Variant"
-            copyText={d.original_pattern || d.variant_of || ""}
-            toast={toast}
-          />
-          {d.variant_of && (
-            <p>
-              <span style={{ color: "var(--muted)", fontSize: "0.82rem" }}>
-                Variant of:{" "}
-              </span>
-              <span className="mono">{d.variant_of}</span>
-            </p>
-          )}
-          {d.original_pattern && (
-            <pre className="pre">{d.original_pattern}</pre>
-          )}
-        </div>
-      )}
-      {additionalDetailKeys.length > 0 && (
-        <div className="section">
-          <p className="section-title">Additional details</p>
-          <div className="json-children">
-            {additionalDetailKeys.map((key) => (
-              <JsonTree
-                key={key}
-                label={key}
-                value={toJsonValue((d.details as Record<string, unknown>)[key])}
-                defaultOpen
-              />
-            ))}
-          </div>
-        </div>
-      )}
+      </details>
     </>
   );
 }
 
-// Exported for FindingsTab.component.test.tsx: this pane renders the operator's
-// own captures, and what it shows has to match what its copy chips hand back.
-export function PocPane({
+function WorkPane({ d, proseMode, toast }: { d: Derived; proseMode: ProseMode; toast: ToastFn }) {
+  const additionalDetailKeys = Object.keys(d.details).filter((key) => !KNOWN_DETAIL_KEYS.has(key));
+  const unblockRequirements = d.unblock_requirements && Object.keys(d.unblock_requirements).length
+    ? d.unblock_requirements
+    : null;
+  const hasWork = Boolean(
+    d.required_followup?.length || d.block_reason || unblockRequirements || d.attempts_summary ||
+    d.notes || d.chain_rationale || d.kill_reason || additionalDetailKeys.length,
+  );
+  return (
+    <>
+      {d.required_followup && d.required_followup.length > 0 && (
+        <div className="section">
+          <SectionHead title="Required follow-up" copyText={d.required_followup.join("\n")} toast={toast} />
+          <ul className="steps">
+            {d.required_followup.map((step, i) => <li key={i}>{step}</li>)}
+          </ul>
+        </div>
+      )}
+      {d.block_reason && (
+        <div className="callout kill">
+          <SectionHead title="Blocker" copyText={d.block_reason} toast={toast} />
+          <Prose text={d.block_reason} mode={proseMode} />
+        </div>
+      )}
+      {unblockRequirements && (
+        <div className="section">
+          <p className="section-title">Unblock requirements</p>
+          <div className="kv-grid">
+            {Object.entries(unblockRequirements).map(([key, value]) => (
+              <KV key={key} k={key.replace(/_/g, " ")} v={String(value)} />
+            ))}
+          </div>
+        </div>
+      )}
+      {d.attempts_summary && (
+        <div className="section">
+          <SectionHead title="Attempts summary" copyText={d.attempts_summary} toast={toast} />
+          <Prose text={d.attempts_summary} mode={proseMode} />
+        </div>
+      )}
+      {(d.chain_required !== undefined || d.chain_rationale) && (
+        <div className="section">
+          <p className="section-title">Chain context</p>
+          {d.chain_required !== undefined && (
+            <p><span className={`pill ${d.chain_required ? "pill-active" : "pill-unreviewed"}`}>
+              {d.chain_required ? "Chain required" : "Standalone"}
+            </span></p>
+          )}
+          {d.chain_rationale && <Prose text={d.chain_rationale} mode={proseMode} />}
+        </div>
+      )}
+      {d.notes && (
+        <div className="section">
+          <SectionHead title="Operational replay log" copyText={d.notes} toast={toast} />
+          <Prose text={d.notes} mode={proseMode} />
+        </div>
+      )}
+      {d.kill_reason && (
+        <div className="callout kill">
+          <p className="section-title">Kill reason · check {d.kill_check ?? "?"}</p>
+          <Prose text={d.kill_reason} mode={proseMode} />
+        </div>
+      )}
+      {additionalDetailKeys.length > 0 && (
+        <details className="detail-disclosure">
+          <summary>Additional working details</summary>
+          <div className="json-children">
+            {additionalDetailKeys.map((key) => (
+              <JsonTree key={key} label={key} value={toJsonValue(d.details[key])} defaultOpen />
+            ))}
+          </div>
+        </details>
+      )}
+      {!hasWork && <p className="empty">No open work recorded for this finding.</p>}
+    </>
+  );
+}
+
+// Exported for focused tests: this pane owns the canonical submission order and
+// renders captures byte-for-byte.
+export function SubmissionPane({
   d,
   proseMode,
   toast,
@@ -2323,12 +2304,7 @@ export function PocPane({
   // out of here is byte-identical to what the finding holds.
   const stepsText = (d.steps_to_reproduce ?? []).join("\n").trim();
   const hasSteps = stepsText.length > 0;
-  const hasAny =
-    hasSteps ||
-    d.evidence ||
-    d.poc_code ||
-    d.poc_request ||
-    d.poc_response;
+  const hasCaptures = Boolean(d.poc_code || d.poc_request || d.poc_response);
   const pocCodeIsCurl = isCurlLike(d.poc_code);
   const reqText = d.poc_request ? formatHttp(d.poc_request, "req") : "";
   const respText = d.poc_response ? formatHttp(d.poc_response, "resp") : "";
@@ -2343,7 +2319,7 @@ export function PocPane({
   const ev = d.evidence || "";
   // Pick a render mode for evidence: raw HTTP exchanges get the mono
   // .pre treatment; short prose gets a compact blockquote; longer
-  // prose keeps NotesBody's paragraph layout but inside a callout. The probe is
+  // prose keeps the shared Markdown layout but inside a callout. The probe is
   // trimmed because LAYOUT is all it decides — a capture that opens with a
   // blank line is still an HTTP exchange — but nothing rendered or copied is.
   const evProbe = ev.trim();
@@ -2360,6 +2336,12 @@ export function PocPane({
 
   return (
     <>
+      {d.summary && (
+        <div className="section">
+          <SectionHead title="Summary" copyText={d.summary} toast={toast} />
+          <Prose text={d.summary} mode={proseMode} />
+        </div>
+      )}
       {hasSteps && (
         <div className="section">
           {/* Steps render exactly as authored — no imposed counter, no list
@@ -2372,44 +2354,69 @@ export function PocPane({
           <div className="steps-verbatim">{stepsText}</div>
         </div>
       )}
-      {ev && (
+      {(ev || hasCaptures) && (
         // Evidence ("how we know") gets a callout so it reads as distinct
         // from Steps-to-reproduce ("how to reproduce"), which keep .section.
         <div className="callout evidence">
           <SectionHead title="Evidence" copyText={ev} toast={toast} />
-          {evidenceMode === "http" || proseMode === "raw" ? (
-            <pre className="pre resp">{ev}</pre>
-          ) : evidenceMode === "quote" ? (
-            <blockquote className="evidence-inline">{ev}</blockquote>
-          ) : (
-            <Prose text={ev} mode={proseMode} />
+          {ev && (evidenceMode === "http" || proseMode === "raw" ? (
+              <pre className="pre resp">{ev}</pre>
+            ) : evidenceMode === "quote" ? (
+              <blockquote className="evidence-inline">{ev}</blockquote>
+            ) : (
+              <Prose text={ev} mode={proseMode} />
+            ))}
+          {hasCaptures && (
+            <details className="detail-disclosure supporting-captures">
+              <summary>Supporting captures</summary>
+              <div className="supporting-captures-body">
+                {d.poc_code && (
+                  <div className="section">
+                    <p className="section-title">
+                      Payload
+                      {d.poc_language && <span className="count">{d.poc_language}</span>}
+                      {pocCodeIsCurl && <span className="count">curl</span>}
+                    </p>
+                    <CodeBlock text={d.poc_code} onCopied={() => toast("Copied", "success")} />
+                  </div>
+                )}
+                {reqText && (
+                  <div className="section">
+                    <SectionHead title="Request" copyText={reqText} toast={toast} />
+                    <pre className="pre req">{reqText}</pre>
+                  </div>
+                )}
+                {respText && (
+                  <div className="section">
+                    <SectionHead title="Response" copyText={respText} toast={toast} />
+                    <pre className="pre resp">{respText}</pre>
+                  </div>
+                )}
+              </div>
+            </details>
           )}
         </div>
       )}
-      {d.poc_code && (
+      {d.attack_scenario && (
         <div className="section">
-          <p className="section-title">
-            Payload
-            {d.poc_language && <span className="count">{d.poc_language}</span>}
-            {pocCodeIsCurl && <span className="count">curl</span>}
-          </p>
-          <CodeBlock text={d.poc_code} onCopied={() => toast("Copied", "success")} />
+          <SectionHead title="Attack scenario" copyText={d.attack_scenario} toast={toast} />
+          <Prose text={d.attack_scenario} mode={proseMode} />
         </div>
       )}
-      {reqText && (
-        <div className="section">
-          <SectionHead title="Request" copyText={reqText} toast={toast} />
-          <pre className="pre req">{reqText}</pre>
+      {d.impact && (
+        <div className="callout impact">
+          <SectionHead title="Impact" copyText={d.impact} toast={toast} />
+          <Prose text={d.impact} mode={proseMode} />
         </div>
       )}
-      {respText && (
-        <div className="section">
-          <SectionHead title="Response" copyText={respText} toast={toast} />
-          <pre className="pre resp">{respText}</pre>
+      {d.remediation && (
+        <div className="callout remediation">
+          <SectionHead title="Remediation" copyText={d.remediation} toast={toast} />
+          <Prose text={d.remediation} mode={proseMode} />
         </div>
       )}
-      {!hasAny && (
-        <p className="empty">No proof-of-concept captured for this finding.</p>
+      {!d.summary && !hasSteps && !ev && !hasCaptures && !d.attack_scenario && !d.impact && !d.remediation && (
+        <p className="empty">No submission content recorded for this finding.</p>
       )}
     </>
   );
@@ -2563,23 +2570,57 @@ function CodePane({ d, toast }: { d: Derived; toast: ToastFn }) {
   );
 }
 
-function LinksPane({
+function RelationshipsPane({
+  engagementKey,
   d,
   derivedBySlug,
   linkedFindings,
   linkedChains,
   chainMembersByKey,
   onSelect,
+  toast,
+  proseMode,
 }: {
+  engagementKey: string;
   d: Derived;
   derivedBySlug: Map<string, Derived>;
   linkedFindings: DerivedLink[];
   linkedChains: AssessmentAttackChainDetail[];
   chainMembersByKey: Map<string, Derived[]>;
   onSelect: (slug: string) => void;
+  toast: ToastFn;
+  proseMode: ProseMode;
 }) {
   return (
     <>
+      {d.root_cause_role && (
+        <div className="section root-cause-section">
+          <p className="section-title">Root cause relationship</p>
+          {d.root_cause_role === "root" ? (
+            <p>
+              Root finding with {d.sibling_count ?? 0} linked sibling outcomes
+              {d.residual_path_count ? `; ${d.residual_path_count} retain a residual remediation path` : ""}.
+            </p>
+          ) : (
+            <>
+              <p>
+                Sibling of <code>{d.root_cause_slug}</code>.{" "}
+                {d.root_cause_effect === "eliminates_attack_path"
+                  ? "Fixing the root eliminates the attack path; this remains a residual remediation item."
+                  : "Fixing the root eliminates this finding."}
+              </p>
+              {d.root_cause_note && <Prose text={d.root_cause_note} mode={proseMode} />}
+            </>
+          )}
+        </div>
+      )}
+      {(d.variant_of || d.original_pattern) && (
+        <div className="section">
+          <SectionHead title="Variant relationship" copyText={d.original_pattern || d.variant_of || ""} toast={toast} />
+          {d.variant_of && <p>Variant of <code>{d.variant_of}</code></p>}
+          {d.original_pattern && <pre className="pre">{d.original_pattern}</pre>}
+        </div>
+      )}
       {linkedFindings.length > 0 && (
         <div className="section">
           <p className="section-title">
@@ -2615,6 +2656,7 @@ function LinksPane({
                     />
                   )}
                   <span className="link-go">›</span>
+                  {l.notes && <span className="link-notes">{l.notes}</span>}
                 </button>
               );
             })}
@@ -2699,18 +2741,249 @@ function LinksPane({
           })}
         </div>
       )}
+      <IntelPane d={d} toast={toast} />
+      {!!d.related_intel_ids?.length && (
+        <RelatedIntelSection engagementKey={engagementKey} ids={d.related_intel_ids} />
+      )}
+      {!d.root_cause_role && !d.variant_of && linkedFindings.length === 0 &&
+        linkedChains.length === 0 && d.references.length === 0 &&
+        !d.related_intel_ids?.length && !hasFindingProvenance(d.provenance) && (
+          <p className="empty">No relationships recorded for this finding.</p>
+      )}
     </>
   );
 }
 
-function HistoryPane({
+export function RelatedIntelSection({
+  engagementKey,
+  ids,
+}: {
+  engagementKey: string;
+  ids: Array<string | number>;
+}) {
+  const [results, setResults] = useState<IntelResolutionResult[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    resolveIntelIds(engagementKey, ids)
+      .then((rows) => {
+        if (!cancelled) setResults(rows);
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) {
+          setResults([]);
+          setError(err instanceof Error ? err.message : "Failed to resolve linked intel");
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [engagementKey, ids]);
+
+  return (
+    <div className="section">
+      <p className="section-title">
+        Linked intel <span className="count">{ids.length}</span>
+      </p>
+      {loading && <Skeleton width="70%" height={12} />}
+      {error && <p className="empty" role="alert">{error}</p>}
+      {!loading && !error && (
+        <div className="intel-resolution-list">
+          {results.map((result, resultIndex) => (
+            <div key={`${result.requested_id}:${resultIndex}`} className={`intel-resolution resolution-${result.resolution}`}>
+              {result.resolution !== "resolved" && (
+                <p className="intel-resolution-state">
+                  Intel #{result.requested_id} is {result.resolution}
+                </p>
+              )}
+              {result.matches.map((match) => {
+                const label = match.title || match.summary || `${match.entity_type} #${match.id}`;
+                if (match.status === "dangling") {
+                  return (
+                    <div key={`${match.entity_type}:${match.id}`} className="intel-resolution-card is-dangling">
+                      <strong>{match.entity_type.replace(/_/g, " ")} #{match.id}</strong>
+                      <span>Index entry has no source record</span>
+                    </div>
+                  );
+                }
+                const query = new URLSearchParams({
+                  tab: "intel",
+                  intel_type: match.entity_type,
+                  intel_id: String(match.id),
+                });
+                return (
+                  <a
+                    key={`${match.entity_type}:${match.id}`}
+                    className="intel-resolution-card"
+                    href={`#/engagements/${encodeURIComponent(engagementKey)}?${query.toString()}`}
+                  >
+                    <span className="intel-resolution-main">
+                      <strong>{label}</strong>
+                      {match.summary && match.summary !== label && <span>{match.summary}</span>}
+                    </span>
+                    <span className="intel-resolution-meta">
+                      {match.entity_type.replace(/_/g, " ")} · {match.status}
+                    </span>
+                  </a>
+                );
+              })}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+type HistoryListItem = AssessmentFindingTransitionSummary | AssessmentFindingTransition;
+
+function isTransitionSummary(t: HistoryListItem): t is AssessmentFindingTransitionSummary {
+  return "reason_preview" in t;
+}
+
+function hasVerificationAudit(audit: AssessmentVerificationAudit | undefined): boolean {
+  return Boolean(
+    audit &&
+    (audit.proof_receipt_total || audit.counter_check_total || audit.severity_variance_total),
+  );
+}
+
+function HistoryRow({
+  transition,
+  engagementKey,
+  findingSlug,
+}: {
+  transition: HistoryListItem;
+  engagementKey?: string;
+  findingSlug?: string;
+}) {
+  const [detail, setDetail] = useState<AssessmentFindingTransition | null>(
+    isTransitionSummary(transition) ? null : transition,
+  );
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const preview = isTransitionSummary(transition)
+    ? transition.reason_preview
+    : previewWords(transition.reason_text, 100).text.replace(/…$/, "");
+  const wordCount = isTransitionSummary(transition)
+    ? transition.reason_word_count
+    : transition.reason_text.trim().split(/\s+/).filter(Boolean).length;
+  const truncated = isTransitionSummary(transition)
+    ? transition.reason_truncated
+    : wordCount > 100;
+  const hasSnapshot = isTransitionSummary(transition)
+    ? transition.has_snapshot
+    : [transition.details_before_json, transition.details_after_json, transition.notes_before_json, transition.notes_after_json].some(Boolean);
+  // The compact projection deliberately omits verification-audit bodies and
+  // counts. Keep every summary row drill-downable so an audit-only transition
+  // cannot disappear merely because it has no narrative or content snapshot.
+  const canExpand = isTransitionSummary(transition) || Boolean(
+    preview || hasSnapshot || hasVerificationAudit(detail?.verification_audit),
+  );
+
+  const loadDetail = (open: boolean) => {
+    if (!open || detail || loading || !engagementKey || !findingSlug) return;
+    setLoading(true);
+    setError(null);
+    getAssessmentFindingTransition(engagementKey, findingSlug, transition.id)
+      .then(setDetail)
+      .catch((err: unknown) => {
+        setError(err instanceof Error ? err.message : "Failed to load transition detail");
+      })
+      .finally(() => setLoading(false));
+  };
+
+  const isCreation = transition.action === "created" || !transition.from_workflow_status;
+  const sevChanged = transition.from_severity && transition.from_severity !== transition.to_severity;
+  const workflowChanged = transition.from_workflow_status && transition.from_workflow_status !== transition.to_workflow_status;
+  const verifChanged = transition.from_verification_status && transition.from_verification_status !== transition.to_verification_status;
+
+  return (
+    <div className={`tl-row action-${transition.action}`}>
+      <div className="tl-head">
+        <span className="tl-action">{transition.action}</span>
+        <span className="tl-actor">{transition.actor || "system"}</span>
+        <span className="tl-time">{relTime(transition.created_at)}</span>
+      </div>
+      <div className="tl-detail">
+        {(isCreation || workflowChanged) && (
+          <span className="tl-change">
+            <span className="tl-change-label">Workflow</span>
+            {!isCreation && (
+              <>
+                <span className={`pill pill-${transition.from_workflow_status}`}>{transition.from_workflow_status}</span>
+                <span className="transition-arrow"> → </span>
+              </>
+            )}
+            <span className={`pill pill-${transition.to_workflow_status}`}>{transition.to_workflow_status}</span>
+          </span>
+        )}
+        {sevChanged && (
+          <span className="tl-change">
+            <span className="tl-change-label">Severity</span>
+            <span className={`hero-sev ${transition.from_severity}`}>{transition.from_severity}</span>
+            <span className="transition-arrow"> → </span>
+            <span className={`hero-sev ${transition.to_severity}`}>{transition.to_severity}</span>
+          </span>
+        )}
+        {verifChanged && (
+          <span className="tl-change">
+            <span className="tl-change-label">Verification</span>
+            <span className={`pill pill-${transition.from_verification_status}`}>{transition.from_verification_status}</span>
+            <span className="transition-arrow"> → </span>
+            <span className={`pill pill-${transition.to_verification_status}`}>{transition.to_verification_status}</span>
+          </span>
+        )}
+      </div>
+      {canExpand && (
+        <details className="history-reason" onToggle={(event) => loadDetail(event.currentTarget.open)}>
+          <summary>
+            {preview && <span className="history-reason-preview">{preview}{truncated ? "…" : ""}</span>}
+            <span className="history-reason-action">{preview ? "Read full reason" : "View details"}</span>
+            {wordCount > 0 && <span className="history-word-count">{wordCount} words</span>}
+          </summary>
+          <div className="history-reason-body">
+            {loading && <Skeleton width="80%" height={12} />}
+            {error && <p className="empty">{error}</p>}
+            {detail?.reason_text && <Prose text={detail.reason_text} mode="rendered" />}
+            {!detail && !loading && !error && !engagementKey && !isTransitionSummary(transition) && (
+              <Prose text={transition.reason_text} mode="rendered" />
+            )}
+            {detail?.verification_audit && <VerificationAudit audit={detail.verification_audit} />}
+            {detail && [detail.details_before_json, detail.details_after_json, detail.notes_before_json, detail.notes_after_json].some(Boolean) && (
+              <details className="detail-disclosure history-snapshot">
+                <summary>Changed content</summary>
+                {detail.details_before_json && <div><p className="snapshot-label">Details before</p><pre className="pre">{detail.details_before_json}</pre></div>}
+                {detail.details_after_json && <div><p className="snapshot-label">Details after</p><pre className="pre">{detail.details_after_json}</pre></div>}
+                {detail.notes_before_json && <div><p className="snapshot-label">Notes before</p><pre className="pre">{detail.notes_before_json}</pre></div>}
+                {detail.notes_after_json && <div><p className="snapshot-label">Notes after</p><pre className="pre">{detail.notes_after_json}</pre></div>}
+              </details>
+            )}
+          </div>
+        </details>
+      )}
+    </div>
+  );
+}
+
+export function HistoryPane({
   transitions,
   loading,
   error,
+  engagementKey,
+  findingSlug,
 }: {
-  transitions: AssessmentFindingTransition[];
+  transitions: HistoryListItem[];
   loading: boolean;
   error: string | null;
+  engagementKey?: string;
+  findingSlug?: string;
 }) {
   if (loading)
     return (
@@ -2728,77 +3001,14 @@ function HistoryPane({
     return <p className="empty">No transition history recorded.</p>;
   return (
     <div className="timeline">
-      {transitions.map((t) => {
-        const isCreation = t.action === "created" || !t.from_workflow_status;
-        const sevChanged =
-          t.from_severity && t.from_severity !== t.to_severity;
-        const workflowChanged =
-          t.from_workflow_status && t.from_workflow_status !== t.to_workflow_status;
-        const verifChanged =
-          t.from_verification_status &&
-          t.from_verification_status !== t.to_verification_status;
-        return (
-          <div key={t.id} className={`tl-row action-${t.action}`}>
-            <div className="tl-head">
-              <span className="tl-action">{t.action}</span>
-              <span className="tl-actor">{t.actor || "system"}</span>
-              <span className="tl-time">{relTime(t.created_at)}</span>
-            </div>
-            <div className="tl-detail">
-              {(isCreation || workflowChanged) && (
-                <span className="tl-change">
-                  <span className="tl-change-label">Workflow</span>
-                  {!isCreation && (
-                    <>
-                      <span className={`pill pill-${t.from_workflow_status}`}>
-                        {t.from_workflow_status}
-                      </span>
-                      <span className="transition-arrow"> → </span>
-                    </>
-                  )}
-                  <span className={`pill pill-${t.to_workflow_status}`}>
-                    {t.to_workflow_status}
-                  </span>
-                </span>
-              )}
-              {sevChanged && (
-                <span className="tl-change">
-                  <span className="tl-change-label">Severity</span>
-                  <span
-                    className={`hero-sev ${t.from_severity}`}
-                    style={{ fontSize: "0.65rem", padding: "1px 7px" }}
-                  >
-                    {t.from_severity}
-                  </span>
-                  <span className="transition-arrow"> → </span>
-                  <span
-                    className={`hero-sev ${t.to_severity}`}
-                    style={{ fontSize: "0.65rem", padding: "1px 7px" }}
-                  >
-                    {t.to_severity}
-                  </span>
-                </span>
-              )}
-              {verifChanged && (
-                <span className="tl-change">
-                  <span className="tl-change-label">Verification</span>
-                  <span className={`pill pill-${t.from_verification_status}`}>
-                    {t.from_verification_status}
-                  </span>
-                  <span className="transition-arrow"> → </span>
-                  <span className={`pill pill-${t.to_verification_status}`}>
-                    {t.to_verification_status}
-                  </span>
-                </span>
-              )}
-            </div>
-            {t.reason_text && (
-              <p className="tl-reason">&ldquo;{t.reason_text}&rdquo;</p>
-            )}
-            <VerificationAudit audit={t.verification_audit} />
-          </div>
-        );
-      })}
+      {transitions.map((transition) => (
+        <HistoryRow
+          key={transition.id}
+          transition={transition}
+          engagementKey={engagementKey}
+          findingSlug={findingSlug}
+        />
+      ))}
     </div>
   );
 }
@@ -2863,7 +3073,7 @@ function IntelPane({ d, toast }: { d: Derived; toast: ToastFn }) {
       {refs.length > 0 && (
         <div className="section">
           <p className="section-title">
-            References <span className="count">{refs.length}</span>
+            External references <span className="count">{refs.length}</span>
           </p>
           <div className="ref-grid">
             {refs.map((r, i) => {
@@ -2914,9 +3124,6 @@ function IntelPane({ d, toast }: { d: Derived; toast: ToastFn }) {
         <p className="prov-footer">
           Discovered by <span className="agent-chip">{prov.agent_name}</span>
         </p>
-      )}
-      {refs.length === 0 && !hasProvenance && (
-        <p className="empty">No intel captured for this finding.</p>
       )}
     </>
   );

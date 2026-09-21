@@ -46,8 +46,9 @@ the codebase clearer than you found it.
   [ADR 0019](docs/adr/0019-vigil-does-not-defend-against-its-own-operator.md) is the authority. It
   carves out the four controls that *do* have a real adversary and must not be removed by citing it:
   benchmark anti-cheat, scope/ROE enforcement, proof and evidence integrity, and the
-  untrusted-target-text boundary (ADR 0018). Before adding any control that withholds data, name the
-  adversary it excludes; "the operator, from their own data" means it is theater.
+  untrusted-target-text boundary (ADR 0018), which requires prompt containment and safe technical
+  rendering but not repetitive frontend warning labels. Before adding any control that withholds data,
+  name the adversary it excludes; "the operator, from their own data" means it is theater.
 
 # Explaining work (breakdowns & planning)
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import sqlite3
 from collections.abc import Collection
 from typing import Any
@@ -3894,6 +3895,65 @@ def list_exploit_candidates(engagement_id: int) -> list[dict[str, Any]]:
         ),
     )
 
+_TRANSITION_SUMMARY_COLUMNS = """
+    id, actor, action,
+    from_workflow_status, to_workflow_status,
+    from_verification_status, to_verification_status,
+    verification_event_version,
+    from_severity, to_severity,
+    from_canonical_location, to_canonical_location,
+    reason_code, reason_text, created_at,
+    CASE WHEN details_before_json IS NOT NULL
+           OR details_after_json IS NOT NULL
+           OR notes_before_json IS NOT NULL
+           OR notes_after_json IS NOT NULL
+         THEN 1 ELSE 0 END AS has_snapshot
+"""
+
+
+def _transition_reason_preview(reason_text: str, *, word_limit: int = 100) -> tuple[str, int]:
+    words = list(re.finditer(r"\S+", reason_text))
+    if len(words) <= word_limit:
+        return reason_text, len(words)
+    return reason_text[: words[word_limit - 1].end()].rstrip(), len(words)
+
+
+def _serialize_transition_summary(row: sqlite3.Row) -> dict[str, Any]:
+    record = dict(row)
+    reason_text = str(record.pop("reason_text", ""))
+    preview, word_count = _transition_reason_preview(reason_text)
+    record["has_snapshot"] = bool(record["has_snapshot"])
+    record["reason_preview"] = preview
+    record["reason_word_count"] = word_count
+    record["reason_truncated"] = word_count > 100
+    return record
+
+
+def _serialize_finding_transition(
+    row: sqlite3.Row,
+    *,
+    verification_audit: dict[str, Any],
+) -> dict[str, Any]:
+    record = dict(row)
+    metadata = _json_object(record.get("metadata_json"))
+    notes_history_status = metadata.get(_NOTES_HISTORY_STATUS_KEY)
+    if notes_history_status not in _NOTES_HISTORY_STATUSES:
+        # Content columns were added after the transition ledger already
+        # contained rows. A populated side proves that transition captured
+        # note history; two NULLs on an unmarked row mean the old writer did
+        # not say whether notes changed. Expose that gap instead of
+        # reinterpreting missing history as "unchanged".
+        notes_history_status = (
+            "recorded"
+            if record.get("notes_before_json") is not None
+            or record.get("notes_after_json") is not None
+            else "historical_gap"
+        )
+    record[_NOTES_HISTORY_STATUS_KEY] = notes_history_status
+    record["verification_audit"] = verification_audit
+    return record
+
+
 def list_finding_transitions(
     engagement_id: int,
     *,
@@ -3927,24 +3987,81 @@ def list_finding_transitions(
             int(finding["id"]),
             [int(row["id"]) for row in rows],
         )
-    records: list[dict[str, Any]] = []
-    for row in rows:
-        record = dict(row)
-        metadata = _json_object(record.get("metadata_json"))
-        notes_history_status = metadata.get(_NOTES_HISTORY_STATUS_KEY)
-        if notes_history_status not in _NOTES_HISTORY_STATUSES:
-            # Content columns were added after the transition ledger already
-            # contained rows. A populated side proves that transition captured
-            # note history; two NULLs on an unmarked row mean the old writer did
-            # not say whether notes changed. Expose that gap instead of
-            # reinterpreting missing history as "unchanged".
-            notes_history_status = (
-                "recorded"
-                if record.get("notes_before_json") is not None
-                or record.get("notes_after_json") is not None
-                else "historical_gap"
+    return [
+        _serialize_finding_transition(
+            row,
+            verification_audit=audit_by_transition[int(row["id"])],
+        )
+        for row in rows
+    ]
+
+
+def list_finding_transition_summaries(
+    engagement_id: int,
+    *,
+    slug: str,
+    limit: int | None = None,
+    offset: int = 0,
+) -> list[dict[str, Any]]:
+    """Return a bounded history index without loading snapshot bodies."""
+
+    engagement = _engagement_or_404(engagement_id)
+    slug = canonical_finding_alias(slug) or slug
+    with _common.get_connection() as connection:
+        finding = connection.execute(
+            "SELECT id FROM assessment_findings WHERE engagement_id = ? AND slug = ?",
+            (engagement.id, slug),
+        ).fetchone()
+        if finding is None:
+            raise _finding_not_found(connection, engagement.id, slug)
+        sql = f"""
+            SELECT {_TRANSITION_SUMMARY_COLUMNS}
+            FROM assessment_finding_transitions
+            WHERE engagement_id = ? AND finding_id = ?
+            ORDER BY created_at DESC, id DESC
+            """
+        params: list[Any] = [engagement.id, int(finding["id"])]
+        if limit is not None:
+            sql += " LIMIT ? OFFSET ?"
+            params.extend((int(limit), int(offset)))
+        rows = connection.execute(sql, tuple(params)).fetchall()
+    return [_serialize_transition_summary(row) for row in rows]
+
+
+def get_finding_transition(
+    engagement_id: int,
+    *,
+    slug: str,
+    transition_id: int,
+) -> dict[str, Any]:
+    """Return one lossless transition, scoped through its finding."""
+
+    engagement = _engagement_or_404(engagement_id)
+    slug = canonical_finding_alias(slug) or slug
+    with _common.get_connection() as connection:
+        finding = connection.execute(
+            "SELECT id FROM assessment_findings WHERE engagement_id = ? AND slug = ?",
+            (engagement.id, slug),
+        ).fetchone()
+        if finding is None:
+            raise _finding_not_found(connection, engagement.id, slug)
+        row = connection.execute(
+            """
+            SELECT *
+            FROM assessment_finding_transitions
+            WHERE engagement_id = ? AND finding_id = ? AND id = ?
+            """,
+            (engagement.id, int(finding["id"]), int(transition_id)),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="finding transition not found",
             )
-        record[_NOTES_HISTORY_STATUS_KEY] = notes_history_status
-        record["verification_audit"] = audit_by_transition[int(row["id"])]
-        records.append(record)
-    return records
+        audit = verification_audit_by_transition(
+            connection,
+            engagement.id,
+            int(finding["id"]),
+            [int(row["id"])],
+        )[int(row["id"])]
+    return _serialize_finding_transition(row, verification_audit=audit)

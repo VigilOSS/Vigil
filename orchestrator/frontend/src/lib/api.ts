@@ -136,6 +136,7 @@ export type FindingDetails = {
   kill_reason?: string;
   kill_check?: number;
   impact?: string;
+  attack_scenario?: string;
   cvss_vector?: string;
   cvss_score?: number;
   remediation?: string;
@@ -147,12 +148,16 @@ export type FindingDetails = {
   chain_required?: boolean;
   chain_rationale?: string;
   required_followup?: string | string[];
+  block_reason?: string;
+  unblock_requirements?: Record<string, unknown>;
+  attempts_summary?: string;
   // Proof-of-concept panel.
   poc_code?: string;
   poc_language?: string;
   poc_request?: FindingPocRequest | string;
   poc_response?: FindingPocResponse | string;
   references?: FindingReference[];
+  related_intel_ids?: Array<string | number>;
   // Code analysis panel.
   slot_type?: string;
   entry_point?: string;
@@ -372,6 +377,29 @@ export type AssessmentFindingTransition = {
   metadata_json: string;
   created_at: string;
   verification_audit: AssessmentVerificationAudit;
+};
+
+export type AssessmentFindingTransitionSummary = Pick<
+  AssessmentFindingTransition,
+  | "id"
+  | "actor"
+  | "action"
+  | "from_workflow_status"
+  | "to_workflow_status"
+  | "from_verification_status"
+  | "to_verification_status"
+  | "verification_event_version"
+  | "from_severity"
+  | "to_severity"
+  | "from_canonical_location"
+  | "to_canonical_location"
+  | "reason_code"
+  | "created_at"
+> & {
+  reason_preview: string;
+  reason_word_count: number;
+  reason_truncated: boolean;
+  has_snapshot: boolean;
 };
 
 export type AssessmentFindingLink = {
@@ -809,8 +837,9 @@ export function listEngagementSessions(engagementKey: string) {
   return request<EngagementSession[]>(`/engagements/${engagementKey}/sessions`);
 }
 
-export function listEvents(engagementKey: string) {
-  return request<EventRecord[]>(`/engagements/${engagementKey}/events`);
+export function listEvents(engagementKey: string, limit = 200) {
+  const query = new URLSearchParams({ limit: String(limit) });
+  return request<EventRecord[]>(`/engagements/${engagementKey}/events?${query.toString()}`);
 }
 
 export function getAssessmentSummary(engagementKey: string) {
@@ -990,17 +1019,28 @@ export async function listAssessmentFindingTransitions(
   engagementKey: string,
   findingSlug: string,
 ) {
-  const transitions: AssessmentFindingTransition[] = [];
+  const transitions: AssessmentFindingTransitionSummary[] = [];
   let offset = 0;
   while (true) {
-    const page = await request<AssessmentFindingTransition[]>(
+    const page = await request<AssessmentFindingTransitionSummary[]>(
       `/engagements/${engagementKey}/assessment/findings/${encodeURIComponent(findingSlug)}` +
-        `/transitions?limit=${FINDING_HISTORY_PAGE_SIZE}&offset=${offset}`,
+        `/transitions?projection=summary&limit=${FINDING_HISTORY_PAGE_SIZE}&offset=${offset}`,
     );
     transitions.push(...page);
     if (page.length < FINDING_HISTORY_PAGE_SIZE) return transitions;
     offset += page.length;
   }
+}
+
+export function getAssessmentFindingTransition(
+  engagementKey: string,
+  findingSlug: string,
+  transitionId: number,
+) {
+  return request<AssessmentFindingTransition>(
+    `/engagements/${engagementKey}/assessment/findings/${encodeURIComponent(findingSlug)}` +
+      `/transitions/${transitionId}`,
+  );
 }
 
 export function listAssessmentFindingLinks(engagementKey: string) {
@@ -1970,6 +2010,20 @@ export type IntelSearchHit = {
   record: Record<string, unknown>;
 };
 
+export type IntelResolutionMatch = {
+  id: number;
+  entity_type: IntelEntityType;
+  title: string;
+  summary: string;
+  status: string;
+};
+
+export type IntelResolutionResult = {
+  requested_id: string | number;
+  resolution: "resolved" | "missing" | "dangling" | "ambiguous" | "unsupported";
+  matches: IntelResolutionMatch[];
+};
+
 export type IntelSummary = {
   counts: Record<string, number>;
 };
@@ -2074,6 +2128,29 @@ export function searchIntel(
   return request<IntelSearchHit[]>(
     `${path}${qs ? `?${qs}` : ""}`,
   );
+}
+
+export function chunkIntelResolutionIds(
+  ids: Array<string | number>,
+  size = 100,
+): Array<Array<string | number>> {
+  const batches: Array<Array<string | number>> = [];
+  for (let offset = 0; offset < ids.length; offset += size) {
+    batches.push(ids.slice(offset, offset + size));
+  }
+  return batches;
+}
+
+export async function resolveIntelIds(engagementKey: string, ids: Array<string | number>) {
+  const results: IntelResolutionResult[] = [];
+  for (const batch of chunkIntelResolutionIds(ids)) {
+    const query = new URLSearchParams();
+    batch.forEach((id) => query.append("ids", String(id)));
+    results.push(...await request<IntelResolutionResult[]>(
+      `/engagements/${engagementKey}/intel/resolve?${query.toString()}`,
+    ));
+  }
+  return results;
 }
 
 export function intelByUrl(engagementKey: string, url: string) {

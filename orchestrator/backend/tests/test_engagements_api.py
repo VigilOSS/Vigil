@@ -1509,6 +1509,30 @@ def test_events_synthesizes_legacy_log_artifact_timeline(client, isolate_setting
     assert "task.completed" in event_types
 
 
+def test_events_recent_limit_is_configurable(client, isolate_settings):
+    write_engagement(isolate_settings["engagements_dir"])
+
+    for index in range(4):
+        response = client.post(
+            "/engagements/2026-03-30-120000-example/events",
+            json={
+                "event_type": "task.updated",
+                "phase": "recon",
+                "task_name": f"task-{index}",
+                "agent_name": "recon-specialist",
+                "summary": f"Event {index}",
+            },
+        )
+        assert response.status_code == 201
+
+    response = client.get(
+        "/engagements/2026-03-30-120000-example/events?limit=2"
+    )
+
+    assert response.status_code == 200, response.text
+    assert [event["summary"] for event in response.json()] == ["Event 2", "Event 3"]
+
+
 def test_events_summary_uses_targeted_latest_queries(client, isolate_settings, monkeypatch):
     write_engagement(isolate_settings["engagements_dir"])
 

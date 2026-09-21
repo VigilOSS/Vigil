@@ -1981,6 +1981,153 @@ def intel_search(
     return hits
 
 
+_INTEL_RESOLUTION_TITLE_FIELDS: dict[str, tuple[str, ...]] = {
+    "tech_component": ("component",),
+    "person": ("name",),
+    "email": ("address",),
+    "domain": ("identity",),
+    "cve": ("cve_id",),
+    "dns_record": ("name",),
+    "social_profile": ("handle", "url"),
+    "breach_record": ("breach_name", "subject"),
+    "org_fact": ("fact_key",),
+    "note": ("title",),
+}
+
+
+def _intel_resolution_text(record: dict[str, Any], fields: tuple[str, ...]) -> str:
+    for field in fields:
+        value = record.get(field)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def _intel_resolution_summary(record: dict[str, Any]) -> str:
+    text = _intel_resolution_text(
+        record,
+        ("summary", "body_markdown", "notes", "fact_value", "evidence_ref"),
+    )
+    compact = " ".join(text.split())
+    return compact if len(compact) <= 280 else f"{compact[:277].rstrip()}…"
+
+
+def _intel_resolution_status(record: dict[str, Any]) -> str:
+    if record.get("superseded_by_id"):
+        return "superseded"
+    return _intel_resolution_text(
+        record,
+        ("lead_status", "validation_status", "status", "confidence"),
+    ) or "active"
+
+
+def resolve_intel_ids(
+    engagement_id: int,
+    source_ids: Iterable[str | int],
+) -> list[dict[str, Any]]:
+    """Resolve untyped intel ids through the engagement's canonical shadow index.
+
+    Intel tables allocate ids independently, so one numeric id can legitimately
+    name several entity types. The result never guesses: it distinguishes a
+    unique live record from missing, dangling-index, and ambiguous ids.
+    """
+    engagement = _engagement_or_404(engagement_id)
+    requested: list[tuple[str | int, int | None]] = []
+    for source_id in source_ids:
+        if isinstance(source_id, int):
+            numeric_id = source_id if source_id > 0 else None
+            requested.append((source_id, numeric_id))
+            continue
+        raw_id = str(source_id).strip()
+        try:
+            parsed_id = int(raw_id)
+        except ValueError:
+            parsed_id = 0
+        if parsed_id > 0:
+            requested.append((parsed_id, parsed_id))
+        else:
+            requested.append((raw_id, None))
+    if not requested:
+        return []
+    unique_ids = list(dict.fromkeys(numeric_id for _, numeric_id in requested if numeric_id))
+    with get_connection() as connection:
+        if unique_ids:
+            placeholders = ",".join("?" for _ in unique_ids)
+            rows = connection.execute(
+                "SELECT entity_type, source_id FROM intel_search_index "
+                f"WHERE engagement_id = ? AND source_id IN ({placeholders}) "
+                "ORDER BY source_id, entity_type",
+                (engagement.id, *unique_ids),
+            ).fetchall()
+        else:
+            rows = []
+        matches_by_id: dict[int, list[dict[str, Any]]] = {
+            source_id: [] for source_id in unique_ids
+        }
+        for row in rows:
+            entity_type = str(row["entity_type"])
+            source_id = int(row["source_id"])
+            table = _ENTITY_TO_TABLE.get(entity_type)
+            record_row = (
+                connection.execute(
+                    f"SELECT * FROM {table} WHERE engagement_id = ? AND id = ?",
+                    (engagement.id, source_id),
+                ).fetchone()
+                if table
+                else None
+            )
+            if record_row is None:
+                candidate = {
+                    "id": source_id,
+                    "entity_type": entity_type,
+                    "title": "",
+                    "summary": "",
+                    "status": "dangling",
+                }
+            else:
+                record = _row_to_dict(record_row)
+                candidate = {
+                    "id": source_id,
+                    "entity_type": entity_type,
+                    "title": _intel_resolution_text(
+                        record,
+                        _INTEL_RESOLUTION_TITLE_FIELDS.get(entity_type, ()),
+                    ),
+                    "summary": _intel_resolution_summary(record),
+                    "status": _intel_resolution_status(record),
+                }
+            matches_by_id[source_id].append(candidate)
+
+    results: list[dict[str, Any]] = []
+    for requested_id, numeric_id in requested:
+        if numeric_id is None:
+            results.append(
+                {
+                    "requested_id": requested_id,
+                    "resolution": "unsupported",
+                    "matches": [],
+                }
+            )
+            continue
+        matches = matches_by_id[numeric_id]
+        if not matches:
+            resolution = "missing"
+        elif all(match["status"] == "dangling" for match in matches):
+            resolution = "dangling"
+        elif len(matches) > 1:
+            resolution = "ambiguous"
+        else:
+            resolution = "resolved"
+        results.append(
+            {
+                "requested_id": requested_id,
+                "resolution": resolution,
+                "matches": matches,
+            }
+        )
+    return results
+
+
 # ── By-URL merged view ─────────────────────────────────────
 
 
