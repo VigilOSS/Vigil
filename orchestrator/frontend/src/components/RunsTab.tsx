@@ -33,7 +33,7 @@ const SECTIONS: { key: RunAuditSection; label: string }[] = [
   { key: "sources", label: "Sources" },
   { key: "source-reads", label: "Source reads" },
   { key: "dispatches", label: "Dispatches" },
-  { key: "commands", label: "Commands" },
+  { key: "commands", label: "Command evidence" },
   { key: "observed-events", label: "Observed events" },
   { key: "decision-history", label: "Decision history" },
   { key: "proof-receipts", label: "Proof and events" },
@@ -44,6 +44,26 @@ const SECTIONS: { key: RunAuditSection; label: string }[] = [
   { key: "code-receipts", label: "Code receipts" },
   { key: "comparisons", label: "Comparison records" },
 ];
+
+const PROOF_SECTION_KEYS = new Set<RunAuditSection>([
+  "dispatches",
+  "commands",
+  "observed-events",
+  "decision-history",
+  "proof-receipts",
+]);
+
+const OVERVIEW_COUNT_KEYS: Record<"proof" | "scan", Set<string>> = {
+  proof: new Set(["findings", "proof_receipts"]),
+  scan: new Set([
+    "inventory_total",
+    "source_reads",
+    "obligations",
+    "candidates",
+    "findings",
+    "proof_receipts",
+  ]),
+};
 
 type ChildState = {
   items: AssessmentRunChild[];
@@ -129,6 +149,74 @@ function AuditJson({ value }: { value: unknown }) {
   );
 }
 
+function RunComparisonPanel({
+  baseline,
+  comparison,
+  comparisonError,
+  comparisonGroups,
+  comparisonLoading,
+  detail,
+  runs,
+  setBaseline,
+}: {
+  baseline: string;
+  comparison: RunComparison | null;
+  comparisonError: string | null;
+  comparisonGroups: ReturnType<typeof normalizedComparison>;
+  comparisonLoading: boolean;
+  detail: AssessmentRun;
+  runs: AssessmentRun[];
+  setBaseline: (value: string) => void;
+}) {
+  const compatibility = comparison
+    ? comparison.target_compatible === true && comparison.source_compatible === true
+      ? "compatible"
+      : comparison.target_compatible === null || comparison.source_compatible === null
+        ? "unknown"
+        : "drift"
+    : null;
+
+  return (
+    <section className="run-audit-comparison">
+      <div className="run-comparison-heading">
+        <div><h2>Deterministic comparison</h2><p className="meta-text">Latest compatible baseline by default; no model call.</p></div>
+        <label>
+          Baseline
+          <select value={baseline} onChange={(event) => setBaseline(event.target.value)}>
+            <option value="">Latest compatible</option>
+            {runs.filter((run) => run.id !== detail.id).map((run) => (
+              <option key={run.id} value={run.id}>{run.run_uuid} · {statusLabel(run.status)}</option>
+            ))}
+          </select>
+        </label>
+      </div>
+      {comparisonLoading && <p className="meta-text">Comparing recorded identities…</p>}
+      {comparisonError && <p className="error-text">{comparisonError}</p>}
+      {comparison && (
+        <>
+          <p className={`run-compatibility ${compatibility === "compatible" ? "is-compatible" : compatibility === "unknown" ? "is-unknown" : "has-drift"}`}>
+            {compatibility === "compatible"
+              ? `Target and source compatible with run ${comparison.baseline_run_id}`
+              : compatibility === "unknown"
+                ? `Compatibility with run ${comparison.baseline_run_id} is unknown because target or source identity was not recorded`
+                : `Target or source drift from run ${comparison.baseline_run_id}; unresolved prior records remain unknown`}
+          </p>
+          <div className="run-comparison-grid">
+            {comparisonGroups.map((group) => (
+              <section key={group.key} className={`comparison-${group.key}`}>
+                <header><h3>{statusLabel(group.key)}</h3><span>{group.items.length}</span></header>
+                {group.items.length === 0 ? <p>None</p> : (
+                  <ul>{group.items.map((item) => <li key={item}>{item}</li>)}</ul>
+                )}
+              </section>
+            ))}
+          </div>
+        </>
+      )}
+    </section>
+  );
+}
+
 export function RunsTab({
   engagementKey,
   refreshVersion,
@@ -154,6 +242,7 @@ export function RunsTab({
   const [comparison, setComparison] = useState<RunComparison | null>(null);
   const [comparisonLoading, setComparisonLoading] = useState(false);
   const [comparisonError, setComparisonError] = useState<string | null>(null);
+  const [advancedOpen, setAdvancedOpen] = useState(false);
   const childrenRequestRef = useRef(0);
   const runsRequestRef = useRef(0);
 
@@ -199,6 +288,7 @@ export function RunsTab({
     if (initialRunId) {
       setSelectedRunId(initialRunId);
       setBaseline("");
+      setAdvancedOpen(false);
     }
   }, [initialRunId]);
 
@@ -326,6 +416,23 @@ export function RunsTab({
   const proofHealth = Object.entries(detail?.proof_health ?? {});
   const counts = Object.entries(detail?.counts ?? {});
   const provenance = detail ? dispatchProvenance(detail) : {};
+  const purpose = detail?.run_purpose === "scan" ? "scan" : "proof";
+  const overviewCounts = counts.filter(([name]) => OVERVIEW_COUNT_KEYS[purpose].has(name));
+  const visibleSections = purpose === "proof" && !advancedOpen
+    ? SECTIONS.filter((section) => PROOF_SECTION_KEYS.has(section.key))
+    : SECTIONS;
+  const targetIdentity = detail?.target_identity ?? {};
+  const hasTargetIdentity = Object.keys(targetIdentity).length > 0;
+
+  useEffect(() => {
+    if (
+      detail?.run_purpose === "proof"
+      && !advancedOpen
+      && !PROOF_SECTION_KEYS.has(ui.section)
+    ) {
+      dispatchUi({ type: "select-section", section: "proof-receipts" });
+    }
+  }, [advancedOpen, detail?.run_purpose, ui.section]);
 
   return (
     <div className="runs-audit">
@@ -399,32 +506,29 @@ export function RunsTab({
                   </div>
                 </dl>
 
-                {counts.length > 0 && (
+                {overviewCounts.length > 0 && (
                   <div className="run-metric-strip" aria-label="Run counts">
-                    {counts.map(([name, value]) => (
+                    {overviewCounts.map(([name, value]) => (
                       <div key={name}><strong>{value}</strong><span>{statusLabel(name)}</span></div>
                     ))}
                   </div>
                 )}
 
-                <div className="run-detail-columns">
-                  <div>
+                {(hasTargetIdentity || proofHealth.length > 0) && (
+                  <div className="run-detail-columns">
+                  {hasTargetIdentity && <div>
                     <h3>Target identity</h3>
-                    <AuditJson value={detail.target_identity ?? {}} />
-                  </div>
-                  <div>
+                    <AuditJson value={targetIdentity} />
+                  </div>}
+                  {proofHealth.length > 0 && <div>
                     <h3>Proof health</h3>
-                    {proofHealth.length === 0 ? (
-                      <p className="empty-state">No proof-health observations recorded.</p>
-                    ) : (
-                      <dl className="run-proof-health">
-                        {proofHealth.map(([name, value]) => (
-                          <div key={name}><dt>{statusLabel(name)}</dt><dd>{String(value)}</dd></div>
-                        ))}
-                      </dl>
-                    )}
-                  </div>
-                </div>
+                    <dl className="run-proof-health">
+                      {proofHealth.map(([name, value]) => (
+                        <div key={name}><dt>{statusLabel(name)}</dt><dd>{String(value)}</dd></div>
+                      ))}
+                    </dl>
+                  </div>}
+                </div>)}
                 {detail.finding_slugs && detail.finding_slugs.length > 0 && (
                   <div className="run-finding-links">
                     <h3>Linked findings</h3>
@@ -471,78 +575,84 @@ export function RunsTab({
                 )}
               </section>
 
-              <section className="panel run-audit-provenance">
-                <div className="panel-header">
-                  <div><h2>Identity and provenance</h2><p className="meta-text">Observed dispatch and immutable source boundaries.</p></div>
-                </div>
-                <div className="run-detail-columns">
-                  <div><h3>Dispatch</h3><AuditJson value={provenance} /></div>
-                  <div><h3>Source generations</h3><AuditJson value={detail.source_generations ?? []} /></div>
-                  <div><h3>Exclusions</h3><AuditJson value={detail.exclusions ?? []} /></div>
-                  <div><h3>Terminal seal</h3><AuditJson value={detail.seal ?? { seal_sha256: detail.seal_sha256 }} /></div>
-                </div>
-                {detail.warnings && detail.warnings.length > 0 && (
-                  <ul className="run-provenance-warnings">
-                    {detail.warnings.map((warning) => <li key={warning}>{warning}</li>)}
-                  </ul>
-                )}
-              </section>
-
-              <section className="panel run-audit-history">
-                <div className="panel-header"><div><h2>Lifecycle history</h2><p className="meta-text">Recorded transitions remain distinct from current status.</p></div></div>
-                {lifecycleRows.length === 0 ? (
-                  <p className="empty-state">No lifecycle events recorded.</p>
-                ) : (
-                  <ol>
-                    {lifecycleRows.map(({ key, transition, event }) => (
-                      <li key={key}>
-                        <span className="run-history-dot" aria-hidden="true" />
-                        <div>
-                          <strong>{transition.split(" → ").map(statusLabel).join(" → ")}</strong>
-                          <p>{formatDate(event.created_at)}{event.actor ? ` · ${event.actor}` : ""}</p>
-                          {event.reason && <p>{event.reason}</p>}
-                        </div>
-                      </li>
-                    ))}
-                  </ol>
-                )}
-              </section>
-
-              <section className="panel run-audit-comparison">
-                <div className="run-comparison-heading">
-                  <div><h2>Deterministic comparison</h2><p className="meta-text">Latest compatible baseline by default; no model call.</p></div>
-                  <label>
-                    Baseline
-                    <select value={baseline} onChange={(event) => setBaseline(event.target.value)}>
-                      <option value="">Latest compatible</option>
-                      {runs.filter((run) => run.id !== detail.id).map((run) => (
-                        <option key={run.id} value={run.id}>{run.run_uuid} · {statusLabel(run.status)}</option>
-                      ))}
-                    </select>
-                  </label>
-                </div>
-                {comparisonLoading && <p className="meta-text">Comparing recorded identities…</p>}
-                {comparisonError && <p className="error-text">{comparisonError}</p>}
-                {comparison && (
-                  <>
-                    <p className={`run-compatibility ${comparison.source_compatible && comparison.target_compatible ? "is-compatible" : "has-drift"}`}>
-                      {comparison.source_compatible && comparison.target_compatible
-                        ? `Target and source compatible with run ${comparison.baseline_run_id}`
-                        : `Target or source drift from run ${comparison.baseline_run_id}; unresolved prior records remain unknown`}
-                    </p>
-                    <div className="run-comparison-grid">
-                      {comparisonGroups.map((group) => (
-                        <section key={group.key} className={`comparison-${group.key}`}>
-                          <header><h3>{statusLabel(group.key)}</h3><span>{group.items.length}</span></header>
-                          {group.items.length === 0 ? <p>None</p> : (
-                            <ul>{group.items.map((item) => <li key={item}>{item}</li>)}</ul>
-                          )}
-                        </section>
+              <section className="panel run-audit-advanced">
+                <button
+                  type="button"
+                  className="run-advanced-toggle"
+                  aria-expanded={advancedOpen}
+                  onClick={() => setAdvancedOpen((open) => !open)}
+                >
+                  <span><strong>Advanced audit</strong><small>Complete accounting, provenance, lifecycle, and comparison data</small></span>
+                  <span aria-hidden="true">{advancedOpen ? "−" : "+"}</span>
+                </button>
+                {advancedOpen && <div className="run-advanced-content">
+                  <section>
+                    <h2>Complete accounting</h2>
+                    <div className="run-metric-strip" aria-label="Complete run counts">
+                      {counts.map(([name, value]) => (
+                        <div key={name}><strong>{value}</strong><span>{statusLabel(name)}</span></div>
                       ))}
                     </div>
-                  </>
-                )}
+                  </section>
+                  <section>
+                    <div className="panel-header">
+                      <div><h2>Identity and provenance</h2><p className="meta-text">Observed dispatch and immutable source boundaries.</p></div>
+                    </div>
+                    <div className="run-detail-columns">
+                      <div><h3>Target identity</h3><AuditJson value={targetIdentity} /></div>
+                      <div><h3>Dispatch</h3><AuditJson value={provenance} /></div>
+                      <div><h3>Source generations</h3><AuditJson value={detail.source_generations ?? []} /></div>
+                      <div><h3>Exclusions</h3><AuditJson value={detail.exclusions ?? []} /></div>
+                      <div><h3>Terminal seal</h3><AuditJson value={detail.seal ?? { seal_sha256: detail.seal_sha256 }} /></div>
+                    </div>
+                    {detail.warnings && detail.warnings.length > 0 && (
+                      <ul className="run-provenance-warnings">
+                        {detail.warnings.map((warning) => <li key={warning}>{warning}</li>)}
+                      </ul>
+                    )}
+                  </section>
+                  <section className="run-audit-history">
+                    <div className="panel-header"><div><h2>Lifecycle history</h2><p className="meta-text">Recorded transitions remain distinct from current status.</p></div></div>
+                    {lifecycleRows.length === 0 ? (
+                      <p className="empty-state">No lifecycle events recorded.</p>
+                    ) : (
+                      <ol>
+                        {lifecycleRows.map(({ key, transition, event }) => (
+                          <li key={key}>
+                            <span className="run-history-dot" aria-hidden="true" />
+                            <div>
+                              <strong>{transition.split(" → ").map(statusLabel).join(" → ")}</strong>
+                              <p>{formatDate(event.created_at)}{event.actor ? ` · ${event.actor}` : ""}</p>
+                              {event.reason && <p>{event.reason}</p>}
+                            </div>
+                          </li>
+                        ))}
+                      </ol>
+                    )}
+                  </section>
+                  {purpose === "proof" && <RunComparisonPanel
+                    baseline={baseline}
+                    comparison={comparison}
+                    comparisonError={comparisonError}
+                    comparisonGroups={comparisonGroups}
+                    comparisonLoading={comparisonLoading}
+                    detail={detail}
+                    runs={runs}
+                    setBaseline={setBaseline}
+                  />}
+                </div>}
               </section>
+
+              {purpose === "scan" && <RunComparisonPanel
+                baseline={baseline}
+                comparison={comparison}
+                comparisonError={comparisonError}
+                comparisonGroups={comparisonGroups}
+                comparisonLoading={comparisonLoading}
+                detail={detail}
+                runs={runs}
+                setBaseline={setBaseline}
+              />}
 
               <section className="panel run-audit-drilldown">
                 <div className="panel-header">
@@ -550,7 +660,7 @@ export function RunsTab({
                   <span className="tab-count">{children.total}</span>
                 </div>
                 <div className="run-section-tabs" role="tablist" aria-label="Run records">
-                  {SECTIONS.map((section) => (
+                  {visibleSections.map((section) => (
                     <button
                       type="button"
                       role="tab"

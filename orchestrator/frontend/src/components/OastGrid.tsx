@@ -20,7 +20,7 @@ import {
   registerAgGrid,
 } from "../lib/agGrid";
 import { RelTime, relTime } from "./formatting";
-import { oobStatusClass } from "./OastTab";
+import { oobStatusClass, oobStatusLabel } from "./OastTab";
 
 registerAgGrid();
 
@@ -33,7 +33,7 @@ type OastGridProps = {
 function StatusCell({ data }: ICellRendererParams<OobProbe>) {
   if (!data) return null;
   const s = data.status || "pending";
-  return <span className={`oob-status-badge ${oobStatusClass(s)}`}>{s}</span>;
+  return <span className={`oob-status-badge ${oobStatusClass(s)}`}>{oobStatusLabel(s)}</span>;
 }
 
 function TargetCell({ data }: ICellRendererParams<OobProbe>) {
@@ -60,7 +60,7 @@ export default function OastGrid({ rows, selectedNonce, onRowOpen }: OastGridPro
       {
         headerName: "Status",
         colId: "status",
-        width: 120,
+        width: 170,
         cellRenderer: StatusCell,
         valueGetter: (p) => p.data?.status || "",
       },
@@ -96,13 +96,19 @@ export default function OastGrid({ rows, selectedNonce, onRowOpen }: OastGridPro
         cellStyle: { color: "var(--ink-2)" },
       },
       {
-        headerName: "OOB domain",
-        colId: "domain",
+        headerName: "Payload host",
+        colId: "payload-host",
         flex: 1,
-        minWidth: 160,
-        valueGetter: (p) => p.data?.oob_domain || "—",
+        minWidth: 220,
+        valueGetter: (p) => p.data?.client_payload_host || "—",
         cellClass: "ag-mono",
         cellStyle: { color: "var(--muted)" },
+      },
+      {
+        headerName: "Binding",
+        colId: "binding",
+        width: 120,
+        valueGetter: (p) => p.data?.client_name && p.data?.client_payload_host ? "Complete" : "Incomplete",
       },
       {
         headerName: "Hits",

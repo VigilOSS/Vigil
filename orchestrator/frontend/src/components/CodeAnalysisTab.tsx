@@ -4,6 +4,7 @@ import type {
   CodeAnalysisResult,
   CodeCoverage,
   CodeModule,
+  CodeQueueItem,
   CodeQueueStats,
   CodeReadiness,
   CodeRepo,
@@ -30,6 +31,11 @@ function phaseState(phase: PhaseKey, persistedPhase: string): "completed" | "act
   if (pi < ci) return "completed";
   if (pi === ci) return "active";
   return "pending";
+}
+
+function phaseLabel(phase: CodeReadiness["target_phase"]): string {
+  if (phase === "complete") return "Completion";
+  return CODE_PHASES.find((entry) => entry.key === phase)?.label ?? phase.replace(/-/g, " ");
 }
 
 function reviewQuality(coverage: CodeCoverage | null): { passed: boolean; warnings: string[] } | null {
@@ -154,13 +160,16 @@ const IconClose = () => (
 // ── Main component ──────────────────────────────────────
 
 type CodeAnalysisTabProps = {
+  engagementKey: string;
   persistedPhase: string;
   loadError: string | null;
   repos: CodeRepo[];
   modules: CodeModule[];
   queueStats: CodeQueueStats | null;
+  queueItems: CodeQueueItem[];
   coverage: CodeCoverage | null;
   readiness: CodeReadiness | null;
+  completionReadiness: CodeReadiness | null;
   results: CodeAnalysisResult[];
 };
 
@@ -174,13 +183,16 @@ const DISPOSITION_ORDER = ["finding", "suspicious", "needs_context", "clean", "s
 const CONFIDENCE_ORDER = ["high", "medium", "low"];
 
 export function CodeAnalysisTab({
+  engagementKey,
   persistedPhase,
   loadError,
   repos,
   modules,
   queueStats,
+  queueItems,
   coverage,
   readiness,
+  completionReadiness,
   results,
 }: CodeAnalysisTabProps) {
   const fallbackQuality = reviewQuality(coverage);
@@ -346,6 +358,44 @@ export function CodeAnalysisTab({
 
   return (
     <>
+      <section className="panel code-readiness-panel">
+        <div className="code-readiness-primary">
+          <p className="eyebrow">
+            {readiness ? `Next transition: ${phaseLabel(readiness.target_phase)}` : "Next transition readiness"}
+          </p>
+          <span
+            className={`code-gate-badge ${readiness ? (readiness.transition_ready ? "code-gate-pass" : "code-gate-fail") : ""}`}
+          >
+            {readiness ? (readiness.transition_ready ? "READY" : "BLOCKED") : "UNKNOWN"}
+          </span>
+          {readiness && readiness.blockers.length > 0 && (
+            <ul className="code-gate-reasons">
+              {readiness.blockers.map((blocker, index) => {
+                const targetRepo = blocker.repo_id == null
+                  ? null
+                  : repos.find((repo) => repo.id === blocker.repo_id);
+                return (
+                  <li key={`${blocker.code}-${index}`} className="meta-text">
+                    <span>[{blocker.code}] {blocker.message}</span>
+                    {targetRepo && (
+                      <> · <a href={`#code-repo-${targetRepo.id}`}>{targetRepo.name}</a></>
+                    )}
+                    {!blocker.overrideable ? " (integrity; non-overrideable)" : ""}
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </div>
+        {readiness?.target_phase !== "complete" && (
+          <p className="code-readiness-secondary">
+            Completion readiness: {completionReadiness
+              ? (completionReadiness.transition_ready ? "READY" : "BLOCKED")
+              : "UNKNOWN"}
+          </p>
+        )}
+      </section>
+
       {/* Phase pipeline */}
       <section className="panel">
         <div className="panel-header">
@@ -394,9 +444,23 @@ export function CodeAnalysisTab({
                 ...repo.structural_artifact_truncated_file_paths,
               ]),
             ].sort();
+            const repoTruth = [
+              repo.source_snapshot_quality === "legacy-unverified"
+                ? "Legacy-unverified source snapshot"
+                : null,
+              repo.worktree_dirty === true ? "Dirty worktree at ingestion" : null,
+              repo.worktree_dirty == null ? "Worktree state unavailable" : null,
+              repo.structural_index_generation !== repo.active_generation
+                ? `Structural index generation ${repo.structural_index_generation ?? "missing"} does not match active generation ${repo.active_generation}`
+                : null,
+              repo.threat_model_generation !== repo.active_generation
+                ? `Threat model generation ${repo.threat_model_generation ?? "missing"} does not match active generation ${repo.active_generation}`
+                : null,
+            ].filter((item): item is string => Boolean(item));
             return (
             <article
               key={repo.id}
+              id={`code-repo-${repo.id}`}
               className={`code-repo-card${hasStructuralDebt ? " code-repo-has-debt" : ""}`}
             >
               <div className="code-repo-header">
@@ -423,9 +487,21 @@ export function CodeAnalysisTab({
                 </div>
               </div>
               <p className="meta-text">
-                Generation {repo.active_generation} · snapshot {repo.source_snapshot_quality}
-                {repo.source_manifest_digest ? ` · ${repo.source_manifest_digest.slice(0, 12)}` : ""}
+                <span className="mono-text">{repo.repo_key}</span> · generation {repo.active_generation} · {repo.source_kind}
               </p>
+              <dl className="code-repo-identity">
+                <div><dt>Repository path</dt><dd className="mono-text">{repo.repo_path || "—"}</dd></div>
+                <div><dt>Source origin</dt><dd className="mono-text">{repo.source_origin_path || "—"}</dd></div>
+                <div><dt>Branch</dt><dd className="mono-text">{repo.branch || "—"}</dd></div>
+                <div><dt>Commit</dt><dd className="mono-text">{repo.commit_hash || "—"}</dd></div>
+                <div><dt>Snapshot digest</dt><dd className="mono-text">{repo.snapshot_digest || "—"}</dd></div>
+                <div><dt>Manifest digest</dt><dd className="mono-text">{repo.source_manifest_digest || "—"}</dd></div>
+              </dl>
+              {repoTruth.length > 0 && (
+                <ul className="code-repo-truth" aria-label={`Repository state warnings for ${repo.name}`}>
+                  {repoTruth.map((item) => <li key={item}>{item}</li>)}
+                </ul>
+              )}
               {hasStructuralDebt && (
                 <div className="code-structural-debt" role="status">
                   <strong>Structural coverage debt</strong>
@@ -434,10 +510,10 @@ export function CodeAnalysisTab({
                   </span>
                   <p>
                     {readiness?.transition_ready
-                      ? "Completion readiness is READY; structural limitations remain recorded for auditability."
+                      ? "Next-transition readiness is READY; structural limitations remain recorded for auditability."
                       : readiness
-                        ? "Check Completion readiness blockers for any outstanding direct-review requirement."
-                        : "Completion readiness is unavailable; inspect the file inventory before treating debt as reviewed."}
+                        ? "Check next-transition blockers for any outstanding direct-review requirement."
+                        : "Transition readiness is unavailable; inspect the file inventory before treating debt as reviewed."}
                   </p>
                   {unsupported > 0 && (
                     <p>Unsupported paths are not included below; inspect the code file inventory/API.</p>
@@ -503,6 +579,31 @@ export function CodeAnalysisTab({
               .map((repo) => `${repo.repo_key} (${repo.queue_items} row(s))`)
               .join(", ")}
           </p>
+        )}
+
+        {queueStats && (
+          <div className="code-queue-integrity" aria-label="Queue integrity">
+            <span>{queueStats.historical_total} historical rows</span>
+            <span>{queueStats.superseded_history} superseded</span>
+            <span>{queueStats.invalid_active_identity} invalid active identities</span>
+            <span>{queueStats.invalid_active_history} invalid active history</span>
+          </div>
+        )}
+
+        {queueItems.length > 0 && (
+          <div className="code-next-work">
+            <h3>Next work</h3>
+            <ol>
+              {queueItems.slice(0, 5).map((item) => (
+                <li key={item.id}>
+                  <span className={`badge code-status-${item.status}`}>{item.status.replace(/_/g, " ")}</span>
+                  <span className="mono-text">{item.file_path}</span>
+                  <a href={`#code-repo-${item.repo_id}`}>{item.repo_key}</a>
+                  <span className="meta-text">priority {item.priority} · queue #{item.id}</span>
+                </li>
+              ))}
+            </ol>
+          </div>
         )}
 
         {/* Queue progress bar */}
@@ -582,24 +683,9 @@ export function CodeAnalysisTab({
           )}
 
           <article className="panel">
-            <p className="eyebrow">Analysis Gates</p>
+            <p className="eyebrow">Review Quality</p>
             <div className="code-gate-status">
-              <p className="meta-text">Completion readiness</p>
-              <span className={`code-gate-badge ${readiness ? (readiness.transition_ready ? "code-gate-pass" : "code-gate-fail") : ""}`}>
-                {readiness ? (readiness.transition_ready ? "READY" : "BLOCKED") : "UNKNOWN"}
-              </span>
-              {readiness && readiness.blockers.length > 0 && (
-                <ul className="code-gate-reasons">
-                  {readiness.blockers.map((blocker, i) => (
-                    <li key={`${blocker.code}-${i}`} className="meta-text">
-                      [{blocker.code}] {blocker.message}
-                      {!blocker.overrideable ? " (integrity; non-overrideable)" : ""}
-                    </li>
-                  ))}
-                </ul>
-              )}
-
-              <p className="meta-text" style={{ marginTop: "16px" }}>Review quality</p>
+              <p className="meta-text">Current review quality</p>
               {(() => {
                 const quality = readiness?.quality_gate ?? fallbackQuality;
                 const warnings = quality?.warnings ?? [];
@@ -664,7 +750,9 @@ export function CodeAnalysisTab({
               return (
                 <div key={mod.id} className="coverage-tree-node">
                   <button
+                    type="button"
                     className="coverage-tree-header"
+                    aria-expanded={isExpanded}
                     onClick={() => {
                       setExpandedModules((prev) => {
                         const next = new Set(prev);
@@ -723,7 +811,9 @@ export function CodeAnalysisTab({
                   <IconSearch />
                   <input
                     ref={searchRef}
+                    type="search"
                     className="search-input"
+                    aria-label="Search analysis results"
                     placeholder="Search function, file, evidence… (try disposition:finding confidence:high cwe:79)"
                     value={query}
                     onChange={(e) => setQuery(e.target.value)}
@@ -732,6 +822,7 @@ export function CodeAnalysisTab({
                     <button
                       type="button"
                       className="icon-btn"
+                      aria-label="Clear analysis results search"
                       onClick={() => setQuery("")}
                       title="Clear"
                       style={{ width: 22, height: 22 }}
@@ -743,13 +834,15 @@ export function CodeAnalysisTab({
                 </div>
               </div>
               <div className="filter-row">
-                <div className="filter-group">
+                <div className="filter-group" aria-label="Disposition filters">
                   <span className="filter-label">Disposition</span>
                   {DISPOSITION_ORDER.filter((d) => (dispositionCounts[d] ?? 0) > 0).map((d) => (
                     <button
                       key={d}
                       type="button"
                       className={`filter-chip ${dispositionFilters.has(d) ? "is-active" : ""}`}
+                      aria-label={`Filter disposition ${d.replace(/_/g, " ")}`}
+                      aria-pressed={dispositionFilters.has(d)}
                       onClick={() => toggle(dispositionFilters, setDispositionFilters, d)}
                     >
                       {d.replace(/_/g, " ")}
@@ -758,13 +851,15 @@ export function CodeAnalysisTab({
                   ))}
                 </div>
                 {Object.keys(confidenceCounts).length > 0 && (
-                  <div className="filter-group">
+                  <div className="filter-group" aria-label="Confidence filters">
                     <span className="filter-label">Confidence</span>
                     {CONFIDENCE_ORDER.filter((c) => (confidenceCounts[c] ?? 0) > 0).map((c) => (
                       <button
                         key={c}
                         type="button"
                         className={`filter-chip ${confidenceFilters.has(c) ? "is-active" : ""}`}
+                        aria-label={`Filter confidence ${c}`}
+                        aria-pressed={confidenceFilters.has(c)}
                         onClick={() => toggle(confidenceFilters, setConfidenceFilters, c)}
                       >
                         {c}
@@ -779,6 +874,8 @@ export function CodeAnalysisTab({
                           key={c}
                           type="button"
                           className={`filter-chip ${confidenceFilters.has(c) ? "is-active" : ""}`}
+                          aria-label={`Filter confidence ${c}`}
+                          aria-pressed={confidenceFilters.has(c)}
                           onClick={() => toggle(confidenceFilters, setConfidenceFilters, c)}
                         >
                           {c}
@@ -788,13 +885,15 @@ export function CodeAnalysisTab({
                   </div>
                 )}
                 {Object.keys(workflowCounts).length > 0 && (
-                  <div className="filter-group">
+                  <div className="filter-group" aria-label="Workflow status filters">
                     <span className="filter-label">Status</span>
                     {Object.keys(workflowCounts).map((s) => (
                       <button
                         key={s}
                         type="button"
                         className={`filter-chip ${workflowFilters.has(s) ? "is-active" : ""}`}
+                        aria-label={`Filter workflow status ${s.replace(/_/g, " ")}`}
+                        aria-pressed={workflowFilters.has(s)}
                         onClick={() => toggle(workflowFilters, setWorkflowFilters, s)}
                       >
                         {s.replace(/_/g, " ")}
@@ -826,15 +925,6 @@ export function CodeAnalysisTab({
                   <article
                     key={r.id}
                     className={`code-result-row ${r.finding_workflow_status === "false_positive" ? "code-result-row-suppressed" : ""}`}
-                    style={needsTruncation ? { cursor: "pointer" } : undefined}
-                    onClick={needsTruncation ? () => {
-                      setExpandedResults((prev) => {
-                        const next = new Set(prev);
-                        if (next.has(r.id)) next.delete(r.id);
-                        else next.add(r.id);
-                        return next;
-                      });
-                    } : undefined}
                   >
                     <div className="code-result-header">
                       <span className={`badge code-disposition-${r.disposition}`}>{r.disposition}</span>
@@ -868,6 +958,7 @@ export function CodeAnalysisTab({
                         </span>
                       </div>
                     ))}
+                    <div id={`code-result-evidence-${r.id}`}>
                     {r.hypothesis && (
                       <div className={`code-result-detail ${isExpanded ? "is-expanded" : ""}`}>
                         <span className="code-result-label">Hypothesis:</span>
@@ -880,10 +971,35 @@ export function CodeAnalysisTab({
                         <span>{!isExpanded && r.evidence.length > truncateAt ? `${r.evidence.slice(0, truncateAt)}...` : r.evidence}</span>
                       </div>
                     )}
+                    </div>
+                    {needsTruncation && (
+                      <button
+                        type="button"
+                        className="code-result-expand"
+                        aria-expanded={isExpanded}
+                        aria-controls={`code-result-evidence-${r.id}`}
+                        aria-label={`${isExpanded ? "Collapse" : "Show full"} evidence for result ${r.id}`}
+                        onClick={() => {
+                          setExpandedResults((prev) => {
+                            const next = new Set(prev);
+                            if (next.has(r.id)) next.delete(r.id);
+                            else next.add(r.id);
+                            return next;
+                          });
+                        }}
+                      >
+                        {isExpanded ? "Collapse evidence" : "Show full evidence"}
+                      </button>
+                    )}
                     {r.finding_slug && (
                       <div className="code-result-detail">
                         <span className="code-result-label">Finding:</span>
-                        <span className="mono-text">{r.finding_slug}</span>
+                        <a
+                          className="mono-text"
+                          href={`#/engagements/${encodeURIComponent(engagementKey)}?tab=findings&finding=${encodeURIComponent(r.finding_slug)}`}
+                        >
+                          {r.finding_slug}
+                        </a>
                         {r.finding_workflow_status && (
                           <span className={`badge status-${r.finding_workflow_status}`}>{r.finding_workflow_status}</span>
                         )}
@@ -903,6 +1019,7 @@ export function CodeAnalysisTab({
             <div className="pager">
               <button
                 className="pager-button"
+                aria-label="Previous analysis results page"
                 disabled={resultPage === 0}
                 onClick={() => setResultPage((p) => p - 1)}
               >
@@ -913,6 +1030,7 @@ export function CodeAnalysisTab({
               </span>
               <button
                 className="pager-button"
+                aria-label="Next analysis results page"
                 disabled={resultPage >= totalResultPages - 1}
                 onClick={() => setResultPage((p) => p + 1)}
               >

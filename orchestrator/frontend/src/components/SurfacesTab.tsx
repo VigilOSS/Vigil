@@ -5,10 +5,12 @@ import type {
   AssessmentFindingLink,
   AssessmentSurface,
   SurfacePatchPayload,
+  SurfaceRequestVariantLink,
 } from "../lib/api";
 import {
   listAssessmentFindingLinks,
   listAssessmentSurfaces,
+  listSurfaceRequestVariantLinks,
   patchAssessmentSurface,
 } from "../lib/api";
 import { Copy } from "lucide-react";
@@ -19,6 +21,24 @@ import { KV, ProseSection, SectionHead } from "./drawer/DrawerKit";
 import { TableSkeleton } from "./Skeletons";
 
 const SURFACE_RETRY_FETCH_LIMIT = 5000;
+const RETIRED_SURFACE_STATUSES = new Set(["covered", "not_applicable"]);
+
+function surfaceNeedsAction(surface: AssessmentSurface): boolean {
+  return !RETIRED_SURFACE_STATUSES.has(surface.status || "discovered");
+}
+
+function surfaceStatusLabel(status: string): string {
+  return status.replace(/[-_]/g, " ");
+}
+
+function surfaceStatusPill(status: string): string {
+  if (status === "covered") return "pill-confirmed";
+  if (status === "not_applicable") return "pill-false_positive";
+  if (status === "administratively-closed") return "pill-blocked";
+  if (status === "partially-covered") return "pill-active";
+  if (status === "deferred") return "pill-unreviewed";
+  return "pill-unreviewed";
+}
 
 // Severity palette + dot color, mirrored from FindingsTab so the linked-
 // findings list reads consistently with the Findings drawer's severity dots.
@@ -165,6 +185,7 @@ export function SurfacesTab({
   const [pendingResolution, setPendingResolution] = useState<string | null>(null);
   const [resolutionError, setResolutionError] = useState<string | null>(null);
   const [resolutionRationale, setResolutionRationale] = useState<string>("");
+  const [followupCondition, setFollowupCondition] = useState<string>("");
   // Local shadow of the parent ``surfaces`` prop. The parent does not
   // currently wire ``onSurfaceUpdated`` back into its list, so without a
   // shadow the table goes stale until the next polling tick. We seed
@@ -193,16 +214,24 @@ export function SurfacesTab({
         setResolutionError("Rationale is required to change surface status.");
         return;
       }
+      const submittedFollowup = followupCondition.trim();
+      if (status === "partially-covered" && !submittedFollowup) {
+        setResolutionError("A follow-up condition is required for partially covered surfaces.");
+        return;
+      }
       setResolutionError(null);
       setPendingResolution(status);
       try {
-        const updated = await patchAssessmentSurface(engagementKey, selected.id, {
+        const payload: SurfacePatchPayload = {
           status,
           rationale: submittedRationale,
-        });
+        };
+        if (status === "partially-covered") payload.followup_condition = submittedFollowup;
+        const updated = await patchAssessmentSurface(engagementKey, selected.id, payload);
         setSelected(updated);
         mergeLocalSurface(updated);
         setResolutionRationale("");
+        setFollowupCondition("");
         onSurfaceUpdated?.(updated);
       } catch (err: unknown) {
         // Network errors are ambiguous: the PATCH may have already landed
@@ -229,6 +258,7 @@ export function SurfacesTab({
               setSelected(refreshed);
               mergeLocalSurface(refreshed);
               setResolutionRationale("");
+              setFollowupCondition("");
               onSurfaceUpdated?.(refreshed);
               return;
             }
@@ -250,10 +280,11 @@ export function SurfacesTab({
         setPendingResolution(null);
       }
     },
-    [engagementKey, mergeLocalSurface, onSurfaceUpdated, resolutionRationale, selected],
+    [engagementKey, followupCondition, mergeLocalSurface, onSurfaceUpdated, resolutionRationale, selected],
   );
 
   const [query, setQuery] = useState("");
+  const [viewMode, setViewMode] = useState<"needs_action" | "all">("needs_action");
   const [typeFilters, setTypeFilters] = useState<Set<string>>(new Set());
   const [statusFilters, setStatusFilters] = useState<Set<string>>(new Set());
   const [sourceFilters, setSourceFilters] = useState<Set<string>>(new Set());
@@ -261,6 +292,12 @@ export function SurfacesTab({
   const searchRef = useRef<HTMLInputElement | null>(null);
   const drawerInvokerRef = useRef<HTMLElement | null>(null);
   const canSubmitResolution = resolutionRationale.trim().length > 0;
+
+  useEffect(() => {
+    setResolutionRationale("");
+    setFollowupCondition("");
+    setResolutionError(null);
+  }, [selected?.id]);
 
   useEffect(() => {
     let cancelled = false;
@@ -342,13 +379,14 @@ export function SurfacesTab({
 
   const filteredSurfaces = useMemo(() => {
     return localSurfaces.filter((s) => {
+      if (viewMode === "needs_action" && !surfaceNeedsAction(s)) return false;
       if (typeFilters.size && !typeFilters.has(s.surface_type || "unknown")) return false;
       if (statusFilters.size && !statusFilters.has(s.status || "")) return false;
       if (sourceFilters.size && !sourceFilters.has(s.source_name || "")) return false;
       if (!matchesQuery(s, parsedQuery)) return false;
       return true;
     });
-  }, [localSurfaces, typeFilters, statusFilters, sourceFilters, parsedQuery, matchesQuery]);
+  }, [localSurfaces, viewMode, typeFilters, statusFilters, sourceFilters, parsedQuery, matchesQuery]);
 
   // surface id → linked-findings count, for the grid's Findings column.
   const linkCounts = useMemo(() => {
@@ -402,6 +440,10 @@ export function SurfacesTab({
   const activeFilterCount =
     typeFilters.size + statusFilters.size + sourceFilters.size + (query ? 1 : 0);
   const snapshotLimitReached = localSurfaces.length >= SURFACE_RETRY_FETCH_LIMIT;
+  const openSurfaceCount = useMemo(
+    () => localSurfaces.reduce((count, surface) => count + (surfaceNeedsAction(surface) ? 1 : 0), 0),
+    [localSurfaces],
+  );
 
   const selectedLinks = selected ? linksBySurfaceId.get(selected.id) ?? [] : [];
 
@@ -456,9 +498,14 @@ export function SurfacesTab({
             <span className="search-kbd">/</span>
           </div>
           <div className="toolbar-right">
+            <span
+              className="surface-ledger-counts"
+              aria-label={`${openSurfaceCount} open / ${localSurfaces.length} total`}
+            >
+              <strong>{openSurfaceCount}</strong> open / <strong>{localSurfaces.length}</strong> total
+            </span>
             <span className="meta-text">
-              {filteredSurfaces.length} of {localSurfaces.length} surface
-              {localSurfaces.length === 1 ? "" : "s"}
+              {filteredSurfaces.length} shown
               {linksError ? " · links unavailable" : ""}
               {snapshotLimitReached
                 ? " · surface limit reached · results may be incomplete"
@@ -467,6 +514,27 @@ export function SurfacesTab({
           </div>
         </div>
         <div className="filter-row">
+          <div className="filter-group" aria-label="Surface view">
+            <span className="filter-label">View</span>
+            <button
+              type="button"
+              className={`filter-chip ${viewMode === "needs_action" ? "is-active" : ""}`}
+              aria-pressed={viewMode === "needs_action"}
+              aria-label="Needs action"
+              onClick={() => setViewMode("needs_action")}
+            >
+              Needs action <span className="filter-count">{openSurfaceCount}</span>
+            </button>
+            <button
+              type="button"
+              className={`filter-chip ${viewMode === "all" ? "is-active" : ""}`}
+              aria-pressed={viewMode === "all"}
+              aria-label="All surfaces"
+              onClick={() => setViewMode("all")}
+            >
+              All <span className="filter-count">{localSurfaces.length}</span>
+            </button>
+          </div>
           {Object.keys(typeCounts).length > 0 && (
             <div className="filter-group">
               <span className="filter-label">Type</span>
@@ -477,9 +545,11 @@ export function SurfacesTab({
                     key={t}
                     type="button"
                     className={`filter-chip ${typeFilters.has(t) ? "is-active" : ""}`}
+                    aria-label={`Filter type ${surfaceStatusLabel(t)}`}
+                    aria-pressed={typeFilters.has(t)}
                     onClick={() => toggleChip(typeFilters, setTypeFilters, t)}
                   >
-                    {t}
+                    {surfaceStatusLabel(t)}
                     <span className="filter-count">{typeCounts[t]}</span>
                   </button>
                 ))}
@@ -495,31 +565,33 @@ export function SurfacesTab({
                     key={s}
                     type="button"
                     className={`filter-chip ${statusFilters.has(s) ? "is-active" : ""}`}
+                    aria-label={`Filter status ${surfaceStatusLabel(s)}`}
+                    aria-pressed={statusFilters.has(s)}
                     onClick={() => toggleChip(statusFilters, setStatusFilters, s)}
                   >
-                    {s.replace(/_/g, " ")}
+                    {surfaceStatusLabel(s)}
                     <span className="filter-count">{statusCounts[s]}</span>
                   </button>
                 ))}
             </div>
           )}
           {Object.keys(sourceCounts).length > 0 && (
-            <div className="filter-group">
+            <label className="filter-group">
               <span className="filter-label">Source</span>
-              {Object.keys(sourceCounts)
-                .sort((a, b) => sourceCounts[b] - sourceCounts[a] || a.localeCompare(b))
-                .map((src) => (
-                  <button
-                    key={src}
-                    type="button"
-                    className={`filter-chip ${sourceFilters.has(src) ? "is-active" : ""}`}
-                    onClick={() => toggleChip(sourceFilters, setSourceFilters, src)}
-                  >
-                    {src}
-                    <span className="filter-count">{sourceCounts[src]}</span>
-                  </button>
-                ))}
-            </div>
+              <select
+                className="surface-source-select"
+                aria-label="Source"
+                value={sourceFilters.values().next().value || ""}
+                onChange={(event) => setSourceFilters(event.target.value ? new Set([event.target.value]) : new Set())}
+              >
+                <option value="">All sources ({Object.keys(sourceCounts).length})</option>
+                {Object.keys(sourceCounts)
+                  .sort((a, b) => sourceCounts[b] - sourceCounts[a] || a.localeCompare(b))
+                  .map((src) => (
+                    <option key={src} value={src}>{src} ({sourceCounts[src]})</option>
+                  ))}
+              </select>
+            </label>
           )}
           {activeFilterCount > 0 && (
             <button type="button" className="filter-clear" onClick={clearAll}>
@@ -576,6 +648,8 @@ export function SurfacesTab({
           returnFocusRef={drawerInvokerRef}
           resolutionRationale={resolutionRationale}
           setResolutionRationale={setResolutionRationale}
+          followupCondition={followupCondition}
+          setFollowupCondition={setFollowupCondition}
           pendingResolution={pendingResolution}
           canSubmitResolution={canSubmitResolution}
           resolutionError={resolutionError}
@@ -602,6 +676,8 @@ function SurfaceDrawer({
   returnFocusRef,
   resolutionRationale,
   setResolutionRationale,
+  followupCondition,
+  setFollowupCondition,
   pendingResolution,
   canSubmitResolution,
   resolutionError,
@@ -616,6 +692,8 @@ function SurfaceDrawer({
   returnFocusRef: RefObject<HTMLElement | null>;
   resolutionRationale: string;
   setResolutionRationale: (v: string) => void;
+  followupCondition: string;
+  setFollowupCondition: (v: string) => void;
   pendingResolution: string | null;
   canSubmitResolution: boolean;
   resolutionError: string | null;
@@ -624,9 +702,31 @@ function SurfaceDrawer({
   useBodyScrollLock();
   const panelRef = useRef<HTMLElement | null>(null);
   useModalFocus(panelRef, onClose, true, returnFocusRef);
+  const [variantLinks, setVariantLinks] = useState<SurfaceRequestVariantLink[]>([]);
+  const [variantLinksError, setVariantLinksError] = useState<string | null>(null);
   const rationale = surface.rationale || "";
   const findingHref = (slug: string) =>
     `#/engagements/${encodeURIComponent(engagementKey)}?tab=findings&finding=${encodeURIComponent(slug)}`;
+  const httpHref = (requestVariantId: number) =>
+    `#/engagements/${encodeURIComponent(engagementKey)}?tab=http&request=${requestVariantId}`;
+
+  useEffect(() => {
+    let cancelled = false;
+    setVariantLinks([]);
+    setVariantLinksError(null);
+    listSurfaceRequestVariantLinks(engagementKey, surface.id)
+      .then((rows) => {
+        if (!cancelled) setVariantLinks(rows);
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) {
+          setVariantLinksError(err instanceof Error ? err.message : "Request-variant links unavailable");
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [engagementKey, surface.id]);
 
   return (
     <div className="finding-overlay" role="presentation" onClick={onClose}>
@@ -667,6 +767,7 @@ function SurfaceDrawer({
                 className="icon-btn"
                 onClick={onClose}
                 title="Close (Esc)"
+                aria-label="Close surface detail"
               >
                 <IconClose />
               </button>
@@ -679,7 +780,10 @@ function SurfaceDrawer({
             {surface.surface_type && (
               <span className="hero-sev info">{surface.surface_type}</span>
             )}
-            <span className={`pill pill-${surface.status}`}>{surface.status}</span>
+            <span className={`pill ${surfaceStatusPill(surface.status)}`}>
+              {surfaceStatusLabel(surface.status)}
+            </span>
+            {surface.status === "administratively-closed" && <span className="tag">no coverage</span>}
             {surface.vendor_saas && <span className="tag">vendor SaaS</span>}
             {surface.source_name && <span className="tag">{surface.source_name}</span>}
           </div>
@@ -692,7 +796,8 @@ function SurfaceDrawer({
               {/* The architecture axis: how the host framework registers this
                   code. Empty on an ordinary web surface, and KV drops empties. */}
               <KV k="Framework registration" v={surface.framework_registration} />
-              <KV k="Status" v={surface.status} />
+              <KV k="Status" v={surfaceStatusLabel(surface.status)} />
+              <KV k="Follow-up condition" v={surface.followup_condition} />
               <KV k="Source" v={surface.source_name} toast={surface.source_name ? toast : undefined} />
               <div className="kv">
                 <p className="k">Updated</p>
@@ -719,12 +824,12 @@ function SurfaceDrawer({
           ) : null}
 
           <div className="section">
-            <p className="section-title">Resolve status</p>
+            <p className="section-title">Coverage lifecycle</p>
             <p className="meta-text" style={{ margin: "0 0 8px" }}>
-              Resolve a discovered surface to covered, not_applicable, or deferred.
-              A non-empty rationale is required and appended to the existing audit trail.
+              Record the evidence-backed state. A rationale is required for every transition and is appended to the audit trail.
             </p>
             <textarea
+              aria-label="Transition rationale"
               rows={2}
               placeholder="Required rationale appended to the audit trail"
               value={resolutionRationale}
@@ -737,24 +842,83 @@ function SurfaceDrawer({
                 marginBottom: "8px",
               }}
             />
+            <label className="surface-followup-field">
+              <span>Required follow-up condition</span>
+              <input
+                aria-label="Required follow-up condition"
+                type="text"
+                placeholder="Required when marking partially covered"
+                value={followupCondition}
+                onChange={(event) => setFollowupCondition(event.target.value)}
+              />
+            </label>
             <div style={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
-              {(["covered", "not_applicable", "deferred"] as const).map((s) => (
+              {(["covered", "partially-covered", "deferred", "not_applicable"] as const).map((s) => (
                 <button
                   key={s}
                   type="button"
                   className={`filter-chip ${pendingResolution === s ? "is-active" : ""}`}
                   disabled={pendingResolution != null || !canSubmitResolution}
                   title={!canSubmitResolution ? "Enter rationale to change status" : undefined}
+                  aria-label={`Mark ${surfaceStatusLabel(s)}`}
                   onClick={() => void resolveSurfaceStatus(s)}
                 >
-                  {pendingResolution === s ? "Saving…" : `Mark ${s}`}
+                  {pendingResolution === s ? "Saving…" : `Mark ${surfaceStatusLabel(s)}`}
                 </button>
               ))}
             </div>
             {resolutionError && (
-              <p className="meta-text" style={{ color: "var(--c-error, #c33)", margin: "8px 0 0" }}>
+              <p role="alert" className="meta-text" style={{ color: "var(--c-error, #c33)", margin: "8px 0 0" }}>
                 {resolutionError}
               </p>
+            )}
+          </div>
+
+          <div className="section surface-admin-closure">
+            <p className="section-title">Administrative closure</p>
+            <p className="meta-text">
+              Administrative closure does not establish coverage. It closes queue handling while preserving this surface as an uncovered obligation.
+            </p>
+            <button
+              type="button"
+              className={`filter-chip ${pendingResolution === "administratively-closed" ? "is-active" : ""}`}
+              disabled={pendingResolution != null || !canSubmitResolution}
+              title={!canSubmitResolution ? "Enter rationale to change status" : undefined}
+              aria-label="Mark administratively closed"
+              onClick={() => void resolveSurfaceStatus("administratively-closed")}
+            >
+              {pendingResolution === "administratively-closed" ? "Saving…" : "Mark administratively closed"}
+            </button>
+          </div>
+
+          <div className="section">
+            <p className="section-title">
+              Request variants <span className="count">{variantLinks.length}</span>
+            </p>
+            {variantLinksError ? (
+              <p className="meta-text" role="alert">Request-variant links unavailable: {variantLinksError}</p>
+            ) : variantLinks.length === 0 ? (
+              <p className="empty" style={{ padding: "12px 0" }}>No durable request-variant links.</p>
+            ) : (
+              <div className="link-grid">
+                {variantLinks.map((link) => (
+                  <a
+                    key={link.id}
+                    className="link-card"
+                    href={httpHref(link.request_variant_id)}
+                    title="Open request variant in HTTP workspace"
+                  >
+                    <span className="link-kind">HTTP</span>
+                    <span>
+                      <span className="link-title">Request variant #{link.request_variant_id}</span>
+                      <br />
+                      <span className="link-sub">{surfaceStatusLabel(link.relation || "related")}</span>
+                      {link.evidence_ref && <span className="link-notes mono">{link.evidence_ref}</span>}
+                    </span>
+                    <span className="link-go">›</span>
+                  </a>
+                ))}
+              </div>
             )}
           </div>
 

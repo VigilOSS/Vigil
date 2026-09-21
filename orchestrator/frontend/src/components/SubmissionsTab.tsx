@@ -24,6 +24,7 @@ type SubmissionsTabProps = {
 };
 
 type ReviewMode = "preview" | "raw";
+type FindingScope = "candidates" | "all";
 type SubmissionPlatform = "bugcrowd" | "hackerone" | "direct";
 
 const PLATFORM_LABELS: Record<SubmissionPlatform, string> = {
@@ -55,12 +56,15 @@ function safeExternalHref(value: string): string | null {
   }
 }
 
-function externalValue(value: string): string {
-  return value.trim() || "Not recorded";
-}
-
 function isSubmissionPlatform(value: unknown): value is SubmissionPlatform {
   return value === "bugcrowd" || value === "hackerone" || value === "direct";
+}
+
+function isFilingCandidate(finding: SubmissionFindingSummary): boolean {
+  return (
+    (finding.verification_status === "confirmed" || finding.verification_status === "downgraded")
+    && finding.submission_status === "none"
+  );
 }
 
 function workspacePlatform(
@@ -103,6 +107,7 @@ export function SubmissionsTab({ engagementKey, refreshVersion = 0 }: Submission
   const [selectedSlug, setSelectedSlug] = useState("");
   const [detail, setDetail] = useState<SubmissionDetail | null>(null);
   const [reviewMode, setReviewMode] = useState<ReviewMode>("preview");
+  const [findingScope, setFindingScope] = useState<FindingScope>("candidates");
   const [selectedAttachments, setSelectedAttachments] = useState<Set<number>>(new Set());
   const [loading, setLoading] = useState(true);
   const [detailLoading, setDetailLoading] = useState(false);
@@ -134,7 +139,13 @@ export function SubmissionsTab({ engagementKey, refreshVersion = 0 }: Submission
     const retainedSelection = !refreshedSelection && previousSelection && next.findings_page.has_more
       ? previousSelection
       : null;
-    const selectedFinding = refreshedSelection ?? retainedSelection ?? next.findings[0] ?? null;
+    const filingCandidates = next.findings.filter(isFilingCandidate);
+    if (filingCandidates.length === 0) setFindingScope("all");
+    const selectedFinding = refreshedSelection
+      ?? retainedSelection
+      ?? filingCandidates[0]
+      ?? next.findings[0]
+      ?? null;
     const findings = retainedSelection ? [...next.findings, retainedSelection] : next.findings;
     selectedFindingRef.current = selectedFinding
       ? { engagementKey, finding: selectedFinding }
@@ -205,6 +216,13 @@ export function SubmissionsTab({ engagementKey, refreshVersion = 0 }: Submission
     () => listing?.findings.find((finding) => finding.slug === selectedSlug) ?? null,
     [listing, selectedSlug],
   );
+  const filingCandidates = useMemo(
+    () => listing?.findings.filter(isFilingCandidate) ?? [],
+    [listing],
+  );
+  const visibleFindings = findingScope === "candidates"
+    ? filingCandidates
+    : listing?.findings ?? [];
   const platform = workspacePlatform(detail, selectedFinding);
   const externalHref = safeExternalHref(selectedFinding?.submission_url ?? "");
   const hasExternalRecord = Boolean(
@@ -215,6 +233,17 @@ export function SubmissionsTab({ engagementKey, refreshVersion = 0 }: Submission
       || selectedFinding.submission_ref
       || selectedFinding.submission_url
     ),
+  );
+  const latestVersion = detail?.versions.reduce(
+    (latest, version) => (
+      !latest || version.version_number > latest.version_number ? version : latest
+    ),
+    detail.versions[0] ?? null,
+  ) ?? null;
+  const latestVersionMatchesMarkdown = Boolean(
+    latestVersion
+    && detail?.workspace.present
+    && latestVersion.submission_sha256 === detail.workspace.submission_sha256,
   );
   const selectedCount = selectedAttachments.size;
   const detailedFailedVersionIds = new Set(
@@ -235,6 +264,17 @@ export function SubmissionsTab({ engagementKey, refreshVersion = 0 }: Submission
       else next.add(artifactId);
       return next;
     });
+  };
+
+  const selectFindingScope = (scope: FindingScope) => {
+    setFindingScope(scope);
+    if (scope === "candidates" && !filingCandidates.some((finding) => finding.slug === selectedSlug)) {
+      const nextFinding = filingCandidates[0];
+      if (nextFinding) {
+        selectedFindingRef.current = { engagementKey, finding: nextFinding };
+        setSelectedSlug(nextFinding.slug);
+      }
+    }
   };
 
   const handleLoadMoreFindings = async () => {
@@ -501,8 +541,28 @@ export function SubmissionsTab({ engagementKey, refreshVersion = 0 }: Submission
             )}
           </div>
         </div>
+        <div className="submission-finding-scopes" role="group" aria-label="Submission queue scope">
+          <button
+            type="button"
+            aria-pressed={findingScope === "candidates"}
+            className={findingScope === "candidates" ? "is-active" : ""}
+            onClick={() => selectFindingScope("candidates")}
+            disabled={filingCandidates.length === 0 || exporting || recovering || loadingMoreAttachments}
+          >
+            Candidates <span>{filingCandidates.length}</span>
+          </button>
+          <button
+            type="button"
+            aria-pressed={findingScope === "all"}
+            className={findingScope === "all" ? "is-active" : ""}
+            onClick={() => selectFindingScope("all")}
+            disabled={exporting || recovering || loadingMoreAttachments}
+          >
+            All / history <span>{listing.findings_page.total}</span>
+          </button>
+        </div>
         <div className="submission-finding-list">
-          {listing.findings.map((finding: SubmissionFindingSummary) => (
+          {visibleFindings.map((finding: SubmissionFindingSummary) => (
             <button
               type="button"
               key={finding.slug}
@@ -560,7 +620,23 @@ export function SubmissionsTab({ engagementKey, refreshVersion = 0 }: Submission
           <div className="submission-title-status">
             <span className={detail?.workspace.final_ready ? "is-ready" : "is-blocked"}>
               <ShieldCheck size={14} aria-hidden="true" />
-              {detail?.workspace.final_ready ? "Final-ready" : "Review required"}
+              {detailLoading
+                ? "Checking draft readiness…"
+                : detail?.workspace.final_ready
+                  ? "Draft final-ready"
+                  : "Draft review required"}
+            </span>
+            <span className={latestVersionMatchesMarkdown ? "is-ready" : "is-stale"}>
+              <FileArchive size={14} aria-hidden="true" />
+              {detailLoading
+                ? "Checking immutable version…"
+                : !latestVersion
+                  ? "No immutable version yet"
+                  : !detail?.workspace.present
+                    ? `Latest v${latestVersion.version_number}; no current Markdown`
+                  : latestVersionMatchesMarkdown
+                    ? `Latest v${latestVersion.version_number} matches current Markdown`
+                    : `Latest v${latestVersion.version_number} differs from current Markdown`}
             </span>
           </div>
         </header>
@@ -570,28 +646,36 @@ export function SubmissionsTab({ engagementKey, refreshVersion = 0 }: Submission
             className="submission-external-record"
             aria-label="External submission record"
           >
-            <div>
-              <span>Status</span>
-              <strong>{externalValue(selectedFinding.submission_status).replace(/_/g, " ")}</strong>
-            </div>
-            <div>
-              <span>Platform</span>
-              <strong>{externalValue(selectedFinding.submission_platform)}</strong>
-            </div>
-            <div>
-              <span>Reference</span>
-              <code>{externalValue(selectedFinding.submission_ref)}</code>
-            </div>
-            <div>
-              <span>Submission URL</span>
-              {externalHref ? (
-                <a href={externalHref} target="_blank" rel="noopener noreferrer">
-                  {selectedFinding.submission_url}
-                </a>
-              ) : (
-                <code>{externalValue(selectedFinding.submission_url)}</code>
-              )}
-            </div>
+            {selectedFinding.submission_status !== "none" && (
+              <div>
+                <span>Status</span>
+                <strong>{selectedFinding.submission_status.replace(/_/g, " ")}</strong>
+              </div>
+            )}
+            {selectedFinding.submission_platform.trim() && (
+              <div>
+                <span>Platform</span>
+                <strong>{selectedFinding.submission_platform}</strong>
+              </div>
+            )}
+            {selectedFinding.submission_ref.trim() && (
+              <div>
+                <span>Reference</span>
+                <code>{selectedFinding.submission_ref}</code>
+              </div>
+            )}
+            {selectedFinding.submission_url.trim() && (
+              <div>
+                <span>Submission URL</span>
+                {externalHref ? (
+                  <a href={externalHref} target="_blank" rel="noopener noreferrer">
+                    {selectedFinding.submission_url}
+                  </a>
+                ) : (
+                  <code>{selectedFinding.submission_url}</code>
+                )}
+              </div>
+            )}
           </section>
         )}
 
@@ -623,12 +707,11 @@ export function SubmissionsTab({ engagementKey, refreshVersion = 0 }: Submission
         ) : (
           <div className="submission-review-grid">
             <article className="submission-document panel">
-              <div className="submission-document-toolbar" role="tablist" aria-label="Submission document view">
-                <div>
+              <div className="submission-document-toolbar">
+                <div role="group" aria-label="Submission document view">
                   <button
                     type="button"
-                    role="tab"
-                    aria-selected={reviewMode === "preview"}
+                    aria-pressed={reviewMode === "preview"}
                     className={reviewMode === "preview" ? "is-active" : ""}
                     onClick={() => setReviewMode("preview")}
                   >
@@ -636,8 +719,7 @@ export function SubmissionsTab({ engagementKey, refreshVersion = 0 }: Submission
                   </button>
                   <button
                     type="button"
-                    role="tab"
-                    aria-selected={reviewMode === "raw"}
+                    aria-pressed={reviewMode === "raw"}
                     className={reviewMode === "raw" ? "is-active" : ""}
                     onClick={() => setReviewMode("raw")}
                   >

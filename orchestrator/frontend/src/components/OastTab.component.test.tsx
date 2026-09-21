@@ -52,7 +52,8 @@ const probe = {
   param: "url",
   probe_kind: "http",
   request_hash: "request-sha256",
-  payload: "https://oast.test/oast-123",
+  client_name: "ssrf-a",
+  client_payload_host: "client-a.oast.test",
   status: "pending",
   notes: "",
   created_at: "2026-09-12T00:00:00Z",
@@ -77,6 +78,102 @@ afterEach(() => {
 });
 
 describe("OastTab detail evidence", () => {
+  it("defaults to the actionable worklist and keeps the full inventory available", async () => {
+    vi.mocked(listOobProbes).mockResolvedValue([
+      { ...probe, nonce: "pending-probe", status: "pending" },
+      { ...probe, nonce: "fired-probe", status: "fired", interaction_count: 1 },
+      { ...probe, nonce: "expired-probe", status: "expired" },
+      { ...probe, nonce: "confirmed-probe", status: "confirmed", interaction_count: 1 },
+      { ...probe, nonce: "ignored-probe", status: "ignored" },
+    ]);
+
+    render(<ToastProvider><OastTab engagementKey="demo" refreshVersion={0} /></ToastProvider>);
+
+    expect((await screen.findByRole("button", { name: /^Worklist/ })).getAttribute("aria-pressed"))
+      .toBe("true");
+    expect(screen.getByRole("button", { name: /^Inventory/ }).getAttribute("aria-pressed"))
+      .toBe("false");
+    expect(await screen.findByRole("gridcell", { name: "pending-probe" })).toBeTruthy();
+    expect(screen.getByRole("gridcell", { name: "fired-probe" })).toBeTruthy();
+    expect(screen.getByRole("gridcell", { name: "expired-probe" })).toBeTruthy();
+    expect(screen.queryByRole("gridcell", { name: "confirmed-probe" })).toBeNull();
+    expect(screen.queryByRole("gridcell", { name: "ignored-probe" })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: /^Inventory/ }));
+    expect(await screen.findByRole("gridcell", { name: "confirmed-probe" })).toBeTruthy();
+    expect(screen.getByRole("gridcell", { name: "ignored-probe" })).toBeTruthy();
+  });
+
+  it("uses truthful distinct lifecycle labels and accessible filters", async () => {
+    vi.mocked(listOobProbes).mockResolvedValue([
+      { ...probe, nonce: "fired-probe", status: "fired", interaction_count: 1 },
+      { ...probe, nonce: "confirmed-probe", status: "confirmed", interaction_count: 1 },
+    ]);
+
+    render(<ToastProvider><OastTab engagementKey="demo" refreshVersion={0} /></ToastProvider>);
+
+    expect((await screen.findByRole("button", { name: /Filter status Callback received/ }))
+      .getAttribute("aria-pressed")).toBe("false");
+    fireEvent.click(screen.getByRole("button", { name: /^Inventory/ }));
+    const confirmed = screen.getByRole("button", { name: /Filter status Operator confirmed/ });
+    expect(confirmed.getAttribute("aria-pressed")).toBe("false");
+    expect(screen.queryByRole("button", { name: /unmatched/i })).toBeNull();
+    expect(screen.getByRole("searchbox", { name: "Search OAST probes" })).toBeTruthy();
+  });
+
+  it("shows binding truth, interaction summary, exact receipt metadata, and separate decoding", async () => {
+    const raw = "R0VUIC9jYWxsYmFjayBIVFRQLzEuMQ==";
+    const firedProbe = {
+      ...probe,
+      status: "fired",
+      interaction_count: 1,
+      last_interaction_at: "2026-09-12T05:06:07Z",
+    };
+    vi.mocked(listOobProbes).mockResolvedValue([firedProbe]);
+    vi.mocked(getOobProbe).mockResolvedValue({
+      ...firedProbe,
+      interactions: [{
+        id: 44,
+        engagement_id: 1,
+        probe_id: 1,
+        protocol: "http",
+        remote_address: "203.0.113.8",
+        query_type: "A",
+        raw_request: raw,
+        interaction_hash: "interaction-sha256",
+        observed_at: "2026-09-12T05:06:07Z",
+        created_at: "2026-09-12T05:06:08Z",
+      }],
+    });
+
+    render(<ToastProvider><OastTab engagementKey="demo" refreshVersion={0} /></ToastProvider>);
+    fireEvent.click(await screen.findByRole("gridcell", { name: "oast-123" }));
+
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText("Callback received · confirmation needed")).toBeTruthy();
+    expect(within(dialog).getByText("ssrf-a")).toBeTruthy();
+    expect(within(dialog).getByText("client-a.oast.test")).toBeTruthy();
+    expect(within(dialog).getByText("Complete")).toBeTruthy();
+    expect(within(dialog).getByText("1 callback")).toBeTruthy();
+    expect(within(dialog).getAllByText("HTTP")).toHaveLength(2);
+    expect(within(dialog).getByText("interaction-sha256")).toBeTruthy();
+    expect(within(dialog).getByText("2026-09-12 05:06:07.000 UTC")).toBeTruthy();
+    expect(within(dialog).getByText(raw)).toBeTruthy();
+    expect(within(dialog).getByText("GET /callback HTTP/1.1")).toBeTruthy();
+    expect(within(dialog).getByRole("button", { name: "Close OAST probe details" })).toBeTruthy();
+  });
+
+  it("makes pending age and the absence of a durable expiry explicit", async () => {
+    vi.mocked(getOobProbe).mockResolvedValue({ ...probe, interactions: [] });
+    render(<ToastProvider><OastTab engagementKey="demo" refreshVersion={0} /></ToastProvider>);
+
+    fireEvent.click(await screen.findByRole("gridcell", { name: "oast-123" }));
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getAllByText("Awaiting callback").length).toBeGreaterThan(0);
+    expect(within(dialog).getByText("Pending age")).toBeTruthy();
+    expect(within(dialog).getByText("Not recorded by OAST ledger")).toBeTruthy();
+  });
+
   it("opens a production grid row by keyboard and restores focus after Escape", async () => {
     vi.mocked(getOobProbe).mockResolvedValue({ ...probe, interactions: [] });
     render(<ToastProvider><OastTab engagementKey="demo" refreshVersion={0} /></ToastProvider>);

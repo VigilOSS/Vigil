@@ -1388,8 +1388,14 @@ def _run_compare(args) -> None:
                 response.get("automatic_baseline") is None
                 or _positive_int(response.get("automatic_baseline"))
             )
-            and isinstance(response.get("target_compatible"), bool)
-            and isinstance(response.get("source_compatible"), bool)
+            and (
+                response.get("target_compatible") is None
+                or isinstance(response.get("target_compatible"), bool)
+            )
+            and (
+                response.get("source_compatible") is None
+                or isinstance(response.get("source_compatible"), bool)
+            )
             and response.get("deterministic") is True
             and isinstance(classifications, dict)
             and all(

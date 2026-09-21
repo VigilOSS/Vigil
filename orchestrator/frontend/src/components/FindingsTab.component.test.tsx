@@ -46,6 +46,18 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("SubmissionPane evidence", () => {
+  it("renders authored Markdown in steps and evidence", () => {
+    const { container } = renderPane({
+      steps_to_reproduce: ["1. Run `curl https://target.example`\n2. Observe **admin access**."],
+      evidence: "#### Authorization bypass\n\nThe response returned `role: admin`.",
+    });
+
+    expect(container.querySelector("ol li code")?.textContent).toBe("curl https://target.example");
+    expect(container.querySelector("ol li strong")?.textContent).toBe("admin access");
+    expect(screen.getByRole("heading", { name: "Authorization bypass" })).toBeTruthy();
+    expect(container.querySelector("p code")?.textContent).toBe("role: admin");
+  });
+
   it("renders and copies a capture byte for byte", () => {
     // Leading and trailing whitespace is the finding on a padding or
     // header-stripping bug, and the clipboard has to carry it.

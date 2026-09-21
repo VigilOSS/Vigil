@@ -44,7 +44,7 @@ FINDING_DETAIL_CORE_PROPERTIES: dict[str, dict[str, Any]] = {
     "evidence": {
         "type": "string",
         "minLength": 1,
-        "description": "Verbatim proof: exact response excerpt, artifact path, or replayable request/response. Must be sufficient to reproduce independently.",
+        "description": "Authored Markdown explaining how the proof establishes the finding. Use short headings when several observations are present and fenced code blocks for exact commands, requests, responses, or tool output; put large raw captures in an artifact or poc_request/poc_response instead. Preserve quoted evidence bytes verbatim and include enough context to reproduce independently.",
     },
     "kill_reason": {
         "type": "string",
@@ -76,7 +76,7 @@ FINDING_DETAIL_CORE_PROPERTIES: dict[str, dict[str, Any]] = {
     "impact": {
         "type": "string",
         "minLength": 1,
-        "description": "Concrete attacker outcome: what data is exposed or what action can be taken, and who is affected (e.g. 'Anonymous attacker can read all DB rows', 'Remote code execution via heap corruption').",
+        "description": "Submission-quality Markdown stating the concrete attacker outcome, what data or action is exposed, and who is affected (e.g. 'Anonymous attacker can read all DB rows', 'Remote code execution via heap corruption').",
     },
     "cvss_vector": {
         "type": "string",
@@ -96,12 +96,12 @@ FINDING_DETAIL_CORE_PROPERTIES: dict[str, dict[str, Any]] = {
     },
     "remediation": {
         "type": "string",
-        "description": "Specific fix or missing control (e.g. 'Use parameterized queries', 'Add bounds check on schemelen before memcpy').",
+        "description": "Submission-quality Markdown naming the specific fix and missing control (e.g. 'Use parameterized queries', 'Add bounds check on schemelen before memcpy').",
     },
     "steps_to_reproduce": {
         "type": ["string", "array"],
         "items": {"type": "string"},
-        "description": "Ordered reproduction steps, starting from initial access state and ending at impact observation. Write them FROM WHAT YOU ACTUALLY RAN, with concrete values (the real session cookie, the real object id, the real payload), and preserve those values verbatim through submission. An unbound placeholder is a step nobody can follow, and reusing one placeholder across different objects corrupts the sequence. Preferred form is ONE string holding the whole block with your own numbering — renderers emit it verbatim, and prose elsewhere in the submission that cites a step number only resolves against numbers you wrote. A list of strings is also accepted, one action per string.",
+        "description": "Authored Markdown with ordered reproduction steps, starting from initial access state and ending at impact observation. Preferred form is ONE string with explicit 1./2./… numbering, blank lines between complex steps, and fenced code blocks for commands, requests, or responses. Write FROM WHAT YOU ACTUALLY RAN, with concrete values (the real session cookie, object id, and payload), and preserve those values verbatim through submission. An unbound placeholder is a step nobody can follow; a list of strings remains accepted for legacy/simple records.",
     },
     # The anti-inference device for ``steps_to_reproduce``: the audit rows that
     # actually produced the reproduction. Without it, "write accurate steps" is an

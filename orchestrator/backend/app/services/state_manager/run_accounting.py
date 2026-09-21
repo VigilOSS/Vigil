@@ -4288,6 +4288,11 @@ def _latest_comparison_baseline(
     run_purpose: str,
     target_identity_json: str,
 ) -> sqlite3.Row | None:
+    # An absent identity is not a shared identity. Treating two empty objects
+    # as equal previously made unrelated runs look comparable merely because
+    # neither writer supplied the field.
+    if not _json_value(target_identity_json, {}):
+        return None
     return connection.execute(
         """
         SELECT * FROM assessment_runs
@@ -4314,15 +4319,27 @@ def _comparison_payload(
 ) -> dict[str, Any]:
     run_id = int(current["id"])
     baseline_run_id = int(baseline["id"])
-    target_compatible = (
+    same_run_contract = (
         str(current["run_kind"]) == str(baseline["run_kind"])
         and str(current["run_purpose"]) == str(baseline["run_purpose"])
-        and str(current["target_identity_json"])
-        == str(baseline["target_identity_json"])
     )
-    source_compatible = target_compatible and _comparison_inventory_identity(
-        connection, run_id
-    ) == _comparison_inventory_identity(connection, baseline_run_id)
+    current_target = _json_value(current["target_identity_json"], {})
+    baseline_target = _json_value(baseline["target_identity_json"], {})
+    if not same_run_contract:
+        target_compatible: bool | None = False
+    elif not current_target or not baseline_target:
+        target_compatible = None
+    else:
+        target_compatible = current_target == baseline_target
+
+    current_inventory = _comparison_inventory_identity(connection, run_id)
+    baseline_inventory = _comparison_inventory_identity(connection, baseline_run_id)
+    if target_compatible is not True:
+        source_compatible: bool | None = target_compatible
+    elif not current_inventory or not baseline_inventory:
+        source_compatible = None
+    else:
+        source_compatible = current_inventory == baseline_inventory
     current_keys = {
         str(row["identity_key"])
         for row in connection.execute(
@@ -4449,8 +4466,8 @@ def _record_comparison(
             run_id,
             baseline_run_id,
             selection,
-            int(payload["target_compatible"]),
-            int(payload["source_compatible"]),
+            -1 if payload["target_compatible"] is None else int(payload["target_compatible"]),
+            -1 if payload["source_compatible"] is None else int(payload["source_compatible"]),
             _json_text(payload),
             comparison_sha256,
         ),

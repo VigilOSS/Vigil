@@ -7,6 +7,7 @@ import type {
 } from "../lib/api";
 
 type CoverageTabProps = {
+  engagementKey: string;
   summary: AssessmentSummary | null;
   targets: AssessmentTarget[];
   services: AssessmentService[];
@@ -14,6 +15,22 @@ type CoverageTabProps = {
 };
 
 const PAGE_SIZE = 50;
+const ATTENTION_STATUSES = new Set(["pending", "queued", "deferred", "blocked"]);
+const STATUS_ORDER = ["blocked", "pending", "queued", "deferred", "covered", "not_applicable"];
+
+function statusLabel(value: string): string {
+  return value.replace(/_/g, " ");
+}
+
+function formatDate(value: string | null | undefined): string {
+  if (!value) return "Not recorded";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return new Intl.DateTimeFormat(undefined, {
+    dateStyle: "medium",
+    timeStyle: "short",
+  }).format(date);
+}
 
 function extractHost(url: string): string {
   try {
@@ -92,13 +109,16 @@ const IconClose = () => (
 );
 
 export function CoverageTab({
+  engagementKey,
   summary,
   targets,
   services,
   coverageItems,
 }: CoverageTabProps) {
   const [expandedHost, setExpandedHost] = useState<string | null>(null);
+  const [expandedItem, setExpandedItem] = useState<number | null>(null);
   const [pages, setPages] = useState<Record<string, number>>({});
+  const [view, setView] = useState<"needs-action" | "ledger">("needs-action");
 
   // Chip filters (multi-select sets)
   const [statusFilters, setStatusFilters] = useState<Set<string>>(new Set());
@@ -109,11 +129,21 @@ export function CoverageTab({
   const [query, setQuery] = useState("");
   const searchRef = useRef<HTMLInputElement | null>(null);
 
+  const summaryAvailable = summary !== null;
   const coverageStatuses = summary?.coverage_statuses ?? {};
   const totalCoverage = Object.values(coverageStatuses).reduce((a, b) => a + b, 0);
   const loadedCoverage = coverageItems.length;
   const coverageIsPartial = totalCoverage > loadedCoverage;
-  const statusKeys = useMemo(() => Object.keys(coverageStatuses), [coverageStatuses]);
+  const statusKeys = useMemo(
+    () => Object.keys(coverageStatuses).sort((a, b) => {
+      const aIndex = STATUS_ORDER.indexOf(a);
+      const bIndex = STATUS_ORDER.indexOf(b);
+      return (aIndex < 0 ? STATUS_ORDER.length : aIndex)
+        - (bIndex < 0 ? STATUS_ORDER.length : bIndex)
+        || a.localeCompare(b);
+    }),
+    [coverageStatuses],
+  );
 
   // Build lookup: service_id → target host / surface name
   const serviceHostMap = useMemo(() => {
@@ -239,6 +269,9 @@ export function CoverageTab({
     });
   }, [coverageItems, statusFilters, familyFilters, authFilters, parsedQuery, matchesQuery]);
 
+  const hasAnyFilter =
+    statusFilters.size + familyFilters.size + authFilters.size > 0 || Boolean(query.trim());
+
   // Group filtered items by host (preserves tree structure)
   const hostGroups = useMemo(() => {
     const map = new Map<string, AssessmentCoverageItem[]>();
@@ -250,10 +283,13 @@ export function CoverageTab({
       map.set(host, list);
     }
 
-    // Also include target hosts with zero coverage items
-    for (const t of targets) {
-      const host = t.host || t.hostname || t.identity;
-      if (!map.has(host)) map.set(host, []);
+    // An unfiltered ledger preserves target hosts with no work. Once filters
+    // are active, an empty host is a false match and only adds noise.
+    if (!hasAnyFilter) {
+      for (const t of targets) {
+        const host = t.host || t.hostname || t.identity;
+        if (!map.has(host)) map.set(host, []);
+      }
     }
 
     const groups: HostGroup[] = [];
@@ -262,7 +298,7 @@ export function CoverageTab({
     }
     groups.sort((a, b) => b.items.length - a.items.length || a.host.localeCompare(b.host));
     return groups;
-  }, [filteredItems, hostOf, serviceCountByHost, targets]);
+  }, [filteredItems, hasAnyFilter, hostOf, serviceCountByHost, targets]);
 
   // Counts per chip dimension (independent of that dimension's own active filter)
   const statusCounts = useMemo(() => {
@@ -316,7 +352,10 @@ export function CoverageTab({
 
   const activeFilterCount =
     statusFilters.size + familyFilters.size + authFilters.size + (query ? 1 : 0);
-  const hasAnyFilter = activeFilterCount > 0;
+  const needsActionItems = summary?.open_coverage_items?.length
+    ? summary.open_coverage_items
+    : coverageItems.filter((item) => ATTENTION_STATUSES.has(item.status));
+  const serviceGaps = summary?.service_coverage_gaps ?? [];
 
   const toggle = useCallback(
     (
@@ -404,11 +443,18 @@ export function CoverageTab({
       <section className="panel">
         <div className="panel-header">
           <h2>Test coverage</h2>
-          <p className="meta-text">{totalCoverage} total items</p>
+          <p className="meta-text">
+            {summaryAvailable ? `${totalCoverage} total items` : "Summary unavailable"}
+          </p>
         </div>
-        {totalCoverage > 0 ? (
+        {!summaryAvailable ? (
+          <p className="data-boundary-note" role="status">
+            Summary unavailable. Showing {loadedCoverage.toLocaleString()} loaded row
+            {loadedCoverage === 1 ? "" : "s"} only; totals and percentages are unknown.
+          </p>
+        ) : totalCoverage > 0 ? (
           <div className="coverage-bar-container">
-            <div className="coverage-bar">
+            <div className="coverage-bar" role="img" aria-label="Coverage status distribution">
               {statusKeys.map((status) => {
                 const count = coverageStatuses[status];
                 const pct = totalCoverage > 0 ? (count / totalCoverage) * 100 : 0;
@@ -427,7 +473,7 @@ export function CoverageTab({
               {statusKeys.map((status) => (
                 <span key={status} className="coverage-legend-item">
                   <span className={`coverage-dot coverage-dot-${status}`} />
-                  {status}: {coverageStatuses[status]}
+                  {statusLabel(status)}: {coverageStatuses[status]}
                 </span>
               ))}
             </div>
@@ -443,8 +489,74 @@ export function CoverageTab({
         )}
       </section>
 
+      <div className="coverage-view-switch" aria-label="Coverage view">
+        <button
+          type="button"
+          aria-pressed={view === "needs-action"}
+          onClick={() => setView("needs-action")}
+        >
+          Needs action
+          <span>{needsActionItems.length + serviceGaps.length}</span>
+        </button>
+        <button
+          type="button"
+          aria-pressed={view === "ledger"}
+          onClick={() => setView("ledger")}
+        >
+          Full ledger
+          <span>{loadedCoverage}</span>
+        </button>
+      </div>
+
+      {view === "needs-action" && (
+        <section className="panel coverage-debt">
+          <div className="panel-header">
+            <div>
+              <h2>Needs action</h2>
+              <p className="meta-text">Open coverage work and service-level gaps.</p>
+            </div>
+          </div>
+          {needsActionItems.length === 0 && serviceGaps.length === 0 ? (
+            <p className="run-clear-state">No coverage debt in the available summary.</p>
+          ) : (
+            <div className="coverage-debt-groups">
+              {needsActionItems.length > 0 && <section>
+                <h3>Coverage work <span>{needsActionItems.length}</span></h3>
+                <div className="coverage-debt-list">
+                  {needsActionItems.map((gap, index) => (
+                    <article key={`${gap.status}-${gap.attack_family}-${gap.input_slot}-${index}`}>
+                      <span className={`badge coverage-badge-${gap.status}`}>{statusLabel(gap.status)}</span>
+                      <div>
+                        <strong>{gap.method ? `${gap.method} ` : ""}{gap.canonical_url || gap.service_endpoint || "Unbound coverage item"}</strong>
+                        <p>{gap.attack_family} · {gap.input_slot} · {gap.auth_context}</p>
+                      </div>
+                      <time>{formatDate(gap.updated_at)}</time>
+                    </article>
+                  ))}
+                </div>
+              </section>}
+              {serviceGaps.length > 0 && <section>
+                <h3>Service gaps <span>{serviceGaps.length}</span></h3>
+                <div className="coverage-debt-list">
+                  {serviceGaps.map((gap, index) => (
+                    <article key={`${gap.endpoint}-${gap.coverage_status}-${index}`}>
+                      <span className={`badge coverage-badge-${gap.coverage_status}`}>{statusLabel(gap.coverage_status)}</span>
+                      <div><strong>{gap.endpoint}</strong><p>{gap.service || "Unclassified service"}</p></div>
+                      <time>{formatDate(gap.updated_at)}</time>
+                    </article>
+                  ))}
+                </div>
+              </section>}
+            </div>
+          )}
+          {coverageIsPartial && (
+            <p className="meta-text">This summary is engagement-wide; the full ledger below remains capped at {loadedCoverage.toLocaleString()} loaded rows.</p>
+          )}
+        </section>
+      )}
+
       {/* Unified attack surface */}
-      <section className="panel">
+      {view === "ledger" && <section className="panel">
         <div className="panel-header">
           <h2>Attack surface</h2>
           <p className="meta-text">
@@ -464,8 +576,10 @@ export function CoverageTab({
                   <IconSearch />
                   <input
                     ref={searchRef}
+                    type="search"
+                    aria-label="Search coverage ledger"
                     className="search-input"
-                    placeholder="Search any field — host, endpoint, family, payload… (try status:covered host:api method:GET)"
+                    placeholder="Search host, endpoint, family, auth… (try status:covered host:api method:GET)"
                     value={query}
                     onChange={(e) => setQuery(e.target.value)}
                   />
@@ -491,7 +605,8 @@ export function CoverageTab({
                       <button
                         key={s}
                         type="button"
-                        className={`filter-chip ${statusFilters.has(s) ? "is-active" : ""}`}
+                      className={`filter-chip ${statusFilters.has(s) ? "is-active" : ""}`}
+                      aria-pressed={statusFilters.has(s)}
                         onClick={() => toggle(statusFilters, setStatusFilters, s)}
                       >
                         {s.replace(/_/g, " ")}
@@ -507,7 +622,8 @@ export function CoverageTab({
                       <button
                         key={s}
                         type="button"
-                        className={`filter-chip ${familyFilters.has(s) ? "is-active" : ""}`}
+                      className={`filter-chip ${familyFilters.has(s) ? "is-active" : ""}`}
+                      aria-pressed={familyFilters.has(s)}
                         onClick={() => toggle(familyFilters, setFamilyFilters, s)}
                       >
                         {s.replace(/_/g, " ")}
@@ -523,7 +639,8 @@ export function CoverageTab({
                       <button
                         key={s}
                         type="button"
-                        className={`filter-chip ${authFilters.has(s) ? "is-active" : ""}`}
+                      className={`filter-chip ${authFilters.has(s) ? "is-active" : ""}`}
+                      aria-pressed={authFilters.has(s)}
                         onClick={() => toggle(authFilters, setAuthFilters, s)}
                       >
                         {s.replace(/_/g, " ")}
@@ -556,6 +673,8 @@ export function CoverageTab({
                   <button
                     type="button"
                     className="coverage-tree-header"
+                    aria-expanded={isExpanded}
+                    aria-controls={`coverage-host-${host.replace(/[^a-zA-Z0-9_-]/g, "-")}`}
                     onClick={() => {
                       setExpandedHost(isExpanded ? null : host);
                     }}
@@ -570,7 +689,7 @@ export function CoverageTab({
                     </span>
                   </button>
                   {isExpanded && (
-                    <div style={{ padding: "0 14px 14px" }}>
+                    <div id={`coverage-host-${host.replace(/[^a-zA-Z0-9_-]/g, "-")}`} style={{ padding: "0 14px 14px" }}>
                       {items.length > 0 ? (
                         <>
                           <div className="coverage-items-grid">
@@ -585,23 +704,35 @@ export function CoverageTab({
                             {pageItems.map((item) => {
                               const { method, endpoint } = splitEndpoint(item);
                               return (
-                                <div
-                                  key={item.id}
-                                  className="coverage-items-row coverage-items-6col"
-                                >
-                                  <span className="mono-text">{method || "—"}</span>
-                                  <span
-                                    className="mono-text"
-                                    title={item.canonical_url || item.service_endpoint || ""}
+                                <div key={item.id} className="coverage-item-record">
+                                  <button
+                                    type="button"
+                                    className="coverage-items-row coverage-items-6col"
+                                    aria-expanded={expandedItem === item.id}
+                                    aria-controls={`coverage-item-${item.id}`}
+                                    onClick={() => setExpandedItem(expandedItem === item.id ? null : item.id)}
                                   >
-                                    {endpoint}
-                                  </span>
-                                  <span>{item.attack_family}</span>
-                                  <span>{item.input_slot}</span>
-                                  <span>{item.auth_context}</span>
-                                  <span className={`badge coverage-badge-${item.status}`}>
-                                    {item.status}
-                                  </span>
+                                    <span className="mono-text">{method || "—"}</span>
+                                    <span className="mono-text" title={item.canonical_url || item.service_endpoint || ""}>{endpoint}</span>
+                                    <span>{item.attack_family}</span>
+                                    <span>{item.input_slot}</span>
+                                    <span>{item.auth_context}</span>
+                                    <span className={`badge coverage-badge-${item.status}`}>{statusLabel(item.status)}</span>
+                                  </button>
+                                  {expandedItem === item.id && (
+                                    <div id={`coverage-item-${item.id}`} className="coverage-item-detail">
+                                      <div><span>Rationale / closeout notes</span><p>{item.notes || "No rationale recorded."}</p></div>
+                                      <dl>
+                                        <div><dt>Created</dt><dd>{formatDate(item.created_at)}</dd></div>
+                                        <div><dt>Updated</dt><dd>{formatDate(item.updated_at)}</dd></div>
+                                      </dl>
+                                      {item.request_variant_id != null && (
+                                        <a href={`#/engagements/${encodeURIComponent(engagementKey)}?tab=http&request=${item.request_variant_id}`}>
+                                          Open request variant #{item.request_variant_id}
+                                        </a>
+                                      )}
+                                    </div>
+                                  )}
                                 </div>
                               );
                             })}
@@ -643,10 +774,10 @@ export function CoverageTab({
           </div>
         ) : (
           <p className="meta-text" style={{ marginTop: "8px" }}>
-            No targets discovered yet.
+            {hasAnyFilter ? "No coverage items match the current filters." : "No targets discovered yet."}
           </p>
         )}
-      </section>
+      </section>}
     </>
   );
 }

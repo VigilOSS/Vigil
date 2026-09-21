@@ -16,28 +16,38 @@ import type { OobInteraction, OobProbe, OobProbeDetail } from "../lib/api";
 import { getOobProbe, listOobProbes } from "../lib/api";
 import { useBodyScrollLock, useModalFocus } from "../lib/modalScrollLock";
 import { useToast } from "../contexts/ToastContext";
-import { CodeBlock, RelTime } from "./formatting";
+import { absTime, CodeBlock, RelTime } from "./formatting";
 import { KV, ProseSection } from "./drawer/DrawerKit";
 import { Skeleton, TableSkeleton } from "./Skeletons";
 
 const OastGrid = lazy(() => import("./OastGrid"));
 
 // ── Status colors ─────────────────────────────────────────────────────
-// fired = ok/green (a callback landed), pending = warn (minted, awaiting),
-// unmatched = muted (stray callback w/ no probe), confirmed = ok,
-// expired/ignored = muted. Drives the colored .oob-status-badge — see
-// app.css "OAST status colors".
+// A callback landing still needs an operator verdict, so fired and confirmed
+// are deliberately distinct lifecycle states.
 const OOB_STATUS_CLASSES: Record<string, string> = {
   fired: "oob-fired",
-  confirmed: "oob-fired",
+  confirmed: "oob-confirmed",
   pending: "oob-pending",
-  unmatched: "oob-muted",
   expired: "oob-muted",
   ignored: "oob-muted",
 };
 
+const OOB_STATUS_LABELS: Record<string, string> = {
+  fired: "Callback received",
+  confirmed: "Operator confirmed",
+  pending: "Awaiting callback",
+  expired: "Expired",
+  ignored: "Ignored",
+};
+
 export function oobStatusClass(status: string): string {
   return OOB_STATUS_CLASSES[(status || "").toLowerCase()] || "oob-muted";
+}
+
+export function oobStatusLabel(status: string): string {
+  const normalized = (status || "pending").toLowerCase();
+  return OOB_STATUS_LABELS[normalized] || normalized.replaceAll("_", " ");
 }
 
 // ── Protocol colors ───────────────────────────────────────────────────
@@ -57,9 +67,9 @@ function protocolClass(proto: string): string {
 
 // A raw_request that looks base64-encoded gets decoded for display; anything
 // else (or a decode failure) renders verbatim.
-function maybeDecode(raw: string): string {
+function decodedInterpretation(raw: string): string | null {
   const text = (raw || "").trim();
-  if (!text) return "";
+  if (!text) return null;
   // Heuristic: base64 alphabet only, length a multiple of 4, reasonably long.
   if (text.length >= 8 && text.length % 4 === 0 && /^[A-Za-z0-9+/]+={0,2}$/.test(text)) {
     try {
@@ -67,12 +77,12 @@ function maybeDecode(raw: string): string {
       // Only swap in the decoded form if it's mostly printable — otherwise
       // the original was probably not base64 (or was binary).
       const printable = decoded.replace(/[^\x20-\x7e\r\n\t]/g, "");
-      if (printable.length >= decoded.length * 0.85) return decoded;
+      if (printable.length >= decoded.length * 0.85 && decoded !== raw) return decoded;
     } catch {
       // fall through to raw
     }
   }
-  return raw;
+  return null;
 }
 
 // ── Icons (match the other tabs) ──────────────────────────────────────
@@ -104,7 +114,8 @@ type OastTabProps = {
   refreshVersion?: number;
 };
 
-const STATUS_ORDER = ["fired", "pending", "unmatched", "confirmed", "expired", "ignored"] as const;
+const STATUS_ORDER = ["fired", "pending", "confirmed", "expired", "ignored"] as const;
+const WORKLIST_STATUSES = new Set(["fired", "pending", "expired"]);
 
 export function OastTab({ engagementKey, refreshVersion }: OastTabProps) {
   const { toast } = useToast();
@@ -113,6 +124,7 @@ export function OastTab({ engagementKey, refreshVersion }: OastTabProps) {
   const [loadError, setLoadError] = useState<string | null>(null);
 
   const [query, setQuery] = useState("");
+  const [view, setView] = useState<"worklist" | "inventory">("worklist");
   const [statusFilters, setStatusFilters] = useState<Set<string>>(new Set());
   const [selected, setSelected] = useState<OobProbe | null>(null);
 
@@ -279,6 +291,9 @@ export function OastTab({ engagementKey, refreshVersion }: OastTabProps) {
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     return probes.filter((p) => {
+      if (view === "worklist" && !WORKLIST_STATUSES.has((p.status || "pending").toLowerCase())) {
+        return false;
+      }
       if (statusFilters.size && !statusFilters.has((p.status || "pending").toLowerCase()))
         return false;
       if (q) {
@@ -290,7 +305,12 @@ export function OastTab({ engagementKey, refreshVersion }: OastTabProps) {
       }
       return true;
     });
-  }, [probes, statusFilters, query]);
+  }, [probes, statusFilters, query, view]);
+
+  const worklistCount = useMemo(
+    () => probes.filter((probe) => WORKLIST_STATUSES.has((probe.status || "pending").toLowerCase())).length,
+    [probes],
+  );
 
   useEffect(() => {
     if (selected && !probes.some((p) => p.nonce === selected.nonce)) {
@@ -355,6 +375,8 @@ export function OastTab({ engagementKey, refreshVersion }: OastTabProps) {
               ref={searchRef}
               className="search-input"
               placeholder="Search OAST probes — target, technique, nonce…"
+              type="search"
+              aria-label="Search OAST probes"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
             />
@@ -364,6 +386,7 @@ export function OastTab({ engagementKey, refreshVersion }: OastTabProps) {
                 className="icon-btn"
                 onClick={() => setQuery("")}
                 title="Clear"
+                aria-label="Clear OAST search"
                 style={{ width: 22, height: 22 }}
               >
                 <IconClose />
@@ -379,6 +402,25 @@ export function OastTab({ engagementKey, refreshVersion }: OastTabProps) {
           </div>
         </div>
         <div className="filter-row">
+          <div className="filter-group" aria-label="OAST view">
+            <span className="filter-label">View</span>
+            <button
+              type="button"
+              className={`filter-chip ${view === "worklist" ? "is-active" : ""}`}
+              aria-pressed={view === "worklist"}
+              onClick={() => setView("worklist")}
+            >
+              Worklist <span className="filter-count">{worklistCount}</span>
+            </button>
+            <button
+              type="button"
+              className={`filter-chip ${view === "inventory" ? "is-active" : ""}`}
+              aria-pressed={view === "inventory"}
+              onClick={() => setView("inventory")}
+            >
+              Inventory <span className="filter-count">{probes.length}</span>
+            </button>
+          </div>
           {statusChips.length > 0 && (
             <div className="filter-group">
               <span className="filter-label">Status</span>
@@ -389,10 +431,12 @@ export function OastTab({ engagementKey, refreshVersion }: OastTabProps) {
                   className={`filter-chip oob-status-chip ${oobStatusClass(s)} ${
                     statusFilters.has(s) ? "is-active" : ""
                   }`}
+                  aria-label={`Filter status ${oobStatusLabel(s)}`}
+                  aria-pressed={statusFilters.has(s)}
                   onClick={() => toggleStatus(s)}
                 >
                   <span className={`sev-dot oob-status-dot ${oobStatusClass(s)}`} />
-                  {s}
+                  {oobStatusLabel(s)}
                   <span className="filter-count">{statusCounts[s] || 0}</span>
                 </button>
               ))}
@@ -451,7 +495,7 @@ export function OastTab({ engagementKey, refreshVersion }: OastTabProps) {
           detailLoading={detailLoading.has(selected.nonce)}
           detailError={detailErrors.get(selected.nonce) ?? null}
           protocolClass={protocolClass}
-          maybeDecode={maybeDecode}
+          decodedInterpretation={decodedInterpretation}
           toast={toast}
           onClose={() => setSelected(null)}
           returnFocusRef={drawerInvokerRef}
@@ -480,7 +524,7 @@ function OastDrawer({
   detailLoading,
   detailError,
   protocolClass,
-  maybeDecode,
+  decodedInterpretation,
   toast,
   onClose,
   returnFocusRef,
@@ -490,7 +534,7 @@ function OastDrawer({
   detailLoading: boolean;
   detailError: string | null;
   protocolClass: (proto: string) => string;
-  maybeDecode: (raw: string) => string;
+  decodedInterpretation: (raw: string) => string | null;
   toast: (message: string, type?: "success" | "error" | "info") => void;
   onClose: () => void;
   returnFocusRef: RefObject<HTMLElement | null>;
@@ -501,6 +545,16 @@ function OastDrawer({
   const status = probe.status || "pending";
   const interactions: OobInteraction[] = detail?.interactions ?? [];
   const expectedCount = probe.interaction_count ?? 0;
+  const attributionComplete = Boolean(probe.client_name?.trim() && probe.client_payload_host?.trim());
+  const protocols = [...new Set(interactions.map((item) => item.protocol).filter(Boolean))];
+  const sources = [...new Set(interactions.map((item) => item.remote_address).filter(Boolean))];
+  const observedTimes = interactions
+    .map((item) => item.observed_at || item.created_at)
+    .filter(Boolean)
+    .sort();
+  const lifecycleMessage = status === "fired"
+    ? "Callback received · confirmation needed"
+    : oobStatusLabel(status);
 
   return (
     <div className="finding-overlay" role="presentation" onClick={onClose}>
@@ -517,10 +571,16 @@ function OastDrawer({
         <div className="drawer-hero">
           <div className="drawer-top">
             <div className="drawer-slug">
-              <span className={`oob-status-badge ${oobStatusClass(status)}`}>{status}</span>
+              <span className={`oob-status-badge ${oobStatusClass(status)}`}>{oobStatusLabel(status)}</span>
             </div>
             <div className="drawer-nav">
-              <button type="button" className="icon-btn" onClick={onClose} title="Close (Esc)">
+              <button
+                type="button"
+                className="icon-btn"
+                onClick={onClose}
+                title="Close (Esc)"
+                aria-label="Close OAST probe details"
+              >
                 <IconClose />
               </button>
             </div>
@@ -532,6 +592,7 @@ function OastDrawer({
             {probe.probe_kind && <span className="tag">{probe.probe_kind}</span>}
             {probe.param && <span className="tag">{probe.param}</span>}
           </div>
+          <p className="oob-lifecycle-summary">{lifecycleMessage}</p>
         </div>
 
         <div className="drawer-body">
@@ -554,13 +615,25 @@ function OastDrawer({
               <KV k="Param" v={probe.param} mono />
               <KV k="Technique" v={probe.technique} />
               <KV k="Probe kind" v={probe.probe_kind} />
+              <KV k="Client" v={probe.client_name} mono />
+              <KV k="Client payload host" v={probe.client_payload_host} mono />
+              <KV k="Attribution" v={attributionComplete ? "Complete" : "Incomplete"} />
               <KV
                 k="Request hash"
                 v={probe.request_hash}
                 mono
                 toast={probe.request_hash ? toast : undefined}
               />
-              <KV k="Status" v={status} />
+              <KV k="Status" v={oobStatusLabel(status)} />
+              {status === "pending" && (
+                <>
+                  <div className="kv">
+                    <p className="k">Pending age</p>
+                    <p className="v">{probe.created_at ? <RelTime iso={probe.created_at} /> : "Unknown"}</p>
+                  </div>
+                  <KV k="Expiry" v="Not recorded by OAST ledger" />
+                </>
+              )}
               <div className="kv">
                 <p className="k">Created</p>
                 <p className="v">{probe.created_at ? <RelTime iso={probe.created_at} /> : "—"}</p>
@@ -602,29 +675,54 @@ function OastDrawer({
                     No callbacks observed for this probe yet.
                   </p>
                 ) : (
-                  <div className="oob-interaction-list">
+                  <>
+                    <div className="oob-interaction-summary" aria-label="Interaction summary">
+                      <strong>{interactions.length} callback{interactions.length === 1 ? "" : "s"}</strong>
+                      {protocols.length > 0 && <span>{protocols.map((value) => value.toUpperCase()).join(", ")}</span>}
+                      {sources.length > 0 && <span>{sources.length} source{sources.length === 1 ? "" : "s"}</span>}
+                      {observedTimes[0] && <span>First {absTime(observedTimes[0])}</span>}
+                      {observedTimes.at(-1) && <span>Latest {absTime(observedTimes.at(-1))}</span>}
+                    </div>
+                    <div className="oob-interaction-list">
                     {interactions.map((it) => (
                       <div key={it.id} className="oob-interaction-card">
                         <div className="oob-interaction-head">
                           <span className={`oob-proto-badge ${protocolClass(it.protocol)}`}>
-                            {it.protocol || "—"}
+                            {it.protocol?.toUpperCase() || "—"}
                           </span>
                           {it.remote_address && (
                             <span className="oob-remote mono">{it.remote_address}</span>
                           )}
                           {it.query_type && <span className="tag">{it.query_type}</span>}
-                          <RelTime iso={it.observed_at || it.created_at} />
+                          <time dateTime={it.observed_at || it.created_at}>
+                            {absTime(it.observed_at || it.created_at)}
+                          </time>
+                        </div>
+                        <div className="oob-interaction-meta">
+                          <span>Interaction hash</span>
+                          <code>{it.interaction_hash}</code>
                         </div>
                         {it.raw_request && (
-                          <CodeBlock
-                            label="Raw request"
-                            text={maybeDecode(it.raw_request)}
-                            onCopied={() => toast("Copied", "success")}
-                          />
+                          <details className="oob-receipt">
+                            <summary>Raw callback receipt</summary>
+                            <CodeBlock
+                              label="Canonical raw content"
+                              text={it.raw_request}
+                              onCopied={() => toast("Copied", "success")}
+                            />
+                            {decodedInterpretation(it.raw_request) && (
+                              <CodeBlock
+                                label="Decoded interpretation"
+                                text={decodedInterpretation(it.raw_request) ?? ""}
+                                onCopied={() => toast("Copied", "success")}
+                              />
+                            )}
+                          </details>
                         )}
                       </div>
                     ))}
-                  </div>
+                    </div>
+                  </>
                 )}
               </>
             )}

@@ -30,7 +30,8 @@ type SurfacesGridProps = {
 
 function StatusCell({ data }: ICellRendererParams<AssessmentSurface>) {
   if (!data) return null;
-  return <span className={`badge status-${data.status}`}>{data.status || "—"}</span>;
+  const label = (data.status || "").replace(/[-_]/g, " ") || "—";
+  return <span className={`badge status-${data.status}`} aria-label={`Status ${label}`}>{label}</span>;
 }
 
 export default function SurfacesGrid({
@@ -94,6 +95,16 @@ export default function SurfacesGrid({
         minWidth: 200,
         valueGetter: (p) => p.data?.rationale || "—",
         tooltipValueGetter: (p) => p.data?.rationale || "",
+        cellClass: "ag-clip-cell",
+        cellStyle: { color: "var(--ink-2)" },
+      },
+      {
+        headerName: "Follow-up",
+        colId: "followup",
+        flex: 1.5,
+        minWidth: 180,
+        valueGetter: (p) => p.data?.followup_condition || "—",
+        tooltipValueGetter: (p) => p.data?.followup_condition || "",
         cellClass: "ag-clip-cell",
         cellStyle: { color: "var(--ink-2)" },
       },

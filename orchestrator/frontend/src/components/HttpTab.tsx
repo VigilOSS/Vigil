@@ -19,6 +19,7 @@ import type {
   RequestVariant,
 } from "../lib/api";
 import {
+  ApiError,
   exportHarUrl,
   getCapturePolicy,
   getHttpFlow,
@@ -116,6 +117,7 @@ const IconClose = () => (
 
 type HttpTabProps = {
   engagementKey: string;
+  initialRequestVariantId?: number;
   // Bumped by EngagementPage after every successful page refresh (including
   // WebSocket-driven ones). A change triggers a silent background reload so
   // this tab stays live alongside the others without flickering to a spinner.
@@ -124,7 +126,7 @@ type HttpTabProps = {
 
 const INITIAL_FETCH_LIMIT = 5000;
 
-export function HttpTab({ engagementKey, refreshVersion }: HttpTabProps) {
+export function HttpTab({ engagementKey, refreshVersion, initialRequestVariantId }: HttpTabProps) {
   const { toast } = useToast();
   const [variants, setVariants] = useState<RequestVariant[]>([]);
   const [observations, setObservations] = useState<RequestObservation[]>([]);
@@ -140,6 +142,7 @@ export function HttpTab({ engagementKey, refreshVersion }: HttpTabProps) {
 
   const searchRef = useRef<HTMLInputElement | null>(null);
   const drawerInvokerRef = useRef<HTMLElement | null>(null);
+  const consumedRequestVariantRef = useRef<number | undefined>(undefined);
 
   // Fetch variants + observations together. Both are read-only and the
   // observations are grouped to variants client-side, so a single fetch
@@ -271,6 +274,23 @@ export function HttpTab({ engagementKey, refreshVersion }: HttpTabProps) {
     return m;
   }, [observationsByVariant]);
 
+  // Resolve exact cross-workspace links only after the bounded variant ledger
+  // has loaded. Consume each id once so closing the drawer does not reopen it.
+  useEffect(() => {
+    if (!initialRequestVariantId) {
+      consumedRequestVariantRef.current = undefined;
+      return;
+    }
+    if (loading) return;
+    if (consumedRequestVariantRef.current === initialRequestVariantId) return;
+    consumedRequestVariantRef.current = initialRequestVariantId;
+    const variant = variants.find((candidate) => candidate.id === initialRequestVariantId);
+    if (variant) {
+      setView("variants");
+      setSelected(variant);
+    }
+  }, [initialRequestVariantId, loading, variants]);
+
   // Method counts over the unfiltered set so chips stay meaningful.
   const methodCounts = useMemo(() => {
     const c: Record<string, number> = {};
@@ -374,7 +394,8 @@ export function HttpTab({ engagementKey, refreshVersion }: HttpTabProps) {
             <input
               ref={searchRef}
               className="search-input"
-              placeholder="Search request variants — path, host, URL…"
+              placeholder="Search endpoint inventory — path, host, URL…"
+              aria-label="Search endpoint inventory"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
             />
@@ -384,6 +405,7 @@ export function HttpTab({ engagementKey, refreshVersion }: HttpTabProps) {
                 className="icon-btn"
                 onClick={() => setQuery("")}
                 title="Clear"
+                aria-label="Clear endpoint search"
                 style={{ width: 22, height: 22 }}
               >
                 <IconClose />
@@ -413,6 +435,7 @@ export function HttpTab({ engagementKey, refreshVersion }: HttpTabProps) {
                     className={`filter-chip method-chip ${methodClass(m)} ${
                       methodFilters.has(m) ? "is-active" : ""
                     }`}
+                    aria-pressed={methodFilters.has(m)}
                     onClick={() => toggleMethod(m)}
                   >
                     <span className={`sev-dot method-dot ${methodClass(m)}`} />
@@ -449,7 +472,7 @@ export function HttpTab({ engagementKey, refreshVersion }: HttpTabProps) {
       {/* Variants table */}
       <section className="panel">
         <div className="panel-header">
-          <h2>Endpoints</h2>
+          <h2>Endpoint inventory</h2>
           <p className="meta-text">
             {filtered.length} variant{filtered.length === 1 ? "" : "s"}
             {observationsLoaded
@@ -465,7 +488,7 @@ export function HttpTab({ engagementKey, refreshVersion }: HttpTabProps) {
           <TableSkeleton rows={8} showHeader={false} />
         ) : loadError && variants.length === 0 ? null : variants.length === 0 ? (
           <p className="empty-state" style={{ padding: "20px", color: "var(--muted)" }}>
-            No HTTP request traffic recorded yet.
+            No endpoint inventory recorded yet.
           </p>
         ) : (
           <Suspense fallback={<TableSkeleton rows={8} showHeader={false} />}>
@@ -526,7 +549,7 @@ function HttpViewToggle({
         onClick={() => onChange("variants")}
         aria-pressed={view === "variants"}
       >
-        Endpoints
+        Endpoint inventory
       </button>
       <button
         type="button"
@@ -534,7 +557,7 @@ function HttpViewToggle({
         onClick={() => onChange("flows")}
         aria-pressed={view === "flows"}
       >
-        Captured traffic
+        Captured exchanges
       </button>
     </div>
   );
@@ -741,6 +764,25 @@ function HttpDrawer({
 type ToastFn = (message: string, type?: "success" | "error" | "info") => void;
 
 const FLOWS_FETCH_LIMIT = 5000;
+
+type CapturePolicyPartialSuccess = {
+  policy: CapturePolicy;
+  error: string;
+};
+
+function capturePolicyPartialSuccess(error: unknown): CapturePolicyPartialSuccess | null {
+  if (!(error instanceof ApiError) || !error.body || typeof error.body !== "object") return null;
+  const detail = (error.body as { detail?: unknown }).detail;
+  if (!detail || typeof detail !== "object") return null;
+  const record = detail as Record<string, unknown>;
+  if (record.database_updated !== true || record.filesystem_mirror_updated !== false) return null;
+  const policy = record.policy;
+  if (!policy || typeof policy !== "object") return null;
+  return {
+    policy: policy as CapturePolicy,
+    error: typeof record.error === "string" ? record.error : "unknown mirror error",
+  };
+}
 
 function HttpFlowsView({
   engagementKey,
@@ -1020,7 +1062,8 @@ function HttpFlowsView({
             <input
               ref={searchRef}
               className="search-input"
-              placeholder="Search flows — URL, path, host…"
+              placeholder="Search captured exchanges — URL, path, host…"
+              aria-label="Search captured exchanges"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
             />
@@ -1030,6 +1073,7 @@ function HttpFlowsView({
                 className="icon-btn"
                 onClick={() => setQuery("")}
                 title="Clear"
+                aria-label="Clear exchange search"
                 style={{ width: 22, height: 22 }}
               >
                 <IconClose />
@@ -1063,6 +1107,7 @@ function HttpFlowsView({
                     className={`filter-chip method-chip ${methodClass(m)} ${
                       method === m ? "is-active" : ""
                     }`}
+                    aria-pressed={method === m}
                     onClick={() => toggleMethod(m)}
                   >
                     <span className={`sev-dot method-dot ${methodClass(m)}`} />
@@ -1078,6 +1123,7 @@ function HttpFlowsView({
               <span className="filter-label">Host</span>
               <select
                 className="filter-select"
+                aria-label="Filter captured exchanges by host"
                 value={host}
                 onChange={(e) => setHost(e.target.value)}
               >
@@ -1096,6 +1142,7 @@ function HttpFlowsView({
               <span className="filter-label">Status</span>
               <select
                 className="filter-select"
+                aria-label="Filter captured exchanges by status"
                 value={status}
                 onChange={(e) => setStatus(e.target.value)}
               >
@@ -1114,6 +1161,7 @@ function HttpFlowsView({
               <span className="filter-label">Type</span>
               <select
                 className="filter-select"
+                aria-label="Filter captured exchanges by content type"
                 value={ctype}
                 onChange={(e) => setCtype(e.target.value)}
               >
@@ -1132,6 +1180,7 @@ function HttpFlowsView({
               <span className="filter-label">Auth</span>
               <select
                 className="filter-select"
+                aria-label="Filter captured exchanges by authentication context"
                 value={auth}
                 onChange={(e) => setAuth(e.target.value)}
               >
@@ -1149,6 +1198,7 @@ function HttpFlowsView({
             <span className="filter-label">Body</span>
             <select
               className="filter-select"
+              aria-label="Filter captured exchanges by body truncation"
               value={truncated}
               onChange={(e) => setTruncated(e.target.value as "" | "true" | "false")}
               title="Filter by body-truncation state"
@@ -1178,7 +1228,7 @@ function HttpFlowsView({
       {/* Flows table */}
       <section className="panel">
         <div className="panel-header">
-          <h2>Captured traffic</h2>
+          <h2>Captured exchanges</h2>
           <p className="meta-text">
             {results.length} flow{results.length === 1 ? "" : "s"}
             {truncatedCount ? ` · ${truncatedCount} truncated` : ""}
@@ -1189,8 +1239,8 @@ function HttpFlowsView({
           <TableSkeleton rows={8} showHeader={false} />
         ) : loadError && allFlows.length === 0 ? null : allFlows.length === 0 ? (
           <p className="empty-state" style={{ padding: "20px", color: "var(--muted)" }}>
-            No canonical HTTP flows captured yet. Enable raw-body capture above and route
-            traffic through the vigil proxy to populate this view.
+            No full HTTP exchanges captured yet. Enable full-flow capture above and route
+            future traffic through the Vigil proxy to populate this view.
           </p>
         ) : (
           <Suspense fallback={<TableSkeleton rows={8} showHeader={false} />}>
@@ -1281,6 +1331,15 @@ function CapturePolicyControl({
           toast("Capture policy updated", "success");
         })
         .catch((err) => {
+          const detail = capturePolicyPartialSuccess(err);
+          if (detail) {
+            setPolicy(detail.policy);
+            setMaxDraft(String(detail.policy.max_body_bytes));
+            const msg = `Policy saved to the database, but the filesystem mirror was not updated: ${detail.error}`;
+            setError(msg);
+            toast(msg, "error");
+            return;
+          }
           const msg = err instanceof Error ? err.message : "Failed to update capture policy";
           setError(msg);
           toast(msg, "error");
@@ -1314,9 +1373,15 @@ function CapturePolicyControl({
     <div className="panel findings-toolbar-panel">
       <div className="toolbar" style={{ alignItems: "center" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <span className="filter-label">Raw-body capture</span>
-          <span className={`pill ${enabled ? "pill-reported" : "pill-unreviewed"}`}>
-            {enabled ? "ON" : "OFF"}
+          <span className="filter-label">Capture policy</span>
+          <span
+            className={`pill ${enabled ? "pill-reported" : "pill-unreviewed"}`}
+            role="status"
+          >
+            Full-flow capture {enabled ? "ON" : "OFF"}
+          </span>
+          <span className="meta-text">
+            Request bodies {policy.capture_request_bodies ? "ON" : "OFF"} · Response bodies {policy.capture_response_bodies ? "ON" : "OFF"} · {fmtBytes(policy.max_body_bytes)} cap
           </span>
           {saving && <span className="meta-text">saving…</span>}
         </div>
@@ -1326,10 +1391,17 @@ function CapturePolicyControl({
             className={`qa-btn ${enabled ? "" : "primary"}`}
             disabled={saving}
             onClick={() => save({ enabled: !enabled })}
+            aria-pressed={enabled}
           >
-            {enabled ? "Disable capture" : "Enable capture"}
+            {enabled ? "Disable full-flow capture" : "Enable full-flow capture"}
           </button>
-          <button type="button" className="qa-btn" onClick={() => setOpen((o) => !o)}>
+          <button
+            type="button"
+            className="qa-btn"
+            onClick={() => setOpen((o) => !o)}
+            aria-expanded={open}
+            aria-controls="http-capture-options"
+          >
             {open ? "Hide options" : "Options"}
           </button>
         </div>
@@ -1337,6 +1409,7 @@ function CapturePolicyControl({
 
       {open && (
         <div
+          id="http-capture-options"
           className="filter-row"
           style={{ gap: 16, alignItems: "center", paddingTop: 10 }}
         >
@@ -1365,8 +1438,9 @@ function CapturePolicyControl({
             Capture response bodies
           </label>
           <div className="filter-select-group">
-            <span className="filter-label">Max body bytes</span>
+            <label className="filter-label" htmlFor="http-max-body-bytes">Max body bytes</label>
             <input
+              id="http-max-body-bytes"
               className="filter-select"
               type="number"
               min={0}
@@ -1393,8 +1467,11 @@ function CapturePolicyControl({
           </span>
         </div>
       )}
+      <p className="meta-text http-capture-fidelity-note">
+        Policy changes apply to future proxy traffic only; existing endpoint inventory and earlier traffic are not backfilled.
+      </p>
       {error && (
-        <p className="empty" style={{ textAlign: "left", paddingTop: 8 }}>
+        <p className="error-text" role="alert" style={{ textAlign: "left", paddingTop: 8 }}>
           {error}
         </p>
       )}
@@ -1489,6 +1566,9 @@ function FlowDrawer({
               <span className="tag">{row.content_type_family}</span>
             )}
             {row.auth_context && <span className="tag">{row.auth_context}</span>}
+            {row.request_variant_id != null && (
+              <span className="tag">Request variant #{row.request_variant_id}</span>
+            )}
             {row.host_mismatch && (
               <span className="tag warning" title="URL authority / Host header / SNI disagree">
                 host mismatch
@@ -1498,6 +1578,22 @@ function FlowDrawer({
         </div>
 
         <div className="drawer-body">
+          <div className="section">
+            <p className="section-title">Evidence</p>
+            <p className="meta-text">
+              The flow UID and body artifact paths identify the captured evidence without altering it.
+            </p>
+            <div className="quick-actions">
+              <a
+                className="qa-btn"
+                href={exportHarUrl(engagementKey, { flow_uid: row.flow_uid })}
+                download={`${row.flow_uid}.har`}
+              >
+                Export this exchange as HAR
+              </a>
+            </div>
+          </div>
+
           <div className="section">
             <p className="section-title">Metadata</p>
             <div className="kv-grid">

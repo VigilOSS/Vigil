@@ -18,6 +18,7 @@ type EngagementRoute = {
   initialDrawerTab?: string;
   initialIntelType?: string;
   initialIntelId?: number;
+  initialRequestVariantId?: number;
   initialRunId?: number;
   initialRunSection?: string;
   initialRunObject?: string;
@@ -45,6 +46,10 @@ function parseEngagementRoute(route: string): EngagementRoute | null {
   const initialIntelId = Number.isInteger(parsedIntelId) && parsedIntelId > 0
     ? parsedIntelId
     : undefined;
+  const parsedRequestVariantId = Number(params.get("request"));
+  const initialRequestVariantId = Number.isInteger(parsedRequestVariantId) && parsedRequestVariantId > 0
+    ? parsedRequestVariantId
+    : undefined;
   const runAudit = parseRunAuditQuery(params);
   return {
     engagementKey,
@@ -53,6 +58,7 @@ function parseEngagementRoute(route: string): EngagementRoute | null {
     initialDrawerTab,
     initialIntelType,
     initialIntelId,
+    initialRequestVariantId,
     initialRunId: runAudit.runId,
     initialRunSection: runAudit.section,
     initialRunObject: runAudit.object,
@@ -143,6 +149,7 @@ export default function App() {
         initialDrawerTab={engagementRoute.initialDrawerTab}
         initialIntelType={engagementRoute.initialIntelType}
         initialIntelId={engagementRoute.initialIntelId}
+        initialRequestVariantId={engagementRoute.initialRequestVariantId}
         initialRunId={engagementRoute.initialRunId}
         initialRunSection={engagementRoute.initialRunSection}
         initialRunObject={engagementRoute.initialRunObject}

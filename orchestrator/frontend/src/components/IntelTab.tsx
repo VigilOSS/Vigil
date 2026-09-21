@@ -2,12 +2,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   IntelByUrlResponse,
   IntelEntityType,
+  IntelReadiness,
   IntelRecord,
   IntelSearchHit,
   IntelSummary,
   ListIntelResponse,
 } from "../lib/api";
 import {
+  getIntelReadiness,
   intelByUrl,
   listIntel,
   listIntelCredentials,
@@ -42,23 +44,24 @@ type EntityFilter = IntelEntityType | "credentials";
 
 type FilterSpec = {
   key: EntityFilter;
+  summaryKey?: string;
   label: string;
   singular: string;
 };
 
 // Ordering mirrors the original sidebar in §3a.
 const ENTITY_FILTERS: FilterSpec[] = [
-  { key: "tech_component", label: "Tech stack", singular: "tech component" },
-  { key: "person", label: "People", singular: "person" },
-  { key: "email", label: "Emails", singular: "email" },
-  { key: "domain", label: "Domains", singular: "domain" },
+  { key: "tech_component", summaryKey: "tech_components", label: "Tech stack", singular: "tech component" },
+  { key: "person", summaryKey: "people", label: "People", singular: "person" },
+  { key: "email", summaryKey: "emails", label: "Emails", singular: "email" },
+  { key: "domain", summaryKey: "domains", label: "Domains", singular: "domain" },
   { key: "credentials", label: "Credentials", singular: "credential" },
-  { key: "cve", label: "CVEs", singular: "CVE" },
-  { key: "dns_record", label: "DNS", singular: "DNS record" },
-  { key: "social_profile", label: "Social", singular: "social profile" },
-  { key: "breach_record", label: "Breach", singular: "breach record" },
-  { key: "org_fact", label: "Org", singular: "org fact" },
-  { key: "note", label: "Notes", singular: "note" },
+  { key: "cve", summaryKey: "cves", label: "CVEs", singular: "CVE" },
+  { key: "dns_record", summaryKey: "dns_records", label: "DNS", singular: "DNS record" },
+  { key: "social_profile", summaryKey: "social_profiles", label: "Social", singular: "social profile" },
+  { key: "breach_record", summaryKey: "breach_records", label: "Breach", singular: "breach record" },
+  { key: "org_fact", summaryKey: "org_facts", label: "Org", singular: "org fact" },
+  { key: "note", summaryKey: "notes", label: "Notes", singular: "note" },
 ];
 
 function isIntelEntityType(value: string | undefined): value is IntelEntityType {
@@ -130,10 +133,10 @@ const STATUS_COLORS: Record<string, string> = {
 };
 function statusColorKey(s: string): string {
   const v = s.toLowerCase();
-  if (v === "active" || v === "live" || v === "up" || v === "valid" || v === "version_match") return "active";
+  if (v === "active" || v === "open" || v === "in_progress" || v === "live" || v === "up" || v === "valid" || v === "version_match") return "active";
   if (v === "blocked" || v === "down" || v === "dead" || v === "revoked" || v === "invalid") return "blocked";
   if (v === "exploited") return "exploited";
-  if (v === "ruled_out" || v === "false_positive") return "false_positive";
+  if (v === "resolved" || v === "ruled_out" || v === "false_positive") return "false_positive";
   return "unreviewed";
 }
 
@@ -294,6 +297,13 @@ function entityTypeSlug(e: EntityFilter): string {
   }
 }
 
+function activeLeadRank(d: Derived): number {
+  if (d.entity !== "note") return 2;
+  if (d.status === "in_progress") return 0;
+  if (d.status === "open") return 1;
+  return 2;
+}
+
 function derive(entity: EntityFilter, raw: Record<string, unknown>, index: number): Derived {
   const id = `${entity}:${raw.id ?? raw.identity ?? raw.address ?? raw.cve_id ?? raw.name ?? index}`;
   const source = (raw.source_name as string) || "";
@@ -442,6 +452,11 @@ function derive(entity: EntityFilter, raw: Record<string, unknown>, index: numbe
     case "note": {
       title = (raw.title as string) || "";
       subtitle = truncate((raw.body_markdown as string) || "", 160);
+      const leadStatus = (raw.lead_status as string) || "";
+      status = leadStatus || null;
+      statusLabel = leadStatus.replace(/_/g, " ");
+      if (leadStatus === "open" || leadStatus === "in_progress") statusPill = "pill-active";
+      else if (leadStatus === "resolved" || leadStatus === "ruled_out") statusPill = "pill-false_positive";
       const sourceAgent = (raw.source_agent as string) || "";
       if (sourceAgent) tags.push(sourceAgent);
       const raw_tags = raw.tags;
@@ -614,6 +629,8 @@ export function IntelTab({
   );
   const [loading, setLoading] = useState<Set<EntityFilter>>(new Set());
   const [errors, setErrors] = useState<Map<EntityFilter, string>>(new Map());
+  const [readiness, setReadiness] = useState<IntelReadiness | null>(null);
+  const [readinessError, setReadinessError] = useState<string | null>(null);
 
   // Which entities have been fetched / are in-flight (as refs for mutable
   // access inside async callbacks).
@@ -728,6 +745,24 @@ export function IntelTab({
     };
   }, [engagementKey]);
 
+  useEffect(() => {
+    let cancelled = false;
+    setReadiness(null);
+    setReadinessError(null);
+    getIntelReadiness(engagementKey)
+      .then((payload) => {
+        if (!cancelled) setReadiness(payload);
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) {
+          setReadinessError(err instanceof Error ? err.message : "Readiness unavailable");
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [engagementKey]);
+
   // Derived list across all entities.
   const derivedList = useMemo<Derived[]>(() => {
     const out: Derived[] = [];
@@ -769,6 +804,28 @@ export function IntelTab({
     setDetailOpen(true);
     writeIntelHash(record);
   }, [writeIntelHash]);
+
+  const openHydratedRecord = useCallback((entity: IntelEntityType, raw: Record<string, unknown>) => {
+    const sourceId = raw.id;
+    const currentRows = cache.get(entity) || [];
+    const existing = currentRows.find((row) => row.id === sourceId);
+    const hydrated = { ...(existing || {}), ...raw };
+    const record = derive(entity, hydrated, currentRows.length);
+    setCache((prev) => {
+      const next = new Map(prev);
+      const rows = next.get(entity) || [];
+      const index = rows.findIndex((row) => row.id === sourceId);
+      if (index >= 0) {
+        const updated = [...rows];
+        updated[index] = { ...updated[index], ...raw };
+        next.set(entity, updated);
+      } else {
+        next.set(entity, [...rows, raw]);
+      }
+      return next;
+    });
+    openRecord(record);
+  }, [cache, openRecord]);
 
   useEffect(() => {
     if (!isIntelEntityType(initialIntelType) || initialIntelId == null) {
@@ -873,8 +930,11 @@ export function IntelTab({
       if (!matchesQuery(d, parsedQuery)) return false;
       return true;
     });
-    // Sort: newest first by updated_at, then title.
+    // Active leads are the operator's current work queue. Keep them on page 1
+    // without filtering out reference notes or historical knowledge.
     list.sort((a, b) => {
+      const rankDelta = activeLeadRank(a) - activeLeadRank(b);
+      if (rankDelta !== 0) return rankDelta;
       const aT = a.updated_at || a.created_at;
       const bT = b.updated_at || b.created_at;
       if (aT && bT && aT !== bT) return bT.localeCompare(aT);
@@ -1028,6 +1088,10 @@ export function IntelTab({
     entityFilters.size + statusFilters.size + sourceFilters.size + (query ? 1 : 0);
 
   const loadingAny = loading.size > 0;
+  const firstReadinessLead = readiness?.open_leads[0];
+  const firstReadinessCve = readiness?.open_high_cves[0]
+    ?? readiness?.exploited_unlinked_cves[0]
+    ?? readiness?.dangling_links[0];
 
   // FTS search.
   const runSearch = () => {
@@ -1084,6 +1148,64 @@ export function IntelTab({
         <EntitySpark counts={entityCounts} />
       </div>
 
+      {readiness?.applicable && (
+        <section className="intel-workbar" aria-label="Intel active work readiness">
+          <div className="intel-workbar-title">
+            <span className="sev-dot" />
+            <span>Active work</span>
+          </div>
+          <button
+            type="button"
+            className="intel-workbar-stat"
+            onClick={() => {
+              setEntityFilters(new Set(["note"]));
+              setStatusFilters(new Set(["open", "in_progress"]));
+              setSourceFilters(new Set());
+              setQuery("");
+            }}
+          >
+            {readiness.open_leads.length} open {readiness.open_leads.length === 1 ? "lead" : "leads"}
+          </button>
+          <span className="intel-workbar-stat">
+            {readiness.open_high_cves.length} high-risk {readiness.open_high_cves.length === 1 ? "CVE" : "CVEs"}
+          </span>
+          <span className="intel-workbar-stat">
+            {readiness.exploited_unlinked_cves.length} unlinked exploited
+          </span>
+          <span className="intel-workbar-stat">
+            {readiness.dangling_links.length} dangling {readiness.dangling_links.length === 1 ? "link" : "links"}
+          </span>
+          {firstReadinessLead && (
+            <button
+              type="button"
+              className="intel-workbar-review"
+              aria-label={`Review ${firstReadinessLead.title}`}
+              onClick={() => openHydratedRecord("note", { ...firstReadinessLead })}
+            >
+              Review first <span aria-hidden="true">›</span>
+            </button>
+          )}
+          {!firstReadinessLead && firstReadinessCve && (
+            <button
+              type="button"
+              className="intel-workbar-review"
+              aria-label={`Review ${firstReadinessCve.cve_id}`}
+              onClick={() => openHydratedRecord("cve", { ...firstReadinessCve })}
+            >
+              Review first <span aria-hidden="true">›</span>
+            </button>
+          )}
+        </section>
+      )}
+      {readiness && !readiness.applicable && (
+        <div className="intel-workbar intel-workbar-muted">
+          Intel closure readiness is not applicable to this {readiness.engagement_type} engagement.
+        </div>
+      )}
+      {readinessError && (
+        <div className="intel-workbar intel-workbar-muted">Intel readiness unavailable: {readinessError}</div>
+      )}
+
       {/* Toolbar */}
       <div className="panel findings-toolbar-panel">
         <div className="toolbar">
@@ -1125,7 +1247,9 @@ export function IntelTab({
           <div className="filter-group">
             <span className="filter-label">Type</span>
             {ENTITY_FILTERS.map((spec) => {
-              const count = entityCounts[spec.key] ?? summaryCounts[spec.key] ?? 0;
+              const count = entityCounts[spec.key]
+                ?? summaryCounts[spec.summaryKey || spec.key]
+                ?? 0;
               if (!count && !entityFilters.has(spec.key)) return null;
               return (
                 <button
@@ -1264,14 +1388,17 @@ export function IntelTab({
                       type="button"
                       className="link-card"
                       onClick={() => {
-                        // Best-effort: try to find the corresponding derived
-                        // row in local cache so the drawer can open.
                         const match = derivedList.find(
                           (d) =>
                             d.entity === (hit.entity_type as EntityFilter) &&
                             ((d.raw.id as number | undefined) === hit.source_id),
                         );
-                        if (match) setSelectedId(match.id);
+                        if (match) openRecord(match);
+                        else openHydratedRecord(hit.entity_type, {
+                          ...hit.record,
+                          id: hit.source_id,
+                          source_name: hit.record.source_name ?? hit.source_name,
+                        });
                       }}
                     >
                       <span className="link-kind">{hit.entity_type}</span>
@@ -1308,10 +1435,14 @@ export function IntelTab({
                 By-URL: <code>{urlQuery}</code>
               </p>
               {urlError && <p className="empty" style={{ padding: 8 }}>{urlError}</p>}
-              <UrlResultBlock label="Domains" rows={urlResults.domains as unknown as Record<string, unknown>[]} />
-              <UrlResultBlock label="Services" rows={urlResults.services} />
-              <UrlResultBlock label="Surfaces" rows={urlResults.surfaces} />
-              <UrlResultBlock label="Request variants" rows={urlResults.request_variants} />
+              <UrlResultBlock
+                label="Domains"
+                rows={urlResults.domains as unknown as Record<string, unknown>[]}
+                onOpen={(row) => openHydratedRecord("domain", row)}
+              />
+              <UrlResultBlock label="Services" rows={urlResults.services} href={intelWorkspaceHref(engagementKey, "coverage")} />
+              <UrlResultBlock label="Surfaces" rows={urlResults.surfaces} href={intelWorkspaceHref(engagementKey, "surfaces")} />
+              <UrlResultBlock label="Request variants" rows={urlResults.request_variants} href={intelWorkspaceHref(engagementKey, "http")} />
             </div>
           )}
         </div>
@@ -1892,6 +2023,7 @@ function OverviewPane({
         "body_markdown",
         "source_agent",
         "tags",
+        "lead_status",
         "authored_by",
         "scope",
         "validity_context",
@@ -1901,6 +2033,7 @@ function OverviewPane({
           <KV k="Title" v={raw.title} />
           <KV k="Source agent" v={raw.source_agent} mono toast={toast} />
           <KV k="Tags" v={Array.isArray(raw.tags) ? (raw.tags as string[]).join(", ") : ""} />
+          <KV k="Lead status" v={fmtCell(raw.lead_status).replace(/_/g, " ")} />
           <KV k="Authored by" v={raw.authored_by} mono toast={toast} />
           <KV k="Scope" v={raw.scope} />
           <KV k="Validity" v={raw.validity_context} />
@@ -2061,9 +2194,13 @@ function RawPane({ d }: { d: Derived }) {
 function UrlResultBlock({
   label,
   rows,
+  href,
+  onOpen,
 }: {
   label: string;
   rows: Record<string, unknown>[];
+  href?: string;
+  onOpen?: (row: Record<string, unknown>) => void;
 }) {
   if (!rows || rows.length === 0) return null;
   return (
@@ -2072,23 +2209,42 @@ function UrlResultBlock({
         {label} <span className="count">{rows.length}</span>
       </p>
       <div style={{ display: "grid", gap: 4 }}>
-        {rows.map((row, i) => (
-          <div key={i} className="link-card" style={{ cursor: "default" }}>
-            <span className="link-kind">{label.toLowerCase()}</span>
-            <span className="link-title mono">{truncate(summarizeRow(row), 220)}</span>
-          </div>
-        ))}
+        {rows.map((row, i) => {
+          const content = (
+            <>
+              <span className="link-kind">{label.toLowerCase()}</span>
+              <span className="link-title mono">{truncate(summarizeRow(row), 220)}</span>
+              <span className="link-go" aria-hidden="true">›</span>
+            </>
+          );
+          if (onOpen) {
+            return (
+              <button key={String(row.id ?? i)} type="button" className="link-card" onClick={() => onOpen(row)}>
+                {content}
+              </button>
+            );
+          }
+          return (
+            <a key={String(row.id ?? i)} className="link-card" href={href}>
+              {content}
+            </a>
+          );
+        })}
       </div>
     </div>
   );
 }
 
 function summarizeRow(row: Record<string, unknown>): string {
-  for (const key of ["identity", "endpoint", "target_descriptor", "host", "name", "address", "url"]) {
+  for (const key of ["identity", "endpoint", "target_descriptor", "canonical_url", "host", "name", "address", "url"]) {
     const v = row[key];
     if (typeof v === "string" && v) return v;
   }
   return fmtCell(row);
+}
+
+function intelWorkspaceHref(engagementKey: string, tab: "coverage" | "surfaces" | "http"): string {
+  return `#/engagements/${encodeURIComponent(engagementKey)}?tab=${tab}`;
 }
 
 // ── Command palette ──────────────────────────────────────────────────

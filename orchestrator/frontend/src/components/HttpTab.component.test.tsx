@@ -4,23 +4,31 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  ApiError,
+  exportHarUrl,
   getCapturePolicy,
+  getHttpFlow,
   listHttpFlows,
   listRequestObservations,
   listRequestVariants,
+  setCapturePolicy,
 } from "../lib/api";
 import { ToastProvider } from "../contexts/ToastContext";
 import { HttpTab } from "./HttpTab";
 
-vi.mock("../lib/api", () => ({
-  exportHarUrl: vi.fn(),
-  getCapturePolicy: vi.fn(),
-  getHttpFlow: vi.fn(),
-  listHttpFlows: vi.fn(),
-  listRequestObservations: vi.fn(),
-  listRequestVariants: vi.fn(),
-  setCapturePolicy: vi.fn(),
-}));
+vi.mock("../lib/api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../lib/api")>();
+  return {
+    ...actual,
+    exportHarUrl: vi.fn(),
+    getCapturePolicy: vi.fn(),
+    getHttpFlow: vi.fn(),
+    listHttpFlows: vi.fn(),
+    listRequestObservations: vi.fn(),
+    listRequestVariants: vi.fn(),
+    setCapturePolicy: vi.fn(),
+  };
+});
 
 vi.mock("./HttpGrid", () => ({
   default: ({ rows, onRowOpen }: { rows: Array<{ id: number; normalized_path: string }>; onRowOpen: (row: never) => void }) => (
@@ -31,9 +39,11 @@ vi.mock("./HttpGrid", () => ({
 }));
 
 vi.mock("./HttpFlowsGrid", () => ({
-  default: ({ rows }: { rows: unknown[] }) => rows.length === 0
+  default: ({ rows, onRowOpen }: { rows: Array<{ flow_uid: string }>; onRowOpen: (row: never) => void }) => rows.length === 0
     ? <span>No HTTP flows match the current filters.</span>
-    : <div>flow grid</div>,
+    : <div>{rows.map((row) => (
+      <button key={row.flow_uid} onClick={() => onRowOpen(row as never)}>{row.flow_uid}</button>
+    ))}</div>,
 }));
 
 const variant = {
@@ -62,6 +72,55 @@ const variant = {
   observation_count: 0,
 };
 
+const capturePolicy = {
+  enabled: false,
+  capture_request_bodies: true,
+  capture_response_bodies: false,
+  max_body_bytes: 1_048_576,
+  content_type_allow: [],
+  content_type_deny: [],
+  retention: "until_engagement_deletion" as const,
+};
+
+const flow = {
+  id: 41,
+  engagement_id: 1,
+  request_variant_id: 1,
+  flow_uid: "flow-1",
+  method: "POST",
+  scheme: "https",
+  host: "target.test",
+  port: 443,
+  url: "https://target.test/admin",
+  path: "/admin",
+  response_status: 200,
+  request_content_type: "application/json",
+  response_content_type: "application/json",
+  content_type_family: "json",
+  auth_context: "authenticated",
+  request_body_sha256: "a".repeat(64),
+  response_body_sha256: "b".repeat(64),
+  request_body_bytes: 24,
+  response_body_bytes: 48,
+  request_body_truncated: false,
+  response_body_truncated: false,
+  request_body_capture_status: "captured",
+  response_body_capture_status: "captured",
+  request_body_capture_error: "",
+  response_body_capture_error: "",
+  request_body_artifact_path: "traffic/mitmproxy/bodies/request.bin",
+  response_body_artifact_path: "traffic/mitmproxy/bodies/response.bin",
+  request_headers: { Authorization: "Bearer operator-token" },
+  response_headers: { "Content-Type": "application/json" },
+  host_mismatch: false,
+  url_authority: "target.test",
+  host_header: "target.test",
+  sni: "target.test",
+  timing_ms: 17,
+  started_at: "2026-09-12T00:00:00Z",
+  created_at: "2026-09-12T00:00:01Z",
+};
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((next) => { resolve = next; });
@@ -73,6 +132,9 @@ beforeEach(() => {
   vi.mocked(listHttpFlows).mockResolvedValue([]);
   vi.mocked(listRequestVariants).mockResolvedValue([variant]);
   vi.mocked(listRequestObservations).mockResolvedValue([]);
+  vi.mocked(exportHarUrl).mockImplementation(
+    (_engagementKey, filters = {}) => `/http-flows/export-har?${new URLSearchParams(filters as Record<string, string>)}`,
+  );
 });
 
 afterEach(() => {
@@ -81,13 +143,25 @@ afterEach(() => {
 });
 
 describe("HttpTab live evidence", () => {
+  it("opens an explicitly deep-linked request variant", async () => {
+    render(
+      <ToastProvider>
+        <HttpTab engagementKey="demo" refreshVersion={0} initialRequestVariantId={1} />
+      </ToastProvider>,
+    );
+
+    expect(await screen.findByRole("dialog")).toBeTruthy();
+    expect(screen.getByText("Canonical URL")).toBeTruthy();
+    expect(screen.getByText("https://target.test/admin")).toBeTruthy();
+  });
+
   it("describes an exact canonical-flow limit as potentially incomplete", async () => {
     vi.mocked(listHttpFlows).mockResolvedValue(
       Array.from({ length: 5000 }, (_, index) => ({ flow_uid: `flow-${index}` })) as never,
     );
 
     render(<ToastProvider><HttpTab engagementKey="demo" refreshVersion={0} /></ToastProvider>);
-    fireEvent.click(await screen.findByRole("button", { name: "Captured traffic" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Captured exchanges" }));
 
     expect(await screen.findByText(/flow limit reached · results may be incomplete/i)).toBeTruthy();
   });
@@ -120,7 +194,7 @@ describe("HttpTab live evidence", () => {
     vi.mocked(listHttpFlows).mockRejectedValue(new Error("flow ledger unavailable"));
 
     render(<ToastProvider><HttpTab engagementKey="demo" refreshVersion={0} /></ToastProvider>);
-    fireEvent.click(await screen.findByRole("button", { name: "Captured traffic" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Captured exchanges" }));
 
     const alerts = await screen.findAllByRole("alert");
     expect(alerts.some((alert) => alert.textContent?.includes("flow ledger unavailable"))).toBe(true);
@@ -149,14 +223,14 @@ describe("HttpTab live evidence", () => {
       .mockRejectedValueOnce(new Error("flow refresh unavailable"));
 
     const view = render(<ToastProvider><HttpTab engagementKey="demo" refreshVersion={0} /></ToastProvider>);
-    fireEvent.click(await screen.findByRole("button", { name: "Captured traffic" }));
-    expect(await screen.findByText("flow grid")).toBeTruthy();
+    fireEvent.click(await screen.findByRole("button", { name: "Captured exchanges" }));
+    expect(await screen.findByRole("button", { name: "flow-1" })).toBeTruthy();
     view.rerender(<ToastProvider><HttpTab engagementKey="demo" refreshVersion={1} /></ToastProvider>);
 
     await waitFor(() => expect(
       screen.getAllByRole("alert").some((alert) => alert.textContent?.includes("flow refresh unavailable")),
     ).toBe(true));
-    expect(screen.getByText("flow grid")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "flow-1" })).toBeTruthy();
   });
 
   it("queues a flow refresh that arrives during the initial flow load", async () => {
@@ -166,7 +240,7 @@ describe("HttpTab live evidence", () => {
       .mockResolvedValueOnce([]);
 
     const view = render(<ToastProvider><HttpTab engagementKey="demo" refreshVersion={0} /></ToastProvider>);
-    fireEvent.click(await screen.findByRole("button", { name: "Captured traffic" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Captured exchanges" }));
     await waitFor(() => expect(listHttpFlows).toHaveBeenCalledTimes(1));
     view.rerender(<ToastProvider><HttpTab engagementKey="demo" refreshVersion={1} /></ToastProvider>);
     firstFlows.resolve([]);
@@ -203,5 +277,81 @@ describe("HttpTab live evidence", () => {
 
     await waitFor(() => expect(listRequestVariants).toHaveBeenCalledTimes(2));
     expect(await screen.findByRole("button", { name: "/fresh" })).toBeTruthy();
+  });
+
+  it("separates endpoint inventory from non-retroactive captured exchanges", async () => {
+    vi.mocked(getCapturePolicy).mockResolvedValue(capturePolicy);
+
+    render(<ToastProvider><HttpTab engagementKey="demo" refreshVersion={0} /></ToastProvider>);
+
+    expect(await screen.findByRole("button", { name: "Endpoint inventory" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Endpoint inventory" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Captured exchanges" }));
+    expect(await screen.findByText(/future proxy traffic only/i)).toBeTruthy();
+    expect(screen.getByText(/existing endpoint inventory and earlier traffic are not backfilled/i)).toBeTruthy();
+  });
+
+  it("keeps full-flow enablement separate from request and response body fidelity", async () => {
+    vi.mocked(getCapturePolicy).mockResolvedValue(capturePolicy);
+
+    render(<ToastProvider><HttpTab engagementKey="demo" refreshVersion={0} /></ToastProvider>);
+    fireEvent.click(await screen.findByRole("button", { name: "Captured exchanges" }));
+
+    const fullFlow = await screen.findByRole("button", { name: "Enable full-flow capture" });
+    expect(fullFlow.getAttribute("aria-pressed")).toBe("false");
+    const options = screen.getByRole("button", { name: "Options" });
+    expect(options.getAttribute("aria-expanded")).toBe("false");
+    fireEvent.click(options);
+    expect(options.getAttribute("aria-expanded")).toBe("true");
+    expect((screen.getByRole("checkbox", { name: "Capture request bodies" }) as HTMLInputElement).checked)
+      .toBe(true);
+    expect((screen.getByRole("checkbox", { name: "Capture response bodies" }) as HTMLInputElement).checked)
+      .toBe(false);
+    expect(screen.getByRole("status").textContent).toContain("Full-flow capture OFF");
+  });
+
+  it("adopts database-updated policy while surfacing a failed filesystem mirror", async () => {
+    vi.mocked(getCapturePolicy).mockResolvedValue(capturePolicy);
+    const savedPolicy = { ...capturePolicy, enabled: true };
+    vi.mocked(setCapturePolicy).mockRejectedValue(new ApiError(
+      "capture policy saved, but its filesystem mirror was not updated",
+      503,
+      {
+        detail: {
+          message: "capture policy saved, but its filesystem mirror was not updated",
+          database_updated: true,
+          filesystem_mirror_updated: false,
+          error: "simulated read-only engagement root",
+          policy: savedPolicy,
+        },
+      },
+    ));
+
+    render(<ToastProvider><HttpTab engagementKey="demo" refreshVersion={0} /></ToastProvider>);
+    fireEvent.click(await screen.findByRole("button", { name: "Captured exchanges" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Enable full-flow capture" }));
+
+    expect(await screen.findByRole("button", { name: "Disable full-flow capture" })).toBeTruthy();
+    const alert = screen.getByRole("alert");
+    expect(alert.textContent).toContain("Policy saved to the database");
+    expect(alert.textContent).toContain("filesystem mirror was not updated");
+    expect(alert.textContent).toContain("simulated read-only engagement root");
+  });
+
+  it("links a selected exchange to its request variant, artifacts, and exact HAR export", async () => {
+    vi.mocked(getCapturePolicy).mockResolvedValue(capturePolicy);
+    vi.mocked(listHttpFlows).mockResolvedValue([flow]);
+    vi.mocked(getHttpFlow).mockResolvedValue(flow);
+
+    render(<ToastProvider><HttpTab engagementKey="demo" refreshVersion={0} /></ToastProvider>);
+    fireEvent.click(await screen.findByRole("button", { name: "Captured exchanges" }));
+    fireEvent.click(await screen.findByRole("button", { name: "flow-1" }));
+
+    expect(await screen.findByText("Request variant #1")).toBeTruthy();
+    expect(screen.getByText("traffic/mitmproxy/bodies/request.bin")).toBeTruthy();
+    expect(screen.getByText("traffic/mitmproxy/bodies/response.bin")).toBeTruthy();
+    const har = screen.getByRole("link", { name: "Export this exchange as HAR" });
+    expect(har.getAttribute("href")).toContain("flow_uid=flow-1");
+    expect(exportHarUrl).toHaveBeenCalledWith("demo", { flow_uid: "flow-1" });
   });
 });

@@ -39,6 +39,14 @@ export type EventRecord = {
   created_at: string;
 };
 
+export type SurfaceStatus =
+  | "discovered"
+  | "covered"
+  | "not_applicable"
+  | "deferred"
+  | "partially-covered"
+  | "administratively-closed";
+
 export type AssessmentSurface = {
   id: number;
   surface_type: string;
@@ -46,7 +54,8 @@ export type AssessmentSurface = {
   source_name: string;
   rationale: string;
   evidence_ref: string;
-  status: string;
+  status: SurfaceStatus;
+  followup_condition?: string;
   updated_at: string;
   vendor_saas?: boolean;
   // The ARCHITECTURE axis, orthogonal to `surface_type`'s security meaning: how
@@ -910,6 +919,23 @@ export function listAssessmentSurfaces(
   );
 }
 
+export type SurfaceRequestVariantLink = {
+  id: number;
+  engagement_id: number;
+  surface_id: number;
+  request_variant_id: number;
+  relation: string;
+  evidence_ref: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export function listSurfaceRequestVariantLinks(engagementKey: string, surfaceId: number) {
+  return request<SurfaceRequestVariantLink[]>(
+    `/engagements/${engagementKey}/assessment/surface-request-variant-links/by-surface/${surfaceId}`,
+  );
+}
+
 export function listAssessmentFindings(engagementKey: string) {
   return request<AssessmentFindingDetail[]>(`/engagements/${engagementKey}/assessment/findings`);
 }
@@ -1186,6 +1212,15 @@ export function listAssessmentCoverageItems(
 // backend: list rows elide the preview text (preview_chars counts + hashes
 // remain so callers can decide whether to request the detail endpoint with
 // full output).
+export type CommandRunStatus =
+  | "queued"
+  | "running"
+  | "completed"
+  | "failed"
+  | "timed_out"
+  | "killed"
+  | "lost";
+
 export type AssessmentCommandRun = {
   id: number;
   engagement_id: number;
@@ -1198,6 +1233,7 @@ export type AssessmentCommandRun = {
   agent_name: string;
   phase: string;
   audit_source: string;
+  status: CommandRunStatus;
   return_code: number | null;
   timed_out: boolean;
   success: boolean;
@@ -1231,6 +1267,14 @@ export type AssessmentCommandRun = {
   indexed_for_embeddings_at: string | null;
   notes: string;
   created_at: string;
+  working_dir?: string | null;
+  scope_version?: string | null;
+  auth_context?: string | null;
+  target_host?: string;
+  superseded_by_id?: number | null;
+  timeout_seconds_requested?: number | null;
+  partial_results?: boolean;
+  finding_id?: number | null;
   // Command-metadata audit fields. All nullable — pre-migration rows
   // and calls that don't set the X-* headers land as null.
   technique?: string | null;
@@ -1239,7 +1283,8 @@ export type AssessmentCommandRun = {
   destructive?: boolean | null;
 };
 
-// Detail fetch always returns preview text (include_output=true server-side).
+// Detail fetch returns the retained preview text (include_output=true server-side).
+// Artifact refs remain the authority for output that spilled beyond that preview.
 export type AssessmentCommandRunDetail = AssessmentCommandRun;
 
 export type ListAssessmentCommandRunsParams = {
@@ -1386,8 +1431,10 @@ export type OobProbe = {
   probe_kind: string;
   request_hash: string;
   oob_domain: string;
+  client_name: string;
+  client_payload_host: string;
   notes: string;
-  status: string; // pending | fired | confirmed | expired | ignored | unmatched
+  status: string; // pending | fired | confirmed | expired | ignored
   created_at: string;
   updated_at: string;
   // Derived by list_oob_probes (not stored). Detail-by-nonce omits these.
@@ -1477,6 +1524,7 @@ export type HttpFlow = {
 // Names are kept 1:1 with the backend query params. `truncated` matches a
 // flow truncated on EITHER side; `q` is a LIKE substring over url/path/host.
 export type HttpFlowFilters = {
+  flow_uid?: string;
   host?: string;
   method?: string;
   response_status?: number;
@@ -1508,6 +1556,7 @@ export type CapturePolicyUpdate = Partial<Omit<CapturePolicy, "retention">>;
 
 function httpFlowParams(filters: HttpFlowFilters): URLSearchParams {
   const query = new URLSearchParams();
+  if (filters.flow_uid) query.set("flow_uid", filters.flow_uid);
   if (filters.host) query.set("host", filters.host);
   if (filters.method) query.set("method", filters.method);
   if (filters.response_status != null)
@@ -1698,6 +1747,50 @@ export type CodeQueueStats = {
   }>;
 };
 
+export type CodeQueueStatus = "pending" | "processing" | "done" | "error" | "needs_context";
+
+export type CodeQueueItem = {
+  id: number;
+  file_id: number;
+  file_path: string;
+  classification: string;
+  analysis_priority: number;
+  repo_id: number;
+  repo_key: string;
+  repo_role: "analysis" | "reference";
+  status: CodeQueueStatus;
+  queue_mode: "initial" | "reanalysis" | "trigger" | "metadata-refresh";
+  priority: number;
+  batch_theme: string;
+  slot_types: string[];
+  guidance_hypotheses: string[];
+  cross_file_triggers: Array<Record<string, unknown>>;
+  agent_name: string;
+  lease_token: string;
+  repo_generation: number;
+  disposition: string;
+  skip_reason: string;
+  reanalysis_of_queue_item_id: number | null;
+  consumed_at: string | null;
+  last_heartbeat_at: string | null;
+  lease_activity_at: string | null;
+  heartbeat_age_seconds: number | null;
+  current_result_count: number;
+  adopted_leases: Array<{ agent_name: string; lease_token: string }>;
+  completed_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type CodeQueuePage = {
+  total: number;
+  offset: number;
+  count: number;
+  has_more: boolean;
+  item_ids: number[];
+  items: CodeQueueItem[];
+};
+
 export type CodeCoverage = {
   total_files: number;
   // The repositories deliberately excluded from every count in this object.
@@ -1835,6 +1928,19 @@ export function getCodeQueueStats(engagementKey: string) {
   return request<CodeQueueStats>(`/engagements/${engagementKey}/assessment/code/analysis-queue/stats`);
 }
 
+export function listCodeQueueItems(
+  engagementKey: string,
+  params: { status?: CodeQueueStatus; limit?: number } = {},
+) {
+  const query = new URLSearchParams();
+  if (params.status) query.set("status", params.status);
+  if (params.limit != null) query.set("limit", String(params.limit));
+  const qs = query.toString();
+  return request<CodeQueuePage>(
+    `/engagements/${engagementKey}/assessment/code/analysis-queue${qs ? `?${qs}` : ""}`,
+  );
+}
+
 export function getCodeCoverage(engagementKey: string, repoId?: number) {
   const qs = repoId != null ? `?repo_id=${repoId}` : "";
   return request<CodeCoverage>(`/engagements/${engagementKey}/assessment/code/coverage${qs}`);
@@ -1965,10 +2071,13 @@ export type IntelNote = IntelRowBase & {
   body_markdown: string;
   source_agent: string;
   tags: string[];
+  lead_status: IntelLeadStatus | null;
   authored_by: string;
   scope: string;
   validity_context: string;
 };
+
+export type IntelLeadStatus = "open" | "in_progress" | "resolved" | "ruled_out";
 
 export type IntelEntityType =
   | "tech_component"
@@ -2028,6 +2137,37 @@ export type IntelSummary = {
   counts: Record<string, number>;
 };
 
+export type IntelReadinessCve = {
+  id: number;
+  cve_id: string;
+  cvss_score: number | null;
+  affected_component: string;
+  validation_status?: string;
+};
+
+export type IntelReadinessLead = {
+  id: number;
+  title: string;
+  lead_status: IntelLeadStatus;
+};
+
+export type IntelReadinessDanglingLink = {
+  id: number;
+  cve_id: string;
+  linked_finding_slug: string;
+  reason: string;
+  workflow_status: string | null;
+};
+
+export type IntelReadiness = {
+  applicable: boolean;
+  engagement_type: string;
+  open_high_cves: IntelReadinessCve[];
+  open_leads: IntelReadinessLead[];
+  exploited_unlinked_cves: IntelReadinessCve[];
+  dangling_links: IntelReadinessDanglingLink[];
+};
+
 export type IntelByUrlResponse = {
   domains: IntelDomain[];
   services: Record<string, unknown>[];
@@ -2065,6 +2205,10 @@ export type ListActivityEntriesResponse = {
 
 export function getIntelSummary(engagementKey: string) {
   return request<IntelSummary>(`/engagements/${engagementKey}/intel/summary`);
+}
+
+export function getIntelReadiness(engagementKey: string) {
+  return request<IntelReadiness>(`/engagements/${engagementKey}/intel/readiness`);
 }
 
 const INTEL_LIST_PAGE_SIZE = 500;
@@ -2184,10 +2328,11 @@ export const listSurfaces = listAssessmentSurfaces;
 // ── Mutation helpers (CLI parity) ───────────────────────
 
 export type SurfacePatchPayload = {
-  status?: "covered" | "deferred" | "discovered" | "not_applicable";
+  status?: SurfaceStatus;
   rationale?: string;
   source_name?: string;
   evidence_ref?: string;
+  followup_condition?: string;
 };
 
 export function patchAssessmentSurface(

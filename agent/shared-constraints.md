@@ -400,6 +400,12 @@ local state are self-owned (see "Credentials and Local State Are Self-Owned"). P
 values through submission; an unbound placeholder — or one placeholder reused
 across different objects — makes the reproduction unfollowable by construction.
 
+Record the working proof as readable Markdown while the session is still live: one numbered
+`steps_to_reproduce` string, fenced commands/requests/responses, and annotated
+`details.evidence` that says what each excerpt proves. Large raw captures belong in an artifact or
+`poc_request`/`poc_response`. The report-writer owns final submission editing, but it must not have
+to recover structure or distinguish commands from prose in an unformatted blob.
+
 When a finding is only reportable as part of a chain, keep it in the same finding lifecycle and set
 `details.chain_required`/`chain_rationale`/`required_followup` — at `finding record` time or later
 via `vigil assess finding update <slug> --details-inline '{...}'` (shapes and enforcement:
@@ -413,7 +419,9 @@ volume does not strengthen the proof and only increases harm. The "evidence beat
 rule (`hunting.md §6`) applies at the collection boundary: more records is not more
 proof, and extracting more is the harm, not the demonstration.
 
-**The `notes` field must contain replayable commands** — not prose descriptions. Instead of
+**The `notes` field is an operational replay log and must contain replayable commands** — not prose
+descriptions. Use readable Markdown: short sections or a numbered sequence, with exact commands,
+requests, responses, and tool output in fenced code blocks. Instead of
 "Login to phpMyAdmin with blank password," write the actual command: curl with headers, cookies,
 and POST body; sqlmap with exact flags; ysoserial with gadget chain and target; or whatever tool
 proved the finding. The field allows up to 20 KB. If the operator or another agent needs to

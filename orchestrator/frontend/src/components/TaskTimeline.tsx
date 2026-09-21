@@ -4,6 +4,7 @@ import type { EventRecord } from "../lib/api";
 const PAGE_SIZE = 20;
 
 type TaskTimelineProps = {
+  engagementKey: string;
   events: EventRecord[];
 };
 
@@ -22,12 +23,17 @@ function eventTypeLabel(eventType: string): string {
   }
 }
 
-export function TaskTimeline({ events }: TaskTimelineProps) {
+function isOperationalActivity(event: EventRecord): boolean {
+  return event.id < 0 || event.event_type.startsWith("task.") || event.event_type === "artifact.updated";
+}
+
+export function TaskTimeline({ engagementKey, events }: TaskTimelineProps) {
   const [page, setPage] = useState(0);
+  const [includeOperationalActivity, setIncludeOperationalActivity] = useState(false);
 
   const activityEvents = useMemo(
-    () => events.filter((event) => event.event_type !== "artifact.updated"),
-    [events],
+    () => events.filter((event) => includeOperationalActivity || !isOperationalActivity(event)),
+    [events, includeOperationalActivity],
   );
 
   const totalPages = Math.max(1, Math.ceil(activityEvents.length / PAGE_SIZE));
@@ -44,10 +50,41 @@ export function TaskTimeline({ events }: TaskTimelineProps) {
       <div className="panel-header">
         <h2>Recent events</h2>
         <p className="meta-text">
-          {activityEvents.length} event{activityEvents.length !== 1 ? "s" : ""}
-          {events.length >= 200 ? " · latest 200 loaded" : ""}
+          {activityEvents.length} shown · {events.length} loaded
         </p>
       </div>
+      <div className="event-timeline-controls" role="group" aria-label="Event timeline view">
+        <button
+          type="button"
+          className={`filter-chip ${!includeOperationalActivity ? "is-active" : ""}`}
+          aria-label="Lifecycle and decisions only"
+          aria-pressed={!includeOperationalActivity}
+          onClick={() => {
+            setIncludeOperationalActivity(false);
+            setPage(0);
+          }}
+        >
+          Lifecycle + decisions
+        </button>
+        <button
+          type="button"
+          className={`filter-chip ${includeOperationalActivity ? "is-active" : ""}`}
+          aria-label="Include operational activity"
+          aria-pressed={includeOperationalActivity}
+          onClick={() => {
+            setIncludeOperationalActivity(true);
+            setPage(0);
+          }}
+        >
+          Include operational activity
+        </button>
+      </div>
+      <p className="event-history-boundary" role="note">
+        Events shows at most the latest 200 rows; earlier history may exist. {" "}
+        <a href={`#/engagements/${encodeURIComponent(engagementKey)}?tab=log`}>
+          Open complete Audit log
+        </a>
+      </p>
       <div className="timeline" style={{ display: "flex", flexDirection: "column" }}>
         {pageEvents.map((event) => (
           <article key={event.id} className="timeline-row">
@@ -56,6 +93,12 @@ export function TaskTimeline({ events }: TaskTimelineProps) {
               <div className="timeline-title-row">
                 <strong>{event.task_name}</strong>
                 <span className="meta-text">{event.agent_name}</span>
+              </div>
+              <div className="event-provenance">
+                <span className={`badge ${event.id < 0 ? "event-source-inferred" : "event-source-persisted"}`}>
+                  {event.id < 0 ? "Inferred from activity" : "Persisted structured event"}
+                </span>
+                <time className="meta-text" dateTime={event.created_at}>{event.created_at}</time>
               </div>
               <p>
                 <span className={`badge event-type-${eventTypeLabel(event.event_type)}`}>{eventTypeLabel(event.event_type)}</span>
@@ -68,9 +111,9 @@ export function TaskTimeline({ events }: TaskTimelineProps) {
       </div>
       {totalPages > 1 && (
         <div className="pager">
-          <button type="button" className="pager-button" disabled={safePage >= lastPage} onClick={() => setPage(safePage + 1)}>Older</button>
+          <button type="button" className="pager-button" aria-label="Older event page" disabled={safePage >= lastPage} onClick={() => setPage(safePage + 1)}>Older</button>
           <span className="meta-text">Page {safePage + 1} of {totalPages}</span>
-          <button type="button" className="pager-button" disabled={safePage === 0} onClick={() => setPage(safePage - 1)}>Newer</button>
+          <button type="button" className="pager-button" aria-label="Newer event page" disabled={safePage === 0} onClick={() => setPage(safePage - 1)}>Newer</button>
         </div>
       )}
     </section>

@@ -12,8 +12,15 @@ vi.mock("../lib/api", () => ({
 }));
 
 vi.mock("./CommandsGrid", () => ({
-  default: ({ rows, onRowOpen }: { rows: Array<{ id: number }>; onRowOpen: (id: number, invoker: HTMLElement) => void }) => rows.length > 0
-    ? <button type="button" onClick={(event) => onRowOpen(rows[0].id, event.currentTarget)}>command grid</button>
+  default: ({ rows, onRowOpen }: {
+    rows: Array<{ id: number; statusLabel: string; target: string; targetSource: string }>;
+    onRowOpen: (id: number, invoker: HTMLElement) => void;
+  }) => rows.length > 0
+    ? <div>{rows.map((row) => (
+        <button key={row.id} type="button" onClick={(event) => onRowOpen(row.id, event.currentTarget)}>
+          command grid {row.id} {row.statusLabel} {row.target} {row.targetSource}
+        </button>
+      ))}</div>
     : <span>No command runs match.</span>,
 }));
 
@@ -62,15 +69,15 @@ describe("CommandsTab live audit", () => {
 
   it("keeps the last loaded command rows visible when a background refresh fails", async () => {
     vi.mocked(listAssessmentCommandRuns)
-      .mockResolvedValueOnce([{ id: 1, argv: [], command: "", timed_out: false, success: true }] as never)
+      .mockResolvedValueOnce([{ id: 1, status: "failed", argv: [], command: "", timed_out: false, success: false }] as never)
       .mockRejectedValueOnce(new Error("command refresh unavailable"));
 
     render(<CommandsTab engagementKey="demo" />);
-    expect(await screen.findByText("command grid")).toBeTruthy();
+    expect(await screen.findByText(/command grid/)).toBeTruthy();
     fireEvent(document, new Event("visibilitychange"));
 
     expect((await screen.findByRole("alert")).textContent).toContain("command refresh unavailable");
-    expect(screen.getByText("command grid")).toBeTruthy();
+    expect(screen.getByText(/command grid/)).toBeTruthy();
   });
 
   it("queues a visibility refresh that arrives during the initial load", async () => {
@@ -93,11 +100,12 @@ describe("CommandsTab live audit", () => {
       vi.mocked(listAssessmentCommandRuns).mockResolvedValue([{
         id: 41,
         run_uuid: "run-41",
+        status: "failed",
         argv: ["printf", "operator-evidence"],
         command: "printf operator-evidence",
         tool_name: "printf",
         timed_out: false,
-        success: true,
+        success: false,
         stdout_bytes: 17,
         stderr_bytes: 0,
         stdout_preview_chars: 17,
@@ -113,7 +121,7 @@ describe("CommandsTab live audit", () => {
       } as never);
 
       render(<CommandsTab engagementKey="demo" />);
-      fireEvent.click(await screen.findByRole("button", { name: "command grid" }));
+      fireEvent.click(await screen.findByRole("button", { name: /command grid/ }));
       fireEvent.click(await screen.findByRole("button", { name: /stdout/i }));
 
       expect(await screen.findByText("operator-evidence")).toBeTruthy();
@@ -121,4 +129,134 @@ describe("CommandsTab live audit", () => {
       expect(screen.getByText(/captured output is shown below/i)).toBeTruthy();
     },
   );
+
+  it("defaults to needs-attention while retaining the all-runs ledger and durable lifecycle status", async () => {
+    vi.mocked(listAssessmentCommandRuns).mockResolvedValue([
+      {
+        id: 1,
+        status: "completed",
+        success: true,
+        timed_out: false,
+        output_retention_status: "retained",
+        output_integrity_status: "verified",
+        argv: [],
+        command: "curl https://clean.test",
+      },
+      {
+        id: 2,
+        status: "lost",
+        success: false,
+        timed_out: false,
+        output_retention_status: "retained",
+        output_integrity_status: "verified",
+        argv: [],
+        command: "curl https://lost.test",
+      },
+    ] as never);
+
+    render(<CommandsTab engagementKey="demo" />);
+
+    expect(await screen.findByRole("button", { name: /command grid 2 lost/i })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /command grid 1 completed/i })).toBeNull();
+    expect(screen.getByRole("button", { name: /needs attention/i }).getAttribute("aria-pressed")).toBe("true");
+
+    fireEvent.click(screen.getByRole("button", { name: /^all/i }));
+    expect(await screen.findByRole("button", { name: /command grid 1 completed/i })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /^all/i }).getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("uses stored attribution and labels command-derived targets as inferred", async () => {
+    vi.mocked(listAssessmentCommandRuns).mockResolvedValue([
+      {
+        id: 11,
+        run_uuid: "stored",
+        status: "failed",
+        success: false,
+        timed_out: false,
+        output_retention_status: "retained",
+        output_integrity_status: "verified",
+        argv: [],
+        command: "curl https://wrong.example/path",
+        target_host: "stored.example",
+        auth_context: "admin-session",
+        scope_version: "sha256:scope-v3",
+        finding_id: 74,
+        partial_results: true,
+        superseded_by_id: 12,
+      },
+      {
+        id: 12,
+        status: "failed",
+        success: false,
+        timed_out: false,
+        output_retention_status: "retained",
+        output_integrity_status: "verified",
+        argv: [],
+        command: "curl https://inferred.example/path",
+      },
+    ] as never);
+
+    render(<CommandsTab engagementKey="demo" />);
+
+    expect(await screen.findByRole("button", { name: /stored\.example stored/i })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /inferred\.example inferred/i })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /command grid 11/i }));
+    expect(screen.getByText("admin-session")).toBeTruthy();
+    expect(screen.getByText("sha256:scope-v3")).toBeTruthy();
+    expect(screen.getByText("74")).toBeTruthy();
+    expect(screen.getByText("partial")).toBeTruthy();
+    expect(screen.getByText("Superseded by run 12")).toBeTruthy();
+  });
+
+  it("labels loaded previews and full-output artifact references honestly", async () => {
+    vi.mocked(listAssessmentCommandRuns).mockResolvedValue([{
+      id: 21,
+      run_uuid: "artifact-run",
+      status: "failed",
+      success: false,
+      timed_out: false,
+      output_retention_status: "artifact",
+      output_integrity_status: "verified",
+      stdout_bytes: 99999,
+      stdout_preview_chars: 12,
+      stdout_artifact_ref: "scans/command-runs/21/stdout.log",
+      argv: [],
+      command: "tool --large-output",
+    }] as never);
+    vi.mocked(getAssessmentCommandRun).mockResolvedValue({
+      id: 21,
+      stdout_preview: "first 12 chars",
+      stderr_preview: "",
+    } as never);
+
+    render(<CommandsTab engagementKey="demo" />);
+    fireEvent.click(await screen.findByRole("button", { name: /command grid 21/i }));
+    fireEvent.click(screen.getByRole("button", { name: /stdout preview/i }));
+
+    expect(await screen.findByText("Captured output preview")).toBeTruthy();
+    expect(screen.getByText("Full output artifact")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Copy artifact reference" })).toBeTruthy();
+  });
+
+  it("gives search and filter controls accessible names and pressed state", async () => {
+    vi.mocked(listAssessmentCommandRuns).mockResolvedValue([{
+      id: 31,
+      status: "failed",
+      success: false,
+      timed_out: false,
+      output_retention_status: "retained",
+      output_integrity_status: "verified",
+      tool_bin: "curl",
+      tool_name: "curl",
+      argv: [],
+      command: "curl example.test",
+    }] as never);
+
+    render(<CommandsTab engagementKey="demo" />);
+    expect(await screen.findByRole("searchbox", { name: "Search command runs" })).toBeTruthy();
+    const tool = screen.getByRole("button", { name: /filter by tool curl/i });
+    expect(tool.getAttribute("aria-pressed")).toBe("false");
+    fireEvent.click(tool);
+    expect(tool.getAttribute("aria-pressed")).toBe("true");
+  });
 });

@@ -11,6 +11,12 @@ vi.mock("./lib/api", () => ({
   listEngagements: vi.fn(),
 }));
 
+vi.mock("./routes/EngagementPage", () => ({
+  EngagementPage: ({ initialRequestVariantId }: { initialRequestVariantId?: number }) => (
+    <div>Request variant {initialRequestVariantId ?? "none"}</div>
+  ),
+}));
+
 beforeEach(() => {
   window.location.hash = "#/engagements";
   vi.mocked(getDashboardSummary).mockRejectedValue(new Error("dashboard unavailable"));
@@ -30,5 +36,13 @@ describe("App engagement loading", () => {
     expect((await screen.findByRole("alert")).textContent).toContain("engagement API unavailable");
     expect(screen.queryByText(/No engagements discovered/)).toBeNull();
     await waitFor(() => expect(listEngagements).toHaveBeenCalledTimes(1));
+  });
+
+  it("passes an HTTP request deep link to the engagement page", async () => {
+    window.location.hash = "#/engagements/demo?tab=http&request=19";
+
+    render(<App />);
+
+    expect(await screen.findByText("Request variant 19")).toBeTruthy();
   });
 });

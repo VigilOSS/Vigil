@@ -104,6 +104,23 @@ def test_list_http_flows_server_side_filters(client, isolate_settings):
     assert len(uids({})) == 3
 
 
+def test_http_flow_uid_filter_drives_exact_single_exchange_har(client, isolate_settings):
+    key = "2026-06-01-000002-flow-har"
+    write_engagement(isolate_settings["engagements_dir"], key)
+    client.post(BASE.format(key=key), json=_flow_payload(flow_uid="flow-one"))
+    client.post(BASE.format(key=key), json=_flow_payload(flow_uid="flow-two"))
+
+    listed = client.get(BASE.format(key=key), params={"flow_uid": "flow-one"})
+    assert [flow["flow_uid"] for flow in listed.json()] == ["flow-one"]
+
+    exported = client.get(
+        BASE.format(key=key) + "/export-har", params={"flow_uid": "flow-one"}
+    )
+    assert exported.status_code == 200
+    entries = exported.json()["log"]["entries"]
+    assert [entry["_vigil"]["flow_uid"] for entry in entries] == ["flow-one"]
+
+
 def test_get_http_flow_detail_and_404(client, isolate_settings):
     key = "2026-06-01-000003-flows"
     write_engagement(isolate_settings["engagements_dir"], key)

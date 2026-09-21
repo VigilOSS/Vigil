@@ -2293,7 +2293,7 @@ function WorkPane({ d, proseMode, toast }: { d: Derived; proseMode: ProseMode; t
 }
 
 // Exported for focused tests: this pane owns the canonical submission order and
-// renders captures byte-for-byte.
+// renders authored narrative as Markdown and supporting captures byte-for-byte.
 export function SubmissionPane({
   d,
   proseMode,
@@ -2309,29 +2309,24 @@ export function SubmissionPane({
   const reqText = d.poc_request ? formatHttp(d.poc_request, "req") : "";
   const respText = d.poc_response ? formatHttp(d.poc_response, "resp") : "";
 
-  // Evidence is a CAPTURE, so the bytes rendered here and the bytes the copy
-  // chip hands back are the recorded ones. Trimming made this pane lossier than
-  // its own Copy-as-Markdown, and dropped a whitespace-only capture from the
-  // page entirely while the PoC tab badge above still counted it — yet a
-  // padded, stripped or blank response IS the finding on a whitespace-sensitive
-  // parser differential (AGENTS.md: never degrade the operator's own data;
-  // ADR 0019; and see report/src/lib/poc.ts, which settled the same question).
+  // Evidence is authored Markdown. Raw HTTP and whitespace-sensitive legacy
+  // captures still use <pre>; new raw request/response bytes belong in the
+  // supporting-capture fields below. The copy chip always returns the stored
+  // bytes unchanged.
   const ev = d.evidence || "";
   // Pick a render mode for evidence: raw HTTP exchanges get the mono
-  // .pre treatment; short prose gets a compact blockquote; longer
-  // prose keeps the shared Markdown layout but inside a callout. The probe is
+  // .pre treatment; authored narrative uses the shared Markdown renderer. The probe is
   // trimmed because LAYOUT is all it decides — a capture that opens with a
   // blank line is still an HTTP exchange — but nothing rendered or copied is.
   const evProbe = ev.trim();
   const looksLikeHttp =
     /^HTTP\/\d\.\d\b/i.test(evProbe) ||
     /^(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+\S+\s+HTTP\/\d/i.test(evProbe);
+  const preservesBoundaryWhitespace = ev !== evProbe;
   // A capture that is nothing but whitespace takes the <pre> too: it is the
   // only renderer here that shows the bytes rather than swallowing them.
-  const evidenceMode: "http" | "quote" | "prose" = looksLikeHttp || evProbe.length === 0
+  const evidenceMode: "http" | "prose" = looksLikeHttp || evProbe.length === 0 || preservesBoundaryWhitespace
     ? "http"
-    : evProbe.length < 200 && !evProbe.includes("\n\n")
-    ? "quote"
     : "prose";
 
   return (
@@ -2344,14 +2339,8 @@ export function SubmissionPane({
       )}
       {hasSteps && (
         <div className="section">
-          {/* Steps render exactly as authored — no imposed counter, no list
-              marker. Numbering belongs to whoever wrote the finding: prose in
-              Impact or Summary cites step numbers, and an `<ol>` counter would
-              disagree with those citations the moment the author's own numbering
-              is non-sequential or sub-stepped. `white-space: pre-wrap` keeps the
-              line breaks of a single authored block. */}
           <SectionHead title="Steps to reproduce" copyText={stepsText} toast={toast} />
-          <div className="steps-verbatim">{stepsText}</div>
+          <Prose text={stepsText} mode={proseMode} />
         </div>
       )}
       {(ev || hasCaptures) && (
@@ -2361,8 +2350,6 @@ export function SubmissionPane({
           <SectionHead title="Evidence" copyText={ev} toast={toast} />
           {ev && (evidenceMode === "http" || proseMode === "raw" ? (
               <pre className="pre resp">{ev}</pre>
-            ) : evidenceMode === "quote" ? (
-              <blockquote className="evidence-inline">{ev}</blockquote>
             ) : (
               <Prose text={ev} mode={proseMode} />
             ))}

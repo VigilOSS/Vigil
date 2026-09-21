@@ -471,7 +471,7 @@ def _schema_specs() -> tuple[SchemaSpec, ...]:
                     },
                     "summary": {
                         "maxLength": 4096,
-                        "description": "2-5 sentence description: what is vulnerable, how it is triggered, and the attacker impact.",
+                        "description": "Concise submission-quality Markdown (normally 2-5 sentences): what is vulnerable, how it is triggered, and the concrete attacker impact.",
                     },
                     "evidence_ref": {
                         "maxLength": 1024,
@@ -479,7 +479,7 @@ def _schema_specs() -> tuple[SchemaSpec, ...]:
                     },
                     "notes": {
                         "maxLength": 20000,
-                        "description": "Freeform operational notes: retesting observations, partial progress, raw tool output. Not shown in reports.",
+                        "description": "Operational replay log in readable Markdown. Use short sections or a numbered sequence and fenced code blocks for exact commands, requests, responses, and tool output. Keep submission narrative in details; notes are not shown in reports.",
                     },
                     "source_name": {
                         "maxLength": 128,

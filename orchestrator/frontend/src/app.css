@@ -685,6 +685,40 @@ input {
   color: var(--accent);
 }
 
+.event-timeline-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.event-history-boundary {
+  margin: 0 0 14px;
+  padding: 9px 0;
+  border-top: 1px solid var(--divider);
+  border-bottom: 1px solid var(--divider);
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.event-provenance {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 3px;
+}
+
+.event-source-persisted {
+  background: rgba(47, 127, 82, 0.12);
+  color: var(--ok);
+}
+
+.event-source-inferred {
+  background: rgba(140, 123, 98, 0.12);
+  color: var(--pending);
+}
+
 /* ── Status pills ───────────────────────────────────────── */
 
 .status-queued,
@@ -976,9 +1010,11 @@ input {
 }
 
 .coverage-segment-pending { background: var(--pending); }
-.coverage-segment-queued { background: var(--accent-soft); }
-.coverage-segment-tested { background: var(--ok); }
-.coverage-segment-deferred { background: rgba(23, 53, 76, 0.25); }
+.coverage-segment-queued { background: var(--warn); }
+.coverage-segment-deferred { background: var(--accent-soft); }
+.coverage-segment-covered { background: var(--ok); }
+.coverage-segment-not_applicable { background: var(--muted); }
+.coverage-segment-blocked { background: var(--danger); }
 
 .coverage-legend {
   display: flex;
@@ -1001,9 +1037,87 @@ input {
 }
 
 .coverage-dot-pending { background: var(--pending); }
-.coverage-dot-queued { background: var(--accent-soft); }
-.coverage-dot-tested { background: var(--ok); }
-.coverage-dot-deferred { background: rgba(23, 53, 76, 0.25); }
+.coverage-dot-queued { background: var(--warn); }
+.coverage-dot-deferred { background: var(--accent-soft); }
+.coverage-dot-covered { background: var(--ok); }
+.coverage-dot-not_applicable { background: var(--muted); }
+.coverage-dot-blocked { background: var(--danger); }
+
+.coverage-view-switch {
+  display: flex;
+  gap: 4px;
+  width: fit-content;
+  padding: 3px;
+  border: 1px solid var(--divider);
+  border-radius: 9px;
+  background: var(--panel-soft);
+}
+
+.coverage-view-switch button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 0;
+  border-radius: 6px;
+  padding: 7px 10px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 0.82rem;
+  cursor: pointer;
+}
+
+.coverage-view-switch button[aria-pressed="true"] {
+  background: var(--panel-strong);
+  color: var(--ink);
+  box-shadow: 0 1px 2px rgb(0 0 0 / 8%);
+}
+
+.coverage-view-switch button span,
+.coverage-debt h3 span {
+  color: var(--muted);
+  font: 0.72rem "IBM Plex Mono", "SFMono-Regular", monospace;
+}
+
+.coverage-debt,
+.coverage-debt-groups,
+.coverage-debt-groups > section,
+.coverage-debt-list {
+  display: grid;
+  gap: 12px;
+}
+
+.coverage-debt h3 {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  margin: 0;
+}
+
+.coverage-debt-list article {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: start;
+  padding-top: 11px;
+  border-top: 1px solid var(--divider);
+}
+
+.coverage-debt-list article > div {
+  min-width: 0;
+}
+
+.coverage-debt-list strong,
+.coverage-debt-list p {
+  overflow-wrap: anywhere;
+}
+
+.coverage-debt-list p,
+.coverage-debt-list time {
+  margin: 3px 0 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
 
 .coverage-tree {
   display: grid;
@@ -1049,9 +1163,11 @@ input {
 
 .coverage-badge-pending { background: rgba(140, 123, 98, 0.12); color: var(--pending); }
 .coverage-badge-queued { background: rgba(244, 162, 89, 0.15); color: var(--warn); }
-.coverage-badge-tested,
 .coverage-badge-covered { background: rgba(47, 127, 82, 0.14); color: var(--ok); }
 .coverage-badge-deferred { background: rgba(23, 53, 76, 0.08); color: var(--accent); }
+.coverage-badge-not_applicable { background: var(--panel-soft); color: var(--muted); }
+.coverage-badge-blocked { background: color-mix(in srgb, var(--danger) 13%, transparent); color: var(--danger); }
+.coverage-badge-partial { background: color-mix(in srgb, var(--warn) 13%, transparent); color: var(--warn); }
 
 .coverage-items-grid {
   display: grid;
@@ -1086,9 +1202,58 @@ input {
   border-radius: 8px;
 }
 
-.coverage-items-row:nth-child(even) {
+button.coverage-items-row {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.coverage-item-record:nth-child(even) > .coverage-items-row {
   background: rgba(255, 255, 255, 0.4);
 }
+
+.coverage-item-detail {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 16px;
+  align-items: start;
+  margin: 0 10px 8px;
+  padding: 12px 14px;
+  border-left: 2px solid var(--accent-muted);
+  background: var(--panel-soft);
+}
+
+.coverage-item-detail span,
+.coverage-item-detail dt {
+  color: var(--muted);
+  font-size: 0.7rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.coverage-item-detail p,
+.coverage-item-detail dl,
+.coverage-item-detail dd {
+  margin: 4px 0 0;
+}
+
+.coverage-item-detail dl {
+  display: grid;
+  gap: 7px;
+}
+
+.coverage-item-detail a {
+  color: var(--accent);
+  font-weight: 600;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.coverage-item-detail a:hover { text-decoration: underline; }
 
 .coverage-filters {
   display: flex;
@@ -1407,6 +1572,28 @@ input {
   margin-top: 12px;
 }
 
+.code-readiness-panel {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
+}
+
+.code-readiness-primary {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+.code-readiness-secondary {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
 .code-repo-card {
   display: grid;
   gap: 10px;
@@ -1478,6 +1665,40 @@ input {
   color: var(--accent);
 }
 
+.code-repo-identity {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px 16px;
+  margin: 0;
+}
+
+.code-repo-identity > div {
+  min-width: 0;
+}
+
+.code-repo-identity dt {
+  color: var(--muted);
+  font-size: 0.7rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.code-repo-identity dd {
+  margin: 2px 0 0;
+  overflow-wrap: anywhere;
+}
+
+.code-repo-truth {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding: 10px 12px 10px 28px;
+  border-left: 3px solid var(--warn);
+  background: color-mix(in srgb, var(--warn) 8%, transparent);
+  color: var(--ink-2);
+  font-size: 0.78rem;
+}
+
 .code-stats-grid {
   margin-top: 12px;
 }
@@ -1486,6 +1707,43 @@ input {
   display: grid;
   gap: 8px;
   margin-top: 14px;
+}
+
+.code-queue-integrity {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--divider);
+  color: var(--ink-2);
+  font-size: 0.78rem;
+}
+
+.code-next-work {
+  margin-top: 16px;
+}
+
+.code-next-work h3 {
+  margin: 0 0 8px;
+  font-size: 0.9rem;
+}
+
+.code-next-work ol {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.code-next-work li {
+  display: grid;
+  grid-template-columns: auto minmax(180px, 1fr) auto auto;
+  align-items: baseline;
+  gap: 8px;
+  padding: 8px 0;
+  border-top: 1px solid var(--divider);
 }
 
 .code-segment-done { background: var(--ok); }
@@ -1623,6 +1881,23 @@ input {
   flex-shrink: 0;
 }
 
+.code-result-expand {
+  width: fit-content;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.code-result-expand:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
 .code-disposition-finding { background: rgba(47, 127, 82, 0.14); color: var(--ok); }
 .code-disposition-suspicious { background: rgba(244, 162, 89, 0.18); color: var(--warn); }
 .code-disposition-clean { background: rgba(23, 53, 76, 0.08); color: var(--accent); }
@@ -1644,7 +1919,23 @@ input {
 .code-status-in_progress { background: rgba(244, 162, 89, 0.18); color: var(--warn); }
 .code-status-analyzed { background: rgba(47, 127, 82, 0.14); color: var(--ok); }
 .code-status-pending { background: rgba(140, 123, 98, 0.12); color: var(--pending); }
+.code-status-needs_context { background: rgba(140, 123, 98, 0.12); color: var(--pending); }
+.code-status-error { background: color-mix(in srgb, var(--danger) 12%, transparent); color: var(--danger); }
 .code-status-complete { background: rgba(47, 127, 82, 0.16); color: var(--ok); }
+
+@media (max-width: 760px) {
+  .code-readiness-panel {
+    display: grid;
+  }
+
+  .code-repo-identity {
+    grid-template-columns: 1fr;
+  }
+
+  .code-next-work li {
+    grid-template-columns: auto 1fr;
+  }
+}
 
 /* ── Typography ─────────────────────────────────────────── */
 
@@ -1843,6 +2134,111 @@ input {
   padding: 1px 6px;
   color: var(--accent);
 }
+
+/* Intel's advisory work queue stays compact: it raises unresolved leads and
+ * CVE disposition debt without turning reference/history records into a
+ * second-class or hidden view. */
+.findings-redesign .intel-workbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 38px;
+  margin: -2px 0 12px;
+  padding: 7px 10px;
+  border-block: 1px solid var(--divider);
+  color: var(--ink-2);
+  font-size: 0.76rem;
+  overflow-x: auto;
+}
+.findings-redesign .intel-workbar-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding-right: 4px;
+  color: var(--ink);
+  font-weight: 700;
+  white-space: nowrap;
+}
+.findings-redesign .intel-workbar-title .sev-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--warn);
+}
+.findings-redesign .intel-workbar-stat,
+.findings-redesign button.intel-workbar-stat {
+  border: 0;
+  border-left: 1px solid var(--divider);
+  border-radius: 0;
+  padding: 1px 0 1px 9px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  white-space: nowrap;
+}
+.findings-redesign button.intel-workbar-stat { cursor: pointer; }
+.findings-redesign button.intel-workbar-stat:hover { color: var(--accent); }
+.findings-redesign .intel-workbar-review {
+  margin-left: auto;
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  cursor: pointer;
+  font: 650 0.76rem inherit;
+  white-space: nowrap;
+}
+.findings-redesign .intel-workbar-muted { color: var(--muted); }
+
+/* Surface-ledger controls emphasize queue truth without adding another card
+ * layer. The source facet is intentionally a select: discovery pipelines can
+ * create dozens of unique source names. */
+.findings-redesign .surface-ledger-counts {
+  color: var(--ink-2);
+  font-size: 0.78rem;
+  white-space: nowrap;
+}
+.findings-redesign .surface-ledger-counts strong {
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+.findings-redesign .surface-source-select {
+  max-width: 230px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 4px 26px 4px 8px;
+  background: var(--panel-strong);
+  color: var(--ink-2);
+  font: inherit;
+  font-size: 0.76rem;
+}
+.findings-redesign .surface-followup-field {
+  display: grid;
+  gap: 4px;
+  margin-bottom: 9px;
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+.findings-redesign .surface-followup-field input {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 7px 8px;
+  background: var(--panel-strong);
+  color: var(--ink);
+  font: inherit;
+  font-size: 0.82rem;
+}
+.findings-redesign .surface-admin-closure {
+  border-left: 3px solid var(--warn);
+  padding-left: 12px;
+}
+.findings-redesign .status-discovered,
+.findings-redesign .status-deferred { background: rgba(140, 123, 98, 0.12); color: var(--pending); }
+.findings-redesign .status-partially-covered { background: rgba(244, 162, 89, 0.18); color: var(--warn); }
+.findings-redesign .status-covered { background: rgba(47, 127, 82, 0.16); color: var(--ok); }
+.findings-redesign .status-not_applicable { background: color-mix(in srgb, var(--chip-slate) 12%, transparent); color: var(--chip-slate); }
+.findings-redesign .status-administratively-closed { background: color-mix(in srgb, var(--danger) 14%, transparent); color: var(--danger); }
 
 /* Toolbar (search + filters) */
 .findings-redesign .findings-toolbar-panel { padding: 0; }
@@ -2808,14 +3204,6 @@ input {
 .findings-redesign .steps.mono li {
   font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
   font-size: 0.82rem;
-}
-
-/* Steps to reproduce render verbatim — the author owns the numbering, so this
-   preserves their line breaks and markers instead of imposing list styling. */
-.findings-redesign .steps-verbatim {
-  font-size: 0.9rem;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
 }
 
 /* Taint path */
@@ -5069,6 +5457,12 @@ body.detail-modal-open {
   font-size: 0.78rem;
 }
 
+.findings-redesign .http-capture-fidelity-note {
+  margin: 0;
+  padding: 0 12px 10px;
+  line-height: 1.45;
+}
+
 /* ---- OAST status badges (grid cell + drawer hero) ----
  * fired/confirmed → ok (green), pending → warn, everything else → muted. */
 .findings-redesign .oob-status-badge {
@@ -5081,15 +5475,18 @@ body.detail-modal-open {
   padding: 2px 8px;
   border-radius: 999px;
 }
-.findings-redesign .oob-status-badge.oob-fired   { color: var(--ok);      background: color-mix(in srgb, var(--ok) 16%, transparent); }
+.findings-redesign .oob-status-badge.oob-fired   { color: var(--warn); background: color-mix(in srgb, var(--warn) 16%, transparent); }
+.findings-redesign .oob-status-badge.oob-confirmed { color: var(--ok); background: color-mix(in srgb, var(--ok) 16%, transparent); }
 .findings-redesign .oob-status-badge.oob-pending { color: var(--warn);    background: color-mix(in srgb, var(--warn) 16%, transparent); }
 .findings-redesign .oob-status-badge.oob-muted   { color: var(--pending); background: color-mix(in srgb, var(--pending) 14%, transparent); }
 
 /* OAST status filter-chip dot + active state. */
-.findings-redesign .oob-status-dot.oob-fired   { background: var(--ok); }
+.findings-redesign .oob-status-dot.oob-fired   { background: var(--warn); }
+.findings-redesign .oob-status-dot.oob-confirmed { background: var(--ok); }
 .findings-redesign .oob-status-dot.oob-pending { background: var(--warn); }
 .findings-redesign .oob-status-dot.oob-muted   { background: var(--pending); }
-.findings-redesign .filter-chip.oob-status-chip.is-active.oob-fired   { border-color: var(--ok);      color: var(--ok);      background: color-mix(in srgb, var(--ok) 10%, transparent); }
+.findings-redesign .filter-chip.oob-status-chip.is-active.oob-fired   { border-color: var(--warn); color: var(--warn); background: color-mix(in srgb, var(--warn) 10%, transparent); }
+.findings-redesign .filter-chip.oob-status-chip.is-active.oob-confirmed { border-color: var(--ok); color: var(--ok); background: color-mix(in srgb, var(--ok) 10%, transparent); }
 .findings-redesign .filter-chip.oob-status-chip.is-active.oob-pending { border-color: var(--warn);    color: var(--warn);    background: color-mix(in srgb, var(--warn) 10%, transparent); }
 .findings-redesign .filter-chip.oob-status-chip.is-active.oob-muted   { border-color: var(--pending); color: var(--pending); background: color-mix(in srgb, var(--pending) 10%, transparent); }
 
@@ -5118,6 +5515,57 @@ body.detail-modal-open {
 .findings-redesign .oob-interaction-list {
   display: grid;
   gap: 10px;
+}
+
+.findings-redesign .oob-lifecycle-summary {
+  margin: 10px 0 0;
+  color: var(--ink-2);
+  font-size: 0.86rem;
+}
+
+.findings-redesign .oob-interaction-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  margin: 4px 0 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--divider);
+  border-radius: 8px;
+  background: var(--panel-soft);
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.findings-redesign .oob-interaction-summary strong {
+  color: var(--ink);
+}
+
+.findings-redesign .oob-interaction-meta {
+  display: grid;
+  gap: 3px;
+  margin: 8px 0;
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.findings-redesign .oob-interaction-meta code {
+  overflow-wrap: anywhere;
+  color: var(--ink-2);
+}
+
+.findings-redesign .oob-receipt {
+  margin-top: 10px;
+}
+
+.findings-redesign .oob-receipt summary {
+  width: fit-content;
+  cursor: pointer;
+  color: var(--accent);
+  font-size: 0.78rem;
+}
+
+.findings-redesign .oob-receipt[open] summary {
+  margin-bottom: 8px;
 }
 .findings-redesign .oob-interaction-card {
   border: 1px solid var(--border);
@@ -5275,6 +5723,7 @@ body.detail-modal-open {
 }
 
 .run-audit-summary,
+.run-audit-advanced,
 .run-audit-provenance,
 .run-audit-history,
 .run-audit-comparison,
@@ -5282,6 +5731,48 @@ body.detail-modal-open {
 .run-audit-blockers {
   display: grid;
   gap: 18px;
+}
+
+.run-advanced-toggle {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--ink);
+  text-align: left;
+  cursor: pointer;
+}
+
+.run-advanced-toggle > span:first-child {
+  display: grid;
+  gap: 3px;
+}
+
+.run-advanced-toggle small {
+  color: var(--muted);
+  font-size: 0.8rem;
+  font-weight: 400;
+}
+
+.run-advanced-toggle > span:last-child {
+  color: var(--accent);
+  font-size: 1.35rem;
+}
+
+.run-advanced-content {
+  display: grid;
+  gap: 24px;
+  padding-top: 18px;
+  border-top: 1px solid var(--divider);
+}
+
+.run-advanced-content > section {
+  display: grid;
+  gap: 14px;
 }
 
 .run-identity-strip {
@@ -5486,6 +5977,12 @@ body.detail-modal-open {
   background: color-mix(in srgb, var(--warn) 8%, transparent);
 }
 
+.run-compatibility.is-unknown {
+  border-left-color: var(--pending);
+  color: var(--muted);
+  background: color-mix(in srgb, var(--pending) 8%, transparent);
+}
+
 .run-comparison-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -5616,6 +6113,31 @@ body.detail-modal-open {
   font: 600 0.7rem inherit;
 }
 
+.submission-finding-scopes {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px;
+  margin-bottom: 10px;
+  padding: 3px;
+  border-radius: 9px;
+  background: var(--panel-soft);
+}
+.submission-finding-scopes button {
+  display: flex;
+  justify-content: space-between;
+  gap: 6px;
+  border: 0;
+  border-radius: 7px;
+  padding: 7px 8px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font: 650 0.69rem inherit;
+}
+.submission-finding-scopes button.is-active { background: var(--panel-strong); color: var(--ink); }
+.submission-finding-scopes button:disabled { cursor: default; opacity: 0.55; }
+.submission-finding-scopes span { color: var(--muted); }
+
 .submission-finding-list { display: grid; gap: 5px; }
 
 .submission-finding {
@@ -5679,14 +6201,9 @@ body.detail-modal-open {
 .submission-main { display: grid; gap: 14px; min-width: 0; }
 .submission-titlebar { min-width: 0; padding: 4px 2px 0; }
 .submission-titlebar > div:first-child { min-width: 0; }
-.submission-titlebar h2 {
-  display: -webkit-box;
-  overflow: hidden;
-  overflow-wrap: anywhere;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-}
+.submission-titlebar h2 { overflow-wrap: anywhere; }
 .submission-titlebar > div > p:last-child { margin: 6px 0 0; color: var(--muted); font-size: 0.8rem; }
+.submission-title-status { display: grid; justify-items: end; gap: 6px; }
 .submission-title-status span {
   display: inline-flex;
   align-items: center;
@@ -5699,6 +6216,7 @@ body.detail-modal-open {
 }
 .submission-title-status .is-ready { color: var(--ok); background: color-mix(in srgb, var(--ok) 8%, transparent); }
 .submission-title-status .is-blocked { color: var(--warn); background: color-mix(in srgb, var(--warn) 8%, transparent); }
+.submission-title-status .is-stale { color: var(--muted); background: var(--panel-soft); }
 
 .submission-external-record {
   display: grid;
@@ -5776,7 +6294,13 @@ body.detail-modal-open {
 .md-image-reference > span { color: var(--warn); font-size: 0.68rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; }
 .md-image-reference > strong { color: var(--ink-2); font-size: 0.78rem; }
 .md-image-reference > code { overflow-wrap: anywhere; color: var(--muted); font-size: 0.7rem; }
-.submission-markdown .md-body table { width: 100%; border-collapse: collapse; }
+.submission-markdown .md-table-scroll {
+  max-width: 100%;
+  overflow-x: auto;
+  overscroll-behavior-inline: contain;
+}
+.submission-markdown .md-table-scroll:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.submission-markdown .md-body table { width: 100%; min-width: max-content; border-collapse: collapse; }
 .submission-markdown .md-body th,
 .submission-markdown .md-body td { padding: 7px; border: 1px solid var(--divider); text-align: left; }
 .submission-raw { margin: 20px; padding: 18px; border-radius: 9px; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.55; }
@@ -5856,7 +6380,7 @@ body.detail-modal-open {
   .submission-external-record { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .submission-external-record > div:nth-child(3) { border-left: 0; border-top: 1px solid var(--divider); }
   .submission-external-record > div:nth-child(4) { border-top: 1px solid var(--divider); }
-  .submission-rail { position: static; max-height: 290px; }
+  .submission-rail { position: static; max-height: none; overflow: visible; }
   .submission-document { min-height: 480px; }
 }
 

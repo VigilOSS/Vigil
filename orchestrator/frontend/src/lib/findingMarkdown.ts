@@ -169,7 +169,12 @@ export function findingToMarkdown(d: MarkdownFinding): string {
   // nested under Evidence so the clipboard and Submission pane share one shape.
   if (hasEvidence) push("### Evidence");
   if (d.evidence) {
-    pushFenced(d.evidence);
+    const evidenceProbe = d.evidence.trim();
+    const evidenceIsRaw = d.evidence !== evidenceProbe || evidenceProbe.length === 0 ||
+      /^HTTP\/\d\.\d\b/i.test(evidenceProbe) ||
+      /^(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+\S+\s+HTTP\/\d/i.test(evidenceProbe);
+    if (evidenceIsRaw) pushFenced(d.evidence);
+    else push(d.evidence);
     push();
   }
   if (d.poc_code) {

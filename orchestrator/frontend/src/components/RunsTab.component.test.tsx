@@ -151,6 +151,7 @@ describe("RunsTab", () => {
     // renders verbatim, with no reveal step in front of it.
     await waitFor(() => expect(view.container.textContent).toContain("aws-private-value"));
     expect(view.container.textContent).toContain("Bearer opaque-token");
+    fireEvent.click(screen.getByText("Advanced audit"));
     const dispatchPanel = screen.getByRole("heading", { name: "Dispatch" }).parentElement;
     expect(dispatchPanel?.textContent).toContain('"requested_client": "claude"');
     expect(dispatchPanel?.textContent).toContain('"launcher_effective_client": "codex"');
@@ -220,5 +221,55 @@ describe("RunsTab", () => {
         view.container.querySelector('.run-audit-rail [aria-busy="true"]'),
       ).toBeNull();
     });
+  });
+
+  it("keeps proof runs concise while retaining full data in advanced audit", async () => {
+    const proofRun: AssessmentRun = {
+      ...currentRun,
+      id: 42,
+      run_uuid: "proof-run",
+      run_purpose: "proof",
+      target_identity: {},
+      counts: {
+        inventory_total: 0,
+        source_reads: 0,
+        obligations: 0,
+        findings: 1,
+        proof_receipts: 2,
+      },
+      source_generations: [],
+      exclusions: [],
+      seal: null,
+      producer_dispatch_id: undefined,
+      producer_dispatch_agent_id: undefined,
+      producer_dispatch_agent_role: undefined,
+    };
+    vi.mocked(listAssessmentRuns).mockResolvedValue([proofRun]);
+    vi.mocked(getAssessmentRun).mockResolvedValue(proofRun);
+    vi.mocked(getAssessmentRunComparison).mockResolvedValue({
+      run_id: proofRun.id,
+      baseline_run_id: baselineRun.id,
+      target_compatible: null,
+      source_compatible: null,
+      deterministic: true,
+      classifications: { new: [], persisting: [], resolved: [], unknown: [] },
+    });
+    vi.mocked(listAssessmentRunChildren).mockResolvedValue({
+      items: [], total: 0, offset: 0, limit: 50, has_more: false,
+    });
+
+    render(<RunsTab engagementKey="audit-test" initialRunId={proofRun.id} />);
+
+    expect(await screen.findByRole("heading", { name: "proof-run" })).toBeTruthy();
+    expect(screen.getByText("proof receipts").previousElementSibling?.textContent).toBe("2");
+    expect(screen.queryByText("inventory total")).toBeNull();
+    expect(screen.queryByRole("heading", { name: "Target identity" })).toBeNull();
+    expect(screen.getByRole("tab", { name: "Command evidence" })).toBeTruthy();
+    expect(screen.queryByRole("tab", { name: "Obligations" })).toBeNull();
+
+    fireEvent.click(screen.getByText("Advanced audit"));
+    expect(screen.getByText("inventory total")).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Target identity" })).toBeTruthy();
+    expect(screen.getByText(/Compatibility with run 40 is unknown/)).toBeTruthy();
   });
 });

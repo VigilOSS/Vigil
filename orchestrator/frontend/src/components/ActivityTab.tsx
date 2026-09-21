@@ -3,16 +3,17 @@ import type { EngagementSession, EventRecord } from "../lib/api";
 import { TaskTimeline } from "./TaskTimeline";
 
 type ActivityTabProps = {
+  engagementKey: string;
   events: EventRecord[];
   sessions: EngagementSession[];
 };
 
-export function ActivityTab({ events, sessions }: ActivityTabProps) {
+export function ActivityTab({ engagementKey, events, sessions }: ActivityTabProps) {
   const [sessionsOpen, setSessionsOpen] = useState(false);
 
   return (
     <>
-      <TaskTimeline events={events} />
+      <TaskTimeline engagementKey={engagementKey} events={events} />
 
       <section className="panel">
         <button
@@ -20,6 +21,7 @@ export function ActivityTab({ events, sessions }: ActivityTabProps) {
           className="sessions-toggle"
           onClick={() => setSessionsOpen((o) => !o)}
           aria-expanded={sessionsOpen}
+          aria-label="Sessions"
         >
           <span>Sessions</span>
           <span className="sessions-count">{sessions.length}</span>

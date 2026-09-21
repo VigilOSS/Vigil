@@ -205,3 +205,28 @@ test("the copied body follows the canonical submission order", () => {
   }
   assert.doesNotMatch(md, /### Proof of Concept|### PoC Request|### PoC Response/);
 });
+
+test("authored evidence remains Markdown while raw HTTP evidence stays fenced", () => {
+  const authored = findingToMarkdown({
+    slug: "VA-008",
+    title: "Authored evidence",
+    severity: "high",
+    workflowLabel: "Verified",
+    verificationLabel: "Confirmed",
+    verificationKey: "confirmed",
+    evidence: "#### Authorization bypass\n\nThe response returned `role: admin`.",
+  });
+  assert.match(authored, /### Evidence\n#### Authorization bypass/);
+  assert.equal(fencedBlocks(authored).length, 0);
+
+  const rawHttp = findingToMarkdown({
+    slug: "VA-009",
+    title: "Raw response",
+    severity: "high",
+    workflowLabel: "Verified",
+    verificationLabel: "Confirmed",
+    verificationKey: "confirmed",
+    evidence: "HTTP/1.1 200 OK\nContent-Type: application/json\n\n{}",
+  });
+  assert.equal(fencedBlocks(rawHttp).length, 1);
+});

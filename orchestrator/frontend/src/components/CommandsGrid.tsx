@@ -21,6 +21,7 @@ import {
   registerAgGrid,
 } from "../lib/agGrid";
 import {
+  STATUS_COLORS,
   agentColor,
   fmtDuration,
   relTime,
@@ -87,6 +88,16 @@ function RcCell({ data }: ICellRendererParams<Derived>) {
   );
 }
 
+function StatusCell({ data }: ICellRendererParams<Derived>) {
+  if (!data) return null;
+  const color = STATUS_COLORS[data.status];
+  return (
+    <span className="tag" style={{ background: `color-mix(in srgb, ${color} 10%, transparent)`, color }}>
+      {data.statusLabel}
+    </span>
+  );
+}
+
 export default function CommandsGrid({
   rows,
   dupCounts,
@@ -106,19 +117,19 @@ export default function CommandsGrid({
         const count = data.row.command_hash ? dupCounts.get(data.row.command_hash) || 0 : 0;
         if (count <= 1) return null;
         return (
-          <span
+          <button
+            type="button"
             className="tag"
-            role="button"
-            tabIndex={0}
             onClick={(e) => {
               e.stopPropagation();
               if (data.row.command_hash) onDupClick(data.row.command_hash);
             }}
             style={{ cursor: "pointer", background: "var(--count-bg)", color: "var(--accent)" }}
             title={`${count} rows share this command_hash — click to filter`}
+            aria-label={`Filter ${count} duplicate commands`}
           >
             ×{count}
-          </span>
+          </button>
         );
       },
     [dupCounts, onDupClick],
@@ -130,18 +141,19 @@ export default function CommandsGrid({
         if (!data) return null;
         if (!data.target) return <span style={{ color: "var(--muted)" }}>—</span>;
         return (
-          <span
-            role="button"
-            tabIndex={0}
+          <button
+            type="button"
             onClick={(e) => {
               e.stopPropagation();
               onTargetClick(data.target);
             }}
             style={{ cursor: "pointer", color: "var(--ink-2)" }}
             title={`Filter by target:${data.target}`}
+            aria-label={`Filter by target ${data.target}${data.targetSource === "inferred" ? ", inferred from command" : ""}`}
           >
             {data.target}
-          </span>
+            {data.targetSource === "inferred" && <span className="sr-only"> inferred</span>}
+          </button>
         );
       },
     [onTargetClick],
@@ -184,6 +196,13 @@ export default function CommandsGrid({
         cellRenderer: TargetCell,
         cellClass: "ag-mono",
         valueGetter: (p) => p.data?.target || "",
+      },
+      {
+        headerName: "Status",
+        colId: "status",
+        width: 120,
+        cellRenderer: StatusCell,
+        valueGetter: (p) => p.data?.status || "",
       },
       {
         headerName: "Command",
@@ -230,14 +249,14 @@ export default function CommandsGrid({
     const sel = window.getSelection?.();
     if (sel && sel.type === "Range" && sel.toString().length > 0) return;
     const target = event.event?.target as HTMLElement | undefined;
-    if (target?.closest('[role="button"]')) return;
+    if (target?.closest("button")) return;
     if (event.data?.id != null) onRowOpen(event.data.id, focusGridInvoker(event.event));
   };
 
   const onCellKeyDown = (event: CellKeyDownEvent<Derived>) => {
     const keyboardEvent = event.event as KeyboardEvent;
     const target = keyboardEvent.target as HTMLElement | null;
-    if (target?.closest('[role="button"]')) return;
+    if (target?.closest("button")) return;
     if (
       event.data?.id == null
       || (keyboardEvent.key !== "Enter" && keyboardEvent.key !== " ")

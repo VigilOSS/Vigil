@@ -264,8 +264,124 @@ describe("SubmissionsTab", () => {
         .disabled,
     ).toBe(false);
 
-    fireEvent.click(screen.getByRole("tab", { name: "Raw Markdown" }));
+    const renderedToggle = screen.getByRole("button", { name: "Rendered preview" });
+    const rawToggle = screen.getByRole("button", { name: "Raw Markdown" });
+    expect(renderedToggle.getAttribute("aria-pressed")).toBe("true");
+    expect(rawToggle.getAttribute("aria-pressed")).toBe("false");
+
+    fireEvent.click(rawToggle);
     expect(screen.getByText(/# Missing authorization/)).toBeTruthy();
+    expect(renderedToggle.getAttribute("aria-pressed")).toBe("false");
+    expect(rawToggle.getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("opens on filing candidates and keeps all findings and history secondary", async () => {
+    const submitted = {
+      ...listing.findings[0],
+      id: 92,
+      slug: "VA-002",
+      title: "Already filed finding",
+      submission_status: "submitted",
+      submission_ref: "H1-92",
+      version_count: 2,
+      latest_version_number: 2,
+    };
+    const stillActive = {
+      ...listing.findings[0],
+      id: 93,
+      slug: "VA-003",
+      title: "Needs verification",
+      verification_status: "unreviewed",
+    };
+    vi.mocked(listSubmissions).mockResolvedValue({
+      ...listing,
+      findings: [submitted, stillActive, listing.findings[0]],
+      findings_page: {
+        ...listing.findings_page,
+        returned: 3,
+        total: 3,
+      },
+    });
+    vi.mocked(getSubmissionDetail).mockResolvedValue(detail);
+
+    render(<SubmissionsTab engagementKey="engagement one" />);
+
+    expect(await screen.findByRole("button", { name: /Missing authorization/ })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Already filed finding/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /Needs verification/ })).toBeNull();
+    expect(screen.getByRole("button", { name: /Candidates.*1/ }).getAttribute("aria-pressed"))
+      .toBe("true");
+
+    fireEvent.click(screen.getByRole("button", { name: /All.*history.*3/ }));
+
+    expect(screen.getByRole("button", { name: /Already filed finding/ })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /Needs verification/ })).toBeTruthy();
+  });
+
+  it("combines draft readiness with latest immutable Markdown freshness", async () => {
+    vi.mocked(listSubmissions).mockResolvedValue({
+      ...listing,
+      findings: [{
+        ...listing.findings[0],
+        version_count: 2,
+        latest_version_number: 2,
+      }],
+    });
+    vi.mocked(getSubmissionDetail).mockResolvedValue({
+      ...detail,
+      versions: [{
+        id: 78,
+        finding_id: 91,
+        version_number: 2,
+        status: "complete",
+        platform: "bugcrowd",
+        package_format: "markdown",
+        actor_surface: "web-ui",
+        relative_path: "submissions/VA-001/versions/0002/submission.md",
+        media_type: "text/markdown",
+        size_bytes: 100,
+        sha256: "d".repeat(64),
+        submission_sha256: detail.workspace.submission_sha256,
+        source_finding_row_version: 9,
+        source_finding_updated_at: "2026-09-09T12:00:00Z",
+        attachment_ids: [],
+        attachment_count: 0,
+        artifact_id: 88,
+        created_at: "2026-09-09T12:10:00Z",
+        completed_at: "2026-09-09T12:10:01Z",
+        stale: false,
+        idempotent_replay: false,
+      }],
+      versions_page: {
+        ...detail.versions_page,
+        returned: 1,
+        total: 2,
+      },
+    });
+
+    render(<SubmissionsTab engagementKey="engagement one" />);
+
+    expect(await screen.findByText("Draft final-ready")).toBeTruthy();
+    expect(screen.getByText("Latest v2 matches current Markdown")).toBeTruthy();
+  });
+
+  it("makes rendered Markdown tables keyboard-scrollable", async () => {
+    vi.mocked(listSubmissions).mockResolvedValue(listing);
+    vi.mocked(getSubmissionDetail).mockResolvedValue({
+      ...detail,
+      workspace: {
+        ...detail.workspace,
+        markdown: "| Endpoint | Evidence |\n| --- | --- |\n| /admin | denied |",
+      },
+    });
+
+    const { container } = render(<SubmissionsTab engagementKey="engagement one" />);
+
+    await screen.findByRole("table");
+    const scroller = container.querySelector(".md-table-scroll");
+    expect(scroller?.getAttribute("role")).toBe("region");
+    expect(scroller?.getAttribute("tabindex")).toBe("0");
+    expect(scroller?.getAttribute("aria-label")).toBe("Scrollable table");
   });
 
   it("renders untrusted Markdown images as inert references", async () => {
@@ -641,6 +757,8 @@ describe("SubmissionsTab", () => {
       expect(externalRecord.textContent).toContain("javascript:alert(1)");
     });
     expect(within(externalRecord).queryByRole("link")).toBeNull();
+    expect(within(externalRecord).queryByText("Platform")).toBeNull();
+    expect(within(externalRecord).queryByText("Reference")).toBeNull();
   });
 
   it("exports selected registered artifacts and exposes immutable history", async () => {

@@ -17,8 +17,10 @@ import {
   CodeAnalysisResult,
   CodeCoverage,
   CodeModule,
+  CodeQueueItem,
   CodeQueueStats,
   CodeReadiness,
+  CodeReadinessTarget,
   CodeRepo,
   Engagement,
   EngagementSession,
@@ -42,6 +44,7 @@ import {
   listAssessmentTargets,
   listCodeAnalysisResults,
   listCodeModules,
+  listCodeQueueItems,
   listCodeRepos,
   listEngagementSessions,
   listEvents,
@@ -85,6 +88,7 @@ type EngagementPageProps = {
   initialDrawerTab?: string;
   initialIntelType?: string;
   initialIntelId?: number;
+  initialRequestVariantId?: number;
   initialRunId?: number;
   initialRunSection?: string;
   initialRunObject?: string;
@@ -101,6 +105,16 @@ const VALID_TAB_KEYS = new Set<string>(TABS.map((t) => t.key));
 
 function coerceTabKey(value: string | undefined): TabKey {
   return value && VALID_TAB_KEYS.has(value) ? (value as TabKey) : "overview";
+}
+
+function nextCodeReadinessTarget(persistedPhase: string): CodeReadinessTarget {
+  switch (persistedPhase) {
+    case "ingest": return "classify-map";
+    case "classify-map": return "hunt";
+    case "hunt": return "verify-variant";
+    case "verify-variant": return "fuzz";
+    default: return "complete";
+  }
 }
 
 // Rewrite the engagement deep-link hash WITHOUT emitting a `hashchange`
@@ -126,6 +140,7 @@ export function EngagementPage({
   initialDrawerTab,
   initialIntelType,
   initialIntelId,
+  initialRequestVariantId,
   initialRunId,
   initialRunSection,
   initialRunObject,
@@ -168,8 +183,10 @@ export function EngagementPage({
   const [codeRepos, setCodeRepos] = useState<CodeRepo[]>([]);
   const [codeModules, setCodeModules] = useState<CodeModule[]>([]);
   const [codeQueueStats, setCodeQueueStats] = useState<CodeQueueStats | null>(null);
+  const [codeQueueItems, setCodeQueueItems] = useState<CodeQueueItem[]>([]);
   const [codeCoverage, setCodeCoverage] = useState<CodeCoverage | null>(null);
   const [codeReadiness, setCodeReadiness] = useState<CodeReadiness | null>(null);
+  const [codeCompletionReadiness, setCodeCompletionReadiness] = useState<CodeReadiness | null>(null);
   const [codeResults, setCodeResults] = useState<CodeAnalysisResult[]>([]);
   const [codeLoadError, setCodeLoadError] = useState<string | null>(null);
   const [intelSummary, setIntelSummary] = useState<IntelSummary | null>(null);
@@ -232,12 +249,40 @@ export function EngagementPage({
     return listEvents(engagementKey, RECENT_EVENT_LIMIT).then(setEvents);
   }
 
-  async function refreshCodeAnalysis() {
+  async function refreshCodeAnalysis(persistedPhase: string) {
     const failures: string[] = [];
     const captureFailure = (label: string, error: unknown) => {
       const detail = error instanceof Error ? error.message : "request failed";
       failures.push(`${label}: ${detail}`);
     };
+    const targetPhase = nextCodeReadinessTarget(persistedPhase);
+    const readinessRequests = targetPhase === "complete"
+      ? [
+          getCodeReadiness(engagementKey, "complete")
+            .then((value) => {
+              setCodeReadiness(value);
+              setCodeCompletionReadiness(value);
+            })
+            .catch((error: unknown) => {
+              setCodeReadiness(null);
+              setCodeCompletionReadiness(null);
+              captureFailure("readiness", error);
+            }),
+        ]
+      : [
+          getCodeReadiness(engagementKey, targetPhase)
+            .then(setCodeReadiness)
+            .catch((error: unknown) => {
+              setCodeReadiness(null);
+              captureFailure("next-transition readiness", error);
+            }),
+          getCodeReadiness(engagementKey, "complete")
+            .then(setCodeCompletionReadiness)
+            .catch((error: unknown) => {
+              setCodeCompletionReadiness(null);
+              captureFailure("completion readiness", error);
+            }),
+        ];
     await Promise.all([
       listCodeRepos(engagementKey)
         .then(setCodeRepos)
@@ -257,18 +302,30 @@ export function EngagementPage({
           setCodeQueueStats(null);
           captureFailure("queue", error);
         }),
+      Promise.all(
+        (["error", "needs_context", "pending"] as const).map((status) =>
+          listCodeQueueItems(engagementKey, { status, limit: 5 }),
+        ),
+      )
+        .then((pages) => {
+          setCodeQueueItems(
+            pages
+              .flatMap((page) => page.items)
+              .sort((a, b) => b.priority - a.priority || a.id - b.id)
+              .slice(0, 5),
+          );
+        })
+        .catch((error: unknown) => {
+          setCodeQueueItems([]);
+          captureFailure("next work", error);
+        }),
       getCodeCoverage(engagementKey)
         .then(setCodeCoverage)
         .catch((error: unknown) => {
           setCodeCoverage(null);
           captureFailure("coverage", error);
         }),
-      getCodeReadiness(engagementKey, "complete")
-        .then(setCodeReadiness)
-        .catch((error: unknown) => {
-          setCodeReadiness(null);
-          captureFailure("readiness", error);
-        }),
+      ...readinessRequests,
       listCodeAnalysisResults(engagementKey)
         .then(setCodeResults)
         .catch((error: unknown) => {
@@ -285,8 +342,9 @@ export function EngagementPage({
 
   const refreshPage = useEffectEvent(async () => {
     try {
+      let refreshedEngagement: Engagement;
       try {
-        await refreshEngagement();
+        refreshedEngagement = await refreshEngagement();
       } catch (error) {
         const message = error instanceof Error ? error.message : "Failed to load engagement";
         setLoadError(message);
@@ -304,8 +362,10 @@ export function EngagementPage({
         setCodeRepos([]);
         setCodeModules([]);
         setCodeQueueStats(null);
+        setCodeQueueItems([]);
         setCodeCoverage(null);
         setCodeReadiness(null);
+        setCodeCompletionReadiness(null);
         setCodeResults([]);
         setCodeLoadError(null);
         setIntelSummary(null);
@@ -351,7 +411,11 @@ export function EngagementPage({
           );
           break;
         case "code":
-          promises.push(refreshCodeAnalysis());
+          promises.push(
+            refreshCodeAnalysis(
+              refreshedEngagement.code_phase ?? refreshedEngagement.current_phase,
+            ),
+          );
           break;
         case "activity":
           promises.push(refreshSessions());
@@ -780,19 +844,23 @@ export function EngagementPage({
 
           {activeTab === "code" && (
             <CodeAnalysisTab
+              engagementKey={engagementKey}
               persistedPhase={activeEngagement.code_phase ?? activeEngagement.current_phase}
               loadError={codeLoadError}
               repos={codeRepos}
               modules={codeModules}
               queueStats={codeQueueStats}
+              queueItems={codeQueueItems}
               coverage={codeCoverage}
               readiness={codeReadiness}
+              completionReadiness={codeCompletionReadiness}
               results={codeResults}
             />
           )}
 
           {activeTab === "coverage" && (
             <CoverageTab
+              engagementKey={engagementKey}
               summary={displaySummary}
               targets={assessmentTargets}
               services={assessmentServices}
@@ -801,7 +869,7 @@ export function EngagementPage({
           )}
 
           {activeTab === "activity" && (
-            <ActivityTab events={displayEvents} sessions={sessions} />
+            <ActivityTab engagementKey={engagementKey} events={displayEvents} sessions={sessions} />
           )}
 
           {activeTab === "intel" && (
@@ -827,7 +895,11 @@ export function EngagementPage({
           )}
 
           {activeTab === "http" && (
-            <HttpTab engagementKey={engagementKey} refreshVersion={assessmentRefreshVersion} />
+            <HttpTab
+              engagementKey={engagementKey}
+              refreshVersion={assessmentRefreshVersion}
+              initialRequestVariantId={initialTab === "http" ? initialRequestVariantId : undefined}
+            />
           )}
 
           {activeTab === "commands" && (
@@ -839,7 +911,7 @@ export function EngagementPage({
           )}
 
           {activeTab === "log" && (
-            <LogTab engagementKey={engagementKey} />
+            <LogTab engagementKey={engagementKey} refreshVersion={assessmentRefreshVersion} />
           )}
 
           {activeTab === "artifacts" && (

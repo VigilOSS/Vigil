@@ -2542,6 +2542,59 @@ def test_comparison_is_deterministic_and_conservative_under_source_drift(
     assert computed_only.json()["total"] == 0
 
 
+def test_comparison_treats_missing_target_and_source_identity_as_unknown(
+    client, isolate_settings
+) -> None:
+    _seed(client, isolate_settings)
+    def create_without_identity(run_uuid: str) -> dict:
+        response = client.post(
+            f"{BASE}/assessment-runs",
+            json={
+                "run_uuid": run_uuid,
+                "run_kind": "code",
+                "run_purpose": "proof",
+                "producer_dispatch_agent_id": "HUNT-RUN-1",
+            },
+        )
+        assert response.status_code == 201, response.text
+        return response.json()
+
+    baseline = create_without_identity("identity-missing-baseline")
+    current = create_without_identity("identity-missing-current")
+
+    comparison = client.get(
+        f"{BASE}/assessment-runs/{current['id']}/comparison",
+        params={"baseline_run_id": baseline["id"]},
+    )
+
+    assert comparison.status_code == 200, comparison.text
+    assert comparison.json()["target_compatible"] is None
+    assert comparison.json()["source_compatible"] is None
+
+    for run in (baseline, current):
+        terminal = client.patch(
+            f"{BASE}/assessment-runs/{run['id']}", json={"status": "completed"}
+        )
+        assert terminal.status_code == 200, terminal.text
+    recorded = client.post(
+        f"{BASE}/assessment-runs/{current['id']}/comparisons",
+        json={"baseline_run_id": baseline["id"]},
+    )
+    assert recorded.status_code == 201, recorded.text
+    assert recorded.json()["target_compatible"] is None
+    assert recorded.json()["source_compatible"] is None
+
+    source_baseline = _create_scan(client, run_uuid="source-missing-baseline")
+    source_current = _create_scan(client, run_uuid="source-missing-current")
+    source_comparison = client.get(
+        f"{BASE}/assessment-runs/{source_current['id']}/comparison",
+        params={"baseline_run_id": source_baseline["id"]},
+    )
+    assert source_comparison.status_code == 200, source_comparison.text
+    assert source_comparison.json()["target_compatible"] is True
+    assert source_comparison.json()["source_compatible"] is None
+
+
 def test_terminal_scan_persists_one_automatic_comparison_with_exact_retry(
     client, isolate_settings
 ) -> None:

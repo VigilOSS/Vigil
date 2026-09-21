@@ -256,6 +256,7 @@ def _synthesize_flow_uid(
 def list_http_flows(
     engagement_id: int,
     *,
+    flow_uid: str = "",
     host: str = "",
     method: str = "",
     response_status: int | None = None,
@@ -277,6 +278,9 @@ def list_http_flows(
     limit, offset = _bounded_http_flow_window(limit, offset)
     clauses = ["engagement_id = ?"]
     params: list[Any] = [engagement.id]
+    if flow_uid.strip():
+        clauses.append("flow_uid = ?")
+        params.append(flow_uid.strip())
     if host.strip():
         clauses.append("host = ?")
         params.append(host.strip().lower())

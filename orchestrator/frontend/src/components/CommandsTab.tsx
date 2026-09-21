@@ -2,6 +2,7 @@ import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type
 import type {
   AssessmentCommandRun,
   AssessmentCommandRunDetail,
+  CommandRunStatus,
 } from "../lib/api";
 import {
   getAssessmentCommandRun,
@@ -29,16 +30,18 @@ const INITIAL_FETCH_LIMIT = 1000;
 
 // Status color map — drives the row-left bar, status pill, filter chips,
 // and sparkline bars. Trust failures stay distinct from ordinary tool failure.
-export const STATUS_COLORS: Record<string, string> = {
-  success: "var(--chip-green)",
+export const STATUS_COLORS: Record<CommandRunStatus, string> = {
+  queued: "var(--chip-slate)",
+  running: "var(--chip-navy)",
+  completed: "var(--chip-green)",
   failed: "var(--chip-red)",
   timed_out: "var(--chip-orange)",
-  suppressed: "var(--chip-muted)",
-  artifact: "var(--chip-teal)",
-  untrusted: "var(--chip-red)",
+  killed: "var(--chip-maroon)",
+  lost: "var(--chip-purple)",
 };
-const STATUS_ORDER = ["success", "failed", "timed_out", "suppressed", "artifact", "untrusted"] as const;
-type StatusBucket = (typeof STATUS_ORDER)[number];
+const STATUS_ORDER: readonly CommandRunStatus[] = [
+  "queued", "running", "completed", "failed", "timed_out", "killed", "lost",
+];
 const INCOMPLETE_OUTPUT_RETENTION = new Set([
   "measurement_conflict",
   "partially_measured",
@@ -245,28 +248,16 @@ function midTruncate(text: string, max: number): string {
   return `${text.slice(0, head)}…${text.slice(text.length - tail)}`;
 }
 
-// ── Status bucket ─────────────────────────────────────────────────────
-// One bucket per row. Pending/deferred suppression remains visibly suppressed;
-// evidence-integrity failures never inherit a success-looking process status.
-function statusBucket(row: AssessmentCommandRun): StatusBucket {
-  const retention = (row.output_retention_status || "").toLowerCase();
-  const integrity = (row.output_integrity_status || "").toLowerCase();
-  if (integrity === "pending" || integrity === "warning") return "untrusted";
-  if (retention === "suppressed" || retention.startsWith("suppression_")) return "suppressed";
-  if (retention === "artifact") return "artifact";
-  if (
-    retention === "untrusted"
-    || retention === "integrity_failure"
-    || INCOMPLETE_OUTPUT_RETENTION.has(retention)
-  ) return "untrusted";
+function lifecycleStatus(row: AssessmentCommandRun): CommandRunStatus {
+  if (STATUS_ORDER.includes(row.status)) return row.status;
+  // Compatibility for responses from servers predating durable lifecycle status.
   if (row.timed_out) return "timed_out";
-  if (row.success) return "success";
-  return "failed";
+  return row.success ? "completed" : "failed";
 }
 
-function statusLabel(bucket: StatusBucket): string {
-  if (bucket === "timed_out") return "timed out";
-  return bucket;
+function statusLabel(status: CommandRunStatus): string {
+  if (status === "timed_out") return "timed out";
+  return status;
 }
 
 // ── Target extraction ────────────────────────────────────────────────
@@ -282,7 +273,7 @@ function statusLabel(bucket: StatusBucket): string {
 const FQDN_RE = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/i;
 const URL_RE = /(https?:\/\/[^\s"']+)/i;
 
-function extractTarget(row: AssessmentCommandRun): string {
+function extractInferredTarget(row: AssessmentCommandRun): string {
   // 1. URL in the command string.
   const urlMatch = (row.command || "").match(URL_RE);
   if (urlMatch) {
@@ -428,9 +419,10 @@ function parseQuery(q: string): ParsedQuery {
 export type Derived = {
   row: AssessmentCommandRun;
   id: number;
-  bucket: StatusBucket;
-  bucketLabel: string;
+  status: CommandRunStatus;
+  statusLabel: string;
   target: string;
+  targetSource: "stored" | "inferred" | "none";
   commandPreview: string;
   toolBin: string;
   agentName: string;
@@ -446,8 +438,15 @@ export type Derived = {
 };
 
 function derive(row: AssessmentCommandRun): Derived {
-  const bucket = statusBucket(row);
-  const target = extractTarget(row);
+  const status = lifecycleStatus(row);
+  const storedTarget = (row.target_host || "").trim();
+  const inferredTarget = storedTarget ? "" : extractInferredTarget(row);
+  const target = storedTarget || inferredTarget;
+  const targetSource: Derived["targetSource"] = storedTarget
+    ? "stored"
+    : inferredTarget
+    ? "inferred"
+    : "none";
   const rcBucket: Derived["rcBucket"] = row.timed_out
     ? "timeout"
     : row.return_code === 0
@@ -480,9 +479,10 @@ function derive(row: AssessmentCommandRun): Derived {
   return {
     row,
     id: row.id,
-    bucket,
-    bucketLabel: statusLabel(bucket),
+    status,
+    statusLabel: statusLabel(status),
     target,
+    targetSource,
     commandPreview: row.command || "",
     toolBin: row.tool_bin || row.tool_name || "",
     agentName: row.agent_name || "",
@@ -590,7 +590,8 @@ export function CommandsTab({ engagementKey }: CommandsTabProps) {
   const [query, setQuery] = useState("");
   const [toolFilters, setToolFilters] = useState<Set<string>>(new Set());
   const [agentFilters, setAgentFilters] = useState<Set<string>>(new Set());
-  const [statusFilters, setStatusFilters] = useState<Set<StatusBucket>>(new Set());
+  const [statusFilters, setStatusFilters] = useState<Set<CommandRunStatus>>(new Set());
+  const [ledgerScope, setLedgerScope] = useState<"attention" | "all">("attention");
   const [techniqueFilters, setTechniqueFilters] = useState<Set<string>>(new Set());
   const [probeKindFilters, setProbeKindFilters] = useState<Set<string>>(new Set());
   const [cmdOpen, setCmdOpen] = useState(false);
@@ -732,17 +733,39 @@ export function CommandsTab({ engagementKey }: CommandsTabProps) {
   }, [derivedList]);
 
   const statusCounts = useMemo(() => {
-    const c: Record<StatusBucket, number> = {
-      success: 0,
+    const c: Record<CommandRunStatus, number> = {
+      queued: 0,
+      running: 0,
+      completed: 0,
       failed: 0,
       timed_out: 0,
-      suppressed: 0,
-      artifact: 0,
-      untrusted: 0,
+      killed: 0,
+      lost: 0,
     };
-    for (const d of derivedList) c[d.bucket] += 1;
+    for (const d of derivedList) c[d.status] += 1;
     return c;
   }, [derivedList]);
+
+  const needsAttention = useCallback((d: Derived) => {
+    const retention = (d.row.output_retention_status || "").toLowerCase();
+    const integrity = (d.row.output_integrity_status || "").toLowerCase();
+    const cleanup = (d.row.output_cleanup_status || "").toLowerCase();
+    return d.status !== "completed"
+      || !d.row.success
+      || Boolean(d.row.partial_results)
+      || Boolean(d.row.superseded_by_id)
+      || integrity === "pending"
+      || integrity === "warning"
+      || retention === "untrusted"
+      || retention === "integrity_failure"
+      || retention.startsWith("suppression_")
+      || INCOMPLETE_OUTPUT_RETENTION.has(retention)
+      || ["deferred", "pending", "warning"].includes(cleanup);
+  }, []);
+  const attentionCount = useMemo(
+    () => derivedList.filter(needsAttention).length,
+    [derivedList, needsAttention],
+  );
 
   // Technique counts over the full fetched set (rendered chips are top-10
   // by count, the rest are addressable via the `technique:` search scope).
@@ -802,7 +825,7 @@ export function CommandsTab({ engagementKey }: CommandsTabProps) {
             } else if (v === "empty") {
               const r = (d.row.output_retention_status || "").toLowerCase();
               if (r !== "empty") return false;
-            } else if (v !== d.bucket) {
+            } else if (v !== d.status) {
               return false;
             }
             break;
@@ -856,10 +879,11 @@ export function CommandsTab({ engagementKey }: CommandsTabProps) {
 
   const filtered = useMemo(() => {
     const list = derivedList.filter((d) => {
+      if (ledgerScope === "attention" && !needsAttention(d)) return false;
       const toolKey = d.toolBin || d.row.tool_name || "(unknown)";
       if (toolFilters.size && !toolFilters.has(toolKey)) return false;
       if (agentFilters.size && !agentFilters.has(d.agentName)) return false;
-      if (statusFilters.size && !statusFilters.has(d.bucket)) return false;
+      if (statusFilters.size && !statusFilters.has(d.status)) return false;
       if (techniqueFilters.size && !techniqueFilters.has(d.techniqueKey)) return false;
       if (probeKindFilters.size && !probeKindFilters.has(d.probeKind)) return false;
       if (!matchesQuery(d, parsedQuery)) return false;
@@ -876,6 +900,8 @@ export function CommandsTab({ engagementKey }: CommandsTabProps) {
     return list;
   }, [
     derivedList,
+    ledgerScope,
+    needsAttention,
     toolFilters,
     agentFilters,
     statusFilters,
@@ -1086,7 +1112,7 @@ export function CommandsTab({ engagementKey }: CommandsTabProps) {
           <div className="page-crumbs">
             Engagement <code>{engagementKey}</code> ·{" "}
             <span>
-              {filtered.length} of {derivedList.length} runs
+              {filtered.length} shown · {derivedList.length} loaded
               {loading && " · loading…"}
               {limitReached && (
                 <>
@@ -1108,11 +1134,31 @@ export function CommandsTab({ engagementKey }: CommandsTabProps) {
       {/* Toolbar */}
       <div className="panel findings-toolbar-panel">
         <div className="toolbar">
+          <div className="toolbar-left" role="group" aria-label="Command ledger scope">
+            <button
+              type="button"
+              className={`qa-btn ${ledgerScope === "attention" ? "is-active" : ""}`}
+              aria-pressed={ledgerScope === "attention"}
+              onClick={() => setLedgerScope("attention")}
+            >
+              Needs attention <span className="filter-count">{attentionCount}</span>
+            </button>
+            <button
+              type="button"
+              className={`qa-btn ${ledgerScope === "all" ? "is-active" : ""}`}
+              aria-pressed={ledgerScope === "all"}
+              onClick={() => setLedgerScope("all")}
+            >
+              All <span className="filter-count">{derivedList.length}</span>
+            </button>
+          </div>
           <div className="search-wrap">
             <IconSearch />
             <input
               ref={searchRef}
               className="search-input"
+              type="search"
+              aria-label="Search command runs"
               placeholder="Search command / argv / notes… (try tool:curl technique:ssrf probe:exploit write:true)"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
@@ -1122,6 +1168,7 @@ export function CommandsTab({ engagementKey }: CommandsTabProps) {
                 type="button"
                 className="icon-btn"
                 onClick={() => setQuery("")}
+                aria-label="Clear command search"
                 title="Clear"
                 style={{ width: 22, height: 22 }}
               >
@@ -1151,6 +1198,8 @@ export function CommandsTab({ engagementKey }: CommandsTabProps) {
                     key={`tool:${bin}`}
                     type="button"
                     className={`filter-chip ctool ${toolFilters.has(bin) ? "is-active" : ""}`}
+                    aria-label={`Filter by tool ${bin}`}
+                    aria-pressed={toolFilters.has(bin)}
                     onClick={() => toggle(toolFilters, setToolFilters, bin)}
                     style={
                       toolFilters.has(bin)
@@ -1176,6 +1225,8 @@ export function CommandsTab({ engagementKey }: CommandsTabProps) {
                     key={`agent:${name}`}
                     type="button"
                     className={`filter-chip cagent ${agentFilters.has(name) ? "is-active" : ""}`}
+                    aria-label={`Filter by agent ${name}`}
+                    aria-pressed={agentFilters.has(name)}
                     onClick={() => toggle(agentFilters, setAgentFilters, name)}
                     style={
                       agentFilters.has(name)
@@ -1201,6 +1252,8 @@ export function CommandsTab({ engagementKey }: CommandsTabProps) {
                   key={`status:${s}`}
                   type="button"
                   className={`filter-chip cstatus-${s} ${statusFilters.has(s) ? "is-active" : ""}`}
+                  aria-label={`Filter by lifecycle status ${statusLabel(s)}`}
+                  aria-pressed={statusFilters.has(s)}
                   onClick={() => toggle(statusFilters, setStatusFilters, s)}
                 >
                   <span className="sev-dot" style={{ background: STATUS_COLORS[s] }} />
@@ -1220,6 +1273,8 @@ export function CommandsTab({ engagementKey }: CommandsTabProps) {
                     key={`tech:${tech}`}
                     type="button"
                     className={`filter-chip ctech ${techniqueFilters.has(tech) ? "is-active" : ""}`}
+                    aria-label={`Filter by technique ${tech}`}
+                    aria-pressed={techniqueFilters.has(tech)}
                     onClick={() => toggle(techniqueFilters, setTechniqueFilters, tech)}
                     style={
                       techniqueFilters.has(tech)
@@ -1246,6 +1301,8 @@ export function CommandsTab({ engagementKey }: CommandsTabProps) {
                     key={`pk:${pk}`}
                     type="button"
                     className={`filter-chip cpk-${pk} ${active ? "is-active" : ""}`}
+                    aria-label={`Filter by probe kind ${pk}`}
+                    aria-pressed={active}
                     onClick={() => toggle(probeKindFilters, setProbeKindFilters, pk)}
                   >
                     <span className="sev-dot" style={{ background: color }} />
@@ -1366,7 +1423,7 @@ export function CommandsTab({ engagementKey }: CommandsTabProps) {
 }
 
 // ── StatusSpark ───────────────────────────────────────────────────────
-function StatusSpark({ counts }: { counts: Record<StatusBucket, number> }) {
+function StatusSpark({ counts }: { counts: Record<CommandRunStatus, number> }) {
   const max = Math.max(1, ...Object.values(counts));
   return (
     <div className="sev-sparkline-wrap">
@@ -1424,12 +1481,12 @@ function Drawer({
     }
   }, [tab, d, onRequestDetail]);
 
-  const color = STATUS_COLORS[d.bucket];
+  const color = STATUS_COLORS[d.status];
   const tabs: { id: DrawerTabId; label: string; count?: number }[] = [
     { id: "overview", label: "Overview" },
     {
       id: "stdout",
-      label: "Stdout",
+      label: "Stdout preview",
       count:
         detail?.stdout_preview.length ||
         d.row.stdout_preview_chars ||
@@ -1437,7 +1494,7 @@ function Drawer({
     },
     {
       id: "stderr",
-      label: "Stderr",
+      label: "Stderr preview",
       count:
         detail?.stderr_preview.length ||
         d.row.stderr_preview_chars ||
@@ -1495,7 +1552,7 @@ function Drawer({
             style={{ background: tint(color, 13), color }}
           >
             <span className="sev-dot" style={{ background: color }} />
-            {d.bucketLabel}
+            {d.statusLabel}
           </span>
           {d.agentName && (
             <span
@@ -1518,6 +1575,7 @@ function Drawer({
             type="button"
             className={`drawer-tab ${tab === t.id ? "is-active" : ""}`}
             onClick={() => setTab(t.id)}
+            aria-pressed={tab === t.id}
           >
             {t.label}
             {t.count != null && t.count > 0 && (
@@ -1721,6 +1779,7 @@ function OverviewPane({ d }: { d: Derived }) {
         <div className="kv-grid">
           <KV k="Started" v={row.started_at} mono />
           <KV k="Completed" v={row.completed_at} mono />
+          <KV k="Lifecycle status" v={d.statusLabel} />
           <KV k="Output recovery baseline" v={row.output_recovery_observed_at || "—"} mono />
           <KV k="Duration" v={fmtDuration(row.duration_ms)} />
           <KV k="Return code" v={row.return_code == null ? "—" : String(row.return_code)} />
@@ -1744,7 +1803,17 @@ function OverviewPane({ d }: { d: Derived }) {
             mono
             onCopy={() => copyToClipboard(row.run_uuid)}
           />
-          {d.target && <KV k="Target" v={d.target} mono />}
+          {d.target && (
+            <KV
+              k={d.targetSource === "inferred" ? "Target (inferred from command)" : "Target (stored)"}
+              v={d.target}
+              mono
+            />
+          )}
+          <KV k="Auth context" v={row.auth_context} mono />
+          <KV k="Scope version" v={row.scope_version} mono />
+          <KV k="Finding ID" v={row.finding_id} mono />
+          <KV k="Results" v={row.partial_results ? "partial" : "complete"} />
           {/* Command-metadata audit fields. Always render the row even when
               null so operators see "field is absent" vs. "field is missing
               from the UI". Null renders as the em-dash muted — a deliberate
@@ -1755,6 +1824,12 @@ function OverviewPane({ d }: { d: Derived }) {
           <DestructiveKV destructive={d.destructive} />
         </div>
       </div>
+      {row.superseded_by_id != null && (
+        <div className="callout">
+          <p className="section-title">Superseded by run {row.superseded_by_id}</p>
+          <p>This row remains in the immutable command ledger for audit history.</p>
+        </div>
+      )}
       {row.notes && (
         <div className="callout">
           <p className="section-title">Notes</p>
@@ -1810,7 +1885,10 @@ function StreamPane({
             ))}
           </div>
         ) : detail ? (
-          <pre className="pre" style={{ marginTop: 10 }}>{preview || "(empty preview)"}</pre>
+          <>
+            <p className="section-title" style={{ marginTop: 10 }}>Captured output preview</p>
+            <pre className="pre" style={{ marginTop: 6 }}>{preview || "(empty preview)"}</pre>
+          </>
         ) : previewChars > 0 ? (
           <p className="empty" style={{ marginTop: 10, textAlign: "left" }}>
             A preview is recorded but has not loaded yet.
@@ -1896,7 +1974,10 @@ function StreamPane({
           ))}
         </div>
       ) : detail ? (
-        <pre className="pre">{preview || "(empty preview)"}</pre>
+        <>
+          <p className="section-title">Captured output preview</p>
+          <pre className="pre" style={{ marginTop: 6 }}>{preview || "(empty preview)"}</pre>
+        </>
       ) : (
         <p className="empty" style={{ textAlign: "left" }}>
           Preview not loaded yet. Re-open this tab to fetch.
@@ -1904,7 +1985,7 @@ function StreamPane({
       )}
       {retention === "artifact" && artifactRef && (
         <div className="callout" style={{ marginTop: 10 }}>
-          <p className="section-title">Artifact</p>
+          <p className="section-title">Full output artifact</p>
           <p>
             Full output spilled to{" "}
             <span className="mono">{artifactRef}</span>
@@ -1914,8 +1995,9 @@ function StreamPane({
               type="button"
               className="qa-btn"
               onClick={() => copyToClipboard(artifactRef)}
+              aria-label="Copy artifact reference"
             >
-              Copy ref
+              Copy artifact reference
             </button>
           </div>
         </div>
@@ -2031,7 +2113,7 @@ function CommandPalette({
             if ((d.phase || "").toLowerCase() !== v) return false;
             break;
           case "status":
-            if (v !== d.bucket) return false;
+            if (v !== d.status) return false;
             break;
           case "target":
             if (!(d.target || "").toLowerCase().includes(v)) return false;
@@ -2121,7 +2203,7 @@ function CommandPalette({
               >
                 <span
                   className="sev-dot"
-                  style={{ background: STATUS_COLORS[d.bucket] }}
+                  style={{ background: STATUS_COLORS[d.status] }}
                 />
                 <span>
                   <div className="cmd-title mono">
@@ -2135,7 +2217,7 @@ function CommandPalette({
                   </div>
                 </span>
                 <span className="cmd-sub">
-                  {d.bucketLabel}
+                  {d.statusLabel}
                 </span>
               </div>
             ))

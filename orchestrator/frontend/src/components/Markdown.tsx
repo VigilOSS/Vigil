@@ -40,6 +40,16 @@ export function MarkdownBlock({ text }: { text: string }) {
               <code>{src || "Source blocked by Markdown URL policy"}</code>
             </span>
           ),
+          table: ({ node: _node, ...props }) => (
+            <div
+              className="md-table-scroll"
+              role="region"
+              aria-label="Scrollable table"
+              tabIndex={0}
+            >
+              <table {...props} />
+            </div>
+          ),
         }}
       >
         {text}

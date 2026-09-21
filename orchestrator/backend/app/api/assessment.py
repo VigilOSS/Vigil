@@ -3136,6 +3136,7 @@ def _register_http_flow_artifacts(engagement_id: int, request: HttpFlowIngestReq
 @router.get("/http-flows")
 def get_http_flows(
     engagement_key: str,
+    flow_uid: str = "",
     host: str = "",
     method: str = "",
     response_status: int | None = None,
@@ -3149,6 +3150,7 @@ def get_http_flows(
     engagement = get_engagement_or_404(engagement_key)
     return state_manager.list_http_flows(
         engagement.id,
+        flow_uid=flow_uid,
         host=host,
         method=method,
         response_status=response_status,
@@ -3164,6 +3166,7 @@ def get_http_flows(
 @router.get("/http-flows/export-har")
 def export_http_flows_har(
     engagement_key: str,
+    flow_uid: str = "",
     host: str = "",
     method: str = "",
     response_status: int | None = None,
@@ -3180,6 +3183,7 @@ def export_http_flows_har(
     engagement = get_engagement_or_404(engagement_key)
     flows = state_manager.list_http_flows(
         engagement.id,
+        flow_uid=flow_uid,
         host=host,
         method=method,
         response_status=response_status,

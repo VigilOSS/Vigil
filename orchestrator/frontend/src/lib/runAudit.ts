@@ -33,8 +33,8 @@ export type AuditBlocker = {
 export type RunComparison = {
   run_id: number;
   baseline_run_id: number | null;
-  target_compatible: boolean;
-  source_compatible: boolean;
+  target_compatible: boolean | null;
+  source_compatible: boolean | null;
   deterministic: boolean;
   classifications: {
     new: string[];
