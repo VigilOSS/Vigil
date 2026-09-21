@@ -135,6 +135,7 @@ def test_engagement_create_web_writes_scope_launchers_and_list_entry(
 def test_engagement_create_blue_points_to_canonical_blue_operator_prompt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    from vigil_cli import client_rosters as client_rosters_module
     from vigil_cli import engagements as engagements_module
     from vigil_cli.engagements import CreateEngagementOptions, create_engagement
 
@@ -146,6 +147,11 @@ def test_engagement_create_blue_points_to_canonical_blue_operator_prompt(
     _isolate_orchestrator_url(monkeypatch)
     monkeypatch.setattr(engagements_module, "_verify_backend_install_root", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(engagements_module, "_emit_post_create_footer", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        client_rosters_module,
+        "_render_codex_compact_prompt",
+        lambda *_args, **_kwargs: "test compact prompt",
+    )
 
     monkeypatch.setattr(
         engagements_module.subprocess,
@@ -3299,7 +3305,12 @@ def test_mitmproxy_build_stages_canonical_scope_parser_without_install_state(
         assert imported.returncode == 0, imported.stderr
         return DockerResult(0, "", "")
 
-    mitmproxy_module.build_image(install_root, force=True, runner=runner)
+    mitmproxy_module.build_image(
+        install_root,
+        force=True,
+        runner=runner,
+        daemon_runner=lambda _argv, **_kwargs: DockerResult(0, "", ""),
+    )
 
     assert observed_context is not None
     assert not observed_context.exists()
@@ -6578,6 +6589,72 @@ def _make_mitmproxy_inputs(install_root: Path) -> tuple[Path, Path]:
     return dockerfile, addon
 
 
+def test_runtime_build_refuses_before_streaming_when_docker_daemon_is_unresponsive(
+    tmp_path: Path,
+) -> None:
+    from vigil_cli import docker as docker_module
+    from vigil_cli import runtime as runtime_module
+
+    build_called = False
+
+    def streaming_runner(argv: list[str], **_kwargs: object) -> docker_module.DockerResult:
+        nonlocal build_called
+        build_called = argv[:2] == ["docker", "build"]
+        return docker_module.DockerResult(0, "", "")
+
+    def daemon_runner(
+        _argv: list[str], **_kwargs: object
+    ) -> docker_module.DockerResult:
+        return docker_module.DockerResult(
+            docker_module.TIMEOUT_RETURNCODE,
+            "",
+            "docker command timed out after 20s (daemon unresponsive?)",
+        )
+
+    with pytest.raises(SystemExit, match="Docker is not responding"):
+        runtime_module.build_runtime(
+            tmp_path,
+            runner=streaming_runner,
+            daemon_runner=daemon_runner,
+        )
+
+    assert build_called is False
+
+
+def test_mitmproxy_build_refuses_before_streaming_when_docker_daemon_is_unresponsive(
+    tmp_path: Path,
+) -> None:
+    from vigil_cli import docker as docker_module
+    from vigil_cli import mitmproxy as mitmproxy_module
+
+    install_root = tmp_path / "install"
+    _make_mitmproxy_inputs(install_root)
+    build_called = False
+
+    def metadata_runner(argv: list[str], **_kwargs: object) -> docker_module.DockerResult:
+        assert argv == ["docker", "info"]
+        return docker_module.DockerResult(
+            docker_module.TIMEOUT_RETURNCODE,
+            "",
+            "docker command timed out after 20s (daemon unresponsive?)",
+        )
+
+    def streaming_runner(argv: list[str], **_kwargs: object) -> docker_module.DockerResult:
+        nonlocal build_called
+        build_called = argv[:2] == ["docker", "build"]
+        return docker_module.DockerResult(0, "", "")
+
+    with pytest.raises(SystemExit, match="Docker is not responding"):
+        mitmproxy_module.build_image(
+            install_root,
+            force=True,
+            runner=metadata_runner,
+            build_runner=streaming_runner,
+        )
+
+    assert build_called is False
+
+
 def _mitmproxy_digest(install_root: Path) -> str:
     from vigil_cli import image_freshness
     from vigil_cli.mitmproxy import mitmproxy_image_inputs
@@ -8523,6 +8600,8 @@ def test_blue_verify_force_bypasses_missing_verifier_dispatch(
             kill_check=None,
             kill_reason=None,
             evidence_refs="artifact-1",
+            proof_receipt_ids=[71],
+            counter_check_file=None,
             new_severity=None,
             force=True,
             engagement_key=None,
@@ -8532,6 +8611,55 @@ def test_blue_verify_force_bypasses_missing_verifier_dispatch(
     )
 
     assert calls[0][:5] == ["finding", "verify", "FIND-001", "--status", "confirmed"]
+    assert calls[0][calls[0].index("--proof-receipt-id") + 1] == "71"
+
+    from assess.commands import verify_finding
+
+    canonical = argparse.ArgumentParser()
+    verify_finding.register(canonical.add_subparsers(dest="command", required=True))
+    parsed = canonical.parse_args(calls[0][1:])
+    assert parsed.proof_receipt_ids == [71]
+
+
+def test_blue_verify_downgraded_forwards_receipts_to_canonical_parser(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from assess.commands import verify_finding
+    from vigil_cli import blue as blue_module
+
+    eng_dir = tmp_path / "engagement"
+    _write_blue_scope(eng_dir)
+    calls: list[list[str]] = []
+    monkeypatch.setattr(blue_module, "_resolve_blue_engagement", lambda *_a, **_k: eng_dir)
+    monkeypatch.setattr(blue_module, "_has_verifier_dispatch_for", lambda *_a, **_k: True)
+    monkeypatch.setattr(
+        blue_module,
+        "_run_assess",
+        lambda _root, _eng, assess_args, **_kwargs: calls.append(assess_args) or 0,
+    )
+
+    blue_module._cmd_verify(
+        SimpleNamespace(
+            finding_slug="FIND-002",
+            disposition="downgraded",
+            reason="impact is limited by tenant policy",
+            evidence_refs=None,
+            proof_receipt_ids=[72, 73],
+            counter_check_file=None,
+            new_severity="low",
+            force=False,
+            engagement_key=None,
+            select=False,
+        ),
+        tmp_path,
+    )
+
+    canonical = argparse.ArgumentParser()
+    verify_finding.register(canonical.add_subparsers(dest="command", required=True))
+    parsed = canonical.parse_args(calls[0][1:])
+    assert parsed.verification_status == "downgraded"
+    assert parsed.new_severity == "low"
+    assert parsed.proof_receipt_ids == [72, 73]
 
 
 def test_blue_verify_false_positive_uses_canonical_finding_verify(
@@ -8541,6 +8669,18 @@ def test_blue_verify_false_positive_uses_canonical_finding_verify(
 
     eng_dir = tmp_path / "engagement"
     _write_blue_scope(eng_dir)
+    counter_check = tmp_path / "counter-check.json"
+    counter_check.write_text(
+        json.dumps({
+            "method": "query tenant audit records",
+            "expected_result": "the suspicious action is present",
+            "observed_result": "the action is absent and the known benign job is present",
+            "falsified_claim": "the user performed the suspicious action",
+            "completed": True,
+            "proof_receipt_ids": [72],
+        }),
+        encoding="utf-8",
+    )
     calls: list[list[str]] = []
 
     monkeypatch.setattr(blue_module, "_resolve_blue_engagement", lambda *_args, **_kwargs: eng_dir)
@@ -8556,9 +8696,9 @@ def test_blue_verify_false_positive_uses_canonical_finding_verify(
             finding_slug="FIND-001",
             disposition="false_positive",
             reason="tenant evidence proves the alert benign",
-            kill_check=5,
-            kill_reason="documented benign tenant pattern",
             evidence_refs="artifact-1,artifact-2",
+            proof_receipt_ids=None,
+            counter_check_file=str(counter_check),
             new_severity=None,
             force=False,
             engagement_key=None,
@@ -8576,8 +8716,33 @@ def test_blue_verify_false_positive_uses_canonical_finding_verify(
         "--reason",
         "tenant evidence proves the alert benign",
     ]
-    assert calls[0][calls[0].index("--kill-reason") + 1] == "documented benign tenant pattern"
-    assert calls[0][calls[0].index("--kill-check") + 1] == "5"
+    assert calls[0][calls[0].index("--counter-check-file") + 1] == str(counter_check)
+
+    from assess.commands import verify_finding
+
+    canonical = argparse.ArgumentParser()
+    verify_finding.register(canonical.add_subparsers(dest="command", required=True))
+    parsed = canonical.parse_args(calls[0][1:])
+    assert parsed.counter_check_file == str(counter_check)
+
+
+def test_blue_verify_parser_accepts_canonical_evidence_flags() -> None:
+    from vigil_cli import blue as blue_module
+
+    parser = argparse.ArgumentParser()
+    blue_module.register_blue_parser(parser.add_subparsers(dest="command", required=True))
+
+    confirmed = parser.parse_args([
+        "blue", "verify", "FIND-001", "--disposition", "verified",
+        "--reason", "reproduced", "--proof-receipt-id", "71",
+    ])
+    false_positive = parser.parse_args([
+        "blue", "verify", "FIND-002", "--disposition", "false_positive",
+        "--reason", "falsified", "--counter-check-file", "counter-check.json",
+    ])
+
+    assert confirmed.proof_receipt_ids == [71]
+    assert false_positive.counter_check_file == "counter-check.json"
 
 
 def test_blue_parser_retires_broken_dispatch_wrapper(capsys) -> None:
@@ -9125,6 +9290,7 @@ def test_blue_help_documents_generic_dispatch_emitter(capsys) -> None:
 def test_blue_initial_report_scaffold_uses_customer_and_platform(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    from vigil_cli import client_rosters as client_rosters_module
     from vigil_cli import engagements as engagements_module
     from vigil_cli.engagements import CreateEngagementOptions, create_engagement
 
@@ -9133,6 +9299,11 @@ def test_blue_initial_report_scaffold_uses_customer_and_platform(
     _isolate_orchestrator_url(monkeypatch)
     monkeypatch.setattr(engagements_module, "_verify_backend_install_root", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(engagements_module, "_emit_post_create_footer", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        client_rosters_module,
+        "_render_codex_compact_prompt",
+        lambda *_args, **_kwargs: "test compact prompt",
+    )
     monkeypatch.setattr(
         engagements_module.subprocess,
         "run",
@@ -9401,6 +9572,7 @@ def test_engagement_create_blue_skips_red_footer(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    from vigil_cli import client_rosters as client_rosters_module
     from vigil_cli import docker as docker_mod
     from vigil_cli import engagements as engagements_module
     from vigil_cli import oob as oob_mod
@@ -9412,6 +9584,11 @@ def test_engagement_create_blue_skips_red_footer(
     # Deliberately do NOT patch _emit_post_create_footer — the type-gate itself
     # must suppress the red footer for blue engagements.
     monkeypatch.setattr(engagements_module, "_verify_backend_install_root", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        client_rosters_module,
+        "_render_codex_compact_prompt",
+        lambda *_args, **_kwargs: "test compact prompt",
+    )
     monkeypatch.setattr(docker_mod, "container_running", lambda *_a, **_k: False)
     monkeypatch.setattr(oob_mod, "oob_status", lambda *_a, **_k: {"state": "stopped"})
     monkeypatch.setattr(
@@ -12683,6 +12860,10 @@ def test_blue_intake_gate_missing_tenant_file_is_advisory_not_block(
     )
 
     class _Client:
+        def get(self, endpoint: str):
+            assert endpoint == "artifacts/search?kind=alert_intake&limit=1&offset=0"
+            return [{"id": 9, "kind": "alert_intake"}]
+
         def get_engagement(self, endpoint: str, query: str = ""):
             assert endpoint == "activity-entries"
             return {"items": [{"action": "alert_intake"}]}
@@ -12728,6 +12909,10 @@ def test_blue_intake_gate_recorded_alert_passes_without_redundant_metadata(
     )
 
     class _Client:
+        def get(self, endpoint: str):
+            assert endpoint == "artifacts/search?kind=alert_intake&limit=1&offset=0"
+            return [{"id": 9, "kind": "alert_intake", "relative_path": "ir/alerts/AL-1.txt"}]
+
         def get_engagement(self, endpoint: str, query: str = ""):
             assert endpoint == "activity-entries"
             return {"items": [{"action": "alert_intake"}]}
@@ -12743,6 +12928,36 @@ def test_blue_intake_gate_recorded_alert_passes_without_redundant_metadata(
 
     assert blockers == []
     assert not any(b["kind"] == "no_alert_intake" for b in blockers)
+
+
+def test_blue_intake_gate_blocks_when_alert_artifact_registration_failed(
+    tmp_path: Path,
+) -> None:
+    module = _load_assess_module(
+        "transition_phase_command_module_intake_missing_artifact",
+        "agent/scripts/assess/commands/transition_phase.py",
+    )
+    eng_dir = tmp_path / "engagement"
+    eng_dir.mkdir(parents=True)
+    (eng_dir / "scope.json").write_text(
+        json.dumps({"engagement_type": "blue", "tenant_reference_paths": []}),
+        encoding="utf-8",
+    )
+
+    class _Client:
+        def get(self, endpoint: str):
+            assert endpoint == "artifacts/search?kind=alert_intake&limit=1&offset=0"
+            return []
+
+        def get_engagement(self, endpoint: str, query: str = ""):
+            assert endpoint == "activity-entries"
+            return {"items": [{"action": "alert_intake"}]}
+
+    blockers = module._blue_check_intake_to_triage(_Client(), str(eng_dir))
+
+    missing = [blocker for blocker in blockers if blocker["kind"] == "no_alert_intake_artifact"]
+    assert len(missing) == 1
+    assert "artifact register" in missing[0]["detail"]
 
 
 def test_blue_investigate_gate_missing_mitre_is_advisory_not_block() -> None:

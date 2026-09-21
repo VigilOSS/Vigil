@@ -937,6 +937,43 @@ def test_verify_rejects_narrative_artifact_receipt_without_canonical_identity(
     assert "do not retry automatically" in error
 
 
+def test_verify_reports_committed_verification_when_narrative_registration_fails(
+    tmp_path, monkeypatch, capsys
+):
+    fake = _FakeClient(fail_on={"artifacts"})
+    _install(monkeypatch, verify_finding, tmp_path, fake)
+    narrative = tmp_path / "debate.md"
+    narrative.write_text("verified narrative", encoding="utf-8")
+    args = _parse(
+        verify_finding,
+        [
+            "verify",
+            "VA-1",
+            "--status",
+            "confirmed",
+            "--reason",
+            "reproduced",
+            "--proof-receipt-id",
+            "17",
+            "--narrative",
+            str(narrative),
+        ],
+        tmp_path,
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        verify_finding.run(args)
+
+    assert exc.value.code == 1
+    captured = capsys.readouterr()
+    result = json.loads(captured.out)
+    assert result["finding"]["slug"] == "VA-1"
+    assert "verification committed" in captured.err
+    assert "narrative registration failed" in captured.err
+    assert "do not retry the verification" in captured.err.lower()
+    assert "verified 0" not in captured.err
+
+
 def test_verify_payload_file_treats_proof_receipt_as_a_content_flag(
     tmp_path, monkeypatch, capsys
 ):

@@ -44,8 +44,11 @@ from typing import Any
 import pytest
 import yaml
 
+from assess.lib.schema_validation import collect_validation_errors, load_schema
+
 _FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
 _DEFINITIONS_DIR = Path(__file__).resolve().parent / "definitions"
+_FINDING_SCHEMA = load_schema("finding-record.schema.json")
 
 # Captured at import time so inline tests can temporarily redirect _FIXTURES_DIR
 # regardless of the module's __name__ when run from different working directories.
@@ -65,6 +68,16 @@ def _load_fixture(fixture_name: str) -> list[dict[str, Any]]:
     path = _FIXTURES_DIR / fixture_name
     data = json.loads(path.read_text(encoding="utf-8"))
     assert isinstance(data, list), f"{fixture_name} must be a JSON array of findings"
+    for index, finding in enumerate(data):
+        errors = collect_validation_errors(
+            finding,
+            _FINDING_SCHEMA,
+            path=f"{fixture_name}[{index}]",
+        )
+        assert not errors, (
+            f"{fixture_name} contains an invalid finding at index {index}:\n"
+            + "\n".join(f"  - {error}" for error in errors)
+        )
     return data
 
 
@@ -257,6 +270,11 @@ def _run_definition(def_path: Path) -> None:
 
     for assertion in assertions:
         mode = assertion.get("mode", "strict")
+        if mode not in {"strict", "soft"}:
+            raise AssertionError(
+                f"[{def_path.name} / {fixture_name}] assertion mode must be "
+                f"'strict' or 'soft', got {mode!r}"
+            )
         failures = _score_assertion(assertion, findings)
         if not failures:
             continue
@@ -283,6 +301,10 @@ def _definition_files() -> list[Path]:
     if not _DEFINITIONS_DIR.exists():
         return []
     return sorted(_DEFINITIONS_DIR.glob("*.yaml"))
+
+
+def test_quality_definition_roster_is_nonempty() -> None:
+    assert _definition_files(), "quality eval must ship at least one definition"
 
 
 @pytest.mark.parametrize(
@@ -489,19 +511,36 @@ def _make_fixture(tmp_path: Path, findings: list[dict], name: str = "inline_fixt
     return p
 
 
+def _valid_fixture_finding(
+    *, title: str = "Only finding", severity: str = "high", cwe_id: str = "CWE-89"
+) -> dict[str, Any]:
+    return {
+        "title": title,
+        "severity": severity,
+        "workflow_status": "active",
+        "verification_status": "unreviewed",
+        "defect_family": "sql-injection",
+        "root_cause_key": "",
+        "auth_context": "anonymous",
+        "canonical_location": "https://target.example/search",
+        "summary": "SQL injection reaches the search query.",
+        "evidence_ref": "",
+        "notes": "",
+        "details": {
+            "cwe_id": cwe_id,
+            "evidence": "A quote closes the query and changes the response.",
+            "impact": "An attacker can read database rows.",
+        },
+    }
+
+
 def test_soft_assertion_miss_emits_warning_does_not_fail(tmp_path: Path) -> None:
     """A soft assertion that fails must emit a UserWarning and NOT raise.
 
     We point _FIXTURES_DIR at tmp_path so _load_fixture resolves our inline file.
     """
     # A finding that passes min_findings (strict) but fails expected_cwes (soft).
-    findings = [
-        {
-            "title": "Only finding",
-            "severity": "high",
-            "details": {"cwe_id": "CWE-89", "impact": "SQL injection"},
-        }
-    ]
+    findings = [_valid_fixture_finding()]
     fixture_name = "soft_miss_fixture.json"
     _make_fixture(tmp_path, findings, name=fixture_name)
 
@@ -531,13 +570,7 @@ assertions:
 
 def test_strict_assertion_miss_raises(tmp_path: Path) -> None:
     """A strict assertion that fails must raise AssertionError."""
-    findings = [
-        {
-            "title": "Low severity finding",
-            "severity": "low",
-            "details": {"cwe_id": "CWE-89", "impact": "Minor"},
-        }
-    ]
+    findings = [_valid_fixture_finding(title="Low severity finding", severity="low")]
     fixture_name = "strict_miss_fixture.json"
     _make_fixture(tmp_path, findings, name=fixture_name)
 
@@ -555,6 +588,47 @@ assertions:
     _THIS_MODULE._FIXTURES_DIR = tmp_path
     try:
         with pytest.raises(AssertionError, match="Quality assertion failures"):
+            _run_definition(def_path)
+    finally:
+        _THIS_MODULE._FIXTURES_DIR = orig_fixtures_dir
+
+
+def test_fixture_schema_is_validated_before_scoring(tmp_path: Path) -> None:
+    fixture_name = "invalid_fixture.json"
+    invalid = _valid_fixture_finding()
+    del invalid["details"]["evidence"]
+    _make_fixture(tmp_path, [invalid], name=fixture_name)
+    def_path = _make_def_path(
+        tmp_path,
+        f"fixture: {fixture_name}\nassertions:\n  - kind: min_findings\n    value: 1\n",
+        name="invalid_fixture.yaml",
+    )
+
+    orig_fixtures_dir = _THIS_MODULE._FIXTURES_DIR
+    _THIS_MODULE._FIXTURES_DIR = tmp_path
+    try:
+        with pytest.raises(AssertionError, match="evidence"):
+            _run_definition(def_path)
+    finally:
+        _THIS_MODULE._FIXTURES_DIR = orig_fixtures_dir
+
+
+def test_assertion_mode_outside_strict_or_soft_is_rejected(tmp_path: Path) -> None:
+    fixture_name = "valid_fixture.json"
+    _make_fixture(tmp_path, [_valid_fixture_finding()], name=fixture_name)
+    def_path = _make_def_path(
+        tmp_path,
+        (
+            f"fixture: {fixture_name}\nassertions:\n"
+            "  - kind: min_findings\n    value: 1\n    mode: warning\n"
+        ),
+        name="invalid_mode.yaml",
+    )
+
+    orig_fixtures_dir = _THIS_MODULE._FIXTURES_DIR
+    _THIS_MODULE._FIXTURES_DIR = tmp_path
+    try:
+        with pytest.raises(AssertionError, match="strict.*soft.*warning"):
             _run_definition(def_path)
     finally:
         _THIS_MODULE._FIXTURES_DIR = orig_fixtures_dir

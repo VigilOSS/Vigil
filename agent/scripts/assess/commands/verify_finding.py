@@ -430,7 +430,8 @@ def run(args) -> None:
             narrative_artifact_path = narrative_path
 
     results: list = []
-    failed = 0
+    verification_failed = 0
+    narrative_failed = 0
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         for slug in slugs:
             try:
@@ -442,7 +443,14 @@ def run(args) -> None:
                     finding_slug=slug,
                     operation="finding verify",
                 )
-                if narrative_path:
+            except Exception as exc:  # noqa: BLE001 - one bad slug must not drop the rest
+                verification_failed += 1
+                print(f"finding verify: {slug} failed: {exc}", file=sys.stderr)
+                continue
+
+            results.append(result)
+            if narrative_path:
+                try:
                     narrative_payload = {
                         "path": narrative_path,
                         "kind": "verification-narrative",
@@ -455,20 +463,33 @@ def run(args) -> None:
                         artifact_path=narrative_artifact_path,
                         operation=f"register verification narrative for {slug}",
                     )
-            except Exception as exc:  # noqa: BLE001 - one bad slug must not drop the rest
-                failed += 1
-                print(f"finding verify: {slug} failed: {exc}", file=sys.stderr)
-                continue
-            results.append(result)
+                except Exception as exc:  # noqa: BLE001 - verification already committed
+                    narrative_failed += 1
+                    print(
+                        f"finding verify: {slug} verification committed; narrative "
+                        f"registration failed: {exc}. Do not retry the verification; "
+                        "inspect artifact state and reconcile the narrative registration "
+                        "separately.",
+                        file=sys.stderr,
+                    )
 
     if len(slugs) == 1 and results:
         print(json.dumps(results[0], indent=2, ensure_ascii=False))
     else:
         for result in results:
             print(json.dumps(result, ensure_ascii=False))
-        print(
-            f"[finding verify] verified {len(results)} finding(s); {failed} failed.",
-            file=sys.stderr,
-        )
-    if failed:
+        if narrative_path:
+            print(
+                f"[finding verify] verified {len(results)} finding(s); "
+                f"{verification_failed} verification failed; "
+                f"{narrative_failed} narrative registration failed.",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"[finding verify] verified {len(results)} finding(s); "
+                f"{verification_failed} failed.",
+                file=sys.stderr,
+            )
+    if verification_failed or narrative_failed:
         sys.exit(1)

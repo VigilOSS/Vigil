@@ -265,4 +265,3 @@ A prompt change is **not** prompt-only when the prompt defines an artifact the b
 - `tests/` — the root CLI and bench-harness suite. `tests/eval/` is the deterministic, zero-LLM eval replay harness and has its own README.
 - `docs/` — user and maintainer documentation. `docs/adr/` holds the architecture decision records this map cites.
 - `tools/` — repo-root maintainer scripts that regenerate the reporting lookup tables. Distinct from `<engagement>/tools/analysis-state/`, which is engagement-local code-analysis artifact state.
-- `third_party/` — vendored upstream licences for the bundled pattern sets, with `THIRD_PARTY_NOTICES.md` at the root.

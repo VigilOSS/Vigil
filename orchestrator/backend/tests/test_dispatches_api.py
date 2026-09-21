@@ -280,6 +280,64 @@ def test_dispatch_terminal_update_uses_atomic_compare_and_swap(
     assert current["completed_at"] == "2026-04-28T12:59:59Z"
 
 
+def test_terminal_dispatch_create_and_update_always_stamp_completed_at(
+    client, isolate_settings
+) -> None:
+    _seed(client, isolate_settings)
+
+    created_terminal = client.post(
+        f"{BASE}/dispatches",
+        json={
+            "agent_id": "AG-CREATED-DONE",
+            "agent_role": "vulnerability-analyst",
+            "status": "completed",
+        },
+    )
+    assert created_terminal.status_code == 201, created_terminal.text
+    assert created_terminal.json()["completed_at"]
+
+    created_active = client.post(
+        f"{BASE}/dispatches",
+        json={
+            "agent_id": "AG-PATCHED-DONE",
+            "agent_role": "vulnerability-analyst",
+        },
+    )
+    assert created_active.status_code == 201, created_active.text
+    assert not created_active.json()["completed_at"]
+
+    patched = client.patch(
+        f"{BASE}/dispatches/AG-PATCHED-DONE",
+        json={"status": "failed"},
+    )
+    assert patched.status_code == 200, patched.text
+    assert patched.json()["status"] == "failed"
+    assert patched.json()["completed_at"]
+
+
+def test_in_progress_dispatch_rejects_completed_at(client, isolate_settings) -> None:
+    _seed(client, isolate_settings)
+    created = client.post(
+        f"{BASE}/dispatches",
+        json={
+            "agent_id": "AG-ACTIVE-TIMESTAMP",
+            "agent_role": "vulnerability-analyst",
+        },
+    )
+    assert created.status_code == 201, created.text
+
+    response = client.patch(
+        f"{BASE}/dispatches/AG-ACTIVE-TIMESTAMP",
+        json={
+            "status": "in-progress",
+            "completed_at": "2026-04-28T13:00:00Z",
+        },
+    )
+
+    assert response.status_code == 400, response.text
+    assert "completed_at" in response.text
+
+
 def test_dispatch_list_filters(client, isolate_settings) -> None:
     _seed(client, isolate_settings)
     rows = [

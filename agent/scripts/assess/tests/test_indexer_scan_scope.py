@@ -714,27 +714,17 @@ eval($_REQUEST['code']);
 """
 
 
-def test_an_empty_closure_does_not_buy_a_measurement_of_the_whole_file() -> None:
-    """One callable is not a scan of the file the callable sits in.
-
-    The honesty flag was all-or-nothing: any callable yielding any scan line
-    declared all three function-scoped dimensions measured for the whole file.
-    A PHP closure is a callable, so `function () {}` -- which reads nothing --
-    turned this file's `security_sinks: []` from a declared gap into a claimed
-    clean. Both statements below stay unread either way; only the declaration
-    tells the reader which it is (ADR 0015).
-    """
+def test_an_empty_closure_does_not_hide_executable_top_level_scope() -> None:
+    """A callable record cannot make sibling top-level statements disappear."""
     indexed = index_file("routes/web.php", "php", LARAVEL_ROUTES_WITH_EMPTY_CLOSURE)
 
     assert indexed["total_functions"] == 1
-    assert indexed["security_sinks"] == []
-    assert indexed["analysis_status"] == "degraded"
-    assert indexed["degradation_reason"] == (
-        treesitter_index.UNSCANNED_SCOPE_DEGRADATION_REASON
-    )
-    assert set(indexed["unavailable_dimensions"]) >= (
-        treesitter_index.FUNCTION_SCOPED_DIMENSIONS
-    )
+    assert [
+        (sink["kind"], sink["function"], sink["line"])
+        for sink in indexed["security_sinks"]
+    ] == [("eval_exec", "<top-level>", 7)]
+    assert indexed["analysis_status"] == "complete"
+    assert indexed["unavailable_dimensions"] == []
 
 
 def test_a_blade_template_is_read_by_its_own_extractor() -> None:
@@ -766,6 +756,37 @@ def test_a_function_that_holds_no_sink_is_still_a_measured_negative() -> None:
 
     assert indexed["total_functions"] == 2
     assert indexed["security_sinks"] == []
+    assert indexed["analysis_status"] == "complete"
+    assert indexed["unavailable_dimensions"] == []
+
+
+def test_function_records_do_not_hide_executable_top_level_sinks_and_calls() -> None:
+    source = b"""import os
+
+def inside(target):
+    os.system(target)
+
+notify('loaded')
+os.system('top-level')
+"""
+
+    indexed = index_file("startup.py", "python", source)
+
+    assert {
+        (sink["function"], sink["line"], sink["kind"])
+        for sink in indexed["security_sinks"]
+    } == {
+        ("inside", 4, "process_exec"),
+        ("<top-level>", 7, "process_exec"),
+    }
+    assert {
+        (call["caller"], call["callee"], call["line"])
+        for call in indexed["call_sites"]
+    } >= {
+        ("inside", "os.system", 4),
+        ("<top-level>", "notify", 6),
+        ("<top-level>", "os.system", 7),
+    }
     assert indexed["analysis_status"] == "complete"
     assert indexed["unavailable_dimensions"] == []
 

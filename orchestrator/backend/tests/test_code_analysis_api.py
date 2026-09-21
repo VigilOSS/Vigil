@@ -15,6 +15,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from app import db as db_module
+from app.api import code_analysis as code_analysis_api
 from app.api.code_analysis import QueueItemsBulkCreateRequest
 from app.services import code_analysis, code_fuzz_completion
 from fastapi import HTTPException
@@ -7681,6 +7682,61 @@ def test_retry_error_queue_item_returns_to_pending_with_audit_row(client, isolat
     )
     assert activity.status_code == 200, activity.text
     assert any(row["title"] == "code-dispatch retry-error" for row in activity.json()["items"])
+
+
+def test_queue_mutation_succeeds_and_persists_audit_failure(
+    client, isolate_settings, monkeypatch
+):
+    engagement_key = "2026-09-20-code-audit-failure"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo = _create_repo(client, engagement_key, repo_key="audit-failure-repo")
+    parser_file = next(
+        row for row in _create_files(client, engagement_key, int(repo["id"]))
+        if row["file_path"] == "src/parser.py"
+    )
+    _classify_file(client, engagement_key, int(parser_file["id"]), "low", 10)
+    queued = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue",
+        json={"items": [{"file_id": parser_file["id"], "priority": 10}]},
+    )
+    assert queued.status_code == 201, queued.text
+    claim = _claim_file_for_analysis(client, engagement_key, int(parser_file["id"]))
+
+    monkeypatch.setattr(
+        code_analysis_api.activity_service,
+        "record_activity_entry",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("activity unavailable")),
+    )
+
+    completed = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue/done",
+        json=_owned(
+            claim,
+            item_ids=[claim["id"]],
+            disposition="clean",
+            notes="review complete",
+            cwe_coverage=_network_input_coverage(default_effort=80),
+        ),
+    )
+
+    assert completed.status_code == 200, completed.text
+    assert completed.json()["updated"] == 1
+    queue = client.get(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue",
+        params={"status": "done"},
+    )
+    assert queue.status_code == 200, queue.text
+    assert [item["id"] for item in queue.json()["items"]] == [claim["id"]]
+
+    events = client.get(f"/engagements/{engagement_key}/events")
+    assert events.status_code == 200, events.text
+    failures = [
+        event for event in events.json()
+        if event["event_type"] == "code_analysis.audit_failed"
+    ]
+    assert len(failures) == 1
+    assert failures[0]["task_name"] == "code-dispatch done"
+    assert "activity unavailable" in failures[0]["summary"]
 
 
 def test_retry_error_rejects_empty_reason_without_error(client, isolate_settings):

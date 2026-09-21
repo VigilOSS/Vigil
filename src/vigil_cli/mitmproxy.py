@@ -88,6 +88,7 @@ def build_image(
     force: bool = False,
     runner: docker.Runner | None = None,
     build_runner: docker.Runner | None = None,
+    daemon_runner: docker.Runner | None = None,
 ) -> None:
     """Build the proxy image. ``--force`` rebuilds even if the tag exists."""
     install_root = install_root.expanduser().resolve()
@@ -113,6 +114,12 @@ def build_image(
     # passes only `runner` keeps the single test seam — both roles use it.
     meta_runner = runner or docker.run_command
     image_build_runner = build_runner or runner or docker.run_command_streaming
+    health_runner = daemon_runner or (
+        docker.run_command
+        if meta_runner is docker.run_command_streaming
+        else meta_runner
+    )
+    docker.require_daemon("build the mitmproxy image", runner=health_runner)
     inputs = mitmproxy_image_inputs(install_root)
     if not force and not image_freshness.image_outdated(
         image, inputs, root=install_root, runner=meta_runner

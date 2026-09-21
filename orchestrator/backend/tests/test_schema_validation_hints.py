@@ -215,3 +215,78 @@ def test_patch_validation_skips_required_check_but_keeps_unknown_field_hint():
     matches = [e for e in errors if "source" in e and "is not allowed" in e]
     assert matches, errors
     assert "source_name" in matches[0]
+
+
+def test_array_bounds_are_enforced_at_every_nested_level():
+    module = _validation_module()
+    schema = {
+        "type": "array",
+        "minItems": 1,
+        "maxItems": 2,
+        "items": {
+            "type": "object",
+            "properties": {
+                "tags": {
+                    "type": "array",
+                    "minItems": 2,
+                    "maxItems": 3,
+                    "items": {"type": "string"},
+                }
+            },
+        },
+    }
+
+    assert module.collect_validation_errors([], schema) == [
+        "payload must contain at least 1 items"
+    ]
+    assert module.collect_validation_errors([{"tags": ["one"]}], schema) == [
+        "payload[0].tags must contain at least 2 items"
+    ]
+    assert module.collect_validation_errors(
+        [{"tags": ["one", "two", "three", "four"]}], schema
+    ) == ["payload[0].tags must contain at most 3 items"]
+    assert module.collect_validation_errors([{}, {}, {}], schema) == [
+        "payload must contain at most 2 items"
+    ]
+
+
+def test_unique_items_handles_nested_json_values_deterministically():
+    module = _validation_module()
+    schema = {
+        "type": "array",
+        "uniqueItems": True,
+        "items": {
+            "type": "object",
+            "properties": {
+                "values": {"type": "array", "uniqueItems": True},
+            },
+        },
+    }
+    payload = [
+        {"values": [{"b": 2, "a": 1}, {"a": 1, "b": 2}]},
+        {"values": ["distinct"]},
+        {"values": ["distinct"]},
+    ]
+
+    assert module.collect_validation_errors(payload, schema) == [
+        "payload[0].values must contain unique items; indexes 0 and 1 are equal",
+        "payload must contain unique items; indexes 1 and 2 are equal",
+    ]
+
+
+def test_typeless_array_subschema_still_applies_array_keywords_recursively():
+    module = _validation_module()
+    schema = {
+        "properties": {
+            "groups": {
+                "items": {"minItems": 1, "uniqueItems": True},
+            }
+        }
+    }
+
+    assert module.collect_validation_errors(
+        {"groups": [[], ["same", "same"]]}, schema
+    ) == [
+        "payload.groups[0] must contain at least 1 items",
+        "payload.groups[1] must contain unique items; indexes 0 and 1 are equal",
+    ]

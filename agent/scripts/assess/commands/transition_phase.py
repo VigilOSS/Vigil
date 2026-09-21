@@ -375,6 +375,14 @@ def _precondition_check_failed(check_name: str, exc: Exception) -> dict[str, str
     }
 
 
+def _require_dict_rows(value: object) -> list[dict]:
+    if not isinstance(value, list):
+        raise ValueError("backend returned a non-list response")
+    if any(not isinstance(row, dict) for row in value):
+        raise ValueError("backend returned a list containing a non-object row")
+    return value
+
+
 def _consumption_advisory(client: AssessmentClient) -> dict[str, str] | None:
     """Advisory (never a block) when the consume-test buffer still has genuinely
     un-consumed work at verify time (S2).
@@ -434,14 +442,13 @@ def _check_web_preconditions(
 
     elif target_phase == "verify":
         try:
-            findings = client.get("findings")
-            if isinstance(findings, list):
-                active = [f for f in findings if f.get("workflow_status") == "active"]
-                if len(active) == 0:
-                    blockers.append({
-                        "kind": "no_active_findings",
-                        "detail": "No active findings to verify",
-                    })
+            findings = _require_dict_rows(client.get("findings"))
+            active = [f for f in findings if f.get("workflow_status") == "active"]
+            if len(active) == 0:
+                blockers.append({
+                    "kind": "no_active_findings",
+                    "detail": "No active findings to verify",
+                })
         except Exception as exc:
             blockers.append(_precondition_check_failed("verify findings", exc))
         consumption = _consumption_advisory(client)
@@ -450,74 +457,76 @@ def _check_web_preconditions(
 
     elif target_phase == "exploit":
         try:
-            findings = client.get("findings")
-            if isinstance(findings, list):
-                unverified_high = [
-                    f for f in findings
-                    if f.get("severity") in ("critical", "high")
-                    and f.get("verification_status") not in {"confirmed", "downgraded"}
-                    and f.get("workflow_status") == "active"
+            findings = _require_dict_rows(client.get("findings"))
+            unverified_high = [
+                f for f in findings
+                if f.get("severity") in ("critical", "high")
+                and f.get("verification_status") not in {"confirmed", "downgraded"}
+                and f.get("workflow_status") == "active"
+            ]
+            if unverified_high:
+                slugs = [f.get("slug", "?") for f in unverified_high[:5]]
+                blockers.append({
+                    "kind": "unverified_high_findings",
+                    "detail": (
+                        f"{len(unverified_high)} high/critical finding(s) unverified: "
+                        f"{', '.join(slugs)}"
+                        + (" ..." if len(unverified_high) > 5 else "")
+                    ),
+                })
+
+            # variant / rotation hunting before the engagement advances to exploit.
+            # Skipping the variant pass is the single most common way real findings
+            confirmed_high = [
+                f for f in findings
+                if f.get("severity") in ("critical", "high")
+                and f.get("verification_status") in {"confirmed", "downgraded"}
+                and f.get("workflow_status") == "active"
+            ]
+            if confirmed_high:
+                # Filter by role server-side and request the max page size
+                # so engagements with many dispatches don't drop older
+                # variant-pass runs behind the default limit=100.
+                try:
+                    dispatches = _require_dict_rows(client.get(
+                        "dispatches?role=vulnerability-analyst&limit=1000"
+                    ))
+                except Exception as exc:
+                    blockers.append(
+                        _precondition_check_failed("exploit variant dispatches", exc)
+                    )
+                    return blockers
+                completed_variant_dispatches = [
+                    d for d in dispatches
+                    if str(d.get("status") or "").lower() == "completed"
+                    and str(d.get("dispatch_mode") or "").lower() == "variant-rotation"
                 ]
-                if unverified_high:
-                    slugs = [f.get("slug", "?") for f in unverified_high[:5]]
+                missing_variant: list[str] = []
+                for finding in confirmed_high:
+                    slug = finding.get("slug", "?")
+                    hit = any(
+                        slug in (d.get("finding_slugs") or [])
+                        for d in completed_variant_dispatches
+                    )
+                    if not hit:
+                        missing_variant.append(slug)
+                if missing_variant:
+                    sample = ", ".join(missing_variant[:5])
                     blockers.append({
-                        "kind": "unverified_high_findings",
+                        "kind": "missing_variant_pass",
                         "detail": (
-                            f"{len(unverified_high)} high/critical finding(s) unverified: "
-                            f"{', '.join(slugs)}"
-                            + (" ..." if len(unverified_high) > 5 else "")
+                            f"{len(missing_variant)} confirmed high/critical finding(s) "
+                            f"have no COMPLETED variant-rotation vulnerability-analyst "
+                            f"dispatch listing them in finding_slugs: "
+                            f"{sample}"
+                            + (" ..." if len(missing_variant) > 5 else "")
+                            + " — run the variant/sibling hunt as a "
+                            "--dispatch-mode variant-rotation dispatch and let it "
+                            "complete before advancing (skipping it is the most "
+                            "common way real findings are missed). Pass --force "
+                            "--reason \"...\" to override with an audited decision."
                         ),
                     })
-
-                # variant / rotation hunting before the engagement advances to exploit.
-                # Skipping the variant pass is the single most common way real findings
-                confirmed_high = [
-                    f for f in findings
-                    if f.get("severity") in ("critical", "high")
-                    and f.get("verification_status") in {"confirmed", "downgraded"}
-                    and f.get("workflow_status") == "active"
-                ]
-                if confirmed_high:
-                    # Filter by role server-side and request the max page size
-                    # so engagements with many dispatches don't drop older
-                    # variant-pass runs behind the default limit=100.
-                    try:
-                        dispatches = client.get(
-                            "dispatches?role=vulnerability-analyst&limit=1000"
-                        ) or []
-                    except Exception:
-                        dispatches = []
-                    completed_variant_dispatches = [
-                        d for d in dispatches
-                        if str(d.get("status") or "").lower() == "completed"
-                        and str(d.get("dispatch_mode") or "").lower() == "variant-rotation"
-                    ]
-                    missing_variant: list[str] = []
-                    for finding in confirmed_high:
-                        slug = finding.get("slug", "?")
-                        hit = any(
-                            slug in (d.get("finding_slugs") or [])
-                            for d in completed_variant_dispatches
-                        )
-                        if not hit:
-                            missing_variant.append(slug)
-                    if missing_variant:
-                        sample = ", ".join(missing_variant[:5])
-                        blockers.append({
-                            "kind": "missing_variant_pass",
-                            "detail": (
-                                f"{len(missing_variant)} confirmed high/critical finding(s) "
-                                f"have no COMPLETED variant-rotation vulnerability-analyst "
-                                f"dispatch listing them in finding_slugs: "
-                                f"{sample}"
-                                + (" ..." if len(missing_variant) > 5 else "")
-                                + " — run the variant/sibling hunt as a "
-                                "--dispatch-mode variant-rotation dispatch and let it "
-                                "complete before advancing (skipping it is the most "
-                                "common way real findings are missed). Pass --force "
-                                "--reason \"...\" to override with an audited decision."
-                            ),
-                        })
         except Exception as exc:
             blockers.append(_precondition_check_failed("exploit findings", exc))
 
@@ -589,11 +598,9 @@ def _chain_construction_blockers(client: AssessmentClient) -> list[dict[str, str
     """
     blockers: list[dict[str, str]] = []
     try:
-        findings = client.get("findings")
+        findings = _require_dict_rows(client.get("findings"))
     except Exception as exc:
         blockers.append(_precondition_check_failed("chain-construction findings", exc))
-        return blockers
-    if not isinstance(findings, list):
         return blockers
 
     confirmed_high = [
@@ -611,11 +618,14 @@ def _chain_construction_blockers(client: AssessmentClient) -> list[dict[str, str
     # the max page size so long engagements don't drop the chain pass behind
     # the default limit=100 (same shape as the variant-pass dispatch read).
     try:
-        dispatches = client.get(
+        dispatches = _require_dict_rows(client.get(
             "dispatches?role=exploit-developer&status=completed&limit=1000"
-        ) or []
-    except Exception:
-        dispatches = []
+        ))
+    except Exception as exc:
+        blockers.append(
+            _precondition_check_failed("chain-construction dispatches", exc)
+        )
+        return blockers
     completed_chain_dispatches = [
         d for d in dispatches
         if isinstance(d, dict)
@@ -678,11 +688,9 @@ def _blind_triage_blockers(client: AssessmentClient) -> list[dict[str, str]]:
     """
     blockers: list[dict[str, str]] = []
     try:
-        findings = client.get("findings")
+        findings = _require_dict_rows(client.get("findings"))
     except Exception as exc:
         blockers.append(_precondition_check_failed("blind-triage findings", exc))
-        return blockers
-    if not isinstance(findings, list):
         return blockers
 
     medium_or_above = [
@@ -699,11 +707,12 @@ def _blind_triage_blockers(client: AssessmentClient) -> list[dict[str, str]]:
     # behind the default limit=100 (same shape as the variant-pass dispatch
     # read above).
     try:
-        decisions = client.get(
+        decisions = _require_dict_rows(client.get(
             "dispatch-decisions?kind=blind_triage_verdict&limit=1000"
-        ) or []
-    except Exception:
-        decisions = []
+        ))
+    except Exception as exc:
+        blockers.append(_precondition_check_failed("blind-triage decisions", exc))
+        return blockers
     accepted_slugs: set[str] = set()
     for d in decisions:
         if not isinstance(d, dict):
@@ -769,15 +778,37 @@ def _depth_backstop_blockers(client: AssessmentClient) -> list[dict[str, str]]:
     out: list[dict[str, str]] = []
     try:
         result = client.get("application-units/terminal-block")
+        if not isinstance(result, dict):
+            raise ValueError("backend returned a non-object response")
     except Exception as exc:
         out.append(_precondition_check_failed("terminal depth backstop", exc))
         return out
-    if not isinstance(result, dict) or result.get("skipped"):
+    skipped = result.get("skipped")
+    if not isinstance(skipped, bool):
+        out.append(_precondition_check_failed(
+            "terminal depth backstop",
+            ValueError("backend response omitted a boolean skipped field"),
+        ))
         return out
-
-    deferral_count = int(result.get("deferral_count") or 0)
-    blocking = result.get("blocking") or []
-    warned = result.get("warned_under_observed") or []
+    if skipped:
+        return out
+    try:
+        deferral_count = int(result.get("deferral_count") or 0)
+        blocking = _require_dict_rows(result.get("blocking"))
+        warned = _require_dict_rows(result.get("warned_under_observed"))
+        if any(not isinstance(row.get("unit"), dict) for row in blocking + warned):
+            raise ValueError("backend depth response contained a malformed unit")
+        if any(
+            row.get("block_grain") == "class"
+            and not isinstance(row.get("uncovered_classes"), list)
+            for row in blocking
+        ):
+            raise ValueError(
+                "backend depth response contained malformed uncovered_classes"
+            )
+    except Exception as exc:
+        out.append(_precondition_check_failed("terminal depth backstop", exc))
+        return out
 
     # The block set carries two grains (depth_ledger.terminal_depth_block):
     #   * "family" — the historical block: a decisive/high-confidence unit left
@@ -1203,6 +1234,26 @@ def _blue_check_intake_to_triage(
                         "fix the path or re-run `vigil blue tenant init`."
                     ),
                 })
+
+    try:
+        alert_artifacts = client.get(
+            "artifacts/search?kind=alert_intake&limit=1&offset=0"
+        )
+        if not isinstance(alert_artifacts, list):
+            raise AssessError("alert artifact search returned a malformed response")
+    except Exception as exc:  # noqa: BLE001 - degrade to blocker
+        blockers.append(_blue_backend_failure("alert intake artifact", exc))
+    else:
+        if not alert_artifacts:
+            blockers.append({
+                "kind": "no_alert_intake_artifact",
+                "detail": (
+                    "no registered artifact with kind='alert_intake' — the raw alert "
+                    "file may exist locally, but intake evidence is not indexed yet. "
+                    "Retry `vigil assess artifact register <raw-alert-path> --kind "
+                    "alert_intake` before transitioning to triage."
+                ),
+            })
 
     try:
         entries = _blue_list_activity_entries(client)

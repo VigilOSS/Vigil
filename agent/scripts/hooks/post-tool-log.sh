@@ -110,29 +110,57 @@ post_activity_entry() {
   local result="$4"
 
   if command -v vigil >/dev/null 2>&1; then
-    ENGAGEMENT_DIR="$ENG_DIR" \
+    if ENGAGEMENT_DIR="$ENG_DIR" \
       vigil assess --engagement-dir "$ENG_DIR" log \
         --actor-kind "$actor_kind" \
         "$AGENT_TYPE" \
         "$title" \
         "$action" \
         "$result" \
-        >/dev/null 2>&1 \
-      || true
-    return 0
+        >/dev/null 2>&1
+    then
+      return 0
+    fi
+    return 1
   fi
 
   if [ -x "$ASSESS_PY" ]; then
-    ENGAGEMENT_DIR="$ENG_DIR" \
+    if ENGAGEMENT_DIR="$ENG_DIR" \
       "$ASSESS_PY" --engagement-dir "$ENG_DIR" log \
         --actor-kind "$actor_kind" \
         "$AGENT_TYPE" \
         "$title" \
         "$action" \
         "$result" \
-        >/dev/null 2>&1 \
-      || true
+        >/dev/null 2>&1
+    then
+      return 0
+    fi
   fi
+  return 1
+}
+
+release_dedup_claim() {
+  if [ -n "$TOOL_USE_ID" ] && [ -f "${SEEN_FILE:-}" ]; then
+    local seen_tmp="${SEEN_FILE}.tmp.$$"
+    grep -Fxv "$TOOL_USE_ID" "$SEEN_FILE" > "$seen_tmp" 2>/dev/null || true
+    if [ -s "$seen_tmp" ]; then
+      mv "$seen_tmp" "$SEEN_FILE" 2>/dev/null || true
+    else
+      rm -f "$seen_tmp" "$SEEN_FILE" 2>/dev/null || true
+    fi
+  fi
+  if [ -n "${CMD_KEY:-}" ] && [ -f "$DEDUP_FILE" ]; then
+    local claimed_key
+    claimed_key=$(head -1 "$DEDUP_FILE" 2>/dev/null || true)
+    if [ "$claimed_key" = "$CMD_KEY" ]; then
+      rm -f "$DEDUP_FILE" 2>/dev/null || true
+    fi
+  fi
+}
+
+post_activity_entry_or_release() {
+  post_activity_entry "$@" || release_dedup_claim
   return 0
 }
 
@@ -198,7 +226,7 @@ case "$TOOL_NAME" in
       RESULT="VIOLATION: host-side target traffic bypassed 'vigil assess kali'. ${RESULT}"
     fi
 
-    post_activity_entry "hook" "Bash" "$ACTION" "$RESULT"
+    post_activity_entry_or_release "hook" "Bash" "$ACTION" "$RESULT"
     ;;
 
   Agent)
@@ -210,7 +238,7 @@ case "$TOOL_NAME" in
     ACTION="${DESCRIPTION:-dispatch}"
     RESULT="${PROMPT_PREVIEW:-}"
 
-    post_activity_entry "hook" "$TITLE" "$ACTION" "$RESULT"
+    post_activity_entry_or_release "hook" "$TITLE" "$ACTION" "$RESULT"
     ;;
 
   Write|Edit)
@@ -221,7 +249,7 @@ case "$TOOL_NAME" in
     case "$FILE_PATH" in
       *engagements/*|*findings.md|*scope.json)
         SHORT_PATH=$(echo "$FILE_PATH" | sed 's|.*/engagements/|engagements/|')
-        post_activity_entry "hook" "$TOOL_NAME" "file=${SHORT_PATH}" ""
+        post_activity_entry_or_release "hook" "$TOOL_NAME" "file=${SHORT_PATH}" ""
         ;;
     esac
     ;;
@@ -235,13 +263,13 @@ case "$TOOL_NAME" in
       2>/dev/null || true)
     [ -z "$FILES" ] && FILES="unknown files"
     RESULT=$(tool_response_text | head -c 300 || true)
-    post_activity_entry "hook" "apply_patch" "files=${FILES}" "$RESULT"
+    post_activity_entry_or_release "hook" "apply_patch" "files=${FILES}" "$RESULT"
     ;;
 
   mcp__*)
     ARG_PREVIEW=$(echo "$INPUT" | jq '.tool_input // {}' 2>/dev/null | json_preview 300)
     RESULT=$(tool_response_text | head -c 300 || true)
-    post_activity_entry "hook" "$TOOL_NAME" "mcp args=${ARG_PREVIEW}" "$RESULT"
+    post_activity_entry_or_release "hook" "$TOOL_NAME" "mcp args=${ARG_PREVIEW}" "$RESULT"
     ;;
 
   *)

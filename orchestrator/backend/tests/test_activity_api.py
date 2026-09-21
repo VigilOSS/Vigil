@@ -157,6 +157,58 @@ def test_activity_entries_since_filter_excludes_older_rows(client, isolate_setti
     assert "Kickoff" not in titles, filtered
 
 
+def test_activity_timestamps_are_normalized_and_sorted_by_instant(
+    client, isolate_settings
+):
+    _seed_engagement(client, isolate_settings)
+
+    offset = client.post(
+        BASE,
+        json={
+            "occurred_at": "2026-04-17T13:00:00+01:00",
+            "title": "Earlier instant with later local clock",
+        },
+    )
+    later = client.post(
+        BASE,
+        json={
+            "occurred_at": "2026-04-17T12:30:00Z",
+            "title": "Later instant",
+        },
+    )
+
+    assert offset.status_code == 201, offset.text
+    assert offset.json()["occurred_at"] == "2026-04-17T12:00:00Z"
+    assert later.status_code == 201, later.text
+    listing = _items(client.get(BASE))
+    assert [row["title"] for row in listing] == [
+        "Later instant",
+        "Earlier instant with later local clock",
+    ]
+
+
+def test_activity_timestamp_filters_compare_instants_and_reject_invalid_values(
+    client, isolate_settings
+):
+    _seed_engagement(client, isolate_settings)
+    assert client.post(
+        BASE,
+        json={"occurred_at": "2026-04-17T12:00:00Z", "title": "Noon"},
+    ).status_code == 201
+
+    filtered = _items(
+        client.get(BASE, params={"since": "2026-04-17T13:00:00+01:00"})
+    )
+    assert [row["title"] for row in filtered] == ["Noon"]
+
+    invalid_post = client.post(
+        BASE, json={"occurred_at": "not-a-timestamp", "title": "Invalid"}
+    )
+    assert invalid_post.status_code == 422, invalid_post.text
+    invalid_filter = client.get(BASE, params={"since": "not-a-timestamp"})
+    assert invalid_filter.status_code == 422, invalid_filter.text
+
+
 def test_activity_entries_list_unknown_engagement_returns_404(client, isolate_settings):
     response = client.get("/engagements/does-not-exist/activity-entries")
     assert response.status_code == 404

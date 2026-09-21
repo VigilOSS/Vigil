@@ -254,6 +254,96 @@ def test_agent_start_swarm_output_preserves_authored_traffic_declaration(
     )
 
 
+def test_agent_start_swarm_reports_partial_dispatch_and_exits_nonzero(
+    monkeypatch, capsys, tmp_path
+) -> None:
+    items = tmp_path / "items.txt"
+    items.write_text("one\ntwo\n", encoding="utf-8")
+    args = _agent_parser().parse_args(
+        [
+            "agent",
+            "start-swarm",
+            "--role",
+            "code-vuln-hunter",
+            "--task",
+            "review assigned files",
+            "--workers",
+            "2",
+            "--batch-size",
+            "1",
+            "--items-file",
+            str(items),
+            "--no-target-traffic",
+        ]
+    )
+
+    class _FailSecondDispatchClient(_DispatchClient):
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def record_dispatch(self, payload: dict) -> dict:
+            self.calls += 1
+            if self.calls == 2:
+                raise RuntimeError("backend write refused")
+            return super().record_dispatch(payload)
+
+    monkeypatch.setattr(
+        agent.dispatch,
+        "_client_for",
+        lambda _args: (
+            _FailSecondDispatchClient(),
+            SimpleNamespace(engagement_dir=str(tmp_path)),
+        ),
+    )
+    monkeypatch.setattr(agent, "_attach_dispatch_provenance", lambda *_args: [])
+    monkeypatch.setattr(
+        agent, "_code_source_identity_lines", lambda *_args, **_kwargs: []
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        agent._start_swarm(args)
+
+    assert exc.value.code == 1
+    captured = capsys.readouterr()
+    assert '"status": "in-progress"' in captured.out
+    assert '"status": "failed_to_record"' in captured.out
+    assert "incomplete: 1 of 2 dispatch writes failed" in captured.err
+
+
+def test_agent_start_swarm_has_parser_and_introspectable_contract(tmp_path) -> None:
+    items = tmp_path / "items.txt"
+    args = _agent_parser().parse_args(
+        [
+            "agent",
+            "start-swarm",
+            "--role",
+            "vulnerability-analyst",
+            "--task",
+            "test every assigned item",
+            "--workers",
+            "3",
+            "--batch-size",
+            "4",
+            "--items-file",
+            str(items),
+            "--rate-budget",
+            "maximum 1 request/second",
+        ]
+    )
+
+    assert args.action == "start-swarm"
+    assert args.swarm_workers == 3
+    assert args.swarm_batch_size == 4
+    contract = contracts.get_contract("agent start-swarm")
+    assert contract is not None
+    assert contract.name == "agent start-swarm"
+    rendered = contracts.render_contract("agent start-swarm")
+    assert "--workers" in rendered
+    assert "--batch-size" in rendered
+    assert "--items-file" in rendered
+    assert "non-zero" in rendered
+
+
 class _CodeDispatchClient(_DispatchClient):
     def __init__(self, repos: list[dict]) -> None:
         self.repos = repos

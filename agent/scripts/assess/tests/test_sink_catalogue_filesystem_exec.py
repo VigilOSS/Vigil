@@ -1,12 +1,12 @@
 """Empirical audit of `_SINK_DEFINITIONS`' file_path / file_inclusion /
-sql_exec / process_exec families -- 89 regex patterns across 9 languages.
+sql_exec / process_exec families -- 93 regex patterns across 9 languages.
 
 Every pattern below is exercised against an idiomatic, current-era (2026)
 fixture through the real tree-sitter indexer. Only patterns that fire on
 realistic code get a case in ``CASES`` -- DEAD / REDUNDANT / MISROUTED
 patterns are named, with the file:line evidence, in ``_EXCLUDED`` instead,
 and ``test_case_table_covers_every_live_pattern_in_the_assigned_slice``
-proves the two lists together account for all 89 patterns, so the catalogue
+proves the two lists together account for all 93 patterns, so the catalogue
 cannot silently regain a dead pattern or lose a live one.
 
 Taxonomy note. Three defects this audit recorded have since been fixed in the
@@ -19,14 +19,17 @@ fails loudly rather than being re-documented:
   ``require_once``) were classed as ``file_path`` -> ``path-traversal``.
   They are now their own ``file_inclusion`` kind carrying ``["lfi", "rfi"]``
   (vuln_taxonomy.py:92-93). The patterns moved verbatim, so the slice is
-  still 89: ``file_path`` went 38 -> 34 and ``file_inclusion`` holds the 4.
+  kept that redistribution: ``file_path`` is 34 and ``file_inclusion`` is 4.
 
 * Ruby's command-substitution pattern was ``\b`[^`]*` ``. ``\b`` holds only at
   a word/non-word transition and a backtick is never a word character, so the
   anchor demanded a word character immediately to its left -- which idiomatic
   Ruby (``out = `ssh ...` ``) never writes. It was pinned DEAD; the anchor is
-  gone and it has a real case in ``CASES`` instead, so the slice moved 81/8 to
-  82/7 without changing its 89 patterns.
+  gone and it has a real case in ``CASES`` instead.
+
+* Java's valid ``Runtime.getRuntime().exec(...)`` form and Python's four
+  commonly used subprocess convenience APIs are live process-execution sinks,
+  bringing this slice to 93 patterns (87 live, 6 excluded).
 
 ``file_path`` keeps the constructs that really are traversal
 (``fopen``/``file_get_contents``/``file_put_contents``).
@@ -98,6 +101,10 @@ class Shell {
     void runCommand(String cmd) throws Exception {
         ProcessBuilder pb = new ProcessBuilder(cmd);
         pb.start();
+    }
+
+    void runRuntime(String cmd) throws Exception {
+        Runtime.getRuntime().exec(cmd);
     }
 }
 """
@@ -229,6 +236,22 @@ def run_popen(cmd):
 
 def run_call(cmd):
     subprocess.call(cmd, shell=True)
+
+
+def run_check_output(cmd):
+    return subprocess.check_output(cmd, shell=True)
+
+
+def run_check_call(cmd):
+    return subprocess.check_call(cmd, shell=True)
+
+
+def run_getoutput(cmd):
+    return subprocess.getoutput(cmd)
+
+
+def run_getstatusoutput(cmd):
+    return subprocess.getstatusoutput(cmd)
 """
 
 JAVASCRIPT_SOURCE = """\
@@ -641,6 +664,7 @@ CASES: list[tuple[str, str, str, str, list[str] | None]] = [
     ("sql_exec", "php", r"\$\w+->prepare\s*\(", "$pdo->prepare($sql)", ["sqli"]),
 
     # ---- process_exec : java (treesitter_index.py:286) ----
+    ("process_exec", "java", r"\bRuntime\.getRuntime\s*\(\s*\)\.exec\s*\(", "Runtime.getRuntime().exec(cmd)", ["injection"]),
     ("process_exec", "java", r"\bProcessBuilder\s*\(", "new ProcessBuilder(cmd)", ["injection"]),
     # ---- process_exec : c (treesitter_index.py:287) ----
     ("process_exec", "c", r"\bsystem\s*\(", "system(cmd)", ["injection"]),
@@ -655,6 +679,10 @@ CASES: list[tuple[str, str, str, str, list[str] | None]] = [
     ("process_exec", "python", r"\bsubprocess\.run\s*\(", "subprocess.run(cmd, shell=True)", ["injection"]),
     ("process_exec", "python", r"\bsubprocess\.Popen\s*\(", "subprocess.Popen(cmd, shell=True)", ["injection"]),
     ("process_exec", "python", r"\bsubprocess\.call\s*\(", "subprocess.call(cmd, shell=True)", ["injection"]),
+    ("process_exec", "python", r"\bsubprocess\.check_output\s*\(", "subprocess.check_output(cmd, shell=True)", ["injection"]),
+    ("process_exec", "python", r"\bsubprocess\.check_call\s*\(", "subprocess.check_call(cmd, shell=True)", ["injection"]),
+    ("process_exec", "python", r"\bsubprocess\.getoutput\s*\(", "subprocess.getoutput(cmd)", ["injection"]),
+    ("process_exec", "python", r"\bsubprocess\.getstatusoutput\s*\(", "subprocess.getstatusoutput(cmd)", ["injection"]),
     # ---- process_exec : javascript / typescript (treesitter_index.py:291-292) ----
     ("process_exec", "javascript", r"\bchild_process\.exec\s*\(", "child_process.exec(cmd)", ["injection"]),
     ("process_exec", "javascript", r"\bchild_process\.spawn\s*\(", "child_process.spawn(cmd, args)", ["injection"]),
@@ -758,7 +786,7 @@ def test_sql_exec_emits_the_canonical_sqli_class() -> None:
 
 # ---------------------------------------------------------------------------
 # Meta-test: the case table above, plus this allow-list, must account for
-# every one of the 89 patterns in the three assigned families. This is what
+# every one of the 93 patterns in the three assigned families. This is what
 # stops the catalogue drifting back to silent zero recall -- add a pattern
 # to _SINK_DEFINITIONS without touching this file and the test below fails.
 # ---------------------------------------------------------------------------
@@ -826,16 +854,6 @@ _EXCLUDED: dict[tuple[str, str, str], str] = {
     ("sql_exec", "python", r"\bcursor\.execute\s*\("):
         "redundant: any cursor.execute(...) call also matches the generic \\.execute\\s*\\( pattern in the same family (verified both fire on the same line)",
 
-    # --- process_exec / java: Runtime.exec() is an instance method; it can
-    # only be called as Runtime.getRuntime().exec(...) or via a variable
-    # holding that instance. Verified: neither
-    # `Runtime.getRuntime().exec(cmd)` nor `rt.exec(cmd)` (rt obtained from
-    # Runtime.getRuntime()) produces ANY sink -- the "().'" between
-    # "Runtime." and "exec(" is not matched by \w*, and a non-"Runtime."
-    # receiver never matches the literal "Runtime." prefix at all.
-    ("process_exec", "java", r"\bRuntime\.\w*exec\s*\("):
-        "dead: Runtime.exec() is an instance method; the only valid call form is Runtime.getRuntime().exec(...), and '().' between 'Runtime.' and 'exec(' is not matched by \\w*",
-
 }
 
 
@@ -859,13 +877,13 @@ def test_case_table_covers_every_live_pattern_in_the_assigned_slice() -> None:
         f"{(tested | excluded) - all_patterns}"
     )
 
-    # Hard counts. The slice is still 89 patterns: PHP's four inclusion
+    # Hard counts. The slice is now 93 patterns: PHP's four inclusion
     # constructs moved verbatim out of `file_path` (38 -> 34) into the new
     # `file_inclusion` kind (4), so the totals only redistribute.
-    # file_path=34, file_inclusion=4, sql_exec=22, process_exec=29 -> 89.
-    assert len(all_patterns) == 89
-    assert len(tested) == 82
-    assert len(excluded) == 7
+    # file_path=34, file_inclusion=4, sql_exec=22, process_exec=33 -> 93.
+    assert len(all_patterns) == 93
+    assert len(tested) == 87
+    assert len(excluded) == 6
 
 
 def test_case_table_has_no_duplicate_rows() -> None:

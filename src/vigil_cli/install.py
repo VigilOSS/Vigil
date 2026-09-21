@@ -747,7 +747,11 @@ def install_from_source(
                 if options.force_image or not docker.image_exists(image, runner=runner):
                     # build_runtime owns the runtime-input label contract.
                     destination_boundary.require_attached()
-                    build_runtime(phase_root, runner=build_runner)
+                    build_runtime(
+                        phase_root,
+                        runner=build_runner,
+                        daemon_runner=runner,
+                    )
                     destination_boundary.require_attached()
                     image_built = True
     finally:

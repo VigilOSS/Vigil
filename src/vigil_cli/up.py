@@ -80,7 +80,7 @@ def run_up(
         "vigil:latest", _runtime_image_inputs(install_root), root=install_root, runner=runner
     ):
         print("runtime image\tbuilding")
-        build_runtime(install_root, runner=build_runner)
+        build_runtime(install_root, runner=build_runner, daemon_runner=runner)
         runtime_built = True
     else:
         print("runtime image\tcurrent")

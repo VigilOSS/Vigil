@@ -288,6 +288,23 @@ def test_mitmproxy_dockerfile_copy_sources_all_exist_in_the_staged_build_context
     )
 
 
+def test_proxy_and_runtime_images_pin_the_same_mitmproxy_version() -> None:
+    runtime_dockerfile = (
+        REPO_ROOT / "agent" / "docker" / "runtime-full" / "Dockerfile"
+    ).read_text(encoding="utf-8")
+    proxy_dockerfile = (
+        REPO_ROOT / "agent" / "docker" / "mitmproxy" / "Dockerfile"
+    ).read_text(encoding="utf-8")
+    runtime_match = re.search(
+        r"^ARG MITMPROXY_VERSION=([^\s]+)$", runtime_dockerfile, re.MULTILINE
+    )
+    proxy_match = re.search(r'mitmproxy==([^"\s]+)', proxy_dockerfile)
+
+    assert runtime_match is not None
+    assert proxy_match is not None
+    assert proxy_match.group(1) == runtime_match.group(1)
+
+
 def test_frontend_build_config_files_are_all_declared_inputs() -> None:
     """A new top-level build-config file must join the declared frontend inputs.
 

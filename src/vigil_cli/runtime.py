@@ -311,9 +311,17 @@ def missing_essential_host_tools() -> list[str]:
     return [t.binary for t, present in host_recon_tool_status() if t.essential and not present]
 
 
-def build_runtime(install_root: Path, *, variant: str = "full", dev: bool = False, runner: docker.Runner = docker.run_command_streaming) -> None:
+def build_runtime(
+    install_root: Path,
+    *,
+    variant: str = "full",
+    dev: bool = False,
+    runner: docker.Runner = docker.run_command_streaming,
+    daemon_runner: docker.Runner = docker.run_command,
+) -> None:
     if variant == "lightweight" and not dev:
         raise SystemExit("The lightweight runtime is development-only. Re-run with --dev to build it.")
+    docker.require_daemon("build the runtime image", runner=daemon_runner)
     dockerfile = install_root / "agent" / "docker" / ("runtime-lightweight" if variant == "lightweight" else "runtime-full") / "Dockerfile"
     image = "vigil-lightweight:latest" if variant == "lightweight" else "vigil:latest"
     argv = ["docker", "build", "-t", image, "-f", str(dockerfile)]

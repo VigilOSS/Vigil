@@ -1251,6 +1251,7 @@ def _start_swarm(args) -> None:
 
     client, cfg = dispatch._client_for(args)  # noqa: SLF001
     rows_emitted: list[dict[str, str | int | None]] = []
+    failed_writes = 0
     try:
         source_identity = _code_source_identity_lines(
             client,
@@ -1276,6 +1277,7 @@ def _start_swarm(args) -> None:
             try:
                 row = client.record_dispatch(payload)
             except Exception as exc:  # noqa: BLE001 - surface and continue
+                failed_writes += 1
                 print(
                     f"WARN agent start-swarm: worker {worker_idx} failed to record: {exc}",
                     file=sys.stderr,
@@ -1316,6 +1318,17 @@ def _start_swarm(args) -> None:
         if source_identity
         else "passing the row's agent_id in the Runtime Identity block"
     )
+    if failed_writes:
+        print(
+            "Next: launch only rows whose status is not failed_to_record; retry or "
+            "repair the failed durable writes before launching their specialists."
+        )
+        print(
+            f"agent start-swarm incomplete: {failed_writes} of {len(rows_emitted)} "
+            "dispatch writes failed; successful rows remain recorded.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
     print(
         "Next: fire one specialist per row using your runtime's wrapper "
         "(@<role> in Claude Code, or spawn_agent in Codex), "

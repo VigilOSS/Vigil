@@ -1656,6 +1656,77 @@ def test_claude_settings_materialize_absolute_paths_for_compaction_and_session_h
     assert "matcher" not in settings["hooks"]["SessionEnd"][0]
 
 
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is required to execute the OpenCode plugin")
+def test_opencode_standard_hook_resolves_from_bare_engagement_cwd(
+    tmp_path: Path,
+) -> None:
+    """A launcher-less OpenCode session still reaches the shared logging hook."""
+    repo_root = Path(__file__).resolve().parents[1]
+    agent_root = tmp_path / "agent"
+    engagement_dir = agent_root / "engagements" / "bare-session"
+    hooks_dir = agent_root / "scripts" / "hooks"
+    engagement_dir.mkdir(parents=True)
+    hooks_dir.mkdir(parents=True)
+    marker = tmp_path / "hook-ran"
+    hook = hooks_dir / "post-tool-log.sh"
+    hook.write_text(
+        "#!/usr/bin/env bash\n"
+        "cat >/dev/null\n"
+        f"printf logged > {shlex.quote(str(marker))}\n",
+        encoding="utf-8",
+    )
+    hook.chmod(0o755)
+    plugin = tmp_path / "standard-hooks.mjs"
+    shutil.copy2(repo_root / "agent" / ".opencode" / "plugin" / "standard-hooks.js", plugin)
+    runner = (
+        "const mod = await import(process.argv[1]); "
+        "const hooks = await mod.VigilStandardHooks(); "
+        "await hooks['tool.execute.after']({tool:'bash',args:{command:'whoami'}}, {});"
+    )
+    env = os.environ.copy()
+    env.pop("VIGIL_AGENT_ROOT", None)
+
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", runner, plugin.as_uri()],
+        cwd=engagement_dir,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert marker.read_text(encoding="utf-8") == "logged"
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is required to execute the OpenCode plugin")
+def test_opencode_standard_hook_reports_unresolvable_bare_session(
+    tmp_path: Path,
+) -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    plugin = tmp_path / "standard-hooks.mjs"
+    shutil.copy2(repo_root / "agent" / ".opencode" / "plugin" / "standard-hooks.js", plugin)
+    runner = (
+        "const mod = await import(process.argv[1]); "
+        "const hooks = await mod.VigilStandardHooks(); "
+        "await hooks['tool.execute.after']({tool:'bash',args:{command:'whoami'}}, {});"
+    )
+    env = os.environ.copy()
+    env.pop("VIGIL_AGENT_ROOT", None)
+
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", runner, plugin.as_uri()],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert "could not resolve post-tool-log.sh" in result.stderr
+
+
 def test_codex_config_materializes_absolute_paths_for_all_hooks(tmp_path: Path) -> None:
     """Codex hooks must also work when the client is opened without a launcher."""
     import tomllib

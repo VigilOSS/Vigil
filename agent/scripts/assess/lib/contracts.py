@@ -5176,6 +5176,7 @@ def _looks_like_verification_payload(payload: Any | None) -> bool:
 AGENT_VERBS: tuple[str, ...] = (
     "render-handoff",
     "start",
+    "start-swarm",
     "bind-client-handle",
     "done",
     "close",
@@ -5390,6 +5391,38 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
                 {
                     "command": "vigil assess agent render-handoff a424a88b02054913d --max-lines 60 --include-evidence",
                 },
+            ),
+        )
+    if verb == "start-swarm":
+        return CommandContract(
+            name="agent start-swarm",
+            summary=(
+                "Partition a line-delimited item file into bounded contiguous batches and "
+                "record one durable swarm dispatch per batch."
+            ),
+            schema_name="argparse batch plan + backend DispatchCreate rows (POST /dispatches)",
+            preferred_invocations=(
+                "vigil assess agent start-swarm --role <role> --task \"...\" "
+                "--workers <n> --batch-size <n> --items-file <path> "
+                "(--rate-budget \"<authored>\" | --no-target-traffic)",
+            ),
+            author_supplied_fields=(
+                "--role (specialist role shared by every worker)",
+                "--task (shared objective; each row receives its own item range)",
+                "--workers (maximum number of dispatch rows to record)",
+                "--batch-size (contiguous items assigned to each worker)",
+                "--items-file (non-empty line-delimited work list)",
+                "exactly one traffic declaration: --rate-budget <authored text> or --no-target-traffic",
+                "optional --skills / --model / --reasoning / --code-repo-id / --finding-slugs / --vuln-classes / --identity / --application-unit-id / --tier shared by every row",
+            ),
+            helper_defaults=(
+                ("dispatch_mode", "swarm"),
+                ("agent_id", "generated as <role>-swarm-<batch-id>-<worker-number>"),
+            ),
+            notes=(
+                "This command records dispatch rows; it does not launch specialists. The JSON and Markdown table preserve every attempted worker row so successful writes remain usable after a partial failure.",
+                "If any durable dispatch write fails, the command prints failed_to_record for that row, reports the swarm as incomplete, and exits non-zero. Launch only successfully recorded rows; never treat partial registration as a complete swarm.",
+                "Items beyond workers × batch-size are explicitly reported as uncovered and require a later swarm against the tail.",
             ),
         )
     if verb in {"register", "start"}:

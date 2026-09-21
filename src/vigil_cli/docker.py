@@ -204,6 +204,25 @@ def daemon_available(*, runner: Runner = run_command) -> bool:
     return daemon_status(runner=runner).responsive
 
 
+def require_daemon(operation: str, *, runner: Runner = run_command) -> None:
+    """Fail with an actionable diagnostic before an unbounded Docker operation."""
+    health = daemon_status(runner=runner)
+    if health.responsive:
+        return
+    headline = (
+        "Docker is not responding (the daemon/VM appears wedged)"
+        if health.timed_out
+        else "Docker does not appear to be running"
+    )
+    detail = f"\n  {health.detail}" if health.detail else ""
+    raise SystemExit(
+        f"{headline} — cannot {operation}.{detail}\n"
+        "  Start or restart Docker (on macOS: launch Docker Desktop, or quit and reopen it "
+        "if it is hung), then retry. Confirm with `docker info`.\n"
+        "  Set VIGIL_DOCKER_TIMEOUT (seconds) if a slow-but-healthy daemon needs longer to respond."
+    )
+
+
 def container_mounts(name: str, *, runner: Runner = run_command) -> dict[str, str]:
     template = '{{range .Mounts}}{{println .Source "->" .Destination}}{{end}}'
     result = runner(["docker", "inspect", "-f", template, name])

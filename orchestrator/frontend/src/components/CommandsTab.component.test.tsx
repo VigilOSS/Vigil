@@ -3,7 +3,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { listAssessmentCommandRuns } from "../lib/api";
+import { getAssessmentCommandRun, listAssessmentCommandRuns } from "../lib/api";
 import { CommandsTab } from "./CommandsTab";
 
 vi.mock("../lib/api", () => ({
@@ -12,8 +12,8 @@ vi.mock("../lib/api", () => ({
 }));
 
 vi.mock("./CommandsGrid", () => ({
-  default: ({ rows }: { rows: unknown[] }) => rows.length > 0
-    ? <div>command grid</div>
+  default: ({ rows, onRowOpen }: { rows: Array<{ id: number }>; onRowOpen: (id: number, invoker: HTMLElement) => void }) => rows.length > 0
+    ? <button type="button" onClick={(event) => onRowOpen(rows[0].id, event.currentTarget)}>command grid</button>
     : <span>No command runs match.</span>,
 }));
 
@@ -86,4 +86,39 @@ describe("CommandsTab live audit", () => {
 
     await waitFor(() => expect(listAssessmentCommandRuns).toHaveBeenCalledTimes(2));
   });
+
+  it.each(["pending", "warning"])(
+    "shows captured stdout with a clear %s integrity warning",
+    async (integrity) => {
+      vi.mocked(listAssessmentCommandRuns).mockResolvedValue([{
+        id: 41,
+        run_uuid: "run-41",
+        argv: ["printf", "operator-evidence"],
+        command: "printf operator-evidence",
+        tool_name: "printf",
+        timed_out: false,
+        success: true,
+        stdout_bytes: 17,
+        stderr_bytes: 0,
+        stdout_preview_chars: 17,
+        stderr_preview_chars: 0,
+        output_retention_status: "retained",
+        output_integrity_status: integrity,
+        output_integrity_warning: "Capture has not completed its integrity check.",
+      }] as never);
+      vi.mocked(getAssessmentCommandRun).mockResolvedValue({
+        id: 41,
+        stdout_preview: "operator-evidence",
+        stderr_preview: "",
+      } as never);
+
+      render(<CommandsTab engagementKey="demo" />);
+      fireEvent.click(await screen.findByRole("button", { name: "command grid" }));
+      fireEvent.click(await screen.findByRole("button", { name: /stdout/i }));
+
+      expect(await screen.findByText("operator-evidence")).toBeTruthy();
+      expect(screen.getByText(`Output integrity is ${integrity}`)).toBeTruthy();
+      expect(screen.getByText(/captured output is shown below/i)).toBeTruthy();
+    },
+  );
 });

@@ -481,6 +481,13 @@ class CommandRunRecordRequest(BaseModel):
                 f"completed_at is required when status='{self.status}'; "
                 "send the real terminal timestamp, not an empty string"
             )
+        if self.status is not None:
+            is_timeout_status = self.status == "timed_out"
+            if self.timed_out != is_timeout_status:
+                raise ValueError(
+                    "contradictory command-run status truth: status='timed_out' "
+                    "and timed_out=true must be supplied together"
+                )
         return self
 
 
@@ -528,6 +535,16 @@ class CommandRunFinalize(BaseModel):
         default=None, ge=0, le=10**12, allow_inf_nan=False
     )
     output_quiesced: bool = True
+
+    @model_validator(mode="after")
+    def _reject_contradictory_status_truth(self) -> "CommandRunFinalize":
+        is_timeout_status = self.status == "timed_out"
+        if self.timed_out != is_timeout_status:
+            raise ValueError(
+                "contradictory command-run status truth: status='timed_out' "
+                "and timed_out=true must be supplied together"
+            )
+        return self
 
 
 class ArtifactRegisterRequest(BaseModel):

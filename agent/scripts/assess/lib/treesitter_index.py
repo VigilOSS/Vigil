@@ -297,11 +297,16 @@ _SINK_DEFINITIONS: list[SinkPattern] = [
         "kind": "process_exec",
         "vuln_classes": ["injection"],
         "patterns": {
-            "java": [r"\bRuntime\.\w*exec\s*\(", r"\bProcessBuilder\s*\("],
+            "java": [r"\bRuntime\.getRuntime\s*\(\s*\)\.exec\s*\(",
+                     r"\bProcessBuilder\s*\("],
             "c": [r"\bsystem\s*\(", r"\bpopen\s*\(", r"\bexecve\s*\("],
             "cpp": [r"\bsystem\s*\(", r"\bpopen\s*\(", r"\bexecve\s*\("],
-            "python": [r"\bos\.system\s*\(", r"\bsubprocess\.run\s*\(", r"\bsubprocess\.Popen\s*\(",
-                       r"\bsubprocess\.call\s*\("],
+            "python": [r"\bos\.system\s*\(", r"\bsubprocess\.run\s*\(",
+                       r"\bsubprocess\.Popen\s*\(", r"\bsubprocess\.call\s*\(",
+                       r"\bsubprocess\.check_output\s*\(",
+                       r"\bsubprocess\.check_call\s*\(",
+                       r"\bsubprocess\.getoutput\s*\(",
+                       r"\bsubprocess\.getstatusoutput\s*\("],
             "javascript": [r"\bchild_process\.exec\s*\(", r"\bchild_process\.spawn\s*\("],
             "typescript": [r"\bchild_process\.exec\s*\(", r"\bchild_process\.spawn\s*\("],
             "go": [r"\bexec\.Command\s*\(", r"\bos\.StartProcess\s*\("],
@@ -319,7 +324,11 @@ _SINK_DEFINITIONS: list[SinkPattern] = [
         "vuln_classes": ["ssrf"],
         "patterns": {
             "java": [r"\bnew\s+URL\s*\(", r"\bHttpURLConnection\b", r"\bHttpClient\.send\s*\("],
-            "python": [r"\brequests\.get\s*\(", r"\burllib\.request\.urlopen\s*\("],
+            "python": [r"\brequests\.get\s*\(", r"\brequests\.post\s*\(",
+                       r"\brequests\.put\s*\(", r"\brequests\.patch\s*\(",
+                       r"\brequests\.delete\s*\(", r"\brequests\.head\s*\(",
+                       r"\brequests\.options\s*\(", r"\brequests\.request\s*\(",
+                       r"\burllib\.request\.urlopen\s*\("],
             "javascript": [r"\bfetch\s*\(", r"\bhttp\.request\s*\(", r"\baxios\."],
             "typescript": [r"\bfetch\s*\(", r"\bhttp\.request\s*\(", r"\baxios\."],
             "go": [r"\bhttp\.Get\s*\(", r"\bhttp\.Post\s*\(", r"\bhttp\.NewRequest\s*\(",
@@ -2054,6 +2063,60 @@ def _unscanned_scope_dimensions(
     return unscanned
 
 
+_TOP_LEVEL_DECLARATION_PREFIXES = (
+    "class ",
+    "interface ",
+    "struct ",
+    "enum ",
+    "namespace ",
+    "package ",
+)
+
+
+def _top_level_scan_lines(
+    functions: list[dict[str, Any]], language: str, source_lines: list[str]
+) -> list[tuple[int, str]]:
+    """Return executable-looking lines outside every reported callable span.
+
+    The structural readers historically scanned callable bodies only. Once a
+    file had any callable record, executable module initializers beside those
+    callables disappeared from both sink and call-site results while metadata
+    still claimed complete coverage. Preserve the callable records and scan
+    their complement as the synthetic ``<top-level>`` scope.
+    """
+    if not functions:
+        return []
+    callable_lines: set[int] = set()
+    for function in functions:
+        callable_lines.update(
+            range(max(0, int(function["line_start"]) - 1), int(function["line_end"]))
+        )
+    lines: list[tuple[int, str]] = []
+    for index, line in enumerate(source_lines):
+        stripped = line.strip()
+        if (
+            index in callable_lines
+            or not _is_scannable_source_line(line)
+            or stripped.startswith(_TOP_LEVEL_DECLARATION_PREFIXES)
+        ):
+            continue
+        if language in {"c", "cpp"} and (
+            (stripped.endswith(";") and "(" in stripped and "=" not in stripped)
+            or (
+                language == "cpp"
+                and "::" in stripped
+                and re.match(r"^[~\w:<>,*&\s]+::[~\w]+\s*\(", stripped)
+            )
+        ):
+            # Function prototypes and out-of-class method signatures are
+            # declarations, not executable top-level calls. Initializers with
+            # an assignment stay visible because C++ global construction does
+            # execute before main.
+            continue
+        lines.append((index, line))
+    return lines
+
+
 def _detect_sinks(
     functions: list[dict[str, Any]],
     language: str,
@@ -2062,11 +2125,16 @@ def _detect_sinks(
     """Detect security-sensitive API calls within function bodies using regex."""
     sinks: list[dict[str, Any]] = []
 
-    for func in functions:
-        if func.get("is_declaration", False):
-            continue
-        scan_lines = _function_scan_lines(func, source_lines)
+    scopes = [
+        (func, _function_scan_lines(func, source_lines))
+        for func in functions
+        if not func.get("is_declaration", False)
+    ]
+    top_level_lines = _top_level_scan_lines(functions, language, source_lines)
+    if top_level_lines:
+        scopes.append(({"name": "<top-level>"}, top_level_lines))
 
+    for func, scan_lines in scopes:
         for sink_def in _SINK_DEFINITIONS:
             lang_patterns = sink_def["patterns"].get(language, [])
             for pat in lang_patterns:
@@ -2117,6 +2185,7 @@ _CALL_NOISE = frozenset({
 
 def _detect_call_sites(
     functions: list[dict[str, Any]],
+    language: str,
     source_lines: list[str],
 ) -> list[dict[str, Any]]:
     """Detect function calls within each function body using regex.
@@ -2126,9 +2195,16 @@ def _detect_call_sites(
     arguments -- a lightweight signal for data-flow propagation.
     """
     calls: list[dict[str, Any]] = []
-    for func in functions:
-        if func.get("is_declaration", False):
-            continue
+    scopes = [
+        (func, _function_scan_lines(func, source_lines))
+        for func in functions
+        if not func.get("is_declaration", False)
+    ]
+    top_level_lines = _top_level_scan_lines(functions, language, source_lines)
+    if top_level_lines:
+        scopes.append(({"name": "<top-level>", "params": []}, top_level_lines))
+
+    for func, scan_lines in scopes:
         # Keyed on the line, not the function: a literal `exec("ls")` at the top
         # of a handler must not hide the `exec($tainted)` fifty lines down, which
         # is the call the taint scheduler exists to reach. One line repeating a
@@ -2143,7 +2219,7 @@ def _detect_call_sites(
                 if tok and tok not in _CALL_NOISE and len(tok) > 1:
                     param_names.add(tok)
 
-        for line_idx, line_text in _function_scan_lines(func, source_lines):
+        for line_idx, line_text in scan_lines:
             if not _is_scannable_source_line(line_text):
                 continue
             for m in _CALL_RE.finditer(line_text):
@@ -4907,7 +4983,7 @@ def index_file(
             )
         )
         sinks = _detect_sinks(functions, effective_lang, source_lines)
-        call_sites = _detect_call_sites(functions, source_lines)
+        call_sites = _detect_call_sites(functions, effective_lang, source_lines)
         unscanned = _unscanned_scope_dimensions(
             functions,
             entry_points,

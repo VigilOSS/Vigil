@@ -7,7 +7,10 @@ module only handles the free-form narrative writes + FTS-backed reads.
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from typing import Any
+
+from fastapi import HTTPException, status
 
 from ..db import get_connection
 from .events import _engagement_or_404
@@ -16,6 +19,25 @@ from .search import fts_escape
 
 def _json_text(value: Any) -> str:
     return json.dumps(value if value is not None else {}, sort_keys=True, separators=(",", ":"))
+
+
+def _normalize_timestamp(value: str, *, field_name: str, blank_now: bool = False) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        if not blank_now:
+            return ""
+        parsed = datetime.now(timezone.utc)
+    else:
+        try:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail=f"{field_name} must be an ISO-8601 timestamp",
+            ) from exc
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def _serialise(row: Any) -> dict[str, Any]:
@@ -48,8 +70,12 @@ def record_activity_entry(
     ``intel_*`` does not apply here.
     """
     engagement = _engagement_or_404(engagement_id)
+    occurred_at_value = _normalize_timestamp(
+        occurred_at, field_name="occurred_at", blank_now=True
+    )
     columns = [
         "engagement_id",
+        "occurred_at",
         "actor_kind",
         "actor_name",
         "title",
@@ -61,6 +87,7 @@ def record_activity_entry(
     ]
     values: list[Any] = [
         engagement.id,
+        occurred_at_value,
         actor_kind,
         actor_name,
         title,
@@ -70,9 +97,6 @@ def record_activity_entry(
         body_markdown,
         _json_text(metadata),
     ]
-    if occurred_at:
-        columns.insert(1, "occurred_at")
-        values.insert(1, occurred_at)
     placeholders = ", ".join(["?"] * len(columns))
     with get_connection() as connection:
         cursor = connection.execute(
@@ -115,11 +139,11 @@ def list_activity_entries(
         where.append("a.actor_kind = ?")
         params.append(actor_kind)
     if since:
-        where.append("a.occurred_at >= ?")
-        params.append(since)
+        where.append("julianday(a.occurred_at) >= julianday(?)")
+        params.append(_normalize_timestamp(since, field_name="since"))
     if until:
-        where.append("a.occurred_at <= ?")
-        params.append(until)
+        where.append("julianday(a.occurred_at) <= julianday(?)")
+        params.append(_normalize_timestamp(until, field_name="until"))
 
     count_sql = (
         f"SELECT COUNT(*) FROM activity_entries a {join_sql} WHERE {' AND '.join(where)}"
@@ -127,7 +151,7 @@ def list_activity_entries(
     list_sql = (
         f"SELECT a.* FROM activity_entries a {join_sql} "
         f"WHERE {' AND '.join(where)} "
-        "ORDER BY a.occurred_at DESC, a.id DESC LIMIT ? OFFSET ?"
+        "ORDER BY julianday(a.occurred_at) DESC, a.id DESC LIMIT ? OFFSET ?"
     )
     with get_connection() as connection:
         total_row = connection.execute(count_sql, tuple(params)).fetchone()

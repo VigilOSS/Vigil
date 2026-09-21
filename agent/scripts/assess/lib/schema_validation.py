@@ -140,6 +140,62 @@ def _validate_object_keywords(
             _validate_value(child_value, child_schema, f"{path}.{key}", errors)
 
 
+def _json_values_equal(left: Any, right: Any) -> bool:
+    """Compare JSON values with type-aware, order-independent object semantics."""
+    if (
+        isinstance(left, (int, float))
+        and not isinstance(left, bool)
+        and isinstance(right, (int, float))
+        and not isinstance(right, bool)
+    ):
+        return left == right
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, list):
+        return len(left) == len(right) and all(
+            _json_values_equal(left_item, right_item)
+            for left_item, right_item in zip(left, right)
+        )
+    if isinstance(left, dict):
+        return left.keys() == right.keys() and all(
+            _json_values_equal(left[key], right[key]) for key in left
+        )
+    return bool(left == right)
+
+
+def _validate_array_keywords(
+    value: list[Any], schema: dict[str, Any], path: str, errors: list[str]
+) -> None:
+    min_items = schema.get("minItems")
+    if min_items is not None and len(value) < int(min_items):
+        errors.append(f"{path} must contain at least {min_items} items")
+    max_items = schema.get("maxItems")
+    if max_items is not None and len(value) > int(max_items):
+        errors.append(f"{path} must contain at most {max_items} items")
+
+    item_schema = schema.get("items")
+    if isinstance(item_schema, dict):
+        for index, item in enumerate(value):
+            _validate_value(item, item_schema, f"{path}[{index}]", errors)
+
+    if schema.get("uniqueItems") is True:
+        for right_index, right in enumerate(value):
+            duplicate_index = next(
+                (
+                    left_index
+                    for left_index, left in enumerate(value[:right_index])
+                    if _json_values_equal(left, right)
+                ),
+                None,
+            )
+            if duplicate_index is not None:
+                errors.append(
+                    f"{path} must contain unique items; indexes "
+                    f"{duplicate_index} and {right_index} are equal"
+                )
+                break
+
+
 def _validate_value(value: Any, schema: dict[str, Any], path: str, errors: list[str]) -> None:
     if "const" in schema and value != schema["const"]:
         errors.append(f"{path} must equal {schema['const']!r}")
@@ -166,10 +222,7 @@ def _validate_value(value: Any, schema: dict[str, Any], path: str, errors: list[
         if not isinstance(value, list):
             errors.append(f"{path} must be an array")
             return
-        item_schema = schema.get("items")
-        if isinstance(item_schema, dict):
-            for index, item in enumerate(value):
-                _validate_value(item, item_schema, f"{path}[{index}]", errors)
+        _validate_array_keywords(value, schema, path, errors)
         _validate_applicators(value, schema, path, errors)
         return
 
@@ -210,6 +263,13 @@ def _validate_value(value: Any, schema: dict[str, Any], path: str, errors: list[
         and any(k in schema for k in ("required", "properties", "additionalProperties"))
     ):
         _validate_object_keywords(value, schema, path, errors)
+
+    if (
+        expected_type is None
+        and isinstance(value, list)
+        and any(k in schema for k in ("items", "minItems", "maxItems", "uniqueItems"))
+    ):
+        _validate_array_keywords(value, schema, path, errors)
 
     if "enum" in schema and value not in schema["enum"]:
         errors.append(f"{path} must be one of {schema['enum']}")

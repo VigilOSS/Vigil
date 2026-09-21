@@ -551,6 +551,40 @@ def test_c_and_cpp_include_survives_the_streaming_comment_rule() -> None:
         assert result["imports"], f"{language} imports must survive the comment rule"
 
 
+@pytest.mark.parametrize(
+    ("language", "source", "kind"),
+    [
+        pytest.param("python", "subprocess.check_output(cmd)\n", "process_exec", id="check-output"),
+        pytest.param("python", "subprocess.check_call(cmd)\n", "process_exec", id="check-call"),
+        pytest.param("python", "subprocess.getoutput(cmd)\n", "process_exec", id="getoutput"),
+        pytest.param(
+            "python", "subprocess.getstatusoutput(cmd)\n", "process_exec", id="getstatusoutput"
+        ),
+        pytest.param(
+            "java",
+            "Runtime.getRuntime().exec(cmd);\n",
+            "process_exec",
+            id="java-runtime-exec",
+        ),
+        *[
+            pytest.param(
+                "python",
+                f"requests.{method}(url)\n",
+                "url_fetch",
+                id=f"requests-{method}",
+            )
+            for method in ("post", "put", "patch", "delete", "head", "options", "request")
+        ],
+    ],
+)
+def test_streaming_fallback_keeps_expanded_exec_and_ssrf_sinks(
+    language: str, source: str, kind: str
+) -> None:
+    result = _stream(source, f"sink.{ 'java' if language == 'java' else 'py'}", language)
+
+    assert any(sink["kind"] == kind for sink in result["security_sinks"]), result
+
+
 def test_html_sink_family_misses_erb_style_interpolation_that_its_own_source_pattern_catches() -> None:
     """Coverage gap, not a regression target: `_STREAM_SOURCE_PATTERNS
     ["html"]["template_input"]` matches BOTH `{{...}}` and `<%...%>`, but

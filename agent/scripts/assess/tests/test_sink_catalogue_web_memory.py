@@ -153,6 +153,8 @@ func loginHandler(c *gin.Context) {
 
 AUTH_RUBY = """\
 class SessionsController < ApplicationController
+  devise :database_authenticatable, :registerable
+
   def create
     authenticate_user!
     user = User.find_by(email: params[:email])
@@ -462,6 +464,9 @@ CASES: tuple[Case, ...] = (
     Case("auth-python-login-call", "auth", "python", r"\blogin\s*\(",
          "views.py", AUTH_PYTHON,
          "login(request, user)", _AUTH_VULN_CLASSES),
+    Case("auth-python-login-required", "auth", "python", r"@login_required\b",
+         "views.py", AUTH_PYTHON,
+         "@login_required", _AUTH_VULN_CLASSES),
     Case("auth-js-req-session", "auth", "javascript", r"\breq\.session\b",
          "auth.js", AUTH_JS,
          "req.session.userId = req.user.id;", _AUTH_VULN_CLASSES),
@@ -496,6 +501,9 @@ CASES: tuple[Case, ...] = (
     Case("auth-ruby-session-subscript", "auth", "ruby", r"\bsession\s*\[",
          "auth.rb", AUTH_RUBY,
          "session[:user_id] = user.id", _AUTH_VULN_CLASSES),
+    Case("auth-ruby-devise", "auth", "ruby", r"\bdevise\b",
+         "auth.rb", AUTH_RUBY,
+         "devise :database_authenticatable", _AUTH_VULN_CLASSES),
     Case("auth-php-auth-facade", "auth", "php", r"\bAuth::\w+\s*\(",
          "auth.php", AUTH_PHP,
          "if (Auth::check()) {", _AUTH_VULN_CLASSES),
@@ -915,15 +923,7 @@ def _unmatchable_word_anchors() -> list[tuple[str, str, str]]:
     ]
 
 
-def test_ruby_devise_macro_call_sits_outside_any_method_body() -> None:
-    """`\\bdevise\\b` (treesitter_index.py:378) is case-sensitive
-    (`_detect_sinks`, treesitter_index.py ~1584), so `Devise::...` /
-    `Devise.mappings` never match. The only idiomatic lowercase occurrence is
-    the class-body macro call `devise :database_authenticatable, ...`, which
-    is a direct statement in the class body -- not inside any method -- so
-    `_detect_sinks` (which iterates `functions` only, treesitter_index.py
-    :1568/1576) never scans it.
-    """
+def test_ruby_devise_macro_is_attributed_to_top_level_scope() -> None:
     source = """\
 class User < ApplicationRecord
   devise :database_authenticatable, :registerable, :recoverable, :validatable
@@ -938,20 +938,13 @@ end
     assert result["functions"] == [
         func for func in result["functions"] if func["name"] != "devise"
     ]
-    assert _sinks_of_kind(result, "auth") == []
+    assert [
+        (sink["function"], sink["line"])
+        for sink in _sinks_of_kind(result, "auth")
+    ] == [("<top-level>", 2)]
 
 
-def test_python_decorator_login_required_is_outside_the_scanned_body() -> None:
-    """`@login_required\\b` (treesitter_index.py:374) is a decorator line.
-    `_function_scan_lines` (treesitter_index.py:1535) scans from
-    `_body_start_line` onward when it is set (treesitter_index.py:1540-1544),
-    and `_body_start_line` comes from the function's `body` child node
-    (treesitter_index.py:816-826) -- the decorator is a sibling of the
-    `function_definition` node under `decorated_definition`
-    (treesitter_index.py:1121-1125), never part of the body span. So a
-    decorator line is never scanned for sinks, no matter which decorator it
-    is.
-    """
+def test_python_login_required_decorator_is_attributed_to_top_level_scope() -> None:
     source = """\
 from flask_login import login_required
 
@@ -963,7 +956,10 @@ def dashboard():
 """
     result = _index("views_decorator_only.py", "python", source)
     assert result["analysis_mode"] == "tree_sitter"
-    assert _sinks_of_kind(result, "auth") == []
+    assert [
+        (sink["function"], sink["line"])
+        for sink in _sinks_of_kind(result, "auth")
+    ] == [("<top-level>", 5)]
 
 
 def test_python_xml_etree_fully_qualified_call_needs_an_unaliased_import() -> None:
@@ -1053,14 +1049,6 @@ _FAMILIES = frozenset(
 # rather than by a CASES row, per the brief: never assert broken/misrouted
 # output as if it were a passing, correct test.
 _EXCLUDED_PATTERNS: dict[tuple[str, str, str], str] = {
-    ("auth", "python", r"@login_required\b"):
-        "DEAD -- decorator line is never part of the scanned function body. "
-        "See test_python_decorator_login_required_is_outside_the_scanned_body.",
-    ("auth", "ruby", r"\bdevise\b"):
-        "DEAD in practice -- the only idiomatic lowercase occurrence is the "
-        "class-body `devise :database_authenticatable, ...` macro call, "
-        "outside any method; case-sensitivity also excludes `Devise::...`. "
-        "See test_ruby_devise_macro_call_sits_outside_any_method_body.",
     ("xml_parse", "python", r"\bxml\.etree\.ElementTree\.parse\s*\("):
         "DEAD in practice -- only matches the unaliased fully-qualified "
         "spelling; idiomatic code aliases the import. "
@@ -1128,5 +1116,5 @@ def test_case_table_covers_every_live_pattern_in_the_assigned_families() -> None
     # java `xml_parse` then gained `\bXMLInputFactory\b` (StAX), closing the
     # one Java XML entry point the family had no pattern for.
     assert len(catalogue) == 81
-    assert len(covered) == 69
-    assert len(excluded) == 12
+    assert len(covered) == 71
+    assert len(excluded) == 10

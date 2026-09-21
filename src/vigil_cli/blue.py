@@ -203,9 +203,18 @@ def register_blue_parser(sub: argparse._SubParsersAction) -> None:
         required=True,
     )
     verify_p.add_argument("--reason", required=True)
-    verify_p.add_argument("--kill-check", type=int, default=None)
-    verify_p.add_argument("--kill-reason", default=None)
     verify_p.add_argument("--evidence-refs", default=None, help="Comma-separated evidence ids")
+    verify_p.add_argument(
+        "--proof-receipt-id",
+        dest="proof_receipt_ids",
+        action="append",
+        type=int,
+        help="Proof-receipt id produced by the independent verifier (repeatable)",
+    )
+    verify_p.add_argument(
+        "--counter-check-file",
+        help="Completed structured false-positive counter-check JSON",
+    )
     verify_p.add_argument("--new-severity", default=None)
     verify_p.add_argument("--force", action="store_true", help="Bypass the incident-verifier dispatch gate")
     verify_p.add_argument("-k", "--engagement-key", default=None)
@@ -895,12 +904,13 @@ def _cmd_verify(args: argparse.Namespace, install_root: Path) -> None:
     if args.evidence_refs:
         evidence_refs = [piece.strip() for piece in args.evidence_refs.split(",") if piece.strip()]
 
+    proof_receipt_ids = args.proof_receipt_ids or []
+
     if blue_disp == "false_positive":
-        if not args.kill_reason or args.kill_check is None:
+        if not args.counter_check_file:
             raise SystemExit(
-                "verify --disposition false_positive requires both --kill-reason and --kill-check "
-                "(finding verify contract). Example: --kill-check 5 "
-                "--kill-reason 'documented benign pattern in tenant ref'"
+                "verify --disposition false_positive requires --counter-check-file "
+                "with a completed structured counter-check (finding verify contract)"
             )
         details = {
             "disposition": blue_disp,  # preserve blue vocab verbatim for report-writer
@@ -914,10 +924,8 @@ def _cmd_verify(args: argparse.Namespace, install_root: Path) -> None:
             cli_disp,
             "--reason",
             args.reason,
-            "--kill-reason",
-            args.kill_reason,
-            "--kill-check",
-            str(args.kill_check),
+            "--counter-check-file",
+            args.counter_check_file,
             "--details-inline",
             json.dumps(details),
         ]
@@ -937,6 +945,13 @@ def _cmd_verify(args: argparse.Namespace, install_root: Path) -> None:
             "--details-inline",
             json.dumps(details),
         ]
+        if blue_disp in {"verified", "downgraded"} and not proof_receipt_ids:
+            raise SystemExit(
+                f"verify --disposition {blue_disp} requires at least one "
+                "--proof-receipt-id (finding verify contract)"
+            )
+        for receipt_id in proof_receipt_ids:
+            assess_args.extend(["--proof-receipt-id", str(receipt_id)])
         if blue_disp == "downgraded":
             if not args.new_severity:
                 raise SystemExit("verify --disposition downgraded requires --new-severity")

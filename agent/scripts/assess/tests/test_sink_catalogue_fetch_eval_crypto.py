@@ -1,7 +1,7 @@
 """Empirical catalogue audit: `url_fetch`, `deserialization`, `eval_exec`, `crypto`.
 
 Scope is exactly these four `_SINK_DEFINITIONS` families in
-`assess.lib.treesitter_index` (80 patterns total: 22 `url_fetch`, 14
+`assess.lib.treesitter_index` (87 patterns total: 29 `url_fetch`, 14
 `deserialization`, 19 `eval_exec`, 25 `crypto`). Every pattern was probed with
 an idiomatic, current-era (2026) fixture through the real structural indexer.
 Only the patterns that actually fire on idiomatic code get a test here; the
@@ -68,8 +68,8 @@ EXPECTED_VULN_CLASSES = {
 # tree-sitter has_error demotion.
 # ---------------------------------------------------------------------------
 
-# ---- url_fetch (22 patterns; LIVE: java x2, python x2, js x3, ts x3, go x4,
-#      ruby x3, php x3 = 20) -------------------------------------------------
+# ---- url_fetch (29 patterns; LIVE: java x2, python x9, js x3, ts x3, go x4,
+#      ruby x3, php x3 = 27) -------------------------------------------------
 
 _JAVA_URL_FETCH = """
 import java.net.URL;
@@ -91,6 +91,27 @@ import urllib.request
 
 def fetch_a(url):
     return requests.get(url, timeout=5).json()
+
+def fetch_post(url):
+    return requests.post(url, json={"probe": True})
+
+def fetch_put(url):
+    return requests.put(url, data=b"probe")
+
+def fetch_patch(url):
+    return requests.patch(url, json={"enabled": True})
+
+def fetch_delete(url):
+    return requests.delete(url)
+
+def fetch_head(url):
+    return requests.head(url)
+
+def fetch_options(url):
+    return requests.options(url)
+
+def fetch_request(url):
+    return requests.request("TRACE", url)
 
 def fetch_b(url):
     with urllib.request.urlopen(url) as resp:
@@ -494,15 +515,22 @@ FIXTURES: dict[tuple[str, str], tuple[str, str]] = {
 
 # ---------------------------------------------------------------------------
 # Case table: (family, language, pattern verbatim, needle that locates the
-# line in its fixture). One row per LIVE pattern -- 62 total.
+# line in its fixture). One row per LIVE pattern -- 69 total.
 # ---------------------------------------------------------------------------
 
 CASES: list[tuple[str, str, str, str]] = [
     # -- url_fetch: java (2) --
     ("url_fetch", "java", r"\bnew\s+URL\s*\(", "URL url = new URL(target);"),
     ("url_fetch", "java", r"\bHttpURLConnection\b", "HttpURLConnection conn ="),
-    # -- url_fetch: python (2) --
+    # -- url_fetch: python (9) --
     ("url_fetch", "python", r"\brequests\.get\s*\(", "requests.get(url, timeout=5)"),
+    ("url_fetch", "python", r"\brequests\.post\s*\(", "requests.post(url, json="),
+    ("url_fetch", "python", r"\brequests\.put\s*\(", "requests.put(url, data="),
+    ("url_fetch", "python", r"\brequests\.patch\s*\(", "requests.patch(url, json="),
+    ("url_fetch", "python", r"\brequests\.delete\s*\(", "requests.delete(url)"),
+    ("url_fetch", "python", r"\brequests\.head\s*\(", "requests.head(url)"),
+    ("url_fetch", "python", r"\brequests\.options\s*\(", "requests.options(url)"),
+    ("url_fetch", "python", r"\brequests\.request\s*\(", 'requests.request("TRACE", url)'),
     ("url_fetch", "python", r"\burllib\.request\.urlopen\s*\(", "urllib.request.urlopen(url)"),
     # -- url_fetch: javascript (3) --
     ("url_fetch", "javascript", r"\bfetch\s*\(", "const res = await fetch(url);"),
@@ -799,7 +827,7 @@ def test_case_table_covers_every_live_pattern_and_no_dead_ones() -> None:
         f"{(tested | excluded) - catalogue}"
     )
 
-    # Hard counts from the brief: 22 + 14 + 19 + 25 = 80.
-    assert len(catalogue) == 80
-    assert len(tested) == 62
+    # Seven additional requests methods: 29 + 14 + 19 + 25 = 87.
+    assert len(catalogue) == 87
+    assert len(tested) == 69
     assert len(excluded) == 18

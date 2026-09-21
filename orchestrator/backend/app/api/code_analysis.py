@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import functools
+import logging
 import os
 from typing import Annotated, Any, Literal, TypeAlias
 
@@ -12,7 +13,10 @@ from ..services import activity as activity_service
 from ..services import code_analysis
 from ..services import code_fuzz_completion
 from ..services.engagements import get_engagement_or_404
+from ..services.events import create_event_for_engagement
 from ..ws import broadcaster
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(
     prefix="/engagements/{engagement_key}/assessment/code",
@@ -911,8 +915,23 @@ def _audit_code_mutation(
             result=result,
             metadata=metadata or {},
         )
-    except Exception:
-        return
+    except Exception as exc:  # noqa: BLE001 - mutation already committed
+        logger.exception("code-analysis activity audit failed after %s", title)
+        summary = f"Activity audit failed after committed mutation: {type(exc).__name__}: {exc}"
+        try:
+            create_event_for_engagement(
+                engagement_id,
+                event_type="code_analysis.audit_failed",
+                phase="code-analysis",
+                task_name=title,
+                agent_name=actor_name or "vigil-assess",
+                summary=summary[:512],
+            )
+        except Exception:  # noqa: BLE001 - logging is the last truthful surface
+            logger.exception(
+                "failed to persist code-analysis activity-audit failure after %s",
+                title,
+            )
 
 
 # ---------------------------------------------------------------------------

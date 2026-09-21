@@ -176,6 +176,55 @@ def test_one_shot_command_run_without_status_infers_terminal_state(
     assert second_row.get("dedup_predecessor_id") is None
 
 
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"status": "queued", "timed_out": True},
+        {"status": "running", "timed_out": True},
+        {"status": "completed", "timed_out": True},
+        {"status": "failed", "timed_out": True},
+        {"status": "timed_out", "timed_out": False},
+    ],
+)
+def test_one_shot_command_run_rejects_contradictory_terminal_truth(
+    client, isolate_settings, overrides
+):
+    _write_engagement(isolate_settings["engagements_dir"])
+
+    response = _post(client, _base_payload(**overrides))
+
+    assert response.status_code == 422, response.text
+    assert "contradict" in response.text.lower()
+
+
+@pytest.mark.parametrize(
+    "finalize",
+    [
+        {"status": "running", "return_code": None, "timed_out": True},
+        {"status": "completed", "return_code": 0, "timed_out": True},
+        {"status": "failed", "return_code": 9, "timed_out": True},
+        {"status": "timed_out", "return_code": None, "timed_out": False},
+    ],
+)
+def test_finalize_command_run_rejects_contradictory_terminal_truth(
+    client, isolate_settings, finalize
+):
+    _write_engagement(isolate_settings["engagements_dir"])
+    created = _post(client, _base_payload(status="running")).json()
+
+    response = client.patch(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/{created['id']}",
+        json={
+            **finalize,
+            "ended_at": "2026-04-17T12:00:05Z",
+            "duration_ms": 5000,
+        },
+    )
+
+    assert response.status_code == 422, response.text
+    assert "contradict" in response.text.lower()
+
+
 def test_foreign_lane_recency_aggregate_counts_target_facing_history(
     client, isolate_settings
 ):

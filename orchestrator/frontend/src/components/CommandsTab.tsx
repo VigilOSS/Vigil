@@ -1800,11 +1800,30 @@ function StreamPane({
       <div className="section">
         <div className="callout" style={{ borderLeft: "4px solid var(--chip-red)" }}>
           <p className="section-title">Output integrity is {integrity}</p>
-          <p>{row.output_integrity_warning || "Vigil has not proved that this artifact stayed stable; do not use it as evidence."}</p>
+          <p>
+            Captured output is shown below, but it has not passed integrity verification.
+            {" "}{row.output_integrity_warning || "Vigil has not proved that this artifact stayed stable; treat it as untrusted evidence."}
+          </p>
         </div>
+        {detailLoading && !detail ? (
+          <div aria-busy="true" aria-label={`Loading ${kind}`} style={{ display: "grid", gap: 6, marginTop: 10 }}>
+            {Array.from({ length: 4 }).map((_, i) => (
+              <Skeleton key={i} width={i === 3 ? "55%" : "90%"} height={9} />
+            ))}
+          </div>
+        ) : detail ? (
+          <pre className="pre" style={{ marginTop: 10 }}>{preview || "(empty preview)"}</pre>
+        ) : previewChars > 0 ? (
+          <p className="empty" style={{ marginTop: 10, textAlign: "left" }}>
+            A preview is recorded but has not loaded yet.
+          </p>
+        ) : null}
         <div className="kv-grid">
+          <KV k="Bytes captured" v={bytes} />
+          <KV k="Preview chars" v={previewChars} />
           <KV k="Retention" v={retention || "unknown"} />
           <KV k="Integrity" v={integrity} />
+          <KV k="SHA-256" v={sha} mono onCopy={() => copyToClipboard(sha)} />
         </div>
       </div>
     );

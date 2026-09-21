@@ -804,3 +804,21 @@ def test_post_tool_log_stays_silent_when_the_backend_write_fails(
     assert result.stdout == ""
     assert result.stderr == ""
     assert len(_captured(capture)) == 1
+
+
+def test_post_tool_log_releases_failed_dedup_claim_for_retry(tmp_path: Path) -> None:
+    """A transient backend failure must not make the event permanently invisible."""
+    engagement_dir = _engagement(tmp_path)
+    capture = tmp_path / "capture.jsonl"
+    _fake_vigil(tmp_path / "bin", capture, exit_code=1)
+    env = {"PATH": f"{tmp_path / 'bin'}:{os.environ.get('PATH', '')}"}
+    payload = {**_BASH_PAYLOAD, "cwd": str(engagement_dir)}
+
+    first = _run_hook(POST_TOOL_LOG, payload, cwd=engagement_dir, env=env)
+    second = _run_hook(POST_TOOL_LOG, payload, cwd=engagement_dir, env=env)
+
+    assert first.returncode == second.returncode == 0
+    assert first.stdout == first.stderr == second.stdout == second.stderr == ""
+    assert len(_captured(capture)) == 2
+    seen = engagement_dir / ".hook_seen_tool_uses"
+    assert not seen.exists() or "tu-1" not in seen.read_text(encoding="utf-8").splitlines()

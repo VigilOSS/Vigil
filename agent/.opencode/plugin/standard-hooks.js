@@ -24,14 +24,29 @@
 // here; network isolation still constrains all target traffic. See
 // docs/deepseek-openrouter.md.
 import { execFileSync } from "node:child_process"
+import { existsSync } from "node:fs"
+import { resolve } from "node:path"
 
 // Resolve a hook script under the agent root. start_opencode.sh exports
 // $VIGIL_AGENT_ROOT; without it, fall back to a relative path so a
 // launcher-less run still finds the hooks when cwd is under the agent root.
-// Returns "" when the root is unknown, making the hook a no-op.
+// A copied project plugin runs with the engagement as cwd, normally
+// <agent-root>/engagements/<key>, so ../../scripts/hooks is the standard bare
+// session fallback. The other candidates cover running from agent/ or the repo
+// root. If none exists, say so: silently dropping the activity trail makes the
+// operator believe evidence was recorded when it was not.
 function resolveHook(name) {
   const root = process.env.VIGIL_AGENT_ROOT
   if (root) return root.replace(/\/+$/, "") + "/scripts/hooks/" + name
+  const candidates = [
+    resolve(process.cwd(), "../../scripts/hooks", name),
+    resolve(process.cwd(), "scripts/hooks", name),
+    resolve(process.cwd(), "agent/scripts/hooks", name),
+  ]
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) return candidate
+  }
+  console.error(`[vigil] OpenCode could not resolve ${name} from cwd ${process.cwd()}`)
   return ""
 }
 

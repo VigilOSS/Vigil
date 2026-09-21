@@ -157,6 +157,11 @@ def record_dispatch(
     if not (agent_id or "").strip():
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="agent_id is required")
     dispatched_value = dispatched_at or _common._utcnow_iso_dispatch()
+    completed_value = (
+        _common._utcnow_iso_dispatch()
+        if status_value in _TERMINAL_DISPATCH_STATUSES
+        else None
+    )
     finding_slugs = _require_canonical_finding_slugs(finding_slugs)
     variant_parent_slugs: list[str] | None = None
     if agent_role == VARIANT_DISPATCH_ROLE:
@@ -239,10 +244,10 @@ def record_dispatch(
                 operator_instruction_path, operator_instruction_sha256,
                 specialist_instruction_path, specialist_instruction_sha256,
                 instruction_identity_status, instructions_stale,
-                dispatched_at, status,
+                dispatched_at, completed_at, status,
                 dispatch_mode, finding_slugs_json, skills, tier,
                 vuln_classes, identity
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 engagement.id,
@@ -269,6 +274,7 @@ def record_dispatch(
                 instruction_identity_status,
                 instructions_stale,
                 dispatched_value,
+                completed_value,
                 status_value,
                 dispatch_mode,
                 findings_json,
@@ -328,14 +334,36 @@ def update_dispatch(
                     "scope and cannot be updated; record produced findings on the handoff"
                 ),
             )
+        effective_status = status_value or str(existing["status"] or "")
+        if effective_status in _TERMINAL_DISPATCH_STATUSES:
+            if completed_at is not None and not str(completed_at).strip():
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="terminal dispatch completed_at must not be blank",
+                )
+            resolved_completed_at = (
+                str(completed_at).strip()
+                if completed_at is not None
+                else str(existing["completed_at"] or "").strip()
+                or _common._utcnow_iso_dispatch()
+            )
+        else:
+            if completed_at is not None and str(completed_at).strip():
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="in-progress dispatch must not have completed_at",
+                )
+            resolved_completed_at = None
         sets: list[str] = []
         values: list[Any] = []
         if status_value is not None:
             sets.append("status = ?")
             values.append(status_value)
-        if completed_at is not None:
+        if effective_status in _TERMINAL_DISPATCH_STATUSES and (
+            completed_at is not None or status_value is not None
+        ):
             sets.append("completed_at = ?")
-            values.append(completed_at)
+            values.append(resolved_completed_at)
         if finding_slugs is not None:
             sets.append("finding_slugs_json = ?")
             values.append(json.dumps(list(finding_slugs)))
