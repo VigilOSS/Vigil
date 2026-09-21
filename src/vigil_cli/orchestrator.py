@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import signal
 import socket
 import subprocess
@@ -236,9 +237,29 @@ def _already_running_message(pid_file: Path, pid: str, host: str, port: int) -> 
     )
 
 
+def _npm_ci(project_dir: Path) -> None:
+    """`npm ci` in ``project_dir``, retrying once against a stale tree.
+
+    `npm ci` wipes `node_modules` before installing, and on macOS that rmdir
+    fails with ENOTEMPTY when a previous interrupted install left the
+    directory in a half-removed state — the failure then repeats on every
+    subsequent run because npm hits the same tree. Removing the tree
+    ourselves and retrying clears it; a second failure is a real one.
+    """
+    first = subprocess.run(["npm", "ci"], cwd=project_dir)
+    if first.returncode == 0:
+        return
+    node_modules = project_dir / "node_modules"
+    if not node_modules.exists():
+        raise subprocess.CalledProcessError(first.returncode, first.args)
+    print(f"npm ci failed; clearing {node_modules} and retrying")
+    shutil.rmtree(node_modules, ignore_errors=True)
+    subprocess.run(["npm", "ci"], cwd=project_dir, check=True)
+
+
 def _build_frontend(install_root: Path) -> None:
     frontend_dir = install_root / "orchestrator" / "frontend"
-    subprocess.run(["npm", "ci"], cwd=frontend_dir, check=True)
+    _npm_ci(frontend_dir)
     subprocess.run(["npm", "run", "build"], cwd=frontend_dir, check=True)
     # Stamp AFTER the build: vite empties `dist/` on the way in, so a stamp
     # written first would not survive. An unstamped build can never be proven
@@ -273,7 +294,7 @@ def build_frontend(install_root: Path, *, force: bool = False) -> None:
 
 def _build_report(install_root: Path) -> None:
     report_dir = install_root / "orchestrator" / "report"
-    subprocess.run(["npm", "ci"], cwd=report_dir, check=True)
+    _npm_ci(report_dir)
     subprocess.run(["npm", "run", "build"], cwd=report_dir, check=True)
     restart_manifest.record_report_build(install_root)
 
