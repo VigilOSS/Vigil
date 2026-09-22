@@ -182,6 +182,7 @@ export type FindingDetails = {
 
 export type AssessmentFindingDetail = AssessmentFinding & {
   id: number;
+  row_version: number;
   evidence_ref: string;
   evidence_artifact_id?: number | null;
   notes: string;

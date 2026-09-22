@@ -183,6 +183,56 @@ describe("SubmissionsTab", () => {
     expect(screen.queryByText("Stale submission finding")).toBeNull();
   });
 
+  it("keeps the reviewed preview stable during live updates until the operator refreshes it", async () => {
+    const refreshedListing = {
+      ...listing,
+      findings: [{ ...listing.findings[0], row_version: 10 }],
+    };
+    const refreshedDetail = {
+      ...detail,
+      finding: { ...detail.finding, row_version: 10 },
+      workspace: {
+        ...detail.workspace,
+        markdown: "# Missing authorization\n\nNew reviewed body.",
+      },
+    };
+    let resolveRefresh: (value: typeof refreshedDetail) => void = () => undefined;
+    const refreshRequest = new Promise<typeof refreshedDetail>((resolve) => {
+      resolveRefresh = resolve;
+    });
+    let resolveListingRefresh: (value: typeof refreshedListing) => void = () => undefined;
+    const listingRefreshRequest = new Promise<typeof refreshedListing>((resolve) => {
+      resolveListingRefresh = resolve;
+    });
+    vi.mocked(listSubmissions)
+      .mockResolvedValueOnce(listing)
+      .mockReturnValueOnce(listingRefreshRequest);
+    vi.mocked(getSubmissionDetail)
+      .mockResolvedValueOnce(detail)
+      .mockReturnValueOnce(refreshRequest);
+
+    const { rerender } = render(
+      <SubmissionsTab engagementKey="engagement one" refreshVersion={0} />,
+    );
+    expect(await screen.findByText("Reviewed body.")).toBeTruthy();
+
+    rerender(<SubmissionsTab engagementKey="engagement one" refreshVersion={1} />);
+    expect(screen.getByText("Reviewed body.")).toBeTruthy();
+    expect(screen.queryByText("Loading submission workspace…")).toBeNull();
+    await act(async () => resolveListingRefresh(refreshedListing));
+    await waitFor(() => expect(listSubmissions).toHaveBeenCalledTimes(2));
+
+    expect(getSubmissionDetail).toHaveBeenCalledTimes(1);
+    expect(screen.getByText("Reviewed body.")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Refresh preview" }));
+
+    expect(screen.getByText("Reviewed body.")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Refreshing preview…" })).toBeTruthy();
+    await act(async () => resolveRefresh(refreshedDetail));
+    expect(await screen.findByText("New reviewed body.")).toBeTruthy();
+    expect(getSubmissionDetail).toHaveBeenCalledTimes(2);
+  });
+
   it("preserves a selected later-page finding across first-page refreshes", async () => {
     const secondFinding = {
       ...listing.findings[0],

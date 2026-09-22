@@ -121,6 +121,8 @@ export function SubmissionsTab({ engagementKey, refreshVersion = 0 }: Submission
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const listingRequestGeneration = useRef(0);
+  const loadedListingEngagement = useRef("");
+  const detailCache = useRef(new Map<string, SubmissionDetail>());
   const selectedFindingRef = useRef<{
     engagementKey: string;
     finding: SubmissionFindingSummary;
@@ -161,7 +163,9 @@ export function SubmissionsTab({ engagementKey, refreshVersion = 0 }: Submission
     }
     setDetailLoading(true);
     try {
-      setDetail(await getSubmissionDetail(engagementKey, selectedSlug));
+      const next = await getSubmissionDetail(engagementKey, selectedSlug);
+      detailCache.current.set(`${engagementKey}\n${selectedSlug}`, next);
+      setDetail(next);
     } finally {
       setDetailLoading(false);
     }
@@ -169,14 +173,18 @@ export function SubmissionsTab({ engagementKey, refreshVersion = 0 }: Submission
 
   useEffect(() => {
     let cancelled = false;
-    setLoading(true);
+    const initialLoad = loadedListingEngagement.current !== engagementKey;
+    if (initialLoad) setLoading(true);
     setError("");
     void refreshListing()
+      .then(() => {
+        if (!cancelled) loadedListingEngagement.current = engagementKey;
+      })
       .catch((cause: unknown) => {
         if (!cancelled) setError(cause instanceof Error ? cause.message : "Submission data unavailable");
       })
       .finally(() => {
-        if (!cancelled) setLoading(false);
+        if (!cancelled && initialLoad) setLoading(false);
       });
     return () => {
       cancelled = true;
@@ -195,11 +203,15 @@ export function SubmissionsTab({ engagementKey, refreshVersion = 0 }: Submission
         cancelled = true;
       };
     }
-    setDetail(null);
+    const cacheKey = `${engagementKey}\n${selectedSlug}`;
+    setDetail(detailCache.current.get(cacheKey) ?? null);
     setDetailLoading(true);
     void getSubmissionDetail(engagementKey, selectedSlug)
       .then((next) => {
-        if (!cancelled) setDetail(next);
+        if (!cancelled) {
+          detailCache.current.set(cacheKey, next);
+          setDetail(next);
+        }
       })
       .catch((cause: unknown) => {
         if (!cancelled) setError(cause instanceof Error ? cause.message : "Submission detail unavailable");
@@ -210,7 +222,7 @@ export function SubmissionsTab({ engagementKey, refreshVersion = 0 }: Submission
     return () => {
       cancelled = true;
     };
-  }, [engagementKey, selectedSlug, refreshVersion]);
+  }, [engagementKey, selectedSlug]);
 
   const selectedFinding = useMemo(
     () => listing?.findings.find((finding) => finding.slug === selectedSlug) ?? null,
@@ -245,6 +257,12 @@ export function SubmissionsTab({ engagementKey, refreshVersion = 0 }: Submission
     && detail?.workspace.present
     && latestVersion.submission_sha256 === detail.workspace.submission_sha256,
   );
+  const previewOutdated = Boolean(
+    selectedFinding
+    && detail
+    && selectedFinding.id === detail.finding.id
+    && selectedFinding.row_version !== detail.finding.row_version,
+  );
   const selectedCount = selectedAttachments.size;
   const detailedFailedVersionIds = new Set(
     detail?.pending_versions
@@ -263,6 +281,13 @@ export function SubmissionsTab({ engagementKey, refreshVersion = 0 }: Submission
       if (next.has(artifactId)) next.delete(artifactId);
       else next.add(artifactId);
       return next;
+    });
+  };
+
+  const handleRefreshPreview = () => {
+    setError("");
+    void refreshDetail().catch((cause: unknown) => {
+      setError(cause instanceof Error ? cause.message : "Submission detail unavailable");
     });
   };
 
@@ -681,6 +706,14 @@ export function SubmissionsTab({ engagementKey, refreshVersion = 0 }: Submission
 
         {error && <div className="submission-message is-error" role="alert">{error}</div>}
         {notice && <div className="submission-message is-notice" role="status">{notice}</div>}
+        {previewOutdated && (
+          <div className="submission-message is-update" role="status">
+            <span>The finding changed while you were reviewing this preview.</span>
+            <button type="button" onClick={handleRefreshPreview} disabled={detailLoading}>
+              {detailLoading ? "Refreshing preview…" : "Refresh preview"}
+            </button>
+          </div>
+        )}
         {recoveryIssues && showRecoveryIssues && (
           <div className="submission-message is-error submission-recovery-issues" role="alert">
             <strong>Recovery incomplete.</strong>
@@ -700,7 +733,7 @@ export function SubmissionsTab({ engagementKey, refreshVersion = 0 }: Submission
           </div>
         )}
 
-        {detailLoading ? (
+        {detailLoading && !detail ? (
           <div className="submission-document panel" aria-busy="true">Loading reviewed document…</div>
         ) : !detail ? (
           <div className="submission-document panel">Submission detail unavailable.</div>
