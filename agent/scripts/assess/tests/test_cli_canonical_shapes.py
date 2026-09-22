@@ -491,6 +491,62 @@ def test_agent_start_parses_explicit_budget_and_prompt_emission() -> None:
     assert args.emit_prompt is True
 
 
+def test_agent_continue_parses_a_linked_replacement_dispatch() -> None:
+    args = _agent_parser().parse_args(
+        ["agent", "continue", "analyst-previous", "--task", "Finish authorization validation"]
+    )
+
+    assert args.action == "continue"
+    assert args.extra == ["analyst-previous"]
+    assert args.task == "Finish authorization validation"
+
+
+def test_agent_continue_replays_saved_packet_with_a_bounded_resume_delta(
+    monkeypatch, capsys
+) -> None:
+    class _ContinuationClient(_DispatchClient):
+        def get_dispatch(self, agent_id: str) -> dict:
+            assert agent_id == "analyst-previous"
+            return {
+                "id": 41,
+                "agent_id": agent_id,
+                "agent_role": "vulnerability-analyst",
+                "status": "failed",
+                "skills": ["idor-testing"],
+            }
+
+        def get(self, endpoint: str) -> dict:
+            if endpoint == "dispatches/analyst-previous/prompt-packet":
+                return {
+                    "schema": "dispatch-prompt/v1",
+                    "context": {"credential_id": "token-123"},
+                    "rendered_prompt": "original prompt",
+                }
+            assert endpoint == "resume-brief?agent_id=analyst-previous"
+            return {"recommended_next_actions": ["check the remaining route"]}
+
+        def record_dispatch(self, payload: dict) -> dict:
+            assert payload["continued_from_dispatch_id"] == 41
+            assert payload["prompt_packet"]["context"] == {"credential_id": "token-123"}
+            assert "check the remaining route" in payload["prompt_packet"]["rendered_prompt"]
+            assert "analyst-next" in payload["prompt_packet"]["rendered_prompt"]
+            assert "Finish validation" in payload["prompt_packet"]["rendered_prompt"]
+            return {"id": 42, **payload}
+
+    client = _ContinuationClient()
+    monkeypatch.setattr(
+        agent.dispatch,
+        "_client_for",
+        lambda _args: (client, SimpleNamespace()),
+    )
+
+    agent._continue(
+        SimpleNamespace(extra=["analyst-previous"], task="Finish validation", agent_id="analyst-next")
+    )
+
+    assert '"continued_from": "analyst-previous"' in capsys.readouterr().out
+
+
 def test_agent_start_dry_run_validates_without_persisting(
     monkeypatch, capsys, tmp_path
 ) -> None:
@@ -609,6 +665,10 @@ def test_agent_start_from_json_preserves_identity_and_emits_complete_context(
     agent._start(args)
 
     assert client.recorded[0]["agent_id"] == "json-investigator-1"
+    packet = client.recorded[0]["prompt_packet"]
+    assert packet["schema"] == "dispatch-prompt/v1"
+    assert packet["context"]["target"] == prompt_context["target"]
+    assert "authorized_phase: investigate" in packet["rendered_prompt"]
     output = capsys.readouterr().out
     assert '"agent_id": "json-investigator-1"' in output
     assert "authorized_phase: investigate" in output

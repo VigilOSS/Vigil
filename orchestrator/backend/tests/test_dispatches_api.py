@@ -597,3 +597,55 @@ def test_dispatch_structured_depth_metadata_optional(client, isolate_settings) -
     assert row["application_unit_id"] is None
     assert row["vuln_classes"] is None
     assert row["identity"] is None
+
+
+def test_dispatch_persists_exact_emitted_prompt_packet(client, isolate_settings) -> None:
+    """A continuation must recover the exact prompt a dispatched specialist saw."""
+    _seed(client, isolate_settings)
+    rendered = "## Dispatch Context\ncredential_id: token-123\n"
+    response = client.post(
+        f"{BASE}/dispatches",
+        json={
+            "agent_id": "AG-PACKET-1",
+            "agent_role": "vulnerability-analyst",
+            "task": "Validate the export route",
+            "prompt_packet": {
+                "schema": "dispatch-prompt/v1",
+                "context": {"target": "https://example.com/export", "credential_id": "token-123"},
+                "rendered_prompt": rendered,
+            },
+        },
+    )
+    assert response.status_code == 201, response.text
+    created = response.json()
+    assert created["prompt_packet"]["sha256"]
+    assert created["prompt_packet"]["rendered_prompt"] == rendered
+
+    packet = client.get(f"{BASE}/dispatches/AG-PACKET-1/prompt-packet")
+    assert packet.status_code == 200, packet.text
+    assert packet.json()["context"]["credential_id"] == "token-123"
+
+
+def test_dispatch_rejects_continuation_parent_from_another_engagement(
+    client, isolate_settings
+) -> None:
+    _seed(client, isolate_settings)
+    other_key = "2026-04-28-120001-dispatches-other"
+    _write_engagement(isolate_settings["engagements_dir"], key=other_key)
+    assert client.get(f"/engagements/{other_key}").status_code == 200
+    other = client.post(
+        f"/engagements/{other_key}/assessment/dispatches",
+        json={"agent_id": "OTHER-PARENT", "agent_role": "vulnerability-analyst"},
+    )
+    assert other.status_code == 201, other.text
+
+    response = client.post(
+        f"{BASE}/dispatches",
+        json={
+            "agent_id": "AG-FOREIGN-PARENT",
+            "agent_role": "vulnerability-analyst",
+            "continued_from_dispatch_id": other.json()["id"],
+        },
+    )
+    assert response.status_code == 400, response.text
+    assert "this engagement" in response.json()["detail"]

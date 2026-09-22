@@ -4400,6 +4400,14 @@ _LAUNCHED_CLIENT = Literal["claude", "codex", "goose", "kimi", "opencode"]
 _DISPATCH_CLIENT = Literal["claude", "codex", "goose", "kimi", "opencode", "unknown"]
 
 
+class DispatchPromptPacket(BaseModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    schema_version: Literal["dispatch-prompt/v1"] = Field(alias="schema")
+    context: dict[str, Any]
+    rendered_prompt: str = Field(min_length=1)
+
+
 class DispatchCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -4441,6 +4449,8 @@ class DispatchCreate(BaseModel):
     tier: Literal["L1", "L2", "L3", "L4"] | None = None
     vuln_classes: str | None = Field(default=None, max_length=2048)
     identity: str | None = Field(default=None, max_length=128)
+    prompt_packet: DispatchPromptPacket | None = None
+    continued_from_dispatch_id: int | None = Field(default=None, gt=0)
 
     @model_validator(mode="after")
     def _validate_instruction_identity(self) -> DispatchCreate:
@@ -4850,6 +4860,8 @@ async def create_dispatch(engagement_key: str, request: DispatchCreate) -> dict[
             tier=request.tier,
             vuln_classes=request.vuln_classes,
             identity=request.identity,
+            prompt_packet=(request.prompt_packet.model_dump() if request.prompt_packet else None),
+            continued_from_dispatch_id=request.continued_from_dispatch_id,
         )
     )
     await anyio.to_thread.run_sync(
@@ -4893,6 +4905,12 @@ def get_dispatches(
 def get_dispatch_endpoint(engagement_key: str, agent_id: str) -> dict[str, Any]:
     engagement = get_engagement_or_404(engagement_key)
     return state_manager.get_dispatch(engagement.id, agent_id)
+
+
+@router.get("/dispatches/{agent_id}/prompt-packet")
+def get_dispatch_prompt_packet_endpoint(engagement_key: str, agent_id: str) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    return state_manager.get_dispatch_prompt_packet(engagement.id, agent_id)
 
 
 @router.patch("/dispatches/{agent_id}")

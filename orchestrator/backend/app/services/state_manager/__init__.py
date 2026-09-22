@@ -101,6 +101,7 @@ from .run_accounting import (
     update_run_obligation,
 )
 from .dispatches import (
+    get_dispatch_prompt_packet,
     record_dispatch,
     update_dispatch,
     get_dispatch,
@@ -342,6 +343,7 @@ __all__ = [
     "compare_assessment_runs",
     "record_assessment_run_comparison",
     "record_dispatch",
+    "get_dispatch_prompt_packet",
     "update_dispatch",
     "get_dispatch",
     "list_dispatches",

@@ -5176,6 +5176,7 @@ def _looks_like_verification_payload(payload: Any | None) -> bool:
 # because they do not mutate state and have nothing to validate.
 AGENT_VERBS: tuple[str, ...] = (
     "render-handoff",
+    "continue",
     "start",
     "start-swarm",
     "bind-client-handle",
@@ -5205,6 +5206,7 @@ def _dispatch_root_contract() -> CommandContract:
             "vigil assess agent reconcile-stale --dry-run",
             "vigil assess agent list [--filter-role <role>] [--status <status>]",
             "vigil assess agent render-handoff <agent-id>",
+            "vigil assess agent continue <prior-agent-id> --task \"...\"",
         ),
         author_supplied_fields=(
             "<action> (e.g. start, done, handoff, render-handoff, decision, ...)",
@@ -5392,6 +5394,20 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
                 {
                     "command": "vigil assess agent render-handoff a424a88b02054913d --max-lines 60 --include-evidence",
                 },
+            ),
+        )
+    if verb == "continue":
+        return CommandContract(
+            name="agent continue",
+            summary="Create a replacement dispatch from an exact saved prompt packet and a bounded live-state delta.",
+            schema_name="reads prior dispatch + prompt packet; writes one linked DispatchCreate row",
+            preferred_invocations=(
+                "vigil assess agent continue <prior-agent-id> --task \"Finish the unresolved authorization pass\"",
+            ),
+            author_supplied_fields=("<prior-agent-id>", "--task", "--agent-id (optional replacement identity)"),
+            notes=(
+                "The predecessor stays immutable history. Continue refuses a fresh in-progress predecessor so it cannot silently duplicate a live specialist; use agent start --allow-duplicate for intentional parallel work.",
+                "A saved packet exists only when the original agent start used --emit-prompt. The replacement prompt preserves the original packet verbatim and directs the specialist to hydrate current state through resume-brief before target-facing work.",
             ),
         )
     if verb == "start-swarm":

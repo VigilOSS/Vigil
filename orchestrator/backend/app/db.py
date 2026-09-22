@@ -5060,6 +5060,7 @@ def _create_dispatch_tables(connection: sqlite3.Connection) -> None:
                 tier TEXT,
                 vuln_classes TEXT,
                 identity TEXT,
+                continued_from_dispatch_id INTEGER REFERENCES assessment_dispatches(id) ON DELETE SET NULL,
                 UNIQUE(engagement_id, agent_id)
             )
             """
@@ -5125,6 +5126,11 @@ def _create_dispatch_tables(connection: sqlite3.Connection) -> None:
             connection.execute(
                 f"ALTER TABLE assessment_dispatches ADD COLUMN {_col} TEXT"
             )
+    if dispatch_columns and "continued_from_dispatch_id" not in dispatch_columns:
+        connection.execute(
+            "ALTER TABLE assessment_dispatches ADD COLUMN continued_from_dispatch_id "
+            "INTEGER REFERENCES assessment_dispatches(id) ON DELETE SET NULL"
+        )
     connection.execute(
         "CREATE INDEX IF NOT EXISTS idx_dispatches_engagement_at "
         "ON assessment_dispatches(engagement_id, dispatched_at DESC)"
@@ -5140,6 +5146,21 @@ def _create_dispatch_tables(connection: sqlite3.Connection) -> None:
     connection.execute(
         "CREATE INDEX IF NOT EXISTS idx_dispatches_engagement_tier "
         "ON assessment_dispatches(engagement_id, tier)"
+    )
+
+    connection.execute(
+        """
+            CREATE TABLE IF NOT EXISTS assessment_dispatch_prompt_packets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                engagement_id INTEGER NOT NULL REFERENCES engagements(id) ON DELETE CASCADE,
+                dispatch_id INTEGER NOT NULL UNIQUE REFERENCES assessment_dispatches(id) ON DELETE CASCADE,
+                schema_version TEXT NOT NULL,
+                context_json TEXT NOT NULL,
+                rendered_prompt TEXT NOT NULL,
+                sha256 TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+        """
     )
 
     connection.execute(

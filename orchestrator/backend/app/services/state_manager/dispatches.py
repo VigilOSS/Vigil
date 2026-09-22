@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import sqlite3
 from typing import Any
 from fastapi import HTTPException, status
@@ -102,6 +103,16 @@ def _serialize_dispatch(row) -> dict[str, Any]:
     )
     return data
 
+
+def _serialize_prompt_packet(row) -> dict[str, Any]:
+    return {
+        "schema": str(row["schema_version"]),
+        "context": json.loads(str(row["context_json"])),
+        "rendered_prompt": str(row["rendered_prompt"]),
+        "sha256": str(row["sha256"]),
+        "created_at": str(row["created_at"]),
+    }
+
 def _serialize_client_binding(values: Any, *, agent_id: str) -> dict[str, Any]:
     """One shape for a binding, read standalone or embedded on a dispatch row.
 
@@ -152,6 +163,8 @@ def record_dispatch(
     tier: str | None = None,
     vuln_classes: str | None = None,
     identity: str | None = None,
+    prompt_packet: dict[str, Any] | None = None,
+    continued_from_dispatch_id: int | None = None,
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     if not (agent_id or "").strip():
@@ -223,6 +236,16 @@ def record_dispatch(
                         "an application unit in this engagement"
                     ),
                 )
+        if continued_from_dispatch_id is not None:
+            parent = connection.execute(
+                "SELECT 1 FROM assessment_dispatches WHERE id = ? AND engagement_id = ?",
+                (continued_from_dispatch_id, engagement.id),
+            ).fetchone()
+            if parent is None:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="continued_from_dispatch_id must name a dispatch in this engagement",
+                )
         existing = connection.execute(
             "SELECT id FROM assessment_dispatches WHERE engagement_id = ? AND agent_id = ?",
             (engagement.id, agent_id),
@@ -246,8 +269,8 @@ def record_dispatch(
                 instruction_identity_status, instructions_stale,
                 dispatched_at, completed_at, status,
                 dispatch_mode, finding_slugs_json, skills, tier,
-                vuln_classes, identity
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                vuln_classes, identity, continued_from_dispatch_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 engagement.id,
@@ -282,6 +305,7 @@ def record_dispatch(
                 tier_value,
                 vuln_classes_value,
                 identity_value,
+                continued_from_dispatch_id,
             ),
         )
         if variant_parent_slugs is not None:
@@ -299,12 +323,49 @@ def record_dispatch(
                     variant_parent_finding_set_digest(variant_parent_slugs),
                 ),
             )
+        if prompt_packet is not None:
+            schema = str(prompt_packet["schema_version"])
+            context = prompt_packet["context"]
+            rendered = str(prompt_packet["rendered_prompt"])
+            canonical_context = json.dumps(context, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            digest = hashlib.sha256(rendered.encode("utf-8")).hexdigest()
+            connection.execute(
+                """
+                INSERT INTO assessment_dispatch_prompt_packets (
+                    engagement_id, dispatch_id, schema_version, context_json, rendered_prompt, sha256
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (engagement.id, int(cursor.lastrowid), schema, canonical_context, rendered, digest),
+            )
         row = connection.execute(
             f"{_DISPATCH_SELECT} WHERE d.id = ?",
             (cursor.lastrowid,),
         ).fetchone()
     assert row is not None
-    return _serialize_dispatch(row)
+    record = _serialize_dispatch(row)
+    if prompt_packet is not None:
+        record["prompt_packet"] = {
+            "schema": str(prompt_packet["schema_version"]),
+            "context": prompt_packet["context"],
+            "rendered_prompt": str(prompt_packet["rendered_prompt"]),
+            "sha256": hashlib.sha256(str(prompt_packet["rendered_prompt"]).encode("utf-8")).hexdigest(),
+        }
+    return record
+
+
+def get_dispatch_prompt_packet(engagement_id: int, agent_id: str) -> dict[str, Any]:
+    with _common.get_connection() as connection:
+        row = connection.execute(
+            """
+            SELECT p.* FROM assessment_dispatch_prompt_packets AS p
+            JOIN assessment_dispatches AS d ON d.id = p.dispatch_id
+            WHERE p.engagement_id = ? AND d.agent_id = ?
+            """,
+            (engagement_id, agent_id),
+        ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="dispatch prompt packet not found")
+    return _serialize_prompt_packet(row)
 
 def update_dispatch(
     engagement_id: int,
