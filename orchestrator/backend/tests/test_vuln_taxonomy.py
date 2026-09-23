@@ -331,6 +331,7 @@ SKILLS_WITHOUT_VULN_CLASS: frozenset[str] = frozenset(
         "exploit-playbook-authoring",
         "finding-verification",
         "gau-triage",
+        "jira-issue-creation",  # reporting/tool-transport skill: file a Jira ticket, no vuln class
         "kali-exec",
         "nuclei-scanning",
         "osint-recon",

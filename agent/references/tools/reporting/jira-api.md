@@ -1,30 +1,47 @@
 ---
-description: "Jira REST API v3: authentication, issue CRUD, ADF formatting for security findings"
-skill: report-generation
+description: "Jira REST API v3 payload reference: issue CRUD, ADF formatting, field/label/priority template, response codes"
+skill: jira-issue-creation, report-generation
 ---
 
 # Jira API (v3)
 
-**Purpose:** Create, update, and query security findings in Jira via the REST API v3
+**Purpose:** The ADF payload and field reference for creating, updating, and
+querying issues in Jira via the REST API v3. This is the payload core behind the
+`jira-issue-creation` skill — the workflow (pluggable auth, MCP vs REST, mirroring
+an example ticket, confirm-before-create) lives in that skill; the concrete
+payload shapes live here.
 
 Jira v3 uses **Atlassian Document Format (ADF)** for rich-text fields — not markdown.
-All `description` payloads must be valid ADF documents.
+All `description` payloads sent to the REST API must be valid ADF documents. (The
+Atlassian MCP `createJiraIssue` tool instead takes markdown and converts it for
+you — see the `jira-issue-creation` skill.)
 
-**Instance:** `https://YOUR_ORG.atlassian.net`
-**Project:** `SEC` — Security findings project
-**Issue type ID:** `10013`
+> **Every concrete value below is an instance-specific EXAMPLE, not a canonical
+> constant.** Instance base URL, project key, issue type id, custom field ids,
+> label scheme, and the priority set all differ per Jira site. Rediscover them for
+> the instance you are filing into (create metadata / `GET /rest/api/3/field` /
+> read an example issue) — never copy an id or key from here or from another site.
+> Placeholders used in the examples below: `YOUR_ORG` (instance base URL), `SEC`
+> (an example security-project key, with keys like `SEC-1234`), and `10013` (an
+> example issue type id). Substitute your instance's real values.
 
 ---
 
 ## Authentication
 
-Basic auth with base64-encoded `user:api_token`:
+Auth is **pluggable** — pick whichever the environment provides and set the
+`Authorization` header to match. The payload does not change with the auth method.
+
+- **Basic** (one option): base64-encoded `user:api_token`.
+- **Bearer / OAuth 2.0**: `Authorization: Bearer <token>` — equally valid.
+- **Atlassian MCP tools**: the connector session is already authenticated; no
+  header to build. Prefer this when present (see the `jira-issue-creation` skill).
+
+Basic-auth example (substitute the Jira email and an Atlassian API token):
 
 ```bash
 AUTH="Authorization: Basic $(echo -n 'USER:API_TOKEN' | base64)"
 ```
-
-Replace `USER` with the Jira email and `API_TOKEN` with an Atlassian API token.
 
 ---
 
@@ -130,11 +147,12 @@ Every Jira issue must be readable by a developer who has zero context on the eng
 - Use Jira's native `Linked Issues` / `Epic` / `Blocks` relationships to express cross-ticket dependencies — reference sibling tickets by SEC-XXXX key.
 - Keep the orchestrator-to-Jira mapping in the engagement backend via `vigil assess agent done --finding-slugs <slugs>` after the ticket is created. The mapping table is operator-internal and stays in the engagement directory.
 
-### Priority Mapping
+### Priority Mapping (example — derive the real mapping from the instance)
 
-Map finding severity to Jira priority and the Security Severity custom field:
+An example mapping of finding severity to Jira priority and a Security Severity
+custom field. Both the priority names and the custom field are instance-specific:
 
-| Finding Severity | Jira Priority (`priority.name`) | Security Severity (`customfield_10850`) |
+| Finding Severity | Jira Priority (`priority.name`) | Security Severity (`customfield_10850` — example id) |
 |---|---|---|
 | Critical | Highest | Critical |
 | High | High | High |
@@ -142,11 +160,24 @@ Map finding severity to Jira priority and the Security Severity custom field:
 | Low | Low | Low |
 | Info | Lowest | Low |
 
-> **Note:** The Security Severity custom field ID (`customfield_10850`) varies by Jira instance. Check your instance's field configuration via `GET /rest/api/3/field` and search for "Security Severity" or "Severity" to find the correct ID.
+> **Priorities are not universal.** A project may offer only Urgent / High /
+> Medium / Low and **not** Highest / Lowest — read `priority.allowedValues` from
+> the create metadata (`GET /rest/api/3/issue/createmeta`, or the MCP
+> `getJiraIssueTypeMetaWithFields` tool) and map onto the set that actually exists.
+> Do not assume the standard five.
+>
+> **The custom field id is an example, not a constant.** `customfield_10850` is
+> what a Security Severity field happened to be on one instance; the same field is
+> a different id — or absent — elsewhere, and a hardcoded id will set the wrong
+> field or `400`. Rediscover it per instance: `GET /rest/api/3/field` (search for
+> "Security Severity" / "Severity"), the create metadata, or read an example issue
+> (MCP `getJiraIssue` with `view: "evidence"`).
 
 ### Labels
 
-Every issue carries two labels:
+This is the default label scheme for issues created by this system. If you were
+handed an example ticket to mirror, copy that project's actual label convention
+off it instead. Two labels by default:
 
 1. **`ai-red-team-scanning`** — always present, used to filter all issues created by this system
 2. **OWASP category** — kebab-case slug matching the finding's OWASP Top 10 category
@@ -171,6 +202,11 @@ XXX: <concise vulnerability title describing the defect and impact>
 ```
 
 ### Full Payload Example
+
+Structure to copy; **values to rediscover.** The project key (`SEC`), issue type
+id (`10013`), custom field id (`customfield_10850`), priority name, and labels are
+all instance-specific examples — replace each with the target instance's real
+value before sending.
 
 ```json
 {
