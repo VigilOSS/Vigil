@@ -50,6 +50,7 @@ _try_import_grammar("tree_sitter_typescript", "typescript")
 _try_import_grammar("tree_sitter_go", "go")
 _try_import_grammar("tree_sitter_ruby", "ruby")
 _try_import_grammar("tree_sitter_php", "php")
+_try_import_grammar("tree_sitter_c_sharp", "csharp")
 
 
 # ---------------------------------------------------------------------------
@@ -85,7 +86,7 @@ def _ts_query_captures(lang_obj: Any, query_str: str, root_node: Any) -> dict[st
 # Tree-sitter backed languages (full structural parsing)
 _TS_SUPPORTED_LANGUAGES = frozenset({
     "java", "c", "cpp", "python", "javascript", "typescript",
-    "go", "ruby", "php",
+    "go", "ruby", "php", "csharp",
 })
 
 # Lightweight regex/line-based extractors (pure-python, no tree-sitter grammar)
@@ -194,6 +195,11 @@ _FUNCTION_QUERIES: dict[str, str] = {
         (function_definition) @func
         (method_declaration) @func
     """,
+    "csharp": """
+        (method_declaration) @func
+        (constructor_declaration) @func
+        (local_function_statement) @func
+    """,
 }
 
 _CPP_DECLARATION_QUERY = """
@@ -220,6 +226,12 @@ _CLASS_QUERIES: dict[str, str] = {
         (interface_declaration) @cls
         (trait_declaration) @cls
     """,
+    "csharp": """
+        (class_declaration) @cls
+        (struct_declaration) @cls
+        (interface_declaration) @cls
+        (record_declaration) @cls
+    """,
 }
 
 _IMPORT_QUERIES: dict[str, str] = {
@@ -234,6 +246,7 @@ _IMPORT_QUERIES: dict[str, str] = {
     "typescript": """(import_statement) @imp""",
     "go": """(import_spec) @imp""",
     "php": """(namespace_use_declaration) @imp""",
+    "csharp": """(using_directive) @imp""",
 }
 
 
@@ -260,6 +273,9 @@ _SINK_DEFINITIONS: list[SinkPattern] = [
             "ruby": [r"\bFile\.open\s*\(", r"\bFile\.read\s*\(", r"\bIO\.read\s*\(",
                      r"\bFileUtils\.\w+\s*\("],
             "php": [r"\bfopen\s*\(", r"\bfile_get_contents\s*\(", r"\bfile_put_contents\s*\("],
+            "csharp": [r"\bFile\.ReadAllText\s*\(", r"\bFile\.WriteAllText\s*\(",
+                       r"\bFile\.Open\w*\s*\(", r"\bnew\s+StreamReader\s*\(",
+                       r"\bPath\.Combine\s*\("],
         },
     },
     {
@@ -291,6 +307,10 @@ _SINK_DEFINITIONS: list[SinkPattern] = [
                      r"\b\w+\.where\s*\(.*\braw\b"],
             "php": [r"\bmysqli_query\s*\(", r"\$\w+->query\s*\(", r"\bPDO::query\s*\(",
                     r"\$\w+->prepare\s*\("],
+            "csharp": [r"\bnew\s+SqlCommand\s*\(", r"\bnew\s+OleDbCommand\s*\(",
+                       r"\.ExecuteReader\s*\(", r"\.ExecuteNonQuery\s*\(",
+                       r"\.ExecuteScalar\s*\(", r"\bFromSqlRaw\s*\(",
+                       r"\bExecuteSqlRaw\s*\("],
         },
     },
     {
@@ -317,6 +337,7 @@ _SINK_DEFINITIONS: list[SinkPattern] = [
                      r"\bOpen3\.\w+\s*\(", r"\bIO\.popen\s*\("],
             "php": [r"\bexec\s*\(", r"\bsystem\s*\(", r"\bshell_exec\s*\(",
                     r"\bpassthru\s*\(", r"\bproc_open\s*\(", r"\bpopen\s*\("],
+            "csharp": [r"\bProcess\.Start\s*\(", r"\bnew\s+ProcessStartInfo\s*\("],
         },
     },
     {
@@ -337,6 +358,8 @@ _SINK_DEFINITIONS: list[SinkPattern] = [
                      r"\bopen-uri\b", r"\bURI\.open\s*\("],
             "php": [r"\bcurl_exec\s*\(", r"\bfile_get_contents\s*\(.*http",
                     r"\bfopen\s*\(.*http"],
+            "csharp": [r"\bnew\s+HttpClient\s*\(", r"\bWebRequest\.Create\s*\(",
+                       r"\bnew\s+WebClient\s*\(", r"\bHttpWebRequest\b"],
         },
     },
     {
@@ -350,6 +373,9 @@ _SINK_DEFINITIONS: list[SinkPattern] = [
             "ruby": [r"\bMarshal\.load\s*\(", r"\bYAML\.load\s*\(",
                      r"\bJSON\.parse\s*\("],
             "php": [r"\bunserialize\s*\(", r"\bjson_decode\s*\("],
+            "csharp": [r"\bBinaryFormatter\b", r"\bJavaScriptSerializer\b",
+                       r"\bNetDataContractSerializer\b", r"\bLosFormatter\b",
+                       r"\bTypeNameHandling\b", r"\bnew\s+XmlSerializer\s*\("],
         },
     },
     {
@@ -372,6 +398,8 @@ _SINK_DEFINITIONS: list[SinkPattern] = [
                      r"\bsend\s*\(", r"\bpublic_send\s*\("],
             "php": [r"\beval\s*\(", r"\bassert\s*\(", r"\bpreg_replace\s*\(.*/e",
                     r"\bcreate_function\s*\("],
+            "csharp": [r"\bAssembly\.Load\w*\s*\(", r"\bActivator\.CreateInstance\s*\(",
+                       r"\bType\.GetType\s*\(", r"\bCSharpCodeProvider\b"],
         },
     },
     {
@@ -389,6 +417,8 @@ _SINK_DEFINITIONS: list[SinkPattern] = [
             "ruby": [r"\bOpenSSL::Cipher\b", r"\bDigest::\w+\b", r"\bOpenSSL::HMAC\b"],
             "php": [r"\bopenssl_encrypt\s*\(", r"\bmd5\s*\(", r"\bsha1\s*\(",
                     r"\bhash\s*\(", r"\bmcrypt_encrypt\s*\("],
+            "csharp": [r"\bMD5\b", r"\bSHA1\b", r"\bDESCryptoServiceProvider\b",
+                       r"\bTripleDES\b", r"\bRijndaelManaged\b", r"\bnew\s+Random\s*\("],
         },
     },
     {
@@ -408,6 +438,8 @@ _SINK_DEFINITIONS: list[SinkPattern] = [
             # pattern could only ever match `a$_SESSION`.
             "php": [r"\$_SESSION\b", r"\bAuth::\w+\s*\(", r"\bpassword_verify\s*\(",
                     r"\bsession_start\s*\("],
+            "csharp": [r"\bFormsAuthentication\b", r"\[Authorize\b",
+                       r"\bHttpContext\.User\b", r"\bClaimsPrincipal\b"],
         },
     },
     {
@@ -420,6 +452,7 @@ _SINK_DEFINITIONS: list[SinkPattern] = [
             "go": [r"\btemplate\.HTML\s*\(", r"\bfmt\.Fprintf\s*\(\s*w\b"],
             "ruby": [r"\braw\s*\(", r"\.html_safe\b"],
             "php": [r"\becho\b", r"\bprint\b", r"\bprintf\s*\("],
+            "csharp": [r"\bHtml\.Raw\s*\(", r"@Html\.Raw\b"],
         },
     },
     {
@@ -433,6 +466,7 @@ _SINK_DEFINITIONS: list[SinkPattern] = [
             "go": [r"\bhttp\.Redirect\s*\("],
             "ruby": [r"\bredirect_to\s*\("],
             "php": [r"\bheader\s*\(\s*['\"]Location", r"\bredirect\s*\("],
+            "csharp": [r"\bResponse\.Redirect\s*\(", r"\bRedirect\s*\("],
         },
     },
     {
@@ -448,6 +482,8 @@ _SINK_DEFINITIONS: list[SinkPattern] = [
             "ruby": [r"\bNokogiri::XML\s*\(", r"\bREXML::Document\.new\s*\("],
             "php": [r"\bsimplexml_load_string\s*\(", r"\bDOMDocument\b",
                     r"\bxml_parse\s*\("],
+            "csharp": [r"\bnew\s+XmlDocument\s*\(", r"\bXmlTextReader\b",
+                       r"\bXmlReader\.Create\s*\("],
         },
     },
     {
@@ -1365,6 +1401,13 @@ def _parse_function_node(node: Any, language: str, source: bytes) -> dict[str, A
                 modifiers.append(_node_text(child, source))
             elif child.type == "attribute_list":
                 annotations.extend(_php_attributes(child, source))
+    elif language == "csharp":
+        name_node = node.child_by_field_name("name")
+        if name_node:
+            name = _node_text(name_node, source)
+        params_node = node.child_by_field_name("parameters")
+        if params_node:
+            params = _extract_params(params_node, source)
 
     if not name:
         return None
@@ -1511,6 +1554,22 @@ def _parse_class_node(node: Any, language: str, source: bytes) -> dict[str, Any]
                 for gc in child.children:
                     if gc.type in ("name", "qualified_name"):
                         implements.append(_node_text(gc, source))
+    elif language == "csharp":
+        name_node = node.child_by_field_name("name")
+        if name_node:
+            name = _node_text(name_node, source)
+        # C#'s `base_list` mixes the base class and interfaces with no field
+        # distinguishing them, the way Python lists its bases; take the first
+        # named base as `extends` and the rest as `implements`.
+        for child in node.children:
+            if child.type == "base_list":
+                for base in child.named_children:
+                    if base.type in ("identifier", "qualified_name", "generic_name"):
+                        txt = _node_text(base, source)
+                        if not extends:
+                            extends = txt
+                        else:
+                            implements.append(txt)
 
     if not name:
         return None
@@ -1576,6 +1635,13 @@ def _extract_imports_ts(tree: Any, language: str, source: bytes) -> list[str]:
                 continue
         elif query_language == "php":
             text = text.removeprefix("use").strip().rstrip(";")
+        elif query_language == "csharp":
+            # `using System.Data.SqlClient;` -> `System.Data.SqlClient`, and
+            # `using static System.Math;` -> `System.Math`. A `using alias =
+            # Ns.Type;` keeps its `alias = Ns.Type` body verbatim, the same way
+            # the other languages leave an aliased import as authored.
+            text = text.removeprefix("using").strip()
+            text = text.removeprefix("static").strip()
         elif query_language == "python":
             pass
         elif query_language in ("javascript", "typescript"):
@@ -4295,6 +4361,17 @@ _STREAM_SOURCE_PATTERNS: dict[str, list[tuple[str, str]]] = {
          r"\b(?:Input|Request)::(?:input|get|all|query|post|json|file|header|cookie)\s*\("),
         ("process_input", r"\bgetenv\s*\("),
     ],
+    "csharp": [
+        # Classic ASP.NET reads request data off the `Request` object; the
+        # `HttpContext.Request` spelling is the same surface reached the long
+        # way. ASP.NET Core's model binding attaches it to action parameters
+        # instead, which is what the `[From...]` binding attributes mark.
+        ("http_request_input",
+         r"\b(?:HttpContext\.)?Request\.(?:Form|QueryString|Query|Params|Headers|Cookies|Body)\b"),
+        ("http_request_input", r"\[From(?:Body|Query|Route|Form|Header)\b"),
+        ("process_input",
+         r"\b(?:Environment\.GetEnvironmentVariable\s*\(|Console\.ReadLine\s*\()"),
+    ],
     "c": [
         ("process_input", r"\b(?:argv\s*\[|getenv\s*\(|read\s*\(|recv\s*\()"),
     ],
@@ -4339,6 +4416,7 @@ _STREAM_IMPORT_PATTERNS: dict[str, list[str]] = {
     "go": [r"\bimport\s*(?:\([^\r\n]*|[\"`][^\"`]+[\"`])"],
     "ruby": [r"\b(?:require|require_relative|load)\s*\(?\s*['\"][^'\"]+"],
     "php": [r"\b(?:include|include_once|require|require_once|use)\b[^\r\n;]*"],
+    "csharp": [r"\busing\s+(?:static\s+)?[^\r\n;=]+"],
     "c": [r"#\s*include\s*[<\"][^>\"]+[>\"]"],
     "cpp": [r"#\s*include\s*[<\"][^>\"]+[>\"]"],
     "lua": [r"\brequire\s*\(?\s*['\"][^'\"]+"],

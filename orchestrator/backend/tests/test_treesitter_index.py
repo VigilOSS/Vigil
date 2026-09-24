@@ -28,6 +28,7 @@ needs_treesitter = pytest.mark.skipif(
 _PARSER_DISTRIBUTIONS = {
     "tree-sitter",
     "tree-sitter-c",
+    "tree-sitter-c-sharp",
     "tree-sitter-cpp",
     "tree-sitter-go",
     "tree-sitter-java",

@@ -13,6 +13,7 @@
 #     "tree-sitter-go==0.25.0",
 #     "tree-sitter-ruby==0.23.1",
 #     "tree-sitter-php==0.24.1",
+#     "tree-sitter-c-sharp==0.23.5",
 # ]
 # ///
 """Vigil — assessment CLI entry point."""

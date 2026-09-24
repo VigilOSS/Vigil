@@ -958,3 +958,71 @@ def test_a_file_that_is_only_commentary_is_never_coverage_debt(
 
     assert indexed["analysis_status"] == "complete"
     assert indexed["unavailable_dimensions"] == []
+
+
+CSHARP_REPOSITORY = b"""using System;
+using System.Data.SqlClient;
+using System.Collections.Generic;
+
+namespace MyApp.Data
+{
+    public interface IUserRepository
+    {
+        List<string> GetUser(string userInput);
+    }
+
+    public class UserRepository : IUserRepository
+    {
+        private readonly string _connectionString;
+
+        public UserRepository(string connectionString)
+        {
+            _connectionString = connectionString;
+        }
+
+        public string LastQuery { get; set; }
+
+        public List<string> GetUser(string userInput)
+        {
+            var command = new SqlCommand("SELECT * FROM Users WHERE id = " + userInput);
+            var reader = command.ExecuteReader();
+            return new List<string>();
+        }
+    }
+}
+"""
+
+
+def test_a_csharp_file_is_a_first_class_tree_sitter_language() -> None:
+    """C# is parsed structurally, not shrugged off as an unsupported language.
+
+    A `.cs` file used to land in the `unsupported_language` bucket with no
+    function map, class list, imports or sinks. It is now a real tree-sitter
+    language: this fixture -- a namespace with using-directives, an interface,
+    a class with a constructor, a property and two methods, and one obvious
+    `new SqlCommand(userInput)` injection -- must index to a complete
+    structural record with every one of those dimensions populated.
+    """
+    indexed = index_file("Data/UserRepository.cs", "csharp", CSHARP_REPOSITORY)
+
+    assert indexed["analysis_status"] == "complete"
+    assert indexed["analysis_mode"] == "tree_sitter"
+
+    # Interface method, constructor, property-free methods: at minimum the
+    # constructor and the two `GetUser` bodies are callables.
+    assert indexed["total_functions"] > 0
+    qualified = {func["qualified_name"] for func in indexed["functions"]}
+    assert "UserRepository.UserRepository" in qualified  # constructor
+    assert "UserRepository.GetUser" in qualified
+
+    class_names = {cls["name"] for cls in indexed["classes"]}
+    assert {"IUserRepository", "UserRepository"} <= class_names
+    repository = next(cls for cls in indexed["classes"] if cls["name"] == "UserRepository")
+    assert repository["extends"] == "IUserRepository"
+
+    assert "System.Data.SqlClient" in indexed["imports"]
+
+    sql_sinks = [sink for sink in indexed["security_sinks"] if sink["kind"] == "sql_exec"]
+    assert sql_sinks, indexed["security_sinks"]
+    assert all(sink["vuln_classes"] == ["sqli"] for sink in sql_sinks)
+    assert any(sink["function"] == "GetUser" for sink in sql_sinks)

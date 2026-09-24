@@ -1,12 +1,12 @@
 """Empirical audit of `_SINK_DEFINITIONS`' file_path / file_inclusion /
-sql_exec / process_exec families -- 93 regex patterns across 9 languages.
+sql_exec / process_exec families -- 107 regex patterns across 10 languages.
 
 Every pattern below is exercised against an idiomatic, current-era (2026)
 fixture through the real tree-sitter indexer. Only patterns that fire on
 realistic code get a case in ``CASES`` -- DEAD / REDUNDANT / MISROUTED
 patterns are named, with the file:line evidence, in ``_EXCLUDED`` instead,
 and ``test_case_table_covers_every_live_pattern_in_the_assigned_slice``
-proves the two lists together account for all 93 patterns, so the catalogue
+proves the two lists together account for all 107 patterns, so the catalogue
 cannot silently regain a dead pattern or lose a live one.
 
 Taxonomy note. Three defects this audit recorded have since been fixed in the
@@ -29,7 +29,12 @@ fails loudly rather than being re-documented:
 
 * Java's valid ``Runtime.getRuntime().exec(...)`` form and Python's four
   commonly used subprocess convenience APIs are live process-execution sinks,
-  bringing this slice to 93 patterns (87 live, 6 excluded).
+  bringing this slice to 93 patterns (87 live, 6 excluded) at that point.
+
+* C# was then added as a tree-sitter language, contributing 14 patterns to
+  this slice (5 ``file_path``, 7 ``sql_exec``, 2 ``process_exec``). All 14
+  fire LIVE on idiomatic C# and get real cases in ``CASES``; none is excluded,
+  bringing the slice to 107 patterns (101 live, 6 excluded).
 
 ``file_path`` keeps the constructs that really are traversal
 (``fopen``/``file_get_contents``/``file_put_contents``).
@@ -505,6 +510,90 @@ class Shell {
 }
 """
 
+CSHARP_SOURCE = """\
+using System;
+using System.Data.SqlClient;
+using System.Data.OleDb;
+using System.Diagnostics;
+using System.IO;
+using Microsoft.EntityFrameworkCore;
+
+namespace Vigil.Data
+{
+    public class UserRepository
+    {
+        private readonly string _root;
+
+        public UserRepository(string root)
+        {
+            _root = root;
+        }
+
+        public string ReadProfile(string name)
+        {
+            string full = Path.Combine(_root, name);
+            return File.ReadAllText(full);
+        }
+
+        public void WriteProfile(string name, string body)
+        {
+            File.WriteAllText(name, body);
+        }
+
+        public Stream OpenUpload(string name)
+        {
+            return File.OpenRead(name);
+        }
+
+        public string ReadStream(string name)
+        {
+            using (var reader = new StreamReader(name))
+            {
+                return reader.ReadToEnd();
+            }
+        }
+
+        public void RunSqlCommand(SqlConnection conn, string sql)
+        {
+            var command = new SqlCommand(sql, conn);
+            command.ExecuteReader();
+        }
+
+        public void RunOleDbCommand(OleDbConnection conn, string sql)
+        {
+            var legacy = new OleDbCommand(sql, conn);
+            legacy.ExecuteNonQuery();
+        }
+
+        public object RunScalar(SqlCommand scalarCommand)
+        {
+            return scalarCommand.ExecuteScalar();
+        }
+
+        public void RunRawQuery(AppDbContext context, string sql)
+        {
+            context.Users.FromSqlRaw(sql);
+        }
+
+        public void RunRawNonQuery(AppDbContext context, string sql)
+        {
+            context.Database.ExecuteSqlRaw(sql);
+        }
+
+        public void RunProcess(string cmd)
+        {
+            Process.Start(cmd);
+        }
+
+        public void RunProcessInfo(string cmd)
+        {
+            var info = new ProcessStartInfo("cmd.exe", cmd);
+            info.UseShellExecute = true;
+        }
+    }
+}
+"""
+
 _SOURCES: dict[str, str] = {
     "java": JAVA_SOURCE,
     "c": C_SOURCE,
@@ -515,6 +604,7 @@ _SOURCES: dict[str, str] = {
     "go": GO_SOURCE,
     "ruby": RUBY_SOURCE,
     "php": PHP_SOURCE,
+    "csharp": CSHARP_SOURCE,
 }
 
 _PATHS: dict[str, str] = {
@@ -527,6 +617,7 @@ _PATHS: dict[str, str] = {
     "go": "main.go",
     "ruby": "report_controller.rb",
     "php": "controller.php",
+    "csharp": "UserRepository.cs",
 }
 
 
@@ -629,6 +720,12 @@ CASES: list[tuple[str, str, str, str, list[str] | None]] = [
     ("file_path", "php", r"\bfopen\s*\(", 'fopen($filename, "r")', ["path-traversal"]),
     ("file_path", "php", r"\bfile_get_contents\s*\(", "file_get_contents($filename)", ["path-traversal"]),
     ("file_path", "php", r"\bfile_put_contents\s*\(", "file_put_contents($filename, $body)", ["path-traversal"]),
+    # ---- file_path : csharp (treesitter_index.py:276-278) ----
+    ("file_path", "csharp", r"\bFile\.ReadAllText\s*\(", "File.ReadAllText(full)", ["path-traversal"]),
+    ("file_path", "csharp", r"\bFile\.WriteAllText\s*\(", "File.WriteAllText(name, body)", ["path-traversal"]),
+    ("file_path", "csharp", r"\bFile\.Open\w*\s*\(", "File.OpenRead(name)", ["path-traversal"]),
+    ("file_path", "csharp", r"\bnew\s+StreamReader\s*\(", "new StreamReader(name)", ["path-traversal"]),
+    ("file_path", "csharp", r"\bPath\.Combine\s*\(", "Path.Combine(_root, name)", ["path-traversal"]),
     # ---- file_inclusion : php ----
     # Its own sink kind, carrying the canonical file-inclusion classes rather
     # than borrowing file_path's `path-traversal`. The four constructs are
@@ -662,6 +759,14 @@ CASES: list[tuple[str, str, str, str, list[str] | None]] = [
     ("sql_exec", "php", r"\bmysqli_query\s*\(", "mysqli_query($mysqli, $sql)", ["sqli"]),
     ("sql_exec", "php", r"\$\w+->query\s*\(", "$pdo->query($sql)", ["sqli"]),
     ("sql_exec", "php", r"\$\w+->prepare\s*\(", "$pdo->prepare($sql)", ["sqli"]),
+    # ---- sql_exec : csharp (treesitter_index.py:310-313) ----
+    ("sql_exec", "csharp", r"\bnew\s+SqlCommand\s*\(", "new SqlCommand(sql, conn)", ["sqli"]),
+    ("sql_exec", "csharp", r"\bnew\s+OleDbCommand\s*\(", "new OleDbCommand(sql, conn)", ["sqli"]),
+    ("sql_exec", "csharp", r"\.ExecuteReader\s*\(", "command.ExecuteReader()", ["sqli"]),
+    ("sql_exec", "csharp", r"\.ExecuteNonQuery\s*\(", "legacy.ExecuteNonQuery()", ["sqli"]),
+    ("sql_exec", "csharp", r"\.ExecuteScalar\s*\(", "scalarCommand.ExecuteScalar()", ["sqli"]),
+    ("sql_exec", "csharp", r"\bFromSqlRaw\s*\(", "context.Users.FromSqlRaw(sql)", ["sqli"]),
+    ("sql_exec", "csharp", r"\bExecuteSqlRaw\s*\(", "context.Database.ExecuteSqlRaw(sql)", ["sqli"]),
 
     # ---- process_exec : java (treesitter_index.py:286) ----
     ("process_exec", "java", r"\bRuntime\.getRuntime\s*\(\s*\)\.exec\s*\(", "Runtime.getRuntime().exec(cmd)", ["injection"]),
@@ -704,6 +809,9 @@ CASES: list[tuple[str, str, str, str, list[str] | None]] = [
     ("process_exec", "php", r"\bpassthru\s*\(", "passthru($cmd)", ["injection"]),
     ("process_exec", "php", r"\bproc_open\s*\(", "proc_open($cmd, [], $pipes)", ["injection"]),
     ("process_exec", "php", r"\bpopen\s*\(", 'popen($cmd, "r")', ["injection"]),
+    # ---- process_exec : csharp (treesitter_index.py:340) ----
+    ("process_exec", "csharp", r"\bProcess\.Start\s*\(", "Process.Start(cmd)", ["injection"]),
+    ("process_exec", "csharp", r"\bnew\s+ProcessStartInfo\s*\(", 'new ProcessStartInfo("cmd.exe", cmd)', ["injection"]),
 ]
 
 
@@ -786,7 +894,7 @@ def test_sql_exec_emits_the_canonical_sqli_class() -> None:
 
 # ---------------------------------------------------------------------------
 # Meta-test: the case table above, plus this allow-list, must account for
-# every one of the 93 patterns in the three assigned families. This is what
+# every one of the 107 patterns in the four assigned families. This is what
 # stops the catalogue drifting back to silent zero recall -- add a pattern
 # to _SINK_DEFINITIONS without touching this file and the test below fails.
 # ---------------------------------------------------------------------------
@@ -877,12 +985,15 @@ def test_case_table_covers_every_live_pattern_in_the_assigned_slice() -> None:
         f"{(tested | excluded) - all_patterns}"
     )
 
-    # Hard counts. The slice is now 93 patterns: PHP's four inclusion
-    # constructs moved verbatim out of `file_path` (38 -> 34) into the new
-    # `file_inclusion` kind (4), so the totals only redistribute.
-    # file_path=34, file_inclusion=4, sql_exec=22, process_exec=33 -> 93.
-    assert len(all_patterns) == 93
-    assert len(tested) == 87
+    # Hard counts. The slice is now 107 patterns. C# was added as a
+    # tree-sitter language, contributing 14 new patterns to this slice
+    # (5 file_path, 7 sql_exec, 2 process_exec), all of which fire LIVE on
+    # idiomatic C# -- so the case table gains 14 rows and _EXCLUDED gains
+    # nothing. PHP's four inclusion constructs still account for the
+    # file_path (34) / file_inclusion (4) split described above.
+    # file_path=39, file_inclusion=4, sql_exec=29, process_exec=35 -> 107.
+    assert len(all_patterns) == 107
+    assert len(tested) == 101
     assert len(excluded) == 6
 
 

@@ -1,8 +1,8 @@
 """Empirical catalogue audit: `url_fetch`, `deserialization`, `eval_exec`, `crypto`.
 
 Scope is exactly these four `_SINK_DEFINITIONS` families in
-`assess.lib.treesitter_index` (87 patterns total: 29 `url_fetch`, 14
-`deserialization`, 19 `eval_exec`, 25 `crypto`). Every pattern was probed with
+`assess.lib.treesitter_index` (107 patterns total: 33 `url_fetch`, 20
+`deserialization`, 23 `eval_exec`, 31 `crypto`). Every pattern was probed with
 an idiomatic, current-era (2026) fixture through the real structural indexer.
 Only the patterns that actually fire on idiomatic code get a test here; the
 rest (`DEAD` / `OBSOLETE` / `MISROUTED`) are recorded in the exclusion
@@ -68,8 +68,8 @@ EXPECTED_VULN_CLASSES = {
 # tree-sitter has_error demotion.
 # ---------------------------------------------------------------------------
 
-# ---- url_fetch (29 patterns; LIVE: java x2, python x9, js x3, ts x3, go x4,
-#      ruby x3, php x3 = 27) -------------------------------------------------
+# ---- url_fetch (33 patterns; LIVE: java x2, python x9, js x3, ts x3, go x4,
+#      ruby x3, php x3, csharp x4 = 31) ---------------------------------------
 
 _JAVA_URL_FETCH = """
 import java.net.URL;
@@ -211,8 +211,44 @@ function fetchCHttp($target) {
 }
 """
 
-# ---- deserialization (14 patterns; LIVE: java x3, python x3, go x2,
-#      ruby x2, php x1 = 11) -------------------------------------------------
+_CSHARP_URL_FETCH = """
+using System;
+using System.Net;
+using System.Net.Http;
+
+namespace Probe
+{
+    public class Fetcher
+    {
+        public void FetchWithHttpClient(string url)
+        {
+            var client = new HttpClient();
+            client.GetStringAsync(url);
+        }
+
+        public void FetchWithWebRequest(string url)
+        {
+            var req = WebRequest.Create(url);
+            req.GetResponse();
+        }
+
+        public void FetchWithWebClient(string url)
+        {
+            var wc = new WebClient();
+            wc.DownloadString(url);
+        }
+
+        public void FetchWithHttpWebRequest(string url)
+        {
+            HttpWebRequest hwr = WebRequest.CreateHttp(url);
+            hwr.GetResponse();
+        }
+    }
+}
+"""
+
+# ---- deserialization (20 patterns; LIVE: java x3, python x3, go x2,
+#      ruby x2, php x1, csharp x6 = 17) ----------------------------------------
 
 _JAVA_DESER = """
 import java.io.ObjectInputStream;
@@ -282,8 +318,62 @@ function loadSerialized($data) {
 }
 """
 
-# ---- eval_exec (19 patterns; LIVE: python x2, js x3, ts x3, ruby x5,
-#      php x1 = 14) ----------------------------------------------------------
+_CSHARP_DESER = """
+using System;
+using System.IO;
+using System.Runtime.Serialization;
+using System.Runtime.Serialization.Formatters.Binary;
+using System.Web.Script.Serialization;
+using System.Web.UI;
+using System.Xml.Serialization;
+using Newtonsoft.Json;
+
+namespace Probe
+{
+    public class Deserializer
+    {
+        public object LoadBinary(Stream stream)
+        {
+            var formatter = new BinaryFormatter();
+            return formatter.Deserialize(stream);
+        }
+
+        public object LoadJavaScript(string json)
+        {
+            var serializer = new JavaScriptSerializer();
+            return serializer.DeserializeObject(json);
+        }
+
+        public object LoadNetDataContract(Stream stream)
+        {
+            var contract = new NetDataContractSerializer();
+            return contract.ReadObject(stream);
+        }
+
+        public object LoadViewState(string data)
+        {
+            var formatter = new LosFormatter();
+            return formatter.Deserialize(data);
+        }
+
+        public T LoadTyped<T>(string json)
+        {
+            var settings = new JsonSerializerSettings();
+            settings.TypeNameHandling = TypeNameHandling.All;
+            return JsonConvert.DeserializeObject<T>(json, settings);
+        }
+
+        public object LoadXml(Stream stream)
+        {
+            var xml = new XmlSerializer(typeof(object));
+            return xml.Deserialize(stream);
+        }
+    }
+}
+"""
+
+# ---- eval_exec (23 patterns; LIVE: python x2, js x3, ts x3, ruby x5,
+#      php x1, csharp x4 = 18) ------------------------------------------------
 
 _PYTHON_EVAL = """
 def run_eval(expr, ctx):
@@ -359,8 +449,45 @@ function runEval($code) {
 }
 """
 
-# ---- crypto (25 patterns; LIVE: java x2, c x2, cpp x2, python x0, js x2,
-#      ts x2, go x2, ruby x2, php x3 = 17) -----------------------------------
+_CSHARP_EVAL = """
+using System;
+using System.Reflection;
+using System.CodeDom.Compiler;
+using Microsoft.CSharp;
+
+namespace Probe
+{
+    public class Loader
+    {
+        public Assembly LoadFromBytes(byte[] raw)
+        {
+            var assembly = Assembly.Load(raw);
+            return assembly;
+        }
+
+        public object Instantiate(Type type)
+        {
+            var instance = Activator.CreateInstance(type);
+            return instance;
+        }
+
+        public Type Resolve(string typeName)
+        {
+            var resolved = Type.GetType(typeName);
+            return resolved;
+        }
+
+        public void CompileSource(string code)
+        {
+            var provider = new CSharpCodeProvider();
+            provider.CompileAssemblyFromSource(new CompilerParameters(), code);
+        }
+    }
+}
+"""
+
+# ---- crypto (31 patterns; LIVE: java x2, c x2, cpp x2, python x0, js x2,
+#      ts x2, go x2, ruby x2, php x3, csharp x6 = 23) --------------------------
 
 _JAVA_CRYPTO = """
 import javax.crypto.Cipher;
@@ -483,6 +610,53 @@ function legacySha1($data) {
 }
 """
 
+_CSHARP_CRYPTO = """
+using System;
+using System.Security.Cryptography;
+
+namespace Probe
+{
+    public class Cryptor
+    {
+        public byte[] HashWithMd5(byte[] data)
+        {
+            var hasher = MD5.Create();
+            return hasher.ComputeHash(data);
+        }
+
+        public byte[] HashWithSha1(byte[] data)
+        {
+            var digest = SHA1.Create();
+            return digest.ComputeHash(data);
+        }
+
+        public void EncryptWithDes()
+        {
+            var provider = new DESCryptoServiceProvider();
+            provider.GenerateKey();
+        }
+
+        public void EncryptWithTripleDes()
+        {
+            var triple = TripleDES.Create();
+            triple.GenerateKey();
+        }
+
+        public void EncryptWithRijndael()
+        {
+            var rijndael = new RijndaelManaged();
+            rijndael.GenerateKey();
+        }
+
+        public int WeakToken()
+        {
+            var random = new Random();
+            return random.Next();
+        }
+    }
+}
+"""
+
 
 FIXTURES: dict[tuple[str, str], tuple[str, str]] = {
     ("url_fetch", "java"): ("Fetcher.java", _JAVA_URL_FETCH),
@@ -492,16 +666,19 @@ FIXTURES: dict[tuple[str, str], tuple[str, str]] = {
     ("url_fetch", "go"): ("fetcher.go", _GO_URL_FETCH),
     ("url_fetch", "ruby"): ("fetcher.rb", _RUBY_URL_FETCH),
     ("url_fetch", "php"): ("fetcher.php", _PHP_URL_FETCH),
+    ("url_fetch", "csharp"): ("Fetcher.cs", _CSHARP_URL_FETCH),
     ("deserialization", "java"): ("Deser.java", _JAVA_DESER),
     ("deserialization", "python"): ("deser.py", _PYTHON_DESER),
     ("deserialization", "go"): ("deser.go", _GO_DESER),
     ("deserialization", "ruby"): ("deser.rb", _RUBY_DESER),
     ("deserialization", "php"): ("deser.php", _PHP_DESER),
+    ("deserialization", "csharp"): ("Deserializer.cs", _CSHARP_DESER),
     ("eval_exec", "python"): ("evalpy.py", _PYTHON_EVAL),
     ("eval_exec", "javascript"): ("evaljs.js", _JS_EVAL),
     ("eval_exec", "typescript"): ("evalts.ts", _TS_EVAL),
     ("eval_exec", "ruby"): ("evalrb.rb", _RUBY_EVAL),
     ("eval_exec", "php"): ("evalphp.php", _PHP_EVAL),
+    ("eval_exec", "csharp"): ("Loader.cs", _CSHARP_EVAL),
     ("crypto", "java"): ("Crypto.java", _JAVA_CRYPTO),
     ("crypto", "c"): ("crypto.c", _C_CRYPTO),
     ("crypto", "cpp"): ("crypto.cpp", _CPP_CRYPTO),
@@ -510,12 +687,13 @@ FIXTURES: dict[tuple[str, str], tuple[str, str]] = {
     ("crypto", "go"): ("crypto.go", _GO_CRYPTO),
     ("crypto", "ruby"): ("crypto.rb", _RUBY_CRYPTO),
     ("crypto", "php"): ("crypto.php", _PHP_CRYPTO),
+    ("crypto", "csharp"): ("Cryptor.cs", _CSHARP_CRYPTO),
 }
 
 
 # ---------------------------------------------------------------------------
 # Case table: (family, language, pattern verbatim, needle that locates the
-# line in its fixture). One row per LIVE pattern -- 69 total.
+# line in its fixture). One row per LIVE pattern -- 89 total.
 # ---------------------------------------------------------------------------
 
 CASES: list[tuple[str, str, str, str]] = [
@@ -553,6 +731,11 @@ CASES: list[tuple[str, str, str, str]] = [
     ("url_fetch", "php", r"\bcurl_exec\s*\(", "curl_exec($ch)"),
     ("url_fetch", "php", r"\bfile_get_contents\s*\(.*http", 'file_get_contents("http://" . $target)'),
     ("url_fetch", "php", r"\bfopen\s*\(.*http", 'fopen("http://" . $target, "r")'),
+    # -- url_fetch: csharp (4) --
+    ("url_fetch", "csharp", r"\bnew\s+HttpClient\s*\(", "var client = new HttpClient();"),
+    ("url_fetch", "csharp", r"\bWebRequest\.Create\s*\(", "var req = WebRequest.Create(url);"),
+    ("url_fetch", "csharp", r"\bnew\s+WebClient\s*\(", "var wc = new WebClient();"),
+    ("url_fetch", "csharp", r"\bHttpWebRequest\b", "HttpWebRequest hwr = WebRequest.CreateHttp(url);"),
 
     # -- deserialization: java (3) --
     ("deserialization", "java", r"\bObjectInputStream\b", "ObjectInputStream in = new ObjectInputStream"),
@@ -570,6 +753,13 @@ CASES: list[tuple[str, str, str, str]] = [
     ("deserialization", "ruby", r"\bYAML\.load\s*\(", "YAML.load(data)"),
     # -- deserialization: php (1, json_decode excluded as MISROUTED) --
     ("deserialization", "php", r"\bunserialize\s*\(", "unserialize($data)"),
+    # -- deserialization: csharp (6) --
+    ("deserialization", "csharp", r"\bBinaryFormatter\b", "var formatter = new BinaryFormatter();"),
+    ("deserialization", "csharp", r"\bJavaScriptSerializer\b", "var serializer = new JavaScriptSerializer();"),
+    ("deserialization", "csharp", r"\bNetDataContractSerializer\b", "var contract = new NetDataContractSerializer();"),
+    ("deserialization", "csharp", r"\bLosFormatter\b", "var formatter = new LosFormatter();"),
+    ("deserialization", "csharp", r"\bTypeNameHandling\b", "settings.TypeNameHandling = TypeNameHandling.All;"),
+    ("deserialization", "csharp", r"\bnew\s+XmlSerializer\s*\(", "var xml = new XmlSerializer(typeof(object));"),
 
     # -- eval_exec: python (2, compile excluded as MISROUTED) --
     ("eval_exec", "python", r"\beval\s*\(", "return eval(expr, ctx)"),
@@ -590,6 +780,11 @@ CASES: list[tuple[str, str, str, str]] = [
     ("eval_exec", "ruby", r"\bpublic_send\s*\(", "public_send(attr)"),
     # -- eval_exec: php (1) --
     ("eval_exec", "php", r"\beval\s*\(", "eval($code);"),
+    # -- eval_exec: csharp (4) --
+    ("eval_exec", "csharp", r"\bAssembly\.Load\w*\s*\(", "var assembly = Assembly.Load(raw);"),
+    ("eval_exec", "csharp", r"\bActivator\.CreateInstance\s*\(", "var instance = Activator.CreateInstance(type);"),
+    ("eval_exec", "csharp", r"\bType\.GetType\s*\(", "var resolved = Type.GetType(typeName);"),
+    ("eval_exec", "csharp", r"\bCSharpCodeProvider\b", "var provider = new CSharpCodeProvider();"),
 
     # -- crypto: java (2, MessageDigest( excluded as DEAD) --
     ("crypto", "java", r"\bCipher\.getInstance\s*\(", 'Cipher.getInstance("AES/GCM/NoPadding")'),
@@ -616,6 +811,13 @@ CASES: list[tuple[str, str, str, str]] = [
     ("crypto", "php", r"\bopenssl_encrypt\s*\(", "openssl_encrypt($data,"),
     ("crypto", "php", r"\bmd5\s*\(", "return md5($data);"),
     ("crypto", "php", r"\bsha1\s*\(", "return sha1($data);"),
+    # -- crypto: csharp (6) --
+    ("crypto", "csharp", r"\bMD5\b", "var hasher = MD5.Create();"),
+    ("crypto", "csharp", r"\bSHA1\b", "var digest = SHA1.Create();"),
+    ("crypto", "csharp", r"\bDESCryptoServiceProvider\b", "var provider = new DESCryptoServiceProvider();"),
+    ("crypto", "csharp", r"\bTripleDES\b", "var triple = TripleDES.Create();"),
+    ("crypto", "csharp", r"\bRijndaelManaged\b", "var rijndael = new RijndaelManaged();"),
+    ("crypto", "csharp", r"\bnew\s+Random\s*\(", "var random = new Random();"),
 ]
 
 
@@ -827,7 +1029,7 @@ def test_case_table_covers_every_live_pattern_and_no_dead_ones() -> None:
         f"{(tested | excluded) - catalogue}"
     )
 
-    # Seven additional requests methods: 29 + 14 + 19 + 25 = 87.
-    assert len(catalogue) == 87
-    assert len(tested) == 69
+    # 33 + 20 + 23 + 31 = 107 (csharp added 4/6/4/6, all LIVE).
+    assert len(catalogue) == 107
+    assert len(tested) == 89
     assert len(excluded) == 18

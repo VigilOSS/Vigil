@@ -230,6 +230,26 @@ function Get-UserData {
 }
 """
 
+CSHARP_SOURCES_SRC = """\
+using Microsoft.AspNetCore.Mvc;
+using System;
+
+public class HomeController : Controller
+{
+    public IActionResult Index()
+    {
+        var id = Request.QueryString["id"];
+        var home = Environment.GetEnvironmentVariable("HOME");
+        return View();
+    }
+
+    public IActionResult Save([FromBody] string body)
+    {
+        return Ok();
+    }
+}
+"""
+
 # ---------------------------------------------------------------------------
 # Fixtures -- imports / extra sinks / extra entry points, one line per
 # pattern, tested via `streaming_security_fallback` directly (matching the
@@ -247,6 +267,7 @@ PHP_IMPORT_SRC = (
     "<?php\ninclude 'a.php';\ninclude_once 'b.php';\n"
     "require 'c.php';\nrequire_once 'd.php';\nuse App\\Foo;\n"
 )
+CSHARP_IMPORT_SRC = "using System.Data;\nusing System.Text;\nusing static System.Math;\n"
 C_IMPORT_SRC = '#include <stdio.h>\n#include "local.h"\n'
 CPP_IMPORT_SRC = '#include <iostream>\n#include "local.hpp"\n'
 LUA_IMPORT_SRC = "local m = require('module')\n"
@@ -347,6 +368,9 @@ LIVE_CASES: list[tuple[str, str, str, str, str, str, str, str]] = [
     ("source", "powershell", r"\$(?:args|PSBoundParameters|MyInvocation)\b", "source", PS_SOURCES_SRC, "script.ps1", "$name = $args[0]", "script_parameter"),
     ("source", "powershell", r"\$env:[A-Za-z_]\w*", "source", PS_SOURCES_SRC, "script.ps1", "$key = $env:API_KEY", "environment_input"),
     ("source", "powershell", r"\bRead-Host\b", "source", PS_SOURCES_SRC, "script.ps1", "$answer = Read-Host", "interactive_input"),
+    ("source", "csharp", r"\b(?:HttpContext\.)?Request\.(?:Form|QueryString|Query|Params|Headers|Cookies|Body)\b", "source", CSHARP_SOURCES_SRC, "HomeController.cs", 'var id = Request.QueryString["id"];', "http_request_input"),
+    ("source", "csharp", r"\[From(?:Body|Query|Route|Form|Header)\b", "source", CSHARP_SOURCES_SRC, "HomeController.cs", "public IActionResult Save([FromBody] string body)", "http_request_input"),
+    ("source", "csharp", r"\b(?:Environment\.GetEnvironmentVariable\s*\(|Console\.ReadLine\s*\()", "source", CSHARP_SOURCES_SRC, "HomeController.cs", 'var home = Environment.GetEnvironmentVariable("HOME");', "process_input"),
     # ============================= imports =================================
     ("import", "python", r"\b(?:from\s+[\w.]+\s+import\b[^\r\n]*|import\s+[^\r\n]+)", "import", PY_IMPORT_SRC, "x.py", "import os", None),
     ("import", "javascript", r"\bimport\b[^\r\n]*", "import", JS_IMPORT_SRC, "x.js", "import foo from 'foo';", None),
@@ -357,6 +381,7 @@ LIVE_CASES: list[tuple[str, str, str, str, str, str, str, str]] = [
     ("import", "go", r"\bimport\s*(?:\([^\r\n]*|[\"`][^\"`]+[\"`])", "import", GO_IMPORT_SRC, "x.go", "import (", None),
     ("import", "ruby", r"\b(?:require|require_relative|load)\s*\(?\s*['\"][^'\"]+", "import", RUBY_IMPORT_SRC, "x.rb", "require 'json'", None),
     ("import", "php", r"\b(?:include|include_once|require|require_once|use)\b[^\r\n;]*", "import", PHP_IMPORT_SRC, "x.php", "include 'a.php';", None),
+    ("import", "csharp", r"\busing\s+(?:static\s+)?[^\r\n;=]+", "import", CSHARP_IMPORT_SRC, "Repo.cs", "using System.Data", None),
     ("import", "c", r"#\s*include\s*[<\"][^>\"]+[>\"]", "import", C_IMPORT_SRC, "x.c", "#include <stdio.h>", None),
     ("import", "cpp", r"#\s*include\s*[<\"][^>\"]+[>\"]", "import", CPP_IMPORT_SRC, "x.cpp", "#include <iostream>", None),
     ("import", "lua", r"\brequire\s*\(?\s*['\"][^'\"]+", "import", LUA_IMPORT_SRC, "x.lua", "local m = require('module')", None),
@@ -669,10 +694,11 @@ def test_catalogue_sweep_covers_every_streaming_pattern() -> None:
         | _real_extra_sink_keys()
         | _real_extra_entry_keys()
     )
-    assert len(real_keys) == 83, (
-        f"expected 83 streaming catalogue entries (29 sources + 22 imports + "
+    assert len(real_keys) == 87, (
+        f"expected 87 streaming catalogue entries (32 sources + 23 imports + "
         f"24 extra sinks + 8 extra entry points -- includes the powershell and "
-        f"blade languages added mid-audit), found {len(real_keys)}. The catalogue "
+        f"blade languages added mid-audit, and the csharp source/import tables "
+        f"added with C# tree-sitter support), found {len(real_keys)}. The catalogue "
         f"has drifted since this audit; update LIVE_CASES/OBSOLETE_PATTERNS."
     )
 
