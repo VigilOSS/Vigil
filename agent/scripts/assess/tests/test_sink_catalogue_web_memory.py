@@ -900,15 +900,8 @@ func renderHandler(resp http.ResponseWriter, r *http.Request) {
     assert _sinks_of_kind(result, "xss_output") == []
 
 
-def test_php_top_level_template_echo_is_invisible() -> None:
-    """`\\becho\\b`/`\\bprint\\b`/`\\bprintf\\s*\\(` (treesitter_index.py:393)
-    only scan inside function bodies (`_detect_sinks`, treesitter_index.py
-    :1568/1576-1579). The classic PHP template idiom -- `<?php echo $x; ?>`
-    mixed with HTML at the top level of the file, outside any function --
-    has no function for `_detect_sinks` to scan, so it never fires. This is
-    the majority PHP `echo` idiom (plain views, WordPress themes, legacy
-    MVC view files).
-    """
+def test_php_top_level_template_echo_is_indexed() -> None:
+    """Plain PHP views expose their top-level output sinks."""
     source = """\
 <?php
 $name = $_GET["name"];
@@ -923,7 +916,7 @@ $name = $_GET["name"];
     result = _index("template.php", "php", source)
     assert result["analysis_mode"] == "tree_sitter"
     assert result["functions"] == []
-    assert _sinks_of_kind(result, "xss_output") == []
+    assert _sinks_of_kind(result, "xss_output")
 
 
 def test_ruby_redirect_to_without_parentheses_is_invisible() -> None:

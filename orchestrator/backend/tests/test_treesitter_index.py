@@ -791,10 +791,12 @@ def test_php_sinks():
 @needs_treesitter
 def test_php_entry_points():
     idx = index_file("app.php", "php", source=PHP_SOURCE)
-    # PHP_SOURCE registers nothing the catalogue reads: no `#[Route]` attribute,
-    # no magic method, no `Route::`/`$app->`/`$router->` call. An empty result is
-    # the honest one, and a positive assertion here would be asserting a gap.
-    assert idx["entry_points"] == []
+    # The fixture explicitly extends a Controller base; its public actions
+    # are candidate request handlers, while its private helper is not.
+    assert {(entry["name"], entry["kind"]) for entry in idx["entry_points"]} == {
+        ("index", "laravel_action"),
+        ("execute", "laravel_action"),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1035,9 +1037,10 @@ end
 """
     idx = index_file("script.lua", "lua", source=source)
     kinds = _sink_kinds(idx)
-    assert "redis_call" in kinds
-    assert "redis_keys_input" in kinds
-    assert "os_execute" in kinds
+    # A fixed Redis command with a key from KEYS is script input, not command
+    # injection. Only the process execution line is an injection sink here.
+    assert kinds == {"os_execute"}
+    assert any(item["kind"] == "script_argument" for item in idx["security_sources"])
     assert any(f["name"] == "handler" for f in idx["functions"])
 
 

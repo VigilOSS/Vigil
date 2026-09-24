@@ -8,7 +8,9 @@ sites.  All tree-sitter imports are guarded so the module remains importable
 from __future__ import annotations
 
 import bisect
+import json
 import re
+import shlex
 import warnings
 from functools import lru_cache
 from pathlib import Path
@@ -59,6 +61,14 @@ _try_import_grammar("tree_sitter_c_sharp", "csharp")
 # QueryCursor.matches() instead.  This helper provides a single call site.
 # ---------------------------------------------------------------------------
 
+@lru_cache(maxsize=128)
+def _compiled_ts_query(lang_obj: Any, query_str: str) -> Any:
+    """Reuse immutable query plans across files; cursors remain per scan."""
+    if hasattr(tree_sitter, "QueryCursor"):
+        return tree_sitter.Query(lang_obj, query_str)
+    return lang_obj.query(query_str)
+
+
 def _ts_query_captures(lang_obj: Any, query_str: str, root_node: Any) -> dict[str, list[Any]]:
     """Run a tree-sitter query and return ``{capture_name: [nodes]}``."""
     if tree_sitter is None:
@@ -66,7 +76,7 @@ def _ts_query_captures(lang_obj: Any, query_str: str, root_node: Any) -> dict[st
     # 0.25+: Query() constructor + QueryCursor
     if hasattr(tree_sitter, "QueryCursor"):
         try:
-            query = tree_sitter.Query(lang_obj, query_str)
+            query = _compiled_ts_query(lang_obj, query_str)
         except Exception:
             return {}
         cursor = tree_sitter.QueryCursor(query)
@@ -77,7 +87,7 @@ def _ts_query_captures(lang_obj: Any, query_str: str, root_node: Any) -> dict[st
         return result
     # 0.23.x: Language.query() + Query.captures()
     try:
-        query = lang_obj.query(query_str)
+        query = _compiled_ts_query(lang_obj, query_str)
     except Exception:
         return {}
     return query.captures(root_node)  # type: ignore[return-value]
@@ -207,8 +217,13 @@ _CPP_DECLARATION_QUERY = """
     (field_declaration) @decl
 """
 
+_C_DECLARATION_QUERY = """(declaration) @decl"""
+
 _CLASS_QUERIES: dict[str, str] = {
-    "java": """(class_declaration) @cls""",
+    "java": """
+        (class_declaration) @cls
+        (interface_declaration) @cls
+    """,
     "cpp": """
         (class_specifier) @cls
         (struct_specifier) @cls
@@ -264,7 +279,8 @@ _SINK_DEFINITIONS: list[SinkPattern] = [
             "java": [r"\bnew\s+File\s*\(", r"\bFileInputStream\s*\(", r"\bFileOutputStream\s*\(",
                      r"\bPaths\.get\s*\(", r"\bFileUtils\.copy"],
             "c": [r"\bfopen\s*\(", r"\bopen\s*\(", r"\baccess\s*\(", r"\bstat\s*\("],
-            "cpp": [r"\bfopen\s*\(", r"\bopen\s*\(", r"\baccess\s*\(", r"\bstat\s*\("],
+            "cpp": [r"\bfopen\s*\(", r"\bopen\s*\(", r"\baccess\s*\(", r"\bstat\s*\(",
+                    r"\b(?:std::)?(?:i|o|f)fstream\s+(?:[A-Za-z_]\w*)\s*[({]"],
             "python": [r"\bopen\s*\(", r"\bos\.path\.join\s*\(", r"\bPath\s*\("],
             "javascript": [r"\bfs\.readFile\w*\s*\(", r"\bfs\.writeFile\w*\s*\(", r"\bpath\.join\s*\("],
             "typescript": [r"\bfs\.readFile\w*\s*\(", r"\bfs\.writeFile\w*\s*\(", r"\bpath\.join\s*\("],
@@ -344,7 +360,8 @@ _SINK_DEFINITIONS: list[SinkPattern] = [
         "kind": "url_fetch",
         "vuln_classes": ["ssrf"],
         "patterns": {
-            "java": [r"\bnew\s+URL\s*\(", r"\bHttpURLConnection\b", r"\bHttpClient\.send\s*\("],
+            "java": [r"\.openStream\s*\(", r"\.getInputStream\s*\(",
+                     r"\.getResponseCode\s*\(", r"\.send(?:Async)?\s*\("],
             "python": [r"\brequests\.get\s*\(", r"\brequests\.post\s*\(",
                        r"\brequests\.put\s*\(", r"\brequests\.patch\s*\(",
                        r"\brequests\.delete\s*\(", r"\brequests\.head\s*\(",
@@ -352,14 +369,17 @@ _SINK_DEFINITIONS: list[SinkPattern] = [
                        r"\burllib\.request\.urlopen\s*\("],
             "javascript": [r"\bfetch\s*\(", r"\bhttp\.request\s*\(", r"\baxios\."],
             "typescript": [r"\bfetch\s*\(", r"\bhttp\.request\s*\(", r"\baxios\."],
-            "go": [r"\bhttp\.Get\s*\(", r"\bhttp\.Post\s*\(", r"\bhttp\.NewRequest\s*\(",
-                   r"\bhttp\.DefaultClient\.Do\s*\("],
+            "go": [r"\bhttp\.Get\s*\(", r"\bhttp\.Post\s*\(",
+                   r"\b\w*[Cc]lient\.Do\s*\("],
             "ruby": [r"\bNet::HTTP\.\w+\s*\(", r"\bHTTParty\.\w+\s*\(",
                      r"\bopen-uri\b", r"\bURI\.open\s*\("],
             "php": [r"\bcurl_exec\s*\(", r"\bfile_get_contents\s*\(.*http",
                     r"\bfopen\s*\(.*http"],
-            "csharp": [r"\bnew\s+HttpClient\s*\(", r"\bWebRequest\.Create\s*\(",
-                       r"\bnew\s+WebClient\s*\(", r"\bHttpWebRequest\b"],
+            "csharp": [
+                r"\.(?:GetAsync|PostAsync|PutAsync|DeleteAsync|SendAsync|GetStringAsync|GetByteArrayAsync|GetStreamAsync)\s*\(",
+                r"\.(?:Download\w*|Upload\w*)\s*\(",
+                r"\.GetResponse(?:Async)?\s*\(",
+            ],
         },
     },
     {
@@ -522,6 +542,7 @@ _ENTRY_ANNOTATIONS: dict[str, list[dict[str, str]]] = {
         {"pattern": r"@DeleteMapping\b", "kind": "spring_mapping"},
         {"pattern": r"@PatchMapping\b", "kind": "spring_mapping"},
         {"pattern": r"@Path\b", "kind": "jaxrs_annotation"},
+        {"pattern": r"@(?:GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\b", "kind": "jaxrs_annotation"},
         {"pattern": r"@Scheduled\b", "kind": "scheduled_task"},
     ],
     "python": [
@@ -535,6 +556,9 @@ _ENTRY_ANNOTATIONS: dict[str, list[dict[str, str]]] = {
     ],
     "php": [
         {"pattern": r"#\[Route\b", "kind": "symfony_route"},
+    ],
+    "csharp": [
+        {"pattern": r"\[Http(?:Get|Post|Put|Patch|Delete|Head|Options)\b", "kind": "aspnet_action"},
     ],
 }
 
@@ -578,6 +602,9 @@ _ENTRY_METHOD_NAMES: dict[str, list[dict[str, str]]] = {
 
 # String patterns scanned against source lines to detect framework registrations.
 _ENTRY_LINE_PATTERNS: dict[str, list[dict[str, str]]] = {
+    "java": [
+        {"pattern": r"\bRouterFunctions\.route\s*\(", "kind": "spring_functional_route"},
+    ],
     "javascript": [
         {"pattern": r"\bapp\.get\s*\(", "kind": "express_route"},
         {"pattern": r"\bapp\.post\s*\(", "kind": "express_route"},
@@ -618,13 +645,16 @@ _ENTRY_LINE_PATTERNS: dict[str, list[dict[str, str]]] = {
         {"pattern": r"\b(?:e|g|app)\.\w+\s*\(", "kind": "framework_route"},
     ],
     "ruby": [
-        {"pattern": r"\bget\s+['\"/]", "kind": "sinatra_route"},
-        {"pattern": r"\bpost\s+['\"/]", "kind": "sinatra_route"},
-        {"pattern": r"\bput\s+['\"/]", "kind": "sinatra_route"},
-        {"pattern": r"\bdelete\s+['\"/]", "kind": "sinatra_route"},
+        {"pattern": r"^\s*get\s+['\"/]", "kind": "sinatra_route"},
+        {"pattern": r"^\s*post\s+['\"/]", "kind": "sinatra_route"},
+        {"pattern": r"^\s*put\s+['\"/]", "kind": "sinatra_route"},
+        {"pattern": r"^\s*patch\s+['\"/]", "kind": "sinatra_route"},
+        {"pattern": r"^\s*delete\s+['\"/]", "kind": "sinatra_route"},
+        {"pattern": r"^\s*options\s+['\"/]", "kind": "sinatra_route"},
+        {"pattern": r"^\s*head\s+['\"/]", "kind": "sinatra_route"},
     ],
     "php": [
-        {"pattern": r"\bRoute::\w+\s*\(", "kind": "laravel_route"},
+        {"pattern": r"\bRoute::(?:get|post|put|patch|delete|options|any|match|resource|apiResource|resources|apiResources|redirect|view|fallback)\s*\(", "kind": "laravel_route"},
         {"pattern": r"\$app->\w+\s*\(", "kind": "slim_route"},
         {"pattern": r"\$router->\w+\s*\(", "kind": "framework_route"},
     ],
@@ -637,6 +667,7 @@ _GLOBAL_ENTRY_LINE_PATTERNS: dict[str, list[dict[str, str]]] = {
     "ruby": [
         {"pattern": r"^\s*if\s+__FILE__\s*==\s*\$0", "kind": "main_guard"},
         {"pattern": r"^\s*if\s+\$PROGRAM_NAME\s*==\s*__FILE__", "kind": "main_guard"},
+        {"pattern": r"^\s*Rails\.application\.routes\.draw\b", "kind": "rails_route"},
     ],
     # A Laravel/Slim route file is the reachability map of the application and
     # is written as top-level statements with no enclosing callable at all, so
@@ -645,6 +676,117 @@ _GLOBAL_ENTRY_LINE_PATTERNS: dict[str, list[dict[str, str]]] = {
     # second copy for the two to drift apart.
     "php": _ENTRY_LINE_PATTERNS["php"],
 }
+
+_C_HTTP_CALLBACK_ARGUMENTS = {
+    "evhttp_set_cb": 2,
+    "evhttp_set_gencb": 1,
+    "MHD_start_daemon": 4,
+}
+
+_CPP_HTTP_ROUTE_METHODS = frozenset({"Get", "Post", "Put", "Patch", "Delete", "Options"})
+
+
+def _cpp_http_route_callbacks(tree: Any, source: bytes) -> list[Any]:
+    """Find cpp-httplib server handlers, which occupy a route call's second argument."""
+    callbacks: list[Any] = []
+    aliases: set[tuple[int, int, str]] = set()
+    server_bindings: set[tuple[int, int, str]] = set()
+    declarations: list[Any] = []
+    route_calls: list[Any] = []
+    for node in _walk_named_nodes(tree.root_node):
+        if node.type == "using_declaration":
+            match = re.fullmatch(
+                r"\s*using\s+httplib::(Server|SSLServer)\s*;",
+                _node_text(node, source),
+            )
+            if match:
+                scope = _cpp_binding_scopes(node, tree.root_node)[0]
+                aliases.add((*scope, match.group(1)))
+        elif node.type in {"declaration", "parameter_declaration", "field_declaration"}:
+            declarations.append(node)
+        elif node.type == "call_expression":
+            route_calls.append(node)
+
+    for node in declarations:
+        type_node = node.child_by_field_name("type")
+        declarator = node.child_by_field_name("declarator")
+        if type_node is None or declarator is None:
+            continue
+        type_name = _node_text(type_node, source)
+        scopes = _cpp_binding_scopes(node, tree.root_node)
+        is_server = type_name in {"httplib::Server", "httplib::SSLServer"}
+        if not is_server and type_name in {"Server", "SSLServer"}:
+            is_server = any((*scope, type_name) in aliases for scope in scopes)
+        if not is_server and type_name == "auto":
+            initializer = declarator.child_by_field_name("value")
+            is_server = initializer is not None and re.match(
+                r"httplib::(?:Server|SSLServer)\s*[({]",
+                _node_text(initializer, source),
+            ) is not None
+        if not is_server:
+            continue
+        path = _cpp_declarator_path(declarator)
+        if path:
+            server_bindings.add((*scopes[0], _node_text(path[-1], source)))
+
+    for node in route_calls:
+        callee = node.child_by_field_name("function")
+        if callee is None or callee.type != "field_expression":
+            continue
+        receiver = callee.child_by_field_name("argument")
+        if receiver is None or receiver.type != "identifier":
+            continue
+        receiver_name = _node_text(receiver, source)
+        if not any(
+            (*scope, receiver_name) in server_bindings
+            for scope in _cpp_binding_scopes(node, tree.root_node)
+        ):
+            continue
+        method = callee.child_by_field_name("field")
+        if method is None or _node_text(method, source) not in _CPP_HTTP_ROUTE_METHODS:
+            continue
+        arguments = node.child_by_field_name("arguments")
+        if arguments is None or len(arguments.named_children) < 2:
+            continue
+        route, callback = arguments.named_children[:2]
+        if route.type not in {"string_literal", "raw_string_literal"}:
+            continue
+        if callback.type in {"lambda_expression", "identifier", "qualified_identifier"}:
+            callbacks.append(callback)
+    return callbacks
+
+
+def _cpp_binding_scopes(node: Any, root: Any) -> list[tuple[int, int]]:
+    """Return lexical function/class scopes followed by file scope."""
+    scopes: list[tuple[int, int]] = []
+    current = node.parent
+    while current is not None:
+        if current.type in {"function_definition", "class_specifier", "struct_specifier"}:
+            scopes.append((current.start_byte, current.end_byte))
+        current = current.parent
+    scopes.append((root.start_byte, root.end_byte))
+    return scopes
+
+
+def _c_http_callback_names(tree: Any, source: bytes) -> set[str]:
+    """Find direct function references in known C HTTP registration calls."""
+    names: set[str] = set()
+    for node in _walk_named_nodes(tree.root_node):
+        if node.type != "call_expression":
+            continue
+        callee = node.child_by_field_name("function")
+        if callee is None or callee.type != "identifier":
+            continue
+        argument_index = _C_HTTP_CALLBACK_ARGUMENTS.get(_node_text(callee, source))
+        if argument_index is None:
+            continue
+        arguments = node.child_by_field_name("arguments")
+        if arguments is None or len(arguments.named_children) <= argument_index:
+            continue
+        callback = arguments.named_children[argument_index]
+        if callback.type == "identifier":
+            names.add(_node_text(callback, source))
+    return names
 
 
 # ---------------------------------------------------------------------------
@@ -1157,6 +1299,49 @@ def _extract_php_closures(tree: Any, source: bytes) -> list[dict[str, Any]]:
     ]
 
 
+def _extract_ruby_route_blocks(tree: Any, source: bytes) -> list[dict[str, Any]]:
+    routes: list[dict[str, Any]] = []
+    for node in _walk_named_nodes(tree.root_node):
+        if node.type != "call" or node.child_by_field_name("receiver") is not None:
+            continue
+        method = node.child_by_field_name("method")
+        arguments = node.child_by_field_name("arguments")
+        block = node.child_by_field_name("block")
+        if method is None or arguments is None or block is None:
+            continue
+        verb = _node_text(method, source)
+        if verb not in {"get", "post", "put", "patch", "delete", "options", "head"}:
+            continue
+        path = next((child for child in arguments.named_children if child.type == "string"), None)
+        if path is None:
+            continue
+        line_start, line_end = _node_lines(node)
+        name = f"{verb} {_node_text(path, source)}"
+        parsed = {
+            "name": name,
+            "qualified_name": name,
+            "line_start": line_start,
+            "line_end": line_end,
+            "params": [],
+            "modifiers": [],
+            "annotations": [],
+            "is_entry_point": False,
+            "_ruby_route": True,
+            "_start_byte": node.start_byte,
+            "_end_byte": node.end_byte,
+            "source_span": _public_node_span(node, source),
+            "body_span": _public_node_span(block, source),
+        }
+        (
+            parsed["_body_start_line"],
+            parsed["_body_start_column"],
+            parsed["_body_end_line"],
+            parsed["_body_end_column"],
+        ) = _node_character_range(block, source)
+        routes.append(parsed)
+    return routes
+
+
 def _extract_cpp_declarations(
     tree: Any,
     language: str,
@@ -1193,6 +1378,44 @@ def _extract_cpp_declarations(
     return declarations
 
 
+def _extract_c_declarations(tree: Any, language: str, source: bytes) -> list[dict[str, Any]]:
+    parser = _get_parser(language)
+    if parser is None:
+        return []
+    captures = _ts_query_captures(parser.language, _C_DECLARATION_QUERY, tree.root_node)
+    declarations: list[dict[str, Any]] = []
+    for node in captures.get("decl", []):
+        for declarator in _field_children(node, "declarator"):
+            callable_node = _c_function_declarator(declarator)
+            if callable_node is None or callable_node.type != "function_declarator":
+                continue
+            name_node = callable_node.child_by_field_name("declarator")
+            params_node = callable_node.child_by_field_name("parameters")
+            if name_node is None or name_node.type != "identifier":
+                continue
+            name = _node_text(name_node, source)
+            start_line, end_line = _node_lines(node)
+            declarations.append({
+                "name": name,
+                "qualified_name": name,
+                "line_start": start_line,
+                "line_end": end_line,
+                "params": _extract_params(params_node, source) if params_node else [],
+                "modifiers": [
+                    _node_text(child, source)
+                    for child in node.children
+                    if child.type == "storage_class_specifier"
+                ],
+                "annotations": [],
+                "is_entry_point": False,
+                "is_declaration": True,
+                "_start_byte": node.start_byte,
+                "_end_byte": node.end_byte,
+                "source_span": _public_node_span(node, source),
+            })
+    return declarations
+
+
 def _extract_functions_ts(tree: Any, language: str, source: bytes) -> list[dict[str, Any]]:
     """Extract function/method definitions and C++ declarations."""
     query_language = _query_language_family(language)
@@ -1224,6 +1447,50 @@ def _extract_functions_ts(tree: Any, language: str, source: bytes) -> list[dict[
 
     if query_language == "cpp":
         functions.extend(_extract_cpp_declarations(tree, language, source))
+        by_start_byte = {function["_start_byte"]: function for function in functions}
+        for callback in _cpp_http_route_callbacks(tree, source):
+            if callback.type != "lambda_expression":
+                continue
+            declarator = callback.child_by_field_name("declarator")
+            params_node = next(
+                (child for child in _walk_named_nodes(declarator) if child.type == "parameter_list"),
+                None,
+            ) if declarator is not None else None
+            if params_node is None or not re.search(r"\bRequest\b", _node_text(params_node, source)):
+                continue
+            line, column, _, _ = _node_character_range(callback, source)
+            name = f"<route@{line}:{column}>"
+            parsed = {
+                "name": name,
+                "qualified_name": name,
+                "line_start": line,
+                "line_end": callback.end_point[0] + 1,
+                "params": _extract_params(params_node, source),
+                "modifiers": [],
+                "annotations": [],
+                "is_entry_point": False,
+                "is_closure": True,
+                "is_declaration": False,
+                "_start_byte": callback.start_byte,
+                "_end_byte": callback.end_byte,
+                "_cpp_parameter_signature": _cpp_parameter_signature(params_node, source),
+                "_cpp_qualifier_signature": (),
+            }
+            _attach_callable_spans(parsed, callable_node=callback, source=source)
+            ancestor = callback.parent
+            while ancestor is not None:
+                enclosing = by_start_byte.get(ancestor.start_byte)
+                if enclosing is not None and enclosing["_end_byte"] == ancestor.end_byte:
+                    enclosing.setdefault("_excluded_ranges", []).append(
+                        _node_character_range(callback, source)
+                    )
+                    break
+                ancestor = ancestor.parent
+            functions.append(parsed)
+            by_start_byte[callback.start_byte] = parsed
+        functions.sort(key=lambda function: function["_start_byte"])
+    elif query_language == "c":
+        functions.extend(_extract_c_declarations(tree, language, source))
     elif query_language in {"javascript", "typescript"}:
         functions = _extract_javascript_callables(tree, source)
     elif query_language == "php":
@@ -1236,6 +1503,49 @@ def _extract_functions_ts(tree: Any, language: str, source: bytes) -> list[dict[
             functions + _extract_php_closures(tree, source),
             key=lambda function: function["_start_byte"],
         )
+    elif query_language == "ruby":
+        functions = sorted(
+            functions + _extract_ruby_route_blocks(tree, source),
+            key=lambda function: function["_start_byte"],
+        )
+    elif query_language == "csharp":
+        for node in _walk_named_nodes(tree.root_node):
+            if node.type != "lambda_expression":
+                continue
+            parent = node.parent
+            invocation = parent.parent if parent is not None and parent.type == "argument" else None
+            if invocation is not None and invocation.type == "argument_list":
+                invocation = invocation.parent
+            if invocation is None or invocation.type != "invocation_expression":
+                continue
+            target = invocation.child_by_field_name("function")
+            if target is None or not re.search(
+                r"\.Map(?:Get|Post|Put|Patch|Delete|Methods|Fallback)\s*$",
+                _node_text(target, source),
+            ):
+                continue
+            line, column, _, _ = _node_character_range(node, source)
+            name = f"<route@{line}:{column}>"
+            parameters = node.child_by_field_name("parameters")
+            single_parameter = node.child_by_field_name("parameter")
+            parsed = {
+                "name": name,
+                "qualified_name": name,
+                "line_start": line,
+                "line_end": node.end_point[0] + 1,
+                "params": (
+                    _extract_params(parameters, source) if parameters is not None
+                    else ([_node_text(single_parameter, source)] if single_parameter is not None else [])
+                ),
+                "modifiers": [],
+                "annotations": [],
+                "is_entry_point": False,
+                "_minimal_api_route": True,
+                "_start_byte": node.start_byte,
+                "_end_byte": node.end_byte,
+            }
+            _attach_callable_spans(parsed, callable_node=node, source=source)
+            functions.append(parsed)
 
     return functions
 
@@ -1340,6 +1650,11 @@ def _parse_function_node(node: Any, language: str, source: bytes) -> dict[str, A
                 is_declaration=False,
             )
     elif language == "c":
+        modifiers = [
+            _node_text(child, source)
+            for child in node.children
+            if child.type == "storage_class_specifier"
+        ]
         decl = _c_function_declarator(node.child_by_field_name("declarator"))
         if decl:
             for child in decl.children:
@@ -1408,6 +1723,15 @@ def _parse_function_node(node: Any, language: str, source: bytes) -> dict[str, A
         params_node = node.child_by_field_name("parameters")
         if params_node:
             params = _extract_params(params_node, source)
+        for child in node.children:
+            if child.type == "modifier":
+                modifiers.append(_node_text(child, source))
+            elif child.type == "attribute_list":
+                annotations.extend(
+                    f"[{_node_text(attribute, source)}]"
+                    for attribute in child.named_children
+                    if attribute.type == "attribute"
+                )
 
     if not name:
         return None
@@ -1469,6 +1793,28 @@ def _extract_classes_ts(tree: Any, language: str, source: bytes) -> list[dict[st
         if cls_info:
             classes.append(cls_info)
 
+    if query_language == "csharp":
+        local_interfaces = {
+            _node_text(node.child_by_field_name("name"), source)
+            for node in nodes
+            if node.type == "interface_declaration"
+            and node.child_by_field_name("name") is not None
+        }
+        local_classes = {
+            _node_text(node.child_by_field_name("name"), source)
+            for node in nodes
+            if node.type in {"class_declaration", "record_declaration"}
+            and node.child_by_field_name("name") is not None
+        }
+        for cls in classes:
+            base_name = cls["extends"].rsplit("::", 1)[-1].rsplit(".", 1)[-1]
+            if cls["extends"] and (
+                cls["extends"] in local_interfaces
+                or base_name in {"IDisposable", "IAsyncDisposable"} and base_name not in local_classes
+            ):
+                cls["implements"].insert(0, cls["extends"])
+                cls["extends"] = ""
+
     return classes
 
 
@@ -1479,21 +1825,27 @@ def _parse_class_node(node: Any, language: str, source: bytes) -> dict[str, Any]
     name = ""
     extends: str = ""
     implements: list[str] = []
+    java_public = False
 
     if language == "java":
         for child in node.children:
             if child.type == "identifier":
                 name = _node_text(child, source)
+            elif child.type == "modifiers":
+                java_public = any(mod.type == "public" for mod in child.children)
             elif child.type == "superclass":
                 for sc in child.children:
-                    if sc.type == "type_identifier":
+                    if sc.type in {"type_identifier", "scoped_type_identifier"}:
                         extends = _node_text(sc, source)
-            elif child.type == "super_interfaces":
+            elif child.type in {"super_interfaces", "extends_interfaces"}:
                 for si in child.children:
                     if si.type == "type_list":
                         for ti in si.children:
-                            if ti.type == "type_identifier":
-                                implements.append(_node_text(ti, source))
+                            if ti.type in {"type_identifier", "scoped_type_identifier"}:
+                                if child.type == "extends_interfaces" and not extends:
+                                    extends = _node_text(ti, source)
+                                else:
+                                    implements.append(_node_text(ti, source))
     elif language in ("c", "cpp"):
         name_node = node.child_by_field_name("name")
         if name_node:
@@ -1558,15 +1910,17 @@ def _parse_class_node(node: Any, language: str, source: bytes) -> dict[str, Any]
         name_node = node.child_by_field_name("name")
         if name_node:
             name = _node_text(name_node, source)
-        # C#'s `base_list` mixes the base class and interfaces with no field
-        # distinguishing them, the way Python lists its bases; take the first
-        # named base as `extends` and the rest as `implements`.
+        # Only classes can inherit a base class. An interface/struct base list
+        # consists entirely of interfaces; class first bases are resolved
+        # against interfaces declared in this file after extraction.
         for child in node.children:
             if child.type == "base_list":
                 for base in child.named_children:
                     if base.type in ("identifier", "qualified_name", "generic_name"):
                         txt = _node_text(base, source)
-                        if not extends:
+                        if node.type in ("interface_declaration", "struct_declaration"):
+                            implements.append(txt)
+                        elif not extends:
                             extends = txt
                         else:
                             implements.append(txt)
@@ -1585,6 +1939,13 @@ def _parse_class_node(node: Any, language: str, source: bytes) -> dict[str, Any]
     }
     if language == "cpp":
         parsed_class["_cpp_namespace"] = _cpp_namespace_qualifier(node, source)
+    elif language == "java":
+        parsed_class["_java_public"] = java_public
+    elif language == "csharp":
+        parsed_class["_csharp_public"] = any(
+            child.type == "modifier" and _node_text(child, source) == "public"
+            for child in node.children
+        )
     return parsed_class
 
 
@@ -1640,7 +2001,7 @@ def _extract_imports_ts(tree: Any, language: str, source: bytes) -> list[str]:
             # `using static System.Math;` -> `System.Math`. A `using alias =
             # Ns.Type;` keeps its `alias = Ns.Type` body verbatim, the same way
             # the other languages leave an aliased import as authored.
-            text = text.removeprefix("using").strip()
+            text = text.removeprefix("global").strip().removeprefix("using").strip()
             text = text.removeprefix("static").strip()
         elif query_language == "python":
             pass
@@ -1794,12 +2155,33 @@ def _registering_call_lines(
     return lines
 
 
+def _ruby_method_is_public(tree: Any, function: dict[str, Any], source: bytes) -> bool:
+    node = tree.root_node.descendant_for_byte_range(
+        function["_start_byte"], function["_end_byte"]
+    )
+    if node is None:
+        return False
+    body = node.parent
+    if body is None or body.type != "body_statement":
+        return False
+    visibility = "public"
+    for sibling in body.named_children:
+        if sibling.start_byte >= node.start_byte:
+            break
+        if sibling.type == "identifier":
+            token = _node_text(sibling, source)
+            if token in {"public", "private", "protected"}:
+                visibility = token
+    return visibility == "public"
+
+
 def _detect_entry_points(
     tree: Any,
     functions: list[dict[str, Any]],
     classes: list[dict[str, Any]],
     language: str,
     source_lines: list[str],
+    source: bytes,
 ) -> list[dict[str, Any]]:
     """Identify entry-point functions via annotations, names, and line patterns."""
     entry_points: list[dict[str, Any]] = []
@@ -1813,9 +2195,108 @@ def _detect_entry_points(
     annotation_defs = _ENTRY_ANNOTATIONS.get(language, [])
     method_name_defs = _ENTRY_METHOD_NAMES.get(language, [])
     line_pattern_defs = _ENTRY_LINE_PATTERNS.get(language, [])
+    c_http_callbacks = _c_http_callback_names(tree, source) if language == "c" else set()
+    cpp_http_callbacks = _cpp_http_route_callbacks(tree, source) if language == "cpp" else []
+    cpp_http_names = {
+        _node_text(callback, source).rsplit("::", 1)[-1]
+        for callback in cpp_http_callbacks
+        if callback.type in {"identifier", "qualified_identifier"}
+    }
+    cpp_http_lambdas = {
+        callback.start_byte
+        for callback in cpp_http_callbacks
+        if callback.type == "lambda_expression"
+    }
+    js_route_calls: list[tuple[Any, str]] = []
+    if language in {"javascript", "typescript"}:
+        for node in _walk_named_nodes(tree.root_node):
+            if node.type != "call_expression":
+                continue
+            target = node.child_by_field_name("function")
+            if target is None:
+                continue
+            match = re.fullmatch(
+                r"(app|router)\.(?:get|post|put|delete)", _node_text(target, source)
+            )
+            if match is not None:
+                js_route_calls.append((node, match.group(1)))
 
     for func in functions:
+        if func.get("is_declaration", False):
+            continue
         matched = False
+
+        cls = class_for_line.get(func["line_start"])
+        if (
+            language == "ruby"
+            and cls is not None
+            and cls["name"].endswith("Controller")
+            and cls.get("extends") in {"ApplicationController", "ActionController::Base", "ActionController::API"}
+            and func["name"] != "initialize"
+            and not func.get("_ruby_route")
+            and _ruby_method_is_public(tree, func, source)
+        ):
+            entry_points.append({
+                "name": func["name"],
+                "line": func["line_start"],
+                "kind": "rails_action",
+                "annotation": "",
+            })
+            func["is_entry_point"] = True
+            continue
+        if (
+            language == "php"
+            and cls is not None
+            and cls["name"].endswith("Controller")
+            and (cls.get("extends") or "").endswith("Controller")
+            and not func.get("is_closure")
+            and not func["name"].startswith("__")
+            and not func["annotations"]
+            and not any(modifier in {"private", "protected"} for modifier in func["modifiers"])
+        ):
+            entry_points.append({
+                "name": func["name"],
+                "line": func["line_start"],
+                "kind": "laravel_action",
+                "annotation": "",
+            })
+            func["is_entry_point"] = True
+            continue
+
+        if language == "c" and func["name"] in c_http_callbacks:
+            entry_points.append({
+                "name": func["name"],
+                "line": func["line_start"],
+                "kind": "http_handler",
+                "annotation": "",
+            })
+            func["is_entry_point"] = True
+            continue
+        if language == "cpp" and (
+            (func.get("is_closure", False) and func.get("_start_byte") in cpp_http_lambdas)
+            or (
+                func["name"] in cpp_http_names
+                and any(re.search(r"\bRequest\b", param) for param in func["params"])
+            )
+        ):
+            entry_points.append({
+                "name": func["name"],
+                "line": func["line_start"],
+                "kind": "http_handler",
+                "annotation": "",
+            })
+            func["is_entry_point"] = True
+            continue
+
+        if language == "csharp" and func.get("_minimal_api_route"):
+            entry_points.append({
+                "name": func["name"],
+                "line": func["line_start"],
+                "kind": "minimal_api_route",
+                "annotation": "",
+            })
+            func["is_entry_point"] = True
+            continue
 
         for ann_def in annotation_defs:
             for ann in func.get("annotations", []):
@@ -1840,7 +2321,13 @@ def _detect_entry_points(
             if func["name"] == mdef["name"]:
                 if mdef["kind"] in ("servlet_override", "filter_override"):
                     cls = class_for_line.get(func["line_start"])
-                    if cls and cls.get("extends") in ("HttpServlet", "Filter", "GenericServlet"):
+                    bases = [cls.get("extends", ""), *cls.get("implements", [])] if cls else []
+                    base_names = {base.rsplit(".", 1)[-1] for base in bases}
+                    valid_bases = (
+                        {"Filter"} if mdef["kind"] == "filter_override"
+                        else {"HttpServlet", "GenericServlet"}
+                    )
+                    if base_names & valid_bases:
                         entry_points.append({
                             "name": func["name"],
                             "line": func["line_start"],
@@ -1895,7 +2382,27 @@ def _detect_entry_points(
             )
         )
         for lp in line_pattern_defs:
+            if language in {"c", "cpp"}:
+                if re.search(lp["pattern"], f'{func["name"]}('):
+                    entry_points.append({
+                        "name": func["name"],
+                        "line": func["line_start"],
+                        "kind": lp["kind"],
+                        "annotation": "",
+                    })
+                    func["is_entry_point"] = True
+                    matched = True
+                    break
+                continue
             for line_no in scan_indices:
+                if language in {"javascript", "typescript"} and lp["kind"] in {
+                    "express_route", "express_router"
+                } and any(
+                    call.start_point[0] == line_no
+                    and func["_start_byte"] < call.start_byte < func["_end_byte"]
+                    for call, _ in js_route_calls
+                ):
+                    continue
                 if re.search(lp["pattern"], source_lines[line_no]):
                     entry_points.append({
                         "name": func["name"],
@@ -1909,9 +2416,33 @@ def _detect_entry_points(
             if matched:
                 break
 
+    if language in {"javascript", "typescript"}:
+        by_name = {func["name"]: func for func in functions}
+        for node, receiver in js_route_calls:
+            arguments = node.child_by_field_name("arguments")
+            if arguments is None:
+                continue
+            actual_args = arguments.named_children
+            if not actual_args or actual_args[0].type not in {"string", "template_string"}:
+                continue
+            for argument in actual_args[1:]:
+                if argument.type != "identifier":
+                    continue
+                func = by_name.get(_node_text(argument, source))
+                if func is None or func["is_entry_point"]:
+                    continue
+                kind = "express_route" if receiver == "app" else "express_router"
+                entry_points.append({
+                    "name": func["name"],
+                    "line": func["line_start"],
+                    "kind": kind,
+                    "annotation": "",
+                })
+                func["is_entry_point"] = True
+
     if language in ("c", "cpp", "go"):
         for func in functions:
-            if func["name"] == "main" and not func["is_entry_point"]:
+            if func["name"] == "main" and not func["is_entry_point"] and not func.get("is_declaration", False):
                 entry_points.append({
                     "name": "main",
                     "line": func["line_start"],
@@ -1935,6 +2466,15 @@ def _function_scan_lines(
         return [(line_index, source_lines[line_index]) for line_index in range(start, end)]
 
     lines: list[tuple[int, str]] = []
+    excluded_by_line: dict[int, list[tuple[int, int]]] = {}
+    for start_line, start_column, end_line, end_column in function.get("_excluded_ranges", []):
+        for line_number in range(start_line, end_line + 1):
+            line_index = line_number - 1
+            if 0 <= line_index < len(source_lines):
+                excluded_by_line.setdefault(line_number, []).append((
+                    start_column if line_number == start_line else 0,
+                    end_column if line_number == end_line else len(source_lines[line_index]),
+                ))
     ranges = [
         *function.get("_initializer_ranges", []),
         (
@@ -1952,7 +2492,19 @@ def _function_scan_lines(
             line = source_lines[line_index]
             segment_start = start_column if line_number == start_line else 0
             segment_end = end_column if line_number == end_line else len(line)
-            lines.append((line_index, line[segment_start:segment_end]))
+            visible = [(segment_start, segment_end)]
+            for excluded_start, excluded_end in sorted(excluded_by_line.get(line_number, [])):
+                next_visible: list[tuple[int, int]] = []
+                for visible_start, visible_end in visible:
+                    if excluded_end <= visible_start or excluded_start >= visible_end:
+                        next_visible.append((visible_start, visible_end))
+                    else:
+                        if visible_start < excluded_start:
+                            next_visible.append((visible_start, excluded_start))
+                        if excluded_end < visible_end:
+                            next_visible.append((excluded_end, visible_end))
+                visible = next_visible
+            lines.extend((line_index, line[start:end]) for start, end in visible if start < end)
     return lines
 
 
@@ -2150,7 +2702,7 @@ def _top_level_scan_lines(
     still claimed complete coverage. Preserve the callable records and scan
     their complement as the synthetic ``<top-level>`` scope.
     """
-    if not functions:
+    if not functions and language != "php":
         return []
     callable_lines: set[int] = set()
     for function in functions:
@@ -2183,13 +2735,168 @@ def _top_level_scan_lines(
     return lines
 
 
+def _java_fetch_call_matches_type(
+    line: str,
+    call_start: int,
+    pattern: str,
+    receivers: dict[str, str],
+) -> bool:
+    receiver = re.search(r"(?:this\.)?([A-Za-z_]\w*)\s*$", line[:call_start])
+    if receiver is None:
+        return False
+    declared_type = receivers.get(receiver.group(1))
+    if "openStream" in pattern:
+        return declared_type == "URL"
+    if "getInputStream" in pattern:
+        return declared_type in {"URLConnection", "HttpURLConnection"}
+    if "getResponseCode" in pattern:
+        return declared_type == "HttpURLConnection"
+    return declared_type == "HttpClient"
+
+
+def _java_fetch_bindings(lines: list[str]) -> dict[str, str]:
+    bindings: dict[str, str] = {}
+    for line in lines:
+        if not _is_scannable_source_line(line):
+            continue
+        for declared_type, name in re.findall(
+            r"\b([A-Z][\w.]*|var|int|long|short|byte|boolean)\s+([A-Za-z_]\w*)\s*(?=[=;,)]|$)",
+            line,
+        ):
+            bindings[name] = declared_type.rsplit(".", 1)[-1]
+        inferred = re.search(
+            r"\bvar\s+([A-Za-z_]\w*)\s*=\s*HttpClient\.newHttpClient\s*\(",
+            line,
+        )
+        if inferred:
+            bindings[inferred.group(1)] = "HttpClient"
+    return bindings
+
+
+def _csharp_fetch_bindings(
+    lines: list[str], known: dict[str, str] | None = None
+) -> dict[str, str]:
+    bindings: dict[str, str] = dict(known or {})
+    for line in lines:
+        if not _is_scannable_source_line(line):
+            continue
+        for declared_type, name in re.findall(
+            r"\b(HttpClient|WebClient|HttpWebRequest|WebRequest|IHttpClientFactory)\??\s+([A-Za-z_]\w*)\b",
+            line,
+        ):
+            bindings[name] = declared_type
+        inferred = re.search(
+            r"\bvar\s+([A-Za-z_]\w*)\s*=\s*(?:new\s+(HttpClient|WebClient)\b|WebRequest\.Create(?:Http)?\s*\()",
+            line,
+        )
+        if inferred:
+            bindings[inferred.group(1)] = inferred.group(2) or (
+                "WebRequest" if "WebRequest.Create" in line else "HttpClient"
+            )
+        factory_call = re.search(
+            r"\bvar\s+([A-Za-z_]\w*)\s*=\s*(?:this\.)?([A-Za-z_]\w*)\.CreateClient\s*\(",
+            line,
+        )
+        if factory_call and bindings.get(factory_call.group(2)) == "IHttpClientFactory":
+            bindings[factory_call.group(1)] = "HttpClient"
+    return bindings
+
+
+def _csharp_fetch_call_matches_type(
+    line: str, call_start: int, pattern: str, bindings: dict[str, str]
+) -> bool:
+    receiver = re.search(r"(?:this\.)?([A-Za-z_]\w*)\s*$", line[:call_start])
+    if receiver is None:
+        prefix = line[:call_start]
+        expected = "WebClient" if "Download" in pattern else "HttpClient"
+        if "GetResponse" not in pattern and re.search(
+            rf"\bnew\s+{expected}\s*\([^)]*\)\s*$", prefix
+        ):
+            return True
+        factory = re.search(
+            r"(?:this\.)?([A-Za-z_]\w*)\.CreateClient\s*\([^)]*\)\s*$", prefix
+        )
+        return bool(
+            expected == "HttpClient"
+            and factory
+            and bindings.get(factory.group(1)) == "IHttpClientFactory"
+        )
+    declared_type = bindings.get(receiver.group(1))
+    if "Download" in pattern:
+        return declared_type == "WebClient"
+    if "GetResponse" in pattern:
+        return declared_type in {"WebRequest", "HttpWebRequest"}
+    return declared_type == "HttpClient"
+
+
+def _go_fetch_bindings(lines: list[str], http_aliases: set[str]) -> set[str]:
+    bindings: set[str] = set()
+    package_names = "|".join(re.escape(alias) for alias in sorted(http_aliases))
+    if not package_names:
+        return bindings
+    for line in lines:
+        if not _is_scannable_source_line(line):
+            continue
+        bindings.update(re.findall(
+            rf"\b([A-Za-z_]\w*)\s+\*?(?:{package_names})\.Client\b", line
+        ))
+        bindings.update(re.findall(
+            rf"\b([A-Za-z_]\w*)\s*:?=\s*(?:&?(?:{package_names})\.Client\s*\{{|(?:{package_names})\.DefaultClient\b)",
+            line,
+        ))
+    return bindings
+
+
 def _detect_sinks(
     functions: list[dict[str, Any]],
+    classes: list[dict[str, Any]],
     language: str,
     source_lines: list[str],
 ) -> list[dict[str, Any]]:
     """Detect security-sensitive API calls within function bodies using regex."""
     sinks: list[dict[str, Any]] = []
+    java_class_receivers: dict[int, dict[str, str]] = {}
+    java_class_for_line: dict[int, dict[str, Any]] = {}
+    csharp_class_receivers: dict[int, dict[str, str]] = {}
+    csharp_class_for_line: dict[int, dict[str, Any]] = {}
+    go_http_aliases: set[str] = set()
+    if language == "java":
+        callable_lines = {
+            line
+            for function in functions
+            for line in range(function["line_start"], function["line_end"] + 1)
+        }
+        for cls in sorted(classes, key=lambda item: item["line_end"] - item["line_start"], reverse=True):
+            for line in range(cls["line_start"], cls["line_end"] + 1):
+                java_class_for_line[line] = cls
+            java_class_receivers[id(cls)] = _java_fetch_bindings([
+                source_lines[line - 1]
+                for line in range(cls["line_start"], cls["line_end"] + 1)
+                if line not in callable_lines
+            ])
+    elif language == "csharp":
+        callable_lines = {
+            line
+            for function in functions
+            for line in range(function["line_start"], function["line_end"] + 1)
+        }
+        for cls in sorted(classes, key=lambda item: item["line_end"] - item["line_start"], reverse=True):
+            for line in range(cls["line_start"], cls["line_end"] + 1):
+                csharp_class_for_line[line] = cls
+            csharp_class_receivers[id(cls)] = _csharp_fetch_bindings([
+                source_lines[line - 1]
+                for line in range(cls["line_start"], cls["line_end"] + 1)
+                if line not in callable_lines
+            ])
+    elif language == "go":
+        for line in source_lines:
+            if not _is_scannable_source_line(line):
+                continue
+            imported = re.search(r"\b(?:(\w+)\s+)?[\"`]net/http[\"`]", line)
+            if imported:
+                alias = imported.group(1)
+                go_http_aliases.add("http" if alias in {None, "import"} else alias)
+    seen: set[tuple[str, str, int]] = set()
 
     scopes = [
         (func, _function_scan_lines(func, source_lines))
@@ -2201,6 +2908,28 @@ def _detect_sinks(
         scopes.append(({"name": "<top-level>"}, top_level_lines))
 
     for func, scan_lines in scopes:
+        java_fetch_receivers: dict[str, str] = {}
+        csharp_fetch_receivers: dict[str, str] = {}
+        go_fetch_receivers: set[str] = set()
+        if language == "java":
+            cls = java_class_for_line.get(func.get("line_start", 0))
+            if cls is not None:
+                java_fetch_receivers.update(java_class_receivers[id(cls)])
+            java_fetch_receivers.update(_java_fetch_bindings(func.get("params", [])))
+            java_fetch_receivers.update(_java_fetch_bindings([line for _, line in scan_lines]))
+        elif language == "csharp":
+            cls = csharp_class_for_line.get(func.get("line_start", 0))
+            if cls is not None:
+                csharp_fetch_receivers.update(csharp_class_receivers[id(cls)])
+            csharp_fetch_receivers = _csharp_fetch_bindings(
+                func.get("params", []), csharp_fetch_receivers
+            )
+            csharp_fetch_receivers = _csharp_fetch_bindings(
+                [line for _, line in scan_lines], csharp_fetch_receivers
+            )
+        elif language == "go":
+            go_fetch_receivers.update(_go_fetch_bindings(func.get("params", []), go_http_aliases))
+            go_fetch_receivers.update(_go_fetch_bindings([line for _, line in scan_lines], go_http_aliases))
         for sink_def in _SINK_DEFINITIONS:
             lang_patterns = sink_def["patterns"].get(language, [])
             for pat in lang_patterns:
@@ -2208,8 +2937,37 @@ def _detect_sinks(
                 for line_idx, line_text in scan_lines:
                     if not _is_scannable_source_line(line_text):
                         continue
-                    m = compiled.search(line_text)
-                    if m:
+                    matches = compiled.finditer(line_text)
+                    if language == "java" and sink_def["kind"] == "url_fetch":
+                        matches = (
+                            match for match in matches
+                            if _java_fetch_call_matches_type(
+                                line_text, match.start(), pat, java_fetch_receivers
+                            )
+                        )
+                    elif language == "csharp" and sink_def["kind"] == "url_fetch":
+                        matches = (
+                            match for match in matches
+                            if _csharp_fetch_call_matches_type(
+                                line_text, match.start(), pat, csharp_fetch_receivers
+                            )
+                        )
+                    elif language == "go" and sink_def["kind"] == "url_fetch" and ".Do" in pat:
+                        matches = (
+                            match for match in matches
+                            if match.group().split(".", 1)[0] == "DefaultClient"
+                            or match.group().split(".", 1)[0] in go_fetch_receivers
+                        )
+                    elif language == "php" and sink_def["kind"] == "sql_exec" and "->query" in pat:
+                        matches = (
+                            match for match in matches
+                            if not re.match(r"\$(?:request|req)->query\s*\(", match.group())
+                        )
+                    if next(matches, None) is not None:
+                        identity = (sink_def["kind"], func["name"], line_idx)
+                        if identity in seen:
+                            continue
+                        seen.add(identity)
                         snippet = line_text.strip()
                         if len(snippet) > 120:
                             snippet = snippet[:117] + "..."
@@ -2220,8 +2978,8 @@ def _detect_sinks(
                             "snippet": snippet,
                             "vuln_classes": list(sink_def["vuln_classes"]),
                         })
-                        # One match per pattern per function is enough
-                        break
+                        # Retain distinct lines so a safe-looking early call
+                        # cannot hide a later call that handles request data.
 
     return sinks
 
@@ -2327,7 +3085,18 @@ def _detect_exports(
     """Detect exported symbols based on language conventions."""
     exports: list[dict[str, Any]] = []
 
-    if language == "go":
+    if language == "c":
+        seen_names: set[str] = set()
+        for func in functions:
+            if "static" in func.get("modifiers", []) or func["name"] in seen_names:
+                continue
+            seen_names.add(func["name"])
+            exports.append({
+                "name": func["name"],
+                "kind": "function",
+                "line": func["line_start"],
+            })
+    elif language == "go":
         for func in functions:
             if func["name"] and func["name"][0].isupper():
                 exports.append({"name": func["name"], "kind": "function", "line": func["line_start"]})
@@ -2377,16 +3146,25 @@ def _detect_exports(
             if "public" in func.get("modifiers", []):
                 exports.append({"name": func["name"], "kind": "public_method", "line": func["line_start"]})
         for cls in classes:
-            exports.append({"name": cls["name"], "kind": "public_class", "line": cls["line_start"]})
+            if cls.get("_java_public"):
+                exports.append({"name": cls["name"], "kind": "public_class", "line": cls["line_start"]})
     elif language == "ruby":
         for func in functions:
-            exports.append({"name": func["name"], "kind": "method", "line": func["line_start"]})
+            if not func.get("_ruby_route"):
+                exports.append({"name": func["name"], "kind": "method", "line": func["line_start"]})
     elif language == "php":
         for func in functions:
             if func.get("is_closure", False):
                 continue
             if "public" in func.get("modifiers", []) or not func.get("modifiers"):
                 exports.append({"name": func["name"], "kind": "public_method", "line": func["line_start"]})
+    elif language == "csharp":
+        for func in functions:
+            if "public" in func.get("modifiers", []):
+                exports.append({"name": func["name"], "kind": "public_method", "line": func["line_start"]})
+        for cls in classes:
+            if cls.get("_csharp_public"):
+                exports.append({"name": cls["name"], "kind": "public_class", "line": cls["line_start"]})
 
     return exports
 
@@ -2429,6 +3207,11 @@ def _resolve_import_targets(
                 target["resolved"] = imp
         elif language == "java":
             target["resolved"] = imp.replace(".", "/") + ".java"
+        elif language == "lua":
+            target["resolved"] = imp.replace(".", "/") + ".lua"
+        elif language in {"shell", "powershell"}:
+            if imp.startswith(("./", "../", ".\\", "..\\")):
+                target["resolved"] = imp.replace("\\", "/")
 
         targets.append(target)
 
@@ -2582,6 +3365,8 @@ def _remove_internal_structural_fields(
             "_body_start_column",
             "_body_start_line",
             "_initializer_ranges",
+            "_ruby_route",
+            "_excluded_ranges",
             "_cpp_parameter_signature",
             "_cpp_qualifier_signature",
             "_cpp_declared_scope",
@@ -2594,6 +3379,8 @@ def _remove_internal_structural_fields(
     for cls in classes:
         for field_name in (
             "_cpp_namespace",
+            "_java_public",
+            "_csharp_public",
             "_end_byte",
             "_qualified_name",
             "_start_byte",
@@ -2639,14 +3426,18 @@ def _index_lightweight(
     """Dispatch helper for lightweight extractors."""
     dispatch = {
         "blade": _extract_blade,
-        "dockerfile": _extract_dockerfile,
         "shell": _extract_shell,
         "powershell": _extract_powershell,
         "lua": _extract_lua,
         "html": _extract_html,
         "css": _extract_css,
     }
-    if language == "freemarker":
+    local_docker_sources: list[str] = []
+    if language == "dockerfile":
+        funcs, entry_points, sinks, exports, imports, local_docker_sources = (
+            _extract_dockerfile(source_lines)
+        )
+    elif language == "freemarker":
         # The one lightweight extractor whose result depends on the filename and
         # not only on the bytes: the extension carries FreeMarker's output format,
         # which decides whether auto-escaping is on before any directive is read.
@@ -2658,6 +3449,15 @@ def _index_lightweight(
         if fn is None:
             return _empty_index(file_path, language, total_lines=total_lines)
         funcs, entry_points, sinks, exports, imports = fn(source_lines)
+    import_targets = _resolve_import_targets(imports, language)
+    imports.extend(local_docker_sources)
+    import_targets.extend(
+        {
+            "raw": path,
+            "resolved": "" if any(char in path for char in "*?[") else path.removeprefix("./"),
+        }
+        for path in local_docker_sources
+    )
     indexed: dict[str, Any] = {
         "file_path": file_path,
         "language": language,
@@ -2668,7 +3468,7 @@ def _index_lightweight(
         "security_sinks": sinks,
         "call_sites": [],
         "imports": imports,
-        "import_targets": [{"raw": i, "resolved": ""} for i in imports],
+        "import_targets": import_targets,
         "exports": exports,
         "classes": [],
     }
@@ -2691,12 +3491,13 @@ _DOCKER_URL_RE = re.compile(r"https?://\S+")
 
 def _extract_dockerfile(
     source_lines: list[str],
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[str]]:
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[str], list[str]]:
     funcs: list[dict[str, Any]] = []
     entry_points: list[dict[str, Any]] = []
     sinks: list[dict[str, Any]] = []
     exports: list[dict[str, Any]] = []
     imports: list[str] = []
+    local_sources: list[str] = []
     has_user_directive = False
 
     # Logical blocks: collect contiguous lines that belong to the same instruction
@@ -2800,7 +3601,8 @@ def _extract_dockerfile(
                 "vuln_classes": ["secrets-exposure"],
             })
 
-        if instr == "ARG" and _DOCKER_SECRET_NAMES.search(block_text):
+        arg_name, has_default, arg_default = block_text.partition("=")
+        if instr == "ARG" and has_default and arg_default.strip() and _DOCKER_SECRET_NAMES.search(arg_name):
             sinks.append({
                 "kind": "embedded_secret_arg",
                 "line": block_start,
@@ -2821,6 +3623,23 @@ def _extract_dockerfile(
                 })
                 imports.append(url_match.group(0))
 
+        if instr in {"COPY", "ADD"}:
+            try:
+                operands = (
+                    json.loads(block_text)
+                    if block_text.startswith("[") else shlex.split(block_text)
+                )
+            except (ValueError, TypeError):
+                operands = []
+            if isinstance(operands, list) and all(isinstance(part, str) for part in operands):
+                from_stage = any(part.startswith("--from=") for part in operands)
+                paths = [part for part in operands if not part.startswith("--")]
+                if not from_stage and len(paths) >= 2:
+                    local_sources.extend(
+                        path for path in paths[:-1]
+                        if not path.startswith(("/", "http://", "https://", "$"))
+                    )
+
         if instr == "FROM":
             # FROM image[:tag][@digest] [AS name]
             img = block_text.split(" AS ")[0].split(" as ")[0].strip()
@@ -2836,7 +3655,7 @@ def _extract_dockerfile(
             "vuln_classes": ["privilege-escalation"],
         })
 
-    return funcs, entry_points, sinks, exports, imports
+    return funcs, entry_points, sinks, exports, imports, local_sources
 
 
 # --- Shell ------------------------------------------------------------------
@@ -3174,6 +3993,7 @@ _LUA_FUNC_RE = re.compile(
 _LUA_LOCAL_FUNC_ASSIGN_RE = re.compile(
     r"^\s*local\s+([A-Za-z_]\w*)\s*=\s*function\s*\(([^)]*)\)"
 )
+_LUA_DYNAMIC_REDIS_COMMAND_RE = r"\bredis\.(?:call|pcall)\s*\(\s*(?!['\"])[^,\s)]+"
 
 
 def _extract_lua(
@@ -3185,7 +4005,7 @@ def _extract_lua(
     exports: list[dict[str, Any]] = []
     imports: list[str] = []
 
-    starts: list[tuple[str, list[str], int]] = []
+    starts: list[tuple[str, list[str], int, int, bool]] = []
     for idx, line in enumerate(source_lines):
         stripped = line.lstrip()
         if stripped.startswith("--"):
@@ -3194,15 +4014,15 @@ def _extract_lua(
         if m:
             name = m.group(1)
             params = [p.strip() for p in m.group(2).split(",") if p.strip()]
-            starts.append((name, params, idx + 1))
+            starts.append((name, params, idx + 1, m.end(), stripped.startswith("local ")))
 
     # Approximate function end by counting nested block-openers against `end`.
-    for k, (name, params, start_line) in enumerate(starts):
+    for k, (name, params, start_line, signature_end, is_local) in enumerate(starts):
         next_start = starts[k + 1][2] - 1 if k + 1 < len(starts) else len(source_lines)
         end_line = next_start
         depth = 1
-        for j in range(start_line, len(source_lines)):
-            line = source_lines[j]
+        for j in range(start_line - 1, len(source_lines)):
+            line = source_lines[j][signature_end:] if j == start_line - 1 else source_lines[j]
             code = re.sub(r"--.*$", "", line)
             # These keywords each open a block that requires a matching `end`.
             depth += len(re.findall(r"\b(?:function|if|for|while|do)\b", code))
@@ -3221,7 +4041,8 @@ def _extract_lua(
             "annotations": [],
             "is_entry_point": False,
         })
-        exports.append({"name": name, "kind": "lua_function", "line": start_line})
+        if not is_local:
+            exports.append({"name": name, "kind": "lua_function", "line": start_line})
 
     for idx, line in enumerate(source_lines):
         stripped = line.lstrip()
@@ -3231,33 +4052,9 @@ def _extract_lua(
         req_m = re.search(r"""require\s*\(?\s*['"]([^'"]+)['"]""", line)
         if req_m:
             imports.append(req_m.group(1))
-        if re.search(r"\bredis\.call\s*\(", line):
+        if re.search(_LUA_DYNAMIC_REDIS_COMMAND_RE, line):
             sinks.append({
-                "kind": "redis_call",
-                "line": line_no,
-                "function": _find_enclosing_func(funcs, line_no),
-                "snippet": _snippet(line),
-                "vuln_classes": ["injection"],
-            })
-        if re.search(r"\bredis\.pcall\s*\(", line):
-            sinks.append({
-                "kind": "redis_pcall",
-                "line": line_no,
-                "function": _find_enclosing_func(funcs, line_no),
-                "snippet": _snippet(line),
-                "vuln_classes": ["injection"],
-            })
-        if re.search(r"\bKEYS\s*\[", line):
-            sinks.append({
-                "kind": "redis_keys_input",
-                "line": line_no,
-                "function": _find_enclosing_func(funcs, line_no),
-                "snippet": _snippet(line),
-                "vuln_classes": ["injection"],
-            })
-        if re.search(r"\bARGV\s*\[", line):
-            sinks.append({
-                "kind": "redis_argv_input",
+                "kind": "redis_dynamic_command",
                 "line": line_no,
                 "function": _find_enclosing_func(funcs, line_no),
                 "snippet": _snippet(line),
@@ -3293,18 +4090,21 @@ def _extract_lua(
 
 # --- HTML / templates -------------------------------------------------------
 
-_HTML_FORM_RE = re.compile(r"<form\b[^>]*\baction\s*=\s*['\"]?([^'\"\s>]+)", re.IGNORECASE)
-_HTML_SCRIPT_SRC_RE = re.compile(r"<script\b[^>]*\bsrc\s*=\s*['\"]?([^'\"\s>]+)", re.IGNORECASE)
-_HTML_IFRAME_SRC_RE = re.compile(r"<iframe\b[^>]*\bsrc\s*=\s*['\"]?([^'\"\s>]+)", re.IGNORECASE)
+_HTML_TAG_RE = re.compile(
+    r"<(?P<tag>form|script|link|iframe)\b(?P<attrs>(?:\"[^\"]*\"|'[^']*'|[^'\">])*)>",
+    re.IGNORECASE,
+)
+_HTML_ATTR_RE = re.compile(
+    r"(?P<name>[^\s=/>]+)(?:\s*=\s*(?:\"(?P<double>[^\"]*)\"|'(?P<single>[^']*)'|(?P<bare>[^\s>]+)))?"
+)
 _HTML_INLINE_HANDLER_RE = re.compile(r"\bon[a-z]+\s*=\s*['\"][^'\"]+['\"]", re.IGNORECASE)
 _HTML_JS_URL_RE = re.compile(r"""=\s*['"]\s*javascript:""", re.IGNORECASE)
 _HTML_MUSTACHE_RE = re.compile(r"\{\{[^}]+\}\}")
 _HTML_ASP_RE = re.compile(r"<%[^%]+%>")
-_HTML_LINK_HREF_RE = re.compile(r"<link\b[^>]*\bhref\s*=\s*['\"]?([^'\"\s>]+)", re.IGNORECASE)
-
-
-def _mask_html_comments(source_lines: list[str]) -> list[str]:
-    """Blank out `<!-- ... -->` regions, keeping every line and column in place.
+def _mask_delimited_comments(
+    source_lines: list[str], opening: str, closing: str
+) -> list[str]:
+    """Blank out comment regions, keeping every line and column in place.
 
     An HTML comment spans lines, so a per-line prefix test cannot see it. Masking
     with spaces rather than deleting keeps line numbers and match offsets true, so
@@ -3319,22 +4119,22 @@ def _mask_html_comments(source_lines: list[str]) -> list[str]:
         i = 0
         while i < len(line):
             if in_comment:
-                close = line.find("-->", i)
+                close = line.find(closing, i)
                 if close == -1:
                     out.append(" " * (len(line) - i))
                     i = len(line)
                 else:
-                    out.append(" " * (close + 3 - i))
-                    i = close + 3
+                    out.append(" " * (close + len(closing) - i))
+                    i = close + len(closing)
                     in_comment = False
             else:
-                opening = line.find("<!--", i)
-                if opening == -1:
+                start = line.find(opening, i)
+                if start == -1:
                     out.append(line[i:])
                     i = len(line)
                 else:
-                    out.append(line[i:opening])
-                    i = opening
+                    out.append(line[i:start])
+                    i = start
                     in_comment = True
         masked.append("".join(out))
     return masked
@@ -3342,6 +4142,8 @@ def _mask_html_comments(source_lines: list[str]) -> list[str]:
 
 def _extract_html(
     source_lines: list[str],
+    *,
+    template_comments: tuple[str, str] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[str]]:
     funcs: list[dict[str, Any]] = []
     entry_points: list[dict[str, Any]] = []
@@ -3349,12 +4151,29 @@ def _extract_html(
     exports: list[dict[str, Any]] = []
     imports: list[str] = []
 
-    # Commented-out markup is not surface. Detect against the masked copy; keep
-    # snippets from the real line so evidence still reads as authored.
-    for idx, (line, raw_line) in enumerate(zip(_mask_html_comments(source_lines), source_lines)):
-        line_no = idx + 1
-        for m in _HTML_FORM_RE.finditer(line):
-            action = m.group(1)
+    # Detect against a comment-masked copy; keep raw lines for evidence.
+    masked_lines = _mask_delimited_comments(source_lines, "<!--", "-->")
+    if template_comments is not None:
+        masked_lines = _mask_delimited_comments(masked_lines, *template_comments)
+    text = "\n".join(masked_lines)
+    line_starts = [0]
+    for line in masked_lines:
+        line_starts.append(line_starts[-1] + len(line) + 1)
+
+    for match in _HTML_TAG_RE.finditer(text):
+        tag = match.group("tag").lower()
+        attrs: dict[str, str] = {}
+        for attr in _HTML_ATTR_RE.finditer(match.group("attrs")):
+            value = next(
+                (part for part in attr.group("double", "single", "bare") if part is not None),
+                None,
+            )
+            if value is not None:
+                attrs.setdefault(attr.group("name").lower(), value)
+        line_no = bisect.bisect_right(line_starts, match.start())
+        raw_line = source_lines[line_no - 1]
+        if tag == "form":
+            action = attrs.get("action", "")
             entry_points.append({
                 "name": "form",
                 "line": line_no,
@@ -3362,8 +4181,7 @@ def _extract_html(
                 "annotation": action,
             })
             funcs.append(_empty_func(f"form:{action}", line_no, line_no))
-        for m in _HTML_SCRIPT_SRC_RE.finditer(line):
-            src = m.group(1)
+        elif tag == "script" and (src := attrs.get("src")):
             imports.append(src)
             if src.startswith(("http://", "//")):
                 sinks.append({
@@ -3381,10 +4199,10 @@ def _extract_html(
                     "snippet": _snippet(raw_line),
                     "vuln_classes": ["supply-chain"],
                 })
-        for m in _HTML_LINK_HREF_RE.finditer(line):
-            imports.append(m.group(1))
-        for m in _HTML_IFRAME_SRC_RE.finditer(line):
-            imports.append(m.group(1))
+        elif tag == "link" and (href := attrs.get("href")):
+            imports.append(href)
+        elif tag == "iframe" and (src := attrs.get("src")):
+            imports.append(src)
             sinks.append({
                 "kind": "iframe_embed",
                 "line": line_no,
@@ -3392,6 +4210,9 @@ def _extract_html(
                 "snippet": _snippet(raw_line),
                 "vuln_classes": ["clickjacking", "xss"],
             })
+
+    for idx, (line, raw_line) in enumerate(zip(masked_lines, source_lines)):
+        line_no = idx + 1
         if _HTML_INLINE_HANDLER_RE.search(line):
             sinks.append({
                 "kind": "inline_event_handler",
@@ -3516,10 +4337,12 @@ def _extract_blade(
     text, so an escaped echo inside a `<script>` or a URL attribute is still
     XSS. See ``FREEMARKER_ESCAPE_OBSERVATIONS`` for the shared vocabulary.
     """
-    funcs, entry_points, sinks, exports, imports = _extract_html(source_lines)
+    funcs, entry_points, sinks, exports, imports = _extract_html(
+        source_lines, template_comments=("{{--", "--}}")
+    )
     sinks = [sink for sink in sinks if sink["kind"] != "template_interpolation"]
 
-    text = "\n".join(source_lines)
+    text = "\n".join(_mask_delimited_comments(source_lines, "{{--", "--}}"))
     line_starts = [0]
     for line in source_lines:
         line_starts.append(line_starts[-1] + len(line) + 1)
@@ -3576,33 +4399,40 @@ def _extract_css(
     exports: list[dict[str, Any]] = []
     imports: list[str] = []
 
-    for idx, line in enumerate(source_lines):
+    masked_lines = _mask_delimited_comments(source_lines, "/*", "*/")
+    for idx, line in enumerate(masked_lines):
+        if line.lstrip().startswith("//"):
+            masked_lines[idx] = " " * len(line)
+    text = "\n".join(masked_lines)
+    line_starts = [0]
+    for line in masked_lines:
+        line_starts.append(line_starts[-1] + len(line) + 1)
+
+    for match in _CSS_IMPORT_RE.finditer(text):
+        url = match.group(1)
+        imports.append(url)
+        if url.startswith(("http://", "//")):
+            line_no = bisect.bisect_right(line_starts, match.start())
+            sinks.append({
+                "kind": "external_css_import",
+                "line": line_no,
+                "function": "<stylesheet>",
+                "snippet": _snippet(source_lines[line_no - 1]),
+                "vuln_classes": ["supply-chain"],
+            })
+    for match in _CSS_URL_RE.finditer(text):
+        ref = match.group(1)
+        if ref.startswith(("http://", "//", "https://", "data:")):
+            imports.append(ref)
+
+    for idx, line in enumerate(masked_lines):
         line_no = idx + 1
-        stripped = line.lstrip()
-        if stripped.startswith("//") or stripped.startswith("/*"):
-            # Still scan for url() in comments? No -- skip pure comment lines.
-            continue
-        for m in _CSS_IMPORT_RE.finditer(line):
-            url = m.group(1)
-            imports.append(url)
-            if url.startswith(("http://", "//")):
-                sinks.append({
-                    "kind": "external_css_import",
-                    "line": line_no,
-                    "function": "<stylesheet>",
-                    "snippet": _snippet(line),
-                    "vuln_classes": ["supply-chain"],
-                })
-        for m in _CSS_URL_RE.finditer(line):
-            ref = m.group(1)
-            if ref.startswith(("http://", "//", "https://", "data:")):
-                imports.append(ref)
         if _CSS_EXPRESSION_RE.search(line):
             sinks.append({
                 "kind": "css_expression",
                 "line": line_no,
                 "function": "<stylesheet>",
-                "snippet": _snippet(line),
+                "snippet": _snippet(source_lines[idx]),
                 "vuln_classes": ["xss"],
             })
         if _CSS_BEHAVIOR_RE.search(line):
@@ -3610,7 +4440,7 @@ def _extract_css(
                 "kind": "css_behavior",
                 "line": line_no,
                 "function": "<stylesheet>",
-                "snippet": _snippet(line),
+                "snippet": _snippet(source_lines[idx]),
                 "vuln_classes": ["xss"],
             })
         if _CSS_BINDING_RE.search(line):
@@ -3618,7 +4448,7 @@ def _extract_css(
                 "kind": "css_moz_binding",
                 "line": line_no,
                 "function": "<stylesheet>",
-                "snippet": _snippet(line),
+                "snippet": _snippet(source_lines[idx]),
                 "vuln_classes": ["xss"],
             })
 
@@ -4035,7 +4865,9 @@ def _extract_freemarker(
     See ``_FREEMARKER_ESCAPING_EXTENSIONS``.  An unknown or absent path is
     treated as a bare ``.ftl``, which is the reporting-heavy direction.
     """
-    funcs, entry_points, sinks, exports, imports = _extract_html(source_lines)
+    funcs, entry_points, sinks, exports, imports = _extract_html(
+        source_lines, template_comments=("<#--", "-->")
+    )
 
     # One linear scan over the joined source: interpolations, HTML tags and
     # FreeMarker directives all cross line boundaries, so a per-line pass cannot
@@ -4312,7 +5144,7 @@ _CAPPED_INDEX_LISTS = (
 # vehicle that could hold nothing true.
 _STREAM_SOURCE_PATTERNS: dict[str, list[tuple[str, str]]] = {
     "python": [
-        ("http_request_input", r"\brequest\.(?:args|form|json|values|files|headers)\b"),
+        ("http_request_input", r"\brequest\.(?:args|form|json|values|files|headers|GET|POST|FILES|COOKIES|META|body)\b"),
         ("process_input", r"\b(?:sys\.argv|os\.environ|getenv\s*\(|input\s*\()"),
     ],
     "javascript": [
@@ -4325,10 +5157,12 @@ _STREAM_SOURCE_PATTERNS: dict[str, list[tuple[str, str]]] = {
     ],
     "java": [
         ("http_request_input", r"\bget(?:Parameter|Header|InputStream)\s*\("),
+        ("http_request_input", r"@(?:PathVariable|MatrixVariable|RequestParam|RequestHeader|CookieValue|RequestBody|RequestPart|ModelAttribute|PathParam|QueryParam|FormParam|HeaderParam|CookieParam|MatrixParam)\b"),
+        ("http_request_input", r"\brequest\.(?:pathVariable|queryParam|param|headers|body)\s*\("),
         ("process_input", r"\bSystem\.getenv\s*\("),
     ],
     "go": [
-        ("http_request_input", r"\br\.(?:URL\.Query|FormValue|Header\.Get)\s*\("),
+        ("http_request_input", r"\b(?:r|req|request)\.(?:URL\.Query|FormValue|PostFormValue|PathValue|Header\.Get|Cookie|FormFile)\s*\("),
         ("process_input", r"\bos\.(?:Args|Getenv)\b"),
     ],
     "ruby": [
@@ -4377,9 +5211,10 @@ _STREAM_SOURCE_PATTERNS: dict[str, list[tuple[str, str]]] = {
     ],
     "cpp": [
         ("process_input", r"\b(?:argv\s*\[|getenv\s*\(|read\s*\(|recv\s*\()"),
+        ("http_request_input", r"\b(?:req|request)\.(?:path|body|get_param_value\s*\(|get_header_value\s*\()"),
     ],
     "shell": [
-        ("positional_parameter", r"\$(?:[1-9]|@|\*)\b"),
+        ("positional_parameter", r"\$(?:[1-9]\b|[@*]|\{(?:[1-9][0-9]*|[@*])\})"),
         ("environment_input", r"\$\{?[A-Z_][A-Z0-9_]*\}?"),
     ],
     "powershell": [
@@ -4452,6 +5287,7 @@ _STREAM_EXTRA_SINK_PATTERNS: dict[str, list[tuple[str, str, list[str]]]] = {
     # strings, so a `.ps1` reports the same sinks whichever path indexed it.
     "powershell": _PS_SINK_PATTERNS,
     "lua": [
+        ("redis_dynamic_command", _LUA_DYNAMIC_REDIS_COMMAND_RE, ["injection"]),
         ("dynamic_code_load", r"\b(?:loadstring|load)\s*\(", ["injection"]),
         ("os_execute", r"\bos\.execute\s*\(", ["injection"]),
     ],
@@ -4475,16 +5311,16 @@ _STREAM_EXTRA_SINK_PATTERNS: dict[str, list[tuple[str, str, list[str]]]] = {
 }
 
 _STREAM_EXTRA_ENTRY_PATTERNS: dict[str, list[tuple[str, str]]] = {
-    "blade": [("html_form", r"<form\b[^>]*\baction\s*=")],
+    "blade": [("html_form", r"<form\b")],
     "shell": [("shell_script", r"^#!")],
     "powershell": [("script_parameters", r"^\s*param\s*\(")],
     "dockerfile": [
         ("container_cmd", r"^\s*CMD\b"),
         ("container_entrypoint", r"^\s*ENTRYPOINT\b"),
     ],
-    "html": [("html_form", r"<form\b[^>]*\baction\s*=")],
+    "html": [("html_form", r"<form\b")],
     "freemarker": [
-        ("html_form", r"<form\b[^>]*\baction\s*="),
+        ("html_form", r"<form\b"),
         ("freemarker_macro", r"<#(?:macro|function)\s"),
     ],
 }
@@ -5053,14 +5889,14 @@ def index_file(
         if effective_lang == "cpp":
             functions = _deduplicate_cpp_functions(functions)
         entry_points = _detect_entry_points(
-            tree, functions, classes, effective_lang, source_lines
+            tree, functions, classes, effective_lang, source_lines, source
         )
         entry_points.extend(
             _detect_top_level_entry_points(
                 tree, effective_lang, source_lines, entry_points
             )
         )
-        sinks = _detect_sinks(functions, effective_lang, source_lines)
+        sinks = _detect_sinks(functions, classes, effective_lang, source_lines)
         call_sites = _detect_call_sites(functions, effective_lang, source_lines)
         unscanned = _unscanned_scope_dimensions(
             functions,
@@ -5079,6 +5915,86 @@ def index_file(
             language=effective_lang,
             source=source,
         )
+        if effective_lang == "java":
+            for func in functions:
+                if not any(re.fullmatch(r"@(?:RequestMapping|GetMapping|PostMapping|PutMapping|DeleteMapping|PatchMapping)", annotation)
+                           for annotation in func["annotations"]):
+                    continue
+                for param in func["params"]:
+                    if not param.strip() or "@" in param:
+                        continue
+                    parameter_type = param.strip().rsplit(" ", 1)[0].rsplit(".", 1)[-1]
+                    if parameter_type in {"Principal", "Model", "ModelMap"}:
+                        continue
+                    security_observations["security_sources"].append({
+                        "kind": "http_request_input",
+                        "line": func.get("_body_start_line", func["line_start"]),
+                        "snippet": param[:120],
+                        "detection": "structural_model_binding",
+                    })
+            security_observations["signal_counts"]["security_sources"] = len(
+                security_observations["security_sources"]
+            )
+        if effective_lang == "python":
+            routed = {
+                (entry["name"], entry["line"])
+                for entry in entry_points
+                if entry["kind"] in {"fastapi_route", "fastapi_router"}
+            }
+            for func in functions:
+                if (func["name"], func["line_start"]) not in routed:
+                    continue
+                for param in func["params"]:
+                    if (
+                        not param.strip()
+                        or "Depends" in param
+                        or re.search(r":\s*(?:Request|Response|BackgroundTasks|WebSocket)\b", param)
+                    ):
+                        continue
+                    security_observations["security_sources"].append({
+                        "kind": "http_request_input",
+                        "line": func["line_start"],
+                        "snippet": param[:120],
+                        "detection": "structural_model_binding",
+                    })
+            security_observations["signal_counts"]["security_sources"] = len(
+                security_observations["security_sources"]
+            )
+        if effective_lang == "csharp":
+            for func in functions:
+                if not func["is_entry_point"] or not (
+                    func.get("_minimal_api_route")
+                    or any(
+                        entry["kind"] == "aspnet_action" and entry["name"] == func["name"]
+                        and entry["line"] == func["line_start"]
+                        for entry in entry_points
+                    )
+                ):
+                    continue
+                for param in func["params"]:
+                    if (
+                        not param.strip()
+                        or "[FromServices" in param
+                        or re.search(
+                            r"\b(?:CancellationToken|HttpContext|HttpRequest|HttpResponse|ClaimsPrincipal|IServiceProvider|ILogger)\??\s+\w+\b",
+                            param,
+                        )
+                    ):
+                        continue
+                    if func.get("_minimal_api_route") and not re.search(
+                        r"\b(?:string|int|long|short|bool|decimal|double|float|Guid|DateTime|DateOnly|TimeOnly)\??\s+\w+\b|\[From(?:Body|Query|Route|Form|Header)\b",
+                        param,
+                    ):
+                        continue
+                    security_observations["security_sources"].append({
+                        "kind": "http_request_input",
+                        "line": func["line_start"],
+                        "snippet": param[:120],
+                        "detection": "structural_model_binding",
+                    })
+            security_observations["signal_counts"]["security_sources"] = len(
+                security_observations["security_sources"]
+            )
         _remove_internal_structural_fields(functions, classes)
     except MemoryError:
         raise

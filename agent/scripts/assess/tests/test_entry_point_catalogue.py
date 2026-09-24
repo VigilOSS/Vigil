@@ -870,6 +870,9 @@ app.get(
 #          expected_kind)
 
 LIVE_CASES: list[tuple[str, str, str, str, str, str, str]] = [
+    ("annotations", "csharp", r"\[Http(?:Get|Post|Put|Patch|Delete|Head|Options)\b",
+     "public class FilesController : ControllerBase {\n    [HttpGet(\"{name}\")]\n    public string Read(string name) => name;\n}\n",
+     "FilesController.cs", "[HttpGet", "aspnet_action"),
     # -- _ENTRY_ANNOTATIONS["java"] (8 of 9; @WebServlet is a dedicated test) --
     ("annotations", "java", r"@RequestMapping\b", JAVA_SPRING_SRC, "Legacy.java", "@RequestMapping(value", "spring_mapping"),
     ("annotations", "java", r"@GetMapping\b", JAVA_SPRING_SRC, "UserController.java", "@GetMapping", "spring_mapping"),
@@ -878,7 +881,13 @@ LIVE_CASES: list[tuple[str, str, str, str, str, str, str]] = [
     ("annotations", "java", r"@DeleteMapping\b", JAVA_SPRING_SRC, "UserController.java", "@DeleteMapping", "spring_mapping"),
     ("annotations", "java", r"@PatchMapping\b", JAVA_SPRING_SRC, "UserController.java", "@PatchMapping", "spring_mapping"),
     ("annotations", "java", r"@Path\b", JAVA_JAXRS_SRC, "Widget.java", "@Path(\"/{id}\")", "jaxrs_annotation"),
+    ("annotations", "java", r"@(?:GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\b",
+     '@Path("/health") class Health { @GET public String get() { return "ok"; } }',
+     "Health.java", "@GET", "jaxrs_annotation"),
     ("annotations", "java", r"@Scheduled\b", JAVA_SPRING_SRC, "UserController.java", "@Scheduled", "scheduled_task"),
+    ("line_patterns", "java", r"\bRouterFunctions\.route\s*\(",
+     'class Routes { Object routes() { return RouterFunctions.route().GET("/", req -> req).build(); } }',
+     "Routes.java", "RouterFunctions.route()", "spring_functional_route"),
     # -- _ENTRY_ANNOTATIONS["php"] (1 of 1) --
     ("annotations", "php", r"#\[Route\b", PHP_ATTRIBUTE_ROUTE_SRC, "UserController.php", "#[Route('/users/{id}'", "symfony_route"),
     # -- _ENTRY_ANNOTATIONS["python"] (7 of 7) --
@@ -897,8 +906,7 @@ LIVE_CASES: list[tuple[str, str, str, str, str, str, str]] = [
     # -- _ENTRY_METHOD_NAMES["java"] (6 of 6) --
     ("method_names", "java", "doGet", JAVA_SERVLET_SRC, "Servlet.java", "protected void doGet", "servlet_override"),
     ("method_names", "java", "doPost", JAVA_SERVLET_SRC, "Servlet.java", "protected void doPost", "servlet_override"),
-    # doFilter/filter_override is DEAD, not LIVE -- see EXCLUDED_PATTERNS
-    # and test_do_filter_can_never_fire_on_compilable_java below.
+    ("method_names", "java", "doFilter", JAVA_SERVLET_SRC, "Servlet.java", "public void doFilter", "filter_override"),
     ("method_names", "java", "doPut", JAVA_SERVLET_SRC, "Servlet.java", "protected void doPut", "servlet_override"),
     ("method_names", "java", "doDelete", JAVA_SERVLET_SRC, "Servlet.java", "protected void doDelete", "servlet_override"),
     ("method_names", "java", "main", JAVA_SERVLET_SRC, "Servlet.java", "public static void main", "main_method"),
@@ -956,23 +964,31 @@ LIVE_CASES: list[tuple[str, str, str, str, str, str, str]] = [
     ("line_patterns", "go", r"\bhttp\.Handle\s*\(", GO_HTTP_HANDLE_SRC, "http_handle.go", "func registerLegacyHandle() {", "http_handler"),
     ("line_patterns", "go", r"\bmux\.HandleFunc\s*\(", GO_SERVEMUX_SRC, "servemux.go", "func registerServeMux() {", "mux_handler"),
     ("line_patterns", "go", r"\br\.HandleFunc\s*\(", GO_GORILLA_SRC, "gorilla.go", "func registerGorilla() {", "gorilla_router"),
-    # -- _ENTRY_LINE_PATTERNS["ruby"]: 0 of 4 are LIVE, all excluded --
+    # -- _ENTRY_LINE_PATTERNS["ruby"] (4 of 4) --
+    ("line_patterns", "ruby", r"^\s*get\s+['\"/]", "get '/x' do\n 'ok'\nend\n", "app.rb", "get '/x' do", "sinatra_route"),
+    ("line_patterns", "ruby", r"^\s*post\s+['\"/]", "post '/x' do\n 'ok'\nend\n", "app.rb", "post '/x' do", "sinatra_route"),
+    ("line_patterns", "ruby", r"^\s*put\s+['\"/]", "put '/x' do\n 'ok'\nend\n", "app.rb", "put '/x' do", "sinatra_route"),
+    ("line_patterns", "ruby", r"^\s*patch\s+['\"/]", "patch '/x' do\n 'ok'\nend\n", "app.rb", "patch '/x' do", "sinatra_route"),
+    ("line_patterns", "ruby", r"^\s*delete\s+['\"/]", "delete '/x' do\n 'ok'\nend\n", "app.rb", "delete '/x' do", "sinatra_route"),
+    ("line_patterns", "ruby", r"^\s*options\s+['\"/]", "options '/x' do\n 'ok'\nend\n", "app.rb", "options '/x' do", "sinatra_route"),
+    ("line_patterns", "ruby", r"^\s*head\s+['\"/]", "head '/x' do\n 'ok'\nend\n", "app.rb", "head '/x' do", "sinatra_route"),
     # -- _ENTRY_LINE_PATTERNS["php"] (3 of 3) --
     # The entry's "line" is the CLOSURE's line_start: a Laravel route file's
     # handler is an anonymous function, and `_registering_call_lines` walks up
     # from it to the `Route::get(` it is an argument to.
-    ("line_patterns", "php", r"\bRoute::\w+\s*\(", PHP_LARAVEL_ROUTES_SRC, "web.php", "Route::get('/', function ()", "laravel_route"),
+    ("line_patterns", "php", r"\bRoute::(?:get|post|put|patch|delete|options|any|match|resource|apiResource|resources|apiResources|redirect|view|fallback)\s*\(", PHP_LARAVEL_ROUTES_SRC, "web.php", "Route::get('/', function ()", "laravel_route"),
     ("line_patterns", "php", r"\$app->\w+\s*\(", PHP_APP_REGISTRAR_SRC, "app_registrar.php", "registerApp", "slim_route"),
     ("line_patterns", "php", r"\$router->\w+\s*\(", PHP_ROUTER_REGISTRAR_SRC, "router_registrar.php", "registerRouter", "framework_route"),
     # -- _GLOBAL_ENTRY_LINE_PATTERNS (6 of 6) --
     ("global_line_patterns", "python", r"^\s*if\s+__name__\s*==\s*['\"]__main__['\"]", PY_FLASK_SRC, "flask_app.py", 'if __name__ == "__main__":', "main_guard"),
     ("global_line_patterns", "ruby", r"^\s*if\s+__FILE__\s*==\s*\$0", RUBY_MAIN_GUARD_1_SRC, "script1.rb", "if __FILE__ == $0", "main_guard"),
     ("global_line_patterns", "ruby", r"^\s*if\s+\$PROGRAM_NAME\s*==\s*__FILE__", RUBY_MAIN_GUARD_2_SRC, "script2.rb", "if $PROGRAM_NAME == __FILE__", "main_guard"),
+    ("global_line_patterns", "ruby", r"^\s*Rails\.application\.routes\.draw\b", "Rails.application.routes.draw do\n get 'files', to: 'files#index'\nend\n", "config/routes.rb", "Rails.application.routes.draw do", "rails_route"),
     # php reuses the same list object as _ENTRY_LINE_PATTERNS["php"], read over
     # top-level statements instead of function spans. Each row needs a
     # registration with NO inline callable, or the function-scoped pass owns it
     # and the top-level pass deliberately stands down.
-    ("global_line_patterns", "php", r"\bRoute::\w+\s*\(", PHP_LARAVEL_ROUTES_SRC, "web.php", "Route::get('/users/{id}'", "laravel_route"),
+    ("global_line_patterns", "php", r"\bRoute::(?:get|post|put|patch|delete|options|any|match|resource|apiResource|resources|apiResources|redirect|view|fallback)\s*\(", PHP_LARAVEL_ROUTES_SRC, "web.php", "Route::get('/users/{id}'", "laravel_route"),
     ("global_line_patterns", "php", r"\$app->\w+\s*\(", PHP_TOP_LEVEL_REGISTRAR_SRC, "index.php", "$app->get('/users'", "slim_route"),
     ("global_line_patterns", "php", r"\$router->\w+\s*\(", PHP_TOP_LEVEL_REGISTRAR_SRC, "index.php", "$router->post('/widgets'", "framework_route"),
 ]
@@ -1067,47 +1083,32 @@ def test_main_requires_public_and_static_modifiers() -> None:
     assert not _entries_at(result, main_line)
 
 
-def test_do_filter_can_never_fire_on_compilable_java() -> None:
-    """DEAD: `javax.servlet.Filter` is an interface, so a real class can
-    only ever write `implements Filter`, never `extends Filter` -- but the
-    servlet/filter-override gate (treesitter_index.py:1467) only accepts
-    `extends`. `LegacyFilter implements Filter` in JAVA_SERVLET_SRC is
-    fully idiomatic, compilable code, and still produces nothing.
-    """
+def test_filter_implementation_is_entry_point() -> None:
+    """Servlet filters implement an interface and receive HTTP requests."""
     result = _index(JAVA_SERVLET_SRC, "Servlet.java", "java")
     do_filter_line = _line_of("public void doFilter", JAVA_SERVLET_SRC)
 
-    assert not _entries_at(result, do_filter_line)
+    assert any(entry["kind"] == "filter_override"
+               for entry in _entries_at(result, do_filter_line))
 
 
-def test_sinatra_route_blocks_produce_no_function_node_to_scan() -> None:
-    """`_ENTRY_LINE_PATTERNS["ruby"]` get/post/put/delete are DEAD: a
-    Sinatra route (`get '/x' do ... end`) is a top-level DSL call, and the
-    ruby function-extraction query only captures `method`/`singleton_method`
-    nodes. There is no function to scan, so the pattern can never match a
-    genuine Sinatra route -- verified structurally, not merely inferred.
-    """
+def test_sinatra_route_blocks_are_indexed_as_callable_entries() -> None:
+    """Sinatra route blocks provide the executable scan scope."""
     result = _index(RUBY_SINATRA_SRC, "app.rb", "ruby")
 
-    assert result["functions"] == []
-    assert result["entry_points"] == []
+    assert len(result["functions"]) == 3
+    assert len([entry for entry in result["entry_points"] if entry["kind"] == "sinatra_route"]) == 3
 
 
-def test_ruby_delete_pattern_only_ever_fires_on_ordinary_delete_calls() -> None:
-    """MISROUTED, pinned as a negative: the only way `\\bdelete\\s+['"/]`
-    fires today is on an ordinary `Hash#delete` / `params.delete` call
-    inside a real method, never on the Sinatra route it was written for
-    (see the previous test). No positive test is written for this pattern
-    per the brief's rule against cementing broken behaviour; this test
-    exists to bound the blast radius, not to certify it as intended.
-    """
+def test_ruby_hash_delete_is_not_a_route() -> None:
+    """Ordinary Hash#delete calls do not register HTTP handlers."""
     result = _index(RUBY_DELETE_FALSE_POSITIVE_SRC, "widgets_controller.rb", "ruby")
     # entry_points["line"] is the method's own def-line (func.line_start),
     # not the line the matching text sits on inside its body.
     line = _line_of("def destroy_all(params)", RUBY_DELETE_FALSE_POSITIVE_SRC)
 
     matches = [ep for ep in _entries_at(result, line) if ep["kind"] == "sinatra_route"]
-    assert matches, "the ordinary Hash#delete call is what actually fires this pattern"
+    assert not matches
 
 
 def test_go_framework_route_pattern_fires_on_ordinary_non_web_code() -> None:
@@ -1225,34 +1226,23 @@ def test_a_closure_inside_a_registered_callback_is_not_itself_the_route() -> Non
     }, "fixture must still extract the nested closure"
 
 
-def test_registration_above_a_named_handler_is_not_attributed_to_it() -> None:
-    """The second shape the removed lookback got wrong.
-
-    A bare top-level `app.get('/admin', handleAdmin)` written ABOVE the
-    handler it names used to be charged to the NEXT function. That is the
-    same coverage gap as
-    ``test_express_route_naming_an_existing_handler_is_never_seen`` (which
-    writes the registration below the handler), and it must have the same
-    answer: nothing. An unfound entry point is a gap; a misattributed one is
-    a wrong answer wearing a gap's clothes.
-    """
+def test_registration_above_a_named_handler_is_attributed_to_it() -> None:
+    """A registration above a declaration belongs to its named handler."""
     result = _index(JS_REGISTRATION_ABOVE_HANDLER_SRC, "admin.js", "javascript")
 
     assert result["functions"], "fixture must still extract handleAdmin"
-    assert result["entry_points"] == []
+    assert [(entry["name"], entry["kind"]) for entry in result["entry_points"]] == [
+        ("handleAdmin", "express_route")
+    ]
 
 
-def test_express_route_naming_an_existing_handler_is_never_seen() -> None:
-    """Coverage gap: registering an already-defined handler by name
-    (`app.get('/users', listUsers)`) is a very common Express idiom, but the
-    line pattern only ever scans a function's OWN range -- there is no
-    function wrapping the bare top-level registration call, so it is
-    invisible. Only the inline-callback style is detected (see
-    LIVE_CASES above).
-    """
+def test_express_route_naming_an_existing_handler_is_attributed() -> None:
+    """A top-level registration below a declaration still names the handler."""
     result = _index(JS_NAMED_HANDLER_GAP_SRC, "server.js", "javascript")
 
-    assert result["entry_points"] == []
+    assert [(entry["name"], entry["kind"]) for entry in result["entry_points"]] == [
+        ("listUsers", "express_route")
+    ]
 
 
 def test_a_laravel_route_file_registers_every_route_exactly_once() -> None:
@@ -1325,29 +1315,10 @@ def test_php_construct_fires_on_every_constructor_regardless_of_reachability() -
 # _ENTRY_ANNOTATIONS / _ENTRY_METHOD_NAMES / _ENTRY_LINE_PATTERNS /
 # _GLOBAL_ENTRY_LINE_PATTERNS not in LIVE_CASES must appear here.
 EXCLUDED_PATTERNS: dict[tuple[str, str, str], str] = {
-    ("method_names", "java", "doFilter"):
-        "DEAD -- javax.servlet.Filter is an interface, so no compilable "
-        "Java class can ever write `extends Filter` (only `implements "
-        "Filter`); the extends-equality gate (treesitter_index.py:1467) "
-        "only accepts `extends`. Verified in "
-        "test_do_filter_can_never_fire_on_compilable_java.",
     ("method_names", "php", "__construct"):
         "MISROUTED -- fires on every PHP constructor; unlike __wakeup, "
         "__construct is never invoked by PHP's native unserialize(). "
         "Verified in test_php_construct_fires_on_every_constructor_regardless_of_reachability.",
-    ("line_patterns", "ruby", r"\bget\s+['\"/]"):
-        "DEAD -- Sinatra route blocks are top-level DSL calls, not `def` "
-        "methods; no function node exists for the line pattern to scan. "
-        "Verified in test_sinatra_route_blocks_produce_no_function_node_to_scan.",
-    ("line_patterns", "ruby", r"\bpost\s+['\"/]"):
-        "DEAD -- same as get, see above.",
-    ("line_patterns", "ruby", r"\bput\s+['\"/]"):
-        "DEAD -- same as get, see above.",
-    ("line_patterns", "ruby", r"\bdelete\s+['\"/]"):
-        "MISROUTED -- same DEAD-for-its-intended-purpose reasoning as "
-        "get/post/put, but this one also collides with the extremely "
-        "common Hash#delete / params.delete idiom and fires on that "
-        "instead. Verified in test_ruby_delete_pattern_only_ever_fires_on_ordinary_delete_calls.",
     ("line_patterns", "go", r"\b(?:e|g|app)\.\w+\s*\("):
         "MISROUTED -- no web-framework context check; fires on any method "
         "call on a variable named e/g/app for any reason (errgroup.Wait(), "
@@ -1395,9 +1366,9 @@ def test_catalogue_sweep_covers_every_entry_point_pattern() -> None:
         | _real_line_pattern_keys()
         | _real_global_line_pattern_keys()
     )
-    assert len(real_keys) == 79, (
-        f"expected 79 entry-point catalogue entries (17 annotations + "
-        f"20 method names + 36 line patterns + 6 global line patterns), "
+    assert len(real_keys) == 86, (
+        f"expected 83 entry-point catalogue entries (19 annotations + "
+        f"20 method names + 37 line patterns + 7 global line patterns), "
         f"found {len(real_keys)} -- the catalogue has drifted; update this "
         f"suite's LIVE_CASES/EXCLUDED_PATTERNS to match"
     )

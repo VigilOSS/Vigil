@@ -1,7 +1,7 @@
 """Empirical catalogue audit: `url_fetch`, `deserialization`, `eval_exec`, `crypto`.
 
 Scope is exactly these four `_SINK_DEFINITIONS` families in
-`assess.lib.treesitter_index` (107 patterns total: 33 `url_fetch`, 20
+`assess.lib.treesitter_index` (106 patterns total: 32 `url_fetch`, 20
 `deserialization`, 23 `eval_exec`, 31 `crypto`). Every pattern was probed with
 an idiomatic, current-era (2026) fixture through the real structural indexer.
 Only the patterns that actually fire on idiomatic code get a test here; the
@@ -68,19 +68,28 @@ EXPECTED_VULN_CLASSES = {
 # tree-sitter has_error demotion.
 # ---------------------------------------------------------------------------
 
-# ---- url_fetch (33 patterns; LIVE: java x2, python x9, js x3, ts x3, go x4,
-#      ruby x3, php x3, csharp x4 = 31) ---------------------------------------
+# ---- url_fetch (32 patterns; LIVE: java x4, python x9, js x3, ts x3, go x3,
+#      ruby x3, php x3, csharp x3 = 31) ---------------------------------------
 
 _JAVA_URL_FETCH = """
 import java.net.URL;
 import java.net.HttpURLConnection;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 
 public class Fetcher {
     public String fetchOld(String target) throws Exception {
         URL url = new URL(target);
         HttpURLConnection conn = (HttpURLConnection) url.openConnection();
         conn.setRequestMethod("GET");
+        url.openStream();
+        conn.getInputStream();
         return conn.getResponseCode() + "";
+    }
+    public String fetchNew(HttpRequest request) throws Exception {
+        HttpClient outbound = HttpClient.newHttpClient();
+        return outbound.send(request, HttpResponse.BodyHandlers.ofString()).body();
     }
 }
 """
@@ -697,9 +706,11 @@ FIXTURES: dict[tuple[str, str], tuple[str, str]] = {
 # ---------------------------------------------------------------------------
 
 CASES: list[tuple[str, str, str, str]] = [
-    # -- url_fetch: java (2) --
-    ("url_fetch", "java", r"\bnew\s+URL\s*\(", "URL url = new URL(target);"),
-    ("url_fetch", "java", r"\bHttpURLConnection\b", "HttpURLConnection conn ="),
+    # -- url_fetch: java (4) --
+    ("url_fetch", "java", r"\.openStream\s*\(", "url.openStream();"),
+    ("url_fetch", "java", r"\.getInputStream\s*\(", "conn.getInputStream();"),
+    ("url_fetch", "java", r"\.getResponseCode\s*\(", "conn.getResponseCode()"),
+    ("url_fetch", "java", r"\.send(?:Async)?\s*\(", "outbound.send(request,"),
     # -- url_fetch: python (9) --
     ("url_fetch", "python", r"\brequests\.get\s*\(", "requests.get(url, timeout=5)"),
     ("url_fetch", "python", r"\brequests\.post\s*\(", "requests.post(url, json="),
@@ -718,11 +729,10 @@ CASES: list[tuple[str, str, str, str]] = [
     ("url_fetch", "typescript", r"\bfetch\s*\(", "const res = await fetch(url);"),
     ("url_fetch", "typescript", r"\bhttp\.request\s*\(", "http.request(target, cb).end();"),
     ("url_fetch", "typescript", r"\baxios\.", "const res = await axios.get(url);"),
-    # -- url_fetch: go (4) --
+    # -- url_fetch: go (3) --
     ("url_fetch", "go", r"\bhttp\.Get\s*\(", "http.Get(url)"),
     ("url_fetch", "go", r"\bhttp\.Post\s*\(", "http.Post(url,"),
-    ("url_fetch", "go", r"\bhttp\.NewRequest\s*\(", "http.NewRequest("),
-    ("url_fetch", "go", r"\bhttp\.DefaultClient\.Do\s*\(", "http.DefaultClient.Do(req)"),
+    ("url_fetch", "go", r"\b\w*[Cc]lient\.Do\s*\(", "http.DefaultClient.Do(req)"),
     # -- url_fetch: ruby (3) --
     ("url_fetch", "ruby", r"\bNet::HTTP\.\w+\s*\(", "Net::HTTP.get(URI(url))"),
     ("url_fetch", "ruby", r"\bHTTParty\.\w+\s*\(", "HTTParty.get(url)"),
@@ -731,11 +741,10 @@ CASES: list[tuple[str, str, str, str]] = [
     ("url_fetch", "php", r"\bcurl_exec\s*\(", "curl_exec($ch)"),
     ("url_fetch", "php", r"\bfile_get_contents\s*\(.*http", 'file_get_contents("http://" . $target)'),
     ("url_fetch", "php", r"\bfopen\s*\(.*http", 'fopen("http://" . $target, "r")'),
-    # -- url_fetch: csharp (4) --
-    ("url_fetch", "csharp", r"\bnew\s+HttpClient\s*\(", "var client = new HttpClient();"),
-    ("url_fetch", "csharp", r"\bWebRequest\.Create\s*\(", "var req = WebRequest.Create(url);"),
-    ("url_fetch", "csharp", r"\bnew\s+WebClient\s*\(", "var wc = new WebClient();"),
-    ("url_fetch", "csharp", r"\bHttpWebRequest\b", "HttpWebRequest hwr = WebRequest.CreateHttp(url);"),
+    # -- url_fetch: csharp (3) --
+    ("url_fetch", "csharp", r"\.(?:GetAsync|PostAsync|PutAsync|DeleteAsync|SendAsync|GetStringAsync|GetByteArrayAsync|GetStreamAsync)\s*\(", "client.GetStringAsync(url)"),
+    ("url_fetch", "csharp", r"\.(?:Download\w*|Upload\w*)\s*\(", "wc.DownloadString(url)"),
+    ("url_fetch", "csharp", r"\.GetResponse(?:Async)?\s*\(", "req.GetResponse()"),
 
     # -- deserialization: java (3) --
     ("deserialization", "java", r"\bObjectInputStream\b", "ObjectInputStream in = new ObjectInputStream"),
@@ -875,12 +884,7 @@ _TARGET_KINDS = {"url_fetch", "deserialization", "eval_exec", "crypto"}
 # Patterns verified NOT LIVE (DEAD / OBSOLETE / MISROUTED), each with the
 # empirical reason. kind, language, pattern (verbatim from _SINK_DEFINITIONS).
 _EXCLUDED: dict[tuple[str, str, str], str] = {
-    # -- url_fetch (2 excluded) --
-    ("url_fetch", "java", r"\bHttpClient\.send\s*\("):
-        "DEAD -- written as a static call on the type name; HttpClient.send "
-        "is an instance method (client.send(...)). Verified: idiomatic "
-        "java.net.http.HttpClient code produces zero sinks; only a "
-        "non-compiling literal `HttpClient.send(...)` call fires.",
+    # -- url_fetch (1 excluded) --
     ("url_fetch", "ruby", r"\bopen-uri\b"):
         "DEAD -- matches a `require \"open-uri\"` line, but sinks are only "
         "scanned inside function bodies (treesitter_index.py:1568/1535) and "
@@ -1029,7 +1033,7 @@ def test_case_table_covers_every_live_pattern_and_no_dead_ones() -> None:
         f"{(tested | excluded) - catalogue}"
     )
 
-    # 33 + 20 + 23 + 31 = 107 (csharp added 4/6/4/6, all LIVE).
-    assert len(catalogue) == 107
+    # 32 + 20 + 23 + 31 = 106 (Java response reads are outbound requests).
+    assert len(catalogue) == 106
     assert len(tested) == 89
-    assert len(excluded) == 18
+    assert len(excluded) == 17

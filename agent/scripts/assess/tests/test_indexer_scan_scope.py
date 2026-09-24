@@ -452,18 +452,20 @@ function handleAdmin(req, res) {
 """
 
 
-def test_a_stacked_function_never_inherits_a_neighbours_registration() -> None:
+def test_a_stacked_function_attributes_only_the_registered_handler() -> None:
     """A registration belongs to the callable it actually registers.
 
-    `helper` and `handleAdmin` merely sit near `app.get("/admin", ...)`; neither
-    is passed to it. Proximity is not registration, so neither may be reported.
-    Attribution is structural — an enclosing call, not a line window — so there
-    is no distance at which a neighbour starts inheriting the match.
+    `helper` merely sits near `app.get("/admin", handleAdmin)`; only
+    `handleAdmin` is passed to it. Proximity must not make `helper` a route.
     """
     indexed = index_file("routes.js", "javascript", STACKED_ROUTES)
 
-    assert indexed["entry_points"] == []
-    assert not [func for func in indexed["functions"] if func["is_entry_point"]]
+    assert [(entry["name"], entry["kind"]) for entry in indexed["entry_points"]] == [
+        ("handleAdmin", "express_route")
+    ]
+    assert [func["name"] for func in indexed["functions"] if func["is_entry_point"]] == [
+        "handleAdmin"
+    ]
 
 
 # The span a registration can be written in has two parts, and this is the
@@ -612,14 +614,6 @@ def test_a_security_source_carries_no_vuln_class() -> None:
 
 # --- 10. Scan scope that covered no source at all ---------------------------
 
-# The classic PHP view: executable statements at file scope, no callable and no
-# framework registration anywhere, so nothing bounds a scan and nothing the
-# entry-point catalogue keys on exists either.
-PHP_TOP_LEVEL_TEMPLATE = b"""<?php
-$name = $_GET["name"];
-echo "<h1>" . $name . "</h1>";
-"""
-
 MODULE_LEVEL_PYTHON = b"""import os
 
 os.system("backup " + os.environ["TARGET"])
@@ -629,14 +623,13 @@ os.system("backup " + os.environ["TARGET"])
 @pytest.mark.parametrize(
     ("file_path", "language", "source"),
     [
-        ("public/legacy.php", "php", PHP_TOP_LEVEL_TEMPLATE),
         ("deploy.py", "python", MODULE_LEVEL_PYTHON),
     ],
 )
 def test_a_file_with_no_scanned_function_never_reports_clean_sinks(
     file_path: str, language: str, source: bytes
 ) -> None:
-    """Zero function nodes means `_detect_sinks` was handed nothing at all.
+    """Python module calls remain outside a callable scan scope.
 
     Each fixture carries an executable sink or route outside any function, so
     `security_sinks: []` under `analysis_status: "complete"` is a measurement
@@ -1018,7 +1011,8 @@ def test_a_csharp_file_is_a_first_class_tree_sitter_language() -> None:
     class_names = {cls["name"] for cls in indexed["classes"]}
     assert {"IUserRepository", "UserRepository"} <= class_names
     repository = next(cls for cls in indexed["classes"] if cls["name"] == "UserRepository")
-    assert repository["extends"] == "IUserRepository"
+    assert repository["extends"] == ""
+    assert repository["implements"] == ["IUserRepository"]
 
     assert "System.Data.SqlClient" in indexed["imports"]
 

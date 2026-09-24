@@ -1,12 +1,12 @@
 """Empirical audit of `_SINK_DEFINITIONS`' file_path / file_inclusion /
-sql_exec / process_exec families -- 107 regex patterns across 10 languages.
+sql_exec / process_exec families -- 108 regex patterns across 10 languages.
 
 Every pattern below is exercised against an idiomatic, current-era (2026)
 fixture through the real tree-sitter indexer. Only patterns that fire on
 realistic code get a case in ``CASES`` -- DEAD / REDUNDANT / MISROUTED
 patterns are named, with the file:line evidence, in ``_EXCLUDED`` instead,
 and ``test_case_table_covers_every_live_pattern_in_the_assigned_slice``
-proves the two lists together account for all 107 patterns, so the catalogue
+proves the two lists together account for all 108 patterns, so the catalogue
 cannot silently regain a dead pattern or lose a live one.
 
 Taxonomy note. Three defects this audit recorded have since been fixed in the
@@ -19,7 +19,7 @@ fails loudly rather than being re-documented:
   ``require_once``) were classed as ``file_path`` -> ``path-traversal``.
   They are now their own ``file_inclusion`` kind carrying ``["lfi", "rfi"]``
   (vuln_taxonomy.py:92-93). The patterns moved verbatim, so the slice is
-  kept that redistribution: ``file_path`` is 34 and ``file_inclusion`` is 4.
+  kept that redistribution: ``file_path`` is 35 and ``file_inclusion`` is 4.
 
 * Ruby's command-substitution pattern was ``\b`[^`]*` ``. ``\b`` holds only at
   a word/non-word transition and a backtick is never a word character, so the
@@ -34,7 +34,8 @@ fails loudly rather than being re-documented:
 * C# was then added as a tree-sitter language, contributing 14 patterns to
   this slice (5 ``file_path``, 7 ``sql_exec``, 2 ``process_exec``). All 14
   fire LIVE on idiomatic C# and get real cases in ``CASES``; none is excluded,
-  bringing the slice to 107 patterns (101 live, 6 excluded).
+  bringing the slice to 107 patterns (101 live, 6 excluded). C++ stream
+  construction adds one live ``file_path`` pattern.
 
 ``file_path`` keeps the constructs that really are traversal
 (``fopen``/``file_get_contents``/``file_put_contents``).
@@ -169,6 +170,10 @@ class ConfigReader {
 public:
     FILE* openLegacy(const char* path) {
         return fopen(path, "r");
+    }
+
+    void readStreamCtor(const std::string& path) {
+        std::ifstream input(path);
     }
 
     void readConfig(const std::string& path) {
@@ -693,6 +698,7 @@ CASES: list[tuple[str, str, str, str, list[str] | None]] = [
     ("file_path", "cpp", r"\bopen\s*\(", "in.open(path)", ["path-traversal"]),
     ("file_path", "cpp", r"\baccess\s*\(", "access(path, R_OK)", ["path-traversal"]),
     ("file_path", "cpp", r"\bstat\s*\(", "stat(path, out)", ["path-traversal"]),
+    ("file_path", "cpp", r"\b(?:std::)?(?:i|o|f)fstream\s+(?:[A-Za-z_]\w*)\s*[({]", "std::ifstream input(path)", ["path-traversal"]),
     # ---- file_path : python (treesitter_index.py:253) ----
     ("file_path", "python", r"\bopen\s*\(", 'open(target, "rb")', ["path-traversal"]),
     ("file_path", "python", r"\bos\.path\.join\s*\(", "os.path.join(UPLOAD_DIR, filename)", ["path-traversal"]),
@@ -985,15 +991,15 @@ def test_case_table_covers_every_live_pattern_in_the_assigned_slice() -> None:
         f"{(tested | excluded) - all_patterns}"
     )
 
-    # Hard counts. The slice is now 107 patterns. C# was added as a
+    # Hard counts. The slice is now 108 patterns. C# was added as a
     # tree-sitter language, contributing 14 new patterns to this slice
     # (5 file_path, 7 sql_exec, 2 process_exec), all of which fire LIVE on
     # idiomatic C# -- so the case table gains 14 rows and _EXCLUDED gains
     # nothing. PHP's four inclusion constructs still account for the
     # file_path (34) / file_inclusion (4) split described above.
     # file_path=39, file_inclusion=4, sql_exec=29, process_exec=35 -> 107.
-    assert len(all_patterns) == 107
-    assert len(tested) == 101
+    assert len(all_patterns) == 108
+    assert len(tested) == 102
     assert len(excluded) == 6
 
 
