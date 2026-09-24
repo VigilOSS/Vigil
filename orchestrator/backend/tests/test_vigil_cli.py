@@ -6292,6 +6292,39 @@ def test_oob_start_post_flight_returns_on_success(tmp_path: Path) -> None:
     assert tail_calls == 1
 
 
+def test_oob_start_post_flight_reports_relay_rejection(tmp_path: Path) -> None:
+    from vigil_cli.docker import DockerResult
+    from vigil_cli.oob import OobOptions, _check_frpc_for_conflicts
+
+    rejection = "[W] [host-oob] start error: proxy 'host-oob' is not registered\n"
+    killed: list[str] = []
+
+    def runner(argv: list[str], **_: object) -> DockerResult:
+        command = argv[-1]
+        if "tail -n 200 /data/oob/frpc.log" in command:
+            return DockerResult(0, rejection, "")
+        if "tmux kill-session" in command:
+            killed.append(command)
+            return DockerResult(0, "", "")
+        if command.startswith("pkill -f "):
+            return DockerResult(0, "", "")
+        raise AssertionError(f"unexpected command: {command}")
+
+    with pytest.raises(SystemExit) as excinfo:
+        _check_frpc_for_conflicts(
+            OobOptions(install_root=tmp_path, oob_domain="slot.oob.example.com"),
+            runner=runner,
+            timeout=1.0,
+            sleep=lambda _seconds: None,
+        )
+
+    message = str(excinfo.value)
+    assert "relay rejected" in message.lower()
+    assert rejection.strip() in message
+    assert any("tmux kill-session -t frpc" in command for command in killed)
+    assert any("tmux kill-session -t oob-server" in command for command in killed)
+
+
 def test_oob_start_post_flight_waits_for_all_frpc_proxy_successes(tmp_path: Path) -> None:
     from vigil_cli.docker import DockerResult
     from vigil_cli.oob import OobOptions, _check_frpc_for_conflicts

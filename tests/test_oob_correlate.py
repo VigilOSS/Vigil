@@ -783,6 +783,8 @@ def _status_runner(scenario):
                 ),
                 "",
             )
+        if "tail -n 200 /data/oob/frpc.log" in cmd:
+            return DockerResult(0, scenario.get("frpc_log", ""), "")
         return DockerResult(0, "", "")
 
     return runner
@@ -892,6 +894,55 @@ def test_oob_status_degrades_when_dns_resolves_but_edge_http_redirects(monkeypat
     assert payload["edge_route_healthy"] is False
     assert payload["health"] == "degraded"
     assert any("HTTP edge route" in issue for issue in payload["issues"])
+
+
+def test_oob_status_names_rejected_relay_registration(monkeypatch):
+    monkeypatch.setattr(oob.docker, "container_running", lambda *a, **k: True)
+    scenario = {
+        "server": True,
+        "frpc": True,
+        "running": [],
+        "configured": [],
+        "dig": "203.0.113.120\n",
+        "http": "HTTP/1.1 200 OK\nServer: slot.oob.example.com\n",
+        "frpc_log": (
+            "[W] [host-oob] start error: proxy 'host-oob' is not registered\n"
+        ),
+    }
+
+    payload = oob.oob_status(
+        oob_domain="slot.oob.example.com",
+        runner=_status_runner(scenario),
+    )
+
+    assert payload["frpc"] is True
+    assert payload["health"] == "degraded"
+    assert any("is not registered" in issue for issue in payload["issues"])
+    assert any("relay" in issue.lower() for issue in payload["issues"])
+
+
+def test_oob_status_clears_relay_rejection_after_proxy_registers(monkeypatch):
+    monkeypatch.setattr(oob.docker, "container_running", lambda *a, **k: True)
+    scenario = {
+        "server": True,
+        "frpc": True,
+        "running": [],
+        "configured": [],
+        "dig": "203.0.113.120\n",
+        "http": "HTTP/1.1 200 OK\nServer: slot.oob.example.com\n",
+        "frpc_log": (
+            "[W] [host-oob] start error: proxy 'host-oob' is not registered\n"
+            "[I] [host-oob] start proxy success\n"
+        ),
+    }
+
+    payload = oob.oob_status(
+        oob_domain="slot.oob.example.com",
+        runner=_status_runner(scenario),
+    )
+
+    assert payload["health"] == "ok"
+    assert not any("not registered" in issue for issue in payload["issues"])
 
 
 def test_oob_status_shallow_skips_probes_and_does_not_false_degrade(monkeypatch):

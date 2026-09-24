@@ -569,9 +569,18 @@ def _emitted_vuln_classes() -> set[str]:
     ``"vuln_classes": [...]`` literal plus the three pattern tables is the only
     way to cover both without a second list to keep in sync.
     """
-    module = ast.parse(Path(treesitter_index.__file__).read_text(encoding="utf-8"))
+    index_path = Path(treesitter_index.__file__)
+    modules = (
+        ast.parse(path.read_text(encoding="utf-8"))
+        for path in (
+            index_path,
+            index_path.with_name("treesitter_catalogues.py"),
+            index_path.with_name("treesitter_lightweight.py"),
+        )
+    )
     emitted = {
         element.value
+        for module in modules
         for node in ast.walk(module)
         if isinstance(node, ast.Dict)
         for key, value in zip(node.keys, node.values)
@@ -593,6 +602,10 @@ def test_no_indexer_table_invents_a_vuln_class() -> None:
         "unknown string: it matches no skill and satisfies no coverage "
         f"expectation. Offenders: {invented}"
     )
+
+
+def test_lightweight_extractor_classes_are_in_taxonomy_sweep() -> None:
+    assert "clickjacking" in _emitted_vuln_classes()
 
 
 def test_a_security_source_carries_no_vuln_class() -> None:

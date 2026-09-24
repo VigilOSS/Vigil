@@ -15,6 +15,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from app import db as db_module
+from app import db_code_analysis_schema
 from app.api import code_analysis as code_analysis_api
 from app.api.code_analysis import QueueItemsBulkCreateRequest
 from app.services import code_analysis, code_fuzz_completion
@@ -1666,7 +1667,7 @@ def test_generation_history_migration_captures_only_live_current_source(
         )
         connection.execute("DROP TABLE code_source_generation_files")
         connection.execute("DROP TABLE code_source_generations")
-        db_module._create_code_analysis_tables(connection)
+        db_code_analysis_schema.create_tables(connection)
         db_module._apply_additive_migrations(connection)
         generations = [
             int(row[0])
