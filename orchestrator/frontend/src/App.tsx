@@ -4,6 +4,7 @@ import { listEngagements } from "./lib/api";
 import type { Engagement } from "./lib/api";
 import { EngagementPage } from "./routes/EngagementPage";
 import { EngagementsPage } from "./routes/EngagementsPage";
+import { RemediationPage } from "./routes/RemediationPage";
 import { parseRunAuditQuery } from "./lib/runAudit";
 
 function currentRoute(): string {
@@ -77,6 +78,9 @@ export default function App() {
   // instead of the "no engagements" empty state.
   const [engagementsLoading, setEngagementsLoading] = useState(true);
   const engagementRoute = useMemo(() => parseEngagementRoute(route), [route]);
+  const remediationMatch = route.match(/^\/remediation\/([^?]+)(?:\?(.*))?$/);
+  const remediationKey = remediationMatch ? decodeURIComponent(remediationMatch[1]) : null;
+  const requestedCaseId = remediationMatch ? Number(new URLSearchParams(remediationMatch[2] ?? "").get("case")) : NaN;
   const engagementKey = engagementRoute?.engagementKey ?? null;
 
   useEffect(() => {
@@ -86,7 +90,7 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (engagementKey) {
+    if (engagementKey || remediationKey) {
       return;
     }
 
@@ -138,7 +142,11 @@ export default function App() {
       window.clearInterval(interval);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
-  }, [engagementKey]);
+  }, [engagementKey, remediationKey]);
+
+  if (remediationKey) {
+    return <RemediationPage engagementKey={remediationKey} initialCaseId={Number.isInteger(requestedCaseId) && requestedCaseId > 0 ? requestedCaseId : undefined} onBack={() => navigate("/engagements")} />;
+  }
 
   if (engagementRoute) {
     return (
@@ -163,7 +171,10 @@ export default function App() {
       engagements={engagements}
       loading={engagementsLoading}
       loadError={engagementsError}
-      onOpenEngagement={(engagementKey) => navigate(`/engagements/${encodeURIComponent(engagementKey)}`)}
+      onOpenEngagement={(engagementKey) => {
+        const engagement = engagements.find((item) => item.key === engagementKey);
+        navigate(`${engagement?.engagement_type === "remediation" ? "/remediation" : "/engagements"}/${encodeURIComponent(engagementKey)}`);
+      }}
       onEngagementDeleted={(engagementKey) => {
         setEngagements((current) => current.filter((engagement) => engagement.key !== engagementKey));
       }}

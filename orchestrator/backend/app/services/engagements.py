@@ -528,6 +528,9 @@ def _view_for(engagement: Engagement, *, session_count: int | None = None) -> En
         tenant_reference_paths,
         out_of_scope,
     ) = _scope_details(Path(engagement.engagement_root))
+    if engagement.engagement_type == "remediation":
+        current_phase = "remediation"
+        code_phase = None
     return EngagementView(
         id=engagement.id,
         key=engagement.key,

@@ -6002,6 +6002,110 @@ def _create_post_migration_indexes(connection: sqlite3.Connection) -> None:
     )
 
 
+def _create_remediation_tables(connection: sqlite3.Connection) -> None:
+    connection.executescript("""
+        CREATE TABLE IF NOT EXISTS remediation_cases (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            engagement_id INTEGER NOT NULL REFERENCES engagements(id) ON DELETE CASCADE,
+            source_type TEXT NOT NULL CHECK(source_type IN ('jira', 'bounty')),
+            source_key TEXT NOT NULL,
+            title TEXT NOT NULL,
+            snapshot_json TEXT NOT NULL,
+            linked_finding_engagement_key TEXT,
+            linked_finding_slug TEXT,
+            status TEXT NOT NULL DEFAULT 'intake',
+            worktree_path TEXT,
+            worktree_branch TEXT,
+            worktree_revision TEXT,
+            verification_plan TEXT NOT NULL DEFAULT '',
+            baseline_json TEXT NOT NULL DEFAULT '{}',
+            release_plan_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(engagement_id, source_type, source_key)
+        );
+        CREATE INDEX IF NOT EXISTS idx_remediation_cases_queue
+            ON remediation_cases(engagement_id, status, updated_at DESC);
+        CREATE TABLE IF NOT EXISTS remediation_evidence (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            case_id INTEGER NOT NULL REFERENCES remediation_cases(id) ON DELETE CASCADE,
+            kind TEXT NOT NULL,
+            method TEXT NOT NULL,
+            environment TEXT,
+            command TEXT NOT NULL DEFAULT '',
+            observed TEXT NOT NULL,
+            proved TEXT NOT NULL,
+            outcome TEXT,
+            artifact_path TEXT,
+            artifact_sha256 TEXT,
+            revision TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS remediation_approvals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            case_id INTEGER NOT NULL REFERENCES remediation_cases(id) ON DELETE CASCADE,
+            reviewer TEXT NOT NULL,
+            review_digest TEXT NOT NULL,
+            approved_revision TEXT NOT NULL,
+            evidence_cutoff_id INTEGER NOT NULL DEFAULT 0,
+            approval_method TEXT NOT NULL DEFAULT 'ui',
+            owner_instruction TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS remediation_transitions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            case_id INTEGER NOT NULL REFERENCES remediation_cases(id) ON DELETE CASCADE,
+            from_status TEXT NOT NULL,
+            to_status TEXT NOT NULL,
+            actor TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS remediation_deployments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            case_id INTEGER NOT NULL REFERENCES remediation_cases(id) ON DELETE CASCADE,
+            approval_id INTEGER REFERENCES remediation_approvals(id),
+            workflow TEXT NOT NULL,
+            run_id TEXT NOT NULL,
+            environment TEXT NOT NULL,
+            expected_revision TEXT NOT NULL,
+            observed_revision TEXT NOT NULL,
+            actor TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS remediation_human_verifications (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            case_id INTEGER NOT NULL REFERENCES remediation_cases(id) ON DELETE CASCADE,
+            deployment_id INTEGER NOT NULL REFERENCES remediation_deployments(id) ON DELETE CASCADE,
+            actor TEXT NOT NULL,
+            result TEXT NOT NULL CHECK(result IN ('passed', 'failed', 'blocked')),
+            observed_revision TEXT NOT NULL,
+            notes TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+    """)
+    if "linked_finding_engagement_key" not in _table_columns(connection, "remediation_cases"):
+        connection.execute("ALTER TABLE remediation_cases ADD COLUMN linked_finding_engagement_key TEXT")
+    if "worktree_branch" not in _table_columns(connection, "remediation_cases"):
+        connection.execute("ALTER TABLE remediation_cases ADD COLUMN worktree_branch TEXT")
+    if "baseline_json" not in _table_columns(connection, "remediation_cases"):
+        connection.execute("ALTER TABLE remediation_cases ADD COLUMN baseline_json TEXT NOT NULL DEFAULT '{}'")
+    if "release_plan_json" not in _table_columns(connection, "remediation_cases"):
+        connection.execute("ALTER TABLE remediation_cases ADD COLUMN release_plan_json TEXT NOT NULL DEFAULT '{}'")
+    if "evidence_cutoff_id" not in _table_columns(connection, "remediation_approvals"):
+        connection.execute("ALTER TABLE remediation_approvals ADD COLUMN evidence_cutoff_id INTEGER NOT NULL DEFAULT 0")
+    if "approval_method" not in _table_columns(connection, "remediation_approvals"):
+        connection.execute("ALTER TABLE remediation_approvals ADD COLUMN approval_method TEXT NOT NULL DEFAULT 'ui'")
+    if "owner_instruction" not in _table_columns(connection, "remediation_approvals"):
+        connection.execute("ALTER TABLE remediation_approvals ADD COLUMN owner_instruction TEXT")
+    if "outcome" not in _table_columns(connection, "remediation_evidence"):
+        connection.execute("ALTER TABLE remediation_evidence ADD COLUMN outcome TEXT")
+    if "environment" not in _table_columns(connection, "remediation_evidence"):
+        connection.execute("ALTER TABLE remediation_evidence ADD COLUMN environment TEXT")
+    if "approval_id" not in _table_columns(connection, "remediation_deployments"):
+        connection.execute("ALTER TABLE remediation_deployments ADD COLUMN approval_id INTEGER REFERENCES remediation_approvals(id)")
+
+
 def init_db() -> None:
     global _connection_generation, _startup_database_fingerprint
 
@@ -6054,6 +6158,7 @@ def init_db() -> None:
         connection.execute("PRAGMA journal_mode = WAL")
         _require_fts5(connection)
         _create_core_tables(connection)
+        _create_remediation_tables(connection)
         _create_credentials_table(connection)
         _create_assessment_entity_tables(connection)
         _create_assessment_work_items_table(connection)

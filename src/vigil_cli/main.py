@@ -24,6 +24,7 @@ from . import blue as blue_module
 from . import config as config_module
 from . import email as email_module
 from . import restart_manifest
+from . import remediation as remediation_module
 from . import term
 from .docker import run_command as docker_run_command
 from .engagements import (
@@ -450,11 +451,12 @@ def main(argv: list[str] | None = None) -> None:
     )
     create_p.add_argument(
         "--type",
-        choices=["web", "code", "both", "android"],
+        choices=["web", "code", "both", "android", "remediation"],
         default=None,
         help="Engagement type; inferred from the other inputs when omitted",
     )
     create_p.add_argument("--name", help="Engagement name (required for code/both)")
+    create_p.add_argument("--project-config", help="Remediation project JSON (environment URLs, Chrome CDP, approved model, deployment workflow)")
     create_p.add_argument("--target", help="Primary target URL or host (web/both)")
     create_p.add_argument("--hosts", help="Comma-separated in-scope hosts")
     create_p.add_argument(
@@ -654,6 +656,7 @@ def main(argv: list[str] | None = None) -> None:
     export_pdf_p.add_argument("--output", help="Output PDF path (default: <engagement>/report.pdf)")
 
     blue_module.register_blue_parser(sub)
+    remediation_module.register_remediation_parser(sub)
     bench_module.register_bench_parser(sub)
 
     orch_p = sub.add_parser("orchestrator")
@@ -1366,6 +1369,8 @@ def main(argv: list[str] | None = None) -> None:
         _engagement(args, install_root)
     elif args.command == "blue":
         blue_module.run_blue(args, install_root)
+    elif args.command == "remediation":
+        remediation_module.run_remediation(args, install_root)
     elif args.command == "bench":
         bench_module.run_bench(args, install_root)
     elif args.command == "orchestrator":
@@ -1836,7 +1841,7 @@ def _engagement_create(args: argparse.Namespace, install_root: Path) -> None:
             android_package = android_package or positional
             if not name:
                 name = positional
-        elif engagement_type == "code" and not name:
+        elif engagement_type in {"code", "remediation"} and not name:
             name = positional
         elif not target:
             target = positional
@@ -1845,7 +1850,7 @@ def _engagement_create(args: argparse.Namespace, install_root: Path) -> None:
         if engagement_type in {"web", "both"} and not target and not hosts:
             target = _ask_required("Target URL or host")
             asked = True
-        if engagement_type in {"code", "both"} and not name:
+        if engagement_type in {"code", "both", "remediation"} and not name:
             name = _ask_required("Engagement name")
             asked = True
         if engagement_type == "android" and not name and not android_package and not artifacts:
@@ -1903,6 +1908,14 @@ def _engagement_create(args: argparse.Namespace, install_root: Path) -> None:
         if not _confirm("Create engagement? [Y/n]"):
             raise SystemExit("aborted: engagement not created")
 
+    remediation_config: dict[str, object] = {}
+    if args.project_config:
+        if engagement_type != "remediation":
+            raise SystemExit("--project-config applies only to remediation engagements")
+        remediation_config = json.loads(Path(args.project_config).expanduser().read_text(encoding="utf-8"))
+        if not isinstance(remediation_config, dict):
+            raise SystemExit("--project-config must be a JSON object")
+
     options = CreateEngagementOptions(
         install_root=install_root,
         engagement_type=engagement_type,
@@ -1917,6 +1930,7 @@ def _engagement_create(args: argparse.Namespace, install_root: Path) -> None:
         required_headers=required_headers,
         out_of_scope=out_of_scope,
         rate_limit=rate_limit,
+        remediation_config=remediation_config,
     )
 
     if args.dry_run:

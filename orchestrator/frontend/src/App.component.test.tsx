@@ -17,6 +17,12 @@ vi.mock("./routes/EngagementPage", () => ({
   ),
 }));
 
+vi.mock("./routes/RemediationPage", () => ({
+  RemediationPage: ({ engagementKey, initialCaseId }: { engagementKey: string; initialCaseId?: number }) => (
+    <div>Remediation {engagementKey} case {initialCaseId ?? "none"}</div>
+  ),
+}));
+
 beforeEach(() => {
   window.location.hash = "#/engagements";
   vi.mocked(getDashboardSummary).mockRejectedValue(new Error("dashboard unavailable"));
@@ -44,5 +50,12 @@ describe("App engagement loading", () => {
     render(<App />);
 
     expect(await screen.findByText("Request variant 19")).toBeTruthy();
+  });
+
+  it("opens a remediation case on its dedicated route", async () => {
+    window.location.hash = "#/remediation/Acme?case=7";
+    render(<App />);
+    expect(await screen.findByText("Remediation Acme case 7")).toBeTruthy();
+    expect(listEngagements).not.toHaveBeenCalled();
   });
 });

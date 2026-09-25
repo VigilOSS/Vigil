@@ -45,6 +45,7 @@ response.
 | [`docs/authentication.md`](docs/authentication.md) | Credential records, capture, freshness clocks, liveness verdicts, proxy routing. |
 | [`docs/blue-engagements.md`](docs/blue-engagements.md) | Blue incident response, end to end. |
 | [`docs/code-analysis.md`](docs/code-analysis.md) | White-box code analysis, end to end. |
+| [`docs/remediation.md`](docs/remediation.md) | Remediation cases, evidence, review approval, and development verification. |
 | [`docs/oob-routing.md`](docs/oob-routing.md) | Per-install relay-slot OOB routing, CoreDNS/Caddy inputs, the frpc conflict scan. |
 | [`docs/operations.md`](docs/operations.md) | Runtime sizing, kernel limits, orchestrator data and backups. |
 | [`docs/engagement-prompt-playbook.md`](docs/engagement-prompt-playbook.md) | Steering prompts for a session that goes shallow, overclaims, or loses the loop. |
@@ -376,6 +377,7 @@ frpc conflict scan: [`docs/oob-routing.md`](docs/oob-routing.md). Payload-side t
 | `vigil engagement create \| list \| start \| open \| path \| current \| cd-init \| archive \| export \| export-pdf` | Create and drive engagements. Scope edits (`add-host`, `add-oos`, `set-header`, `add-track`, `set-rate-limit`, …) live here too — `vigil engagement --help`. |
 | `vigil use <key>` | Set the persisted active engagement for global services. |
 | `vigil assess ...` | The assessment surface — see [`docs/assessment-cli.md`](docs/assessment-cli.md). |
+| `vigil remediation ...` | Remediation case intake, worktrees, evidence, review, and PR handoff — see [`docs/remediation.md`](docs/remediation.md). |
 | `vigil blue ...` | Blue incident response — see [`docs/blue-engagements.md`](docs/blue-engagements.md). |
 | `vigil auth status \| show \| edit \| clear \| export \| quarantine \| import \| alias \| env-check \| set-active \| keepalive` | Manage engagement credentials in the backend store. |
 | `vigil mitmproxy start \| stop \| status \| cert \| build \| reload \| routes` | Manage the shared MITM proxy. |

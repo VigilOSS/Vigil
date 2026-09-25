@@ -1829,6 +1829,27 @@ def test_codex_compact_prompt_refresh_rejects_a_symlinked_client_directory(
 _CODEX_PROJECT_DOC_MAX_BYTES = 32 * 1024
 
 
+@pytest.mark.parametrize("client_kind", ["codex", "claude", "both"])
+def test_remediation_prompt_wrappers_use_case_commands(tmp_path: Path, client_kind: str) -> None:
+    agent_root = tmp_path / "agent"
+    agent_root.mkdir()
+    (agent_root / "operator-core-remediation.md").write_text("# Remediation operator\n")
+    engagement_dir = agent_root / "engagements" / "case-work"
+    engagement_dir.mkdir(parents=True)
+
+    engagements._write_prompt_wrappers(
+        agent_root, engagement_dir, client_kind, engagement_type="remediation"
+    )
+
+    wrapper = (engagement_dir / "AGENTS.md").read_text()
+    assert "vigil remediation" in wrapper
+    assert "vigil remediation -k <engagement-key> evidence" in wrapper
+    assert "vigil assess" not in wrapper
+    assert "operator-core-remediation.md" in wrapper
+    if client_kind in {"claude", "both"}:
+        assert "Read `AGENTS.md`" in (engagement_dir / "CLAUDE.md").read_text()
+
+
 @pytest.mark.parametrize(
     ("engagement_type", "canonical"),
     (("web", "AGENTS.md"), ("blue", "AGENTS-blue.md")),

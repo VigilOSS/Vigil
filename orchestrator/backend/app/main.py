@@ -26,6 +26,7 @@ from .api.engagements import router as engagements_router
 from .api.events import router as events_router
 from .api.intel import router as intel_router
 from .api.report_export import router as report_export_router
+from .api.remediation import router as remediation_router
 from .api.submissions import router as submissions_router
 from .config import settings
 from .db import database_readiness_flags, get_connection, init_db
@@ -394,6 +395,7 @@ async def sqlite_operational_error(
 app.include_router(admin_router)
 app.include_router(dashboard_router)
 app.include_router(engagements_router)
+app.include_router(remediation_router)
 app.include_router(credentials_router)
 app.include_router(events_router)
 app.include_router(artifacts_router)
