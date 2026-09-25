@@ -26,6 +26,11 @@ def register(subparsers) -> None:
         help="Why the prior claim is being retracted",
     )
     parser.add_argument(
+        "--retracted-text",
+        help="Exact phrase to locate in current authored report text after correction "
+             "(defaults to the entire prior summary)",
+    )
+    parser.add_argument(
         "--source-name",
         default="operator",
         help="Actor authoring the correction history entry (default: operator)",
@@ -61,6 +66,36 @@ def _correction_history(current: dict, entry: dict) -> list:
     return history
 
 
+_CURRENT_REPORT_FIELDS = (
+    "evidence", "impact", "exploitability", "proof", "attack_scenario",
+    "steps_to_reproduce", "remediation", "poc_description",
+)
+
+
+def _surviving_claim_locations(finding: dict, phrase: str) -> list[str]:
+    needle = phrase.casefold()
+    locations: list[str] = []
+
+    def check(path: str, value: object) -> None:
+        if isinstance(value, str) and needle in value.casefold():
+            excerpt = next(
+                (line.strip() for line in value.splitlines() if needle in line.casefold()),
+                value.strip(),
+            )
+            locations.append(f'{path}: "{excerpt}"')
+        elif isinstance(value, list):
+            for index, item in enumerate(value, start=1):
+                check(f"{path} step {index}", item)
+
+    for field in ("title", "summary"):
+        check(field, finding.get(field))
+    details = finding.get("details")
+    if isinstance(details, dict):
+        for field in _CURRENT_REPORT_FIELDS:
+            check(f"details.{field}", details.get(field))
+    return locations
+
+
 def run(args) -> None:
     replacement = str(args.replacement_summary).strip()
     reason = str(args.reason).strip()
@@ -71,6 +106,7 @@ def run(args) -> None:
         _fail("--reason must not be empty")
     if not source_name:
         _fail("--source-name must not be empty")
+    retracted_text = str(args.retracted_text or "").strip()
 
     cfg = load_config(args.engagement_dir)
     requested_slug = str(args.finding_slug)
@@ -86,6 +122,8 @@ def run(args) -> None:
             _fail("stored finding has no current summary to retract")
         if replacement == prior_claim.strip():
             _fail("--replacement-summary must differ from the current summary")
+        if not retracted_text:
+            retracted_text = prior_claim.strip()
 
         row_version = current.get("row_version")
         if (
@@ -118,4 +156,12 @@ def run(args) -> None:
             operation="finding retract-claim",
         )
 
+    finding = response.get("finding") if isinstance(response, dict) else None
+    if isinstance(finding, dict):
+        for location in _surviving_claim_locations(finding, retracted_text):
+            print(
+                f"finding retract-claim: current text still contains the retracted "
+                f"phrase at {location}; review this field before publication",
+                file=sys.stderr,
+            )
     print(json.dumps(response, indent=2, ensure_ascii=False))

@@ -10,15 +10,27 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { getAssessmentFindingTransition, resolveIntelIds } from "../lib/api";
-import { HistoryPane, RelatedIntelSection, SubmissionPane } from "./FindingsTab";
+import { ToastProvider } from "../contexts/ToastContext";
+import {
+  getAssessmentFinding,
+  getAssessmentFindingTransition,
+  listAssessmentFindingGroups,
+  listAssessmentFindingLinks,
+  listAssessmentFindingTransitions,
+  resolveIntelIds,
+} from "../lib/api";
+import { FindingsTab, HistoryPane, RelatedIntelSection, SubmissionPane } from "./FindingsTab";
 import type { Derived } from "./FindingsTab";
 
 vi.mock("../lib/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../lib/api")>();
   return {
     ...actual,
+    getAssessmentFinding: vi.fn(),
     getAssessmentFindingTransition: vi.fn(),
+    listAssessmentFindingGroups: vi.fn(),
+    listAssessmentFindingLinks: vi.fn(),
+    listAssessmentFindingTransitions: vi.fn(),
     resolveIntelIds: vi.fn(),
   };
 });
@@ -41,6 +53,10 @@ beforeEach(() => {
   });
   vi.mocked(resolveIntelIds).mockReset();
   vi.mocked(getAssessmentFindingTransition).mockReset();
+  vi.mocked(getAssessmentFinding).mockReset();
+  vi.mocked(listAssessmentFindingGroups).mockReset().mockResolvedValue([]);
+  vi.mocked(listAssessmentFindingLinks).mockReset().mockResolvedValue([]);
+  vi.mocked(listAssessmentFindingTransitions).mockReset().mockResolvedValue([]);
 });
 
 afterEach(cleanup);
@@ -277,6 +293,102 @@ describe("HistoryPane", () => {
     fireEvent.click(screen.getByText("View details"));
     expect(await screen.findByText("Changed content")).toBeTruthy();
     expect(getAssessmentFindingTransition).toHaveBeenCalledWith("demo", "VA-001", 8);
+  });
+
+  it("renders the structured confirmation falsification check from transition metadata", async () => {
+    vi.mocked(getAssessmentFindingTransition).mockResolvedValue({
+      id: 12, actor: "verifier", action: "verified_confirmed",
+      from_workflow_status: "active", to_workflow_status: "active",
+      from_verification_status: "unreviewed", to_verification_status: "confirmed",
+      verification_event_version: 2, from_severity: "high", to_severity: "high",
+      reason_code: "verified", reason_text: "", artifact_ref: "",
+      metadata_json: JSON.stringify({ confirm_check: {
+        method: "Replay as a non-admin",
+        attempted_falsification: "Try the same request without the privileged role",
+        expected_result: "Access denied",
+        observed_result: "The endpoint still returned the protected record",
+        completed: true,
+        proof_receipt_ids: [41, 42],
+      } }),
+      created_at: new Date().toISOString(),
+      verification_audit: {
+        proof_receipt_ids: [], proof_receipt_total: 0, counter_checks: [],
+        counter_check_total: 0, severity_variances: [], severity_variance_total: 0,
+        record_limit: 20, truncated: false,
+      },
+    });
+    const { container } = render(
+      <HistoryPane engagementKey="demo" findingSlug="VA-001" loading={false} error={null}
+        transitions={[{
+          id: 12, actor: "verifier", action: "verified_confirmed",
+          from_workflow_status: "active", to_workflow_status: "active",
+          from_verification_status: "unreviewed", to_verification_status: "confirmed",
+          verification_event_version: 2, from_severity: "high", to_severity: "high",
+          reason_code: "verified", artifact_ref: "", created_at: new Date().toISOString(),
+          reason_preview: "", reason_word_count: 0, reason_truncated: false, has_snapshot: false,
+        }]}
+      />,
+    );
+
+    fireEvent.click(screen.getByText("View details"));
+    expect(await screen.findByText("Structured confirmation check")).toBeTruthy();
+    expect(screen.getByText("Try the same request without the privileged role")).toBeTruthy();
+    expect(screen.getByText("The endpoint still returned the protected record")).toBeTruthy();
+    expect(screen.getByText("41, 42")).toBeTruthy();
+    expect(container.textContent).not.toContain("[object Object]");
+  });
+});
+
+describe("finding claim review state", () => {
+  it("shows the pending independent review transition and current claim digest", async () => {
+    const finding = {
+      id: 4,
+      slug: "VA-004",
+      title: "Authorization bypass",
+      severity: "high",
+      workflow_status: "active",
+      submission_status: "none",
+      verification_status: "confirmed",
+      canonical_location: "/admin",
+      summary: "Ordinary users can access administrator data.",
+      source_name: "vulnerability-analyst",
+      updated_at: "2026-09-25T12:00:00Z",
+      row_version: 8,
+      evidence_ref: "",
+      notes: "",
+      defect_family: "web-app-auth",
+      root_cause_key: "authz-check",
+      auth_context: "ordinary user",
+      details: {},
+      provenance: {},
+      verification_audit: undefined,
+    };
+    vi.mocked(getAssessmentFinding).mockResolvedValue({
+      ...finding,
+      verification_audit: {
+        proof_receipt_ids: [31], proof_receipt_total: 1,
+        counter_checks: [], counter_check_total: 0,
+        severity_variances: [], severity_variance_total: 0,
+        claim_review_pending: true,
+        claim_transition_id: 77,
+        current_claim_sha256: "a".repeat(64),
+        record_limit: 20, truncated: false,
+      },
+    } as never);
+    render(<ToastProvider><FindingsTab
+      engagementKey="demo"
+      findings={[finding] as never[]}
+      fallbackFindings={[]}
+      chains={[]}
+      chainLinks={[]}
+      assessmentRefreshVersion={0}
+    /></ToastProvider>);
+
+    fireEvent.click(await screen.findByText("Authorization bypass"));
+    expect(await screen.findByText("Claim review pending")).toBeTruthy();
+    const notice = screen.getByRole("status", { name: "Claim review pending" });
+    expect(notice.textContent).toContain("claim transition 77");
+    expect(notice.textContent).toContain("a".repeat(64));
   });
 });
 

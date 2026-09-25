@@ -673,7 +673,7 @@ class SurfaceUpdateRequest(BaseModel):
     rationale: str | None = Field(default=None, max_length=4096)
     source_name: str | None = Field(default=None, min_length=1, max_length=128)
     evidence_ref: str | None = Field(default=None, min_length=1, max_length=1024)
-    followup_condition: str | None = Field(default=None, max_length=500)
+    followup_condition: str | None = Field(default=None, max_length=4096)
 
 
 class SurfaceRequestVariantLinkRequest(BaseModel):
@@ -1182,6 +1182,17 @@ class FindingCounterCheckRequest(BaseModel):
     proof_receipt_ids: list[int] = Field(min_length=1)
 
 
+class FindingConfirmCheckRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    method: str = Field(min_length=1, max_length=4096)
+    attempted_falsification: str = Field(min_length=1, max_length=4096)
+    expected_result: str = Field(min_length=1, max_length=4096)
+    observed_result: str = Field(min_length=1, max_length=4096)
+    completed: bool
+    proof_receipt_ids: list[int] = Field(min_length=1)
+
+
 class FindingSeverityVarianceRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1214,6 +1225,7 @@ class FindingVerifyRequest(BaseModel):
     provenance: FindingProvenance = Field(default_factory=FindingProvenance)
     proof_receipt_ids: list[int] = Field(default_factory=list)
     counter_check: FindingCounterCheckRequest | None = None
+    confirm_check: FindingConfirmCheckRequest | None = None
     severity_variance: FindingSeverityVarianceRequest | None = None
 
 
@@ -4219,6 +4231,11 @@ async def verify_finding(
             counter_check=(
                 request.counter_check.model_dump()
                 if request.counter_check is not None
+                else None
+            ),
+            confirm_check=(
+                request.confirm_check.model_dump()
+                if request.confirm_check is not None
                 else None
             ),
             severity_variance=(

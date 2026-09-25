@@ -282,6 +282,85 @@ def test_code_dispatch_reanalyze_requires_reason_and_posts_auditable_mode(
     ]
 
 
+def test_code_dispatch_reanalyze_continues_after_a_batch_conflict(
+    monkeypatch, tmp_path
+):
+    queue_path = tmp_path / "reanalyze-many.json"
+    queue_path.write_text(
+        json.dumps([{"file_id": file_id} for file_id in range(1, 202)]),
+        encoding="utf-8",
+    )
+    _install_snapshot_stub(monkeypatch, tmp_path)
+    posted_sizes: list[int] = []
+
+    class FakeClient:
+        def __init__(self, *_args):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def post(self, _endpoint, payload):
+            posted_sizes.append(len(payload["items"]))
+            conflict = 1 if len(posted_sizes) == 1 else 0
+            reanalysis = len(payload["items"]) - conflict
+            return {
+                "mode": "reanalysis", "inserted": 0, "updated": 0,
+                "already_active": 0, "conflicts": conflict,
+                "reanalysis": reanalysis, "total": len(payload["items"]),
+                "outcomes": [],
+            }
+
+    monkeypatch.setattr(code_dispatch, "AssessmentClient", FakeClient)
+
+    with pytest.raises(SystemExit) as excinfo:
+        code_dispatch._queue(
+            _config(tmp_path), str(queue_path), mode="reanalysis", reason="Independent reread"
+        )
+
+    assert excinfo.value.code == 1
+    assert posted_sizes == [code_dispatch._QUEUE_SUBMISSION_BATCH_SIZE, 1]
+
+
+def test_code_dispatch_reanalysis_can_omit_backend_owned_priority_and_predecessor(
+    monkeypatch, tmp_path
+):
+    queue_path = tmp_path / "reanalyze.json"
+    queue_path.write_text('{"file_id":7,"batch_theme":"reread"}', encoding="utf-8")
+    _install_snapshot_stub(monkeypatch, tmp_path)
+    posted = []
+
+    class FakeClient:
+        def __init__(self, *_args):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def post(self, _endpoint, payload):
+            posted.append(payload)
+            return {
+                "mode": "reanalysis", "inserted": 0, "updated": 0,
+                "already_active": 0, "conflicts": 0, "reanalysis": 1,
+                "total": 1, "outcomes": [],
+            }
+
+    monkeypatch.setattr(code_dispatch, "AssessmentClient", FakeClient)
+    code_dispatch._queue(
+        _config(tmp_path), str(queue_path), mode="reanalysis", reason="Independent reread"
+    )
+    assert posted[0]["items"] == [{
+        "file_id": 7, "batch_theme": "reread", "slot_types": [],
+        "guidance_hypotheses": [],
+    }]
+
+
 def test_code_dispatch_queue_rejects_out_of_range_priority_without_clamping(
     monkeypatch, tmp_path, capsys
 ):

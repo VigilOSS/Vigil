@@ -75,6 +75,7 @@ const detail = {
     context_path: "submissions/VA-001/submission-context.json",
     markdown: "# Missing authorization\n\nReviewed body.",
     submission_sha256: "b".repeat(64),
+    external_body_sha256: "b".repeat(64),
     context: { platform: "bugcrowd", mode: "final" },
     final_ready: true,
     blockers: [],
@@ -411,8 +412,112 @@ describe("SubmissionsTab", () => {
 
     render(<SubmissionsTab engagementKey="engagement one" />);
 
-    expect(await screen.findByText("Draft final-ready")).toBeTruthy();
-    expect(screen.getByText("Latest v2 matches current Markdown")).toBeTruthy();
+    expect(await screen.findByText("Draft final-ready for selected attachments")).toBeTruthy();
+    expect(screen.getByText("Latest v2 matches current external body")).toBeTruthy();
+  });
+
+  it("uses the external body digest and refreshes publication gates for selected attachments", async () => {
+    vi.mocked(listSubmissions).mockResolvedValue(listing);
+    vi.mocked(getSubmissionDetail)
+      .mockResolvedValueOnce({
+        ...detail,
+        workspace: {
+          ...detail.workspace,
+          submission_sha256: "d".repeat(64),
+          external_body_sha256: "e".repeat(64),
+        },
+        versions: [{
+          id: 78,
+          finding_id: 91,
+          version_number: 2,
+          status: "complete",
+          platform: "bugcrowd",
+          package_format: "markdown",
+          actor_surface: "web-ui",
+          relative_path: "submissions/VA-001/versions/0002/submission.md",
+          media_type: "text/markdown",
+          size_bytes: 100,
+          sha256: "f".repeat(64),
+          submission_sha256: "e".repeat(64),
+          source_finding_row_version: 9,
+          source_finding_updated_at: "2026-09-09T12:10:00Z",
+          attachment_ids: [],
+          attachment_count: 0,
+          artifact_id: 88,
+          created_at: "2026-09-09T12:10:00Z",
+          completed_at: "2026-09-09T12:10:01Z",
+          stale: false,
+          idempotent_replay: false,
+        }],
+      })
+      .mockResolvedValueOnce({
+        ...detail,
+        workspace: {
+          ...detail.workspace,
+          final_ready: false,
+          blockers: ["latest blind triage verdict covers different external attachments"],
+        },
+      });
+
+    render(<SubmissionsTab engagementKey="engagement one" />);
+
+    expect(await screen.findByText("Latest v2 matches current external body")).toBeTruthy();
+    fireEvent.click(screen.getByRole("checkbox", { name: /response\.json/ }));
+    expect(await screen.findByText("latest blind triage verdict covers different external attachments")).toBeTruthy();
+    expect(getSubmissionDetail).toHaveBeenLastCalledWith("engagement one", "VA-001", {
+      selectedAttachmentIds: [42],
+    });
+    expect((screen.getByRole("button", { name: "Export immutable version" }) as HTMLButtonElement).disabled)
+      .toBe(true);
+  });
+
+  it("ignores an unselected detail response that finishes after selected-attachment readiness", async () => {
+    const secondFinding = {
+      ...listing.findings[0],
+      id: 92,
+      slug: "VA-002",
+      title: "Second finding",
+    };
+    const twoFindingListing = {
+      ...listing,
+      findings: [listing.findings[0], secondFinding],
+      findings_page: { ...listing.findings_page, returned: 2, total: 2 },
+    };
+    let finishStaleRequest!: (value: typeof detail) => void;
+    const staleResponse = new Promise<typeof detail>((resolve) => {
+      finishStaleRequest = resolve;
+    });
+    vi.mocked(listSubmissions).mockResolvedValue(twoFindingListing);
+    vi.mocked(getSubmissionDetail)
+      .mockResolvedValueOnce(detail)
+      .mockResolvedValueOnce({ ...detail, finding: { ...detail.finding, ...secondFinding } })
+      .mockReturnValueOnce(staleResponse)
+      .mockResolvedValueOnce({
+        ...detail,
+        workspace: {
+          ...detail.workspace,
+          final_ready: false,
+          blockers: ["selected attachments need fresh blind triage"],
+        },
+      });
+
+    render(<SubmissionsTab engagementKey="engagement one" />);
+    await screen.findByRole("checkbox", { name: /response\.json/ });
+    fireEvent.click(screen.getByRole("button", { name: /Second finding/ }));
+    await waitFor(() => expect(getSubmissionDetail).toHaveBeenCalledTimes(2));
+    fireEvent.click(screen.getByRole("button", { name: /Missing authorization on admin API/ }));
+    await screen.findByRole("checkbox", { name: /response\.json/ });
+
+    fireEvent.click(screen.getByRole("checkbox", { name: /response\.json/ }));
+    expect(await screen.findByText("selected attachments need fresh blind triage")).toBeTruthy();
+    await act(async () => {
+      finishStaleRequest(detail);
+      await staleResponse;
+    });
+
+    expect(screen.getByText("selected attachments need fresh blind triage")).toBeTruthy();
+    expect((screen.getByRole("button", { name: "Export immutable version" }) as HTMLButtonElement).disabled)
+      .toBe(true);
   });
 
   it("makes rendered Markdown tables keyboard-scrollable", async () => {
@@ -507,6 +612,7 @@ describe("SubmissionsTab", () => {
       ],
     });
     vi.mocked(getSubmissionDetail)
+      .mockResolvedValueOnce(firstPage)
       .mockResolvedValueOnce(firstPage)
       .mockReturnValueOnce(secondPageRequest);
 
@@ -784,6 +890,7 @@ describe("SubmissionsTab", () => {
     });
     vi.mocked(getSubmissionDetail)
       .mockResolvedValueOnce(detail)
+      .mockResolvedValueOnce(detail)
       .mockResolvedValueOnce({
         ...detail,
         finding: { ...detail.finding, id: 92, slug: "VA-002" },
@@ -826,6 +933,7 @@ describe("SubmissionsTab", () => {
       });
     vi.mocked(getSubmissionDetail)
       .mockResolvedValueOnce(detail)
+      .mockResolvedValueOnce(detail)
       .mockResolvedValueOnce({
         ...detail,
         versions: [
@@ -864,6 +972,7 @@ describe("SubmissionsTab", () => {
     const attachment = await screen.findByRole("checkbox", { name: /response\.json/ });
     fireEvent.click(attachment);
     expect(screen.getByText("1 attachment selected")).toBeTruthy();
+    await screen.findByText("Draft final-ready for selected attachments");
 
     fireEvent.click(screen.getByRole("button", { name: "Export immutable version" }));
 

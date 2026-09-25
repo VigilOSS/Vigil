@@ -326,6 +326,10 @@ def _c_http_callback_names(tree: Any, source: bytes) -> set[str]:
         if arguments is None or len(arguments.named_children) <= argument_index:
             continue
         callback = arguments.named_children[argument_index]
+        if callback.type == "pointer_expression" and _node_text(callback, source).lstrip().startswith("&"):
+            children = callback.named_children
+            if len(children) == 1:
+                callback = children[0]
         if callback.type == "identifier":
             names.add(_node_text(callback, source))
     return names
@@ -1088,6 +1092,51 @@ def _extract_functions_ts(tree: Any, language: str, source: bytes) -> list[dict[
             }
             _attach_callable_spans(parsed, callable_node=node, source=source)
             functions.append(parsed)
+
+        declaration_nodes = {
+            node.start_byte: node
+            for node in _walk_named_nodes(tree.root_node)
+            if node.type in {"local_function_statement", "method_declaration"}
+        }
+        for invocation in _walk_named_nodes(tree.root_node):
+            if invocation.type != "invocation_expression":
+                continue
+            target = invocation.child_by_field_name("function")
+            if target is None or not re.search(
+                r"\.Map(?:Get|Post|Put|Patch|Delete|Methods|Fallback)\s*$",
+                _node_text(target, source),
+            ):
+                continue
+            arguments = invocation.child_by_field_name("arguments")
+            if arguments is None or not arguments.named_children:
+                continue
+            callback = arguments.named_children[-1]
+            if callback.type != "argument" or len(callback.named_children) != 1:
+                continue
+            identifier = callback.named_children[0]
+            if identifier.type != "identifier":
+                continue
+            name = _node_text(identifier, source)
+            candidates: list[tuple[int, dict[str, Any]]] = []
+            for func in functions:
+                if func["name"] != name:
+                    continue
+                declaration = declaration_nodes.get(func["_start_byte"])
+                if declaration is None:
+                    continue
+                scope_types = (
+                    {"block", "compilation_unit"}
+                    if declaration.type == "local_function_statement"
+                    else {"class_declaration", "struct_declaration", "record_declaration"}
+                )
+                scope = declaration.parent
+                while scope is not None and scope.type not in scope_types:
+                    scope = scope.parent
+                if scope is not None and scope.start_byte <= invocation.start_byte < scope.end_byte:
+                    candidates.append((scope.end_byte - scope.start_byte, func))
+            candidates.sort(key=lambda candidate: candidate[0])
+            if candidates and (len(candidates) == 1 or candidates[0][0] < candidates[1][0]):
+                candidates[0][1]["_minimal_api_route"] = True
 
     return functions
 
@@ -1959,7 +2008,28 @@ def _detect_entry_points(
                 break
 
     if language in {"javascript", "typescript"}:
-        by_name = {func["name"]: func for func in functions}
+        callable_nodes = {
+            node.start_byte: node
+            for node in _walk_named_nodes(tree.root_node)
+            if node.type in _JAVASCRIPT_CALLABLE_TYPES
+        }
+        bindings: dict[str, list[tuple[int, int, dict[str, Any]]]] = {}
+        for func in functions:
+            callable_node = callable_nodes.get(func["_start_byte"])
+            if callable_node is None:
+                continue
+            if callable_node.type not in {"function_declaration", "generator_function_declaration"}:
+                parent = callable_node.parent
+                if parent is None or parent.type not in {"variable_declarator", "assignment_expression"}:
+                    continue
+                name = parent.child_by_field_name("name") or parent.child_by_field_name("left")
+                if name is None or name.type != "identifier" or _node_text(name, source) != func["name"]:
+                    continue
+            scope = callable_node.parent
+            while scope is not None and scope.type not in {"program", "statement_block"}:
+                scope = scope.parent
+            if scope is not None:
+                bindings.setdefault(func["name"], []).append((scope.start_byte, scope.end_byte, func))
         for node, receiver in js_route_calls:
             arguments = node.child_by_field_name("arguments")
             if arguments is None:
@@ -1970,8 +2040,14 @@ def _detect_entry_points(
             for argument in actual_args[1:]:
                 if argument.type != "identifier":
                     continue
-                func = by_name.get(_node_text(argument, source))
-                if func is None or func["is_entry_point"]:
+                candidates = [
+                    binding for binding in bindings.get(_node_text(argument, source), [])
+                    if binding[0] <= node.start_byte and node.end_byte <= binding[1]
+                ]
+                if not candidates:
+                    continue
+                func = min(candidates, key=lambda binding: (binding[1] - binding[0], -binding[2]["_start_byte"]))[2]
+                if func["is_entry_point"]:
                     continue
                 kind = "express_route" if receiver == "app" else "express_router"
                 entry_points.append({

@@ -25,15 +25,14 @@ Use `$vigil-start` if this engagement has no work in it yet.
 files the loaded operator prompt names, and treat them as authoritative over a compaction summary,
 handoff, or remembered instruction.
 
-**3. Load optional engagement memory.** Two files may sit in the engagement directory: `RESUME.md`,
-the last handoff `vigil-handoff` wrote, and `COMPACT.md`, this engagement's local additions to the
-compaction contract. Read whichever exist and report whichever are absent — a missing optional file
-is not an error, but silently skipping one is.
+**3. Load optional engagement memory.** Read `RESUME.md` and `COMPACT.md` when present; report
+their absence. Also report whether the canonical `ISSUES-AND-ENHANCEMENTS.md` exists, as a pointer
+to reusable engagement lessons. Open it only when those lessons are relevant.
 
 Run this and report each file it marks `absent` — a missing optional file is a
 normal result, not a failure:
 
-    for f in RESUME.md COMPACT.md; do if [ -f "$f" ]; then printf 'present  %-12s %s bytes\n' "$f" "$(wc -c < "$f" | tr -d ' ')"; else printf 'absent   %s\n' "$f"; fi; done
+    for f in RESUME.md COMPACT.md ISSUES-AND-ENHANCEMENTS.md; do if [ -f "$f" ]; then printf 'present  %-27s %s bytes\n' "$f" "$(wc -c < "$f" | tr -d ' ')"; else printf 'absent   %s\n' "$f"; fi; done
 
 **4. Re-establish live state from the backend.** The backend is canonical; recollection is not.
 `agent/rules/resume.md` is an always-active rule, so it is already in your context and it owns this

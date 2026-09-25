@@ -2019,6 +2019,141 @@ def test_code_record_analysis_rejects_bad_nested_payloads_before_post(tmp_path, 
     assert "cwe_coverage must be a JSON array" in capsys.readouterr().err
 
 
+def test_code_record_analysis_accepts_index_callable_span_names():
+    module = _load_code_record_analysis_module()
+    result = {
+        "disposition": "clean",
+        "callable_refs": [{
+            "file_id": 7,
+            "name": "run",
+            "qualified_name": "Handler.run",
+            "line_start": 12,
+            "line_end": 18,
+        }],
+    }
+
+    module._validate_source_receipt(0, result)
+
+    assert result["callable_refs"][0] == {
+        "file_id": 7,
+        "name": "run",
+        "qualified_name": "Handler.run",
+        "start_line": 12,
+        "end_line": 18,
+    }
+
+
+def test_code_record_analysis_rejects_invalid_supersedes_before_backend(
+    monkeypatch, tmp_path, capsys
+):
+    module = _load_code_record_analysis_module()
+    analysis_path = tmp_path / "analysis.json"
+    analysis_path.write_text(
+        json.dumps({
+            "queue_item_id": 101,
+            "agent_name": "code-vuln-hunter",
+            "lease_token": "lease-101",
+            "disposition": "clean",
+            "reviewed_spans": [{"file_id": 7, "start_line": 1, "end_line": 1}],
+            "supersedes": True,
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("must reject before backend")),
+    )
+
+    with pytest.raises(SystemExit) as excinfo:
+        module.run(
+            SimpleNamespace(analysis_json=str(analysis_path), engagement_dir=tmp_path)
+        )
+
+    assert excinfo.value.code == 1
+    assert "supersedes must be a positive integer analysis-result ID" in capsys.readouterr().err
+
+
+def test_code_record_analysis_supersede_targets_a_completed_queue_item(
+    monkeypatch, tmp_path
+):
+    module = _load_code_record_analysis_module()
+    analysis_path = tmp_path / "correction.json"
+    analysis_path.write_text(
+        json.dumps({
+            "queue_item_id": 51,
+            "agent_name": "original-reviewer",
+            "lease_token": "original-lease",
+            "disposition": "clean",
+            "reviewed_spans": [{"file_id": 7, "start_line": 1, "end_line": 1}],
+            "evidence": "Corrected source evidence.",
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda *_args: SimpleNamespace(base_url="http://example.test", engagement_key="eng", engagement_dir=tmp_path),
+    )
+    snapshots = iter((tmp_path / "submit.json", tmp_path / "response.json"))
+    monkeypatch.setattr(
+        module,
+        "write_json_snapshot",
+        lambda *_args, **_kwargs: next(snapshots),
+    )
+    captured: dict[str, object] = {}
+
+    class FakeClient:
+        def __init__(self, *_args):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def get(self, endpoint):
+            captured["get"] = endpoint
+            return [{"id": 77, "queue_item_id": 51}]
+
+        def post(self, endpoint, payload):
+            captured["post"] = (endpoint, payload)
+            return {
+                **payload,
+                "id": 88,
+                "supersedes": 77,
+                "receipt_kind": "file",
+                "receipt_binding_status": "source_span",
+                "callable_refs": [],
+                "reviewed_spans": [
+                    {
+                        "file_id": 7,
+                        "file_path": "src/parser.py",
+                        "start_line": 1,
+                        "end_line": 1,
+                        "label": "",
+                    }
+                ],
+            }
+
+    monkeypatch.setattr(module, "AssessmentClient", FakeClient)
+
+    module.run(
+        SimpleNamespace(
+            analysis_json=str(analysis_path),
+            engagement_dir=tmp_path,
+            supersede=51,
+        )
+    )
+
+    assert captured["get"] == "code/analysis-results?queue_item_id=51"
+    endpoint, submitted = captured["post"]
+    assert endpoint == "code/analysis-results"
+    assert submitted["queue_item_id"] == 51
+    assert submitted["supersedes"] == 77
+
+
 def test_code_record_analysis_requires_grouped_source_receipt_before_post(
     monkeypatch, tmp_path, capsys
 ):

@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import stat
 import subprocess
 import sys
@@ -84,6 +85,71 @@ _GIT_LARGE_HISTORY_COMMIT_THRESHOLD = 50_000
 _GIT_SECURITY_LOOKBACK = '3years'
 _GIT_CHURN_LOOKBACK = '1year'
 _SHA256_PATTERN = re.compile(r"^[0-9a-fA-F]{64}$")
+_BUILD_REFERENCE_SCAN_BYTES = 64 * 1024
+
+
+def _is_build_reference_file(path: str) -> bool:
+    name = Path(path).name
+    return name == "Dockerfile" or name.startswith("Dockerfile.") or name == "theme.properties"
+
+
+def _excluded_build_reference_warnings(
+    admitted_build_files: dict[str, bytes], excluded: list[dict[str, object]],
+    admitted_paths: set[str],
+) -> list[str]:
+    excluded_dirs = {
+        str(row["path"]).strip("/"): str(row["reason"])
+        for row in excluded
+        if row.get("kind") == "directory"
+        and str(row.get("reason") or "").startswith("skipped_dir:")
+    }
+    warnings: set[str] = set()
+    for file_path, raw in admitted_build_files.items():
+        name = Path(file_path).name
+        for line in raw.decode("utf-8", errors="replace").splitlines():
+            stripped = line.strip()
+            paths: list[str] = []
+            if name.startswith("Dockerfile"):
+                command, _, remainder = stripped.partition(" ")
+                if command.upper() not in {"COPY", "ADD"}:
+                    continue
+                try:
+                    parts = (
+                        json.loads(remainder)
+                        if remainder.startswith("[")
+                        else shlex.split(remainder)
+                    )
+                except ValueError:
+                    continue
+                if not isinstance(parts, list) or not all(isinstance(part, str) for part in parts):
+                    continue
+                if any(part == "--from" or part.startswith("--from=") for part in parts):
+                    continue
+                paths = [part for part in parts[:-1] if not part.startswith("--")]
+            elif name == "theme.properties":
+                key, separator, value = stripped.partition("=")
+                if separator and key.strip() in {"styles", "scripts"}:
+                    paths = value.split()
+            for path in paths:
+                if name == "theme.properties" and (
+                    path.startswith("/") or "://" in path or "$" in path
+                    or ".." in PurePosixPath(path).parts
+                ):
+                    continue
+                candidate = path.removeprefix("./").strip("/")
+                if name == "theme.properties":
+                    candidate = str(PurePosixPath(file_path).parent / candidate)
+                excluded_match = False
+                for excluded_path, reason in excluded_dirs.items():
+                    if candidate == excluded_path or candidate.startswith(excluded_path + "/"):
+                        warnings.add(f"{file_path} references excluded {candidate} ({reason})")
+                        excluded_match = True
+                if name == "theme.properties" and not excluded_match and candidate not in admitted_paths:
+                    warnings.add(
+                        f"{file_path} references missing relative asset {candidate} "
+                        "(absent from sealed snapshot)"
+                    )
+    return sorted(warnings)
 
 
 def _refresh_receipt_error(operation: str, fields: str) -> AssessError:
@@ -1379,6 +1445,7 @@ def run(args) -> None:
     include_patterns = list(getattr(args, "include_path", []) or [])
     matched_include_patterns: set[str] = set()
     source_bindings: dict[str, tuple[str, int, bool]] = {}
+    admitted_build_files: dict[str, bytes] = {}
     builder = None if getattr(args, "dry_run", False) else SnapshotBuilder(snapshots_root, repo_key)
     try:
         repo_root = Path(repo_path)
@@ -1388,7 +1455,7 @@ def run(args) -> None:
                 try:
                     captured = source_tree.capture(
                         rel_path,
-                        retain_spool=builder is not None,
+                        retain_spool=builder is not None or _is_build_reference_file(rel_path),
                     )
                 except (OSError, ValueError, SourceSnapshotRaceError) as exc:
                     raise SourceSnapshotRaceError(
@@ -1417,6 +1484,8 @@ def run(args) -> None:
                         "has_past_cve_fix": rel_path in security_files,
                     }
                     files.append(file_record)
+                    if _is_build_reference_file(rel_path) and captured.size <= _BUILD_REFERENCE_SCAN_BYTES:
+                        admitted_build_files[rel_path] = captured.read_bounded(_BUILD_REFERENCE_SCAN_BYTES)
                     source_bindings[rel_path] = (
                         captured.sha256,
                         captured.size,
@@ -1469,6 +1538,11 @@ def run(args) -> None:
         )
 
     _warn_on_collapsed_admission(skip_census, len(files))
+    for warning in _excluded_build_reference_warnings(
+        admitted_build_files, skipped_records,
+        {str(record["file_path"]) for record in files},
+    ):
+        print(f"WARN code-ingest: {warning}", file=sys.stderr)
     # A --dry-run must produce the same warnings as a real run, or the warning
     # is untestable by the operator before the generation is committed.
     if _report_unmatched_include_patterns(

@@ -111,7 +111,7 @@ FINDING_DETAIL_CORE_PROPERTIES: dict[str, dict[str, Any]] = {
     "repro_runs": {
         "type": "array",
         "items": {"type": ["string", "integer"]},
-        "description": "Command-run ids (from `vigil assess command-run list`) that actually produced this reproduction, in step order. A step with no run id behind it was imagined, not executed. `export submission` fetches each row and renders its real argv under OPERATOR DETAILS, so the reproduction is transcribed rather than paraphrased. An id that does not resolve is reported as an advisory, never a refusal — an unreachable run row and an invented one look identical from there.",
+        "description": "Command-run ids (from `vigil assess command-run list`) that actually produced this reproduction, in step order. Newly authored ids must resolve in this engagement; legacy missing ids are reported as advisories. `export submission` fetches each row and renders its real argv under OPERATOR DETAILS, so the reproduction is transcribed rather than paraphrased.",
     },
     "attack_scenario": {
         "type": "string",

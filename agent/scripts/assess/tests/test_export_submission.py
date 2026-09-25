@@ -432,6 +432,7 @@ def test_final_snapshots_context_and_calls_shared_version_api(
     }
 
 
+
 def test_draft_does_not_create_an_immutable_version(tmp_path, monkeypatch, capsys):
     fake = _FakeClient(_finding(details=_complete_details()))
     _install(monkeypatch, tmp_path, fake)

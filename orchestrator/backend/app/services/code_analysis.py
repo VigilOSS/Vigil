@@ -2651,16 +2651,17 @@ def bulk_create_queue_items(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="queue request contains duplicate file IDs",
         )
-    submitted_priorities: list[int] = []
+    submitted_priorities: list[int | None] = []
     for item in items:
-        if "priority" not in item:
+        if normalized_mode == "initial" and item.get("priority") is None:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="every queue item requires an integer priority",
+                detail="every initial queue item requires an integer priority",
             )
-        priority = _require_strict_priority(
-            item["priority"],
-            field_name="queue priority",
+        priority = (
+            None
+            if item.get("priority") is None
+            else _require_strict_priority(item["priority"], field_name="queue priority")
         )
         submitted_priorities.append(priority)
 
@@ -2710,7 +2711,7 @@ def bulk_create_queue_items(
             submitted_file_ids, submitted_priorities, strict=True
         ):
             expected_priority = int(file_rows[file_id]["analysis_priority"])
-            if priority != expected_priority:
+            if priority is not None and priority != expected_priority:
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT,
                     detail=(
@@ -2723,11 +2724,12 @@ def bulk_create_queue_items(
             zip(items, submitted_priorities, strict=True)
         ):
             file_id = submitted_file_ids[idx]
+            expected_priority = int(file_rows[file_id]["analysis_priority"])
             repo_generation = int(
                 repo_rows[int(file_rows[file_id]["repo_id"])]["active_generation"]
             )
             normalized_item = {
-                "priority": priority,
+                "priority": expected_priority,
                 "batch_theme": str(item.get("batch_theme", "")),
                 "slot_types": _normalize_slot_types(
                     item.get("slot_types"), field_name="slot_types"
@@ -2770,30 +2772,39 @@ def bulk_create_queue_items(
             requested_predecessor = item.get("supersedes")
             expected_predecessor = None
             if normalized_mode == "reanalysis":
-                if requested_predecessor is None:
-                    raise HTTPException(
-                        status_code=status.HTTP_400_BAD_REQUEST,
-                        detail=(
-                            f"reanalysis for file {file_id} requires supersedes with "
-                            "the exact predecessor queue row ID"
-                        ),
-                    )
                 if active is not None and str(active.get("queue_mode")) == "reanalysis":
                     expected_predecessor = active.get("reanalysis_of_queue_item_id")
                 elif latest is not None:
                     expected_predecessor = latest.get("id")
                 if (
-                    expected_predecessor is not None
-                    and int(requested_predecessor) != int(expected_predecessor)
-                ):
-                    raise HTTPException(
-                        status_code=status.HTTP_409_CONFLICT,
-                        detail=(
-                            f"reanalysis supersedes={requested_predecessor} does not match "
-                            f"the current predecessor queue row {expected_predecessor} "
-                            f"for file {file_id}"
-                        ),
+                    requested_predecessor is not None
+                    and (
+                        expected_predecessor is None
+                        or int(requested_predecessor) != int(expected_predecessor)
                     )
+                ):
+                    counts["conflicts"] += 1
+                    outcomes.append(
+                        _queue_outcome(
+                            file_id=file_id,
+                            queue_item_id=(
+                                None
+                                if expected_predecessor is None
+                                else int(expected_predecessor)
+                            ),
+                            outcome="conflict",
+                            status_value=(
+                                "missing" if expected_predecessor is None else "done"
+                            ),
+                            detail=(
+                                f"reanalysis supersedes={requested_predecessor} does not "
+                                "match the current predecessor queue row "
+                                f"{expected_predecessor} for file {file_id}"
+                            ),
+                        )
+                    )
+                    continue
+                requested_predecessor = expected_predecessor
 
             if active is not None:
                 active_status = str(active["status"])
@@ -2837,7 +2848,7 @@ def bulk_create_queue_items(
                               AND assigned_agent = '' AND lease_token = ''
                             """,
                             (
-                                priority,
+                                expected_priority,
                                 normalized_item["batch_theme"],
                                 _json_list_text(normalized_item["slot_types"]),
                                 _json_list_text(normalized_item["guidance_hypotheses"]),
@@ -2939,7 +2950,7 @@ def bulk_create_queue_items(
                 (
                     engagement.id,
                     file_id,
-                    priority,
+                    expected_priority,
                     normalized_item["batch_theme"],
                     _json_list_text(normalized_item["slot_types"]),
                     _json_list_text(normalized_item["guidance_hypotheses"]),
@@ -4041,10 +4052,7 @@ def complete_queue_items(
                         "with evidence or evidence_ref"
                     ),
                 )
-        if (
-            str(file_row.get("classification") or "") in {"critical", "high"}
-            and disposition != "skipped"
-        ):
+        if disposition != "skipped":
             source_receipt = connection.execute(
                 f"""
                 SELECT results.id
@@ -4062,6 +4070,9 @@ def complete_queue_items(
                       WHERE replacement.supersedes_result_id = results.id
                   )
                   AND (
+                      (results.receipt_binding_status = 'empty_file'
+                       AND ? = 0 AND ? = ?)
+                      OR
                       EXISTS (
                           SELECT 1 FROM code_analysis_result_callables AS links
                           WHERE links.result_id = results.id AND links.file_id = ?
@@ -4080,6 +4091,9 @@ def complete_queue_items(
                     *attempt_tokens,
                     int(queue_row["repo_generation"]),
                     disposition,
+                    int(file_row["loc"]),
+                    str(file_row["file_hash"]),
+                    hashlib.sha256(b"").hexdigest(),
                     int(queue_row["file_id"]),
                     int(queue_row["file_id"]),
                 ),
@@ -4088,7 +4102,7 @@ def complete_queue_items(
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail=(
-                        "critical/high review requires a current source-level receipt "
+                        "review requires a current source-level receipt "
                         "with a matching disposition, bound to this file and lease"
                     ),
                 )
@@ -4870,6 +4884,19 @@ def create_analysis_result(
         queue_row = _get_queue_rows(connection, engagement.id, {int(queue_item_id)})[
             int(queue_item_id)
         ]
+        supersedes = result.get("supersedes")
+        correction_mode = supersedes is not None and str(queue_row.get("status")) == "done"
+        if correction_mode:
+            # Serialize predecessor-currentness validation with the append below.
+            connection.execute("BEGIN IMMEDIATE")
+            queue_row = _get_queue_rows(
+                connection, engagement.id, {int(queue_item_id)}
+            )[int(queue_item_id)]
+            if str(queue_row.get("status")) != "done":
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="completed queue item changed state before correction; refetch and retry",
+                )
         queue_file_id = int(queue_row["file_id"])
         payload_file_id = result.get("file_id")
         if payload_file_id is not None and int(payload_file_id) != queue_file_id:
@@ -4882,11 +4909,12 @@ def create_analysis_result(
         agent_name = str(result.get("agent_name", ""))
         lease_token = str(result.get("lease_token", ""))
 
-        _require_queue_status(
-            {int(queue_item_id): queue_row},
-            expected_status="processing",
-            action="record analysis results for",
-        )
+        if not correction_mode:
+            _require_queue_status(
+                {int(queue_item_id): queue_row},
+                expected_status="processing",
+                action="record analysis results for",
+            )
         _require_queue_lease(
             {int(queue_item_id): queue_row},
             agent_name=agent_name,
@@ -4903,7 +4931,27 @@ def create_analysis_result(
         has_source_anchors = bool(
             result.get("callable_refs") or result.get("reviewed_spans")
         )
-        if disposition == "skipped" and not has_source_anchors:
+        empty_file_reviewed = result.get("empty_file_reviewed") is True
+        if empty_file_reviewed:
+            if (
+                disposition != "clean"
+                or receipt_kind != "file"
+                or has_source_anchors
+                or int(file_row["loc"]) != 0
+                or str(file_row["file_hash"]) != hashlib.sha256(b"").hexdigest()
+            ):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        "empty_file_reviewed requires a clean file receipt with no "
+                        "anchors for a sealed zero-byte file"
+                    ),
+                )
+            canonical_callable_refs = []
+            callable_ids = []
+            canonical_reviewed_spans = []
+            receipt_binding_status = "empty_file"
+        elif disposition == "skipped" and not has_source_anchors:
             canonical_callable_refs: list[dict[str, Any]] = []
             callable_ids: list[int] = []
             canonical_reviewed_spans: list[dict[str, Any]] = []
@@ -5064,20 +5112,21 @@ def create_analysis_result(
                 source_anchor=str(run_candidate_context["source_anchor"]),
                 result_identity_fingerprint=result_identity_fingerprint,
             )
-        cursor = connection.execute(
-            """
+        if not correction_mode:
+            cursor = connection.execute(
+                """
             UPDATE code_analysis_queue
             SET updated_at = updated_at
             WHERE engagement_id = ? AND id = ? AND file_id = ? AND status = 'processing'
               AND assigned_agent = ? AND lease_token = ?
-            """,
-            (engagement.id, int(queue_item_id), int(file_row["id"]), agent_name, lease_token),
-        )
-        if cursor.rowcount != 1:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="queue item changed state before recording analysis result; refetch and retry",
+                """,
+                (engagement.id, int(queue_item_id), int(file_row["id"]), agent_name, lease_token),
             )
+            if cursor.rowcount != 1:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="queue item changed state before recording analysis result; refetch and retry",
+                )
 
         existing_result = connection.execute(
             """
@@ -5121,13 +5170,16 @@ def create_analysis_result(
                 )
             return hydrated
 
-        supersedes = result.get("supersedes")
         if supersedes is not None:
             superseded_result = connection.execute(
                 """
                 SELECT original.*,
+                       original_queue.status AS original_queue_status,
                        replacement.id AS replaced_by_result_id
                 FROM code_analysis_results AS original
+                JOIN code_analysis_queue AS original_queue
+                  ON original_queue.engagement_id = original.engagement_id
+                 AND original_queue.id = original.queue_item_id
                 LEFT JOIN code_analysis_results AS replacement
                   ON replacement.supersedes_result_id = original.id
                 WHERE original.engagement_id = ? AND original.id = ?
@@ -5149,8 +5201,7 @@ def create_analysis_result(
                     status_code=status.HTTP_409_CONFLICT,
                     detail="supersedes analysis result is not current for this source generation",
                 )
-            expected_identity = (
-                int(queue_item_id),
+            same_receipt_identity = (
                 int(file_row["id"]),
                 int(queue_row.get("repo_generation", 0) or 0),
                 receipt_kind,
@@ -5158,30 +5209,32 @@ def create_analysis_result(
                 _json_list_text(canonical_reviewed_spans),
             )
             actual_identity = (
-                int(superseded_result["queue_item_id"]),
                 int(superseded_result["file_id"]),
                 int(superseded_result["repo_generation"]),
                 str(superseded_result["receipt_kind"]),
                 str(superseded_result["callable_refs_json"]),
                 str(superseded_result["reviewed_spans_json"]),
             )
-            # The receipt being corrected must belong to this ATTEMPT, not to
-            # this lease: every read of an adopted attempt already treats the
-            # inherited receipts as owned, so pinning the write to the current
-            # token alone refused the adopter the one correction adoption exists
-            # to enable. Same list closeout binds (:func:`_attempt_lease_tokens`),
-            # and for a row that was never adopted it is exactly its own token.
+            same_attempt = (
+                int(superseded_result["queue_item_id"]) == int(queue_item_id)
+                and str(superseded_result["lease_token"])
+                in _attempt_lease_tokens(queue_row)
+            )
+            completed_item_correction = (
+                correction_mode
+                and int(superseded_result["queue_item_id"]) == int(queue_item_id)
+                and str(superseded_result["original_queue_status"]) == "done"
+            )
             if (
-                actual_identity != expected_identity
-                or str(superseded_result["lease_token"])
-                not in _attempt_lease_tokens(queue_row)
+                actual_identity != same_receipt_identity
+                or not (same_attempt or completed_item_correction)
             ):
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT,
                     detail=(
-                        "supersedes must identify a current result with the same "
-                        "queue item, file, source anchors, and repository generation, "
-                        "recorded under this attempt's lease or one it adopted"
+                        "supersedes must identify a current result with the same file, "
+                        "source anchors, and repository generation, recorded under "
+                        "this attempt's lease/adoption or this completed queue item's lease"
                     ),
                 )
 
@@ -5250,6 +5303,38 @@ def create_analysis_result(
             )
         row = _analysis_result_row(connection, int(cursor.lastrowid))
         assert row is not None
+        if correction_mode:
+            # The completed queue row is the operator-facing decision projection.
+            # Keep it aligned with the corrected receipt while preserving its
+            # independently recorded coverage when the correction omits coverage.
+            corrected_coverage = result.get("cwe_coverage")
+            if corrected_coverage:
+                corrected_coverage = _normalize_cwe_coverage(corrected_coverage)
+                if disposition != "skipped":
+                    _validate_completion_coverage(file_row, corrected_coverage)
+            else:
+                corrected_coverage = _json_decode(queue_row.get("cwe_coverage_json"), [])
+            queue_update = connection.execute(
+                """
+                UPDATE code_analysis_queue
+                SET disposition = ?, cwe_coverage_json = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE engagement_id = ? AND id = ? AND status = 'done'
+                  AND assigned_agent = ? AND lease_token = ?
+                """,
+                (
+                    disposition,
+                    _json_list_text(corrected_coverage),
+                    engagement.id,
+                    int(queue_item_id),
+                    agent_name,
+                    lease_token,
+                ),
+            )
+            if queue_update.rowcount != 1:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="completed queue item changed state before correction; refetch and retry",
+                )
         run_candidate = None
         if assessment_run_id is not None:
             assert run_candidate_context is not None
@@ -7742,6 +7827,21 @@ _CODE_READINESS_PHASES = (
 )
 
 
+def next_code_readiness_phase(current_phase: str) -> str | None:
+    """Return the next transition target for the persisted code-track phase."""
+    if current_phase == "ingest":
+        return _CODE_READINESS_PHASES[0]
+    try:
+        index = _CODE_READINESS_PHASES.index(current_phase)
+    except ValueError:
+        return None
+    return (
+        _CODE_READINESS_PHASES[index + 1]
+        if index + 1 < len(_CODE_READINESS_PHASES)
+        else None
+    )
+
+
 def _readiness_blocker(
     code: str,
     message: str,
@@ -7759,7 +7859,9 @@ def _readiness_blocker(
     return blocker
 
 
-def code_readiness(engagement_id: int, *, target_phase: str) -> dict[str, Any]:
+def code_readiness(
+    engagement_id: int, *, target_phase: str, include_debt_paths: bool = False
+) -> dict[str, Any]:
     """Project durable code-analysis state into explicit phase-transition blockers."""
     engagement = _engagement_or_404(engagement_id)
     if target_phase not in _CODE_READINESS_PHASES:
@@ -7770,6 +7872,8 @@ def code_readiness(engagement_id: int, *, target_phase: str) -> dict[str, Any]:
 
     blockers: list[dict[str, Any]] = []
     structural_quality_warnings: list[str] = []
+    structural_debt: list[dict[str, Any]] = []
+    structural_debt_count = 0
     with get_connection() as connection:
         repos = [
             dict(row)
@@ -7981,7 +8085,8 @@ def code_readiness(engagement_id: int, *, target_phase: str) -> dict[str, Any]:
                     structural_debt_rows = connection.execute(
                         f"""
                         SELECT files.file_path, files.structural_analysis_status,
-                               files.structural_artifact_truncated
+                               files.structural_artifact_truncated,
+                               files.classification
                         FROM code_files AS files
                         WHERE files.engagement_id = ? AND files.repo_id = ?
                           AND files.retired_at IS NULL
@@ -7994,6 +8099,22 @@ def code_readiness(engagement_id: int, *, target_phase: str) -> dict[str, Any]:
                         """,
                         (engagement.id, repo_id),
                     ).fetchall()
+                    structural_debt_count += len(structural_debt_rows)
+                    if include_debt_paths:
+                        structural_debt.extend(
+                            {
+                                "repo_id": repo_id,
+                                "file_path": str(row["file_path"]),
+                                "classification": str(row["classification"] or ""),
+                                "structural_analysis_status": str(
+                                    row["structural_analysis_status"] or ""
+                                ),
+                                "structural_artifact_truncated": bool(
+                                    row["structural_artifact_truncated"]
+                                ),
+                            }
+                            for row in structural_debt_rows
+                        )
                     if structural_debt_rows and target_phase in {"classify-map", "hunt"}:
                         degraded_count = sum(
                             str(row["structural_analysis_status"]) == "degraded"
@@ -8441,7 +8562,6 @@ def code_readiness(engagement_id: int, *, target_phase: str) -> dict[str, Any]:
                 _readiness_blocker(
                     "findings_unverified",
                     f"{len(unverified_findings)} current code finding(s) have not completed verification triage.",
-                    overrideable=True,
                 )
             )
         if blind_triage_findings:
@@ -8449,7 +8569,6 @@ def code_readiness(engagement_id: int, *, target_phase: str) -> dict[str, Any]:
                 _readiness_blocker(
                     "findings_blind_triage_incomplete",
                     f"{len(blind_triage_findings)} current code finding(s) lack a report-durable triage disposition.",
-                    overrideable=True,
                 )
             )
 
@@ -8521,8 +8640,11 @@ def code_readiness(engagement_id: int, *, target_phase: str) -> dict[str, Any]:
         "target_phase": target_phase,
         "transition_ready": not blockers,
         "blockers": blockers,
+        "structural_debt_count": structural_debt_count,
         "quality_gate": {"passed": not warnings, "warnings": warnings},
     }
+    if include_debt_paths:
+        payload["structural_debt"] = structural_debt
     if fuzz_completion is not None:
         payload["fuzz_completion"] = fuzz_completion
     return payload
@@ -8646,6 +8768,15 @@ def _applicable_families_for_file(
                 is_native=is_native,
                 lang_known=lang_known,
             )
+
+    if lang_lower == "freemarker":
+        # FILE-CONTENT describes a template's input, not a native parser. Its
+        # generic families omit the rendering bug class and demand impossible
+        # memory/serialization work from template-only source.
+        families.add("web-app-injection")
+        families.difference_update(
+            {"buffer-overflow", "integer-overflow", "type-confusion", "deserialization"}
+        )
 
     return sorted(families)
 

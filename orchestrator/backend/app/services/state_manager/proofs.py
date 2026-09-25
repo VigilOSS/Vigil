@@ -619,6 +619,14 @@ def create_proof_receipt(
                         "content SHA-256"
                     ),
                 )
+            if not str(artifact["producer_agent_id"] or "").strip() and artifact["producer_command_run_id"] is None:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=(
+                        "artifact-backed proof receipt requires producer attribution; "
+                        "re-register the artifact with producer agent or command run before binding proof"
+                    ),
+                )
 
         if not resolved_sha256:
             canonical = json.dumps(
@@ -1368,6 +1376,7 @@ def record_finding_verification_evidence(
     verification_status: str,
     proof_receipt_ids: list[int],
     counter_check: dict[str, Any] | None,
+    confirm_check: dict[str, Any] | None,
     severity_variance: dict[str, Any] | None,
     normal_severity_band: str | None,
 ) -> dict[str, Any]:
@@ -1375,7 +1384,7 @@ def record_finding_verification_evidence(
 
     terminal = verification_status in TERMINAL_VERIFICATION_STATUSES
     if not terminal:
-        if proof_receipt_ids or counter_check is not None or severity_variance is not None:
+        if proof_receipt_ids or counter_check is not None or confirm_check is not None or severity_variance is not None:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="proof decision records apply only to terminal verification statuses",
@@ -1392,6 +1401,24 @@ def record_finding_verification_evidence(
         connection, engagement_id, decision_receipt_ids
     )
     receipt_id_set = {int(receipt["id"]) for receipt in receipts}
+    linked_runs = connection.execute(
+        """
+        SELECT target_id FROM assessment_finding_links
+        WHERE engagement_id = ? AND finding_id = ?
+          AND link_kind = 'proof_run' AND target_kind = 'assessment_run'
+          AND retired_at IS NULL
+        """,
+        (engagement_id, int(finding["id"])),
+    ).fetchall()
+    linked_run_ids = {int(link["target_id"]) for link in linked_runs}
+    if not any(int(receipt["run_id"]) in linked_run_ids for receipt in receipts):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "terminal verification requires a decision proof receipt from an "
+                "active proof_run link to this finding"
+            ),
+        )
 
     provenance = json.loads(str(finding["provenance_json"] or "{}"))
     origin_agent_id = str(provenance.get("agent_id") or "").strip()
@@ -1419,6 +1446,46 @@ def record_finding_verification_evidence(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="terminal verification requires an independent verifier dispatch",
+        )
+
+    confirm_receipt_ids: set[int] = set()
+    if verification_status in {"confirmed", "downgraded"}:
+        if confirm_check is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="confirmed/downgraded verification requires a structured confirm_check",
+            )
+        if confirm_check.get("completed") is not True:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="confirm_check must be completed to establish terminal verification",
+            )
+        for name in ("method", "attempted_falsification", "expected_result", "observed_result"):
+            if not str(confirm_check.get(name) or "").strip():
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"confirm_check.{name} is required",
+                )
+        check_receipt_ids = confirm_check.get("proof_receipt_ids") or []
+        confirm_receipt_ids = {int(value) for value in check_receipt_ids}
+        if not check_receipt_ids or not confirm_receipt_ids <= receipt_id_set:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="confirm_check proof_receipt_ids must name the decision proof receipts",
+            )
+    elif confirm_check is not None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="confirm_check applies only to confirmed or downgraded verification",
+        )
+    if confirm_receipt_ids and not any(
+        int(receipt["id"]) in confirm_receipt_ids
+        and int(receipt["run_id"]) in linked_run_ids
+        for receipt in receipts
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="confirm_check requires a finding-linked decision proof receipt",
         )
 
     for receipt_id in receipt_id_set:
@@ -1518,11 +1585,23 @@ def record_finding_verification_evidence(
     chosen_severity = str(finding["severity"])
     if normal_severity_band is not None and chosen_severity != normal_severity_band:
         if severity_variance is None:
+            example = json.dumps(
+                {
+                    "normal_band": normal_severity_band,
+                    "chosen_severity": chosen_severity,
+                    "actor": verifier_dispatch_id,
+                    "reason": "Explain why the chosen severity differs from the CVSS band",
+                    "proof_receipt_id": min(receipt_id_set),
+                },
+                separators=(",", ":"),
+            )
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=(
                     "verification severity departs from its CVSS band; an attributed "
-                    "severity_variance event is required"
+                    "severity_variance event is required. Pass --severity-variance-file "
+                    f"with a JSON object such as {example}, and also pass its "
+                    "proof_receipt_id with --proof-receipt-id. Replace the example reason."
                 ),
             )
         proof_receipt_id = int(severity_variance["proof_receipt_id"])

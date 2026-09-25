@@ -21,6 +21,7 @@ from ._common import (
 from .coverage import coverage_readiness, web_uncovered_high_route_hosts
 from .cvss import CvssVectorError, base_score
 from .findings import (
+    _claim_review_status,
     code_snapshot_attestation_status,
     finding_code_snapshot_status,
     is_file_finding,
@@ -57,6 +58,9 @@ def _cited_markdown_exists(engagement_root: Path, cited_path: str) -> bool:
 
 
 def _normalize_report_evidence_ref(root: Path, evidence_ref: str) -> str:
+    mount = f"/engagements/{root.name}/"
+    if evidence_ref.startswith(mount):
+        evidence_ref = evidence_ref[len(mount):]
     try:
         return _normalize_relative_path(root, evidence_ref)
     except HTTPException:
@@ -75,6 +79,13 @@ def _report_candidate_records(engagement_id: int) -> list[dict[str, Any]]:
             """,
             (engagement.id,),
         ).fetchall()
+        records = []
+        for row in rows:
+            record = _serialize_finding_record(row)
+            record["claim_review_pending"] = _claim_review_status(
+                connection, engagement.id, row,
+            )["claim_review_pending"]
+            records.append(record)
     # A ``blocked`` verification status (blocked-for-provisioning, hunting.md)
     # is NOT a report candidate: the primitive was never reached, so it is neither
     # gradeable at impact-if-true nor report-durable — it "stays OUT of the report".
@@ -85,7 +96,7 @@ def _report_candidate_records(engagement_id: int) -> list[dict[str, Any]]:
     # block and explicitly re-admits the finding.
     return [
         record
-        for record in (_serialize_finding_record(row) for row in rows)
+        for record in records
         if record.get("verification_status") != "blocked"
     ]
 
@@ -258,14 +269,11 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
                 draft_snapshot_statuses[str(row.get("slug", ""))] = snapshot_status
             if row.get("workflow_status") not in reportable_statuses:
                 continue
-            # ADVISORY, never a blocker: the gate's verdict is unchanged, and a
-            # legacy row that predates the attestation is not a violation. What
-            # this surfaces is a binding that nothing corroborates — asserted
-            # outside any audited dispatch or run, or carried over from another
-            # finding — which the gate alone cannot tell from a genuine one.
+            # Legacy rows predate attestation and remain readable. A new
+            # attestation that names no audited source is a final-report defect.
             attestation_status = code_snapshot_attestation_status(row)
             if attestation_status in {"copied", "unattested"}:
-                advisories.append(
+                blockers.append(
                     {
                         "kind": "finding_code_snapshot_unattested",
                         "slug": row.get("slug", ""),
@@ -472,6 +480,15 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
                     "slug": row.get("slug", ""),
                     "title": row.get("title", ""),
                     "detail": f"verification_status={row.get('verification_status', 'unknown')}",
+                }
+            )
+        elif row.get("claim_review_pending"):
+            blockers.append(
+                {
+                    "kind": "finding_claim_review_pending",
+                    "slug": row.get("slug", ""),
+                    "title": row.get("title", ""),
+                    "detail": "verified claim wording changed; record a current independent claim_equivalence review or re-verify the finding",
                 }
             )
 

@@ -191,6 +191,7 @@ vigil assess finding verify <slug> --status <verdict> --reason "<rationale>"
 # Substitute the current Code Source Identity values in this exact provenance shape.
 vigil assess finding verify <slug> --status confirmed --reason "Re-reviewed current sealed source" \
   --proof-receipt-id <proof-receipt-id> \
+  --confirm-check-file <confirm-check.json> \
   --source-name code-vuln-verifier \
   --provenance-inline '{"code_snapshot":{"repo_id":7,"repo_generation":3,"source_manifest_digest":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}}'
 # Or pass the dedicated false-positive status with a completed counter-check

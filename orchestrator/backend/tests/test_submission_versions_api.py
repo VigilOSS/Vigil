@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
 import io
 import json
 import sqlite3
+import sys
 import zipfile
+from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
+from fastapi import HTTPException
 
 from app.db import get_connection
 from tests.test_report_export import ENGAGEMENT_KEY, _add_finding, _finding, _seed
@@ -24,6 +28,88 @@ def _seed_reportable_finding(client, isolate_settings, slug: str = "VA-001") -> 
     return response.json()
 
 
+def _approve_packet(client, isolate_settings, slug: str, attachments: list[dict] | None = None) -> None:
+    root = (isolate_settings["engagements_dir"] / ENGAGEMENT_KEY).resolve()
+    (root / "ENGAGEMENT.md").write_text("# Program facts\n", encoding="utf-8")
+    scripts = Path(__file__).resolve().parents[3] / "agent" / "scripts"
+    if str(scripts) not in sys.path:
+        sys.path.insert(0, str(scripts))
+    packet_module = importlib.import_module("assess.commands.export_triage_packet")
+    packet = packet_module.build_packet(root, slug, attachment_rows=attachments)
+    decision = client.post(
+        f"{BASE}/dispatch-decisions",
+        json={
+            "kind": "blind_triage_verdict",
+            "payload": {
+                "finding_slug": slug,
+                "verdict": "Accept@P3",
+                "packet_id": packet["packet_id"],
+            },
+        },
+    )
+    assert decision.status_code == 201, decision.text
+
+
+def _rehearse(client, slug: str, *, suffix: str = "") -> None:
+    agent_id = f"REHEARSE-{slug}{suffix}"
+    dispatch = client.post(
+        f"{BASE}/dispatches",
+        json={"agent_id": agent_id, "agent_role": "vulnerability-analyst", "task": f"independent reproduction of {slug}"},
+    )
+    assert dispatch.status_code in {201, 409}, dispatch.text
+    with get_connection() as connection:
+        attempt = connection.execute(
+            "SELECT COUNT(*) AS count FROM assessment_dispatch_decisions WHERE kind = 'repro_rehearsal'"
+        ).fetchone()["count"]
+    run = client.post(
+        f"{BASE}/command-runs",
+        json={
+            "run_uuid": f"submission-rehearsal-{slug}-{attempt}",
+            "command": f"curl https://acme.example/{slug.lower()}",
+            "tool_name": "curl", "agent_name": agent_id, "phase": "report",
+            "status": "completed", "return_code": 0,
+            "started_at": "2026-09-25T12:00:00Z",
+            "completed_at": "2026-09-25T12:00:01Z",
+            "stdout": "cross-account response observed",
+        },
+    )
+    assert run.status_code == 201, run.text
+    decision = client.post(
+        f"{BASE}/dispatch-decisions",
+        json={"kind": "repro_rehearsal", "payload": {
+            "finding_slug": slug, "verdict": "followed", "proof_mode": "live",
+            "verifier_dispatch_agent_id": agent_id,
+            "runs_checked": [run.json()["id"]],
+            "observed_outcome": "Independent replay observed the claimed cross-account response",
+        }},
+    )
+    assert decision.status_code == 201, decision.text
+
+
+def _review_claim(client, slug: str) -> None:
+    current = client.get(f"{BASE}/findings/{slug}").json()
+    audit = current["verification_audit"]
+    if not audit["claim_review_pending"]:
+        return
+    agent_id = f"REVIEW-CLAIM-{slug}"
+    dispatch = client.post(
+        f"{BASE}/dispatches",
+        json={"agent_id": agent_id, "agent_role": "vulnerability-analyst", "task": "compare edited claim with verified claim"},
+    )
+    assert dispatch.status_code == 201, dispatch.text
+    decision = client.post(
+        f"{BASE}/dispatch-decisions",
+        json={"kind": "claim_equivalence", "payload": {
+            "finding_slug": slug, "verdict": "equivalent",
+            "claim_transition_id": audit["claim_transition_id"],
+            "new_claim_sha256": audit["current_claim_sha256"],
+            "verifier_dispatch_agent_id": agent_id,
+            "reason": "The edited steps preserve the same verified action and outcome",
+        }},
+    )
+    assert decision.status_code == 201, decision.text
+
+
 def _write_workspace(
     client,
     isolate_settings,
@@ -31,6 +117,9 @@ def _write_workspace(
     *,
     platform: str = "bugcrowd",
     markdown: bytes = b"# Reviewed submission\n\nExact approved bytes.\n",
+    external_body: bytes | None = None,
+    reviewed: bool = True,
+    rehearsed: bool = True,
 ) -> tuple[str, str]:
     slug = str(finding["slug"])
     submission_path = f"submissions/{slug}/submission.md"
@@ -39,12 +128,15 @@ def _write_workspace(
     submission = root / submission_path
     submission.parent.mkdir(parents=True, exist_ok=True)
     submission.write_bytes(markdown)
+    body = markdown if external_body is None else external_body
+    (submission.parent / "submission-body.md").write_bytes(body)
     context = {
         "slug": slug,
         "platform": platform,
         "mode": "final",
         "submission_path": submission_path,
         "submission_sha256": hashlib.sha256(markdown).hexdigest(),
+        "external_body_sha256": hashlib.sha256(body).hexdigest(),
         "source_finding": {
             "id": finding["id"],
             "row_version": finding["row_version"],
@@ -73,6 +165,10 @@ def _write_workspace(
         },
     )
     assert registered.status_code == 201, registered.text
+    if rehearsed:
+        _rehearse(client, slug)
+    if reviewed and b"\xff" not in markdown:
+        _approve_packet(client, isolate_settings, slug)
     return submission_path, context_path
 
 
@@ -142,6 +238,199 @@ def test_export_without_attachments_is_an_immutable_markdown_version(
     assert detail.json()["workspace"]["final_ready"] is True
 
 
+def test_final_export_rejects_accept_for_older_submission_bytes(
+    client, isolate_settings
+) -> None:
+    finding = _seed_reportable_finding(client, isolate_settings)
+    _write_workspace(client, isolate_settings, finding, markdown=b"# Earlier body\n")
+    decision = client.post(
+        f"{BASE}/dispatch-decisions",
+        json={
+            "kind": "blind_triage_verdict",
+            "payload": {
+                "finding_slug": "VA-001",
+                "verdict": "Accept@P3",
+                "packet_id": "a" * 64,
+            },
+        },
+    )
+    assert decision.status_code == 201, decision.text
+    submission_path, context_path = _write_workspace(
+        client, isolate_settings, finding, markdown=b"# New unreviewed body\n",
+        reviewed=False,
+    )
+
+    response = _export(client, "VA-001", submission_path, context_path)
+
+    assert response.status_code == 409, response.text
+    assert "blind triage" in response.json()["detail"].lower()
+
+
+def test_final_export_rejects_rehearsal_before_step_edit(
+    client, isolate_settings
+) -> None:
+    finding = _seed_reportable_finding(client, isolate_settings)
+    _rehearse(client, "VA-001")
+    updated = client.patch(
+        f"{BASE}/findings/VA-001",
+        json={
+            "details": {**finding["details"], "steps_to_reproduce": "1. Replay the recorded request with the other account."},
+        },
+    )
+    assert updated.status_code == 200, updated.text
+    _review_claim(client, "VA-001")
+    current = client.get(f"{BASE}/findings/VA-001").json()
+    submission_path, context_path = _write_workspace(
+        client, isolate_settings, current, rehearsed=False,
+    )
+
+    response = _export(client, "VA-001", submission_path, context_path)
+
+    assert response.status_code == 409, response.text
+    assert "reproduction" in response.json()["detail"].lower()
+
+
+def test_equivalent_reproduction_needs_fresh_reviewer_and_reason(
+    client, isolate_settings
+) -> None:
+    finding = _seed_reportable_finding(client, isolate_settings)
+    _rehearse(client, "VA-001")
+    with get_connection() as connection:
+        prior = connection.execute(
+            "SELECT id FROM assessment_dispatch_decisions WHERE kind = 'repro_rehearsal' ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    assert prior is not None
+    updated = client.patch(
+        f"{BASE}/findings/VA-001",
+        json={"details": {**finding["details"], "steps_to_reproduce": "1. Replay the recorded request."}},
+    )
+    assert updated.status_code == 200, updated.text
+    fresh = client.post(
+        f"{BASE}/dispatches",
+        json={"agent_id": "SECOND-REHEARSAL", "agent_role": "vulnerability-analyst", "task": "check edited steps"},
+    )
+    assert fresh.status_code == 201, fresh.text
+    equivalent = client.post(
+        f"{BASE}/dispatch-decisions",
+        json={"kind": "repro_rehearsal", "payload": {
+            "finding_slug": "VA-001", "verdict": "equivalent", "proof_mode": "live",
+            "verifier_dispatch_agent_id": "SECOND-REHEARSAL",
+            "prior_decision_id": prior["id"], "reason": "Only the numbering and wording changed",
+        }},
+    )
+    assert equivalent.status_code == 201, equivalent.text
+    _review_claim(client, "VA-001")
+    current = client.get(f"{BASE}/findings/VA-001").json()
+    submission_path, context_path = _write_workspace(
+        client, isolate_settings, current, rehearsed=False,
+    )
+    exported = _export(client, "VA-001", submission_path, context_path)
+    assert exported.status_code == 201, exported.text
+
+
+def test_web_reproduction_cannot_claim_source_only_review(client, isolate_settings) -> None:
+    _seed_reportable_finding(client, isolate_settings)
+    dispatch = client.post(
+        f"{BASE}/dispatches",
+        json={"agent_id": "SOURCE-REVIEW-ONLY", "agent_role": "code-vuln-verifier", "task": "source-only review"},
+    )
+    assert dispatch.status_code == 201, dispatch.text
+    decision = client.post(
+        f"{BASE}/dispatch-decisions",
+        json={"kind": "repro_rehearsal", "payload": {
+            "finding_slug": "VA-001", "verdict": "followed", "proof_mode": "source",
+            "verifier_dispatch_agent_id": "SOURCE-REVIEW-ONLY",
+            "observed_outcome": "Source appears vulnerable",
+        }},
+    )
+    assert decision.status_code == 422, decision.text
+
+
+def test_reproduction_check_must_cover_authored_run_ids(client, isolate_settings) -> None:
+    finding = _seed_reportable_finding(client, isolate_settings)
+    def run(agent: str, suffix: str) -> int:
+        response = client.post(
+            f"{BASE}/command-runs",
+            json={
+                "run_uuid": f"repro-coverage-{suffix}", "command": "curl https://acme.example/va-001",
+                "tool_name": "curl", "agent_name": agent, "phase": "report",
+                "status": "completed", "return_code": 0,
+                "started_at": "2026-09-25T12:00:00Z",
+                "completed_at": "2026-09-25T12:00:01Z",
+                "stdout": "observed response",
+            },
+        )
+        assert response.status_code == 201, response.text
+        return response.json()["id"]
+
+    authored_run = run("SOURCE-VA-001", "authored")
+    updated = client.patch(
+        f"{BASE}/findings/VA-001",
+        json={"details": {**finding["details"], "repro_runs": [authored_run]}},
+    )
+    assert updated.status_code == 200, updated.text
+    reviewer = client.post(
+        f"{BASE}/dispatches",
+        json={"agent_id": "COLD-REVIEW", "agent_role": "vulnerability-analyst", "task": "cold check"},
+    )
+    assert reviewer.status_code == 201, reviewer.text
+    unrelated_run = run("COLD-REVIEW", "unrelated")
+    decision = client.post(
+        f"{BASE}/dispatch-decisions",
+        json={"kind": "repro_rehearsal", "payload": {
+            "finding_slug": "VA-001", "verdict": "followed", "proof_mode": "live",
+            "verifier_dispatch_agent_id": "COLD-REVIEW", "runs_checked": [unrelated_run],
+            "observed_outcome": "claimed outcome observed",
+        }},
+    )
+    assert decision.status_code == 422, decision.text
+    covering = client.post(
+        f"{BASE}/dispatch-decisions",
+        json={"kind": "repro_rehearsal", "payload": {
+            "finding_slug": "VA-001", "verdict": "followed", "proof_mode": "live",
+            "verifier_dispatch_agent_id": "COLD-REVIEW",
+            "runs_checked": [authored_run, unrelated_run],
+            "observed_outcome": "claimed outcome observed",
+        }},
+    )
+    assert covering.status_code == 201, covering.text
+
+
+def test_reproduction_decision_service_rejects_missing_fields_without_crashing(
+    client, isolate_settings
+) -> None:
+    from app.services.state_manager.dispatches import record_decision
+
+    finding = _seed_reportable_finding(client, isolate_settings)
+    with pytest.raises(HTTPException) as raised:
+        record_decision(finding["engagement_id"], kind="repro_rehearsal", payload={})
+    assert raised.value.status_code == 422
+
+
+def test_final_export_waits_for_review_of_editorial_claim_change(
+    client, isolate_settings
+) -> None:
+    finding = _seed_reportable_finding(client, isolate_settings)
+    edited = client.patch(
+        f"{BASE}/findings/VA-001",
+        json={"summary": finding["summary"] + " with improved wording"},
+    )
+    assert edited.status_code == 200, edited.text
+    current = client.get(f"{BASE}/findings/VA-001").json()
+    assert current["verification_audit"]["claim_review_pending"] is True
+    submission_path, context_path = _write_workspace(client, isolate_settings, current)
+
+    response = _export(client, "VA-001", submission_path, context_path)
+
+    assert response.status_code == 409, response.text
+    assert "claim" in response.json()["detail"].lower()
+    readiness = client.get(f"{BASE}/report-readiness").json()
+    assert any(
+        row["kind"] == "finding_claim_review_pending" and row["slug"] == "VA-001"
+        for row in readiness["blockers"]
+    )
+
+
 def test_successful_export_and_recovery_broadcast_submission_updates(
     client, isolate_settings, monkeypatch
 ) -> None:
@@ -170,6 +459,125 @@ def test_successful_export_and_recovery_broadcast_submission_updates(
         and call.args[1]["engagement_key"] == ENGAGEMENT_KEY
         for call in publish.await_args_list
     )
+
+
+def test_final_package_contains_only_the_blind_reviewed_external_body(
+    client, isolate_settings
+) -> None:
+    finding = _seed_reportable_finding(client, isolate_settings)
+    body = b"# External report\n\nVerified impact.\n"
+    workspace = body + b"\n---\nOPERATOR DETAILS - NOT FOR SUBMISSION\nsecret test note\n"
+    submission_path, context_path = _write_workspace(
+        client, isolate_settings, finding, markdown=workspace, external_body=body,
+    )
+    exported = _export(client, "VA-001", submission_path, context_path)
+    assert exported.status_code == 201, exported.text
+    root = (isolate_settings["engagements_dir"] / ENGAGEMENT_KEY).resolve()
+    assert (root / exported.json()["relative_path"]).read_bytes() == body
+
+
+def test_submission_detail_exposes_current_publication_gates(
+    client, isolate_settings
+) -> None:
+    finding = _seed_reportable_finding(client, isolate_settings)
+    _write_workspace(client, isolate_settings, finding, reviewed=False, rehearsed=False)
+    pending = client.get(f"{BASE}/submissions/VA-001")
+    assert pending.status_code == 200, pending.text
+    workspace = pending.json()["workspace"]
+    assert workspace["final_ready"] is False
+    assert any("reproduction has no independent check" in item for item in workspace["blockers"])
+    assert any("blind triage has no verdict" in item for item in workspace["blockers"])
+    assert workspace["external_body_sha256"] == hashlib.sha256(
+        b"# Reviewed submission\n\nExact approved bytes.\n"
+    ).hexdigest()
+
+    _rehearse(client, "VA-001")
+    _approve_packet(client, isolate_settings, "VA-001")
+    ready = client.get(f"{BASE}/submissions/VA-001")
+    assert ready.status_code == 200, ready.text
+    assert ready.json()["workspace"]["final_ready"] is True
+
+    root = isolate_settings["engagements_dir"] / ENGAGEMENT_KEY
+    attachment = root / "evidence" / "response.json"
+    attachment.parent.mkdir(parents=True, exist_ok=True)
+    attachment.write_bytes(b'{"status": 200}\n')
+    registered = client.post(
+        f"{BASE}/artifacts",
+        json={
+            "path": "evidence/response.json", "kind": "proof",
+            "media_type": "application/json", "related_finding_slug": "VA-001",
+        },
+    )
+    assert registered.status_code == 201, registered.text
+    artifact_id = registered.json()["id"]
+    selected = client.get(f"{BASE}/submissions/VA-001?attachment_id={artifact_id}")
+    assert selected.status_code == 200, selected.text
+    assert selected.json()["workspace"]["final_ready"] is False
+    assert any(
+        "different external attachments" in item
+        for item in selected.json()["workspace"]["blockers"]
+    )
+    _approve_packet(client, isolate_settings, "VA-001", [registered.json()])
+    matched = client.get(f"{BASE}/submissions/VA-001?attachment_id={artifact_id}")
+    assert matched.status_code == 200, matched.text
+    assert matched.json()["workspace"]["final_ready"] is True
+
+
+def test_finalization_rechecks_latest_blind_verdict(
+    client, isolate_settings, monkeypatch
+) -> None:
+    from app.services import submission_versions
+
+    finding = _seed_reportable_finding(client, isolate_settings)
+    submission_path, context_path = _write_workspace(client, isolate_settings, finding)
+    original_complete = submission_versions._complete_version
+
+    def reject_before_complete(engagement_id, row):
+        rejected = client.post(
+            f"{BASE}/dispatch-decisions",
+            json={
+                "kind": "blind_triage_verdict",
+                "payload": {
+                    "finding_slug": "VA-001", "verdict": "Need-More-Info",
+                    "packet_id": "0" * 64,
+                },
+            },
+        )
+        assert rejected.status_code == 201, rejected.text
+        return original_complete(engagement_id, row)
+
+    monkeypatch.setattr(submission_versions, "_complete_version", reject_before_complete)
+    result = _export(client, "VA-001", submission_path, context_path)
+    assert result.status_code == 409, result.text
+    assert "blind triage" in result.json()["detail"]
+
+
+def test_finalization_rechecks_latest_reproduction_decision(
+    client, isolate_settings, monkeypatch
+) -> None:
+    from app.services import submission_versions
+
+    finding = _seed_reportable_finding(client, isolate_settings)
+    submission_path, context_path = _write_workspace(client, isolate_settings, finding)
+    original_complete = submission_versions._complete_version
+
+    def fail_rehearsal_before_complete(engagement_id, row):
+        failed = client.post(
+            f"{BASE}/dispatch-decisions",
+            json={"kind": "repro_rehearsal", "payload": {
+                "finding_slug": "VA-001", "verdict": "failed", "proof_mode": "live",
+                "verifier_dispatch_agent_id": "REHEARSE-VA-001",
+                "failed_step": "Step 2 did not produce the claimed response",
+                "runs_checked": [],
+            }},
+        )
+        assert failed.status_code == 201, failed.text
+        return original_complete(engagement_id, row)
+
+    monkeypatch.setattr(submission_versions, "_complete_version", fail_rehearsal_before_complete)
+    result = _export(client, "VA-001", submission_path, context_path)
+    assert result.status_code == 409, result.text
+    assert "reproduction" in result.json()["detail"]
 
 
 def test_submission_detail_keeps_preview_but_blocks_an_unregistered_workspace(
@@ -361,8 +769,11 @@ def test_attachment_export_is_deterministic_and_manifested(
     client, isolate_settings
 ) -> None:
     finding = _seed_reportable_finding(client, isolate_settings)
+    external_body = b"# Reviewed submission\n\nExact approved bytes.\n"
     submission_path, context_path = _write_workspace(
-        client, isolate_settings, finding
+        client, isolate_settings, finding,
+        markdown=external_body + b"\n---\nOPERATOR DETAILS\ninternal proof\n",
+        external_body=external_body,
     )
     root = isolate_settings["engagements_dir"] / ENGAGEMENT_KEY
     attachments = []
@@ -385,6 +796,7 @@ def test_attachment_export_is_deterministic_and_manifested(
         assert registered.status_code == 201, registered.text
         attachments.append(registered.json())
 
+    _approve_packet(client, isolate_settings, "VA-001", attachments)
     response = _export(
         client,
         "VA-001",
@@ -415,9 +827,7 @@ def test_attachment_export_is_deterministic_and_manifested(
             "attachment-manifest.json",
             *expected_attachment_names,
         ]
-        assert archive.read("submission.md") == (
-            b"# Reviewed submission\n\nExact approved bytes.\n"
-        )
+        assert archive.read("submission.md") == external_body
         manifest = json.loads(archive.read("attachment-manifest.json"))
         assert manifest["schema"] == "vigil-submission-attachment-manifest/v1"
         assert manifest["finding_slug"] == "VA-001"
@@ -462,6 +872,7 @@ def test_attachment_zip_member_is_portable_while_manifest_keeps_original_path(
     )
     assert registered.status_code == 201, registered.text
 
+    _approve_packet(client, isolate_settings, "VA-001", [registered.json()])
     exported = _export(
         client,
         "VA-001",
@@ -552,6 +963,7 @@ def test_submission_version_has_no_operator_data_suppression_metadata(
     assert registered.status_code == 201, registered.text
     assert "sensitive" not in registered.json()
 
+    _approve_packet(client, isolate_settings, "VA-001", [registered.json()])
     exported = _export(
         client,
         "VA-001",

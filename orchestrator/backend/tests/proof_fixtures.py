@@ -9,6 +9,19 @@ from typing import Any
 from app.config import settings
 
 
+def completed_confirm_check(*receipt_ids: int) -> dict[str, Any]:
+    """A completed attempted disproof for terminal verification fixtures."""
+
+    return {
+        "method": "Replay the claim against the expected guard",
+        "attempted_falsification": "Check whether the expected guard defeats the claim",
+        "expected_result": "The guard prevents the claimed outcome",
+        "observed_result": "The claimed outcome still occurs",
+        "proof_receipt_ids": list(receipt_ids),
+        "completed": True,
+    }
+
+
 def post_artifact_backed_source_observation(
     client,
     endpoint: str,

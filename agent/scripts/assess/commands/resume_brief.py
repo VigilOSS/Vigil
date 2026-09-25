@@ -304,6 +304,8 @@ def _render_markdown(brief: dict) -> str:
     _render_surfaces(lines, brief.get("surfaces") or {})
     _render_work_buffer(lines, brief.get("work_buffer") or {})
     _render_attempts(lines, brief.get("attempts") or {})
+    _render_credential_needs(lines, brief.get("credential_needs") or {})
+    _render_contradiction_reviews(lines, brief.get("contradiction_reviews") or {})
     _render_per_input_coverage(lines, brief.get("per_input_coverage") or {})
     _render_code_analysis(lines, brief.get("code_analysis") or {})
     _render_decisions(
@@ -313,6 +315,13 @@ def _render_markdown(brief: dict) -> str:
     )
     lines.extend(["", "## Dispatches"])
     dispatches = brief.get("dispatches") or {}
+    closable_rows = dispatches.get("closable_handoffs") or []
+    for row in closable_rows:
+        lines.append(contain_separators(
+            f"- closeout: {row.get('agent_id')} role={row.get('agent_role')} "
+            f"handoff={row.get('handoff_status')} action=`vigil assess agent close {row.get('agent_id')}`"
+        ))
+    _render_dispatch_more(lines, len(closable_rows), dispatches.get("closable_handoffs_count"), "closable handoffs")
     # The lists are capped by the backend; the *_count fields carry the TRUE
     # totals so a stale row that sorts below the display window is still counted
     # (I-10). Surface a "showing N of M" hint whenever the list was truncated.
@@ -332,7 +341,7 @@ def _render_markdown(brief: dict) -> str:
             "(silent state-loss — no handoff was ever written)"
         ))
     _render_dispatch_more(lines, len(terminal_rows), dispatches.get("terminal_no_handoff_count"), "terminal handoff-less dispatches")
-    if not (stale_rows or gap_rows or terminal_rows):
+    if not (closable_rows or stale_rows or gap_rows or terminal_rows):
         lines.append(
             "- no stale in-progress dispatches, handoff gaps, or terminal "
             "handoff-less dispatches across the engagement"
@@ -718,6 +727,40 @@ def _render_work_buffer(lines: list, work_buffer: dict) -> None:
 _ATTEMPTS_RENDER_LIMIT = 8
 
 
+def _render_credential_needs(lines: list[str], section: dict) -> None:
+    count = int(section.get("count") or 0)
+    if not count:
+        return
+    items = section.get("items") or []
+    lines.extend(["", f"## Credential and Identity Needs ({count})"])
+    for item in items:
+        reference = item.get("slug") or f"decision #{item.get('id')}"
+        lines.append(contain_separators(
+            f"- {reference}: identity={item.get('identity') or '-'} "
+            f"surface={item.get('surface') or '-'} "
+            f"need={item.get('need') or '-'} "
+            f"requested_from={item.get('requested_from') or '-'}"
+        ))
+    if count > len(items):
+        lines.append(f"- … showing {len(items)} of {count}")
+
+
+def _render_contradiction_reviews(lines: list[str], section: dict) -> None:
+    count = int(section.get("count") or 0)
+    if not count:
+        return
+    items = section.get("items") or []
+    lines.extend(["", f"## Contradiction Reviews ({count})"])
+    for item in items:
+        lines.append(contain_separators(
+            f"- link #{item.get('link_id')}: {item.get('source_slug')} contradicts "
+            f"{item.get('target_slug')} — {_trim(item.get('notes') or '', 160)}; "
+            f"review with `vigil assess finding get {item.get('target_slug')}`"
+        ))
+    if count > len(items):
+        lines.append(f"- … showing {len(items)} of {count}")
+
+
 def _render_attempts(lines: list, attempts: dict) -> None:
     """Render the ## Attempts do-today ledger (P1-C). No-op when the brief
     carries no attempts block (older backend) or both sources are empty — a
@@ -824,7 +867,7 @@ def _render_per_input_coverage(lines: list, per_input: dict) -> None:
 
 
 def _render_code_analysis(lines: list, code_analysis: dict) -> None:
-    """Render open code-analysis leases. No-op for a web-only engagement.
+    """Render the code gate and open leases. No-op for a web-only engagement.
 
     A queue row still in `processing` is a dispatch that was authoring durable
     state when it stopped: the lease is held, receipts may already be recorded,
@@ -836,11 +879,69 @@ def _render_code_analysis(lines: list, code_analysis: dict) -> None:
     if not code_analysis:
         return
     leases = code_analysis.get("open_leases") or []
+    if not leases and not any(
+        key in code_analysis for key in (
+            "queue_count", "coverage_by_classification", "trigger_counts",
+            "next_gate", "reference_repos",
+        )
+    ):
+        return
+    lease_total = code_analysis.get("open_leases_count", len(leases))
+    lines.extend(["", "## Code Analysis"])
+    trigger_counts = code_analysis.get("trigger_counts") or {}
+    lines.append(contain_separators(
+        f"- remaining queue={code_analysis.get('queue_count', 0)} "
+        f"triggers_pending={trigger_counts.get('pending', 0)} "
+        f"triggers_queued={trigger_counts.get('queued', 0)}"
+    ))
+    tiers = code_analysis.get("coverage_by_classification") or {}
+    if tiers:
+        lines.append("- review coverage by classification:")
+        for classification in ("critical", "high", "medium", "low", "skip"):
+            row = tiers.get(classification)
+            if not isinstance(row, dict):
+                continue
+            tier_total = int(row.get("count") or 0)
+            reviewed = int(row.get("analyzed") or 0)
+            remaining = int(row.get("remaining") or 0)
+            pct = reviewed / tier_total * 100 if tier_total else 100.0
+            lines.append(contain_separators(
+                f"  - {classification}: {reviewed}/{tier_total} reviewed "
+                f"({pct:.0f}%); {remaining} remaining"
+            ))
+    next_gate = code_analysis.get("next_gate")
+    if isinstance(next_gate, dict):
+        target = next_gate.get("target_phase") or "unknown"
+        state = "READY" if next_gate.get("transition_ready") is True else "BLOCKED"
+        blockers = ", ".join(next_gate.get("blocker_codes") or []) or "none"
+        lines.append(contain_separators(
+            f"- next phase transition ({target}): {state}; blockers={blockers}; "
+            f"structural debt: {int(next_gate.get('structural_debt_count') or 0)} files"
+        ))
+    elif next_gate:
+        lines.append(contain_separators(f"- next phase transition: {next_gate}"))
+    else:
+        lines.append("- next phase transition: none")
+    coverage_gate = code_analysis.get("coverage_gate") or {}
+    if coverage_gate:
+        state = "PASS" if coverage_gate.get("passed") is True else "NEEDS ATTENTION"
+        reasons = "; ".join(str(item) for item in coverage_gate.get("reasons", [])[:3])
+        lines.append(contain_separators(
+            f"- coverage quality gate: {state}"
+            + (f" ({reasons})" if reasons else "")
+        ))
+    references = code_analysis.get("reference_repos") or []
+    for repo in references:
+        lines.append(contain_separators(
+            f"- reference repo: id={repo.get('repo_id')} key={repo.get('repo_key')} "
+            f"generation={repo.get('repo_generation')} (navigation only)"
+        ))
+    reference_total = code_analysis.get("reference_repos_count", len(references))
+    if reference_total > len(references):
+        lines.append(f"- … showing {len(references)} of {reference_total} reference repos")
     if not leases:
         return
-    total = code_analysis.get("open_leases_count", len(leases))
-    lines.extend(["", "## Code Analysis"])
-    lines.append(f"- open analysis leases ({total}):")
+    lines.append(f"- open analysis leases ({lease_total}):")
     for lease in leases:
         if not isinstance(lease, dict):
             continue
@@ -852,8 +953,8 @@ def _render_code_analysis(lines: list, code_analysis: dict) -> None:
             f"silent={_format_lease_age(lease.get('heartbeat_age_seconds'))} "
             f"receipts={lease.get('current_result_count', 0)}"
         ))
-    if isinstance(total, int) and total > len(leases):
-        lines.append(f"  - … showing {len(leases)} of {total}")
+    if isinstance(lease_total, int) and lease_total > len(leases):
+        lines.append(f"  - … showing {len(leases)} of {lease_total}")
     lines.append(
         "  - inspect: `vigil assess code-dispatch progress <item-id>`; recover with "
         "`code-dispatch adopt-lease` (keeps receipts) or `code-dispatch reset-stale` "

@@ -95,6 +95,7 @@ async def list_submission_findings(
 async def get_submission_detail(
     engagement_key: str,
     finding_slug: str,
+    attachment_id: list[int] | None = Query(default=None),
     attachment_offset: int = Query(default=0, ge=0),
     attachment_limit: int = Query(
         default=submission_versions.DEFAULT_ATTACHMENT_PAGE_LIMIT,
@@ -122,6 +123,7 @@ async def get_submission_detail(
             submission_versions.submission_detail,
             engagement.id,
             finding_slug,
+            attachment_ids=attachment_id or [],
             attachment_offset=attachment_offset,
             attachment_limit=attachment_limit,
             version_offset=version_offset,

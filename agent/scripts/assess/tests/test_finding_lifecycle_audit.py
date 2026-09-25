@@ -278,6 +278,43 @@ def test_retract_claim_replaces_current_claim_and_preserves_audit_and_evidence(
     assert json.loads(capsys.readouterr().out)["finding"]["row_version"] == 8
 
 
+def test_retract_claim_points_to_surviving_current_text_not_correction_history(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    engagement = _engagement(tmp_path)
+    current = {
+        "slug": "VA-022", "summary": "Persistent access is obtainable.",
+        "details": {
+            "steps_to_reproduce": [
+                "Authenticate as the test user.",
+                "Show persistent access is obtainable through the session token.",
+            ],
+            "correction_history": ["Persistent access is obtainable."],
+        },
+        "row_version": 2,
+    }
+    monkeypatch.setattr(config, "_verify_backend", lambda _cfg: None)
+    monkeypatch.setattr(AssessmentClient, "get", lambda _client, _endpoint: current)
+    monkeypatch.setattr(
+        AssessmentClient, "patch",
+        lambda _client, _endpoint, payload: {
+            "finding": {**current, "summary": payload["summary"], "row_version": 3}
+        },
+    )
+
+    cli.main([
+        "--engagement-dir", str(engagement), "finding", "retract-claim", "VA-022",
+        "--replacement-summary", "The token expires at logout.",
+        "--retracted-text", "persistent access is obtainable",
+        "--reason", "The session check disproved persistence.",
+    ])
+
+    stderr = capsys.readouterr().err
+    assert "details.steps_to_reproduce step 2" in stderr
+    assert "Show persistent access is obtainable" in stderr
+    assert "correction_history" not in stderr
+
+
 def test_retract_claim_refuses_a_noop_replacement_before_patch(
     tmp_path, monkeypatch, capsys
 ) -> None:

@@ -78,15 +78,14 @@ That is the difference between a reproduction and a plausible narrative: a reade
 can diff every claimed step against the audit row behind it. The runs are a
 separate block from the linked-evidence runs above because they answer a different
 question — "what proves the finding" versus "what reproduces it" — and a finding
-routinely has one without the other. Nothing here GATES: authored steps with no
-``repro_runs`` behind them, and declared ids that do not resolve, are both reported
-as (non-blocking) ``advisories``. A run fetch can fail for reasons that say nothing
-about the finding — a transient backend error resolves to the same signal as a
-fabricated id — so refusing on it would let infrastructure block the publish of a
-correct, verified finding. The unresolved ids are named in the render, on stderr,
-and in the context JSON (``repro_runs_unresolved``); the report-writer decides.
+routinely has one without the other. This local render reports missing or
+unresolved ids as advisories because a fetch can fail transiently. New authored
+run ids are validated when recorded, and final publication separately requires
+a current independent reproduction decision covering the authored ids. Unresolved
+ids are named in the render, on stderr, and in the context JSON
+(``repro_runs_unresolved``) so the report-writer can correct them.
 
-THE REHEARSAL IS ADVISED ON HERE, not at the phase transition. The Phase-8
+THE REHEARSAL IS ADVISED ON HERE and gated at final publication. The Phase-8
 reproduction rehearsal — an agent that EXECUTES the steps from a cold start — is
 the only check that can catch a step whose removal takes state a later step needs,
 which is the defect a trim can introduce; this command reads its ``repro_rehearsal``
@@ -94,8 +93,9 @@ decision rows and advises when none is recorded, when the newest one did not fol
 or when it checked a run ``details.repro_runs`` no longer declares. Export is the
 right place because the trim happens HERE, while the report-writer is reading, and
 a rehearsal re-dispatched at engagement close is the same work at its most
-expensive. It never blocks, and an unreachable backend degrades to a stderr WARN
-with no advisory (see ``_repro_rehearsal_decisions``).
+expensive. This local advisory does not block a draft; the backend checks the
+current decision before publishing a final version. An unreachable backend
+degrades the local render to a stderr WARN (see ``_repro_rehearsal_decisions``).
 
 The generated ``submission.md`` is registered as a finding-linked artifact
 (``kind="submission"``); final mode then asks the backend to stage, verify and
@@ -1093,6 +1093,8 @@ def _render_markdown(
     hygiene_warnings: list[str],
     required_headers: dict[str, str],
     advisories: list[str],
+    *,
+    include_operator_details: bool = True,
 ) -> str:
     # --- header field lines (the platform copy-paste layout) ----------------
     # The slug is NOT emitted in the body (submission-format.md "No internal
@@ -1139,16 +1141,17 @@ def _render_markdown(
 
     # --- single OPERATOR DETAILS reference section below the second divider --
     # (never pasted; the report-writer authors the body sections FROM it).
-    lines += _operator_details_block(
-        finding,
-        resolved,
-        linked_runs,
-        repro_runs,
-        repro_unresolved,
-        hygiene_warnings,
-        advisories,
-        draft,
-    )
+    if include_operator_details:
+        lines += _operator_details_block(
+            finding,
+            resolved,
+            linked_runs,
+            repro_runs,
+            repro_unresolved,
+            hygiene_warnings,
+            advisories,
+            draft,
+        )
 
     text = "\n".join(lines).rstrip()
     return text + "\n"
@@ -1170,6 +1173,7 @@ def _build_context(
     verification_audit: dict[str, object],
     finding: dict[str, object],
     submission_sha256: str,
+    external_body_sha256: str,
 ) -> dict:
     return {
         "slug": slug,
@@ -1177,6 +1181,7 @@ def _build_context(
         "mode": "draft" if draft else "final",
         "submission_path": submission_rel,
         "submission_sha256": submission_sha256,
+        "external_body_sha256": external_body_sha256,
         "source_finding": {
             "id": finding.get("id"),
             "row_version": finding.get("row_version"),
@@ -1468,6 +1473,7 @@ def run(args) -> None:
     else:
         out_dir = Path(engagement_dir) / "submissions" / slug
     submission_md = out_dir / "submission.md"
+    external_body_md = out_dir / "submission-body.md"
     context_json = out_dir / "submission-context.json"
     submission_rel = _engagement_relative(submission_md.resolve(strict=False), engagement_dir)
     context_rel = _engagement_relative(context_json.resolve(strict=False), engagement_dir)
@@ -1507,9 +1513,9 @@ def run(args) -> None:
 
         # Final mode refuses to write an incomplete submission.
         # Raised BEFORE any file write or artifact POST — a gated finding leaves
-        # no partial artifacts behind. Repro-run state is deliberately NOT part of
-        # this gate: see ``_repro_runs`` — an unreachable run row and a fabricated
-        # id are indistinguishable here, so both are advised on below.
+        # no partial artifacts behind. This local gate leaves reproduction
+        # currentness to the backend final-publication check; run fetch failures
+        # are reported below as advisories during rendering.
         if not draft and (resolved["missing"] or readiness_blockers or readiness_error):
             blockers = [
                 f"{item.get('kind', 'readiness')}: {item.get('detail', '')}".rstrip(": ")
@@ -1555,10 +1561,8 @@ def run(args) -> None:
         # measures the tool's own text) and confined to the pasteable body, so the
         # never-paste OPERATOR DETAILS proof is never counted as submission prose.
         advisories += prose_advisories(scan_markdown, steps=resolved["steps"])
-        # Both repro-run conditions advise. Refusing on either would gate a publish
-        # on something that is not a fact about the document: an absent repro_runs
-        # is every finding recorded before the field existed, and an unresolved id
-        # can be a backend hiccup as easily as an invented run.
+        # These local advisories help repair legacy findings and transient fetch
+        # failures before the backend final-publication gate checks currentness.
         for entry in repro_unresolved:
             advisories.append(
                 f"details.repro_runs cites {entry} — no audit row stands behind the "
@@ -1629,7 +1633,21 @@ def run(args) -> None:
             required_headers,
             advisories,
         )
+        external_body = _render_markdown(
+            render_finding,
+            resolved,
+            platform,
+            linked_runs,
+            repro_runs,
+            repro_unresolved,
+            draft,
+            hygiene_warnings,
+            required_headers,
+            advisories,
+            include_operator_details=False,
+        )
         submission_sha256 = hashlib.sha256(markdown.encode("utf-8")).hexdigest()
+        external_body_sha256 = hashlib.sha256(external_body.encode("utf-8")).hexdigest()
         context = _build_context(
             slug,
             platform,
@@ -1650,18 +1668,22 @@ def run(args) -> None:
             ),
             finding,
             submission_sha256,
+            external_body_sha256,
         )
         context_text = json.dumps(context, indent=2, ensure_ascii=False)
 
         previous_submission = submission_md.read_bytes() if submission_md.exists() else None
+        previous_external_body = external_body_md.read_bytes() if external_body_md.exists() else None
         previous_context = context_json.read_bytes() if context_json.exists() else None
         prior_outputs = (
             (submission_md, previous_submission),
+            (external_body_md, previous_external_body),
             (context_json, previous_context),
         )
         try:
             out_dir.mkdir(parents=True, exist_ok=True)
             submission_md.write_text(markdown, encoding="utf-8")
+            external_body_md.write_text(external_body, encoding="utf-8")
             context_json.write_text(context_text + "\n", encoding="utf-8")
         except OSError as exc:
             if not draft:

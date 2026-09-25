@@ -853,10 +853,13 @@ def _schema_specs() -> tuple[SchemaSpec, ...]:
                         "description": "file groups reviewed source in the claimed queue file; call_chain may include exact anchors in other files from the same sealed repository snapshot, but must include the claimed file.",
                     },
                     "callable_refs": {
-                        "description": "Exact callable identities copied from the current structural index. Each referenced file's coverage is derived from the union of these references on current receipts; cross-file coverage does not close that file's separate lease.",
+                        "description": "Exact callable identities from the current structural index. The CLI maps index line_start/line_end to receipt start_line/end_line. Each referenced file's coverage is derived from the union of these references on current receipts; cross-file coverage does not close that file's separate lease.",
                     },
                     "reviewed_spans": {
-                        "description": "Exact source line spans reviewed where no structural callable identity applies. A span requires a sealed callable registry publication; omitted callables are unpublished. Each span is validated against the sealed file and cannot substitute for an overlapped registered callable unless every overlapped callable is also supplied as an exact callable_ref. When structural analysis is unsupported, when the function dimension is truncated or unavailable, or when the index scanned no function scope at all (its function-scoped dimensions are unavailable), only a whole-file span can prove manual source review. Non-skipped receipts require callable_refs or reviewed_spans.",
+                        "description": "Exact source line spans reviewed where no structural callable identity applies. A span requires a sealed callable registry publication; omitted callables are unpublished. Each span is validated against the sealed file and cannot substitute for an overlapped registered callable unless every overlapped callable is also supplied as an exact callable_ref. When structural analysis is unsupported, when the function dimension is truncated or unavailable, or when the index scanned no function scope at all (its function-scoped dimensions are unavailable), only a whole-file span can prove manual source review. Non-skipped nonempty receipts require callable_refs or reviewed_spans.",
+                    },
+                    "empty_file_reviewed": {
+                        "description": "Explicit clean review of a current sealed zero-byte file. Requires file receipt kind and no callable refs or spans; bound to the claimed queue generation and lease.",
                     },
                     "hypothesis": {
                         "description": "The vulnerability hypothesis tested. What could go wrong and why.",

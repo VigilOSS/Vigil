@@ -277,6 +277,7 @@ export type SubmissionWorkspace = {
   context_path: string;
   markdown: string;
   submission_sha256: string;
+  external_body_sha256?: string;
   context: Record<string, unknown>;
   final_ready: boolean;
   blockers: string[];
@@ -360,8 +361,20 @@ export type AssessmentVerificationAudit = {
   counter_check_total: number;
   severity_variances: AssessmentFindingSeverityVariance[];
   severity_variance_total: number;
+  claim_review_pending?: boolean;
+  claim_transition_id?: number | null;
+  current_claim_sha256?: string;
   record_limit: number;
   truncated: boolean;
+};
+
+export type AssessmentConfirmCheck = {
+  method: string;
+  attempted_falsification: string;
+  expected_result: string;
+  observed_result: string;
+  completed: boolean;
+  proof_receipt_ids: number[];
 };
 
 export type AssessmentFindingTransition = {
@@ -941,6 +954,12 @@ export function listAssessmentFindings(engagementKey: string) {
   return request<AssessmentFindingDetail[]>(`/engagements/${engagementKey}/assessment/findings`);
 }
 
+export function getAssessmentFinding(engagementKey: string, findingSlug: string) {
+  return request<AssessmentFindingDetail>(
+    `/engagements/${encodeURIComponent(engagementKey)}/assessment/findings/${encodeURIComponent(findingSlug)}`,
+  );
+}
+
 export function listSubmissions(
   engagementKey: string,
   params: { findingOffset?: number; findingLimit?: number } = {},
@@ -964,6 +983,7 @@ export function getSubmissionDetail(
     versionLimit?: number;
     pendingVersionOffset?: number;
     pendingVersionLimit?: number;
+    selectedAttachmentIds?: number[];
   } = {},
 ) {
   const query = new URLSearchParams();
@@ -980,6 +1000,9 @@ export function getSubmissionDetail(
   }
   if (params.pendingVersionLimit != null) {
     query.set("pending_version_limit", String(params.pendingVersionLimit));
+  }
+  for (const attachmentId of params.selectedAttachmentIds ?? []) {
+    query.append("attachment_id", String(attachmentId));
   }
   const qs = query.toString();
   return request<SubmissionDetail>(
@@ -1842,6 +1865,8 @@ export type CodeReadinessTarget =
 export type CodeReadiness = {
   target_phase: CodeReadinessTarget;
   transition_ready: boolean;
+  structural_debt_count?: number;
+  structural_debt?: Array<{ repo_id: number; file_path: string }>;
   blockers: Array<{
     code: string;
     message: string;
@@ -1948,7 +1973,7 @@ export function getCodeCoverage(engagementKey: string, repoId?: number) {
 }
 
 export function getCodeReadiness(engagementKey: string, targetPhase: CodeReadinessTarget) {
-  const query = new URLSearchParams({ target_phase: targetPhase });
+  const query = new URLSearchParams({ target_phase: targetPhase, include_debt_paths: "true" });
   return request<CodeReadiness>(
     `/engagements/${engagementKey}/assessment/code/readiness?${query.toString()}`,
   );

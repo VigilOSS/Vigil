@@ -1718,14 +1718,7 @@ def _successful_terminal_review_row_sql(
                 )
             )
         )
-        AND (
-            NOT EXISTS (
-                SELECT 1 FROM code_files AS receipt_required_file
-                WHERE receipt_required_file.engagement_id = {queue_alias}.engagement_id
-                  AND receipt_required_file.id = {queue_alias}.file_id
-                  AND receipt_required_file.classification IN ('critical', 'high')
-            )
-            OR EXISTS (
+        AND EXISTS (
                 SELECT 1
                 FROM code_analysis_results AS source_receipt
                 WHERE source_receipt.engagement_id = {queue_alias}.engagement_id
@@ -1738,6 +1731,15 @@ def _successful_terminal_review_row_sql(
                       queue_alias, "source_receipt"
                   )})
                   AND (
+                      (source_receipt.receipt_binding_status = 'empty_file'
+                       AND EXISTS (
+                           SELECT 1 FROM code_files AS empty_source
+                           WHERE empty_source.id = {queue_alias}.file_id
+                             AND empty_source.engagement_id = {queue_alias}.engagement_id
+                             AND empty_source.loc = 0
+                             AND empty_source.file_hash = '{hashlib.sha256(b'').hexdigest()}'
+                       ))
+                      OR
                       EXISTS (
                           SELECT 1
                           FROM code_analysis_result_callables AS source_link
@@ -1751,7 +1753,6 @@ def _successful_terminal_review_row_sql(
                       )
                   )
             )
-        )
     """
 
 

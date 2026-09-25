@@ -30,7 +30,7 @@ sys.path.insert(0, str(repo_root / "src"))
 # documented to tolerate an absent agent tree.
 sys.path.insert(0, str(repo_root / "agent" / "scripts"))
 
-from tests.proof_fixtures import post_artifact_backed_source_observation  # noqa: E402
+from tests.proof_fixtures import completed_confirm_check, post_artifact_backed_source_observation  # noqa: E402
 from vigil_cli import restart_manifest  # noqa: E402
 
 
@@ -8113,7 +8113,7 @@ def _accept_verdicts(*slugs: str) -> dict[str, list[dict]]:
     return {
         "blind_triage_verdict": [
             {"id": i, "kind": "blind_triage_verdict",
-             "payload": {"finding_slug": slug, "verdict": "Accept@P3"}}
+             "payload": {"finding_slug": slug, "verdict": "Accept@P3", "packet_id": "a" * 64}}
             for i, slug in enumerate(slugs, start=1)
         ]
     }
@@ -17245,6 +17245,11 @@ def _confirm_export_finding(client, slug: str) -> None:
         },
     )
     assert run.status_code == 201, run.text
+    linked = client.post(
+        f"{_EXPORT_BASE}/findings/{slug}/links",
+        json={"link_kind": "proof_run", "target_kind": "assessment_run", "target_id": run.json()["id"]},
+    )
+    assert linked.status_code == 200, linked.text
     receipt = post_artifact_backed_source_observation(
         client,
         f"{_EXPORT_BASE}/proof-receipts",
@@ -17268,6 +17273,7 @@ def _confirm_export_finding(client, slug: str) -> None:
             "reason_text": "Independent review reproduced the finding.",
             "source_name": "report-verifier",
             "proof_receipt_ids": [receipt.json()["id"]],
+            "confirm_check": completed_confirm_check(receipt.json()["id"]),
         },
     )
     assert verified.status_code == 200, verified.text

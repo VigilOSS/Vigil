@@ -91,6 +91,18 @@ def test_patch_surface_resolves_to_covered_with_rationale(client, isolate_settin
     assert "GET handler with numeric id parameter" in body["rationale"]
 
 
+def test_patch_surface_accepts_4096_character_followup(client, isolate_settings):
+    _seed_engagement(client, isolate_settings)
+    created = _create_surface(client)
+    followup = "x" * 4096
+    response = client.patch(
+        f"{ASSESSMENT_BASE}/surfaces/{created['id']}",
+        json={"status": "partially-covered", "rationale": "next pass", "followup_condition": followup},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["followup_condition"] == followup
+
+
 def test_list_surfaces_is_bounded_and_paginates(client, isolate_settings):
     _seed_engagement(client, isolate_settings)
     created = [

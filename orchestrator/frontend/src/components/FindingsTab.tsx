@@ -8,6 +8,7 @@ import type {
   AssessmentFindingLink,
   AssessmentFindingTransition,
   AssessmentFindingTransitionSummary,
+  AssessmentConfirmCheck,
   AssessmentVerificationAudit,
   FindingDetails,
   FindingPocRequest,
@@ -17,7 +18,7 @@ import type {
   IntelResolutionResult,
 } from "../lib/api";
 import { Check, Copy, Link as LinkIcon, List, Table2 } from "lucide-react";
-import { getAssessmentFindingTransition, listAssessmentFindingGroups, listAssessmentFindingLinks, listAssessmentFindingTransitions, resolveIntelIds } from "../lib/api";
+import { getAssessmentFinding, getAssessmentFindingTransition, listAssessmentFindingGroups, listAssessmentFindingLinks, listAssessmentFindingTransitions, resolveIntelIds } from "../lib/api";
 import { JsonTree } from "./ArtifactViewer";
 import { JsonView } from "./JsonView";
 import { useBodyScrollLock, useModalFocus } from "../lib/modalScrollLock";
@@ -395,6 +396,7 @@ export type Derived = {
   notes?: string;
   evidence_ref?: string;
   code_snapshot_status?: "current" | "stale" | "unbound" | "not_applicable";
+  verification_audit?: AssessmentVerificationAudit;
   // derived
   details: FindingDetails;
   provenance: FindingProvenance | null;
@@ -907,6 +909,7 @@ export function FindingsTab({
         notes: isDetail(f) ? f.notes : undefined,
         evidence_ref: isDetail(f) ? f.evidence_ref : undefined,
         code_snapshot_status: isDetail(f) ? f.code_snapshot_status : undefined,
+        verification_audit: isDetail(f) ? f.verification_audit : undefined,
         details,
         provenance,
         links,
@@ -1933,6 +1936,8 @@ function Drawer({
     initialTab && d?.slug === initialTabSlug ? initialTab : "overview";
   const [tab, setTabState] = useState<TabId>(deepLinkTab);
   const [proseMode, setProseMode] = useState<ProseMode>("rendered");
+  const [verificationAudit, setVerificationAudit] = useState(d.verification_audit);
+  const [verificationAuditUnavailable, setVerificationAuditUnavailable] = useState(false);
   const [mdCopied, setMdCopied] = useState(false);
   const [linkCopied, setLinkCopied] = useState(false);
   const setTab = (next: TabId) => {
@@ -1950,6 +1955,21 @@ function Drawer({
     setProseMode("rendered");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [d?.slug]);
+
+  useEffect(() => {
+    let current = true;
+    setVerificationAudit(d.verification_audit);
+    setVerificationAuditUnavailable(false);
+    if (d.verification_audit) return () => { current = false; };
+    getAssessmentFinding(engagementKey, d.slug)
+      .then((finding) => {
+        if (current) setVerificationAudit(finding.verification_audit);
+      })
+      .catch(() => {
+        if (current) setVerificationAuditUnavailable(true);
+      });
+    return () => { current = false; };
+  }, [engagementKey, d.slug, d.verification_audit]);
 
   const linkedFindings = d.links.filter((l) => l.target_kind === "finding");
   const linkedChains = d.links
@@ -2087,6 +2107,20 @@ function Drawer({
           )}
           {d.cwe_id && <span className="tag cwe">{d.cwe_id}</span>}
         </div>
+        {verificationAuditUnavailable && (
+          <div className="submission-blockers" role="status">Claim review status unavailable</div>
+        )}
+        {verificationAudit?.claim_review_pending && (
+          <div className="submission-blockers" role="status" aria-label="Claim review pending">
+            <strong>Claim review pending</strong>
+            <span>
+              Independent review required for claim transition {verificationAudit.claim_transition_id ?? "unknown"}.
+            </span>
+            {verificationAudit.current_claim_sha256 && (
+              <code>Current claim SHA-256: {verificationAudit.current_claim_sha256}</code>
+            )}
+          </div>
+        )}
       </div>
       <div className="drawer-tabs">
         {visibleTabs.map((t) => (
@@ -2841,6 +2875,32 @@ function hasVerificationAudit(audit: AssessmentVerificationAudit | undefined): b
   );
 }
 
+function parseConfirmCheck(metadataJson: string): AssessmentConfirmCheck | null {
+  try {
+    const metadata: unknown = JSON.parse(metadataJson);
+    if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return null;
+    const value = (metadata as Record<string, unknown>).confirm_check;
+    if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+    const check = value as Record<string, unknown>;
+    const textFields = [
+      "method", "attempted_falsification", "expected_result", "observed_result",
+    ] as const;
+    if (textFields.some((field) => typeof check[field] !== "string")) return null;
+    if (typeof check.completed !== "boolean" || !Array.isArray(check.proof_receipt_ids)) return null;
+    if (!check.proof_receipt_ids.every((id) => Number.isInteger(id) && Number(id) > 0)) return null;
+    return {
+      method: check.method as string,
+      attempted_falsification: check.attempted_falsification as string,
+      expected_result: check.expected_result as string,
+      observed_result: check.observed_result as string,
+      completed: check.completed,
+      proof_receipt_ids: check.proof_receipt_ids as number[],
+    };
+  } catch {
+    return null;
+  }
+}
+
 function HistoryRow({
   transition,
   engagementKey,
@@ -2867,11 +2927,12 @@ function HistoryRow({
   const hasSnapshot = isTransitionSummary(transition)
     ? transition.has_snapshot
     : [transition.details_before_json, transition.details_after_json, transition.notes_before_json, transition.notes_after_json].some(Boolean);
+  const confirmCheck = detail ? parseConfirmCheck(detail.metadata_json) : null;
   // The compact projection deliberately omits verification-audit bodies and
   // counts. Keep every summary row drill-downable so an audit-only transition
   // cannot disappear merely because it has no narrative or content snapshot.
   const canExpand = isTransitionSummary(transition) || Boolean(
-    preview || hasSnapshot || hasVerificationAudit(detail?.verification_audit),
+    preview || hasSnapshot || hasVerificationAudit(detail?.verification_audit) || confirmCheck,
   );
 
   const loadDetail = (open: boolean) => {
@@ -2943,6 +3004,7 @@ function HistoryRow({
               <Prose text={transition.reason_text} mode="rendered" />
             )}
             {detail?.verification_audit && <VerificationAudit audit={detail.verification_audit} />}
+            {confirmCheck && <ConfirmCheckAudit check={confirmCheck} />}
             {detail && [detail.details_before_json, detail.details_after_json, detail.notes_before_json, detail.notes_after_json].some(Boolean) && (
               <details className="detail-disclosure history-snapshot">
                 <summary>Changed content</summary>
@@ -2955,6 +3017,22 @@ function HistoryRow({
           </div>
         </details>
       )}
+    </div>
+  );
+}
+
+function ConfirmCheckAudit({ check }: { check: AssessmentConfirmCheck }) {
+  return (
+    <div className="tl-audit-record">
+      <div className="tl-audit-title">Structured confirmation check</div>
+      <dl>
+        <dt>Completed</dt><dd>{check.completed ? "Yes" : "No"}</dd>
+        <dt>Method</dt><dd>{check.method}</dd>
+        <dt>Attempted falsification</dt><dd>{check.attempted_falsification}</dd>
+        <dt>Expected</dt><dd>{check.expected_result}</dd>
+        <dt>Observed</dt><dd>{check.observed_result}</dd>
+        <dt>Proof receipts</dt><dd>{check.proof_receipt_ids.join(", ")}</dd>
+      </dl>
     </div>
   );
 }

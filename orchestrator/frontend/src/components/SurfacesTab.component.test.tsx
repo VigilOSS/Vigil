@@ -171,15 +171,16 @@ describe("SurfacesTab lifecycle", () => {
     fireEvent.click(screen.getByRole("button", { name: "Mark partially covered" }));
     expect((await screen.findByRole("alert")).textContent).toMatch(/follow-up condition is required/i);
 
+    const followup = "Retest with org admin. ".repeat(30);
     fireEvent.change(screen.getByLabelText("Required follow-up condition"), {
-      target: { value: "Retest with org admin" },
+      target: { value: followup },
     });
     fireEvent.click(screen.getByRole("button", { name: "Mark partially covered" }));
 
     expect(patchAssessmentSurface).toHaveBeenCalledWith("demo", 9, {
       status: "partially-covered",
       rationale: "One identity tested",
-      followup_condition: "Retest with org admin",
+      followup_condition: followup.trim(),
     });
     expect(screen.getByRole("button", { name: "Mark administratively closed" })).toBeTruthy();
   });

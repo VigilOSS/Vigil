@@ -144,6 +144,7 @@ def _accept_verdict_row(slug: str, verdict: str = "Accept@P3") -> dict:
         "payload": {
             "finding_slug": slug,
             "verdict": verdict,
+            "packet_id": "a" * 64,
             "claimed_severity": "medium",
             "weak_points": "none material",
         },
@@ -216,6 +217,22 @@ def test_non_accept_verdict_does_not_clear_block(monkeypatch, tmp_path, capsys):
         decisions_by_kind={
             "blind_triage_verdict": [_accept_verdict_row("idor-7", "Need-More-Info")]
         },
+    )
+    with pytest.raises(SystemExit):
+        module.run(_args(eng, "report"))
+    assert "missing_blind_triage" in capsys.readouterr().err
+
+
+def test_later_blind_miss_revokes_earlier_accept(monkeypatch, tmp_path, capsys):
+    module = _load_transition_module("tp_blind_latest_miss")
+    latest = _accept_verdict_row("idor-7", "Need-More-Info")
+    latest["id"] = 2
+    older = _accept_verdict_row("idor-7", "Accept@P3")
+    eng, _ = _setup_env(
+        monkeypatch, module, tmp_path,
+        scope={"engagement_type": "web", "current_phase": "exploit"},
+        findings=[_MEDIUM_ACTIVE],
+        decisions_by_kind={"blind_triage_verdict": [latest, older]},
     )
     with pytest.raises(SystemExit):
         module.run(_args(eng, "report"))
@@ -348,6 +365,7 @@ def test_blind_triage_verdict_round_trips_to_dispatch_decisions(client, isolate_
     payload = {
         "finding_slug": "idor-7",
         "verdict": "Accept@P3",
+        "packet_id": "a" * 64,
         "claimed_severity": "medium",
         "weak_points": "single-object read, no cross-tenant proof requested",
     }
@@ -397,3 +415,17 @@ def test_blind_triage_verdict_rejects_missing_keys_and_unknown_verdicts(
     listed = client.get(f"{_RT_BASE}/dispatch-decisions?kind=blind_triage_verdict")
     assert listed.status_code == 200
     assert listed.json() == []
+
+
+def test_blind_triage_accept_requires_a_content_addressed_packet(
+    client, isolate_settings
+) -> None:
+    _seed_engagement(client, isolate_settings)
+    response = client.post(
+        f"{_RT_BASE}/dispatch-decisions",
+        json={
+            "kind": "blind_triage_verdict",
+            "payload": {"finding_slug": "idor-7", "verdict": "Accept@P3"},
+        },
+    )
+    assert response.status_code == 422, response.text

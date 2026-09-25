@@ -1388,7 +1388,7 @@ def _resolve_queue_file_ids(item: dict, code_files: list[dict]) -> list[int]:
     return [int(row['id']) for row in matches]
 
 
-def _normalize_queue_items(cfg, raw_items: list[dict]) -> list[dict]:
+def _normalize_queue_items(cfg, raw_items: list[dict], *, mode: str = "initial") -> list[dict]:
     flattened: list[dict] = []
     for item in raw_items:
         flattened.extend(_flatten_queue_specs(item))
@@ -1419,24 +1419,25 @@ def _normalize_queue_items(cfg, raw_items: list[dict]) -> list[dict]:
             sys.exit(1)
 
         file_ids = _resolve_queue_file_ids(entry, code_files)
-        if entry.get('priority') in (None, ""):
+        if mode == "initial" and entry.get('priority') in (None, ""):
             print("Queue item requires explicit priority", file=sys.stderr)
             sys.exit(1)
-        priority = entry['priority']
-        if type(priority) is not int:
+        priority = entry.get('priority')
+        if priority is not None and type(priority) is not int:
             print("Queue priority must be an integer", file=sys.stderr)
             sys.exit(1)
-        if not 0 <= priority <= 100:
+        if priority is not None and not 0 <= priority <= 100:
             print("Queue priority must be between 0 and 100", file=sys.stderr)
             sys.exit(1)
         for file_id in file_ids:
             normalized_item: dict = {
                 'file_id': file_id,
-                'priority': priority,
                 'batch_theme': str(entry.get('batch_theme', '')),
                 'slot_types': _normalize_string_list(entry.get('slot_types')),
                 'guidance_hypotheses': _normalize_string_list(entry.get('guidance_hypotheses')),
             }
+            if priority is not None:
+                normalized_item['priority'] = priority
             supersedes = entry.get("supersedes")
             if supersedes is not None:
                 if type(supersedes) is not int or supersedes <= 0:
@@ -1499,7 +1500,7 @@ def _queue(
         print("Queue items file must contain a JSON array or object", file=sys.stderr)
         sys.exit(1)
 
-    normalized_items = _normalize_queue_items(cfg, items)
+    normalized_items = _normalize_queue_items(cfg, items, mode=mode)
     if not normalized_items:
         print("Queue input does not contain any queue items", file=sys.stderr)
         sys.exit(1)
@@ -1511,14 +1512,6 @@ def _queue(
         sys.exit(1)
     if normalized_mode == "reanalysis" and not normalized_reason:
         print("Reanalysis reason is required", file=sys.stderr)
-        sys.exit(1)
-    if normalized_mode == "reanalysis" and any(
-        item.get("supersedes") is None for item in normalized_items
-    ):
-        print(
-            "Every reanalysis item requires supersedes with the exact predecessor queue row ID",
-            file=sys.stderr,
-        )
         sys.exit(1)
     if normalized_mode == "initial" and any(
         item.get("supersedes") is not None for item in normalized_items
@@ -1631,9 +1624,6 @@ def submit_queue_items(
                     },
                 )
             )
-            if totals["conflicts"]:
-                break
-
     inserted_count = totals["inserted"]
     updated_count = totals["updated"]
     already_active_count = totals["already_active"]

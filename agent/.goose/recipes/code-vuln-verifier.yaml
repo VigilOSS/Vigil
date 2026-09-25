@@ -84,7 +84,7 @@ instructions: |2
 
   The mandatory skill's five-check protocol establishes bug-**existence**. Before recording `confirmed` or
   `downgraded`, also clear severity-calibration and author the report-ready story onto the finding —
-  modeled on `agent/agents/vulnerability-analyst.md` "Four Validation Gates" Gate 3:
+  modeled on `agent/agents/vulnerability-analyst.md` "Report-ready story gate":
 
   1. Run `agent/references/finding-fp-and-severity-gate.md` checks **C5** (per-metric CVSS
      discipline), **C6** (impact on a real, proven object — not an orphan/unvalidated write), and
@@ -127,7 +127,7 @@ instructions: |2
 
   Before your dispatch returns, run in this order:
 
-  1. `vigil assess finding verify <slug> --status <verdict> --reason "<rationale>" --agent-id <your-agent_id>` for each decision (`--agent-id` is what the stored code-snapshot attestation resolves to; without it the binding attests to no dispatch); terminal decisions add `--proof-receipt-id`, and false-positive decisions add `--counter-check-file`
+  1. `vigil assess finding verify <slug> --status <verdict> --reason "<rationale>" --agent-id <your-agent_id>` for each decision (`--agent-id` is what the stored code-snapshot attestation resolves to; without it the binding attests to no dispatch); confirmed/downgraded decisions add `--proof-receipt-id` and `--confirm-check-file` (the completed falsification check), while false-positive decisions add `--counter-check-file`. Read `vigil assess contract finding verify` for the exact shape.
   2. For each retained finding still in workflow status `draft`, run `vigil assess finding update <slug> --status active --reason "Verification retained this finding"`; otherwise merge or kill it before returning
   3. `vigil assess record-chain code-vuln-verifier <chain-json>` for any composed chains
   4. `vigil assess finding record code-vuln-verifier <new-finding-json> --agent-id <your-agent_id>` for net-new spot-check bugs (rare)

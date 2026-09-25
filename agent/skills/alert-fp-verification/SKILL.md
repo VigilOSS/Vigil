@@ -484,6 +484,7 @@ vigil assess finding verify <slug> \
   --reason "Five-check complete: Checks 1-4 PASS, Check 5 survives" \
   --proof-receipt-id <proof-receipt-id-1> \
   --proof-receipt-id <proof-receipt-id-2> \
+  --confirm-check-file confirm-check.json \
   --details-inline '{
     "five_check": {
       "check_1": "PASS",
@@ -513,6 +514,9 @@ vigil assess finding verify <slug> --status false_positive \
 `counter-check.json` contains `method`, `expected_result`, `observed_result`,
 `falsified_claim`, `completed: true`, and `proof_receipt_ids`. If the check is
 incomplete, record `blocked` or `pending_runtime_proof` instead.
+`confirm-check.json` for `confirmed` or `downgraded` contains `method`,
+`attempted_falsification`, `expected_result`, `observed_result`, `completed: true`,
+and `proof_receipt_ids` cited by that decision. Record the actual observation.
 
 `downgraded`:
 
@@ -522,6 +526,7 @@ vigil assess finding verify <slug> \
   --new-severity medium \
   --reason "Check 4 DOWNGRADE: reproduction confirms sign-in anomaly but not exfil action" \
   --proof-receipt-id <proof-receipt-id-1> \
+  --confirm-check-file confirm-check.json \
   --details-inline '{
     "original_severity": "high",
     "new_severity": "medium",

@@ -392,6 +392,7 @@ class BlindTriageVerdictPayload(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     finding_slug: str = Field(min_length=1)
+    packet_id: str = Field(pattern=r"^[0-9a-f]{64}$")
     verdict: Literal[
         "Accept@P1",
         "Accept@P2",
@@ -403,6 +404,22 @@ class BlindTriageVerdictPayload(BaseModel):
         "Out-of-Scope",
         "Duplicate",
     ]
+
+
+class ReproRehearsalPayload(BaseModel):
+    """A testing dispatch's result for the current authored reproduction."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    finding_slug: str = Field(min_length=1)
+    verdict: Literal["followed", "failed", "equivalent"]
+    proof_mode: Literal["live", "source", "fuzz"]
+    verifier_dispatch_agent_id: str = Field(min_length=1)
+    runs_checked: list[int] = Field(default_factory=list)
+    observed_outcome: str = ""
+    failed_step: str = ""
+    prior_decision_id: int | None = Field(default=None, gt=0)
+    reason: str = ""
 
 
 class DecisionCreate(BaseModel):
@@ -450,6 +467,8 @@ class DecisionCreate(BaseModel):
                 ) from exc
         elif self.kind == "blind_triage_verdict":
             BlindTriageVerdictPayload.model_validate(self.payload)
+        elif self.kind == "repro_rehearsal":
+            ReproRehearsalPayload.model_validate(self.payload)
         return self
 
 

@@ -308,6 +308,7 @@ def _recent_dispatch_picture(
     now = dt.datetime.now(dt.timezone.utc)
     stale: list[dict[str, Any]] = []
     gaps: list[dict[str, Any]] = []
+    closable_handoffs: list[dict[str, Any]] = []
     # Terminal dispatch with no handoff row = silent state-loss: nothing durable
     # explains why the worker died. A `dispatch_reconciliation` decision takes an
     # honestly-empty worker off this worklist without fabricating a handoff.
@@ -318,6 +319,11 @@ def _recent_dispatch_picture(
         row_status = str(row["status"] or "")
         handoff_status = handoff_status_by_agent.get(agent_id)
         if row_status == _IN_PROGRESS_STATUS:
+            if handoff_status in {"ready", "blocked"}:
+                closable_handoffs.append(
+                    {"agent_id": agent_id, "agent_role": agent_role,
+                     "handoff_status": handoff_status}
+                )
             # In-progress with no handoff = running but not yet checkpointed.
             if handoff_status is None:
                 gaps.append(
@@ -379,6 +385,8 @@ def _recent_dispatch_picture(
         "stale_in_progress_dispatches_count": len(stale),
         "handoff_gaps": gaps[:_DISPATCH_LIST_RENDER_CAP],
         "handoff_gaps_count": len(gaps),
+        "closable_handoffs": closable_handoffs[:_DISPATCH_LIST_RENDER_CAP],
+        "closable_handoffs_count": len(closable_handoffs),
         "terminal_no_handoff": terminal_no_handoff[:_DISPATCH_LIST_RENDER_CAP],
         "terminal_no_handoff_count": len(terminal_no_handoff),
         "stale_threshold_hours": reported_threshold,
@@ -830,11 +838,149 @@ def _per_input_coverage_section(
 _OPEN_LEASE_RENDER_CAP = 10
 
 
-def _code_analysis_section(engagement_id: int) -> dict[str, Any]:
-    """Open code-analysis leases, as the code service itself defines them."""
-    return code_analysis.open_authoring_leases(
+def _code_analysis_section(
+    engagement_id: int, engagement_type: str, current_code_phase: str
+) -> dict[str, Any]:
+    """Project the existing code gate, queue, and repository identities."""
+    section = code_analysis.open_authoring_leases(
         engagement_id, limit=_OPEN_LEASE_RENDER_CAP
     )
+    repos = code_analysis.list_code_repos(engagement_id)
+    if engagement_type not in {"code", "both"} and not repos:
+        return section
+    coverage = code_analysis.code_coverage_summary(engagement_id)
+    confidence = coverage.get("confidence") or {}
+    triggers = coverage.get("trigger_summary") or {}
+    coverage_gate = coverage.get("gate") or {}
+    coverage_by_classification = {}
+    for classification, counts in (coverage.get("by_classification") or {}).items():
+        if not isinstance(counts, dict):
+            continue
+        total = int(counts.get("count") or 0)
+        analyzed = int(counts.get("analyzed") or 0)
+        coverage_by_classification[str(classification)] = {
+            "count": total,
+            "analyzed": analyzed,
+            "remaining": max(0, total - analyzed),
+        }
+    readiness_target = code_analysis.next_code_readiness_phase(current_code_phase)
+    readiness = (
+        code_analysis.code_readiness(
+            engagement_id, target_phase=readiness_target
+        )
+        if readiness_target
+        else None
+    )
+    section.update({
+        "queue_count": int(confidence.get("active_queue_items") or 0),
+        "coverage_by_classification": coverage_by_classification,
+        "trigger_counts": {
+            "pending": int(triggers.get("pending") or 0),
+            "queued": int(triggers.get("queued") or 0),
+        },
+        "coverage_gate": {
+            "passed": coverage_gate.get("passed") is True,
+            "reasons": list(coverage_gate.get("reasons") or []),
+        },
+        "next_gate": None if readiness is None else {
+            "target_phase": readiness_target,
+            "transition_ready": readiness.get("transition_ready") is True,
+            "blocker_codes": [
+                str(row.get("code")) for row in readiness.get("blockers", [])
+                if isinstance(row, dict) and row.get("code")
+            ],
+            "structural_debt_count": int(
+                readiness.get("structural_debt_count") or 0
+            ),
+        },
+        "reference_repos": [
+            {"repo_id": row.get("id"), "repo_key": row.get("repo_key"),
+             "repo_generation": row.get("active_generation")}
+            for row in repos if row.get("repo_role") == "reference"
+        ][:10],
+        "reference_repos_count": sum(
+            row.get("repo_role") == "reference" for row in repos
+        ),
+    })
+    return section
+
+
+def _credential_needs_section(connection, engagement_id: int) -> dict[str, Any]:
+    """Bounded owner queue from unresolved dispatch decisions and blocked findings."""
+    decisions = connection.execute(
+        "SELECT id, payload_json FROM assessment_dispatch_decisions "
+        "WHERE engagement_id = ? AND kind = 'dispatch_blocked' AND resolved = 0 "
+        "ORDER BY created_at DESC, id DESC LIMIT 10",
+        (engagement_id,),
+    ).fetchall()
+    findings = connection.execute(
+        "SELECT slug, title, severity, details_json FROM assessment_findings "
+        "WHERE engagement_id = ? AND verification_status = 'blocked' "
+        "ORDER BY updated_at DESC, id DESC LIMIT 10",
+        (engagement_id,),
+    ).fetchall()
+    count = connection.execute(
+        "SELECT (SELECT COUNT(*) FROM assessment_dispatch_decisions WHERE engagement_id = ? "
+        "AND kind = 'dispatch_blocked' AND resolved = 0) + "
+        "(SELECT COUNT(*) FROM assessment_findings WHERE engagement_id = ? "
+        "AND verification_status = 'blocked')",
+        (engagement_id, engagement_id),
+    ).fetchone()[0]
+    items = []
+    for row in decisions:
+        payload = _json_obj(row["payload_json"])
+        items.append({
+            "source": "dispatch_decision", "id": row["id"],
+            "identity": str(payload.get("identity") or "")[:128],
+            "surface": str(payload.get("surface") or "")[:200],
+            "need": str(payload.get("need") or payload.get("reason") or "")[:300],
+        })
+    for row in findings:
+        details = _json_obj(row["details_json"])
+        requirement = details.get("unblock_requirements") or {}
+        items.append({
+            "source": "finding", "slug": row["slug"],
+            "severity": row["severity"],
+            "identity": str(requirement.get("kind") or "")[:128],
+            "surface": str(row["title"] or "")[:200],
+            "need": str(requirement.get("description") or details.get("block_reason") or "")[:300],
+            "requested_from": str(requirement.get("requested_from") or "")[:128],
+        })
+    return {"count": int(count), "items": items[:10]}
+
+
+def _contradiction_reviews_section(connection, engagement_id: int) -> dict[str, Any]:
+    predicate = (
+        "links.engagement_id = ? AND links.link_kind = 'contradicts' "
+        "AND links.target_kind = 'finding' AND links.retired_at IS NULL"
+    )
+    count = connection.execute(
+        f"SELECT COUNT(*) FROM assessment_finding_links AS links WHERE {predicate}",
+        (engagement_id,),
+    ).fetchone()[0]
+    rows = connection.execute(
+        f"""
+        SELECT links.id, COALESCE(target.slug, links.target_ref) AS target_slug,
+               links.notes, source.slug AS source_slug
+        FROM assessment_finding_links AS links
+        JOIN assessment_findings AS source ON source.id = links.finding_id
+        LEFT JOIN assessment_findings AS target
+          ON target.id = links.target_id AND target.engagement_id = links.engagement_id
+        WHERE {predicate}
+        ORDER BY links.id DESC LIMIT 10
+        """,
+        (engagement_id,),
+    ).fetchall()
+    return {
+        "count": int(count),
+        "items": [
+            {
+                "link_id": row["id"], "source_slug": row["source_slug"],
+                "target_slug": row["target_slug"], "notes": row["notes"],
+            }
+            for row in rows
+        ],
+    }
 
 
 def build_resume_brief(
@@ -861,6 +1007,7 @@ def build_resume_brief(
     engagement = _engagement_or_404(engagement_id)
     root = Path(engagement.engagement_root)
     scope = _read_scope(root)
+    engagement_type = str(scope.get("engagement_type") or "web")
     canonical_finding = canonical_finding_alias(finding) if finding else ""
     search_terms = [term for term in (canonical_finding, q) if term]
     search_text = " ".join(search_terms)
@@ -904,11 +1051,14 @@ def build_resume_brief(
             ),
         }
         counts = _counts(connection, engagement_id)
-        surfaces_section = _surfaces_section(connection, engagement_id)
-        work_buffer_section = _work_buffer_section(connection, engagement_id)
+        surfaces_section = _surfaces_section(connection, engagement_id) if engagement_type != "code" else {}
+        work_buffer_section = _work_buffer_section(connection, engagement_id) if engagement_type != "code" else {}
         attempts_section = _attempts_section(connection, engagement_id, since=since)
-        per_input_coverage_section = _per_input_coverage_section(
-            connection, engagement_id, since=since, row_limit=per_input_limit
+        credential_needs = _credential_needs_section(connection, engagement_id)
+        contradiction_reviews = _contradiction_reviews_section(connection, engagement_id)
+        per_input_coverage_section = (
+            _per_input_coverage_section(connection, engagement_id, since=since, row_limit=per_input_limit)
+            if engagement_type != "code" else {}
         )
 
     command_matches_all = (
@@ -998,7 +1148,13 @@ def build_resume_brief(
         "read_first_notes": _resume_note_pointers(engagement_id, since=since),
     }
     dispatch_picture = _recent_dispatch_picture(engagement_id, max_age_hours=max_age_hours)
-    code_analysis_section = _code_analysis_section(engagement_id)
+    current_code_phase = str(
+        (scope.get("code_phase") if engagement_type == "both" else scope.get("current_phase"))
+        or ("ingest" if engagement_type in {"code", "both"} else "")
+    )
+    code_analysis_section = _code_analysis_section(
+        engagement_id, engagement_type, current_code_phase
+    )
     knowledge_drift = _knowledge_drift_section(engagement_id)
     recent_decisions = _recent_decisions(engagement_id, since=since)
     with get_connection() as connection:
@@ -1017,6 +1173,7 @@ def build_resume_brief(
             "root": str(root),
             "current_phase": scope.get("current_phase") or "unknown",
             "scope_status": scope.get("status") or engagement.status,
+            "engagement_type": engagement_type,
             "host_count": len(scope.get("hosts") or []) if isinstance(scope.get("hosts"), list) else 0,
         },
         "query": {"q": q, "finding": canonical_finding or finding, "agent_id": agent_id, "since": since},
@@ -1024,6 +1181,8 @@ def build_resume_brief(
         "surfaces": surfaces_section,
         "work_buffer": work_buffer_section,
         "attempts": attempts_section,
+        "credential_needs": credential_needs,
+        "contradiction_reviews": contradiction_reviews,
         "per_input_coverage": per_input_coverage_section,
         "target_finding": target_finding,
         "findings": findings,

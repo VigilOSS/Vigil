@@ -91,3 +91,20 @@ def test_resume_brief_reports_the_true_total_behind_a_capped_lease_list():
     )
 
     assert "showing 1 of 14" in out
+
+
+def test_resume_brief_preserves_open_lease_total_when_rendering_classification_tiers():
+    out = resume_brief._render_markdown({
+        "engagement": {"key": "eng"},
+        "code_analysis": {
+            "open_leases": [_OPEN_LEASE],
+            "open_leases_count": 14,
+            "coverage_by_classification": {
+                "high": {"count": 10, "analyzed": 8, "remaining": 2},
+                "skip": {"count": 20, "analyzed": 3, "remaining": 17},
+            },
+        },
+    })
+
+    assert "open analysis leases (14)" in out
+    assert "showing 1 of 14" in out

@@ -44,6 +44,84 @@ def _coverage():
     }
 
 
+def test_default_coverage_shows_next_hard_gate_and_bounded_debt(
+    monkeypatch, tmp_path, capsys
+):
+    module = _load_module("test_code_readiness_default_next_gate")
+    (tmp_path / "scope.json").write_text(
+        '{"engagement_type":"code","current_phase":"hunt"}', encoding="utf-8"
+    )
+    requested = []
+
+    class _Client:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def get(self, path):
+            requested.append(path)
+            if path == "code/coverage":
+                return _coverage()
+            return {
+                "target_phase": "verify-variant", "transition_ready": False,
+                "blockers": [{"code": "structural_analysis_debt_unreviewed", "message": "3 files", "repo_id": 7}],
+                "structural_debt_count": 15,
+                "structural_debt": [
+                    {"repo_id": 7, "file_path": f"src/{i}.py",
+                     "classification": "skip" if i < 2 else "high",
+                     "structural_analysis_status": "unsupported" if i < 2 else "degraded",
+                     "structural_artifact_truncated": i == 2}
+                    for i in range(15)
+                ],
+            }
+
+    monkeypatch.setattr(module, "AssessmentClient", _Client)
+    monkeypatch.setattr(
+        module, "load_config", lambda *_args: SimpleNamespace(
+            base_url="http://example.test", engagement_key="eng-code",
+            engagement_dir=str(tmp_path),
+        ),
+    )
+    module.run(_args(None))
+    out = capsys.readouterr().out
+    assert "Next hard gate (verify-variant): BLOCKED" in out
+    assert "structural debt: 15 file(s)" in out
+    assert out.index("Next hard gate (verify-variant)") < out.index("Review Quality:")
+    assert "skip=2" in out and "high=13" in out
+    assert "unsupported=2" in out and "degraded=13" in out
+    assert "src/0.py" in out and "classification=skip" in out
+    assert "showing 10 of 15" in out and "src/14.py" not in out
+    assert "code/readiness?target_phase=verify-variant&include_debt_paths=true" in requested[-1]
+    assert requested == [
+        "code/coverage",
+        "code/readiness?target_phase=verify-variant&include_debt_paths=true",
+    ]
+
+
+def test_readiness_fetch_includes_debt_paths_for_bounded_default_preview():
+    module = _load_module("test_code_readiness_debt_path_query")
+    assert module._readiness_endpoint("verify-variant") == (
+        "code/readiness?target_phase=verify-variant&include_debt_paths=true"
+    )
+
+
+def test_skip_classification_reports_review_and_structural_debt_counts(capsys):
+    module = _load_module("test_code_readiness_skip_debt_row")
+    module._print_coverage(
+        {
+            "total_files": 4,
+            "by_classification": {"skip": {"count": 4, "analyzed": 1}},
+        },
+        structural_debt_by_classification={"skip": 3},
+    )
+    assert "4 files |    1 reviewed | structural debt: 3" in capsys.readouterr().out
+
+
 def test_code_coverage_can_require_target_transition_readiness(monkeypatch, capsys):
     module = _load_module("test_code_readiness_cli_blocks")
     requested: list[str] = []
@@ -88,7 +166,10 @@ def test_code_coverage_can_require_target_transition_readiness(monkeypatch, caps
         module.run(_args("hunt"))
 
     assert exc.value.code == 1
-    assert requested == ["code/coverage", "code/readiness?target_phase=hunt"]
+    assert requested == [
+        "code/coverage",
+        "code/readiness?target_phase=hunt&include_debt_paths=true",
+    ]
     output = capsys.readouterr().out
     assert "Transition Readiness (hunt): BLOCKED" in output
     assert "threat_model_stale" in output
@@ -194,7 +275,7 @@ def test_cwe_matrix_does_not_bypass_transition_readiness(monkeypatch):
             return False
 
         def get(self, path: str):
-            assert path == "code/readiness?target_phase=hunt"
+            assert path == "code/readiness?target_phase=hunt&include_debt_paths=true"
             return {
                 "target_phase": "hunt",
                 "transition_ready": False,

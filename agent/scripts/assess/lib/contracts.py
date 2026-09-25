@@ -1731,9 +1731,9 @@ def _dispatch_root_contract() -> CommandContract:
         preferred_invocations=(
             "vigil assess agent start --role <role> --task \"...\" --dispatch-mode <mode> --skills <skills> (--rate-budget <authored> | --no-target-traffic) [--prompt-context-json <context.json> --emit-prompt]",
             "vigil assess agent bind-client-handle <agent-id> --client <client> --session-namespace <scope> --handle <session-id>",
-            "vigil assess agent done <agent-id> --finding-slugs <slug1,slug2>",
             "vigil assess agent handoff --from-json <handoff.json>",
             "vigil assess agent close <agent-id>",
+            "vigil assess agent done <agent-id> --status failed",
             "vigil assess agent reconcile-stale --dry-run",
             "vigil assess agent list [--filter-role <role>] [--status <status>]",
             "vigil assess agent render-handoff <agent-id>",
@@ -1751,9 +1751,10 @@ def _dispatch_root_contract() -> CommandContract:
             "but does not spawn a specialist. Launch the specialist in the active client using "
             "the Runtime Identity block printed by `agent start`, then run "
             "`agent bind-client-handle` so the row names the session you launched and a "
-            "mid-flight message no longer depends on a mapping you keep by hand. `agent done` "
-            "patches lifecycle directly, `agent handoff` writes a repeatable checkpoint, "
-            "`agent close` consumes a ready/blocked handoff into closure, and "
+            "mid-flight message no longer depends on a mapping you keep by hand. `agent handoff` "
+            "writes a repeatable checkpoint, `agent close` consumes a ready/blocked handoff "
+            "into closure and records its decision, while `agent done --status ...` is an "
+            "explicit raw lifecycle write for recovery. "
             "`agent render-handoff` assembles the blob the next dispatch prompt pastes verbatim.",
             "`agent start` defaults a missing --dispatch-mode from the role (warn, not block) and accepts a newly-coined mode (advisory warn). "
             "--skills is optional: set it when the applicable skill is already known, otherwise the specialist selects one from the surface and names it in its handoff. The advisory overlap scan is default-on across in-progress and completed rows; it streams paged history, ranks the five displayed rows by relevance/findings produced with deterministic tie-breaks, and prints the total count. Use --allow-duplicate only when the overlap is intentional.",
@@ -2001,7 +2002,7 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
                 "--skills (comma-separated; optional — omitting it WARNs, never blocks)",
                 "--task (one-line objective)",
                 "--application-unit-id (optional concrete application-unit identity for depth attribution)",
-                "--code-repo-id (code roles: selects the active backend repository used to render Code Source Identity; required when several active repositories exist)",
+                "--code-repo-id (code roles: selects the active analysis repository used to render Code Source Identity; required when several analysis repositories exist; reference repositories are navigation pointers)",
                 "--finding-slugs (optional canonical related/input finding set; required for a receipt-bearing code-variant-hunter dispatch)",
                 "exactly one traffic declaration: --rate-budget <authored text> or --no-target-traffic (JSON: top-level rate_budget string or no_target_traffic=true)",
                 "--prompt-context-json when --emit-prompt is set (or JSON: top-level prompt_context object) with every canonical prompt-only field documented by dispatch-template.md",
@@ -2024,10 +2025,11 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
                 "prints the backend-derived Code Source Identity block immediately after "
                 "Runtime Identity.",
                 "Every output path prints the exact authored rate budget (or an explicit no-target-traffic declaration). --emit-prompt requires the complete prompt-only object (authorized_phase, target, hunt_scope, mindset_lens, depth_expectation, oob, auth_context, credential_id, prior_state, coverage, cleanup, human_reach_decision, role_specific_additions); missing or empty values fail before the dispatch write. On a blue engagement it also validates and injects customer, platforms, and every owned regular-file tenant reference from scope.json before the write.",
+                "prompt_context prior_state is authored text capped at 4096 characters. Optional queue_item_ids (1–20 current code queue IDs) are resolved against the selected analysis repository into a backend-derived file/status manifest before dispatch. Optional lane_file names a generated code queue-fetch JSON file or newline list of indexed paths; it is validated before the write and rendered as exact item/LOC totals with bounded file/directory previews. Optional prior_agent_id quotes a bounded `agent render-handoff` result inside the untrusted prior-state boundary. Missing/stale queue IDs, an invalid lane file, or a missing handoff fail before the dispatch row is written.",
                 "`skills` on a specialist dispatch is a WARNING when missing, never a rejection — neither the CLI nor the backend blocks on it. A specialist picks its skills from what it observes, so the honest list is often known only after the dispatch runs. Set it when the applicable skill is already clear; otherwise name it in the handoff.",
                 "requested_model and requested_reasoning record the recipe YOU selected. An ordinary dispatch carries no launcher-effective or provider-observed model/reasoning — no trusted launcher integration attests them — so the row is an asserted recipe, never measured truth, and caller-supplied actual_/launcher_effective_ fields are dropped rather than stored. Leaving either unset is visible warning debt: the dispatch stays usable but is not replayable. Never invent a runtime model the client does not expose.",
                 "Discover skill names with `vigil assess list-skills` — each value must match a directory under `agent/skills/<name>/`.",
-                "Pair with `agent done` when the dispatch finishes; rows left `in-progress` past the dispatch's actual lifetime corrupt dedup checks.",
+                "On return, render the handoff and use `agent close` for ready/blocked handoffs; rows left `in-progress` past the dispatch's actual lifetime corrupt dedup checks. Use `agent done --status ...` for an explicit raw recovery write.",
             ),
             common_mistakes=(
                 ("role", "use --role for the agent command; the backend stores agent_role"),
@@ -2163,8 +2165,8 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
                 ("--finding-slugs", "appended additively to the row, not replaced"),
             ),
             notes=(
-                "Call when a dispatch returns so cross-dispatch dedup, reporting, and the audit trail see the actual outcome.",
-                "Pair `--status completed --finding-slugs <slugs>` so the row names the slugs the specialist produced; `vigil assess agent render-handoff` reads from there.",
+                "Use for a deliberate raw lifecycle write when a ready/blocked handoff cannot be closed through `agent close`. Without explicit --status, a ready/blocked handoff is refused so its closure decision is not silently skipped.",
+                "For recovery, pair `--status completed --finding-slugs <slugs>` so the row names the slugs the specialist produced; `vigil assess agent render-handoff` reads from there.",
             ),
             common_mistakes=(
                 ("status=done", "status enum is in-progress / completed / failed / aborted / blocked — 'done' is rejected"),
@@ -2270,6 +2272,8 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
                 "vigil assess agent decision --kind dispatch_blocked --phase recon --reason \"missing massdns binary in runtime image\" --surfaced-to-user",
                 "vigil assess agent decision --kind human_reach_decision --surfaced-to-user --payload-json '{\"choice\": \"pending\", \"endpoint\": \"<path-or-url>\", \"action\": \"<what-it-does>\", \"live_attempts_used\": <n>, \"destination_class\": \"real_third_party|unknown\", \"evidence\": \"<what steps 1-3 showed>\"}'",
                 "vigil assess agent decision --kind depth_deferral --surfaced-to-user --payload-json '{\"host\": \"<host>\", \"path_prefix\": \"<prefix>\", \"vuln_classes\": [\"sqli\"], \"reason\": \"<why>\"}'",
+                "vigil assess agent decision --kind claim_equivalence --payload-json '{\"finding_slug\":\"<slug>\",\"verdict\":\"equivalent\",\"claim_transition_id\":<id>,\"new_claim_sha256\":\"<digest>\",\"verifier_dispatch_agent_id\":\"<agent-id>\",\"reason\":\"<why the verified claim is unchanged>\"}'",
+                "vigil assess agent decision --kind repro_rehearsal --payload-json '{\"finding_slug\":\"<slug>\",\"verdict\":\"followed\",\"proof_mode\":\"live\",\"verifier_dispatch_agent_id\":\"<agent-id>\",\"observed_outcome\":\"<actual result>\",\"runs_checked\":[<authored-run-id>,<reviewer-run-id>]}'",
             ),
             author_supplied_fields=(
                 "--kind (scope_decision|egress_decision|dispatch_blocked|human_reach_decision|depth_deferral|... — the backend accepts any string but report-writer only renders known kinds)",
@@ -2284,6 +2288,8 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
                 "Vendor-SaaS scope warnings, egress-block decisions, and dispatch-blocked rows all share this table — keep the --kind taxonomy disciplined so report-writer can summarize by kind.",
                 "Set --surfaced-to-user for operator-facing decisions (vendor-SaaS, egress reputation, blocked dispatch) so the human-visible audit log matches what the operator was shown.",
                 "--payload-json WINS OUTRIGHT: when it is supplied the shorthand flags are ignored entirely, so a top-level --choice alongside --payload-json is silently dropped and any gate that reads `payload.choice` never fires. Put `choice` INSIDE the JSON object, never as a sibling flag.",
+                "For claim_equivalence, read finding GET's verification_audit.claim_transition_id and current_claim_sha256. A separate verifier dispatch compares the changed finding with the verified claim and records verdict=equivalent or changed with those exact values. Equivalent clears claim_review_pending; changed requires a new canonical edit and terminal verification. Report readiness and final export block while review is pending.",
+                "For repro_rehearsal, verdict is followed, failed, or equivalent; proof_mode is live, source, or fuzz. The verifier_dispatch_agent_id must name an independent dispatch with the matching role: vulnerability-analyst, code-vuln-verifier, or code-fuzz-engineer. A followed live/fuzz check needs observed_outcome, all authored repro_runs IDs in runs_checked, and a completed reviewer command run. A followed source check names the independently observed outcome. A failed check needs failed_step. An equivalent step edit needs prior_decision_id of a followed check, a fresh verifier dispatch, and reason. The backend stamps a digest of current steps and ordered run IDs; final publication requires the latest successful digest to match.",
                 # --- human_reach_decision: the side-effect preflight -------------
                 "`--kind human_reach_decision` IS THE SIDE-EFFECT PREFLIGHT GATE. Run the preflight before sending any request that could create persistent state or reach a human — signup, request-access, support/report/ticket, password-reset, contact-form, or any endpoint whose name or path suggests a write that notifies someone. The posture is CAPPED LIVE-FIRE, not zero-fire: static characterization is unlimited, and genuine ambiguity earns a small, hard, audited budget gated by this recorded decision.",
                 "Preflight step 1 — UNLIMITED static characterization, mandatory first. No request budget at all: run as many read-only, non-triggering probes as it takes to learn the methods and parameters the endpoint accepts, the response shape on a non-triggering GET/HEAD/OPTIONS (status, headers, body fields — never the write verb itself), and what the source, API spec, or documentation say it does. Cross-reference ENGAGEMENT.md §4 (No-Fire Endpoints) and §5 (Irreversible and Notifying Flows), including its Known-Safe Test Destinations table, for a pre-declared answer.",

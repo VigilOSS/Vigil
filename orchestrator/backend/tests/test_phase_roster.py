@@ -182,9 +182,10 @@ def test_transition_phase_orders_are_the_shared_rosters():
 def test_check_phase_readiness_uses_the_shared_web_roster():
     assert check_phase_readiness.PHASES == phases.WEB_PHASES
     assert tuple(check_phase_readiness._PHASE_REQUIRE_STAGE) == phases.WEB_PHASES
-    # Every CLI --phase choice is a roster value or a declared input alias.
-    assert set(check_phase_readiness._CLI_PHASE_CHOICES) == set(phases.WEB_PHASES) | set(
-        phases.PHASE_INPUT_ALIASES
+    # The readiness command accepts web and code phases plus the terminal edge.
+    assert set(check_phase_readiness._CLI_PHASE_CHOICES) == (
+        set(phases.WEB_PHASES) | set(phases.CODE_PHASES)
+        | {phases.TERMINAL_PHASE} | set(phases.PHASE_INPUT_ALIASES)
     )
     for group in (
         check_phase_readiness._INTEL_PHASES,

@@ -4,7 +4,7 @@ import json
 
 from app import db as db_module
 
-from tests.proof_fixtures import post_artifact_backed_source_observation
+from tests.proof_fixtures import completed_confirm_check, post_artifact_backed_source_observation
 from tests.test_engagements_api import write_engagement
 
 
@@ -80,7 +80,10 @@ def _legacy_authorless_finding(slug: str) -> dict:
     return {"id": finding_id, "row_version": 1}
 
 
-def _receipt(client, agent_id: str, suffix: str, *, kind: str = "source_observation") -> dict:
+def _receipt(
+    client, agent_id: str, suffix: str, *,
+    kind: str = "source_observation", finding_slug: str | None = None,
+) -> dict:
     run = client.post(
         f"{BASE}/assessment-runs",
         json={
@@ -90,6 +93,15 @@ def _receipt(client, agent_id: str, suffix: str, *, kind: str = "source_observat
         },
     )
     assert run.status_code == 201, run.text
+    if finding_slug is not None:
+        linked = client.post(
+            f"{BASE}/findings/{finding_slug}/links",
+            json={
+                "link_kind": "proof_run", "target_kind": "assessment_run",
+                "target_id": run.json()["id"],
+            },
+        )
+        assert linked.status_code == 200, linked.text
     receipt = post_artifact_backed_source_observation(
         client,
         f"{BASE}/proof-receipts",
@@ -122,7 +134,7 @@ def test_terminal_verification_requires_healthy_independent_proof(
     assert missing.status_code == 400, missing.text
     assert "proof_receipt" in missing.json()["detail"]
 
-    hunter_receipt = _receipt(client, "HUNT-1", "hunter")
+    hunter_receipt = _receipt(client, "HUNT-1", "hunter", finding_slug="VA-001")
     not_independent = client.post(
         f"{BASE}/findings/VA-001/verify",
         json={
@@ -134,8 +146,8 @@ def test_terminal_verification_requires_healthy_independent_proof(
     assert not_independent.status_code == 400, not_independent.text
     assert "independent" in not_independent.json()["detail"]
 
-    verifier_receipt = _receipt(client, "VERIFY-1", "verifier")
-    confirmed = client.post(
+    verifier_receipt = _receipt(client, "VERIFY-1", "verifier", finding_slug="VA-001")
+    unchecked = client.post(
         f"{BASE}/findings/VA-001/verify",
         json={
             "verification_status": "confirmed",
@@ -143,10 +155,113 @@ def test_terminal_verification_requires_healthy_independent_proof(
             "proof_receipt_ids": [verifier_receipt["id"]],
         },
     )
+    assert unchecked.status_code == 400, unchecked.text
+    assert "confirm_check" in unchecked.json()["detail"]
+    incomplete = client.post(
+        f"{BASE}/findings/VA-001/verify",
+        json={
+            "verification_status": "confirmed",
+            "reason_text": "unsettled source-path proof",
+            "proof_receipt_ids": [verifier_receipt["id"]],
+            "confirm_check": {**completed_confirm_check(verifier_receipt["id"]), "completed": False},
+        },
+    )
+    assert incomplete.status_code == 400, incomplete.text
+    mismatched = client.post(
+        f"{BASE}/findings/VA-001/verify",
+        json={
+            "verification_status": "confirmed",
+            "reason_text": "unrelated falsification evidence",
+            "proof_receipt_ids": [verifier_receipt["id"]],
+            "confirm_check": completed_confirm_check(hunter_receipt["id"]),
+        },
+    )
+    assert mismatched.status_code == 400, mismatched.text
+    assert "decision proof receipts" in mismatched.json()["detail"]
+    unrelated_receipt = _receipt(client, "VERIFY-1", "unrelated-check")
+    unrelated_check = client.post(
+        f"{BASE}/findings/VA-001/verify",
+        json={
+            "verification_status": "confirmed",
+            "reason_text": "The check cites unrelated verifier work.",
+            "proof_receipt_ids": [verifier_receipt["id"], unrelated_receipt["id"]],
+            "confirm_check": completed_confirm_check(unrelated_receipt["id"]),
+        },
+    )
+    assert unrelated_check.status_code == 400, unrelated_check.text
+    assert "finding-linked" in unrelated_check.json()["detail"]
+    confirmed = client.post(
+        f"{BASE}/findings/VA-001/verify",
+        json={
+            "verification_status": "confirmed",
+            "reason_text": "independent source-path proof",
+            "proof_receipt_ids": [verifier_receipt["id"]],
+            "confirm_check": {
+                "method": "Replay with a second tenant",
+                "attempted_falsification": "Check whether object ownership stops the read",
+                "expected_result": "The second tenant receives a denial",
+                "observed_result": "The second tenant receives the object",
+                "proof_receipt_ids": [verifier_receipt["id"]],
+                "completed": True,
+            },
+        },
+    )
     assert confirmed.status_code == 200, confirmed.text
     finding = confirmed.json()["finding"]
     assert finding["verification_status"] == "confirmed"
     assert [row["id"] for row in finding["proof_receipts"]] == [verifier_receipt["id"]]
+    transition = client.get(f"{BASE}/findings/VA-001/transitions").json()[0]
+    assert json.loads(transition["metadata_json"])["confirm_check"]["attempted_falsification"] == "Check whether object ownership stops the read"
+
+
+def test_terminal_verification_requires_receipt_run_linked_to_finding(
+    client, isolate_settings
+) -> None:
+    _seed(client, isolate_settings)
+    _finding(client, "VA-099")
+    verifier_receipt = _receipt(client, "VERIFY-1", "unlinked-verifier")
+    payload = {
+        "verification_status": "confirmed",
+        "reason_text": "Independent source-path proof",
+        "proof_receipt_ids": [verifier_receipt["id"]],
+        "confirm_check": completed_confirm_check(verifier_receipt["id"]),
+    }
+
+    unlinked = client.post(f"{BASE}/findings/VA-099/verify", json=payload)
+    assert unlinked.status_code == 400, unlinked.text
+    assert "proof_run" in unlinked.json()["detail"]
+
+    unknown_run = client.post(
+        f"{BASE}/findings/VA-099/links",
+        json={
+            "link_kind": "proof_run", "target_kind": "assessment_run",
+            "target_id": 999999,
+        },
+    )
+    assert unknown_run.status_code == 404, unknown_run.text
+
+    linked = client.post(
+        f"{BASE}/findings/VA-099/links",
+        json={
+            "link_kind": "proof_run",
+            "target_kind": "assessment_run",
+            "target_id": verifier_receipt["run_id"],
+        },
+    )
+    assert linked.status_code == 200, linked.text
+    retired = client.patch(
+        f"{BASE}/findings/VA-099/links/{linked.json()['id']}",
+        json={"retired": True},
+    )
+    assert retired.status_code == 200, retired.text
+    assert client.post(f"{BASE}/findings/VA-099/verify", json=payload).status_code == 400
+    reactivated = client.patch(
+        f"{BASE}/findings/VA-099/links/{linked.json()['id']}",
+        json={"retired": False},
+    )
+    assert reactivated.status_code == 200, reactivated.text
+    confirmed = client.post(f"{BASE}/findings/VA-099/verify", json=payload)
+    assert confirmed.status_code == 200, confirmed.text
 
 
 def test_terminal_verification_cannot_invent_missing_author_identity(
@@ -160,7 +275,7 @@ def test_terminal_verification_cannot_invent_missing_author_identity(
     assert readable.status_code == 200, readable.text
     assert readable.json()["provenance"] == {}
 
-    hunter_receipt = _receipt(client, "HUNT-1", "legacy-self-review")
+    hunter_receipt = _receipt(client, "HUNT-1", "legacy-self-review", finding_slug="VA-003")
     response = client.post(
         f"{BASE}/findings/VA-003/verify",
         json={
@@ -228,7 +343,7 @@ def test_merge_cannot_replace_unknown_target_author_with_source_author(
     )
     assert merged.status_code == 200, merged.text
 
-    hunter_receipt = _receipt(client, "HUNT-1", "merged-unknown-self-review")
+    hunter_receipt = _receipt(client, "HUNT-1", "merged-unknown-self-review", finding_slug="VA-005")
     response = client.post(
         f"{BASE}/findings/VA-005/verify",
         json={
@@ -270,7 +385,7 @@ def test_false_positive_requires_completed_structured_countercheck(
 ) -> None:
     _seed(client, isolate_settings)
     _finding(client, "VA-010")
-    receipt = _receipt(client, "VERIFY-1", "fp")
+    receipt = _receipt(client, "VERIFY-1", "fp", finding_slug="VA-010")
 
     prose_only = client.post(
         f"{BASE}/findings/VA-010/verify",
@@ -373,7 +488,7 @@ def test_missing_raw_evidence_blocks_only_a_dependent_terminal_decision(
 
     _seed(client, isolate_settings)
     _finding(client, "VA-020")
-    receipt = _receipt(client, "VERIFY-1", "missing")
+    receipt = _receipt(client, "VERIFY-1", "missing", finding_slug="VA-020")
     with db_module.get_connection() as connection:
         connection.execute(
             "UPDATE assessment_proof_receipts SET recorded_health = 'tombstoned' WHERE id = ?",
@@ -409,24 +524,26 @@ def test_fresh_reverification_supersedes_old_receipt_health_dependency(
 
     _seed(client, isolate_settings)
     _finding(client, "VA-021")
-    old_receipt = _receipt(client, "VERIFY-1", "old-decision")
+    old_receipt = _receipt(client, "VERIFY-1", "old-decision", finding_slug="VA-021")
     original = client.post(
         f"{BASE}/findings/VA-021/verify",
         json={
             "verification_status": "confirmed",
             "reason_text": "initial independent proof",
             "proof_receipt_ids": [old_receipt["id"]],
+            "confirm_check": completed_confirm_check(old_receipt["id"]),
         },
     )
     assert original.status_code == 200, original.text
 
-    fresh_receipt = _receipt(client, "VERIFY-1", "fresh-decision")
+    fresh_receipt = _receipt(client, "VERIFY-1", "fresh-decision", finding_slug="VA-021")
     refreshed = client.post(
         f"{BASE}/findings/VA-021/verify",
         json={
             "verification_status": "confirmed",
             "reason_text": "fresh independent proof supersedes the old decision",
             "proof_receipt_ids": [fresh_receipt["id"]],
+            "confirm_check": completed_confirm_check(fresh_receipt["id"]),
         },
     )
     assert refreshed.status_code == 200, refreshed.text
@@ -477,7 +594,7 @@ def test_cvss_band_departure_requires_attributed_variance_event(
             "severity_band_rationale": "legacy free text is not an approval",
         },
     )
-    receipt = _receipt(client, "VERIFY-1", "variance")
+    receipt = _receipt(client, "VERIFY-1", "variance", finding_slug="VA-030")
 
     missing = client.post(
         f"{BASE}/findings/VA-030/verify",
@@ -485,10 +602,14 @@ def test_cvss_band_departure_requires_attributed_variance_event(
             "verification_status": "confirmed",
             "reason_text": "business impact supports high",
             "proof_receipt_ids": [receipt["id"]],
+            "confirm_check": completed_confirm_check(receipt["id"]),
         },
     )
     assert missing.status_code == 400, missing.text
     assert "severity_variance" in missing.json()["detail"]
+    assert '"normal_band":"medium"' in missing.json()["detail"]
+    assert '"chosen_severity":"high"' in missing.json()["detail"]
+    assert f'"proof_receipt_id":{receipt["id"]}' in missing.json()["detail"]
 
     accepted = client.post(
         f"{BASE}/findings/VA-030/verify",
@@ -496,6 +617,7 @@ def test_cvss_band_departure_requires_attributed_variance_event(
             "verification_status": "confirmed",
             "reason_text": "business impact supports high",
             "proof_receipt_ids": [receipt["id"]],
+            "confirm_check": completed_confirm_check(receipt["id"]),
             "severity_variance": {
                 "normal_band": "medium",
                 "chosen_severity": "high",

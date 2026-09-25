@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 import sqlite3
 from collections.abc import Collection
@@ -88,12 +90,10 @@ _VERIFICATION_MATERIAL_DETAIL_KEYS = frozenset(
         "cwe_id",
         "cvss_score",
         "cvss_vector",
-        "evidence",
-        "exploitability",
-        "impact",
-        "proof",
     }
 )
+
+_CLAIM_REVIEW_IGNORED_DETAIL_KEYS = frozenset({"correction_history"})
 
 _FINDING_PREFIX_BY_SOURCE = {
     "exploit-developer": "EX",
@@ -351,6 +351,8 @@ def _duplicate_advisories(
     finding_id: int,
     canonical_location: str,
     root_cause_key: str,
+    defect_family: str,
+    auth_context: str,
     details: dict[str, Any],
 ) -> list[dict[str, Any]]:
     """Siblings that were already FILED and this record probably duplicates.
@@ -374,10 +376,11 @@ def _duplicate_advisories(
         WHERE engagement_id = ?
           AND id != ?
           AND submission_status != 'none'
-        ORDER BY id ASC
+          AND defect_family = ? AND auth_context = ?
+        ORDER BY id DESC
         """,
-        (engagement_id, finding_id),
-    ).fetchall()
+        (engagement_id, finding_id, defect_family, auth_context),
+    )
     advisories: list[dict[str, Any]] = []
     for row in rows:
         sibling_details = _json_object(row["details_json"])
@@ -412,6 +415,8 @@ def _duplicate_advisories(
                 ),
             }
         )
+        if len(advisories) == 10:
+            break
     return advisories
 
 
@@ -545,6 +550,8 @@ def _finding_content_snapshot(row: dict[str, Any] | Any) -> dict[str, str]:
             return row[key] if key in row.keys() else default
 
     return {
+        "title": str(get("title", "") or ""),
+        "summary": str(get("summary", "") or ""),
         "canonical_location": str(get("canonical_location", "") or ""),
         "details_json": str(get("details_json", "{}") or "{}"),
         "notes": str(get("notes", "") or ""),
@@ -571,6 +578,8 @@ def _verification_material_details_changed(
     existing_details_json: str,
     details: dict[str, Any] | None,
     details_mode: str,
+    *,
+    ignore_cvss: bool = False,
 ) -> bool:
     if details is None or details_mode == "append":
         return False
@@ -581,7 +590,278 @@ def _verification_material_details_changed(
     return any(
         (key in before) != (key in after) or before.get(key) != after.get(key)
         for key in _VERIFICATION_MATERIAL_DETAIL_KEYS
+        if not (ignore_cvss and key in _CVSS_KEYS)
     )
+
+
+def _cvss_score_band(score: float) -> str:
+    if score == 0:
+        return "info"
+    if score < 4:
+        return "low"
+    if score < 7:
+        return "medium"
+    if score < 9:
+        return "high"
+    return "critical"
+
+
+def _same_band_cvss_reduction(
+    existing_details_json: str,
+    details: dict[str, Any] | None,
+    details_mode: str,
+    severity: str,
+) -> tuple[float, float] | None:
+    if details is None or not any(key in details for key in _CVSS_KEYS):
+        return None
+    before = _json_object(existing_details_json).get("cvss_score")
+    after = _json_object(
+        _resolved_details(existing_details_json, details, details_mode)
+    ).get("cvss_score")
+    if (
+        isinstance(before, (int, float))
+        and not isinstance(before, bool)
+        and isinstance(after, (int, float))
+        and not isinstance(after, bool)
+        and float(after) < float(before)
+        and _cvss_score_band(float(before)) == severity
+        and _cvss_score_band(float(after)) == severity
+    ):
+        return float(before), float(after)
+    return None
+
+
+def _claim_review_details_changed(
+    existing_details_json: str,
+    details: dict[str, Any] | None,
+    details_mode: str,
+) -> bool:
+    if details is None:
+        return False
+    before = _json_object(existing_details_json)
+    after = _json_object(_resolved_details(existing_details_json, details, details_mode))
+    return any(
+        before.get(key) != after.get(key) or (key in before) != (key in after)
+        for key in before.keys() | after.keys()
+        if key not in _CLAIM_REVIEW_IGNORED_DETAIL_KEYS
+        and key not in _VERIFICATION_MATERIAL_DETAIL_KEYS
+    )
+
+
+def _proof_dependency_removed(
+    existing_details_json: str,
+    details: dict[str, Any] | None,
+    details_mode: str,
+) -> bool:
+    if details is None:
+        return False
+    before = _json_object(existing_details_json)
+    after = _json_object(_resolved_details(existing_details_json, details, details_mode))
+    return any(
+        key in before and key not in after
+        for key in ("evidence", "impact", "proof", "exploitability")
+    )
+
+
+def _validate_authored_repro_runs(
+    connection, engagement_id: int, authored_details: dict[str, Any]
+) -> None:
+    if "repro_runs" not in authored_details:
+        return
+    for entry in authored_details["repro_runs"]:
+        if type(entry) is int:
+            run_id = entry
+        elif isinstance(entry, str) and entry.strip().isdigit():
+            run_id = int(entry.strip())
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"details.repro_runs entry {entry!r} is not a command-run id",
+            )
+        if run_id < 1 or connection.execute(
+            "SELECT 1 FROM assessment_command_runs WHERE engagement_id = ? AND id = ?",
+            (engagement_id, run_id),
+        ).fetchone() is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"details.repro_runs command-run id {run_id} does not belong to this engagement",
+            )
+
+
+def _current_claim_sha256(row: dict[str, Any] | Any) -> str:
+    def get(key: str, default: str = "") -> Any:
+        if isinstance(row, dict):
+            return row.get(key, default)
+        return row[key] if key in row.keys() else default
+
+    details = _json_object(get("details_json", "{}"))
+    details = {
+        key: value
+        for key, value in details.items()
+        if key not in _CLAIM_REVIEW_IGNORED_DETAIL_KEYS
+    }
+    claim = {
+        "title": str(get("title", "") or ""),
+        "summary": str(get("summary", "") or ""),
+        "severity": str(get("severity", "") or ""),
+        "defect_family": str(get("defect_family", "") or ""),
+        "root_cause_key": str(get("root_cause_key", "") or ""),
+        "auth_context": str(get("auth_context", "") or ""),
+        "canonical_location": str(get("canonical_location", "") or ""),
+        "evidence_ref": str(get("evidence_ref", "") or ""),
+        "details": details,
+    }
+    encoded = json.dumps(claim, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _claim_review_status(connection, engagement_id: int, row) -> dict[str, Any]:
+    digest = _current_claim_sha256(row)
+    if _row_verification_status(row) not in {"confirmed", "downgraded"}:
+        return {
+            "claim_review_pending": False,
+            "claim_transition_id": None,
+            "current_claim_sha256": digest,
+        }
+    latest_verification = connection.execute(
+        """
+        SELECT COALESCE(MAX(id), 0) AS id
+        FROM assessment_finding_transitions
+        WHERE engagement_id = ? AND finding_id = ?
+          AND action IN ('verified_confirmed', 'verified_downgraded')
+        """,
+        (engagement_id, int(row["id"])),
+    ).fetchone()
+    latest_pending = connection.execute(
+        """
+        SELECT id FROM assessment_finding_transitions
+        WHERE engagement_id = ? AND finding_id = ?
+          AND action = 'claim_review_pending' AND id > ?
+        ORDER BY id DESC LIMIT 1
+        """,
+        (engagement_id, int(row["id"]), int(latest_verification["id"])),
+    ).fetchone()
+    transition_id = int(latest_pending["id"]) if latest_pending else None
+    pending = transition_id is not None
+    if pending:
+        decision = connection.execute(
+            """
+            SELECT payload_json FROM assessment_dispatch_decisions
+            WHERE engagement_id = ? AND kind = 'claim_equivalence'
+              AND json_valid(payload_json)
+              AND json_extract(payload_json, '$.finding_slug') = ?
+              AND json_extract(payload_json, '$.claim_transition_id') = ?
+              AND json_extract(payload_json, '$.new_claim_sha256') = ?
+            ORDER BY id DESC LIMIT 1
+            """,
+            (engagement_id, str(row["slug"]), transition_id, digest),
+        ).fetchone()
+        if decision is not None:
+            pending = _json_object(decision["payload_json"]).get("verdict") != "equivalent"
+    return {
+        "claim_review_pending": pending,
+        "claim_transition_id": transition_id,
+        "current_claim_sha256": digest,
+    }
+
+
+def validate_claim_equivalence_decision(
+    connection, engagement_id: int, payload: dict[str, Any]
+) -> None:
+    required = (
+        "finding_slug", "verdict", "claim_transition_id",
+        "new_claim_sha256", "verifier_dispatch_agent_id", "reason",
+    )
+    if any(not payload.get(field) for field in required):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"claim_equivalence requires {', '.join(required)}",
+        )
+    for field in (
+        "finding_slug", "verdict", "new_claim_sha256",
+        "verifier_dispatch_agent_id", "reason",
+    ):
+        if not isinstance(payload[field], str) or not payload[field].strip():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"claim_equivalence {field} must be non-empty text",
+            )
+    if type(payload["claim_transition_id"]) is not int:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="claim_equivalence claim_transition_id must be an integer",
+        )
+    if payload["verdict"] not in {"equivalent", "changed"}:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="claim_equivalence verdict must be equivalent or changed",
+        )
+    slug = str(payload["finding_slug"])
+    row = connection.execute(
+        "SELECT * FROM assessment_findings WHERE engagement_id = ? AND slug = ?",
+        (engagement_id, slug),
+    ).fetchone()
+    if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="claim_equivalence finding not found",
+        )
+    audit = _claim_review_status(connection, engagement_id, row)
+    if (
+        type(payload["claim_transition_id"]) is not int
+        or payload["claim_transition_id"] != audit["claim_transition_id"]
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="claim_equivalence transition is not the current claim edit",
+        )
+    if payload["new_claim_sha256"] != audit["current_claim_sha256"]:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="claim_equivalence digest does not match the current finding claim",
+        )
+    verifier_agent_id = str(payload["verifier_dispatch_agent_id"])
+    verifier = connection.execute(
+        "SELECT agent_role FROM assessment_dispatches WHERE engagement_id = ? AND agent_id = ?",
+        (engagement_id, verifier_agent_id),
+    ).fetchone()
+    if verifier is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="claim_equivalence verifier dispatch does not exist",
+        )
+    if verifier["agent_role"] not in {
+        "vulnerability-analyst", "code-vuln-verifier", "incident-verifier",
+    }:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="claim_equivalence requires a finding verifier dispatch",
+        )
+    author_id = str(_json_object(row["provenance_json"]).get("agent_id") or "")
+    if author_id and verifier_agent_id == author_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="claim_equivalence requires a separate verifier dispatch",
+        )
+    if payload["verdict"] == "equivalent":
+        changed = connection.execute(
+            """
+            SELECT 1 FROM assessment_dispatch_decisions
+            WHERE engagement_id = ? AND kind = 'claim_equivalence'
+              AND json_valid(payload_json)
+              AND json_extract(payload_json, '$.finding_slug') = ?
+              AND json_extract(payload_json, '$.claim_transition_id') = ?
+              AND json_extract(payload_json, '$.new_claim_sha256') = ?
+              AND json_extract(payload_json, '$.verdict') = 'changed'
+            LIMIT 1
+            """,
+            (engagement_id, slug, audit["claim_transition_id"], audit["current_claim_sha256"]),
+        ).fetchone()
+        if changed is not None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="a changed verdict requires a new canonical finding edit before equivalence review",
+            )
 
 
 def _merge_replaces_verification_material_details(
@@ -783,6 +1063,11 @@ def _record_finding_transition(
     elif before_content is None and after_content is not None:
         notes_history_status = "initial"
     metadata_payload = dict(metadata or {})
+    if before_content is not None and after_content is not None:
+        for field in ("title", "summary"):
+            if before_content[field] != after_content[field]:
+                metadata_payload[f"{field}_before"] = before_content[field]
+                metadata_payload[f"{field}_after"] = after_content[field]
     metadata_payload[_NOTES_HISTORY_STATUS_KEY] = notes_history_status
     cursor = connection.execute(
         """
@@ -1162,6 +1447,7 @@ def create_finding(
     code_snapshot_write_mode: str = "record",
     verification_proof_receipt_ids: list[int] | None = None,
     verification_counter_check: dict[str, Any] | None = None,
+    verification_confirm_check: dict[str, Any] | None = None,
     verification_severity_variance: dict[str, Any] | None = None,
     verification_normal_severity_band: str | None = None,
     run_candidate: dict[str, Any] | None = None,
@@ -1213,7 +1499,7 @@ def create_finding(
             )
         if (
             is_file_finding(canonical_location)
-            and code_snapshot_write_mode in {"record", "verify"}
+            and code_snapshot_write_mode == "record"
         ) or incoming_binding is not None:
             incoming_binding = _require_current_code_snapshot(
                 connection, engagement.id, provenance
@@ -1228,6 +1514,23 @@ def create_finding(
             auth_context=auth_context,
             title=title,
         )
+        if (
+            is_file_finding(canonical_location)
+            and code_snapshot_write_mode == "verify"
+            and incoming_binding is None
+        ):
+            if existing is None:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="file finding not found for verification",
+                )
+            # Runtime evidence may be verifier-owned while the source binding
+            # remains the author's current, attested snapshot. A stale binding
+            # still demands a fresh source review and explicit rebind.
+            _require_current_code_snapshot(
+                connection, engagement.id,
+                _json_object(existing["provenance_json"]),
+            )
         if code_snapshot_write_mode == "record":
             record_author = _require_record_author_dispatch(
                 connection,
@@ -1390,6 +1693,7 @@ def create_finding(
             existing_details=existing_details,
             effective_details=effective_details,
         )
+        _validate_authored_repro_runs(connection, engagement.id, authored_details)
         if (
             existing is not None
             and existing_details.get("replies") != effective_details.get("replies")
@@ -1616,6 +1920,7 @@ def create_finding(
             (
                 verification_proof_receipt_ids,
                 verification_counter_check is not None,
+                verification_confirm_check is not None,
                 verification_severity_variance is not None,
             )
         )
@@ -1625,6 +1930,8 @@ def create_finding(
             finding_id=int(finding["id"]),
             canonical_location=str(finding["canonical_location"] or ""),
             root_cause_key=str(finding["root_cause_key"] or ""),
+            defect_family=str(finding["defect_family"] or ""),
+            auth_context=str(finding["auth_context"] or ""),
             details=_json_object(finding["details_json"]),
         )
         derived_links = list(links or [])
@@ -1718,6 +2025,59 @@ def create_finding(
                     "material_change": True,
                     "relationship_change": relationship_change,
                 }
+        if (
+            existing is not None
+            and code_snapshot_write_mode == "record"
+            and _row_verification_status(existing) in {"confirmed", "downgraded"}
+            and _row_verification_status(finding) in {"confirmed", "downgraded"}
+        ):
+            cvss_reduction = _same_band_cvss_reduction(
+                str(existing["details_json"]), details, details_mode,
+                str(existing["severity"]),
+            )
+            material_change = any(
+                str(existing[field] or "") != str(finding[field] or "")
+                for field in (
+                    "severity", "defect_family", "root_cause_key", "auth_context",
+                    "canonical_location", "evidence_ref",
+                )
+            ) or _verification_material_details_changed(
+                str(existing["details_json"]), details, details_mode,
+                ignore_cvss=cvss_reduction is not None,
+            ) or _proof_dependency_removed(
+                str(existing["details_json"]), details, details_mode,
+            )
+            if material_change:
+                connection.execute(
+                    "UPDATE assessment_findings SET verification_status = 'unreviewed' WHERE id = ?",
+                    (int(finding["id"]),),
+                )
+                finding["verification_status"] = "unreviewed"
+                transition_action = "verification_invalidated"
+                transition_reason_code = "finding_content_changed"
+                transition_reason_text = "A material finding claim changed after terminal verification."
+                transition_metadata = {
+                    **(transition_metadata or {}), "material_change": True,
+                }
+            elif (
+                str(existing["title"] or "") != str(finding["title"] or "")
+                or str(existing["summary"] or "") != str(finding["summary"] or "")
+                or _claim_review_details_changed(
+                    str(existing["details_json"]), details, details_mode,
+                )
+                or cvss_reduction is not None
+            ):
+                transition_action = "claim_review_pending"
+                transition_reason_code = "claim_text_changed"
+                transition_reason_text = "The finding claim was revised after terminal verification."
+                transition_metadata = {
+                    **(transition_metadata or {}), "claim_review_pending": True,
+                }
+                if cvss_reduction is not None:
+                    transition_metadata.update({
+                        "cvss_score_before": cvss_reduction[0],
+                        "cvss_score_after": cvss_reduction[1],
+                    })
         after_state = _finding_state_snapshot(finding)
         after_content = _finding_content_snapshot(finding)
         terminal_verification_asserted = (
@@ -1788,6 +2148,7 @@ def create_finding(
                 verification_status=after_state["verification_status"],
                 proof_receipt_ids=list(verification_proof_receipt_ids or []),
                 counter_check=verification_counter_check,
+                confirm_check=verification_confirm_check,
                 severity_variance=verification_severity_variance,
                 normal_severity_band=verification_normal_severity_band,
             )
@@ -1975,6 +2336,7 @@ def patch_finding(
     details_mode: str = "merge",
     verification_proof_receipt_ids: list[int] | None = None,
     verification_counter_check: dict[str, Any] | None = None,
+    verification_confirm_check: dict[str, Any] | None = None,
     verification_severity_variance: dict[str, Any] | None = None,
     verification_normal_severity_band: str | None = None,
 ) -> dict[str, Any]:
@@ -2056,6 +2418,10 @@ def patch_finding(
             if transition_action is None:
                 transition_action = "verification_recleared"
 
+        cvss_reduction = _same_band_cvss_reduction(
+            str(existing["details_json"]), details, details_mode,
+            str(existing["severity"]),
+        )
         material_change = any(
             (
                 severity is not None and _normalize_severity(severity) != str(existing["severity"]),
@@ -2064,15 +2430,31 @@ def patch_finding(
                 auth_context is not None and auth_context != str(existing["auth_context"]),
                 canonical_location is not None
                 and canonical_location != str(existing["canonical_location"]),
-                summary is not None and summary != str(existing["summary"]),
                 evidence_ref is not None and evidence_ref != str(existing["evidence_ref"]),
-                _verification_material_details_changed(
+                transition_reason_code == "claim_retracted",
+                _proof_dependency_removed(
                     str(existing["details_json"]), details, details_mode
+                ),
+                _verification_material_details_changed(
+                    str(existing["details_json"]), details, details_mode,
+                    ignore_cvss=cvss_reduction is not None,
                 ),
             )
         )
         verification_invalidated = (
             material_change and existing_verification != "unreviewed"
+        )
+        claim_review_pending = (
+            not verification_invalidated
+            and existing_verification in {"confirmed", "downgraded"}
+            and (
+                title is not None and title != str(existing["title"])
+                or bool(summary) and summary != str(existing["summary"])
+                or _claim_review_details_changed(
+                    str(existing["details_json"]), details, details_mode
+                )
+                or cvss_reduction is not None
+            )
         )
         if verification_invalidated:
             verification_status = "unreviewed"
@@ -2081,6 +2463,17 @@ def patch_finding(
                 **(transition_metadata or {}),
                 "material_change": True,
             }
+        elif claim_review_pending:
+            transition_action = "claim_review_pending"
+            transition_metadata = {
+                **(transition_metadata or {}),
+                "claim_review_pending": True,
+            }
+            if cvss_reduction is not None:
+                transition_metadata.update({
+                    "cvss_score_before": cvss_reduction[0],
+                    "cvss_score_after": cvss_reduction[1],
+                })
     else:
         verification_invalidated = False
 
@@ -2137,6 +2530,7 @@ def patch_finding(
         ),
         verification_proof_receipt_ids=verification_proof_receipt_ids,
         verification_counter_check=verification_counter_check,
+        verification_confirm_check=verification_confirm_check,
         verification_severity_variance=verification_severity_variance,
         verification_normal_severity_band=verification_normal_severity_band,
     )
@@ -2333,6 +2727,7 @@ def verify_finding(
     new_severity: str | None = None,
     proof_receipt_ids: list[int] | None = None,
     counter_check: dict[str, Any] | None = None,
+    confirm_check: dict[str, Any] | None = None,
     severity_variance: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
@@ -2380,6 +2775,8 @@ def verify_finding(
     target_severity = str(existing["severity"])
     transition_action = "verified_confirmed"
     transition_metadata: dict[str, Any] = {}
+    if confirm_check is not None:
+        transition_metadata["confirm_check"] = confirm_check
     details_payload = dict(details or {})
 
     if normalized_verification_status == "downgraded":
@@ -2504,6 +2901,7 @@ def verify_finding(
         expected_row_version=expected_row_version,
         verification_proof_receipt_ids=list(proof_receipt_ids or []),
         verification_counter_check=counter_check,
+        verification_confirm_check=confirm_check,
         verification_severity_variance=severity_variance,
         verification_normal_severity_band=normal_severity_band,
     )
@@ -3449,6 +3847,29 @@ def get_finding(engagement_id: int, slug: str) -> dict[str, Any]:
         record["verification_audit"] = verification_audit_for_finding(
             connection, engagement.id, int(row["id"])
         )
+        record["verification_audit"].update(
+            _claim_review_status(connection, engagement.id, row)
+        )
+        contradictions = connection.execute(
+            """
+            SELECT links.id, links.notes, source.slug AS source_slug
+            FROM assessment_finding_links AS links
+            JOIN assessment_findings AS source ON source.id = links.finding_id
+            WHERE links.engagement_id = ? AND links.link_kind = 'contradicts'
+              AND links.target_kind = 'finding' AND links.retired_at IS NULL
+              AND (links.target_id = ? OR links.target_ref = ?)
+            ORDER BY links.id DESC LIMIT 20
+            """,
+            (engagement.id, int(row["id"]), str(row["slug"])),
+        ).fetchall()
+        record["verification_audit"]["contradiction_reviews"] = [
+            {
+                "source_slug": str(link["source_slug"]),
+                "link_id": int(link["id"]),
+                "notes": str(link["notes"] or ""),
+            }
+            for link in contradictions
+        ]
         return record
 
 def list_exploit_candidates(engagement_id: int) -> list[dict[str, Any]]:

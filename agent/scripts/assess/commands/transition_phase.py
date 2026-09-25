@@ -702,28 +702,35 @@ def _blind_triage_blockers(client: AssessmentClient) -> list[dict[str, str]]:
     if not medium_or_above:
         return blockers
 
-    # Filter the decisions read to kind=blind_triage_verdict server-side and
-    # request the max page size so long engagements don't drop older verdicts
-    # behind the default limit=100 (same shape as the variant-pass dispatch
-    # read above).
+    # Rows are newest-first. Keep only the first verdict for each finding: a
+    # later miss must revoke an earlier Accept. Page until every finding has a
+    # verdict or the decision ledger ends, rather than trusting the first 1000.
+    target_slugs = {str(f.get("slug") or "") for f in medium_or_above}
+    latest: dict[str, dict] = {}
+    offset = 0
     try:
-        decisions = _require_dict_rows(client.get(
-            "dispatch-decisions?kind=blind_triage_verdict&limit=1000"
-        ))
+        while target_slugs - latest.keys():
+            decisions = _require_dict_rows(client.get(
+                f"dispatch-decisions?kind=blind_triage_verdict&limit=1000&offset={offset}"
+            ))
+            for row in decisions:
+                payload = row.get("payload")
+                if not isinstance(payload, dict):
+                    continue
+                slug = str(payload.get("finding_slug") or "").strip()
+                if slug in target_slugs and slug not in latest:
+                    latest[slug] = payload
+            if len(decisions) < 1000:
+                break
+            offset += len(decisions)
     except Exception as exc:
         blockers.append(_precondition_check_failed("blind-triage decisions", exc))
         return blockers
-    accepted_slugs: set[str] = set()
-    for d in decisions:
-        if not isinstance(d, dict):
-            continue
-        payload = d.get("payload")
-        if not isinstance(payload, dict):
-            continue
-        slug = str(payload.get("finding_slug") or "").strip()
-        verdict = str(payload.get("verdict") or "").strip()
-        if slug and verdict.lower().startswith("accept"):
-            accepted_slugs.add(slug)
+    accepted_slugs = {
+        slug for slug, payload in latest.items()
+        if re.fullmatch(r"Accept@P[1-5]", str(payload.get("verdict") or ""))
+        and re.fullmatch(r"[0-9a-f]{64}", str(payload.get("packet_id") or ""))
+    }
 
     missing = [
         f.get("slug", "?") for f in medium_or_above
@@ -740,7 +747,7 @@ def _blind_triage_blockers(client: AssessmentClient) -> list[dict[str, str]]:
                 + " — run blind-triage Pass 2 (agent/skills/blind-triage/SKILL.md) "
                 "and record the Accept verdict with `vigil assess agent decision "
                 "--kind blind_triage_verdict --payload-json "
-                "'{\"finding_slug\":\"<slug>\",\"verdict\":\"Accept@P3\",...}'` "
+                "'{\"finding_slug\":\"<slug>\",\"packet_id\":\"<packet id>\",\"verdict\":\"Accept@P3\"}'` "
                 "before publish (skipping the blind pass is how false-positive / "
                 "over-severity submissions ship). Pass --force --reason \"...\" to "
                 "override with an audited decision."

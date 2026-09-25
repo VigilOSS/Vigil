@@ -68,7 +68,7 @@ def register(subparsers) -> None:
     p.add_argument(
         "--rationale",
         required=True,
-        help="Reason for the resolution; appended to the existing rationale/notes for the audit trail. Required.",
+        help="Reason for the resolution; appended to the existing rationale/notes for the audit trail. Required (surface: at most 4096 characters).",
     )
     p.add_argument(
         "--source-name",
@@ -85,7 +85,7 @@ def register(subparsers) -> None:
         default="",
         help=(
             "(surface only) Required when --status=partially-covered: one-line "
-            "description of the condition the follow-up coverage pass must satisfy."
+            "description of the condition the follow-up coverage pass must satisfy (at most 4096 characters)."
         ),
     )
     p.set_defaults(func=run)
@@ -149,6 +149,10 @@ def run(args) -> None:
     _validate(target_kind, status)
     if not args.rationale.strip():
         _fail("--rationale must be non-empty")
+    if target_kind == "surface" and len(args.rationale) > 4096:
+        _fail("resolve surface: --rationale must be at most 4096 characters")
+    if target_kind == "surface" and len(args.followup_condition) > 4096:
+        _fail("resolve surface: --followup-condition must be at most 4096 characters")
     if (
         target_kind == "surface"
         and status == "partially-covered"

@@ -25,6 +25,18 @@ int main(void) {
     }
 
 
+def test_registered_c_address_of_callback_is_an_entry_point() -> None:
+    source = b"""\
+static void serve_file(struct evhttp_request *request, void *arg) { open(arg, 0); }
+void configure(void) { evhttp_set_cb(http, "/file", &serve_file, 0); }
+"""
+    indexed = index_file("server.c", "c", source)
+
+    assert ("serve_file", "http_handler") in {
+        (entry["name"], entry["kind"]) for entry in indexed["entry_points"]
+    }
+
+
 def test_c_http_registration_does_not_promote_other_arguments() -> None:
     source = b"""\
 void serve_file(void) { open("file", 0); }

@@ -89,7 +89,7 @@ dispatch write:
   "oob": "<status snapshot or not needed>",
   "auth_context": "<anonymous, named identity, or backend-read-only>",
   "credential_id": "<id or none>",
-  "prior_state": "<bounded handoff/finding/artifact pointers or none>",
+  "prior_state": "<up to 4096 characters of authored handoff/finding/artifact pointers or none>",
   "coverage": "<covered vs untouched>",
   "cleanup": "<obligations or none expected>",
   "human_reach_decision": "<inherited state or none open>",
@@ -97,10 +97,24 @@ dispatch write:
 }
 ```
 
+For a code lane with selected queue work, optionally add `"queue_item_ids": [44, 45]`
+to this object. `agent start --emit-prompt` validates those IDs against the selected active
+repository and renders their current file paths and statuses from the backend. To quote a
+prior specialist's saved handoff, optionally add `"prior_agent_id": "<dispatch-id>"`;
+the helper renders that handoff inside the untrusted prior-state boundary. These pointers
+do not replace the required fields above.
+
+For a code lane selected in a generated queue-fetch JSON file or a newline list of indexed
+paths, optionally add `"lane_file": "<path>"`. Before recording the dispatch, the helper
+checks the file against the selected repository and renders exact item/LOC totals plus a
+bounded file and directory preview inside the untrusted prior-state block. The full lane
+file remains the work list.
+
 On return:
 
 ```bash
-vigil assess agent done <agent_id> --status completed --finding-slugs <slugs>
+vigil assess agent render-handoff <agent_id>
+vigil assess agent close <agent_id>
 ```
 
 ## Field map

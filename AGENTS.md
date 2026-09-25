@@ -21,6 +21,8 @@ the codebase clearer than you found it.
 - **Every line earns its place.** Prefer deleting to adding; match the surrounding idiom, naming, and
   comment density; a comment explains *why*, not what. No dead code, no speculative abstraction, no
   second copy of a value that already has a single source of truth.
+- **Inspect existing functionality first.** Search the owning code, contracts, and tests before
+  adding a helper or workflow; extend the existing path when it already owns the behavior.
 - **Land changes whole.** Touch every registration point a change needs (see the recipes + `CODE-MAP.md`)
   so nothing half-lands, and keep generated artifacts, schemas, and the map in sync in the same change.
 - **Durable over expedient.** Fix the root cause, not the symptom. Choose the design that still reads

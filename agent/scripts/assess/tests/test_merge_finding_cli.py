@@ -66,7 +66,7 @@ def test_merge_relays_a_backend_warning_to_stderr(tmp_path, monkeypatch, capsys)
         "details.cvss_vector. Repair it with `vigil assess finding update VA-001 "
         "--details-inline '{\"cvss_score\": <n>, \"cvss_vector\": \"<v>\"}'`"
     )
-    fake = _run(monkeypatch, tmp_path, {"slug": "VA-001", "warnings": [warning]})
+    fake = _run(monkeypatch, tmp_path, {"target": {"slug": "VA-001"}, "warnings": [warning]})
 
     captured = capsys.readouterr()
     # The merge still LANDED — the warning never costs the consolidation.
@@ -79,15 +79,26 @@ def test_merge_relays_a_backend_warning_to_stderr(tmp_path, monkeypatch, capsys)
 
 def test_a_clean_merge_says_nothing_extra(tmp_path, monkeypatch, capsys):
     """The relay must not add noise to the overwhelmingly common clean merge."""
-    _run(monkeypatch, tmp_path, {"slug": "VA-001", "warnings": []})
+    _run(monkeypatch, tmp_path, {"target": {"slug": "VA-001"}, "warnings": []})
 
     captured = capsys.readouterr()
     assert captured.err == ""
     assert "Merged VA-002 into VA-001" in captured.out
 
 
-def test_a_response_without_the_key_is_not_an_error(tmp_path, monkeypatch, capsys):
-    """An older backend (no `warnings` key) must not break the CLI."""
-    _run(monkeypatch, tmp_path, {"slug": "VA-001"})
+def test_merge_accepts_the_backend_source_target_response(tmp_path, monkeypatch, capsys):
+    fake = _run(
+        monkeypatch,
+        tmp_path,
+        {"source": {"slug": "VA-002", "workflow_status": "merged"},
+         "target": {"slug": "VA-001"}, "link": {"id": 1}, "warnings": []},
+    )
+
+    assert fake.events[0]["event_type"] == "finding.merged"
+    assert "Merged VA-002 into VA-001" in capsys.readouterr().out
+
+
+def test_a_response_without_warnings_is_not_an_error(tmp_path, monkeypatch, capsys):
+    _run(monkeypatch, tmp_path, {"target": {"slug": "VA-001"}})
 
     assert capsys.readouterr().err == ""

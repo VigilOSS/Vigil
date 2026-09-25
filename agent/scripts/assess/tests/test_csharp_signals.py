@@ -35,6 +35,23 @@ app.MapGet("/files/{name}", (string name) => System.IO.File.ReadAllText(name));
     assert any(sink["kind"] == "file_path" for sink in indexed["security_sinks"])
 
 
+def test_named_minimal_api_handler_is_entry_and_binds_request_input() -> None:
+    source = """var app = builder.Build();
+app.MapGet("/files/{name}", ReadFile);
+static string ReadFile(string name) => System.IO.File.ReadAllText(name);
+class Other { static string ReadFile(string name) => "unrelated"; }
+"""
+    indexed = index_file("Program.cs", "csharp", source.encode())
+
+    assert [(entry["name"], entry["line"], entry["kind"]) for entry in indexed["entry_points"]] == [
+        ("ReadFile", 3, "minimal_api_route")
+    ]
+    assert any(item["kind"] == "http_request_input" and "string name" in item["snippet"]
+               for item in indexed["security_sources"])
+    assert any(item["kind"] == "file_path" and item["function"] == "ReadFile"
+               for item in indexed["security_sinks"])
+
+
 def test_http_client_request_is_sink_but_construction_is_not() -> None:
     source = """using System.Net.Http;
 public class Fetcher {

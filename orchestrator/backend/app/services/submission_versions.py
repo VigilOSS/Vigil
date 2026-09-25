@@ -10,6 +10,7 @@ import re
 import secrets
 import stat
 import zipfile
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, Mapping
@@ -22,6 +23,7 @@ from . import artifact_index, state_manager
 from .events import _engagement_or_404
 from .state_manager.proofs import proof_evidence_health_issues_for_finding
 from .state_manager.report_readiness import report_readiness
+from .state_manager.repro_currentness import reproduction_sha256
 
 
 SUBMISSION_PLATFORMS = frozenset({"bugcrowd", "hackerone", "direct"})
@@ -361,12 +363,23 @@ def _workspace_state(
     markdown_sha256 = _sha256(markdown)
     context = _load_context(context_bytes)
     blockers: list[str] = []
+    body_path = (PurePosixPath(normalized_submission).parent / "submission-body.md").as_posix()
+    try:
+        _, external_body = _read_stable_file(
+            root, body_path, max_bytes=WORKSPACE_MARKDOWN_MAX_BYTES,
+            label="external submission body",
+        )
+    except HTTPException as exc:
+        external_body = b""
+        blockers.append(str(exc.detail))
     if str(context.get("slug") or "") != slug:
         blockers.append("submission context names a different finding")
     if str(context.get("submission_path") or "") != normalized_submission:
         blockers.append("submission context names a different Markdown path")
     if str(context.get("submission_sha256") or "") != markdown_sha256:
         blockers.append("submission context does not bind the current Markdown bytes")
+    if str(context.get("external_body_sha256") or "") != _sha256(external_body):
+        blockers.append("submission context does not bind the current external body bytes")
     if str(context.get("mode") or "") != "final":
         blockers.append("workspace is a draft render; create a final render before export")
     source = context.get("source_finding")
@@ -402,6 +415,8 @@ def _workspace_state(
     audit = finding.get("verification_audit")
     if not isinstance(audit, dict) or int(audit.get("proof_receipt_total") or 0) < 1:
         blockers.append("finding has no current verification proof receipt")
+    if isinstance(audit, dict) and audit.get("claim_review_pending"):
+        blockers.append("finding claim change awaits an independent equivalence review or new verification")
     with get_connection() as connection:
         proof_issues = proof_evidence_health_issues_for_finding(
             connection, engagement_id, int(finding["id"])
@@ -426,6 +441,8 @@ def _workspace_state(
         "context_path": normalized_context,
         "markdown": markdown,
         "markdown_text": markdown_text,
+        "external_body": external_body,
+        "external_body_sha256": _sha256(external_body),
         "submission_sha256": markdown_sha256,
         "context": context,
         "context_sha256": _sha256(context_bytes),
@@ -503,6 +520,118 @@ def _portable_attachment_basename(relative_path: str) -> str:
     sanitized = re.sub(r"[-_]{2,}", "-", sanitized).strip("._-")
     sanitized = sanitized[:_ATTACHMENT_BASENAME_MAX_LENGTH].rstrip("._-")
     return sanitized or "artifact"
+
+
+def _blind_triage_issue(
+    engagement_id: int,
+    slug: str,
+    root: Path,
+    workspace: dict[str, Any],
+    platform: str,
+    attachments: list[tuple[dict[str, Any], bytes]],
+    connection: Any | None = None,
+) -> str | None:
+    """Compare the latest verdict with the exact external package being exported."""
+    if str(workspace["finding"].get("severity") or "").lower() not in {
+        "medium", "high", "critical",
+    }:
+        return None
+    with nullcontext(connection) if connection is not None else get_connection() as current:
+        decision = current.execute(
+            """
+            SELECT payload_json FROM assessment_dispatch_decisions
+            WHERE engagement_id = ? AND kind = 'blind_triage_verdict'
+              AND json_extract(payload_json, '$.finding_slug') = ?
+            ORDER BY id DESC LIMIT 1
+            """,
+            (engagement_id, slug),
+        ).fetchone()
+    if decision is None:
+        return "blind triage has no verdict for the current finding"
+    payload = json.loads(decision["payload_json"])
+    if not re.fullmatch(r"Accept@P[1-5]", str(payload.get("verdict") or "")):
+        return "latest blind triage verdict does not accept this finding"
+    packet_id = str(payload.get("packet_id") or "")
+    if not re.fullmatch(r"[0-9a-f]{64}", packet_id):
+        return "latest blind triage verdict has no content-addressed packet"
+    try:
+        _, raw = _read_stable_file(
+            root,
+            f"submissions/{slug}/blind-triage/{packet_id}/manifest.json",
+            max_bytes=WORKSPACE_CONTEXT_MAX_BYTES,
+            label="blind triage packet manifest",
+        )
+        manifest = json.loads(raw)
+    except (HTTPException, ValueError) as exc:
+        return f"blind triage packet manifest is unavailable or invalid: {exc}"
+    if not isinstance(manifest, dict) or manifest.get("packet_id") != packet_id:
+        return "blind triage packet manifest does not match its verdict"
+    identity = {key: value for key, value in manifest.items() if key not in {"packet_id", "outputs"}}
+    if _sha256(_canonical_json(identity).encode("utf-8")) != packet_id:
+        return "blind triage packet identity is invalid"
+    inputs = manifest.get("inputs")
+    if not isinstance(inputs, dict):
+        return "blind triage packet inputs are missing"
+    if (
+        manifest.get("finding_slug") != slug
+        or manifest.get("platform") != platform
+        or (inputs.get("submission") or {}).get("sha256") != workspace["external_body_sha256"]
+    ):
+        return "blind triage verdict covers a different submission body or platform"
+    selected = sorted(
+        (int(row["artifact_id"]), str(row["sha256"]), int(row["size_bytes"]))
+        for row, _ in attachments
+    )
+    packet_attachments = inputs.get("attachments")
+    if not isinstance(packet_attachments, list):
+        return "blind triage packet does not declare selected attachments"
+    reviewed = sorted(
+        (int(row["artifact_id"]), str(row["sha256"]), int(row["bytes"]))
+        for row in packet_attachments
+        if isinstance(row, dict)
+    )
+    if selected != reviewed:
+        return "blind triage verdict covers different external attachments"
+    _, brief = _read_stable_file(
+        root, "ENGAGEMENT.md", max_bytes=WORKSPACE_MARKDOWN_MAX_BYTES,
+        label="blind triage program brief",
+    )
+    prompt_root = Path(__file__).resolve().parents[4]
+    _, rubric = _read_stable_file(
+        prompt_root, "agent/skills/blind-triage/SKILL.md",
+        max_bytes=WORKSPACE_MARKDOWN_MAX_BYTES, label="blind triage verdict rubric",
+    )
+    if (
+        (inputs.get("program_brief") or {}).get("sha256") != _sha256(brief)
+        or (inputs.get("verdict_rubric") or {}).get("sha256") != _sha256(rubric)
+    ):
+        return "blind triage verdict covers an older program brief or rubric"
+    return None
+
+
+def _reproduction_issue(
+    engagement_id: int, slug: str, finding: dict[str, Any],
+    connection: Any | None = None,
+) -> str | None:
+    """A report can only publish the reproduction last checked by a tester."""
+    with nullcontext(connection) if connection is not None else get_connection() as current:
+        decision = current.execute(
+            """
+            SELECT payload_json FROM assessment_dispatch_decisions
+            WHERE engagement_id = ? AND kind = 'repro_rehearsal'
+              AND json_extract(payload_json, '$.finding_slug') = ?
+            ORDER BY id DESC LIMIT 1
+            """,
+            (engagement_id, slug),
+        ).fetchone()
+    if decision is None:
+        return "reproduction has no independent check"
+    payload = json.loads(decision["payload_json"])
+    if payload.get("verdict") not in {"followed", "equivalent"}:
+        return "latest reproduction check did not confirm the authored steps"
+    if payload.get("reproduction_sha256") != reproduction_sha256(finding):
+        return "reproduction steps changed after the latest independent check"
+    return None
 
 
 def _zip_member(name: str, data: bytes) -> tuple[zipfile.ZipInfo, bytes]:
@@ -1014,7 +1143,7 @@ def _complete_version(engagement_id: int, row: Mapping[str, Any]) -> dict[str, A
         connection.execute("BEGIN IMMEDIATE")
         finding = connection.execute(
             """
-            SELECT id, slug, row_version, updated_at, status, verification_status
+            SELECT *
             FROM assessment_findings
             WHERE engagement_id = ? AND id = ?
             """,
@@ -1063,6 +1192,31 @@ def _complete_version(engagement_id: int, row: Mapping[str, Any]) -> dict[str, A
                     "finding readiness changed while the submission version was "
                     "being finalized; resolve the current blockers and render a "
                     "fresh final workspace"
+                ),
+            )
+        workspace_source = sources.get("workspace")
+        attachment_sources = sources.get("attachments")
+        if not isinstance(workspace_source, dict) or not isinstance(attachment_sources, list) or any(
+            not isinstance(item, dict) for item in attachment_sources
+        ):
+            raise HTTPException(status_code=409, detail="submission reservation has incomplete review sources")
+        reviewed_workspace = {
+            "finding": dict(finding),
+            "external_body_sha256": workspace_source.get("external_body_sha256"),
+        }
+        triage_issue = _blind_triage_issue(
+            engagement_id, str(finding["slug"]), root, reviewed_workspace,
+            str(row["platform"]), [(item, b"") for item in attachment_sources],
+            connection,
+        )
+        reproduction_issue = _reproduction_issue(
+            engagement_id, str(finding["slug"]), dict(finding), connection,
+        )
+        if triage_issue or reproduction_issue:
+            raise HTTPException(
+                status_code=409,
+                detail="submission review changed during finalization: " + "; ".join(
+                    issue for issue in (triage_issue, reproduction_issue) if issue
                 ),
             )
         artifact = artifact_index.register_artifact(
@@ -1144,8 +1298,22 @@ def export_version(
                 ),
             )
         attachments.append(attachment)
+    triage_issue = _blind_triage_issue(
+        engagement_id, slug, root, workspace, platform, attachments,
+    )
+    if triage_issue:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="submission export is not final-ready: " + triage_issue,
+        )
+    reproduction_issue = _reproduction_issue(engagement_id, slug, workspace["finding"])
+    if reproduction_issue:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="submission export is not final-ready: " + reproduction_issue,
+        )
     package, package_format, media_type, manifest = _build_package(
-        slug, workspace["markdown"], attachments
+        slug, workspace["external_body"], attachments
     )
     package_sha256 = _sha256(package)
     sources = {
@@ -1161,6 +1329,7 @@ def export_version(
             "artifact_id": int(workspace["workspace_artifact"]["id"]),
             "submission_path": workspace["submission_path"],
             "submission_sha256": workspace["submission_sha256"],
+            "external_body_sha256": workspace["external_body_sha256"],
             "context_path": workspace["context_path"],
             "context_sha256": workspace["context_sha256"],
         },
@@ -1186,7 +1355,7 @@ def export_version(
         media_type=media_type,
         size_bytes=len(package),
         sha256=package_sha256,
-        submission_sha256=workspace["submission_sha256"],
+        submission_sha256=workspace["external_body_sha256"],
         attachment_ids=ids,
         manifest=manifest,
         sources=sources,
@@ -1270,6 +1439,7 @@ def submission_detail(
     engagement_id: int,
     slug: str,
     *,
+    attachment_ids: Iterable[int] = (),
     attachment_offset: int = 0,
     attachment_limit: int = DEFAULT_ATTACHMENT_PAGE_LIMIT,
     version_offset: int = 0,
@@ -1277,6 +1447,10 @@ def submission_detail(
     pending_version_offset: int = 0,
     pending_version_limit: int = DEFAULT_SUBMISSION_PAGE_LIMIT,
 ) -> dict[str, Any]:
+    selected_ids = [int(value) for value in attachment_ids]
+    if len(selected_ids) != len(set(selected_ids)):
+        raise HTTPException(status_code=400, detail="attachment_ids must not contain duplicates")
+    selected_ids.sort()
     if attachment_offset < 0:
         raise HTTPException(status_code=400, detail="attachment_offset must be non-negative")
     if attachment_limit < 1 or attachment_limit > MAX_ATTACHMENT_PAGE_LIMIT:
@@ -1314,12 +1488,33 @@ def submission_detail(
             )
         except HTTPException as exc:
             blockers.append(str(exc.detail))
+        if not blockers:
+            root = Path(_engagement_or_404(engagement_id).engagement_root).expanduser().resolve()
+            try:
+                attachments = [_read_attachment(engagement_id, root, artifact_id) for artifact_id in selected_ids]
+                if sum(len(data) for _, data in attachments) > ATTACHMENTS_TOTAL_MAX_BYTES:
+                    raise HTTPException(
+                        status_code=413,
+                        detail="selected attachments exceed the total size limit",
+                    )
+                triage_issue = _blind_triage_issue(
+                    engagement_id, str(finding["slug"]), root, workspace,
+                    str(workspace["context"].get("platform") or ""), attachments,
+                )
+                if triage_issue:
+                    blockers.append(triage_issue)
+            except HTTPException as exc:
+                blockers.append(str(exc.detail))
+            reproduction_issue = _reproduction_issue(engagement_id, str(finding["slug"]), workspace["finding"])
+            if reproduction_issue:
+                blockers.append(reproduction_issue)
         workspace_payload = {
             "present": True,
             "submission_path": workspace["submission_path"],
             "context_path": workspace["context_path"],
             "markdown": workspace["markdown_text"],
             "submission_sha256": workspace["submission_sha256"],
+            "external_body_sha256": workspace["external_body_sha256"],
             "context": workspace["context"],
             "final_ready": not blockers,
             "blockers": list(dict.fromkeys(blockers)),
@@ -1331,6 +1526,7 @@ def submission_detail(
             "context_path": context_path,
             "markdown": "",
             "submission_sha256": "",
+            "external_body_sha256": "",
             "context": {},
             "final_ready": False,
             "blockers": [str(exc.detail)],

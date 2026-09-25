@@ -214,9 +214,17 @@ export function SurfacesTab({
         setResolutionError("Rationale is required to change surface status.");
         return;
       }
+      if (submittedRationale.length > 4096) {
+        setResolutionError("Rationale must be at most 4096 characters.");
+        return;
+      }
       const submittedFollowup = followupCondition.trim();
       if (status === "partially-covered" && !submittedFollowup) {
         setResolutionError("A follow-up condition is required for partially covered surfaces.");
+        return;
+      }
+      if (status === "partially-covered" && submittedFollowup.length > 4096) {
+        setResolutionError("Follow-up condition must be at most 4096 characters.");
         return;
       }
       setResolutionError(null);
@@ -834,6 +842,7 @@ function SurfaceDrawer({
               placeholder="Required rationale appended to the audit trail"
               value={resolutionRationale}
               onChange={(e) => setResolutionRationale(e.target.value)}
+              maxLength={4096}
               style={{
                 width: "100%",
                 boxSizing: "border-box",
@@ -850,6 +859,7 @@ function SurfaceDrawer({
                 placeholder="Required when marking partially covered"
                 value={followupCondition}
                 onChange={(event) => setFollowupCondition(event.target.value)}
+                maxLength={4096}
               />
             </label>
             <div style={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>

@@ -1048,6 +1048,92 @@ def record_decision(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="kind is required")
     created_at = _common._utcnow_iso_dispatch()
     with _common.get_connection() as connection:
+        if kind == "claim_equivalence":
+            connection.execute("BEGIN IMMEDIATE")
+            from .findings import validate_claim_equivalence_decision
+
+            validate_claim_equivalence_decision(connection, engagement.id, payload)
+        if kind == "repro_rehearsal":
+            connection.execute("BEGIN IMMEDIATE")
+            from .repro_currentness import reproduction_sha256
+
+            required = ("finding_slug", "verdict", "proof_mode", "verifier_dispatch_agent_id")
+            if (
+                not isinstance(payload, dict)
+                or any(not isinstance(payload.get(key), str) or not payload[key].strip() for key in required)
+                or payload.get("verdict") not in {"followed", "failed", "equivalent"}
+                or payload.get("proof_mode") not in {"live", "source", "fuzz"}
+                or not isinstance(payload.get("runs_checked", []), list)
+                or any(type(run_id) is not int or run_id < 1 for run_id in payload.get("runs_checked", []))
+            ):
+                raise HTTPException(status_code=422, detail="invalid reproduction decision payload")
+
+            finding = connection.execute(
+                "SELECT * FROM assessment_findings WHERE engagement_id = ? AND slug = ?",
+                (engagement.id, payload["finding_slug"]),
+            ).fetchone()
+            if finding is None:
+                raise HTTPException(status_code=404, detail="reproduction finding not found")
+            if payload["proof_mode"] in {"source", "fuzz"} and not str(
+                finding["canonical_location"] or ""
+            ).startswith("file:"):
+                raise HTTPException(status_code=422, detail="source or fuzz reproduction requires a file finding")
+            reviewer = connection.execute(
+                "SELECT agent_role FROM assessment_dispatches WHERE engagement_id = ? AND agent_id = ?",
+                (engagement.id, payload["verifier_dispatch_agent_id"]),
+            ).fetchone()
+            roles = {
+                "live": "vulnerability-analyst",
+                "source": "code-vuln-verifier",
+                "fuzz": "code-fuzz-engineer",
+            }
+            if reviewer is None or reviewer["agent_role"] != roles[payload["proof_mode"]]:
+                raise HTTPException(status_code=422, detail="reproduction requires a dispatch with the matching verifier role")
+            provenance = json.loads(finding["provenance_json"] or "{}")
+            if payload["verifier_dispatch_agent_id"] == provenance.get("agent_id"):
+                raise HTTPException(status_code=422, detail="reproduction reviewer must be independent of the finding author")
+            verdict = payload["verdict"]
+            if verdict == "followed":
+                if not str(payload.get("observed_outcome") or "").strip():
+                    raise HTTPException(status_code=422, detail="successful reproduction needs the observed outcome")
+                if payload["proof_mode"] in {"live", "fuzz"}:
+                    run_ids = payload.get("runs_checked") or []
+                    if not run_ids:
+                        raise HTTPException(status_code=422, detail="live or fuzz reproduction needs checked command run IDs")
+                    rows = connection.execute(
+                        f"SELECT id, agent_name FROM assessment_command_runs WHERE engagement_id = ? AND status = 'completed' AND id IN ({','.join('?' for _ in run_ids)})",
+                        (engagement.id, *run_ids),
+                    ).fetchall()
+                    if {int(row["id"]) for row in rows} != set(run_ids):
+                        raise HTTPException(status_code=422, detail="reproduction command runs must be completed in this engagement")
+                    if not any(row["agent_name"] == payload["verifier_dispatch_agent_id"] for row in rows):
+                        raise HTTPException(status_code=422, detail="reproduction needs a completed run attributed to the cold verifier")
+                    details = json.loads(finding["details_json"] or "{}")
+                    authored_runs = details.get("repro_runs") or []
+                    if not isinstance(authored_runs, list) or any(
+                        type(run_id) not in {int, str}
+                        or not str(run_id).strip().isdigit()
+                        or int(run_id) < 1
+                        for run_id in authored_runs
+                    ):
+                        raise HTTPException(status_code=422, detail="finding repro_runs contains an invalid command-run ID")
+                    if not {int(run_id) for run_id in authored_runs}.issubset(set(run_ids)):
+                        raise HTTPException(status_code=422, detail="reproduction check omits an authored repro_runs ID")
+            elif verdict == "failed":
+                if not str(payload.get("failed_step") or "").strip():
+                    raise HTTPException(status_code=422, detail="failed reproduction needs the failed step")
+            else:
+                prior = connection.execute(
+                    "SELECT payload_json FROM assessment_dispatch_decisions WHERE id = ? AND engagement_id = ? AND kind = 'repro_rehearsal'",
+                    (payload.get("prior_decision_id"), engagement.id),
+                ).fetchone()
+                previous = json.loads(prior["payload_json"]) if prior else {}
+                if (previous.get("finding_slug") != payload["finding_slug"]
+                    or previous.get("verdict") != "followed"
+                    or previous.get("verifier_dispatch_agent_id") == payload["verifier_dispatch_agent_id"]
+                    or not str(payload.get("reason") or "").strip()):
+                    raise HTTPException(status_code=422, detail="equivalence needs a prior successful check, a fresh reviewer, and a reason")
+            payload = {**payload, "reproduction_sha256": reproduction_sha256(dict(finding))}
         cursor = connection.execute(
             """
             INSERT INTO assessment_dispatch_decisions (

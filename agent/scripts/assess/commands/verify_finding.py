@@ -97,8 +97,12 @@ def register(subparsers) -> None:
         help="JSON file containing the completed structured false-positive counter-check",
     )
     p.add_argument(
+        "--confirm-check-file",
+        help="JSON file containing the completed falsification check for confirmed/downgraded",
+    )
+    p.add_argument(
         "--severity-variance-file",
-        help="JSON file containing an attributed CVSS-band variance event",
+        help="JSON file with {normal_band, chosen_severity, actor, reason, proof_receipt_id} when chosen severity differs from its CVSS band; receipt id must also be passed with --proof-receipt-id",
     )
     p.set_defaults(func=run)
 
@@ -119,6 +123,7 @@ _CONTENT_FLAGS = (
     ("provenance_inline", "--provenance-inline"),
     ("proof_receipt_ids", "--proof-receipt-id"),
     ("counter_check_file", "--counter-check-file"),
+    ("confirm_check_file", "--confirm-check-file"),
     ("severity_variance_file", "--severity-variance-file"),
 )
 
@@ -299,6 +304,11 @@ def run(args) -> None:
                 "counter-check payload",
             ),
             (
+                "confirm_check",
+                getattr(args, "confirm_check_file", None),
+                "confirm-check payload",
+            ),
+            (
                 "severity_variance",
                 getattr(args, "severity_variance_file", None),
                 "severity-variance payload",
@@ -380,6 +390,15 @@ def run(args) -> None:
             file=sys.stderr,
         )
         sys.exit(1)
+    if payload.get("verification_status") in {"confirmed", "downgraded"}:
+        confirm_check = payload.get("confirm_check")
+        if not isinstance(confirm_check, dict) or confirm_check.get("completed") is not True:
+            print(
+                "confirmed/downgraded verification requires --confirm-check-file "
+                "with a completed structured falsification check",
+                file=sys.stderr,
+            )
+            sys.exit(1)
     if payload.get("verification_status") == "downgraded" and not payload.get("new_severity"):
         print("downgraded verification requires new_severity", file=sys.stderr)
         sys.exit(1)
