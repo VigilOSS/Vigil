@@ -2578,6 +2578,7 @@ def kali_exec(
             stderr_preview=stderr_preview,
             timed_out=timed_out,
             partial_results=partial_results,
+            audit_finalized=finalize_ok,
             transport_error=transport_error,
             transport_error_detail=transport_error_detail,
             waf_challenge=waf_challenge,

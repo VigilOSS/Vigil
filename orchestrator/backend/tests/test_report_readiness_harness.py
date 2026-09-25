@@ -21,7 +21,7 @@ import json
 from pathlib import Path
 
 from app import db as db_module
-from tests.proof_fixtures import post_artifact_backed_source_observation
+from tests.proof_fixtures import completed_confirm_check, post_artifact_backed_source_observation
 
 
 ENGAGEMENT_KEY = "2026-05-20-090000-harness"
@@ -117,6 +117,14 @@ def _reportable_finding(
         },
     )
     assert run.status_code == 201, run.text
+    linked = client.post(
+        f"{BASE}/findings/{slug}/links",
+        json={
+            "link_kind": "proof_run", "target_kind": "assessment_run",
+            "target_id": run.json()["id"],
+        },
+    )
+    assert linked.status_code == 200, linked.text
     receipt = post_artifact_backed_source_observation(
         client,
         f"{BASE}/proof-receipts",
@@ -137,6 +145,7 @@ def _reportable_finding(
         "verification_status": verification_status,
         "reason_text": "independently verified for report readiness",
         "proof_receipt_ids": [receipt.json()["id"]],
+        "confirm_check": completed_confirm_check(receipt.json()["id"]),
     }
     if normal_severity_band is not None:
         verify_payload["severity_variance"] = {
@@ -380,6 +389,14 @@ def test_same_status_reverification_repairs_legacy_severity_variance(
         },
     )
     assert run.status_code == 201, run.text
+    linked = client.post(
+        f"{BASE}/findings/HR-006/links",
+        json={
+            "link_kind": "proof_run", "target_kind": "assessment_run",
+            "target_id": run.json()["id"],
+        },
+    )
+    assert linked.status_code == 200, linked.text
     receipt = post_artifact_backed_source_observation(
         client,
         f"{BASE}/proof-receipts",
@@ -402,6 +419,7 @@ def test_same_status_reverification_repairs_legacy_severity_variance(
             "verification_status": "confirmed",
             "reason_text": "fresh independent review confirms the legacy finding",
             "proof_receipt_ids": [receipt.json()["id"]],
+            "confirm_check": completed_confirm_check(receipt.json()["id"]),
             "severity_variance": {
                 "normal_band": "medium",
                 "chosen_severity": "high",

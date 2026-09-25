@@ -5,8 +5,11 @@ import json
 import sqlite3
 from pathlib import Path
 
+import pytest
+
 from app import db as db_module
 from app.services.assessment_memory import _recommended_actions
+from tests.proof_fixtures import completed_confirm_check
 
 
 ENGAGEMENT_KEY = "2026-05-19-120000-memory"
@@ -86,7 +89,7 @@ def _seed_finding(client, eng: Path, slug: str = "VA-047") -> None:
             "severity": "high",
             "workflow_status": "active",
             "verification_status": "unreviewed",
-            "canonical_location": "https://example.com/login",
+            "canonical_location": "https://example.com/login" + (f"/{slug}" if slug != "VA-047" else ""),
             "summary": "Static state can be replayed",
             "evidence_ref": "notes/VA-047-note.md",
             "source_name": "vulnerability-analyst",
@@ -125,6 +128,14 @@ def _verify_finding(client, slug: str, *, artifact_id: int) -> None:
         },
     )
     assert run.status_code == 201, run.text
+    linked = client.post(
+        f"{BASE}/findings/{slug}/links",
+        json={
+            "link_kind": "proof_run", "target_kind": "assessment_run",
+            "target_id": run.json()["id"],
+        },
+    )
+    assert linked.status_code == 200, linked.text
     command = client.post(
         f"{BASE}/command-runs",
         json={
@@ -163,6 +174,7 @@ def _verify_finding(client, slug: str, *, artifact_id: int) -> None:
             "verification_status": "confirmed",
             "reason_text": "independent artifact review confirmed the finding",
             "proof_receipt_ids": [receipt.json()["id"]],
+            "confirm_check": completed_confirm_check(receipt.json()["id"]),
         },
     )
     assert verified.status_code == 200, verified.text
@@ -1154,6 +1166,22 @@ def test_report_readiness_validates_evidence_ref_when_artifact_id_is_present(cli
     assert "vigil assess finding update VA-047 --evidence-ref notes/replacement-evidence.md" in mismatch["detail"]
 
 
+def test_report_evidence_ref_resolves_only_its_engagement_container_mount(tmp_path) -> None:
+    from app.services.state_manager.report_readiness import _normalize_report_evidence_ref
+
+    root = tmp_path / "current-engagement"
+    root.mkdir()
+    assert _normalize_report_evidence_ref(
+        root, "/engagements/current-engagement/notes/proof.md"
+    ) == "notes/proof.md"
+    assert _normalize_report_evidence_ref(
+        root, "/engagements/other-engagement/notes/proof.md"
+    ) != "notes/proof.md"
+    assert _normalize_report_evidence_ref(
+        root, "/engagements/current-engagement/../other-engagement/notes/proof.md"
+    ) != "notes/proof.md"
+
+
 def test_mark_scratch_clears_unlinked_markdown_advisory(client, isolate_settings) -> None:
     eng = _write_engagement(isolate_settings["engagements_dir"])
     assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
@@ -1365,6 +1393,124 @@ def test_resume_brief_surfaces_terminal_handoff_less_dispatch(client, isolate_se
 
     stale_ids = [row["agent_id"] for row in dispatches.get("stale_in_progress_dispatches") or []]
     assert "recon-died-1" not in stale_ids
+
+
+def test_resume_brief_surfaces_ready_handoff_waiting_for_dispatch_close(
+    client, isolate_settings
+) -> None:
+    _write_engagement(isolate_settings["engagements_dir"])
+    assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
+    created = client.post(
+        f"{BASE}/dispatches",
+        json={"agent_id": "ready-open", "agent_role": "vulnerability-analyst", "task": "verify"},
+    )
+    assert created.status_code == 201, created.text
+    handoff = client.post(
+        f"{BASE}/dispatch-handoffs",
+        json={"agent_id": "ready-open", "agent_role": "vulnerability-analyst",
+              "summary": "Verified", "handoff_status": "ready"},
+    )
+    assert handoff.status_code == 201, handoff.text
+    dispatches = client.get(f"{BASE}/resume-brief").json()["dispatches"]
+    assert dispatches["closable_handoffs_count"] == 1
+    assert dispatches["closable_handoffs"][0]["agent_id"] == "ready-open"
+    assert dispatches["closable_handoffs"][0]["handoff_status"] == "ready"
+
+
+def test_code_resume_projects_existing_coverage_gate_and_reference_repos(
+    client, isolate_settings, monkeypatch
+) -> None:
+    from app.services import assessment_memory
+
+    eng = _write_engagement(isolate_settings["engagements_dir"])
+    scope_path = eng / "scope.json"
+    scope_doc = json.loads(scope_path.read_text())
+    scope_doc["engagement_type"] = "code"
+    scope_doc["current_phase"] = "hunt"
+    scope_path.write_text(json.dumps(scope_doc))
+    assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
+    monkeypatch.setattr(assessment_memory.code_analysis, "code_coverage_summary", lambda *_a: {
+        "by_classification": {
+            "high": {"count": 4, "analyzed": 2},
+            "skip": {"count": 10, "analyzed": 1},
+        },
+        "confidence": {"active_queue_items": 3},
+        "trigger_summary": {"pending": 2, "queued": 1},
+        "gate": {"passed": False, "reasons": ["3 queue items remain", "2 triggers unresolved"]},
+    })
+    monkeypatch.setattr(assessment_memory.code_analysis, "code_readiness", lambda *_a, **_k: {
+        "target_phase": "verify-variant", "transition_ready": False,
+        "blockers": [{"code": "structural_analysis_debt_unreviewed"}],
+        "structural_debt_count": 3,
+    })
+    monkeypatch.setattr(assessment_memory.code_analysis, "list_code_repos", lambda *_a: [
+        {"id": 7, "repo_key": "primary", "repo_role": "analysis", "active_generation": 4},
+        {"id": 8, "repo_key": "framework", "repo_role": "reference", "active_generation": 2},
+    ])
+
+    body = client.get(f"{BASE}/resume-brief").json()
+    assert body["code_analysis"]["queue_count"] == 3
+    assert body["code_analysis"]["coverage_by_classification"] == {
+        "high": {"count": 4, "analyzed": 2, "remaining": 2},
+        "skip": {"count": 10, "analyzed": 1, "remaining": 9},
+    }
+    assert body["code_analysis"]["trigger_counts"] == {"pending": 2, "queued": 1}
+    assert body["code_analysis"]["next_gate"] == {
+        "target_phase": "verify-variant", "transition_ready": False,
+        "blocker_codes": ["structural_analysis_debt_unreviewed"],
+        "structural_debt_count": 3,
+    }
+    assert body["code_analysis"]["reference_repos"] == [
+        {"repo_id": 8, "repo_key": "framework", "repo_generation": 2}
+    ]
+    assert body["engagement"]["engagement_type"] == "code"
+    assert body["surfaces"] == {}
+    assert body["work_buffer"] == {}
+    assert body["per_input_coverage"] == {}
+
+
+@pytest.mark.parametrize("target_locator", ["target_ref", "target_id"])
+def test_resume_brief_surfaces_active_contradiction_review(
+    client, isolate_settings, target_locator: str,
+) -> None:
+    eng = _write_engagement(isolate_settings["engagements_dir"])
+    assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
+    _seed_finding(client, eng, "VA-047")
+    _seed_finding(client, eng, "VA-048")
+    target = client.get(f"{BASE}/findings/VA-047").json()
+    locator = {target_locator: target["id"] if target_locator == "target_id" else "VA-047"}
+    link = client.post(
+        f"{BASE}/findings/VA-048/links",
+        json={
+            "link_kind": "contradicts", "target_kind": "finding", **locator,
+            "notes": "A second tenant check returned 403.",
+        },
+    )
+    assert link.status_code == 200, link.text
+
+    body = client.get(f"{BASE}/resume-brief").json()
+    assert body["contradiction_reviews"]["count"] == 1
+    assert body["contradiction_reviews"]["items"] == [{
+        "link_id": link.json()["id"], "source_slug": "VA-048",
+        "target_slug": "VA-047", "notes": "A second tenant check returned 403.",
+    }]
+
+
+def test_resume_brief_projects_open_identity_block_decision(client, isolate_settings) -> None:
+    _write_engagement(isolate_settings["engagements_dir"])
+    assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
+    decision = client.post(f"{BASE}/dispatch-decisions", json={
+        "kind": "dispatch_blocked",
+        "payload": {"identity": "org-admin", "surface": "/role-grants",
+                    "reason": "Need org-admin test account"},
+        "surfaced_to_user": True,
+    })
+    assert decision.status_code == 201, decision.text
+    body = client.get(f"{BASE}/resume-brief").json()
+    needs = body["credential_needs"]
+    assert needs["count"] == 1
+    assert needs["items"][0]["identity"] == "org-admin"
+    assert needs["items"][0]["surface"] == "/role-grants"
 
 
 def test_resume_brief_surfaces_completed_handoff_gap_until_decision_reconciles_it(

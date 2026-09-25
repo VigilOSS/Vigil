@@ -15,12 +15,13 @@ from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from app import db as db_module
+from app import db_code_analysis_schema
 from app.api import code_analysis as code_analysis_api
 from app.api.code_analysis import QueueItemsBulkCreateRequest
 from app.services import code_analysis, code_fuzz_completion
 from fastapi import HTTPException
 from pydantic import ValidationError
-from tests.proof_fixtures import post_artifact_backed_source_observation
+from tests.proof_fixtures import completed_confirm_check, post_artifact_backed_source_observation
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SCRIPTS_ROOT = REPO_ROOT / "agent" / "scripts"
@@ -802,6 +803,14 @@ def _verify_code_finding(
             },
         )
         assert run.status_code == 201, run.text
+        linked = client.post(
+            f"/engagements/{engagement_key}/assessment/findings/{slug}/links",
+            json={
+                "link_kind": "proof_run", "target_kind": "assessment_run",
+                "target_id": run.json()["id"],
+            },
+        )
+        assert linked.status_code == 200, linked.text
         receipt = post_artifact_backed_source_observation(
             client,
             f"/engagements/{engagement_key}/assessment/proof-receipts",
@@ -820,6 +829,8 @@ def _verify_code_finding(
         assert completed.status_code == 200, completed.text
         receipt_id = receipt.json()["id"]
         payload["proof_receipt_ids"] = [receipt_id]
+        if disposition in {"confirmed", "downgraded"}:
+            payload["confirm_check"] = completed_confirm_check(receipt_id)
         if disposition == "false_positive":
             payload["counter_check"] = {
                 "method": "sealed-source reachability review",
@@ -1666,7 +1677,7 @@ def test_generation_history_migration_captures_only_live_current_source(
         )
         connection.execute("DROP TABLE code_source_generation_files")
         connection.execute("DROP TABLE code_source_generations")
-        db_module._create_code_analysis_tables(connection)
+        db_code_analysis_schema.create_tables(connection)
         db_module._apply_additive_migrations(connection)
         generations = [
             int(row[0])
@@ -1861,6 +1872,85 @@ def test_grouped_analysis_receipt_rejects_unbound_or_inexact_source_anchors(
         ),
     )
     assert accepted_close.status_code == 200, accepted_close.text
+
+
+def test_medium_clean_close_requires_current_source_receipt(client, isolate_settings):
+    engagement_key = "2026-09-25-medium-clean-receipt"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo = _create_repo(client, engagement_key, repo_key="medium-clean-receipt-repo")
+    files = _create_files(client, engagement_key, int(repo["id"]))
+    parser = next(row for row in files if row["file_path"] == "src/parser.py")
+    _classify_file(client, engagement_key, int(parser["id"]), "medium", 40)
+    claim = _claim_file_for_analysis(
+        client, engagement_key, int(parser["id"]), priority=40
+    )
+    closed = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue/done",
+        json=_owned(
+            claim,
+            item_ids=[claim["id"]],
+            disposition="clean",
+            notes="No source receipt was accepted.",
+            cwe_coverage=_network_input_coverage(default_effort=40),
+        ),
+    )
+    assert closed.status_code == 400, closed.text
+    assert "source-level receipt" in closed.json()["detail"]
+
+
+def test_sealed_empty_file_has_explicit_review_receipt(client, isolate_settings):
+    engagement_key = "2026-09-25-empty-source-review"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo = _create_repo(client, engagement_key, repo_key="empty-source-review-repo")
+    files = _refresh_repo_files(
+        client,
+        engagement_key,
+        int(repo["id"]),
+        [{
+            "file_path": "src/empty.py",
+            "language": "python",
+            "loc": 0,
+            "file_hash": hashlib.sha256(b"").hexdigest(),
+            "header_snippet": "",
+            "git_churn_score": 0,
+            "has_past_cve_fix": False,
+        }],
+    )
+    empty = next(row for row in files if row["file_path"] == "src/empty.py")
+    assert (empty["loc"], empty["file_hash"]) == (0, hashlib.sha256(b"").hexdigest())
+    _classify_file(client, engagement_key, int(empty["id"]), "medium", 40)
+    claim = _claim_file_for_analysis(
+        client, engagement_key, int(empty["id"]), priority=40
+    )
+    base = f"/engagements/{engagement_key}/assessment/code"
+    receipt = client.post(
+        f"{base}/analysis-results",
+        json=_owned(
+            claim,
+            queue_item_id=claim["id"],
+            disposition="clean",
+            empty_file_reviewed=True,
+            callable_refs=[],
+            reviewed_spans=[],
+            evidence="Current sealed file has zero bytes.",
+        ),
+    )
+    assert receipt.status_code == 201, receipt.text
+    assert receipt.json()["receipt_binding_status"] == "empty_file"
+    closed = client.post(
+        f"{base}/analysis-queue/done",
+        json=_owned(
+            claim,
+            item_ids=[claim["id"]],
+            disposition="clean",
+            notes="Confirmed the sealed file is empty.",
+            cwe_coverage=_network_input_coverage(default_effort=40),
+        ),
+    )
+    assert closed.status_code == 200, closed.text
+    coverage = client.get(f"{base}/coverage?repo_id={repo['id']}")
+    assert coverage.status_code == 200
+    assert coverage.json()["by_classification"]["medium"]["analyzed"] == 1
 
 
 def test_structural_sync_binds_only_unambiguous_legacy_function_rows(
@@ -5003,6 +5093,7 @@ def test_same_hash_risk_metadata_change_reopens_review_at_prior_priority(
             """,
             (metadata_claim["id"], resolved_trigger_id),
         )
+    _record_fixture_source_receipt(client, engagement_key, metadata_claim)
     metadata_done = client.post(
         f"{base}/analysis-queue/done",
         json=_owned(
@@ -5618,6 +5709,98 @@ def test_analysis_result_explicit_supersession_replaces_one_source_receipt(
         ),
     )
     assert done.status_code == 200, done.text
+
+
+def test_reanalysis_result_can_supersede_receipt_from_completed_predecessor(
+    client, isolate_settings
+):
+    engagement_key = "2026-09-25-code-reanalysis-result-correction"
+    repo, parser, _claim, original = _seed_reviewed_parser(
+        client, isolate_settings, engagement_key
+    )
+    base = f"/engagements/{engagement_key}/assessment/code"
+    with db_module.get_connection() as connection:
+        queue_count_before = connection.execute(
+            "SELECT COUNT(*) FROM code_analysis_queue WHERE file_id = ?",
+            (parser["id"],),
+        ).fetchone()[0]
+    replacement = client.post(
+        f"{base}/analysis-results",
+        json=_owned(
+            _claim,
+            queue_item_id=_claim["id"],
+            supersedes=original["id"],
+            disposition="suspicious",
+            hypothesis="The input reaches the parser without a rejecting guard.",
+            evidence="source evidence from the corrective pass",
+        ),
+    )
+
+    assert replacement.status_code == 201, replacement.text
+    assert replacement.json()["supersedes"] == original["id"]
+    with db_module.get_connection() as connection:
+        queue_count_after = connection.execute(
+            "SELECT COUNT(*) FROM code_analysis_queue WHERE file_id = ?",
+            (parser["id"],),
+        ).fetchone()[0]
+        projected_queue = connection.execute(
+            "SELECT disposition, cwe_coverage_json FROM code_analysis_queue WHERE id = ?",
+            (_claim["id"],),
+        ).fetchone()
+    assert queue_count_after == queue_count_before
+    assert projected_queue["disposition"] == "suspicious"
+    assert json.loads(projected_queue["cwe_coverage_json"]) == _network_input_coverage(default_effort=80)
+    history = client.get(f"{base}/analysis-results?include_superseded=true")
+    assert history.status_code == 200, history.text
+    prior = next(row for row in history.json() if row["id"] == original["id"])
+    assert prior["replaced_by_result_id"] == replacement.json()["id"]
+    current = client.get(f"{base}/analysis-results?file_id={parser['id']}")
+    assert [row["id"] for row in current.json()] == [replacement.json()["id"]]
+
+
+def test_reanalysis_stale_predecessor_is_reported_per_item_and_batch_continues(
+    client, isolate_settings
+):
+    engagement_key, repo, parser = _seed_queue_contract_file(
+        client, isolate_settings, "stale-predecessor-outcome"
+    )
+    base = f"/engagements/{engagement_key}/assessment/code"
+    second_file = next(
+        row for row in _create_files(client, engagement_key, int(repo["id"]))
+        if row["id"] != parser["id"]
+    )
+    for file_row in (parser, second_file):
+        _classify_file(client, engagement_key, int(file_row["id"]), "critical", 80)
+        claim = _claim_file_for_analysis(
+            client, engagement_key, int(file_row["id"]), priority=80,
+            agent_name=f"review-{file_row['id']}",
+        )
+        closed = client.post(
+            f"{base}/analysis-queue/done",
+            json=_owned(
+                claim, item_ids=[claim["id"]], disposition="skipped",
+                skip_reason="test-fixture",
+            ),
+        )
+        assert closed.status_code == 200, closed.text
+
+    created = client.post(
+        f"{base}/analysis-queue",
+        json={
+            "mode": "reanalysis",
+            "reason": "Review both files again.",
+            "items": [
+                {"file_id": parser["id"], "supersedes": 999999},
+                {"file_id": second_file["id"]},
+            ],
+        },
+    )
+
+    assert created.status_code == 201, created.text
+    result = created.json()
+    assert result["conflicts"] == 1
+    assert result["reanalysis"] == 1
+    assert [row["outcome"] for row in result["outcomes"]] == ["conflict", "reanalysis"]
 
 
 def test_suspicious_result_atomically_materializes_its_run_candidate(
@@ -6324,6 +6507,7 @@ def test_clean_closeout_requires_nonempty_review_notes(client, isolate_settings)
     )
     assert rejected.status_code == 400
     assert "notes are required" in rejected.json()["detail"]
+    _record_fixture_source_receipt(client, engagement_key, claim)
     accepted = client.post(
         f"/engagements/{engagement_key}/assessment/code/analysis-queue/done",
         json={**payload, "notes": "Reviewed every applicable family and found no issue."},
@@ -6909,6 +7093,14 @@ def test_managed_supported_file_has_real_resource_and_error_handling_floor():
 
     assert "algorithmic-dos" in families
     assert "error-handling" in families
+
+
+def test_freemarker_template_file_content_prioritizes_rendering_defects():
+    families = code_analysis._applicable_families_for_file(
+        ["FILE-CONTENT"], language="freemarker", role="email-template"
+    )
+    assert "web-app-injection" in families
+    assert not {"buffer-overflow", "integer-overflow", "type-confusion", "deserialization"} & set(families)
 
 
 def test_unknown_language_does_not_receive_a_synthetic_family_floor():
@@ -7701,6 +7893,7 @@ def test_queue_mutation_succeeds_and_persists_audit_failure(
     )
     assert queued.status_code == 201, queued.text
     claim = _claim_file_for_analysis(client, engagement_key, int(parser_file["id"]))
+    _record_fixture_source_receipt(client, engagement_key, claim)
 
     monkeypatch.setattr(
         code_analysis_api.activity_service,
@@ -9599,6 +9792,19 @@ def test_bulk_structural_metadata_accepts_bounded_parser_signal_truncation(
         ).json()["blockers"]
     }
     assert "structural_analysis_debt_unreviewed" in verify_codes
+    concise = client.get(f"{base}/readiness?target_phase=verify-variant").json()
+    assert concise["structural_debt_count"] == 1
+    assert "structural_debt" not in concise
+    detailed = client.get(
+        f"{base}/readiness?target_phase=verify-variant&include_debt_paths=true"
+    ).json()
+    assert detailed["structural_debt"] == [{
+        "repo_id": repo["id"],
+        "file_path": truncated_path,
+        "classification": files[0]["classification"],
+        "structural_analysis_status": "degraded",
+        "structural_artifact_truncated": True,
+    }]
 
 
 def test_unsupported_structural_metadata_is_explicit_review_debt(
@@ -10234,6 +10440,7 @@ def test_coverage_skip_reasons_come_from_current_terminal_queue_receipts(
         f"{base}/analysis-queue/fetch",
         json={"limit": 1, "agent_name": "final-agent", "item_ids": [final_id]},
     ).json()[0]
+    _record_fixture_source_receipt(client, engagement_key, final_claim)
     final = client.post(
         f"{base}/analysis-queue/done",
         json=_owned(
@@ -12620,8 +12827,8 @@ def test_complete_readiness_requires_snapshot_current_verification_and_blind_tri
     readiness = client.get(f"{base}/readiness?target_phase=complete")
     assert readiness.status_code == 200, readiness.text
     by_code = {item["code"]: item for item in readiness.json()["blockers"]}
-    assert by_code["findings_unverified"]["overrideable"] is True
-    assert by_code["findings_blind_triage_incomplete"]["overrideable"] is True
+    assert by_code["findings_unverified"]["overrideable"] is False
+    assert by_code["findings_blind_triage_incomplete"]["overrideable"] is False
     assert "finding_snapshot_stale" not in by_code
 
     with db_module.get_connection() as connection:
@@ -13676,8 +13883,8 @@ def test_coverage_detail_cwe(client, isolate_settings):
     assert "gate" in payload
 
 
-def test_coverage_integrity_warns_when_no_results_recorded(client, isolate_settings):
-    """Completing a queue item with high effort but zero analysis results triggers a warning."""
+def test_coverage_integrity_rejects_clean_closeout_without_results(client, isolate_settings):
+    """Claimed effort cannot close a file without a current source receipt."""
     engagement_key = "2026-05-12-integrity-no-results"
     write_engagement(isolate_settings["engagements_dir"], engagement_key)
     repo = _create_repo(client, engagement_key, repo_key="integrity-repo")
@@ -13711,11 +13918,14 @@ def test_coverage_integrity_warns_when_no_results_recorded(client, isolate_setti
             "notes": "Reviewed",
         },
     )
-    assert done.status_code == 200
-    integrity = done.json()["coverage_integrity"]
-    assert integrity["plausible"] is False
-    assert integrity["current_receipt_rows"] == 0
-    assert len(integrity["warnings"]) > 0
+    assert done.status_code == 400
+    assert "source-level receipt" in done.json()["detail"]
+    queue = client.get(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue",
+        params={"status": "processing"},
+    )
+    assert queue.status_code == 200
+    assert any(row["id"] == queue_item["id"] for row in queue.json()["items"])
 
 
 def test_coverage_integrity_passes_with_matching_results(client, isolate_settings):
@@ -14328,16 +14538,24 @@ def test_explicit_reanalysis_requires_terminal_predecessor_and_records_audit_lin
     assert accidental_retry.json()["conflicts"] == 1
 
     reason = "Phase 2C independent adversarial reread"
-    missing_predecessor = client.post(
+    derived_values = client.post(
         f"{base}/analysis-queue",
         json={
             "mode": "reanalysis",
             "reason": reason,
-            "items": [{**item, "batch_theme": "phase-2c"}],
+            "items": [{"file_id": file_row["id"], "batch_theme": "phase-2c"}],
         },
     )
-    assert missing_predecessor.status_code == 422
-    assert "supersedes" in missing_predecessor.text
+    assert derived_values.status_code == 201, derived_values.text
+    assert derived_values.json()["reanalysis"] == 1
+    derived_id = derived_values.json()["outcomes"][0]["queue_item_id"]
+
+    with db_module.get_connection() as connection:
+        derived = connection.execute(
+            "SELECT priority, reanalysis_of_queue_item_id FROM code_analysis_queue WHERE id = ?",
+            (derived_id,),
+        ).fetchone()
+    assert dict(derived) == {"priority": 80, "reanalysis_of_queue_item_id": original_id}
 
     mismatched_priority = client.post(
         f"{base}/analysis-queue",
@@ -14366,9 +14584,9 @@ def test_explicit_reanalysis_requires_terminal_predecessor_and_records_audit_lin
     )
     assert reanalysis.status_code == 201, reanalysis.text
     payload = reanalysis.json()
-    assert payload["reanalysis"] == 1
-    assert payload["outcomes"][0]["outcome"] == "reanalysis"
-    reanalysis_id = payload["outcomes"][0]["queue_item_id"]
+    assert payload["already_active"] == 1
+    assert payload["outcomes"][0]["outcome"] == "already_active"
+    reanalysis_id = derived_id
 
     with db_module.get_connection() as connection:
         rows = connection.execute(

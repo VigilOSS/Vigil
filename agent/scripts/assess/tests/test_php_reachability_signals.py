@@ -259,10 +259,7 @@ def test_a_route_file_is_no_longer_an_unmeasured_scope() -> None:
 
 
 def test_a_route_file_of_pure_controller_references_still_measures_its_entries() -> None:
-    """No closure anywhere, so no callable bounds a sink scan -- but the
-    entry-point dimension WAS read, and must not be declared unavailable
-    alongside the three function-scoped ones.
-    """
+    """A route registration with no closure is still a measured file scope."""
     source = """\
 <?php
 
@@ -271,11 +268,7 @@ Route::get('/status', [StatusController::class, 'show']);
     result = _tree_sitter(source, "routes/api.php")
 
     assert result["entry_points"]
-    assert result["unavailable_dimensions"] == [
-        "call_sites",
-        "dataflow",
-        "security_sinks",
-    ]
+    assert result["unavailable_dimensions"] == []
 
 
 # ---------------------------------------------------------------------------

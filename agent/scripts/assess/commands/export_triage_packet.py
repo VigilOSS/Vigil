@@ -10,14 +10,18 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from assess.lib.config import resolve_engagement_dir
+from assess.lib.client import AssessmentClient
+from assess.lib.config import load_config, resolve_engagement_dir
+from assess.lib.finding_render import _fence_for
 
 
-_SCHEMA = "vigil-blind-triage-packet/v1"
+_SCHEMA = "vigil-blind-triage-packet/v2"
 _SLUG = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _RUBRIC_ROOT = Path(__file__).resolve().parents[3]
 _RUBRIC_RELATIVE = Path("skills") / "blind-triage" / "SKILL.md"
 _MAX_CANONICAL_INPUT_BYTES = 16 * 1024 * 1024
+_MAX_ATTACHMENT_BYTES = 64 * 1024 * 1024
+_MAX_TOTAL_ATTACHMENT_BYTES = 256 * 1024 * 1024
 
 
 def register(subparsers) -> None:
@@ -26,11 +30,18 @@ def register(subparsers) -> None:
         help="Package canonical submission, program-brief, and verdict-rubric bytes with digests",
     )
     parser.add_argument("slug", help="Finding slug whose canonical submission.md is packaged")
+    parser.add_argument(
+        "--attachment-id", type=int, action="append", dest="attachment_ids", default=[],
+        help="Include a registered external attachment; repeat for each selected artifact",
+    )
     parser.add_argument("--json", dest="as_json", action="store_true")
     parser.set_defaults(func=run)
 
 
-def _read_regular_at(root: Path, relative: Path, *, label: str) -> bytes:
+def _read_regular_at(
+    root: Path, relative: Path, *, label: str,
+    max_bytes: int = _MAX_CANONICAL_INPUT_BYTES, text_required: bool = True,
+) -> bytes:
     """Read one bounded regular file beneath an owned directory descriptor.
 
     Every path component is opened relative to the descriptor above it with
@@ -98,10 +109,10 @@ def _read_regular_at(root: Path, relative: Path, *, label: str) -> bytes:
                 raise SystemExit(
                     f"export triage-packet: {label} changed while it was opened: {display_path}"
                 )
-            if opened.st_size > _MAX_CANONICAL_INPUT_BYTES:
+            if opened.st_size > max_bytes:
                 raise SystemExit(
                     f"export triage-packet: {label} exceeds the "
-                    f"{_MAX_CANONICAL_INPUT_BYTES}-byte input limit: {display_path}"
+                    f"{max_bytes}-byte input limit: {display_path}"
                 )
             raw = source.read(opened.st_size + 1)
             after = os.fstat(source.fileno())
@@ -115,7 +126,8 @@ def _read_regular_at(root: Path, relative: Path, *, label: str) -> bytes:
                 raise SystemExit(
                     f"export triage-packet: {label} changed while it was read: {display_path}"
                 )
-        raw.decode("utf-8")
+        if text_required:
+            raw.decode("utf-8")
     except (OSError, UnicodeDecodeError) as exc:
         raise SystemExit(f"export triage-packet: cannot read UTF-8 {label}: {exc}") from exc
     finally:
@@ -250,7 +262,8 @@ def _atomic_create_or_verify(
 
 
 def _packet_markdown(
-    *, slug: str, submission: bytes, program_brief: bytes, verdict_rubric: bytes
+    *, slug: str, submission: bytes, program_brief: bytes, verdict_rubric: bytes,
+    attachments: list[dict[str, Any]],
 ) -> bytes:
     header = (
         f"# Blind triage packet: {slug}\n\n"
@@ -266,24 +279,98 @@ def _packet_markdown(
     )
     packet = bytearray(header)
     for heading, raw in sections:
+        fence = _fence_for(raw.decode("utf-8")).encode("ascii")
         packet.extend(heading)
+        packet.extend(fence + b"\n")
         packet.extend(raw)
         if not raw.endswith(b"\n"):
             packet.extend(b"\n")
-        packet.extend(b"\n")
+        packet.extend(fence + b"\n\n")
+    if attachments:
+        packet.extend(b"## Selected external attachments\n\n")
+        for attachment in attachments:
+            packet.extend(
+                f"- `{attachment['packet_path']}`: sha256={attachment['sha256']} "
+                f"bytes={attachment['bytes']} media_type={attachment['media_type']}\n".encode("utf-8")
+            )
+        packet.extend(b"\nThese files are part of the recipient's submission. Review their content where relevant.\n")
     return bytes(packet)
 
 
-def build_packet(engagement: Path, slug: str) -> dict[str, Any]:
+def _selected_attachments(
+    engagement: Path, rows: list[dict[str, Any]],
+) -> list[tuple[dict[str, Any], bytes]]:
+    selected: list[tuple[dict[str, Any], bytes]] = []
+    seen: set[int] = set()
+    total = 0
+    for row in rows:
+        artifact_id = int(row.get("id") or 0)
+        if artifact_id < 1 or artifact_id in seen or not row.get("present"):
+            raise SystemExit("export triage-packet: attachment id must name a distinct present artifact")
+        seen.add(artifact_id)
+        relative = Path(str(row.get("relative_path") or ""))
+        raw = _read_regular_at(
+            engagement, relative, label=f"attachment {artifact_id}",
+            max_bytes=_MAX_ATTACHMENT_BYTES, text_required=False,
+        )
+        digest = hashlib.sha256(raw).hexdigest()
+        if digest != row.get("sha256") or len(raw) != row.get("size_bytes"):
+            raise SystemExit(f"export triage-packet: attachment {artifact_id} changed since registration")
+        total += len(raw)
+        if total > _MAX_TOTAL_ATTACHMENT_BYTES:
+            raise SystemExit("export triage-packet: selected attachments exceed total size limit")
+        basename = re.sub(r"[^A-Za-z0-9._-]+", "-", relative.name).strip("._-") or "artifact"
+        packet_path = f"attachments/{artifact_id}-{basename[:100]}"
+        selected.append(({
+            "artifact_id": artifact_id,
+            "source_path": relative.as_posix(),
+            "packet_path": packet_path,
+            "sha256": digest,
+            "bytes": len(raw),
+            "media_type": str(row.get("media_type") or "application/octet-stream"),
+        }, raw))
+    return sorted(selected, key=lambda item: item[0]["artifact_id"])
+
+
+def build_packet(
+    engagement: Path, slug: str, *, attachment_rows: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     if not _SLUG.fullmatch(slug):
         raise SystemExit("export triage-packet: slug must be one safe path component")
     submission_relative = Path("submissions") / slug / "submission.md"
+    body_relative = Path("submissions") / slug / "submission-body.md"
+    context_relative = Path("submissions") / slug / "submission-context.json"
     brief_relative = Path("ENGAGEMENT.md")
-    submission = _read_regular_at(
+    workspace = _read_regular_at(
         engagement,
         submission_relative,
-        label="canonical submission",
+        label="canonical submission workspace",
     )
+    submission = _read_regular_at(
+        engagement,
+        body_relative,
+        label="external submission body",
+    )
+    context_raw = _read_regular_at(
+        engagement,
+        context_relative,
+        label="submission context",
+    )
+    try:
+        context = json.loads(context_raw)
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"export triage-packet: invalid submission context: {exc}") from exc
+    if not isinstance(context, dict) or (
+        context.get("submission_sha256") != hashlib.sha256(workspace).hexdigest()
+        or context.get("external_body_sha256") != hashlib.sha256(submission).hexdigest()
+    ):
+        raise SystemExit(
+            "export triage-packet: submission workspace or external body changed "
+            "since rendering; re-render from the canonical finding"
+        )
+    platform = str(context.get("platform") or "")
+    if platform not in {"bugcrowd", "hackerone", "direct"}:
+        raise SystemExit("export triage-packet: submission context has no valid platform")
     program_brief = _read_regular_at(
         engagement,
         brief_relative,
@@ -294,17 +381,22 @@ def build_packet(engagement: Path, slug: str) -> dict[str, Any]:
         _RUBRIC_RELATIVE,
         label="canonical verdict rubric",
     )
+    attachments = _selected_attachments(engagement, attachment_rows or [])
+    attachment_records = [row for row, _ in attachments]
 
     inputs = {
-        "submission": _input_record(submission_relative.as_posix(), submission),
+        "submission": _input_record(body_relative.as_posix(), submission),
+        "workspace_sha256": hashlib.sha256(workspace).hexdigest(),
         "program_brief": _input_record(brief_relative.as_posix(), program_brief),
         "verdict_rubric": _input_record(
             "agent/skills/blind-triage/SKILL.md", verdict_rubric
         ),
+        "attachments": attachment_records,
     }
     identity = {
         "schema": _SCHEMA,
         "finding_slug": slug,
+        "platform": platform,
         "process_isolation_enforced": False,
         "inputs": inputs,
     }
@@ -318,6 +410,7 @@ def build_packet(engagement: Path, slug: str) -> dict[str, Any]:
         submission=submission,
         program_brief=program_brief,
         verdict_rubric=verdict_rubric,
+        attachments=attachment_records,
     )
     manifest = {
         **identity,
@@ -327,6 +420,10 @@ def build_packet(engagement: Path, slug: str) -> dict[str, Any]:
             "submission.md": _input_record("submission.md", submission),
             "program-brief.md": _input_record("program-brief.md", program_brief),
             "verdict-rubric.md": _input_record("verdict-rubric.md", verdict_rubric),
+            **{
+                row["packet_path"]: _input_record(row["packet_path"], raw)
+                for row, raw in attachments
+            },
         },
     }
     manifest_bytes = (
@@ -334,6 +431,16 @@ def build_packet(engagement: Path, slug: str) -> dict[str, Any]:
     ).encode("utf-8")
     packet_dir_fd = _open_packet_directory(engagement, packet_dir)
     try:
+        if attachments:
+            attachment_dir_fd = _open_packet_directory(engagement, packet_dir / "attachments")
+            try:
+                for row, raw in attachments:
+                    _atomic_create_or_verify(
+                        attachment_dir_fd, packet_dir / "attachments",
+                        Path(row["packet_path"]).name, raw,
+                    )
+            finally:
+                os.close(attachment_dir_fd)
         for name, raw in (
             ("submission.md", submission),
             ("program-brief.md", program_brief),
@@ -355,7 +462,16 @@ def build_packet(engagement: Path, slug: str) -> dict[str, Any]:
 
 def run(args) -> None:
     engagement = Path(resolve_engagement_dir(args.engagement_dir))
-    result = build_packet(engagement, args.slug)
+    attachment_ids = list(args.attachment_ids)
+    if len(attachment_ids) != len(set(attachment_ids)) or any(value < 1 for value in attachment_ids):
+        raise SystemExit("export triage-packet: --attachment-id values must be distinct positive integers")
+    attachment_rows: list[dict[str, Any]] = []
+    if attachment_ids:
+        cfg = load_config(args.engagement_dir)
+        with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
+            for artifact_id in attachment_ids:
+                attachment_rows.append(client.get(f"artifacts/{artifact_id}"))
+    result = build_packet(engagement, args.slug, attachment_rows=attachment_rows)
     if args.as_json:
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return

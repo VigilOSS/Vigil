@@ -23,6 +23,58 @@ from types import SimpleNamespace
 from assess.commands import check_phase_readiness as cpr
 
 
+def test_code_only_readiness_points_to_code_gate_before_web_fetch(monkeypatch, tmp_path, capsys):
+    (tmp_path / "scope.json").write_text('{"engagement_type":"code"}', encoding="utf-8")
+    monkeypatch.setattr(
+        cpr,
+        "load_config",
+        lambda *_args: SimpleNamespace(
+            engagement_dir=str(tmp_path), engagement_key="code-eng", base_url="http://unused"
+        ),
+    )
+    monkeypatch.setattr(
+        cpr,
+        "AssessmentClient",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("web fetch must not run")),
+    )
+    with __import__("pytest").raises(SystemExit) as exit_info:
+        cpr.run(SimpleNamespace(engagement_dir=tmp_path, phase="classify-map"))
+    assert exit_info.value.code != 0
+    assert "code-coverage --require-transition-ready classify-map" in capsys.readouterr().err
+
+
+def test_code_only_web_phase_uses_current_code_track_for_pointer(monkeypatch, tmp_path, capsys):
+    (tmp_path / "scope.json").write_text(
+        '{"engagement_type":"code","current_phase":"hunt"}', encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        cpr,
+        "load_config",
+        lambda *_args: SimpleNamespace(
+            engagement_dir=str(tmp_path), engagement_key="code-eng", base_url="http://unused"
+        ),
+    )
+    with __import__("pytest").raises(SystemExit):
+        cpr.run(SimpleNamespace(engagement_dir=tmp_path, phase="verify"))
+    assert "code-coverage --require-transition-ready verify-variant" in capsys.readouterr().err
+
+
+def test_web_only_code_phase_does_not_offer_code_gate(monkeypatch, tmp_path, capsys):
+    (tmp_path / "scope.json").write_text(
+        '{"engagement_type":"web","current_phase":"recon"}', encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        cpr,
+        "load_config",
+        lambda *_args: SimpleNamespace(
+            engagement_dir=str(tmp_path), engagement_key="web-eng", base_url="http://unused"
+        ),
+    )
+    with __import__("pytest").raises(SystemExit):
+        cpr.run(SimpleNamespace(engagement_dir=tmp_path, phase="hunt"))
+    assert "no code track" in capsys.readouterr().err
+
+
 # ---------------------------------------------------------------------------
 # _render_depth_ledger — default text surfaces signal_classes_uncovered
 # ---------------------------------------------------------------------------

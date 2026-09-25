@@ -32,6 +32,36 @@ def _engagement(tmp_path: Path, doc: dict) -> Path:
     return eng
 
 
+def test_stub_program_brief_blocks_live_target_traffic_until_declared(
+    tmp_path: Path, monkeypatch
+) -> None:
+    eng = _engagement(tmp_path, {"hosts": ["example.test"]})
+    (eng / "ENGAGEMENT.md").write_text("> **STUB — fill this in**\n")
+
+    with pytest.raises(scope.ScopePolicyError, match="STUB"):
+        scope.enforce_execution_policy(
+            ["curl", "https://example.test/"], tool_name="curl", engagement_dir=eng
+        )
+
+    monkeypatch.setattr(
+        scope, "_program_brief_decisions",
+        lambda _eng: [{"payload": {"choice": "no_separate_program_brief", "reason": "Operator confirmed"}}],
+    )
+    result = scope.enforce_execution_policy(
+        ["curl", "https://example.test/"], tool_name="curl", engagement_dir=eng
+    )
+    assert result["target_facing"] is True
+
+
+def test_stub_program_brief_does_not_block_static_source_review(tmp_path: Path) -> None:
+    eng = _engagement(tmp_path, {"engagement_type": "code", "hosts": []})
+    (eng / "ENGAGEMENT.md").write_text("> **STUB — fill this in**\n")
+    result = scope.enforce_execution_policy(
+        ["rg", "password", "repo/"], tool_name="rg", engagement_dir=eng
+    )
+    assert result["target_facing"] is False
+
+
 # ---------------------------------------------------------------------------
 # No destination filtering
 # ---------------------------------------------------------------------------

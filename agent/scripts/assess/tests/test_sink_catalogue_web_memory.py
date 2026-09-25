@@ -443,6 +443,68 @@ void log_msg(char *scratch, const char *user_input) {
 }
 """
 
+# ---- csharp fixture (one file spanning all four in-scope C# families) ------
+#
+# C# was added as a tree-sitter language after the per-family fixtures above.
+# Rather than one fixture per (family, language), a single controller carries
+# every LIVE C# needle on its own line inside a method body. Two deliberate
+# properties:
+#
+# * `[Authorize]` sits on the method DECLARATION -- outside every scanned
+#   function body and not top-level -- so `_detect_sinks` never reads it and
+#   it does not fire (verified). It is listed in _EXCLUDED_PATTERNS.
+# * The two redirect needles share `GoTo`. `\bRedirect\s*\(` also matches the
+#   `.Redirect(` inside `Response.Redirect(`, and `_detect_sinks` keeps only
+#   the first line a pattern hits per function, so the bare `Redirect(` line
+#   is placed BEFORE `Response.Redirect(`: the bare-form pattern breaks on the
+#   earlier line and each line then carries exactly one redirect sink.
+CSHARP_SOURCE = """\
+using System.Web;
+using System.Web.Security;
+using System.Security.Claims;
+using System.Xml;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Authorization;
+
+namespace Vigil.Web
+{
+    public class AccountController : Controller
+    {
+        public void SignIn(string user)
+        {
+            FormsAuthentication.SetAuthCookie(user, false);
+            var principal = HttpContext.User;
+            var claims = new ClaimsPrincipal();
+        }
+
+        [Authorize]
+        public string Protected()
+        {
+            return "secret";
+        }
+
+        public IActionResult Render(string content)
+        {
+            return Content(Html.Raw(content).ToString());
+        }
+
+        public IActionResult GoTo(string next)
+        {
+            var fallback = Redirect(next);
+            Response.Redirect(next);
+            return fallback;
+        }
+
+        public void ParseXml(string path, System.IO.Stream stream)
+        {
+            var doc = new XmlDocument();
+            var legacy = new XmlTextReader(path);
+            var reader = XmlReader.Create(stream);
+        }
+    }
+}
+"""
+
 
 CASES: tuple[Case, ...] = (
     # -- auth --
@@ -517,6 +579,15 @@ CASES: tuple[Case, ...] = (
     Case("auth-php-session-superglobal", "auth", "php", r"\$_SESSION\b",
          "auth.php", AUTH_PHP,
          '$_SESSION["user"] = $user->id;', _AUTH_VULN_CLASSES),
+    Case("auth-csharp-formsauthentication", "auth", "csharp",
+         r"\bFormsAuthentication\b", "AccountController.cs", CSHARP_SOURCE,
+         "FormsAuthentication.SetAuthCookie(user, false);", _AUTH_VULN_CLASSES),
+    Case("auth-csharp-httpcontext-user", "auth", "csharp",
+         r"\bHttpContext\.User\b", "AccountController.cs", CSHARP_SOURCE,
+         "var principal = HttpContext.User;", _AUTH_VULN_CLASSES),
+    Case("auth-csharp-claimsprincipal", "auth", "csharp",
+         r"\bClaimsPrincipal\b", "AccountController.cs", CSHARP_SOURCE,
+         "var claims = new ClaimsPrincipal();", _AUTH_VULN_CLASSES),
 
     # -- xss_output --
     Case("xss-java-getwriter-write", "xss_output", "java",
@@ -566,6 +637,9 @@ CASES: tuple[Case, ...] = (
     Case("xss-php-printf", "xss_output", "php", r"\bprintf\s*\(",
          "PageController.php", XSS_PHP,
          'printf("<p>%s</p>", $name);', _XSS_VULN_CLASSES),
+    Case("xss-csharp-html-raw", "xss_output", "csharp", r"\bHtml\.Raw\s*\(",
+         "AccountController.cs", CSHARP_SOURCE,
+         "return Content(Html.Raw(content).ToString());", _XSS_VULN_CLASSES),
 
     # -- redirect --
     Case("redirect-java-sendRedirect", "redirect", "java", r"\bsendRedirect\s*\(",
@@ -599,6 +673,14 @@ CASES: tuple[Case, ...] = (
     Case("redirect-php-redirect-call", "redirect", "php", r"\bredirect\s*\(",
          "RedirController.php", REDIRECT_PHP,
          "redirect($next);", _REDIRECT_VULN_CLASSES),
+    # Bare `Redirect(` sits on its own line ABOVE `Response.Redirect(` in the
+    # fixture so each carries exactly one redirect sink -- see CSHARP_SOURCE.
+    Case("redirect-csharp-redirect", "redirect", "csharp", r"\bRedirect\s*\(",
+         "AccountController.cs", CSHARP_SOURCE,
+         "var fallback = Redirect(next);", _REDIRECT_VULN_CLASSES),
+    Case("redirect-csharp-response-redirect", "redirect", "csharp",
+         r"\bResponse\.Redirect\s*\(", "AccountController.cs", CSHARP_SOURCE,
+         "Response.Redirect(next);", _REDIRECT_VULN_CLASSES),
 
     # -- xml_parse --
     Case("xml-java-documentbuilderfactory", "xml_parse", "java",
@@ -650,6 +732,15 @@ CASES: tuple[Case, ...] = (
     Case("xml-php-xml-parse", "xml_parse", "php", r"\bxml_parse\s*\(",
          "FeedParser.php", XML_PHP,
          "xml_parse($parser, $xmlString);", _XML_VULN_CLASSES),
+    Case("xml-csharp-xmldocument", "xml_parse", "csharp",
+         r"\bnew\s+XmlDocument\s*\(", "AccountController.cs", CSHARP_SOURCE,
+         "var doc = new XmlDocument();", _XML_VULN_CLASSES),
+    Case("xml-csharp-xmltextreader", "xml_parse", "csharp", r"\bXmlTextReader\b",
+         "AccountController.cs", CSHARP_SOURCE,
+         "var legacy = new XmlTextReader(path);", _XML_VULN_CLASSES),
+    Case("xml-csharp-xmlreader-create", "xml_parse", "csharp",
+         r"\bXmlReader\.Create\s*\(", "AccountController.cs", CSHARP_SOURCE,
+         "var reader = XmlReader.Create(stream);", _XML_VULN_CLASSES),
 
     # -- memory (malloc/free/realloc excluded -- MISROUTED, see below) --
     Case("memory-c-memcpy", "memory", "c", r"\bmemcpy\s*\(",
@@ -809,15 +900,8 @@ func renderHandler(resp http.ResponseWriter, r *http.Request) {
     assert _sinks_of_kind(result, "xss_output") == []
 
 
-def test_php_top_level_template_echo_is_invisible() -> None:
-    """`\\becho\\b`/`\\bprint\\b`/`\\bprintf\\s*\\(` (treesitter_index.py:393)
-    only scan inside function bodies (`_detect_sinks`, treesitter_index.py
-    :1568/1576-1579). The classic PHP template idiom -- `<?php echo $x; ?>`
-    mixed with HTML at the top level of the file, outside any function --
-    has no function for `_detect_sinks` to scan, so it never fires. This is
-    the majority PHP `echo` idiom (plain views, WordPress themes, legacy
-    MVC view files).
-    """
+def test_php_top_level_template_echo_is_indexed() -> None:
+    """Plain PHP views expose their top-level output sinks."""
     source = """\
 <?php
 $name = $_GET["name"];
@@ -832,7 +916,7 @@ $name = $_GET["name"];
     result = _index("template.php", "php", source)
     assert result["analysis_mode"] == "tree_sitter"
     assert result["functions"] == []
-    assert _sinks_of_kind(result, "xss_output") == []
+    assert _sinks_of_kind(result, "xss_output")
 
 
 def test_ruby_redirect_to_without_parentheses_is_invisible() -> None:
@@ -1081,6 +1165,17 @@ _EXCLUDED_PATTERNS: dict[tuple[str, str, str], str] = {
         "See test_format_string_family_snprintf_fires_on_the_safe_replacement.",
     ("format_string", "cpp", r"\bsnprintf\s*\("):
         "MISROUTED -- see format_string/c/snprintf.",
+    ("auth", "csharp", r"\[Authorize\b"):
+        "DEAD in structural scan -- `[Authorize]` is a declaration-level "
+        "attribute that sits on the method/class declaration, outside every "
+        "scanned function body and not at top-level, so `_detect_sinks` never "
+        "reads it. Verified: it produces no auth sink on the AccountController "
+        "fixture even though the attribute is present on `Protected()`.",
+    ("xss_output", "csharp", r"@Html\.Raw\b"):
+        "DEAD/redundant for .cs -- `@Html.Raw(...)` is Razor `.cshtml` view "
+        "syntax, not idiomatic (or even parseable) C# in a `.cs` source file; "
+        "the C# source form `Html.Raw(...)` is already covered LIVE by "
+        r"\bHtml\.Raw\s*\(.",
 }
 
 
@@ -1112,9 +1207,12 @@ def test_case_table_covers_every_live_pattern_in_the_assigned_families() -> None
     assert not missing, f"pattern(s) in the catalogue but untracked here: {missing}"
     assert not stale, f"tracked pattern(s) no longer in the catalogue: {stale}"
 
-    # Hard counts: exactly six families, 81 patterns. The audit started at 80;
+    # Hard counts: exactly six families, 92 patterns. The audit started at 80;
     # java `xml_parse` then gained `\bXMLInputFactory\b` (StAX), closing the
-    # one Java XML entry point the family had no pattern for.
-    assert len(catalogue) == 81
-    assert len(covered) == 71
-    assert len(excluded) == 10
+    # one Java XML entry point the family had no pattern for (81). C# was then
+    # added as a tree-sitter language, contributing 11 patterns across auth (4),
+    # xss_output (2), redirect (2) and xml_parse (3) -- 9 LIVE (covered) and 2
+    # dead (`[Authorize` declaration attribute, `@Html.Raw` Razor syntax).
+    assert len(catalogue) == 92
+    assert len(covered) == 80
+    assert len(excluded) == 12

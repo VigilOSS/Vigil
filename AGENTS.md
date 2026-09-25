@@ -21,6 +21,8 @@ the codebase clearer than you found it.
 - **Every line earns its place.** Prefer deleting to adding; match the surrounding idiom, naming, and
   comment density; a comment explains *why*, not what. No dead code, no speculative abstraction, no
   second copy of a value that already has a single source of truth.
+- **Inspect existing functionality first.** Search the owning code, contracts, and tests before
+  adding a helper or workflow; extend the existing path when it already owns the behavior.
 - **Land changes whole.** Touch every registration point a change needs (see the recipes + `CODE-MAP.md`)
   so nothing half-lands, and keep generated artifacts, schemas, and the map in sync in the same change.
 - **Durable over expedient.** Fix the root cause, not the symptom. Choose the design that still reads
@@ -256,9 +258,9 @@ authoritative registry, but registration shape depends on the command.
    help may also need the pre-`parse_args` hook. A Kali verb joins `KALI_TARGET_VERBS` or
    `KALI_MAINT_VERBS`; `KALI_VERBS` is their computed union.
 
-4. If the verb carries durable contract metadata operators should introspect, add it to
-   `agent/scripts/assess/lib/contracts.py` so `vigil assess contract <verb>` documents it — that is the
-   only operator-facing surface for verb contracts.
+4. If the verb carries durable contract metadata operators should introspect, add its declarative
+   entry to `agent/scripts/assess/lib/contract_registry.py`. Dynamic lookup and rendering live in
+   `contracts.py`; `vigil assess contract <verb>` is the operator-facing surface.
 
 5. Make the focused test green, then run the assess suite and registry-shape guard:
 
@@ -311,8 +313,9 @@ identical. Removing or renaming one is therefore a change you record, not just a
    both spellings and the invocation that replaces the old one. That entry is where an operator
    looks up what the verb they remember became.
 
-3. **Move the contract surface with the verb.** `agent/scripts/assess/lib/contracts.py` owns the
-   operator-facing contract: the dict key, `name`, and every `preferred_invocations` / `notes` /
+3. **Move the contract surface with the verb.** `agent/scripts/assess/lib/contract_registry.py` owns
+   declarative contract entries; `contracts.py` resolves and renders them. Update the dict key,
+   `name`, and every `preferred_invocations` / `notes` /
    `common_mistakes` string that spells the verb. Then sweep the prompt layer under `agent/`,
    `docs/`, and `README.md` — the new spelling everywhere, including an alias you kept, which stays
    out of the docs and in the allowlist instead. `orchestrator/backend/tests/test_skill_cli_sync.py`
@@ -363,19 +366,24 @@ reproducible verdict (anomaly ranking, payload classification, reachability) the
 
 ## Add a language, sink family, or entry-point pattern
 
-The structural index is `agent/scripts/assess/lib/treesitter_index.py`. Its catalogues are
-module-level dicts keyed by language, so an addition is usually one table entry plus its
-registrations — but the registrations span two trees and the catalogue tests carry exact counts.
+The structural index enters through `agent/scripts/assess/lib/treesitter_index.py`.
+Tree-sitter dispatch lives there; query, sink, and entry catalogues live in
+`treesitter_catalogues.py`, shared helpers in `treesitter_common.py`, line-based extractors in
+`treesitter_lightweight.py`, and bounded degraded scanning and its catalogues in
+`treesitter_streaming.py`. The registrations span two trees and the catalogue tests carry exact counts.
 
 **A new language or extension:**
 
 1. `agent/scripts/assess/lib/code_languages.py` — `detect_language`, and
    `STRUCTURAL_SUPPORTED_LANGUAGES` for a new language code. A compound suffix (`.blade.php`) needs
    its rule *before* the `Path(name).suffix` lookup, which only ever sees the last extension.
-2. `agent/scripts/assess/lib/treesitter_index.py` — the extractor plus `LIGHTWEIGHT_LANGUAGES` and
-   its dispatch, and an entry in each `_STREAM_*_PATTERNS` table. Without the streaming entries the
-   degraded path reports nothing rather than reporting a gap.
-3. `orchestrator/backend/app/services/code_analysis.py` — **both** language sets.
+2. `agent/scripts/assess/lib/treesitter_index.py` — tree-sitter extractor, language roster, and
+   dispatch. Put query/entry/sink catalogue entries in `treesitter_catalogues.py`, line-based
+   extractors in `treesitter_lightweight.py`, and entries in each
+   `_STREAM_*_PATTERNS` table in `treesitter_streaming.py`. Without the streaming entries the degraded
+   path reports nothing rather than reporting a gap.
+3. `orchestrator/backend/app/services/code_analysis_support.py` and `code_analysis.py` — **both**
+   language sets.
    `_CANONICAL_STRUCTURAL_LANGUAGES` gates the request: a value missing here 400s `code-index sync`
    for the whole repository. `STRUCTURALLY_ANALYZED_LANGUAGES` grants the baseline vuln families;
    a language in it with no extractor is a set that lies. `test_structural_language_drift.py` exists
@@ -387,7 +395,8 @@ registrations — but the registrations span two trees and the catalogue tests c
 `_ENTRY_*`/`_GLOBAL_ENTRY_LINE_PATTERNS`, or `_STREAM_SOURCE_PATTERNS`. Two rules bind it:
 
 - Every `vuln_classes` string must already exist in `agent/scripts/assess/lib/vuln_taxonomy.py`.
-  `test_indexer_scan_scope.py` AST-sweeps the module for invented classes. A security *source*
+  `test_indexer_scan_scope.py` AST-sweeps the index, catalogues, and lightweight extractor for invented classes.
+  A security *source*
   deliberately carries no vuln class.
 - The catalogue sweeps assert an exact pattern count and demand every pattern be either exercised by
   a case with a working fixture or listed in that file's exclusion table with a prose reason — never

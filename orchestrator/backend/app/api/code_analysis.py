@@ -224,7 +224,7 @@ class QueueItemRecord(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     file_id: StrictPositiveId
-    priority: int = Field(strict=True, ge=0, le=100)
+    priority: int | None = Field(default=None, strict=True, ge=0, le=100)
     batch_theme: str = Field(default="", max_length=256)
     slot_types: list[CodeSlotType] = Field(default_factory=list)
     guidance_hypotheses: list[str] = Field(default_factory=list)
@@ -243,12 +243,8 @@ class QueueItemsBulkCreateRequest(BaseModel):
         self.reason = self.reason.strip()
         if self.mode == "reanalysis" and not self.reason:
             raise ValueError("reason is required when mode=reanalysis")
-        if self.mode == "reanalysis" and any(
-            item.supersedes is None for item in self.items
-        ):
-            raise ValueError(
-                "every reanalysis item requires supersedes with the exact predecessor queue row ID"
-            )
+        if self.mode == "initial" and any(item.priority is None for item in self.items):
+            raise ValueError("every initial queue item requires priority")
         if self.mode == "initial" and any(
             item.supersedes is not None for item in self.items
         ):
@@ -383,6 +379,7 @@ class AnalysisResultRecord(BaseModel):
         default_factory=list,
         max_length=10000,
     )
+    empty_file_reviewed: bool = False
     hypothesis: str = Field(default="", max_length=20000)
     evidence: str = Field(default="", max_length=20000)
     evidence_ref: str = Field(default="", max_length=4096)
@@ -1807,9 +1804,12 @@ def get_threat_model(engagement_key: str, repo_id: int) -> dict[str, Any]:
 def get_readiness(
     engagement_key: str,
     target_phase: Literal["classify-map", "hunt", "verify-variant", "fuzz", "complete"] = Query(),
+    include_debt_paths: bool = False,
 ) -> dict[str, Any]:
     engagement = get_engagement_or_404(engagement_key)
-    return code_analysis.code_readiness(engagement.id, target_phase=target_phase)
+    return code_analysis.code_readiness(
+        engagement.id, target_phase=target_phase, include_debt_paths=include_debt_paths
+    )
 
 
 # ---------------------------------------------------------------------------

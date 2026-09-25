@@ -17,21 +17,24 @@ from fastapi import HTTPException, status
 
 from .. import artifact_index
 from ..events import _engagement_or_404
-from ..search import (
-    fts_escape as _fts_escape_shared,
-    expanded_fts_query,
-    finding_aliases_in_text,
-)
-
 from . import _common
 from ._common import (
     _remove_written_command_run_artifacts,
     COMMAND_RUN_TERMINAL_STATUSES as _FINALIZE_TERMINAL_STATUSES,
     COMMAND_RUN_FINALIZE_ALLOWED_STATUSES as _FINALIZE_ALLOWED_STATUSES,
     COMMAND_RUN_MUTABLE_STATUSES as _FINALIZE_MUTABLE_STATUSES,
-    JOB_STATUSES as _JOB_VALID_STATUSES,
-    JOB_TERMINAL_STATUSES as _JOB_TERMINAL_STATUSES,
-    JOB_PRE_TERMINAL_STATUSES as _JOB_PRE_TERMINAL_STATUSES,
+)
+from .assessment_jobs import get_job, list_jobs, record_job, update_job  # noqa: F401
+from .command_run_queries import (  # noqa: F401
+    _serialize_command_run,
+    foreign_lane_target_facing_recency,
+    get_command_run,
+    list_command_runs,
+)
+from .host_liveness import (  # noqa: F401
+    _normalize_liveness_host,
+    host_liveness,
+    upsert_host_liveness,
 )
 
 
@@ -579,9 +582,8 @@ def _publish_verified_command_output(
                             detail="verified command output path contains different evidence",
                         )
                 existing_hash = existing_digest.hexdigest() if existing_size else ""
-                if (
-                    existing_size != int(retention["bytes"])
-                    or existing_hash != str(retention["sha256"])
+                if existing_size != int(retention["bytes"]) or existing_hash != str(
+                    retention["sha256"]
                 ):
                     raise HTTPException(
                         status_code=status.HTTP_409_CONFLICT,
@@ -723,9 +725,11 @@ def _apply_host_exec_spill_retention(
                 status_code=status.HTTP_409_CONFLICT,
                 detail=f"host-exec output spill is no longer private: {path}",
             )
-        if expected_identity is not None and (
-            int(initial_stat.st_dev), int(initial_stat.st_ino)
-        ) != expected_identity:
+        if (
+            expected_identity is not None
+            and (int(initial_stat.st_dev), int(initial_stat.st_ino))
+            != expected_identity
+        ):
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail=f"host-exec output spill identity changed after pre-exec audit: {path}",
@@ -1565,9 +1569,7 @@ def _recover_pending_host_output(
         failures: list[tuple[str, str, str]] = []
         verified_count = 0
         for stream in ("stdout", "stderr"):
-            relative_path = (
-                f"scans/command-runs/{row['run_uuid']}.{stream}.log"
-            )
+            relative_path = f"scans/command-runs/{row['run_uuid']}.{stream}.log"
             artifact = connection.execute(
                 """
                 SELECT * FROM assessment_artifacts
@@ -1689,12 +1691,9 @@ def _recover_pending_host_output(
                     expected_identity=(int(device), int(inode)),
                 )
                 retentions.append(retention)
-                if (
-                    str(retention["sha256"] or "")
-                    != str(row[f"{stream}_sha256"] or "")
-                    or int(retention["bytes"] or 0)
-                    != int(row[f"{stream}_bytes"] or 0)
-                ):
+                if str(retention["sha256"] or "") != str(
+                    row[f"{stream}_sha256"] or ""
+                ) or int(retention["bytes"] or 0) != int(row[f"{stream}_bytes"] or 0):
                     raise HTTPException(
                         status_code=status.HTTP_409_CONFLICT,
                         detail=f"{stream} spill content changed after terminal commit",
@@ -1796,13 +1795,9 @@ def finalize_command_run(
                 )
             existing_status = (existing_row["status"] or "").strip()
             if existing_status in _FINALIZE_TERMINAL_STATUSES:
-                if (
-                    str(existing_row["route"] or "") == "host_exec"
-                    and (
-                        str(existing_row["output_cleanup_status"] or "") == "pending"
-                        or str(existing_row["output_integrity_status"] or "")
-                        == "pending"
-                    )
+                if str(existing_row["route"] or "") == "host_exec" and (
+                    str(existing_row["output_cleanup_status"] or "") == "pending"
+                    or str(existing_row["output_integrity_status"] or "") == "pending"
                 ):
                     return _recover_pending_host_output(
                         connection,
@@ -1885,7 +1880,9 @@ def finalize_command_run(
                         status_code=status.HTTP_409_CONFLICT,
                         detail="host-exec row was finalized by another owner",
                     )
-                engagement_root = Path(engagement.engagement_root).expanduser().resolve()
+                engagement_root = (
+                    Path(engagement.engagement_root).expanduser().resolve()
+                )
                 for stream_name, path_value in (
                     ("stdout", existing_row["stdout_path"]),
                     ("stderr", existing_row["stderr_path"]),
@@ -2201,9 +2198,9 @@ def finalize_command_run(
             integrity_failures: list[dict[str, Any]] = []
             engagement_root = Path(engagement.engagement_root).expanduser().resolve()
             for published in published_outputs:
-                relative_path = Path(published["path"]).relative_to(
-                    engagement_root
-                ).as_posix()
+                relative_path = (
+                    Path(published["path"]).relative_to(engagement_root).as_posix()
+                )
                 metadata = published["stat_result"]
                 retention = (
                     host_stdout_retention
@@ -2320,7 +2317,8 @@ def finalize_command_run(
 
         if (
             str(serialized.get("route") or "") != "host_exec"
-            and str(serialized.get("status") or "") in _common.COMMAND_RUN_TERMINAL_STATUSES
+            and str(serialized.get("status") or "")
+            in _common.COMMAND_RUN_TERMINAL_STATUSES
         ):
             # The row — and with it these artifact rows — was opened BEFORE the
             # command ran, so the files it names did not exist yet and indexed as
@@ -2359,871 +2357,3 @@ def finalize_command_run(
     finally:
         _close_published_outputs(published_outputs)
         _close_retention_descriptors(retained_streams)
-
-
-# ── Assessment job lifecycle ────────────────────────────────────────
-
-
-# Job status membership sets are sourced from the JobStatus enum in _common
-# (imported above under their original private names).
-
-
-def _serialize_job(row) -> dict[str, Any]:
-    data = dict(row)
-    raw_meta = data.pop("audit_metadata_json", None) or ""
-    if raw_meta:
-        try:
-            data["audit_metadata"] = json.loads(raw_meta)
-        except json.JSONDecodeError:
-            data["audit_metadata"] = None
-    else:
-        data["audit_metadata"] = None
-    return data
-
-
-def record_job(
-    engagement_id: int,
-    *,
-    parent_command_run_id: int | None = None,
-    status_value: str = "queued",
-    started_at: str | None = None,
-    ended_at: str | None = None,
-    exit_code: int | None = None,
-    dtach_socket_path: str | None = None,
-    stdout_path: str | None = None,
-    stderr_path: str | None = None,
-    audit_metadata: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    engagement = _engagement_or_404(engagement_id)
-    if status_value not in _JOB_VALID_STATUSES:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"job status must be one of {sorted(str(s) for s in _JOB_VALID_STATUSES)}",
-        )
-    metadata_json = (
-        json.dumps(audit_metadata, ensure_ascii=False)
-        if audit_metadata is not None
-        else None
-    )
-    with _common.get_connection() as connection:
-        if parent_command_run_id is not None:
-            row = connection.execute(
-                "SELECT id FROM assessment_command_runs WHERE engagement_id = ? AND id = ?",
-                (engagement.id, int(parent_command_run_id)),
-            ).fetchone()
-            if row is None:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="parent_command_run_id does not reference an existing command run for this engagement",
-                )
-        cursor = connection.execute(
-            """
-            INSERT INTO assessment_jobs (
-                engagement_id, parent_command_run_id, status,
-                started_at, ended_at, exit_code,
-                dtach_socket_path, stdout_path, stderr_path,
-                audit_metadata_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                engagement.id,
-                parent_command_run_id,
-                status_value,
-                started_at,
-                ended_at,
-                exit_code,
-                dtach_socket_path,
-                stdout_path,
-                stderr_path,
-                metadata_json,
-            ),
-        )
-        out_row = connection.execute(
-            "SELECT * FROM assessment_jobs WHERE id = ?",
-            (cursor.lastrowid,),
-        ).fetchone()
-        assert out_row is not None
-        return _serialize_job(out_row)
-
-
-def update_job(
-    engagement_id: int,
-    *,
-    job_id: int,
-    status_value: str | None = None,
-    started_at: str | None = None,
-    ended_at: str | None = None,
-    exit_code: int | None = None,
-    dtach_socket_path: str | None = None,
-    stdout_path: str | None = None,
-    stderr_path: str | None = None,
-    audit_metadata: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    engagement = _engagement_or_404(engagement_id)
-    sets: list[str] = []
-    values: list[Any] = []
-    if status_value is not None:
-        if status_value not in _JOB_VALID_STATUSES:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"job status must be one of {sorted(str(s) for s in _JOB_VALID_STATUSES)}",
-            )
-        sets.append("status = ?")
-        values.append(status_value)
-    if started_at is not None:
-        sets.append("started_at = ?")
-        values.append(started_at)
-    if ended_at is not None:
-        sets.append("ended_at = ?")
-        values.append(ended_at)
-    if exit_code is not None:
-        sets.append("exit_code = ?")
-        values.append(int(exit_code))
-    if dtach_socket_path is not None:
-        sets.append("dtach_socket_path = ?")
-        values.append(dtach_socket_path)
-    if stdout_path is not None:
-        sets.append("stdout_path = ?")
-        values.append(stdout_path)
-    if stderr_path is not None:
-        sets.append("stderr_path = ?")
-        values.append(stderr_path)
-    if audit_metadata is not None:
-        sets.append("audit_metadata_json = ?")
-        values.append(json.dumps(audit_metadata, ensure_ascii=False))
-    if not sets:
-        return get_job(engagement.id, job_id)
-    sets.append("updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')")
-    with _common.get_connection() as connection:
-        existing = connection.execute(
-            "SELECT * FROM assessment_jobs WHERE engagement_id = ? AND id = ?",
-            (engagement.id, int(job_id)),
-        ).fetchone()
-        if existing is None:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="job not found",
-            )
-        existing_status = str(existing["status"] or "")
-        if (
-            status_value is not None
-            and existing_status in _JOB_TERMINAL_STATUSES
-            and status_value != existing_status
-        ):
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail={
-                    "message": "job already terminal",
-                    "existing": _serialize_job(existing),
-                },
-            )
-        where = "WHERE engagement_id = ? AND id = ?"
-        where_values: list[Any] = [engagement.id, int(job_id)]
-        guard_pre_terminal_update = (
-            status_value is not None and existing_status in _JOB_PRE_TERMINAL_STATUSES
-        )
-        if guard_pre_terminal_update:
-            pre_terminal_statuses = tuple(
-                sorted(str(s) for s in _JOB_PRE_TERMINAL_STATUSES)
-            )
-            placeholders = ", ".join("?" for _ in pre_terminal_statuses)
-            where += f" AND status IN ({placeholders})"
-            where_values.extend(pre_terminal_statuses)
-        cursor = connection.execute(
-            f"UPDATE assessment_jobs SET {', '.join(sets)} {where}",
-            tuple(values + where_values),
-        )
-        if cursor.rowcount == 0:
-            current = connection.execute(
-                "SELECT * FROM assessment_jobs WHERE engagement_id = ? AND id = ?",
-                (engagement.id, int(job_id)),
-            ).fetchone()
-            if current is None:
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail="job not found",
-                )
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail={
-                    "message": "job already terminal",
-                    "existing": _serialize_job(current),
-                },
-            )
-        row = connection.execute(
-            "SELECT * FROM assessment_jobs WHERE id = ?",
-            (int(job_id),),
-        ).fetchone()
-        assert row is not None
-        return _serialize_job(row)
-
-
-def list_jobs(
-    engagement_id: int,
-    *,
-    status_value: str = "",
-    parent_command_run_id: int | None = None,
-    limit: int = 100,
-    offset: int = 0,
-) -> list[dict[str, Any]]:
-    engagement = _engagement_or_404(engagement_id)
-    where = ["engagement_id = ?"]
-    params: list[Any] = [engagement.id]
-    if status_value:
-        where.append("status = ?")
-        params.append(status_value)
-    if parent_command_run_id is not None:
-        where.append("parent_command_run_id = ?")
-        params.append(int(parent_command_run_id))
-    params.extend([int(limit), int(offset)])
-    query = (
-        f"SELECT * FROM assessment_jobs "
-        f"WHERE {' AND '.join(where)} "
-        "ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?"
-    )
-    with _common.get_connection() as connection:
-        rows = connection.execute(query, tuple(params)).fetchall()
-    return [_serialize_job(row) for row in rows]
-
-
-def get_job(engagement_id: int, job_id: int) -> dict[str, Any]:
-    engagement = _engagement_or_404(engagement_id)
-    with _common.get_connection() as connection:
-        row = connection.execute(
-            "SELECT * FROM assessment_jobs WHERE engagement_id = ? AND id = ?",
-            (engagement.id, int(job_id)),
-        ).fetchone()
-    if row is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="job not found"
-        )
-    return _serialize_job(row)
-
-
-def _serialize_command_run(row, *, include_output: bool) -> dict[str, Any]:
-    data = dict(row)
-    try:
-        data["argv"] = json.loads(data.pop("argv_json", None) or "[]")
-    except json.JSONDecodeError:
-        data["argv"] = []
-    data["timed_out"] = bool(data.get("timed_out"))
-    data["success"] = bool(data.get("success"))
-    # Command-metadata fields — surfaced explicitly so callers don't rely on
-    # sqlite3.Row dict coercion to include them. Default to None so rows
-    # written before this migration (where dict(row) simply won't have the
-    # key if the schema matched pre-ALTER) still serialize with a null
-    # present. `destructive` is stored as 0/1 INTEGER; coerce back to a
-    # Python bool for API consumers, preserving NULL.
-    data["technique"] = data.get("technique")
-    data["intent"] = data.get("intent")
-    data["probe_kind"] = data.get("probe_kind")
-    destructive_raw = data.get("destructive")
-    if destructive_raw is None:
-        data["destructive"] = None
-    else:
-        data["destructive"] = bool(destructive_raw)
-    data["partial_results"] = bool(data.get("partial_results"))
-    data["output_recovery_observed_at"] = data.get(
-        "output_recovery_observed_at"
-    )
-    if not include_output:
-        # Listings default to lightweight rows so a sub-agent fetching 50
-        # records does not load 50 × 64 KiB of preview text into context.
-        # Hashes, suppression reasons, artifact refs, and byte counts stay
-        # so the caller can decide whether a follow-up command-run get is
-        # warranted. The full preview is always available via that detail
-        # endpoint or by passing include_output=true on the list call.
-        stdout_len = len(data.get("stdout_preview") or "")
-        stderr_len = len(data.get("stderr_preview") or "")
-        data["stdout_preview"] = ""
-        data["stderr_preview"] = ""
-        data["stdout_preview_chars"] = stdout_len
-        data["stderr_preview_chars"] = stderr_len
-    return data
-
-
-def _fts_escape(term: str) -> str:
-    """Back-compat shim; real implementation lives in ``services.search``."""
-    return _fts_escape_shared(term)
-
-
-def list_command_runs(
-    engagement_id: int,
-    *,
-    q: str = "",
-    agent_name: str = "",
-    phase: str = "",
-    tool_name: str = "",
-    tool_bin: str = "",
-    target_host: str = "",
-    auth_context: str = "",
-    audit_source: str = "",
-    route: str = "",
-    success: bool | None = None,
-    timed_out: bool | None = None,
-    output_attention: bool = False,
-    technique: str = "",
-    probe_kind: str = "",
-    destructive: bool | None = None,
-    intent_q: str = "",
-    sort: str = "",
-    exact: bool = False,
-    require_all: bool = False,
-    show_matches: bool = False,
-    limit: int = 100,
-    offset: int = 0,
-    include_output: bool = False,
-) -> list[dict[str, Any]]:
-    engagement = _engagement_or_404(engagement_id)
-
-    # Track WHERE filters as (clause, params) tuples so the distant-search
-    # helper can drop the MATCH filter cleanly. Positional zip() against a
-    # flat base_params list breaks when a filter takes >1 param.
-    filters: list[tuple[str, list[Any]]] = [("r.engagement_id = ?", [engagement.id])]
-
-    # ``q`` is a global FTS match across all content columns. ``intent_q`` is
-    # a scoped FTS match against the intent column only — SQLite FTS5 uses
-    # the ``column:term`` syntax for this. When both are provided the
-    # queries are AND-combined via an additional MATCH (FTS5 supports two
-    # MATCH clauses against the same virtual table via two JOINs; simpler
-    # here is to merge them into a single MATCH term joined with AND).
-    join_sql = ""
-    match_terms: list[str] = []
-    fts_term = expanded_fts_query(q, exact=exact, require_all=require_all) if q else ""
-    if fts_term:
-        match_terms.append(fts_term)
-    intent_term = _fts_escape(intent_q) if intent_q else ""
-    if intent_term:
-        # Scope every escaped token to the intent column. ``_fts_escape``
-        # returns space-separated quoted phrases (implicit AND); prefixing
-        # each with ``intent:`` restricts the match to that column.
-        scoped_tokens = [f"intent:{tok}" for tok in intent_term.split(" ") if tok]
-        if scoped_tokens:
-            match_terms.append(" ".join(scoped_tokens))
-    match_filter: tuple[str, list[Any]] | None = None
-    if match_terms:
-        join_sql = "JOIN assessment_command_runs_fts ON assessment_command_runs_fts.rowid = r.id"
-        match_filter = ("assessment_command_runs_fts MATCH ?", [" ".join(match_terms)])
-        filters.append(match_filter)
-
-    if agent_name:
-        filters.append(("r.agent_name = ?", [agent_name]))
-    if phase:
-        filters.append(("r.phase = ?", [phase]))
-    if tool_name:
-        filters.append(("r.tool_name = ?", [tool_name]))
-    if tool_bin:
-        filters.append(("r.tool_bin = ?", [tool_bin]))
-    if target_host:
-        # Case-insensitive exact match against the parsed target_host column.
-        # NULL-tolerant (LOWER(NULL) = NULL, which will not match the literal).
-        filters.append(("LOWER(r.target_host) = ?", [target_host.strip().lower()]))
-    if auth_context:
-        filters.append(("r.auth_context = ?", [auth_context]))
-    if audit_source:
-        filters.append(("r.audit_source = ?", [audit_source]))
-    if route:
-        # Provenance-lane filter so host-side katana/httpx coverage is visible.
-        # host-exec rows are stamped route='host_exec'; container/kali typed-verb
-        # rows are stamped route='vigil assess kali/<tool>'. 'kali' is therefore a
-        # prefix match, 'host_exec' an exact match, and any other value an exact
-        # match against the stored route string.
-        if route == "kali":
-            # Transitional back-compat: rows recorded before the aith->vigil
-            # rename are stamped route='aith assess kali/<tool>'. Match both
-            # the new prefix and the old one so pre-rename rows still return.
-            filters.append(
-                (
-                    "(r.route LIKE 'vigil assess kali/%' OR r.route LIKE 'aith assess kali/%')",
-                    [],
-                )
-            )
-        else:
-            filters.append(("r.route = ?", [route]))
-    if success is not None:
-        filters.append(("r.success = ?", [1 if success else 0]))
-    if timed_out is not None:
-        filters.append(("r.timed_out = ?", [1 if timed_out else 0]))
-    if output_attention:
-        filters.append(
-            (
-                "("
-                "r.output_retention_status IN "
-                "('integrity_failure', 'measurement_conflict', 'partially_measured', "
-                "'suppression_deferred', 'untrusted', 'preview_only', 'unmeasured') "
-                "OR r.output_cleanup_status IN ('deferred', 'pending', 'warning') "
-                "OR r.output_integrity_status IN ('pending', 'warning')"
-                ")",
-                [],
-            )
-        )
-    if technique:
-        filters.append(("r.technique = ?", [technique]))
-    if probe_kind:
-        filters.append(("r.probe_kind = ?", [probe_kind]))
-    if destructive is not None:
-        filters.append(("r.destructive = ?", [1 if destructive else 0]))
-
-    base_where = [clause for clause, _ in filters]
-    base_params: list[Any] = [param for _, params in filters for param in params]
-
-    sort_value = (sort or "").strip().lower()
-    if not sort_value:
-        sort_value = "relevance" if match_terms else "recent"
-    if sort_value not in {"relevance", "recent", "distant"}:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"invalid command-run sort: {sort}",
-        )
-
-    if sort_value == "distant":
-        return _list_distant_command_runs(
-            engagement.id,
-            q=q,
-            filters=filters,
-            match_filter=match_filter,
-            match_terms=match_terms,
-            limit=limit,
-            offset=offset,
-            include_output=include_output,
-            show_matches=show_matches,
-            exact=exact,
-        )
-
-    params = list(base_params)
-    params.extend([int(limit), int(offset)])
-    rank_select = (
-        ", bm25(assessment_command_runs_fts) AS search_rank" if match_terms else ""
-    )
-    if sort_value == "relevance" and match_terms:
-        order_sql = "ORDER BY search_rank ASC, r.created_at DESC, r.id DESC"
-    else:
-        order_sql = "ORDER BY r.created_at DESC, r.id DESC"
-    query = (
-        f"SELECT r.*{rank_select} FROM assessment_command_runs r {join_sql} "
-        f"WHERE {' AND '.join(base_where)} "
-        f"{order_sql} LIMIT ? OFFSET ?"
-    )
-
-    with _common.get_connection() as connection:
-        rows = connection.execute(query, tuple(params)).fetchall()
-    return [
-        _serialize_command_run_with_matches(
-            row,
-            include_output=include_output,
-            q=q,
-            show_matches=show_matches,
-            exact=exact,
-        )
-        for row in rows
-    ]
-
-
-def foreign_lane_target_facing_recency(
-    engagement_id: int, *, current_agent: str
-) -> dict[str, int | str | None]:
-    """Return all-history foreign target-facing execution timing in one row.
-
-    The advisory is intentionally non-enforcing, but it runs before every
-    target-facing sync and async command. Keeping its target-facing predicate
-    and count in the command-run service avoids replaying bounded list pages in
-    each client execution path.
-    """
-    engagement = _engagement_or_404(engagement_id)
-    query = """
-        WITH foreign_target_facing_runs AS (
-            SELECT
-                r.id,
-                CASE
-                    WHEN r.started_at IS NOT NULL AND r.started_at != '' THEN r.started_at
-                    ELSE r.created_at
-                END AS activity_at
-            FROM assessment_command_runs AS r
-            WHERE r.engagement_id = ?
-              AND COALESCE(r.agent_name, '') != ?
-              AND CASE
-                    WHEN json_valid(r.notes) THEN json_extract(r.notes, '$.target_facing')
-                    ELSE 0
-                  END = 1
-        )
-        SELECT
-            COUNT(*) AS foreign_count,
-            (
-                SELECT activity_at
-                FROM foreign_target_facing_runs
-                WHERE julianday(activity_at) IS NOT NULL
-                ORDER BY julianday(activity_at) DESC, id DESC
-                LIMIT 1
-            ) AS latest_started_at
-        FROM foreign_target_facing_runs
-    """
-    with _common.get_connection() as connection:
-        row = connection.execute(query, (engagement.id, current_agent)).fetchone()
-    assert row is not None
-    return {
-        "foreign_count": int(row["foreign_count"]),
-        "latest_started_at": row["latest_started_at"],
-    }
-
-
-def _list_distant_command_runs(
-    engagement_id: int,
-    *,
-    q: str,
-    filters: list[tuple[str, list[Any]]],
-    match_filter: tuple[str, list[Any]] | None,
-    match_terms: list[str],
-    limit: int,
-    offset: int,
-    include_output: bool,
-    show_matches: bool,
-    exact: bool = False,
-) -> list[dict[str, Any]]:
-    """Return nonmatching rows in the same inferred command scope.
-
-    This is a coverage-gap view: first find direct matches, infer scope from
-    their structured fields, then list older/nonmatching command families in
-    that scope.
-    """
-
-    distant_filters = [
-        (clause, list(params))
-        for clause, params in filters
-        if (clause, params) != match_filter
-    ]
-    if not distant_filters:
-        distant_filters = [("r.engagement_id = ?", [engagement_id])]
-    distant_where = [clause for clause, _ in distant_filters]
-    distant_params: list[Any] = [p for _, ps in distant_filters for p in ps]
-
-    direct_rows: list[Any] = []
-    direct_ids: list[int] = []
-    if match_terms:
-        base_where = [clause for clause, _ in filters]
-        base_params = [p for _, ps in filters for p in ps]
-        direct_query = (
-            "SELECT r.* FROM assessment_command_runs r "
-            "JOIN assessment_command_runs_fts ON assessment_command_runs_fts.rowid = r.id "
-            f"WHERE {' AND '.join(base_where)} "
-            "ORDER BY r.created_at DESC, r.id DESC LIMIT 200"
-        )
-        with _common.get_connection() as connection:
-            direct_rows = connection.execute(
-                direct_query, tuple(base_params)
-            ).fetchall()
-        direct_ids = [int(row["id"]) for row in direct_rows]
-
-    if direct_ids:
-        placeholders = ", ".join("?" for _ in direct_ids)
-        distant_where.append(f"r.id NOT IN ({placeholders})")
-        distant_params.extend(direct_ids)
-        scope_clauses: list[str] = []
-        for column in ("target_host", "tool_bin", "technique", "probe_kind", "phase"):
-            values = sorted(
-                {
-                    str(row[column] or "")
-                    for row in direct_rows
-                    if str(row[column] or "").strip()
-                }
-            )
-            if values:
-                scope_placeholders = ", ".join("?" for _ in values)
-                scope_clauses.append(f"r.{column} IN ({scope_placeholders})")
-                distant_params.extend(values)
-        if scope_clauses:
-            distant_where.append("(" + " OR ".join(scope_clauses) + ")")
-    elif match_terms:
-        # No direct match means there is no safe inferred scope. Return no
-        # distant rows rather than flooding resume output with unrelated runs.
-        return []
-
-    distant_params.extend([int(limit), int(offset)])
-    query = (
-        "SELECT r.* FROM assessment_command_runs r "
-        f"WHERE {' AND '.join(distant_where)} "
-        "ORDER BY r.created_at ASC, r.id ASC LIMIT ? OFFSET ?"
-    )
-    with _common.get_connection() as connection:
-        rows = connection.execute(query, tuple(distant_params)).fetchall()
-    return [
-        _serialize_command_run_with_matches(
-            row,
-            include_output=include_output,
-            q=q,
-            show_matches=show_matches,
-            exact=exact,
-        )
-        for row in rows
-    ]
-
-
-def _serialize_command_run_with_matches(
-    row,
-    *,
-    include_output: bool,
-    q: str,
-    show_matches: bool,
-    exact: bool = False,
-) -> dict[str, Any]:
-    data = _serialize_command_run(row, include_output=include_output)
-    if show_matches:
-        data["matches"] = _command_run_match_reasons(data, q, exact=exact)
-    return data
-
-
-def _command_run_match_reasons(
-    row: dict[str, Any], q: str, *, exact: bool = False
-) -> list[str]:
-    reasons: list[str] = []
-    # In exact mode the FTS query is the user's raw phrase only — alias
-    # expansion never ran, so attributing the match to an alias would be
-    # misleading. Plain-token reasons still apply because the input phrase
-    # itself was searched.
-    if not exact:
-        aliases = finding_aliases_in_text(q)
-        if aliases:
-            for canonical, values in aliases.items():
-                needle_values = {value.lower() for value in values}
-                for field in (
-                    "command",
-                    "tool_name",
-                    "tool_bin",
-                    "agent_name",
-                    "phase",
-                    "notes",
-                    "intent",
-                    "technique",
-                    "stdout_suppression_reason",
-                    "stderr_suppression_reason",
-                    "stdout_artifact_ref",
-                    "stderr_artifact_ref",
-                ):
-                    value = str(row.get(field) or "").lower()
-                    if value and any(needle in value for needle in needle_values):
-                        reasons.append(f"finding_alias:{canonical}:{field}")
-    plain_terms = [term.lower() for term in str(q or "").split() if len(term) >= 3]
-    for field in (
-        "command",
-        "tool_name",
-        "tool_bin",
-        "agent_name",
-        "phase",
-        "notes",
-        "intent",
-        "technique",
-    ):
-        value = str(row.get(field) or "").lower()
-        for term in plain_terms:
-            if term in value:
-                reasons.append(f"token:{term}:{field}")
-                break
-    return sorted(set(reasons))
-
-
-def get_command_run(engagement_id: int, command_run_id: int) -> dict[str, Any]:
-    engagement = _engagement_or_404(engagement_id)
-    with _common.get_connection() as connection:
-        row = connection.execute(
-            "SELECT * FROM assessment_command_runs WHERE engagement_id = ? AND id = ?",
-            (engagement.id, int(command_run_id)),
-        ).fetchone()
-    if not row:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="command run not found"
-        )
-    return _serialize_command_run(row, include_output=True)
-
-
-# ── Host liveness ledger ──────────────────────────────────────────────────
-# Authoritative per-host reachability, upserted from httpx probes via
-# `vigil assess ingest-httpx`. A verdict older than the TTL is reported as
-# 'stale' by the read projection (not stored as 'stale'), forcing a re-probe
-# rather than trusting it across the shifting-egress boundary (§9).
-_HOST_LIVENESS_TTL_SECONDS = 120 * 60  # 2h
-
-_HOST_LIVENESS_DECAYS = frozenset({"live", "blackholed", "dead"})
-
-
-def _normalize_liveness_host(value: str) -> str:
-    """Canonical liveness key: lowercased, scheme- and port-stripped authority.
-
-    Must stay byte-for-byte in sync with ``discovery.normalize_host`` (CLI side)
-    so a GET ?host= lookup matches stored rows.
-    """
-    h = (value or "").strip().lower().rstrip(".")
-    if "://" in h:
-        h = h.split("://", 1)[1]
-    h = h.split("/", 1)[0]
-    if h.startswith("["):  # [ipv6](:port)?
-        end = h.find("]")
-        if end != -1:
-            h = h[: end + 1]
-    elif h.count(":") == 1:
-        # exactly one colon → host:port (a bare IPv6 has >=2 colons; leave it intact)
-        h = h.split(":", 1)[0]
-    return h
-
-
-def _parse_probed_at(probed_at):
-    """Parse an ISO probed_at into an aware UTC datetime, or None."""
-    import datetime as _dt
-
-    if not probed_at:
-        return None
-    raw = str(probed_at).strip()
-    if raw.endswith("Z"):
-        raw = raw[:-1] + "+00:00"
-    try:
-        parsed = _dt.datetime.fromisoformat(raw)
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=_dt.timezone.utc)
-    return parsed.astimezone(_dt.timezone.utc)
-
-
-def _canonical_probed_at(probed_at):
-    """Normalize probed_at to a single lexicographically-sortable UTC form so the
-    keep-newest TEXT comparison in the upsert is correct across mixed input
-    formats (fractional precision, ``+HH:MM`` offsets, naive). Returns None when
-    unparseable/empty (the upsert then treats it as "no probe time")."""
-    parsed = _parse_probed_at(probed_at)
-    if parsed is None:
-        return None
-    return parsed.strftime("%Y-%m-%dT%H:%M:%S.%f") + "Z"
-
-
-def _liveness_age_seconds(probed_at) -> float | None:
-    import datetime as _dt
-
-    parsed = _parse_probed_at(probed_at)
-    if parsed is None:
-        return None
-    return (_dt.datetime.now(_dt.timezone.utc) - parsed).total_seconds()
-
-
-def upsert_host_liveness(
-    engagement_id: int, rows: list[dict[str, Any]]
-) -> dict[str, Any]:
-    """Bulk-upsert host-liveness rows keyed by (engagement, host).
-
-    The caller (ingest-httpx) supplies the already-classified ``reachability_class``
-    — the backend stores it verbatim and keeps the newest probe per host (an
-    incoming row with an older ``probed_at`` does not overwrite a newer one).
-    """
-    _engagement_or_404(engagement_id)
-    upserted = 0
-    with _common.get_connection() as connection:
-        connection.execute("BEGIN IMMEDIATE")
-        for r in rows:
-            host = _normalize_liveness_host(str(r.get("host", "")))
-            if not host:
-                continue
-            connection.execute(
-                """
-                INSERT INTO assessment_host_liveness (
-                    engagement_id, host, status_code, scheme, final_url, host_ip,
-                    tech, title, webserver, tls, failed, reachability_class,
-                    probed_at, source, source_run_id, source_run_uuid
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(engagement_id, host) DO UPDATE SET
-                    status_code = excluded.status_code,
-                    scheme = excluded.scheme,
-                    final_url = excluded.final_url,
-                    host_ip = excluded.host_ip,
-                    tech = excluded.tech,
-                    title = excluded.title,
-                    webserver = excluded.webserver,
-                    tls = excluded.tls,
-                    failed = excluded.failed,
-                    reachability_class = excluded.reachability_class,
-                    probed_at = excluded.probed_at,
-                    source = excluded.source,
-                    source_run_id = excluded.source_run_id,
-                    source_run_uuid = excluded.source_run_uuid,
-                    updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
-                -- Keep the newest probe: overwrite only when the existing row has
-                -- no probe time, or the incoming probe is at-or-after it. A NULL
-                -- incoming probed_at must NOT clobber a real timestamped verdict.
-                -- probed_at is canonicalized to one sortable UTC form on the way
-                -- in, so this TEXT comparison is correct across input formats.
-                WHERE assessment_host_liveness.probed_at IS NULL
-                   OR (excluded.probed_at IS NOT NULL
-                       AND excluded.probed_at >= assessment_host_liveness.probed_at)
-                """,
-                (
-                    engagement_id,
-                    host,
-                    r.get("status_code"),
-                    str(r.get("scheme") or ""),
-                    str(r.get("final_url") or ""),
-                    str(r.get("host_ip") or ""),
-                    str(r.get("tech") or ""),
-                    str(r.get("title") or ""),
-                    str(r.get("webserver") or ""),
-                    str(r.get("tls") or ""),
-                    1 if r.get("failed") else 0,
-                    str(r.get("reachability_class") or "unknown"),
-                    _canonical_probed_at(r.get("probed_at")),
-                    str(r.get("source") or "httpx"),
-                    r.get("source_run_id"),
-                    str(r.get("source_run_uuid") or ""),
-                ),
-            )
-            upserted += 1
-    return {"upserted": upserted}
-
-
-def host_liveness(
-    engagement_id: int,
-    *,
-    hosts: list[str] | None = None,
-    fresh_only: bool = False,
-) -> list[dict[str, Any]]:
-    """Read host-liveness rows with the freshness overlay applied.
-
-    A stored verdict older than the TTL is reported as ``reachability_class``
-    'stale' (the stored value is preserved under ``stored_reachability_class``)
-    and each row carries ``age_seconds``. With ``fresh_only`` the stale/unprobed
-    rows are dropped.
-    """
-    _engagement_or_404(engagement_id)
-    with _common.get_connection() as connection:
-        if hosts:
-            norm = sorted(
-                {
-                    _normalize_liveness_host(h)
-                    for h in hosts
-                    if _normalize_liveness_host(h)
-                }
-            )
-            if not norm:
-                return []
-            placeholders = ",".join("?" for _ in norm)
-            cursor = connection.execute(
-                f"SELECT * FROM assessment_host_liveness "
-                f"WHERE engagement_id = ? AND host IN ({placeholders}) ORDER BY host",
-                (engagement_id, *norm),
-            )
-        else:
-            cursor = connection.execute(
-                "SELECT * FROM assessment_host_liveness WHERE engagement_id = ? ORDER BY host",
-                (engagement_id,),
-            )
-        rows = cursor.fetchall()
-
-    out: list[dict[str, Any]] = []
-    for row in rows:
-        data = dict(row)
-        age = _liveness_age_seconds(data.get("probed_at"))
-        data["age_seconds"] = age
-        stored = data.get("reachability_class") or "unknown"
-        is_fresh = age is not None and age <= _HOST_LIVENESS_TTL_SECONDS
-        if not is_fresh and stored in _HOST_LIVENESS_DECAYS:
-            data["stored_reachability_class"] = stored
-            data["reachability_class"] = "stale"
-        if fresh_only and not is_fresh:
-            continue
-        out.append(data)
-    return out

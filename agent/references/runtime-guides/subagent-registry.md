@@ -27,7 +27,7 @@ The operator's audit trail. One row per dispatched specialist agent.
 | `task` | string | One-paragraph dispatch objective. |
 | `application_unit_id` | positive integer (optional) | Concrete application unit assigned to a dedicated lane; validated against the current engagement. |
 | `dispatched_at` | ISO datetime | Set on agent start (`POST /dispatches`). |
-| `completed_at` | ISO datetime | Set on `vigil assess agent done` when status moves to a terminal value. |
+| `completed_at` | ISO datetime | Set by `agent close` or an explicit `agent done --status` when status moves to a terminal value. |
 | `status` | enum | `in-progress` / `completed` / `failed` / `aborted` / `blocked`. |
 | `requested_model` | string | Operator-requested model id (`claude-opus-4-7`, …). |
 | `launcher_effective_model` | string or null | Exact model attested for this child invocation by a trusted launcher/session integration; currently null for ordinary dispatches. |
@@ -37,7 +37,7 @@ The operator's audit trail. One row per dispatched specialist agent.
 | `launcher_effective_source` | string or null | Attributable launcher/session evidence for the effective value; currently null for ordinary dispatches. |
 | `actual_reasoning` | string | Provider-observed reasoning level, or `unknown`; read-only to dispatch callers. |
 | `dispatch_mode` | string | `hypothesis-driven` / `item-iterating` / `deep-manual` / `variant-rotation` / `swarm`. |
-| `finding_slugs_json` | JSON array | Finding slugs the dispatch produced (`agent done` PATCH may append additively). |
+| `finding_slugs_json` | JSON array | Finding slugs the dispatch produced (`agent close` copies the handoff; raw `agent done` may append additively). |
 
 ### CLI
 
@@ -58,10 +58,9 @@ vigil assess agent start \
 # Then launch the specialist with the client-native agent tool and pass it
 # the Runtime Identity block printed by `agent start`.
 
-# Update status when the dispatch returns.
-vigil assess agent done recon_a3f9 \
-    --status completed \
-    --finding-slugs RECON-2026-01-15-001,RECON-2026-01-15-002
+# Render the returned handoff and close its ready/blocked dispatch.
+vigil assess agent render-handoff recon_a3f9
+vigil assess agent close recon_a3f9
 
 # List dispatches (DEDUP input — replaces the old JSON-file scan).
 vigil assess agent list --filter-role recon-specialist --since 2026-01-15T00:00:00Z

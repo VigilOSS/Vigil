@@ -28,7 +28,7 @@ from app.services import state_manager
 from app.services.state_manager._common import VERIFICATION_STATUSES, VerificationStatus
 from app.services.state_manager.coverage import _probe_key
 
-from tests.proof_fixtures import post_artifact_backed_source_observation
+from tests.proof_fixtures import completed_confirm_check, post_artifact_backed_source_observation
 from tests.test_engagements_api import write_engagement
 
 
@@ -96,6 +96,11 @@ def _confirm_finding(client, slug: str) -> dict:
         },
     )
     assert run.status_code == 201, run.text
+    linked = client.post(
+        f"{BASE}/findings/{slug}/links",
+        json={"link_kind": "proof_run", "target_kind": "assessment_run", "target_id": run.json()["id"]},
+    )
+    assert linked.status_code == 200, linked.text
     receipt = post_artifact_backed_source_observation(
         client,
         f"{BASE}/proof-receipts",
@@ -118,6 +123,7 @@ def _confirm_finding(client, slug: str) -> dict:
             "verification_status": "confirmed",
             "reason_text": "independently reproduced",
             "proof_receipt_ids": [receipt.json()["id"]],
+            "confirm_check": completed_confirm_check(receipt.json()["id"]),
         },
     )
     assert verified.status_code == 200, verified.text

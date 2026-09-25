@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from app import db as db_module
+from tests.proof_fixtures import completed_confirm_check
 from tests.test_engagements_api import write_engagement
 
 
@@ -53,13 +54,24 @@ def _complete_run(client, run: dict, status: str = "completed") -> dict:
     return response.json()
 
 
+def _link_run(client, run: dict, slug: str) -> None:
+    response = client.post(
+        f"{BASE}/findings/{slug}/links",
+        json={
+            "link_kind": "proof_run", "target_kind": "assessment_run",
+            "target_id": run["id"],
+        },
+    )
+    assert response.status_code == 200, response.text
+
+
 def _artifact(
     client,
     engagement_dir: Path,
     path: str,
     content: str,
     *,
-    producer_agent_id: str | None = None,
+    producer_agent_id: str | None = "VERIFY-1",
 ) -> dict:
     target = engagement_dir / path
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -243,6 +255,7 @@ def _verified_command_finding(client, *, slug: str, stdout: str) -> tuple[dict, 
     )
     assert finding.status_code == 201, finding.text
     run = _run(client)
+    _link_run(client, run, slug)
     command = client.post(
         f"{BASE}/command-runs",
         json={
@@ -280,6 +293,7 @@ def _verified_command_finding(client, *, slug: str, stdout: str) -> tuple[dict, 
             "verification_status": "confirmed",
             "reason_text": "Independent command proof reproduced the defect.",
             "proof_receipt_ids": [receipt.json()["id"]],
+            "confirm_check": completed_confirm_check(receipt.json()["id"]),
         },
     )
     assert verified.status_code == 200, verified.text
@@ -773,6 +787,78 @@ def test_artifact_verification_rejects_artifact_owned_by_a_different_dispatch(
     assert "was not produced by the verifier dispatch" in still_rejected.json()["detail"]
 
 
+def test_artifact_receipt_requires_producer_before_irreversible_binding(
+    client, isolate_settings
+) -> None:
+    engagement_dir = _seed(client, isolate_settings)
+    run = _run(client)
+    (engagement_dir / "proof").mkdir(parents=True, exist_ok=True)
+    (engagement_dir / "proof/unattributed.txt").write_text("observed")
+    artifact_response = client.post(
+        f"{BASE}/artifacts", json={"path": "proof/unattributed.txt", "kind": "proof"}
+    )
+    assert artifact_response.status_code == 201, artifact_response.text
+    artifact = artifact_response.json()
+    payload = {
+        "run_id": run["id"], "evidence_kind": "artifact",
+        "artifact_id": artifact["id"], "observed_result": "observed",
+    }
+    refused = client.post(f"{BASE}/proof-receipts", json=payload)
+    assert refused.status_code == 409, refused.text
+    assert "producer attribution" in refused.json()["detail"]
+
+    attributed = client.post(
+        f"{BASE}/artifacts",
+        json={"path": "proof/unattributed.txt", "kind": "proof", "producer_agent_id": "VERIFY-1"},
+    )
+    assert attributed.status_code == 201, attributed.text
+    assert attributed.json()["id"] == artifact["id"]
+    receipt = client.post(f"{BASE}/proof-receipts", json=payload)
+    assert receipt.status_code == 201, receipt.text
+
+
+def test_artifact_receipt_with_verifier_command_producer_passes_ownership_check(
+    client, isolate_settings
+) -> None:
+    from app.services.state_manager.proofs import _require_verifier_owned_evidence
+
+    engagement_dir = _seed(client, isolate_settings)
+    run = _run(client)
+    command = client.post(
+        f"{BASE}/command-runs",
+        json={
+            "command": "cat proof/command-owned.txt", "argv": ["cat", "proof/command-owned.txt"],
+            "tool_name": "cat", "agent_name": "VERIFY-1", "phase": "verify",
+            "return_code": 0, "timed_out": False, "success": True,
+            "started_at": "2026-09-09T12:00:00Z", "completed_at": "2026-09-09T12:00:01Z",
+            "duration_ms": 1000, "stdout": "observed", "stderr": "",
+            "run_uuid": "proof-artifact-command-1",
+        },
+    )
+    assert command.status_code == 201, command.text
+    (engagement_dir / "proof").mkdir(parents=True, exist_ok=True)
+    (engagement_dir / "proof/command-owned.txt").write_text("observed")
+    artifact = client.post(
+        f"{BASE}/artifacts",
+        json={
+            "path": "proof/command-owned.txt", "kind": "proof",
+            "producer_agent_id": "VERIFY-1",
+            "producer_command_run_id": command.json()["id"],
+        },
+    )
+    assert artifact.status_code == 201, artifact.text
+    receipt = client.post(
+        f"{BASE}/proof-receipts",
+        json={
+            "run_id": run["id"], "evidence_kind": "artifact",
+            "artifact_id": artifact.json()["id"], "observed_result": "observed",
+        },
+    )
+    assert receipt.status_code == 201, receipt.text
+    with db_module.get_connection() as connection:
+        _require_verifier_owned_evidence(connection, receipt.json()["engagement_id"], receipt.json()["id"])
+
+
 def test_command_receipt_and_readiness_degrade_when_output_becomes_unmeasured(
     client, isolate_settings
 ) -> None:
@@ -894,6 +980,7 @@ def test_resumed_run_summary_preserves_parent_linked_findings(
     )
     assert finding.status_code == 201, finding.text
     parent = _run(client)
+    _link_run(client, parent, "VA-902")
     receipt = _source_observation(
         client, parent, "independent review reproduced the finding"
     )
@@ -904,6 +991,7 @@ def test_resumed_run_summary_preserves_parent_linked_findings(
             "verification_status": "confirmed",
             "reason_text": "independent review",
             "proof_receipt_ids": [receipt["id"]],
+            "confirm_check": completed_confirm_check(receipt["id"]),
         },
     )
     assert verified.status_code == 200, verified.text
@@ -1006,6 +1094,7 @@ def test_legacy_proof_links_gain_nullable_transition_without_losing_evidence(
     )
     assert created.status_code == 201, created.text
     run = _run(client)
+    _link_run(client, run, "VA-777")
     receipt = _source_observation(
         client, run, "independent review reproduced the finding"
     )
@@ -1016,6 +1105,7 @@ def test_legacy_proof_links_gain_nullable_transition_without_losing_evidence(
             "verification_status": "confirmed",
             "reason_text": "independent review",
             "proof_receipt_ids": [receipt["id"]],
+            "confirm_check": completed_confirm_check(receipt["id"]),
         },
     )
     assert verified.status_code == 200, verified.text
@@ -1181,6 +1271,7 @@ def test_degraded_decision_receipt_blocks_readiness_without_artifact_refresh(
     )
     assert finding.status_code == 201, finding.text
     run = _run(client)
+    _link_run(client, run, "VA-901")
     artifact = _artifact(
         client,
         engagement_dir,
@@ -1205,6 +1296,7 @@ def test_degraded_decision_receipt_blocks_readiness_without_artifact_refresh(
             "verification_status": "confirmed",
             "reason_text": "Independent proof reproduced the claim.",
             "proof_receipt_ids": [receipt_id],
+            "confirm_check": completed_confirm_check(receipt_id),
             "artifact_ref": "evidence/decision.txt",
             "source_name": "code-vuln-verifier",
         },

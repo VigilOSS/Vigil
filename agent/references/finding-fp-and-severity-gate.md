@@ -207,8 +207,7 @@ This gate's conclusions are not scratch notes — the verifier writes them into 
 attacker outcome from C5's gut-check, or bounded intrinsic product outcome plus missing consumer
 context), the `remediation`, the `steps_to_reproduce` with its
 `repro_runs`, and — when C7 was material to the disposition — the exact vendor doc URL/line cited
-and, if found, the precedent disclosure it was compared against. See the "Four Validation Gates"
-(Gate 3) in `agent/agents/vulnerability-analyst.md`.
+and, if found, the precedent disclosure it was compared against. See the "Report-ready story gate" in `agent/agents/vulnerability-analyst.md`.
 
 `steps_to_reproduce` is written from what you actually ran, with concrete values, and each step
 carries the `command-run` id behind it in `repro_runs` — **a step with no run id behind it was
@@ -224,7 +223,7 @@ it can only infer; those concrete values remain verbatim through submission.
   draws on; also the role best placed to build a per-capability vendor-docs boundary map (docs SHOULD
   vs. documented BOUNDARY, cited by URL/line) ahead of scoring a cluster of related findings
 - `agent/skills/blind-triage/SKILL.md` — the zero-context pre-submission blind gate that re-applies the same overclaim catalog on the submission bytes before publish (this gate is the in-context Phase-4 version)
-- `agent/agents/vulnerability-analyst.md` — the 8-Question Gate, Chain-Only List, Fast Kill Signals, Four Validation Gates
+- `agent/agents/vulnerability-analyst.md` — the 8-Question Gate, Chain-Only List, Fast Kill Signals, Report-ready story gate
 - `agent/skills/code-finding-verification/SKILL.md` — the code-side bug-EXISTENCE protocol (five-check: reachability, guards, build-config, feasibility, devil's advocate); it establishes that a source finding is real, then defers the severity-calibration half (C5/C7 + the `hunting.md §3` net-new test) to this gate
 - `agent/references/api-security/API01-broken-object-level-authz.md` — CWE taxonomy + BOLA/BOPLA/BFLA
 - `agent/references/access-control/idor-identifier-prediction.md` — id enumerability / prediction (C4)

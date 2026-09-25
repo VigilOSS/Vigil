@@ -1066,7 +1066,7 @@ def test_kali_exec_writes_pre_exec_row_then_finalizes(monkeypatch, fake_engageme
     )
     assert result.status == "completed"
     assert result.return_code == 0
-    assert result.run_id == 7
+
 
     # Pre-exec POST went out with status=running and full audit metadata.
     assert len(fake_client.posts) == 1
@@ -1101,6 +1101,35 @@ def test_kali_exec_writes_pre_exec_row_then_finalizes(monkeypatch, fake_engageme
     assert patch_payload["status"] == "completed"
     assert patch_payload["return_code"] == 0
     assert patch_payload["timed_out"] is False
+
+
+def test_kali_exec_reports_finalize_failure_separately_from_target_success(
+    monkeypatch, fake_engagement, capsys
+):
+    kali = _setup_fake_config(monkeypatch, fake_engagement)
+    fake_client = _FakeClient("http://127.0.0.1:18000", fake_engagement.name)
+    monkeypatch.setattr(kali, "AssessmentClient", lambda *a, **k: fake_client)
+    monkeypatch.setattr(kali, "_check_container_running", lambda name: None)
+    monkeypatch.setattr(kali.subprocess, "Popen", lambda *a, **k: _FakePopen(returncode=0))
+    monkeypatch.setattr(kali, "_patch_finalize", lambda *a, **k: (_ for _ in ()).throw(kali.AssessError("backend unavailable")))
+
+    result = kali.kali_exec(
+        ["nmap", "-sV", "10.0.0.1"], technique="RECON", intent="probe",
+        probe_kind="fingerprint", phase="recon", timeout=60,
+        agent_name="recon-specialist", engagement_dir=fake_engagement, tool_name="nmap",
+    )
+    assert result.status == "completed"
+    assert result.return_code == 0
+    assert result.run_id == 7
+    assert result.audit_finalized is False
+    with pytest.raises(SystemExit) as exc:
+        kali.emit_result(result)
+    assert exc.value.code == 7
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "completed"
+    assert payload["return_code"] == 0
+    assert payload["audit_finalized"] is False
+    assert result.run_id == 7
 
 
 def test_kali_exec_runs_a_command_naming_an_undeclared_host_and_audits_it(

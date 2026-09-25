@@ -89,6 +89,71 @@ def _payload(slug: str = "VA-001", **over) -> dict:
     return payload
 
 
+def test_authored_repro_runs_must_resolve_to_this_engagement_command_runs(seeded) -> None:
+    missing = seeded.patch(
+        f"{_base()}/findings/VA-001",
+        json={"details": {"repro_runs": [999999]}},
+    )
+    assert missing.status_code == 400, missing.text
+    assert "repro_runs" in missing.json()["detail"]
+
+    command = seeded.post(
+        f"{_base()}/command-runs",
+        json={
+            "run_uuid": "repro-ran-001", "command": "curl https://app.example/api/users/2",
+            "tool_name": "curl", "agent_name": "HUNT-1", "phase": "verify",
+            "status": "completed", "return_code": 0,
+            "started_at": "2026-09-25T12:00:00Z",
+            "completed_at": "2026-09-25T12:00:01Z", "stdout": "user 2",
+        },
+    )
+    assert command.status_code == 201, command.text
+    accepted = seeded.patch(
+        f"{_base()}/findings/VA-001",
+        json={"details": {"repro_runs": [command.json()["id"]]}},
+    )
+    assert accepted.status_code == 200, accepted.text
+
+
+def test_reproduction_decision_matches_numeric_string_repro_run_ids(seeded) -> None:
+    reviewer = seeded.post(
+        f"{_base()}/dispatches",
+        json={
+            "agent_id": "COLD-REVIEW", "agent_role": "vulnerability-analyst",
+            "task": "Cold reproduction of the finding",
+        },
+    )
+    assert reviewer.status_code == 201, reviewer.text
+    command = seeded.post(
+        f"{_base()}/command-runs",
+        json={
+            "run_uuid": "cold-repro-001", "command": "curl https://app.example/api/users/2",
+            "tool_name": "curl", "agent_name": "COLD-REVIEW", "phase": "report",
+            "status": "completed", "return_code": 0,
+            "started_at": "2026-09-25T12:00:00Z",
+            "completed_at": "2026-09-25T12:00:01Z", "stdout": "user 2",
+        },
+    )
+    assert command.status_code == 201, command.text
+    run_id = command.json()["id"]
+    updated = seeded.patch(
+        f"{_base()}/findings/VA-001",
+        json={"details": {"repro_runs": [str(run_id)]}},
+    )
+    assert updated.status_code == 200, updated.text
+
+    decision = seeded.post(
+        f"{_base()}/dispatch-decisions",
+        json={"kind": "repro_rehearsal", "payload": {
+            "finding_slug": "VA-001", "verdict": "followed", "proof_mode": "live",
+            "verifier_dispatch_agent_id": "COLD-REVIEW", "runs_checked": [run_id],
+            "observed_outcome": "The second user's record was returned.",
+        }},
+    )
+
+    assert decision.status_code == 201, decision.text
+
+
 @pytest.mark.parametrize(
     "key",
     [
@@ -634,6 +699,14 @@ def _completed_counter_check(seeded) -> dict:
         },
     )
     assert run.status_code == 201, run.text
+    linked = seeded.post(
+        f"{_base()}/findings/VA-001/links",
+        json={
+            "link_kind": "proof_run", "target_kind": "assessment_run",
+            "target_id": run.json()["id"],
+        },
+    )
+    assert linked.status_code == 200, linked.text
     receipt = post_artifact_backed_source_observation(
         seeded,
         f"{_base()}/proof-receipts",

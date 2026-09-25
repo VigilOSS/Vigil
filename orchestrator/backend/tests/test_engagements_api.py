@@ -12,7 +12,7 @@ import pytest
 from app import db as db_module
 from app.services import engagements as engagement_service
 from app.services import events as events_service
-from tests.proof_fixtures import post_artifact_backed_source_observation
+from tests.proof_fixtures import completed_confirm_check, post_artifact_backed_source_observation
 
 
 def legacy_finding_slug(suffix: str = "VA-001") -> str:
@@ -65,6 +65,16 @@ def _proof_receipt(client, slug: str, *, key: str = "2026-03-30-120000-example")
         },
     )
     assert run.status_code == 201, run.text
+    finding = client.get(f"{base}/findings/{slug}")
+    if finding.status_code == 200:
+        linked = client.post(
+            f"{base}/findings/{slug}/links",
+            json={
+                "link_kind": "proof_run", "target_kind": "assessment_run",
+                "target_id": run.json()["id"],
+            },
+        )
+        assert linked.status_code == 200, linked.text
     receipt = post_artifact_backed_source_observation(
         client,
         f"{base}/proof-receipts",
@@ -93,6 +103,8 @@ def _verify_with_fixture_proof(
 ):
     receipt_id = _proof_receipt(client, slug, key=key)
     request = {**payload, "proof_receipt_ids": [receipt_id]}
+    if request["verification_status"] in {"confirmed", "downgraded"}:
+        request["confirm_check"] = completed_confirm_check(receipt_id)
     if request["verification_status"] == "false_positive":
         request["counter_check"] = {
             "method": "independent source-path counter-check",
@@ -2643,20 +2655,20 @@ def test_findings_patch_can_revive_false_positive_and_lower_severity(client, iso
 
 
 @pytest.mark.parametrize(
-    "destructive_patch",
+    ("destructive_patch", "expected_verification", "expected_action"),
     [
-        {
+        ({
             "details": {"evidence": "Replacement proof set."},
             "details_mode": "merge",
-        },
-        {
+        }, "confirmed", "claim_review_pending"),
+        ({
             "details": {"impact": "Replacement removed the evidence narrative."},
             "details_mode": "replace",
-        },
+        }, "unreviewed", "verification_invalidated"),
     ],
 )
 def test_findings_patch_append_evidence_preserves_terminal_verification(
-    client, isolate_settings, destructive_patch
+    client, isolate_settings, destructive_patch, expected_verification, expected_action
 ):
     write_engagement(isolate_settings["engagements_dir"])
     created = _record_terminal_finding(
@@ -2714,8 +2726,8 @@ def test_findings_patch_append_evidence_preserves_terminal_verification(
         },
     )
     assert replaced.status_code == 200, replaced.text
-    assert replaced.json()["finding"]["verification_status"] == "unreviewed"
-    assert replaced.json()["finding"]["verification_invalidated"] is True
+    assert replaced.json()["finding"]["verification_status"] == expected_verification
+    assert replaced.json()["transition"]["action"] == expected_action
 
 
 def test_findings_patch_rejects_direct_verification_bypass(client, isolate_settings):

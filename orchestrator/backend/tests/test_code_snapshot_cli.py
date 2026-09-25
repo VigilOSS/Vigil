@@ -4710,7 +4710,7 @@ def test_streaming_fallback_caps_retained_records_but_keeps_full_counts() -> Non
 def test_full_parser_signal_cap_is_explicit_debt_without_losing_availability(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from assess.lib import treesitter_index as module
+    from assess.lib import treesitter_streaming as module
 
     monkeypatch.setattr(module, "STRUCTURAL_SIGNAL_LIMIT", 2)
     indexed = module._complete_index_metadata(

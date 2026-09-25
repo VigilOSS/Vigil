@@ -378,3 +378,46 @@ def test_code_index_refusal_names_the_source_subdirectory(tmp_path):
 
     message = str(excinfo.value)
     assert f"{snapshot}/source" in message
+
+
+def test_admitted_dockerfile_reference_to_excluded_build_tree_is_warned():
+    warnings = code_ingest._excluded_build_reference_warnings(
+        {"Dockerfile": b"FROM node:22\nCOPY build/package.json /app/\n"},
+        [{"path": "build", "kind": "directory", "reason": "skipped_dir:build"}],
+        {"Dockerfile"},
+    )
+    assert warnings == [
+        "Dockerfile references excluded build/package.json (skipped_dir:build)"
+    ]
+
+
+def test_admitted_dockerfile_json_copy_reference_to_excluded_build_tree_is_warned():
+    warnings = code_ingest._excluded_build_reference_warnings(
+        {"Dockerfile": b'COPY ["build/package.json", "/app/"]\n'},
+        [{"path": "build", "kind": "directory", "reason": "skipped_dir:build"}],
+        {"Dockerfile"},
+    )
+    assert warnings == [
+        "Dockerfile references excluded build/package.json (skipped_dir:build)"
+    ]
+
+
+def test_dockerfile_multistage_copy_does_not_warn_on_local_exclusion():
+    warnings = code_ingest._excluded_build_reference_warnings(
+        {"Dockerfile": b"COPY --from=builder build/package.json /app/\n"},
+        [{"path": "build", "kind": "directory", "reason": "skipped_dir:build"}],
+        {"Dockerfile"},
+    )
+    assert warnings == []
+
+
+def test_admitted_theme_manifest_warns_on_missing_relative_shipped_asset():
+    warnings = code_ingest._excluded_build_reference_warnings(
+        {"themes/login/theme.properties": b"styles=css/app.min.css\nscripts=js/app.min.js\n"},
+        [{"path": "build", "kind": "directory", "reason": "skipped_dir:build"}],
+        {"themes/login/theme.properties", "themes/login/js/app.min.js"},
+    )
+    assert warnings == [
+        "themes/login/theme.properties references missing relative asset "
+        "themes/login/css/app.min.css (absent from sealed snapshot)",
+    ]

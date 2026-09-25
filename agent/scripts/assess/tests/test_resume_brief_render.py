@@ -77,6 +77,47 @@ def test_resume_brief_marks_persisted_excerpts_as_untrusted_without_rewriting_th
     assert authored in out
 
 
+def test_resume_brief_renders_bounded_contradiction_review_pointer():
+    out = resume_brief._render_markdown({
+        "engagement": {"key": "eng"},
+        "contradiction_reviews": {
+            "count": 2,
+            "items": [{
+                "link_id": 17, "source_slug": "VA-048", "target_slug": "VA-047",
+                "notes": "A second tenant check returned 403.",
+            }],
+        },
+    })
+    assert "## Contradiction Reviews (2)" in out
+    assert "VA-048 contradicts VA-047" in out
+    assert "showing 1 of 2" in out
+
+
+def test_code_resume_labels_transition_gate_and_queue_coverage_by_tier():
+    out = resume_brief._render_markdown({
+        "engagement": {"key": "eng", "engagement_type": "code"},
+        "code_analysis": {
+            "queue_count": 12,
+            "coverage_by_classification": {
+                "high": {"count": 10, "analyzed": 8, "remaining": 2},
+                "skip": {"count": 20, "analyzed": 3, "remaining": 17},
+            },
+            "trigger_counts": {"pending": 4, "queued": 2},
+            "next_gate": {
+                "target_phase": "verify-variant",
+                "transition_ready": False,
+                "blocker_codes": ["structural_analysis_debt_unreviewed"],
+                "structural_debt_count": 17,
+            },
+        },
+    })
+    assert "next phase transition (verify-variant): BLOCKED" in out
+    assert "structural_analysis_debt_unreviewed" in out
+    assert "high: 8/10 reviewed (80%); 2 remaining" in out
+    assert "skip: 3/20 reviewed (15%); 17 remaining" in out
+    assert "structural debt: 17 files" in out
+
+
 def test_resume_hydration_observes_orphans_read_only_before_backend_read(
     monkeypatch, tmp_path, capsys
 ):

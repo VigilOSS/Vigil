@@ -38,9 +38,10 @@ def register(subparsers) -> None:
         action="append",
         metavar="SLUG",
         default=[],
-        help="Finding this run is being started to verify (repeatable). Each slug's author "
+        help="Finding this run is being started to verify (repeatable). Persists a "
+             "proof_run association after run creation. Each slug's author "
              "is read BEFORE the run is created and refused when it is the --agent-id "
-             "dispatch: a finding's author cannot be its own verifier, so receipts from "
+             "dispatch: the author dispatch cannot also verify, so receipts from "
              "such a run could never carry a terminal decision. Naming the findings here "
              "costs a read; discovering it at `finding verify` costs the whole proof run, "
              "target traffic included.",
@@ -286,6 +287,26 @@ def _run_start(args) -> None:
         },
         positive_ids=("id", "producer_dispatch_id"),
     )
+    for slug in dict.fromkeys(getattr(args, "for_findings", None) or []):
+        link_payload = {
+            "link_kind": "proof_run",
+            "target_kind": "assessment_run",
+            "target_id": row["id"],
+        }
+        try:
+            with _client(args) as client:
+                link = client.post(f"findings/{slug}/links", link_payload)
+            if not isinstance(link, dict) or any(
+                link.get(key) != value for key, value in link_payload.items()
+            ):
+                raise AssessError("backend did not confirm the proof_run association")
+        except AssessError as exc:
+            raise AssessError(
+                f"proof-run start: run {row['id']} was created, but association "
+                f"to {slug} is incomplete: {exc}. Inspect the durable link and "
+                f"recover with `vigil assess finding link {slug} --link-kind "
+                f"proof_run --target-kind assessment_run --target-id {row['id']}`"
+            ) from exc
     print(json.dumps(row, indent=2, ensure_ascii=False))
 
 

@@ -1,8 +1,10 @@
 """vigil assess code-coverage — display code analysis coverage and gate status."""
 from __future__ import annotations
 
+from collections import Counter
 import json
 import sys
+from pathlib import Path
 
 # `code-dispatch` owns the lease vocabulary these verbs share; importing its age
 # renderer keeps one reading of "silent for" across the queue table, this report
@@ -10,6 +12,7 @@ import sys
 from assess.commands.code_dispatch import _format_lease_age
 from assess.lib.client import AssessmentClient
 from assess.lib.config import load_config
+from assess.lib.phases import CODE_PHASES, TERMINAL_PHASE
 from assess.lib.treesitter_index import FUNCTION_SCOPED_DIMENSIONS
 
 EFFORT_THRESHOLDS = {
@@ -25,6 +28,8 @@ READINESS_TARGETS = (
     "fuzz",
     "complete",
 )
+
+_STRUCTURAL_DEBT_PREVIEW_LIMIT = 10
 
 
 def _coerce_effort(value) -> float:
@@ -70,19 +75,113 @@ def register(subparsers) -> None:
         action="store_true",
         help="Display per-file CWE effort coverage matrix",
     )
+    p.add_argument(
+        "--debt-paths", action="store_true",
+        help="List every path behind the next structural review debt gate",
+    )
     p.set_defaults(func=run)
+
+
+def _next_code_gate(engagement_dir: str) -> str | None:
+    scope_path = Path(engagement_dir) / "scope.json"
+    if not scope_path.is_file():
+        return None
+    try:
+        scope = json.loads(scope_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(scope, dict):
+        return None
+    engagement_type = scope.get("engagement_type")
+    if engagement_type not in {"code", "both"}:
+        return None
+    phase_key = "code_phase" if engagement_type == "both" else "current_phase"
+    current = scope.get(phase_key, "ingest")
+    if current == TERMINAL_PHASE:
+        return None
+    if current not in CODE_PHASES:
+        return None
+    index = CODE_PHASES.index(current)
+    return (*CODE_PHASES, TERMINAL_PHASE)[index + 1]
+
+
+def _debt_counts(readiness: dict) -> tuple[Counter, Counter, Counter]:
+    classifications: Counter = Counter()
+    statuses: Counter = Counter()
+    truncated: Counter = Counter()
+    for item in readiness.get("structural_debt", []):
+        if not isinstance(item, dict):
+            continue
+        classifications[str(item.get("classification") or "unclassified")] += 1
+        statuses[str(item.get("structural_analysis_status") or "unknown")] += 1
+        if item.get("structural_artifact_truncated") is True:
+            truncated["truncated"] += 1
+    return classifications, statuses, truncated
+
+
+def _print_debt_summary(readiness: dict, *, show_all: bool) -> None:
+    debt = readiness.get("structural_debt")
+    if not isinstance(debt, list):
+        return
+    count = readiness.get("structural_debt_count", len(debt))
+    classifications, statuses, truncated = _debt_counts(readiness)
+    class_text = ", ".join(
+        f"{name}={classifications[name]}" for name in sorted(classifications)
+    ) or "none"
+    status_text = ", ".join(
+        f"{name}={statuses[name]}" for name in sorted(statuses)
+    ) or "none"
+    print(f"  debt by classification: {class_text}")
+    print(f"  debt by structural status: {status_text}; truncated={truncated['truncated']}")
+    limit = len(debt) if show_all else _STRUCTURAL_DEBT_PREVIEW_LIMIT
+    shown = debt[:limit]
+    if shown:
+        if len(debt) > len(shown):
+            print(f"  debt files (showing {len(shown)} of {count}; use --debt-paths for all):")
+        else:
+            print("  debt files:")
+        for item in shown:
+            if not isinstance(item, dict):
+                continue
+            print(
+                f"    repo {item.get('repo_id', '?')}: {item.get('file_path', '?')} "
+                f"classification={item.get('classification') or 'unclassified'} "
+                f"structural={item.get('structural_analysis_status') or 'unknown'}"
+                f"{' truncated' if item.get('structural_artifact_truncated') is True else ''}"
+            )
+
+
+def _print_next_gate(target: str, readiness: dict, *, debt_paths: bool) -> None:
+    ready = readiness.get("target_phase") == target and readiness.get("transition_ready") is True
+    print(f"\nNext hard gate ({target}): {'READY' if ready else 'BLOCKED'}")
+    blockers = readiness.get("blockers")
+    if isinstance(blockers, list) and blockers:
+        codes = [str(item.get("code")) for item in blockers if isinstance(item, dict)]
+        print(f"  blockers: {', '.join(codes[:3])}" + (f" +{len(codes) - 3} more" if len(codes) > 3 else ""))
+    debt_count = readiness.get("structural_debt_count")
+    if isinstance(debt_count, int):
+        print(f"  structural debt: {debt_count} file(s)")
+    _print_debt_summary(readiness, show_all=debt_paths)
+    print(f"  full gate: vigil assess code-coverage --require-transition-ready {target}")
+
+
+def _readiness_endpoint(target: str) -> str:
+    return f"code/readiness?target_phase={target}&include_debt_paths=true"
 
 
 def run(args) -> None:
     cfg = load_config(args.engagement_dir)
     readiness_target = getattr(args, 'require_transition_ready', None)
+    next_target = None if readiness_target else _next_code_gate(
+        getattr(cfg, "engagement_dir", getattr(args, "engagement_dir", ""))
+    )
 
     if getattr(args, 'cwe_matrix', False):
         quality_passed = _run_cwe_matrix(cfg, args)
         failed = bool(getattr(args, 'require_gate_pass', False) and not quality_passed)
         if readiness_target:
             with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
-                readiness = client.get(f'code/readiness?target_phase={readiness_target}')
+                readiness = client.get(_readiness_endpoint(readiness_target))
             if not isinstance(readiness, dict):
                 print(
                     f"Transition Readiness ({readiness_target}): UNKNOWN\n"
@@ -90,7 +189,10 @@ def run(args) -> None:
                 )
                 failed = True
             else:
-                _print_transition_readiness(readiness_target, readiness)
+                _print_transition_readiness(
+                    readiness_target, readiness,
+                    debt_paths=bool(getattr(args, "debt_paths", False)),
+                )
                 if (
                     readiness.get('target_phase') != readiness_target
                     or readiness.get('transition_ready') is not True
@@ -107,8 +209,8 @@ def run(args) -> None:
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         result = client.get(endpoint)
         readiness = (
-            client.get(f'code/readiness?target_phase={readiness_target}')
-            if readiness_target
+            client.get(_readiness_endpoint(readiness_target or next_target))
+            if readiness_target or next_target
             else None
         )
 
@@ -118,8 +220,21 @@ def run(args) -> None:
             sys.exit(1)
         return
 
-    _print_coverage(result)
+    _print_coverage(
+        result,
+        structural_debt_by_classification=(
+            _debt_counts(readiness)[0] if isinstance(readiness, dict) else Counter()
+        ),
+        include_review_quality=False,
+    )
     _print_vuln_class_summary(result)
+    if next_target:
+        if isinstance(readiness, dict):
+            _print_next_gate(
+                next_target, readiness, debt_paths=bool(getattr(args, "debt_paths", False))
+            )
+        else:
+            print(f"\nNext hard gate ({next_target}): UNKNOWN")
 
     failed = False
     if getattr(args, 'require_gate_pass', False):
@@ -135,12 +250,18 @@ def run(args) -> None:
             )
             failed = True
         else:
-            _print_transition_readiness(readiness_target, readiness)
+            _print_transition_readiness(
+                readiness_target, readiness,
+                debt_paths=bool(getattr(args, "debt_paths", False)),
+            )
             if (
                 readiness.get('target_phase') != readiness_target
                 or readiness.get('transition_ready') is not True
             ):
                 failed = True
+
+    _print_review_quality(result)
+    print()
 
     if failed:
         sys.exit(1)
@@ -194,7 +315,9 @@ _BLOCKER_REPAIRS = {
 }
 
 
-def _print_transition_readiness(target_phase: str, readiness: dict) -> None:
+def _print_transition_readiness(
+    target_phase: str, readiness: dict, *, debt_paths: bool = False
+) -> None:
     bound_target = readiness.get('target_phase')
     ready = bound_target == target_phase and readiness.get('transition_ready') is True
     print(f"Transition Readiness ({target_phase}): {'READY' if ready else 'BLOCKED'}")
@@ -228,6 +351,7 @@ def _print_transition_readiness(target_phase: str, readiness: dict) -> None:
             if isinstance(warnings, list):
                 for warning in warnings:
                     print(f"  - {warning}")
+    _print_debt_summary(readiness, show_all=debt_paths)
     print()
 
 
@@ -608,7 +732,12 @@ def _print_open_leases(data: dict) -> None:
     )
 
 
-def _print_coverage(data: dict) -> None:
+def _print_coverage(
+    data: dict,
+    *,
+    structural_debt_by_classification: Counter | None = None,
+    include_review_quality: bool = True,
+) -> None:
     total_files = data.get('total_files', 0)
 
     print("=== Code Analysis Coverage ===")
@@ -638,7 +767,11 @@ def _print_coverage(data: dict) -> None:
                 count = tier_data.get('count', 0)
                 analyzed = tier_data.get('analyzed', 0)
                 if tier == 'skip':
-                    print(f"  {tier:10s}: {count:>4} files |   -- skipped  |   --")
+                    debt = (structural_debt_by_classification or Counter()).get(tier, 0)
+                    print(
+                        f"  {tier:10s}: {count:>4} files | {analyzed:>4} reviewed | "
+                        f"structural debt: {debt}"
+                    )
                 elif count > 0:
                     pct = (analyzed / count) * 100.0
                     print(f"  {tier:10s}: {count:>4} files | {analyzed:>4} analyzed | {pct:5.1f}%")
@@ -689,5 +822,6 @@ def _print_coverage(data: dict) -> None:
             f"{accepted} accepted gap"
         )
 
-    _print_review_quality(data)
+    if include_review_quality:
+        _print_review_quality(data)
     print()

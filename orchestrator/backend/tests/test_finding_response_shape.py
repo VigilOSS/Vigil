@@ -15,6 +15,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from app import db as db_module
+
 ENGAGEMENT_KEY = "2026-08-20-finding-shape"
 AUTHOR_AGENT_ID = "FINDING-SHAPE-AUTHOR"
 
@@ -237,3 +239,71 @@ def test_a_record_that_collides_with_a_filed_sibling_is_warned_not_refused(
     assert advisories[0]["submission_status"] == "submitted"
     assert advisories[0]["submission_ref"] == "BC-77"
     assert "root_cause_key" in advisories[0]["matched_on"]
+
+
+def test_duplicate_advisory_requires_matching_defect_family_and_auth_context(
+    client, isolate_settings
+) -> None:
+    _seed(client, isolate_settings)
+    assert client.post(f"{_base()}/findings", json=_payload("VA-007")).status_code == 201
+    submitted = client.patch(
+        f"{_base()}/findings/VA-007",
+        json={"submission_status": "submitted", "submission_ref": "BC-78"},
+    )
+    assert submitted.status_code == 200, submitted.text
+
+    unrelated = client.post(
+        f"{_base()}/findings",
+        json=_payload(
+            "VA-008", defect_family="server-side-request-forgery",
+            auth_context="administrator",
+            root_cause_key="separate-egress-control",
+            canonical_location="https://app.example/api/users/VA-007",
+        ),
+    )
+
+    assert unrelated.status_code == 201, unrelated.text
+    assert unrelated.json()["duplicate_advisories"] == []
+
+
+def test_duplicate_advisory_finds_older_exact_location_after_many_submissions(
+    client, isolate_settings
+) -> None:
+    _seed(client, isolate_settings)
+    original = client.post(f"{_base()}/findings", json=_payload("VA-009"))
+    assert original.status_code == 201, original.text
+    assert client.patch(
+        f"{_base()}/findings/VA-009",
+        json={"submission_status": "submitted", "submission_ref": "BC-79"},
+    ).status_code == 200
+    with db_module.get_connection() as connection:
+        engagement_id = connection.execute(
+            "SELECT id FROM engagements WHERE key = ?", (ENGAGEMENT_KEY,)
+        ).fetchone()["id"]
+        connection.executemany(
+            """
+            INSERT INTO assessment_findings (
+                engagement_id, slug, title, severity, status, verification_status,
+                defect_family, root_cause_key, auth_context, canonical_location,
+                submission_status, submission_ref
+            ) VALUES (?, ?, ?, 'medium', 'active', 'unreviewed',
+                      'access-control', ?, '', ?, 'submitted', ?)
+            """,
+            (
+                (engagement_id, f"OLD-{index}", f"Unrelated {index}",
+                 f"other-{index}", f"https://app.example/unrelated/{index}",
+                 f"BC-{index}")
+                for index in range(501)
+            ),
+        )
+
+    twin = client.post(
+        f"{_base()}/findings",
+        json=_payload(
+            "VA-010", root_cause_key="new-key",
+            canonical_location="https://app.example/api/users/VA-009",
+        ),
+    )
+
+    assert twin.status_code == 201, twin.text
+    assert [item["slug"] for item in twin.json()["duplicate_advisories"]] == ["VA-009"]

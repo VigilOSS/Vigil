@@ -115,12 +115,14 @@ export function SubmissionsTab({ engagementKey, refreshVersion = 0 }: Submission
   const [loadingMoreAttachments, setLoadingMoreAttachments] = useState(false);
   const [loadingMoreVersions, setLoadingMoreVersions] = useState(false);
   const [loadingMorePendingVersions, setLoadingMorePendingVersions] = useState(false);
+  const [checkingPublicationReadiness, setCheckingPublicationReadiness] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [recovering, setRecovering] = useState(false);
   const [recoveryIssues, setRecoveryIssues] = useState<SubmissionRecoveryResult | null>(null);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const listingRequestGeneration = useRef(0);
+  const readinessRequestGeneration = useRef(0);
   const loadedListingEngagement = useRef("");
   const detailCache = useRef(new Map<string, SubmissionDetail>());
   const selectedFindingRef = useRef<{
@@ -163,13 +165,15 @@ export function SubmissionsTab({ engagementKey, refreshVersion = 0 }: Submission
     }
     setDetailLoading(true);
     try {
-      const next = await getSubmissionDetail(engagementKey, selectedSlug);
+      const next = await getSubmissionDetail(engagementKey, selectedSlug, {
+        selectedAttachmentIds: [...selectedAttachments].sort((a, b) => a - b),
+      });
       detailCache.current.set(`${engagementKey}\n${selectedSlug}`, next);
       setDetail(next);
     } finally {
       setDetailLoading(false);
     }
-  }, [engagementKey, selectedSlug]);
+  }, [engagementKey, selectedSlug, selectedAttachments]);
 
   useEffect(() => {
     let cancelled = false;
@@ -194,6 +198,8 @@ export function SubmissionsTab({ engagementKey, refreshVersion = 0 }: Submission
 
   useEffect(() => {
     let cancelled = false;
+    const requestGeneration = ++readinessRequestGeneration.current;
+    setCheckingPublicationReadiness(false);
     setSelectedAttachments(new Set());
     setNotice("");
     setError("");
@@ -208,13 +214,15 @@ export function SubmissionsTab({ engagementKey, refreshVersion = 0 }: Submission
     setDetailLoading(true);
     void getSubmissionDetail(engagementKey, selectedSlug)
       .then((next) => {
-        if (!cancelled) {
+        if (!cancelled && requestGeneration === readinessRequestGeneration.current) {
           detailCache.current.set(cacheKey, next);
           setDetail(next);
         }
       })
       .catch((cause: unknown) => {
-        if (!cancelled) setError(cause instanceof Error ? cause.message : "Submission detail unavailable");
+        if (!cancelled && requestGeneration === readinessRequestGeneration.current) {
+          setError(cause instanceof Error ? cause.message : "Submission detail unavailable");
+        }
       })
       .finally(() => {
         if (!cancelled) setDetailLoading(false);
@@ -252,10 +260,11 @@ export function SubmissionsTab({ engagementKey, refreshVersion = 0 }: Submission
     ),
     detail.versions[0] ?? null,
   ) ?? null;
-  const latestVersionMatchesMarkdown = Boolean(
+  const latestVersionMatchesExternalBody = Boolean(
     latestVersion
     && detail?.workspace.present
-    && latestVersion.submission_sha256 === detail.workspace.submission_sha256,
+    && detail.workspace.external_body_sha256
+    && latestVersion.submission_sha256 === detail.workspace.external_body_sha256,
   );
   const previewOutdated = Boolean(
     selectedFinding
@@ -276,12 +285,52 @@ export function SubmissionsTab({ engagementKey, refreshVersion = 0 }: Submission
     || (recoveryIssues?.orphaned_staging_paths.length ?? 0) > 0;
 
   const toggleAttachment = (artifactId: number) => {
-    setSelectedAttachments((current) => {
-      const next = new Set(current);
-      if (next.has(artifactId)) next.delete(artifactId);
-      else next.add(artifactId);
-      return next;
-    });
+    const current = selectedAttachments;
+    const next = new Set(current);
+    if (next.has(artifactId)) next.delete(artifactId);
+    else next.add(artifactId);
+    setSelectedAttachments(next);
+    const requestGeneration = ++readinessRequestGeneration.current;
+    const requestedSlug = selectedSlug;
+    const selectedAttachmentIds = [...next].sort((a, b) => a - b);
+    setCheckingPublicationReadiness(true);
+    setDetail((currentDetail) => currentDetail && ({
+      ...currentDetail,
+      workspace: {
+        ...currentDetail.workspace,
+        final_ready: false,
+        blockers: ["Checking publication readiness for selected attachments…"],
+      },
+    }));
+    void getSubmissionDetail(engagementKey, requestedSlug, { selectedAttachmentIds })
+      .then((readiness) => {
+        if (requestGeneration !== readinessRequestGeneration.current) return;
+        setDetail((currentDetail) => {
+          if (!currentDetail || currentDetail.finding.slug !== requestedSlug) return currentDetail;
+          return {
+            ...currentDetail,
+            workspace: {
+              ...currentDetail.workspace,
+              final_ready: readiness.workspace.final_ready,
+              blockers: readiness.workspace.blockers,
+              external_body_sha256: readiness.workspace.external_body_sha256,
+            },
+          };
+        });
+      })
+      .catch((cause: unknown) => {
+        if (requestGeneration !== readinessRequestGeneration.current) return;
+        const message = cause instanceof Error ? cause.message : "Publication readiness unavailable";
+        setDetail((currentDetail) => currentDetail && ({
+          ...currentDetail,
+          workspace: { ...currentDetail.workspace, final_ready: false, blockers: [message] },
+        }));
+      })
+      .finally(() => {
+        if (requestGeneration === readinessRequestGeneration.current) {
+          setCheckingPublicationReadiness(false);
+        }
+      });
   };
 
   const handleRefreshPreview = () => {
@@ -426,7 +475,13 @@ export function SubmissionsTab({ engagementKey, refreshVersion = 0 }: Submission
   };
 
   const handleExport = async () => {
-    if (!detail?.workspace.final_ready || exporting || recovering || loadingMoreAttachments) return;
+    if (
+      !detail?.workspace.final_ready
+      || exporting
+      || recovering
+      || loadingMoreAttachments
+      || checkingPublicationReadiness
+    ) return;
     setExporting(true);
     setError("");
     setNotice("");
@@ -648,10 +703,10 @@ export function SubmissionsTab({ engagementKey, refreshVersion = 0 }: Submission
               {detailLoading
                 ? "Checking draft readiness…"
                 : detail?.workspace.final_ready
-                  ? "Draft final-ready"
+                  ? "Draft final-ready for selected attachments"
                   : "Draft review required"}
             </span>
-            <span className={latestVersionMatchesMarkdown ? "is-ready" : "is-stale"}>
+            <span className={latestVersionMatchesExternalBody ? "is-ready" : "is-stale"}>
               <FileArchive size={14} aria-hidden="true" />
               {detailLoading
                 ? "Checking immutable version…"
@@ -659,9 +714,11 @@ export function SubmissionsTab({ engagementKey, refreshVersion = 0 }: Submission
                   ? "No immutable version yet"
                   : !detail?.workspace.present
                     ? `Latest v${latestVersion.version_number}; no current Markdown`
-                  : latestVersionMatchesMarkdown
-                    ? `Latest v${latestVersion.version_number} matches current Markdown`
-                    : `Latest v${latestVersion.version_number} differs from current Markdown`}
+                  : !detail?.workspace.external_body_sha256
+                    ? "Current external-body digest unavailable"
+                  : latestVersionMatchesExternalBody
+                    ? `Latest v${latestVersion.version_number} matches current external body`
+                    : `Latest v${latestVersion.version_number} differs from current external body`}
             </span>
           </div>
         </header>
@@ -830,6 +887,7 @@ export function SubmissionsTab({ engagementKey, refreshVersion = 0 }: Submission
                   className="primary-button submission-export-button"
                   disabled={
                     !detail.workspace.final_ready
+                    || checkingPublicationReadiness
                     || exporting
                     || recovering
                     || loadingMoreAttachments
@@ -837,7 +895,11 @@ export function SubmissionsTab({ engagementKey, refreshVersion = 0 }: Submission
                   onClick={handleExport}
                 >
                   <FileArchive size={15} aria-hidden="true" />
-                  {exporting ? "Verifying and staging…" : "Export immutable version"}
+                  {exporting
+                    ? "Verifying and staging…"
+                    : checkingPublicationReadiness
+                      ? "Checking publication readiness…"
+                      : "Export immutable version"}
                 </button>
               </section>
 

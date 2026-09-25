@@ -34,6 +34,11 @@ def _active_relationship_identity(link: dict[str, Any] | Any | None) -> tuple[An
     """Identity of the active claim a verifier reviewed, excluding prose/order."""
     if link is None or link["retired_at"] is not None:
         return None
+    # Root-cause grouping changes what a confirmed finding claims to represent.
+    # Evidence, related, contradiction, duplicate-intel, and proof-run links add
+    # review context without changing the vulnerability already verified.
+    if not _is_root_cause_link(link):
+        return None
     target_ref = str(link["target_ref"] or "")
     target_selector = (
         ("ref", target_ref)
@@ -83,6 +88,33 @@ def _relationship_collection_change(
         "before": [_finding_link_audit_snapshot(link) for link in before],
         "after": [_finding_link_audit_snapshot(link) for link in after],
     }
+
+
+def _validate_proof_run_link_target(
+    connection,
+    engagement_id: int,
+    *,
+    link_kind: str,
+    target_kind: str,
+    target_id: int | None,
+    target_ref: str,
+) -> None:
+    if link_kind != "proof_run":
+        return
+    if target_kind != "assessment_run" or target_id is None or target_ref:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="proof_run links require target_kind='assessment_run' and target_id",
+        )
+    run = connection.execute(
+        "SELECT id FROM assessment_runs WHERE engagement_id = ? AND id = ?",
+        (engagement_id, int(target_id)),
+    ).fetchone()
+    if run is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="proof_run target does not belong to this engagement",
+        )
 
 
 def _invalidate_relationship_verification(
@@ -165,6 +197,11 @@ def _upsert_finding_link(
     notes: str,
     provenance: dict[str, Any] | None,
 ) -> dict[str, Any]:
+    _validate_proof_run_link_target(
+        connection, engagement_id,
+        link_kind=link_kind, target_kind=target_kind,
+        target_id=target_id, target_ref=target_ref,
+    )
     if str(target_kind) == "finding" and target_ref:
         target_ref = _resolve_existing_finding_slug(
             connection,
@@ -647,6 +684,11 @@ def update_finding_link(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="finding link requires target_id or target_ref",
             )
+        _validate_proof_run_link_target(
+            connection, engagement.id,
+            link_kind=str(link["link_kind"]), target_kind=next_kind,
+            target_id=next_id, target_ref=next_ref,
+        )
 
         next_notes = str(link["notes"]) if notes is None else str(notes)
         next_provenance = _merge_object_text(

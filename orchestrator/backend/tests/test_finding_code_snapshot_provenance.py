@@ -13,7 +13,7 @@ from app.api.assessment import (
 from app.services.state_manager import findings as findings_service
 from fastapi import HTTPException
 from pydantic import ValidationError
-from tests.proof_fixtures import post_artifact_backed_source_observation
+from tests.proof_fixtures import completed_confirm_check, post_artifact_backed_source_observation
 
 _CODE_SNAPSHOT = {
     "repo_id": 7,
@@ -301,6 +301,70 @@ def test_file_finding_record_accepts_current_verified_snapshot(
     assert stored["code_snapshot"] == binding
 
 
+def test_runtime_verifier_reuses_current_source_binding_with_own_command_proof(
+    client, isolate_settings
+) -> None:
+    binding = _seed_repo(client, isolate_settings)
+    assert _record(client, _finding_payload("VA-057", binding)).status_code == 201
+    _dispatch(client, "runtime-verify-057", role="code-vuln-verifier")
+    base = f"/engagements/{_ENGAGEMENT_KEY}/assessment"
+    run = client.post(
+        f"{base}/assessment-runs",
+        json={
+            "run_uuid": "runtime-verify-057", "run_kind": "shared",
+            "producer_dispatch_agent_id": "runtime-verify-057",
+        },
+    )
+    assert run.status_code == 201, run.text
+    linked = client.post(
+        f"{base}/findings/VA-057/links",
+        json={
+            "link_kind": "proof_run", "target_kind": "assessment_run",
+            "target_id": run.json()["id"],
+        },
+    )
+    assert linked.status_code == 200, linked.text
+    command = client.post(
+        f"{base}/command-runs",
+        json={
+            "run_uuid": "runtime-command-057",
+            "command": "./parser oversized.dat", "tool_name": "parser",
+            "agent_name": "runtime-verify-057", "phase": "verify",
+            "status": "completed", "return_code": 1,
+            "started_at": "2026-09-25T12:00:00Z",
+            "completed_at": "2026-09-25T12:00:01Z",
+            "stdout": "AddressSanitizer: heap-buffer-overflow",
+        },
+    )
+    assert command.status_code == 201, command.text
+    proof = client.post(
+        f"{base}/proof-receipts",
+        json={
+            "run_id": run.json()["id"], "evidence_kind": "command",
+            "command_run_id": command.json()["id"],
+            "observed_result": "AddressSanitizer reported the overflow",
+        },
+    )
+    assert proof.status_code == 201, proof.text
+    assert client.patch(
+        f"{base}/assessment-runs/{run.json()['id']}", json={"status": "completed"}
+    ).status_code == 200
+
+    verified = client.post(
+        f"{base}/findings/VA-057/verify",
+        json={
+            "verification_status": "confirmed",
+            "reason_text": "Runtime replay observed the same source defect.",
+            "proof_receipt_ids": [proof.json()["id"]],
+            "confirm_check": completed_confirm_check(proof.json()["id"]),
+            "severity_variance": _info_severity_variance(proof.json()["id"]),
+        },
+    )
+
+    assert verified.status_code == 200, verified.text
+    assert verified.json()["finding"]["provenance"]["code_snapshot"] == binding
+
+
 def test_verify_is_the_only_path_that_can_rebind_a_stale_file_finding(
     client, isolate_settings
 ) -> None:
@@ -343,7 +407,8 @@ def test_verify_is_the_only_path_that_can_rebind_a_stale_file_finding(
             "severity_variance": _info_severity_variance(proof_receipt_id),
         },
     )
-    assert verify_without_binding.status_code == 400
+    assert verify_without_binding.status_code == 409
+    assert "stale" in verify_without_binding.json()["detail"]
 
     verified = client.post(
         f"/engagements/{_ENGAGEMENT_KEY}/assessment/findings/VA-005/verify",
@@ -353,6 +418,7 @@ def test_verify_is_the_only_path_that_can_rebind_a_stale_file_finding(
             "source_name": "code-vuln-verifier",
             "provenance": {"code_snapshot": current_binding},
             "proof_receipt_ids": [proof_receipt_id],
+            "confirm_check": completed_confirm_check(proof_receipt_id),
             "severity_variance": _info_severity_variance(proof_receipt_id),
         },
     )
@@ -743,6 +809,7 @@ def test_cross_track_merge_preserves_confirmed_target_when_evidence_is_only_addi
             "source_name": "code-vuln-verifier",
             "provenance": {"code_snapshot": binding},
             "proof_receipt_ids": [proof_receipt_id],
+            "confirm_check": completed_confirm_check(proof_receipt_id),
         },
     )
     assert confirmed.status_code == 200, confirmed.text
@@ -830,6 +897,7 @@ def test_cross_track_merge_preserves_confirmation_when_source_adds_material_deta
             "source_name": "code-vuln-verifier",
             "provenance": {"code_snapshot": binding},
             "proof_receipt_ids": [proof_receipt_id],
+            "confirm_check": completed_confirm_check(proof_receipt_id),
         },
     )
     assert confirmed.status_code == 200, confirmed.text
@@ -916,6 +984,7 @@ def test_cross_track_merge_invalidates_confirmation_when_claim_dependencies_are_
             "source_name": "code-vuln-verifier",
             "provenance": {"code_snapshot": binding},
             "proof_receipt_ids": [proof_receipt_id],
+            "confirm_check": completed_confirm_check(proof_receipt_id),
         },
     )
     assert confirmed.status_code == 200, confirmed.text
@@ -1103,6 +1172,14 @@ def _verification_receipt(client, verifier_id: str, slug: str) -> int:
         },
     )
     assert run.status_code == 201, run.text
+    linked = client.post(
+        f"/engagements/{_ENGAGEMENT_KEY}/assessment/findings/{slug}/links",
+        json={
+            "link_kind": "proof_run", "target_kind": "assessment_run",
+            "target_id": run.json()["id"],
+        },
+    )
+    assert linked.status_code == 200, linked.text
     receipt = post_artifact_backed_source_observation(
         client,
         f"/engagements/{_ENGAGEMENT_KEY}/assessment/proof-receipts",
@@ -1161,6 +1238,7 @@ def test_verify_reports_the_snapshot_transition_on_its_own_response(
             "source_name": "code-vuln-verifier",
             "provenance": {"code_snapshot": current},
             "proof_receipt_ids": [proof_receipt_id],
+            "confirm_check": completed_confirm_check(proof_receipt_id),
             "severity_variance": _info_severity_variance(proof_receipt_id),
         },
     )
@@ -1509,7 +1587,7 @@ def test_a_binding_asserted_by_an_unknown_dispatch_is_rejected_at_creation(
     ).status_code == 404
 
 
-def test_an_unattested_reportable_finding_is_an_advisory_never_a_blocker(
+def test_an_unattested_reportable_finding_blocks_final_readiness(
     client, isolate_settings
 ) -> None:
     binding = _seed_repo(client, isolate_settings)
@@ -1551,10 +1629,6 @@ def test_an_unattested_reportable_finding_is_an_advisory_never_a_blocker(
     assert any(
         item.get("kind") == "finding_code_snapshot_unattested"
         and item.get("slug") == "VA-054"
-        for item in readiness["advisories"]
-    )
-    assert not any(
-        item.get("kind") == "finding_code_snapshot_unattested"
         for item in readiness["blockers"]
     )
 
@@ -1624,6 +1698,7 @@ def test_a_verify_rebind_re_attests_under_the_verifying_agent(
             "source_name": "code-vuln-verifier",
             "provenance": {"code_snapshot": current, "agent_id": "cvv-001"},
             "proof_receipt_ids": [proof_receipt_id],
+            "confirm_check": completed_confirm_check(proof_receipt_id),
             "severity_variance": _info_severity_variance(proof_receipt_id),
         },
     )

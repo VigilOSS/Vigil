@@ -127,7 +127,8 @@ procedure lives in `agent/skills/code-fuzz-campaign/SKILL.md`; it uses out-of-tr
 project supports them, otherwise a disposable writable copy made only from validated sealed bytes.
 The mutable origin remains provenance and is never a build fallback.
 
-**Host/runtime boundary for executable code.** Host tools may read sealed source and author
+**Host/runtime boundary for executable code.** Host tools may read sealed source, inspect
+third-party dependency bytecode without running it (for example, `javap`), and author
 engagement-owned configurations, harnesses, corpora, and helper scripts. Compilers, build systems,
 fuzzers, debuggers, sanitizer reproducers, and every repository-built binary execute only through
 the audited `vigil assess kali ...` surface. A host-side `which clang`, build, seed check, or
@@ -542,8 +543,10 @@ analysis receipts and reports it as `coverage_integrity` on the `code-dispatch d
    a current cross-file `call_chain`; `reviewed_spans` prove checked source that has no structural
    callable identity but do not invent callable coverage.
 3. Cross-file callable coverage does not transfer lease ownership. Only a source receipt anchored
-   to the claimed queue file can close that file's critical/high review; referenced files retain
+   to the claimed queue file can close its non-skipped review; referenced files retain
    their own queue, disposition, evidence, and closeout obligations.
+   A sealed zero-byte file uses the explicit empty-file review form in `vigil assess contract
+   code-record analysis`; never invent a source line.
 4. Not-applicable entries (`disposition: "not_applicable"`) are exempt from the backing check.
 5. Use `analysis_effort` in per-file coverage detail as the trustworthy effort projection: it is
    derived from current receipt rows, evidenced receipts, distinct structural callable bindings,

@@ -519,6 +519,8 @@ def test_proof_run_start_accepts_an_independent_verifier_dispatch(
 
     def post(_client, endpoint: str, payload: dict):
         posted.append((endpoint, payload))
+        if endpoint.endswith("/links"):
+            return {"id": len(posted), "finding_slug": endpoint.split("/")[1], **payload}
         return {
             "id": 31,
             "run_uuid": payload["run_uuid"],
@@ -550,13 +552,21 @@ def test_proof_run_start_accepts_an_independent_verifier_dispatch(
     )
 
     assert json.loads(capsys.readouterr().out)["status"] == "running"
-    # The preflight is a read: it adds no field to the run the backend stores.
+    # The run and its finding associations must both be durable writes.
     assert posted[0][1] == {
         "run_uuid": "verify-va-047",
         "run_kind": "web",
         "run_purpose": "proof",
         "producer_dispatch_agent_id": "VERIFY-1",
     }
+    assert posted[1:] == [
+        ("findings/VA-047/links", {
+            "link_kind": "proof_run", "target_kind": "assessment_run", "target_id": 31,
+        }),
+        ("findings/VA-048/links", {
+            "link_kind": "proof_run", "target_kind": "assessment_run", "target_id": 31,
+        }),
+    ]
 
 
 def test_proof_run_start_refuses_a_finding_with_no_resolvable_author(

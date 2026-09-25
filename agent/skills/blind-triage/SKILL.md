@@ -44,23 +44,28 @@ BLOCKED. Do not re-implement it here.)
 
 ## Pass 2 — BLIND unbiased triage (the decisive gate)
 
-Pass 2 is an agent with **ZERO engagement context** that judges **only the
-submitted bytes**, exactly like a real Bugcrowd / VDP reviewer who never saw the
-engagement. It is the decisive gate.
+Pass 2 is an agent with **ZERO engagement context** that judges the exact
+external submission body and selected attachments a program reviewer would see.
+It is the decisive gate.
 
 **Reviewer setup (all of these are required):**
 
 - **Non-specialist general agent, strongest model.** Not the report-writer, not
   the vulnerability-analyst who found it — a fresh general agent on the strongest
   available model, so it brings an unbiased, adversarial reviewer's eye.
-- **Zero engagement context.** The reviewer is given **only**: (a) the program
-  brief facts (in-scope assets, the triage bar, the severity-band policy), and
-  (b) the submission `.md` itself. Nothing else.
+- **Zero engagement context on the first pass.** The reviewer receives the
+  program brief, verdict rubric, external submission body, and the exact selected
+  attachments. It receives no internal OPERATOR DETAILS section. After a
+  recorded miss, the reviewer may inspect the canonical finding solely to
+  diagnose the gap; the writer or analyst makes the correction, then a fresh
+  packet and fresh blind reviewer judge the changed submission.
 - **Reviewer input discipline.** Build the content-addressed input with
-  `vigil assess export triage-packet <slug>` and give the reviewer only that packet.
+  `vigil assess export triage-packet <slug> [--attachment-id <id> ...]` and give
+  the reviewer only that packet. Use the exact attachment IDs intended for export.
   Packet generation records `process_isolation_enforced=false`: it proves which bytes
   were packaged but does not control the reviewer's process. The reviewer reads only the
-  packaged submission, program brief, and rubric; it does not query other engagement state.
+  packaged external submission, attachments, program brief, and rubric; it does not
+  query other engagement state on the first pass.
   If a claim is not proven inside the submission bytes, it is unproven for triage purposes —
   that is the reviewer judging exactly what an external triager can see.
 
@@ -89,7 +94,7 @@ returns the table, the operator records one decision row per finding:
 
 ```bash
 vigil assess agent decision --kind blind_triage_verdict --payload-json \
-  '{"finding_slug":"<slug>","verdict":"<Accept@P1..P5|Need-More-Info|Not-Applicable|Out-of-Scope|Duplicate>","claimed_severity":"<sev>","weak_points":"..."}'
+  '{"finding_slug":"<slug>","packet_id":"<64-char packet id>","verdict":"<Accept@P1..P5|Need-More-Info|Not-Applicable-Informational|Out-of-Scope|Duplicate>","claimed_severity":"<sev>","weak_points":"..."}'
 ```
 
 This writes a `kind='blind_triage_verdict'` row to the `assessment_dispatch_decisions`
@@ -99,7 +104,10 @@ submittable workflow state (`active`, `exploited`, `blocked`, `reported`, ...) t
 lacks a recorded verdict whose `verdict` starts `Accept` — so an un-recorded
 verdict reads identically to no triage at all. The verdict string must start with
 `Accept` (e.g. `Accept@P3`) to clear the gate; any other value records the
-disposition but does not unblock publish.
+disposition but does not unblock publish. Final export also verifies that the
+latest Accept's packet covers the current external body, selected attachments,
+platform, program brief, and rubric. Any changed input needs a new packet and
+review.
 
 **Gating rule (hard block).** If the blind verdict is **anything other than
 `Accept` (at any priority)**, **do NOT submit.** Route the finding back to the

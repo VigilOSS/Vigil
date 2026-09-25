@@ -1665,6 +1665,7 @@ def enforce_execution_policy(
                 f"`hosts` list. {recovery} before retrying; execution cannot create "
                 "or infer authorization from its argv."
             )
+        _require_program_brief_resolution(eng_dir)
 
     result: dict[str, Any] = {"target_facing": target_facing}
     code_lane = engagement_type == "code" or (
@@ -1688,6 +1689,52 @@ def enforce_execution_policy(
             )
             break
     return result
+
+
+def _program_brief_decisions(eng_dir: Path) -> list[dict[str, Any]]:
+    from assess.lib.client import AssessmentClient, AssessError
+    from assess.lib.config import load_config
+
+    try:
+        cfg = load_config(str(eng_dir))
+        client = AssessmentClient(cfg.base_url, eng_dir.name)
+        try:
+            return client.list_all_decisions(kind="program_brief")
+        finally:
+            client.close()
+    except (AssessError, OSError, SystemExit) as exc:
+        raise ScopePolicyError(
+            f"ENGAGEMENT.md is a STUB and its operator decision cannot be checked: {exc}"
+        ) from exc
+
+
+def _require_program_brief_resolution(eng_dir: Path) -> None:
+    """A generated brief is a placeholder, not an operator ROE decision."""
+    brief_path = eng_dir / "ENGAGEMENT.md"
+    try:
+        brief = brief_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return  # Legacy engagement without the generated stub.
+    except OSError as exc:
+        raise ScopePolicyError(f"cannot read engagement program brief: {exc}") from exc
+    if not re.search(r"^> \*\*STUB\b", brief, flags=re.MULTILINE):
+        return
+
+    decisions = _program_brief_decisions(eng_dir)
+    if any(
+        isinstance(row, dict)
+        and isinstance(row.get("payload"), dict)
+        and row["payload"].get("choice") == "no_separate_program_brief"
+        and str(row["payload"].get("reason") or "").strip()
+        for row in decisions
+    ):
+        return
+    raise ScopePolicyError(
+        "ENGAGEMENT.md is a STUB. Fill it with the actual program ROE before "
+        "target traffic, or record the operator's no-separate-brief declaration "
+        "once with `vigil assess agent decision --kind program_brief "
+        "--choice no_separate_program_brief --reason '<operator instruction>'`."
+    )
 
 
 def filter_recon_targets(

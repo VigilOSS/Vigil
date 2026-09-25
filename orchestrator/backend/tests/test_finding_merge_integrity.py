@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from app import db as db_module
-from tests.proof_fixtures import post_artifact_backed_source_observation
+from tests.proof_fixtures import completed_confirm_check, post_artifact_backed_source_observation
 
 
 ENGAGEMENT_KEY = "2026-07-20-120000-merge-integrity"
@@ -129,6 +129,14 @@ def _confirm_finding(client, slug: str) -> dict:
         },
     )
     assert run.status_code == 201, run.text
+    linked = client.post(
+        f"{ASSESSMENT_BASE}/findings/{slug}/links",
+        json={
+            "link_kind": "proof_run", "target_kind": "assessment_run",
+            "target_id": run.json()["id"],
+        },
+    )
+    assert linked.status_code == 200, linked.text
     receipt = post_artifact_backed_source_observation(
         client,
         f"{ASSESSMENT_BASE}/proof-receipts",
@@ -152,6 +160,7 @@ def _confirm_finding(client, slug: str) -> dict:
             "reason_text": "Independent review confirmed the finding.",
             "source_name": "merge-verifier",
             "proof_receipt_ids": [receipt.json()["id"]],
+            "confirm_check": completed_confirm_check(receipt.json()["id"]),
         },
     )
     assert verified.status_code == 200, verified.text

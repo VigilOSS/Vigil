@@ -452,18 +452,20 @@ function handleAdmin(req, res) {
 """
 
 
-def test_a_stacked_function_never_inherits_a_neighbours_registration() -> None:
+def test_a_stacked_function_attributes_only_the_registered_handler() -> None:
     """A registration belongs to the callable it actually registers.
 
-    `helper` and `handleAdmin` merely sit near `app.get("/admin", ...)`; neither
-    is passed to it. Proximity is not registration, so neither may be reported.
-    Attribution is structural — an enclosing call, not a line window — so there
-    is no distance at which a neighbour starts inheriting the match.
+    `helper` merely sits near `app.get("/admin", handleAdmin)`; only
+    `handleAdmin` is passed to it. Proximity must not make `helper` a route.
     """
     indexed = index_file("routes.js", "javascript", STACKED_ROUTES)
 
-    assert indexed["entry_points"] == []
-    assert not [func for func in indexed["functions"] if func["is_entry_point"]]
+    assert [(entry["name"], entry["kind"]) for entry in indexed["entry_points"]] == [
+        ("handleAdmin", "express_route")
+    ]
+    assert [func["name"] for func in indexed["functions"] if func["is_entry_point"]] == [
+        "handleAdmin"
+    ]
 
 
 # The span a registration can be written in has two parts, and this is the
@@ -567,9 +569,18 @@ def _emitted_vuln_classes() -> set[str]:
     ``"vuln_classes": [...]`` literal plus the three pattern tables is the only
     way to cover both without a second list to keep in sync.
     """
-    module = ast.parse(Path(treesitter_index.__file__).read_text(encoding="utf-8"))
+    index_path = Path(treesitter_index.__file__)
+    modules = (
+        ast.parse(path.read_text(encoding="utf-8"))
+        for path in (
+            index_path,
+            index_path.with_name("treesitter_catalogues.py"),
+            index_path.with_name("treesitter_lightweight.py"),
+        )
+    )
     emitted = {
         element.value
+        for module in modules
         for node in ast.walk(module)
         if isinstance(node, ast.Dict)
         for key, value in zip(node.keys, node.values)
@@ -593,6 +604,10 @@ def test_no_indexer_table_invents_a_vuln_class() -> None:
     )
 
 
+def test_lightweight_extractor_classes_are_in_taxonomy_sweep() -> None:
+    assert "clickjacking" in _emitted_vuln_classes()
+
+
 def test_a_security_source_carries_no_vuln_class() -> None:
     """A source is where a value came from, not a vulnerability.
 
@@ -612,14 +627,6 @@ def test_a_security_source_carries_no_vuln_class() -> None:
 
 # --- 10. Scan scope that covered no source at all ---------------------------
 
-# The classic PHP view: executable statements at file scope, no callable and no
-# framework registration anywhere, so nothing bounds a scan and nothing the
-# entry-point catalogue keys on exists either.
-PHP_TOP_LEVEL_TEMPLATE = b"""<?php
-$name = $_GET["name"];
-echo "<h1>" . $name . "</h1>";
-"""
-
 MODULE_LEVEL_PYTHON = b"""import os
 
 os.system("backup " + os.environ["TARGET"])
@@ -629,14 +636,13 @@ os.system("backup " + os.environ["TARGET"])
 @pytest.mark.parametrize(
     ("file_path", "language", "source"),
     [
-        ("public/legacy.php", "php", PHP_TOP_LEVEL_TEMPLATE),
         ("deploy.py", "python", MODULE_LEVEL_PYTHON),
     ],
 )
 def test_a_file_with_no_scanned_function_never_reports_clean_sinks(
     file_path: str, language: str, source: bytes
 ) -> None:
-    """Zero function nodes means `_detect_sinks` was handed nothing at all.
+    """Python module calls remain outside a callable scan scope.
 
     Each fixture carries an executable sink or route outside any function, so
     `security_sinks: []` under `analysis_status: "complete"` is a measurement
@@ -958,3 +964,72 @@ def test_a_file_that_is_only_commentary_is_never_coverage_debt(
 
     assert indexed["analysis_status"] == "complete"
     assert indexed["unavailable_dimensions"] == []
+
+
+CSHARP_REPOSITORY = b"""using System;
+using System.Data.SqlClient;
+using System.Collections.Generic;
+
+namespace MyApp.Data
+{
+    public interface IUserRepository
+    {
+        List<string> GetUser(string userInput);
+    }
+
+    public class UserRepository : IUserRepository
+    {
+        private readonly string _connectionString;
+
+        public UserRepository(string connectionString)
+        {
+            _connectionString = connectionString;
+        }
+
+        public string LastQuery { get; set; }
+
+        public List<string> GetUser(string userInput)
+        {
+            var command = new SqlCommand("SELECT * FROM Users WHERE id = " + userInput);
+            var reader = command.ExecuteReader();
+            return new List<string>();
+        }
+    }
+}
+"""
+
+
+def test_a_csharp_file_is_a_first_class_tree_sitter_language() -> None:
+    """C# is parsed structurally, not shrugged off as an unsupported language.
+
+    A `.cs` file used to land in the `unsupported_language` bucket with no
+    function map, class list, imports or sinks. It is now a real tree-sitter
+    language: this fixture -- a namespace with using-directives, an interface,
+    a class with a constructor, a property and two methods, and one obvious
+    `new SqlCommand(userInput)` injection -- must index to a complete
+    structural record with every one of those dimensions populated.
+    """
+    indexed = index_file("Data/UserRepository.cs", "csharp", CSHARP_REPOSITORY)
+
+    assert indexed["analysis_status"] == "complete"
+    assert indexed["analysis_mode"] == "tree_sitter"
+
+    # Interface method, constructor, property-free methods: at minimum the
+    # constructor and the two `GetUser` bodies are callables.
+    assert indexed["total_functions"] > 0
+    qualified = {func["qualified_name"] for func in indexed["functions"]}
+    assert "UserRepository.UserRepository" in qualified  # constructor
+    assert "UserRepository.GetUser" in qualified
+
+    class_names = {cls["name"] for cls in indexed["classes"]}
+    assert {"IUserRepository", "UserRepository"} <= class_names
+    repository = next(cls for cls in indexed["classes"] if cls["name"] == "UserRepository")
+    assert repository["extends"] == ""
+    assert repository["implements"] == ["IUserRepository"]
+
+    assert "System.Data.SqlClient" in indexed["imports"]
+
+    sql_sinks = [sink for sink in indexed["security_sinks"] if sink["kind"] == "sql_exec"]
+    assert sql_sinks, indexed["security_sinks"]
+    assert all(sink["vuln_classes"] == ["sqli"] for sink in sql_sinks)
+    assert any(sink["function"] == "GetUser" for sink in sql_sinks)

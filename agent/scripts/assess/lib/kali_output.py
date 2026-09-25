@@ -36,6 +36,9 @@ class KaliResult:
     stderr_preview: str
     timed_out: bool
     partial_results: bool
+    # Target execution can succeed while the terminal audit write fails. Keep
+    # that separate from the target verdict so callers can reconcile the row.
+    audit_finalized: bool = True
     # CR-36 false-negative guard. True when the run ended in the
     # http=000 / connection-failed / DNS-resolution-failure transport signature
     # — i.e. NO real HTTP answer came back — so an agent must NOT read the

@@ -7,16 +7,66 @@ sites.  All tree-sitter imports are guarded so the module remains importable
 """
 from __future__ import annotations
 
-import bisect
 import re
 import warnings
 from functools import lru_cache
-from pathlib import Path
 from typing import Any
 
 from assess.lib.code_languages import (
     STRUCTURAL_SUPPORTED_LANGUAGES,
     structural_language_for_file,
+)
+
+from assess.lib.treesitter_catalogues import (
+    _CLASS_QUERIES,
+    _C_DECLARATION_QUERY,
+    _CPP_DECLARATION_QUERY,
+    _ENTRY_ANNOTATIONS,
+    _ENTRY_LINE_PATTERNS,
+    _ENTRY_METHOD_NAMES,
+    _FUNCTION_QUERIES,
+    _GLOBAL_ENTRY_LINE_PATTERNS,
+    _IMPORT_QUERIES,
+    _SINK_DEFINITIONS,
+)
+from assess.lib.treesitter_lightweight import (
+    _blade_template_sources,
+    _extract_blade,
+    _extract_css,
+    _extract_dockerfile,
+    _extract_freemarker,
+    _extract_html,
+    _extract_lua,
+    _extract_powershell,
+    _extract_shell,
+)
+from assess.lib.treesitter_streaming import (
+    _SIGNAL_DIMENSIONS,
+    _UNSUPPORTED_UNAVAILABLE_DIMENSIONS,
+    _attach_bounded_security_sources,
+    _complete_index_metadata,
+    _fallback_from_bytes,
+)
+
+# Compatibility names for existing callers and catalogue tests. Their owning
+# modules are imported directly above, so this façade creates no reverse import.
+from assess.lib.treesitter_lightweight import (  # noqa: F401
+    FREEMARKER_ESCAPE_OBSERVATIONS,
+    FREEMARKER_OUTPUT_CONTEXTS,
+    _LUA_DYNAMIC_REDIS_COMMAND_RE,
+)
+from assess.lib.treesitter_streaming import (  # noqa: F401
+    STREAMING_FALLBACK_BASELINE_UNAVAILABLE,
+    STREAMING_SCAN_OVERLAP_BYTES,
+    STREAMING_SCAN_WINDOW_BYTES,
+    STRUCTURAL_SIGNAL_LIMIT,
+    StreamingSecurityScanner,
+    _CAPPED_INDEX_LISTS,
+    _STREAM_EXTRA_ENTRY_PATTERNS,
+    _STREAM_EXTRA_SINK_PATTERNS,
+    _STREAM_IMPORT_PATTERNS,
+    _STREAM_SOURCE_PATTERNS,
+    streaming_security_fallback,
 )
 
 # ---------------------------------------------------------------------------
@@ -50,6 +100,7 @@ _try_import_grammar("tree_sitter_typescript", "typescript")
 _try_import_grammar("tree_sitter_go", "go")
 _try_import_grammar("tree_sitter_ruby", "ruby")
 _try_import_grammar("tree_sitter_php", "php")
+_try_import_grammar("tree_sitter_c_sharp", "csharp")
 
 
 # ---------------------------------------------------------------------------
@@ -58,6 +109,14 @@ _try_import_grammar("tree_sitter_php", "php")
 # QueryCursor.matches() instead.  This helper provides a single call site.
 # ---------------------------------------------------------------------------
 
+@lru_cache(maxsize=128)
+def _compiled_ts_query(lang_obj: Any, query_str: str) -> Any:
+    """Reuse immutable query plans across files; cursors remain per scan."""
+    if hasattr(tree_sitter, "QueryCursor"):
+        return tree_sitter.Query(lang_obj, query_str)
+    return lang_obj.query(query_str)
+
+
 def _ts_query_captures(lang_obj: Any, query_str: str, root_node: Any) -> dict[str, list[Any]]:
     """Run a tree-sitter query and return ``{capture_name: [nodes]}``."""
     if tree_sitter is None:
@@ -65,7 +124,7 @@ def _ts_query_captures(lang_obj: Any, query_str: str, root_node: Any) -> dict[st
     # 0.25+: Query() constructor + QueryCursor
     if hasattr(tree_sitter, "QueryCursor"):
         try:
-            query = tree_sitter.Query(lang_obj, query_str)
+            query = _compiled_ts_query(lang_obj, query_str)
         except Exception:
             return {}
         cursor = tree_sitter.QueryCursor(query)
@@ -76,7 +135,7 @@ def _ts_query_captures(lang_obj: Any, query_str: str, root_node: Any) -> dict[st
         return result
     # 0.23.x: Language.query() + Query.captures()
     try:
-        query = lang_obj.query(query_str)
+        query = _compiled_ts_query(lang_obj, query_str)
     except Exception:
         return {}
     return query.captures(root_node)  # type: ignore[return-value]
@@ -85,7 +144,7 @@ def _ts_query_captures(lang_obj: Any, query_str: str, root_node: Any) -> dict[st
 # Tree-sitter backed languages (full structural parsing)
 _TS_SUPPORTED_LANGUAGES = frozenset({
     "java", "c", "cpp", "python", "javascript", "typescript",
-    "go", "ruby", "php",
+    "go", "ruby", "php", "csharp",
 })
 
 # Lightweight regex/line-based extractors (pure-python, no tree-sitter grammar)
@@ -160,455 +219,120 @@ def _get_parser(language: str) -> Any | None:
 # Tree-sitter query strings per language (functions, classes, imports)
 # ---------------------------------------------------------------------------
 
-_FUNCTION_QUERIES: dict[str, str] = {
-    "java": """
-        (method_declaration) @func
-        (constructor_declaration) @func
-    """,
-    "c": """
-        (function_definition) @func
-    """,
-    "cpp": """
-        (function_definition) @func
-    """,
-    "python": """
-        (function_definition) @func
-    """,
-    "javascript": """
-        (function_declaration) @func
-        (method_definition) @func
-    """,
-    "typescript": """
-        (function_declaration) @func
-        (method_definition) @func
-    """,
-    "go": """
-        (function_declaration) @func
-        (method_declaration) @func
-    """,
-    "ruby": """
-        (method) @func
-        (singleton_method) @func
-    """,
-    "php": """
-        (function_definition) @func
-        (method_declaration) @func
-    """,
+_C_HTTP_CALLBACK_ARGUMENTS = {
+    "evhttp_set_cb": 2,
+    "evhttp_set_gencb": 1,
+    "MHD_start_daemon": 4,
 }
 
-_CPP_DECLARATION_QUERY = """
-    (declaration) @decl
-    (field_declaration) @decl
-"""
-
-_CLASS_QUERIES: dict[str, str] = {
-    "java": """(class_declaration) @cls""",
-    "cpp": """
-        (class_specifier) @cls
-        (struct_specifier) @cls
-    """,
-    "python": """(class_definition) @cls""",
-    "javascript": """(class_declaration) @cls""",
-    "typescript": """(class_declaration) @cls""",
-    "go": """(type_spec) @cls""",
-    "ruby": """
-        (class) @cls
-        (module) @cls
-    """,
-    "php": """
-        (class_declaration) @cls
-        (interface_declaration) @cls
-        (trait_declaration) @cls
-    """,
-}
-
-_IMPORT_QUERIES: dict[str, str] = {
-    "java": """(import_declaration) @imp""",
-    "c": """(preproc_include) @imp""",
-    "cpp": """(preproc_include) @imp""",
-    "python": """
-        (import_statement) @imp
-        (import_from_statement) @imp
-    """,
-    "javascript": """(import_statement) @imp""",
-    "typescript": """(import_statement) @imp""",
-    "go": """(import_spec) @imp""",
-    "php": """(namespace_use_declaration) @imp""",
-}
+_CPP_HTTP_ROUTE_METHODS = frozenset({"Get", "Post", "Put", "Patch", "Delete", "Options"})
 
 
-# ---------------------------------------------------------------------------
-# Security sink patterns per vulnerability class
-# ---------------------------------------------------------------------------
+def _cpp_http_route_callbacks(tree: Any, source: bytes) -> list[Any]:
+    """Find cpp-httplib server handlers, which occupy a route call's second argument."""
+    callbacks: list[Any] = []
+    aliases: set[tuple[int, int, str]] = set()
+    server_bindings: set[tuple[int, int, str]] = set()
+    declarations: list[Any] = []
+    route_calls: list[Any] = []
+    for node in _walk_named_nodes(tree.root_node):
+        if node.type == "using_declaration":
+            match = re.fullmatch(
+                r"\s*using\s+httplib::(Server|SSLServer)\s*;",
+                _node_text(node, source),
+            )
+            if match:
+                scope = _cpp_binding_scopes(node, tree.root_node)[0]
+                aliases.add((*scope, match.group(1)))
+        elif node.type in {"declaration", "parameter_declaration", "field_declaration"}:
+            declarations.append(node)
+        elif node.type == "call_expression":
+            route_calls.append(node)
 
-SinkPattern = dict[str, Any]  # {"kind", "patterns": {lang: [regex_str,...]}, "vuln_classes": [...]}
+    for node in declarations:
+        type_node = node.child_by_field_name("type")
+        declarator = node.child_by_field_name("declarator")
+        if type_node is None or declarator is None:
+            continue
+        type_name = _node_text(type_node, source)
+        scopes = _cpp_binding_scopes(node, tree.root_node)
+        is_server = type_name in {"httplib::Server", "httplib::SSLServer"}
+        if not is_server and type_name in {"Server", "SSLServer"}:
+            is_server = any((*scope, type_name) in aliases for scope in scopes)
+        if not is_server and type_name == "auto":
+            initializer = declarator.child_by_field_name("value")
+            is_server = initializer is not None and re.match(
+                r"httplib::(?:Server|SSLServer)\s*[({]",
+                _node_text(initializer, source),
+            ) is not None
+        if not is_server:
+            continue
+        path = _cpp_declarator_path(declarator)
+        if path:
+            server_bindings.add((*scopes[0], _node_text(path[-1], source)))
 
-_SINK_DEFINITIONS: list[SinkPattern] = [
-    {
-        "kind": "file_path",
-        "vuln_classes": ["path-traversal"],
-        "patterns": {
-            "java": [r"\bnew\s+File\s*\(", r"\bFileInputStream\s*\(", r"\bFileOutputStream\s*\(",
-                     r"\bPaths\.get\s*\(", r"\bFileUtils\.copy"],
-            "c": [r"\bfopen\s*\(", r"\bopen\s*\(", r"\baccess\s*\(", r"\bstat\s*\("],
-            "cpp": [r"\bfopen\s*\(", r"\bopen\s*\(", r"\baccess\s*\(", r"\bstat\s*\("],
-            "python": [r"\bopen\s*\(", r"\bos\.path\.join\s*\(", r"\bPath\s*\("],
-            "javascript": [r"\bfs\.readFile\w*\s*\(", r"\bfs\.writeFile\w*\s*\(", r"\bpath\.join\s*\("],
-            "typescript": [r"\bfs\.readFile\w*\s*\(", r"\bfs\.writeFile\w*\s*\(", r"\bpath\.join\s*\("],
-            "go": [r"\bos\.Open\w*\s*\(", r"\bos\.Create\s*\(", r"\bfilepath\.Join\s*\(",
-                   r"\bioutil\.ReadFile\s*\(", r"\bos\.ReadFile\s*\("],
-            "ruby": [r"\bFile\.open\s*\(", r"\bFile\.read\s*\(", r"\bIO\.read\s*\(",
-                     r"\bFileUtils\.\w+\s*\("],
-            "php": [r"\bfopen\s*\(", r"\bfile_get_contents\s*\(", r"\bfile_put_contents\s*\("],
-        },
-    },
-    {
-        # PHP's inclusion constructs load and EXECUTE the named file, so a
-        # caller-controlled path is `lfi` (and `rfi` wherever `allow_url_include`
-        # is on), not the `path-traversal` that reading one would be. They route
-        # to different skills, so the coarser family was the wrong answer for the
-        # commonest PHP RCE shape there is.
-        "kind": "file_inclusion",
-        "vuln_classes": ["lfi", "rfi"],
-        "patterns": {
-            "php": [r"\binclude\b", r"\brequire\b", r"\binclude_once\b",
-                    r"\brequire_once\b"],
-        },
-    },
-    {
-        "kind": "sql_exec",
-        "vuln_classes": ["sqli"],
-        "patterns": {
-            "java": [r"\bcreateStatement\s*\(", r"\.execute\s*\(", r"\.executeQuery\s*\(",
-                     r"\.executeUpdate\s*\("],
-            "c": [r"\bsqlite3_exec\s*\("],
-            "cpp": [r"\bsqlite3_exec\s*\("],
-            "python": [r"\bcursor\.execute\s*\(", r"\.execute\s*\("],
-            "javascript": [r"\.query\s*\(", r"\.execute\s*\("],
-            "typescript": [r"\.query\s*\(", r"\.execute\s*\("],
-            "go": [r"\b\w+\.Query\s*\(", r"\b\w+\.QueryRow\s*\(", r"\b\w+\.Exec\s*\("],
-            "ruby": [r"\b\w+\.execute\s*\(", r"\bActiveRecord.*\.find_by_sql\s*\(",
-                     r"\b\w+\.where\s*\(.*\braw\b"],
-            "php": [r"\bmysqli_query\s*\(", r"\$\w+->query\s*\(", r"\bPDO::query\s*\(",
-                    r"\$\w+->prepare\s*\("],
-        },
-    },
-    {
-        "kind": "process_exec",
-        "vuln_classes": ["injection"],
-        "patterns": {
-            "java": [r"\bRuntime\.getRuntime\s*\(\s*\)\.exec\s*\(",
-                     r"\bProcessBuilder\s*\("],
-            "c": [r"\bsystem\s*\(", r"\bpopen\s*\(", r"\bexecve\s*\("],
-            "cpp": [r"\bsystem\s*\(", r"\bpopen\s*\(", r"\bexecve\s*\("],
-            "python": [r"\bos\.system\s*\(", r"\bsubprocess\.run\s*\(",
-                       r"\bsubprocess\.Popen\s*\(", r"\bsubprocess\.call\s*\(",
-                       r"\bsubprocess\.check_output\s*\(",
-                       r"\bsubprocess\.check_call\s*\(",
-                       r"\bsubprocess\.getoutput\s*\(",
-                       r"\bsubprocess\.getstatusoutput\s*\("],
-            "javascript": [r"\bchild_process\.exec\s*\(", r"\bchild_process\.spawn\s*\("],
-            "typescript": [r"\bchild_process\.exec\s*\(", r"\bchild_process\.spawn\s*\("],
-            "go": [r"\bexec\.Command\s*\(", r"\bos\.StartProcess\s*\("],
-            # No leading `\b`: it demands a word character to the LEFT of the
-            # backtick, which idiomatic Ruby (`out = \`ssh ...\``) never writes,
-            # so the anchored form could only ever match `a\`cmd\``.
-            "ruby": [r"\bsystem\s*\(", r"\bexec\s*\(", r"`[^`]*`",
-                     r"\bOpen3\.\w+\s*\(", r"\bIO\.popen\s*\("],
-            "php": [r"\bexec\s*\(", r"\bsystem\s*\(", r"\bshell_exec\s*\(",
-                    r"\bpassthru\s*\(", r"\bproc_open\s*\(", r"\bpopen\s*\("],
-        },
-    },
-    {
-        "kind": "url_fetch",
-        "vuln_classes": ["ssrf"],
-        "patterns": {
-            "java": [r"\bnew\s+URL\s*\(", r"\bHttpURLConnection\b", r"\bHttpClient\.send\s*\("],
-            "python": [r"\brequests\.get\s*\(", r"\brequests\.post\s*\(",
-                       r"\brequests\.put\s*\(", r"\brequests\.patch\s*\(",
-                       r"\brequests\.delete\s*\(", r"\brequests\.head\s*\(",
-                       r"\brequests\.options\s*\(", r"\brequests\.request\s*\(",
-                       r"\burllib\.request\.urlopen\s*\("],
-            "javascript": [r"\bfetch\s*\(", r"\bhttp\.request\s*\(", r"\baxios\."],
-            "typescript": [r"\bfetch\s*\(", r"\bhttp\.request\s*\(", r"\baxios\."],
-            "go": [r"\bhttp\.Get\s*\(", r"\bhttp\.Post\s*\(", r"\bhttp\.NewRequest\s*\(",
-                   r"\bhttp\.DefaultClient\.Do\s*\("],
-            "ruby": [r"\bNet::HTTP\.\w+\s*\(", r"\bHTTParty\.\w+\s*\(",
-                     r"\bopen-uri\b", r"\bURI\.open\s*\("],
-            "php": [r"\bcurl_exec\s*\(", r"\bfile_get_contents\s*\(.*http",
-                    r"\bfopen\s*\(.*http"],
-        },
-    },
-    {
-        "kind": "deserialization",
-        "vuln_classes": ["deserialization"],
-        "patterns": {
-            "java": [r"\bObjectInputStream\b", r"\breadObject\s*\(", r"\bXMLDecoder\b"],
-            "python": [r"\bpickle\.loads?\s*\(", r"\byaml\.load\s*\(", r"\bmarshal\.loads?\s*\("],
-            "go": [r"\bjson\.Unmarshal\s*\(", r"\bgob\.NewDecoder\s*\(",
-                   r"\bxml\.Unmarshal\s*\("],
-            "ruby": [r"\bMarshal\.load\s*\(", r"\bYAML\.load\s*\(",
-                     r"\bJSON\.parse\s*\("],
-            "php": [r"\bunserialize\s*\(", r"\bjson_decode\s*\("],
-        },
-    },
-    {
-        "kind": "eval_exec",
-        "vuln_classes": ["injection"],
-        "patterns": {
-            "java": [r"\bScriptEngine\.eval\s*\("],
-            "python": [r"\beval\s*\(", r"\bexec\s*\(", r"\bcompile\s*\("],
-            "javascript": [
-                r"\beval\s*\(",
-                r"\bFunction\s*\(",
-                r"""\bset(?:Timeout|Interval)\s*\(\s*["'`]""",
-            ],
-            "typescript": [
-                r"\beval\s*\(",
-                r"\bFunction\s*\(",
-                r"""\bset(?:Timeout|Interval)\s*\(\s*["'`]""",
-            ],
-            "ruby": [r"\beval\s*\(", r"\bclass_eval\s*\(", r"\binstance_eval\s*\(",
-                     r"\bsend\s*\(", r"\bpublic_send\s*\("],
-            "php": [r"\beval\s*\(", r"\bassert\s*\(", r"\bpreg_replace\s*\(.*/e",
-                    r"\bcreate_function\s*\("],
-        },
-    },
-    {
-        "kind": "crypto",
-        "vuln_classes": ["crypto-misuse"],
-        "patterns": {
-            "java": [r"\bCipher\.getInstance\s*\(", r"\bSecretKeySpec\s*\(", r"\bMessageDigest\s*\("],
-            "c": [r"\bEVP_Cipher\w*\s*\(", r"\bAES_encrypt\s*\("],
-            "cpp": [r"\bEVP_Cipher\w*\s*\(", r"\bAES_encrypt\s*\("],
-            "python": [r"\bhashlib\.", r"\bCrypto\.Cipher\."],
-            "javascript": [r"\bcrypto\.createCipher\w*\s*\(", r"\bcrypto\.createHash\s*\("],
-            "typescript": [r"\bcrypto\.createCipher\w*\s*\(", r"\bcrypto\.createHash\s*\("],
-            "go": [r"\bcrypto/\w+\b", r"\baes\.NewCipher\s*\(", r"\bsha256\.New\s*\(",
-                   r"\bhmac\.New\s*\("],
-            "ruby": [r"\bOpenSSL::Cipher\b", r"\bDigest::\w+\b", r"\bOpenSSL::HMAC\b"],
-            "php": [r"\bopenssl_encrypt\s*\(", r"\bmd5\s*\(", r"\bsha1\s*\(",
-                    r"\bhash\s*\(", r"\bmcrypt_encrypt\s*\("],
-        },
-    },
-    {
-        "kind": "auth",
-        "vuln_classes": ["auth-bypass", "web-app-auth"],
-        "patterns": {
-            "java": [r"\bgetSession\s*\(", r"\bsetAttribute\s*\(", r"\bisUserInRole\s*\(",
-                     r"\bauthenticate\s*\("],
-            "python": [r"\blogin\s*\(", r"\bsession\s*\[", r"@login_required\b"],
-            "javascript": [r"\breq\.session\b", r"\bpassport\.authenticate\s*\("],
-            "typescript": [r"\breq\.session\b", r"\bpassport\.authenticate\s*\("],
-            "go": [r"\bjwt\.\w+\s*\(", r"\bsession\.Get\s*\(", r"\bbcrypt\.\w+\s*\("],
-            "ruby": [r"\bauthenticate_user\b", r"\bdevise\b", r"\bcurrent_user\b",
-                     r"\bsession\s*\["],
-            # No leading `\b`: it demands a word character to the LEFT of the
-            # `$`, which valid PHP never writes before a variable sigil, so the
-            # pattern could only ever match `a$_SESSION`.
-            "php": [r"\$_SESSION\b", r"\bAuth::\w+\s*\(", r"\bpassword_verify\s*\(",
-                    r"\bsession_start\s*\("],
-        },
-    },
-    {
-        "kind": "xss_output",
-        "vuln_classes": ["web-app-injection"],
-        "patterns": {
-            "java": [r"\bgetWriter\s*\(\s*\)\.write\s*\("],
-            "javascript": [r"\.innerHTML\b", r"\.outerHTML\b", r"\bdocument\.write\s*\("],
-            "typescript": [r"\.innerHTML\b", r"\.outerHTML\b", r"\bdocument\.write\s*\("],
-            "go": [r"\btemplate\.HTML\s*\(", r"\bfmt\.Fprintf\s*\(\s*w\b"],
-            "ruby": [r"\braw\s*\(", r"\.html_safe\b"],
-            "php": [r"\becho\b", r"\bprint\b", r"\bprintf\s*\("],
-        },
-    },
-    {
-        "kind": "redirect",
-        "vuln_classes": ["open-redirect"],
-        "patterns": {
-            "java": [r"\bsendRedirect\s*\(", r'\bsetHeader\s*\(\s*"Location"'],
-            "python": [r"\bredirect\s*\(", r"\bHttpResponseRedirect\s*\("],
-            "javascript": [r"\bres\.redirect\s*\("],
-            "typescript": [r"\bres\.redirect\s*\("],
-            "go": [r"\bhttp\.Redirect\s*\("],
-            "ruby": [r"\bredirect_to\s*\("],
-            "php": [r"\bheader\s*\(\s*['\"]Location", r"\bredirect\s*\("],
-        },
-    },
-    {
-        "kind": "xml_parse",
-        "vuln_classes": ["xxe"],
-        "patterns": {
-            "java": [r"\bDocumentBuilderFactory\b", r"\bSAXParserFactory\b",
-                     r"\bXMLReader\b", r"\bXMLInputFactory\b"],
-            "c": [r"\bxmlParseFile\s*\("],
-            "cpp": [r"\bxmlParseFile\s*\("],
-            "python": [r"\bxml\.etree\.ElementTree\.parse\s*\(", r"\blxml\.etree\.parse\s*\("],
-            "go": [r"\bxml\.NewDecoder\s*\(", r"\bxml\.Unmarshal\s*\("],
-            "ruby": [r"\bNokogiri::XML\s*\(", r"\bREXML::Document\.new\s*\("],
-            "php": [r"\bsimplexml_load_string\s*\(", r"\bDOMDocument\b",
-                    r"\bxml_parse\s*\("],
-        },
-    },
-    {
-        "kind": "memory",
-        "vuln_classes": ["buffer-overflow", "use-after-free"],
-        "patterns": {
-            "c": [r"\bmemcpy\s*\(", r"\bstrcpy\s*\(", r"\bsprintf\s*\(", r"\bmalloc\s*\(",
-                  r"\bfree\s*\(", r"\brealloc\s*\("],
-            "cpp": [r"\bmemcpy\s*\(", r"\bstrcpy\s*\(", r"\bsprintf\s*\(", r"\bmalloc\s*\(",
-                    r"\bfree\s*\(", r"\brealloc\s*\("],
-        },
-    },
-    {
-        "kind": "format_string",
-        "vuln_classes": ["format-string"],
-        "patterns": {
-            "c": [r"\bprintf\s*\(", r"\bfprintf\s*\(", r"\bsprintf\s*\(", r"\bsnprintf\s*\("],
-            "cpp": [r"\bprintf\s*\(", r"\bfprintf\s*\(", r"\bsprintf\s*\(", r"\bsnprintf\s*\("],
-        },
-    },
-]
+    for node in route_calls:
+        callee = node.child_by_field_name("function")
+        if callee is None or callee.type != "field_expression":
+            continue
+        receiver = callee.child_by_field_name("argument")
+        if receiver is None or receiver.type != "identifier":
+            continue
+        receiver_name = _node_text(receiver, source)
+        if not any(
+            (*scope, receiver_name) in server_bindings
+            for scope in _cpp_binding_scopes(node, tree.root_node)
+        ):
+            continue
+        method = callee.child_by_field_name("field")
+        if method is None or _node_text(method, source) not in _CPP_HTTP_ROUTE_METHODS:
+            continue
+        arguments = node.child_by_field_name("arguments")
+        if arguments is None or len(arguments.named_children) < 2:
+            continue
+        route, callback = arguments.named_children[:2]
+        if route.type not in {"string_literal", "raw_string_literal"}:
+            continue
+        if callback.type in {"lambda_expression", "identifier", "qualified_identifier"}:
+            callbacks.append(callback)
+    return callbacks
 
 
-# ---------------------------------------------------------------------------
-# Entry-point detection patterns
-# ---------------------------------------------------------------------------
+def _cpp_binding_scopes(node: Any, root: Any) -> list[tuple[int, int]]:
+    """Return lexical function/class scopes followed by file scope."""
+    scopes: list[tuple[int, int]] = []
+    current = node.parent
+    while current is not None:
+        if current.type in {"function_definition", "class_specifier", "struct_specifier"}:
+            scopes.append((current.start_byte, current.end_byte))
+        current = current.parent
+    scopes.append((root.start_byte, root.end_byte))
+    return scopes
 
-# Annotation / decorator strings that mark entry points, keyed by language.
-_ENTRY_ANNOTATIONS: dict[str, list[dict[str, str]]] = {
-    "java": [
-        {"pattern": r"@WebServlet\b", "kind": "servlet_annotation"},
-        {"pattern": r"@RequestMapping\b", "kind": "spring_mapping"},
-        {"pattern": r"@GetMapping\b", "kind": "spring_mapping"},
-        {"pattern": r"@PostMapping\b", "kind": "spring_mapping"},
-        {"pattern": r"@PutMapping\b", "kind": "spring_mapping"},
-        {"pattern": r"@DeleteMapping\b", "kind": "spring_mapping"},
-        {"pattern": r"@PatchMapping\b", "kind": "spring_mapping"},
-        {"pattern": r"@Path\b", "kind": "jaxrs_annotation"},
-        {"pattern": r"@Scheduled\b", "kind": "scheduled_task"},
-    ],
-    "python": [
-        {"pattern": r"@app\.route\b", "kind": "flask_route"},
-        {"pattern": r"@app\.get\b", "kind": "fastapi_route"},
-        {"pattern": r"@app\.post\b", "kind": "fastapi_route"},
-        {"pattern": r"@blueprint\.route\b", "kind": "flask_blueprint"},
-        {"pattern": r"@api_view\b", "kind": "drf_view"},
-        {"pattern": r"@router\.\w+\b", "kind": "fastapi_router"},
-        {"pattern": r"@celery\.task\b", "kind": "celery_task"},
-    ],
-    "php": [
-        {"pattern": r"#\[Route\b", "kind": "symfony_route"},
-    ],
-}
 
-# Method names that indicate entry points when in the right class context.
-_ENTRY_METHOD_NAMES: dict[str, list[dict[str, str]]] = {
-    "java": [
-        {"name": "doGet", "kind": "servlet_override"},
-        {"name": "doPost", "kind": "servlet_override"},
-        {"name": "doFilter", "kind": "filter_override"},
-        {"name": "doPut", "kind": "servlet_override"},
-        {"name": "doDelete", "kind": "servlet_override"},
-        {"name": "main", "kind": "main_method"},
-    ],
-    "go": [
-        {"name": "main", "kind": "main_function"},
-        {"name": "init", "kind": "init_function"},
-    ],
-    "ruby": [
-        {"name": "call", "kind": "rack_call"},
-    ],
-    # PHP's magic methods are where an attacker-controlled `unserialize()`
-    # lands: the payload picks the class, and the runtime -- not the
-    # application -- calls these. They are entry points for that reason, not
-    # sinks. Matching is name equality per function and stays that way:
-    # following a chain from one magic method into the next class is liveness
-    # analysis, which this index does not do.
-    "php": [
-        {"name": "__construct", "kind": "constructor"},
-        {"name": "__destruct", "kind": "destructor"},
-        {"name": "__wakeup", "kind": "deserialization_hook"},
-        {"name": "__unserialize", "kind": "deserialization_hook"},
-        {"name": "__serialize", "kind": "serialization_hook"},
-        {"name": "__sleep", "kind": "serialization_hook"},
-        {"name": "__toString", "kind": "string_conversion_hook"},
-        {"name": "__invoke", "kind": "invocation_hook"},
-        {"name": "__call", "kind": "magic_call_hook"},
-        {"name": "__get", "kind": "property_read_hook"},
-        {"name": "__set", "kind": "property_write_hook"},
-    ],
-}
-
-# String patterns scanned against source lines to detect framework registrations.
-_ENTRY_LINE_PATTERNS: dict[str, list[dict[str, str]]] = {
-    "javascript": [
-        {"pattern": r"\bapp\.get\s*\(", "kind": "express_route"},
-        {"pattern": r"\bapp\.post\s*\(", "kind": "express_route"},
-        {"pattern": r"\bapp\.put\s*\(", "kind": "express_route"},
-        {"pattern": r"\bapp\.delete\s*\(", "kind": "express_route"},
-        {"pattern": r"\brouter\.get\s*\(", "kind": "express_router"},
-        {"pattern": r"\brouter\.post\s*\(", "kind": "express_router"},
-        {"pattern": r"\brouter\.put\s*\(", "kind": "express_router"},
-        {"pattern": r"\brouter\.delete\s*\(", "kind": "express_router"},
-        {"pattern": r"\bexport\s+default\s+function\b", "kind": "default_export"},
-        {"pattern": r"\bmodule\.exports\b", "kind": "module_exports"},
-    ],
-    "typescript": [
-        {"pattern": r"\bapp\.get\s*\(", "kind": "express_route"},
-        {"pattern": r"\bapp\.post\s*\(", "kind": "express_route"},
-        {"pattern": r"\bapp\.put\s*\(", "kind": "express_route"},
-        {"pattern": r"\bapp\.delete\s*\(", "kind": "express_route"},
-        {"pattern": r"\brouter\.get\s*\(", "kind": "express_router"},
-        {"pattern": r"\brouter\.post\s*\(", "kind": "express_router"},
-        {"pattern": r"\brouter\.put\s*\(", "kind": "express_router"},
-        {"pattern": r"\brouter\.delete\s*\(", "kind": "express_router"},
-        {"pattern": r"\bexport\s+default\s+function\b", "kind": "default_export"},
-        {"pattern": r"\bmodule\.exports\b", "kind": "module_exports"},
-    ],
-    "c": [
-        {"pattern": r"\b\w+_handler\s*\(", "kind": "handler_callback"},
-        {"pattern": r"\b\w+_callback\s*\(", "kind": "handler_callback"},
-    ],
-    "cpp": [
-        {"pattern": r"\b\w+_handler\s*\(", "kind": "handler_callback"},
-        {"pattern": r"\b\w+_callback\s*\(", "kind": "handler_callback"},
-    ],
-    "go": [
-        {"pattern": r"\bhttp\.HandleFunc\s*\(", "kind": "http_handler"},
-        {"pattern": r"\bhttp\.Handle\s*\(", "kind": "http_handler"},
-        {"pattern": r"\bmux\.HandleFunc\s*\(", "kind": "mux_handler"},
-        {"pattern": r"\br\.HandleFunc\s*\(", "kind": "gorilla_router"},
-        {"pattern": r"\b(?:e|g|app)\.\w+\s*\(", "kind": "framework_route"},
-    ],
-    "ruby": [
-        {"pattern": r"\bget\s+['\"/]", "kind": "sinatra_route"},
-        {"pattern": r"\bpost\s+['\"/]", "kind": "sinatra_route"},
-        {"pattern": r"\bput\s+['\"/]", "kind": "sinatra_route"},
-        {"pattern": r"\bdelete\s+['\"/]", "kind": "sinatra_route"},
-    ],
-    "php": [
-        {"pattern": r"\bRoute::\w+\s*\(", "kind": "laravel_route"},
-        {"pattern": r"\$app->\w+\s*\(", "kind": "slim_route"},
-        {"pattern": r"\$router->\w+\s*\(", "kind": "framework_route"},
-    ],
-}
-
-_GLOBAL_ENTRY_LINE_PATTERNS: dict[str, list[dict[str, str]]] = {
-    "python": [
-        {"pattern": r"^\s*if\s+__name__\s*==\s*['\"]__main__['\"]", "kind": "main_guard"},
-    ],
-    "ruby": [
-        {"pattern": r"^\s*if\s+__FILE__\s*==\s*\$0", "kind": "main_guard"},
-        {"pattern": r"^\s*if\s+\$PROGRAM_NAME\s*==\s*__FILE__", "kind": "main_guard"},
-    ],
-    # A Laravel/Slim route file is the reachability map of the application and
-    # is written as top-level statements with no enclosing callable at all, so
-    # the function-scoped table above never reaches one. Same registration
-    # syntax read at file scope -- deliberately the same list object, not a
-    # second copy for the two to drift apart.
-    "php": _ENTRY_LINE_PATTERNS["php"],
-}
+def _c_http_callback_names(tree: Any, source: bytes) -> set[str]:
+    """Find direct function references in known C HTTP registration calls."""
+    names: set[str] = set()
+    for node in _walk_named_nodes(tree.root_node):
+        if node.type != "call_expression":
+            continue
+        callee = node.child_by_field_name("function")
+        if callee is None or callee.type != "identifier":
+            continue
+        argument_index = _C_HTTP_CALLBACK_ARGUMENTS.get(_node_text(callee, source))
+        if argument_index is None:
+            continue
+        arguments = node.child_by_field_name("arguments")
+        if arguments is None or len(arguments.named_children) <= argument_index:
+            continue
+        callback = arguments.named_children[argument_index]
+        if callback.type == "pointer_expression" and _node_text(callback, source).lstrip().startswith("&"):
+            children = callback.named_children
+            if len(children) == 1:
+                callback = children[0]
+        if callback.type == "identifier":
+            names.add(_node_text(callback, source))
+    return names
 
 
 # ---------------------------------------------------------------------------
@@ -1121,6 +845,49 @@ def _extract_php_closures(tree: Any, source: bytes) -> list[dict[str, Any]]:
     ]
 
 
+def _extract_ruby_route_blocks(tree: Any, source: bytes) -> list[dict[str, Any]]:
+    routes: list[dict[str, Any]] = []
+    for node in _walk_named_nodes(tree.root_node):
+        if node.type != "call" or node.child_by_field_name("receiver") is not None:
+            continue
+        method = node.child_by_field_name("method")
+        arguments = node.child_by_field_name("arguments")
+        block = node.child_by_field_name("block")
+        if method is None or arguments is None or block is None:
+            continue
+        verb = _node_text(method, source)
+        if verb not in {"get", "post", "put", "patch", "delete", "options", "head"}:
+            continue
+        path = next((child for child in arguments.named_children if child.type == "string"), None)
+        if path is None:
+            continue
+        line_start, line_end = _node_lines(node)
+        name = f"{verb} {_node_text(path, source)}"
+        parsed = {
+            "name": name,
+            "qualified_name": name,
+            "line_start": line_start,
+            "line_end": line_end,
+            "params": [],
+            "modifiers": [],
+            "annotations": [],
+            "is_entry_point": False,
+            "_ruby_route": True,
+            "_start_byte": node.start_byte,
+            "_end_byte": node.end_byte,
+            "source_span": _public_node_span(node, source),
+            "body_span": _public_node_span(block, source),
+        }
+        (
+            parsed["_body_start_line"],
+            parsed["_body_start_column"],
+            parsed["_body_end_line"],
+            parsed["_body_end_column"],
+        ) = _node_character_range(block, source)
+        routes.append(parsed)
+    return routes
+
+
 def _extract_cpp_declarations(
     tree: Any,
     language: str,
@@ -1157,6 +924,44 @@ def _extract_cpp_declarations(
     return declarations
 
 
+def _extract_c_declarations(tree: Any, language: str, source: bytes) -> list[dict[str, Any]]:
+    parser = _get_parser(language)
+    if parser is None:
+        return []
+    captures = _ts_query_captures(parser.language, _C_DECLARATION_QUERY, tree.root_node)
+    declarations: list[dict[str, Any]] = []
+    for node in captures.get("decl", []):
+        for declarator in _field_children(node, "declarator"):
+            callable_node = _c_function_declarator(declarator)
+            if callable_node is None or callable_node.type != "function_declarator":
+                continue
+            name_node = callable_node.child_by_field_name("declarator")
+            params_node = callable_node.child_by_field_name("parameters")
+            if name_node is None or name_node.type != "identifier":
+                continue
+            name = _node_text(name_node, source)
+            start_line, end_line = _node_lines(node)
+            declarations.append({
+                "name": name,
+                "qualified_name": name,
+                "line_start": start_line,
+                "line_end": end_line,
+                "params": _extract_params(params_node, source) if params_node else [],
+                "modifiers": [
+                    _node_text(child, source)
+                    for child in node.children
+                    if child.type == "storage_class_specifier"
+                ],
+                "annotations": [],
+                "is_entry_point": False,
+                "is_declaration": True,
+                "_start_byte": node.start_byte,
+                "_end_byte": node.end_byte,
+                "source_span": _public_node_span(node, source),
+            })
+    return declarations
+
+
 def _extract_functions_ts(tree: Any, language: str, source: bytes) -> list[dict[str, Any]]:
     """Extract function/method definitions and C++ declarations."""
     query_language = _query_language_family(language)
@@ -1188,6 +993,50 @@ def _extract_functions_ts(tree: Any, language: str, source: bytes) -> list[dict[
 
     if query_language == "cpp":
         functions.extend(_extract_cpp_declarations(tree, language, source))
+        by_start_byte = {function["_start_byte"]: function for function in functions}
+        for callback in _cpp_http_route_callbacks(tree, source):
+            if callback.type != "lambda_expression":
+                continue
+            declarator = callback.child_by_field_name("declarator")
+            params_node = next(
+                (child for child in _walk_named_nodes(declarator) if child.type == "parameter_list"),
+                None,
+            ) if declarator is not None else None
+            if params_node is None or not re.search(r"\bRequest\b", _node_text(params_node, source)):
+                continue
+            line, column, _, _ = _node_character_range(callback, source)
+            name = f"<route@{line}:{column}>"
+            parsed = {
+                "name": name,
+                "qualified_name": name,
+                "line_start": line,
+                "line_end": callback.end_point[0] + 1,
+                "params": _extract_params(params_node, source),
+                "modifiers": [],
+                "annotations": [],
+                "is_entry_point": False,
+                "is_closure": True,
+                "is_declaration": False,
+                "_start_byte": callback.start_byte,
+                "_end_byte": callback.end_byte,
+                "_cpp_parameter_signature": _cpp_parameter_signature(params_node, source),
+                "_cpp_qualifier_signature": (),
+            }
+            _attach_callable_spans(parsed, callable_node=callback, source=source)
+            ancestor = callback.parent
+            while ancestor is not None:
+                enclosing = by_start_byte.get(ancestor.start_byte)
+                if enclosing is not None and enclosing["_end_byte"] == ancestor.end_byte:
+                    enclosing.setdefault("_excluded_ranges", []).append(
+                        _node_character_range(callback, source)
+                    )
+                    break
+                ancestor = ancestor.parent
+            functions.append(parsed)
+            by_start_byte[callback.start_byte] = parsed
+        functions.sort(key=lambda function: function["_start_byte"])
+    elif query_language == "c":
+        functions.extend(_extract_c_declarations(tree, language, source))
     elif query_language in {"javascript", "typescript"}:
         functions = _extract_javascript_callables(tree, source)
     elif query_language == "php":
@@ -1200,6 +1049,94 @@ def _extract_functions_ts(tree: Any, language: str, source: bytes) -> list[dict[
             functions + _extract_php_closures(tree, source),
             key=lambda function: function["_start_byte"],
         )
+    elif query_language == "ruby":
+        functions = sorted(
+            functions + _extract_ruby_route_blocks(tree, source),
+            key=lambda function: function["_start_byte"],
+        )
+    elif query_language == "csharp":
+        for node in _walk_named_nodes(tree.root_node):
+            if node.type != "lambda_expression":
+                continue
+            parent = node.parent
+            invocation = parent.parent if parent is not None and parent.type == "argument" else None
+            if invocation is not None and invocation.type == "argument_list":
+                invocation = invocation.parent
+            if invocation is None or invocation.type != "invocation_expression":
+                continue
+            target = invocation.child_by_field_name("function")
+            if target is None or not re.search(
+                r"\.Map(?:Get|Post|Put|Patch|Delete|Methods|Fallback)\s*$",
+                _node_text(target, source),
+            ):
+                continue
+            line, column, _, _ = _node_character_range(node, source)
+            name = f"<route@{line}:{column}>"
+            parameters = node.child_by_field_name("parameters")
+            single_parameter = node.child_by_field_name("parameter")
+            parsed = {
+                "name": name,
+                "qualified_name": name,
+                "line_start": line,
+                "line_end": node.end_point[0] + 1,
+                "params": (
+                    _extract_params(parameters, source) if parameters is not None
+                    else ([_node_text(single_parameter, source)] if single_parameter is not None else [])
+                ),
+                "modifiers": [],
+                "annotations": [],
+                "is_entry_point": False,
+                "_minimal_api_route": True,
+                "_start_byte": node.start_byte,
+                "_end_byte": node.end_byte,
+            }
+            _attach_callable_spans(parsed, callable_node=node, source=source)
+            functions.append(parsed)
+
+        declaration_nodes = {
+            node.start_byte: node
+            for node in _walk_named_nodes(tree.root_node)
+            if node.type in {"local_function_statement", "method_declaration"}
+        }
+        for invocation in _walk_named_nodes(tree.root_node):
+            if invocation.type != "invocation_expression":
+                continue
+            target = invocation.child_by_field_name("function")
+            if target is None or not re.search(
+                r"\.Map(?:Get|Post|Put|Patch|Delete|Methods|Fallback)\s*$",
+                _node_text(target, source),
+            ):
+                continue
+            arguments = invocation.child_by_field_name("arguments")
+            if arguments is None or not arguments.named_children:
+                continue
+            callback = arguments.named_children[-1]
+            if callback.type != "argument" or len(callback.named_children) != 1:
+                continue
+            identifier = callback.named_children[0]
+            if identifier.type != "identifier":
+                continue
+            name = _node_text(identifier, source)
+            candidates: list[tuple[int, dict[str, Any]]] = []
+            for func in functions:
+                if func["name"] != name:
+                    continue
+                declaration = declaration_nodes.get(func["_start_byte"])
+                if declaration is None:
+                    continue
+                scope_types = (
+                    {"block", "compilation_unit"}
+                    if declaration.type == "local_function_statement"
+                    else {"class_declaration", "struct_declaration", "record_declaration"}
+                )
+                scope = declaration.parent
+                while scope is not None and scope.type not in scope_types:
+                    scope = scope.parent
+                if scope is not None and scope.start_byte <= invocation.start_byte < scope.end_byte:
+                    candidates.append((scope.end_byte - scope.start_byte, func))
+            candidates.sort(key=lambda candidate: candidate[0])
+            if candidates and (len(candidates) == 1 or candidates[0][0] < candidates[1][0]):
+                candidates[0][1]["_minimal_api_route"] = True
 
     return functions
 
@@ -1304,6 +1241,11 @@ def _parse_function_node(node: Any, language: str, source: bytes) -> dict[str, A
                 is_declaration=False,
             )
     elif language == "c":
+        modifiers = [
+            _node_text(child, source)
+            for child in node.children
+            if child.type == "storage_class_specifier"
+        ]
         decl = _c_function_declarator(node.child_by_field_name("declarator"))
         if decl:
             for child in decl.children:
@@ -1365,6 +1307,22 @@ def _parse_function_node(node: Any, language: str, source: bytes) -> dict[str, A
                 modifiers.append(_node_text(child, source))
             elif child.type == "attribute_list":
                 annotations.extend(_php_attributes(child, source))
+    elif language == "csharp":
+        name_node = node.child_by_field_name("name")
+        if name_node:
+            name = _node_text(name_node, source)
+        params_node = node.child_by_field_name("parameters")
+        if params_node:
+            params = _extract_params(params_node, source)
+        for child in node.children:
+            if child.type == "modifier":
+                modifiers.append(_node_text(child, source))
+            elif child.type == "attribute_list":
+                annotations.extend(
+                    f"[{_node_text(attribute, source)}]"
+                    for attribute in child.named_children
+                    if attribute.type == "attribute"
+                )
 
     if not name:
         return None
@@ -1426,6 +1384,28 @@ def _extract_classes_ts(tree: Any, language: str, source: bytes) -> list[dict[st
         if cls_info:
             classes.append(cls_info)
 
+    if query_language == "csharp":
+        local_interfaces = {
+            _node_text(node.child_by_field_name("name"), source)
+            for node in nodes
+            if node.type == "interface_declaration"
+            and node.child_by_field_name("name") is not None
+        }
+        local_classes = {
+            _node_text(node.child_by_field_name("name"), source)
+            for node in nodes
+            if node.type in {"class_declaration", "record_declaration"}
+            and node.child_by_field_name("name") is not None
+        }
+        for cls in classes:
+            base_name = cls["extends"].rsplit("::", 1)[-1].rsplit(".", 1)[-1]
+            if cls["extends"] and (
+                cls["extends"] in local_interfaces
+                or base_name in {"IDisposable", "IAsyncDisposable"} and base_name not in local_classes
+            ):
+                cls["implements"].insert(0, cls["extends"])
+                cls["extends"] = ""
+
     return classes
 
 
@@ -1436,21 +1416,27 @@ def _parse_class_node(node: Any, language: str, source: bytes) -> dict[str, Any]
     name = ""
     extends: str = ""
     implements: list[str] = []
+    java_public = False
 
     if language == "java":
         for child in node.children:
             if child.type == "identifier":
                 name = _node_text(child, source)
+            elif child.type == "modifiers":
+                java_public = any(mod.type == "public" for mod in child.children)
             elif child.type == "superclass":
                 for sc in child.children:
-                    if sc.type == "type_identifier":
+                    if sc.type in {"type_identifier", "scoped_type_identifier"}:
                         extends = _node_text(sc, source)
-            elif child.type == "super_interfaces":
+            elif child.type in {"super_interfaces", "extends_interfaces"}:
                 for si in child.children:
                     if si.type == "type_list":
                         for ti in si.children:
-                            if ti.type == "type_identifier":
-                                implements.append(_node_text(ti, source))
+                            if ti.type in {"type_identifier", "scoped_type_identifier"}:
+                                if child.type == "extends_interfaces" and not extends:
+                                    extends = _node_text(ti, source)
+                                else:
+                                    implements.append(_node_text(ti, source))
     elif language in ("c", "cpp"):
         name_node = node.child_by_field_name("name")
         if name_node:
@@ -1511,6 +1497,24 @@ def _parse_class_node(node: Any, language: str, source: bytes) -> dict[str, Any]
                 for gc in child.children:
                     if gc.type in ("name", "qualified_name"):
                         implements.append(_node_text(gc, source))
+    elif language == "csharp":
+        name_node = node.child_by_field_name("name")
+        if name_node:
+            name = _node_text(name_node, source)
+        # Only classes can inherit a base class. An interface/struct base list
+        # consists entirely of interfaces; class first bases are resolved
+        # against interfaces declared in this file after extraction.
+        for child in node.children:
+            if child.type == "base_list":
+                for base in child.named_children:
+                    if base.type in ("identifier", "qualified_name", "generic_name"):
+                        txt = _node_text(base, source)
+                        if node.type in ("interface_declaration", "struct_declaration"):
+                            implements.append(txt)
+                        elif not extends:
+                            extends = txt
+                        else:
+                            implements.append(txt)
 
     if not name:
         return None
@@ -1526,6 +1530,13 @@ def _parse_class_node(node: Any, language: str, source: bytes) -> dict[str, Any]
     }
     if language == "cpp":
         parsed_class["_cpp_namespace"] = _cpp_namespace_qualifier(node, source)
+    elif language == "java":
+        parsed_class["_java_public"] = java_public
+    elif language == "csharp":
+        parsed_class["_csharp_public"] = any(
+            child.type == "modifier" and _node_text(child, source) == "public"
+            for child in node.children
+        )
     return parsed_class
 
 
@@ -1576,6 +1587,13 @@ def _extract_imports_ts(tree: Any, language: str, source: bytes) -> list[str]:
                 continue
         elif query_language == "php":
             text = text.removeprefix("use").strip().rstrip(";")
+        elif query_language == "csharp":
+            # `using System.Data.SqlClient;` -> `System.Data.SqlClient`, and
+            # `using static System.Math;` -> `System.Math`. A `using alias =
+            # Ns.Type;` keeps its `alias = Ns.Type` body verbatim, the same way
+            # the other languages leave an aliased import as authored.
+            text = text.removeprefix("global").strip().removeprefix("using").strip()
+            text = text.removeprefix("static").strip()
         elif query_language == "python":
             pass
         elif query_language in ("javascript", "typescript"):
@@ -1728,12 +1746,33 @@ def _registering_call_lines(
     return lines
 
 
+def _ruby_method_is_public(tree: Any, function: dict[str, Any], source: bytes) -> bool:
+    node = tree.root_node.descendant_for_byte_range(
+        function["_start_byte"], function["_end_byte"]
+    )
+    if node is None:
+        return False
+    body = node.parent
+    if body is None or body.type != "body_statement":
+        return False
+    visibility = "public"
+    for sibling in body.named_children:
+        if sibling.start_byte >= node.start_byte:
+            break
+        if sibling.type == "identifier":
+            token = _node_text(sibling, source)
+            if token in {"public", "private", "protected"}:
+                visibility = token
+    return visibility == "public"
+
+
 def _detect_entry_points(
     tree: Any,
     functions: list[dict[str, Any]],
     classes: list[dict[str, Any]],
     language: str,
     source_lines: list[str],
+    source: bytes,
 ) -> list[dict[str, Any]]:
     """Identify entry-point functions via annotations, names, and line patterns."""
     entry_points: list[dict[str, Any]] = []
@@ -1747,9 +1786,108 @@ def _detect_entry_points(
     annotation_defs = _ENTRY_ANNOTATIONS.get(language, [])
     method_name_defs = _ENTRY_METHOD_NAMES.get(language, [])
     line_pattern_defs = _ENTRY_LINE_PATTERNS.get(language, [])
+    c_http_callbacks = _c_http_callback_names(tree, source) if language == "c" else set()
+    cpp_http_callbacks = _cpp_http_route_callbacks(tree, source) if language == "cpp" else []
+    cpp_http_names = {
+        _node_text(callback, source).rsplit("::", 1)[-1]
+        for callback in cpp_http_callbacks
+        if callback.type in {"identifier", "qualified_identifier"}
+    }
+    cpp_http_lambdas = {
+        callback.start_byte
+        for callback in cpp_http_callbacks
+        if callback.type == "lambda_expression"
+    }
+    js_route_calls: list[tuple[Any, str]] = []
+    if language in {"javascript", "typescript"}:
+        for node in _walk_named_nodes(tree.root_node):
+            if node.type != "call_expression":
+                continue
+            target = node.child_by_field_name("function")
+            if target is None:
+                continue
+            match = re.fullmatch(
+                r"(app|router)\.(?:get|post|put|delete)", _node_text(target, source)
+            )
+            if match is not None:
+                js_route_calls.append((node, match.group(1)))
 
     for func in functions:
+        if func.get("is_declaration", False):
+            continue
         matched = False
+
+        cls = class_for_line.get(func["line_start"])
+        if (
+            language == "ruby"
+            and cls is not None
+            and cls["name"].endswith("Controller")
+            and cls.get("extends") in {"ApplicationController", "ActionController::Base", "ActionController::API"}
+            and func["name"] != "initialize"
+            and not func.get("_ruby_route")
+            and _ruby_method_is_public(tree, func, source)
+        ):
+            entry_points.append({
+                "name": func["name"],
+                "line": func["line_start"],
+                "kind": "rails_action",
+                "annotation": "",
+            })
+            func["is_entry_point"] = True
+            continue
+        if (
+            language == "php"
+            and cls is not None
+            and cls["name"].endswith("Controller")
+            and (cls.get("extends") or "").endswith("Controller")
+            and not func.get("is_closure")
+            and not func["name"].startswith("__")
+            and not func["annotations"]
+            and not any(modifier in {"private", "protected"} for modifier in func["modifiers"])
+        ):
+            entry_points.append({
+                "name": func["name"],
+                "line": func["line_start"],
+                "kind": "laravel_action",
+                "annotation": "",
+            })
+            func["is_entry_point"] = True
+            continue
+
+        if language == "c" and func["name"] in c_http_callbacks:
+            entry_points.append({
+                "name": func["name"],
+                "line": func["line_start"],
+                "kind": "http_handler",
+                "annotation": "",
+            })
+            func["is_entry_point"] = True
+            continue
+        if language == "cpp" and (
+            (func.get("is_closure", False) and func.get("_start_byte") in cpp_http_lambdas)
+            or (
+                func["name"] in cpp_http_names
+                and any(re.search(r"\bRequest\b", param) for param in func["params"])
+            )
+        ):
+            entry_points.append({
+                "name": func["name"],
+                "line": func["line_start"],
+                "kind": "http_handler",
+                "annotation": "",
+            })
+            func["is_entry_point"] = True
+            continue
+
+        if language == "csharp" and func.get("_minimal_api_route"):
+            entry_points.append({
+                "name": func["name"],
+                "line": func["line_start"],
+                "kind": "minimal_api_route",
+                "annotation": "",
+            })
+            func["is_entry_point"] = True
+            continue
 
         for ann_def in annotation_defs:
             for ann in func.get("annotations", []):
@@ -1774,7 +1912,13 @@ def _detect_entry_points(
             if func["name"] == mdef["name"]:
                 if mdef["kind"] in ("servlet_override", "filter_override"):
                     cls = class_for_line.get(func["line_start"])
-                    if cls and cls.get("extends") in ("HttpServlet", "Filter", "GenericServlet"):
+                    bases = [cls.get("extends", ""), *cls.get("implements", [])] if cls else []
+                    base_names = {base.rsplit(".", 1)[-1] for base in bases}
+                    valid_bases = (
+                        {"Filter"} if mdef["kind"] == "filter_override"
+                        else {"HttpServlet", "GenericServlet"}
+                    )
+                    if base_names & valid_bases:
                         entry_points.append({
                             "name": func["name"],
                             "line": func["line_start"],
@@ -1829,7 +1973,27 @@ def _detect_entry_points(
             )
         )
         for lp in line_pattern_defs:
+            if language in {"c", "cpp"}:
+                if re.search(lp["pattern"], f'{func["name"]}('):
+                    entry_points.append({
+                        "name": func["name"],
+                        "line": func["line_start"],
+                        "kind": lp["kind"],
+                        "annotation": "",
+                    })
+                    func["is_entry_point"] = True
+                    matched = True
+                    break
+                continue
             for line_no in scan_indices:
+                if language in {"javascript", "typescript"} and lp["kind"] in {
+                    "express_route", "express_router"
+                } and any(
+                    call.start_point[0] == line_no
+                    and func["_start_byte"] < call.start_byte < func["_end_byte"]
+                    for call, _ in js_route_calls
+                ):
+                    continue
                 if re.search(lp["pattern"], source_lines[line_no]):
                     entry_points.append({
                         "name": func["name"],
@@ -1843,9 +2007,60 @@ def _detect_entry_points(
             if matched:
                 break
 
+    if language in {"javascript", "typescript"}:
+        callable_nodes = {
+            node.start_byte: node
+            for node in _walk_named_nodes(tree.root_node)
+            if node.type in _JAVASCRIPT_CALLABLE_TYPES
+        }
+        bindings: dict[str, list[tuple[int, int, dict[str, Any]]]] = {}
+        for func in functions:
+            callable_node = callable_nodes.get(func["_start_byte"])
+            if callable_node is None:
+                continue
+            if callable_node.type not in {"function_declaration", "generator_function_declaration"}:
+                parent = callable_node.parent
+                if parent is None or parent.type not in {"variable_declarator", "assignment_expression"}:
+                    continue
+                name = parent.child_by_field_name("name") or parent.child_by_field_name("left")
+                if name is None or name.type != "identifier" or _node_text(name, source) != func["name"]:
+                    continue
+            scope = callable_node.parent
+            while scope is not None and scope.type not in {"program", "statement_block"}:
+                scope = scope.parent
+            if scope is not None:
+                bindings.setdefault(func["name"], []).append((scope.start_byte, scope.end_byte, func))
+        for node, receiver in js_route_calls:
+            arguments = node.child_by_field_name("arguments")
+            if arguments is None:
+                continue
+            actual_args = arguments.named_children
+            if not actual_args or actual_args[0].type not in {"string", "template_string"}:
+                continue
+            for argument in actual_args[1:]:
+                if argument.type != "identifier":
+                    continue
+                candidates = [
+                    binding for binding in bindings.get(_node_text(argument, source), [])
+                    if binding[0] <= node.start_byte and node.end_byte <= binding[1]
+                ]
+                if not candidates:
+                    continue
+                func = min(candidates, key=lambda binding: (binding[1] - binding[0], -binding[2]["_start_byte"]))[2]
+                if func["is_entry_point"]:
+                    continue
+                kind = "express_route" if receiver == "app" else "express_router"
+                entry_points.append({
+                    "name": func["name"],
+                    "line": func["line_start"],
+                    "kind": kind,
+                    "annotation": "",
+                })
+                func["is_entry_point"] = True
+
     if language in ("c", "cpp", "go"):
         for func in functions:
-            if func["name"] == "main" and not func["is_entry_point"]:
+            if func["name"] == "main" and not func["is_entry_point"] and not func.get("is_declaration", False):
                 entry_points.append({
                     "name": "main",
                     "line": func["line_start"],
@@ -1869,6 +2084,15 @@ def _function_scan_lines(
         return [(line_index, source_lines[line_index]) for line_index in range(start, end)]
 
     lines: list[tuple[int, str]] = []
+    excluded_by_line: dict[int, list[tuple[int, int]]] = {}
+    for start_line, start_column, end_line, end_column in function.get("_excluded_ranges", []):
+        for line_number in range(start_line, end_line + 1):
+            line_index = line_number - 1
+            if 0 <= line_index < len(source_lines):
+                excluded_by_line.setdefault(line_number, []).append((
+                    start_column if line_number == start_line else 0,
+                    end_column if line_number == end_line else len(source_lines[line_index]),
+                ))
     ranges = [
         *function.get("_initializer_ranges", []),
         (
@@ -1886,7 +2110,19 @@ def _function_scan_lines(
             line = source_lines[line_index]
             segment_start = start_column if line_number == start_line else 0
             segment_end = end_column if line_number == end_line else len(line)
-            lines.append((line_index, line[segment_start:segment_end]))
+            visible = [(segment_start, segment_end)]
+            for excluded_start, excluded_end in sorted(excluded_by_line.get(line_number, [])):
+                next_visible: list[tuple[int, int]] = []
+                for visible_start, visible_end in visible:
+                    if excluded_end <= visible_start or excluded_start >= visible_end:
+                        next_visible.append((visible_start, visible_end))
+                    else:
+                        if visible_start < excluded_start:
+                            next_visible.append((visible_start, excluded_start))
+                        if excluded_end < visible_end:
+                            next_visible.append((excluded_end, visible_end))
+                visible = next_visible
+            lines.extend((line_index, line[start:end]) for start, end in visible if start < end)
     return lines
 
 
@@ -2084,7 +2320,7 @@ def _top_level_scan_lines(
     still claimed complete coverage. Preserve the callable records and scan
     their complement as the synthetic ``<top-level>`` scope.
     """
-    if not functions:
+    if not functions and language != "php":
         return []
     callable_lines: set[int] = set()
     for function in functions:
@@ -2117,13 +2353,168 @@ def _top_level_scan_lines(
     return lines
 
 
+def _java_fetch_call_matches_type(
+    line: str,
+    call_start: int,
+    pattern: str,
+    receivers: dict[str, str],
+) -> bool:
+    receiver = re.search(r"(?:this\.)?([A-Za-z_]\w*)\s*$", line[:call_start])
+    if receiver is None:
+        return False
+    declared_type = receivers.get(receiver.group(1))
+    if "openStream" in pattern:
+        return declared_type == "URL"
+    if "getInputStream" in pattern:
+        return declared_type in {"URLConnection", "HttpURLConnection"}
+    if "getResponseCode" in pattern:
+        return declared_type == "HttpURLConnection"
+    return declared_type == "HttpClient"
+
+
+def _java_fetch_bindings(lines: list[str]) -> dict[str, str]:
+    bindings: dict[str, str] = {}
+    for line in lines:
+        if not _is_scannable_source_line(line):
+            continue
+        for declared_type, name in re.findall(
+            r"\b([A-Z][\w.]*|var|int|long|short|byte|boolean)\s+([A-Za-z_]\w*)\s*(?=[=;,)]|$)",
+            line,
+        ):
+            bindings[name] = declared_type.rsplit(".", 1)[-1]
+        inferred = re.search(
+            r"\bvar\s+([A-Za-z_]\w*)\s*=\s*HttpClient\.newHttpClient\s*\(",
+            line,
+        )
+        if inferred:
+            bindings[inferred.group(1)] = "HttpClient"
+    return bindings
+
+
+def _csharp_fetch_bindings(
+    lines: list[str], known: dict[str, str] | None = None
+) -> dict[str, str]:
+    bindings: dict[str, str] = dict(known or {})
+    for line in lines:
+        if not _is_scannable_source_line(line):
+            continue
+        for declared_type, name in re.findall(
+            r"\b(HttpClient|WebClient|HttpWebRequest|WebRequest|IHttpClientFactory)\??\s+([A-Za-z_]\w*)\b",
+            line,
+        ):
+            bindings[name] = declared_type
+        inferred = re.search(
+            r"\bvar\s+([A-Za-z_]\w*)\s*=\s*(?:new\s+(HttpClient|WebClient)\b|WebRequest\.Create(?:Http)?\s*\()",
+            line,
+        )
+        if inferred:
+            bindings[inferred.group(1)] = inferred.group(2) or (
+                "WebRequest" if "WebRequest.Create" in line else "HttpClient"
+            )
+        factory_call = re.search(
+            r"\bvar\s+([A-Za-z_]\w*)\s*=\s*(?:this\.)?([A-Za-z_]\w*)\.CreateClient\s*\(",
+            line,
+        )
+        if factory_call and bindings.get(factory_call.group(2)) == "IHttpClientFactory":
+            bindings[factory_call.group(1)] = "HttpClient"
+    return bindings
+
+
+def _csharp_fetch_call_matches_type(
+    line: str, call_start: int, pattern: str, bindings: dict[str, str]
+) -> bool:
+    receiver = re.search(r"(?:this\.)?([A-Za-z_]\w*)\s*$", line[:call_start])
+    if receiver is None:
+        prefix = line[:call_start]
+        expected = "WebClient" if "Download" in pattern else "HttpClient"
+        if "GetResponse" not in pattern and re.search(
+            rf"\bnew\s+{expected}\s*\([^)]*\)\s*$", prefix
+        ):
+            return True
+        factory = re.search(
+            r"(?:this\.)?([A-Za-z_]\w*)\.CreateClient\s*\([^)]*\)\s*$", prefix
+        )
+        return bool(
+            expected == "HttpClient"
+            and factory
+            and bindings.get(factory.group(1)) == "IHttpClientFactory"
+        )
+    declared_type = bindings.get(receiver.group(1))
+    if "Download" in pattern:
+        return declared_type == "WebClient"
+    if "GetResponse" in pattern:
+        return declared_type in {"WebRequest", "HttpWebRequest"}
+    return declared_type == "HttpClient"
+
+
+def _go_fetch_bindings(lines: list[str], http_aliases: set[str]) -> set[str]:
+    bindings: set[str] = set()
+    package_names = "|".join(re.escape(alias) for alias in sorted(http_aliases))
+    if not package_names:
+        return bindings
+    for line in lines:
+        if not _is_scannable_source_line(line):
+            continue
+        bindings.update(re.findall(
+            rf"\b([A-Za-z_]\w*)\s+\*?(?:{package_names})\.Client\b", line
+        ))
+        bindings.update(re.findall(
+            rf"\b([A-Za-z_]\w*)\s*:?=\s*(?:&?(?:{package_names})\.Client\s*\{{|(?:{package_names})\.DefaultClient\b)",
+            line,
+        ))
+    return bindings
+
+
 def _detect_sinks(
     functions: list[dict[str, Any]],
+    classes: list[dict[str, Any]],
     language: str,
     source_lines: list[str],
 ) -> list[dict[str, Any]]:
     """Detect security-sensitive API calls within function bodies using regex."""
     sinks: list[dict[str, Any]] = []
+    java_class_receivers: dict[int, dict[str, str]] = {}
+    java_class_for_line: dict[int, dict[str, Any]] = {}
+    csharp_class_receivers: dict[int, dict[str, str]] = {}
+    csharp_class_for_line: dict[int, dict[str, Any]] = {}
+    go_http_aliases: set[str] = set()
+    if language == "java":
+        callable_lines = {
+            line
+            for function in functions
+            for line in range(function["line_start"], function["line_end"] + 1)
+        }
+        for cls in sorted(classes, key=lambda item: item["line_end"] - item["line_start"], reverse=True):
+            for line in range(cls["line_start"], cls["line_end"] + 1):
+                java_class_for_line[line] = cls
+            java_class_receivers[id(cls)] = _java_fetch_bindings([
+                source_lines[line - 1]
+                for line in range(cls["line_start"], cls["line_end"] + 1)
+                if line not in callable_lines
+            ])
+    elif language == "csharp":
+        callable_lines = {
+            line
+            for function in functions
+            for line in range(function["line_start"], function["line_end"] + 1)
+        }
+        for cls in sorted(classes, key=lambda item: item["line_end"] - item["line_start"], reverse=True):
+            for line in range(cls["line_start"], cls["line_end"] + 1):
+                csharp_class_for_line[line] = cls
+            csharp_class_receivers[id(cls)] = _csharp_fetch_bindings([
+                source_lines[line - 1]
+                for line in range(cls["line_start"], cls["line_end"] + 1)
+                if line not in callable_lines
+            ])
+    elif language == "go":
+        for line in source_lines:
+            if not _is_scannable_source_line(line):
+                continue
+            imported = re.search(r"\b(?:(\w+)\s+)?[\"`]net/http[\"`]", line)
+            if imported:
+                alias = imported.group(1)
+                go_http_aliases.add("http" if alias in {None, "import"} else alias)
+    seen: set[tuple[str, str, int]] = set()
 
     scopes = [
         (func, _function_scan_lines(func, source_lines))
@@ -2135,6 +2526,28 @@ def _detect_sinks(
         scopes.append(({"name": "<top-level>"}, top_level_lines))
 
     for func, scan_lines in scopes:
+        java_fetch_receivers: dict[str, str] = {}
+        csharp_fetch_receivers: dict[str, str] = {}
+        go_fetch_receivers: set[str] = set()
+        if language == "java":
+            cls = java_class_for_line.get(func.get("line_start", 0))
+            if cls is not None:
+                java_fetch_receivers.update(java_class_receivers[id(cls)])
+            java_fetch_receivers.update(_java_fetch_bindings(func.get("params", [])))
+            java_fetch_receivers.update(_java_fetch_bindings([line for _, line in scan_lines]))
+        elif language == "csharp":
+            cls = csharp_class_for_line.get(func.get("line_start", 0))
+            if cls is not None:
+                csharp_fetch_receivers.update(csharp_class_receivers[id(cls)])
+            csharp_fetch_receivers = _csharp_fetch_bindings(
+                func.get("params", []), csharp_fetch_receivers
+            )
+            csharp_fetch_receivers = _csharp_fetch_bindings(
+                [line for _, line in scan_lines], csharp_fetch_receivers
+            )
+        elif language == "go":
+            go_fetch_receivers.update(_go_fetch_bindings(func.get("params", []), go_http_aliases))
+            go_fetch_receivers.update(_go_fetch_bindings([line for _, line in scan_lines], go_http_aliases))
         for sink_def in _SINK_DEFINITIONS:
             lang_patterns = sink_def["patterns"].get(language, [])
             for pat in lang_patterns:
@@ -2142,8 +2555,37 @@ def _detect_sinks(
                 for line_idx, line_text in scan_lines:
                     if not _is_scannable_source_line(line_text):
                         continue
-                    m = compiled.search(line_text)
-                    if m:
+                    matches = compiled.finditer(line_text)
+                    if language == "java" and sink_def["kind"] == "url_fetch":
+                        matches = (
+                            match for match in matches
+                            if _java_fetch_call_matches_type(
+                                line_text, match.start(), pat, java_fetch_receivers
+                            )
+                        )
+                    elif language == "csharp" and sink_def["kind"] == "url_fetch":
+                        matches = (
+                            match for match in matches
+                            if _csharp_fetch_call_matches_type(
+                                line_text, match.start(), pat, csharp_fetch_receivers
+                            )
+                        )
+                    elif language == "go" and sink_def["kind"] == "url_fetch" and ".Do" in pat:
+                        matches = (
+                            match for match in matches
+                            if match.group().split(".", 1)[0] == "DefaultClient"
+                            or match.group().split(".", 1)[0] in go_fetch_receivers
+                        )
+                    elif language == "php" and sink_def["kind"] == "sql_exec" and "->query" in pat:
+                        matches = (
+                            match for match in matches
+                            if not re.match(r"\$(?:request|req)->query\s*\(", match.group())
+                        )
+                    if next(matches, None) is not None:
+                        identity = (sink_def["kind"], func["name"], line_idx)
+                        if identity in seen:
+                            continue
+                        seen.add(identity)
                         snippet = line_text.strip()
                         if len(snippet) > 120:
                             snippet = snippet[:117] + "..."
@@ -2154,8 +2596,8 @@ def _detect_sinks(
                             "snippet": snippet,
                             "vuln_classes": list(sink_def["vuln_classes"]),
                         })
-                        # One match per pattern per function is enough
-                        break
+                        # Retain distinct lines so a safe-looking early call
+                        # cannot hide a later call that handles request data.
 
     return sinks
 
@@ -2261,7 +2703,18 @@ def _detect_exports(
     """Detect exported symbols based on language conventions."""
     exports: list[dict[str, Any]] = []
 
-    if language == "go":
+    if language == "c":
+        seen_names: set[str] = set()
+        for func in functions:
+            if "static" in func.get("modifiers", []) or func["name"] in seen_names:
+                continue
+            seen_names.add(func["name"])
+            exports.append({
+                "name": func["name"],
+                "kind": "function",
+                "line": func["line_start"],
+            })
+    elif language == "go":
         for func in functions:
             if func["name"] and func["name"][0].isupper():
                 exports.append({"name": func["name"], "kind": "function", "line": func["line_start"]})
@@ -2311,16 +2764,25 @@ def _detect_exports(
             if "public" in func.get("modifiers", []):
                 exports.append({"name": func["name"], "kind": "public_method", "line": func["line_start"]})
         for cls in classes:
-            exports.append({"name": cls["name"], "kind": "public_class", "line": cls["line_start"]})
+            if cls.get("_java_public"):
+                exports.append({"name": cls["name"], "kind": "public_class", "line": cls["line_start"]})
     elif language == "ruby":
         for func in functions:
-            exports.append({"name": func["name"], "kind": "method", "line": func["line_start"]})
+            if not func.get("_ruby_route"):
+                exports.append({"name": func["name"], "kind": "method", "line": func["line_start"]})
     elif language == "php":
         for func in functions:
             if func.get("is_closure", False):
                 continue
             if "public" in func.get("modifiers", []) or not func.get("modifiers"):
                 exports.append({"name": func["name"], "kind": "public_method", "line": func["line_start"]})
+    elif language == "csharp":
+        for func in functions:
+            if "public" in func.get("modifiers", []):
+                exports.append({"name": func["name"], "kind": "public_method", "line": func["line_start"]})
+        for cls in classes:
+            if cls.get("_csharp_public"):
+                exports.append({"name": cls["name"], "kind": "public_class", "line": cls["line_start"]})
 
     return exports
 
@@ -2363,6 +2825,11 @@ def _resolve_import_targets(
                 target["resolved"] = imp
         elif language == "java":
             target["resolved"] = imp.replace(".", "/") + ".java"
+        elif language == "lua":
+            target["resolved"] = imp.replace(".", "/") + ".lua"
+        elif language in {"shell", "powershell"}:
+            if imp.startswith(("./", "../", ".\\", "..\\")):
+                target["resolved"] = imp.replace("\\", "/")
 
         targets.append(target)
 
@@ -2516,6 +2983,8 @@ def _remove_internal_structural_fields(
             "_body_start_column",
             "_body_start_line",
             "_initializer_ranges",
+            "_ruby_route",
+            "_excluded_ranges",
             "_cpp_parameter_signature",
             "_cpp_qualifier_signature",
             "_cpp_declared_scope",
@@ -2528,6 +2997,8 @@ def _remove_internal_structural_fields(
     for cls in classes:
         for field_name in (
             "_cpp_namespace",
+            "_java_public",
+            "_csharp_public",
             "_end_byte",
             "_qualified_name",
             "_start_byte",
@@ -2544,26 +3015,6 @@ def _remove_internal_structural_fields(
 # ---------------------------------------------------------------------------
 
 
-def _snippet(line: str, limit: int = 120) -> str:
-    s = line.strip()
-    if len(s) > limit:
-        s = s[: limit - 3] + "..."
-    return s
-
-
-def _empty_func(name: str, line_start: int, line_end: int) -> dict[str, Any]:
-    return {
-        "name": name,
-        "qualified_name": name,
-        "line_start": line_start,
-        "line_end": line_end,
-        "params": [],
-        "modifiers": [],
-        "annotations": [],
-        "is_entry_point": False,
-    }
-
-
 def _index_lightweight(
     file_path: str,
     language: str,
@@ -2573,14 +3024,18 @@ def _index_lightweight(
     """Dispatch helper for lightweight extractors."""
     dispatch = {
         "blade": _extract_blade,
-        "dockerfile": _extract_dockerfile,
         "shell": _extract_shell,
         "powershell": _extract_powershell,
         "lua": _extract_lua,
         "html": _extract_html,
         "css": _extract_css,
     }
-    if language == "freemarker":
+    local_docker_sources: list[str] = []
+    if language == "dockerfile":
+        funcs, entry_points, sinks, exports, imports, local_docker_sources = (
+            _extract_dockerfile(source_lines)
+        )
+    elif language == "freemarker":
         # The one lightweight extractor whose result depends on the filename and
         # not only on the bytes: the extension carries FreeMarker's output format,
         # which decides whether auto-escaping is on before any directive is read.
@@ -2592,6 +3047,15 @@ def _index_lightweight(
         if fn is None:
             return _empty_index(file_path, language, total_lines=total_lines)
         funcs, entry_points, sinks, exports, imports = fn(source_lines)
+    import_targets = _resolve_import_targets(imports, language)
+    imports.extend(local_docker_sources)
+    import_targets.extend(
+        {
+            "raw": path,
+            "resolved": "" if any(char in path for char in "*?[") else path.removeprefix("./"),
+        }
+        for path in local_docker_sources
+    )
     indexed: dict[str, Any] = {
         "file_path": file_path,
         "language": language,
@@ -2602,7 +3066,7 @@ def _index_lightweight(
         "security_sinks": sinks,
         "call_sites": [],
         "imports": imports,
-        "import_targets": [{"raw": i, "resolved": ""} for i in imports],
+        "import_targets": import_targets,
         "exports": exports,
         "classes": [],
     }
@@ -2617,2209 +3081,6 @@ def _index_lightweight(
 
 
 # --- Dockerfile -------------------------------------------------------------
-
-_DOCKER_INSTR_RE = re.compile(r"^\s*([A-Z]+)\s+(.*)$")
-_DOCKER_SECRET_NAMES = re.compile(r"\b(TOKEN|SECRET|PASSWORD|PASSWD|API[_-]?KEY|PRIVATE[_-]?KEY|ACCESS[_-]?KEY|AUTH)\b", re.IGNORECASE)
-_DOCKER_URL_RE = re.compile(r"https?://\S+")
-
-
-def _extract_dockerfile(
-    source_lines: list[str],
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[str]]:
-    funcs: list[dict[str, Any]] = []
-    entry_points: list[dict[str, Any]] = []
-    sinks: list[dict[str, Any]] = []
-    exports: list[dict[str, Any]] = []
-    imports: list[str] = []
-    has_user_directive = False
-
-    # Logical blocks: collect contiguous lines that belong to the same instruction
-    # (handle backslash continuations).
-    i = 0
-    n = len(source_lines)
-    while i < n:
-        raw = source_lines[i]
-        stripped = raw.strip()
-        if not stripped or stripped.startswith("#"):
-            i += 1
-            continue
-        m = _DOCKER_INSTR_RE.match(raw)
-        if not m:
-            i += 1
-            continue
-        instr = m.group(1).upper()
-        block_start = i + 1
-        block_text_parts = [m.group(2)]
-        while raw.rstrip().endswith("\\") and i + 1 < n:
-            i += 1
-            raw = source_lines[i]
-            block_text_parts.append(raw.rstrip("\\").strip())
-        block_end = i + 1
-        block_text = " ".join(block_text_parts)
-        i += 1
-
-        if instr in {"RUN", "COPY", "ADD", "CMD", "ENTRYPOINT", "USER", "EXPOSE", "HEALTHCHECK", "ENV", "FROM", "ARG", "WORKDIR", "VOLUME", "LABEL"}:
-            funcs.append(_empty_func(instr, block_start, block_end))
-
-        if instr == "USER":
-            has_user_directive = True
-            if re.match(r"\s*(0|root)\b", block_text):
-                sinks.append({
-                    "kind": "container_runs_as_root",
-                    "line": block_start,
-                    "function": instr,
-                    "snippet": _snippet(stripped),
-                    "vuln_classes": ["privilege-escalation"],
-                })
-
-        if instr in {"CMD", "ENTRYPOINT"}:
-            entry_points.append({
-                "name": instr,
-                "line": block_start,
-                "kind": "container_" + instr.lower(),
-                "annotation": "",
-            })
-            exports.append({"name": instr, "kind": "container_entrypoint", "line": block_start})
-
-        if instr == "EXPOSE":
-            for port in re.findall(r"\b(\d+)(?:/\w+)?\b", block_text):
-                sinks.append({
-                    "kind": "exposed_port",
-                    "line": block_start,
-                    "function": instr,
-                    "snippet": _snippet(f"EXPOSE {port}"),
-                    "vuln_classes": ["network-exposure"],
-                })
-
-        if instr == "RUN":
-            if re.search(r"\b(curl|wget)\b[^|;]*\|\s*(sh|bash|zsh)\b", block_text):
-                sinks.append({
-                    "kind": "remote_pipe_to_shell",
-                    "line": block_start,
-                    "function": instr,
-                    "snippet": _snippet(block_text),
-                    "vuln_classes": ["supply-chain", "injection"],
-                })
-            elif re.search(r"\b(curl|wget)\b", block_text):
-                sinks.append({
-                    "kind": "external_fetch",
-                    "line": block_start,
-                    "function": instr,
-                    "snippet": _snippet(block_text),
-                    "vuln_classes": ["supply-chain"],
-                })
-            if re.search(r"\bchmod\s+(?:-R\s+)?[0-7]*777\b", block_text):
-                sinks.append({
-                    "kind": "permissive_chmod",
-                    "line": block_start,
-                    "function": instr,
-                    "snippet": _snippet(block_text),
-                    "vuln_classes": ["privilege-escalation"],
-                })
-            if re.search(r"\bsudo\b", block_text):
-                sinks.append({
-                    "kind": "sudo_in_build",
-                    "line": block_start,
-                    "function": instr,
-                    "snippet": _snippet(block_text),
-                    "vuln_classes": ["privilege-escalation"],
-                })
-
-        if instr == "ENV" and _DOCKER_SECRET_NAMES.search(block_text):
-            sinks.append({
-                "kind": "embedded_secret_env",
-                "line": block_start,
-                "function": instr,
-                "snippet": _snippet(stripped),
-                "vuln_classes": ["secrets-exposure"],
-            })
-
-        if instr == "ARG" and _DOCKER_SECRET_NAMES.search(block_text):
-            sinks.append({
-                "kind": "embedded_secret_arg",
-                "line": block_start,
-                "function": instr,
-                "snippet": _snippet(stripped),
-                "vuln_classes": ["secrets-exposure"],
-            })
-
-        if instr == "ADD":
-            url_match = _DOCKER_URL_RE.search(block_text)
-            if url_match:
-                sinks.append({
-                    "kind": "add_external_url",
-                    "line": block_start,
-                    "function": instr,
-                    "snippet": _snippet(block_text),
-                    "vuln_classes": ["supply-chain"],
-                })
-                imports.append(url_match.group(0))
-
-        if instr == "FROM":
-            # FROM image[:tag][@digest] [AS name]
-            img = block_text.split(" AS ")[0].split(" as ")[0].strip()
-            if img:
-                imports.append(img)
-
-    if not has_user_directive and funcs:
-        sinks.append({
-            "kind": "missing_user_directive",
-            "line": 1,
-            "function": "FROM",
-            "snippet": "Dockerfile does not set USER -- container runs as root by default",
-            "vuln_classes": ["privilege-escalation"],
-        })
-
-    return funcs, entry_points, sinks, exports, imports
-
-
-# --- Shell ------------------------------------------------------------------
-
-_SHELL_FUNC_PAREN_RE = re.compile(r"^\s*([A-Za-z_][\w-]*)\s*\(\s*\)\s*\{?")
-_SHELL_FUNC_KW_RE = re.compile(r"^\s*function\s+([A-Za-z_][\w-]*)\s*(?:\(\s*\))?\s*\{?")
-_SHELL_SOURCE_RE = re.compile(r"^\s*(?:\.|source)\s+(\S+)")
-
-
-def _extract_shell(
-    source_lines: list[str],
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[str]]:
-    funcs: list[dict[str, Any]] = []
-    entry_points: list[dict[str, Any]] = []
-    sinks: list[dict[str, Any]] = []
-    exports: list[dict[str, Any]] = []
-    imports: list[str] = []
-
-    # First pass: find function starts and infer ends by brace matching (best-effort)
-    func_starts: list[tuple[str, int]] = []
-    for idx, line in enumerate(source_lines):
-        # Skip comment-only lines (but not lines with trailing comments)
-        if line.lstrip().startswith("#"):
-            continue
-        m = _SHELL_FUNC_KW_RE.match(line) or _SHELL_FUNC_PAREN_RE.match(line)
-        if m:
-            name = m.group(1)
-            func_starts.append((name, idx + 1))
-
-    # Compute approximate end lines by scanning braces from each start
-    for fi, (name, start_line) in enumerate(func_starts):
-        end_line = start_line
-        depth = 0
-        seen_brace = False
-        for j in range(start_line - 1, len(source_lines)):
-            for ch in source_lines[j]:
-                if ch == "{":
-                    depth += 1
-                    seen_brace = True
-                elif ch == "}":
-                    depth -= 1
-                    if seen_brace and depth <= 0:
-                        end_line = j + 1
-                        break
-            if seen_brace and depth <= 0:
-                break
-            end_line = j + 1
-        funcs.append(_empty_func(name, start_line, end_line))
-        exports.append({"name": name, "kind": "shell_function", "line": start_line})
-
-    for idx, line in enumerate(source_lines):
-        stripped = line.lstrip()
-        if stripped.startswith("#") and not stripped.startswith("#!"):
-            continue
-        line_no = idx + 1
-        # shebang as entry point
-        if idx == 0 and stripped.startswith("#!"):
-            entry_points.append({
-                "name": "script",
-                "line": 1,
-                "kind": "shell_script",
-                "annotation": stripped,
-            })
-        # source / dot includes
-        m = _SHELL_SOURCE_RE.match(line)
-        if m:
-            imports.append(m.group(1))
-        # Security sinks
-        if re.search(r"\beval\b", line):
-            sinks.append({
-                "kind": "shell_eval",
-                "line": line_no,
-                "function": _find_enclosing_func(funcs, line_no),
-                "snippet": _snippet(line),
-                "vuln_classes": ["injection"],
-            })
-        if re.search(r"\b(curl|wget)\b[^|;]*\|\s*(sh|bash|zsh)\b", line):
-            sinks.append({
-                "kind": "remote_pipe_to_shell",
-                "line": line_no,
-                "function": _find_enclosing_func(funcs, line_no),
-                "snippet": _snippet(line),
-                "vuln_classes": ["supply-chain", "injection"],
-            })
-        if re.search(r"\bchmod\s+(?:-R\s+)?[0-7]*777\b", line):
-            sinks.append({
-                "kind": "permissive_chmod",
-                "line": line_no,
-                "function": _find_enclosing_func(funcs, line_no),
-                "snippet": _snippet(line),
-                "vuln_classes": ["privilege-escalation"],
-            })
-        if re.search(r"\bsudo\b", line):
-            sinks.append({
-                "kind": "sudo",
-                "line": line_no,
-                "function": _find_enclosing_func(funcs, line_no),
-                "snippet": _snippet(line),
-                "vuln_classes": ["privilege-escalation"],
-            })
-        # Command substitution with $1/$@/$* (user-tainted) inside backticks or $(...)
-        if re.search(r"(?:`[^`]*\$[1-9@*][^`]*`|\$\([^)]*\$[1-9@*][^)]*\))", line):
-            sinks.append({
-                "kind": "tainted_command_substitution",
-                "line": line_no,
-                "function": _find_enclosing_func(funcs, line_no),
-                "snippet": _snippet(line),
-                "vuln_classes": ["injection"],
-            })
-        # Hardcoded credentials: VAR=... where VAR name looks secret-y and value is a quoted literal
-        cred_m = re.match(r"\s*(?:export\s+)?([A-Za-z_][\w]*)\s*=\s*['\"]([^'\"]+)['\"]", line)
-        if cred_m and _DOCKER_SECRET_NAMES.search(cred_m.group(1)):
-            sinks.append({
-                "kind": "hardcoded_credential",
-                "line": line_no,
-                "function": _find_enclosing_func(funcs, line_no),
-                "snippet": _snippet(line),
-                "vuln_classes": ["secrets-exposure"],
-            })
-
-    return funcs, entry_points, sinks, exports, imports
-
-
-def _find_enclosing_func(funcs: list[dict[str, Any]], line_no: int) -> str:
-    """Name the script-language function a line falls in, or the file scope."""
-    for f in funcs:
-        if f["line_start"] <= line_no <= f["line_end"]:
-            return f["name"]
-    return "<script>"
-
-
-# --- PowerShell -------------------------------------------------------------
-
-_PS_FUNC_RE = re.compile(
-    r"^\s*(?:function|filter|workflow)\s+([A-Za-z_][\w-]*(?::[A-Za-z_][\w-]*)?)",
-    re.IGNORECASE,
-)
-_PS_PARAM_BLOCK_RE = re.compile(r"\bparam\s*\(", re.IGNORECASE)
-_PS_FUNC_SIGNATURE_RE = re.compile(
-    r"^\s*(?:function|filter|workflow)\s+[\w:-]+\s*\(", re.IGNORECASE
-)
-_PS_PARAM_NAME_RE = re.compile(r"\$([A-Za-z_]\w*)")
-_PS_IMPORT_RE = re.compile(
-    r"""^\s*(?:Import-Module|using\s+(?:module|namespace))\s+['"]?([^\s'";]+)""",
-    re.IGNORECASE,
-)
-# Dot-sourcing runs another script's contents in the caller's scope, which is
-# both an import edge and how most PowerShell codebases share helpers.
-_PS_DOT_SOURCE_RE = re.compile(
-    r"""^\s*\.\s+['"]?([^\s'";]+\.psm?1)""", re.IGNORECASE
-)
-
-# PowerShell's security-relevant cmdlets, one table serving both the structural
-# extractor below and the bounded streaming scanner, so the two paths cannot
-# report a `.ps1` differently. Each pattern is anchored on a cmdlet or type
-# accelerator rather than a bare verb, because PowerShell's own aliases (`iex`,
-# `iwr`) are the short forms an attacker-facing script actually uses.
-_PS_SINK_PATTERNS: list[tuple[str, str, list[str]]] = [
-    (
-        "dynamic_code_evaluation",
-        r"\b(?:Invoke-Expression|iex)\b|\[scriptblock\]::Create\s*\(|\bAdd-Type\b",
-        ["injection"],
-    ),
-    (
-        "process_exec",
-        r"\b(?:Start-Process|Invoke-Item|Invoke-Command|Start-Job)\b",
-        ["injection"],
-    ),
-    (
-        "url_fetch",
-        r"\b(?:Invoke-WebRequest|Invoke-RestMethod|iwr|irm)\b|\bNet\.WebClient\b",
-        ["ssrf"],
-    ),
-    (
-        "remote_download_to_execution",
-        r"\b(?:DownloadString|DownloadFile|Invoke-WebRequest|Invoke-RestMethod|iwr|irm)\b"
-        r"[^|\r\n]*\|\s*(?:iex|Invoke-Expression)\b",
-        ["injection"],
-    ),
-    (
-        "deserialization",
-        r"\bImport-Clixml\b"
-        r"|\[System\.Management\.Automation\.PSSerializer\]::Deserialize",
-        ["deserialization"],
-    ),
-    (
-        "file_path",
-        r"\b(?:Get-Content|Set-Content|Add-Content|Out-File|Remove-Item|Join-Path)\b",
-        ["path-traversal"],
-    ),
-    (
-        "plaintext_secret",
-        r"\bConvertTo-SecureString\b[^\r\n]*-AsPlainText",
-        ["secrets-exposure"],
-    ),
-    (
-        "certificate_validation_disabled",
-        r"\bServerCertificateValidationCallback\b|-SkipCertificateCheck\b",
-        ["crypto-misuse"],
-    ),
-]
-_PS_LITERAL_ASSIGNMENT_RE = re.compile(r"""\s*\$([A-Za-z_]\w*)\s*=\s*['"][^'"]+['"]""")
-_PS_COMPILED_SINKS = tuple(
-    (kind, re.compile(pattern, re.IGNORECASE), vuln_classes)
-    for kind, pattern, vuln_classes in _PS_SINK_PATTERNS
-)
-
-
-def _ps_balanced_span(text: str, open_paren: int) -> str:
-    """Return what sits between the `(` at *open_paren* and its matching `)`."""
-    depth = 0
-    for index in range(open_paren, len(text)):
-        char = text[index]
-        if char == "(":
-            depth += 1
-        elif char == ")":
-            depth -= 1
-            if depth == 0:
-                return text[open_paren + 1 : index]
-    return text[open_paren + 1 :]
-
-
-def _ps_declared_params(block: str) -> list[str]:
-    """Return the parameter names a function declares, either way it can.
-
-    PowerShell accepts both a C-style signature after the name and a `param()`
-    block as the body's first statement; a script's own arguments arrive only
-    through the latter.
-    """
-    signature = _PS_FUNC_SIGNATURE_RE.match(block)
-    if signature is not None:
-        declaration = _ps_balanced_span(block, signature.end() - 1)
-    else:
-        param_block = _PS_PARAM_BLOCK_RE.search(block)
-        if param_block is None:
-            return []
-        declaration = _ps_balanced_span(block, param_block.end() - 1)
-    return _PS_PARAM_NAME_RE.findall(declaration)
-
-
-def _ps_block_end(source_lines: list[str], start_index: int) -> int:
-    """Return the 1-based line on which the block opened at *start_index* closes."""
-    depth = 0
-    opened = False
-    for index in range(start_index, len(source_lines)):
-        for char in source_lines[index]:
-            if char == "{":
-                depth += 1
-                opened = True
-            elif char == "}":
-                depth -= 1
-        if opened and depth <= 0:
-            return index + 1
-    return len(source_lines)
-
-
-def _extract_powershell(
-    source_lines: list[str],
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[str]]:
-    funcs: list[dict[str, Any]] = []
-    entry_points: list[dict[str, Any]] = []
-    sinks: list[dict[str, Any]] = []
-    exports: list[dict[str, Any]] = []
-    imports: list[str] = []
-
-    in_block_comment = False
-    for idx, line in enumerate(source_lines):
-        stripped = line.strip()
-        # `<# ... #>` is comment-based help, and its `.EXAMPLE` sections quote
-        # the very cmdlets this extractor flags -- skipping the block is what
-        # keeps a documented script from reading as a vulnerable one.
-        if in_block_comment:
-            in_block_comment = "#>" not in stripped
-            continue
-        if stripped.startswith("<#"):
-            in_block_comment = "#>" not in stripped[2:]
-            continue
-        if stripped.startswith("#"):
-            continue
-        line_no = idx + 1
-
-        declaration = _PS_FUNC_RE.match(line)
-        if declaration is not None:
-            name = declaration.group(1)
-            end_line = _ps_block_end(source_lines, idx)
-            func = _empty_func(name, line_no, end_line)
-            func["params"] = _ps_declared_params("\n".join(source_lines[idx:end_line]))
-            funcs.append(func)
-            exports.append(
-                {"name": name, "kind": "powershell_function", "line": line_no}
-            )
-
-        enclosing = _find_enclosing_func(funcs, line_no)
-        # A `param()` block outside every function is the script's own argument
-        # surface: whatever invokes the script reaches the body through it.
-        if enclosing == "<script>" and _PS_PARAM_BLOCK_RE.match(stripped):
-            entry_points.append({
-                "name": "<script>",
-                "line": line_no,
-                "kind": "script_parameters",
-                "annotation": _snippet(line),
-            })
-
-        imported = _PS_IMPORT_RE.match(line) or _PS_DOT_SOURCE_RE.match(line)
-        if imported is not None:
-            imports.append(imported.group(1))
-
-        for kind, pattern, vuln_classes in _PS_COMPILED_SINKS:
-            if pattern.search(line):
-                sinks.append({
-                    "kind": kind,
-                    "line": line_no,
-                    "function": enclosing,
-                    "snippet": _snippet(line),
-                    "vuln_classes": list(vuln_classes),
-                })
-        credential = _PS_LITERAL_ASSIGNMENT_RE.match(line)
-        if credential and _DOCKER_SECRET_NAMES.search(credential.group(1)):
-            sinks.append({
-                "kind": "hardcoded_credential",
-                "line": line_no,
-                "function": enclosing,
-                "snippet": _snippet(line),
-                "vuln_classes": ["secrets-exposure"],
-            })
-
-    return funcs, entry_points, sinks, exports, imports
-
-
-# --- Lua --------------------------------------------------------------------
-
-_LUA_FUNC_RE = re.compile(
-    r"^\s*(?:local\s+)?function\s+([A-Za-z_][\w.:]*)\s*\(([^)]*)\)"
-)
-_LUA_LOCAL_FUNC_ASSIGN_RE = re.compile(
-    r"^\s*local\s+([A-Za-z_]\w*)\s*=\s*function\s*\(([^)]*)\)"
-)
-
-
-def _extract_lua(
-    source_lines: list[str],
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[str]]:
-    funcs: list[dict[str, Any]] = []
-    entry_points: list[dict[str, Any]] = []
-    sinks: list[dict[str, Any]] = []
-    exports: list[dict[str, Any]] = []
-    imports: list[str] = []
-
-    starts: list[tuple[str, list[str], int]] = []
-    for idx, line in enumerate(source_lines):
-        stripped = line.lstrip()
-        if stripped.startswith("--"):
-            continue
-        m = _LUA_FUNC_RE.match(line) or _LUA_LOCAL_FUNC_ASSIGN_RE.match(line)
-        if m:
-            name = m.group(1)
-            params = [p.strip() for p in m.group(2).split(",") if p.strip()]
-            starts.append((name, params, idx + 1))
-
-    # Approximate function end by counting nested block-openers against `end`.
-    for k, (name, params, start_line) in enumerate(starts):
-        next_start = starts[k + 1][2] - 1 if k + 1 < len(starts) else len(source_lines)
-        end_line = next_start
-        depth = 1
-        for j in range(start_line, len(source_lines)):
-            line = source_lines[j]
-            code = re.sub(r"--.*$", "", line)
-            # These keywords each open a block that requires a matching `end`.
-            depth += len(re.findall(r"\b(?:function|if|for|while|do)\b", code))
-            depth -= len(re.findall(r"\bend\b", code))
-            if depth <= 0:
-                end_line = j + 1
-                break
-            end_line = j + 1
-        funcs.append({
-            "name": name,
-            "qualified_name": name,
-            "line_start": start_line,
-            "line_end": end_line,
-            "params": params,
-            "modifiers": [],
-            "annotations": [],
-            "is_entry_point": False,
-        })
-        exports.append({"name": name, "kind": "lua_function", "line": start_line})
-
-    for idx, line in enumerate(source_lines):
-        stripped = line.lstrip()
-        if stripped.startswith("--"):
-            continue
-        line_no = idx + 1
-        req_m = re.search(r"""require\s*\(?\s*['"]([^'"]+)['"]""", line)
-        if req_m:
-            imports.append(req_m.group(1))
-        if re.search(r"\bredis\.call\s*\(", line):
-            sinks.append({
-                "kind": "redis_call",
-                "line": line_no,
-                "function": _find_enclosing_func(funcs, line_no),
-                "snippet": _snippet(line),
-                "vuln_classes": ["injection"],
-            })
-        if re.search(r"\bredis\.pcall\s*\(", line):
-            sinks.append({
-                "kind": "redis_pcall",
-                "line": line_no,
-                "function": _find_enclosing_func(funcs, line_no),
-                "snippet": _snippet(line),
-                "vuln_classes": ["injection"],
-            })
-        if re.search(r"\bKEYS\s*\[", line):
-            sinks.append({
-                "kind": "redis_keys_input",
-                "line": line_no,
-                "function": _find_enclosing_func(funcs, line_no),
-                "snippet": _snippet(line),
-                "vuln_classes": ["injection"],
-            })
-        if re.search(r"\bARGV\s*\[", line):
-            sinks.append({
-                "kind": "redis_argv_input",
-                "line": line_no,
-                "function": _find_enclosing_func(funcs, line_no),
-                "snippet": _snippet(line),
-                "vuln_classes": ["injection"],
-            })
-        if re.search(r"\b(loadstring|load)\s*\(", line):
-            sinks.append({
-                "kind": "dynamic_code_load",
-                "line": line_no,
-                "function": _find_enclosing_func(funcs, line_no),
-                "snippet": _snippet(line),
-                "vuln_classes": ["injection"],
-            })
-        if re.search(r"\bos\.execute\s*\(", line):
-            sinks.append({
-                "kind": "os_execute",
-                "line": line_no,
-                "function": _find_enclosing_func(funcs, line_no),
-                "snippet": _snippet(line),
-                "vuln_classes": ["injection"],
-            })
-        if re.search(r"\bio\.popen\s*\(", line):
-            sinks.append({
-                "kind": "io_popen",
-                "line": line_no,
-                "function": _find_enclosing_func(funcs, line_no),
-                "snippet": _snippet(line),
-                "vuln_classes": ["injection"],
-            })
-
-    return funcs, entry_points, sinks, exports, imports
-
-
-# --- HTML / templates -------------------------------------------------------
-
-_HTML_FORM_RE = re.compile(r"<form\b[^>]*\baction\s*=\s*['\"]?([^'\"\s>]+)", re.IGNORECASE)
-_HTML_SCRIPT_SRC_RE = re.compile(r"<script\b[^>]*\bsrc\s*=\s*['\"]?([^'\"\s>]+)", re.IGNORECASE)
-_HTML_IFRAME_SRC_RE = re.compile(r"<iframe\b[^>]*\bsrc\s*=\s*['\"]?([^'\"\s>]+)", re.IGNORECASE)
-_HTML_INLINE_HANDLER_RE = re.compile(r"\bon[a-z]+\s*=\s*['\"][^'\"]+['\"]", re.IGNORECASE)
-_HTML_JS_URL_RE = re.compile(r"""=\s*['"]\s*javascript:""", re.IGNORECASE)
-_HTML_MUSTACHE_RE = re.compile(r"\{\{[^}]+\}\}")
-_HTML_ASP_RE = re.compile(r"<%[^%]+%>")
-_HTML_LINK_HREF_RE = re.compile(r"<link\b[^>]*\bhref\s*=\s*['\"]?([^'\"\s>]+)", re.IGNORECASE)
-
-
-def _mask_html_comments(source_lines: list[str]) -> list[str]:
-    """Blank out `<!-- ... -->` regions, keeping every line and column in place.
-
-    An HTML comment spans lines, so a per-line prefix test cannot see it. Masking
-    with spaces rather than deleting keeps line numbers and match offsets true, so
-    a real tag sharing a line with a closed comment is still found. Without this a
-    commented-out `<form>` registers as an entry point and a commented-out remote
-    `<script src>` as a supply-chain sink -- a reachability claim on dead markup.
-    """
-    masked: list[str] = []
-    in_comment = False
-    for line in source_lines:
-        out: list[str] = []
-        i = 0
-        while i < len(line):
-            if in_comment:
-                close = line.find("-->", i)
-                if close == -1:
-                    out.append(" " * (len(line) - i))
-                    i = len(line)
-                else:
-                    out.append(" " * (close + 3 - i))
-                    i = close + 3
-                    in_comment = False
-            else:
-                opening = line.find("<!--", i)
-                if opening == -1:
-                    out.append(line[i:])
-                    i = len(line)
-                else:
-                    out.append(line[i:opening])
-                    i = opening
-                    in_comment = True
-        masked.append("".join(out))
-    return masked
-
-
-def _extract_html(
-    source_lines: list[str],
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[str]]:
-    funcs: list[dict[str, Any]] = []
-    entry_points: list[dict[str, Any]] = []
-    sinks: list[dict[str, Any]] = []
-    exports: list[dict[str, Any]] = []
-    imports: list[str] = []
-
-    # Commented-out markup is not surface. Detect against the masked copy; keep
-    # snippets from the real line so evidence still reads as authored.
-    for idx, (line, raw_line) in enumerate(zip(_mask_html_comments(source_lines), source_lines)):
-        line_no = idx + 1
-        for m in _HTML_FORM_RE.finditer(line):
-            action = m.group(1)
-            entry_points.append({
-                "name": "form",
-                "line": line_no,
-                "kind": "html_form",
-                "annotation": action,
-            })
-            funcs.append(_empty_func(f"form:{action}", line_no, line_no))
-        for m in _HTML_SCRIPT_SRC_RE.finditer(line):
-            src = m.group(1)
-            imports.append(src)
-            if src.startswith(("http://", "//")):
-                sinks.append({
-                    "kind": "external_script_load",
-                    "line": line_no,
-                    "function": "<html>",
-                    "snippet": _snippet(raw_line),
-                    "vuln_classes": ["supply-chain", "xss"],
-                })
-            elif src.startswith("https://"):
-                sinks.append({
-                    "kind": "external_script_load",
-                    "line": line_no,
-                    "function": "<html>",
-                    "snippet": _snippet(raw_line),
-                    "vuln_classes": ["supply-chain"],
-                })
-        for m in _HTML_LINK_HREF_RE.finditer(line):
-            imports.append(m.group(1))
-        for m in _HTML_IFRAME_SRC_RE.finditer(line):
-            imports.append(m.group(1))
-            sinks.append({
-                "kind": "iframe_embed",
-                "line": line_no,
-                "function": "<html>",
-                "snippet": _snippet(raw_line),
-                "vuln_classes": ["clickjacking", "xss"],
-            })
-        if _HTML_INLINE_HANDLER_RE.search(line):
-            sinks.append({
-                "kind": "inline_event_handler",
-                "line": line_no,
-                "function": "<html>",
-                "snippet": _snippet(raw_line),
-                "vuln_classes": ["xss"],
-            })
-        if _HTML_JS_URL_RE.search(line):
-            sinks.append({
-                "kind": "javascript_url",
-                "line": line_no,
-                "function": "<html>",
-                "snippet": _snippet(raw_line),
-                "vuln_classes": ["xss"],
-            })
-        if _HTML_MUSTACHE_RE.search(line):
-            sinks.append({
-                "kind": "template_interpolation",
-                "line": line_no,
-                "function": "<template>",
-                "snippet": _snippet(raw_line),
-                "vuln_classes": ["xss", "ssti"],
-            })
-        if _HTML_ASP_RE.search(line):
-            sinks.append({
-                "kind": "asp_interpolation",
-                "line": line_no,
-                "function": "<template>",
-                "snippet": _snippet(raw_line),
-                "vuln_classes": ["xss", "ssti"],
-            })
-
-    return funcs, entry_points, sinks, exports, imports
-
-
-# --- Blade (Laravel server templates) ---------------------------------------
-
-# One alternation, scanned in order over the joined source: a Blade comment
-# wins over the echo forms it can contain, and both echo forms cross line
-# boundaries in real templates (`{!! trans('k', [\n ... \n]) !!}`), which a
-# per-line pass cannot see. `@{{ ... }}` is Blade's own escape for a client-side
-# framework's braces and renders literally, so it is not an echo at all.
-_BLADE_CONSTRUCT_RE = re.compile(
-    r"\{\{--(?P<comment>.*?)--\}\}"
-    r"|\{!!(?P<raw>.*?)!!\}"
-    r"|(?<!@)\{\{(?P<escaped>.*?)\}\}",
-    re.DOTALL,
-)
-# The composition edges of the view graph: which template pulls in which.
-# Longer directive names first so `includeIf` is not consumed by `include`.
-_BLADE_IMPORT_RE = re.compile(
-    r"@(?:extends|includeFirst|includeUnless|includeWhen|includeIf|include"
-    r"|component|each)\s*\(\s*\[?\s*['\"]([^'\"]+)['\"]"
-)
-# The named slots a layout declares and a child fills -- the other half of the
-# same graph, and the only thing a Blade template exports.
-_BLADE_SLOT_RE = re.compile(
-    r"@(?P<directive>section|yield)\s*\(\s*['\"](?P<name>[^'\"]+)['\"]"
-)
-
-
-def _blade_echoes(source_lines: list[str]) -> list[dict[str, Any]]:
-    r"""Every Blade echo in one ordered `_BLADE_CONSTRUCT_RE` scan.
-
-    The alternation is the only reading that can tell an echo from the
-    `{{-- --}}` comment that may contain one: a per-line ``\{\{(?!--)`` rejects
-    only a match *starting* at the comment's braces, and the engine then
-    matches the echo inside it. `@{{ }}` is Blade's escape for a client-side
-    framework's braces and renders literally, so it is not an echo either.
-    Both the sink and the taint-source readings come from here, so the two
-    cannot disagree about what a Blade echo is.
-    """
-    text = "\n".join(source_lines)
-    line_starts = [0]
-    for line in source_lines:
-        line_starts.append(line_starts[-1] + len(line) + 1)
-
-    echoes: list[dict[str, Any]] = []
-    for match in _BLADE_CONSTRUCT_RE.finditer(text):
-        if match.group("comment") is not None:
-            continue
-        raw = match.group("raw")
-        line = bisect.bisect_right(line_starts, match.start())
-        echoes.append({
-            "line": line,
-            "raw": raw is not None,
-            "expression": raw if raw is not None else match.group("escaped"),
-            "snippet": _snippet(source_lines[line - 1]),
-        })
-    return echoes
-
-
-def _blade_template_sources(source_lines: list[str]) -> list[dict[str, Any]]:
-    """Blade's taint sources: the echoes are where controller data -- and
-    through it the request -- enters the rendered document."""
-    return [
-        {
-            "kind": "template_input",
-            "line": echo["line"],
-            "snippet": echo["snippet"],
-            "detection": "heuristic_template_regex",
-        }
-        for echo in _blade_echoes(source_lines)
-    ]
-
-
-def _extract_blade(
-    source_lines: list[str],
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[str]]:
-    """Index a Blade template.
-
-    The HTML pass runs first so a `.blade.php` yields every signal a `.html`
-    file would -- forms as entry points, external scripts, inline handlers. Its
-    mustache rule is then dropped rather than kept: in Blade `{{ }}` is the
-    *escaped* echo and `{{-- --}}` is a comment, so reporting both as one
-    `ssti`-bearing `template_interpolation` is the wrong answer twice. Blade's
-    own pass replaces it and distinguishes `{{ }}` from `{!! !!}`, which is the
-    unescaped construct and the reason this language has its own extractor.
-
-    Escaping is an observation, not clearance -- Blade's `e()` escapes for HTML
-    text, so an escaped echo inside a `<script>` or a URL attribute is still
-    XSS. See ``FREEMARKER_ESCAPE_OBSERVATIONS`` for the shared vocabulary.
-    """
-    funcs, entry_points, sinks, exports, imports = _extract_html(source_lines)
-    sinks = [sink for sink in sinks if sink["kind"] != "template_interpolation"]
-
-    text = "\n".join(source_lines)
-    line_starts = [0]
-    for line in source_lines:
-        line_starts.append(line_starts[-1] + len(line) + 1)
-
-    def line_of(offset: int) -> int:
-        return bisect.bisect_right(line_starts, offset)
-
-    for echo in _blade_echoes(source_lines):
-        sinks.append({
-            "kind": (
-                "unescaped_output" if echo["raw"] else "template_interpolation"
-            ),
-            "line": echo["line"],
-            "function": "<template>",
-            "snippet": echo["snippet"],
-            "vuln_classes": ["xss"],
-            "detection": "heuristic_template_regex",
-            "expression": _snippet(" ".join(echo["expression"].split())),
-            "escape_observation": (
-                "unverified_no_escape_observed"
-                if echo["raw"]
-                else "unverified_escape_observed"
-            ),
-        })
-
-    for match in _BLADE_IMPORT_RE.finditer(text):
-        imports.append(match.group(1))
-
-    for match in _BLADE_SLOT_RE.finditer(text):
-        exports.append({
-            "name": match.group("name"),
-            "kind": f"blade_{match.group('directive')}",
-            "line": line_of(match.start()),
-        })
-
-    return funcs, entry_points, sinks, exports, imports
-
-
-# --- CSS / SCSS -------------------------------------------------------------
-
-_CSS_IMPORT_RE = re.compile(r"@import\s+(?:url\()?\s*['\"]?([^'\"\s)]+)", re.IGNORECASE)
-_CSS_URL_RE = re.compile(r"\burl\(\s*['\"]?([^'\"\)]+)", re.IGNORECASE)
-_CSS_EXPRESSION_RE = re.compile(r"\bexpression\s*\(", re.IGNORECASE)
-_CSS_BEHAVIOR_RE = re.compile(r"\bbehavior\s*:", re.IGNORECASE)
-_CSS_BINDING_RE = re.compile(r"-moz-binding\s*:", re.IGNORECASE)
-
-
-def _extract_css(
-    source_lines: list[str],
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[str]]:
-    funcs: list[dict[str, Any]] = []
-    entry_points: list[dict[str, Any]] = []
-    sinks: list[dict[str, Any]] = []
-    exports: list[dict[str, Any]] = []
-    imports: list[str] = []
-
-    for idx, line in enumerate(source_lines):
-        line_no = idx + 1
-        stripped = line.lstrip()
-        if stripped.startswith("//") or stripped.startswith("/*"):
-            # Still scan for url() in comments? No -- skip pure comment lines.
-            continue
-        for m in _CSS_IMPORT_RE.finditer(line):
-            url = m.group(1)
-            imports.append(url)
-            if url.startswith(("http://", "//")):
-                sinks.append({
-                    "kind": "external_css_import",
-                    "line": line_no,
-                    "function": "<stylesheet>",
-                    "snippet": _snippet(line),
-                    "vuln_classes": ["supply-chain"],
-                })
-        for m in _CSS_URL_RE.finditer(line):
-            ref = m.group(1)
-            if ref.startswith(("http://", "//", "https://", "data:")):
-                imports.append(ref)
-        if _CSS_EXPRESSION_RE.search(line):
-            sinks.append({
-                "kind": "css_expression",
-                "line": line_no,
-                "function": "<stylesheet>",
-                "snippet": _snippet(line),
-                "vuln_classes": ["xss"],
-            })
-        if _CSS_BEHAVIOR_RE.search(line):
-            sinks.append({
-                "kind": "css_behavior",
-                "line": line_no,
-                "function": "<stylesheet>",
-                "snippet": _snippet(line),
-                "vuln_classes": ["xss"],
-            })
-        if _CSS_BINDING_RE.search(line):
-            sinks.append({
-                "kind": "css_moz_binding",
-                "line": line_no,
-                "function": "<stylesheet>",
-                "snippet": _snippet(line),
-                "vuln_classes": ["xss"],
-            })
-
-    return funcs, entry_points, sinks, exports, imports
-
-
-# --- FreeMarker -------------------------------------------------------------
-
-# Escape and context evidence from a line scanner is advisory. FreeMarker's
-# real escaping depends on the output format in force, the directive stack that
-# encloses a site, and the runtime type of the value -- none of which a regex
-# can settle. Every member of this vocabulary therefore names an *observation*,
-# never a verdict: there is deliberately no value that reads as "safe", and an
-# interpolation stays an XSS sink whatever was observed, because a false clean
-# on a template is worse than no signal at all.
-FREEMARKER_ESCAPE_OBSERVATIONS = (
-    "unverified_escape_observed",
-    "unverified_partial_escape_observed",
-    "unverified_escape_suppressed",
-    "unverified_no_escape_observed",
-)
-
-# Where an interpolation's bytes land in the rendered document. Which escaper
-# would be correct depends on this, so a reviewer needs the context even though
-# it too is regex-derived.
-FREEMARKER_OUTPUT_CONTEXTS = (
-    "html_text",
-    "html_attribute",
-    "url_attribute",
-    "event_handler_attribute",
-    "style_attribute",
-    "html_tag",
-    "html_comment",
-    "script",
-    "style",
-)
-
-_FREEMARKER_ESCAPER_BUILTINS = frozenset({
-    "html", "xhtml", "xml", "rtf", "esc",
-    "js_string", "jsString", "json_string", "jsonString",
-    "url", "urlPath", "url_path",
-})
-_FREEMARKER_ESCAPE_SUPPRESSORS = frozenset({"no_esc", "noEsc"})
-# Directives that change the escaping ambient to the interpolations they
-# enclose. Tracked as a stack so an inner one overrides its parent.
-_FREEMARKER_ESCAPE_SCOPES = frozenset({
-    "escape", "noescape", "outputformat", "autoesc", "noautoesc",
-})
-# FreeMarker's markup output formats -- the ones whose auto-escaper escapes for
-# a markup document. An allowlist, not a denylist of `plaintext`/`undefined`:
-# `JavaScript`, `JSON` and `CSS` are built-in formats that escape for something
-# other than HTML, and an application may register any name it likes, so a
-# denylist reads every format nobody enumerated as escaping. That is a false
-# clean on the exact template that needed the reviewer.
-_FREEMARKER_ESCAPING_FORMATS = frozenset({"html", "xhtml", "xml", "rtf"})
-# FreeMarker's "recognize output format by file extension" feature: ``.ftlh``
-# means HTML and ``.ftlx`` means XML, both escaping output formats, so
-# auto-escaping is on for the whole template before a single directive is read.
-# A bare ``.ftl`` inherits the application's configured default, which is
-# ``undefined`` out of the box and which this file cannot see either way -- so it
-# stays False, and every interpolation in it is reported unescaped until an
-# explicit directive says otherwise. An explicit ``<#ftl ...>`` header still wins
-# over the extension in both directions, because that is FreeMarker's own order.
-_FREEMARKER_ESCAPING_EXTENSIONS = frozenset({".ftlh", ".ftlx"})
-_FREEMARKER_FORM_FIELD_TAGS = frozenset({"button", "input", "select", "textarea"})
-_FREEMARKER_URL_ATTRIBUTES = frozenset({
-    "action", "background", "cite", "codebase", "data", "formaction", "href",
-    "longdesc", "manifest", "poster", "profile", "src", "srcset", "usemap",
-    "xlink:href",
-})
-_FREEMARKER_URL_VULN_CLASSES = ("xss", "open-redirect")
-_FREEMARKER_BUILTIN_RE = re.compile(r"\?([A-Za-z_]\w*)")
-_FREEMARKER_DIRECTIVE_NAME_RE = re.compile(r"^</?[#@]([A-Za-z_][\w.]*)")
-_FREEMARKER_CALLABLE_RE = re.compile(r"^<#(?:macro|function)\s+([A-Za-z_$][\w$]*)\s*")
-# Matched with `re.match(text, offset)`, which anchors on its own; a `^` here
-# would additionally demand the start of the whole source.
-_FREEMARKER_TAG_NAME_RE = re.compile(r"</?([A-Za-z][-\w:]*)")
-_FREEMARKER_ATTRIBUTE_NAME_RE = re.compile(r"[^\s=/>]+")
-_FREEMARKER_STRING_LITERAL_RE = re.compile(r"""(['"])(.*?)\1""")
-_FREEMARKER_OUTPUT_FORMAT_RE = re.compile(r"""output_format\s*=\s*(['"])([^'"]*)\1""")
-_FREEMARKER_AUTO_ESC_RE = re.compile(r"auto_esc\s*=\s*(true|false)")
-_FREEMARKER_EVENT_ATTRIBUTE_RE = re.compile(r"^on[a-z]+$")
-_FREEMARKER_SCALAR_LITERAL_RE = re.compile(r"^(?:-?\d+(?:\.\d+)?|true|false)$")
-# Constructs that evaluate template or Java code chosen at render time: the
-# FreeMarker sandbox-escape primitives, distinct from ordinary interpolation.
-_FREEMARKER_DYNAMIC_EVAL_RE = re.compile(
-    r"\?(?:eval|eval_json|evalJson|interpret|new)\b"
-    r"|\bfreemarker\.template\.utility\.(?:Execute|ObjectConstructor|JythonRuntime)\b"
-)
-# An unterminated `${` would otherwise make every later opener rescan the rest
-# of the file, so the search for a closing brace is bounded. A run longer than
-# this is reported as malformed, which keeps the site visible either way.
-_FREEMARKER_MAX_EXPRESSION_CHARS = 4096
-
-
-def _freemarker_split_top_level(expression: str, separators: str) -> list[str]:
-    """Split *expression* on *separators* outside string literals and brackets."""
-    pieces: list[str] = []
-    quote = ""
-    depth = 0
-    start = 0
-    index = 0
-    while index < len(expression):
-        char = expression[index]
-        if quote:
-            if char == "\\":
-                index += 2
-                continue
-            if char == quote:
-                quote = ""
-        elif char in "\"'":
-            quote = char
-        elif char in "([{":
-            depth += 1
-        elif char in ")]}":
-            depth -= 1
-        elif depth == 0 and char in separators:
-            pieces.append(expression[start:index])
-            start = index + 1
-        index += 1
-    pieces.append(expression[start:])
-    return [piece for piece in (item.strip() for item in pieces) if piece]
-
-
-def _freemarker_interpolation_end(text: str, brace: int) -> int:
-    """Return the offset just past the `}` closing the interpolation, or -1."""
-    limit = min(len(text), brace + _FREEMARKER_MAX_EXPRESSION_CHARS)
-    quote = ""
-    depth = 0
-    index = brace
-    while index < limit:
-        char = text[index]
-        if quote:
-            if char == "\\":
-                index += 2
-                continue
-            if char == quote:
-                quote = ""
-        elif char in "\"'":
-            quote = char
-        elif char == "{":
-            depth += 1
-        elif char == "}":
-            depth -= 1
-            if depth == 0:
-                return index + 1
-        index += 1
-    return -1
-
-
-def _freemarker_attribute_value_end(text: str, start: int, quote: str, length: int) -> int:
-    """Return the offset of the `quote` closing an attribute value, or -1.
-
-    Interpolation spans are stepped over, because a quote inside one belongs to
-    the FreeMarker expression and not to the attribute: `href="${url!""}"` and
-    `href="${msg("key")}"` are two of the commonest idioms in the themes this
-    extractor targets, and stopping at the first matching quote truncates the
-    value mid-`${`, downgrading a URL-context site to malformed noise.
-    """
-    index = start
-    while index < length:
-        char = text[index]
-        if char == quote:
-            return index
-        if char in "$#" and index + 1 < length and text[index + 1] == "{":
-            close = _freemarker_interpolation_end(text, index + 1)
-            if close > 0:
-                index = close
-                continue
-        index += 1
-    return -1
-
-
-def _freemarker_span_interpolations(text: str, start: int, end: int):
-    """Yield ``(open, close, syntax)`` for each interpolation in ``text[start:end]``.
-
-    ``close`` is -1 when the site is unterminated inside the span; the scan then
-    resumes just past the opening marker so the rest of the file is still read.
-    """
-    index = start
-    while index < end:
-        if text[index] in "$#" and index + 1 < end and text[index + 1] == "{":
-            syntax = "expression" if text[index] == "$" else "numeric"
-            close = _freemarker_interpolation_end(text, index + 1)
-            if close < 0 or close > end:
-                yield index, -1, syntax
-                index += 2
-                continue
-            yield index, close, syntax
-            index = close
-            continue
-        index += 1
-
-
-def _freemarker_builtins(expression: str) -> list[str]:
-    """Return the `?builtin` tokens in *expression*, verbatim and in source order."""
-    return [
-        f"?{match.group(1)}"
-        for match in _FREEMARKER_BUILTIN_RE.finditer(expression)
-    ]
-
-
-def _freemarker_observed_escapers(expression: str) -> list[str]:
-    """Return the escaping-related builtins applied anywhere in *expression*."""
-    return [
-        token
-        for token in _freemarker_builtins(expression)
-        if token[1:] in _FREEMARKER_ESCAPER_BUILTINS
-        or token[1:] in _FREEMARKER_ESCAPE_SUPPRESSORS
-    ]
-
-
-def _freemarker_value_operands(expression: str) -> list[str]:
-    """Return the sub-expressions whose escaping decides the rendered bytes.
-
-    Each top-level `+` operand contributes itself; a string literal contributes
-    only the interpolations nested inside it, because FreeMarker evaluates
-    `${...}` within string literals too; a scalar literal contributes nothing.
-    """
-    operands: list[str] = []
-    for operand in _freemarker_split_top_level(expression, "+"):
-        if len(operand) >= 2 and operand[0] in "\"'" and operand[-1] == operand[0]:
-            operands.extend(
-                operand[open_at + 2 : close_at - 1]
-                for open_at, close_at, _syntax in _freemarker_span_interpolations(
-                    operand, 0, len(operand)
-                )
-                if close_at > 0
-            )
-        elif not _FREEMARKER_SCALAR_LITERAL_RE.match(operand):
-            operands.append(operand)
-    return operands
-
-
-def _freemarker_escape_observation(expression: str, *, ambient_escaping: bool) -> str:
-    """Classify the escaping *observed* on one interpolation expression.
-
-    The result is a member of ``FREEMARKER_ESCAPE_OBSERVATIONS``: evidence for a
-    reviewer, never a clearance for the site.
-    """
-    if any(
-        token[1:] in _FREEMARKER_ESCAPE_SUPPRESSORS
-        for token in _freemarker_builtins(expression)
-    ):
-        return "unverified_escape_suppressed"
-    if ambient_escaping:
-        return "unverified_escape_observed"
-    operands = _freemarker_value_operands(expression)
-    escaped = [
-        operand
-        for operand in operands
-        if any(
-            token[1:] in _FREEMARKER_ESCAPER_BUILTINS
-            for token in _freemarker_builtins(operand)
-        )
-    ]
-    if operands and len(escaped) == len(operands):
-        return "unverified_escape_observed"
-    if escaped:
-        return "unverified_partial_escape_observed"
-    return "unverified_no_escape_observed"
-
-
-def _freemarker_scope_escaping(name: str, directive: str) -> bool:
-    """Whether an escape-scope directive turns escaping on for its body."""
-    if name == "escape":
-        # `<#escape x as x>` opens a scope that escapes nothing, so only a
-        # recognized escaper in the replacement expression counts.
-        return any(
-            token[1:] in _FREEMARKER_ESCAPER_BUILTINS
-            for token in _freemarker_builtins(directive)
-        )
-    if name == "outputformat":
-        literal = _FREEMARKER_STRING_LITERAL_RE.search(directive)
-        return (
-            literal is not None
-            and literal.group(2).strip().lower() in _FREEMARKER_ESCAPING_FORMATS
-        )
-    return name == "autoesc"
-
-
-def _freemarker_attribute_context(attribute: str) -> str:
-    """Return the output context an interpolation inside *attribute* lands in."""
-    name = attribute.lower()
-    if _FREEMARKER_EVENT_ATTRIBUTE_RE.match(name):
-        return "event_handler_attribute"
-    if name == "style":
-        return "style_attribute"
-    if name in _FREEMARKER_URL_ATTRIBUTES:
-        return "url_attribute"
-    return "html_attribute"
-
-
-def _freemarker_callable_params(declaration: str) -> list[str]:
-    """Return the parameter names declared after a macro/function name."""
-    body = declaration.rstrip()
-    if body.endswith("/>"):
-        body = body[:-2]
-    elif body.endswith(">"):
-        body = body[:-1]
-    params: list[str] = []
-    for token in _freemarker_split_top_level(body, " \t\n"):
-        name = token.split("=", 1)[0].strip().rstrip(".")
-        if name:
-            params.append(name)
-    return params
-
-
-def _freemarker_directive_end(text: str, start: int, length: int) -> int:
-    """Return the offset just past the `>` closing the directive, or -1."""
-    quote = ""
-    index = start
-    while index < length:
-        char = text[index]
-        if quote:
-            if char == "\\":
-                index += 2
-                continue
-            if char == quote:
-                quote = ""
-        elif char in "\"'":
-            quote = char
-        elif char == ">":
-            return index + 1
-        index += 1
-    return -1
-
-
-def _freemarker_tag_regions(
-    text: str, start: int, length: int
-) -> tuple[int, str, bool, list[tuple[int, int, str, str]], list[tuple[str, str]]]:
-    """Parse the HTML tag at *start* into interpolation regions.
-
-    Returns the offset after the tag, the lowercased start-tag name (empty for an
-    end tag), whether the tag is self-closing, the regions an interpolation can
-    occur in as ``(start, end, attribute, quote)`` -- an empty attribute meaning
-    the tag body itself, where an interpolation builds a tag or attribute name --
-    and the tag's ``(lowercased name, verbatim value)`` attributes.
-    """
-    regions: list[tuple[int, int, str, str]] = []
-    attributes: list[tuple[str, str]] = []
-    is_end_tag = text[start + 1 : start + 2] == "/"
-    name_match = _FREEMARKER_TAG_NAME_RE.match(text, start)
-    tag_name = "" if is_end_tag or name_match is None else name_match.group(1).lower()
-    index = name_match.end() if name_match is not None else start + (2 if is_end_tag else 1)
-    bare_start = index
-    self_closing = False
-    while index < length:
-        char = text[index]
-        if char == ">":
-            index += 1
-            break
-        if text.startswith("/>", index):
-            self_closing = True
-            index += 2
-            break
-        if char.isspace():
-            index += 1
-            continue
-        attribute_match = _FREEMARKER_ATTRIBUTE_NAME_RE.match(text, index)
-        if attribute_match is None:
-            index += 1
-            continue
-        attribute = attribute_match.group(0)
-        index = attribute_match.end()
-        probe = index
-        while probe < length and text[probe].isspace():
-            probe += 1
-        if probe >= length or text[probe] != "=":
-            attributes.append((attribute.lower(), ""))
-            continue
-        probe += 1
-        while probe < length and text[probe].isspace():
-            probe += 1
-        if probe >= length:
-            index = length
-            break
-        quote = text[probe] if text[probe] in "\"'" else ""
-        if quote:
-            value_start = probe + 1
-            value_end = _freemarker_attribute_value_end(text, value_start, quote, length)
-            if value_end < 0:
-                value_end = length
-            index = min(value_end + 1, length)
-        else:
-            value_start = probe
-            value_end = value_start
-            while value_end < length and not text[value_end].isspace() and text[value_end] != ">":
-                value_end += 1
-            index = value_end
-        regions.append((bare_start, value_start - len(quote), "", ""))
-        regions.append((value_start, value_end, attribute, quote))
-        attributes.append((attribute.lower(), text[value_start:value_end]))
-        bare_start = index
-    regions.append((bare_start, index, "", ""))
-    return index, tag_name, self_closing, regions, attributes
-
-
-def _extract_freemarker(
-    source_lines: list[str],
-    *,
-    file_path: str = "",
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[str]]:
-    """Index a FreeMarker template.
-
-    The HTML pass runs first so a `.ftl` yields every signal a `.html` file
-    would; this pass adds the template layer on top -- interpolation sites with
-    the output context they land in and the escaping observed on them, macros
-    and functions, template includes, and form fields.  Context and escaping are
-    regex-derived advisory signals only; see ``FREEMARKER_ESCAPE_OBSERVATIONS``.
-
-    ``file_path`` is read for its extension alone: ``.ftlh`` and ``.ftlx`` carry
-    an implied escaping output format, so the ambient starts on rather than off.
-    See ``_FREEMARKER_ESCAPING_EXTENSIONS``.  An unknown or absent path is
-    treated as a bare ``.ftl``, which is the reporting-heavy direction.
-    """
-    funcs, entry_points, sinks, exports, imports = _extract_html(source_lines)
-
-    # One linear scan over the joined source: interpolations, HTML tags and
-    # FreeMarker directives all cross line boundaries, so a per-line pass cannot
-    # resolve either the output context or the enclosing escape scope.
-    text = "\n".join(source_lines)
-    length = len(text)
-    line_starts = [0]
-    for line in source_lines:
-        line_starts.append(line_starts[-1] + len(line) + 1)
-
-    header_escaping = Path(file_path).suffix.lower() in _FREEMARKER_ESCAPING_EXTENSIONS
-    escape_stack: list[dict[str, Any]] = []
-    callable_stack: list[dict[str, Any]] = []
-    state = "text"
-
-    def line_of(offset: int) -> int:
-        return bisect.bisect_right(line_starts, offset)
-
-    def enclosing() -> str:
-        return callable_stack[-1]["name"] if callable_stack else "<template>"
-
-    def flag(kind: str, line: int, vuln_classes: list[str]) -> None:
-        sinks.append({
-            "kind": kind,
-            "line": line,
-            "function": enclosing(),
-            "snippet": _snippet(source_lines[line - 1]),
-            "vuln_classes": vuln_classes,
-            "detection": "heuristic_template_regex",
-        })
-
-    def close_callable(frame: dict[str, Any], end_line: int) -> None:
-        callable_kind = f"freemarker_{frame['kind']}"
-        func = _empty_func(frame["name"], frame["line"], end_line)
-        func["params"] = frame["params"]
-        func["is_entry_point"] = True
-        funcs.append(func)
-        entry_points.append({
-            "name": frame["name"],
-            "line": frame["line"],
-            "kind": callable_kind,
-            "annotation": "",
-        })
-        exports.append({
-            "name": frame["name"], "kind": callable_kind, "line": frame["line"]
-        })
-
-    def emit(span_start: int, span_end: int, context: str, attribute: str, quote: str) -> None:
-        for open_at, close_at, syntax in _freemarker_span_interpolations(
-            text, span_start, span_end
-        ):
-            line = line_of(open_at)
-            if close_at < 0:
-                flag("malformed_template_interpolation", line, ["xss"])
-                continue
-            expression = text[open_at + 2 : close_at - 1]
-            sinks.append({
-                "kind": "template_interpolation",
-                "line": line,
-                "function": enclosing(),
-                "snippet": _snippet(source_lines[line - 1]),
-                # An interpolation is an XSS sink whatever escaping was observed
-                # on it: `escape_observation` below is evidence, not clearance.
-                "vuln_classes": list(
-                    _FREEMARKER_URL_VULN_CLASSES
-                    if context == "url_attribute"
-                    else ("xss",)
-                ),
-                "detection": "heuristic_template_regex",
-                "interpolation_syntax": syntax,
-                "expression": _snippet(expression),
-                "output_context": context,
-                "attribute": attribute,
-                "attribute_quote": quote,
-                "escape_observation": _freemarker_escape_observation(
-                    expression,
-                    ambient_escaping=(
-                        bool(escape_stack[-1]["escaping"])
-                        if escape_stack
-                        else header_escaping
-                    ),
-                ),
-                "observed_escapers": _freemarker_observed_escapers(expression),
-                "ambient_escape_scopes": [
-                    {"directive": scope["directive"], "line": scope["line"]}
-                    for scope in escape_stack
-                ],
-            })
-            if _FREEMARKER_DYNAMIC_EVAL_RE.search(expression):
-                flag("freemarker_dynamic_evaluation", line, ["ssti", "injection"])
-
-    def handle_directive(start: int) -> int:
-        nonlocal header_escaping
-        end = _freemarker_directive_end(text, start, length)
-        line = line_of(start)
-        if end < 0:
-            flag("malformed_template_directive", line, ["xss"])
-            return length
-        directive = text[start:end]
-        match = _FREEMARKER_DIRECTIVE_NAME_RE.match(directive)
-        name = match.group(1).lower() if match is not None else ""
-        closing = directive.startswith("</")
-        self_closing = directive.rstrip().endswith("/>")
-        if _FREEMARKER_DYNAMIC_EVAL_RE.search(directive):
-            flag("freemarker_dynamic_evaluation", line, ["ssti", "injection"])
-        if name in {"macro", "function"}:
-            if closing:
-                if callable_stack and callable_stack[-1]["kind"] == name:
-                    close_callable(callable_stack.pop(), line)
-                else:
-                    flag("malformed_template_directive", line, ["xss"])
-            else:
-                declared = _FREEMARKER_CALLABLE_RE.match(directive)
-                if declared is not None:
-                    frame = {
-                        "name": declared.group(1),
-                        "kind": name,
-                        "line": line,
-                        "params": _freemarker_callable_params(directive[declared.end():]),
-                    }
-                    if self_closing:
-                        close_callable(frame, line)
-                    else:
-                        callable_stack.append(frame)
-        elif name in _FREEMARKER_ESCAPE_SCOPES:
-            if closing:
-                if escape_stack and escape_stack[-1]["name"] == name:
-                    escape_stack.pop()
-                else:
-                    flag("malformed_template_directive", line, ["xss"])
-            elif not self_closing:
-                escape_stack.append({
-                    "name": name,
-                    "directive": _snippet(directive),
-                    "line": line,
-                    "escaping": _freemarker_scope_escaping(name, directive),
-                })
-        elif name == "ftl" and not closing:
-            auto_esc = _FREEMARKER_AUTO_ESC_RE.search(directive)
-            output_format = _FREEMARKER_OUTPUT_FORMAT_RE.search(directive)
-            if auto_esc is not None:
-                header_escaping = auto_esc.group(1) == "true"
-            elif output_format is not None:
-                header_escaping = (
-                    output_format.group(2).strip().lower()
-                    in _FREEMARKER_ESCAPING_FORMATS
-                )
-        elif name in {"include", "import"} and not closing:
-            literal = _FREEMARKER_STRING_LITERAL_RE.search(directive)
-            if literal is not None:
-                imports.append(literal.group(2))
-        return end
-
-    def handle_tag(start: int) -> int:
-        nonlocal state
-        end, tag_name, self_closing, regions, attributes = _freemarker_tag_regions(
-            text, start, length
-        )
-        for region_start, region_end, attribute, quote in regions:
-            context = (
-                _freemarker_attribute_context(attribute) if attribute else "html_tag"
-            )
-            emit(region_start, region_end, context, attribute, quote)
-        if not self_closing:
-            if tag_name == "script":
-                state = "script"
-            elif tag_name == "style":
-                state = "style"
-        if tag_name in _FREEMARKER_FORM_FIELD_TAGS:
-            values = dict(attributes)
-            field = values.get("name", "")
-            if field:
-                entry_points.append({
-                    "name": field,
-                    "line": line_of(start),
-                    "kind": "html_form_field",
-                    "annotation": values.get("type", ""),
-                })
-        return end
-
-    index = 0
-    while index < length:
-        if text[index] != "<":
-            stop = text.find("<", index)
-            if stop < 0:
-                stop = length
-            emit(index, stop, "html_text" if state == "text" else state, "", "")
-            index = stop
-            continue
-        if text.startswith("<#--", index):
-            closed = text.find("-->", index + 4)
-            index = length if closed < 0 else closed + 3
-            continue
-        if text.startswith(("<#", "</#", "<@", "</@"), index):
-            index = handle_directive(index)
-            continue
-        if state in {"script", "style"}:
-            closer = f"</{state}"
-            if text[index : index + len(closer)].lower() == closer:
-                state = "text"
-                index += len(closer)
-            else:
-                index += 1
-            continue
-        if text.startswith("<!--", index):
-            closed = text.find("-->", index + 4)
-            emit(index + 4, length if closed < 0 else closed, "html_comment", "", "")
-            index = length if closed < 0 else closed + 3
-            continue
-        following = text[index + 1 : index + 2]
-        if following.isalpha() or following == "/" or text.startswith("<${", index):
-            index = handle_tag(index)
-            continue
-        index += 1
-
-    # Scopes still open at EOF are a template the scanner could not balance; the
-    # sites they cover were still indexed, so report the imbalance rather than
-    # dropping it.
-    for scope in escape_stack:
-        flag("malformed_template_directive", scope["line"], ["xss"])
-    for frame in callable_stack:
-        close_callable(frame, len(source_lines))
-        flag("malformed_template_directive", frame["line"], ["xss"])
-
-    return funcs, entry_points, sinks, exports, imports
-
-
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
-
-STREAMING_SCAN_WINDOW_BYTES = 64 * 1024
-STREAMING_SCAN_OVERLAP_BYTES = 512
-STRUCTURAL_SIGNAL_LIMIT = 2_000
-STREAMING_FALLBACK_BASELINE_UNAVAILABLE = frozenset({
-    "call_sites",
-    "classes",
-    "dataflow",
-    "exports",
-    "functions",
-})
-_UNSUPPORTED_UNAVAILABLE_DIMENSIONS = [
-    "call_sites",
-    "classes",
-    "dataflow",
-    "entry_points",
-    "exports",
-    "functions",
-    "imports",
-    "security_sinks",
-    "security_sources",
-]
-_SIGNAL_DIMENSIONS = (
-    "entry_points",
-    "imports",
-    "security_sinks",
-    "security_sources",
-)
-_CAPPED_INDEX_LISTS = (
-    "call_sites",
-    "classes",
-    "entry_points",
-    "exports",
-    "functions",
-    "import_targets",
-    "imports",
-    "security_sinks",
-    "security_sources",
-)
-
-# Where a value enters the file. A source is not a vulnerability -- the sink it
-# reaches is -- so these records carry a `kind` and no vuln class. Every one
-# of them used to name a class no taxonomy declares, which made the field a
-# vehicle that could hold nothing true.
-_STREAM_SOURCE_PATTERNS: dict[str, list[tuple[str, str]]] = {
-    "python": [
-        ("http_request_input", r"\brequest\.(?:args|form|json|values|files|headers)\b"),
-        ("process_input", r"\b(?:sys\.argv|os\.environ|getenv\s*\(|input\s*\()"),
-    ],
-    "javascript": [
-        ("http_request_input", r"\breq\.(?:params|query|body|headers|cookies)\b"),
-        ("process_input", r"\bprocess\.(?:argv|env)\b"),
-    ],
-    "typescript": [
-        ("http_request_input", r"\breq\.(?:params|query|body|headers|cookies)\b"),
-        ("process_input", r"\bprocess\.(?:argv|env)\b"),
-    ],
-    "java": [
-        ("http_request_input", r"\bget(?:Parameter|Header|InputStream)\s*\("),
-        ("process_input", r"\bSystem\.getenv\s*\("),
-    ],
-    "go": [
-        ("http_request_input", r"\br\.(?:URL\.Query|FormValue|Header\.Get)\s*\("),
-        ("process_input", r"\bos\.(?:Args|Getenv)\b"),
-    ],
-    "ruby": [
-        ("http_request_input", r"\b(?:params\s*\[|request\.)"),
-        ("process_input", r"\b(?:ENV\s*\[|ARGV\b)"),
-    ],
-    # Blade's two echo forms are where controller data -- and through it the
-    # request -- enters the rendered document. This is the streaming fallback's
-    # reading only, and it is the weaker one: `(?!--)` rejects a match starting
-    # at a comment's `{{` but not the echo written inside that comment, and a
-    # line-bounded scanner cannot see the `{{-- ... --}}` that encloses it.
-    # `_blade_template_sources` is the authority wherever the whole file is in
-    # hand, which is every path but this one; `_STREAM_EXTRA_SINK_PATTERNS`
-    # reads Blade's sinks with the same limit, so the two stay symmetrical.
-    "blade": [
-        ("template_input", r"\{\{(?!--)[^}\r\n]+\}\}|\{!![^!\r\n]+!!\}"),
-    ],
-    "php": [
-        ("http_request_input", r"\$_(?:GET|POST|REQUEST|COOKIE|FILES|SERVER)\b"),
-        # Idiomatic Laravel/Symfony/CodeIgniter never touches a superglobal:
-        # the request arrives as an injected object, `$this->request`, or the
-        # `request()` helper. Anchored on the request object rather than on
-        # accessor names, because a bare `->get(`/`->all(` also names a
-        # repository, a config bag and an Eloquent query builder.
-        ("http_request_input",
-         r"(?:\$request|\$req|\$this->(?:request|input)|\brequest\s*\(\s*\))\s*->"),
-        # The facade spellings the anchor above cannot see, narrowed to the
-        # accessors that only ever read request data.
-        ("http_request_input",
-         r"\b(?:Input|Request)::(?:input|get|all|query|post|json|file|header|cookie)\s*\("),
-        ("process_input", r"\bgetenv\s*\("),
-    ],
-    "c": [
-        ("process_input", r"\b(?:argv\s*\[|getenv\s*\(|read\s*\(|recv\s*\()"),
-    ],
-    "cpp": [
-        ("process_input", r"\b(?:argv\s*\[|getenv\s*\(|read\s*\(|recv\s*\()"),
-    ],
-    "shell": [
-        ("positional_parameter", r"\$(?:[1-9]|@|\*)\b"),
-        ("environment_input", r"\$\{?[A-Z_][A-Z0-9_]*\}?"),
-    ],
-    "powershell": [
-        ("script_parameter", r"\$(?:args|PSBoundParameters|MyInvocation)\b"),
-        ("environment_input", r"\$env:[A-Za-z_]\w*"),
-        ("interactive_input", r"\bRead-Host\b"),
-    ],
-    "dockerfile": [
-        ("build_argument", r"^\s*(?:ARG|ENV)\s+[A-Za-z_][A-Za-z0-9_]*"),
-    ],
-    "lua": [
-        ("script_argument", r"\b(?:ARGV|KEYS)\s*\["),
-    ],
-    "html": [
-        ("template_input", r"\{\{[^}\r\n]+\}\}|<%[^%\r\n]+%>"),
-    ],
-    "css": [
-        ("template_input", r"\{\{[^}\r\n]+\}\}|<%[^%\r\n]+%>"),
-    ],
-    "freemarker": [
-        ("template_input", r"[$#]\{[^}\r\n]+\}"),
-    ],
-}
-
-_STREAM_IMPORT_PATTERNS: dict[str, list[str]] = {
-    "blade": [
-        r"@(?:extends|include(?:First|Unless|When|If)?|component|each)\s*\([^\r\n)]*",
-        r"<(?:script|link|iframe)\b[^>]*(?:src|href)\s*=\s*['\"]?[^'\"\s>]+",
-    ],
-    "python": [r"\b(?:from\s+[\w.]+\s+import\b[^\r\n]*|import\s+[^\r\n]+)"],
-    "javascript": [r"\bimport\b[^\r\n]*", r"\brequire\s*\([^\r\n]*"],
-    "typescript": [r"\bimport\b[^\r\n]*", r"\brequire\s*\([^\r\n]*"],
-    "java": [r"\bimport\s+[\w.*]+"],
-    "go": [r"\bimport\s*(?:\([^\r\n]*|[\"`][^\"`]+[\"`])"],
-    "ruby": [r"\b(?:require|require_relative|load)\s*\(?\s*['\"][^'\"]+"],
-    "php": [r"\b(?:include|include_once|require|require_once|use)\b[^\r\n;]*"],
-    "c": [r"#\s*include\s*[<\"][^>\"]+[>\"]"],
-    "cpp": [r"#\s*include\s*[<\"][^>\"]+[>\"]"],
-    "lua": [r"\brequire\s*\(?\s*['\"][^'\"]+"],
-    "dockerfile": [r"^\s*(?:FROM|ADD)\s+[^\r\n]+"],
-    "shell": [r"^\s*(?:\.|source)\s+[^\r\n]+"],
-    "powershell": [
-        r"^\s*(?:Import-Module|using\s+(?:module|namespace))\s+[^\r\n]+",
-        r"^\s*\.\s+[^\s\r\n]+\.psm?1",
-    ],
-    "html": [r"<(?:script|link|iframe)\b[^>]*(?:src|href)\s*=\s*['\"]?[^'\"\s>]+"],
-    "css": [r"@import\s+(?:url\()?\s*['\"]?[^'\"\s)]+"],
-    "freemarker": [
-        r"<#(?:include|import)\s[^\r\n>]*",
-        r"<(?:script|link|iframe)\b[^>]*(?:src|href)\s*=\s*['\"]?[^'\"\s>]+",
-    ],
-}
-
-_STREAM_EXTRA_SINK_PATTERNS: dict[str, list[tuple[str, str, list[str]]]] = {
-    "blade": [
-        ("unescaped_output", r"\{!![^!\r\n]+!!\}", ["xss"]),
-        ("template_interpolation", r"\{\{(?!--)[^}\r\n]+\}\}", ["xss"]),
-        ("inline_event_handler", r"\bon[a-z]+\s*=\s*['\"][^'\"]+['\"]", ["xss"]),
-    ],
-    "dockerfile": [
-        ("remote_pipe_to_shell", r"\b(?:curl|wget)\b[^\r\n|;]*\|\s*(?:sh|bash|zsh)\b", ["supply-chain", "injection"]),
-        ("permissive_chmod", r"\bchmod\s+(?:-R\s+)?[0-7]*777\b", ["privilege-escalation"]),
-    ],
-    "shell": [
-        ("shell_eval", r"\beval\b", ["injection"]),
-        ("remote_pipe_to_shell", r"\b(?:curl|wget)\b[^\r\n|;]*\|\s*(?:sh|bash|zsh)\b", ["supply-chain", "injection"]),
-    ],
-    # One table, two readers: the structural extractor compiles these same
-    # strings, so a `.ps1` reports the same sinks whichever path indexed it.
-    "powershell": _PS_SINK_PATTERNS,
-    "lua": [
-        ("dynamic_code_load", r"\b(?:loadstring|load)\s*\(", ["injection"]),
-        ("os_execute", r"\bos\.execute\s*\(", ["injection"]),
-    ],
-    "html": [
-        ("inline_event_handler", r"\bon[a-z]+\s*=\s*['\"][^'\"]+['\"]", ["xss"]),
-        ("template_interpolation", r"\{\{[^}\r\n]+\}\}", ["xss", "ssti"]),
-    ],
-    "css": [
-        ("css_expression", r"\bexpression\s*\(", ["xss"]),
-        ("css_behavior", r"\bbehavior\s*:", ["xss"]),
-    ],
-    "freemarker": [
-        ("template_interpolation", r"[$#]\{[^}\r\n]+\}", ["xss"]),
-        ("inline_event_handler", r"\bon[a-z]+\s*=\s*['\"][^'\"]+['\"]", ["xss"]),
-        (
-            "freemarker_dynamic_evaluation",
-            r"\?(?:eval|eval_json|evalJson|interpret|new)\b",
-            ["ssti", "injection"],
-        ),
-    ],
-}
-
-_STREAM_EXTRA_ENTRY_PATTERNS: dict[str, list[tuple[str, str]]] = {
-    "blade": [("html_form", r"<form\b[^>]*\baction\s*=")],
-    "shell": [("shell_script", r"^#!")],
-    "powershell": [("script_parameters", r"^\s*param\s*\(")],
-    "dockerfile": [
-        ("container_cmd", r"^\s*CMD\b"),
-        ("container_entrypoint", r"^\s*ENTRYPOINT\b"),
-    ],
-    "html": [("html_form", r"<form\b[^>]*\baction\s*=")],
-    "freemarker": [
-        ("html_form", r"<form\b[^>]*\baction\s*="),
-        ("freemarker_macro", r"<#(?:macro|function)\s"),
-    ],
-}
-
-
-def _byte_pattern(pattern: str) -> re.Pattern[bytes]:
-    return re.compile(pattern.encode("ascii"), re.IGNORECASE)
-
-
-# Languages whose line comments open with `#`. An allowlist, because a leading
-# `#` is *code* in the rest of what this scanner serves: a C preprocessor
-# directive, a FreeMarker `#{...}` numeric interpolation, a Lua length operator.
-# Reading one as a comment drops the whole line from every detector below.
-_HASH_COMMENT_LANGUAGES = frozenset(
-    {"dockerfile", "php", "powershell", "python", "ruby", "shell"}
-)
-# ...and even there, `#` followed by one character is not: `#!` opens a shell
-# script's interpreter line, which is that language's own entry-point signal,
-# and `#[` opens a PHP 8 attribute, which carries the framework route table.
-_HASH_CODE_PREFIXES: dict[str, bytes] = {"php": b"#[", "shell": b"#!"}
-
-
-class StreamingSecurityScanner:
-    """Bounded line/window scanner used when exact structural parsing is unavailable."""
-
-    def __init__(
-        self,
-        file_path: str,
-        language: str,
-        *,
-        signal_limit: int = STRUCTURAL_SIGNAL_LIMIT,
-        window_bytes: int = STREAMING_SCAN_WINDOW_BYTES,
-        overlap_bytes: int = STREAMING_SCAN_OVERLAP_BYTES,
-    ) -> None:
-        if signal_limit < 1:
-            raise ValueError("signal_limit must be positive")
-        if overlap_bytes < 1 or window_bytes <= overlap_bytes:
-            raise ValueError("streaming scan window must exceed its positive overlap")
-        self.file_path = file_path
-        self.language = language
-        self.signal_limit = signal_limit
-        self.window_bytes = window_bytes
-        self.overlap_bytes = overlap_bytes
-        self._stride = window_bytes - overlap_bytes
-        self._line_buffer = bytearray()
-        self._line_number = 1
-        self._line_had_bytes = False
-        self._line_comment: bool | None = None
-        self._pending_cr = False
-        self.bytes_scanned = 0
-        self.total_lines = 0
-        self.entry_points: list[dict[str, Any]] = []
-        self.imports: list[str] = []
-        self.import_targets: list[dict[str, Any]] = []
-        self.security_sinks: list[dict[str, Any]] = []
-        self.security_sources: list[dict[str, Any]] = []
-        self.signal_counts = {dimension: 0 for dimension in _SIGNAL_DIMENSIONS}
-        self._truncated: set[str] = set()
-        self._sink_patterns = self._compile_sink_patterns()
-        self._source_patterns = [
-            (kind, _byte_pattern(pattern))
-            for kind, pattern in _STREAM_SOURCE_PATTERNS.get(language, [])
-        ]
-        self._entry_patterns = [
-            (item["kind"], _byte_pattern(item["pattern"]))
-            for item in (
-                _ENTRY_ANNOTATIONS.get(language, []) + _ENTRY_LINE_PATTERNS.get(language, [])
-            )
-        ] + [
-            (kind, _byte_pattern(pattern))
-            for kind, pattern in _STREAM_EXTRA_ENTRY_PATTERNS.get(language, [])
-        ]
-        self._import_patterns = [
-            _byte_pattern(pattern) for pattern in _STREAM_IMPORT_PATTERNS.get(language, [])
-        ]
-
-    def _compile_sink_patterns(
-        self,
-    ) -> list[tuple[str, re.Pattern[bytes], list[str]]]:
-        patterns: list[tuple[str, re.Pattern[bytes], list[str]]] = []
-        for definition in _SINK_DEFINITIONS:
-            for pattern in definition["patterns"].get(self.language, []):
-                patterns.append(
-                    (
-                        str(definition["kind"]),
-                        _byte_pattern(pattern),
-                        list(definition["vuln_classes"]),
-                    )
-                )
-        for kind, pattern, vuln_classes in _STREAM_EXTRA_SINK_PATTERNS.get(
-            self.language, []
-        ):
-            patterns.append((kind, _byte_pattern(pattern), vuln_classes))
-        return patterns
-
-    def feed(self, chunk: bytes) -> None:
-        """Consume a fixed source chunk without retaining an attacker-sized line."""
-        if not chunk:
-            return
-        self.bytes_scanned += len(chunk)
-        position = 0
-        if self._pending_cr:
-            if chunk.startswith(b"\n"):
-                position = 1
-            self._pending_cr = False
-        while position < len(chunk):
-            carriage = chunk.find(b"\r", position)
-            newline = chunk.find(b"\n", position)
-            separators = [value for value in (carriage, newline) if value >= 0]
-            if not separators:
-                self._append_line_bytes(chunk[position:])
-                return
-            separator = min(separators)
-            self._append_line_bytes(chunk[position:separator])
-            byte = chunk[separator]
-            self._finish_line()
-            position = separator + 1
-            if byte == 0x0D:
-                if position < len(chunk) and chunk[position] == 0x0A:
-                    position += 1
-                elif position == len(chunk):
-                    self._pending_cr = True
-
-    def _opens_a_comment(self, stripped: bytes) -> bool:
-        """Whether *stripped* — a line's first non-blank bytes — starts a comment."""
-        if stripped.startswith(b"//"):
-            return True
-        if not stripped.startswith(b"#") or self.language not in _HASH_COMMENT_LANGUAGES:
-            return False
-        code_prefix = _HASH_CODE_PREFIXES.get(self.language)
-        return code_prefix is None or not stripped.startswith(code_prefix)
-
-    def _append_line_bytes(self, data: bytes) -> None:
-        if not data:
-            return
-        self._line_had_bytes = True
-        if self._line_comment is None:
-            stripped = data.lstrip(b" \t\v\f")
-            if stripped:
-                self._line_comment = self._opens_a_comment(stripped)
-        self._line_buffer.extend(data)
-        while len(self._line_buffer) >= self.window_bytes:
-            window = bytes(self._line_buffer[: self.window_bytes])
-            self._scan_window(window, accept_before=self._stride)
-            del self._line_buffer[: self._stride]
-
-    def _finish_line(self) -> None:
-        if self._line_buffer:
-            self._scan_window(bytes(self._line_buffer), accept_before=len(self._line_buffer))
-        self.total_lines += 1
-        self._line_number += 1
-        self._line_buffer.clear()
-        self._line_had_bytes = False
-        self._line_comment = None
-
-    @staticmethod
-    def _snippet(window: bytes, start: int, end: int) -> str:
-        left = max(0, start - 48)
-        right = min(len(window), max(end + 72, start + 120))
-        text = window[left:right].decode("utf-8", errors="replace").strip()
-        return text if len(text) <= 120 else text[:117] + "..."
-
-    def _retain(self, dimension: str, record: dict[str, Any] | str) -> None:
-        self.signal_counts[dimension] += 1
-        target = getattr(self, dimension)
-        if len(target) < self.signal_limit:
-            target.append(record)
-        else:
-            self._truncated.add(dimension)
-
-    def _scan_window(self, window: bytes, *, accept_before: int) -> None:
-        if self._line_comment is True:
-            return
-        for kind, pattern, vuln_classes in self._sink_patterns:
-            for match in pattern.finditer(window):
-                if match.start() >= accept_before:
-                    continue
-                self._retain(
-                    "security_sinks",
-                    {
-                        "kind": kind,
-                        "line": self._line_number,
-                        "function": "<streaming>",
-                        "snippet": self._snippet(window, match.start(), match.end()),
-                        "vuln_classes": vuln_classes,
-                        "detection": "heuristic_streaming",
-                    },
-                )
-        for kind, pattern in self._source_patterns:
-            for match in pattern.finditer(window):
-                if match.start() >= accept_before:
-                    continue
-                self._retain(
-                    "security_sources",
-                    {
-                        "kind": kind,
-                        "line": self._line_number,
-                        "snippet": self._snippet(window, match.start(), match.end()),
-                        "detection": "heuristic_streaming",
-                    },
-                )
-        for kind, pattern in self._entry_patterns:
-            for match in pattern.finditer(window):
-                if match.start() >= accept_before:
-                    continue
-                self._retain(
-                    "entry_points",
-                    {
-                        "name": kind,
-                        "line": self._line_number,
-                        "kind": kind,
-                        "annotation": "",
-                        "detection": "heuristic_streaming",
-                    },
-                )
-        for pattern in self._import_patterns:
-            for match in pattern.finditer(window):
-                if match.start() >= accept_before:
-                    continue
-                raw = self._snippet(window, match.start(), match.end())
-                self.signal_counts["imports"] += 1
-                if len(self.imports) < self.signal_limit:
-                    self.imports.append(raw)
-                    self.import_targets.append(
-                        {
-                            "raw": raw,
-                            "resolved": "",
-                            "line": self._line_number,
-                            "detection": "heuristic_streaming",
-                        }
-                    )
-                else:
-                    self._truncated.add("imports")
-
-    def finish(self, *, degradation_reason: str) -> dict[str, Any]:
-        if self._line_had_bytes:
-            self._finish_line()
-        truncated = sorted(self._truncated)
-        unavailable = set(STREAMING_FALLBACK_BASELINE_UNAVAILABLE)
-        for dimension, patterns in (
-            ("entry_points", self._entry_patterns),
-            ("imports", self._import_patterns),
-            ("security_sinks", self._sink_patterns),
-            ("security_sources", self._source_patterns),
-        ):
-            if not patterns:
-                unavailable.add(dimension)
-        return {
-            "file_path": self.file_path,
-            "language": self.language,
-            "structural_index_available": False,
-            "analysis_status": "degraded",
-            "analysis_mode": "streaming_security_fallback",
-            "degradation_reason": degradation_reason,
-            "source_size": self.bytes_scanned,
-            "bytes_scanned": self.bytes_scanned,
-            "unavailable_dimensions": sorted(unavailable),
-            "artifact_truncated": bool(truncated),
-            "truncated_dimensions": truncated,
-            "signal_counts": dict(self.signal_counts),
-            "signal_limit_per_dimension": self.signal_limit,
-            "scan_window_bytes": self.window_bytes,
-            "scan_overlap_bytes": self.overlap_bytes,
-            "total_functions": 0,
-            "total_exports": 0,
-            "total_lines": self.total_lines,
-            "functions": [],
-            "entry_points": self.entry_points,
-            "security_sinks": self.security_sinks,
-            "security_sources": self.security_sources,
-            "call_sites": [],
-            "imports": self.imports,
-            "import_targets": self.import_targets,
-            "exports": [],
-            "classes": [],
-        }
-
-
-def streaming_security_fallback(
-    file_path: str,
-    language: str,
-    chunks,
-    *,
-    degradation_reason: str,
-) -> dict[str, Any]:
-    scanner = StreamingSecurityScanner(file_path, language)
-    for chunk in chunks:
-        scanner.feed(chunk)
-    return scanner.finish(degradation_reason=degradation_reason)
-
-
-def _fallback_from_bytes(
-    file_path: str,
-    language: str,
-    source: bytes,
-    *,
-    degradation_reason: str,
-) -> dict[str, Any]:
-    return streaming_security_fallback(
-        file_path,
-        language,
-        (source[offset : offset + STREAMING_SCAN_WINDOW_BYTES] for offset in range(0, len(source), STREAMING_SCAN_WINDOW_BYTES)),
-        degradation_reason=degradation_reason,
-    )
-
-
-def _attach_bounded_security_sources(
-    indexed: dict[str, Any],
-    *,
-    file_path: str,
-    language: str,
-    source: bytes,
-) -> dict[str, Any]:
-    """Read taint sources with the bounded line scanner, unless the caller read
-    them exactly. An extractor that already resolved whole-file constructs
-    (Blade) keeps its own answer; the per-line table stays the reading the
-    streaming fallback uses, where it is the only one available."""
-    if "security_sources" in indexed:
-        counts = dict(indexed.get("signal_counts") or {})
-        counts["security_sources"] = len(indexed["security_sources"])
-        indexed["signal_counts"] = counts
-        return indexed
-    observed = _fallback_from_bytes(
-        file_path,
-        language,
-        source,
-        degradation_reason="bounded_security_source_scan",
-    )
-    if "security_sources" in observed["unavailable_dimensions"]:
-        raise RuntimeError(f"no bounded security-source detector for {language}")
-    indexed["security_sources"] = observed["security_sources"]
-    counts = dict(indexed.get("signal_counts") or {})
-    counts["security_sources"] = int(observed["signal_counts"]["security_sources"])
-    indexed["signal_counts"] = counts
-    return indexed
-
-
-def _complete_index_metadata(
-    indexed: dict[str, Any],
-    *,
-    source_size: int,
-    analysis_mode: str,
-    unscanned_dimensions: set[str],
-) -> dict[str, Any]:
-    provided_counts = indexed.get("signal_counts")
-    if not isinstance(provided_counts, dict):
-        provided_counts = {}
-    retained_signal_counts = {
-        "entry_points": len(indexed.get("entry_points", [])),
-        "imports": max(
-            len(indexed.get("imports", [])), len(indexed.get("import_targets", []))
-        ),
-        "security_sinks": len(indexed.get("security_sinks", [])),
-        "security_sources": len(indexed.get("security_sources", [])),
-    }
-    signal_counts: dict[str, int] = {}
-    for dimension, retained in retained_signal_counts.items():
-        observed = provided_counts.get(dimension, retained)
-        if type(observed) is not int or observed < retained:
-            raise ValueError(f"{dimension} total undercounts retained records")
-        signal_counts[dimension] = observed
-
-    functions = indexed.setdefault("functions", [])
-    exports = indexed.setdefault("exports", [])
-    total_functions = indexed.get("total_functions", len(functions))
-    total_exports = indexed.get("total_exports", len(exports))
-    if type(total_functions) is not int or total_functions < len(functions):
-        raise ValueError("function total undercounts retained records")
-    if type(total_exports) is not int or total_exports < len(exports):
-        raise ValueError("export total undercounts retained records")
-    indexed["total_functions"] = total_functions
-    indexed["total_exports"] = total_exports
-
-    truncated: set[str] = set()
-    for dimension, retained in retained_signal_counts.items():
-        if signal_counts[dimension] > retained:
-            truncated.add(dimension)
-    if total_functions > len(functions):
-        truncated.add("functions")
-    if total_exports > len(exports):
-        truncated.add("exports")
-    for dimension in _CAPPED_INDEX_LISTS:
-        values = indexed.setdefault(dimension, [])
-        if len(values) > STRUCTURAL_SIGNAL_LIMIT:
-            indexed[dimension] = values[:STRUCTURAL_SIGNAL_LIMIT]
-            truncated.add("imports" if dimension == "import_targets" else dimension)
-    # Truncation and an unscanned scope are different debts on one field. The
-    # signal limit is the louder of the two -- it means retained records were
-    # dropped -- so it owns the reason, and `unavailable_dimensions` still names
-    # what was never read.
-    unavailable = sorted(unscanned_dimensions)
-    if truncated:
-        degradation_reason: str | None = "artifact_signal_limit"
-    elif unavailable:
-        degradation_reason = UNSCANNED_SCOPE_DEGRADATION_REASON
-    else:
-        degradation_reason = None
-    indexed.update(
-        {
-            "structural_index_available": True,
-            "analysis_status": "complete" if degradation_reason is None else "degraded",
-            "analysis_mode": analysis_mode,
-            "degradation_reason": degradation_reason,
-            "source_size": source_size,
-            "bytes_scanned": source_size,
-            "unavailable_dimensions": unavailable,
-            "artifact_truncated": bool(truncated),
-            "truncated_dimensions": sorted(truncated),
-            "signal_counts": signal_counts,
-            "signal_limit_per_dimension": STRUCTURAL_SIGNAL_LIMIT,
-        }
-    )
-    return indexed
 
 def language_for_file(file_path: str) -> str | None:
     """Return the language key for a file, or None if unsupported.
@@ -4975,14 +3236,14 @@ def index_file(
         if effective_lang == "cpp":
             functions = _deduplicate_cpp_functions(functions)
         entry_points = _detect_entry_points(
-            tree, functions, classes, effective_lang, source_lines
+            tree, functions, classes, effective_lang, source_lines, source
         )
         entry_points.extend(
             _detect_top_level_entry_points(
                 tree, effective_lang, source_lines, entry_points
             )
         )
-        sinks = _detect_sinks(functions, effective_lang, source_lines)
+        sinks = _detect_sinks(functions, classes, effective_lang, source_lines)
         call_sites = _detect_call_sites(functions, effective_lang, source_lines)
         unscanned = _unscanned_scope_dimensions(
             functions,
@@ -5001,6 +3262,86 @@ def index_file(
             language=effective_lang,
             source=source,
         )
+        if effective_lang == "java":
+            for func in functions:
+                if not any(re.fullmatch(r"@(?:RequestMapping|GetMapping|PostMapping|PutMapping|DeleteMapping|PatchMapping)", annotation)
+                           for annotation in func["annotations"]):
+                    continue
+                for param in func["params"]:
+                    if not param.strip() or "@" in param:
+                        continue
+                    parameter_type = param.strip().rsplit(" ", 1)[0].rsplit(".", 1)[-1]
+                    if parameter_type in {"Principal", "Model", "ModelMap"}:
+                        continue
+                    security_observations["security_sources"].append({
+                        "kind": "http_request_input",
+                        "line": func.get("_body_start_line", func["line_start"]),
+                        "snippet": param[:120],
+                        "detection": "structural_model_binding",
+                    })
+            security_observations["signal_counts"]["security_sources"] = len(
+                security_observations["security_sources"]
+            )
+        if effective_lang == "python":
+            routed = {
+                (entry["name"], entry["line"])
+                for entry in entry_points
+                if entry["kind"] in {"fastapi_route", "fastapi_router"}
+            }
+            for func in functions:
+                if (func["name"], func["line_start"]) not in routed:
+                    continue
+                for param in func["params"]:
+                    if (
+                        not param.strip()
+                        or "Depends" in param
+                        or re.search(r":\s*(?:Request|Response|BackgroundTasks|WebSocket)\b", param)
+                    ):
+                        continue
+                    security_observations["security_sources"].append({
+                        "kind": "http_request_input",
+                        "line": func["line_start"],
+                        "snippet": param[:120],
+                        "detection": "structural_model_binding",
+                    })
+            security_observations["signal_counts"]["security_sources"] = len(
+                security_observations["security_sources"]
+            )
+        if effective_lang == "csharp":
+            for func in functions:
+                if not func["is_entry_point"] or not (
+                    func.get("_minimal_api_route")
+                    or any(
+                        entry["kind"] == "aspnet_action" and entry["name"] == func["name"]
+                        and entry["line"] == func["line_start"]
+                        for entry in entry_points
+                    )
+                ):
+                    continue
+                for param in func["params"]:
+                    if (
+                        not param.strip()
+                        or "[FromServices" in param
+                        or re.search(
+                            r"\b(?:CancellationToken|HttpContext|HttpRequest|HttpResponse|ClaimsPrincipal|IServiceProvider|ILogger)\??\s+\w+\b",
+                            param,
+                        )
+                    ):
+                        continue
+                    if func.get("_minimal_api_route") and not re.search(
+                        r"\b(?:string|int|long|short|bool|decimal|double|float|Guid|DateTime|DateOnly|TimeOnly)\??\s+\w+\b|\[From(?:Body|Query|Route|Form|Header)\b",
+                        param,
+                    ):
+                        continue
+                    security_observations["security_sources"].append({
+                        "kind": "http_request_input",
+                        "line": func["line_start"],
+                        "snippet": param[:120],
+                        "detection": "structural_model_binding",
+                    })
+            security_observations["signal_counts"]["security_sources"] = len(
+                security_observations["security_sources"]
+            )
         _remove_internal_structural_fields(functions, classes)
     except MemoryError:
         raise

@@ -31,8 +31,9 @@ def run(args) -> None:
     payload = {key: value for key, value in payload.items() if value is not None}
 
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
-        result = require_write_result(
-            client.post("findings/merge", payload),
+        result = client.post("findings/merge", payload)
+        require_write_result(
+            result.get("target") if isinstance(result.get("target"), dict) else {},
             operation="merge findings",
             expected={"slug": args.target_slug},
         )

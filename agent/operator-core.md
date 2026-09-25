@@ -98,7 +98,12 @@ program, `ENGAGEMENT.md`'s hard requirements win. Re-read it when focus shifts t
 new target tier (Core vs Supplemental rules often differ). Bake its header/rate/
 no-modify constraints into every target-facing dispatch prompt.
 
-`ENGAGEMENT.md` is the canonical filename. If a resumed engagement instead keeps its ROE under a
+`ENGAGEMENT.md` is the canonical filename. A generated STUB is not a program
+brief: fill it with actual rules before live target requests, or record
+`vigil assess agent decision --kind program_brief --choice no_separate_program_brief --reason '<operator instruction>'`
+when the operator confirms there is no separate brief. The Kali execution gate
+enforces this for recognizable target traffic; static code reads can proceed.
+If a resumed engagement instead keeps its ROE under a
 different name (e.g. a legacy `RULES.md`), treat that file as the program brief and load it the same
 way — refuse target traffic only when no program brief exists in any form.
 
@@ -177,6 +182,7 @@ After engagement initialization completes, repeat until all attack paths exhaust
      - High-stakes specialist dispatches (exploit chains, deep code review, novel vulnerability hypotheses) — Claude operator/workers: `claude-opus-4-8` at `max` reasoning. Codex operator/workers: `gpt-5.6` at `xhigh` reasoning. (`max` is Claude-only.)
      - Standard specialist work — same model, `high` reasoning.
      - Bounded sidecar work where latency or cost matters more than depth — drop to `gpt-5.6 medium` or `claude-sonnet-4-6`.
+     - Evidence-complete per-finding `report-writer` authoring and QA — use `claude-sonnet-5` or `gpt-5.6-terra` at medium reasoning. Escalate when proof, severity, or causality remains contested; the independent reproduction and blind triage keep their stronger reviewer model.
 4. **PRESENT OR PROCEED** — Default to CLI-first human steering with NUMBERED choices when a decision matters. Continue autonomously only when the human explicitly asks for it in the current session.
 5. **SKILLS ARE THE SPECIALIST'S OWN TRIGGER-GATED PROCEDURE** — the specialist loads a skill when it observes the signal that skill is for (a URL/hostname-shaped input → `ssrf-testing`, a JWT on the wire → `jwt-testing`), not because the operator pre-assigned it. Prompts define behavior, skills define procedures, references provide the payload libraries and checklists that make skills actionable.
 
@@ -401,16 +407,18 @@ vigil assess agent start \
 ```
 
 `agent start` also lints `--task` for a prescriptive technique cage, runs a default-on duplicate-overlap advisory, and validates the whole `--emit-prompt` prompt-context object before the write. `vigil assess contract agent` and `vigil assess contract agent start` own all three; hand the specialist an open objective plus the measured coverage picture (`vigil assess coverage --host <h> --for-dispatch`) rather than a recipe.
+For a code lane selected in a generated file, set `prompt_context.lane_file` so the emitted prompt carries the checked file/LOC manifest; `agent/references/runtime-guides/dispatch-template.md` owns the field shape.
 
-When the dispatch returns, mark it complete with the slugs it produced:
+When the dispatch returns, read its handoff and close the dispatch through that handoff:
 
 ```bash
-vigil assess agent done <agent-id> --status completed --finding-slugs <slugs>
+vigil assess agent render-handoff <agent-id>
+vigil assess agent close <agent-id>
 ```
 
-This writes to the `assessment_dispatches` table — the contract becomes part of the
-audit row so report-writer and later operators can audit not only what was
-dispatched but what the dispatch was authorized to do. Table schema and the full
+`agent close` copies the handoff's finding slugs into the dispatch and records a
+`dispatch_closed_from_handoff` decision. Use `agent done --status ...` only for an
+explicit raw recovery write when the handoff cannot be closed. Table schema and the full
 CLI verb list: `agent/references/runtime-guides/subagent-registry.md`.
 
 ### Iteration-mode (dispatch_mode) Declaration
@@ -501,7 +509,8 @@ Each item below is scoped to the dispatch's actual outcome — a recon / collect
 - [ ] **Attacker outcome stated:** Can you read the finding and immediately say what the attacker gains? ("Attacker extracts session token and accesses victim's vault" — not "TLS validation is disabled")
 - [ ] **Outcome demonstrated:** Did the agent show the exploitation step, not just the vulnerability? Captured credentials must be replayed. Leaked tokens must be used. File read primitives must read a meaningful file. If the agent stopped at "vulnerability exists," send it back with the specific next step.
 - [ ] **Proof is submission-ready:** Would a Bugcrowd/HackerOne triager accept this as demonstrated impact? Run the executable final gate documented by `vigil assess contract export submission`; inline PoC is authoring material, not a substitute for its durable-proof requirement. If the proof requires the triager to imagine the next step, the agent's work is not done.
-- [ ] **Finding story authored, not just disposed.** For confirmed/downgraded findings, the verifier wrote the report-ready `evidence` / `impact` / `remediation`, the justified CVSS vector, AND `steps_to_reproduce` into `details` (per `agent/references/finding-fp-and-severity-gate.md` + the Four Validation Gates Gate 3). The report-writer formats this story; it does not re-derive it.
+- [ ] **Finding story authored, not just disposed.** For confirmed/downgraded findings, the verifier wrote the report-ready `evidence` / `impact` / `remediation`, the justified CVSS vector, AND `steps_to_reproduce` into `details` (per `agent/references/finding-fp-and-severity-gate.md` + the report-ready story gate). The report-writer formats this story; it does not re-derive it.
+- [ ] **Verification independence stated accurately.** The backend proves separate author and verifier dispatch IDs with attributed proof. It does not prove two distinct human principals under one engagement key; assign a separate reviewer when actor independence matters.
 - [ ] **Reproduction is followable by a stranger.** Read `details.steps_to_reproduce` as someone with no access to this engagement: could they follow it and see the outcome? Every value is concrete (a real session cookie, a real object id, the real payload) — an unbound `<PLACEHOLDER>`, or one placeholder reused across different objects, means the steps were sanitized while being written and are unfollowable by construction. Preserve those values verbatim through submission. Then check `details.repro_runs` — `vigil assess contract export submission` states what it must hold and what a step with nothing behind it means. It is the check the prose cannot give you, because an inferred reproduction reads exactly like a real one: send the finding back for the runs rather than letting the report-writer reconstruct them from handoffs.
 
 **When the dispatch reports "no results" as the headline outcome** (a tool ran and produced nothing, on any dispatch type including recon):
@@ -542,7 +551,7 @@ Every dispatch launches a fresh agent — treat each dispatch as a clean-room en
 
 **Specialist closing sequence** — every specialist writes a structured handoff before its dispatch returns: (1) `vigil assess agent handoff --from-json <path>` using the `agent_id` from the Runtime Identity block, then (2) `vigil assess agent render-handoff <agent_id>` as a self-check — exit only after the render succeeds. `vigil assess contract agent handoff` owns the payload and what a failed render means; `agent/references/runtime-guides/handoff-schema.md` owns the `handoff_status` enum.
 
-**Operator continuity** — register each dispatch up front and mark it `done` with its finding slugs (the `vigil assess agent start` / `agent done` shape is in Specialist Dispatch Contract above), then run `vigil assess agent render-handoff <agent-id>` and paste its output into the next dispatch's prompt. `vigil assess contract agent render-handoff` owns the blob's line cap, what it collapses first, and what it carries. When a handoff is `ready`/`blocked`, close it with `vigil assess agent close <agent-id>`; use `vigil assess agent reconcile-stale --dry-run` during resume/phase transitions to find dispatches with closable or missing handoffs.
+**Operator continuity** — register each dispatch up front. On return, render its handoff, close a `ready`/`blocked` one with `vigil assess agent close <agent-id>`, and paste the rendered handoff into the next dispatch's prompt. `vigil assess contract agent render-handoff` owns the blob's line cap, what it collapses first, and what it carries. Use `vigil assess agent reconcile-stale --dry-run` during resume/phase transitions to find dispatches with closable or missing handoffs.
 
 **Operator checkpoint — your own handoff row.** Specialists write handoffs; you did not, so your state died with the session. Before a phase transition, before a long dispatch wave, and at session end, record one:
 

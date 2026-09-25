@@ -305,7 +305,8 @@ vigil assess code-dispatch reanalyze \
 ```
 
 `reanalyze` requires the prior row to be complete, links the new row to that predecessor, and
-refuses active/error/needs-context rows without changing them. Fetch the new leases normally.
+refuses active/error/needs-context rows without changing them. The backend derives current priority
+and predecessor; include either value only to reject stale queue state. Fetch the new leases normally.
 
 ```json
 {"cwe_directives": ["path-traversal", "injection"], "prior_effort": {"path-traversal": {"effort": 25, "functions_analyzed": 1, "notes": "checked main handler only"}, "injection": {"effort": 40, "functions_analyzed": 3, "notes": "basic sink check"}}, "target_effort": 70, "entry_chains_to_trace": ["handleUpload -> FileUtils.copyFile -> FileOutputStream.write"], "cwe_pattern_refs": ["agent/references/code-vuln-patterns/injection.md", "agent/references/code-vuln-patterns/web-app-injection.md"]}

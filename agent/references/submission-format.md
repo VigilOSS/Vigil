@@ -193,7 +193,7 @@ justification, not a retelling of the scenario.]
 ---
 
 ## OPERATOR DETAILS — NOT FOR SUBMISSION
-[Reference section — present in both draft and final, ALWAYS below this second `---`, NEVER pasted.
+[Reference section — present in the local draft and final workspaces below this second `---`, excluded from the delivered package.
 Consolidates everything you author the body FROM: the finding metadata to weave in, any
 internal-identifier hygiene warnings to strip, the structured proof (`poc_*` / `evidence_ref`) to
 author Evidence from verbatim, and every linked command run. The pasteable body is everything from

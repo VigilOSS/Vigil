@@ -82,7 +82,21 @@ def _validate_source_receipt(item_index: int, result: dict) -> None:
             file=sys.stderr,
         )
         sys.exit(1)
-    if result.get("disposition") != "skipped" and not callable_refs and not reviewed_spans:
+    empty_file_reviewed = result.get("empty_file_reviewed") is True
+    if empty_file_reviewed and (
+        result.get("disposition") != "clean" or callable_refs or reviewed_spans
+    ):
+        print(
+            f"Item {item_index} empty_file_reviewed requires clean with no anchors",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if (
+        result.get("disposition") != "skipped"
+        and not empty_file_reviewed
+        and not callable_refs
+        and not reviewed_spans
+    ):
         print(
             f"Item {item_index} requires callable_refs or reviewed_spans",
             file=sys.stderr,
@@ -104,6 +118,23 @@ def _validate_source_receipt(item_index: int, result: dict) -> None:
                     file=sys.stderr,
                 )
                 sys.exit(1)
+            if collection_name == "callable_refs" and (
+                "line_start" in anchor or "line_end" in anchor
+            ):
+                if (
+                    "start_line" in anchor
+                    or "end_line" in anchor
+                    or "line_start" not in anchor
+                    or "line_end" not in anchor
+                ):
+                    print(
+                        f"Item {item_index} callable_refs entry {anchor_index} "
+                        "must use one complete line range spelling",
+                        file=sys.stderr,
+                    )
+                    sys.exit(1)
+                anchor["start_line"] = anchor.pop("line_start")
+                anchor["end_line"] = anchor.pop("line_end")
             missing = [field for field in required_fields if field not in anchor]
             if missing:
                 print(
@@ -130,6 +161,16 @@ def _validate_source_receipt(item_index: int, result: dict) -> None:
                 sys.exit(1)
 
 
+def _validate_supersedes(item_index: int, result: dict) -> None:
+    supersedes = result.get("supersedes")
+    if supersedes is not None and (type(supersedes) is not int or supersedes < 1):
+        print(
+            f"Item {item_index} supersedes must be a positive integer analysis-result ID",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+
 def _require_canonical_source_receipt_response(
     response: dict, *, submitted: dict
 ) -> None:
@@ -142,6 +183,8 @@ def _require_canonical_source_receipt_response(
         if submitted_refs
         else "source_span"
         if submitted_spans
+        else "empty_file"
+        if submitted.get("empty_file_reviewed") is True
         else "skipped_unbound"
     )
     canonical_shape = isinstance(returned_refs, list) and isinstance(
@@ -228,6 +271,12 @@ def register(subparsers) -> None:
         help="Record grouped source-review receipts from code-vuln-hunter",
     )
     p.add_argument(
+        "--supersede",
+        type=int,
+        metavar="QUEUE_ITEM_ID",
+        help="Append a correction to a completed queue item's current receipt",
+    )
+    p.add_argument(
         "analysis_json",
         help="Path to JSON file with a single result object or array of result objects",
     )
@@ -235,6 +284,10 @@ def register(subparsers) -> None:
 
 
 def run(args) -> None:
+    supersede_queue_item_id = getattr(args, "supersede", None)
+    if supersede_queue_item_id is not None and supersede_queue_item_id < 1:
+        print("--supersede must be a positive queue item ID", file=sys.stderr)
+        sys.exit(1)
     json_path = Path(args.analysis_json)
     if not json_path.is_file():
         print(f"Analysis JSON file not found: {args.analysis_json}", file=sys.stderr)
@@ -280,6 +333,14 @@ def run(args) -> None:
         _validate_cwe_coverage(i, result)
         _validate_cross_file_triggers(i, result)
         _validate_source_receipt(i, result)
+        _validate_supersedes(i, result)
+        if supersede_queue_item_id is not None:
+            if int(result["queue_item_id"]) != supersede_queue_item_id:
+                print(
+                    f"Item {i} queue_item_id must match --supersede {supersede_queue_item_id}",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
 
     cfg = load_config(args.engagement_dir)
     submit_snapshot = write_json_snapshot(
@@ -288,13 +349,49 @@ def run(args) -> None:
         label=json_path.stem,
         payload=results,
         source_path=str(json_path),
-        metadata={"command": "code-record analysis", "count": len(results)},
+        metadata={
+            "command": "code-record analysis",
+            "count": len(results),
+            **({"supersede_queue_item_id": supersede_queue_item_id} if supersede_queue_item_id else {}),
+        },
     )
     responses = []
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         created = 0
+        current_by_queue: dict[int, list[dict]] = {}
+        if supersede_queue_item_id is not None:
+            current = client.get(
+                f"code/analysis-results?queue_item_id={supersede_queue_item_id}"
+            )
+            if not isinstance(current, list) or not current:
+                raise AssessError(
+                    f"--supersede queue item {supersede_queue_item_id} has no current receipt"
+                )
+            current_by_queue[supersede_queue_item_id] = current
+            if any(int(row.get("queue_item_id", -1)) != supersede_queue_item_id for row in current):
+                raise AssessError("backend returned receipts for a different queue item")
         for result in results:
-            resp = client.post("code/analysis-results", result)
+            submitted = dict(result)
+            if supersede_queue_item_id is not None:
+                current = current_by_queue[supersede_queue_item_id]
+                current_ids = {int(row["id"]) for row in current}
+                predecessor = submitted.get("supersedes")
+                if predecessor is None:
+                    if len(results) != 1 or len(current_ids) != 1:
+                        raise AssessError(
+                            "--supersede requires explicit supersedes IDs when correcting multiple receipts"
+                        )
+                    predecessor = next(iter(current_ids))
+                    submitted["supersedes"] = predecessor
+                if predecessor not in current_ids:
+                    raise AssessError(
+                        f"supersedes {predecessor} is not a current receipt for queue item {supersede_queue_item_id}"
+                    )
+                current_ids.remove(predecessor)
+                current_by_queue[supersede_queue_item_id] = [
+                    row for row in current if int(row["id"]) != predecessor
+                ]
+            resp = client.post("code/analysis-results", submitted)
             expected = {
                 "queue_item_id": int(result["queue_item_id"]),
                 "agent_name": result["agent_name"],
@@ -304,13 +401,15 @@ def run(args) -> None:
             }
             if result.get("file_id") is not None:
                 expected["file_id"] = int(result["file_id"])
+            if submitted.get("supersedes") is not None:
+                expected["supersedes"] = submitted["supersedes"]
             require_write_result(
                 resp,
                 operation="record code analysis result",
                 expected=expected,
                 positive_ids=("id",),
             )
-            _require_canonical_source_receipt_response(resp, submitted=result)
+            _require_canonical_source_receipt_response(resp, submitted=submitted)
             responses.append(resp)
             created += 1
             disp = result.get("disposition", "?")

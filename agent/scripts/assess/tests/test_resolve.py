@@ -122,6 +122,20 @@ def test_resolve_surface_partially_covered_with_followup(tmp_path, monkeypatch, 
     assert payload["followup_condition"] == "needs auth re-test"
 
 
+def test_resolve_surface_followup_length_is_checked_before_patch(tmp_path, monkeypatch, capsys):
+    fake = _FakeClient()
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(
+        ["resolve", "surface", "31", "--status", "partially-covered",
+         "--rationale", "reviewed", "--followup-condition", "x" * 4097],
+        str(tmp_path),
+    )
+    with pytest.raises(SystemExit):
+        resolve.run(args)
+    assert fake.patches == []
+    assert "4096" in capsys.readouterr().err
+
+
 def test_resolve_surface_extra_flags_thread(tmp_path, monkeypatch, capsys):
     fake = _FakeClient()
     _install(monkeypatch, tmp_path, fake)

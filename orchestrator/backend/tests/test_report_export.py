@@ -7,7 +7,7 @@ import pytest
 
 from app.api import report_export
 from app.config import settings
-from tests.proof_fixtures import post_artifact_backed_source_observation
+from tests.proof_fixtures import completed_confirm_check, post_artifact_backed_source_observation
 
 
 ENGAGEMENT_KEY = "2026-06-01-090000-report-export"
@@ -90,6 +90,23 @@ def _seed(client, isolate_settings, **kwargs) -> None:
     assert response.status_code == 200, response.text
 
 
+def _command_run(client, suffix: str) -> int:
+    response = client.post(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs",
+        json={
+            "run_uuid": f"report-export-repro-{suffix}",
+            "command": f"curl https://acme.example/{suffix}",
+            "tool_name": "curl", "agent_name": "SOURCE-VA-001",
+            "phase": "verify", "status": "completed", "return_code": 0,
+            "started_at": "2026-09-25T12:00:00Z",
+            "completed_at": "2026-09-25T12:00:01Z",
+            "stdout": "observed outcome",
+        },
+    )
+    assert response.status_code == 201, response.text
+    return int(response.json()["id"])
+
+
 def _finding(slug: str, title: str, *, severity: str = "high") -> dict:
     return {
         "slug": slug,
@@ -167,6 +184,15 @@ def _verify_finding(
         },
     )
     assert run.status_code == 201, run.text
+    linked = client.post(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/findings/{slug}/links",
+        json={
+            "link_kind": "proof_run",
+            "target_kind": "assessment_run",
+            "target_id": run.json()["id"],
+        },
+    )
+    assert linked.status_code == 200, linked.text
     receipt = post_artifact_backed_source_observation(
         client,
         f"/engagements/{ENGAGEMENT_KEY}/assessment/proof-receipts",
@@ -189,6 +215,8 @@ def _verify_finding(
         "reason_text": "independently reproduced",
         "proof_receipt_ids": [receipt_id],
     }
+    if disposition in {"confirmed", "downgraded"}:
+        verify_payload["confirm_check"] = completed_confirm_check(receipt_id)
     if disposition == "false_positive":
         verify_payload["reason_text"] = "the suspected path is not attacker reachable"
         # A false-positive kill is a terminal state, so the API requires the
@@ -383,7 +411,8 @@ def test_report_findings_project_repro_runs_alongside_steps(client, isolate_sett
     # details_json. Integer ids stringify rather than being dropped.
     _seed(client, isolate_settings)
     payload = _finding("VA-051", "Finding with backed steps")
-    payload["details"]["repro_runs"] = [56052, "56054"]
+    first, second = _command_run(client, "first"), _command_run(client, "second")
+    payload["details"]["repro_runs"] = [first, str(second)]
     _add_finding(client, payload)
 
     resp = client.get(
@@ -391,7 +420,7 @@ def test_report_findings_project_repro_runs_alongside_steps(client, isolate_sett
     )
     assert resp.status_code == 200, resp.text
     rec = next(r for r in resp.json()["standalone"] if r["slug"] == "VA-051")
-    assert rec["repro_runs"] == ["56052", "56054"]
+    assert rec["repro_runs"] == [str(first), str(second)]
 
 
 def test_readiness_advises_on_steps_with_no_repro_runs(client, isolate_settings):
@@ -417,7 +446,7 @@ def test_readiness_advises_on_steps_with_no_repro_runs(client, isolate_settings)
     _add_finding(client, unbacked)
     backed = _finding("VA-061", "Steps with runs behind them", severity="critical")
     backed["details"].update(critical_cvss)
-    backed["details"]["repro_runs"] = [56052]
+    backed["details"]["repro_runs"] = [_command_run(client, "readiness")]
     _add_finding(client, backed)
 
     resp = client.get(f"/engagements/{ENGAGEMENT_KEY}/assessment/report-readiness")
@@ -739,7 +768,7 @@ def test_report_payload_omits_readiness_from_a_final_export(
         {
             "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N",
             "cvss_score": 9.1,
-            "repro_runs": [56052],
+            "repro_runs": [_command_run(client, "final-payload")],
         }
     )
     _add_finding(client, backed)

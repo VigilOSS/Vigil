@@ -366,6 +366,7 @@ def emit_result(result: KaliResult) -> None:
                 "peak_rss_bytes": result.peak_rss_bytes,
                 "timed_out": result.timed_out,
                 "partial_results": result.partial_results,
+                "audit_finalized": result.audit_finalized,
                 # The argv that ACTUALLY ran inside the container, after the
                 # transparent header / --resolve-pin / exclude-tags injections —
                 # so the operator sees what executed, not just what it typed.
@@ -379,7 +380,10 @@ def emit_result(result: KaliResult) -> None:
             ensure_ascii=False,
         )
     )
-    code = kali_exit_code(result.status)
+    # A usable target response is not a completed Vigil operation until its
+    # terminal audit row is durable. Keep the target verdict in JSON and give
+    # the audit failure its own exit code.
+    code = 7 if not result.audit_finalized else kali_exit_code(result.status)
     if code:
         sys.exit(code)
 

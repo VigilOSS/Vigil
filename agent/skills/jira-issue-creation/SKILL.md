@@ -27,6 +27,12 @@ Not this skill: choosing a bug-bounty platform or drafting the submission prose 
 that is `report-generation` (submission-first closeout). This skill starts once
 the destination is a Jira instance.
 
+For a Vigil finding, finish its report-writer QA, current reproduction check, and
+applicable blind triage before creating the Jira issue. Run the final
+`vigil assess export submission <slug> --platform direct --overwrite` gate and
+use its reviewed external body as the issue description. If the ticket is an
+ordinary non-finding record, this finding gate does not apply.
+
 ## Auth is pluggable; the payload is not
 
 The `fields` object you send is identical no matter how you authenticate or which

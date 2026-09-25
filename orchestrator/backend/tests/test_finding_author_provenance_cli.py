@@ -26,6 +26,7 @@ from pathlib import Path
 import pytest
 
 from tests.test_engagements_api import write_engagement
+from tests.proof_fixtures import completed_confirm_check
 from app import db as db_module
 
 _SCRIPTS_ROOT = Path(__file__).resolve().parents[3] / "agent" / "scripts"
@@ -93,7 +94,7 @@ def _cli_payload(slug: str, *, dispatch_agent_id: str) -> dict:
     )
 
 
-def _verifier_receipt(client, suffix: str) -> int:
+def _verifier_receipt(client, suffix: str, finding_slug: str) -> int:
     """Return a healthy command receipt owned by the independent verifier."""
 
     run = client.post(
@@ -105,6 +106,11 @@ def _verifier_receipt(client, suffix: str) -> int:
         },
     )
     assert run.status_code == 201, run.text
+    linked = client.post(
+        f"{BASE}/findings/{finding_slug}/links",
+        json={"link_kind": "proof_run", "target_kind": "assessment_run", "target_id": run.json()["id"]},
+    )
+    assert linked.status_code == 200, linked.text
     command = client.post(
         f"{BASE}/command-runs",
         json={
@@ -304,12 +310,14 @@ def test_cli_recorded_finding_reaches_confirmed(client, isolate_settings) -> Non
     assert recorded.status_code == 201, recorded.text
     assert recorded.json()["finding"]["provenance"]["agent_id"] == AUTHOR_DISPATCH
 
+    receipt_id = _verifier_receipt(client, "va-010", "VA-010")
     confirmed = client.post(
         f"{BASE}/findings/VA-010/verify",
         json={
             "verification_status": "confirmed",
             "reason_text": "independent verifier replayed the cross-tenant read",
-            "proof_receipt_ids": [_verifier_receipt(client, "va-010")],
+            "proof_receipt_ids": [receipt_id],
+            "confirm_check": completed_confirm_check(receipt_id),
         },
     )
     assert confirmed.status_code == 200, confirmed.text
@@ -502,7 +510,7 @@ def test_terminal_verification_still_requires_an_independent_resolvable_author(
         json={
             "verification_status": "confirmed",
             "reason_text": "independent verifier replayed the cross-tenant read",
-            "proof_receipt_ids": [_verifier_receipt(client, slug.lower())],
+            "proof_receipt_ids": [_verifier_receipt(client, slug.lower(), slug)],
         },
     )
     assert refused.status_code == 400, refused.text

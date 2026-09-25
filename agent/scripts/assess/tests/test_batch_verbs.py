@@ -118,6 +118,22 @@ def _parse(module, argv, tmp_path) -> argparse.Namespace:
     module.register(sub)
     args = parser.parse_args(argv)
     args.engagement_dir = str(tmp_path)
+    if (
+        module is verify_finding
+        and args.verification_status in {"confirmed", "downgraded"}
+        and not args.payload_file
+        and not args.confirm_check_file
+    ):
+        check_path = tmp_path / "confirm-check.json"
+        check_path.write_text(json.dumps({
+            "method": "Replay the claim",
+            "attempted_falsification": "Check whether the expected guard blocks it",
+            "expected_result": "The guard blocks the claim",
+            "observed_result": "The claim still reproduces",
+            "proof_receipt_ids": [17],
+            "completed": True,
+        }), encoding="utf-8")
+        args.confirm_check_file = str(check_path)
     return args
 
 
@@ -154,6 +170,27 @@ def test_verify_batch_applies_same_payload_to_each(tmp_path, monkeypatch, capsys
         for _, p in fake.posts
     )
     assert "verified 3 finding(s); 0 failed" in err
+
+
+def test_verify_confirmed_requires_completed_confirm_check_before_post(
+    tmp_path, monkeypatch, capsys
+):
+    fake = _FakeClient()
+    _install(monkeypatch, verify_finding, tmp_path, fake)
+    args = _parse(
+        verify_finding,
+        ["verify", "VA-1", "--status", "confirmed", "--reason", "reproduced",
+         "--proof-receipt-id", "17"],
+        tmp_path,
+    )
+    args.confirm_check_file = None
+
+    with pytest.raises(SystemExit) as exc:
+        verify_finding.run(args)
+
+    assert exc.value.code == 1
+    assert "--confirm-check-file" in capsys.readouterr().err
+    assert fake.posts == []
 
 
 def test_verify_partial_failure_tally_and_nonzero_exit(tmp_path, monkeypatch, capsys):
@@ -321,6 +358,14 @@ def test_verify_payload_file_flag(tmp_path, monkeypatch, capsys):
                 "verification_status": "confirmed",
                 "reason_text": "from file",
                 "proof_receipt_ids": [17],
+                "confirm_check": {
+                    "method": "Replay the claim",
+                    "attempted_falsification": "Check whether the expected guard blocks it",
+                    "expected_result": "The guard blocks the claim",
+                    "observed_result": "The claim still reproduces",
+                    "proof_receipt_ids": [17],
+                    "completed": True,
+                },
             }
         ),
         encoding="utf-8",
@@ -796,6 +841,14 @@ def test_payload_file_rejects_explicit_empty_content_flags(
                 "verification_status": "confirmed",
                 "reason_text": "final",
                 "proof_receipt_ids": [17],
+                "confirm_check": {
+                    "method": "Replay the claim",
+                    "attempted_falsification": "Check whether the expected guard blocks it",
+                    "expected_result": "The guard blocks the claim",
+                    "observed_result": "The claim still reproduces",
+                    "proof_receipt_ids": [17],
+                    "completed": True,
+                },
             }
         ),
         encoding="utf-8",
@@ -866,6 +919,14 @@ def test_verify_payload_file_rejects_content_flags_but_allows_narrative(
                 "verification_status": "confirmed",
                 "reason_text": "final",
                 "proof_receipt_ids": [17],
+                "confirm_check": {
+                    "method": "Replay the claim",
+                    "attempted_falsification": "Check whether the expected guard blocks it",
+                    "expected_result": "The guard blocks the claim",
+                    "observed_result": "The claim still reproduces",
+                    "proof_receipt_ids": [17],
+                    "completed": True,
+                },
             }
         ),
         encoding="utf-8",

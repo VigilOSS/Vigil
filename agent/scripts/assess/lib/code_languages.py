@@ -35,6 +35,10 @@ LANGUAGE_BY_EXTENSION: dict[str, str] = {
     ".kts": "kotlin",
     ".rb": "ruby",
     ".php": "php",
+    ".cs": "csharp",
+    # C# script files (`dotnet script`, Roslyn `.csx`). Same language as `.cs`;
+    # tree-sitter reads them with the C# grammar like any other source.
+    ".csx": "csharp",
     ".swift": "swift",
     ".m": "objectivec",
     ".sh": "shell",
@@ -98,6 +102,7 @@ STRUCTURAL_SUPPORTED_LANGUAGES = frozenset(
         "go",
         "ruby",
         "php",
+        "csharp",
         "blade",
         "dockerfile",
         "shell",

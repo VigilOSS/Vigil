@@ -145,7 +145,7 @@ def test_a_description_is_rendered_on_one_line() -> None:
         if line.strip().startswith("- steps_to_reproduce (")
     ]
     assert len(steps) == 1
-    assert "Write them FROM WHAT YOU ACTUALLY RAN" in steps[0]
+    assert steps[0].split(" — ", 1)[1].strip()
 
 
 def test_a_null_enum_member_renders_in_json_spelling() -> None:

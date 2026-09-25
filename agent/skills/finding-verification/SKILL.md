@@ -63,7 +63,7 @@ into "unreviewed" — every finding still gets a recorded check.
 
 This skill operationalizes gates that live elsewhere; read them rather than re-deriving:
 
-- **8-Question Gate, Four Validation Gates, Chain-Only List, Fast Kill Signals** —
+- **8-Question Gate, Report-ready story gate, Chain-Only List, Fast Kill Signals** —
   `agent/agents/vulnerability-analyst.md`. These are your reviewer toolkit; they are part of
   your role prompt already.
 - **C1–C7 FP & severity-downgrade gate** — `agent/references/finding-fp-and-severity-gate.md`.
@@ -109,10 +109,14 @@ For each finding under review:
 Write exactly one per reviewed finding (these are the operator-facing verbs, kept in
 operator-core Phase 5 — listed here so the reviewer self-serves them):
 
-- **Confirmed** — reproduced, severity accurate → `vigil assess finding verify <slug> --status confirmed --reason "..." --proof-receipt-id <id>`
-- **Upgraded** — real, severity understated → `vigil assess finding update <slug> --severity <higher> --reason "..."` then `finding verify ... --status confirmed --proof-receipt-id <id>`
-- **Downgraded** — real, severity overstated → `vigil assess finding verify <slug> --status downgraded --reason "..." --new-severity <lower> --proof-receipt-id <id>`
+- **Confirmed** — reproduced, severity accurate → `vigil assess finding verify <slug> --status confirmed --reason "..." --proof-receipt-id <id> --confirm-check-file <confirm-check.json>`
+- **Upgraded** — real, severity understated → `vigil assess finding update <slug> --severity <higher> --reason "..."` then `finding verify ... --status confirmed --proof-receipt-id <id> --confirm-check-file <confirm-check.json>`
+- **Downgraded** — real, severity overstated → `vigil assess finding verify <slug> --status downgraded --reason "..." --new-severity <lower> --proof-receipt-id <id> --confirm-check-file <confirm-check.json>`
 - **Killed** — a completed counter-check falsifies the claim → `vigil assess finding verify <slug> --status false_positive --reason "..." --counter-check-file <counter-check.json>`
+
+For confirmed/downgraded, the completed `confirm_check` records the attempted
+falsification and observed result against the decision's proof receipts; read
+`vigil assess contract finding verify` for its fields.
 
 **Dedup:** merge findings with overlapping `canonical_location` + similar `defect_family` across
 agent prefixes — `vigil assess finding merge <source-slug> <target-slug> "<reason>"`.
@@ -122,7 +126,7 @@ of a proved/expected escalation path, `vigil assess finding update <slug>` to po
 `details.chain_required`, `details.chain_rationale`, `details.required_followup`. Do not invent a
 chain-specific status.
 
-## Author the report-ready story (Four Validation Gates, Gate 3)
+## Author the report-ready story (Report-ready story gate)
 
 For every Confirmed/Downgraded finding, write the report-ready `evidence` / `impact` /
 `remediation` and the justified CVSS vector into `details`. The report-writer **formats** this
@@ -148,6 +152,6 @@ root as the broadest attacker-controllable cause. See "Root-Cause Review Mode" i
 
 ## Extended Resources
 
-- `agent/agents/vulnerability-analyst.md` — 8-Question Gate, Four Validation Gates, Chain-Only List
+- `agent/agents/vulnerability-analyst.md` — 8-Question Gate, Report-ready story gate, Chain-Only List
 - `agent/skills/blind-triage/SKILL.md` — the zero-context pre-submission gate that re-applies the overclaim catalog on the submission bytes (this skill is the in-context Phase-5 version)
 - `agent/skills/code-finding-verification/SKILL.md` — the source-only analog (five-check protocol)

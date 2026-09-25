@@ -245,7 +245,7 @@ See `agent/references/examples/submission-direct-buffer-overflow-fuzz.md` for a 
    renders `submissions/<slug>/submission.md` + `submission-context.json` FROM the finding's fields
    and consolidates the finding metadata, any hygiene warnings, the structured proof, and every
    linked command/crash run into ONE "OPERATOR DETAILS — NOT FOR SUBMISSION" reference section below
-   the second `---` (present in both draft and final; never pasted), and marks anything missing with
+   the second `---` in the local workspace (excluded from the final delivered package), and marks anything missing with
    `[NEEDS: ...]`.
 2. **Author + write back to the finding:** author the stable sections and write each back via
    `--payload-file` (the default write path — see "Submission-First Closeout" step 3 in

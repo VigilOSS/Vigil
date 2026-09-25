@@ -93,7 +93,8 @@ def add_common_probe_args(parser) -> None:
         help=(
             "REQUIRED — where the payload entered. Prefer the specific named input "
             "as 'slot:name' (e.g. 'header:X-Forwarded-Host', 'query:uid', "
-            "'body:idProofUser') so 'which input was tested' stays queryable; a bare "
+            "'body:form.username' for URL-encoded form data, "
+            "'body:json.username' for JSON) so 'which input was tested' stays queryable; a bare "
             "coarse slot (query|body|header|path|cookie|endpoint|service) is fine "
             "for a whole-slot probe. A browser/JS-instrumentation observation has "
             "no network slot — use 'js:<global-or-api>' (js:URL.createObjectURL, "

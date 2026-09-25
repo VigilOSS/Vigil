@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 
 from app import db as db_module
-from tests.proof_fixtures import post_artifact_backed_source_observation
+from tests.proof_fixtures import completed_confirm_check, post_artifact_backed_source_observation
 
 
 ENGAGEMENT_KEY = "2026-05-05-170700-root-cause"
@@ -107,6 +107,14 @@ def _confirm(client, slug: str, *, attempt: str = "") -> int:
         },
     )
     assert run.status_code == 201, run.text
+    linked = client.post(
+        f"{base}/findings/{slug}/links",
+        json={
+            "link_kind": "proof_run", "target_kind": "assessment_run",
+            "target_id": run.json()["id"],
+        },
+    )
+    assert linked.status_code == 200, linked.text
     receipt = post_artifact_backed_source_observation(
         client,
         f"{base}/proof-receipts",
@@ -129,6 +137,7 @@ def _confirm(client, slug: str, *, attempt: str = "") -> int:
             "verification_status": "confirmed",
             "reason_text": "independent root-cause fixture proof",
             "proof_receipt_ids": [receipt.json()["id"]],
+            "confirm_check": completed_confirm_check(receipt.json()["id"]),
         },
     )
     assert verified.status_code == 200, verified.text
@@ -524,7 +533,7 @@ def test_root_cause_relationship_changes_invalidate_terminal_verification(
     assert change["after"][0]["retired_at"] is not None
 
 
-def test_generic_and_duplicate_relationship_lifecycle_invalidates_only_material_changes(
+def test_generic_and_duplicate_relationship_lifecycle_preserves_verified_claim(
     client, isolate_settings
 ):
     _seed(client, isolate_settings)
@@ -551,13 +560,8 @@ def test_generic_and_duplicate_relationship_lifecycle_invalidates_only_material_
         )
         assert created.status_code == 200, created.text
         link = created.json()
-        change = _assert_relationship_invalidation(
-            client, slug=source, receipt_id=receipt_id
-        )
-        assert change["before"] is None
-        assert change["after"]["link_kind"] == link_kind
+        assert link["link_kind"] == link_kind
 
-        _confirm(client, source, attempt=f"{link_kind}-unchanged")
         unchanged = client.post(
             endpoint,
             json={
@@ -571,31 +575,20 @@ def test_generic_and_duplicate_relationship_lifecycle_invalidates_only_material_
         assert unchanged.status_code == 200, unchanged.text
         assert client.get(f"{base}/{source}").json()["verification_status"] == "confirmed"
 
-        receipt_id = _confirm(client, source, attempt=f"{link_kind}-retarget")
         retargeted = client.patch(
             f"{endpoint}/{link['id']}",
             json={"target_ref": alternate},
         )
         assert retargeted.status_code == 200, retargeted.text
-        change = _assert_relationship_invalidation(
-            client, slug=source, receipt_id=receipt_id
-        )
-        assert change["before"]["target_ref"] == target
-        assert change["after"]["target_ref"] == alternate
+        assert retargeted.json()["target_ref"] == alternate
 
-        receipt_id = _confirm(client, source, attempt=f"{link_kind}-retire")
         retired = client.patch(
             f"{endpoint}/{link['id']}",
             json={"retired": True},
         )
         assert retired.status_code == 200, retired.text
-        change = _assert_relationship_invalidation(
-            client, slug=source, receipt_id=receipt_id
-        )
-        assert change["before"]["retired_at"] is None
-        assert change["after"]["retired_at"] is not None
+        assert retired.json()["retired_at"] is not None
 
-        _confirm(client, source, attempt=f"{link_kind}-retired-noop")
         retired_again = client.patch(
             f"{endpoint}/{link['id']}",
             json={"retired": True, "notes": "Retained audit clarification."},
@@ -603,17 +596,20 @@ def test_generic_and_duplicate_relationship_lifecycle_invalidates_only_material_
         assert retired_again.status_code == 200, retired_again.text
         assert client.get(f"{base}/{source}").json()["verification_status"] == "confirmed"
 
-        receipt_id = _confirm(client, source, attempt=f"{link_kind}-reactivate")
         reactivated = client.patch(
             f"{endpoint}/{link['id']}",
             json={"retired": False},
         )
         assert reactivated.status_code == 200, reactivated.text
-        change = _assert_relationship_invalidation(
-            client, slug=source, receipt_id=receipt_id
-        )
-        assert change["before"]["retired_at"] is not None
-        assert change["after"]["retired_at"] is None
+        assert reactivated.json()["retired_at"] is None
+        current = client.get(f"{base}/{source}")
+        assert current.status_code == 200, current.text
+        assert current.json()["verification_status"] == "confirmed"
+        assert receipt_id in {
+            int(row["id"]) for row in current.json()["proof_receipts"]
+        }
+        transitions = client.get(f"{base}/{source}/transitions").json()
+        assert not any(row["action"] == "verification_invalidated" for row in transitions)
 
 
 def test_relationship_changes_do_not_invent_invalidation_for_unreviewed_finding(
@@ -643,7 +639,7 @@ def test_relationship_changes_do_not_invent_invalidation_for_unreviewed_finding(
     assert not any(row["action"] == "verification_invalidated" for row in transitions)
 
 
-def test_embedded_general_link_on_rerecord_invalidates_terminal_verification(
+def test_embedded_general_link_on_rerecord_preserves_terminal_verification(
     client, isolate_settings
 ):
     _seed(client, isolate_settings)
@@ -670,9 +666,16 @@ def test_embedded_general_link_on_rerecord_invalidates_terminal_verification(
     )
 
     assert rerecorded.status_code in {200, 201}, rerecorded.text
-    _assert_relationship_invalidation(
-        client, slug="RC-097", receipt_id=receipt_id
+    finding = client.get(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/findings/RC-097"
     )
+    assert finding.status_code == 200, finding.text
+    assert finding.json()["verification_status"] == "confirmed"
+    receipts = client.get(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/proof-receipts",
+        params={"finding_slug": "RC-097"},
+    )
+    assert receipt_id in {int(row["id"]) for row in receipts.json()}
 
 
 def test_record_rejects_a_cvss_score_that_contradicts_its_vector(

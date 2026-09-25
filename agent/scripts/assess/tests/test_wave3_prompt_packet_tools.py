@@ -16,6 +16,18 @@ export_triage_packet = importlib.import_module(
 )
 
 
+def _write_submission(submission_dir: Path, body: bytes) -> None:
+    (submission_dir / "submission.md").write_bytes(body)
+    (submission_dir / "submission-body.md").write_bytes(body)
+    (submission_dir / "submission-context.json").write_text(
+        json.dumps({
+            "submission_sha256": hashlib.sha256(body).hexdigest(),
+            "external_body_sha256": hashlib.sha256(body).hexdigest(),
+            "platform": "direct",
+        }), encoding="utf-8",
+    )
+
+
 def _run_cli(argv: list[str]) -> None:
     try:
         cli.main(argv)
@@ -29,7 +41,7 @@ def _seed_packet_inputs(tmp_path: Path) -> tuple[Path, list[str]]:
     submission_dir.mkdir(parents=True)
     (engagement / "scope.json").write_text("{}\n", encoding="utf-8")
     (engagement / "ENGAGEMENT.md").write_text("# Program facts\n", encoding="utf-8")
-    (submission_dir / "submission.md").write_text("# Finding\nProof.\n", encoding="utf-8")
+    _write_submission(submission_dir, b"# Finding\nProof.\n")
     return engagement, [
         "--engagement-dir",
         str(engagement),
@@ -105,7 +117,7 @@ def test_blind_triage_packet_uses_exact_canonical_inputs_and_truthful_manifest(
     brief_bytes = b"# Program facts\nIn scope: app.example\n"
     submission_bytes = b"# Finding\nExact canonical submission bytes.\n"
     (engagement / "ENGAGEMENT.md").write_bytes(brief_bytes)
-    (submission_dir / "submission.md").write_bytes(submission_bytes)
+    _write_submission(submission_dir, submission_bytes)
 
     _run_cli(
         [
@@ -121,7 +133,7 @@ def test_blind_triage_packet_uses_exact_canonical_inputs_and_truthful_manifest(
     result = json.loads(capsys.readouterr().out)
     packet_dir = Path(result["packet_dir"])
     manifest = json.loads((packet_dir / "manifest.json").read_text(encoding="utf-8"))
-    assert manifest["schema"] == "vigil-blind-triage-packet/v1"
+    assert manifest["schema"] == "vigil-blind-triage-packet/v2"
     assert manifest["process_isolation_enforced"] is False
     assert (packet_dir / "submission.md").read_bytes() == submission_bytes
     assert (packet_dir / "program-brief.md").read_bytes() == brief_bytes
@@ -151,7 +163,7 @@ def test_blind_triage_packet_uses_exact_canonical_inputs_and_truthful_manifest(
     assert repeated["packet_id"] == result["packet_id"]
 
     revised_bytes = submission_bytes + b"Additional canonical evidence.\n"
-    (submission_dir / "submission.md").write_bytes(revised_bytes)
+    _write_submission(submission_dir, revised_bytes)
     _run_cli(
         [
             "--engagement-dir",
@@ -165,6 +177,62 @@ def test_blind_triage_packet_uses_exact_canonical_inputs_and_truthful_manifest(
     revised = json.loads(capsys.readouterr().out)
     assert revised["packet_id"] != result["packet_id"]
     assert (Path(revised["packet_dir"]) / "submission.md").read_bytes() == revised_bytes
+
+
+def test_blind_triage_packet_excludes_operator_only_reference_from_reviewer_input(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    engagement, argv = _seed_packet_inputs(tmp_path)
+    submission_dir = engagement / "submissions" / "VA-001"
+    external_body = b"**Title:** Finding\n\n---\n\n### Evidence\n\nPublic proof.\n"
+    full_workspace = (
+        external_body
+        + b"\n---\n\n## OPERATOR DETAILS \xe2\x80\x94 NOT FOR SUBMISSION\n\n"
+        + b"Internal proof that a recipient will not see.\n"
+    )
+    (submission_dir / "submission.md").write_bytes(full_workspace)
+    (submission_dir / "submission-body.md").write_bytes(external_body)
+    (submission_dir / "submission-context.json").write_text(
+        json.dumps({
+            "submission_sha256": hashlib.sha256(full_workspace).hexdigest(),
+            "external_body_sha256": hashlib.sha256(external_body).hexdigest(),
+            "platform": "direct",
+        }), encoding="utf-8",
+    )
+
+    _run_cli(argv)
+
+    result = json.loads(capsys.readouterr().out)
+    packet_dir = Path(result["packet_dir"])
+    reviewer_input = (packet_dir / "packet.md").read_bytes()
+    assert external_body in reviewer_input
+    assert b"Internal proof that a recipient will not see" not in reviewer_input
+    assert (packet_dir / "submission.md").read_bytes() == external_body
+
+
+def test_blind_triage_packet_binds_selected_attachment_bytes(tmp_path: Path) -> None:
+    engagement, _ = _seed_packet_inputs(tmp_path)
+    proof = engagement / "proof" / "crash.txt"
+    proof.parent.mkdir()
+    proof.write_bytes(b"ASAN crash at vulnerable sink\n")
+    artifact = {
+        "id": 7,
+        "relative_path": "proof/crash.txt",
+        "sha256": hashlib.sha256(proof.read_bytes()).hexdigest(),
+        "size_bytes": proof.stat().st_size,
+        "present": True,
+        "media_type": "text/plain",
+    }
+
+    result = export_triage_packet.build_packet(
+        engagement, "VA-001", attachment_rows=[artifact]
+    )
+
+    packet_dir = Path(result["packet_dir"])
+    manifest = json.loads((packet_dir / "manifest.json").read_text())
+    assert manifest["inputs"]["attachments"][0]["sha256"] == artifact["sha256"]
+    assert (packet_dir / "attachments" / "7-crash.txt").read_bytes() == proof.read_bytes()
+    assert export_triage_packet.build_packet(engagement, "VA-001")["packet_id"] != result["packet_id"]
 
 
 def test_blind_triage_packet_refuses_symlinked_packet_directory(

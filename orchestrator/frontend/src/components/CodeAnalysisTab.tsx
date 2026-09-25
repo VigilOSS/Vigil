@@ -437,11 +437,15 @@ export function CodeAnalysisTab({
             const degraded = repo.structural_analysis_status_counts.degraded ?? 0;
             const unsupported = repo.structural_analysis_status_counts.unsupported ?? 0;
             const truncated = repo.structural_artifact_truncated_files;
-            const hasStructuralDebt = degraded > 0 || unsupported > 0 || truncated > 0;
+            const readinessDebtPaths = (readiness?.structural_debt ?? [])
+              .filter((debt) => debt.repo_id === repo.id)
+              .map((debt) => debt.file_path);
+            const hasStructuralDebt = degraded > 0 || unsupported > 0 || truncated > 0 || readinessDebtPaths.length > 0;
             const degradedOrTruncatedPaths = [
               ...new Set([
                 ...repo.structural_degraded_file_paths,
                 ...repo.structural_artifact_truncated_file_paths,
+                ...readinessDebtPaths,
               ]),
             ].sort();
             const repoTruth = [
@@ -516,12 +520,12 @@ export function CodeAnalysisTab({
                         : "Transition readiness is unavailable; inspect the file inventory before treating debt as reviewed."}
                   </p>
                   {unsupported > 0 && (
-                    <p>Unsupported paths are not included below; inspect the code file inventory/API.</p>
+                    <p>Unsupported files are included in the debt path list below.</p>
                   )}
                   {degradedOrTruncatedPaths.length > 0 && (
                     <details>
                       <summary>
-                        {degradedOrTruncatedPaths.length} degraded/truncated affected path
+                        {degradedOrTruncatedPaths.length} structural debt path
                         {degradedOrTruncatedPaths.length === 1 ? "" : "s"}
                       </summary>
                       <ul>

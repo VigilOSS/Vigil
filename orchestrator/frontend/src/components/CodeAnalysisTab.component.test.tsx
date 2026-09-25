@@ -239,6 +239,34 @@ describe("CodeAnalysisTab operator readiness", () => {
     expect(screen.getByText("Threat model generation 1 does not match active generation 3")).toBeTruthy();
   });
 
+  it("lists unsupported structural-debt paths returned by readiness", () => {
+    render(
+      <CodeAnalysisTab
+        engagementKey="demo"
+        persistedPhase="hunt"
+        loadError={null}
+        repos={[repo({
+          structural_analysis_status_counts: { complete: 10, unsupported: 1 },
+        })]}
+        modules={[]}
+        queueStats={null}
+        queueItems={[]}
+        coverage={null}
+        readiness={readiness({
+          structural_debt_count: 1,
+          structural_debt: [{ repo_id: 7, file_path: "src/legacy/unsupported.cbl" }],
+        } as CodeReadiness & {
+          structural_debt_count: number;
+          structural_debt: Array<{ repo_id: number; file_path: string }>;
+        })}
+        completionReadiness={null}
+        results={[]}
+      />,
+    );
+
+    expect(screen.getByText("src/legacy/unsupported.cbl")).toBeTruthy();
+  });
+
   it("shows queue integrity and a compact actionable next-work list", () => {
     render(
       <CodeAnalysisTab

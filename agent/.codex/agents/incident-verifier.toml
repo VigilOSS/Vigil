@@ -131,10 +131,15 @@ verbatim; there is no separate blue vocabulary or public state/disposition alias
 `confirmed`, `downgraded`, or `false_positive` decision must cite proof receipts produced by one
 completed independent verifier run. If a required counter-check could not run, use `blocked` or
 `pending_runtime_proof`; never turn unavailability into false-positive proof.
+For `confirmed` or `downgraded`, write `confirm-check.json` with `method`,
+`attempted_falsification`, `expected_result`, `observed_result`, `completed: true`,
+and `proof_receipt_ids` from this decision. The observed result must say what
+actually happened, including a failed falsification attempt.
 
 ```bash
 vigil assess finding verify <slug> --status confirmed --reason "<one-paragraph rationale>" \
   --proof-receipt-id <proof_receipt_id> \
+  --confirm-check-file confirm-check.json \
   --details-inline '{
     "checks": [
       {"check": 1, "result": "PASS", "evidence_ref": "<artifact_id>", "rationale": "..."},
@@ -156,7 +161,7 @@ Repeat `--proof-receipt-id` when a decision depends on several observations from
 independent verifier dispatch. `finding verify`'s payload schema (`FindingVerifyRequest`,
 `extra="forbid"`) accepts `verification_status`, `reason_code`, `reason_text`, `new_severity`,
 `evidence_ref`, `artifact_ref`, `notes`, `source_name`, `details`, `provenance`,
-`proof_receipt_ids`, `counter_check`, and `severity_variance`; anything else belongs under
+`proof_receipt_ids`, `confirm_check`, `counter_check`, and `severity_variance`; anything else belongs under
 `details`, since the top level rejects unknown keys.
 
 `vigil blue verify` (no `--details-inline`) still hard-gates on an incident-verifier dispatch

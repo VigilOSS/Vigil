@@ -63,7 +63,7 @@ from assess.lib import coverage_checks as cc
 from assess.lib.client import AssessError, AssessmentClient
 from assess.lib.config import load_config
 from assess.lib.exploit_targets import resolve_approved_target_slugs
-from assess.lib.phases import PHASE_INPUT_ALIASES, WEB_PHASES, canonical_phase
+from assess.lib.phases import CODE_PHASES, PHASE_INPUT_ALIASES, WEB_PHASES, canonical_phase
 from assess.lib.scope import load_scope
 
 
@@ -76,7 +76,7 @@ PHASES = WEB_PHASES
 
 _PHASE_ALIASES = PHASE_INPUT_ALIASES
 
-_CLI_PHASE_CHOICES = (*PHASES, *_PHASE_ALIASES)
+_CLI_PHASE_CHOICES = (*PHASES, *CODE_PHASES, "complete", *_PHASE_ALIASES)
 
 _INTEL_PHASES = frozenset({"recon", "consume-test", "report"})
 
@@ -224,9 +224,37 @@ def register(subparsers: argparse._SubParsersAction) -> None:
 def run(args: argparse.Namespace) -> None:
     cfg = load_config(args.engagement_dir)
     phase = canonical_phase(args.phase)
+    scope_path = Path(cfg.engagement_dir) / "scope.json"
+    scope = json.loads(scope_path.read_text(encoding="utf-8")) if scope_path.is_file() else {}
+    engagement_type = scope.get("engagement_type", "web")
+    if engagement_type not in {"code", "both"} and phase not in PHASES:
+        print(
+            f"check-phase-readiness: {phase} is a code phase, but this engagement has no code track",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if engagement_type == "code" or phase in (*CODE_PHASES, "complete"):
+        if phase in (*CODE_PHASES, "complete"):
+            target = phase
+        else:
+            current = scope.get("code_phase" if engagement_type == "both" else "current_phase", "ingest")
+            target = (
+                (*CODE_PHASES, "complete")[CODE_PHASES.index(current) + 1]
+                if current in CODE_PHASES else "classify-map"
+            )
+        print(
+            "check-phase-readiness checks web phases; code readiness is owned by "
+            f"`vigil assess code-coverage --require-transition-ready {target}`.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     projection: dict[str, Any] = {"phase": phase, "engagement_key": cfg.engagement_key}
-    text_lines: list[str] = []
+    text_lines: list[str] = (
+        ["Web track readiness only. For code, use `vigil assess code-coverage "
+         "--require-transition-ready <target-phase>`."]
+        if engagement_type == "both" else []
+    )
     exit_nonzero = False
 
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:

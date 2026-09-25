@@ -43,16 +43,16 @@ When you are about to copy one of these into a second file, stop and import.
   `agent/scripts/assess/commands/dispatch/work_items.py` mirrors the backend-side predicate.
 - `agent/scripts/assess/lib/classify_buckets.py:_BUCKETS` owns URL bucket scoring and skip tags.
   Ingest classifies inline; `work-buffer reclassify` reapplies it.
-- `orchestrator/backend/app/services/code_analysis.py:CODE_REPO_ROLES` owns the repository
+- `orchestrator/backend/app/services/code_analysis_support.py:CODE_REPO_ROLES` owns the repository
   obligation role — `analysis` carries coverage/queue/readiness duties, `reference` carries none;
-  `contracts.py:CODE_REPO_ROLES` is the CLI mirror.
+  `contract_registry.py:CODE_REPO_ROLES` is the CLI mirror.
   See: `orchestrator/backend/tests/test_reference_repo_role.py`.
-- `agent/scripts/assess/lib/contracts.py:FRAMEWORK_REGISTRATION_KINDS` owns the registration
+- `agent/scripts/assess/lib/contract_registry.py:FRAMEWORK_REGISTRATION_KINDS` owns the registration
   vocabulary on `assessment_surfaces`; `api/assessment.py` mirrors it as a Literal. Deliberately NOT
   in `agent/scripts/assess/lib/surfaces.py:VALID_SURFACE_TYPES` — registration kind is architecture,
   surface type security meaning. See: `orchestrator/backend/tests/test_surface_framework_registration.py`.
-- `orchestrator/backend/app/api/assessment.py:_LAUNCHED_CLIENT` owns the clients a dispatch can be
-  BOUND to; `_DISPATCH_CLIENT` adds `unknown`, `contracts.py:BINDABLE_CLIENTS` mirrors it in the CLI.
+- `orchestrator/backend/app/api/assessment_operator.py:_LAUNCHED_CLIENT` owns the clients a dispatch can be
+  BOUND to; `_DISPATCH_CLIENT` adds `unknown`, `contract_registry.py:BINDABLE_CLIENTS` mirrors it in the CLI.
   See: `orchestrator/backend/tests/test_dispatch_client_binding_api.py`.
 - `agent/scripts/assess/lib/render_containment.py:contain_separators` owns how persisted,
   target-influenced text reaches an agent-readable document: lossless, indent-only, so nothing lands
@@ -60,13 +60,13 @@ When you are about to copy one of these into a second file, stop and import.
   `operator_checkpoint.py` and `resume_brief.py` render through it.
   See: `agent/scripts/assess/tests/test_operator_checkpoint_render.py`.
 - `agent/scripts/assess/lib/code_languages.py:CANONICAL_CODE_LANGUAGES` owns every detectable
-  language; `code_analysis.py:_CANONICAL_STRUCTURAL_LANGUAGES` must be a SUPERSET, or one unknown
+  language; `code_analysis_support.py:_CANONICAL_STRUCTURAL_LANGUAGES` must be a SUPERSET, or one unknown
   language fails `code-index sync` for the whole repo, and `STRUCTURALLY_ANALYZED_LANGUAGES` must
   cover every lightweight one. See: `orchestrator/backend/tests/test_structural_language_drift.py`.
-- `code_analysis.py:_lease_activity_sql` owns what "a lease last proved life" means
+- `orchestrator/backend/app/services/code_analysis_support.py:_lease_activity_sql` owns what "a lease last proved life" means
   (`COALESCE(last_heartbeat_at, consumed_at)`); `reset-stale`, `list --stale-minutes`, adoption
   liveness and the open-lease report all measure from it.
-- `code_analysis.py:_attempt_owned_result_sql` owns which `(agent, lease)` identities may author a
+- `orchestrator/backend/app/services/code_analysis_support.py:_attempt_owned_result_sql` owns which `(agent, lease)` identities may author a
   queue attempt's receipts — the current lease PLUS the row's adoption chain. Matching the current
   lease alone voids everything an adopted attempt inherited.
 - `agent/scripts/assess/lib/dependency_manifests.py:RECOGNIZED_MANIFESTS` owns the manifest roster
@@ -82,17 +82,17 @@ When you are about to copy one of these into a second file, stop and import.
 - `orchestrator/backend/app/services/state_manager/coverage.py:CoverageStatus` owns coverage status;
   the standalone CLI mirror is `agent/scripts/assess/commands/resolve.py:_COVERAGE_STATUSES`.
 - `orchestrator/backend/app/services/state_manager/_common.py:SUBMISSION_STATUSES` owns submission
-  status; `agent/scripts/assess/lib/contracts.py:SUBMISSION_STATUSES` is the CLI mirror.
+  status; `agent/scripts/assess/lib/contract_registry.py:SUBMISSION_STATUSES` is the CLI mirror.
 - `orchestrator/backend/app/api/assessment.py:FindingPatchRequest` owns patchable finding fields;
-  `contracts.py:FINDING_PATCH_FIELDS` mirrors it. See:
+  `contract_registry.py:FINDING_PATCH_FIELDS` mirrors it. See:
   `orchestrator/backend/tests/test_finding_patch_contract_mirror.py`.
 - `orchestrator/backend/app/services/state_manager/_common.py:VERIFICATION_STATUSES` owns finding
-  verification status; `agent/scripts/assess/lib/contracts.py:VERIFICATION_STATUSES` mirrors it.
+  verification status; `agent/scripts/assess/lib/contract_registry.py:VERIFICATION_STATUSES` mirrors it.
 - `orchestrator/backend/app/retry_state.py:RETRY_STATES` owns blocked-technique retries; unknown
   legacy prose becomes reviewable `pending`, never `no_retry`.
 - `agent/scripts/assess/lib/audit_enums.py` owns Kali technique and probe-kind enums. These are
   host-side only and are not copied into the runtime image.
-- `agent/scripts/assess/lib/contracts.py:KALI_TARGET_VERBS` and `KALI_MAINT_VERBS` own the Kali
+- `agent/scripts/assess/lib/contract_registry.py:KALI_TARGET_VERBS` and `KALI_MAINT_VERBS` own the Kali
   roster; `KALI_VERBS` is their union. Registration and `agent/skills/kali-exec/SKILL.md` mirror it.
 - `agent/scripts/assess/lib/kali_output.py:KALI_EXIT_CODES` owns terminal status exit codes;
   `kali_cli.py:emit_result` is the output funnel and renders the help table.
@@ -104,8 +104,8 @@ When you are about to copy one of these into a second file, stop and import.
 - `orchestrator/backend/app/api/report_export.py`'s five `_*_FIELDS` rosters own what the
   client-delivered HTML carries; `orchestrator/report/src/types.ts` is the other half, index signature
   dropped so a renderer reaching past them is a type error. See: `AGENTS.md` report-template section.
-- `agent/scripts/assess/lib/contracts.py` owns executable CLI metadata and phase discovery.
-  `contract.py` and `list_commands.py` render it live; a wrong phase makes a verb undiscoverable.
+- `agent/scripts/assess/lib/contract_registry.py` owns executable CLI metadata; `contracts.py`
+  resolves and renders it for `contract.py` and `list_commands.py`.
 - `src/vigil_cli/engagements.py:CLIENT_PROVIDER_KEYS` and `CLIENT_MESSAGE_FLAGS` own client launch
   identity. Generated launchers, preflight, and the benchmark consume them.
 - `src/vigil_cli/image_freshness.py` owns the content-digest mechanism every freshness check uses —
@@ -134,7 +134,9 @@ When you are about to copy one of these into a second file, stop and import.
 - `src/vigil_cli/client_rosters.py` links those wrapper trees into an engagement as **per-entry symlinks** (`<engagement>/.claude/commands/`, `<engagement>/.codex/skills/`), so an engagement never carries a stale copy and an operator-authored command of the same name wins.
 - `orchestrator/backend/app/api/assessment.py` and `orchestrator/backend/app/api/code_analysis.py` feed the generated `agent/schemas/*.json` through `orchestrator/backend/scripts/generate_agent_schemas.py`. Check drift with that script's `--check` mode.
 - `agent/scripts/assess/lib/contracts.py` renders the engagement-binding invariant onto every executable command contract, so prompts do not restate it.
-- `orchestrator/backend/app/db.py` is the single schema owner. Backend state is canonical for findings, coverage, services, chains, command runs, dispatch/handoff lifecycle, host liveness, and artifact metadata; large files stay engagement-local and are registered explicitly.
+- `agent/scripts/assess/lib/treesitter_index.py` owns parsing and dispatch;
+  `treesitter_catalogues.py` owns sink/entry queries, `treesitter_common.py` shared helpers,
+  `treesitter_lightweight.py` line-based extractors, and `treesitter_streaming.py` bounded fallback.
 - `agent/scripts/assess/commands/code_index.py` writes the engagement-local structural manifest;
   `code_index_sync.py` publishes validated metadata. Legacy or wrong-schema artifacts are rejected.
 - `agent/scripts/assess/lib/kali_audit.py` threads the command-run audit chain. A persisted Kali flag
@@ -163,8 +165,8 @@ A prompt change is **not** prompt-only when the prompt defines an artifact the b
   prefix here, in the backend finding-prefix map, and in the applicable operator prompt table.
 - `agent/scripts/assess/cli.py` — a verb can touch the import block, flat loop, four grouped
   registries, inline `kali` registry, and pre-parse action-help hook. See the recipe in `AGENTS.md`.
-- `agent/scripts/assess/lib/contracts.py:_INLINE_DOCUMENTED_NAMESPACES` — a `<verb> <action>` leaf documented on its parent contract must have that parent listed here, or `vigil assess contract` cannot resolve it.
-- `orchestrator/backend/app/services/code_analysis.py:_analysis_repo_sql` / `_analysis_repo_files_sql`
+- `agent/scripts/assess/lib/contract_registry.py:_INLINE_DOCUMENTED_NAMESPACES` — a `<verb> <action>` leaf documented on its parent contract must have that parent listed here, or `vigil assess contract` cannot resolve it.
+- `orchestrator/backend/app/services/code_analysis_support.py:_analysis_repo_sql` / `_analysis_repo_files_sql`
   — every query counting an OBLIGATION over `code_files` must carry one, or a `reference` repository
   regains coverage, queue and readiness duties. Reads must NOT: reference source stays searchable
   and citable. `code_fuzz_completion.py:fuzz_states` applies it at source.
@@ -229,6 +231,7 @@ A prompt change is **not** prompt-only when the prompt defines an artifact the b
 - `src/vigil_cli/runtime.py` + `up.py` — one shared long-lived Kali container, reached host-side by `docker exec`. There is no in-container API server or MCP bridge.
 - `src/vigil_cli/mitmproxy.py` — the single owner of the proxy `docker build` argv, including the inputs-digest label without which the image can never be proven current.
 - `src/vigil_cli/bench/` — the benchmark harness. Verbs are `list`, `run`, `run-all`, `score`, `teardown`, `selftest`, `history`, and the `vm` group. `run-all` defaults to a **billed** launch; `run` does not. See: ADR 0020.
+- `src/vigil_cli/bench/lima_guest_control.py` owns guest control payloads included in Lima controller attestation.
 - `src/vigil_cli/bench/anticheat.py` — the bench guards are **generated at runtime as strings** by this module, not committed files: `bench-guard.sh` is written into the off-tree bench home, `bench-guard.js` into the attempt engagement's OpenCode plugin dirs.
 - `src/vigil_cli/term.py` — the one place CLI output learns whether it is on a terminal. Off a TTY: same bytes or fewer, one record per line, no ESC. Style through it, never a raw escape at a call site.
 - `src/vigil_cli/oob_relay.py` — the single owner of the install's OOB relay-slot identity contract; `oob.py`, `install.py`, `up.py`, and `status.py` consume that record rather than deriving routes independently.
@@ -236,11 +239,10 @@ A prompt change is **not** prompt-only when the prompt defines an artifact the b
 ### orchestrator/backend
 
 - `orchestrator/backend/app/main.py` — FastAPI bootstrap. Routers are registered explicitly here.
-- `orchestrator/backend/app/db.py` — the SQLite persistence boundary and the single schema owner.
-- `orchestrator/backend/app/api/assessment.py` — the canonical live-state interface for recon,
-  surfaces, coverage, readiness, findings, chains, credentials, dispatch/handoff registry writes,
-  bulk ingestion, and command-run audit. Finding history has a compact `projection=summary` list
-  and a lossless transition point read.
+- `orchestrator/backend/app/db.py` — SQLite persistence and schema orchestration; `db_code_analysis_schema.py` owns code-analysis tables.
+- `orchestrator/backend/app/api/assessment.py` — live-state routes for recon, coverage, findings,
+  command runs, and bulk ingestion; finding history supports summary and lossless transition reads.
+- `orchestrator/backend/app/api/assessment_operator.py` owns dispatch, handoff, decision, and checkpoint routes included by `assessment.py`.
 - `orchestrator/backend/app/api/intel.py` — per-engagement intel reads and writes. `/resolve` maps
   untyped finding intel ids through the canonical search index without guessing across entity tables;
   it reports resolved, missing, unsupported, dangling, and ambiguous ids.
@@ -250,10 +252,12 @@ A prompt change is **not** prompt-only when the prompt defines an artifact the b
 - `orchestrator/backend/app/api/submissions.py` — the immutable submission-version and sent-reply API shared by the CLI and the web UI.
 - `orchestrator/backend/app/services/state_manager/` — the live-state service package, re-exported
   through `__init__.py` so public `state_manager.<fn>` paths remain stable.
+- `orchestrator/backend/app/services/state_manager/coverage_readiness.py` owns readiness and per-host verdicts; `finding_snapshots.py` owns finding snapshot/author provenance.
+- `orchestrator/backend/app/services/state_manager/command_runs.py` owns run writes and output integrity; `command_run_queries.py`, `assessment_jobs.py`, and `host_liveness.py` own their reads and ledgers.
 - `orchestrator/backend/app/services/submission_versions.py` — the one service behind `vigil assess export submission` and the web UI. It never changes `submission_status` and never submits externally. See: ADR 0025.
 - `orchestrator/backend/app/reply_render.py` — the versioned exact-bytes outbound renderer; `agent/scripts/assess/lib/reply_render.py` is an import-only bridge so draft previews and the backend cannot fork the format.
 - `orchestrator/backend/app/services/operator_checkpoints.py` — writes `assessment_operator_checkpoints`, an append-only table enforced by SQLite triggers. The only permitted mutation is stamping a null `superseded_by_id`.
-- `orchestrator/backend/app/services/state_manager/run_accounting.py` — run identity, lifecycle, source inventory, obligations, and generation-bound receipt links shared by code, web and blue. `proofs.py` separately owns immutable evidence receipts. See: ADR 0028.
+- `orchestrator/backend/app/services/state_manager/run_accounting.py` owns run identity and lifecycle; `run_inventory.py` owns sources and obligations, `run_evidence.py` owns linked receipts, and `run_comparisons.py` owns comparisons. `proofs.py` owns immutable evidence receipts. See: ADR 0028.
 - `orchestrator/backend/app/services/engagements.py` — filesystem-to-DB sync. Explicit deletes are tombstoned so a later sync cannot resurrect them from leftover files.
 
 ### Frontend and the rest

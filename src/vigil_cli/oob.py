@@ -301,7 +301,16 @@ def oob_status(
     running = list_running_oob_clients(container_name, runner=runner)
     # Reuse the already-fetched running set instead of re-querying tmux inside list_oob_clients.
     clients = sorted(set(running) | _configured_oob_clients(container_name, runner=runner))
+    frpc_rejections = []
     if deep:
+        if frpc:
+            frpc_log = _run_exec(
+                container_name,
+                f"tail -n 200 {OOB_ROOT}/frpc.log 2>/dev/null || true",
+                runner=runner,
+                check=False,
+            ).stdout
+            frpc_rejections = _frpc_unregistered_proxy_lines(frpc_log)
         client_health = [
             {"name": name, "registered": bool(client_payload_host(name, container_name, runner=runner, oob_domain=domain))}
             for name in running
@@ -360,6 +369,13 @@ def oob_status(
         client_health=client_health, domain=domain, domain_resolves=domain_resolves,
         edge_route_healthy=edge_route_healthy,
     )
+    if frpc_rejections:
+        issues.append(
+            "FRP relay rejected OOB proxy registration; compare this install's `vigil oob routing` "
+            "with the relay's configured routes. frpc reported: "
+            + " | ".join(frpc_rejections[:3])
+        )
+        health = "degraded"
     active = server or frpc
     if active and route_matches is False:
         if route_issue:
@@ -1650,6 +1666,10 @@ _FRPC_SUCCESS_PATTERNS = (
     "start proxy success",
     "new proxy [",
 )
+_FRPC_UNREGISTERED_PROXY_RE = re.compile(
+    r"\bproxy ['\"]?\[?([A-Za-z0-9_.-]+)\]?['\"]? is not registered\b",
+    re.IGNORECASE,
+)
 _FRPC_EXPECTED_PROXY_LABELS = frozenset(("dns", "http", "reverse"))
 _FRPC_PROXY_LABEL_HINTS = {
     "dns": "*-oob-dns",
@@ -1700,6 +1720,15 @@ def _check_frpc_for_conflicts(
                 f"  docker exec {options.container_name} tail -n 200 {OOB_ROOT}/frpc.log\n"
                 "(See docs/oob-routing.md for the relay-slot allocation contract.)"
             )
+        rejections = _frpc_unregistered_proxy_lines(last_log)
+        if rejections:
+            _kill_oob_sessions(options.container_name, runner=runner)
+            raise SystemExit(
+                "FRP relay rejected OOB proxy registration. Compare `vigil oob routing` "
+                "with the relay's configured routes; restarting local OOB sessions cannot "
+                "provision the relay. frpc reported:\n"
+                + "\n".join(f"  {line}" for line in rejections[:3])
+            )
         registered = _frpc_registered_proxy_labels(last_log)
         if registered >= _FRPC_EXPECTED_PROXY_LABELS:
             return
@@ -1726,6 +1755,19 @@ def _frpc_registered_proxy_labels(log_text: str) -> set[str]:
             elif token.endswith("-oob"):
                 labels.add("http")
     return labels
+
+
+def _frpc_unregistered_proxy_lines(log_text: str) -> list[str]:
+    rejections: dict[str, str] = {}
+    for line in log_text.splitlines():
+        match = _FRPC_UNREGISTERED_PROXY_RE.search(line)
+        if match:
+            rejections[match.group(1)] = line.strip()
+        elif any(pattern in line for pattern in _FRPC_SUCCESS_PATTERNS):
+            for name in tuple(rejections):
+                if f"[{name}]" in line:
+                    del rejections[name]
+    return list(rejections.values())
 
 
 def _kill_oob_sessions(container_name: str, *, runner: docker.Runner) -> None:
