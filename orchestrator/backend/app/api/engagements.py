@@ -74,7 +74,7 @@ def _engagement_response(engagement: EngagementView) -> EngagementResponse:
             },
         }
     else:
-        track = engagement_type if engagement_type in {"code", "blue", "android"} else "web"
+        track = engagement_type if engagement_type in {"code", "blue", "android", "remediation"} else "web"
         track_state = {
             track: {
                 "phase": engagement.current_phase,

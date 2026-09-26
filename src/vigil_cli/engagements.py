@@ -45,7 +45,7 @@ from .scope_entries import ScopeEntryError, canonicalize_scope_entry
 # ignores it so concurrent assessment sessions cannot retarget each other.
 ACTIVE_ENGAGEMENT_CONFIG_KEY = "active_engagement_dir"
 
-ENGAGEMENT_TYPES = {"web", "code", "both", "android", "blue"}
+ENGAGEMENT_TYPES = {"web", "code", "both", "android", "blue", "remediation"}
 ANDROID_DYNAMIC_MODES = {"static_only", "device", "emulator"}
 ENGAGEMENT_DB_SNAPSHOT_MAX_COPIES_ENV = "VIGIL_ENGAGEMENT_DB_SNAPSHOT_MAX_COPIES"
 DEFAULT_ENGAGEMENT_DB_SNAPSHOT_MAX_COPIES = 2
@@ -213,6 +213,7 @@ class CreateEngagementOptions:
     tenant_reference_paths: list[str] = field(default_factory=list)
     alert_source: str | None = None
     severity_hint: str | None = None
+    remediation_config: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -291,7 +292,7 @@ def plan_engagement(options: CreateEngagementOptions, *, now: datetime | None = 
     SystemExit on the same invalid inputs `create_engagement` rejects.
     """
     if options.engagement_type not in ENGAGEMENT_TYPES:
-        raise SystemExit("--type must be one of: web, code, both, android, blue")
+        raise SystemExit("--type must be one of: web, code, both, android, blue, remediation")
     if options.dynamic_mode not in ANDROID_DYNAMIC_MODES:
         raise SystemExit("--dynamic-mode must be one of: static_only, device, emulator")
     if options.engagement_type == "blue":
@@ -299,6 +300,22 @@ def plan_engagement(options: CreateEngagementOptions, *, now: datetime | None = 
             raise SystemExit("blue engagements require --customer")
         if not options.platforms:
             raise SystemExit("blue engagements require at least one --platform")
+    if options.engagement_type == "remediation":
+        if not options.name:
+            raise SystemExit("remediation engagements require --name")
+        if len(options.repos) != 1:
+            raise SystemExit("remediation engagements require exactly one repository")
+        if "://" in options.repos[0]:
+            raise SystemExit("remediation requires a local repository path")
+        repository = Path(options.repos[0]).expanduser().resolve()
+        if not repository.is_dir():
+            raise SystemExit("remediation requires an existing local Git repository")
+        probe = subprocess.run(
+            ["git", "-C", str(repository), "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True,
+        )
+        if probe.returncode or Path(probe.stdout.strip()).resolve() != repository:
+            raise SystemExit("remediation requires an existing local Git repository root")
 
     if now is None:
         now = datetime.now(timezone.utc)
@@ -343,6 +360,8 @@ def plan_engagement(options: CreateEngagementOptions, *, now: datetime | None = 
     subdirs = ["tools", "downloads", "scans", "pids", "sessions"]
     if options.engagement_type in {"code", "both", "android"}:
         subdirs.append("source")
+    if options.engagement_type == "remediation":
+        subdirs.extend(["cases", "evidence"])
 
     # The final key is the collision-suffixed directory name, chosen when the
     # plan is materialized; the manifest carries a placeholder until then.
@@ -351,7 +370,23 @@ def plan_engagement(options: CreateEngagementOptions, *, now: datetime | None = 
     repos = [{"path": raw, "name": repo_name(raw)} for raw in options.repos]
     scope: dict[str, object]
     manifest: dict[str, object]
-    if options.engagement_type == "code":
+    if options.engagement_type == "remediation":
+        scope = {
+            "engagement_type": "remediation",
+            "name": name,
+            "hosts": [],
+            "status": "in_progress",
+            "current_phase": "intake",
+        }
+        manifest = {
+            "key": key,
+            "name": name,
+            "target": name,
+            "repos": repos,
+            "remediation_project": dict(options.remediation_config),
+            "created_at": created_at,
+        }
+    elif options.engagement_type == "code":
         scope = {
             "engagement_type": "code",
             "name": name,
@@ -565,7 +600,10 @@ def create_engagement(
             date_label=plan.date_label,
         )
         _write_issues_doc(eng_dir)
-        _write_engagement_brief_stub(agent_root, eng_dir)
+        if options.engagement_type == "remediation":
+            _write_remediation_project_notes(eng_dir, options)
+        else:
+            _write_engagement_brief_stub(agent_root, eng_dir)
         # No auth.json scaffold: credentials live in the centralized store and an
         # engagement with no credentials reads as anonymous (vigil auth import /
         # mitmproxy capture populate it). See orchestrator credentials API.
@@ -639,7 +677,7 @@ def create_engagement(
     # Blue engagements own their own footer (blue.py:_cmd_engage) and must not
     # emit the red-infra footer (mitmproxy/oob are irrelevant to incident
     # response). Skip entirely for blue so blue.py has sole footer ownership.
-    if contact_backend and options.engagement_type != "blue":
+    if contact_backend and options.engagement_type not in {"blue", "remediation"}:
         _emit_post_create_footer(key)
     return CreatedEngagement(key=key, path=eng_dir)
 
@@ -1936,6 +1974,42 @@ def _write_issues_doc(eng_dir: Path) -> None:
     (eng_dir / "ISSUES-AND-ENHANCEMENTS.md").write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
 
 
+def _write_remediation_project_notes(eng_dir: Path, options: CreateEngagementOptions) -> None:
+    """Seed only project-level notes; case history belongs to the backend."""
+    repo = Path(options.repos[0]).expanduser().resolve()
+    _write_json(eng_dir / "remediation-project.json", {
+        **options.remediation_config,
+        "repository": str(repo),
+    })
+    (eng_dir / "PROJECT.md").write_text(
+        f"# {options.name} remediation\n\n"
+        f"Repository: `{repo}`\n\n"
+        "## Environment and accounts\n\n"
+        "Record development URL, account and fixture prerequisites, and approved model/account "
+        "in `remediation-project.json`. Never put credentials or session tokens here.\n\n"
+        "## Case workflow\n\n"
+        "Import each Jira issue or bounty report as a separate case. Keep one worktree per case. "
+        "Record exact baseline, red/green tests, Stagehand rehearsal, review, deployment identity, "
+        "and human verification through `vigil remediation`.\n\n"
+        "## Release\n\n"
+        "The first development deployment is a human GitHub Actions handoff. Record its run ID "
+        "and observed revision before claiming verification.\n",
+        encoding="utf-8",
+    )
+    (eng_dir / "cases" / "verification-plan.template.md").write_text(
+        "# Human verification\n\n"
+        "Environment and deployed revision: \n\n"
+        "Account and data prerequisites: \n\n"
+        "Navigation: \n\n"
+        "Exact inputs or tested console snippet: \n\n"
+        "Expected observations: \n\n"
+        "Cleanup: \n\n"
+        "Production canary required (yes/no) and reason: \n\n"
+        "Coralogix signals to monitor: \n",
+        encoding="utf-8",
+    )
+
+
 # Canonical program-brief section headings. The stub mirrors the
 # `agent/references/_template-engagement.md`
 # template's shape so an engagement starts with a structured, fill-in-the-blanks
@@ -2105,6 +2179,10 @@ _ENGAGEMENT_ROE_POINTER = (
 
 def _canonical_operator_prompt(agent_root: Path, engagement_type: str) -> Path:
     """The installed operator prompt this engagement's wrappers must point at."""
+    if engagement_type == "remediation":
+        # This source is copied by the managed agent-tree installer. Unlike the
+        # offensive and blue cores it has no specialist roster to render.
+        return agent_root / "operator-core-remediation.md"
     return agent_root / ("AGENTS-blue.md" if engagement_type == "blue" else "AGENTS.md")
 
 
@@ -2144,16 +2222,25 @@ def _write_prompt_wrappers(agent_root: Path, eng_dir: Path, client_kind: str, *,
     # bootstrap files are seeded — e.g. start landing specialist clients in their own cwd —
     # make sure the new cwd's local AGENTS.md/CLAUDE.md does not pull operator startup
     # banner prose into a specialist context.
+    if engagement_type == "remediation":
+        artifact_guidance = (
+            "- Keep each case's files under `remediation/cases/<case-id>/`\n"
+            "- Use `vigil remediation -k <engagement-key> evidence <case-id> ...` to register case evidence\n"
+            "- Use `vigil remediation -k <engagement-key> ...` for case state and review operations\n"
+        )
+    else:
+        artifact_guidance = (
+            "- Use `vigil assess artifact register <path>` to index engagement files explicitly\n"
+            "- Use `vigil assess ...` for assessment operations from any directory\n"
+        )
     common = f"""This engagement directory is only the run-artifact root. Resolve shared prompts, skills, references, and scripts through:
 - Install root: {install_root}
 - Agent workspace root: {agent_root}
 - Scripts: {agent_root / "scripts"}
 
 Artifacts:
-- Use `vigil assess artifact register <path>` to index engagement files explicitly
-- Use `vigil assess ...` for assessment operations from any directory
-- Treat backend records and indexed engagement artifacts as shared durable memory; client-local memory is not visible to other clients or the audit trail
-- Start clients through this engagement directory's launcher so ENGAGEMENT_DIR is exported for artifact paths and VIGIL_SESSION_ENGAGEMENT_DIR binds assessment state
+{artifact_guidance}- Treat backend records and indexed engagement artifacts as shared durable memory; client-local memory is not visible to other clients or the audit trail
+- Start clients through this engagement directory's launcher so ENGAGEMENT_DIR is exported for artifact paths and VIGIL_SESSION_ENGAGEMENT_DIR binds engagement state
 - The local .orchestrator.env provides this engagement's orchestrator base URL; install-root env files are only fallbacks
 """
     # The engagement-local AGENTS.md points at the applicable canonical installed
@@ -2323,9 +2410,9 @@ def _write_goose_config(
     - ``.goosehints`` — Goose auto-loads this from the cwd. We copy the engagement
       ``AGENTS.md`` (written by ``_write_prompt_wrappers`` just before this call) into it, so
       Goose gets the SAME engagement-local entrypoint Codex/OpenCode read natively. That
-      ``AGENTS.md`` is a thin POINTER for every engagement type — red and blue alike —
-      and ``engagement_type`` only selects which canonical installed prompt it names
-      (``agent/AGENTS.md`` or ``agent/AGENTS-blue.md``); the operator resolves the
+      ``AGENTS.md`` is a thin POINTER for every engagement type, and
+      ``engagement_type`` selects the canonical installed prompt it names
+      (assessment, blue, or remediation); the operator resolves the
       pointer by reading the referenced file — the bench CTF message and the human start
       prompt both say "Read AGENTS.md", which drives that. There is no ``--agent operator``
       step — the default ``goose run`` agent already holds the ``delegate`` tool.
@@ -2337,9 +2424,12 @@ def _write_goose_config(
     """
     agents_md = eng_dir / "AGENTS.md"
     base = agents_md.read_text(encoding="utf-8") if agents_md.is_file() else ""
-    # Append the Goose-only dispatch directive so the (non-thinking) open-model operator
-    # actually orchestrates instead of soloing inline; Goose auto-loads .goosehints.
-    (eng_dir / ".goosehints").write_text(base + GOOSE_DISPATCH_DIRECTIVE, encoding="utf-8")
+    # The dispatch directive names offensive assessment tools and roles. Goose
+    # auto-loads .goosehints, so a remediation engagement must receive only its
+    # own operator pointer. Preserve the directive for assessment engagements.
+    engagement_type = _read_json(eng_dir / "scope.json").get("engagement_type")
+    directive = "" if engagement_type == "remediation" else GOOSE_DISPATCH_DIRECTIVE
+    (eng_dir / ".goosehints").write_text(base + directive, encoding="utf-8")
     ensure_goose_recipes_link(agent_root, eng_dir / ".goose")
     ensure_goose_standard_hooks(
         agent_root,

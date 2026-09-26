@@ -4,6 +4,7 @@ export type { AuditBlocker, AuditPage, RunAuditSection, RunComparison } from "./
 export type Engagement = {
   id: number;
   key: string;
+  engagement_type?: string | null;
   target: string;
   status: string;
   engagement_root: string;
@@ -793,6 +794,137 @@ export function listEngagements() {
 
 export function getEngagement(engagementKey: string) {
   return request<Engagement>(`/engagements/${engagementKey}`);
+}
+
+export type RemediationEvidence = {
+  id: number;
+  kind: string;
+  method: string;
+  environment: string | null;
+  outcome?: string | null;
+  command: string;
+  observed: string;
+  proved: string;
+  artifact_path: string | null;
+  artifact_sha256: string | null;
+  created_at?: string;
+  revision?: string | null;
+};
+
+export type RemediationCase = {
+  id: number;
+  source_type: string;
+  source_key: string;
+  title: string;
+  status: string;
+  snapshot: Record<string, unknown>;
+  linked_finding_slug: string | null;
+  linked_finding_engagement_key?: string | null;
+  duplicate_hints: number[];
+  duplicate_hint_details?: Array<{ case_id: number; reasons: string[] }>;
+  worktree_path: string | null;
+  worktree_revision: string | null;
+  verification_plan: string;
+  baseline: Partial<RemediationBaseline>;
+  release_plan: Partial<RemediationReleasePlan>;
+  evidence: RemediationEvidence[];
+  approvals: Array<Record<string, unknown>>;
+  transitions: Array<Record<string, unknown>>;
+  human_verifications: Array<{ id: number; deployment_id: number; actor: string; result: "passed" | "failed" | "blocked"; observed_revision: string; notes: string; created_at?: string }>;
+  deployment: { environment: string; workflow: string; run_id: string; expected_revision: string; observed_revision: string } | null;
+  approval_current: boolean;
+  review_evidence_ready: boolean;
+  review_evidence_missing: string[];
+  review_digest: string;
+};
+
+export type RemediationBaseline = {
+  outcome: "runtime_reproduced" | "code_test_confirmed" | "unreproduced";
+  method: string;
+  proved: string;
+  owner_decision?: "proceed" | "pause" | null;
+  owner_actor?: string | null;
+  owner_reason?: string | null;
+};
+
+export type RemediationReleasePlan = {
+  production_canary_decision: "required" | "not_required" | "defer";
+  production_canary_rationale: string;
+  safe_procedure: string;
+  coralogix_monitoring: string;
+};
+
+export type RemediationCaseSummary = Pick<RemediationCase, "id" | "source_type" | "source_key" | "title" | "status"> & { duplicate_hints: number[]; duplicate_hint_details?: Array<{ case_id: number; reasons: string[] }> };
+
+function remediationBase(engagementKey: string): string {
+  return `/engagements/${encodeURIComponent(engagementKey)}/remediation`;
+}
+
+export function listRemediationCases(engagementKey: string) {
+  return request<RemediationCaseSummary[]>(`${remediationBase(engagementKey)}/cases`);
+}
+
+export function getRemediationCase(engagementKey: string, caseId: number) {
+  return request<RemediationCase>(`${remediationBase(engagementKey)}/cases/${caseId}`);
+}
+
+export type RemediationDiff = {
+  text: string;
+  truncated: boolean;
+  bytes_total: number;
+  base_revision: string;
+  head_revision: string;
+  review_digest: string;
+};
+
+export function getRemediationDiff(engagementKey: string, caseId: number) {
+  return request<RemediationDiff>(`${remediationBase(engagementKey)}/cases/${caseId}/diff`);
+}
+
+export function updateRemediationVerificationPlan(engagementKey: string, caseId: number, verificationPlan: string) {
+  return request<RemediationCase>(`${remediationBase(engagementKey)}/cases/${caseId}/verification-plan`, {
+    method: "PATCH",
+    body: JSON.stringify({ verification_plan: verificationPlan }),
+  });
+}
+
+export function updateRemediationBaseline(engagementKey: string, caseId: number, baseline: RemediationBaseline) {
+  return request<RemediationCase>(`${remediationBase(engagementKey)}/cases/${caseId}/baseline`, {
+    method: "PATCH",
+    body: JSON.stringify(baseline),
+  });
+}
+
+export function updateRemediationReleasePlan(engagementKey: string, caseId: number, releasePlan: RemediationReleasePlan) {
+  return request<RemediationCase>(`${remediationBase(engagementKey)}/cases/${caseId}/release-plan`, {
+    method: "PATCH",
+    body: JSON.stringify(releasePlan),
+  });
+}
+
+export function approveRemediationCase(engagementKey: string, caseId: number, reviewer: string, expectedReviewDigest: string, approvalMethod: "ui" | "cli_instruction") {
+  return request<{ id: number; reviewer: string; review_digest: string }>(`${remediationBase(engagementKey)}/cases/${caseId}/approve`, {
+    method: "POST",
+    body: JSON.stringify({ reviewer, expected_review_digest: expectedReviewDigest, approval_method: approvalMethod }),
+  });
+}
+
+export type RemediationHumanVerificationInput = {
+  actor: string;
+  result: "passed" | "failed" | "blocked";
+  observed_revision: string;
+  notes: string;
+};
+
+export function recordRemediationHumanVerification(engagementKey: string, caseId: number, input: RemediationHumanVerificationInput) {
+  return request<{ id: number; actor: string; result: RemediationHumanVerificationInput["result"]; observed_revision: string; notes: string }>(`${remediationBase(engagementKey)}/cases/${caseId}/human-verification`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function remediationEvidenceFileUrl(engagementKey: string, caseId: number, evidenceId: number): string {
+  return resolveAppUrl(`${remediationBase(engagementKey)}/cases/${caseId}/evidence/${evidenceId}/file`);
 }
 
 // ── Cross-engagement dashboard summary ──────────────────
