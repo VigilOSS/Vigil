@@ -8992,8 +8992,12 @@ def test_blue_contain_accepts_command_run_id_as_execution_proof(
             "phase": "respond",
             "technique": "CONTAINMENT",
             "success": True,
+            "finding_id": 11,
+            "intent": "containment proposal=7 action=revoke_session",
+            "argv": ["gam", "user", "alex@example.com", "signout"],
         },
     )
+    monkeypatch.setattr(blue_module, "_fetch_containment_finding", lambda *_args: {"id": 11, "slug": "FIND-001"})
     monkeypatch.setattr(
         blue_module,
         "_run_assess",
@@ -9141,7 +9145,13 @@ def test_blue_contain_rejects_non_containment_command_run_proof(
             },
         },
     )
-    monkeypatch.setattr(blue_module, "_fetch_command_run", lambda *_args, **_kwargs: command_row)
+    monkeypatch.setattr(blue_module, "_fetch_command_run", lambda *_args, **_kwargs: {
+        "finding_id": 11,
+        "intent": "containment proposal=7 action=revoke_session",
+        "argv": ["gam", "user", "alex@example.com", "signout"],
+        **command_row,
+    })
+    monkeypatch.setattr(blue_module, "_fetch_containment_finding", lambda *_args: {"id": 11, "slug": "FIND-001"})
     monkeypatch.setattr(
         blue_module,
         "_run_assess",

@@ -528,6 +528,9 @@ def _run_stagehand(install_root: Path, eng_dir: Path, key: str, args: argparse.N
     validate_production_stagehand_policy(args)
     case_id = args.case_id
     _case_path(case_id)
+    case = _case(install_root, eng_dir, key, case_id)
+    if case.get("status") == "closed":
+        raise SystemExit("closed remediation cases cannot accept Stagehand evidence")
     script = args.script.expanduser().resolve(strict=True)
     if not script.is_file() or script.suffix != ".py":
         raise SystemExit("--script must name a Python file")

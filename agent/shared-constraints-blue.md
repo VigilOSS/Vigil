@@ -79,7 +79,10 @@ vigil blue propose-contain <finding-slug> \
 
 Approval is per-action per-target — a broad "you can contain this BEC"
 approval is not specific. Execution is two operator steps after approval:
-first run the platform command through `vigil assess host-exec --require-audit`,
+first run the platform command through `vigil assess host-exec --require-audit
+--phase respond --technique CONTAINMENT --finding <finding-slug> --intent
+"containment proposal=<id> action=<action>"`, with the approved target as a
+distinct command argument,
 then record the already executed action with `vigil blue contain <finding-slug> --proposal <id> --command-run-id <id>`
 or `vigil blue contain <finding-slug> --proposal <id> --proof-artifact <path>`,
 which logs structured metadata to `activity_entries` and bumps the finding's

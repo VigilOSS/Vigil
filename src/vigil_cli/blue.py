@@ -1055,7 +1055,30 @@ def _fetch_command_run(install_root: Path, eng_dir: Path, command_run_id: int) -
     return row if isinstance(row, dict) else None
 
 
-def _require_containment_command_run(command_row: dict, command_run_id: int) -> None:
+def _fetch_containment_finding(install_root: Path, eng_dir: Path, slug: str) -> dict | None:
+    try:
+        result = subprocess.run(
+            _build_assess_argv(install_root, eng_dir, ["finding", "get", slug]),
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    try:
+        row = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return None
+    return row if isinstance(row, dict) and row.get("slug") == slug else None
+
+
+def _require_containment_command_run(
+    command_row: dict, command_run_id: int, *, finding_id: int, proposal_id: int,
+    action: str, target: str,
+) -> None:
     failures: list[str] = []
     route = str(command_row.get("route") or "").strip()
     if route != "host_exec":
@@ -1068,6 +1091,16 @@ def _require_containment_command_run(command_row: dict, command_run_id: int) -> 
         failures.append(f"technique={technique!r}; expected 'CONTAINMENT'")
     if command_row.get("success") is not True:
         failures.append(f"success={command_row.get('success')!r}; expected true")
+    if command_row.get("finding_id") != finding_id:
+        failures.append(f"finding_id={command_row.get('finding_id')!r}; expected {finding_id}")
+    intent_tokens = str(command_row.get("intent") or "").split()
+    if f"proposal={proposal_id}" not in intent_tokens:
+        failures.append(f"intent does not identify proposal={proposal_id}")
+    if f"action={action}" not in intent_tokens:
+        failures.append(f"intent does not identify action={action}")
+    argv = command_row.get("argv")
+    if not isinstance(argv, list) or target not in argv:
+        failures.append(f"argv does not contain target {target!r} as an argument")
     if failures:
         raise SystemExit(
             f"vigil blue contain: command run id {command_run_id} is not valid containment proof: "
@@ -1207,8 +1240,12 @@ def _cmd_contain(args: argparse.Namespace, install_root: Path) -> None:
             payload.get("platform") if isinstance(payload.get("platform"), str) else None
         )
 
-    action = args.action or proposal_action or "contain"
-    target = args.target or proposal_target or "-"
+    if args.action and args.action != proposal_action:
+        raise SystemExit("vigil blue contain: action differs from the approved action")
+    if args.target and args.target != proposal_target:
+        raise SystemExit("vigil blue contain: target differs from the approved target")
+    action = proposal_action or "contain"
+    target = proposal_target or "-"
 
     command_run_id = getattr(args, "command_run_id", None)
     if not args.proof_artifact and command_run_id is None:
@@ -1224,7 +1261,13 @@ def _cmd_contain(args: argparse.Namespace, install_root: Path) -> None:
                 f"vigil blue contain: command run id {command_run_id} not found in this engagement. "
                 "Pass the id printed by `vigil assess host-exec --require-audit ...` or use --proof-artifact."
             )
-        _require_containment_command_run(command_row, int(command_run_id))
+        finding_row = _fetch_containment_finding(install_root, eng_dir, args.finding_slug)
+        if finding_row is None or not isinstance(finding_row.get("id"), int):
+            raise SystemExit(f"vigil blue contain: finding {args.finding_slug!r} could not be resolved for command proof")
+        _require_containment_command_run(
+            command_row, int(command_run_id), finding_id=finding_row["id"],
+            proposal_id=decision_id_int, action=action, target=target,
+        )
 
     if args.proof_artifact:
         proof_path = Path(args.proof_artifact)

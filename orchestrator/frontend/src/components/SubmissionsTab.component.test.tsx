@@ -129,6 +129,86 @@ afterEach(() => {
 });
 
 describe("SubmissionsTab", () => {
+  it("ignores a late preview refresh for a finding that is no longer selected", async () => {
+    const secondFinding = { ...listing.findings[0], id: 92, slug: "VA-002", title: "Second finding" };
+    const secondDetail = {
+      ...detail,
+      finding: { ...detail.finding, ...secondFinding },
+      workspace: { ...detail.workspace, submission_path: "submissions/VA-002/submission.md",
+        context_path: "submissions/VA-002/submission-context.json", markdown: "# Second\n\nSecond reviewed body." },
+    };
+    let resolveOldRefresh: (value: typeof detail) => void = () => undefined;
+    let firstRequests = 0;
+    vi.mocked(listSubmissions).mockResolvedValue({ ...listing, findings: [{ ...listing.findings[0], row_version: 10 }, secondFinding],
+      findings_page: { ...listing.findings_page, returned: 2, total: 2 } });
+    vi.mocked(getSubmissionDetail).mockImplementation((_key, slug) => {
+      if (slug === "VA-002") return Promise.resolve(secondDetail);
+      firstRequests += 1;
+      return firstRequests === 1 ? Promise.resolve(detail) : new Promise((resolve) => { resolveOldRefresh = resolve; });
+    });
+
+    render(<SubmissionsTab engagementKey="engagement one" />);
+    expect(await screen.findByText("Reviewed body.")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Refresh preview" }));
+    fireEvent.click(screen.getByRole("button", { name: /Second finding/ }));
+    expect(await screen.findByText("Second reviewed body.")).toBeTruthy();
+
+    await act(async () => resolveOldRefresh(detail));
+
+    expect(screen.getByText("Second reviewed body.")).toBeTruthy();
+    expect(screen.queryByText("Reviewed body.")).toBeNull();
+  });
+
+  it("ignores a late preview error for a finding that is no longer selected", async () => {
+    const secondFinding = { ...listing.findings[0], id: 92, slug: "VA-002", title: "Second finding" };
+    const secondDetail = { ...detail, finding: { ...detail.finding, ...secondFinding },
+      workspace: { ...detail.workspace, markdown: "# Second\n\nSecond reviewed body." } };
+    let rejectOldRefresh: (reason: Error) => void = () => undefined;
+    let firstRequests = 0;
+    vi.mocked(listSubmissions).mockResolvedValue({ ...listing,
+      findings: [{ ...listing.findings[0], row_version: 10 }, secondFinding],
+      findings_page: { ...listing.findings_page, returned: 2, total: 2 } });
+    vi.mocked(getSubmissionDetail).mockImplementation((_key, slug) => {
+      if (slug === "VA-002") return Promise.resolve(secondDetail);
+      firstRequests += 1;
+      return firstRequests === 1 ? Promise.resolve(detail) : new Promise((_resolve, reject) => { rejectOldRefresh = reject; });
+    });
+
+    render(<SubmissionsTab engagementKey="engagement one" />);
+    expect(await screen.findByText("Reviewed body.")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Refresh preview" }));
+    fireEvent.click(screen.getByRole("button", { name: /Second finding/ }));
+    expect(await screen.findByText("Second reviewed body.")).toBeTruthy();
+
+    await act(async () => rejectOldRefresh(new Error("Old preview failed")));
+
+    expect(screen.queryByText("Old preview failed")).toBeNull();
+  });
+
+  it("keeps selected-attachment readiness when an older preview refresh completes", async () => {
+    let resolveOldRefresh: (value: typeof detail) => void = () => undefined;
+    let requests = 0;
+    vi.mocked(listSubmissions).mockResolvedValue({ ...listing,
+      findings: [{ ...listing.findings[0], row_version: 10 }] });
+    vi.mocked(getSubmissionDetail).mockImplementation(() => {
+      requests += 1;
+      if (requests === 1) return Promise.resolve(detail);
+      if (requests === 2) return new Promise((resolve) => { resolveOldRefresh = resolve; });
+      return Promise.resolve({ ...detail, workspace: { ...detail.workspace,
+        final_ready: false, blockers: ["Selected attachments need fresh review"] } });
+    });
+
+    render(<SubmissionsTab engagementKey="engagement one" />);
+    await screen.findByRole("checkbox", { name: /response\.json/ });
+    fireEvent.click(screen.getByRole("button", { name: "Refresh preview" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: /response\.json/ }));
+    expect(await screen.findByText("Selected attachments need fresh review")).toBeTruthy();
+
+    await act(async () => resolveOldRefresh(detail));
+
+    expect(screen.getByText("Selected attachments need fresh review")).toBeTruthy();
+  });
+
   it("keeps a listing failure visible instead of presenting an empty workspace", async () => {
     vi.mocked(listSubmissions).mockRejectedValueOnce(
       new Error("submission API unavailable"),

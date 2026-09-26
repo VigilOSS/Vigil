@@ -58,6 +58,11 @@ def run_up(
             install_root=install_root,
             preserve_path=True,
         )
+    except SystemExit:
+        if options.source_root is not None:
+            raise
+        print("source sync\tskipped (no source checkout found)")
+    else:
         print("source sync\tupdating install root")
         install_from_source(
             InstallOptions(
@@ -68,8 +73,6 @@ def run_up(
             runner=runner,
             build_runner=build_runner,
         )
-    except SystemExit:
-        print("source sync\tskipped (no source checkout found)")
 
     runtime_was_running = docker.container_running(default_runtime_container(), runner=runner)
 

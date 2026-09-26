@@ -68,6 +68,25 @@ def test_ingest_candidates_rejects_noncanonical_observation_receipt(
     assert "do not retry automatically" in str(exc.value)
 
 
+def test_ingest_candidates_skips_whitespace_url_without_losing_later_records(
+    tmp_path, monkeypatch
+) -> None:
+    records_file = tmp_path / "candidates.jsonl"
+    records_file.write_text(
+        json.dumps({"url": "   "}) + "\n"
+        + json.dumps({"method": "GET", "url": "https://target.example/valid"}) + "\n",
+        encoding="utf-8",
+    )
+    fake = FakeAssessmentClient()
+    monkeypatch.setattr(ingest_candidates, "load_config", lambda *_: _Cfg(str(tmp_path)))
+    monkeypatch.setattr(ingest_candidates, "auth_active_context", lambda *_: "anonymous")
+    monkeypatch.setattr(ingest_candidates, "AssessmentClient", lambda *_: fake)
+
+    ingest_candidates.run(_ns(str(records_file), str(tmp_path)))
+
+    assert len(fake.row_for_url("https://target.example/valid")) == 1
+
+
 def test_ingest_candidates_scope_filter_excludes_out_of_scope_hosts(
     tmp_path, monkeypatch, capsys
 ):

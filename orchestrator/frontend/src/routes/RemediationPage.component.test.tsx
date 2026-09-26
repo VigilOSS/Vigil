@@ -80,6 +80,19 @@ afterEach(() => {
 });
 
 describe("remediation workspace", () => {
+  it("clears the previous case when switching engagements", async () => {
+    vi.mocked(listRemediationCases).mockImplementation((key) => key === "first"
+      ? Promise.resolve([reviewedCase])
+      : new Promise(() => {}));
+    const { rerender } = render(<RemediationPage engagementKey="first" onBack={() => {}} />);
+    expect(await screen.findByText(/Report says a profile can be edited/)).toBeTruthy();
+
+    rerender(<RemediationPage engagementKey="second" onBack={() => {}} />);
+
+    expect(screen.queryByText(/Report says a profile can be edited/)).toBeNull();
+    expect(screen.queryByRole("button", { name: "Save plan" })).toBeNull();
+  });
+
   it("shows the queue, source snapshot, duplicate hint, worktree and deployment identity", async () => {
     render(<RemediationPage engagementKey="Acme" onBack={() => {}} />);
 

@@ -123,6 +123,7 @@ export function SubmissionsTab({ engagementKey, refreshVersion = 0 }: Submission
   const [notice, setNotice] = useState("");
   const listingRequestGeneration = useRef(0);
   const readinessRequestGeneration = useRef(0);
+  const detailRequestGeneration = useRef(0);
   const loadedListingEngagement = useRef("");
   const detailCache = useRef(new Map<string, SubmissionDetail>());
   const selectedFindingRef = useRef<{
@@ -159,6 +160,7 @@ export function SubmissionsTab({ engagementKey, refreshVersion = 0 }: Submission
   }, [engagementKey]);
 
   const refreshDetail = useCallback(async () => {
+    const requestGeneration = ++detailRequestGeneration.current;
     if (!selectedSlug) {
       setDetail(null);
       return;
@@ -168,10 +170,14 @@ export function SubmissionsTab({ engagementKey, refreshVersion = 0 }: Submission
       const next = await getSubmissionDetail(engagementKey, selectedSlug, {
         selectedAttachmentIds: [...selectedAttachments].sort((a, b) => a - b),
       });
-      detailCache.current.set(`${engagementKey}\n${selectedSlug}`, next);
-      setDetail(next);
+      if (requestGeneration === detailRequestGeneration.current) {
+        detailCache.current.set(`${engagementKey}\n${selectedSlug}`, next);
+        setDetail(next);
+      }
+    } catch (cause) {
+      if (requestGeneration === detailRequestGeneration.current) throw cause;
     } finally {
-      setDetailLoading(false);
+      if (requestGeneration === detailRequestGeneration.current) setDetailLoading(false);
     }
   }, [engagementKey, selectedSlug, selectedAttachments]);
 
@@ -199,6 +205,7 @@ export function SubmissionsTab({ engagementKey, refreshVersion = 0 }: Submission
   useEffect(() => {
     let cancelled = false;
     const requestGeneration = ++readinessRequestGeneration.current;
+    const detailGeneration = ++detailRequestGeneration.current;
     setCheckingPublicationReadiness(false);
     setSelectedAttachments(new Set());
     setNotice("");
@@ -214,7 +221,8 @@ export function SubmissionsTab({ engagementKey, refreshVersion = 0 }: Submission
     setDetailLoading(true);
     void getSubmissionDetail(engagementKey, selectedSlug)
       .then((next) => {
-        if (!cancelled && requestGeneration === readinessRequestGeneration.current) {
+        if (!cancelled && requestGeneration === readinessRequestGeneration.current
+          && detailGeneration === detailRequestGeneration.current) {
           detailCache.current.set(cacheKey, next);
           setDetail(next);
         }
@@ -225,7 +233,7 @@ export function SubmissionsTab({ engagementKey, refreshVersion = 0 }: Submission
         }
       })
       .finally(() => {
-        if (!cancelled) setDetailLoading(false);
+        if (!cancelled && detailGeneration === detailRequestGeneration.current) setDetailLoading(false);
       });
     return () => {
       cancelled = true;
@@ -290,6 +298,7 @@ export function SubmissionsTab({ engagementKey, refreshVersion = 0 }: Submission
     if (next.has(artifactId)) next.delete(artifactId);
     else next.add(artifactId);
     setSelectedAttachments(next);
+    ++detailRequestGeneration.current;
     const requestGeneration = ++readinessRequestGeneration.current;
     const requestedSlug = selectedSlug;
     const selectedAttachmentIds = [...next].sort((a, b) => a - b);

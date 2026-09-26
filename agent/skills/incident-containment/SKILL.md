@@ -213,13 +213,14 @@ vigil blue propose-contain <finding-slug> \
 # approved (`assessment_dispatch_decisions.resolved=true`, set by
 # `vigil assess approve-proposal`) before invoking. Example:
 #
-#   vigil assess host-exec --tool aws --intent "rotate compromised key" \
-#     --technique T1098 --phase respond --scope-host <customer-slug> \
+#   vigil assess host-exec --tool aws \
+#     --intent "containment proposal=<decision-id> action=rotate_credential" \
+#     --technique CONTAINMENT --finding <finding-slug> --phase respond --scope-host <customer-slug> \
 #     --require-audit --allow-destructive \
 #     -- aws iam delete-access-key --user-name <user> --access-key-id <id>
 vigil assess host-exec \
-  --tool gam --intent "revoke active sessions" \
-  --technique T1110 --phase respond --scope-host <customer-slug> \
+  --tool gam --intent "containment proposal=<decision-id> action=revoke_session" \
+  --technique CONTAINMENT --finding <finding-slug> --phase respond --scope-host <customer-slug> \
   --require-audit \
   -- gam user <target-email> signout
 # (No --allow-destructive needed here: `signout` is not in the token

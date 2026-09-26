@@ -163,8 +163,11 @@ def run(args) -> None:
                     continue
 
                 method = str(record.get("method") or "GET").upper()
-                url = str(record.get("url") or "").split()[0]
-                if not url or any(tok in url for tok in ("FUZZ", "PARAM", "{{")):
+                url_parts = str(record.get("url") or "").split()
+                if not url_parts:
+                    continue
+                url = url_parts[0]
+                if any(tok in url for tok in ("FUZZ", "PARAM", "{{")):
                     continue
                 if not url.startswith(("http://", "https://")):
                     if re.match(r"^[a-zA-Z0-9][-a-zA-Z0-9.]*\.[a-zA-Z]{2,}", url):

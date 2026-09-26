@@ -364,6 +364,41 @@ def test_stagehand_failed_status_cannot_claim_happy_path(tmp_path: Path) -> None
         validate_stagehand_result(result, tmp_path, "happy-path")
 
 
+@pytest.mark.parametrize("case_response", [None, {"id": 7, "status": "closed"}])
+def test_stagehand_checks_case_before_browser_actions(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, case_response: dict | None,
+) -> None:
+    from vigil_cli import remediation
+
+    eng = tmp_path / "eng"
+    eng.mkdir()
+    script = tmp_path / "rehearsal.py"
+    script.write_text("async def run(stagehand, output_dir): pass\n", encoding="utf-8")
+    args = argparse.Namespace(case_id="7", script=script, revision="abc123", environment="local",
+                              purpose="bad-path", production_decision=None, production_evidence_policy=None)
+    monkeypatch.setattr(remediation, "validate_stagehand_config", lambda *_: None)
+    calls: list[str] = []
+
+    def fake_api(_root: Path, _eng: Path, _key: str, method: str, path: str, _payload=None) -> dict:
+        calls.append(f"{method} {path}")
+        if case_response is None:
+            raise SystemExit("case not found")
+        return case_response
+
+    async def fake_execute(*_args) -> dict:
+        calls.append("browser executed")
+        return {"status": "passed"}
+
+    monkeypatch.setattr(remediation, "_api", fake_api)
+    monkeypatch.setattr(remediation, "_execute_stagehand", fake_execute)
+
+    with pytest.raises(SystemExit, match="case not found|closed"):
+        remediation._run_stagehand(tmp_path, eng, "project", args, {})
+
+    assert "browser executed" not in calls
+    assert not (eng / "remediation" / "cases" / "7").exists()
+
+
 def test_production_stagehand_requires_decision_and_evidence_policy(tmp_path: Path) -> None:
     from vigil_cli.remediation import validate_production_stagehand_policy
 

@@ -41,7 +41,11 @@ function detailLabel(evidence: RemediationEvidence): string {
   return evidence.artifact_path?.split("/").pop() || evidence.kind.replace(/_/g, " ");
 }
 
-export function RemediationPage({ engagementKey, onBack, initialCaseId }: Props) {
+export function RemediationPage(props: Props) {
+  return <RemediationWorkspace key={`${props.engagementKey}:${props.initialCaseId ?? ""}`} {...props} />;
+}
+
+function RemediationWorkspace({ engagementKey, onBack, initialCaseId }: Props) {
   const [cases, setCases] = useState<RemediationCaseSummary[]>([]);
   const [selectedId, setSelectedId] = useState<number | null>(initialCaseId ?? null);
   const [selected, setSelected] = useState<RemediationCase | null>(null);
