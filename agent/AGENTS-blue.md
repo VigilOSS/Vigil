@@ -80,7 +80,7 @@ Read top-to-bottom once at engagement start; after that, jump to the section you
 - **Always-active rules** — see "Always-Active Rules" below.
 - **Skill discovery** — `vigil assess list-skills` returns the compact skill index (`name` + one-liner). The operator does not read full skill files; specialists do.
 - **Detailed skill bodies** — `agent/skills/<name>/SKILL.md`.
-- **References / payload libraries / tenant context** — `vigil assess list-references` (`--skill <name>` for a skill's paired refs); tenant refs at `agent/references/tenants/<customer>-<platform>.md`.
+- **References / payload libraries / tenant context** — `vigil assess list-references` (`--skill <name>` for a skill's paired refs); tenant refs at `agent/references/tenants/<customer>-<tenant-suffix>.md` (`gws` uses `workspace`; other supported platforms use their platform name).
 
 ## Always-Active Rules
 
@@ -190,7 +190,7 @@ under `vigil blue <subcommand>` and are thin wrappers over the generic assess in
 | `vigil assess agent start --role <role> --skills <names> [--tier L1|L2|L3|L4] (--rate-budget <authored> \| --no-target-traffic) --prompt-context-json <file> --emit-prompt` | Records the shared dispatch row, validates and injects blue tenant-ref paths into the emitted prompt, and writes `tier` on the dispatch row. The context file supplies every canonical prompt-only field; its schema is in `agent/references/runtime-guides/dispatch-template.md`. |
 | `vigil blue tier <finding-slug> --tier L1|L2|L3|L4 [--notes ...]` | Records current tier in parsed `details`. |
 | `vigil blue verify <finding-slug> ...` | Existing blue convenience wrapper. The canonical lifecycle contract is `vigil assess finding verify <slug> --status <status>` because terminal decisions now require proof receipts and false-positive decisions require a structured counter-check. Do not use the wrapper to bypass those evidence fields. |
-| `vigil blue propose-contain <finding-slug> --action <revoke_session\|disable_account\|isolate_host\|block_ioc\|rotate_credential\|sinkhole_domain> --target <id> --platform <gws\|m365\|aws\|okta\|edr\|network\|generic> --rollback "<plan>" --blast-radius <single-user\|multi-user\|multi-tenant\|cross-platform> [--note "..."]` | Writes a `containment_proposal` dispatch-decision row that `vigil blue contain` reads for approval. Prints `{decision_id, approval_hint}` JSON — pass `decision_id` to `vigil assess approve-proposal`, execute with audited `host-exec`, then record with `vigil blue contain --proposal <decision_id> --command-run-id <id>` or `--proof-artifact <path>`. |
+| `vigil blue propose-contain <finding-slug> --action <revoke_session\|disable_account\|isolate_host\|block_ioc\|rotate_credential\|sinkhole_domain> --target <id> --platform <gws\|m365\|aws\|okta\|edr\|network\|generic> --rollback "<plan>" --blast-radius <single-user\|multi-user\|multi-tenant\|cross-platform> [--note "..."]` | Writes a `containment_proposal` dispatch-decision row that `vigil blue contain` reads for approval. Prints `{decision_id, approval_hint}` JSON — pass `decision_id` to `vigil assess approve-proposal`, execute with audited `host-exec`, then record with `vigil blue contain <finding-slug> --proposal <decision_id> --command-run-id <id>` or `--proof-artifact <path>`. |
 | `vigil blue contain <finding-slug> --proposal <id> (--command-run-id <id> \| --proof-artifact <path>)` | Records an approved containment action that the operator already executed through `vigil assess host-exec --require-audit`; writes structured containment metadata to `activity_entries` and bumps finding workflow status. |
 | `vigil blue report` | Wraps `vigil assess finding report` + report-writer dispatch with blue template. |
 | `vigil blue closeout` | Dispatch report-writer to produce `closeout.md` for false-positive, benign, no-impact, or inconclusive alert closure. |
@@ -209,7 +209,7 @@ overrides with a stated reason.
 - **Dispatch mode default:** —
 - **Definition of Done:**
   - [ ] Engagement declaration written with `engagement_type=blue`, `customer`, `platforms[]`, `current_phase=intake`.
-  - [ ] Tenant ref path resolved for every platform — `agent/references/tenants/<customer>-<platform>.md` exists on disk for every platform. Missing tenant ref → **halt** with a message naming the expected path.
+  - [ ] Tenant ref path resolved for every platform — `agent/references/tenants/<customer>-<tenant-suffix>.md` exists on disk for every platform (`gws` → `workspace`). Missing tenant ref → **halt** with a message naming the expected path.
   - [ ] Alert pasted into operator chat and recorded by piping it straight into `vigil blue alert record --body-file -` via heredoc — the CLI writes the canonical `ir/alerts/` copy, so do **not** save a separate file first — populating canonical alert metadata. Example:
 
     ```
@@ -496,7 +496,7 @@ tier: <L1|L2|L3|L4>
 customer: <customer-slug>
 platforms: [<platform>, ...]
 tenant_reference_paths:
-  - agent/references/tenants/<customer>-<platform>.md
+  - agent/references/tenants/<customer>-<tenant-suffix>.md  # gws → workspace
 ```
 
 Pass this block verbatim at the top of the dispatch prompt. The specialist

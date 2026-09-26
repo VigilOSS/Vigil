@@ -716,6 +716,6 @@ handoff schema.
 - `agent/skills/incident-containment/SKILL.md` — downstream L4 skill
   that activates only on `confirmed` ≥ `high` (or operator-forced
   containment on `downgraded`).
-- `agent/references/tenants/<customer>-<platform>.md` — the tenant
+- `agent/references/tenants/<customer>-<tenant-suffix>.md` — the tenant
   ref whose Known-benign register, documented egress, and configured
   policies the five checks read against.

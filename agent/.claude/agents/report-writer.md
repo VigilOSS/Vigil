@@ -91,7 +91,7 @@ Sequence below end to end — it is the authoritative procedure (`export submiss
 → author each section and write it back to the finding → re-render + checklist/QA → blind-triage
 Pass 2 → publish, which re-renders the authored content from the finding).
 
-- **Bug bounty submission mode:** `vigil assess export submission <slug> --platform bugcrowd` or
+- **Bug bounty submission mode:** `vigil assess export submission <slug> --platform bugcrowd --draft` or
   `--platform hackerone --draft`. Output: `$ENGAGEMENT_DIR/submissions/<slug>/submission.md`. Load
   `agent/references/submission-format.md` and the LDAP injection example to resolve the
   draft's `[NEEDS: ...]` markers and pass the checklist.

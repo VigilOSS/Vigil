@@ -227,7 +227,7 @@ With `/tmp/finding.json` shaped:
       "severity_hint": "..."
     },
     "alert_external_id": "<SIEM alert UUID or operator-assigned slug>",
-    "tenant_ref_paths_consulted": ["agent/references/tenants/<customer>-<platform>.md"]
+    "tenant_ref_paths_consulted": ["agent/references/tenants/<customer>-<tenant-suffix>.md"]
   }
 }
 ```
@@ -265,8 +265,9 @@ prerequisite for L2 is a populated tenant ref at
 specialist has no policy / inventory / known-quiet baseline to read against
 and degrades to a blind pull. If the tenant ref is missing or stale, L1's
 handoff should still name the target skill so the operator's queue records
-the gap; bootstrap the ref via `vigil blue tenant init --platform <tag>`
-before re-dispatching.
+the gap; bootstrap the ref via `vigil blue tenant init --customer <slug> --platform <supported-platform>` before re-dispatching. `other` is not a
+tenant-init platform; if the operator onboards it as `generic`, use that
+platform and its tenant ref, otherwise keep the L2 dispatch blocked.
 
 ### Step 7 — Closing sequence
 
@@ -461,5 +462,5 @@ already at the top of the dispatch prompt; re-emitting it wastes context.
   skill mirrors (signal → skill trigger, batch routing, completion).
 - `agent/skills/google-workspaces/SKILL.md` — the L2 specialist's playbook
   for `platform=gws` dispatches.
-- `agent/references/tenants/<customer>-<platform>.md` — the tenant ref
+- `agent/references/tenants/<customer>-<tenant-suffix>.md` — the tenant ref
   whose "Known benign patterns" register the mechanical-FP screen reads.

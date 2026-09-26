@@ -13,7 +13,7 @@ instructions: |2
   through `vigil blue propose-contain`; do **not** execute them. Execution is
   operator-mediated: the operator runs the approved platform command through
   `vigil assess host-exec --require-audit`, then records it with `vigil blue
-  contain --proposal <id> --command-run-id <id>` or a proof artifact. No
+  contain <finding-slug> --proposal <id> --command-run-id <id>` or a proof artifact. No
   automated containment in v1.
 
   **Iteration mode:** `deep-manual`. **Default when omitted:** `deep-manual`.
@@ -68,7 +68,7 @@ instructions: |2
   - Each proposal specifies: action verb, specific target, exact command, rollback plan, blast-radius assessment, rationale
   - Record each proposal via `vigil blue propose-contain` — surfaces in the operator CLI for per-action approval
   - Wait for operator approval. Do NOT execute. Do NOT compose a "and then I ran it" sentence.
-  - Post-execution (operator runs `vigil blue contain --proposal <id> --command-run-id <id>` or passes `--proof-artifact <path>`), confirm execution proof landed and the `activity_entries` row carries the `containment_action` metadata
+  - Post-execution (operator runs `vigil blue contain <finding-slug> --proposal <id> --command-run-id <id>` or passes `--proof-artifact <path>`), confirm execution proof landed and the `activity_entries` row carries the `containment_action` metadata
   - Surface any benign pattern discovered during respond that the tenant ref does not document — those feed into the tenant ref's known-benign register on the next engagement
 
   ## Inputs

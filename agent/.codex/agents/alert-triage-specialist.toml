@@ -98,7 +98,7 @@ emitted to L2.
 L1 may propose an alert as `false_positive` **only** when the alert pattern
 matches an entry already documented in the tenant ref's known-benign register
 section (typically headed `## Known benign patterns` or similar in
-`agent/references/tenants/<customer>-<platform>.md`). The proposal
+`agent/references/tenants/<customer>-<tenant-suffix>.md`). The proposal
 must cite:
 
 - The tenant ref path

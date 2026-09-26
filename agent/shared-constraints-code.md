@@ -1,6 +1,6 @@
 # Shared Subagent Constraints -- Code Analysis Mode
 
-**Standing-load budget:** 560 lines; this revision is 549 lines.
+**Standing-load budget:** 560 lines; this revision is 559 lines.
 
 Load this file as part of your Load First set -- together with your role file and
 `agent/shared-specialist-core.md` -- before any source code work. All three load together, not
@@ -379,7 +379,11 @@ cannot prove that omitted source is non-callable:
 - `finding` -- Confirmed vulnerability with CWE, evidence, and exploitability assessment
 - `suspicious` -- Anomalous pattern needing variant analysis or deeper context to confirm
 - `clean` -- No vulnerabilities found in current analysis
-- `needs-context` -- Analysis blocked on missing information (specify exactly what is needed)
+
+If analysis is blocked by genuinely unavailable code or context, do not submit a
+disposition for that item yet. Close its lease with `vigil assess code-dispatch
+needs-context <item-id> <agent-name> <lease-token> [expansion-json-file]`, naming
+the missing dependency so the queue can route the expansion.
 
 Coverage must be structurally attributable, but write-up depth can be proportional:
 - Attack-facing, sink-bearing, stateful, or ambiguous functions need full reasoning.
@@ -393,9 +397,11 @@ the write-up, not the analysis behind it. Grouping verified mechanical helpers i
 grouping must never erase a finding, suspicious hypothesis, unresolved gap, or its exact evidence.
 
 Record dispositions via `vigil assess code-record analysis`.
-`finding` dispositions record durable finding state through `finding record`; `suspicious`,
-`clean`, and `needs-context` still record through `code-record analysis` so backend coverage knows
-which source regions were reviewed and why the queue can advance or re-dispatch.
+`finding` dispositions record durable finding state through `finding record`;
+`suspicious` and `clean` still record through `code-record analysis` so backend
+coverage knows which source regions were reviewed. `needs-context` is a queue
+action, not an analysis disposition; use it only for work that cannot yet be
+completed.
 
 ---
 

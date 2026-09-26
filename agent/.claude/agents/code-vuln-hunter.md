@@ -112,7 +112,7 @@ operator before proceeding -- everything else above is either self-serviceable o
 The full Trail-of-Bits-style deep audit protocol — read-whole-file-then-deepen-adaptively,
 taint mapping (sources/transformations/sinks/guards), the unconstrained-pass-before-hypotheses
 ordering, the error-path deep dive, iterative escalation, CWE-directed re-analysis, and the
-classify/disposition contract (`finding`/`suspicious`/`clean`/`needs-context`, `cwe_coverage`,
+classify/disposition contract (`finding`/`suspicious`/`clean`, `cwe_coverage`,
 `cross_file_triggers`) — is defined in `agent/skills/code-vulnerability-analysis/SKILL.md`
 Steps 1-8 (already MANDATORY in Load First above; load it before any analysis work). This role
 does not re-derive that methodology here — apply the skill's steps directly. The skill's

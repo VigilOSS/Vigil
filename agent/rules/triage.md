@@ -92,7 +92,7 @@ admin behavior" is not a false_positive; it is `disputed` until a citation lands
 
 L1 may auto-close as `false_positive` only when the alert matches a pattern already
 documented in the tenant ref's known-benign register (e.g., `agent/references/
-tenants/<customer>-<platform>.md` "Known benign patterns" section). The auto-close
+tenants/<customer>-<tenant-suffix>.md` "Known benign patterns" section). The auto-close
 finding must cite:
 
 - The tenant-ref path and section header

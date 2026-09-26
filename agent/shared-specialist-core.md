@@ -176,11 +176,11 @@ it in role prompts.
 
 ## Contract-First Rule
 
-Before the **first invocation of any `vigil assess` verb that mutates durable
-state, dispatches a runtime tool, or seats work-buffer rows**, run
-`vigil assess contract <verb>` (or `vigil assess contract <verb> <variant>`)
+Before the **first invocation of a `vigil assess` verb in the covered list
+below**, run `vigil assess contract <verb>` (or `vigil assess contract <verb> <variant>`)
 to read the canonical schema, the required fields, the common mistakes, and
-the example payload. Schema validation errors from guessing waste a full
+the example payload. These verbs write payload-bearing state, dispatch runtime
+tools, or seat work-buffer rows. Schema validation errors from guessing waste a full
 round-trip, so reading the contract first is faster than re-running the
 verb after a rejection.
 
@@ -202,8 +202,9 @@ your track simply never come up:
   `variant-check`, `fuzz-decision`, `fuzz-campaign`) —
   `vigil assess contract code-record <subverb>`
 
-Verbs **not** covered (skip the contract round-trip — they are read-only or
-have no payload to validate): `fetch`, `list-skills`, `work-buffer clusters`,
+Verbs **not** covered (skip the contract round-trip — they are read-only or,
+for `work-buffer done`, close a tokenized lease without a payload contract):
+`fetch`, `list-skills`, `work-buffer clusters`,
 `command-run list`, `command-run get`, `check-phase-readiness`,
 `scope filter`, `work-buffer stats|peek|fetch|done`,
 `dispatch list`, `dispatch get`. Reading the contract for these adds

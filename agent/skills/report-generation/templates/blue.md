@@ -133,13 +133,13 @@ No MITRE codes. No artifact IDs. No log fragments. Write this LAST.
 
 | Field | Value |
 |-------|-------|
-| Tenant / Reference | `<customer-slug>` / `agent/references/tenants/<customer>-<platform>.md` |
+| Tenant / Reference | `<customer-slug>` / `agent/references/tenants/<customer>-<tenant-suffix>.md` |
 | Platforms | `<gws | m365 | aws | okta | edr | network>` |
 | Identities / Assets | `<user@tenant>`, ... / `<MAC-12345>`, `<arn:aws:iam::...:user/...>`, ... |
 | Authorization (UTC) / By | `<UTC>` / `<title — name → Appendix B if PII>` |
 
 ### Out-of-scope exclusions
-<Copy verbatim from `agent/references/tenants/<customer>-<platform>.md` § "Out-of-Scope Artifacts". Do not paraphrase.>
+<Copy verbatim from `agent/references/tenants/<customer>-<tenant-suffix>.md` § "Out-of-Scope Artifacts". Do not paraphrase.>
 
 ### Recent authorized activity windows
 <List entries from the tenant ref's "Recent red team / authorized testing windows" so the reader can match adversary-looking telemetry against authorized activity.>
@@ -342,7 +342,7 @@ that need updating.
 
 | Category | Observation | Tenant-ref section |
 |----------|-------------|---------------------|
-| Identity | <one-line observation, e.g., "OAuth refresh tokens are not re-evaluated against device-trust on refresh; stolen token bypassed CA for session lifetime."> | `agent/references/tenants/<customer>-<platform>.md` §<n> |
+| Identity | <one-line observation, e.g., "OAuth refresh tokens are not re-evaluated against device-trust on refresh; stolen token bypassed CA for session lifetime."> | `agent/references/tenants/<customer>-<tenant-suffix>.md` §<n> |
 | Network | <one-line observation> | `<tenant-ref-section>` |
 | Endpoint | <one-line observation> | `<tenant-ref-section>` |
 | Process | <one-line observation> | `<tenant-ref-section or "(not in tenant ref)">` |

@@ -376,6 +376,6 @@ this pass; missing providers (no API key, rate-limited) surface as
   intel_emails, intel_domains, intel_cves, intel_dns_records,
   intel_social_profiles, intel_breach_records, intel_org_facts,
   intel_notes).
-- `agent/references/tenants/<customer>-<platform>.md` — the tenant
+- `agent/references/tenants/<customer>-<tenant-suffix>.md` — the tenant
   ref's "Documented egress IP ranges" and "Partner / vendor allowlist"
   sections drive Step 4's cross-check.

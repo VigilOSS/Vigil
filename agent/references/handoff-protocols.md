@@ -58,7 +58,7 @@ Output: endpoint lists, technologies, JS file URLs, parameters, surface candidat
 Output: new API endpoints, routes, secrets/tokens, config objects, coverage gaps
 
 1. **Read `#### Coverage Gaps` first** — if JS analysis was incomplete (files behind auth, opaque minification), re-dispatch with additional context before proceeding.
-2. New requestable endpoints → `vigil assess ingest endpoints source-analysis`
+2. New requestable endpoints → `vigil assess ingest endpoints source-analysis --file <urls-file>` (or piped URL lines)
 3. Secrets/tokens → durable findings immediately via `vigil assess finding record` + credential backend record via `vigil assess post credentials <credential-json-file>` (assessment_credentials table)
 4. API routes, object references, mutation paths, parameter names → queued for Phase 4 dispatch (these enter the work buffer via endpoint ingestion, not via immediate agent dispatch)
 
@@ -96,7 +96,7 @@ Output: prioritized findings (HIGH/MEDIUM/LOW), test commands, FUZZER_NEEDED sig
 
 Output: discovered paths, valid parameters, anomalous responses, confirmed findings
 
-1. New paths/endpoints → ingest into backend coverage state via `vigil assess ingest endpoints <source>`
+1. New paths/endpoints → ingest into backend coverage state via `vigil assess ingest endpoints <source> --file <urls-file>` (or piped URL lines)
 2. Anomalous responses → dispatch vuln-analyst for analysis within Phase 4
 3. Confirmed findings (e.g., valid credentials) → durable findings directly via `vigil assess finding record`
 
@@ -138,7 +138,7 @@ Output: backend intel-table updates via `intel record` (technology, CVE, breach,
 1. Read Intelligence Assessment section
 2. HIGH-value CVE + PoC match → record via `vigil assess intel record cve <json-file>` and dispatch exploit-developer to **validate** against the live target — **name the matching skill (discoverable via `vigil assess list-skills`) so the operator includes it in the dispatch**. Promote to a finding only after exploit-developer confirms exploitability — version-only CVE matches are intel, not findings, because backported patches and disabled modules routinely invalidate version-only matches.
 3. Breached credentials with target-specific proof → record finding + credential via `vigil assess post credentials` + dispatch exploit-developer to test access
-4. Historical endpoints → ingest into backend coverage state via `vigil assess ingest endpoints <source>`
+4. Historical endpoints → ingest into backend coverage state via `vigil assess ingest endpoints <source> --file <urls-file>` (or piped URL lines)
 5. MEDIUM/LOW intel without target proof → keep in backend intel tables via `intel record` only — do not promote to findings
 
 ## Phase 8 (REPORT)

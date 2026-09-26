@@ -285,7 +285,7 @@ without re-introducing the adversary's foothold.
 |-----------------|--------|
 | Restore-from-clean-backup | Confirm backup predates the earliest plausible compromise trigger (per `triage.md` rule 6 — T-30d look-back). Backup-date evidence is a registered artifact. |
 | Re-enroll affected identities | New password + new MFA factor + new device enrollment. Re-issued credentials follow the tenant ref's documented onboarding pattern, not an ad-hoc reset. |
-| Communicate to affected users | Tenant-ref-documented comms template (often in `agent/references/tenants/<customer>-<platform>.md` § "Incident comms"). The comms message is a registered artifact (`kind=evidence`) so the report-writer cites it. |
+| Communicate to affected users | Tenant-ref-documented comms template (often in `agent/references/tenants/<customer>-<tenant-suffix>.md` § "Incident comms"). The comms message is a registered artifact (`kind=evidence`) so the report-writer cites it. |
 | Re-verify detection coverage | Confirm the SIEM rule that fired the original alert is still healthy AND the rule's coverage of the compromise pattern is intact. If the rule's coverage was narrower than the actual compromise (i.e., the verifier discovered a sibling primitive that did not fire), record a `detection_gap` intel note. |
 | Lessons-learned for tenant ref | Update the customer's tenant ref's "Known-benign register" if the compromise revealed a previously-thought-benign pattern that should now escalate, OR update the "Tenant config baseline" if the compromise revealed a config gap. |
 
@@ -398,7 +398,7 @@ dispatch (if a follow-on finding lands).
 - `agent/skills/google-workspaces/SKILL.md` — example platform skill in
   containment mode; its "WRITE actions" section names the GWS-specific
   commands this skill's proposal table surfaces.
-- `agent/references/tenants/<customer>-<platform>.md` — tenant ref's
+- `agent/references/tenants/<customer>-<tenant-suffix>.md` — tenant ref's
   documented admin identities authorized for containment execution,
   comms templates, break-glass procedures.
 - `vigil blue contain` — recording verb (v1): does NOT run the platform

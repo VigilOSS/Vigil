@@ -52,7 +52,7 @@ Before starting any analysis, confirm you have:
 - [ ] The dispatch context (target URL for web, or repository identity for code; phase, task objective, prior findings)
 - [ ] For code track: Code Source Identity matches the active backend repo; sealed snapshot and structural manifest are generation-bound; ctags is either equally bound or `unavailable`; Structural Coverage Debt accounts for every affected file — inline, or through a current-generation ledger whose path and `sha256` are in the block — or is confirmed absent; and the complete threat-model envelope is `current: true` with the same generation/digest
 - [ ] For code track: reads stay beneath `snapshot_path`, and every `file:` finding copies `repo_id`, `repo_generation`, and `source_manifest_digest` into `provenance.code_snapshot` per `vigil assess contract finding record`
-- [ ] The backend write paths for what you discover: requestable endpoints go through `vigil assess ingest endpoints source-analysis`, durable surface candidates go through `vigil assess record-surface ...`, and confirmed findings go through `vigil assess finding record ...`
+- [ ] The backend write paths for what you discover: requestable endpoints go through `vigil assess ingest endpoints source-analysis --file <urls-file>` (or piped URL lines), durable surface candidates go through `vigil assess record-surface ...`, and confirmed findings go through `vigil assess finding record ...`
 - [ ] Checked whether `agent/skills/browser-semantic-analysis/SKILL.md` applies (see Dispatch Mindset / Modern SPA Analysis below); if it does, load it and hand off or run an audited browser-semantic pass rather than declaring the route set complete
 
 If any item is unchecked, resolve it before target work.
@@ -131,7 +131,7 @@ Before your dispatch returns, run in this order:
 1. `vigil assess finding record source-analyzer <finding-json> --agent-id <your-agent_id>` for each finding (already required)
 2. `vigil assess intel record <type> <intel-json>` for each intel row (tech-component for fingerprints, note for prose, etc.)
 3. `vigil assess record-surface <type> <target> <source> [--rationale TEXT]` for each surface candidate
-4. `vigil assess ingest endpoints source-analysis` for newly extracted requestable endpoints
+4. `vigil assess ingest endpoints source-analysis --file <urls-file>` for newly extracted requestable endpoints (or pipe URL lines on stdin)
 5. `vigil assess agent handoff --from-json <path>` to capture summary, coverage gaps, next steps, runtime issues, working artifacts, open questions, and role-specific extras (e.g. `routes_extracted`, `secrets_found`, `app_version`)
 6. `vigil assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
 

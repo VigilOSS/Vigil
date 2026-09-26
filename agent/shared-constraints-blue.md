@@ -435,8 +435,10 @@ list and in `agent/rules/triage.md`'s own Reference Block; it is not re-listed
 here. The paths below are the ones this file's contracts depend on that no
 Load First names:
 
-- `agent/references/tenants/<customer>-<platform>.md` — the tenant ref injected
-  for this dispatch.
+- `agent/references/tenants/<customer>-<tenant-suffix>.md` — the tenant ref injected
+  for this dispatch (`gws` resolves to `workspace`; other supported platforms
+  retain their platform name). Use the resolved `tenant_reference_paths[]`, not
+  a filename guessed from the platform tag.
 - `agent/references/runtime-guides/handoff-schema.md` — canonical handoff JSON
   schema (cross-mode); see "Dispatch Handoff Conventions" above.
 - `agent/references/runtime-guides/command-history-auditing.md` — the coverage-

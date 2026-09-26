@@ -46,7 +46,7 @@ in. Cross-reference to the relevant identity-platform tenant ref
 | Deployed EDR vendor (primary) | `<MDE / CrowdStrike / SentinelOne>` |
 | Secondary / legacy EDR (if any) | `<vendor>` or `N/A` |
 | Total managed endpoints | `<count>` (as of `<YYYY-MM-DD>`) |
-| Linked identity platform | `<m365 / okta / gws / aws-sso>` — see `<customer>-<platform>.md` |
+| Linked identity platform | `<m365 / okta / gws / aws-sso>` — see the resolved `<customer>-<tenant-suffix>.md` (`gws` uses `workspace`) |
 | Organization name | `<CUSTOMER>` |
 | Admin secondary email | `<admin-recovery-email>` |
 | Org phone | `<+E.164-org-phone>` |

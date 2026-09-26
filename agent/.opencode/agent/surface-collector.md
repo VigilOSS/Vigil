@@ -171,7 +171,7 @@ For any collection source you could NOT complete, declare it in `#### Coverage G
 1. `vigil assess finding record surface-collector <finding-json> --agent-id <your-agent_id>` for each finding (already required)
 2. `vigil assess intel record <type> <intel-json>` for each intel row
 3. `vigil assess record-surface <type> <target> <source> [--rationale TEXT]` for each surface candidate (priority signals carry on the surface row's `priority_*` fields, not in markdown)
-4. `vigil assess ingest endpoints katana|recon|source-analysis` for each raw URL ingestion source not already handled by `vigil assess gau endpoints`
+4. `vigil assess ingest endpoints <katana|recon|source-analysis> --file <urls-file>` for each raw URL ingestion source not already handled by `vigil assess gau endpoints` (or pipe URL lines on stdin)
 5. `vigil assess ingest candidates surface-collector-curated "$DIR/scans/surface-collector/candidate_records.jsonl"` when you produced curated candidate records
 6. `vigil assess agent handoff --from-json <path>` to capture summary, coverage gaps, next steps, runtime issues, working artifacts, open questions, and role-specific extras (e.g. `urls_ingested`, `clusters`, `deferred_clusters`)
 7. `vigil assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).

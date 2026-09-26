@@ -56,20 +56,25 @@ phase's full dispatch transcripts:
    — slug, severity, status, `canonical_location`, and the `details` story (evidence /
    impact / cvss_vector).
 
-## Stage-Completion Audit (Pipeline Gate)
+## Recon/Collect Stage-Completion Audit
 
-Before running the judgment-question pass below, run the stage-completion audit. This is a prerequisite check — it confirms that every expected pipeline stage has a completed audit row; the judgment pass then reasons on top of those results, not on a pipeline that silently dropped stages.
+For `recon` and `collect`, run the stage-completion audit before the
+judgment-question pass. Those are the phases with an expected-stage checklist;
+other phases have no `stage_audit` block, so absence of that block is not a
+clean stage verdict. Apply the judgment questions below at every phase boundary.
 
 ```bash
-vigil assess check-phase-readiness --phase <current-phase> --by-host
+vigil assess check-phase-readiness --phase recon --by-host  # use collect at that boundary
 ```
 
 Walk the output for any stage flagged `timed_out`, `partial`, or never run (absent from the ledger). For each:
 
 - [ ] **Re-run the stage** if it is still worth running (scope unchanged, tool available, budget permits). A `timed_out` nuclei sweep over 500 hosts is not a verdict — it is a coverage gap. Raise `--timeout` or scope the list down and re-dispatch.
-- [ ] **Accept with reason** if re-run is not warranted (out-of-scope host discovered mid-run, tool unavailable, operator explicitly deferred): record the deferral via `vigil assess agent decision --kind coverage_deferral --payload-json '{"stage": "...", "host": "...", "reason": "..."}' --surfaced-to-user` so the gap is audited, not invisible.
+- [ ] **Accept with reason** only when a supported host objective is intentionally deferred: record `vigil assess agent decision --kind coverage_deferral --payload-json '{"host":"api.example.com","deferred_objectives":["directory_fuzz"],"reason":"..."}' --surfaced-to-user`. Name any remaining pipeline-stage gap in the handoff; an objective deferral does not mark an arbitrary stage complete.
 
-A stage that is silently absent from the ledger is a coverage gap the five judgment questions cannot see — `coverage` miss kind catches depth and surface gaps but cannot flag a tool that never ran. The stage audit catches what the ledger's binary state cannot.
+In `recon` and `collect`, a stage silently absent from the ledger is a gap the
+five judgment questions cannot see. The stage audit catches that pipeline gap;
+it does not generalize to phases without an expected-stage checklist.
 
 ## Procedure
 

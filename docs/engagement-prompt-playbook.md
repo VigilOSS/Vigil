@@ -325,15 +325,16 @@ The `vigil-` prefix is mandatory: bare `resume` and `compact` collide with built
 clients.
 
 - **Claude Code** — `/vigil-resume`, `/vigil-hunt-deeper`, … Arguments are passed inline
-  (`/vigil-fresh-skeptic-verify idor-on-tenant-export`), and the commands run backend queries for
-  you before you read them.
+  (`/vigil-fresh-skeptic-verify idor-on-tenant-export`). Commands with query substitutions
+  run those backend queries before you read them; others provide instructions to run.
 - **Codex** — `$vigil-resume`, `$vigil-hunt-deeper`, … Codex skills perform no argument or
   command substitution, so the Codex rendering states the commands for the agent to run and
   reads your intent from the message you send alongside the skill name.
 - **opencode, goose and kimi get no commands.** Those clients have no equivalent
-  project-command surface. Paste the §6 template, or the body of the matching
-  `agent/commands/<name>.md`, into the session by hand — the content is identical, only the
-  invocation differs.
+  project-command surface. Paste the §6 template into the session by hand, or adapt the
+  matching `agent/commands/<name>.md` for that client first. Canonical command bodies
+  can contain Claude/Codex-specific branches and substitution syntax; they are not
+  identical to the rendered client commands.
 
 Commands reach an engagement as pointers, not copies: `<engagement>/.claude/commands/<name>.md`
 and `<engagement>/.codex/skills/<name>/` are per-entry symlinks into the install root, so an

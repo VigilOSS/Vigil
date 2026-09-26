@@ -26,13 +26,19 @@ Use the case worktree. Add a Laravel regression that fails before and passes
 after, a legitimate-user positive control, and assertions on relevant side
 effects. Inspect sibling routes and callers sharing the root cause. When
 Docker Compose participates, first verify the actual source mount and served
-revision with `vigil remediation runtime-identity`; a dirty worktree, overlay
-mount, or unconfirmed image label leaves the result unproven. Record red and
-green Laravel output files as case evidence with exact commands and the
-`failed_as_expected` or `passed` outcome. Do not claim a result against an
+revision:
+
+```bash
+vigil remediation -k <key> runtime-identity <case-id> \
+  --compose-file <path> --service <name> --container-path <app-path>
+```
+
+A dirty worktree, overlay mount, or unconfirmed image label leaves the result
+unproven. Record red and green Laravel output files as case evidence with exact
+commands and the `failed_as_expected` or `passed` outcome. Do not claim a result against an
 unconfirmed revision.
 Commit the failing regression before recording red evidence. After committing
-the fix, run `vigil remediation sync-revision <case-id>` to record the clean
+the fix, run `vigil remediation -k <key> sync-revision <case-id>` to record the clean
 worktree HEAD before green evidence, browser rehearsal, or review.
 
 Rehearse the fixed human happy path with Stagehand in a running environment;

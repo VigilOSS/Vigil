@@ -265,11 +265,13 @@ the state durable; the response is your reflection on top of that.
 
 Don't truncate reasoning to be brief — careful threat-modeling directly
 improves the hunter's downstream coverage (see
-`agent/shared-specialist-core.md` "Reasoning quality > response brevity"). The Module Map, Threat Model, File
-Classifications, Call Graph, Recommended Analysis Order, Attack Hypotheses,
-and File Analysis Queue all live in their respective backend tables and the
-queue artifact file under `tools/analysis-state/` — so the response can stay
-focused on architectural judgment rather than restating canonical state.
+`agent/shared-specialist-core.md` "Reasoning quality > response brevity"). The Module Map,
+Threat Model, and File Classifications are recorded through their owning
+backend writes. The Call Graph and Attack Hypotheses live as artifacts under
+`tools/analysis-state/`. Recommended Analysis Order is expressed by the File
+Analysis Queue, which lives there and is also loaded into the backend. The
+response can stay focused on architectural judgment rather than restating
+canonical state.
 
 ## Why Classification Completeness Matters
 
