@@ -506,11 +506,12 @@ def frontend_app(full_path: str):
             content={"detail": _FRONTEND_MISSING_HELP, "fix": "vigil orchestrator build"},
         )
 
-    requested_path = settings.frontend_dist_dir / full_path
-    if full_path and requested_path.is_file() and requested_path.is_relative_to(settings.frontend_dist_dir):
+    frontend_root = settings.frontend_dist_dir.resolve()
+    requested_path = (frontend_root / full_path).resolve()
+    if full_path and requested_path.is_relative_to(frontend_root) and requested_path.is_file():
         return FileResponse(requested_path)
 
-    index_path = settings.frontend_dist_dir / "index.html"
+    index_path = frontend_root / "index.html"
     if index_path.exists():
         return FileResponse(index_path)
 

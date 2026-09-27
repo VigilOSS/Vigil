@@ -12,6 +12,8 @@ Covers ``PATCH /engagements/{key}/assessment/surfaces/{id}`` and the
 """
 from __future__ import annotations
 
+import pytest
+
 from tests.test_engagements_api import write_engagement
 
 
@@ -89,6 +91,34 @@ def test_patch_surface_resolves_to_covered_with_rationale(client, isolate_settin
     assert "vulnerability-analyst confirmed" in body["rationale"]
     # Original rationale is retained because update_surface appends.
     assert "GET handler with numeric id parameter" in body["rationale"]
+
+
+@pytest.mark.parametrize("resolved_status", ["covered", "not_applicable", "deferred"])
+def test_recording_existing_surface_preserves_operator_status(
+    client, isolate_settings, resolved_status
+):
+    _seed_engagement(client, isolate_settings)
+    created = _create_surface(client)
+    resolved = client.patch(
+        f"{ASSESSMENT_BASE}/surfaces/{created['id']}",
+        json={"status": resolved_status, "rationale": "Operator reviewed this surface"},
+    )
+    assert resolved.status_code == 200, resolved.text
+
+    repeated = client.post(
+        f"{ASSESSMENT_BASE}/surfaces",
+        json={
+            "surface_type": "object_reference",
+            "target_descriptor": "https://example.test/api/users/{id}",
+            "source_name": "surface-collector",
+            "rationale": "Observed again during recon",
+        },
+    )
+
+    assert repeated.status_code == 201, repeated.text
+    assert repeated.json()["id"] == created["id"]
+    assert repeated.json()["status"] == resolved_status
+    assert "Operator reviewed this surface" in repeated.json()["rationale"]
 
 
 def test_patch_surface_accepts_4096_character_followup(client, isolate_settings):

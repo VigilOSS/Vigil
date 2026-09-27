@@ -859,6 +859,46 @@ def registered_snapshot_evidence_health(
         os.close(descriptor)
 
 
+def read_registered_artifact_bytes(
+    root: Path,
+    relative_path: str,
+    *,
+    expected_size: int,
+    expected_sha256: str,
+) -> bytes:
+    """Return the indexed bytes from one no-follow descriptor, or reject drift."""
+    path = Path(relative_path)
+    if path.is_absolute() or ".." in path.parts:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="invalid artifact path")
+    descriptor = _open_registered_artifact(root, relative_path)
+    if descriptor is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="artifact file not found")
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode) or before.st_size != expected_size:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="artifact content changed")
+        digest = hashlib.sha256()
+        content = bytearray()
+        while chunk := os.read(descriptor, 1024 * 1024):
+            content.extend(chunk)
+            if len(content) > expected_size:
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="artifact content changed")
+            digest.update(chunk)
+        after = os.fstat(descriptor)
+        if (
+            before.st_dev != after.st_dev
+            or before.st_ino != after.st_ino
+            or before.st_size != after.st_size
+            or before.st_mtime_ns != after.st_mtime_ns
+            or len(content) != expected_size
+            or digest.hexdigest() != expected_sha256
+        ):
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="artifact content changed")
+        return bytes(content)
+    finally:
+        os.close(descriptor)
+
+
 def register_verified_command_output(
     engagement_id: int,
     *,

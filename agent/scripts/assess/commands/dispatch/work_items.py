@@ -618,6 +618,10 @@ def _reclassify_retype(client, *, batch: int, retype_all: bool) -> None:
         else:
             new_qk = old_qk
 
+        # Retyping may reclaim a classifier-owned inert skip, but an operator's
+        # skip is a separate decision. Only --reclaim-skipped may revisit it.
+        preserve_skip = row.get("status") == "skipped" and row.get("terminal_reason") != "inert_type"
+        terminal_reason = row.get("terminal_reason") if preserve_skip else assignment["terminal_reason"]
         update = {
             "id": row["id"],
             "type": new_type,
@@ -625,12 +629,11 @@ def _reclassify_retype(client, *, batch: int, retype_all: bool) -> None:
             "priority_score": assignment["priority_score"],
             "priority_reason": assignment["priority_reason"],
             "cluster_key": assignment["cluster_key"],
-            "terminal_reason": assignment["terminal_reason"],
+            "terminal_reason": terminal_reason,
             "classifier_version": CLASSIFIER_VERSION,
-            # Terminal → skipped; a previously-skipped row that re-types to an
-            # actionable (non-terminal) type is restored to pending; else keep.
+            # Only a classifier-owned inert skip may return to pending.
             "status": (
-                "skipped" if assignment["terminal_reason"] is not None
+                "skipped" if preserve_skip or terminal_reason is not None
                 else ("pending" if row.get("status") == "skipped" else row.get("status"))
             ),
         }

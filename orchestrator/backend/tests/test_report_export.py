@@ -542,6 +542,31 @@ def test_report_export_download_serves_html_and_404s_for_wrong_id(
     assert missing.status_code == 404
 
 
+def test_report_export_download_rejects_modified_artifact(
+    client, isolate_settings, fake_template
+):
+    _seed(client, isolate_settings)
+    _add_finding(client, _finding("VA-001", "Missing authorization on admin API"))
+    export = client.post(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/report-export", json={"mode": "draft"}
+    )
+    assert export.status_code == 200, export.text
+    artifact = export.json()
+    report_path = (
+        isolate_settings["engagements_dir"] / ENGAGEMENT_KEY / artifact["relative_path"]
+    )
+    original = report_path.read_bytes()
+    report_path.write_bytes(b"X" + original[1:])
+
+    download = client.get(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/report-export/"
+        f"{artifact['artifact_id']}/download"
+    )
+
+    assert download.status_code == 409
+    assert b"X" + original[1:] not in download.content
+
+
 def test_report_export_download_rejects_non_report_artifact(
     client, isolate_settings, fake_template
 ):

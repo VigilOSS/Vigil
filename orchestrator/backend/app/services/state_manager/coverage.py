@@ -612,7 +612,7 @@ def _upsert_surface(
                 NULLIF(excluded.framework_registration, ''),
                 assessment_surfaces.framework_registration
             ),
-            status = excluded.status,
+            -- Re-observation enriches the row; status changes require PATCH.
             updated_at = CURRENT_TIMESTAMP
         """,
         (engagement_id, surface_type, target_descriptor, source_name, rationale, evidence_ref, status_value, framework_registration),

@@ -59,3 +59,17 @@ def test_backend_serves_frontend_build_when_present(isolate_settings):
     assert "orchestrator" in root_response.text
     assert asset_response.status_code == 200
     assert "console.log('ok')" in asset_response.text
+
+
+def test_frontend_fallback_never_serves_files_outside_build(client, isolate_settings):
+    build_dir = isolate_settings["frontend_dist_dir"]
+    (build_dir / "index.html").write_text("frontend index", encoding="utf-8")
+    outside = build_dir.parent.parent / "outside.txt"
+    outside.write_text("private fixture", encoding="utf-8")
+    (build_dir / "linked.txt").symlink_to(outside)
+
+    traversal = client.get("/%2e%2e/%2e%2e/outside.txt")
+    symlink = client.get("/linked.txt")
+
+    assert traversal.text == "frontend index"
+    assert symlink.text == "frontend index"

@@ -307,6 +307,23 @@ def test_retype_inert_to_actionable_restores_pending(tmp_path, monkeypatch):
     assert row["terminal_reason"] is None
 
 
+def test_retype_preserves_operator_deferred_skip(tmp_path, monkeypatch):
+    fake = FakeAssessmentClient()
+    rid = _insert_row(
+        fake, queue_key="variant:8:page", method="GET",
+        url="http://t/api/orders", url_path="/api/orders",
+        content_type="application/json", case_type="page",
+        status="skipped", terminal_reason="skipped:operator | Review after access is granted",
+    )
+
+    _run(fake, _args(retype_all=True))
+
+    row = _row(fake, rid)
+    assert row["type"] == "api"
+    assert row["status"] == "skipped"
+    assert row["terminal_reason"] == "skipped:operator | Review after access is granted"
+
+
 def test_retype_does_not_corrupt_arjun_queue_key(tmp_path, monkeypatch):
     fake = FakeAssessmentClient()
     qk = "arjun:POST:https://h.example/api/users:deadbeefcafef00d"

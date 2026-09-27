@@ -3,15 +3,15 @@ from __future__ import annotations
 import datetime as dt
 import importlib.metadata
 import json
-import os
 import uuid
 from collections import Counter
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, status
-from fastapi.responses import FileResponse
+from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..services import artifact_index
@@ -419,7 +419,7 @@ def export_report(engagement_key: str, request: ReportExportRequest) -> dict[str
 
 
 @router.get("/report-export/{artifact_id}/download")
-def download_report(engagement_key: str, artifact_id: int) -> FileResponse:
+def download_report(engagement_key: str, artifact_id: int) -> Response:
     engagement = get_engagement_view_or_404(engagement_key)
     record = artifact_index.get_artifact(engagement.id, artifact_id)
     # The artifact must belong to this engagement (enforced by get_artifact's
@@ -429,13 +429,16 @@ def download_report(engagement_key: str, artifact_id: int) -> FileResponse:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="report artifact not found")
     root = Path(engagement.engagement_root).resolve()
     file_path = (root / str(record["relative_path"])).resolve()
-    # Defense in depth: confirm the resolved path is still inside the
-    # engagement root and exists on disk.
-    if not file_path.is_file() or os.path.commonpath([str(root), str(file_path)]) != str(root):
+    if not file_path.is_relative_to(root):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="report file not found")
-    return FileResponse(
-        path=file_path,
+    content = artifact_index.read_registered_artifact_bytes(
+        root,
+        str(record["relative_path"]),
+        expected_size=int(record["size_bytes"]),
+        expected_sha256=str(record["sha256"]),
+    )
+    return Response(
+        content=content,
         media_type="text/html",
-        filename=file_path.name,
-        content_disposition_type="attachment",
+        headers={"Content-Disposition": f"attachment; filename*=utf-8''{quote(file_path.name)}"},
     )
