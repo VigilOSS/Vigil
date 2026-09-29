@@ -5,11 +5,13 @@
 This file replaces the web-focused core loop from `operator-core.md` for code-analysis
 engagements (same backend, findings table, and CLI tools).
 
-**Applies to:** a standalone code engagement selected by the parent routing gate, or
-mid-engagement when source code is obtained (exposed `.git`, source maps, backup download) —
-code analysis then runs in parallel with ongoing web testing. Create with `vigil engagement create
---type code <name> --repo <path>`. On entry, use `vigil assess resume-brief` and the guarded
-transition helpers to determine the current phase and resume from there.
+**Applies to:** a session launched with `--mode code`. Run `vigil engagement mode`
+and confirm `mode: code` and this file as `prompt:` before target-facing work.
+The code track may share an engagement and findings with a web track, but this
+session runs only the code workflow. When source is obtained during web work,
+enable the code track and start a fresh code session. On entry, use
+`vigil assess resume-brief` and the guarded transition helpers to determine
+the current phase and resume from there.
 
 ## Shared Run Accounting
 
@@ -22,7 +24,7 @@ After an uncertain write response, inspect stored state before deciding whether 
 ROE** — mandatory headers, rate caps, no-fire endpoints, deconfliction, exfiltration limits. For a
 pure static source review it is advisory only, since reading `source/` never touches the wire. It
 re-applies in full the instant the code track does anything live — a Phase-4 fuzz campaign against
-a running target, or web testing alongside the code track (see "Integration with Web Engagement").
+a running target, or when a separate web session tests the same engagement (see "Integration with Web Engagement").
 Re-check it before any such live probe, even mid-run.
 
 ---
@@ -435,7 +437,9 @@ When source code is obtained mid-engagement (exposed .git, source maps, backup d
    `vigil assess code-index build --repo-id <repo-id> <sealed-source-path>`, then run
    `vigil assess code-index sync` (the script bootstraps bundled tree-sitter packages through `uv`
    on first run)
-5. Code analysis phases run in parallel with ongoing web testing
+5. Start a fresh `vigil engagement start <engagement-key> --mode code --client <client>`
+   session. Code analysis may proceed alongside a separate web session; never load both
+   cores into one context.
 6. Findings land in the same `assessment_findings` table
 
 When a standalone code engagement gains an authorized live target, explicitly run
@@ -446,7 +450,10 @@ comes from the program you were authorized against, never from a finding's `deta
 them is `vigil assess exploit review`'s `Runtime proof owed` section — findings verified
 `pending_runtime_proof`, whose source evidence holds but whose live PoC is owed. Running that pass
 and recording its proof receipt belongs to an exploit-developer dispatch on the web track
-(`agent/phases/phase-6-exploit.md`).
+(`agent/phases/phase-6-exploit.md`). Start a fresh
+`vigil engagement start <engagement-key> --mode web --client <client>` session
+for that work. Give it a bounded handoff with the source finding IDs, runtime
+proof owed, and admitted hosts; keep this code session's phase separate.
 
 Until that web track is active and authorized, CODE-phase specialists follow the declared-target
 advisory in `shared-constraints-code.md`: ordinary research network access remains available, while

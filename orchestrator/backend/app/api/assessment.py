@@ -1866,6 +1866,7 @@ def get_foreign_lane_command_recency(
 @router.get("/resume-brief")
 def get_resume_brief(
     engagement_key: str,
+    mode: Literal["web", "code", "blue", "android", "remediation"] | None = None,
     q: str = "",
     finding: str = "",
     agent_id: str = "",
@@ -1878,6 +1879,7 @@ def get_resume_brief(
     engagement = get_engagement_or_404(engagement_key)
     return assessment_memory.build_resume_brief(
         engagement.id,
+        mode=mode,
         q=q,
         finding=finding,
         agent_id=agent_id,

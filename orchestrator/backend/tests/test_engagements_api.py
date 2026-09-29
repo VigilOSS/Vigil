@@ -253,7 +253,62 @@ def test_both_engagement_exposes_independent_code_phase(client, isolate_settings
         "code": {"phase": "verify-variant", "complete": False},
     }
     assert fetched.json()["aggregate_complete"] is False
-    assert fetched.json()["status"] == "in_progress"
+
+
+def test_legacy_both_missing_code_phase_requires_repair_before_completion(client, isolate_settings):
+    engagement_dir = write_engagement(
+        isolate_settings["engagements_dir"], key="2026-09-29-120000-both-unrepaired"
+    )
+    scope_path = engagement_dir / "scope.json"
+    scope = json.loads(scope_path.read_text(encoding="utf-8"))
+    scope.update({"engagement_type": "both", "current_phase": "complete", "status": "completed"})
+    scope.pop("code_phase", None)
+    scope_path.write_text(json.dumps(scope), encoding="utf-8")
+
+    response = client.get("/engagements/2026-09-29-120000-both-unrepaired")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "in_progress"
+    assert body["aggregate_complete"] is False
+    assert body["track_state"]["code"] == {
+        "phase": "repair-required", "complete": False, "repair_required": True,
+    }
+
+
+def test_offensive_tracks_expose_independent_phases_without_both_type(
+    client, isolate_settings
+):
+    """The durable track map, rather than a combined type label, owns phases."""
+    engagement_dir = write_engagement(
+        isolate_settings["engagements_dir"],
+        key="2026-09-29-120000-offensive-tracks",
+    )
+    scope_path = engagement_dir / "scope.json"
+    scope = json.loads(scope_path.read_text(encoding="utf-8"))
+    scope.update(
+        {
+            "engagement_type": "offensive",
+            "tracks": {
+                "web": {"phase": "verify"},
+                "code": {"phase": "hunt"},
+            },
+            "status": "in_progress",
+        }
+    )
+    scope.pop("code_phase", None)
+    scope_path.write_text(json.dumps(scope), encoding="utf-8")
+
+    response = client.get("/engagements/2026-09-29-120000-offensive-tracks")
+
+    assert response.status_code == 200
+    assert response.json()["track_state"] == {
+        "web": {"phase": "verify", "complete": False},
+        "code": {"phase": "hunt", "complete": False},
+    }
+    assert response.json()["current_phase"] == "verify"
+    assert response.json()["code_phase"] == "hunt"
+    assert response.json()["status"] == "in_progress"
 
 
 def test_list_engagements_surfaces_scope_hosts_for_proxy_router(client, isolate_settings):

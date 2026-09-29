@@ -19,9 +19,10 @@ Print the canonical contract and read it in full:
 
 Then inspect `.codex/config.toml` and confirm that `compact_prompt` is non-empty,
 `model_auto_compact_token_limit` is `510000`, and `hooks.SessionStart` contains exactly one
-`^compact$` entry invoking `post-compact-resume.sh`. The generated prompt is the same contract
-Claude Code applies through its `PreCompact` hook; Codex loads it directly as its history
-compaction override.
+`^compact$` entry invoking `post-compact-resume.sh`. The generated prompt is a mode-neutral
+copy of the standing contract; Codex loads it directly as its history compaction override.
+The continuation hook uses the session's `VIGIL_OPERATOR_MODE` and `vigil engagement mode`
+to restore only the selected operator prompt.
 
 Report to the operator, in three lines:
 

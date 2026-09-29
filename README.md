@@ -145,17 +145,25 @@ vigil engagement start <engagement-key> --client codex
 
 `create` starts the exploit policy at `pause` — explicit human approval before any exploit work
 — and leaves authentication unset. When `--type` is omitted it is inferred from the inputs
-(URL/host → `web`, `--repo` → `code`, both → `both`, APK or `--package-name` → `android`) and
+(URL/host → `web`, `--repo` → `code`, APK or `--package-name` → `android`) and
 echoed on stderr so it can be overridden; ambiguous inputs prompt on a terminal and fail fast
-under `--no-prompt`. Scope hosts can be given as `--hosts a,b`, repeated `--host` flags, a
+under `--no-prompt`. Combined source and web target inputs are rejected at creation so the
+first track is explicit.
+Scope hosts can be given as `--hosts a,b`, repeated `--host` flags, a
 `--hosts-file`, or any mix. `--dry-run` validates without writing; `--json` emits an object
 instead of the bare path. The path goes to stdout and everything else to stderr, so
 `eng=$(vigil engagement create ...)` works even when the wizard engages. Start
 `vigil mitmproxy start` / `vigil oob start` first if the target needs authenticated coverage or
 out-of-band callbacks.
 
+Offensive engagements store enabled capabilities in `scope.json.tracks`. Creation enables one
+track. Use `vigil engagement add-track <key> web|code` to enable the second explicitly. Then
+start each operator session with `--mode web` or `--mode code`; each session reads only that
+mode's operator prompt. `vigil engagement mode` reports the selected mode and prompt path from
+inside a session. Selecting a mode does not add a track or change scope.
+
 `start` requires `--client`. It changes into the engagement directory, exports `ENGAGEMENT_DIR`,
-`VIGIL_SESSION_ENGAGEMENT_DIR`, `ENGAGEMENT_KEY`, and the resolved `ORCHESTRATOR_BASE_URL`, then
+`VIGIL_SESSION_ENGAGEMENT_DIR`, `ENGAGEMENT_KEY`, `VIGIL_OPERATOR_MODE`, and the resolved `ORCHESTRATOR_BASE_URL`, then
 execs the client. Any flag it does not own is **forwarded to the client verbatim** and echoed as
 `[vigil] forwarding to the client: …` on stderr; a near-miss of a real Vigil flag is refused
 with a suggestion rather than forwarded, and a bare `--` forces everything after it through
@@ -240,16 +248,15 @@ Vigil runs three independent tracks, each with its own ordered roster terminatin
 
 | Track | Phases | Persisted as |
 |---|---|---|
-| **web** (red) | `recon → collect → consume-test → verify → exploit → report` | `scope.json.current_phase` |
-| **code** (white-box) | `ingest → classify-map → hunt → verify-variant → fuzz` | `scope.json.current_phase`, or `scope.json.code_phase` on a `both` engagement |
+| **web** (red) | `recon → collect → consume-test → verify → exploit → report` | `scope.json.tracks.web.phase` |
+| **code** (white-box) | `ingest → classify-map → hunt → verify-variant → fuzz` | `scope.json.tracks.code.phase` |
 | **blue** (incident response) | `intake → triage → investigate → verify → respond → report` | `scope.json.current_phase` |
 
 `complete` is a terminal state, not a working phase: no readiness gate, no audit tag, no
 per-phase operator doc. The code vocabulary is deliberately distinct from the web one, and a
-`both` engagement advances the two tracks independently — which is why the second phase field
-exists at all: an engagement runs one track in `current_phase` and only a `both` engagement needs
-`code_phase` as well. A `--type code` engagement holds its code-track position in
-`current_phase` and has no `code_phase` key. Phase values are persisted, so
+dual-track offensive engagement advances web and code independently. Older scopes with
+`engagement_type=web|code|both` and scalar phase fields remain readable; new scopes use
+`engagement_type=offensive` and the `tracks` map. Phase values are persisted, so
 `consume` and `consume_test` are accepted as input aliases resolving to the canonical
 `consume-test` at the boundary; the UI labels it "Consume & Test". Optional Athena log
 investigation is a numbered step inside the exploit phase, not a phase of its own.

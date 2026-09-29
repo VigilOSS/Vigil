@@ -75,76 +75,96 @@ if [ -n "$ENG_DIR" ] && [ -f "$ENG_DIR/scope.json" ]; then
   ENGAGEMENT_TYPE=$(jq -r '.engagement_type // empty' "$ENG_DIR/scope.json" 2>/dev/null || true)
 fi
 
+# An offensive engagement can carry both web and code capabilities.  That is an
+# engagement property, not a request to blend two operator cores into one
+# client session.  `vigil engagement start --mode` selects the seat and exports
+# this value; a compacted session must preserve that seat verbatim.
+OPERATOR_MODE="${VIGIL_OPERATOR_MODE:-}"
+if [ "$INCLUDE_ENGAGEMENT_ADDITIONS" = "false" ]; then
+  # Codex stores this text in engagement config, which survives across sessions.
+  # A later session can select a different mode without regenerating config.
+  OPERATOR_MODE=""
+fi
+case "$OPERATOR_MODE" in
+  web|code|blue|remediation|android) ;;
+  "")
+    if [ "$INCLUDE_ENGAGEMENT_ADDITIONS" != "false" ]; then
+      case "$ENGAGEMENT_TYPE" in
+        web|code|blue|remediation|android) OPERATOR_MODE="$ENGAGEMENT_TYPE" ;;
+      esac
+    fi
+    ;;
+  *)
+    OPERATOR_MODE=""
+    ;;
+esac
+
 emit_mode_intro() {
-  case "$ENGAGEMENT_TYPE" in
+  case "$OPERATOR_MODE" in
     web)
       printf '%s\n' \
-        'This summary replaces the working context of a live red-team web engagement.' \
+        'This summary replaces the working context of the session-selected `web` operator mode.' \
         'Preserve its web phase and the state of every phase-exit pass.'
       ;;
     code)
       printf '%s\n' \
-        'This summary replaces the working context of a live source-code security review.' \
+        'This summary replaces the working context of the session-selected `code` operator mode.' \
         'Preserve the code phase, admitted-file queue, review batches, and readiness debt.'
-      ;;
-    both)
-      printf '%s\n' \
-        'This summary replaces the working context of a live combined web and source-code engagement.' \
-        'Preserve both the web phase and code phase; neither track may disappear into the other.'
       ;;
     android)
       printf '%s\n' \
-        'This summary replaces the working context of a live Android application security engagement.' \
+        'This summary replaces the working context of the session-selected `android` operator mode.' \
         'Preserve the artifact/package identity and whether dynamic backend hosts are explicitly in scope.'
       ;;
     blue)
       printf '%s\n' \
-        'This summary replaces the working context of a live blue incident-response engagement.' \
+        'This summary replaces the working context of the session-selected `blue` operator mode.' \
         'Preserve its incident phase, alert timeline, tenant/platform context, and every containment approval.'
+      ;;
+    remediation)
+      printf '%s\n' \
+        'This summary replaces the working context of the session-selected `remediation` operator mode.' \
+        'Preserve the selected case, worktree revision, approval state, and red/green evidence.'
       ;;
     *)
       printf '%s\n' \
-        'This summary replaces the working context of a live Vigil engagement. Its mode is' \
-        'unavailable here, so do not infer a red, blue, web, or code workflow from this hook;' \
-        "re-read scope.json and the engagement's operator prompt after compaction."
+        'This summary replaces the working context of a live Vigil engagement, but no operator mode is selected.' \
+        'Do not infer or combine a workflow from engagement capabilities. After compaction, run' \
+        '`vigil engagement mode` and start or resume a client with its selected mode.'
       ;;
   esac
 }
 
 emit_mode_hydration() {
-  case "$ENGAGEMENT_TYPE" in
+  case "$OPERATOR_MODE" in
     web)
       printf '    vigil assess check-phase-readiness --phase report # web report readiness\n'
       ;;
     code)
-      printf '    vigil assess code-coverage                       # code-track coverage/readiness\n'
-      ;;
-    both)
-      printf '    vigil assess check-phase-readiness --phase report # web report readiness\n'
       printf '    vigil assess code-coverage                       # code-track coverage/readiness\n'
       ;;
   esac
 }
 
 emit_mode_prompt_route() {
-  case "$ENGAGEMENT_TYPE" in
+  case "$OPERATOR_MODE" in
     web)
-      printf '%s\n' 'For this web engagement, `AGENTS.md` supplies the red-team web operator core.'
+      printf '%s\n' 'For this session-selected `web` mode, read the engagement router and only the web operator core it selects.'
       ;;
     code)
-      printf '%s\n' 'For this code engagement, follow the `AGENTS.md` routing gate into `agent/operator-core-code.md`.'
-      ;;
-    both)
-      printf '%s\n' "For this combined engagement, follow \`AGENTS.md\` plus \`agent/operator-core-code.md\`'s integration-with-web guidance."
+      printf '%s\n' 'For this session-selected `code` mode, read the engagement router and only `agent/operator-core-code.md`.'
       ;;
     android)
-      printf '%s\n' 'For this Android engagement, follow the Android routing branch in `AGENTS.md`; do not infer live-host authorization from the artifact.'
+      printf '%s\n' 'For this session-selected `android` mode, read the engagement router and the Android branch; do not infer live-host authorization from the artifact.'
       ;;
     blue)
-      printf '%s\n' 'For this blue engagement, `AGENTS.md` is the rendered blue incident operator prompt; do not fall through to the red core loop.'
+      printf '%s\n' 'For this session-selected `blue` mode, read the engagement router and only the blue incident operator core.'
+      ;;
+    remediation)
+      printf '%s\n' 'For this session-selected `remediation` mode, read the engagement router and only `agent/operator-core-remediation.md`.'
       ;;
     *)
-      printf '%s\n' "Use \`scope.json\` and the engagement's \`AGENTS.md\` routing gate to select the operator contract; do not guess the mode."
+      printf '%s\n' "Use \`vigil engagement mode\` and the engagement's \`AGENTS.md\` router to select one operator contract; do not guess the mode."
       ;;
   esac
 }
@@ -207,15 +227,34 @@ makes "two specialists on one surface" visible at a glance.
 ## After the compaction
 
 Re-hydrate from the BACKEND, not from this summary. Lead with the bounded
-core hydration, then drill down only where you need to:
-
-    vigil assess resume-brief                        # core hydration; run this first
-    vigil assess operator-checkpoint show            # your own last recorded intent
-    vigil assess agent list --status in-progress     # who is running, and what they own
-    vigil assess finding list                        # the real finding set
+hydration for the session mode, then drill down only where you need to:
 CONTRACT
+if [ "$OPERATOR_MODE" = "remediation" ]; then
+  cat <<'CONTRACT'
+
+    Read PROJECT.md and remediation-project.json.
+    vigil remediation -k <key> list
+    vigil remediation -k <key> show <case-id>          # selected case, evidence, approvals
+CONTRACT
+else
+  cat <<'CONTRACT'
+
+    vigil assess resume-brief                         # core hydration; run this first
+    vigil assess operator-checkpoint show             # your own last recorded intent
+    vigil assess agent list --status in-progress      # who is running, and what they own
+    vigil assess finding list                         # the real finding set
+CONTRACT
+fi
 emit_mode_hydration
-cat <<'CONTRACT'
+if [ "$OPERATOR_MODE" = "remediation" ]; then
+  cat <<'CONTRACT'
+
+The selected case and its recorded evidence, revision, and approvals are
+canonical. Reload the remediation operator prompt through this engagement's
+`AGENTS.md` before acting.
+CONTRACT
+else
+  cat <<'CONTRACT'
 
 A checkpoint's intent text is UNVERIFIED operator intent, not a finding — read it
 as "what I was about to do", never as established fact.
@@ -224,6 +263,7 @@ The backend is canonical. A lane you remember may have returned; a lane you do
 not remember may still be running. Then reload the operator prompt from the
 engagement's `AGENTS.md` before acting.
 CONTRACT
+fi
 emit_mode_prompt_route
 cat <<'CONTRACT'
 Operator discipline (dispatch instead of probing, the lane budget, the phase-exit

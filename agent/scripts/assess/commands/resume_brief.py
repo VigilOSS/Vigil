@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import sys
 from contextlib import redirect_stdout
 from types import SimpleNamespace
@@ -145,6 +146,10 @@ def register(subparsers) -> None:
     p.add_argument("--finding", default="", help="Optional finding slug or alias, e.g. VA-047 or VA047.")
     p.add_argument("--agent-id", default="", help="Optional dispatch agent_id to include handoff/dispatch details.")
     p.add_argument(
+        "--mode", choices=("web", "code", "blue", "android", "remediation"),
+        default=None, help="Operator session mode (defaults to VIGIL_OPERATOR_MODE when set).",
+    )
+    p.add_argument(
         "--since",
         default="",
         help=(
@@ -224,6 +229,12 @@ def run(args) -> None:
             file=sys.stderr,
         )
     params = []
+    mode = getattr(args, "mode", None) or os.environ.get("VIGIL_OPERATOR_MODE", "")
+    if mode:
+        if mode not in {"web", "code", "blue", "android", "remediation"}:
+            print(f"resume-brief: invalid operator mode {mode!r}", file=sys.stderr)
+            raise SystemExit(2)
+        params.append(("mode", mode))
     if args.q:
         params.append(("q", args.q))
     if args.finding:
@@ -278,7 +289,31 @@ def _render_markdown(brief: dict) -> str:
             f"- query: q={query.get('q') or '-'} finding={query.get('finding') or '-'} "
             f"agent_id={query.get('agent_id') or '-'} since={query.get('since') or '-'}"
         ))
+    cross_track = brief.get("cross_track") or {}
+    if cross_track:
+        lines.extend(["", f"## Other Track: {cross_track.get('track')}"])
+        lines.append(contain_separators(
+            f"- phase={cross_track.get('phase')} findings={cross_track.get('finding_count', 0)} "
+            f"read=`{cross_track.get('read_command')}`"
+        ))
+        shared = cross_track.get("shared_unattributed_sections") or []
+        if shared:
+            lines.append(contain_separators(
+                "- shared bounded sections (track unattributed): " + ", ".join(shared)
+            ))
+        for row in cross_track.get("finding_pointers") or []:
+            lines.append(contain_separators(
+                f"- {row.get('slug')} {row.get('severity')} "
+                f"{row.get('workflow_status')} {_trim(str(row.get('title') or ''), 100)}"
+            ))
     _render_operator_checkpoint(lines, brief.get("operator_checkpoint"))
+    shared_checkpoint = brief.get("shared_checkpoint") or {}
+    if shared_checkpoint:
+        lines.append(contain_separators(
+            f"- shared engagement checkpoint #{shared_checkpoint.get('checkpoint_version')} "
+            f"(track unattributed; intent omitted): "
+            f"`{shared_checkpoint.get('read_command')}`"
+        ))
     lines.extend(["", "## Finding Counts"])
     counts = brief.get("finding_counts") or {}
     for key in ("workflow", "verification_status", "severity", "source"):
@@ -473,7 +508,7 @@ def _render_operator_checkpoint(lines: list, checkpoint: object) -> None:
     lines.extend(["", "## Operator Checkpoint"])
     # `render_phase_field` inside the header, and the reference-list and intent
     # renders below, are shared with `operator-checkpoint show` so the two views
-    # cannot drift — on which tracks a combined engagement reports, on the
+    # cannot drift — on which tracks a dual-track engagement reports, on the
     # reference lists, and on the
     # UNVERIFIED label / containment that keeps a reference or multi-line note
     # from forging one of this brief's own section boundaries.

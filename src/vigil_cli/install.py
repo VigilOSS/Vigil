@@ -652,7 +652,7 @@ def install_from_source(
             # Import lazily: engagements consumes the roster helpers above, while the
             # installer owns when existing workdirs are reconciled after their generated
             # sources have been refreshed.
-            from .engagements import repair_engagement_client_entrypoints
+            from .engagements import repair_engagement_client_entrypoints, repair_engagement_operator_pointers
 
             destination_boundary.require_attached()
             client_entrypoint_repair = repair_engagement_client_entrypoints(
@@ -661,6 +661,15 @@ def install_from_source(
                 rendered_install_root=install_root,
             )
             destination_boundary.require_attached()
+            pointer_repairs = repair_engagement_operator_pointers(
+                phase_root, rendered_install_root=install_root
+            )
+            destination_boundary.require_attached()
+            if pointer_repairs:
+                print(
+                    _diagnostic(f"[vigil] operator pointer repair: {', '.join(pointer_repairs)}"),
+                    file=sys.stderr,
+                )
             if client_entrypoint_repair.scanned_count:
                 print(
                     _diagnostic(

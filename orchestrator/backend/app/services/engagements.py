@@ -15,6 +15,7 @@ from .. import db
 from ..config import settings
 from ..models.engagement import Engagement
 from ..models.engagement_session import EngagementSession
+from .engagement_tracks import track_phases
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,6 +27,7 @@ class EngagementView:
     engagement_root: str
     current_phase: str
     code_phase: str | None
+    track_phases: dict[str, str]
     exploit_policy: str
     exploit_review_state: str
     approved_targets: list[str]
@@ -198,11 +200,11 @@ def _manifest_for(engagement_dir: Path) -> dict[str, Any]:
     raw_type = scope.get("engagement_type") or manifest.get("engagement_type")
     engagement_type: str | None = str(raw_type) if raw_type else None
     status = str(scope.get("status") or "in_progress")
-    if engagement_type == "both" and status in {"in_progress", "completed"}:
+    phases = track_phases(scope)
+    if len(phases) > 1 and status in {"in_progress", "completed"}:
         status = (
             "completed"
-            if scope.get("current_phase") == "complete"
-            and scope.get("code_phase") == "complete"
+            if all(phase == "complete" for phase in phases.values())
             else "in_progress"
         )
     return {
@@ -398,19 +400,16 @@ def _scope_details(
     list[str],
     list[str],
     list[str],
+    dict[str, str],
 ]:
     try:
         scope = _migrate_scope_file(engagement_root / "scope.json")
     except RuntimeError as exc:
         _logger.warning("Using persisted engagement identity for invalid scope at %s: %s", engagement_root, exc)
-        return "unknown", None, "pause", "pending", [], [], 0, None, [], [], []
-    current_phase = str(scope.get("current_phase") or "unknown")
-    raw_code_phase = scope.get("code_phase")
-    code_phase = (
-        str(raw_code_phase).strip()
-        if isinstance(raw_code_phase, str) and raw_code_phase.strip()
-        else None
-    )
+        return "unknown", None, "pause", "pending", [], [], 0, None, [], [], [], {}
+    phases = track_phases(scope)
+    current_phase = phases.get("web") or phases.get("code") or phases.get("blue") or phases.get("android") or phases.get("remediation") or "unknown"
+    code_phase = phases.get("code") if "web" in phases else None
     exploit_policy = str(scope.get("exploit_policy") or "pause")
     exploit_review_state = str(scope.get("exploit_review_state") or "pending")
     approved_targets = scope.get("approved_targets")
@@ -441,6 +440,7 @@ def _scope_details(
         platforms,
         tenant_reference_paths,
         out_of_scope,
+        phases,
     )
 
 
@@ -527,10 +527,12 @@ def _view_for(engagement: Engagement, *, session_count: int | None = None) -> En
         platforms,
         tenant_reference_paths,
         out_of_scope,
+        track_state,
     ) = _scope_details(Path(engagement.engagement_root))
     if engagement.engagement_type == "remediation":
         current_phase = "remediation"
         code_phase = None
+        track_state.setdefault("remediation", "remediation")
     return EngagementView(
         id=engagement.id,
         key=engagement.key,
@@ -539,6 +541,7 @@ def _view_for(engagement: Engagement, *, session_count: int | None = None) -> En
         engagement_root=engagement.engagement_root,
         current_phase=current_phase,
         code_phase=code_phase,
+        track_phases=track_state,
         exploit_policy=exploit_policy,
         exploit_review_state=exploit_review_state,
         approved_targets=approved_targets,

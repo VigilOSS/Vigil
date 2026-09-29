@@ -4,13 +4,15 @@ Vigil runs three independent engagement tracks, each with its own ordered phase
 roster that terminates in the shared ``complete`` state:
 
 - **web** (red / runtime): ``recon → collect → consume-test → verify → exploit
-  → report``. Persisted as ``scope.json.current_phase``.
+  → report``.
 - **code** (white-box source analysis): ``ingest → classify-map → hunt →
-  verify-variant → fuzz``. Persisted as ``scope.json.code_phase``. This is a
-  deliberately DISTINCT vocabulary, not an alternate spelling of the web one —
-  a ``both`` engagement advances the two tracks independently.
+  verify-variant → fuzz``. This is a deliberately DISTINCT vocabulary, not an
+  alternate spelling of the web one.
 - **blue** (incident response): ``intake → triage → investigate → verify →
-  respond → report``. Persisted as ``scope.json.current_phase``.
+  respond → report``.
+
+New engagements persist each enabled phase in ``scope.json.tracks``. Legacy
+engagements keep ``current_phase`` and optional ``code_phase`` until repaired.
 
 Consumers must import from here rather than re-declaring a literal:
 

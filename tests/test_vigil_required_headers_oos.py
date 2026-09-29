@@ -138,14 +138,13 @@ def test_plan_rejects_headers_on_code_engagement():
         plan_engagement(opts)
 
 
-@pytest.mark.parametrize("engagement_type", ["code", "both", "android"])
+@pytest.mark.parametrize("engagement_type", ["code", "android"])
 def test_new_scope_does_not_write_legacy_repository_keys(engagement_type):
     from vigil_cli.engagements import CreateEngagementOptions, plan_engagement
 
     opts = CreateEngagementOptions(
         install_root=Path("/tmp"),
         engagement_type=engagement_type,
-        target="https://target.example" if engagement_type == "both" else None,
         name="project",
         repos=["/src/project"],
     )
@@ -216,14 +215,12 @@ def test_add_track_preserves_existing_phase_and_initializes_only_new_track(tmp_p
     )
 
     assert add_engagement_track(tmp_path, "code1", "web") == {
-        "engagement_type": "both",
-        "current_phase": "recon",
-        "code_phase": "hunt",
+        "engagement_type": "offensive",
+        "tracks": {"web": {"phase": "recon"}, "code": {"phase": "hunt"}},
     }
     assert add_engagement_track(tmp_path, "web1", "code") == {
-        "engagement_type": "both",
-        "current_phase": "complete",
-        "code_phase": "ingest",
+        "engagement_type": "offensive",
+        "tracks": {"web": {"phase": "complete"}, "code": {"phase": "ingest"}},
     }
     updated_web = json.loads((web / "scope.json").read_text())
     assert updated_web["status"] == "in_progress"
@@ -295,7 +292,7 @@ def test_add_track_is_idempotent_but_rejects_unrelated_transitions(tmp_path):
         )
     )
 
-    assert add_engagement_track(tmp_path, "both1", "code")["code_phase"] == "hunt"
+    assert add_engagement_track(tmp_path, "both1", "code")["tracks"]["code"]["phase"] == "hunt"
     with pytest.raises(SystemExit, match="cannot add"):
         add_engagement_track(tmp_path, "both1", "android")
 
@@ -317,11 +314,10 @@ def test_repair_track_state_requires_explicit_both_legacy_shape(tmp_path):
 
     repaired = repair_engagement_tracks(tmp_path, "legacy")
     assert repaired == {
-        "engagement_type": "both",
-        "current_phase": "verify",
-        "code_phase": "ingest",
+        "engagement_type": "offensive",
+        "tracks": {"web": {"phase": "verify"}, "code": {"phase": "ingest"}},
     }
-    with pytest.raises(SystemExit, match="already has"):
+    with pytest.raises(SystemExit, match="legacy both"):
         repair_engagement_tracks(tmp_path, "legacy")
 
 

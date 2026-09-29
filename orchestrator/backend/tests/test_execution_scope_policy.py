@@ -62,6 +62,19 @@ def test_stub_program_brief_does_not_block_static_source_review(tmp_path: Path) 
     assert result["target_facing"] is False
 
 
+def test_canonical_code_only_track_keeps_code_execution_policy(tmp_path: Path) -> None:
+    eng = _engagement(tmp_path, {
+        "engagement_type": "offensive",
+        "tracks": {"code": {"phase": "hunt"}},
+        "hosts": [],
+    })
+
+    result = scope.enforce_execution_policy(
+        ["curl", "https://repository.example/"], tool_name="curl", engagement_dir=eng
+    )
+    assert result["target_facing"] is True
+
+
 # ---------------------------------------------------------------------------
 # No destination filtering
 # ---------------------------------------------------------------------------

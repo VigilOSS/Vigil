@@ -11,6 +11,7 @@ from fastapi import HTTPException, status
 from ..db import get_connection
 from . import artifact_index, code_analysis, intel, operator_checkpoints, state_manager
 from .events import _engagement_or_404
+from .engagement_tracks import track_phases
 from .search import canonical_finding_alias
 
 
@@ -67,6 +68,7 @@ def _limited_findings(
     params: tuple[Any, ...] = (),
     *,
     since: str = "",
+    mode: str | None = None,
 ) -> list[dict[str, Any]]:
     extra_where = ""
     extra_params: tuple[Any, ...] = ()
@@ -79,7 +81,7 @@ def _limited_findings(
                source_name, evidence_ref,
                details_json, updated_at
         FROM assessment_findings
-        WHERE engagement_id = ? AND {where_sql}{extra_where}
+        WHERE engagement_id = ? AND {where_sql}{extra_where}{_finding_mode_sql(mode)}
         ORDER BY updated_at DESC, id DESC
         LIMIT 12
         """,
@@ -287,23 +289,39 @@ def _reconciled_agent_ids(connection, engagement_id: int) -> set[str]:
     return agent_ids
 
 
+def _dispatch_in_mode(role: str | None, mode: str | None) -> bool:
+    if mode not in {"web", "code"}:
+        return True
+    is_code = str(role or "").startswith("code-")
+    return is_code if mode == "code" else not is_code
+
+
 def _recent_dispatch_picture(
     engagement_id: int,
     *,
     max_age_hours: float | None,
+    mode: str | None = None,
 ) -> dict[str, Any]:
     # Detection and its counts come from ONE connection, so the worklists and
     # the totals beside them describe the same instant: a handoff written
     # between two separate reads could otherwise erase a gap from the list while
     # leaving it in the count.
     with get_connection() as connection:
-        lifecycle_rows = _dispatch_lifecycle_rows(connection, engagement_id)
+        lifecycle_rows = [
+            row for row in _dispatch_lifecycle_rows(connection, engagement_id)
+            if _dispatch_in_mode(row["agent_role"], mode)
+        ]
         handoff_status_by_agent = _handoff_status_by_agent(connection, engagement_id)
         reconciled_agent_ids = _reconciled_agent_ids(connection, engagement_id)
-        dispatch_total = _row_count(connection, "assessment_dispatches", engagement_id)
-        handoff_total = _row_count(
-            connection, "assessment_dispatch_handoffs", engagement_id
-        )
+        dispatch_total = len(lifecycle_rows)
+        if mode in {"web", "code"}:
+            role_filter = "LIKE 'code-%'" if mode == "code" else "NOT LIKE 'code-%'"
+            handoff_total = int(connection.execute(
+                f"SELECT COUNT(*) FROM assessment_dispatch_handoffs WHERE engagement_id = ? AND agent_role {role_filter}",
+                (engagement_id,),
+            ).fetchone()[0])
+        else:
+            handoff_total = _row_count(connection, "assessment_dispatch_handoffs", engagement_id)
 
     now = dt.datetime.now(dt.timezone.utc)
     stale: list[dict[str, Any]] = []
@@ -374,11 +392,15 @@ def _recent_dispatch_picture(
     # no re-sort afterwards can recover a row the LIMIT already dropped.
     return {
         "recent_dispatches": state_manager.list_dispatches(
-            engagement_id, limit=_DISPATCH_LIST_RENDER_CAP
+            engagement_id, limit=_DISPATCH_LIST_RENDER_CAP,
+            role_prefix="code-" if mode == "code" else "",
+            exclude_role_prefix="code-" if mode == "web" else "",
         ),
         "recent_dispatches_count": dispatch_total,
         "latest_handoffs": state_manager.list_handoffs(
-            engagement_id, sort="checkpoint", limit=_DISPATCH_LIST_RENDER_CAP
+            engagement_id, sort="checkpoint", limit=_DISPATCH_LIST_RENDER_CAP,
+            role_prefix="code-" if mode == "code" else "",
+            exclude_role_prefix="code-" if mode == "web" else "",
         ),
         "latest_handoffs_count": handoff_total,
         "stale_in_progress_dispatches": stale[:_DISPATCH_LIST_RENDER_CAP],
@@ -404,12 +426,20 @@ def _parse_iso(value: Any) -> dt.datetime | None:
         return None
 
 
-def _counts(connection, engagement_id: int) -> dict[str, dict[str, int]]:
+def _finding_mode_sql(mode: str | None) -> str:
+    if mode == "code":
+        return " AND canonical_location LIKE 'file:%'"
+    if mode == "web":
+        return " AND COALESCE(canonical_location, '') NOT LIKE 'file:%'"
+    return ""
+
+
+def _counts(connection, engagement_id: int, *, mode: str | None = None) -> dict[str, dict[str, int]]:
     rows = connection.execute(
-        """
+        f"""
         SELECT status, verification_status, severity, source_name
         FROM assessment_findings
-        WHERE engagement_id = ?
+        WHERE engagement_id = ?{_finding_mode_sql(mode)}
         """,
         (engagement_id,),
     ).fetchall()
@@ -839,14 +869,14 @@ _OPEN_LEASE_RENDER_CAP = 10
 
 
 def _code_analysis_section(
-    engagement_id: int, engagement_type: str, current_code_phase: str
+    engagement_id: int, code_enabled: bool, current_code_phase: str
 ) -> dict[str, Any]:
     """Project the existing code gate, queue, and repository identities."""
     section = code_analysis.open_authoring_leases(
         engagement_id, limit=_OPEN_LEASE_RENDER_CAP
     )
     repos = code_analysis.list_code_repos(engagement_id)
-    if engagement_type not in {"code", "both"} and not repos:
+    if not code_enabled and not repos:
         return section
     coverage = code_analysis.code_coverage_summary(engagement_id)
     confidence = coverage.get("confidence") or {}
@@ -903,6 +933,37 @@ def _code_analysis_section(
         ),
     })
     return section
+
+
+def _cross_track_pointer(connection, engagement_id: int, *, mode: str, phases: dict[str, str]) -> dict[str, Any]:
+    other = "code" if mode == "web" else "web"
+    if other not in phases:
+        return {}
+    where = _finding_mode_sql(other)
+    count = int(connection.execute(
+        f"SELECT COUNT(*) FROM assessment_findings WHERE engagement_id = ?{where}",
+        (engagement_id,),
+    ).fetchone()[0])
+    rows = connection.execute(
+        f"""SELECT slug, title, severity, status FROM assessment_findings
+            WHERE engagement_id = ?{where}
+            ORDER BY updated_at DESC, id DESC LIMIT 5""",
+        (engagement_id,),
+    ).fetchall()
+    return {
+        "track": other,
+        "phase": phases[other],
+        "finding_count": count,
+        "finding_pointers": [
+            {"slug": row["slug"], "title": row["title"],
+             "severity": row["severity"], "workflow_status": row["status"]}
+            for row in rows
+        ],
+        "read_command": f"vigil assess resume-brief --mode {other}",
+        "shared_unattributed_sections": [
+            "attempts", "command_runs", "artifacts", "recent_decisions", "intel"
+        ],
+    }
 
 
 def _credential_needs_section(connection, engagement_id: int) -> dict[str, Any]:
@@ -986,6 +1047,7 @@ def _contradiction_reviews_section(connection, engagement_id: int) -> dict[str, 
 def build_resume_brief(
     engagement_id: int,
     *,
+    mode: str | None = None,
     q: str = "",
     finding: str = "",
     agent_id: str = "",
@@ -1008,6 +1070,12 @@ def build_resume_brief(
     root = Path(engagement.engagement_root)
     scope = _read_scope(root)
     engagement_type = str(scope.get("engagement_type") or "web")
+    phases = track_phases(scope)
+    if mode is not None and mode not in phases:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"resume-brief mode {mode!r} is not enabled for this engagement",
+        )
     canonical_finding = canonical_finding_alias(finding) if finding else ""
     search_terms = [term for term in (canonical_finding, q) if term]
     search_text = " ".join(search_terms)
@@ -1027,38 +1095,43 @@ def build_resume_brief(
             ).fetchone()
             target_finding = _finding_summary(row) if row else None
         findings = {
-            "active": _limited_findings(connection, engagement_id, "status IN ('active', 'exploited', 'reported')", since=since),
+            "active": _limited_findings(connection, engagement_id, "status IN ('active', 'exploited', 'reported')", since=since, mode=mode),
             "unreviewed": _limited_findings(
                 connection,
                 engagement_id,
                 "verification_status = 'unreviewed' "
                 "AND status NOT IN ('merged', 'false_positive')",
-                since=since,
+                since=since, mode=mode,
             ),
             "verified": _limited_findings(
                 connection,
                 engagement_id,
                 "verification_status NOT IN ('unreviewed', 'disputed')",
-                since=since,
+                since=since, mode=mode,
             ),
-            "killed": _limited_findings(connection, engagement_id, "status = 'false_positive'", since=since),
-            "merged": _limited_findings(connection, engagement_id, "status = 'merged'", since=since),
+            "killed": _limited_findings(connection, engagement_id, "status = 'false_positive'", since=since, mode=mode),
+            "merged": _limited_findings(connection, engagement_id, "status = 'merged'", since=since, mode=mode),
             "chain_required": _limited_findings(
                 connection,
                 engagement_id,
                 "json_extract(details_json,'$.chain_required') = 1",
-                since=since,
+                since=since, mode=mode,
             ),
         }
-        counts = _counts(connection, engagement_id)
-        surfaces_section = _surfaces_section(connection, engagement_id) if engagement_type != "code" else {}
-        work_buffer_section = _work_buffer_section(connection, engagement_id) if engagement_type != "code" else {}
+        counts = _counts(connection, engagement_id, mode=mode)
+        cross_track = (
+            _cross_track_pointer(connection, engagement_id, mode=mode, phases=phases)
+            if mode in {"web", "code"} else {}
+        )
+        web_view = "web" in phases and mode != "code"
+        surfaces_section = _surfaces_section(connection, engagement_id) if web_view else {}
+        work_buffer_section = _work_buffer_section(connection, engagement_id) if web_view else {}
         attempts_section = _attempts_section(connection, engagement_id, since=since)
         credential_needs = _credential_needs_section(connection, engagement_id)
         contradiction_reviews = _contradiction_reviews_section(connection, engagement_id)
         per_input_coverage_section = (
             _per_input_coverage_section(connection, engagement_id, since=since, row_limit=per_input_limit)
-            if engagement_type != "code" else {}
+            if web_view else {}
         )
 
     command_matches_all = (
@@ -1147,18 +1220,25 @@ def build_resume_brief(
         # coverage map or read-first context is not lost in the plain-note pile.
         "read_first_notes": _resume_note_pointers(engagement_id, since=since),
     }
-    dispatch_picture = _recent_dispatch_picture(engagement_id, max_age_hours=max_age_hours)
-    current_code_phase = str(
-        (scope.get("code_phase") if engagement_type == "both" else scope.get("current_phase"))
-        or ("ingest" if engagement_type in {"code", "both"} else "")
-    )
-    code_analysis_section = _code_analysis_section(
-        engagement_id, engagement_type, current_code_phase
+    dispatch_picture = _recent_dispatch_picture(engagement_id, max_age_hours=max_age_hours, mode=mode)
+    current_code_phase = phases.get("code", "")
+    code_analysis_section = (
+        _code_analysis_section(engagement_id, "code" in phases, current_code_phase)
+        if mode != "web" else {}
     )
     knowledge_drift = _knowledge_drift_section(engagement_id)
     recent_decisions = _recent_decisions(engagement_id, since=since)
     with get_connection() as connection:
         decision_total = _decision_count(connection, engagement_id, since=since)
+    checkpoint = operator_checkpoints.current_checkpoint(engagement_id)
+    shared_checkpoint: dict[str, Any] | None = None
+    if mode in {"web", "code"} and {"web", "code"}.issubset(phases):
+        if checkpoint:
+            shared_checkpoint = {
+                "checkpoint_version": checkpoint["checkpoint_version"],
+                "read_command": "vigil assess operator-checkpoint show",
+            }
+        checkpoint = None
     if agent_id:
         dispatch_picture["selected_dispatch"] = state_manager.get_dispatch(engagement_id, agent_id)
         try:
@@ -1171,12 +1251,15 @@ def build_resume_brief(
             "id": engagement.id,
             "key": engagement.key,
             "root": str(root),
-            "current_phase": scope.get("current_phase") or "unknown",
+            "current_phase": phases.get(mode) if mode else (phases.get("web") or next(iter(phases.values()), "unknown")),
+            "operator_mode": mode,
+            "track_state": {name: {"phase": phase, "complete": phase == "complete"} for name, phase in phases.items()},
             "scope_status": scope.get("status") or engagement.status,
             "engagement_type": engagement_type,
             "host_count": len(scope.get("hosts") or []) if isinstance(scope.get("hosts"), list) else 0,
         },
         "query": {"q": q, "finding": canonical_finding or finding, "agent_id": agent_id, "since": since},
+        "cross_track": cross_track,
         "finding_counts": counts,
         "surfaces": surfaces_section,
         "work_buffer": work_buffer_section,
@@ -1188,7 +1271,8 @@ def build_resume_brief(
         "findings": findings,
         "recent_decisions": recent_decisions,
         "recent_decisions_count": decision_total,
-        "operator_checkpoint": operator_checkpoints.current_checkpoint(engagement_id),
+        "operator_checkpoint": checkpoint,
+        "shared_checkpoint": shared_checkpoint,
         "code_analysis": code_analysis_section,
         "dispatches": dispatch_picture,
         "command_runs": command_matches,

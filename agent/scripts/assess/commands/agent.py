@@ -941,15 +941,15 @@ def _require_proof_variant_parent_set(payload: dict, engagement_dir: Path) -> No
     except (OSError, json.JSONDecodeError) as exc:
         print(f"agent start: cannot read {scope_path}: {exc}", file=sys.stderr)
         raise SystemExit(1) from exc
+    from assess.lib.tracks import track_phases
+
+    phases = track_phases(scope)
     web_proof = (
         role == "vulnerability-analyst"
         and mode == "variant-rotation"
-        and scope.get("current_phase") == "verify"
+        and phases.get("web") == "verify"
     )
-    code_phase = (
-        scope.get("code_phase") if scope.get("engagement_type") == "both"
-        else scope.get("current_phase")
-    )
+    code_phase = phases.get("code")
     code_proof = role == "code-variant-hunter" and code_phase == "verify-variant"
     if (web_proof or code_proof) and not payload.get("finding_slugs"):
         print(

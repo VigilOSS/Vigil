@@ -112,7 +112,8 @@ there for the full reference, env-var precedence, and resource sizing.
    ```
 
    The command prints the engagement directory on stdout and a status footer (mitmproxy/OOB state +
-   the exact start command) on stderr. For code analysis use `--type code`/`--type both`, and for blue
+   the exact start command) on stderr. For code analysis use `--type code`, then explicitly
+   enable web testing with `vigil engagement add-track <key> web` when authorized; for blue
    incident work use `vigil blue engage`. See [Running an engagement](README.md#running-an-engagement).
 
 4. **Start a client in the engagement.** The CLI verb changes into the engagement directory,

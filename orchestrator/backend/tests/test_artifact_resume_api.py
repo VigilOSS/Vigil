@@ -44,6 +44,56 @@ def _write_engagement(engagements_dir: Path) -> Path:
     return eng
 
 
+def test_resume_brief_scopes_dual_track_operator_view(client, isolate_settings):
+    eng = _write_engagement(isolate_settings["engagements_dir"])
+    scope_path = eng / "scope.json"
+    scope = json.loads(scope_path.read_text(encoding="utf-8"))
+    scope.update({
+        "engagement_type": "offensive",
+        "tracks": {"web": {"phase": "verify"}, "code": {"phase": "hunt"}},
+    })
+    scope_path.write_text(json.dumps(scope), encoding="utf-8")
+    _seed_finding(client, eng)
+    for agent_id, role in (("web-worker", "vulnerability-analyst"), ("code-worker", "code-vuln-hunter")):
+        response = client.post(f"{BASE}/dispatches", json={
+            "agent_id": agent_id, "agent_role": role, "task": "track work",
+        })
+        assert response.status_code == 201, response.text
+    checkpoint = client.post(f"{BASE}/operator-checkpoints", json={
+        "intent_note": "continue code sink analysis",
+    })
+    assert checkpoint.status_code == 201, checkpoint.text
+
+    code = client.get(f"{BASE}/resume-brief", params={"mode": "code"})
+    web = client.get(f"{BASE}/resume-brief", params={"mode": "web"})
+    unscoped = client.get(f"{BASE}/resume-brief")
+
+    assert code.status_code == web.status_code == unscoped.status_code == 200
+    code_body, web_body = code.json(), web.json()
+    assert code_body["engagement"]["current_phase"] == "hunt"
+    assert code_body["surfaces"] == {}
+    assert code_body["findings"]["active"] == []
+    assert code_body["cross_track"]["track"] == "web"
+    assert code_body["cross_track"]["finding_pointers"][0]["slug"] == "VA-047"
+    assert {row["agent_id"] for row in code_body["dispatches"]["recent_dispatches"]} == {
+        "code-worker", "artifact-verifier-va-047"
+    }
+    assert web_body["engagement"]["current_phase"] == "verify"
+    assert web_body["code_analysis"] == {}
+    assert {row["agent_id"] for row in web_body["dispatches"]["recent_dispatches"]} == {
+        "web-worker", "artifact-author-va-047"
+    }
+    assert len(unscoped.json()["dispatches"]["recent_dispatches"]) == 4
+    assert unscoped.json()["operator_checkpoint"]["intent_note"] == "continue code sink analysis"
+    for body in (code_body, web_body):
+        assert body["operator_checkpoint"] is None
+        assert body["shared_checkpoint"] == {
+            "checkpoint_version": checkpoint.json()["checkpoint_version"],
+            "read_command": "vigil assess operator-checkpoint show",
+        }
+        assert "continue code sink analysis" not in json.dumps(body)
+
+
 def _register_note(client, path: str, **kwargs) -> dict:
     """POST /artifacts to register a note explicitly.
 

@@ -226,18 +226,20 @@ def run(args: argparse.Namespace) -> None:
     phase = canonical_phase(args.phase)
     scope_path = Path(cfg.engagement_dir) / "scope.json"
     scope = json.loads(scope_path.read_text(encoding="utf-8")) if scope_path.is_file() else {}
-    engagement_type = scope.get("engagement_type", "web")
-    if engagement_type not in {"code", "both"} and phase not in PHASES:
+    from assess.lib.tracks import track_phases
+
+    tracks = track_phases(scope)
+    if "code" not in tracks and phase not in PHASES:
         print(
             f"check-phase-readiness: {phase} is a code phase, but this engagement has no code track",
             file=sys.stderr,
         )
         sys.exit(1)
-    if engagement_type == "code" or phase in (*CODE_PHASES, "complete"):
+    if "web" not in tracks or phase in (*CODE_PHASES, "complete"):
         if phase in (*CODE_PHASES, "complete"):
             target = phase
         else:
-            current = scope.get("code_phase" if engagement_type == "both" else "current_phase", "ingest")
+            current = tracks.get("code", "ingest")
             target = (
                 (*CODE_PHASES, "complete")[CODE_PHASES.index(current) + 1]
                 if current in CODE_PHASES else "classify-map"
@@ -253,7 +255,7 @@ def run(args: argparse.Namespace) -> None:
     text_lines: list[str] = (
         ["Web track readiness only. For code, use `vigil assess code-coverage "
          "--require-transition-ready <target-phase>`."]
-        if engagement_type == "both" else []
+        if "code" in tracks else []
     )
     exit_nonzero = False
 

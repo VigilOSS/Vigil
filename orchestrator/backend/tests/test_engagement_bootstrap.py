@@ -31,6 +31,7 @@ def _copy_agent_fixture(agent_root: Path, sandbox_root: Path, *, client: str) ->
     shutil.copytree(agent_root / "references", sandbox_root / "references")
     shutil.copy2(agent_root / "AGENTS.md", sandbox_root / "AGENTS.md")
     shutil.copy2(agent_root / "AGENTS-blue.md", sandbox_root / "AGENTS-blue.md")
+    shutil.copy2(agent_root / "operator-core-code.md", sandbox_root / "operator-core-code.md")
     if client in {"codex", "both"}:
         shutil.copytree(agent_root / ".codex", sandbox_root / ".codex")
     if client in {"claude", "both"}:
@@ -468,7 +469,8 @@ def test_aith_engagement_create_code_mode_with_local_repo(tmp_path: Path, monkey
     scope = json.loads((created.path / "scope.json").read_text(encoding="utf-8"))
     manifest = json.loads((created.path / "engagement.json").read_text(encoding="utf-8"))
 
-    assert scope["engagement_type"] == "code"
+    assert scope["engagement_type"] == "offensive"
+    assert scope["tracks"] == {"code": {"phase": "ingest"}}
     assert scope["name"] == "my-cool-project"
     assert "repos" not in scope
     assert "source_repos" not in scope
@@ -476,7 +478,7 @@ def test_aith_engagement_create_code_mode_with_local_repo(tmp_path: Path, monkey
     assert scope["code_target_contact_policy"] == (
         "warn-do-not-contact-declared-hosts"
     )
-    assert scope["current_phase"] == "ingest"
+    assert "current_phase" not in scope
     # Credentials are centralized in the backend store; no auth.json scaffold.
     assert not (created.path / "auth.json").exists()
     assert manifest["name"] == "my-cool-project"

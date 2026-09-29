@@ -470,6 +470,8 @@ def list_dispatches(
     engagement_id: int,
     *,
     role: str = "",
+    role_prefix: str = "",
+    exclude_role_prefix: str = "",
     status_value: str = "",
     since: str = "",
     task_q: str = "",
@@ -484,6 +486,12 @@ def list_dispatches(
     if role:
         where.append("d.agent_role = ?")
         params.append(role)
+    if role_prefix:
+        where.append("d.agent_role LIKE ?")
+        params.append(f"{role_prefix}%")
+    if exclude_role_prefix:
+        where.append("d.agent_role NOT LIKE ?")
+        params.append(f"{exclude_role_prefix}%")
     if status_value:
         where.append("d.status = ?")
         params.append(status_value)
@@ -980,6 +988,8 @@ def list_handoffs(
     engagement_id: int,
     *,
     role: str = "",
+    role_prefix: str = "",
+    exclude_role_prefix: str = "",
     since: str = "",
     sort: str = "created",
     limit: int = 100,
@@ -1000,6 +1010,12 @@ def list_handoffs(
     if role:
         where.append("agent_role = ?")
         params.append(role)
+    if role_prefix:
+        where.append("agent_role LIKE ?")
+        params.append(f"{role_prefix}%")
+    if exclude_role_prefix:
+        where.append("agent_role NOT LIKE ?")
+        params.append(f"{exclude_role_prefix}%")
     if since:
         # `since` is a creation-time window regardless of `sort` — it is the
         # documented filter on the public read, so it keeps its own meaning.

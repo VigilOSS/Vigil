@@ -21,6 +21,7 @@ from assess.lib.phases import (
     WEB_TRANSITION_PHASES as WEB_PHASES,
 )
 from assess.lib.scope import mutate_scope
+from assess.lib.tracks import track_phases
 
 # The three ordered rosters (terminal `complete` included) come from
 # `assess.lib.phases`, the single source of truth for phase vocabulary.
@@ -69,7 +70,7 @@ def register(subparsers) -> None:
         "--track",
         choices=("auto", "web", "code", "blue"),
         default="auto",
-        help="Phase track for `both` engagements (default: infer from target phase).",
+        help="Enabled phase track (default: infer from target phase when unambiguous).",
     )
     p.set_defaults(func=run)
 
@@ -88,7 +89,7 @@ def run(args) -> None:
 
     target_phase = args.target_phase
     engagement_type = scope.get("engagement_type", "web")
-    track = _phase_track(engagement_type, target_phase, getattr(args, "track", "auto"))
+    track = _phase_track(scope, target_phase, getattr(args, "track", "auto"))
 
     if engagement_type == "both" and track == "code":
         raw_code_phase = scope.get("code_phase")
@@ -111,7 +112,7 @@ def run(args) -> None:
         order = WEB_TRANSITION_ORDER
         phases = WEB_PHASES
     phase_key = "code_phase" if engagement_type == "both" and track == "code" else "current_phase"
-    current_phase = scope.get(phase_key, "")
+    current_phase = track_phases(scope).get(track, "")
 
     if target_phase not in order:
         print(
@@ -235,8 +236,15 @@ def run(args) -> None:
             print(f"  - [{b['kind']}] {b['detail']}", file=sys.stderr)
 
     def update(latest_scope):
-        latest_scope[phase_key] = target_phase
-        if engagement_type == "both":
+        if isinstance(latest_scope.get("tracks"), dict):
+            latest_scope["tracks"][track]["phase"] = target_phase
+            latest_scope["status"] = (
+                "completed"
+                if all(phase == "complete" for phase in track_phases(latest_scope).values())
+                else "in_progress"
+            )
+        elif engagement_type == "both":
+            latest_scope[phase_key] = target_phase
             latest_scope["status"] = (
                 "completed"
                 if latest_scope.get("current_phase") == "complete"
@@ -244,6 +252,7 @@ def run(args) -> None:
                 else "in_progress"
             )
         else:
+            latest_scope[phase_key] = target_phase
             latest_scope["status"] = (
                 "completed" if target_phase == "complete" else "in_progress"
             )
@@ -282,26 +291,29 @@ def _precondition_targets_for_transition(
     return ordered_phases[start + 1 : end + 1]
 
 
-def _phase_track(engagement_type: str, target_phase: str, requested_track: str) -> str:
-    if engagement_type == "blue":
-        return "blue"
-    if engagement_type == "code":
-        return "code"
-    if engagement_type != "both":
-        return "web"
-    if requested_track in {"web", "code"}:
+def _phase_track(scope: dict, target_phase: str, requested_track: str) -> str:
+    enabled = track_phases(scope)
+    if requested_track != "auto":
+        if requested_track not in enabled:
+            print(f"transition-phase: track '{requested_track}' is not enabled", file=sys.stderr)
+            sys.exit(2)
         return requested_track
+    if len(enabled) == 1:
+        return next(iter(enabled))
     in_web = target_phase in WEB_TRANSITION_ORDER
     in_code = target_phase in CODE_TRANSITION_ORDER
-    if in_web and in_code:
+    if "web" in enabled and "code" in enabled and in_web and in_code:
         print(
             f"transition-phase: phase '{target_phase}' is valid for both tracks; pass --track web or --track code",
             file=sys.stderr,
         )
         sys.exit(2)
-    if in_code:
+    if "code" in enabled and in_code:
         return "code"
-    return "web"
+    if "web" in enabled and in_web:
+        return "web"
+    print(f"transition-phase: cannot infer enabled track for phase '{target_phase}'; pass --track", file=sys.stderr)
+    sys.exit(2)
 
 
 def _record_transition_decision(

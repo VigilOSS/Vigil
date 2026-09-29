@@ -39,7 +39,7 @@ def _copy_agent_fixture(agent_root: Path, install_root: Path) -> Path:
     target_agent.mkdir(parents=True)
     for name in ("scripts", ".codex", ".claude"):
         shutil.copytree(agent_root / name, target_agent / name)
-    for name in ("AGENTS.md", "AGENTS-blue.md", "CLAUDE.md", "SKILL.md"):
+    for name in ("AGENTS.md", "AGENTS-blue.md", "operator-core-code.md", "CLAUDE.md", "SKILL.md"):
         shutil.copy2(agent_root / name, target_agent / name)
     (target_agent / "engagements").mkdir()
     return target_agent
@@ -101,7 +101,8 @@ def test_engagement_create_web_writes_scope_launchers_and_list_entry(
     manifest = json.loads((created.path / "engagement.json").read_text(encoding="utf-8"))
 
     assert created.path.parent == install_root / "agent" / "engagements"
-    assert scope["engagement_type"] == "web"
+    assert scope["engagement_type"] == "offensive"
+    assert scope["tracks"] == {"web": {"phase": "recon"}}
     assert scope["hostname"] == "app.example.com"
     assert scope["hosts"] == ["app.example.com", "admin.example.com"]
     assert scope["exploit_policy"] == "pause"
@@ -579,7 +580,7 @@ def test_engagement_create_cli_echoes_inferred_type(
     captured = capsys.readouterr()
     created_path = _created_path_from_stdout(captured.out)
     scope = json.loads((created_path / "scope.json").read_text(encoding="utf-8"))
-    assert scope["engagement_type"] == "web"
+    assert scope["engagement_type"] == "offensive"
     assert "inferred type: web" in captured.err
     assert "--type" in captured.err
 
@@ -632,13 +633,14 @@ def test_engagement_create_cli_repo_flag_infers_code_type(
     captured = capsys.readouterr()
     created_path = _created_path_from_stdout(captured.out)
     scope = json.loads((created_path / "scope.json").read_text(encoding="utf-8"))
-    assert scope["engagement_type"] == "code"
+    assert scope["engagement_type"] == "offensive"
+    assert scope["tracks"] == {"code": {"phase": "ingest"}}
     assert scope["name"] == "my-project"
     assert "inferred type: code" in captured.err
 
 
-def test_engagement_create_cli_repo_plus_web_target_infers_both(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+def test_engagement_create_cli_repo_plus_web_target_requires_explicit_first_track(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from vigil_cli import main as main_module
 
@@ -646,31 +648,15 @@ def test_engagement_create_cli_repo_plus_web_target_infers_both(
     install_root = tmp_path / "install"
     _copy_agent_fixture(repo_root / "agent", install_root)
 
-    main_module.main(
-        [
-            "--root",
-            str(install_root),
-            "engagement",
-            "create",
-            "https://app.example.com",
-            "--repo",
-            str(tmp_path / "repo"),
-            "--name",
-            "my-project",
-            "--no-prompt",
-        ]
-    )
-
-    captured = capsys.readouterr()
-    created_path = _created_path_from_stdout(captured.out)
-    scope = json.loads((created_path / "scope.json").read_text(encoding="utf-8"))
-    manifest = json.loads((created_path / "engagement.json").read_text(encoding="utf-8"))
-    assert scope["engagement_type"] == "both"
-    assert scope["hosts"] == ["app.example.com"]
-    assert "repos" not in scope
-    assert "source_repos" not in scope
-    assert [repo["path"] for repo in manifest["repos"]] == [str(tmp_path / "repo")]
-    assert "inferred type: both" in captured.err
+    with pytest.raises(SystemExit, match="explicit first track"):
+        main_module.main(
+            [
+                "--root", str(install_root), "engagement", "create",
+                "https://app.example.com", "--repo", str(tmp_path / "repo"),
+                "--name", "my-project", "--no-prompt",
+            ]
+        )
+    assert not list((install_root / "agent" / "engagements").iterdir())
 
 
 def test_engagement_create_wizard_prompts_on_stderr_keep_stdout_path_only(
@@ -692,7 +678,7 @@ def test_engagement_create_wizard_prompts_on_stderr_keep_stdout_path_only(
     captured = capsys.readouterr()
     created_path = _created_path_from_stdout(captured.out)
     scope = json.loads((created_path / "scope.json").read_text(encoding="utf-8"))
-    assert scope["engagement_type"] == "web"
+    assert scope["engagement_type"] == "offensive"
     assert scope["hosts"] == ["app.example.com"]
     assert "Target URL or host" in captured.err
     assert "Create engagement?" in captured.err
@@ -717,7 +703,7 @@ def test_engagement_create_bare_invocation_runs_full_wizard_with_confirmation(
     captured = capsys.readouterr()
     created_path = _created_path_from_stdout(captured.out)
     scope = json.loads((created_path / "scope.json").read_text(encoding="utf-8"))
-    assert scope["engagement_type"] == "web"
+    assert scope["engagement_type"] == "offensive"
     assert scope["hosts"] == ["app.example.com"]
     assert "Engagement type" in captured.err
     assert "Create engagement?" in captured.err
@@ -1013,7 +999,7 @@ def test_engagement_create_cli_json_output_replaces_bare_path(
     )
 
     payload = json.loads(capsys.readouterr().out)
-    assert payload["engagement_type"] == "web"
+    assert payload["engagement_type"] == "offensive"
     assert payload["scope"]["hosts"] == ["app.example.com"]
     created_path = Path(payload["path"])
     assert created_path.name == payload["key"]
@@ -3247,6 +3233,10 @@ def test_mitmproxy_build_stages_canonical_scope_parser_without_install_state(
         repo_root / "agent" / "scripts" / "assess" / "lib" / "scope.py",
         assess / "lib" / "scope.py",
     )
+    shutil.copy2(
+        repo_root / "agent" / "scripts" / "assess" / "lib" / "tracks.py",
+        assess / "lib" / "tracks.py",
+    )
     (assess / "__init__.py").write_text("", encoding="utf-8")
     (assess / "lib" / "__init__.py").write_text("", encoding="utf-8")
 
@@ -3270,6 +3260,7 @@ def test_mitmproxy_build_stages_canonical_scope_parser_without_install_state(
         assert (context / "Dockerfile").is_file()
         assert (context / "scripts" / "proxy_addon.py").is_file()
         assert (context / "scripts" / "assess" / "lib" / "scope.py").is_file()
+        assert (context / "scripts" / "assess" / "lib" / "tracks.py").is_file()
 
         staged_scope_entries = context / "vigil_cli" / "scope_entries.py"
         assert staged_scope_entries.read_bytes() == Path(
@@ -4283,7 +4274,7 @@ def test_engagement_create_infers_localhost_url_as_web(tmp_path: Path, monkeypat
     created = next((install_root / "agent" / "engagements").iterdir())
     scope = json.loads((created / "scope.json").read_text(encoding="utf-8"))
     manifest = json.loads((created / "engagement.json").read_text(encoding="utf-8"))
-    assert scope["engagement_type"] == "web"
+    assert scope["engagement_type"] == "offensive"
     assert scope["hostname"] == "localhost"
     assert manifest["target"] == "http://localhost:8080"
 

@@ -27,6 +27,7 @@ POINTER_KEY = "active_engagement_dir"
 
 def _make_install(base: Path) -> Path:
     (base / "agent" / "engagements").mkdir(parents=True, exist_ok=True)
+    (base / "agent" / "AGENTS.md").write_text("web operator\n")
     return base
 
 
@@ -34,7 +35,7 @@ def _make_engagement(root: Path, name: str) -> Path:
     eng = root / name
     eng.mkdir(parents=True, exist_ok=True)
     (eng / "scope.json").write_text(
-        json.dumps({"hostname": f"{name}.example.com", "status": "active"})
+        json.dumps({"engagement_type": "web", "hostname": f"{name}.example.com", "status": "active"})
     )
     return eng
 

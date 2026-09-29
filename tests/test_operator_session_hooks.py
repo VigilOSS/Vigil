@@ -58,6 +58,7 @@ def _run_hook(
     environment.pop("ENGAGEMENT_DIR", None)
     environment.pop("VIGIL_AGENT_ROOT", None)
     environment.pop("VIGIL_CLIENT_NAME", None)
+    environment.pop("VIGIL_OPERATOR_MODE", None)
     if env:
         environment.update(env)
     return subprocess.run(
@@ -124,11 +125,16 @@ def test_pre_compact_can_render_a_stable_prompt_without_local_additions(
             "include_engagement_additions": False,
         },
         cwd=engagement_dir,
+        env={"VIGIL_OPERATOR_MODE": "web"},
     )
 
     assert result.returncode == 0
     assert "vigil assess resume-brief" in result.stdout
     assert "STALE-LOCAL-RULE" not in result.stdout
+    assert "session-selected `web`" not in result.stdout
+    assert "session-selected `code`" not in result.stdout
+    assert "vigil assess check-phase-readiness --phase report" not in result.stdout
+    assert "vigil assess code-coverage" not in result.stdout
 
 
 @pytest.mark.parametrize(
@@ -136,7 +142,7 @@ def test_pre_compact_can_render_a_stable_prompt_without_local_additions(
     [
         ("web", True, False),
         ("code", False, True),
-        ("both", True, True),
+        ("both", False, False),
         ("android", False, False),
         ("blue", False, False),
     ],
@@ -180,6 +186,94 @@ def test_pre_compact_uses_neutral_guidance_when_mode_is_unavailable(
     assert result.stdout.strip()
     assert "vigil assess check-phase-readiness --phase report" not in result.stdout
     assert "vigil assess code-coverage" not in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("operator_mode", "web_readiness", "code_readiness"),
+    [
+        ("web", True, False),
+        ("code", False, True),
+        ("android", False, False),
+        ("blue", False, False),
+        ("remediation", False, False),
+    ],
+    ids=("web", "code", "android", "blue", "remediation"),
+)
+def test_pre_compact_uses_the_session_selected_operator_mode(
+    tmp_path: Path,
+    operator_mode: str,
+    web_readiness: bool,
+    code_readiness: bool,
+) -> None:
+    """A dual-capability engagement has no globally selected operator core."""
+    engagement_dir = _engagement(tmp_path, engagement_type="offensive")
+    (engagement_dir / "scope.json").write_text(
+        json.dumps(
+            {
+                "status": "in_progress",
+                "engagement_type": "offensive",
+                "tracks": {"web": True, "code": True},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = _run_hook(
+        PRE_COMPACT,
+        {"trigger": "auto", "cwd": str(engagement_dir)},
+        cwd=engagement_dir,
+        env={"VIGIL_OPERATOR_MODE": operator_mode},
+    )
+
+    assert result.returncode == 0
+    assert f"session-selected `{operator_mode}` operator mode" in result.stdout
+    assert (
+        "vigil assess check-phase-readiness --phase report" in result.stdout
+    ) is web_readiness
+    assert ("vigil assess code-coverage" in result.stdout) is code_readiness
+    assert "combined web and source-code engagement" not in result.stdout
+
+
+def test_pre_compact_does_not_choose_a_mode_for_a_dual_capability_engagement(
+    tmp_path: Path,
+) -> None:
+    engagement_dir = _engagement(tmp_path, engagement_type="offensive")
+    (engagement_dir / "scope.json").write_text(
+        json.dumps(
+            {
+                "status": "in_progress",
+                "engagement_type": "offensive",
+                "tracks": {"web": True, "code": True},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = _run_hook(
+        PRE_COMPACT,
+        {"trigger": "auto", "cwd": str(engagement_dir)},
+        cwd=engagement_dir,
+    )
+
+    assert result.returncode == 0
+    assert "vigil engagement mode" in result.stdout
+    assert "vigil assess check-phase-readiness --phase report" not in result.stdout
+    assert "vigil assess code-coverage" not in result.stdout
+
+
+def test_pre_compact_uses_remediation_case_state_in_remediation_mode(
+    tmp_path: Path,
+) -> None:
+    engagement_dir = _engagement(tmp_path, engagement_type="remediation")
+    result = _run_hook(
+        PRE_COMPACT,
+        {"trigger": "auto", "cwd": str(engagement_dir)},
+        cwd=engagement_dir,
+        env={"VIGIL_OPERATOR_MODE": "remediation"},
+    )
+    assert result.returncode == 0
+    assert "vigil remediation -k <key> list" in result.stdout
+    assert "vigil assess resume-brief" not in result.stdout
 
 
 @pytest.mark.parametrize(
@@ -232,6 +326,7 @@ def test_post_compact_resume_rehydrates_a_live_engagement(tmp_path: Path) -> Non
             "hook_event_name": "SessionStart",
         },
         cwd=engagement_dir,
+        env={"VIGIL_OPERATOR_MODE": "web"},
     )
 
     assert result.returncode == 0
@@ -241,6 +336,48 @@ def test_post_compact_resume_rehydrates_a_live_engagement(tmp_path: Path) -> Non
     assert "AGENTS.md" in result.stdout
     assert "COMPACT.md" in result.stdout
     assert "COBALT-ORCHID" in result.stdout
+
+
+@pytest.mark.parametrize("operator_mode", ["web", "code", "blue", "remediation", "android"])
+def test_post_compact_resume_restores_only_the_session_mode(
+    tmp_path: Path, operator_mode: str
+) -> None:
+    engagement_dir = _engagement(tmp_path, engagement_type="offensive")
+    result = _run_hook(
+        POST_COMPACT_RESUME,
+        {"source": "compact", "cwd": str(engagement_dir)},
+        cwd=engagement_dir,
+        env={"VIGIL_OPERATOR_MODE": operator_mode},
+    )
+    assert result.returncode == 0
+    assert f"session-selected `{operator_mode}` mode" in result.stdout
+    assert "vigil engagement mode" in result.stdout
+    assert "load both" not in result.stdout.lower()
+
+
+def test_post_compact_resume_stops_without_a_session_mode(tmp_path: Path) -> None:
+    engagement_dir = _engagement(tmp_path, engagement_type="offensive")
+    result = _run_hook(
+        POST_COMPACT_RESUME,
+        {"source": "compact", "cwd": str(engagement_dir)},
+        cwd=engagement_dir,
+    )
+    assert result.returncode == 0
+    assert "vigil engagement mode" in result.stdout
+    assert "stop" in result.stdout.lower()
+
+
+def test_post_compact_resume_uses_remediation_case_state(tmp_path: Path) -> None:
+    engagement_dir = _engagement(tmp_path, engagement_type="remediation")
+    result = _run_hook(
+        POST_COMPACT_RESUME,
+        {"source": "compact", "cwd": str(engagement_dir)},
+        cwd=engagement_dir,
+        env={"VIGIL_OPERATOR_MODE": "remediation"},
+    )
+    assert result.returncode == 0
+    assert "vigil remediation -k <key> list" in result.stdout
+    assert "vigil assess resume-brief" not in result.stdout
 
 
 @pytest.mark.parametrize(

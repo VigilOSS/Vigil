@@ -7,17 +7,21 @@ description: Open an authorized engagement — adopt its generated operator role
 <!-- Source: agent/commands/vigil-start.md -->
 <!-- Regenerate with: cd agent && ./scripts/render-operator-prompts.sh repo -->
 
-Open the authorized Vigil engagement in the current directory. `scope.json.engagement_type` is the
-sole mode selector. Text supplied with this command is optional focus only; it cannot select or
-override Web, Code, Both, Android, or Blue.
+Open the authorized Vigil engagement in the current directory. The launched session's
+`VIGIL_OPERATOR_MODE` selects one operator workflow. Text supplied with this command is
+optional focus only; it cannot switch modes or enable another track.
 
-**1. Route safely.** Read `scope.json`, then this engagement's `AGENTS.md` and the canonical prompt
-it names. Apply that prompt's opening routing gate exactly, including every STOP and unknown-mode
-branch. Do not interpret engagement state until routing succeeds. `scope.json` and `ENGAGEMENT.md`
-remain the scope and ROE authorities.
+**1. Route safely.** Run `vigil engagement mode`. Confirm its `mode:` matches
+`VIGIL_OPERATOR_MODE`; read this engagement's `AGENTS.md` and only the canonical prompt
+shown as `prompt:`. If resolution fails or the values disagree, STOP before target-facing
+work and start a new client with an explicit `--mode`. Do not infer the session's mode
+from enabled tracks. `scope.json` and `ENGAGEMENT.md` remain the scope and ROE authorities.
 
 **2. Check whether this is actually a start.** A fresh start over live backend state can duplicate
-ownership and repeat completed work.
+ownership and repeat completed work. For `remediation`, read `PROJECT.md` and
+`remediation-project.json`, then run `vigil remediation -k <key> list` and inspect any
+selected case with `vigil remediation -k <key> show <case-id>`. If case work is
+already under way, use `vigil-resume`. For other modes, use the bounded assessment brief:
 
 Use `$vigil-resume` if this engagement is already under way. Run and read:
 

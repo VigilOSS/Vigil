@@ -1197,7 +1197,7 @@ _CONTRACTS: dict[str, CommandContract] = {
         ),
         notes=(
             "The checkpoint cannot hold a new factual claim about the target by construction: every field except --intent is a reference to an existing backend row, and the phase is server-derived at write time.",
-            "On a `both` engagement the web and code tracks advance independently, so the checkpoint records BOTH server-derived phases and renders them as `web_phase=` / `code_phase=`. A single-track engagement records the one phase it has and renders a bare `phase=`.",
+            "When web and code are both enabled they advance independently, so the checkpoint records both server-derived phases and renders them as `web_phase=` / `code_phase=`. A single-track engagement records the one phase it has and renders a bare `phase=`.",
             "--intent is recorded and rendered as UNVERIFIED operator intent — what you were about to do and why. It is never a finding, a measurement, or evidence; record those with `finding record` / `record-probe`.",
             "Every referenced id must already exist in this engagement. An unknown finding slug, agent id, command-run id, or artifact id refuses the write (HTTP 400) naming the unknown ids, because a checkpoint pointing at a nonexistent row is itself a false claim.",
             "Storage is append-only. Correct a wrong checkpoint by recording a NEW one — the previous row stays readable and renders as `superseded by checkpoint #N`, so the correction is visible instead of erasing the mistake.",

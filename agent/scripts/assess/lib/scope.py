@@ -16,6 +16,8 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 from urllib.parse import urlsplit
 
+from assess.lib.tracks import track_phases
+
 try:
     from vigil_cli.scope_entries import (
         _warned_scope_keys,
@@ -1651,14 +1653,16 @@ def enforce_execution_policy(
     # advisory. The declared name is supplied by the caller, not guessed from
     # argv.
     target_facing = bool(positive_tools & _TARGET_FACING_TOOLS) or bool(request_urls)
-    engagement_type = str(scope_doc.get("engagement_type", "")).strip().lower()
+    phases = track_phases(scope_doc)
+    legacy_both = scope_doc.get("engagement_type") == "both" and "tracks" not in scope_doc
+    code_only = "code" in phases and "web" not in phases
     declared_hosts: list[dict[str, str]] = []
     if target_facing:
         try:
             declared_hosts = scope_entries(scope_doc)
         except SystemExit as exc:
             raise ScopePolicyError(str(exc)) from exc
-        if not declared_hosts and engagement_type != "code":
+        if not declared_hosts and not code_only:
             recovery = f"Run `vigil engagement add-host {eng_dir.name} <host>`"
             raise ScopePolicyError(
                 "target-facing execution requires a non-empty, valid scope.json "
@@ -1668,8 +1672,8 @@ def enforce_execution_policy(
         _require_program_brief_resolution(eng_dir)
 
     result: dict[str, Any] = {"target_facing": target_facing}
-    code_lane = engagement_type == "code" or (
-        engagement_type == "both"
+    code_lane = code_only or (
+        ("code" in phases or legacy_both)
         and str(execution_phase or "").strip().lower().startswith("code-")
     )
     if code_lane and declared_hosts:

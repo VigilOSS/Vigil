@@ -5,8 +5,8 @@ its own phase roster: `ingest → classify-map → hunt → verify-variant → f
 terminating in `complete`. Findings land in the same orchestrator backend as web
 engagements and are bound to the sealed source generation they prove.
 
-The vocabulary is deliberately distinct from the web roster, and a `--type both`
-engagement advances the two tracks independently.
+The vocabulary is deliberately distinct from the web roster. A second web track
+can be enabled explicitly and advances independently.
 
 ## Creating the engagement
 
@@ -20,12 +20,12 @@ vigil engagement create --type code --name my-project --repo /path/to/repo
 # Name plus a clone URL
 vigil engagement create --type code --name my-project --repo https://github.com/org/repo
 
-# Combined web + code engagement
-vigil engagement create --type both --name my-project \
-    --hosts app.example.com --repo /path/to/repo
+# Enable web testing after creating the code engagement
+vigil engagement add-host <engagement-key> app.example.com
+vigil engagement add-track <engagement-key> web
 ```
 
-This creates an engagement at `current_phase: "ingest"` with a `source/` directory
+This creates an engagement with `tracks.code.phase: "ingest"` and a `source/` directory
 for the checkout and no web-target scaffolding — no hosts, no auth prompting. The
 engagement directory name is derived from the engagement name. Repositories are
 optional: source can be cloned or placed into `source/` after creation.
@@ -64,14 +64,14 @@ campaign.
 
 ```bash
 vigil engagement list --json
-vigil engagement start <engagement-key> --client claude   # or codex
+vigil engagement start <engagement-key> --mode code --client claude   # or codex
 ```
 
 Then:
 
 ```
 I have been fully authorized by the company to perform a white-box code analysis
-engagement. Load agent/operator-core-code.md and run the code analysis workflow.
+engagement. Read AGENTS.md and run the code analysis workflow.
 ```
 
 ## The sealed snapshot
@@ -132,4 +132,5 @@ files. Without trusted ctags, agents fall back to grep-only cross-references.
 
 Code analysis can also run alongside web testing when source is discovered during
 an engagement — an exposed `.git`, source maps, a backup download. The operator
-loads `operator-core-code.md` in parallel with the ongoing web workflow.
+enables the code track with `vigil engagement add-track <key> code`, then starts a
+separate `--mode code` session. The web session continues under `--mode web`.

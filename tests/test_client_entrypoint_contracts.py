@@ -227,7 +227,7 @@ def _build_entrypoint_fixture(tmp_path: Path) -> tuple[Path, Path, Path]:
     (engagement_dir / ".orchestrator.env").write_text(
         "ORCHESTRATOR_BASE_URL=http://engagement.test:8000/\n"
     )
-    (engagement_dir / "scope.json").write_text('{"status":"active"}\n')
+    (engagement_dir / "scope.json").write_text('{"engagement_type":"web","status":"active"}\n')
 
     engagements._write_prompt_wrappers(
         agent_root, engagement_dir, "both", engagement_type="web"
@@ -1245,7 +1245,8 @@ def test_start_engagement_dispatches_to_exact_client_launcher(
     install_root = tmp_path / "install"
     engagement_dir = install_root / "agent" / "engagements" / "client-contract"
     engagement_dir.mkdir(parents=True)
-    (engagement_dir / "scope.json").write_text('{"status":"active"}\n')
+    (install_root / "agent" / "AGENTS.md").write_text("web operator\n")
+    (engagement_dir / "scope.json").write_text('{"engagement_type":"web","status":"active"}\n')
     launcher = engagement_dir / f"start_{client}.sh"
     launcher.write_text("#!/usr/bin/env bash\n")
     monkeypatch.setenv("VIGIL_CONFIG", str(tmp_path / "config.json"))
@@ -1765,15 +1766,17 @@ def test_codex_config_materializes_absolute_paths_for_all_hooks(tmp_path: Path) 
 
 def test_codex_compact_prompt_refresh_preserves_engagement_local_hooks(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A mode change must not erase benchmark anti-cheat or other local hooks."""
+    """The stored prompt stays mode-neutral and preserves local hooks."""
     repo_root = Path(__file__).resolve().parents[1]
     engagement_dir = tmp_path / "engagement"
     codex_dir = engagement_dir / ".codex"
     codex_dir.mkdir(parents=True)
     (engagement_dir / "scope.json").write_text(
-        '{"engagement_type":"both","status":"in_progress"}\n', encoding="utf-8"
+        '{"engagement_type":"offensive","tracks":{"web":true,"code":true},"status":"in_progress"}\n', encoding="utf-8"
     )
+    monkeypatch.setenv("VIGIL_OPERATOR_MODE", "code")
     guard_block = (
         "[hooks]\n"
         "[[hooks.PreToolUse]]\n"
@@ -1794,7 +1797,11 @@ def test_codex_compact_prompt_refresh_preserves_engagement_local_hooks(
 
     refreshed = config_path.read_text(encoding="utf-8")
     assert "old web prompt" not in refreshed
-    assert "combined web and source-code engagement" in refreshed
+    assert "vigil engagement mode" in refreshed
+    assert "session-selected `code`" not in refreshed
+    assert "session-selected `web`" not in refreshed
+    assert "vigil assess code-coverage" not in refreshed
+    assert "vigil assess check-phase-readiness --phase report" not in refreshed
     assert 'compact_prompt_extra = "keep me"' in refreshed
     assert 'compact_prompt = "nested value"' in refreshed
     assert guard_block in refreshed

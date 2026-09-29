@@ -9,24 +9,25 @@ description: Write a handoff for the active engagement operator, grounded in bac
 Produce a handoff for the next operator session, whether it uses another client or resumes after a
 restart. The reader has the engagement directory and backend, not this session's context.
 
-**1. Adopt the engagement's operator role.** Read this engagement's `AGENTS.md`, follow its pointer
-to the canonical operator prompt, and read that prompt in bounded parts, following its own Map of
-This File. Obey its **Engagement-Type Routing Gate** branch for this engagement's `engagement_type`
-in `scope.json` — including a branch that says STOP, and including its instruction to stop and
-report an `engagement_type` it does not recognize. A handoff must use the loaded workflow's state
-and exit language; a single-track template written for a different mode hides the work that actually
-governs completion.
+**1. Adopt the session's operator role.** Run `vigil engagement mode` and confirm its
+`mode:` matches `VIGIL_OPERATOR_MODE`. Read this engagement's `AGENTS.md`, then only
+the canonical prompt shown as `prompt:` in bounded parts. If resolution fails or the
+values disagree, STOP before writing a handoff; a handoff in the wrong workflow's
+state and exit language hides the work that actually governs completion.
 
-**2. Read the complete shared backend hydration.** Ground every claim in these outputs instead of
-memory.
+**2. Read the complete shared backend hydration.** Ground every claim in backend
+state instead of memory. For `remediation`, read `PROJECT.md` and
+`remediation-project.json`; run `vigil remediation -k <key> list` and
+`vigil remediation -k <key> show <case-id>` for the selected case, then follow
+the remediation prompt's evidence and approval checks. For other modes, run:
 
-!`vigil assess resume-brief 2>&1`
+!`if [ "${VIGIL_OPERATOR_MODE:-}" != remediation ]; then vigil assess resume-brief 2>&1; fi`
 
-!`vigil assess agent list --status in-progress 2>&1`
+!`if [ "${VIGIL_OPERATOR_MODE:-}" != remediation ]; then vigil assess agent list --status in-progress 2>&1; fi`
 
-!`vigil assess finding list 2>&1`
+!`if [ "${VIGIL_OPERATOR_MODE:-}" != remediation ]; then vigil assess finding list 2>&1; fi`
 
-!`vigil assess operator-checkpoint show 2>&1`
+!`if [ "${VIGIL_OPERATOR_MODE:-}" != remediation ]; then vigil assess operator-checkpoint show 2>&1; fi`
 
 **3. Read the readiness surface for the loaded mode.** These route to CLI surfaces no operator
 prompt owns; run only the applicable one.
@@ -42,14 +43,6 @@ report closeout — it is the web report-readiness projection, not a generic all
 Run `vigil assess code-coverage` and pair its coverage/quality output with the current code phase's
 readiness obligations from the loaded code operator prompt. When the next target phase is known,
 use `--require-transition-ready <target-phase>` to obtain its structural readiness verdict.
-
-### Combined mode
-
-Read both track states and report their readiness separately. Run
-`vigil assess check-phase-readiness --phase <active-web-phase>` for the web track (`--phase report`
-only when that track is actually approaching report closeout) and `vigil assess code-coverage` for
-the code track; when its next code phase is known, add `--require-transition-ready <target-phase>`.
-A clear result on one track does not clear the other.
 
 ### Android mode
 
@@ -69,19 +62,28 @@ shared hydration above plus the active blue operator phase checklist: verifier d
 registered evidence, open containment proposals and approvals, and report/closeout state. A
 transition is a state change, so readiness inspection does not execute one merely to test it.
 
+### Remediation mode
+
+Use the selected case's state and evidence: issue snapshot, worktree revision,
+red and green tests, browser rehearsal, review approval, PR, deployment, and
+human verification. `vigil remediation -k <key> show <case-id>` is the case
+state surface; do not treat offensive phase readiness as a remediation gate.
+
 **4. Write the brief** with each section below in order. Write `none` when a section is genuinely
 empty, because an empty section and a forgotten section are indistinguishable to the next reader.
 
 - **ROE and approval deltas.** Anything the next operator would get wrong from the engagement files
   alone. Use the vocabulary of the loaded mode.
-- **Workflow state.** Current phase or track, the applicable readiness result, and unfinished exit
-  obligations.
+- **Session mode and workflow state.** Name this session's `mode:` and the command to start
+  a fresh session in that mode. Record its current phase, readiness result, and unfinished
+  exit obligations. For another enabled track, provide a bounded finding or proof pointer
+  and a separate `--mode` start command; never ask one session to load both cores.
 - **In-flight ownership.** Agent id, role, assigned work, dispatch time, and any ready/blocked
   handoff for every active lane. Existing ownership must remain visible to prevent duplicate work.
 - **Findings or incidents by evidence status.** Separate verified facts, unverified reports, killed
   claims, and blocked verification. Name the backend evidence or kill reason for each.
 - **Coverage completed and outstanding.** Use the active mode's unit: web surfaces; code queues and
-  obligations; both units separately for a combined engagement; Android static/dynamic surfaces,
+  obligations; Android static/dynamic surfaces,
   artifacts, and admitted live hosts; or blue incident evidence/containment work.
 - **Open and settled decisions.** Preserve both questions awaiting the user and decisions that must
   not be re-litigated.

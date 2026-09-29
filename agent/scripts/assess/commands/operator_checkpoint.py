@@ -244,7 +244,7 @@ def _require_checkpoint_page(body: object) -> dict:
 def render_phase_field(row: dict) -> str:
     """Render the checkpoint's position on every track the engagement runs.
 
-    A ``both`` engagement advances the web track (``current_phase``) and the
+    A dual-track engagement advances the web track (``current_phase``) and the
     code track (``code_phase``) independently, so one unlabelled ``phase=``
     would let a reader take a code-track position for a web one. When both are
     present each is named by its track; a single-track engagement has nothing

@@ -7,6 +7,15 @@ Durable design decisions live in [`docs/adr/`](docs/adr/).
 
 ## [Unreleased]
 
+### Changed
+
+- **Offensive engagements now store enabled web and code tracks separately from operator
+  sessions.** New creation enables one track; `vigil engagement add-track <key> web|code`
+  enables the other. `vigil engagement start` selects one prompt with `--mode web|code`
+  when both are enabled. `vigil engagement mode` reports the active selection and prompt.
+  `--type both` no longer creates engagements; existing web/code/both scopes remain
+  readable, and `repair-tracks` converts a legacy both scope missing its code phase.
+
 ### Removed
 
 - **`vigil update` is gone.** It was a verbatim duplicate of `vigil install` with no behavior of

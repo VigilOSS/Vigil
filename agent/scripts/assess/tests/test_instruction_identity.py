@@ -89,6 +89,64 @@ def test_dispatch_instruction_identity_hashes_exact_installed_files(
     assert warnings == []
 
 
+@pytest.mark.parametrize(
+    ("mode", "scope", "operator_file"),
+    [
+        ("code", {"engagement_type": "offensive", "tracks": {
+            "web": {"phase": "recon"}, "code": {"phase": "hunt"}}}, "operator-core-code.md"),
+        ("remediation", {"engagement_type": "remediation"}, "operator-core-remediation.md"),
+    ],
+)
+def test_dispatch_instruction_identity_fingerprints_selected_operator_core(
+    tmp_path, monkeypatch, mode, scope, operator_file
+):
+    source_root, agent_root, engagement_dir = _fixture_tree(tmp_path)
+    monkeypatch.setenv("VIGIL_OPERATOR_MODE", mode)
+    (engagement_dir / "scope.json").write_text(json.dumps(scope), encoding="utf-8")
+    (agent_root / operator_file).write_text("selected operator\n", encoding="utf-8")
+    (source_root / "agent" / operator_file).write_text("selected operator\n", encoding="utf-8")
+    specialist = agent_root / ".codex" / "agents" / "recon-specialist.toml"
+    specialist.write_text("specialist\n", encoding="utf-8")
+    (source_root / "agent" / ".codex" / "agents" / "recon-specialist.toml").write_text(
+        "specialist\n", encoding="utf-8"
+    )
+
+    identity, warnings = build_dispatch_instruction_identity(
+        agent_root=agent_root, engagement_dir=engagement_dir,
+        agent_role="recon-specialist", client_name="codex",
+    )
+
+    assert identity["operator_instruction_path"] == f"agent/{operator_file}"
+    assert identity["instruction_identity_status"] == "verified"
+    assert warnings == []
+
+
+def test_dual_track_without_session_mode_cannot_verify_web_instruction(tmp_path, monkeypatch):
+    source_root, agent_root, engagement_dir = _fixture_tree(tmp_path)
+    monkeypatch.delenv("VIGIL_OPERATOR_MODE", raising=False)
+    (engagement_dir / "scope.json").write_text(json.dumps({
+        "engagement_type": "offensive", "tracks": {
+            "web": {"phase": "recon"}, "code": {"phase": "hunt"}}
+    }), encoding="utf-8")
+    (agent_root / "AGENTS.md").write_text("web wrapper\n", encoding="utf-8")
+    (source_root / "agent" / "AGENTS.md").write_text("web wrapper\n", encoding="utf-8")
+    (agent_root / ".codex" / "agents" / "recon-specialist.toml").write_text(
+        "specialist\n", encoding="utf-8"
+    )
+    (source_root / "agent" / ".codex" / "agents" / "recon-specialist.toml").write_text(
+        "specialist\n", encoding="utf-8"
+    )
+
+    identity, warnings = build_dispatch_instruction_identity(
+        agent_root=agent_root, engagement_dir=engagement_dir,
+        agent_role="recon-specialist", client_name="codex",
+    )
+
+    assert identity["operator_instruction_path"] is None
+    assert identity["instruction_identity_status"] == "incomplete"
+    assert any("operator mode" in warning for warning in warnings)
+
+
 def test_dispatch_instruction_identity_keeps_request_launcher_and_provider_facts_separate(
     tmp_path: Path,
     monkeypatch,

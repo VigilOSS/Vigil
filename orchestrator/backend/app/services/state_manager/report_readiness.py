@@ -10,6 +10,7 @@ from fastapi import HTTPException, status
 from ...finding_merge import strict_finding_id
 from ..artifact_index import _normalize_relative_path
 from ..events import _engagement_or_404
+from ..engagement_tracks import has_track
 from . import _common
 from ._common import (
     FINDING_NOTES_MAX_LENGTH,
@@ -225,14 +226,9 @@ def _finding_merge_integrity_blockers(engagement_id: int) -> list[dict[str, Any]
 
 def report_readiness(engagement_id: int) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
-    engagement_type = str(getattr(engagement, "engagement_type", "") or "").lower()
-    is_blue = engagement_type == "blue"
-    # WEB-ONLY guard for the W3 coverage/grading blockers below. Mirrors the
-    # ``_is_web_engagement`` convention used by app-unit scoring / the depth
-    # ledger: anything that is NOT a code or blue track is web-eligible
-    # (``web`` / ``both`` / legacy ``red`` / unset). Code and blue engagements
-    # never get the route-coverage or finding-grading blockers.
-    is_web = engagement_type not in ("code", "blue")
+    root = Path(engagement.engagement_root)
+    is_blue = has_track(root, "blue")
+    is_web = has_track(root, "web")
     engagement_root = Path(engagement.engagement_root).expanduser().resolve()
     coverage = coverage_readiness(engagement_id)
     blockers: list[dict[str, Any]] = []

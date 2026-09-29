@@ -815,7 +815,7 @@ def _scope_version(engagement_dir: Path) -> str:
 
 
 def _engagement_type(engagement_dir: Path) -> str:
-    """Read ``engagement_type`` from ``scope.json`` (web/code/blue/both).
+    """Return the track category used by the web-only probe emission guard.
 
     Used by the probe-run emission WEB-ONLY guard so the depth
     harness never fires on code/blue engagements. Mirrors the default used by
@@ -832,6 +832,15 @@ def _engagement_type(engagement_dir: Path) -> str:
         return "web"
     if not isinstance(data, dict):
         return "web"
+    from assess.lib.tracks import track_phases
+
+    tracks = track_phases(data)
+    if "web" in tracks:
+        return "web"
+    if "code" in tracks:
+        return "code"
+    if "blue" in tracks:
+        return "blue"
     return str(data.get("engagement_type", "web")) or "web"
 
 

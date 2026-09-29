@@ -147,7 +147,7 @@ def _track_phases(engagement) -> tuple[str, str | None]:
     brief resolve phases through, so a checkpoint can never disagree with the
     phase the rest of the backend reports.
 
-    A ``both`` engagement advances the web track (``current_phase``) and the
+    A dual-track engagement advances the web track (``current_phase``) and the
     code track (``code_phase``) independently, so recording only the first
     reports the position of a track the operator may not have been working —
     the checkpoint exists to carry that position across a context boundary, so

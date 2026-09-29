@@ -37,6 +37,7 @@ from .engagements import (
     clear_active_engagement,
     create_engagement,
     current_engagement_path,
+    engagement_mode_prompt,
     export_pdf,
     list_engagements,
     mutate_scope_file,
@@ -45,6 +46,7 @@ from .engagements import (
     remove_out_of_scope,
     repair_engagement_tracks,
     resolve_current_engagement,
+    resolve_engagement_mode,
     resolve_engagement_path,
     resolve_out_of_scope,
     resolve_rate_limit,
@@ -425,7 +427,8 @@ def main(argv: list[str] | None = None) -> None:
         description=(
             "Create an engagement workspace under <install-root>/agent/engagements/.\n"
             "When --type is omitted it is inferred from the inputs (URL/host → web,\n"
-            "--repo → code, both kinds of evidence → both, APK/--package-name → android)\n"
+            "--repo → code, APK/--package-name → android); combined web and code\n"
+            "evidence requires choosing one initial track explicitly.\n"
             "and the inferred type is echoed so it can be overridden. On a terminal,\n"
             "missing required fields are asked for interactively; pass --no-prompt to\n"
             "fail instead of asking."
@@ -451,13 +454,13 @@ def main(argv: list[str] | None = None) -> None:
     )
     create_p.add_argument(
         "--type",
-        choices=["web", "code", "both", "android", "remediation"],
+        choices=["web", "code", "android", "remediation"],
         default=None,
         help="Engagement type; inferred from the other inputs when omitted",
     )
-    create_p.add_argument("--name", help="Engagement name (required for code/both)")
+    create_p.add_argument("--name", help="Engagement name (required for code)")
     create_p.add_argument("--project-config", help="Remediation project JSON (environment URLs, Chrome CDP, approved model, deployment workflow)")
-    create_p.add_argument("--target", help="Primary target URL or host (web/both)")
+    create_p.add_argument("--target", help="Primary target URL or host (web)")
     create_p.add_argument("--hosts", help="Comma-separated in-scope hosts")
     create_p.add_argument(
         "--host",
@@ -473,7 +476,7 @@ def main(argv: list[str] | None = None) -> None:
         "--repo",
         action="append",
         default=[],
-        help="Source repository path or URL (code/both); repeatable",
+        help="Source repository path or URL (code); repeatable",
     )
     create_p.add_argument("--apk", action="append", default=[], help="Android APK/AAB/XAPK artifact path")
     create_p.add_argument("--package-name", help="Android package name, for example com.example.app")
@@ -493,7 +496,7 @@ def main(argv: list[str] | None = None) -> None:
         choices=sorted(PROGRAM_HEADER_PRESETS),
         default=None,
         help="Bug-bounty program preset; sets the program's mandated attribution "
-             "header (requires --researcher). web/both/android only.",
+             "header (requires --researcher). web/android only.",
     )
     create_p.add_argument(
         "--researcher",
@@ -514,7 +517,7 @@ def main(argv: list[str] | None = None) -> None:
         default=[],
         metavar="HOST|*.WILDCARD|CIDR",
         help="Out-of-scope carve-out excluded even when an in-scope wildcard "
-             "would match it; repeatable. web/both/android only.",
+             "would match it; repeatable. web/android only.",
     )
     create_p.add_argument(
         "--rate-limit",
@@ -533,7 +536,7 @@ def main(argv: list[str] | None = None) -> None:
              "tools take an integer req/s); a value >= 1 is accepted but truncates "
              "DOWN at use (5.9 -> 5), and a cap above a stage's verb default is a "
              "no-op (the ceiling only clamps DOWN). Unset = today's behavior (per-tool "
-             "defaults, agent discretion, no hard gate). web/both/android only. "
+             "defaults, agent discretion, no hard gate). web/android only. "
              "e.g. --rate-limit 5",
     )
     create_p.add_argument(
@@ -573,7 +576,7 @@ def main(argv: list[str] | None = None) -> None:
     remove_oos_p.add_argument("entry")
     add_track_p = engagement_sub.add_parser(
         "add-track",
-        help="Explicitly add a web or code track and upgrade the engagement to both",
+        help="Explicitly enable a web or code track on an offensive engagement",
     )
     add_track_p.add_argument("key")
     add_track_p.add_argument("track", choices=("web", "code"))
@@ -595,6 +598,9 @@ def main(argv: list[str] | None = None) -> None:
     path_p = engagement_sub.add_parser("path")
     path_p.add_argument("key", nargs="?")
     path_p.add_argument("--select", action="store_true")
+    mode_p = engagement_sub.add_parser("mode", help="Resolve this session's operator mode and prompt")
+    mode_p.add_argument("key", nargs="?")
+    mode_p.add_argument("--json", action="store_true")
     engagement_sub.add_parser(
         "current",
         help="Print the resolved active engagement and which tier won (flag/cwd/pointer/env).",
@@ -605,6 +611,8 @@ def main(argv: list[str] | None = None) -> None:
     start_p.add_argument("key", nargs="?")
     start_p.add_argument("--select", action="store_true")
     start_p.add_argument("--client", choices=["codex", "claude", "opencode", "goose", "kimi"], required=True)
+    start_p.add_argument("--mode", choices=["web", "code", "blue", "remediation", "android"],
+                         help="Session prompt; required when web and code tracks are both enabled")
     start_p.add_argument("--thinking", choices=["off", "high", "max"], default=None,
                          help="DeepSeek thinking level for --client opencode: off=disabled, "
                               "high=on, max=maximum (default: client default — thinking on). "
@@ -1538,6 +1546,9 @@ def _engagement_start_client_args(
     for token in ambiguous:
         if not token.startswith("--"):
             continue
+        # Common client flag is one character away from Vigil's --mode.
+        if token == "--model":
+            continue
         near = difflib.get_close_matches(
             token, vigil_options, n=1, cutoff=_VIGIL_OPTION_TYPO_RATIO
         )
@@ -1753,6 +1764,14 @@ def _engagement(args: argparse.Namespace, install_root: Path) -> None:
         print(json.dumps(mutation_result, indent=2, sort_keys=True))
     elif command == "path":
         print(_resolve_current_or_selected_engagement(install_root, key=args.key, select=args.select))
+    elif command == "mode":
+        path = _resolve_current_or_selected_engagement(install_root, key=args.key, select=False)
+        mode = resolve_engagement_mode(path, os.environ.get("VIGIL_OPERATOR_MODE"))
+        prompt = engagement_mode_prompt(install_root, mode)
+        if args.json:
+            print(json.dumps({"mode": mode, "prompt": str(prompt)}, sort_keys=True))
+        else:
+            print(f"mode: {mode}\nprompt: {prompt}")
     elif command == "current":
         _engagement_current(install_root)
     elif command == "cd-init":
@@ -1764,7 +1783,10 @@ def _engagement(args: argparse.Namespace, install_root: Path) -> None:
         if args.client == "opencode":
             from .engagements import write_opencode_reasoning_config
             write_opencode_reasoning_config(path, args.thinking)
-        start_engagement(install_root, path, args.client, args.client_args)
+        if args.mode is None:
+            start_engagement(install_root, path, args.client, args.client_args)
+        else:
+            start_engagement(install_root, path, args.client, args.client_args, args.mode)
     elif command == "open":
         path = _resolve_current_or_selected_engagement(install_root, key=args.key, select=args.select)
         webbrowser.open(path.as_uri())
@@ -1811,6 +1833,12 @@ def _engagement_create(args: argparse.Namespace, install_root: Path) -> None:
     asked = False
     engagement_type = args.type
     if engagement_type is None:
+        if args.repo and (target or hosts or (positional and _looks_like_web_target(positional))):
+            raise SystemExit(
+                "source and web target inputs require an explicit first track: create with "
+                "--type code --name <name> --repo <path>, then add hosts and run "
+                "`vigil engagement add-track <key> web`."
+            )
         engagement_type = _infer_engagement_type(
             positional,
             target=target,
@@ -1822,12 +1850,12 @@ def _engagement_create(args: argparse.Namespace, install_root: Path) -> None:
         if engagement_type is not None:
             print(f"[vigil] inferred type: {engagement_type} (pass --type to override)", file=sys.stderr)
         elif interactive:
-            engagement_type = _prompt_choice("Engagement type", "web", ["web", "code", "both", "android"])
+            engagement_type = _prompt_choice("Engagement type", "web", ["web", "code", "android"])
             asked = True
         else:
             described = repr(positional) if positional else "the provided flags"
             raise SystemExit(
-                f"cannot infer engagement type from {described}; pass --type web|code|both|android "
+                f"cannot infer engagement type from {described}; pass --type web|code|android "
                 "(blue engagements: vigil blue engage)"
             )
 
@@ -1847,10 +1875,10 @@ def _engagement_create(args: argparse.Namespace, install_root: Path) -> None:
             target = positional
 
     if interactive:
-        if engagement_type in {"web", "both"} and not target and not hosts:
+        if engagement_type == "web" and not target and not hosts:
             target = _ask_required("Target URL or host")
             asked = True
-        if engagement_type in {"code", "both", "remediation"} and not name:
+        if engagement_type in {"code", "remediation"} and not name:
             name = _ask_required("Engagement name")
             asked = True
         if engagement_type == "android" and not name and not android_package and not artifacts:
@@ -1863,7 +1891,7 @@ def _engagement_create(args: argparse.Namespace, install_root: Path) -> None:
         # android (APK) engagements are excluded — pass --program/--header
         # explicitly for those. Mutating `args` here lets the normal
         # resolve_required_headers/resolve_out_of_scope path pick them up.
-        if engagement_type in {"web", "both"}:
+        if engagement_type == "web":
             if not args.program and not args.header:
                 header_choice = _prompt_choice(
                     "Required attribution header (some programs, e.g. BugCrowd, mandate one on all traffic)",
@@ -2023,7 +2051,7 @@ def _infer_engagement_type(
     web_evidence = bool(target) or bool(hosts) or bool(positional and _looks_like_web_target(positional))
     code_evidence = bool(repos)
     if web_evidence and code_evidence:
-        return "both"
+        return None
     if web_evidence:
         return "web"
     if code_evidence:

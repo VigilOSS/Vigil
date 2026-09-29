@@ -61,26 +61,14 @@ class SessionResponse(BaseModel):
 
 
 def _engagement_response(engagement: EngagementView) -> EngagementResponse:
-    engagement_type = (engagement.engagement_type or "web").strip().lower()
-    if engagement_type == "both":
-        track_state = {
-            "web": {
-                "phase": engagement.current_phase,
-                "complete": engagement.current_phase == "complete",
-            },
-            "code": {
-                "phase": engagement.code_phase,
-                "complete": engagement.code_phase == "complete",
-            },
+    track_state = {
+        track: {
+            "phase": phase,
+            "complete": phase == "complete",
+            **({"repair_required": True} if phase == "repair-required" else {}),
         }
-    else:
-        track = engagement_type if engagement_type in {"code", "blue", "android", "remediation"} else "web"
-        track_state = {
-            track: {
-                "phase": engagement.current_phase,
-                "complete": engagement.current_phase == "complete",
-            }
-        }
+        for track, phase in engagement.track_phases.items()
+    }
     return EngagementResponse(
         id=engagement.id,
         key=engagement.key,
@@ -103,7 +91,7 @@ def _engagement_response(engagement: EngagementView) -> EngagementResponse:
         tenant_reference_paths=list(engagement.tenant_reference_paths or []),
         out_of_scope=list(engagement.out_of_scope or []),
         track_state=track_state,
-        aggregate_complete=all(
+        aggregate_complete=bool(track_state) and all(
             bool(state["complete"]) for state in track_state.values()
         ),
         capture_policy=dict(engagement.capture_policy or {}),

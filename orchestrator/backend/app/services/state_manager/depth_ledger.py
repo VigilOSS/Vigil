@@ -35,11 +35,13 @@ tied to the unit's host. A bare "I looked for secrets" probe never counts
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
 from .taxonomy_bridge import vuln_taxonomy
 
 from ..events import _engagement_or_404
+from ..engagement_tracks import has_track
 from . import _common
 from ._common import _fetch_all
 from .app_units import (
@@ -146,8 +148,7 @@ def depth_ledger(engagement_id: int) -> dict[str, Any]:
         }
     """
     engagement = _engagement_or_404(engagement_id)
-    etype = str(getattr(engagement, "engagement_type", "") or "").lower()
-    if etype in ("code", "blue"):
+    if not has_track(Path(engagement.engagement_root), "web"):
         return {
             "skipped": True,
             "reason": f"non-web engagement_type={engagement.engagement_type!r}; "

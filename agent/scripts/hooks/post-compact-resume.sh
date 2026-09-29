@@ -30,11 +30,45 @@ fi
 STATUS=$(jq -r '.status // "unknown"' "$ENG_DIR/scope.json" 2>/dev/null || echo "unknown")
 [ "$STATUS" != "in_progress" ] && exit 0
 
+case "${VIGIL_OPERATOR_MODE:-}" in
+  web|code|blue|remediation|android)
+    printf 'Restore the session-selected `%s` mode. Run `vigil engagement mode` to verify its canonical prompt path, then load only that prompt.\n\n' "$VIGIL_OPERATOR_MODE"
+    ;;
+  *)
+    cat <<'CONTEXT'
+Vigil post-compaction mode is unavailable. STOP before target-facing work.
+Run `vigil engagement mode` to resolve this session's operator mode and canonical
+prompt. If it cannot resolve a mode, start a new client with an explicit
+`vigil engagement start <key> --mode <mode> --client <client>` selection.
+Do not choose a mode from the engagement's enabled tracks or compacted summary.
+CONTEXT
+    exit 0
+    ;;
+esac
+
+if [ "$VIGIL_OPERATOR_MODE" = "remediation" ]; then
+  cat <<'CONTEXT'
+Vigil post-compaction rehydration is mandatory. The summary is a lossy index;
+the remediation case is canonical. Before acting:
+
+1. Run `vigil engagement mode`, verify `mode: remediation`, read this
+   engagement's `AGENTS.md`, then only its selected remediation prompt.
+2. Read `PROJECT.md` and `remediation-project.json`.
+3. Run `vigil remediation -k <key> list`, then
+   `vigil remediation -k <key> show <case-id>` for the selected case.
+4. Reconcile the summary against case evidence, worktree revision, approvals,
+   PR, deployment, and human verification before continuing.
+
+Stop if the mode or selected case is uncertain. Do not perform target-facing
+work until hydration is complete.
+CONTEXT
+else
 cat <<'CONTEXT'
 Vigil post-compaction rehydration is mandatory. The compacted summary is a lossy
 index, while the backend is canonical. Before any other action or conclusion:
 
-1. Re-read this engagement's `AGENTS.md` and the operator prompt it routes to.
+1. Run `vigil engagement mode` and verify it matches the session-selected mode.
+   Re-read this engagement's `AGENTS.md` and only the canonical prompt it routes to.
 2. Read `agent/rules/resume.md` in full and apply its hydration procedure.
 3. Read `ENGAGEMENT.md`; also read `RESUME.md` and `COMPACT.md` when present, and
    report either optional file as absent when it is missing.
@@ -47,6 +81,7 @@ Do not ask the operator to invoke `$vigil-resume`; this hook is that automatic
 continuation boundary. Preserve the active ROE and do not perform target-facing
 work until hydration is complete.
 CONTEXT
+fi
 
 if [ -f "$ENG_DIR/COMPACT.md" ]; then
   printf '\n---\n\n'

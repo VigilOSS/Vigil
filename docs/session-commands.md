@@ -13,7 +13,8 @@ live in [`engagement-prompt-playbook.md`](engagement-prompt-playbook.md).
 
 ### New or resumed engagement
 
-Paste this after `vigil engagement start <key> --client <client>`:
+Paste this after `vigil engagement start <key> --mode web --client <client>`
+(or the corresponding selected mode):
 
 ```
 Read AGENTS.md and assume Operator role.
@@ -52,7 +53,7 @@ Previous agent context (paste only when continuing a specific dispatch):
 <paste vigil assess agent render-handoff <agent-id> output here>
 ```
 
-### Blue, code-analysis, combined, and Android openers
+### Blue, code-analysis, Android, and remediation openers
 
 ```
 I have been fully authorized by the company to run a blue-team incident-response
@@ -66,17 +67,24 @@ engagement. Load agent/operator-core-code.md and run the code analysis workflow.
 ```
 
 ```
-I have been fully authorized by the company to perform a combined web and white-box code
-engagement. Run both operator tracks; keep their phase and readiness state separate.
-```
-
-```
 I have been fully authorized to analyze the Android package named in scope.json. Begin with
 static artifact analysis. Treat discovered live hosts as leads only; do not contact one unless
 it is explicitly admitted to scope.
 ```
 
-Model guidance for all five modes: prefer `gpt-5.6` at `high` reasoning for Codex and
+```
+I have been authorized to work the selected remediation case. Read PROJECT.md and
+remediation-project.json, inspect the case through `vigil remediation`, and follow the
+remediation operator prompt's evidence and approval gates.
+```
+
+For an engagement with web and code enabled, start one `--mode web` client and a separate
+`--mode code` client. Each loads only its selected operator core, and both use the same
+backend findings and independent phase state. The enabled tracks do not select a combined
+operator role. Use `vigil engagement mode` inside a client to verify `mode:` and the
+canonical `prompt:` before work or after compaction.
+
+Model guidance for these modes: prefer `gpt-5.6` at `high` reasoning for Codex and
 Opus for Claude. Drop to a smaller model only for clearly bounded sidecar work
 where latency matters more than depth.
 
@@ -105,9 +113,8 @@ Seven commands are available. Each has one canonical source under
 | `codex` | Project skills, `.codex/skills/<name>/SKILL.md` | `$vigil-resume` |
 | `opencode`, `goose`, `kimi` | None | Paste the body of `agent/commands/<name>.md` |
 
-Create or select the engagement type before starting; command text never changes it. For Codex,
-`$vigil-start <focus>` supplies optional focus within the mode already stored in
-`scope.json.engagement_type`.
+Select the operator mode at `vigil engagement start`; command text never changes it. For
+Codex, `$vigil-start <focus>` supplies optional focus within the launched session's mode.
 
 opencode, goose, and kimi have no equivalent project-command surface. The content
 is identical — only the invocation differs — so their operators paste the command
@@ -128,14 +135,16 @@ Both clients use a 510,000-token auto-compact window; a smaller model context ca
 `/compact` triggers the same steered flow early.
 
 Claude's `PreCompact` hook is registered with no matcher, so it fires on both manual `/compact`
-and automatic context-window compaction. It resolves the engagement type and prints a mode-aware
+and automatic context-window compaction. It reads `VIGIL_OPERATOR_MODE` and prints a mode-aware
 Vigil compaction contract: preserve the applicable ROE/scope, workflow phase and
 exit state, in-flight ownership, evidence status, decisions, and unmasked auth
 state. Its core hydration block names `resume-brief`, `operator-checkpoint show`,
-`agent list`, and `finding list`; web adds report readiness, code adds code coverage,
-and a combined engagement adds both. The final route sends the resumed operator
-back through the engagement's generated `AGENTS.md` instead of assuming a red,
-code, blue, or Android workflow.
+`agent list`, and `finding list`; web adds report readiness and code adds code coverage.
+It never asks one session to load both cores. The final route sends the resumed operator
+through the engagement's `AGENTS.md` and the selected canonical prompt.
+Remediation sessions rehydrate with `vigil remediation -k <key> list` and
+`vigil remediation -k <key> show <case-id>`; their case gates do not use
+offensive phase readiness.
 
 The hook never exits non-zero — a compaction that cannot run would leave the
 session wedged.
@@ -148,12 +157,15 @@ continuation, so additions and edits do not wait for reinstall. They are
 
 Claude's unfiltered `PreCompact` hook supplies the contract as summarizer instructions.
 Codex cannot use `PreCompact` stdout for that purpose, so each engagement's installer
-renders the same canonical hook output into Codex's stable `compact_prompt` setting.
+renders a mode-neutral copy of the canonical hook output into Codex's stable
+`compact_prompt` setting. This remains valid if another session selects a different mode.
 Codex then runs `post-compact-resume.sh` through a `SessionStart` hook matching
 `compact`; its developer context reaches the immediate continuation after both manual
 and automatic compaction, including an automatic compaction in the middle of a turn.
-The resumed operator re-hydrates authoritative backend state without waiting for the
-human to invoke `$vigil-resume`.
+The hook verifies the session-selected mode through `vigil engagement mode` and directs
+the operator to only that mode's canonical prompt. If mode selection is unavailable,
+it stops target-facing work. The resumed operator re-hydrates authoritative backend
+state without waiting for the human to invoke `$vigil-resume`.
 
 Claude sets `CLAUDE_CODE_AUTO_COMPACT_WINDOW`; Codex sets
 `model_auto_compact_token_limit`. Both use an absolute token count, so 510,000 is the

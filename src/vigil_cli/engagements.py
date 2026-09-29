@@ -45,7 +45,7 @@ from .scope_entries import ScopeEntryError, canonicalize_scope_entry
 # ignores it so concurrent assessment sessions cannot retarget each other.
 ACTIVE_ENGAGEMENT_CONFIG_KEY = "active_engagement_dir"
 
-ENGAGEMENT_TYPES = {"web", "code", "both", "android", "blue", "remediation"}
+ENGAGEMENT_TYPES = {"web", "code", "android", "blue", "remediation"}
 ANDROID_DYNAMIC_MODES = {"static_only", "device", "emulator"}
 ENGAGEMENT_DB_SNAPSHOT_MAX_COPIES_ENV = "VIGIL_ENGAGEMENT_DB_SNAPSHOT_MAX_COPIES"
 DEFAULT_ENGAGEMENT_DB_SNAPSHOT_MAX_COPIES = 2
@@ -54,14 +54,14 @@ CODE_TARGET_CONTACT_POLICY = "warn-do-not-contact-declared-hosts"
 # Engagement types that probe a live HTTP target at creation time and so can be
 # created with required attribution headers / out-of-scope carve-outs already
 # set. code/blue declare no hosts at create, so there is nothing to attribute.
-_HTTP_TARGET_TYPES = {"web", "both", "android"}
+_HTTP_TARGET_TYPES = {"web", "android"}
 
 # Engagement types that carry offensive host scope at all. Mid-engagement ROE
 # mutations are gated on this plus, for the traffic-shaping ones, an actually
 # declared root — not on the track mix. A code engagement may legitimately
 # declare the hosts its source talks to (ADR 0021), and declaring one never
 # activates the web track (ADR 0022). Blue incident work has no such scope.
-_HOST_SCOPE_TYPES = {"web", "both", "android", "code"}
+_HOST_SCOPE_TYPES = {"web", "code", "both", "offensive", "android"}
 
 # Bug-bounty program → the attribution header name that program mandates on all
 # traffic. `--program <name> --researcher <handle>` is sugar over `--header`.
@@ -292,7 +292,7 @@ def plan_engagement(options: CreateEngagementOptions, *, now: datetime | None = 
     SystemExit on the same invalid inputs `create_engagement` rejects.
     """
     if options.engagement_type not in ENGAGEMENT_TYPES:
-        raise SystemExit("--type must be one of: web, code, both, android, blue, remediation")
+        raise SystemExit("--type must be one of: web, code, android, blue, remediation")
     if options.dynamic_mode not in ANDROID_DYNAMIC_MODES:
         raise SystemExit("--dynamic-mode must be one of: static_only, device, emulator")
     if options.engagement_type == "blue":
@@ -326,13 +326,18 @@ def plan_engagement(options: CreateEngagementOptions, *, now: datetime | None = 
     target_normalized = ""
     hostname = ""
     hosts = list(options.hosts)
-    if options.engagement_type in {"web", "both"}:
+    if options.engagement_type == "web":
         if not options.target and not hosts:
-            raise SystemExit("web and both engagements require --target or --hosts")
+            raise SystemExit("web engagements require --target or --hosts")
         target_normalized = normalize_target(options.target or hosts[0].removeprefix("*."))
         hostname = hostname_for(target_normalized)
         if not hosts:
             hosts = [hostname]
+    elif options.engagement_type == "code" and options.target:
+        target_normalized = normalize_target(options.target)
+        hostname = hostname_for(target_normalized)
+        if hostname not in hosts:
+            hosts.append(hostname)
 
     artifacts = [str(Path(raw).expanduser()) for raw in options.artifacts]
     name = options.name or (options.target if options.engagement_type == "code" else None)
@@ -341,8 +346,8 @@ def plan_engagement(options: CreateEngagementOptions, *, now: datetime | None = 
             name = options.android_package
         elif artifacts:
             name = Path(artifacts[0]).name
-    if options.engagement_type in {"code", "both"} and not name:
-        raise SystemExit("code and both engagements require --name")
+    if options.engagement_type == "code" and not name:
+        raise SystemExit("code engagements require --name")
     if options.engagement_type == "android" and not name:
         raise SystemExit("android engagements require --name, --package-name, or --apk")
 
@@ -358,7 +363,7 @@ def plan_engagement(options: CreateEngagementOptions, *, now: datetime | None = 
         label = slug(name or "engagement")
 
     subdirs = ["tools", "downloads", "scans", "pids", "sessions"]
-    if options.engagement_type in {"code", "both", "android"}:
+    if options.engagement_type in {"code", "android"}:
         subdirs.append("source")
     if options.engagement_type == "remediation":
         subdirs.extend(["cases", "evidence"])
@@ -388,15 +393,15 @@ def plan_engagement(options: CreateEngagementOptions, *, now: datetime | None = 
         }
     elif options.engagement_type == "code":
         scope = {
-            "engagement_type": "code",
+            "engagement_type": "offensive",
+            "tracks": {"code": {"phase": "ingest"}},
             "name": name,
-            "hosts": [],
+            "hosts": hosts,
             "code_target_contact_policy": CODE_TARGET_CONTACT_POLICY,
             "exploit_policy": "pause",
             "exploit_review_state": "pending",
             "approved_targets": [],
             "status": "in_progress",
-            "current_phase": "ingest",
         }
         manifest = {"key": key, "name": name, "target": name, "repos": repos, "created_at": created_at}
     elif options.engagement_type == "android":
@@ -428,14 +433,14 @@ def plan_engagement(options: CreateEngagementOptions, *, now: datetime | None = 
         }
     elif options.engagement_type == "web":
         scope = {
-            "engagement_type": "web",
+            "engagement_type": "offensive",
+            "tracks": {"web": {"phase": "recon"}},
             "hostname": hostname,
             "hosts": hosts,
             "exploit_policy": "pause",
             "exploit_review_state": "pending",
             "approved_targets": [],
             "status": "in_progress",
-            "current_phase": "recon",
         }
         manifest = {"key": key, "target": target_normalized, "hostname": hostname, "created_at": created_at}
     elif options.engagement_type == "blue":
@@ -472,29 +477,6 @@ def plan_engagement(options: CreateEngagementOptions, *, now: datetime | None = 
             "platforms": list(options.platforms),
             "created_at": created_at,
         }
-    else:
-        scope = {
-            "engagement_type": "both",
-            "name": name,
-            "hostname": hostname,
-            "hosts": hosts,
-            "code_target_contact_policy": CODE_TARGET_CONTACT_POLICY,
-            "exploit_policy": "pause",
-            "exploit_review_state": "pending",
-            "approved_targets": [],
-            "status": "in_progress",
-            "current_phase": "recon",
-            "code_phase": "ingest",
-        }
-        manifest = {
-            "key": key,
-            "name": name,
-            "target": target_normalized,
-            "hostname": hostname,
-            "repos": repos,
-            "created_at": created_at,
-        }
-
     # Program attribution headers + OOS carve-outs apply only to engagements
     # that probe a live HTTP target. Written only when non-empty so existing
     # scope.json shapes stay byte-identical when the feature is unused.
@@ -514,7 +496,7 @@ def plan_engagement(options: CreateEngagementOptions, *, now: datetime | None = 
     ):
         raise SystemExit(
             "--program/--header, --out-of-scope, and --rate-limit apply only to "
-            f"HTTP-target engagements (web/both/android), not '{options.engagement_type}'."
+            f"HTTP-target engagements (web/android), not '{options.engagement_type}'."
         )
 
     report_name = name
@@ -1027,12 +1009,62 @@ def remove_out_of_scope(install_root: Path, key: str, entry: str) -> list[str]:
     return list(remaining) if isinstance(remaining, list) else []
 
 
-def _track_state(scope: dict[str, Any]) -> dict[str, str]:
+def _offensive_tracks(scope: dict[str, Any]) -> dict[str, dict[str, str]]:
+    """Read canonical tracks, or the old single/dual-track scope shape."""
+    raw = scope.get("tracks")
+    if raw is not None:
+        if not isinstance(raw, dict) or not raw or set(raw) - {"web", "code"}:
+            raise SystemExit("invalid offensive tracks in scope.json")
+        tracks: dict[str, dict[str, str]] = {}
+        for name, value in raw.items():
+            phase = value.get("phase") if isinstance(value, dict) else None
+            if not isinstance(phase, str) or not phase.strip():
+                raise SystemExit(f"invalid {name} track phase in scope.json")
+            tracks[name] = {"phase": phase.strip()}
+        return tracks
+    kind = str(scope.get("engagement_type") or "web")
+    if kind == "web":
+        return {"web": {"phase": str(scope.get("current_phase") or "recon")}}
+    if kind == "code":
+        return {"code": {"phase": str(scope.get("current_phase") or "ingest")}}
+    if kind == "both":
+        code_phase = scope.get("code_phase")
+        if not isinstance(code_phase, str) or not code_phase.strip():
+            raise SystemExit("legacy both engagement is missing code_phase; run `vigil engagement repair-tracks <key>`")
+        return {
+            "web": {"phase": str(scope.get("current_phase") or "recon")},
+            "code": {"phase": code_phase.strip()},
+        }
+    raise SystemExit(f"engagement type '{kind}' has no offensive tracks")
+
+
+def _track_state(scope: dict[str, Any]) -> dict[str, Any]:
     return {
         "engagement_type": str(scope.get("engagement_type") or ""),
-        "current_phase": str(scope.get("current_phase") or ""),
-        "code_phase": str(scope.get("code_phase") or ""),
+        "tracks": _offensive_tracks(scope),
     }
+
+
+def resolve_engagement_mode(engagement_dir: Path, requested_mode: str | None = None) -> str:
+    """Select one operator prompt from the engagement's durable capabilities."""
+    scope = _read_json(engagement_dir / "scope.json")
+    kind = str(scope.get("engagement_type") or "web")
+    if kind not in {"offensive", "web", "code", "both", "blue", "remediation", "android"}:
+        raise SystemExit(f"unknown engagement type '{kind}' in scope.json")
+    available = set(_offensive_tracks(scope)) if kind in {"offensive", "web", "code", "both"} else {kind}
+    if requested_mode == "both" or (requested_mode and requested_mode not in {"web", "code", "blue", "remediation", "android"}):
+        raise SystemExit(f"invalid operator mode '{requested_mode}'")
+    if requested_mode:
+        if requested_mode not in available:
+            raise SystemExit(f"operator mode '{requested_mode}' is not enabled for this engagement")
+        return requested_mode
+    if len(available) == 1:
+        return next(iter(available))
+    raise SystemExit("select an operator session with --mode web or --mode code")
+
+
+def engagement_mode_prompt(install_root: Path, mode: str) -> Path:
+    return _canonical_operator_prompt(install_root / "agent", mode)
 
 
 def _append_track_transition(
@@ -1040,7 +1072,7 @@ def _append_track_transition(
     *,
     operation: str,
     actor: str,
-    before: dict[str, str],
+    before: dict[str, Any],
 ) -> None:
     history = scope.get("track_transitions")
     if not isinstance(history, list):
@@ -1057,14 +1089,30 @@ def _append_track_transition(
     scope["track_transitions"] = history
 
 
+def _prepare_operator_pointer_rewrite(install_root: Path, engagement_dir: Path) -> bool:
+    pointer = engagement_dir / "AGENTS.md"
+    generated = pointer.is_file() and pointer.read_text(encoding="utf-8").startswith(_SPECIALIST_STOP_SIGN)
+    if generated:
+        unsafe_destination = unsafe_symlink_destination(engagement_dir, ("AGENTS.md", "CLAUDE.md"))
+        if unsafe_destination is not None:
+            raise SystemExit(f"unsafe operator pointer path: {unsafe_destination} contains a symlink.")
+        _require_install_prerequisites(install_root / "agent", "offensive")
+    return generated
+
+
+def _rewrite_operator_pointer(install_root: Path, engagement_dir: Path) -> None:
+    client_kind = "both" if (engagement_dir / "CLAUDE.md").is_file() else "codex"
+    _write_prompt_wrappers(install_root / "agent", engagement_dir, client_kind, engagement_type="offensive")
+
+
 def add_engagement_track(
     install_root: Path,
     key: str,
     track: str,
     *,
     actor: str = "operator",
-) -> dict[str, str]:
-    """Explicitly upgrade a single-track web/code engagement to ``both``.
+) -> dict[str, Any]:
+    """Explicitly enable a second offensive track without changing session mode.
 
     The existing track phase is preserved. Only the newly enabled track is
     initialized, and the transition is retained in scope.json so an implicit
@@ -1075,6 +1123,7 @@ def add_engagement_track(
         raise SystemExit(f"cannot add track '{track}'; choose web or code.")
     scope_path = _engagement_scope_path(install_root, key)
     engagement_dir = scope_path.parent
+    rewrite_pointer = _prepare_operator_pointer_rewrite(install_root, engagement_dir)
     codex_config = engagement_dir / ".codex" / "config.toml"
     if codex_config.is_file():
         unsafe_destination = unsafe_symlink_destination(
@@ -1088,28 +1137,20 @@ def add_engagement_track(
 
     def update(scope: dict[str, Any]) -> None:
         current_type = str(scope.get("engagement_type") or "")
-        if current_type == "both":
-            if not scope.get("current_phase") or not scope.get("code_phase"):
-                raise SystemExit(
-                    f"engagement '{key}' is both but has incomplete track state; "
-                    f"run `vigil engagement repair-tracks {key}` first."
-                )
-            return
-        expected = "code" if requested == "web" else "web"
-        if current_type != expected:
+        if current_type not in {"web", "code", "both", "offensive"}:
             raise SystemExit(
                 f"cannot add {requested} track to engagement '{key}' of type "
-                f"'{current_type or 'unknown'}'; expected {expected}."
+                f"'{current_type or 'unknown'}'."
             )
+        tracks = _offensive_tracks(scope)
         before = _track_state(scope)
-        previous_phase = str(scope.get("current_phase") or "")
-        if current_type == "code":
-            scope["code_phase"] = previous_phase or "ingest"
-            scope["current_phase"] = "recon"
-        else:
-            scope["current_phase"] = previous_phase or "recon"
-            scope["code_phase"] = "ingest"
-        scope["engagement_type"] = "both"
+        if requested in tracks:
+            return
+        tracks[requested] = {"phase": "recon" if requested == "web" else "ingest"}
+        scope["engagement_type"] = "offensive"
+        scope["tracks"] = tracks
+        scope.pop("current_phase", None)
+        scope.pop("code_phase", None)
         scope["code_target_contact_policy"] = CODE_TARGET_CONTACT_POLICY
         scope["status"] = "in_progress"
         _append_track_transition(
@@ -1120,6 +1161,8 @@ def add_engagement_track(
         )
 
     scope = mutate_scope_file(scope_path, update)
+    if rewrite_pointer:
+        _rewrite_operator_pointer(install_root, engagement_dir)
     if codex_config.is_file():
         refresh_codex_compact_prompt(install_root / "agent", engagement_dir / ".codex")
     return _track_state(scope)
@@ -1130,18 +1173,29 @@ def repair_engagement_tracks(
     key: str,
     *,
     actor: str = "operator",
-) -> dict[str, str]:
+) -> dict[str, Any]:
     """Repair the one supported legacy shape: ``both`` without code_phase."""
     scope_path = _engagement_scope_path(install_root, key)
+    engagement_dir = scope_path.parent
+    rewrite_pointer = _prepare_operator_pointer_rewrite(install_root, engagement_dir)
 
     def update(scope: dict[str, Any]) -> None:
         if str(scope.get("engagement_type") or "") != "both":
-            raise SystemExit(f"engagement '{key}' is not a both-track engagement.")
+            raise SystemExit(f"engagement '{key}' is not a legacy both engagement needing repair.")
         if scope.get("code_phase"):
             raise SystemExit(f"engagement '{key}' already has code_phase.")
-        before = _track_state(scope)
-        scope["current_phase"] = str(scope.get("current_phase") or "recon")
-        scope["code_phase"] = "ingest"
+        before = {
+            "engagement_type": "both",
+            "current_phase": str(scope.get("current_phase") or ""),
+            "code_phase": "",
+        }
+        scope["engagement_type"] = "offensive"
+        scope["tracks"] = {
+            "web": {"phase": str(scope.get("current_phase") or "recon")},
+            "code": {"phase": "ingest"},
+        }
+        scope.pop("current_phase", None)
+        scope.pop("code_phase", None)
         scope["status"] = "in_progress"
         _append_track_transition(
             scope,
@@ -1151,6 +1205,8 @@ def repair_engagement_tracks(
         )
 
     scope = mutate_scope_file(scope_path, update)
+    if rewrite_pointer:
+        _rewrite_operator_pointer(install_root, engagement_dir)
     return _track_state(scope)
 
 
@@ -1180,7 +1236,7 @@ def add_engagement_hosts(
         scope["hosts"] = merged
 
     scope = _mutate_host_scope(install_root, key, update)
-    if str(scope.get("engagement_type") or "") == "code":
+    if str(scope.get("engagement_type") or "") in {"code", "offensive"} and "web" not in _offensive_tracks(scope):
         # ADR 0022: the web track is added explicitly, never as a side effect of
         # another operation. Say so here rather than let the operator read a
         # successful add-host as "live work is now authorized to start".
@@ -1221,13 +1277,22 @@ def list_engagements(install_root: Path) -> list[EngagementRow]:
         scope = _read_json(eng_dir / "scope.json")
         manifest = _read_json(eng_dir / "engagement.json")
         target = str(manifest.get("target") or manifest.get("hostname") or scope.get("hostname") or manifest.get("name") or eng_dir.name)
+        kind = str(scope.get("engagement_type") or "")
+        if kind in {"offensive", "web", "code", "both"}:
+            try:
+                tracks = _offensive_tracks(scope)
+                phase = ",".join(f"{name}:{state['phase']}" for name, state in tracks.items())
+            except SystemExit:
+                phase = "repair-required"
+        else:
+            phase = str(scope.get("current_phase") or "unknown")
         rows.append(
             EngagementRow(
                 key=eng_dir.name,
                 path=eng_dir.resolve(),
                 target=target,
                 status=str(scope.get("status") or "unknown"),
-                current_phase=str(scope.get("current_phase") or "unknown"),
+                current_phase=phase,
                 created_at=str(manifest.get("created_at") or ""),
             )
         )
@@ -1422,7 +1487,24 @@ def print_shell_cd_init(shell: str = "zsh") -> str:
     return 'athcd() { cd "$(vigil engagement path --select)"; }\n'
 
 
-def start_engagement(install_root: Path, engagement_dir: Path, client: str, extra_args: list[str]) -> None:
+def start_engagement(install_root: Path, engagement_dir: Path, client: str, extra_args: list[str], mode: str | None = None) -> None:
+    selected_mode = resolve_engagement_mode(engagement_dir, mode)
+    prompt = engagement_mode_prompt(install_root, selected_mode)
+    if not prompt.is_file():
+        raise SystemExit(f"operator prompt not found at {prompt}; run `vigil install {install_root}`")
+    pointer = engagement_dir / "AGENTS.md"
+    if pointer.is_file():
+        body = pointer.read_text(encoding="utf-8")
+        if body.startswith(_SPECIALIST_STOP_SIGN):
+            scope = _read_json(engagement_dir / "scope.json")
+            tracks = _offensive_tracks(scope) if selected_mode in {"web", "code"} else {}
+            if (len(tracks) == 2 and "vigil engagement mode" not in body) or (
+                len(tracks) == 1 and str(prompt) not in body
+            ):
+                raise SystemExit(
+                    "engagement operator pointer is stale for the selected mode; "
+                    f"run `vigil install {install_root}` before starting."
+                )
     launcher = engagement_dir / f"start_{client}.sh"
     if not launcher.exists():
         raise SystemExit(f"Launcher not found for {client}: {launcher}")
@@ -1439,6 +1521,7 @@ def start_engagement(install_root: Path, engagement_dir: Path, client: str, extr
     # The generated wrapper exports VIGIL_CLIENT_NAME; neither fact is a
     # provider-owned observation.
     os.environ["VIGIL_REQUESTED_CLIENT"] = client
+    os.environ["VIGIL_OPERATOR_MODE"] = selected_mode
     os.chdir(engagement_dir)
     os.execv(str(launcher), [str(launcher), *client_launch_argv(client, extra_args)])
 
@@ -2183,6 +2266,8 @@ def _canonical_operator_prompt(agent_root: Path, engagement_type: str) -> Path:
         # This source is copied by the managed agent-tree installer. Unlike the
         # offensive and blue cores it has no specialist roster to render.
         return agent_root / "operator-core-remediation.md"
+    if engagement_type == "code":
+        return agent_root / "operator-core-code.md"
     return agent_root / ("AGENTS-blue.md" if engagement_type == "blue" else "AGENTS.md")
 
 
@@ -2196,18 +2281,41 @@ def _require_install_prerequisites(agent_root: Path, engagement_type: str) -> No
     repair it (a launcher-less directory is a `clientless` repair skip). Checking the
     precondition first turns that unrecoverable state into an actionable refusal.
     """
-    operator_prompt = _canonical_operator_prompt(agent_root, engagement_type)
-    if not operator_prompt.is_file():
+    prompts = (
+        [_canonical_operator_prompt(agent_root, mode) for mode in ("web", "code")]
+        if engagement_type == "offensive"
+        else [_canonical_operator_prompt(agent_root, engagement_type)]
+    )
+    missing = next((prompt for prompt in prompts if not prompt.is_file()), None)
+    if missing is not None:
         raise SystemExit(
-            f"canonical operator prompt not found at {operator_prompt}; "
+            f"canonical operator prompt not found at {missing}; "
             f"run `vigil install {agent_root.parent}` first"
         )
 
 
 def _write_prompt_wrappers(agent_root: Path, eng_dir: Path, client_kind: str, *, engagement_type: str) -> None:
     install_root = agent_root.parent
-    _require_install_prerequisites(agent_root, engagement_type)
-    operator_prompt = _canonical_operator_prompt(agent_root, engagement_type)
+    scope = _read_json(eng_dir / "scope.json")
+    tracks = _offensive_tracks(scope) if engagement_type == "offensive" else {}
+    if engagement_type == "offensive":
+        for mode in tracks:
+            _require_install_prerequisites(agent_root, mode)
+    else:
+        _require_install_prerequisites(agent_root, engagement_type)
+    dual_track = len(tracks) == 2
+    selected_kind = next(iter(tracks)) if tracks and not dual_track else engagement_type
+    operator_prompt = None if dual_track else _canonical_operator_prompt(agent_root, selected_kind)
+    prompt_instruction = (
+        "Run `vigil engagement mode` in this engagement session. Read only the absolute "
+        "prompt path it returns, in bounded parts until the end. If it asks for a mode, "
+        "restart with `vigil engagement start <key> --mode web|code --client <client>`.\n"
+        if dual_track else
+        f"Load workspace operator instructions from:\n- {operator_prompt}\n\n"
+        "Read that file in bounded parts, following its Map of This File, and continue "
+        "until you have reached the end of the file. Do not treat a tool's partial-read "
+        "notice as completion.\n"
+    )
 
     # Specialist context isolation invariant:
     # The per-engagement AGENTS.md/CLAUDE.md written here are operator-only bootstrap pointers.
@@ -2255,10 +2363,7 @@ Artifacts:
     if client_kind in {"codex", "claude", "both"}:
         (eng_dir / "AGENTS.md").write_text(
             f"{_SPECIALIST_STOP_SIGN}\n"
-            f"# Engagement Workspace\n\nLoad workspace operator instructions from:\n- {operator_prompt}\n\n"
-            "Read that file in bounded parts, following its Map of This File, and continue "
-            "until you have reached the end of the file. Do not treat a tool's partial-read "
-            "notice as completion.\n\n"
+            f"# Engagement Workspace\n\n{prompt_instruction}\n"
             f"{_ENGAGEMENT_ROE_POINTER}\n{common}",
             encoding="utf-8",
         )
@@ -2272,6 +2377,42 @@ Artifacts:
             f"{_ENGAGEMENT_ROE_POINTER}",
             encoding="utf-8",
         )
+
+
+def repair_engagement_operator_pointers(
+    install_root: Path, *, rendered_install_root: Path | None = None
+) -> tuple[str, ...]:
+    """Upgrade generated local pointers to the durable session-mode router."""
+    root = engagements_root(install_root)
+    rendered_agent_root = (rendered_install_root or install_root.resolve()) / "agent"
+    if not root.is_dir():
+        return ()
+    repaired: list[str] = []
+    for eng_dir in sorted(root.iterdir()):
+        pointer = eng_dir / "AGENTS.md"
+        if eng_dir.is_symlink() or not eng_dir.is_dir() or pointer.is_symlink() or not pointer.is_file():
+            continue
+        body = pointer.read_text(encoding="utf-8")
+        if not body.startswith(_SPECIALIST_STOP_SIGN):
+            continue
+        scope = _read_json(eng_dir / "scope.json")
+        kind = str(scope.get("engagement_type") or "")
+        if kind not in {"offensive", "web", "code", "both"}:
+            continue
+        try:
+            tracks = _offensive_tracks(scope)
+        except SystemExit:
+            continue
+        if len(tracks) == 2 and "vigil engagement mode" in body:
+            continue
+        if len(tracks) == 1 and str(_canonical_operator_prompt(rendered_agent_root, next(iter(tracks)))) in body:
+            continue
+        if (eng_dir / "CLAUDE.md").is_symlink():
+            continue
+        client_kind = "both" if (eng_dir / "CLAUDE.md").is_file() else "codex"
+        _write_prompt_wrappers(rendered_agent_root, eng_dir, client_kind, engagement_type="offensive")
+        repaired.append(eng_dir.name)
+    return tuple(repaired)
 
 
 def _write_codex_config(

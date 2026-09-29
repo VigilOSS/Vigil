@@ -92,11 +92,11 @@ def _next_code_gate(engagement_dir: str) -> str | None:
         return None
     if not isinstance(scope, dict):
         return None
-    engagement_type = scope.get("engagement_type")
-    if engagement_type not in {"code", "both"}:
+    from assess.lib.tracks import track_phases
+
+    current = track_phases(scope).get("code")
+    if current is None:
         return None
-    phase_key = "code_phase" if engagement_type == "both" else "current_phase"
-    current = scope.get(phase_key, "ingest")
     if current == TERMINAL_PHASE:
         return None
     if current not in CODE_PHASES:

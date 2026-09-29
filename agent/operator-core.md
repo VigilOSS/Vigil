@@ -1,15 +1,15 @@
-## Engagement-Type Routing Gate (READ FIRST)
+## Session Mode Routing Gate (READ FIRST)
 
-At engagement start, before any procedural section below (Core Loop, Phase Index, and dispatch mechanics), check `scope.json`'s `engagement_type`:
+At engagement start and after compaction, before any procedural section below, run
+`vigil engagement mode`. Its `mode:` must match `VIGIL_OPERATOR_MODE`; this core
+is selected for `web` or `android` only. The engagement's enabled tracks are
+durable authorization and phase state, not a request to merge operator methods.
 
-- **`"code"`** — STOP reading this file's web core loop. Load `agent/operator-core-code.md` instead and follow it in full; it replaces the Core Loop, Phase Index, and Subagent Dispatch mechanics below for this engagement.
-- **`"web"` (or unset — the default)** — continue in this file as normal.
-- **`"both"`** (source and web are both in scope — mixed engagement, or source obtained mid-run) — run both loops together, per `agent/operator-core-code.md`'s "Integration with Web Engagement" section (also cross-referenced from "Source Code Analysis Mode" below).
-- **`"android"`** — continue with this core's orchestration and submission closeout, but begin from the APK/package artifact rather than web recon: dispatch `vulnerability-analyst` with `agent/skills/android-app-security/SKILL.md` and the declared artifact/package path. Static work is not target-facing. Add live API hosts explicitly with `vigil engagement add-host <key> <host>` before any dynamic network probe; never infer authorization from endpoints found inside the app.
-- **`"blue"`** — STOP. This is a red-team prompt and must never run the red core loop against a blue engagement. Blue engagements render their own operator prompt from `agent/operator-core-blue.md` into the engagement dir at `vigil blue engage` time; if you are reading THIS file inside a blue engagement, that render is missing or stale. Re-render it with `agent/scripts/render-operator-prompts.sh repo <engagement-dir> --type blue` and load that `AGENTS.md` instead.
-- **Any other non-empty value** — STOP and report the unsupported `engagement_type`; do not fall through to web behavior.
+- **`web`** — continue in this file as normal.
+- **`android`** — continue with this core's orchestration and submission closeout, but begin from the APK/package artifact rather than web recon: dispatch `vulnerability-analyst` with `agent/skills/android-app-security/SKILL.md` and the declared artifact/package path. Static work is not target-facing. Add live API hosts explicitly with `vigil engagement add-host <key> <host>` before any dynamic network probe; never infer authorization from endpoints found inside the app.
+- **Any other value, mismatch, or command failure** — STOP before target-facing work. Start a fresh client with the intended `--mode`; do not load a second operator core in this session.
 
-Do not skip this gate on resume — re-check `engagement_type` whenever a resumed engagement's mode is uncertain.
+Do not skip this gate on resume; a remembered mode is not evidence of the current one.
 
 ## Authorization & Always-Active Rules
 
@@ -39,7 +39,7 @@ Read top-to-bottom once at engagement start; after that, jump to the section you
 
 | When | Section(s) |
 |---|---|
-| Before anything else, every engagement (including resume) | Engagement-Type Routing Gate |
+| Before anything else, every engagement (including resume) | Session Mode Routing Gate |
 | Before starting any engagement | Shared Kali Runtime, Engagement Program Brief, Resume Gate |
 | Once, to orient on the 8 phases | Phase Index |
 | Every loop iteration | Core Loop, Investigation Priorities |
@@ -709,8 +709,8 @@ Use `vigil assess intel record <type> <json-file>` for `#### Intelligence` rows 
 ## Source Code Analysis Mode
 
 When source code is available (cloned repo, exposed `.git`, decompiled source, backup download):
-- Load `agent/operator-core-code.md` for the code analysis workflow (Phases 0–4: Ingest+Index → Classify+Map → Hunt → Verify+Variant → Fuzz (conditional))
-- Code analysis runs in parallel with web testing — findings land in the same `assessment_findings` table
+- Enable the code track explicitly with `vigil engagement add-track <engagement-key> code` when authorized. Start a fresh `--mode code` client for the code workflow (Phases 0–4: Ingest+Index → Classify+Map → Hunt → Verify+Variant → Fuzz (conditional)).
+- The code session reads `agent/operator-core-code.md`; this web session continues its own phase. Findings land in the same `assessment_findings` table.
 - Code findings use `canonical_location = "file:<path>:<line>"` and link to web findings via attack chains
 - See the Code Analysis Agents roster in `agent/operator-core-code.md` for available specialists
 

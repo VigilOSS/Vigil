@@ -148,7 +148,7 @@ _KALI_NOOP_ENV = "VIGIL_KALI_NOOP"
 
 _PROBE_EMITTING_KINDS = frozenset({"payload", "exploit", "baseline", "replay"})
 
-_NON_WEB_ENGAGEMENT_TYPES = frozenset({"code", "blue"})
+_NON_WEB_ENGAGEMENT_TYPES = frozenset({"code", "blue", "offensive"})
 
 # Families where an explicit HTTP authentication/authorization denial IS the
 # measurement rather than a failed probe. Other 4xx responses can be a bad
@@ -239,7 +239,7 @@ def _emit_probe_run(
     against this host" WITHOUT any new specialist behavior.
 
     Emission rules (each derived from durable run state, never a blind default):
-      * WEB-ONLY GUARD: skip unless engagement_type ∈ {web, both} — no
+      * WEB-ONLY GUARD: skip unless the engagement has a web track — no
         cross-track bleed onto code/blue engagements that have no declared HTTP host scope.
       * Only for a REAL test (probe_kind ∈ payload/exploit/baseline/replay);
         fingerprint/cleanup never emit.

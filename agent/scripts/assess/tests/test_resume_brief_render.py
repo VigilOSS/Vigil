@@ -1047,6 +1047,39 @@ def test_resume_LABEL_fields_cannot_forge_headings_across_line_separators(
     assert not any(line.startswith("##") and marker in line for line in out.splitlines())
 
 
+def test_resume_brief_passes_session_mode_to_backend(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    monkeypatch.setenv("VIGIL_OPERATOR_MODE", "code")
+    monkeypatch.setattr(resume_brief, "load_config", lambda *_: SimpleNamespace(
+        engagement_dir=str(tmp_path), engagement_key="eng", base_url="http://backend"
+    ))
+    monkeypatch.setattr(resume_brief.kali_sweep_orphans, "run", lambda *_: None)
+    requested = []
+
+    class FakeClient:
+        def __init__(self, *_a, **_k):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def get(self, endpoint):
+            requested.append(endpoint)
+            return {"engagement": {"key": "eng"}}
+
+    monkeypatch.setattr(resume_brief, "AssessmentClient", FakeClient)
+    resume_brief.run(SimpleNamespace(
+        engagement_dir=str(tmp_path), q="", finding="", agent_id="", since="",
+        max_age_hours=None, all_cells=False, per_input_limit=None, as_json=True,
+    ))
+
+    assert requested == ["resume-brief?mode=code"]
+
+
 def _brief_with_dispatch(row: dict) -> dict:
     return {"engagement_key": "eng", "dispatches": {"recent_dispatches": [row]}}
 

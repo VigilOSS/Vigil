@@ -103,6 +103,7 @@ def _create(tmp_path, monkeypatch, etype, **extra):
     agent_root = tmp_path / "agent"
     agent_root.mkdir(parents=True, exist_ok=True)
     (agent_root / "AGENTS.md").write_text("# Canonical operator instructions\n")
+    (agent_root / "operator-core-code.md").write_text("# Canonical code operator instructions\n")
     (agent_root / "AGENTS-blue.md").write_text("# Canonical blue operator instructions\n")
 
     for name in (

@@ -32,10 +32,12 @@ from __future__ import annotations
 import ipaddress
 import json
 import re
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
 from ..events import _engagement_or_404
+from ..engagement_tracks import has_track
 from . import _common
 from ._common import _fetch_all
 
@@ -627,15 +629,8 @@ def _classify_tier(
 
 
 def _is_web_engagement(engagement) -> bool:
-    """WEB-ONLY guard. Code/blue tracks never get app units persisted.
-
-    engagement_type is free text from scope.json (``web`` / ``red`` / None for
-    legacy red engagements, vs ``code`` / ``blue``). We treat anything that is
-    NOT explicitly a code/blue track as web-eligible, so legacy red web
-    engagements (type None or 'red') still score.
-    """
-    etype = str(getattr(engagement, "engagement_type", "") or "").lower()
-    return etype not in ("code", "blue")
+    """WEB-ONLY guard. Code/blue tracks never get app units persisted."""
+    return has_track(Path(engagement.engagement_root), "web")
 
 
 def score_application_units(engagement_id: int) -> dict[str, Any]:

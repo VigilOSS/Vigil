@@ -118,6 +118,14 @@ When you are about to copy one of these into a second file, stop and import.
   claim-time scope exclusion, applied before ordering and limits.
 - `agent/operator-core*.md` and `agent/agents/*.md` own prompt prose. Generated wrappers are never
   authoring surfaces; remediation uses its own core rather than the assessment phases.
+- `src/vigil_cli/engagements.py` owns durable offensive track creation, explicit add-track,
+  session mode validation, and engagement-local prompt routing. New offensive scopes store
+  `tracks.web.phase` and/or `tracks.code.phase`; legacy scalar phase scopes remain readable.
+  `agent/scripts/assess/lib/tracks.py` and
+  `orchestrator/backend/app/services/engagement_tracks.py` read that contract for their
+  respective assessment and backend paths. `VIGIL_OPERATOR_MODE` selects one prompt per
+  session and never grants a track. `src/vigil_cli/install.py` calls the generated-pointer
+  repair in `engagements.py` so existing engagement directories route to the selected prompt.
 - `orchestrator/backend/app/services/state_manager/app_units.py:score_application_units` and
   `depth_ledger.py` own the web-only terminal depth gate. See: ADR 0012.
 - `orchestrator/backend/app/services/assessment_memory.py` and `artifact_index.py` own the bounded
@@ -153,7 +161,6 @@ A prompt change is **not** prompt-only when the prompt defines an artifact the b
   `attack-hypotheses.json`, and `cve-bug-shapes.jsonl` contracts consumed by later code dispatches.
 - `agent/scripts/assess/commands/code_dispatch.py` loads `file-analysis-queue.json`; its `priority` must exactly equal the file's current band-valid `analysis_priority`, with whole-batch rejection before mutation on drift.
 - `agent/operator-core.md` phase gates call `vigil assess check-phase-readiness`. Dropping the gate call silently disables the phase boundary.
-- **General rule:** if a prompt tells an agent to emit structured output that a CLI verb consumes or the backend stores, prompt and consumer are coupled. Check both sides.
 
 ---
 
@@ -179,14 +186,8 @@ A prompt change is **not** prompt-only when the prompt defines an artifact the b
   promotion. Queue rows, results and triggers are stamped superseded; `_rebase_lead_bindings` carries
   a lead binding forward only on an identical `file_hash`. A generation-bound table added without a
   line here claims a currency it does not have.
-- `orchestrator/backend/app/services/state_manager/phase_readiness.py` — its readiness function names
-  and HTTP routes are load-bearing for the phase gate, report export, and frontend. Refactor behind
-  them or add a front door that delegates to them.
 - `orchestrator/backend/app/services/state_manager/phase_readiness.py:PER_HOST_OBJECTIVES` has a CLI
   mirror in `agent/scripts/assess/lib/coverage_checks.py` and a `coverage_deferral` API literal.
-- `orchestrator/backend/app/services/code_analysis.py` allowlists fields persisted by repo/file
-  updates and structural sync. A new column must land here, in the DB, and in the API together.
-- `agent/scripts/assess/commands/code_index_sync.py` — a structural field populated from tree-sitter output must be added here too, or the index artifact and the backend row disagree.
 - `state_manager/command_runs.py` registers output artifacts before and after execution, both
   gated on `route != "host_exec"`; a third route needs both registrations.
 - `orchestrator/backend/app/main.py` registers each API router explicitly; a new router is inert

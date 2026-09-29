@@ -8,6 +8,8 @@ import os
 from pathlib import Path
 from typing import Any
 
+from .tracks import track_phases
+
 
 _CLIENT_SPECIALIST_PATHS = {
     "claude": Path("agent/.claude/agents/{role}.md"),
@@ -34,9 +36,19 @@ def _load_object(path: Path) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
-def _operator_relative_path(engagement_dir: Path) -> Path:
+def _operator_relative_path(engagement_dir: Path) -> Path | None:
     scope = _load_object(engagement_dir / "scope.json")
-    name = "AGENTS-blue.md" if scope.get("engagement_type") == "blue" else "AGENTS.md"
+    enabled = track_phases(scope)
+    mode = os.environ.get("VIGIL_OPERATOR_MODE", "").strip().lower()
+    if not mode:
+        mode = next(iter(enabled)) if len(enabled) == 1 else ""
+    if mode not in enabled:
+        return None
+    name = {
+        "code": "operator-core-code.md",
+        "blue": "AGENTS-blue.md",
+        "remediation": "operator-core-remediation.md",
+    }.get(mode, "AGENTS.md")
     return Path("agent") / name
 
 
@@ -98,12 +110,15 @@ def build_dispatch_instruction_identity(
         warnings.append("installed Vigil source revision is unavailable")
 
     operator_relative = _operator_relative_path(engagement_dir)
-    operator_path = install_root / operator_relative
     operator_digest: str | None = None
-    if operator_path.is_file():
-        operator_digest = _sha256(operator_path)
+    if operator_relative is None:
+        warnings.append("operator mode is unavailable or not enabled; instruction fingerprint is unknown")
     else:
-        warnings.append(f"installed operator instructions are missing: {operator_relative}")
+        operator_path = install_root / operator_relative
+        if operator_path.is_file():
+            operator_digest = _sha256(operator_path)
+        else:
+            warnings.append(f"installed operator instructions are missing: {operator_relative}")
 
     specialist_relative: Path | None = None
     specialist_digest: str | None = None
@@ -144,6 +159,7 @@ def build_dispatch_instruction_identity(
         else None
     )
     if complete and source_root is not None:
+        assert operator_relative is not None
         source_operator = source_root / operator_relative
         assert specialist_relative is not None
         source_specialist = source_root / specialist_relative
@@ -177,7 +193,7 @@ def build_dispatch_instruction_identity(
         "launcher_effective_reasoning": None,
         "launcher_effective_source": None,
         "source_revision": source_revision,
-        "operator_instruction_path": str(operator_relative),
+        "operator_instruction_path": str(operator_relative) if operator_relative is not None else None,
         "operator_instruction_sha256": operator_digest,
         "specialist_instruction_path": (
             str(specialist_relative) if specialist_relative is not None else None

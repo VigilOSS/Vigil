@@ -7,17 +7,18 @@ description: Re-hydrate the engagement's generated operator role in a new sessio
 <!-- Source: agent/commands/vigil-resume.md -->
 <!-- Regenerate with: cd agent && ./scripts/render-operator-prompts.sh repo -->
 
-Resume the Vigil engagement in the current directory. Its generated operator contract decides the
-role; current context, a handoff, and prior summaries do not.
+Resume the Vigil engagement in the current directory. The launched session selects one
+operator mode; the engagement's enabled tracks do not select a combined role.
 
-**1. Re-read `scope.json` and restore the role its `engagement_type` routes you to.** Read this
-engagement's `AGENTS.md`, follow its pointer to the canonical operator prompt, and read that prompt
-in bounded parts, following its own Map of This File. Obey its **Engagement-Type Routing Gate**
-branch for this engagement's `engagement_type` — **including a branch that says STOP**, and
-including its instruction to stop and report an `engagement_type` it does not recognize. The gate
-applies on resume by its own terms: a remembered mode is not evidence of the current one. Operator
-discipline is the first thing lost at a context boundary, so restore the contract before acting on
-any remembered or persisted state.
+**1. Resolve and restore the session role.** Run `vigil engagement mode`. Confirm its
+`mode:` matches `VIGIL_OPERATOR_MODE`, and read only the canonical file shown as `prompt:`.
+Read this engagement's `AGENTS.md` router first, then the selected prompt in bounded parts,
+following its Map of This File. If mode resolution fails, the values disagree, or no mode is
+selected, STOP before target-facing work. Start a new client with
+`vigil engagement start <key> --mode <mode> --client <client>`; do not infer a role from
+`scope.json`, another track's findings, a handoff, or this session's summary. Operator
+discipline is the first thing lost at a context boundary, so restore the selected contract
+before acting on remembered or persisted state.
 
 Use `$vigil-start` if this engagement has no work in it yet.
 
@@ -35,10 +36,12 @@ normal result, not a failure:
     for f in RESUME.md COMPACT.md ISSUES-AND-ENHANCEMENTS.md; do if [ -f "$f" ]; then printf 'present  %-27s %s bytes\n' "$f" "$(wc -c < "$f" | tr -d ' ')"; else printf 'absent   %s\n' "$f"; fi; done
 
 **4. Re-establish live state from the backend.** The backend is canonical; recollection is not.
-`agent/rules/resume.md` is an always-active rule, so it is already in your context and it owns this
-procedure in full — the brief's drill-downs and narrowing flags, the orphan reconciliation it
-requires before new target-facing work, and the bounds that keep resume affordable. Follow that rule
-rather than a summary of it. Start with the brief:
+For `remediation`, read `PROJECT.md` and `remediation-project.json`, run
+`vigil remediation -k <key> list`, then `vigil remediation -k <key> show <case-id>`
+for the selected case. Follow the case's evidence and approval state in the
+remediation operator prompt. For other modes, `agent/rules/resume.md` owns the
+brief's drill-downs, orphan reconciliation before new target-facing work, and
+bounds that keep resume affordable. Start with the brief:
 
 Run this first and read its complete output:
 
