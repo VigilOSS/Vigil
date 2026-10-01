@@ -13,6 +13,7 @@ import tarfile
 import time
 import webbrowser
 from collections.abc import Sequence
+from contextlib import redirect_stdout
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, NoReturn, TextIO
@@ -43,6 +44,7 @@ from .engagements import (
     mutate_scope_file,
     plan_engagement,
     print_shell_cd_init,
+    remediation_repository,
     remove_out_of_scope,
     repair_engagement_tracks,
     resolve_current_engagement,
@@ -108,6 +110,9 @@ from .quickstart import QuickstartOptions, run_quickstart
 from .runtime import RuntimeOptions, vigil_runtime_resources, build_runtime, runtime_status, start_runtime, stop_runtime, warn_if_local_hosts_need_restart
 from .status import collect_doctor_checks, collect_status, print_doctor, print_status
 from .up import UpOptions, run_up
+
+
+_CREATE_ENGAGEMENT_TYPES = ["web", "code", "android", "remediation"]
 
 
 # The operator cannot deduce the two-layer model from the CLI's output, and
@@ -400,6 +405,9 @@ def main(argv: list[str] | None = None) -> None:
     config_sub.add_parser("list")
     config_get = config_sub.add_parser("get")
     config_get.add_argument("key")
+    config_resolve = config_sub.add_parser("resolve", help="Print an effective runtime configuration value")
+    config_resolve.add_argument("key", choices=["orchestrator_base_url"])
+    config_resolve.add_argument("--engagement-dir", type=Path, help="Engagement whose backend override should apply")
     config_set = config_sub.add_parser("set")
     config_set.add_argument("key")
     config_set.add_argument("value")
@@ -437,7 +445,7 @@ def main(argv: list[str] | None = None) -> None:
             "Examples:\n"
             "  vigil engagement create https://app.example.com --hosts app.example.com\n"
             "  vigil engagement create --type code my-project --repo ~/src/my-project\n"
-            "  vigil engagement create https://app.example.com --repo ~/src/my-project --name my-project\n"
+            "  vigil engagement create --type remediation --name my-project --repo ~/src/my-project\n"
             "  vigil engagement create --type android ./app.apk\n"
             "  vigil engagement create https://app.example.com --dry-run\n"
             "\n"
@@ -450,16 +458,16 @@ def main(argv: list[str] | None = None) -> None:
     create_p.add_argument(
         "target_or_name",
         nargs="?",
-        help="Target URL/host (web), engagement name (code), or APK path/package (android)",
+        help="Target URL/host (web), engagement name (code/remediation), or APK path/package (android)",
     )
     create_p.add_argument(
         "--type",
-        choices=["web", "code", "android", "remediation"],
+        choices=_CREATE_ENGAGEMENT_TYPES,
         default=None,
         help="Engagement type; inferred from the other inputs when omitted",
     )
-    create_p.add_argument("--name", help="Engagement name (required for code)")
-    create_p.add_argument("--project-config", help="Remediation project JSON (environment URLs, Chrome CDP, approved model, deployment workflow)")
+    create_p.add_argument("--name", help="Engagement name (required for code/remediation)")
+    create_p.add_argument("--project-config", help="Shared repository PROJECT.md with +++ TOML frontmatter (legacy JSON is imported once)")
     create_p.add_argument("--target", help="Primary target URL or host (web)")
     create_p.add_argument("--hosts", help="Comma-separated in-scope hosts")
     create_p.add_argument(
@@ -610,13 +618,13 @@ def main(argv: list[str] | None = None) -> None:
     start_p = engagement_sub.add_parser("start")
     start_p.add_argument("key", nargs="?")
     start_p.add_argument("--select", action="store_true")
-    start_p.add_argument("--client", choices=["codex", "claude", "opencode", "goose", "kimi"], required=True)
+    start_p.add_argument("--client", choices=["codex", "claude", "opencode", "goose", "kimi", "pi"], required=True)
     start_p.add_argument("--mode", choices=["web", "code", "blue", "remediation", "android"],
                          help="Session prompt; required when web and code tracks are both enabled")
     start_p.add_argument("--thinking", choices=["off", "high", "max"], default=None,
                          help="DeepSeek thinking level for --client opencode: off=disabled, "
                               "high=on, max=maximum (default: client default — thinking on). "
-                              "Ignored for claude/codex/kimi.")
+                              "Ignored for claude/codex/kimi/pi; use -- --thinking for Pi.")
     start_p.add_argument(
         "--skip-preflight",
         action="store_true",
@@ -1370,7 +1378,7 @@ def main(argv: list[str] | None = None) -> None:
     elif args.command == "logs":
         _logs(args, install_root)
     elif args.command == "config":
-        _config(args)
+        _config(args, install_root)
     elif args.command == "use":
         _use(args, install_root)
     elif args.command == "engagement":
@@ -1613,7 +1621,7 @@ def _assess_exec_environment(install_root: Path) -> dict[str, str]:
     return env
 
 
-def _config(args: argparse.Namespace) -> None:
+def _config(args: argparse.Namespace, install_root: Path) -> None:
     if args.config_command == "path":
         print(config_module.config_path())
     elif args.config_command == "list":
@@ -1623,6 +1631,11 @@ def _config(args: argparse.Namespace) -> None:
         if value is None:
             raise SystemExit(f"Config key not set: {args.key}")
         print(value)
+    elif args.config_command == "resolve":
+        from .paths import resolve_orchestrator_base_url
+
+        engagement_dir = args.engagement_dir.expanduser().resolve() if args.engagement_dir else None
+        print(resolve_orchestrator_base_url(install_root, engagement_dir))
     elif args.config_command == "set":
         config_module.set_config_value(args.key, args.value)
         print(f"{args.key}={args.value}")
@@ -1850,12 +1863,12 @@ def _engagement_create(args: argparse.Namespace, install_root: Path) -> None:
         if engagement_type is not None:
             print(f"[vigil] inferred type: {engagement_type} (pass --type to override)", file=sys.stderr)
         elif interactive:
-            engagement_type = _prompt_choice("Engagement type", "web", ["web", "code", "android"])
+            engagement_type = _prompt_choice("Engagement type", "web", _CREATE_ENGAGEMENT_TYPES)
             asked = True
         else:
             described = repr(positional) if positional else "the provided flags"
             raise SystemExit(
-                f"cannot infer engagement type from {described}; pass --type web|code|android "
+                f"cannot infer engagement type from {described}; pass --type {'|'.join(_CREATE_ENGAGEMENT_TYPES)} "
                 "(blue engagements: vigil blue engage)"
             )
 
@@ -1880,6 +1893,9 @@ def _engagement_create(args: argparse.Namespace, install_root: Path) -> None:
             asked = True
         if engagement_type in {"code", "remediation"} and not name:
             name = _ask_required("Engagement name")
+            asked = True
+        if engagement_type == "remediation" and not args.repo:
+            args.repo = [_ask_repository(install_root=install_root)]
             asked = True
         if engagement_type == "android" and not name and not android_package and not artifacts:
             name = _ask_required("Engagement name")
@@ -1937,12 +1953,25 @@ def _engagement_create(args: argparse.Namespace, install_root: Path) -> None:
             raise SystemExit("aborted: engagement not created")
 
     remediation_config: dict[str, object] = {}
+    remediation_project_path: Path | None = None
     if args.project_config:
         if engagement_type != "remediation":
             raise SystemExit("--project-config applies only to remediation engagements")
-        remediation_config = json.loads(Path(args.project_config).expanduser().read_text(encoding="utf-8"))
-        if not isinstance(remediation_config, dict):
-            raise SystemExit("--project-config must be a JSON object")
+        from .project_config import project_module
+
+        source = Path(args.project_config).expanduser().resolve()
+        try:
+            project = project_module(install_root)
+            if source.suffix.lower() == ".json":
+                remediation_config = json.loads(source.read_text(encoding="utf-8"))
+                if not isinstance(remediation_config, dict):
+                    raise ValueError("legacy project JSON must be an object")
+                project.validate_project(remediation_config)
+            else:
+                remediation_config = project.load_project(source)
+                remediation_project_path = source
+        except (OSError, ValueError) as exc:
+            raise SystemExit(f"cannot read --project-config {args.project_config}: {exc}") from exc
 
     options = CreateEngagementOptions(
         install_root=install_root,
@@ -1959,6 +1988,7 @@ def _engagement_create(args: argparse.Namespace, install_root: Path) -> None:
         out_of_scope=out_of_scope,
         rate_limit=rate_limit,
         remediation_config=remediation_config,
+        remediation_project_path=remediation_project_path,
     )
 
     if args.dry_run:
@@ -2066,12 +2096,63 @@ def _read_line() -> str:
         raise SystemExit("stdin closed during interactive prompt; pass the missing flags or --no-prompt") from exc
 
 
+def _uses_prompt_ui() -> bool:
+    return term.is_terminal(sys.stdin) and term.is_terminal(sys.stderr)
+
+
+def _terminal_question(kind: str, label: str, **kwargs: Any) -> Any:
+    import questionary
+
+    if not term.supports_style(sys.stderr):
+        kwargs["color_depth"] = "DEPTH_1_BIT"
+    try:
+        # Questionary chooses its output when the prompt is built. Keep both
+        # construction and rendering off the command's machine-readable stdout.
+        with redirect_stdout(sys.stderr):
+            answer = getattr(questionary, kind)(label, **kwargs).unsafe_ask()
+    except (KeyboardInterrupt, EOFError) as exc:
+        raise SystemExit("interactive prompt cancelled") from exc
+    if answer is None:
+        raise SystemExit("interactive prompt cancelled")
+    return answer
+
+
+def _ask_repository(*, attempts: int = 3, install_root: Path | None = None) -> str:
+    def validate(raw: str) -> bool | str:
+        if not raw.strip():
+            return "A repository root is required."
+        try:
+            remediation_repository(raw.strip(), install_root=install_root)
+        except SystemExit as exc:
+            return str(exc)
+        return True
+
+    if _uses_prompt_ui():
+        raw = _terminal_question(
+            "path", "Repository root", only_directories=True,
+            validate=validate, validate_while_typing=False,
+        )
+        return str(remediation_repository(raw.strip(), install_root=install_root))
+    for _ in range(attempts):
+        print("Repository root: ", end="", file=sys.stderr, flush=True)
+        raw = _read_line().strip()
+        result = validate(raw)
+        if result is True:
+            return str(remediation_repository(raw, install_root=install_root))
+        print(result, file=sys.stderr)
+    raise SystemExit(f"Invalid repository root after {attempts} attempts")
+
+
 def _ask_required(label: str, *, attempts: int = 3) -> str:
     """Prompt on stderr for a required value, re-asking on empty input.
 
     Prompts never touch stdout so `eng=$(vigil engagement create ...)` works
     even when the wizard engages.
     """
+    if _uses_prompt_ui():
+        return str(_terminal_question(
+            "text", label, validate=lambda value: bool(value.strip()) or "A value is required.",
+        )).strip()
     for _ in range(attempts):
         print(f"{label}: ", end="", file=sys.stderr, flush=True)
         value = _read_line().strip()
@@ -2087,11 +2168,15 @@ def _ask_optional(label: str) -> str:
     Like `_ask_required` but never re-asks and never raises — a blank answer is
     a valid "skip". Prompts stay on stderr so command substitution still works.
     """
+    if _uses_prompt_ui():
+        return str(_terminal_question("text", label)).strip()
     print(f"{label}: ", end="", file=sys.stderr, flush=True)
     return _read_line().strip()
 
 
 def _confirm(prompt: str) -> bool:
+    if _uses_prompt_ui():
+        return bool(_terminal_question("confirm", prompt, default=True))
     print(f"{prompt} ", end="", file=sys.stderr, flush=True)
     return _read_line().strip().lower() in {"", "y", "yes"}
 
@@ -3064,6 +3149,8 @@ def _resolve_current_or_selected_engagement(install_root: Path, *, key: str | No
 
 
 def _prompt_choice(label: str, default: str, choices: list[str], *, attempts: int = 3) -> str:
+    if _uses_prompt_ui():
+        return str(_terminal_question("select", label, choices=choices, default=default))
     for _ in range(attempts):
         print(label, file=sys.stderr)
         for idx, choice in enumerate(choices, start=1):

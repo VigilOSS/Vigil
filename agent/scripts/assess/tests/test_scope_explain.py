@@ -230,3 +230,22 @@ def test_scope_explain_no_targets_exits_nonzero(tmp_path, capsys) -> None:
         scope_explain.run(_ns(eng))
     assert excinfo.value.code == 2
     assert "no targets" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("denied", [False, True])
+def test_scope_filter_single_label_targets(tmp_path, monkeypatch, capsys, denied):
+    from assess.commands import filter_scope
+
+    eng = _write_scope(
+        tmp_path, hosts=["intranet"], out_of_scope=["intranet"] if denied else []
+    )
+    listing = tmp_path / "targets.txt"
+    targets = "intranet\nhttp://intranet/\nintranet:8080\n"
+    listing.write_text(targets + "other\n", encoding="utf-8")
+    monkeypatch.setattr(filter_scope, "_vendor_saas_decided_hosts", lambda _cfg: set())
+
+    filter_scope.run(argparse.Namespace(
+        engagement_dir=eng, input_file=str(listing), output=None,
+    ))
+
+    assert capsys.readouterr().out == ("" if denied else targets)

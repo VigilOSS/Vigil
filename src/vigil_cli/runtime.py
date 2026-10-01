@@ -564,7 +564,8 @@ def start_runtime(
     _preflight_shared_vm(resources, options, runner=runner)
 
     if docker.container_exists(options.container_name, runner=runner):
-        runner(["docker", "rm", "-f", options.container_name])
+        remove_argv = ["docker", "rm", "-f", options.container_name]
+        docker.require_success(runner(remove_argv), remove_argv)
 
     argv = [
         "docker",
@@ -607,6 +608,7 @@ def start_runtime(
     argv.extend(["-e", f"ORCHESTRATOR_BASE_URL={base_url}", options.image])
     _surface_egress_choice(egress)
     docker.run_with_host_gateway_fallback(argv, runner=runner)
+    # Keep a container that fails validation available for logs and mount inspection.
     _validate_image_current(options, runner=runner)
     _validate_mounts(options.container_name, data_dir, engagements_dir, runner=runner)
     if validate_tools:
@@ -636,7 +638,8 @@ def stop_runtime(container_name: str | None = None, *, runner: docker.Runner = d
             "attempt teardown; `vigil runtime stop`/`restart` is for the shared `vigil` runtime."
         )
     if docker.container_exists(container_name, runner=runner):
-        runner(["docker", "rm", "-f", container_name])
+        remove_argv = ["docker", "rm", "-f", container_name]
+        docker.require_success(runner(remove_argv), remove_argv)
 
 
 def start_bench_runtime(
@@ -736,7 +739,12 @@ def stop_bench_runtime(container_name: str, *, runner: docker.Runner = docker.ru
     if not container_name:
         return
     if docker.container_exists(container_name, runner=runner):
-        runner(["docker", "rm", "-f", container_name])
+        result = runner(["docker", "rm", "-f", container_name])
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"failed to remove bench runtime {container_name}: "
+                f"{(result.stderr or result.stdout or '').strip() or 'docker rm failed'}"
+            )
 
 
 def runtime_status(container_name: str | None = None, *, runner: docker.Runner = docker.run_command) -> str:
@@ -934,6 +942,7 @@ def _validate_mounts(container_name: str, data_dir: Path, engagements_dir: Path,
 
 
 def _format_cpus(value: float) -> str:
+    value = float(value)
     if value.is_integer():
         return str(int(value))
     return f"{value:g}"

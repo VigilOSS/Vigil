@@ -516,7 +516,7 @@ def test_code_index_sync_rejects_response_without_bound_repo_identity(
     monkeypatch.setattr(
         code_index_sync,
         "_resolve_per_repo_manifests",
-        lambda _top, _path: [("repo", {"repo_id": 7, "repo_key": "repo"})],
+        lambda _top, _path, **_filters: [("repo", {"repo_id": 7, "repo_key": "repo"})],
     )
     monkeypatch.setattr(
         code_index_sync,

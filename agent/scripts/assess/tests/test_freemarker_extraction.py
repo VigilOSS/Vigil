@@ -501,7 +501,7 @@ def test_freemarker_artifacts_satisfy_the_index_and_sync_contracts() -> None:
     has to clear both in the complete and the truncated shape.
     """
     from assess.commands.code_index import _validate_analysis_artifact
-    from assess.commands.code_index_sync import _validated_structural_metadata
+    from assess.lib.code_structural_metadata import validated_structural_metadata
 
     limit = treesitter_index.STRUCTURAL_SIGNAL_LIMIT
     truncating = "".join(f"<p>${{value{number}}}</p>\n" for number in range(limit + 1))
@@ -511,7 +511,7 @@ def test_freemarker_artifacts_satisfy_the_index_and_sync_contracts() -> None:
 
         assert result["analysis_status"] == label
         _validate_analysis_artifact(result, rel_path=f"{label}.ftl", source_size=len(raw))
-        metadata = _validated_structural_metadata(
+        metadata = validated_structural_metadata(
             result, rel_path=f"{label}.ftl", source_size=len(raw)
         )
         assert metadata["structural_analysis_status"] == label

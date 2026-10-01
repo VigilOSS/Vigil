@@ -589,3 +589,17 @@ def test_start_runs_the_preflight_before_touching_the_launcher(
                 "goose",
             ]
         )
+
+
+def test_start_pi_forwards_provider_model_and_thinking(started: dict[str, object]) -> None:
+    main([
+        "--root", str(started["install_root"]), "engagement", "start",
+        "2026-01-01-0000-target", "--client", "pi", "--",
+        "--provider", "anthropic", "--model", "test-model", "--thinking", "medium",
+        "operator task",
+    ])
+    assert started["client"] == "pi"
+    assert started["client_args"] == [
+        "--provider", "anthropic", "--model", "test-model", "--thinking", "medium",
+        "operator task",
+    ]

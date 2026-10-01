@@ -4,6 +4,7 @@ from __future__ import annotations
 import fnmatch
 import hashlib
 import json
+import math
 import os
 import re
 import shlex
@@ -13,7 +14,7 @@ import sys
 import tempfile
 from pathlib import Path, PurePosixPath
 
-from assess.lib.client import AssessmentClient, AssessError, require_write_result
+from assess.lib.client import AssessmentClient, AssessError, DEFAULT_READ_TIMEOUT_SECONDS, require_write_result
 from assess.lib.code_languages import detect_language
 from assess.lib.code_snapshot import (
     RootedSourceTree,
@@ -80,12 +81,16 @@ _COLLAPSED_ADMISSION_MIN_SKIPPED = 100
 
 
 _GIT_LOG_TIMEOUT_SECONDS = 120
+_GIT_STATUS_TIMEOUT_SECONDS = 30.0
 _GIT_REV_LIST_TIMEOUT_SECONDS = 30
 _GIT_LARGE_HISTORY_COMMIT_THRESHOLD = 50_000
 _GIT_SECURITY_LOOKBACK = '3years'
 _GIT_CHURN_LOOKBACK = '1year'
 _SHA256_PATTERN = re.compile(r"^[0-9a-fA-F]{64}$")
 _BUILD_REFERENCE_SCAN_BYTES = 64 * 1024
+_SCAN_PROGRESS_FILES = 1000
+_REFRESH_SECONDS_PER_FILE = 0.02
+_REFRESH_BYTES_PER_SECOND = 16 * 1024 * 1024
 
 
 def _is_build_reference_file(path: str) -> bool:
@@ -272,6 +277,13 @@ def _setup_ctags(
                 raise ValueError(f"unsafe ctags source path: {rel_path!r}") from exc
             if captured.sha256 != binding.get("source_sha256"):
                 raise ValueError(f"ctags source hash mismatch: {rel_path}")
+            # Ctags -L splits on newline and strips trailing whitespace.
+            if "\n" in rel_path or "\r" in rel_path or rel_path != rel_path.rstrip():
+                print(
+                    f"  ctags: unavailable (file list cannot represent source path {rel_path!r})",
+                    file=sys.stderr,
+                )
+                return config
             explicit_files.append(f"./{rel_path}")
         source_tree.verify_root_identity()
 
@@ -317,8 +329,9 @@ def _setup_ctags(
                 '--extras=+q',
                 '--output-format=e-ctags',
                 '-f', str(temp_tags_path),
-                *explicit_files,
+                '-L', '-',
             ],
+            input=b''.join(os.fsencode(path) + b'\n' for path in explicit_files),
             capture_output=True,
             timeout=120,
             env=environment,
@@ -363,6 +376,11 @@ def register(subparsers) -> None:
     )
     p.add_argument("--repo-key", default=None, help="Explicit repository key (default: stable name+path hash)")
     p.add_argument(
+        "--git-status-timeout", type=_positive_seconds,
+        default=_GIT_STATUS_TIMEOUT_SECONDS,
+        help="Seconds allowed for each Git worktree status check (default: 30). Provenance checks remain required.",
+    )
+    p.add_argument(
         "--role",
         choices=CODE_REPO_ROLES,
         default=None,
@@ -375,6 +393,10 @@ def register(subparsers) -> None:
             "searchable and citable, but never coverage. Omit on a re-ingest to "
             "keep the role the repository already has."
         ),
+    )
+    p.add_argument(
+        "--exclude-path", action="append", default=[],
+        help="Exclude a relative file-path glob or directory and record its files in the exclusion manifest; repeatable. Exclusions take precedence over inclusion overrides.",
     )
     p.add_argument(
         "--include-minified",
@@ -427,9 +449,21 @@ def register(subparsers) -> None:
     p.add_argument(
         "--dry-run",
         action="store_true",
-        help="Compare the scanned manifest with the active backend generation without staging or committing it.",
+        help="Read and hash all admitted and excluded files, then compare the scanned manifest with the active backend generation without staging or committing it. This is a full content scan, not a cheap selection preview.",
     )
     p.set_defaults(func=run)
+
+
+def _positive_seconds(value: str) -> float:
+    import argparse
+
+    try:
+        seconds = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("timeout must be a finite positive number of seconds") from exc
+    if not math.isfinite(seconds) or seconds <= 0:
+        raise argparse.ArgumentTypeError("timeout must be a finite positive number of seconds")
+    return seconds
 
 
 def _max_included_skipped_bytes(args) -> int:
@@ -499,6 +533,18 @@ def _include_path_matches(rel_path: str, patterns: list[str] | None) -> list[str
 def _include_path_match(rel_path: str, patterns: list[str] | None) -> str | None:
     matches = _include_path_matches(rel_path, patterns)
     return matches[0] if matches else None
+
+
+def _exclude_path_match(rel_path: str, args) -> str | None:
+    normalized = rel_path.replace(os.sep, '/')
+    for pattern in getattr(args, "exclude_path", []) or []:
+        directory = pattern.rstrip('/')
+        if _pattern_matches(normalized, pattern) or (
+            directory and not any(char in directory for char in '*?[')
+            and normalized.startswith(directory + '/')
+        ):
+            return pattern
+    return None
 
 
 def _expand_directory_include_patterns(repo_path: str, args) -> None:
@@ -728,6 +774,8 @@ def _admitted_source_paths(
             )
             if rel_path == ".git" or rel_path.startswith(".git/"):
                 continue
+            if _exclude_path_match(rel_path, args):
+                continue
             skip_reason = _skip_file_reason(rel_path, filename, skip_dirs)
             include_reason = _include_reason(rel_path, skip_reason, args)
             if skip_reason and not include_reason:
@@ -752,9 +800,13 @@ def _verify_source_inventory(
     expected_excluded: list[dict[str, object]],
 ) -> None:
     verified: dict[str, tuple[str, int, bool]] = {}
+    verified_bytes = 0
     for rel_path in _admitted_source_paths(source_tree, args, snapshots_root):
         captured = source_tree.capture(rel_path, retain_spool=False)
         verified[rel_path] = (captured.sha256, captured.size, captured.executable)
+        verified_bytes += captured.size
+        if len(verified) % _SCAN_PROGRESS_FILES == 0:
+            print(f"Verified {len(verified):,} source files ({verified_bytes:,} bytes)", file=sys.stderr, flush=True)
     source_tree.verify_root_identity()
     if verified != expected:
         added = sorted(set(verified) - set(expected))
@@ -963,6 +1015,11 @@ def _collect_excluded_records(
             )
             if rel_path == ".git" or rel_path.startswith(".git/"):
                 continue
+            exclude_pattern = _exclude_path_match(rel_path, args)
+            if exclude_pattern:
+                captured = source_tree.capture(rel_path, retain_spool=False)
+                records.append(_captured_skipped_record(rel_path, f"exclude_path:{exclude_pattern}", captured))
+                continue
             skip_reason = _skip_file_reason(rel_path, filename, skip_dirs)
             include_reason = _include_reason(rel_path, skip_reason, args)
             if not skip_reason:
@@ -1051,6 +1108,7 @@ def _write_skipped_manifest(
             "include_minified": bool(getattr(args, "include_minified", False)),
             "include_skipped": bool(getattr(args, "include_skipped", False)),
             "include_path": list(getattr(args, "include_path", []) or []),
+            "exclude_path": list(getattr(args, "exclude_path", []) or []),
             "max_included_skipped_bytes": _max_included_skipped_bytes(args),
         },
         "excluded_entries": records,
@@ -1156,7 +1214,10 @@ def _run_git(repo_path: str, git_path: str, arguments: list[str], **kwargs):
     return subprocess.run(git_command(git_path, repo_path, *arguments), check=False, **options)
 
 
-def _git_provenance(repo_path: str, git_path: str) -> dict[str, object]:
+def _git_provenance(
+    repo_path: str, git_path: str,
+    status_timeout: float = _GIT_STATUS_TIMEOUT_SECONDS,
+) -> dict[str, object]:
     """Validate a worktree and return its HEAD, branch, and dirty bit."""
     common = {"capture_output": True, "text": True, "timeout": 30}
     inside = _run_git(repo_path, git_path, ["rev-parse", "--is-inside-work-tree"], **common)
@@ -1176,12 +1237,18 @@ def _git_provenance(repo_path: str, git_path: str) -> dict[str, object]:
         **common,
     )
     branch = branch_result.stdout.strip() if branch_result.returncode == 0 else ""
-    status_result = _run_git(
-        repo_path,
-        git_path,
-        ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--", "."],
-        **common,
-    )
+    try:
+        status_result = _run_git(
+            repo_path,
+            git_path,
+            ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--", "."],
+            **{**common, "timeout": status_timeout},
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise ValueError(
+            f"Git worktree status timed out after {status_timeout:g}s; "
+            "increase --git-status-timeout for this repository"
+        ) from exc
     if status_result.returncode != 0:
         detail = status_result.stderr.strip()
         raise ValueError(f"cannot inspect repository worktree status: {detail or repo_path}")
@@ -1196,9 +1263,10 @@ def _verify_git_provenance(
     repo_path: str,
     git_path: str,
     expected: dict[str, object],
+    status_timeout: float = _GIT_STATUS_TIMEOUT_SECONDS,
 ) -> None:
     """Reject a source snapshot whose Git provenance changed during sealing."""
-    current = _git_provenance(repo_path, git_path)
+    current = _git_provenance(repo_path, git_path, status_timeout)
     if current != expected:
         changed = sorted(key for key in expected if current.get(key) != expected.get(key))
         raise SourceSnapshotRaceError(
@@ -1206,7 +1274,9 @@ def _verify_git_provenance(
         )
 
 
-def _prepare_git_source(repo_path: str) -> tuple[str, dict[str, object]]:
+def _prepare_git_source(
+    repo_path: str, status_timeout: float = _GIT_STATUS_TIMEOUT_SECONDS,
+) -> tuple[str, dict[str, object]]:
     marker = Path(repo_path) / ".git"
     try:
         marker_stat = marker.lstat()
@@ -1219,14 +1289,16 @@ def _prepare_git_source(repo_path: str) -> tuple[str, dict[str, object]]:
     git_path = _resolve_trusted_tool("git", source_root=repo_path)
     if not git_path:
         raise ValueError("trusted Git executable not found on absolute non-repository PATH entries")
-    return git_path, _git_provenance(repo_path, git_path)
+    return git_path, _git_provenance(repo_path, git_path, status_timeout)
 
 
-def _prepare_source(repo_path: str) -> tuple[str | None, str, dict[str, object]]:
+def _prepare_source(
+    repo_path: str, status_timeout: float = _GIT_STATUS_TIMEOUT_SECONDS,
+) -> tuple[str | None, str, dict[str, object]]:
     marker = Path(repo_path) / ".git"
     if not marker.exists() and not marker.is_symlink():
         return None, "directory", {"head": "", "branch": "", "dirty": None}
-    git_path, provenance = _prepare_git_source(repo_path)
+    git_path, provenance = _prepare_git_source(repo_path, status_timeout)
     return git_path, "git", provenance
 
 
@@ -1404,7 +1476,8 @@ def run(args) -> None:
         print(f"Cannot ingest repository: {exc}", file=sys.stderr)
         sys.exit(1)
     try:
-        git_path, source_kind, git_provenance = _prepare_source(repo_path)
+        status_timeout = getattr(args, "git_status_timeout", _GIT_STATUS_TIMEOUT_SECONDS)
+        git_path, source_kind, git_provenance = _prepare_source(repo_path, status_timeout)
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
         print(f"Cannot ingest repository: {exc}", file=sys.stderr)
         sys.exit(1)
@@ -1447,6 +1520,13 @@ def run(args) -> None:
     source_bindings: dict[str, tuple[str, int, bool]] = {}
     admitted_build_files: dict[str, bytes] = {}
     builder = None if getattr(args, "dry_run", False) else SnapshotBuilder(snapshots_root, repo_key)
+    captured_bytes = 0
+    print(
+        "code-ingest: dry-run reads and hashes the full source inventory before comparison."
+        if getattr(args, "dry_run", False)
+        else "Capturing source inventory...",
+        file=sys.stderr, flush=True,
+    )
     try:
         repo_root = Path(repo_path)
         with RootedSourceTree(repo_root) as source_tree:
@@ -1484,6 +1564,9 @@ def run(args) -> None:
                         "has_past_cve_fix": rel_path in security_files,
                     }
                     files.append(file_record)
+                    captured_bytes += captured.size
+                    if len(files) % _SCAN_PROGRESS_FILES == 0:
+                        print(f"Captured {len(files):,} source files ({captured_bytes:,} bytes)", file=sys.stderr, flush=True)
                     if _is_build_reference_file(rel_path) and captured.size <= _BUILD_REFERENCE_SCAN_BYTES:
                         admitted_build_files[rel_path] = captured.read_bounded(_BUILD_REFERENCE_SCAN_BYTES)
                     source_bindings[rel_path] = (
@@ -1505,7 +1588,7 @@ def run(args) -> None:
             )
             if source_kind == "git":
                 assert git_path is not None
-                _verify_git_provenance(repo_path, git_path, git_provenance)
+                _verify_git_provenance(repo_path, git_path, git_provenance, status_timeout)
     except (OSError, ValueError, SourceSnapshotRaceError) as exc:
         if builder is not None:
             builder.abort()
@@ -1574,7 +1657,7 @@ def run(args) -> None:
     if source_kind == "git":
         assert git_path is not None
         try:
-            _verify_git_provenance(repo_path, git_path, git_provenance)
+            _verify_git_provenance(repo_path, git_path, git_provenance, status_timeout)
         except (OSError, ValueError, subprocess.SubprocessError, SourceSnapshotRaceError) as exc:
             print(f"Cannot publish source snapshot: {exc}", file=sys.stderr)
             sys.exit(1)
@@ -1633,9 +1716,16 @@ def run(args) -> None:
                 nonnegative_counts=("staged",),
             )
             created_count += resp["staged"]
+        # Promotion independently hashes the source and reconciles every file.
+        commit_timeout = max(
+            DEFAULT_READ_TIMEOUT_SECONDS,
+            _REFRESH_SECONDS_PER_FILE * (len(files) + len(skipped_records))
+            + captured_bytes / _REFRESH_BYTES_PER_SECOND,
+        )
         commit = client.post(
             f'code/repos/{repo_id}/refresh/commit',
             {'refresh_token': refresh_token, 'manifest_complete': True},
+            **({"read_timeout": commit_timeout} if commit_timeout > DEFAULT_READ_TIMEOUT_SECONDS else {}),
         )
         repo_generation, committed_digest, committed_role = (
             _require_refresh_commit_receipt(commit, requested_repo_id=repo_id)

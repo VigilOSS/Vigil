@@ -76,7 +76,8 @@ def test_remediation_project_config_is_saved_in_plan(tmp_path: Path) -> None:
         repos=[str(repo)], remediation_config=config,
     ))
     assert plan.manifest["remediation_project"] == config
-    assert json.dumps(plan.scope)
+    assert "remediation_project" not in plan.scope
+    assert plan.scope["hosts"] == []
 
 
 def test_remediation_engagement_rejects_missing_or_non_git_repository(tmp_path: Path) -> None:

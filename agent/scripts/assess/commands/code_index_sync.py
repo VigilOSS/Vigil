@@ -29,54 +29,15 @@ from assess.lib.code_structural_identity import (
     structural_input_digest,
 )
 from assess.lib.config import load_config
-from assess.lib.treesitter_index import (
-    STREAMING_FALLBACK_BASELINE_UNAVAILABLE,
-    UNSCANNED_SCOPE_DEGRADATION_REASON,
+from assess.lib.code_structural_metadata import (
+    validated_callable_records,
+    validated_structural_metadata,
 )
 
-STRUCTURAL_DIMENSIONS = {
-    "call_sites",
-    "classes",
-    "dataflow",
-    "entry_points",
-    "exports",
-    "functions",
-    "imports",
-    "security_sinks",
-    "security_sources",
-}
-SIGNAL_DIMENSIONS = (
-    "entry_points",
-    "imports",
-    "security_sinks",
-    "security_sources",
-)
-STRUCTURAL_RECORD_FIELDS = (
-    "functions",
-    "entry_points",
-    "security_sinks",
-    "security_sources",
-    "call_sites",
-    "imports",
-    "import_targets",
-    "exports",
-    "classes",
-)
 # The bulk write is one all-or-none transaction per repo, so its server-side
 # cost scales with the file count; widen the response budget past the 10s
 # default the same way bulk artifact registration does.
 _BULK_SYNC_SECONDS_PER_FILE = 0.02
-
-UNAVAILABLE_RECORD_FIELDS = {
-    "functions": ("functions",),
-    "entry_points": ("entry_points",),
-    "security_sinks": ("security_sinks",),
-    "security_sources": ("security_sources",),
-    "call_sites": ("call_sites",),
-    "imports": ("imports", "import_targets"),
-    "exports": ("exports",),
-    "classes": ("classes",),
-}
 
 
 def register_sync(subparsers) -> None:
@@ -131,14 +92,26 @@ def _under(root: Path, path: Path, *, label: str) -> Path:
     return resolved
 
 
-def _resolve_per_repo_manifests(top: dict, top_path: Path) -> list[tuple[str, dict]]:
+def _resolve_per_repo_manifests(
+    top: dict,
+    top_path: Path,
+    *,
+    repo_id: int | None = None,
+    repo_key: str | None = None,
+) -> list[tuple[str, dict]]:
     if top.get("schema") != STRUCTURAL_AGGREGATE_SCHEMA or not isinstance(top.get("repos"), dict):
         raise ValueError(
             f"structural index aggregate must use {STRUCTURAL_AGGREGATE_SCHEMA}; rebuild with code-index"
         )
     output: list[tuple[str, dict]] = []
     for key, summary in top["repos"].items():
-        if not isinstance(summary, dict) or not summary.get("manifest_path"):
+        if not isinstance(summary, dict):
+            raise ValueError(f"aggregate repo {key!r} has no manifest_path")
+        if repo_id is not None and summary.get("repo_id") != repo_id:
+            continue
+        if repo_key is not None and summary.get("repo_key") is not None and summary["repo_key"] != repo_key:
+            continue
+        if not summary.get("manifest_path"):
             raise ValueError(f"aggregate repo {key!r} has no manifest_path")
         manifest_path = _under(
             top_path.parent,
@@ -146,6 +119,8 @@ def _resolve_per_repo_manifests(top: dict, top_path: Path) -> list[tuple[str, di
             label=f"repo {key} manifest",
         )
         manifest = _load_manifest(manifest_path)
+        if repo_key is not None and manifest.get("repo_key") != repo_key:
+            continue
         if manifest.get("schema") != STRUCTURAL_INDEX_SCHEMA:
             raise ValueError(f"repo {key} manifest is not {STRUCTURAL_INDEX_SCHEMA}")
         manifest["_resolved_manifest_path"] = str(manifest_path)
@@ -197,160 +172,6 @@ def _read_index(path: Path, *, expected_sha256: str) -> dict[str, Any]:
 
 def _backend_files(client: AssessmentClient, repo_id: int) -> dict[str, dict]:
     return fetch_backend_file_inventory(client, repo_id)
-
-
-def _validated_structural_metadata(
-    indexed: dict[str, Any],
-    *,
-    rel_path: str,
-    source_size: int,
-) -> dict[str, Any]:
-    status = indexed.get("analysis_status")
-    mode = indexed.get("analysis_mode")
-    reason = indexed.get("degradation_reason")
-    available = indexed.get("structural_index_available")
-    unavailable = indexed.get("unavailable_dimensions")
-    truncated = indexed.get("artifact_truncated")
-    truncated_dimensions = indexed.get("truncated_dimensions")
-    counts = indexed.get("signal_counts")
-    if status not in {"complete", "degraded", "unsupported"}:
-        raise ValueError(f"structural analysis status is invalid for {rel_path}")
-    if mode not in {"tree_sitter", "lightweight_regex", "streaming_security_fallback", "none"}:
-        raise ValueError(f"structural analysis mode is invalid for {rel_path}")
-    if indexed.get("source_size") != source_size or indexed.get("bytes_scanned") != source_size:
-        raise ValueError(f"structural scan byte accounting differs for {rel_path}")
-    if not isinstance(available, bool) or not isinstance(truncated, bool):
-        raise ValueError(f"structural availability/truncation is invalid for {rel_path}")
-    if not isinstance(unavailable, list) or unavailable != sorted(set(unavailable)):
-        raise ValueError(f"structural unavailable dimensions are invalid for {rel_path}")
-    if not isinstance(truncated_dimensions, list) or truncated_dimensions != sorted(
-        set(truncated_dimensions)
-    ):
-        raise ValueError(f"structural truncated dimensions are invalid for {rel_path}")
-    if not set(unavailable).issubset(STRUCTURAL_DIMENSIONS) or not set(
-        truncated_dimensions
-    ).issubset(STRUCTURAL_DIMENSIONS):
-        raise ValueError(f"structural dimensions are unsupported for {rel_path}")
-    if truncated != bool(truncated_dimensions) or (truncated and status != "degraded"):
-        raise ValueError(f"structural truncation debt is inconsistent for {rel_path}")
-    if status == "complete" and (
-        not available
-        or mode not in {"tree_sitter", "lightweight_regex"}
-        or reason
-        or unavailable
-        or truncated
-    ):
-        raise ValueError(f"complete structural analysis is inconsistent for {rel_path}")
-    if status == "unsupported" and (
-        available
-        or mode != "none"
-        or reason != "unsupported_language"
-        or not unavailable
-    ):
-        raise ValueError(f"unsupported structural analysis is inconsistent for {rel_path}")
-    if status == "degraded":
-        if mode == "streaming_security_fallback":
-            if (
-                available
-                or not reason
-                or not STREAMING_FALLBACK_BASELINE_UNAVAILABLE.issubset(unavailable)
-            ):
-                raise ValueError(f"streaming fallback debt is incomplete for {rel_path}")
-        elif not (
-            mode in {"tree_sitter", "lightweight_regex"}
-            and available
-            and (truncated or unavailable)
-            and reason
-            == (
-                "artifact_signal_limit"
-                if truncated
-                else UNSCANNED_SCOPE_DEGRADATION_REASON
-            )
-        ):
-            raise ValueError(f"bounded parser debt is inconsistent for {rel_path}")
-    if not isinstance(counts, dict) or set(counts) != set(SIGNAL_DIMENSIONS) or any(
-        not isinstance(counts.get(dimension), int) or int(counts[dimension]) < 0
-        for dimension in SIGNAL_DIMENSIONS
-    ):
-        raise ValueError(f"structural signal counts are invalid for {rel_path}")
-    for field in STRUCTURAL_RECORD_FIELDS:
-        if not isinstance(indexed.get(field), list):
-            raise ValueError(f"structural {field} records are invalid for {rel_path}")
-    if not isinstance(indexed.get("total_functions"), int) or int(
-        indexed["total_functions"]
-    ) < 0:
-        raise ValueError(f"structural function total is invalid for {rel_path}")
-    if not isinstance(indexed.get("total_exports"), int) or int(indexed["total_exports"]) < 0:
-        raise ValueError(f"structural export total is invalid for {rel_path}")
-    if status == "unsupported" and (
-        int(indexed["total_functions"]) != 0
-        or int(indexed["total_exports"]) != 0
-        or any(int(counts[dimension]) for dimension in SIGNAL_DIMENSIONS)
-        or any(indexed[field] for field in STRUCTURAL_RECORD_FIELDS)
-    ):
-        raise ValueError(f"unsupported structural analysis contains signals for {rel_path}")
-    # The backend refuses this shape too, but it refuses one `updates` list per
-    # repository and names no file, so a single artifact like this takes the
-    # whole sync down with an opaque 400. With no callable, the exact parser
-    # handed no line to the function-scoped detectors; any other signal proves
-    # the file still had source to scan, so `complete` claims a measurement
-    # that cannot have happened. No signal at all stays legal -- a blank or
-    # comment-only file really does measure empty.
-    if (
-        status == "complete"
-        and mode == "tree_sitter"
-        and int(indexed["total_functions"]) == 0
-        and (
-            int(indexed["total_exports"])
-            or any(int(counts[dimension]) for dimension in SIGNAL_DIMENSIONS)
-        )
-    ):
-        raise ValueError(
-            "complete structural analysis has no callable scope to have measured "
-            f"the source it clearly scanned for {rel_path}"
-        )
-    retained_counts = {
-        "entry_points": len(indexed["entry_points"]),
-        "imports": max(len(indexed["imports"]), len(indexed["import_targets"])),
-        "security_sinks": len(indexed["security_sinks"]),
-        "security_sources": len(indexed["security_sources"]),
-    }
-    if any(int(counts[dimension]) < retained_counts[dimension] for dimension in SIGNAL_DIMENSIONS):
-        raise ValueError(f"structural signal totals undercount retained records for {rel_path}")
-    if int(indexed["total_exports"]) < len(indexed["exports"]):
-        raise ValueError(f"structural export total undercounts retained records for {rel_path}")
-    if (
-        "functions" not in {*unavailable, *truncated_dimensions}
-        and int(indexed["total_functions"]) != len(indexed["functions"])
-    ):
-        raise ValueError(
-            f"structural function total must match retained callables for {rel_path}"
-        )
-    unavailable_signals = set(unavailable).intersection(SIGNAL_DIMENSIONS)
-    if (
-        any(int(counts[dimension]) for dimension in unavailable_signals)
-        or ("functions" in unavailable and int(indexed["total_functions"]) != 0)
-        or ("exports" in unavailable and int(indexed["total_exports"]) != 0)
-        or any(
-            any(indexed[field] for field in fields)
-            for dimension, fields in UNAVAILABLE_RECORD_FIELDS.items()
-            if dimension in unavailable
-        )
-    ):
-        raise ValueError(f"unavailable structural dimension contains signals for {rel_path}")
-    if reason is not None and (not isinstance(reason, str) or len(reason) > 128):
-        raise ValueError(f"structural degradation reason is invalid for {rel_path}")
-    return {
-        "structural_analysis_status": status,
-        "structural_analysis_mode": mode,
-        "structural_degradation_reason": reason,
-        "structural_source_size": source_size,
-        "structural_bytes_scanned": int(indexed["bytes_scanned"]),
-        "structural_unavailable_dimensions": unavailable,
-        "structural_artifact_truncated": truncated,
-        "structural_truncated_dimensions": truncated_dimensions,
-        "structural_signal_counts": counts,
-    }
 
 
 def _prepare_repo_payload(
@@ -446,136 +267,100 @@ def _prepare_repo_payload(
     degraded_paths: list[str] = []
     truncated_paths: list[str] = []
     status_counts = {"complete": 0, "degraded": 0, "unsupported": 0}
+    errors: list[str] = []
     with RootedSourceTree(source) as source_tree:
         for rel_path in sorted(files_manifest):
-            binding = files_manifest[rel_path]
-            if not isinstance(binding, dict):
-                raise ValueError(  # noqa: TRY004 - malformed artifacts are validation failures
-                    f"repo {repo_id} file binding is invalid: {rel_path}"
-                )
-            source_sha = str(binding.get("source_sha256") or "")
-            index_sha = str(binding.get("index_sha256") or "")
-            if len(source_sha) != 64 or len(index_sha) != 64:
-                raise ValueError(f"repo {repo_id} file binding hashes are invalid: {rel_path}")
-            if source_by_path[rel_path].get("source_sha256") != source_sha:
-                raise ValueError(f"repo {repo_id} snapshot source hash differs for {rel_path}")
-            backend_file = backend_by_path.get(rel_path)
-            if backend_file is None:
-                raise ValueError(f"repo {repo_id} backend has no file row for {rel_path}")
-            if backend_file.get("file_hash") != source_sha:
-                raise ValueError(f"repo {repo_id} backend source hash differs for {rel_path}")
-            expected_language = str(bound_inputs[rel_path]["language"])
-            if binding.get("language") != expected_language:
-                raise ValueError(
-                    f"repo {repo_id} structural binding language differs from the backend for "
-                    f"{rel_path}"
-                )
-            captured_source = source_tree.capture(rel_path, retain_spool=False)
-            if captured_source.sha256 != source_sha:
-                raise ValueError(f"repo {repo_id} sealed source hash differs for {rel_path}")
-            index_path = _under(
-                index_root,
-                index_root / str(binding.get("index_path") or ""),
-                label=f"repo {repo_id} file index",
-            )
-            if index_path.parent != manifest_path.parent / "files":
-                raise ValueError(
-                    f"repo {repo_id} structural index path differs from its identity for {rel_path}"
-                )
-            indexed = _read_index(index_path, expected_sha256=index_sha)
-            expected_binding = {
-                "file_path": rel_path,
-                "repo_id": repo_id,
-                "repo_generation": generation,
-                "source_manifest_digest": digest,
-                "structural_input_digest": expected_input_digest,
-                "source_sha256": source_sha,
-            }
-            for field, expected in expected_binding.items():
-                if indexed.get(field) != expected:
-                    raise ValueError(f"repo {repo_id} structural index {field} mismatch for {rel_path}")
-            if indexed.get("language") != expected_language:
-                raise ValueError(
-                    f"repo {repo_id} structural index language differs from the backend for "
-                    f"{rel_path}"
-                )
-            source_size = int(source_by_path[rel_path].get("size") or 0)
-            structural_metadata = _validated_structural_metadata(
-                indexed,
-                rel_path=rel_path,
-                source_size=source_size,
-            )
-            for field in ("analysis_status", "analysis_mode", "artifact_truncated"):
-                if binding.get(field) != indexed.get(field):
-                    raise ValueError(
-                        f"repo {repo_id} structural binding {field} mismatch for {rel_path}"
+            try:
+                binding = files_manifest[rel_path]
+                if not isinstance(binding, dict):
+                    raise ValueError(  # noqa: TRY004 - malformed artifacts are validation failures
+                        f"repo {repo_id} file binding is invalid: {rel_path}"
                     )
-            status = str(indexed["analysis_status"])
-            status_counts[status] += 1
-            if status == "degraded":
-                degraded_paths.append(rel_path)
-            if indexed["artifact_truncated"]:
-                truncated_paths.append(rel_path)
-            file_id = int(backend_file.get("id") or 0)
-            if file_id < 1:
-                raise ValueError(f"repo {repo_id} backend file has no ID for {rel_path}")
-            callable_records: list[dict[str, Any]] = []
-            callable_identities: set[tuple[str, int, int]] = set()
-            for callable_record in indexed.get("functions", []):
-                if not isinstance(callable_record, dict):
+                source_sha = str(binding.get("source_sha256") or "")
+                index_sha = str(binding.get("index_sha256") or "")
+                if len(source_sha) != 64 or len(index_sha) != 64:
+                    raise ValueError(f"repo {repo_id} file binding hashes are invalid: {rel_path}")
+                if source_by_path[rel_path].get("source_sha256") != source_sha:
+                    raise ValueError(f"repo {repo_id} snapshot source hash differs for {rel_path}")
+                backend_file = backend_by_path.get(rel_path)
+                if backend_file is None:
+                    raise ValueError(f"repo {repo_id} backend has no file row for {rel_path}")
+                if backend_file.get("file_hash") != source_sha:
+                    raise ValueError(f"repo {repo_id} backend source hash differs for {rel_path}")
+                expected_language = str(bound_inputs[rel_path]["language"])
+                if binding.get("language") != expected_language:
                     raise ValueError(
-                        f"repo {repo_id} structural callable is invalid for {rel_path}"
+                        f"repo {repo_id} structural binding language differs from the backend for "
+                        f"{rel_path}"
                     )
-                source_span = callable_record.get("source_span")
-                span = source_span if isinstance(source_span, dict) else callable_record
-                name = callable_record.get("name")
-                qualified_name = callable_record.get("qualified_name")
-                start_line = span.get("start_line", span.get("line_start"))
-                end_line = span.get("end_line", span.get("line_end"))
-                if (
-                    not isinstance(name, str)
-                    or not name
-                    or name != name.strip()
-                    or not isinstance(qualified_name, str)
-                    or not qualified_name
-                    or qualified_name != qualified_name.strip()
-                    or type(start_line) is not int
-                    or type(end_line) is not int
-                    or start_line < 1
-                    or end_line < start_line
-                    or end_line > int(indexed.get("total_lines") or 0)
-                ):
+                captured_source = source_tree.capture(rel_path, retain_spool=False)
+                if captured_source.sha256 != source_sha:
+                    raise ValueError(f"repo {repo_id} sealed source hash differs for {rel_path}")
+                index_path = _under(
+                    index_root,
+                    index_root / str(binding.get("index_path") or ""),
+                    label=f"repo {repo_id} file index",
+                )
+                if index_path.parent != manifest_path.parent / "files":
                     raise ValueError(
-                        f"repo {repo_id} structural callable identity is invalid for {rel_path}"
+                        f"repo {repo_id} structural index path differs from its identity for {rel_path}"
                     )
-                identity = (qualified_name, start_line, end_line)
-                if identity in callable_identities:
+                indexed = _read_index(index_path, expected_sha256=index_sha)
+                expected_binding = {
+                    "file_path": rel_path,
+                    "repo_id": repo_id,
+                    "repo_generation": generation,
+                    "source_manifest_digest": digest,
+                    "structural_input_digest": expected_input_digest,
+                    "source_sha256": source_sha,
+                }
+                for field, expected in expected_binding.items():
+                    if indexed.get(field) != expected:
+                        raise ValueError(f"repo {repo_id} structural index {field} mismatch for {rel_path}")
+                if indexed.get("language") != expected_language:
                     raise ValueError(
-                        f"repo {repo_id} structural callable identity is duplicated for {rel_path}"
+                        f"repo {repo_id} structural index language differs from the backend for "
+                        f"{rel_path}"
                     )
-                callable_identities.add(identity)
-                callable_records.append(
+                source_size = int(source_by_path[rel_path].get("size") or 0)
+                structural_metadata = validated_structural_metadata(
+                    indexed,
+                    rel_path=rel_path,
+                    source_size=source_size,
+                )
+                for field in ("analysis_status", "analysis_mode", "artifact_truncated"):
+                    if binding.get(field) != indexed.get(field):
+                        raise ValueError(
+                            f"repo {repo_id} structural binding {field} mismatch for {rel_path}"
+                        )
+                status = str(indexed["analysis_status"])
+                status_counts[status] += 1
+                if status == "degraded":
+                    degraded_paths.append(rel_path)
+                if indexed["artifact_truncated"]:
+                    truncated_paths.append(rel_path)
+                file_id = int(backend_file.get("id") or 0)
+                if file_id < 1:
+                    raise ValueError(f"repo {repo_id} backend file has no ID for {rel_path}")
+                callable_records = validated_callable_records(indexed, rel_path=rel_path)
+                updates.append(
                     {
-                        "name": name,
-                        "qualified_name": qualified_name,
-                        "start_line": start_line,
-                        "end_line": end_line,
+                        "file_id": file_id,
+                        "source_sha256": source_sha,
+                        "indexed_language": expected_language,
+                        "total_functions": int(indexed.get("total_functions", 0)),
+                        "total_entry_points": int(indexed["signal_counts"]["entry_points"]),
+                        "total_sinks": int(indexed["signal_counts"]["security_sinks"]),
+                        "total_exports": int(indexed["total_exports"]),
+                        "callables": callable_records,
+                        **structural_metadata,
                     }
                 )
-            updates.append(
-                {
-                    "file_id": file_id,
-                    "source_sha256": source_sha,
-                    "indexed_language": expected_language,
-                    "total_functions": int(indexed.get("total_functions", 0)),
-                    "total_entry_points": int(indexed["signal_counts"]["entry_points"]),
-                    "total_sinks": int(indexed["signal_counts"]["security_sinks"]),
-                    "total_exports": int(indexed["total_exports"]),
-                    "callables": callable_records,
-                    **structural_metadata,
-                }
-            )
+            except (OSError, ValueError) as exc:
+                errors.append(f"{rel_path}: {exc}")
         source_tree.verify_root_identity()
+    if errors:
+        raise ValueError("invalid structural artifacts:\n" + "\n".join(errors))
 
     expected_degraded = sorted(degraded_paths)
     expected_truncated = sorted(truncated_paths)
@@ -626,18 +411,16 @@ def run(args) -> None:
         if getattr(args, "index_dir", None)
         else manifest_path.parent / "structural-index"
     )
+    repo_id_filter = getattr(args, "repo_id", None)
+    repo_key_filter = getattr(args, "repo_key", None)
     try:
-        selected = _resolve_per_repo_manifests(top, manifest_path)
+        selected = _resolve_per_repo_manifests(
+            top, manifest_path, repo_id=repo_id_filter, repo_key=repo_key_filter or None,
+        )
     except ValueError as exc:
         print(f"Cannot sync structural index: {exc}", file=sys.stderr)
         sys.exit(1)
 
-    repo_id_filter = getattr(args, "repo_id", None)
-    repo_key_filter = getattr(args, "repo_key", None)
-    if repo_id_filter is not None:
-        selected = [item for item in selected if int(item[1].get("repo_id") or 0) == repo_id_filter]
-    if repo_key_filter:
-        selected = [item for item in selected if item[1].get("repo_key") == repo_key_filter]
     if not selected:
         print("No structural manifest matched the selected repository", file=sys.stderr)
         sys.exit(1)
@@ -650,15 +433,18 @@ def run(args) -> None:
             print("Cannot sync structural index: backend repo response is invalid", file=sys.stderr)
             sys.exit(1)
         prepared: list[dict[str, Any]] = []
-        try:
-            for _key, manifest in selected:
+        errors: list[str] = []
+        for _key, manifest in selected:
+            try:
                 repo_id = int(manifest.get("repo_id") or 0)
                 backend = _find_backend_repo(repos, repo_id=repo_id)
                 if backend is None:
                     raise ValueError(f"no unique backend repo matches repo_id {repo_id}")
                 prepared.append(_prepare_repo_payload(client, backend, manifest, index_root))
-        except (OSError, ValueError) as exc:
-            print(f"Cannot sync structural index: {exc}", file=sys.stderr)
+            except (OSError, ValueError) as exc:
+                errors.append(f"repo {_key}: {exc}")
+        if errors:
+            print("Cannot sync structural index:\n" + "\n".join(errors), file=sys.stderr)
             sys.exit(1)
 
         total_updated = 0

@@ -19,7 +19,7 @@ from assess.lib.client import AssessmentClient
 from assess.lib.code_snapshot import (
     MAX_JSON_ARTIFACT_BYTES,
     RootedSourceTree,
-    SOURCE_MANIFEST_SCHEMA,
+    SOURCE_MANIFEST_SCHEMAS,
     capture_regular_file,
     read_bounded_regular_file,
     sealed_source_file_path,
@@ -34,12 +34,14 @@ from assess.lib.code_structural_identity import (
     fetch_backend_file_inventory,
     structural_input_digest,
 )
+from assess.lib.code_structural_metadata import (
+    validated_callable_records,
+    validated_structural_metadata,
+)
 from assess.lib.config import load_config, resolve_engagement_dir
 from assess.lib.parser_boundary import ParserBoundaryCancelled, index_file
 from assess.lib.treesitter_index import (
     SUPPORTED_LANGUAGES,
-    STREAMING_FALLBACK_BASELINE_UNAVAILABLE,
-    UNSCANNED_SCOPE_DEGRADATION_REASON,
     StreamingSecurityScanner,
     language_for_file,
 )
@@ -70,35 +72,6 @@ LEGACY_STRUCTURAL_STATUS_FIELDS = frozenset(
 )
 LOWER_HEX_DIGITS = frozenset("0123456789abcdef")
 MAX_SQLITE_INTEGER = (1 << 63) - 1
-SIGNAL_DIMENSIONS = (
-    "entry_points",
-    "imports",
-    "security_sinks",
-    "security_sources",
-)
-STRUCTURAL_RECORD_FIELDS = (
-    "functions",
-    "entry_points",
-    "security_sinks",
-    "security_sources",
-    "call_sites",
-    "imports",
-    "import_targets",
-    "exports",
-    "classes",
-)
-UNAVAILABLE_RECORD_FIELDS = {
-    "functions": ("functions",),
-    "entry_points": ("entry_points",),
-    "security_sinks": ("security_sinks",),
-    "security_sources": ("security_sources",),
-    "call_sites": ("call_sites",),
-    "imports": ("imports", "import_targets"),
-    "exports": ("exports",),
-    "classes": ("classes",),
-}
-
-
 class _DuplicateJSONKeyError(ValueError):
     pass
 
@@ -235,7 +208,7 @@ def _load_snapshot(source_path: Path) -> dict[str, Any]:
     manifest = validate_snapshot(source_path.parent, expected_digest=digest)
     if Path(str(manifest.get("source_path", ""))).resolve() != source_path:
         raise ValueError("source snapshot manifest path does not match the selected source")
-    if manifest.get("schema") != SOURCE_MANIFEST_SCHEMA or len(digest) != 64:
+    if manifest.get("schema") not in SOURCE_MANIFEST_SCHEMAS or len(digest) != 64:
         raise ValueError("source snapshot digest/path binding is invalid")
     files = manifest.get("files")
     if not isinstance(files, list):
@@ -997,102 +970,8 @@ def _validate_analysis_artifact(
     rel_path: str,
     source_size: int,
 ) -> None:
-    status = indexed.get("analysis_status")
-    mode = indexed.get("analysis_mode")
-    available = indexed.get("structural_index_available")
-    if status not in {"complete", "degraded", "unsupported"}:
-        raise ValueError(f"structural analysis status is invalid for {rel_path}")
-    if not isinstance(available, bool):
-        raise ValueError(f"structural availability is missing for {rel_path}")
-    if indexed.get("source_size") != source_size or indexed.get("bytes_scanned") != source_size:
-        raise ValueError(f"structural scan byte accounting differs for {rel_path}")
-    truncated = indexed.get("artifact_truncated")
-    if not isinstance(truncated, bool):
-        raise ValueError(f"structural truncation status is missing for {rel_path}")
-    if truncated and status != "degraded":
-        raise ValueError(f"truncated structural analysis must be degraded for {rel_path}")
-    if status == "complete" and (
-        not available
-        or truncated
-        or mode not in {"tree_sitter", "lightweight_regex"}
-        or indexed.get("degradation_reason")
-        or indexed.get("unavailable_dimensions")
-    ):
-        raise ValueError(f"complete structural analysis is inconsistent for {rel_path}")
-    if status == "unsupported" and (
-        available
-        or mode != "none"
-        or indexed.get("degradation_reason") != "unsupported_language"
-        or not indexed.get("unavailable_dimensions")
-    ):
-        raise ValueError(f"unsupported structural analysis is inconsistent for {rel_path}")
-    if status == "degraded":
-        if mode == "streaming_security_fallback":
-            if (
-                available
-                or not indexed.get("degradation_reason")
-                or not STREAMING_FALLBACK_BASELINE_UNAVAILABLE.issubset(
-                    indexed.get("unavailable_dimensions") or []
-                )
-            ):
-                raise ValueError(f"streaming fallback debt is incomplete for {rel_path}")
-        elif not (
-            mode in {"tree_sitter", "lightweight_regex"}
-            and available
-            and (truncated or indexed.get("unavailable_dimensions"))
-            and indexed.get("degradation_reason")
-            == (
-                "artifact_signal_limit"
-                if truncated
-                else UNSCANNED_SCOPE_DEGRADATION_REASON
-            )
-        ):
-            raise ValueError(f"degraded structural analysis is inconsistent for {rel_path}")
-    counts = indexed.get("signal_counts")
-    if not isinstance(counts, dict) or set(counts) != set(SIGNAL_DIMENSIONS) or any(
-        not isinstance(counts.get(dimension), int) or int(counts[dimension]) < 0
-        for dimension in SIGNAL_DIMENSIONS
-    ):
-        raise ValueError(f"structural signal counts are invalid for {rel_path}")
-    for field in STRUCTURAL_RECORD_FIELDS:
-        if not isinstance(indexed.get(field), list):
-            raise ValueError(f"structural {field} records are invalid for {rel_path}")
-    if not isinstance(indexed.get("total_functions"), int) or int(
-        indexed["total_functions"]
-    ) < 0:
-        raise ValueError(f"structural function total is invalid for {rel_path}")
-    if not isinstance(indexed.get("total_exports"), int) or int(indexed["total_exports"]) < 0:
-        raise ValueError(f"structural export total is invalid for {rel_path}")
-    if status == "unsupported" and (
-        int(indexed["total_functions"]) != 0
-        or int(indexed["total_exports"]) != 0
-        or any(int(counts[dimension]) for dimension in SIGNAL_DIMENSIONS)
-        or any(indexed[field] for field in STRUCTURAL_RECORD_FIELDS)
-    ):
-        raise ValueError(f"unsupported structural analysis contains signals for {rel_path}")
-    retained_counts = {
-        "entry_points": len(indexed["entry_points"]),
-        "imports": max(len(indexed["imports"]), len(indexed["import_targets"])),
-        "security_sinks": len(indexed["security_sinks"]),
-        "security_sources": len(indexed["security_sources"]),
-    }
-    if any(int(counts[dimension]) < retained_counts[dimension] for dimension in SIGNAL_DIMENSIONS):
-        raise ValueError(f"structural signal totals undercount retained records for {rel_path}")
-    if int(indexed["total_exports"]) < len(indexed["exports"]):
-        raise ValueError(f"structural export total undercounts retained records for {rel_path}")
-    unavailable = set(indexed.get("unavailable_dimensions") or [])
-    unavailable_signals = unavailable.intersection(SIGNAL_DIMENSIONS)
-    if (
-        any(int(counts[dimension]) for dimension in unavailable_signals)
-        or ("functions" in unavailable and int(indexed["total_functions"]) != 0)
-        or ("exports" in unavailable and int(indexed["total_exports"]) != 0)
-        or any(
-            any(indexed[field] for field in fields)
-            for dimension, fields in UNAVAILABLE_RECORD_FIELDS.items()
-            if dimension in unavailable
-        )
-    ):
-        raise ValueError(f"unavailable structural dimension contains signals for {rel_path}")
+    validated_structural_metadata(indexed, rel_path=rel_path, source_size=source_size)
+    validated_callable_records(indexed, rel_path=rel_path)
 
 
 def run(args) -> None:
@@ -1206,88 +1085,94 @@ def run(args) -> None:
     degraded_file_paths: list[str] = []
     truncated_file_paths: list[str] = []
     analysis_status_counts = {"complete": 0, "degraded": 0, "unsupported": 0}
+    errors: list[str] = []
     try:
         with RootedSourceTree(source_path) as source_tree:
             for entry in selected:
                 rel_path = str(entry["file_path"])
-                language = str(entry["language"])
-                absolute = sealed_source_file_path(source_path, rel_path)
-                supported = language in SUPPORTED_LANGUAGES
-                scanner = (
-                    StreamingSecurityScanner(rel_path, language)
-                    if supported and int(entry.get("size") or 0) > max_tree_sitter_bytes
-                    else None
-                )
-                captured = source_tree.capture(
-                    rel_path,
-                    retain_spool=False,
-                    materialize_limit=max_tree_sitter_bytes if supported else None,
-                    chunk_consumer=scanner.feed if scanner is not None else None,
-                )
-                if captured.sha256 != entry.get("source_sha256") or captured.size != entry.get("size"):
-                    raise ValueError(f"snapshot file no longer matches manifest: {rel_path}")
-                if supported and captured.materialized is not None:
-                    indexed = index_file(
-                        str(absolute),
-                        language,
-                        source=captured.materialized,
-                        result_validator=lambda result: _validate_analysis_artifact(
-                            result,
-                            rel_path=rel_path,
-                            source_size=captured.size,
-                        ),
+                try:
+                    language = str(entry["language"])
+                    absolute = sealed_source_file_path(source_path, rel_path)
+                    supported = language in SUPPORTED_LANGUAGES
+                    scanner = (
+                        StreamingSecurityScanner(rel_path, language)
+                        if supported and int(entry.get("size") or 0) > max_tree_sitter_bytes
+                        else None
                     )
-                elif supported and scanner is not None:
-                    indexed = scanner.finish(degradation_reason="tree_sitter_resource_limit")
-                else:
-                    skipped_unsupported += 1
-                    indexed = _unsupported_index(rel_path, language, source_size=captured.size)
-                    indexed["total_lines"] = captured.loc
-                if indexed.get("language") != language:
-                    raise ValueError(f"structural parser language differs for {rel_path}")
-                _validate_analysis_artifact(
-                    indexed,
-                    rel_path=rel_path,
-                    source_size=captured.size,
-                )
-                signal_counts = indexed["signal_counts"]
-                indexed["total_entry_points"] = int(signal_counts["entry_points"])
-                indexed["total_security_sinks"] = int(signal_counts["security_sinks"])
-                indexed.update(
-                    {
-                        "file_path": rel_path,
-                        "repo_id": repo_id,
-                        "repo_generation": generation,
-                        "source_manifest_digest": source_digest,
-                        "structural_input_digest": input_digest,
+                    captured = source_tree.capture(
+                        rel_path,
+                        retain_spool=False,
+                        materialize_limit=max_tree_sitter_bytes if supported else None,
+                        chunk_consumer=scanner.feed if scanner is not None else None,
+                    )
+                    if captured.sha256 != entry.get("source_sha256") or captured.size != entry.get("size"):
+                        raise ValueError(f"snapshot file no longer matches manifest: {rel_path}")
+                    if supported and captured.materialized is not None:
+                        indexed = index_file(
+                            str(absolute),
+                            language,
+                            source=captured.materialized,
+                            result_validator=lambda result: _validate_analysis_artifact(
+                                result,
+                                rel_path=rel_path,
+                                source_size=captured.size,
+                            ),
+                        )
+                    elif supported and scanner is not None:
+                        indexed = scanner.finish(degradation_reason="tree_sitter_resource_limit")
+                    else:
+                        skipped_unsupported += 1
+                        indexed = _unsupported_index(rel_path, language, source_size=captured.size)
+                        indexed["total_lines"] = captured.loc
+                    if indexed.get("language") != language:
+                        raise ValueError(f"structural parser language differs for {rel_path}")
+                    _validate_analysis_artifact(
+                        indexed,
+                        rel_path=rel_path,
+                        source_size=captured.size,
+                    )
+                    signal_counts = indexed["signal_counts"]
+                    indexed["total_entry_points"] = int(signal_counts["entry_points"])
+                    indexed["total_security_sinks"] = int(signal_counts["security_sinks"])
+                    indexed.update(
+                        {
+                            "file_path": rel_path,
+                            "repo_id": repo_id,
+                            "repo_generation": generation,
+                            "source_manifest_digest": source_digest,
+                            "structural_input_digest": input_digest,
+                            "source_sha256": captured.sha256,
+                        }
+                    )
+                    filename = f"{_file_id(repo_id, generation, rel_path)}.json"
+                    path = files_dir / filename
+                    index_bytes = (json.dumps(indexed, indent=2, sort_keys=True) + "\n").encode("utf-8")
+                    path.write_bytes(index_bytes)
+                    files_manifest[rel_path] = {
+                        "index_path": str((final_dir / "files" / filename).relative_to(structural_root)),
                         "source_sha256": captured.sha256,
+                        "language": language,
+                        "index_sha256": hashlib.sha256(index_bytes).hexdigest(),
+                        "analysis_status": indexed["analysis_status"],
+                        "analysis_mode": indexed["analysis_mode"],
+                        "artifact_truncated": indexed["artifact_truncated"],
                     }
-                )
-                filename = f"{_file_id(repo_id, generation, rel_path)}.json"
-                path = files_dir / filename
-                index_bytes = (json.dumps(indexed, indent=2, sort_keys=True) + "\n").encode("utf-8")
-                path.write_bytes(index_bytes)
-                files_manifest[rel_path] = {
-                    "index_path": str((final_dir / "files" / filename).relative_to(structural_root)),
-                    "source_sha256": captured.sha256,
-                    "language": language,
-                    "index_sha256": hashlib.sha256(index_bytes).hexdigest(),
-                    "analysis_status": indexed["analysis_status"],
-                    "analysis_mode": indexed["analysis_mode"],
-                    "artifact_truncated": indexed["artifact_truncated"],
-                }
-                lang_counts[language] = lang_counts.get(language, 0) + 1
-                status = str(indexed["analysis_status"])
-                analysis_status_counts[status] += 1
-                if status == "degraded":
-                    degraded_file_paths.append(rel_path)
-                if indexed["artifact_truncated"]:
-                    truncated_file_paths.append(rel_path)
-                totals["total_functions"] += int(indexed.get("total_functions", 0))
-                totals["total_entry_points"] += int(signal_counts["entry_points"])
-                totals["total_security_sinks"] += int(signal_counts["security_sinks"])
-                totals["total_exports"] += int(indexed["total_exports"])
+                    lang_counts[language] = lang_counts.get(language, 0) + 1
+                    status = str(indexed["analysis_status"])
+                    analysis_status_counts[status] += 1
+                    if status == "degraded":
+                        degraded_file_paths.append(rel_path)
+                    if indexed["artifact_truncated"]:
+                        truncated_file_paths.append(rel_path)
+                    totals["total_functions"] += int(indexed.get("total_functions", 0))
+                    totals["total_entry_points"] += int(signal_counts["entry_points"])
+                    totals["total_security_sinks"] += int(signal_counts["security_sinks"])
+                    totals["total_exports"] += int(indexed["total_exports"])
+                except ValueError as exc:
+                    errors.append(f"{rel_path}: {exc}")
             source_tree.verify_root_identity()
+        if errors:
+            raise ValueError("invalid structural artifacts:\n" + "\n".join(errors))
 
         with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
             current_repo = _resolve_backend_repo(client, repo_id, source_path)

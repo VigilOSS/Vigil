@@ -18,6 +18,8 @@ from urllib.request import Request, urlopen
 
 from .engagements import resolve_engagement_path
 from .paths import resolve_orchestrator_base_url
+from .remediation_vcs import adapter as _vcs
+from .remediation_browser import execute as _execute_browse
 
 
 def register_remediation_parser(sub: argparse._SubParsersAction) -> None:
@@ -25,7 +27,10 @@ def register_remediation_parser(sub: argparse._SubParsersAction) -> None:
     parser.add_argument("--engagement-key", "-k", required=True)
     commands = parser.add_subparsers(dest="remediation_command", required=True)
 
-    intake = commands.add_parser("import", help="Import a Jira issue or bounty report snapshot")
+    intake = commands.add_parser(
+        "import", help="Import a Jira issue or bounty report snapshot",
+        description="Import a prepared local JSON snapshot and attachments. This command does not fetch Jira or bounty data. Resume a partial import with --resume-case-id.",
+    )
     intake.add_argument("--source", choices=("jira", "bounty"), required=True)
     intake.add_argument("--source-key", required=True)
     intake.add_argument("--title", required=True)
@@ -40,12 +45,15 @@ def register_remediation_parser(sub: argparse._SubParsersAction) -> None:
     show = commands.add_parser("show", help="Show case and review state")
     show.add_argument("case_id")
 
-    worktree = commands.add_parser("worktree", help="Create a dedicated Git worktree for a case")
+    worktree = commands.add_parser("worktree", help="Create a dedicated JJ workspace or Git worktree for a case")
     worktree.add_argument("case_id")
     worktree.add_argument("--base", default="main")
     worktree.add_argument("--branch")
 
-    sync_revision = commands.add_parser("sync-revision", help="Record the clean case worktree HEAD after committing the fix")
+    sync_revision = commands.add_parser(
+        "sync-revision", help="Record the immutable case revision after committing the fix",
+        description="Record the revision before green-test evidence, browser verification, or review. Requires a registered case workspace/bookmark or Git worktree/branch. Git must be clean; JJ snapshots edits and rejects conflicts. A content change makes approval stale.",
+    )
     sync_revision.add_argument("case_id")
 
     runtime = commands.add_parser("runtime-identity", help="Inspect which worktree or image revision Compose containers serve")
@@ -66,7 +74,10 @@ def register_remediation_parser(sub: argparse._SubParsersAction) -> None:
     evidence.add_argument("--revision")
     evidence.add_argument("--outcome", choices=("failed_as_expected", "passed"), help="Typed red/green test outcome")
 
-    baseline = commands.add_parser("baseline", help="Record runtime reproduction or code/test support and owner decision")
+    baseline = commands.add_parser(
+        "baseline", help="Record runtime reproduction or code/test support and owner decision",
+        description="Record the case's reproduction decision. Record individual runs separately with evidence --kind baseline. Code/test confirmation without runtime reproduction requires an explicit owner decision.",
+    )
     baseline.add_argument("case_id")
     baseline.add_argument("--outcome", choices=("runtime_reproduced", "code_test_confirmed", "unreproduced"), required=True)
     baseline.add_argument("--method", required=True)
@@ -114,7 +125,10 @@ def register_remediation_parser(sub: argparse._SubParsersAction) -> None:
     human.add_argument("--observed-revision", required=True)
     human.add_argument("--notes", required=True)
 
-    stagehand = commands.add_parser("stagehand", help="Run a trusted local Stagehand script and register evidence")
+    stagehand = commands.add_parser(
+        "stagehand", help="Run a trusted local Stagehand script and register evidence",
+        description="Attach to configured local Chrome and run a trusted script. Stagehand uses a separate model API key from the configured environment variable; a Claude Code subscription does not authenticate this SDK. Happy-path evidence requires passing steps and a screenshot.",
+    )
     stagehand.add_argument("case_id")
     stagehand.add_argument("--script", required=True, type=Path)
     stagehand.add_argument("--revision", required=True)
@@ -123,19 +137,41 @@ def register_remediation_parser(sub: argparse._SubParsersAction) -> None:
     stagehand.add_argument("--production-decision", help="Case owner decision for production Stagehand use")
     stagehand.add_argument("--production-evidence-policy", choices=("retain-screenshots", "no-screenshots"), help="Case-specific production screenshot retention decision")
 
-    draft = commands.add_parser("prepare-pr", help="Generate draft PR content after review approval")
+    browser = commands.add_parser(
+        "browser", help="Run a trusted browser UI rehearsal and retain evidence",
+        description="Default browse driver uses the existing Claude Code or Codex session for reasoning, with an isolated local browser and no separate model API key. Install browse@0.11.1. Script must expose async def run(browser, output_dir); passed happy-path results require observed steps, a screenshot, and served_revision matching --revision. Stagehand is optional and requires its own configured provider key.",
+    )
+    browser.add_argument("case_id")
+    browser.add_argument("--driver", choices=("browse", "stagehand"), default="browse", help="browse (default): local tools; stagehand: optional model SDK")
+    browser.add_argument("--script", required=True, type=Path)
+    browser.add_argument("--revision", required=True)
+    browser.add_argument("--environment", choices=("local", "development", "test", "production"), default="local")
+    browser.add_argument("--purpose", choices=("happy-path", "bad-path", "other"), required=True)
+    browser.add_argument("--production-decision")
+    browser.add_argument("--production-evidence-policy", choices=("retain-screenshots", "no-screenshots"))
+
+    draft = commands.add_parser(
+        "prepare-pr", help="Generate draft PR content after review approval",
+        description="Requires current approval of the clean case revision, evidence, and human verification plan. Generate the body, then map it to the repository's PR template before create-pr.",
+    )
     draft.add_argument("case_id")
     draft.add_argument("--output", required=True, type=Path)
     draft.add_argument("--root-cause", required=True, help="Concrete root cause found in the reviewed diff")
     draft.add_argument("--fix-summary", required=True, help="Concrete code change and security boundary restored")
 
-    create_pr = commands.add_parser("create-pr", help="Push approved branch and open draft PR against main")
+    create_pr = commands.add_parser(
+        "create-pr", help="Push approved branch and open draft PR against main",
+        description="Requires current approval, a template-mapped body, a final canary decision, origin remote, and authenticated gh. Push the exact approved case bookmark with JJ when .jj exists, otherwise the Git branch; open a draft against main. Retry with the same body to reconcile an existing draft after a partial failure.",
+    )
     create_pr.add_argument("case_id")
     create_pr.add_argument("--body-file", required=True, type=Path, help="Final body mapped to the repository PR template")
     create_pr.add_argument("--actor", required=True)
     create_pr.add_argument("--template-mapped", action="store_true", help="Assert final body maps required content to the actual repository PR template")
 
-    handoff = commands.add_parser("development-handoff", help="Prepare manual GitHub Actions development deployment")
+    handoff = commands.add_parser(
+        "development-handoff", help="Prepare manual GitHub Actions development deployment",
+        description="Record the development handoff and print its expected revision and configured deployment_workflow. A human triggers the actual GitHub Actions workflow; this command does not deploy.",
+    )
     handoff.add_argument("case_id")
     handoff.add_argument("--actor", required=True)
 
@@ -145,7 +181,12 @@ def _project(install_root: Path, key: str) -> tuple[Path, dict[str, object]]:
     scope = json.loads((path / "scope.json").read_text(encoding="utf-8"))
     if scope.get("engagement_type") != "remediation":
         raise SystemExit(f"{key} is not a remediation engagement")
-    config = json.loads((path / "remediation-project.json").read_text(encoding="utf-8"))
+    from .project_config import project_module
+
+    try:
+        config = project_module(install_root).load_engagement_project(path)
+    except (OSError, ValueError) as exc:
+        raise SystemExit(f"cannot read remediation PROJECT.md: {exc}") from exc
     return path, config
 
 
@@ -179,43 +220,21 @@ def _case(install_root: Path, eng_dir: Path, key: str, case_id: str) -> dict:
 
 
 def _revision(path: Path) -> str:
-    process = subprocess.run(["git", "-C", str(path), "rev-parse", "HEAD"], text=True, capture_output=True)
-    if process.returncode:
-        raise SystemExit(process.stderr.strip() or "cannot read worktree revision")
-    return process.stdout.strip()
+    try:
+        return _vcs().revision(path)
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        raise SystemExit(f"cannot read worktree revision: {error}") from None
 
 
 def _worktree_status(path: Path) -> str:
-    process = subprocess.run(["git", "-C", str(path), "status", "--porcelain", "--untracked-files=all"], text=True, capture_output=True)
-    if process.returncode:
-        raise SystemExit(process.stderr.strip() or "cannot read worktree status")
-    return process.stdout.strip()
+    try:
+        return _vcs().status(path)
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        raise SystemExit(f"cannot read worktree status: {error}") from None
 
 
 def _is_registered_worktree(repo: Path, path: Path) -> bool:
-    def git_path(directory: Path, argument: str) -> Path | None:
-        process = subprocess.run(
-            ["git", "-C", str(directory), "rev-parse", "--path-format=absolute", argument],
-            text=True, capture_output=True,
-        )
-        return Path(process.stdout.strip()).resolve() if process.returncode == 0 and process.stdout.strip() else None
-
-    if path.is_symlink() or git_path(path, "--show-toplevel") != path.resolve():
-        return False
-    common_dir = git_path(repo, "--git-common-dir")
-    if common_dir is None or git_path(path, "--git-common-dir") != common_dir:
-        return False
-    listed = subprocess.run(
-        ["git", "-C", str(repo), "worktree", "list", "--porcelain", "-z"],
-        text=True, capture_output=True,
-    )
-    if listed.returncode:
-        return False
-    return any(
-        Path(os.path.abspath(entry.removeprefix("worktree "))) == Path(os.path.abspath(path))
-        for entry in listed.stdout.split("\0")
-        if entry.startswith("worktree ")
-    )
+    return _vcs().registered(repo, path)
 
 
 def inspect_compose_identity(
@@ -326,10 +345,7 @@ def _require_case_worktree(case: dict, repo: Path) -> Path:
     branch = str(case.get("worktree_branch") or "")
     if not branch:
         raise SystemExit("case has no recorded worktree branch; register the case worktree before continuing")
-    current = subprocess.run(
-        ["git", "-C", str(path), "branch", "--show-current"], text=True, capture_output=True,
-    )
-    if current.returncode or current.stdout.strip() != branch:
+    if not _vcs().branch_matches(path, branch):
         raise SystemExit(f"case worktree branch differs from recorded branch {branch}; restore it before continuing")
     return path
 
@@ -356,10 +372,21 @@ def _approved_digest(case: dict) -> str:
     return digest
 
 
-def _existing_draft_pr(worktree: Path, branch: str, body: str) -> str | None:
+def _github_repository(worktree: Path) -> str | None:
+    adapter = _vcs()
+    if not adapter.is_jj(worktree):
+        return None
+    try:
+        return adapter.github_repository(worktree)
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        raise SystemExit(f"cannot resolve GitHub repository from JJ origin: {error}") from None
+
+
+def _existing_draft_pr(worktree: Path, branch: str, body: str, *, repository: str | None = None) -> str | None:
+    repository = repository or _github_repository(worktree)
     listed = subprocess.run(
         ["gh", "pr", "list", "--head", branch, "--base", "main", "--state", "all",
-         "--json", "url,state,isDraft,headRefName,baseRefName,headRefOid,body"],
+         "--json", "url,state,isDraft,headRefName,baseRefName,headRefOid,body", *(["--repo", repository] if repository else [])],
         cwd=worktree, text=True, capture_output=True,
     )
     if listed.returncode:
@@ -403,11 +430,12 @@ def _required_reviewed_evidence_lines(case: dict) -> list[str]:
     approvals = case.get("approvals") or []
     cutoff = int(approvals[-1].get("evidence_cutoff_id") or 0) if approvals else 0
     evidence = [row for row in case.get("evidence") or [] if isinstance(row, dict) and int(row.get("id") or 0) <= cutoff]
-    required = {"red-test", "green-test", "stagehand"}
-    if not required.issubset({str(row.get("kind")) for row in evidence}):
-        raise SystemExit("reviewed red/green Laravel and Stagehand evidence are required in PR content")
+    required = {"red-test", "green-test"}
+    kinds = {str(row.get("kind")) for row in evidence}
+    if not required.issubset(kinds) or not kinds.intersection({"stagehand", "browse"}):
+        raise SystemExit("reviewed red/green Laravel and browser evidence are required in PR content")
     lines = _reviewed_evidence_lines(case)
-    return [line for line, row in zip(lines, evidence) if row.get("kind") in required]
+    return [line for line, row in zip(lines, evidence) if row.get("kind") in required | {"stagehand", "browse"}]
 
 
 def _register_pr_body(
@@ -455,18 +483,18 @@ def validate_stagehand_result(result: dict, output: Path, purpose: str) -> None:
     if purpose != "happy-path":
         return
     if result.get("status") != "passed":
-        raise SystemExit("happy-path Stagehand result requires explicit passed status")
+        raise SystemExit("happy-path browser result requires explicit passed status")
     if not str(result.get("observed") or "").strip() or not str(result.get("proved") or "").strip():
-        raise SystemExit("happy-path Stagehand result requires observed and proved claims")
+        raise SystemExit("happy-path browser result requires observed and proved claims")
     steps = result.get("steps")
     if not isinstance(steps, list) or not steps or not all(
         isinstance(step, dict) and str(step.get("action") or "").strip() and str(step.get("observation") or "").strip()
         for step in steps
     ):
-        raise SystemExit("happy-path Stagehand result requires structured observed UI steps (action and observation)")
+        raise SystemExit("happy-path browser result requires structured observed UI steps (action and observation)")
     screenshots = [path for path in output.iterdir() if path.is_file() and path.suffix.lower() in {".png", ".jpg", ".jpeg"}]
     if not screenshots or not any(_valid_screenshot(path) for path in screenshots):
-        raise SystemExit("happy-path Stagehand result requires at least one nonempty valid screenshot")
+        raise SystemExit("happy-path browser result requires at least one nonempty valid screenshot")
 
 
 def _valid_screenshot(path: Path) -> bool:
@@ -487,9 +515,9 @@ def validate_production_stagehand_policy(args: argparse.Namespace, output: Path 
     if args.environment != "production":
         return
     if not args.production_decision or not args.production_decision.strip():
-        raise SystemExit("production Stagehand requires a case-specific human decision")
+        raise SystemExit("production browser requires a case-specific human decision")
     if not args.production_evidence_policy:
-        raise SystemExit("production Stagehand requires a case-specific evidence policy")
+        raise SystemExit("production browser requires a case-specific evidence policy")
     if args.purpose == "happy-path" and args.production_evidence_policy == "no-screenshots":
         raise SystemExit("happy-path evidence requires a screenshot; choose retain-screenshots or run locally")
     if output is not None and args.production_evidence_policy == "no-screenshots" and any(
@@ -524,32 +552,38 @@ async def _execute_stagehand(script: Path, output: Path, config: dict[str, objec
 
 
 def _run_stagehand(install_root: Path, eng_dir: Path, key: str, args: argparse.Namespace, config: dict[str, object]) -> object:
-    validate_stagehand_config(config, dict(os.environ))
+    driver = getattr(args, "driver", "stagehand")
+    if driver == "stagehand":
+        validate_stagehand_config(config, dict(os.environ))
     validate_production_stagehand_policy(args)
     case_id = args.case_id
     _case_path(case_id)
     case = _case(install_root, eng_dir, key, case_id)
     if case.get("status") == "closed":
-        raise SystemExit("closed remediation cases cannot accept Stagehand evidence")
+        raise SystemExit("closed remediation cases cannot accept browser evidence")
     script = args.script.expanduser().resolve(strict=True)
     if not script.is_file() or script.suffix != ".py":
         raise SystemExit("--script must name a Python file")
-    output = eng_dir / "remediation" / "cases" / case_id / "stagehand" / uuid.uuid4().hex
+    output = eng_dir / "remediation" / "cases" / case_id / driver / uuid.uuid4().hex
     output.mkdir(parents=True)
     stored_script = output / "script.py"
     shutil.copy2(script, stored_script)
     result: dict
     try:
-        result = asyncio.run(_execute_stagehand(stored_script, output, config))
+        execute = _execute_browse if driver == "browse" else _execute_stagehand
+        result = asyncio.run(execute(stored_script, output, config))
+        if driver == "browse" and result.get("served_revision") != args.revision:
+            raise SystemExit("browse result must identify the served revision matching --revision")
         validate_stagehand_result(result, output, args.purpose)
         validate_production_stagehand_policy(args, output)
+        result["driver"] = driver
         result["purpose"] = args.purpose
         result["environment"] = args.environment
         if args.production_decision:
             result["production_decision"] = args.production_decision
             result["production_evidence_policy"] = args.production_evidence_policy
     except BaseException as exc:
-        result = {"status": "failed", "error": str(exc), "purpose": args.purpose, "environment": args.environment}
+        result = {"status": "failed", "error": str(exc), "purpose": args.purpose, "environment": args.environment, "driver": driver}
         if args.production_decision:
             result["production_decision"] = args.production_decision
             result["production_evidence_policy"] = args.production_evidence_policy
@@ -562,15 +596,16 @@ def _run_stagehand(install_root: Path, eng_dir: Path, key: str, args: argparse.N
 
 def _register_stagehand_files(install_root: Path, eng_dir: Path, key: str, case_id: str, output: Path, revision: str, result: dict) -> list[object]:
     registered = []
+    driver = str(result.get("driver") or "stagehand")
     for file in sorted(output.iterdir()):
         if not file.is_file():
             continue
-        kind = "screenshot" if file.suffix.lower() in {".png", ".jpg", ".jpeg"} else "stagehand"
+        kind = "screenshot" if file.suffix.lower() in {".png", ".jpg", ".jpeg"} else driver
         registered.append(_api(install_root, eng_dir, key, "POST", _case_path(case_id) + "/evidence", {
             "kind": kind,
-            "method": "stagehand",
+            "method": driver,
             "environment": str(result["environment"]),
-            "command": "trusted script run via local Chrome CDP",
+            "command": "trusted script run via local browse CLI" if driver == "browse" else "trusted script run via local Chrome CDP",
             "observed": str(result.get("observed") or result.get("status") or ""),
             "proved": str(result.get("proved") or "See recorded run result; no broader claim"),
             "artifact_path": str(file.relative_to(eng_dir)),
@@ -585,6 +620,11 @@ def _register_intake_files(
 ) -> None:
     case_id = str(result["id"])
     intake_dir = eng_dir / "remediation" / "cases" / case_id / "source"
+    for directory in (intake_dir, *intake_dir.parents):
+        if directory == eng_dir:
+            break
+        if directory.is_symlink():
+            raise SystemExit(f"case intake directory is a symlink: {directory}")
     intake_dir.mkdir(parents=True, exist_ok=True)
     files = [source_file, *attachments]
     existing_evidence = {
@@ -592,6 +632,8 @@ def _register_intake_files(
     }
     for index, source in enumerate(files):
         stored = intake_dir / ("snapshot.json" if index == 0 else f"{index}-{source.name}")
+        if stored.is_symlink():
+            raise SystemExit(f"case intake artifact is a symlink: {stored}")
         if stored.exists() and stored.read_bytes() != source.read_bytes():
             raise SystemExit(f"resume file differs from existing case artifact: {stored}")
         shutil.copy2(source, stored)
@@ -618,8 +660,11 @@ def run_remediation(args: argparse.Namespace, install_root: Path) -> None:
     if cmd == "import":
         if bool(args.finding) != bool(args.finding_engagement):
             raise SystemExit("--finding and --finding-engagement must be supplied together")
-        source_file = args.snapshot_file.expanduser().resolve(strict=True)
-        snapshot = json.loads(source_file.read_text(encoding="utf-8"))
+        try:
+            source_file = args.snapshot_file.expanduser().resolve(strict=True)
+            snapshot = json.loads(source_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise SystemExit(f"cannot read --snapshot-file {args.snapshot_file}: {exc}") from exc
         if not isinstance(snapshot, dict):
             raise SystemExit("snapshot must be a JSON object containing the report and attachments")
         attachments = snapshot.get("attachments")
@@ -672,15 +717,15 @@ def run_remediation(args: argparse.Namespace, install_root: Path) -> None:
         if path.exists():
             if not path.is_dir():
                 raise SystemExit(f"existing case worktree path is not a directory: {path}")
-            actual_branch = subprocess.run(["git", "-C", str(path), "branch", "--show-current"], text=True, capture_output=True)
-            if actual_branch.returncode or actual_branch.stdout.strip() != branch:
+            if not _vcs().branch_matches(path, branch):
                 raise SystemExit("existing case worktree branch differs from requested branch; inspect before retry")
             if not _is_registered_worktree(repo, path):
                 raise SystemExit("existing case worktree is not registered to the configured repository; inspect before retry")
         else:
-            process = subprocess.run(["git", "-C", str(repo), "worktree", "add", "-b", branch, str(path), args.base], text=True, capture_output=True)
-            if process.returncode:
-                raise SystemExit(process.stderr.strip() or "worktree creation failed")
+            try:
+                _vcs().create_workspace(repo, path, branch, args.base)
+            except (OSError, ValueError, subprocess.SubprocessError) as error:
+                raise SystemExit(f"worktree creation failed: {error}") from None
         result = _api(install_root, eng_dir, key, "PATCH", endpoint, {
             "worktree_path": str(path), "worktree_branch": branch, "worktree_revision": _revision(path),
         })
@@ -779,7 +824,7 @@ def run_remediation(args: argparse.Namespace, install_root: Path) -> None:
             "actor": args.actor, "result": args.result,
             "observed_revision": args.observed_revision, "notes": args.notes,
         })
-    elif cmd == "stagehand":
+    elif cmd in {"stagehand", "browser"}:
         result = _run_stagehand(install_root, eng_dir, key, args, config)
     elif cmd == "prepare-pr":
         case = _case(install_root, eng_dir, key, case_id)
@@ -829,8 +874,9 @@ def run_remediation(args: argparse.Namespace, install_root: Path) -> None:
         branch = str(case["worktree_branch"])
         if branch == "main":
             raise SystemExit("case worktree must be on a dedicated branch")
+        github_repository = _github_repository(worktree)
         retained_final = _register_pr_body(install_root, eng_dir, key, case_id, case, body, "final")
-        url = _existing_draft_pr(worktree, branch, body)
+        url = _existing_draft_pr(worktree, branch, body, repository=github_repository)
         if case.get("status") == "pr_draft":
             if not url:
                 raise SystemExit("case claims draft PR state, but no open draft PR exists for its branch")
@@ -838,15 +884,16 @@ def run_remediation(args: argparse.Namespace, install_root: Path) -> None:
         else:
             if not url:
                 _approved_current(case, repo)
-                push = subprocess.run(["git", "-C", str(worktree), "push", "-u", "origin", branch], text=True, capture_output=True)
-                if push.returncode:
-                    raise SystemExit(push.stderr.strip() or "branch push failed")
+                try:
+                    _vcs().push(worktree, branch, str(case["worktree_revision"]))
+                except (OSError, ValueError, subprocess.SubprocessError) as error:
+                    raise SystemExit(f"branch push failed: {error}") from None
                 opened = subprocess.run([
                     "gh", "pr", "create", "--draft", "--base", "main", "--head", branch,
                     "--title", str(case.get("title") or f"Remediate case {case_id}"),
-                    "--body-file", str(body_file),
+                    "--body-file", str(body_file), *(["--repo", github_repository] if github_repository else []),
                 ], cwd=worktree, text=True, capture_output=True)
-                url = _existing_draft_pr(worktree, branch, body)
+                url = _existing_draft_pr(worktree, branch, body, repository=github_repository)
                 if not url:
                     raise SystemExit(opened.stderr.strip() or "draft PR head revision could not be confirmed; retry create-pr after checking the remote branch")
                 if opened.returncode == 0 and opened.stdout.strip() != url:

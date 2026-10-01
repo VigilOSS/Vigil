@@ -912,7 +912,7 @@ def _variant_receipt_payload(
 
 def _bind_structural_identity(payload: dict[str, object]) -> dict[str, object]:
     bound = json.loads(json.dumps(payload))
-    bound.setdefault("structural_index_schema", "structural-index/v6")
+    bound.setdefault("structural_index_schema", CLI_STRUCTURAL_INDEX_SCHEMA)
     repo_id = int(bound["repo_id"])
     with db_module.get_connection() as connection:
         current_files = [
@@ -3783,7 +3783,7 @@ def test_language_change_advances_generation_and_clears_derived_bindings(
     assert noop_commit.status_code == 200, noop_commit.text
     assert noop_commit.json()["generation_changed"] is False
     after_noop = client.get(f"{base}/repos/{repo['id']}").json()
-    assert after_noop["structural_index_schema"] == "structural-index/v6"
+    assert after_noop["structural_index_schema"] == CLI_STRUCTURAL_INDEX_SCHEMA
     assert after_noop["structural_index_generation"] == binding["active_generation"]
     assert after_noop["structural_index_manifest_path"].endswith("manifest.json")
     assert after_noop["lsp_config"]["ctags"]["tags_path"] == "old-generation/tags"
@@ -9940,7 +9940,7 @@ def test_structural_index_update_is_all_or_none_snapshot_cas(client, isolate_set
         "repo_id": repo["id"],
         "repo_generation": binding["active_generation"],
         "source_manifest_digest": binding["source_manifest_digest"],
-        "structural_index_schema": "structural-index/v6",
+        "structural_index_schema": CLI_STRUCTURAL_INDEX_SCHEMA,
         "structural_input_digest": payload["structural_input_digest"],
         "structural_index_manifest_path": "tools/analysis-state/structural-index/manifest.json",
         "degraded_files": 0,
@@ -9953,7 +9953,7 @@ def test_structural_index_update_is_all_or_none_snapshot_cas(client, isolate_set
             "updated": 2,
     }
     indexed = client.get(f"{base}/repos/{repo['id']}").json()
-    assert indexed["structural_index_schema"] == "structural-index/v6"
+    assert indexed["structural_index_schema"] == CLI_STRUCTURAL_INDEX_SCHEMA
     assert indexed["structural_index_generation"] == binding["active_generation"]
     assert indexed["structural_index_manifest_path"].endswith("manifest.json")
 
@@ -10064,7 +10064,7 @@ def test_structural_publication_rejects_payload_from_prior_file_language_identit
 
 def test_structural_input_digest_matches_cli_known_vector():
     assert code_analysis.STRUCTURAL_INDEX_SCHEMA == CLI_STRUCTURAL_INDEX_SCHEMA
-    assert code_analysis.STRUCTURAL_INDEX_SCHEMA == "structural-index/v6"
+    assert code_analysis.STRUCTURAL_INDEX_SCHEMA == "structural-index/v7"
     source_manifest_digest = "ab" * 32
     files = [
         {
@@ -10645,7 +10645,7 @@ def test_degraded_structural_metadata_is_durable_and_requires_manual_review(
     assert published.json()["degraded_files"] == 1
 
     persisted_repo = client.get(f"{base}/repos/{repo['id']}").json()
-    assert persisted_repo["structural_index_schema"] == "structural-index/v6"
+    assert persisted_repo["structural_index_schema"] == CLI_STRUCTURAL_INDEX_SCHEMA
     assert persisted_repo["structural_degraded_files"] == 1
     assert persisted_repo["structural_degraded_file_paths"] == ["src/helpers.py"]
     assert persisted_repo["structural_analysis_status_counts"] == {

@@ -395,16 +395,18 @@ def test_dispatch_instruction_identity_rejects_role_path_components(
     assert any("role is not a safe basename" in warning for warning in warnings)
 
 
+@pytest.mark.parametrize("client", ["kimi", "pi"])
 def test_dispatch_instruction_identity_retains_known_client_without_specialist_wrapper(
     tmp_path: Path,
     monkeypatch,
+    client: str,
 ) -> None:
     source_root, agent_root, engagement_dir = _fixture_tree(tmp_path)
     operator_bytes = b"operator\n"
     (agent_root / "AGENTS.md").write_bytes(operator_bytes)
     (source_root / "agent" / "AGENTS.md").write_bytes(operator_bytes)
     (engagement_dir / "scope.json").write_text("{}", encoding="utf-8")
-    monkeypatch.setenv("VIGIL_CLIENT_NAME", "kimi")
+    monkeypatch.setenv("VIGIL_CLIENT_NAME", client)
 
     identity, warnings = build_dispatch_instruction_identity(
         agent_root=agent_root,
@@ -412,7 +414,7 @@ def test_dispatch_instruction_identity_retains_known_client_without_specialist_w
         agent_role="recon-specialist",
     )
 
-    assert identity["client_name"] == "kimi"
+    assert identity["client_name"] == client
     assert identity["operator_instruction_sha256"] == _sha256(operator_bytes)
     assert identity["specialist_instruction_path"] is None
     assert identity["instruction_identity_status"] == "incomplete"

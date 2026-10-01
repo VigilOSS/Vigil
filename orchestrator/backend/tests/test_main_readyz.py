@@ -144,7 +144,7 @@ def test_readyz_exposes_both_startup_and_current_input_digests(client) -> None:
     runtime = client.get("/readyz").json()["backend_runtime"]
     assert len(runtime["startup_inputs_sha256"]) == 64
     assert len(runtime["current_inputs_sha256"]) == 64
-    assert runtime["startup_inputs_sha256"] == runtime["current_inputs_sha256"]
+    assert runtime["startup_inputs_sha256"] == runtime["current_inputs_sha256"], runtime.get("changed_inputs")
     assert runtime["install_root"]
 
 

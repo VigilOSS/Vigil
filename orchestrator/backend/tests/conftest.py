@@ -266,3 +266,17 @@ def _isolate_vigil_config(tmp_path, monkeypatch):
     manage ``$ENGAGEMENT_DIR`` or ``$VIGIL_CONFIG`` themselves via monkeypatch
     still override this cleanly (later setenv wins, LIFO teardown restores)."""
     monkeypatch.setenv("VIGIL_CONFIG", str(tmp_path / "vigil-config.json"))
+
+
+@pytest.fixture(autouse=True)
+def _isolate_assess_import_cache():
+    """CLI tests reload assess modules; backend imports must survive their teardown."""
+    saved = {
+        name: module for name, module in list(sys.modules.items())
+        if name == "assess" or name.startswith("assess.")
+    }
+    yield
+    for name in list(sys.modules):
+        if name == "assess" or name.startswith("assess."):
+            sys.modules.pop(name, None)
+    sys.modules.update(saved)

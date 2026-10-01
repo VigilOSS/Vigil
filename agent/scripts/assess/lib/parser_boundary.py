@@ -1,17 +1,19 @@
 """Parent-owned process boundary for structural source parsers."""
 from __future__ import annotations
 
+import codecs
 import hashlib
 import json
 import math
 import os
+import re
 import selectors
 import signal
 import subprocess
 import sys
 import tempfile
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -50,37 +52,45 @@ def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
+def _source_chunks(
+    source: bytes, cancellation_requested: Callable[[], bool] | None,
+) -> Iterator[bytes]:
+    for offset in range(0, len(source), STREAMING_SCAN_WINDOW_BYTES):
+        if cancellation_requested is not None and cancellation_requested():
+            raise ParserBoundaryCancelled("structural parser cancelled")
+        yield source[offset : offset + STREAMING_SCAN_WINDOW_BYTES]
+
+
 def _fallback(
     file_path: str,
     language: str,
     source: bytes,
     *,
     reason: str,
+    cancellation_requested: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
     return streaming_security_fallback(
         file_path,
         language,
-        (
-            source[offset : offset + STREAMING_SCAN_WINDOW_BYTES]
-            for offset in range(0, len(source), STREAMING_SCAN_WINDOW_BYTES)
-        ),
+        _source_chunks(source, cancellation_requested),
         degradation_reason=reason,
     )
 
 
-def _has_giant_line(source: bytes, *, max_line_bytes: int) -> bool:
+def _has_giant_line(
+    source: bytes, *, max_line_bytes: int,
+    cancellation_requested: Callable[[], bool] | None = None,
+) -> bool:
     if len(source) <= max_line_bytes:
         return False
-    start = 0
-    source_size = len(source)
-    while start < source_size:
-        newline = source.find(b"\n", start)
-        carriage = source.find(b"\r", start)
-        boundaries = [value for value in (newline, carriage) if value >= 0]
-        end = min(boundaries) if boundaries else source_size
-        if end - start > max_line_bytes:
+    line_bytes = 0
+    for chunk in _source_chunks(source, cancellation_requested):
+        # Bounded chunks avoid rescanning the remaining suffix for an absent CR/LF.
+        lengths = [len(line) for line in re.split(rb"[\r\n]+", chunk)]
+        lengths[0] += line_bytes
+        if max(lengths) > max_line_bytes:
             return True
-        start = end + 1
+        line_bytes = lengths[-1]
     return False
 
 
@@ -289,18 +299,27 @@ def index_file(
     if cancellation_requested is not None and cancellation_requested():
         raise ParserBoundaryCancelled("structural parser cancelled")
     try:
-        source.decode("utf-8", errors="strict")
+        decoder = codecs.getincrementaldecoder("utf-8")("strict")
+        for chunk in _source_chunks(source, cancellation_requested):
+            decoder.decode(chunk)
+        decoder.decode(b"", final=True)
     except UnicodeDecodeError:
         return _fallback(
-            file_path, language, source, reason="invalid_utf8_source"
+            file_path, language, source, reason="invalid_utf8_source",
+            cancellation_requested=cancellation_requested,
         )
     if len(source) > DEFAULT_MAX_EXACT_SOURCE_BYTES:
         return _fallback(
-            file_path, language, source, reason="exact_parser_source_limit"
+            file_path, language, source, reason="exact_parser_source_limit",
+            cancellation_requested=cancellation_requested,
         )
-    if _has_giant_line(source, max_line_bytes=DEFAULT_MAX_LINE_BYTES):
+    if _has_giant_line(
+        source, max_line_bytes=DEFAULT_MAX_LINE_BYTES,
+        cancellation_requested=cancellation_requested,
+    ):
         return _fallback(
-            file_path, language, source, reason="giant_line_resource_limit"
+            file_path, language, source, reason="giant_line_resource_limit",
+            cancellation_requested=cancellation_requested,
         )
 
     with tempfile.TemporaryDirectory(prefix="vigil-structural-parser-") as temporary:
@@ -345,7 +364,8 @@ def index_file(
             )
         except OSError:
             return _fallback(
-                file_path, language, source, reason="parser_worker_launch_error"
+                file_path, language, source, reason="parser_worker_launch_error",
+                cancellation_requested=cancellation_requested,
             )
         output, _diagnostics, failure = _collect_worker_output(
             process,
@@ -372,4 +392,5 @@ def index_file(
             language,
             source,
             reason=failure or "parser_worker_malformed_output",
+            cancellation_requested=cancellation_requested,
         )

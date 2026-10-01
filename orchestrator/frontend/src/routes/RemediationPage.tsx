@@ -60,24 +60,28 @@ function RemediationWorkspace({ engagementKey, onBack, initialCaseId }: Props) {
   const [diffError, setDiffError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [listError, setListError] = useState<string | null>(null);
+  const [caseError, setCaseError] = useState<string | null>(null);
+  const [listAttempt, setListAttempt] = useState(0);
+  const [caseAttempt, setCaseAttempt] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
   useEffect(() => {
     let active = true;
     setLoading(true);
+    setListError(null);
     listRemediationCases(engagementKey).then((next) => {
       if (!active) return;
       setCases(next);
       setSelectedId((current) => current ?? next[0]?.id ?? null);
-      setError(null);
     }).catch((failure: unknown) => {
-      if (active) setError(failure instanceof Error ? failure.message : "Could not load cases");
+      if (active) setListError(failure instanceof Error ? failure.message : "Could not load cases");
     }).finally(() => {
       if (active) setLoading(false);
     });
     return () => { active = false; };
-  }, [engagementKey]);
+  }, [engagementKey, listAttempt]);
 
   useEffect(() => {
     if (selectedId == null) {
@@ -85,6 +89,7 @@ function RemediationWorkspace({ engagementKey, onBack, initialCaseId }: Props) {
       return;
     }
     let active = true;
+    setCaseError(null);
     setDiff(null);
     setDiffError(null);
     getRemediationCase(engagementKey, selectedId).then((next) => {
@@ -93,9 +98,8 @@ function RemediationWorkspace({ engagementKey, onBack, initialCaseId }: Props) {
       setPlan(next.verification_plan || "");
       setBaseline(next.baseline || {});
       setReleasePlan(next.release_plan || {});
-      setError(null);
     }).catch((failure: unknown) => {
-      if (active) setError(failure instanceof Error ? failure.message : "Could not load case");
+      if (active) setCaseError(failure instanceof Error ? failure.message : "Could not load case");
     });
     getRemediationDiff(engagementKey, selectedId).then((next) => {
       if (active) setDiff(next);
@@ -103,7 +107,7 @@ function RemediationWorkspace({ engagementKey, onBack, initialCaseId }: Props) {
       if (active) setDiffError(failure instanceof Error ? failure.message : "Could not load code diff");
     });
     return () => { active = false; };
-  }, [engagementKey, selectedId]);
+  }, [engagementKey, selectedId, caseAttempt]);
 
   function chooseCase(caseId: number) {
     setSelectedId(caseId);
@@ -285,7 +289,7 @@ function RemediationWorkspace({ engagementKey, onBack, initialCaseId }: Props) {
       <div className="remediation-layout">
         <aside className="remediation-queue" aria-label="Case queue">
           <div className="remediation-section-heading"><h2>Cases</h2><span>{cases.length}</span></div>
-          {loading ? <p>Loading cases…</p> : cases.length === 0 ? <p>No remediation cases imported yet.</p> : (
+          {loading ? <p>Loading cases…</p> : listError ? <><p role="alert">{listError}</p><button type="button" onClick={() => setListAttempt((attempt) => attempt + 1)}>Retry loading cases</button></> : cases.length === 0 ? <p>No remediation cases imported yet.</p> : (
             <ul>
               {cases.map((item) => (
                 <li key={item.id}>
@@ -302,7 +306,7 @@ function RemediationWorkspace({ engagementKey, onBack, initialCaseId }: Props) {
         </aside>
 
         <main className="remediation-workspace">
-          {!selected ? (selectedId == null ? <p>Select a case to begin.</p> : <p>Loading case…</p>) : (
+          {!selected ? (caseError ? <><p role="alert">{caseError}</p><button type="button" onClick={() => setCaseAttempt((attempt) => attempt + 1)}>Retry loading case</button></> : selectedId == null ? <p>Select a case to begin.</p> : <p>Loading case…</p>) : (
             <>
               <div className="remediation-title-row">
                 <div><p className="remediation-eyebrow">{selected.source_type} · {selected.source_key}</p><h2>{selected.title}</h2></div>

@@ -412,3 +412,18 @@ def test_a_database_that_already_fanned_out_is_collapsed_on_startup(
     listed = client.get(f"{BASE}/dispatches").json()
     assert [entry["agent_id"] for entry in listed] == ["code-hunter-3"]
     assert listed[0]["client_binding"]["asserted_client_handle"] == "conv_race"
+
+
+def test_pi_dispatch_identity_and_client_binding(client, isolate_settings) -> None:
+    _seed(client, isolate_settings["engagements_dir"])
+    response = client.post(f"{BASE}/dispatches", json={
+        "agent_id": "pi-operator", "agent_role": "operator",
+        "client_name": "pi", "requested_client": "pi", "launcher_effective_client": "pi",
+    })
+    assert response.status_code == 201, response.text
+    assert response.json()["client_name"] == "pi"
+    binding = _bind(client, "pi-operator", asserted_client="pi")
+    assert binding.status_code == 201, binding.text
+    row = client.get(f"{BASE}/dispatches/pi-operator").json()
+    assert row["requested_client"] == row["launcher_effective_client"] == "pi"
+    assert row["client_binding"]["asserted_client"] == "pi"

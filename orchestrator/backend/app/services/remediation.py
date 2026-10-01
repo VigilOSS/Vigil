@@ -7,6 +7,7 @@ import os
 import select
 import stat
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Any, BinaryIO
@@ -15,6 +16,12 @@ from fastapi import HTTPException
 
 from .. import db
 from .engagements import get_engagement_or_404
+
+_AGENT_SCRIPTS = Path(__file__).resolve().parents[4] / "agent" / "scripts"
+if str(_AGENT_SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(_AGENT_SCRIPTS))
+from assess.lib import remediation_vcs as _vcs  # noqa: E402
+from assess.lib.remediation_project import load_engagement_project  # noqa: E402
 
 
 TRANSITIONS = {
@@ -137,14 +144,16 @@ def _worktree_digest(path_value: str | None) -> str:
     if not root.is_absolute() or not root.is_dir():
         return "unavailable"
     try:
-        changed, changed_truncated = _bounded_git_diff(str(root), "HEAD", limit=_REVIEW_DIFF_LIMIT)
+        if _vcs.is_jj(root):
+            # A jj commit already seals the complete snapshotted filesystem;
+            # an empty child resolves to the same reviewed content commit.
+            changed, changed_truncated = _vcs.revision(root).encode(), False
+        else:
+            changed, changed_truncated = _bounded_vcs_diff(str(root), "HEAD", limit=_REVIEW_DIFF_LIMIT)
         if changed_truncated:
             return "oversized"
-        untracked = subprocess.run(
-            ["git", "-C", str(root), "ls-files", "--others", "--exclude-standard", "-z"],
-            capture_output=True, check=True, timeout=30,
-        ).stdout.split(b"\0")
-    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        untracked = _vcs.untracked(root)
+    except (OSError, ValueError, subprocess.SubprocessError):
         return "unavailable"
     digest = hashlib.sha256()
     digest.update(changed)
@@ -178,115 +187,56 @@ def _worktree_digest(path_value: str | None) -> str:
 def _actual_revision(path_value: str | None) -> str:
     if not path_value:
         return ""
-    root = Path(path_value).resolve()
+    path = Path(path_value)
     try:
-        top = subprocess.run(
-            ["git", "-C", str(root), "rev-parse", "--show-toplevel"],
-            capture_output=True, text=True, check=True, timeout=10,
-        ).stdout.strip()
-        if Path(top).resolve() != root:
+        if _vcs.root(path) != path.resolve():
             return ""
-        return subprocess.run(
-            ["git", "-C", str(root), "rev-parse", "HEAD"],
-            capture_output=True, text=True, check=True, timeout=10,
-        ).stdout.strip()
-    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return _vcs.revision(path)
+    except (OSError, ValueError, subprocess.SubprocessError):
         return ""
 
 
 def _worktree_clean(path_value: str) -> bool:
     try:
-        return not subprocess.run(
-            ["git", "-C", path_value, "status", "--porcelain", "--untracked-files=all"],
-            capture_output=True, check=True, timeout=20,
-        ).stdout
-    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return not _vcs.status(Path(path_value))
+    except (OSError, ValueError, subprocess.SubprocessError):
         return False
 
 
 def _registered_worktree(repo: Path, path: Path) -> bool:
-    def git_path(directory: Path, flag: str) -> Path | None:
-        try:
-            result = subprocess.run(
-                ["git", "-C", str(directory), "rev-parse", "--path-format=absolute", flag],
-                capture_output=True, text=True, timeout=10,
-            )
-        except (OSError, subprocess.TimeoutExpired):
-            return None
-        return Path(result.stdout.strip()).resolve() if result.returncode == 0 and result.stdout.strip() else None
-
-    if path.is_symlink() or git_path(path, "--show-toplevel") != path.resolve():
-        return False
-    common_dir = git_path(repo, "--git-common-dir")
-    if common_dir is None or git_path(path, "--git-common-dir") != common_dir:
-        return False
-    try:
-        listed = subprocess.run(
-            ["git", "-C", str(repo), "worktree", "list", "--porcelain", "-z"],
-            capture_output=True, text=True, timeout=10,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return False
-    return listed.returncode == 0 and any(
-        Path(entry.removeprefix("worktree ")).resolve() == path.resolve()
-        for entry in listed.stdout.split("\0") if entry.startswith("worktree ")
-    )
+    return _vcs.registered(repo, path)
 
 
 def _case_worktree_identity(row, engagement_root: Path) -> bool:
-    config_path = engagement_root / "remediation-project.json"
-    if not config_path.is_file():
+    if not (engagement_root / "PROJECT.md").exists() and not (engagement_root / "remediation-project.json").exists():
         return not row["worktree_branch"]
     if not row["worktree_branch"] or not row["worktree_path"]:
         return False
     try:
-        repo_value = json.loads(config_path.read_text(encoding="utf-8"))["repository"]
+        repo_value = load_engagement_project(engagement_root)["repository"]
         if not isinstance(repo_value, str) or not Path(repo_value).is_absolute():
             return False
         if not _registered_worktree(Path(repo_value), Path(row["worktree_path"])):
             return False
-        return _actual_branch(row["worktree_path"]) == row["worktree_branch"]
+        return _vcs.branch_matches(Path(row["worktree_path"]), row["worktree_branch"])
     except (OSError, ValueError, KeyError, TypeError):
         return False
-
-
-def _actual_branch(path_value: str) -> str | None:
-    try:
-        result = subprocess.run(
-            ["git", "-C", path_value, "symbolic-ref", "--quiet", "--short", "HEAD"],
-            capture_output=True, text=True, timeout=10,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    return result.stdout.strip() if result.returncode == 0 else None
 
 
 def _commit_ancestor(path_value: str | None, ancestor: str, descendant: str) -> bool:
     if not path_value or not ancestor or not descendant:
         return False
     try:
-        revisions = [
-            subprocess.run(
-                ["git", "-C", path_value, "rev-parse", "--verify", "--end-of-options", f"{revision}^{{commit}}"],
-                capture_output=True, text=True, check=True, timeout=10,
-            ).stdout.strip()
-            for revision in (ancestor, descendant)
-        ]
-        if revisions[0] == revisions[1]:
-            return False
-        return subprocess.run(
-            ["git", "-C", path_value, "merge-base", "--is-ancestor", *revisions],
-            capture_output=True, timeout=10,
-        ).returncode == 0
-    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return _vcs.ancestor(Path(path_value), ancestor, descendant)
+    except (OSError, ValueError, subprocess.SubprocessError):
         return False
 
 
 _REVIEW_DIFF_LIMIT = 1024 * 1024
 
 
-def _bounded_git_diff(path_value: str, *revisions: str, limit: int) -> tuple[bytes, bool]:
-    command = ["git", "-C", path_value, "diff", "--binary", "--no-ext-diff", *revisions]
+def _bounded_vcs_diff(path_value: str, *revisions: str, limit: int) -> tuple[bytes, bool]:
+    command = _vcs.diff_command(Path(path_value), *revisions)
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     assert process.stdout is not None
     deadline = time.monotonic() + 30
@@ -318,37 +268,20 @@ def _review_patch(path_value: str | None) -> tuple[str, str, bytes, bool, int]:
     if not head or not path_value:
         raise HTTPException(409, "Case worktree has no confirmed revision")
     root = Path(path_value)
-    base_ref = ""
-    for candidate in ("refs/remotes/origin/main", "refs/heads/main"):
-        probe = subprocess.run(
-            ["git", "-C", path_value, "rev-parse", "--verify", candidate],
-            capture_output=True, text=True, timeout=10,
-        )
-        if probe.returncode == 0:
-            base_ref = candidate
-            break
-    if not base_ref:
-        raise HTTPException(409, "Main branch is unavailable for review")
     try:
-        base = subprocess.run(
-            ["git", "-C", path_value, "merge-base", "HEAD", base_ref],
-            capture_output=True, text=True, check=True, timeout=10,
-        ).stdout.strip()
-        committed, committed_truncated = _bounded_git_diff(
+        base = _vcs.review_base(root)
+        committed, committed_truncated = _bounded_vcs_diff(
             path_value, base, "HEAD", limit=_REVIEW_DIFF_LIMIT,
         )
         if committed_truncated:
             return base, head, committed, True, _REVIEW_DIFF_LIMIT + 1
-        local, local_truncated = _bounded_git_diff(
+        local, local_truncated = _bounded_vcs_diff(
             path_value, "HEAD", limit=max(0, _REVIEW_DIFF_LIMIT - len(committed) - 1),
         )
         if local_truncated:
             return base, head, (committed + b"\n" + local)[:_REVIEW_DIFF_LIMIT], True, _REVIEW_DIFF_LIMIT + 1
-        untracked = subprocess.run(
-            ["git", "-C", path_value, "ls-files", "--others", "--exclude-standard", "-z"],
-            capture_output=True, check=True, timeout=30,
-        ).stdout.split(b"\0")
-    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        untracked = _vcs.untracked(root)
+    except (OSError, ValueError, subprocess.SubprocessError):
         raise HTTPException(409, "Cannot establish review diff against main") from None
     chunks = [committed, local]
     total = len(committed) + len(local) + 1
@@ -454,6 +387,17 @@ def _review_digest(row, evidence: list[dict[str, Any]], engagement_root: Path) -
         ],
         "current_artifact_sha256": artifact_state,
     }
+    project_path = engagement_root / "PROJECT.md"
+    if project_path.exists() or project_path.is_symlink():
+        from assess.lib.remediation_project import load_engagement_project
+
+        try:
+            material["project"] = {
+                "source_sha256": _sha256_file(project_path),
+                "configuration": load_engagement_project(engagement_root),
+            }
+        except (OSError, ValueError):
+            material["project"] = "unavailable"
     return hashlib.sha256(_json(material).encode()).hexdigest()
 
 
@@ -489,7 +433,8 @@ def _review_evidence_missing(row, evidence: list[dict[str, Any]], engagement_roo
     registered = {item["artifact_path"]: item for item in evidence if item["artifact_path"]}
     for item in evidence:
         artifact = item["artifact_path"] or ""
-        if (item["kind"] != "stagehand" or (item["method"] or "").casefold() != "stagehand"
+        driver = (item["method"] or "").casefold()
+        if (driver not in {"stagehand", "browse"} or item["kind"] != driver
                 or not artifact.endswith("/result.json") or not item["command"].strip()
                 or item["revision"] != row["worktree_revision"]):
             continue
@@ -499,6 +444,8 @@ def _review_evidence_missing(row, evidence: list[dict[str, Any]], engagement_roo
             result = json.loads(_artifact(engagement_root, case_id, artifact).read_text(encoding="utf-8"))
         except (HTTPException, OSError, UnicodeError, json.JSONDecodeError):
             continue
+        if not isinstance(result, dict):
+            continue
         steps = result.get("steps")
         if (result.get("status") != "passed" or result.get("purpose") != "happy-path"
                 or not str(result.get("observed") or "").strip()
@@ -507,15 +454,40 @@ def _review_evidence_missing(row, evidence: list[dict[str, Any]], engagement_roo
                 or not all(isinstance(step, dict) and str(step.get("action") or "").strip()
                            and str(step.get("observation") or "").strip() for step in steps)):
             continue
-        stagehand_result = True
         parent = str(Path(artifact).parent)
+        if driver == "browse":
+            transcript = registered.get(f"{parent}/commands.json")
+            if (result.get("served_revision") != row["worktree_revision"] or not transcript
+                    or transcript["method"].casefold() != driver
+                    or transcript["revision"] != row["worktree_revision"]
+                    or not _evidence_current(engagement_root, case_id, [transcript])):
+                continue
+            try:
+                commands = json.loads(_artifact(engagement_root, case_id, transcript["artifact_path"]).read_text(encoding="utf-8"))
+            except (HTTPException, OSError, UnicodeError, json.JSONDecodeError):
+                continue
+            if not isinstance(commands, list) or not commands or not all(
+                isinstance(command, dict) and command.get("returncode") == 0
+                and isinstance(command.get("argv"), list) and command["argv"]
+                and command["argv"][0] == "browse"
+                and ("--local" in command["argv"] or "--cdp" in command["argv"]
+                     or (len(command["argv"]) == 4
+                         and command["argv"][:3] == ["browse", "stop", "--session"]
+                         and isinstance(command["argv"][3], str) and command["argv"][3]))
+                and isinstance(command.get("stdout"), str) and isinstance(command.get("stderr"), str)
+                for command in commands
+            ):
+                continue
+            if not any(command["argv"][1] != "stop" for command in commands if len(command["argv"]) > 1):
+                continue
+        stagehand_result = True
         script = registered.get(f"{parent}/script.py")
-        stagehand_script = bool(script and script["method"].casefold() == "stagehand"
+        stagehand_script = bool(script and script["method"].casefold() == driver
                                 and script["revision"] == row["worktree_revision"]
                                 and _evidence_current(engagement_root, case_id, [script]))
         stagehand_screenshot = any(
             path.startswith(f"{parent}/") and Path(path).suffix.lower() in {".png", ".jpg", ".jpeg"}
-            and proof["kind"] == "screenshot" and proof["method"].casefold() == "stagehand"
+            and proof["kind"] == "screenshot" and proof["method"].casefold() == driver
             and proof["revision"] == row["worktree_revision"]
             and _evidence_current(engagement_root, case_id, [proof])
             and _valid_screenshot(_artifact(engagement_root, case_id, path))
@@ -524,11 +496,11 @@ def _review_evidence_missing(row, evidence: list[dict[str, Any]], engagement_roo
         if stagehand_script and stagehand_screenshot:
             break
     if not stagehand_result:
-        missing.append("passed Stagehand happy-path result.json at current revision")
+        missing.append("passed browser happy-path result.json at current revision")
     if not stagehand_script:
-        missing.append("registered Stagehand script.py")
+        missing.append("registered browser script.py")
     if not stagehand_screenshot:
-        missing.append("registered Stagehand screenshot")
+        missing.append("registered browser screenshot")
     return missing
 
 
@@ -705,10 +677,10 @@ def patch_case(key: str, case_id: int, changes: dict[str, Any]) -> dict[str, Any
                 raise HTTPException(400, "Worktree must belong to this case")
             if old["worktree_path"] and path.resolve() != Path(old["worktree_path"]).resolve():
                 raise HTTPException(409, "Case worktree path is already registered")
-            config_path = Path(owner.engagement_root) / "remediation-project.json"
-            if config_path.is_file():
+            engagement_root = Path(owner.engagement_root)
+            if (engagement_root / "PROJECT.md").exists() or (engagement_root / "remediation-project.json").exists():
                 try:
-                    repo_value = json.loads(config_path.read_text(encoding="utf-8"))["repository"]
+                    repo_value = load_engagement_project(engagement_root)["repository"]
                 except (OSError, ValueError, KeyError, TypeError):
                     raise HTTPException(400, "Remediation project repository is invalid") from None
                 if not isinstance(repo_value, str) or not Path(repo_value).is_absolute() or not _registered_worktree(Path(repo_value), path):
@@ -726,7 +698,7 @@ def patch_case(key: str, case_id: int, changes: dict[str, Any]) -> dict[str, Any
             path_value = changes.get("worktree_path") or old["worktree_path"]
             if not path_value:
                 raise HTTPException(400, "Worktree path is required to register a branch")
-            if _actual_branch(path_value) != branch:
+            if not _vcs.branch_matches(Path(path_value), branch):
                 status = 409 if old["worktree_branch"] else 400
                 raise HTTPException(status, "Worktree branch differs from checkout branch")
         if old["worktree_branch"] and "worktree_revision" in changes:
@@ -768,20 +740,10 @@ def _evidence_current(engagement_root: Path, case_id: int, evidence: list[dict[s
 def _evidence_revision(path_value: str | None, revision: str) -> str:
     if not path_value or not revision.strip():
         raise HTTPException(400, "Evidence revision must identify a commit in the case worktree")
-    refs = [revision]
-    if 7 <= len(revision) <= 64 and all(char in "0123456789abcdefABCDEF" for char in revision):
-        refs.append(revision.lower())
-    for ref in refs:
-        try:
-            result = subprocess.run(
-                ["git", "-C", path_value, "rev-parse", "--verify", "--end-of-options", f"{ref}^{{commit}}"],
-                capture_output=True, text=True, timeout=10,
-            )
-        except (OSError, subprocess.TimeoutExpired):
-            break
-        if result.returncode == 0:
-            return result.stdout.strip()
-    raise HTTPException(400, "Evidence revision must identify a commit in the case worktree")
+    try:
+        return _vcs.resolve_revision(Path(path_value), revision)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        raise HTTPException(400, "Evidence revision must identify a commit in the case worktree") from None
 
 
 def add_evidence(key: str, case_id: int, data: dict[str, Any]) -> dict[str, Any]:

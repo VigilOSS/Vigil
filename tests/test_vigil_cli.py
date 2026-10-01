@@ -760,3 +760,10 @@ def test_doctor_reports_missing_database_without_touching_sqlite(tmp_path):
     from vigil_cli.status import _database_check
 
     assert _database_check(tmp_path / "absent.sqlite3").status == "MISSING"
+
+
+@pytest.mark.parametrize(("cpus", "expected"), [(2, "2"), (2.0, "2"), (0.5, "0.5")])
+def test_runtime_cpu_argument_accepts_integer_and_fractional_limits(cpus, expected):
+    from vigil_cli.runtime import _format_cpus
+
+    assert _format_cpus(cpus) == expected

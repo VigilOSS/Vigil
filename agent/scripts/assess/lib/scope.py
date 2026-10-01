@@ -596,8 +596,8 @@ def host_from_token(raw: str, *, allow_single_label: bool = False) -> str:
     """Extract a lowercased host from a URL, host:port, or line token.
 
     ``allow_single_label`` admits bare single-label hosts (``intranet``). It is
-    set only on the explicitly-authored scope-entry path; free-text token
-    parsing leaves it False so log lines can't widen scope with stray words.
+    set for structured target admission; free-text token parsing leaves it False
+    so log lines can't widen scope with stray words.
     """
     token = raw.strip()
     if not token or token.startswith("-"):
@@ -730,7 +730,7 @@ def explain_target(
     ``vendor_saas`` (vendor label when the host's shape matches a known
     SaaS-fronted suffix, else ``None``).
     """
-    host = host_from_token(token)
+    host = host_from_token(token, allow_single_label=True)
     headers = required_headers(scope)
     rl = rate_limit(scope)
 

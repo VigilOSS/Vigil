@@ -307,3 +307,19 @@ def test_denied_tools_reads_canonical_nested_tool_policy():
 
     with pytest.raises(SystemExit, match="tool_policy.*object"):
         scope.denied_tools({"tool_policy": ["nuclei"]})
+
+
+@pytest.mark.parametrize("token", ["intranet", "http://intranet/", "intranet:8080"])
+def test_single_label_target_admission_and_recon_filter(token):
+    document = {"hosts": ["intranet"]}
+    verdict = scope.target_admission(document, token)
+    assert verdict["host"] == "intranet"
+    assert verdict["admitted"] is True
+    assert verdict["allow_entry"] == "intranet"
+    assert scope.filter_recon_targets(document, [token, "other"])[0] == [token]
+
+    document["out_of_scope"] = ["intranet"]
+    denied = scope.target_admission(document, token)
+    assert denied["admitted"] is False
+    assert denied["deny_entry"] == "intranet"
+    assert scope.filter_recon_targets(document, [token])[0] == []

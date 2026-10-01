@@ -21,6 +21,11 @@ SCRIPTS_ROOT = REPO_ROOT / "agent" / "scripts"
 if str(SCRIPTS_ROOT) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_ROOT))
 
+from assess.lib.code_structural_identity import (  # noqa: E402
+    STRUCTURAL_INDEX_PATH_VERSION,
+    STRUCTURAL_INDEX_SCHEMA,
+)
+
 
 def _load_command(filename: str, name: str):
     path = SCRIPTS_ROOT / "assess" / "commands" / filename
@@ -1158,12 +1163,14 @@ def test_ctags_uses_only_manifest_selected_explicit_files(
         }
     ]
     commands: list[list[str]] = []
+    file_lists: list[list[str]] = []
     monkeypatch.setattr(module, "_resolve_trusted_tool", lambda *_args, **_kwargs: "/trusted/ctags")
 
     def fake_run(command, **_kwargs):
         commands.append(list(command))
         if "--version" in command:
             return SimpleNamespace(returncode=0, stdout="Universal Ctags\n", stderr="")
+        file_lists.append(_kwargs["input"].decode().splitlines())
         output = Path(command[command.index("-f") + 1])
         output.write_text("main\tmain.py\t1\n", encoding="utf-8")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
@@ -1179,7 +1186,8 @@ def test_ctags_uses_only_manifest_selected_explicit_files(
     generation_command = commands[-1]
     assert result["available"] is True
     assert "-R" not in generation_command
-    assert "./main.py" in generation_command
+    assert generation_command[generation_command.index("-L") + 1] == "-"
+    assert file_lists == [["./main.py"]]
     assert "ignored.py" not in generation_command
 
 
@@ -1198,12 +1206,14 @@ def test_ctags_prefixes_dash_leading_source_names_so_they_cannot_inject_options(
         }
     ]
     commands: list[list[str]] = []
+    file_lists: list[list[str]] = []
     monkeypatch.setattr(module, "_resolve_trusted_tool", lambda *_args, **_kwargs: "/trusted/ctags")
 
     def fake_run(command, **_kwargs):
         commands.append(list(command))
         if "--version" in command:
             return SimpleNamespace(returncode=0, stdout="Universal Ctags\n", stderr="")
+        file_lists.append(_kwargs["input"].decode().splitlines())
         output = Path(command[command.index("-f") + 1])
         output.write_text("", encoding="utf-8")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
@@ -1220,7 +1230,7 @@ def test_ctags_prefixes_dash_leading_source_names_so_they_cannot_inject_options(
 
     generation_command = commands[-1]
     assert result["available"] is True
-    assert "./--options=evil.ctags" in generation_command
+    assert file_lists == [["./--options=evil.ctags"]]
     assert "--options=evil.ctags" not in generation_command
 
 
@@ -1513,12 +1523,12 @@ def test_code_ingest_closes_capture_spool_on_record_build_failure(
     assert all(spool.closed for spool in captured_spools)
 
 
-def test_code_index_build_emits_generation_scoped_v6_and_preserves_v4_history(
+def test_code_index_build_emits_generation_scoped_current_and_preserves_v4_history(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     request: pytest.FixtureRequest,
 ) -> None:
-    module = _load_command("code_index.py", "test_sealed_code_index_v6")
+    module = _load_command("code_index.py", "test_sealed_code_index_current")
     server_digest = "d" * 64
     raw = b"print('sealed')\n"
     notes = b"# Security notes\n"
@@ -1683,7 +1693,7 @@ def test_code_index_build_emits_generation_scoped_v6_and_preserves_v4_history(
     assert not [
         path
         for path in (output / "structural-index").rglob("manifest.json")
-        if "v6" in path.parts
+        if STRUCTURAL_INDEX_PATH_VERSION in path.parts
     ]
 
     identity_parent = (
@@ -1691,7 +1701,7 @@ def test_code_index_build_emits_generation_scoped_v6_and_preserves_v4_history(
         / "structural-index"
         / "7"
         / "4"
-        / "v6"
+        / STRUCTURAL_INDEX_PATH_VERSION
         / server_digest
     )
     final_dir = identity_parent / input_digest
@@ -1783,7 +1793,7 @@ def test_code_index_build_emits_generation_scoped_v6_and_preserves_v4_history(
         assert not [
             path
             for path in (output / "structural-index").rglob("manifest.json")
-            if "v6" in path.parts
+            if STRUCTURAL_INDEX_PATH_VERSION in path.parts
         ]
         monkeypatch.setattr(module.os, "fsync", real_os_fsync)
         monkeypatch.setattr(module, "_fsync_directory_strict", real_fsync_directory)
@@ -1939,11 +1949,11 @@ def test_code_index_build_emits_generation_scoped_v6_and_preserves_v4_history(
     manifests = [
         path
         for path in (output / "structural-index").rglob("manifest.json")
-        if "v6" in path.parts
+        if STRUCTURAL_INDEX_PATH_VERSION in path.parts
     ]
     assert len(manifests) == 1
-    v6_manifest_bytes = manifests[0].read_bytes()
-    tampered = json.loads(v6_manifest_bytes)
+    current_manifest_bytes = manifests[0].read_bytes()
+    tampered = json.loads(current_manifest_bytes)
     tampered["total_functions"] = int(tampered["total_functions"]) + 1
     os.chmod(manifests[0], 0o644)
     manifests[0].write_text(json.dumps(tampered), encoding="utf-8")
@@ -1959,7 +1969,7 @@ def test_code_index_build_emits_generation_scoped_v6_and_preserves_v4_history(
     assert archive_path.stat().st_mtime_ns == archive_stat.st_mtime_ns
 
     os.chmod(manifests[0], 0o644)
-    manifests[0].write_bytes(v6_manifest_bytes)
+    manifests[0].write_bytes(current_manifest_bytes)
     os.chmod(manifests[0], 0o444)
     module.run(args)
     durability_events.clear()
@@ -2005,12 +2015,12 @@ def test_code_index_build_emits_generation_scoped_v6_and_preserves_v4_history(
     assert manifests[0].relative_to(output / "structural-index").parts == (
         "7",
         "4",
-        "v6",
+        STRUCTURAL_INDEX_PATH_VERSION,
         server_digest,
         input_digest,
         "manifest.json",
     )
-    assert built["schema"] == "structural-index/v6"
+    assert built["schema"] == STRUCTURAL_INDEX_SCHEMA
     assert built["repo_id"] == 7
     assert built["repo_generation"] == 4
     assert built["source_manifest_digest"] == server_digest
@@ -2030,7 +2040,7 @@ def test_code_index_build_emits_generation_scoped_v6_and_preserves_v4_history(
     assert unsupported["unavailable_dimensions"]
     assert unsupported["total_functions"] == 0
     assert unsupported["source_sha256"] == hashlib.sha256(notes).hexdigest()
-    assert f"/7/4/v6/{server_digest}/{built['structural_input_digest']}/" in (
+    assert f"/7/4/{STRUCTURAL_INDEX_PATH_VERSION}/{server_digest}/{built['structural_input_digest']}/" in (
         f"/{manifests[0].relative_to(output / 'structural-index')}/"
     )
     aggregate = json.loads(aggregate_path.read_text(encoding="utf-8"))
@@ -2069,7 +2079,7 @@ def test_code_index_build_emits_generation_scoped_v6_and_preserves_v4_history(
         sync_manifest,
         output / "structural-index",
     )
-    assert prepared["structural_index_schema"] == "structural-index/v6"
+    assert prepared["structural_index_schema"] == STRUCTURAL_INDEX_SCHEMA
     unsupported_update = next(item for item in prepared["updates"] if item["file_id"] == 12)
     assert unsupported_update["structural_analysis_status"] == "unsupported"
     assert unsupported_update["structural_analysis_mode"] == "none"
@@ -2745,7 +2755,7 @@ def test_code_index_publish_rejects_corrupt_known_v3_summary_without_archiving(
         / "structural-index"
         / "7"
         / "4"
-        / "v6"
+        / STRUCTURAL_INDEX_PATH_VERSION
         / ("d" * 64)
         / ("e" * 64)
         / "manifest.json"
@@ -2798,7 +2808,7 @@ def test_code_index_publish_rejects_duplicate_legacy_v3_object_keys(
         / "structural-index"
         / "7"
         / "4"
-        / "v6"
+        / STRUCTURAL_INDEX_PATH_VERSION
         / ("d" * 64)
         / ("e" * 64)
         / "manifest.json"
@@ -2856,7 +2866,7 @@ def test_code_index_publish_rejects_fifo_collision_without_blocking(
         / "structural-index"
         / "7"
         / "4"
-        / "v6"
+        / STRUCTURAL_INDEX_PATH_VERSION
         / ("d" * 64)
         / ("e" * 64)
         / "manifest.json"
@@ -2913,7 +2923,7 @@ def test_code_index_publish_rejects_unsafe_lock_nodes_without_blocking(
         / "structural-index"
         / "7"
         / "4"
-        / "v6"
+        / STRUCTURAL_INDEX_PATH_VERSION
         / ("d" * 64)
         / ("e" * 64)
         / "manifest.json"
@@ -2960,7 +2970,7 @@ def test_code_index_retry_rejects_retained_v5_fifo_without_blocking(
         structural_root
         / "7"
         / "4"
-        / "v6"
+        / STRUCTURAL_INDEX_PATH_VERSION
         / ("d" * 64)
         / ("e" * 64)
     )
@@ -3016,7 +3026,7 @@ def test_code_index_retry_rejects_retained_v5_manifest_shape_drift(
         structural_root
         / "7"
         / "4"
-        / "v6"
+        / STRUCTURAL_INDEX_PATH_VERSION
         / ("d" * 64)
         / ("e" * 64)
     )
@@ -3024,7 +3034,7 @@ def test_code_index_retry_rejects_retained_v5_manifest_shape_drift(
     files_dir.mkdir(parents=True)
     request.addfinalizer(lambda: _restore_tree_writable(structural_root))
     expected = {
-        "schema": "structural-index/v6",
+        "schema": STRUCTURAL_INDEX_SCHEMA,
         "indexed_at": "2026-08-05T17:00:00Z",
         "files": {},
     }
@@ -3033,8 +3043,9 @@ def test_code_index_retry_rejects_retained_v5_manifest_shape_drift(
         manifest_bytes = json.dumps(existing).encode("utf-8")
     else:
         manifest_bytes = (
-            b'{"schema":"attacker-schema","schema":"structural-index/v6",'
-            b'"indexed_at":"2026-08-05T16:00:00Z","files":{}}'
+            b'{"schema":"attacker-schema","schema":"'
+            + STRUCTURAL_INDEX_SCHEMA.encode()
+            + b'","indexed_at":"2026-08-05T16:00:00Z","files":{}}'
         )
     manifest_path = final_dir / "manifest.json"
     manifest_path.write_bytes(manifest_bytes)
@@ -3070,7 +3081,7 @@ def test_code_index_publish_rejects_group_writable_legacy_archive_directory(
         / "structural-index"
         / "7"
         / "4"
-        / "v6"
+        / STRUCTURAL_INDEX_PATH_VERSION
         / ("d" * 64)
         / ("e" * 64)
         / "manifest.json"
@@ -3126,7 +3137,7 @@ def test_code_index_publish_fails_closed_on_unreadable_legacy_aggregate(
     ("legacy_kind", "expected_error"),
     [
         ("aggregate", "structural index aggregate must use structural-index-aggregate/v4"),
-        ("manifest", "repo 7 manifest is not structural-index/v6"),
+        ("manifest", f"repo 7 manifest is not {STRUCTURAL_INDEX_SCHEMA}"),
     ],
 )
 def test_code_index_sync_rejects_legacy_contracts_before_backend_access(
@@ -3215,7 +3226,7 @@ def test_code_index_sync_rejects_source_path_traversal(tmp_path: Path) -> None:
     }
     index_file.write_text(json.dumps(index_payload), encoding="utf-8")
     manifest = {
-        "schema": "structural-index/v6",
+        "schema": STRUCTURAL_INDEX_SCHEMA,
         "repo_id": 7,
         "repo_key": "demo-repo",
         "repo_generation": 4,
@@ -3284,7 +3295,7 @@ def test_code_index_sync_validates_all_files_before_bound_cas_post(
     )
     index_root = tmp_path / "structural-index"
     index_file = (
-        index_root / "7" / "4" / "v6" / digest / input_digest / "files" / "main.json"
+        index_root / "7" / "4" / STRUCTURAL_INDEX_PATH_VERSION / digest / input_digest / "files" / "main.json"
     )
     index_file.parent.mkdir(parents=True)
     index_payload = {
@@ -3333,7 +3344,7 @@ def test_code_index_sync_validates_all_files_before_bound_cas_post(
     index_file.write_text(json.dumps(index_payload), encoding="utf-8")
     index_sha = hashlib.sha256(index_file.read_bytes()).hexdigest()
     manifest = {
-        "schema": "structural-index/v6",
+        "schema": STRUCTURAL_INDEX_SCHEMA,
         "repo_id": 7,
         "repo_key": "demo-repo",
         "repo_generation": 4,
@@ -3472,7 +3483,7 @@ def test_code_index_sync_validates_all_files_before_bound_cas_post(
                 "repo_id": 7,
                 "repo_generation": 4,
                 "source_manifest_digest": digest,
-                "structural_index_schema": "structural-index/v6",
+                "structural_index_schema": STRUCTURAL_INDEX_SCHEMA,
                 "structural_input_digest": input_digest,
                 "structural_index_manifest_path": str(manifest_path.resolve()),
                 "degraded_files": 0,
@@ -3581,7 +3592,7 @@ def test_code_index_sync_ancestor_swap_fails_before_any_post(
     )
     index_root = tmp_path / "structural-index"
     artifact_path = (
-        index_root / "7" / "4" / "v6" / digest / input_digest / "files" / "main.json"
+        index_root / "7" / "4" / STRUCTURAL_INDEX_PATH_VERSION / digest / input_digest / "files" / "main.json"
     )
     artifact_path.parent.mkdir(parents=True)
     artifact = {
@@ -3625,7 +3636,7 @@ def test_code_index_sync_ancestor_swap_fails_before_any_post(
     manifest_path = artifact_path.parent.parent / "manifest.json"
     index_rel = str(artifact_path.relative_to(index_root))
     manifest = {
-        "schema": "structural-index/v6",
+        "schema": STRUCTURAL_INDEX_SCHEMA,
         "repo_id": 7,
         "repo_key": "demo-repo",
         "repo_generation": 4,
@@ -3795,7 +3806,7 @@ def test_code_index_sync_uses_observed_signal_counts_when_artifact_lists_are_cap
     )
     index_root = tmp_path / "structural-index"
     artifact_path = (
-        index_root / "7" / "4" / "v6" / digest / input_digest / "files" / "main.json"
+        index_root / "7" / "4" / STRUCTURAL_INDEX_PATH_VERSION / digest / input_digest / "files" / "main.json"
     )
     artifact_path.parent.mkdir(parents=True)
     artifact = {
@@ -3843,7 +3854,7 @@ def test_code_index_sync_uses_observed_signal_counts_when_artifact_lists_are_cap
     artifact_path.write_bytes(artifact_bytes)
     index_rel = str(artifact_path.relative_to(index_root))
     manifest = {
-        "schema": "structural-index/v6",
+        "schema": STRUCTURAL_INDEX_SCHEMA,
         "repo_id": 7,
         "repo_key": "demo-repo",
         "repo_generation": 4,
@@ -3935,7 +3946,7 @@ def test_code_index_sync_rejects_complete_callable_registry_shortfall() -> None:
     artifact["total_functions"] = 1
 
     with pytest.raises(ValueError, match="function total must match retained callables"):
-        module._validated_structural_metadata(
+        module.validated_structural_metadata(
             artifact,
             rel_path="main.py",
             source_size=12,
@@ -3958,7 +3969,7 @@ def test_code_index_sync_rejects_signal_counts_below_every_retained_dimension(
     artifact[dimension] = [record]
 
     with pytest.raises(ValueError, match="undercount retained records"):
-        module._validated_structural_metadata(
+        module.validated_structural_metadata(
             artifact,
             rel_path="main.py",
             source_size=12,
@@ -4002,7 +4013,7 @@ def test_code_index_sync_rejects_unsupported_artifacts_with_any_signal(
     artifact[field] = value
 
     with pytest.raises(ValueError, match="unsupported structural analysis contains signals"):
-        module._validated_structural_metadata(
+        module.validated_structural_metadata(
             artifact,
             rel_path="notes.md",
             source_size=12,
@@ -4049,7 +4060,7 @@ def test_code_index_sync_rejects_signals_for_unavailable_dimensions(
             artifact["total_exports"] = len(value)
 
     with pytest.raises(ValueError, match="unavailable structural dimension contains signals"):
-        module._validated_structural_metadata(
+        module.validated_structural_metadata(
             artifact,
             rel_path="large.py",
             source_size=12,
@@ -4087,7 +4098,7 @@ def test_code_index_producer_rejects_streaming_fallback_without_a_reason() -> No
     ("filename", "validator_name"),
     [
         ("code_index.py", "_validate_analysis_artifact"),
-        ("code_index_sync.py", "_validated_structural_metadata"),
+        ("code_index_sync.py", "validated_structural_metadata"),
     ],
 )
 @pytest.mark.parametrize(

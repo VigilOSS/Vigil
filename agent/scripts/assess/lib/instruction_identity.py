@@ -17,7 +17,7 @@ _CLIENT_SPECIALIST_PATHS = {
     "goose": Path("agent/.goose/recipes/{role}.yaml"),
     "opencode": Path("agent/.opencode/agent/{role}.md"),
 }
-_KNOWN_CLIENTS = frozenset({*_CLIENT_SPECIALIST_PATHS, "kimi"})
+_KNOWN_CLIENTS = frozenset({*_CLIENT_SPECIALIST_PATHS, "kimi", "pi"})
 
 
 def _sha256(path: Path) -> str:

@@ -111,12 +111,12 @@ Seven commands are available. Each has one canonical source under
 |---|---|---|
 | `claude` | Project slash commands, `.claude/commands/<name>.md` | `/vigil-resume` |
 | `codex` | Project skills, `.codex/skills/<name>/SKILL.md` | `$vigil-resume` |
-| `opencode`, `goose`, `kimi` | None | Paste the body of `agent/commands/<name>.md` |
+| `opencode`, `goose`, `kimi`, `pi` | None | Paste the body of `agent/commands/<name>.md` |
 
 Select the operator mode at `vigil engagement start`; command text never changes it. For
 Codex, `$vigil-start <focus>` supplies optional focus within the launched session's mode.
 
-opencode, goose, and kimi have no equivalent project-command surface. The content
+Vigil installs no project commands for opencode, goose, kimi, or pi. The content
 is identical — only the invocation differs — so their operators paste the command
 body or run the verbs it names directly.
 
@@ -170,7 +170,7 @@ state without waiting for the human to invoke `$vigil-resume`.
 Claude sets `CLAUDE_CODE_AUTO_COMPACT_WINDOW`; Codex sets
 `model_auto_compact_token_limit`. Both use an absolute token count, so 510,000 is the
 configured approximation of 51% of a one-million-token context. `/vigil-compact` and
-`$vigil-compact` audit the respective client wiring. kimi, goose, and opencode have
+`$vigil-compact` audit the respective client wiring. kimi, pi, goose, and opencode have
 neither compaction integration nor a command surface — paste the bodies of
 `agent/commands/vigil-compact.md` and `agent/commands/vigil-resume.md`.
 

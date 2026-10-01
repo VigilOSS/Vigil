@@ -2271,7 +2271,7 @@ def _unscanned_scope_dimensions(
       turned a route file's unread `DB::statement(...)` into a claimed clean.
     * Without the first, the flag cannot be raised at all once a callable has
       reported something -- and it must not be. `unavailable` means zero on
-      both sides of the contract (`code_index_sync._validated_structural_metadata`
+      both sides of the contract (`code_structural_metadata.validated_structural_metadata`
       and the backend's payload validator), so declaring a dimension that
       retained a record would either reject the whole repository's sync or
       force the indexer to drop signal it really found. A non-empty list is not
@@ -2787,6 +2787,18 @@ def _detect_exports(
     return exports
 
 
+def _export_source_lines(tree: Any, source: bytes) -> list[str]:
+    # Keep source coordinates while excluding parser-labelled comments from
+    # the line-based export reader, including comments closing before code.
+    visible = bytearray(source)
+    for node in _walk_named_nodes(tree.root_node):
+        if getattr(node, "type", "") in _COMMENT_NODE_TYPES:
+            visible[node.start_byte:node.end_byte] = re.sub(
+                rb"[^\r\n]", b" ", source[node.start_byte:node.end_byte]
+            )
+    return visible.decode("utf-8", errors="replace").splitlines()
+
+
 def _resolve_import_targets(
     imports: list[str],
     language: str,
@@ -3253,7 +3265,12 @@ def index_file(
             language=effective_lang,
             function_scoped_records=bool(sinks or call_sites),
         )
-        exports = _detect_exports(functions, classes, effective_lang, source_lines)
+        export_lines = (
+            _export_source_lines(tree, source)
+            if effective_lang in {"javascript", "typescript"}
+            else source_lines
+        )
+        exports = _detect_exports(functions, classes, effective_lang, export_lines)
         import_targets = _resolve_import_targets(imports, effective_lang)
         security_observations: dict[str, Any] = {}
         _attach_bounded_security_sources(

@@ -22,6 +22,22 @@ from vigil_cli.engagements import CreateEngagementOptions, create_engagement  # 
 from vigil_cli.client_rosters import repair_engagement_client_rosters  # noqa: E402
 
 
+@pytest.fixture
+def vigil_cli_on_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    bin_dir = tmp_path / "vigil-bin"
+    bin_dir.mkdir()
+    code = (
+        f"import sys; sys.path.insert(0, {str(repo_root / 'src')!r}); "
+        "from vigil_cli.main import main; main()"
+    )
+    executable = bin_dir / "vigil"
+    executable.write_text(
+        f'#!/bin/sh\nexec {shlex.quote(sys.executable)} -c {shlex.quote(code)} "$@"\n'
+    )
+    executable.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+
+
 def _copy_agent_fixture(agent_root: Path, sandbox_root: Path, *, client: str) -> None:
     shutil.copytree(agent_root / "scripts", sandbox_root / "scripts")
     shutil.copytree(agent_root / "schemas", sandbox_root / "schemas")
@@ -564,6 +580,7 @@ def test_aith_engagement_create_no_warning_when_apex_listed_alongside_wildcard(
     assert "wildcard-only entries lacking explicit apex" not in err
 
 
+@pytest.mark.usefixtures("vigil_cli_on_path")
 def test_aith_start_codex_exports_engagement_environment(tmp_path: Path) -> None:
     repo_root = Path(__file__).resolve().parents[3]
     install_root = tmp_path / "install"
@@ -610,6 +627,7 @@ def test_aith_start_codex_exports_engagement_environment(tmp_path: Path) -> None
     assert "ORCHESTRATOR_BASE_URL=https://override.example.test" in launch.stdout
 
 
+@pytest.mark.usefixtures("vigil_cli_on_path")
 def test_aith_start_codex_keeps_engagement_env_over_install_env(tmp_path: Path) -> None:
     repo_root = Path(__file__).resolve().parents[3]
     install_root = tmp_path / "install"
@@ -721,6 +739,7 @@ def test_aith_launchers_do_not_export_agent_name_default(tmp_path: Path, monkeyp
         )
 
 
+@pytest.mark.usefixtures("vigil_cli_on_path")
 def test_aith_launchers_respect_explicit_agent_name_override(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

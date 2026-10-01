@@ -771,7 +771,7 @@ def test_session_end_drops_an_unrecognized_client_name(tmp_path: Path) -> None:
     assert "--client-name" not in argv
 
 
-@pytest.mark.parametrize("client", ["claude", "codex", "goose", "kimi", "opencode"])
+@pytest.mark.parametrize("client", ["claude", "codex", "goose", "kimi", "opencode", "pi"])
 def test_session_end_records_every_launcher_client_name(
     tmp_path: Path, client: str
 ) -> None:

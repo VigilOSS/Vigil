@@ -609,7 +609,9 @@ The verification surface is **not one command**: four pytest scopes, a render-ch
 lint/types, and the bench rungs. All four pytest scopes run on the backend venv; the other gates have
 their own prerequisites and costs. `.github/workflows/ci.yml` is authoritative for what blocks —
 backend pytest (the markdown-vs-CLI sync-lint rides inside it), the deterministic eval, the root
-`tests/` suite, the assess CLI suite, the frontend build, ruff, and mypy.
+`tests/` suite, the assess CLI suite, the frontend and report builds, ruff, and mypy.
+The deterministic eval, ruff, and mypy share the `quality-checks` job; each keeps a named step.
+Backend CI uses `-n 2` for the hosted runner's two vCPUs; local defaults still use `-n auto`.
 
 > **Never run a bare `pytest` from the repo root, and always go through the backend venv.** Scope every run to one suite — duplicate `test_vigil_cli.py` basenames in `tests/` and `agent/scripts/assess/tests/` collide under a single collection. The backend venv (`uv run --directory orchestrator/backend --extra dev …`) is the one interpreter that can collect every suite; the root `.venv` hard-errors on `tests/eval` (unconditional `import yaml`), and `uv run` *without* `--extra dev` fails to spawn pytest in a clean env.
 
@@ -642,7 +644,7 @@ VIGIL_REPO=$(git rev-parse --show-toplevel)   # or: VIGIL_REPO=$(jj root)
   adding tests.
 - **Integration tests are deselected by default** (`-m 'not integration'` in both pyprojects); opt in with `pytest -m integration` only after rebuilding the runtime image (`test_oob_correlate.py`, backend `test_runtime_tooling_contract.py`, `test_kali_cli.py`).
 - **Pre-push: mirror the blocking CI gates locally.** Before pushing a branch, run the gates CI blocks on — all four pytest rows above (backend, root `tests/`, assess CLI, deterministic eval; the sync-lint rides inside backend pytest), `uvx ruff check .`, and `uvx --with-editable . mypy src/vigil_cli`. CI runs on a clean checkout, so it catches drift a warm local venv hides.
-- **CI covers all four pytest scopes.** `backend-tests`, `eval`, `root-tests`, and `assess-tests`
+- **CI covers all four pytest scopes.** `backend-tests`, `quality-checks` (eval), `root-tests`, and `assess-tests`
   are blocking. Path-scoped jobs use absolute paths because `uv --directory` changes the working
   directory. Check pytest's exit status and collected count; an empty selection proves nothing.
 - **The `**/data/` ignore trap.** Required resolver lists, fixtures, or golden files under `data/`

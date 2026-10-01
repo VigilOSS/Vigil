@@ -199,7 +199,7 @@ def test_cancellation_terminates_in_flight_worker_without_returning_partial_cove
     def cancellation_requested() -> bool:
         nonlocal callback_calls
         callback_calls += 1
-        return callback_calls >= 3
+        return bool(worker_pids) and callback_calls >= 3
 
     monkeypatch.setattr(parser_boundary.subprocess, "Popen", observe_worker)
 
@@ -254,3 +254,96 @@ def test_exact_extractor_does_not_swallow_memory_exhaustion(
 
     with pytest.raises(MemoryError):
         treesitter_index.index_file("Dockerfile", "dockerfile", source=b"RUN true\n")
+
+
+@pytest.mark.parametrize("separator", [b"\n", b"\r", b"\r\n", b"\n\r"])
+def test_giant_line_preflight_scans_each_byte_a_bounded_number_of_times(separator):
+    class CountedBytes(bytes):
+        scanned = 0
+
+        def find(self, sub, start=0, end=None):
+            end = len(self) if end is None else end
+            result = super().find(sub, start, end)
+            self.scanned += (end if result < 0 else result + len(sub)) - start
+            return result
+
+    source = CountedBytes((b"x" + separator) * 4096)
+    assert not parser_boundary._has_giant_line(source, max_line_bytes=32)
+    assert source.scanned <= 4 * len(source)
+
+
+@pytest.mark.parametrize("prefix", [b"", b"\n", b"\r\n"])
+@pytest.mark.parametrize("extra", [0, 1])
+def test_giant_line_threshold_across_scan_chunks(prefix, extra):
+    limit = parser_boundary._READ_SIZE + 17
+    source = prefix + b"x" * (limit + extra) + b"\r\nshort\n"
+    assert parser_boundary._has_giant_line(source, max_line_bytes=limit) is bool(extra)
+
+
+@pytest.mark.parametrize("source", [
+    b"\n" * (2 * 1024 * 1024),
+    b"x" * (parser_boundary.DEFAULT_MAX_EXACT_SOURCE_BYTES + 1),
+    b"\xff" + b"\n" * (2 * 1024 * 1024),
+], ids=["many-lines", "source-limit", "invalid-utf8"])
+def test_parent_preprocessing_observes_cancellation_before_worker_launch(source, monkeypatch):
+    calls = 0
+    launches = []
+    real_popen = parser_boundary.subprocess.Popen
+
+    def observe_worker(*args, **kwargs):
+        launches.append(True)
+        return real_popen(*args, **kwargs)
+
+    def cancelled():
+        nonlocal calls
+        calls += 1
+        return calls >= 3
+
+    monkeypatch.setattr(parser_boundary.subprocess, "Popen", observe_worker)
+    with pytest.raises(parser_boundary.ParserBoundaryCancelled):
+        parser_boundary.index_file(
+            "app.py", "python", source=source,
+            worker_command=_python_command("print('{}')"),
+            cancellation_requested=cancelled,
+        )
+    assert not launches
+
+
+def test_giant_line_preflight_observes_cancellation(monkeypatch):
+    scanning = False
+    real_scan = parser_boundary._has_giant_line
+    launches = []
+    real_popen = parser_boundary.subprocess.Popen
+
+    def scan(*args, **kwargs):
+        nonlocal scanning
+        scanning = True
+        return real_scan(*args, **kwargs)
+
+    def observe_worker(*args, **kwargs):
+        launches.append(True)
+        return real_popen(*args, **kwargs)
+
+    monkeypatch.setattr(parser_boundary, "_has_giant_line", scan)
+    monkeypatch.setattr(parser_boundary, "DEFAULT_MAX_LINE_BYTES", 32)
+    monkeypatch.setattr(parser_boundary.subprocess, "Popen", observe_worker)
+    with pytest.raises(parser_boundary.ParserBoundaryCancelled):
+        parser_boundary.index_file(
+            "app.py", "python", source=b"\n" * parser_boundary._READ_SIZE,
+            worker_command=_python_command("print('{}')"),
+            cancellation_requested=lambda: scanning,
+        )
+    assert not launches
+
+
+@pytest.mark.parametrize(("suffix", "reason"), [
+    (b"\xe2\x82\xac\n", "parser_worker_crash"),
+    (b"\xe2\x82", "invalid_utf8_source"),
+])
+def test_preflight_decodes_utf8_across_chunks_and_checks_final_sequence(suffix, reason):
+    source = b"#" + b"x" * (parser_boundary.STREAMING_SCAN_WINDOW_BYTES - 2) + suffix
+    result = parser_boundary.index_file(
+        "app.py", "python", source=source,
+        worker_command=_python_command("import os; os._exit(73)"),
+    )
+    _assert_full_byte_fallback(result, source, reason)

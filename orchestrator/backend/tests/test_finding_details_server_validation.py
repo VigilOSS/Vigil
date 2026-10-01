@@ -768,6 +768,7 @@ def test_false_positive_requires_kill_reason_and_kill_check(seeded, details) -> 
 
     assert response.status_code == 400, response.text
     assert "details.kill_reason and details.kill_check" in response.json()["detail"]
+    assert "integer from 1 to 5" in response.json()["detail"]
 
 
 def test_a_kill_citing_an_absent_capability_must_name_a_settling_test(seeded) -> None:

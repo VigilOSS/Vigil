@@ -13,6 +13,7 @@ import os
 import shlex
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -214,6 +215,19 @@ def test_claude_settings_materialize_absolute_hooks_for_bare_engagement_sessions
         assert marker.is_file()
 
 
+def _write_vigil_entrypoint(bin_dir: Path) -> None:
+    # Exercise this checkout's CLI, independent of any globally installed version.
+    code = (
+        f"import sys; sys.path.insert(0, {str(Path(__file__).resolve().parents[1] / 'src')!r}); "
+        "from vigil_cli.main import main; main()"
+    )
+    executable = bin_dir / "vigil"
+    executable.write_text(
+        f'#!/bin/sh\nexec {shlex.quote(sys.executable)} -c {shlex.quote(code)} "$@"\n'
+    )
+    executable.chmod(0o755)
+
+
 def _build_entrypoint_fixture(tmp_path: Path) -> tuple[Path, Path, Path]:
     # The literal shell expansion is deliberate: install paths are data, and must
     # survive launcher generation without being interpreted as shell syntax.
@@ -240,7 +254,8 @@ def _build_entrypoint_fixture(tmp_path: Path) -> tuple[Path, Path, Path]:
 
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    for client in ("codex", "claude", "opencode", "goose", "kimi"):
+    _write_vigil_entrypoint(bin_dir)
+    for client in ("codex", "claude", "opencode", "goose", "kimi", "pi"):
         executable = bin_dir / client
         executable.write_text(_CAPTURE_STUB)
         executable.chmod(0o755)
@@ -410,6 +425,7 @@ def test_physical_client_roster_refresh_rejects_collision_before_any_write(
             ],
         ),
         ("kimi", ["kimi", "--auto", "--model", "test-model", "operator task"]),
+        ("pi", ["pi", "--model", "test-model", "operator task"]),
     ],
 )
 def test_generated_client_entrypoint_executes_canonical_contract(
@@ -560,7 +576,7 @@ def test_install_upgrade_reconciles_all_client_entrypoints_for_existing_engageme
         "both",
         skip_permissions=skip_permissions,
     )
-    for client in ("opencode", "goose", "kimi"):
+    for client in ("opencode", "goose", "kimi", "pi"):
         (engagement_dir / f"start_{client}.sh").unlink()
 
     # Existing user-authored client state is not an installer-owned generated file.
@@ -608,7 +624,8 @@ def test_install_upgrade_reconciles_all_client_entrypoints_for_existing_engageme
 
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    for client in ("codex", "claude", "opencode", "goose", "kimi"):
+    _write_vigil_entrypoint(bin_dir)
+    for client in ("codex", "claude", "opencode", "goose", "kimi", "pi"):
         executable = bin_dir / client
         executable.write_text(_CAPTURE_STUB)
         executable.chmod(0o755)
@@ -619,6 +636,7 @@ def test_install_upgrade_reconciles_all_client_entrypoints_for_existing_engageme
         "opencode": ["--dangerously-skip-permissions"] if skip_permissions else [],
         "goose": [],
         "kimi": ["--auto"] if skip_permissions else [],
+        "pi": [],
     }
     # Unconditional per-client arguments: not a permission choice, so they ride
     # both `--skip-permissions` parametrizations. Codex gates project-local hooks
@@ -630,6 +648,7 @@ def test_install_upgrade_reconciles_all_client_entrypoints_for_existing_engageme
         "opencode": [],
         "goose": [],
         "kimi": [],
+        "pi": [],
     }
     command_prefixes = {
         "codex": ["codex"],
@@ -637,8 +656,9 @@ def test_install_upgrade_reconciles_all_client_entrypoints_for_existing_engageme
         "opencode": ["opencode", "--agent", "operator"],
         "goose": ["goose", "run", "--interactive", "--with-builtin", "developer"],
         "kimi": ["kimi"],
+        "pi": ["pi"],
     }
-    for client in ("codex", "claude", "opencode", "goose", "kimi"):
+    for client in ("codex", "claude", "opencode", "goose", "kimi", "pi"):
         capture = tmp_path / f"{client}-{skip_permissions}.json"
         env = os.environ.copy()
         for key in (
@@ -745,14 +765,14 @@ def test_entrypoint_repair_preserves_existing_primary_client_kind(
     engagements._write_launchers(
         agent_root, engagement_dir, client_kind, skip_permissions=False
     )
-    for client in ("opencode", "goose", "kimi"):
+    for client in ("opencode", "goose", "kimi", "pi"):
         (engagement_dir / f"start_{client}.sh").unlink()
 
     engagements.repair_engagement_client_entrypoints(install_root)
 
     assert (engagement_dir / f"start_{present_primary}.sh").is_file()
     assert not (engagement_dir / f"start_{absent_primary}.sh").exists()
-    for client in ("opencode", "goose", "kimi"):
+    for client in ("opencode", "goose", "kimi", "pi"):
         assert (engagement_dir / f"start_{client}.sh").is_file()
 
 
@@ -809,7 +829,7 @@ def test_entrypoint_repair_skips_conflicting_existing_permission_modes(
     codex_launcher.write_text(
         codex_launcher.read_text().replace(" --dangerously-bypass-approvals-and-sandbox ", "  ")
     )
-    for client in ("opencode", "goose", "kimi"):
+    for client in ("opencode", "goose", "kimi", "pi"):
         (engagement_dir / f"start_{client}.sh").unlink()
 
     result = engagements.repair_engagement_client_entrypoints(install_root)
@@ -820,7 +840,7 @@ def test_entrypoint_repair_skips_conflicting_existing_permission_modes(
     assert result.skipped[0].engagement_key == "legacy-conflict"
     assert result.skipped[0].reason == "permission_mode_conflict"
     assert result.skipped[0].evidence == ("claude=skip", "codex=prompt")
-    for client in ("opencode", "goose", "kimi"):
+    for client in ("opencode", "goose", "kimi", "pi"):
         assert not (engagement_dir / f"start_{client}.sh").exists()
 
 
@@ -843,7 +863,7 @@ def test_entrypoint_repair_explicit_skip_override_normalizes_recognized_conflict
     codex_launcher.write_text(
         codex_launcher.read_text().replace(" --dangerously-bypass-approvals-and-sandbox ", "  ")
     )
-    for client in ("opencode", "goose", "kimi"):
+    for client in ("opencode", "goose", "kimi", "pi"):
         (engagement_dir / f"start_{client}.sh").unlink()
 
     result = engagements.repair_engagement_client_entrypoints(
@@ -859,7 +879,7 @@ def test_entrypoint_repair_explicit_skip_override_normalizes_recognized_conflict
     assert "--dangerously-skip-permissions" in (
         engagement_dir / "start_claude.sh"
     ).read_text()
-    for client in ("opencode", "goose", "kimi"):
+    for client in ("opencode", "goose", "kimi", "pi"):
         assert (engagement_dir / f"start_{client}.sh").is_file()
 
 
@@ -912,7 +932,7 @@ def test_entrypoint_repair_explicit_skip_override_upgrades_config_only_legacy_en
     assert result.permission_overrides == ("legacy-config-only",)
     assert result.skipped == ()
     assert evidence.read_bytes() == b"retain\x00exactly"
-    for client in ("codex", "claude", "opencode", "goose", "kimi"):
+    for client in ("codex", "claude", "opencode", "goose", "kimi", "pi"):
         assert (engagement_dir / f"start_{client}.sh").is_file()
     assert "--dangerously-bypass-approvals-and-sandbox" in (
         engagement_dir / "start_codex.sh"
@@ -1006,7 +1026,7 @@ def test_entrypoint_repair_accepts_legacy_generated_launcher_without_engagement_
 
     assert result.reconciled == ("legacy-pre-key-export",)
     assert result.skipped == ()
-    for client in ("claude", "opencode", "goose", "kimi"):
+    for client in ("claude", "opencode", "goose", "kimi", "pi"):
         assert (engagement_dir / f"start_{client}.sh").is_file()
     assert not (engagement_dir / "start_codex.sh").exists()
     assert "--dangerously-skip-permissions" in (
@@ -1035,6 +1055,7 @@ def test_entrypoint_repair_accepts_legacy_generated_launcher_without_engagement_
         "start_opencode.sh",
         "start_goose.sh",
         "start_kimi.sh",
+        "start_pi.sh",
     ),
 )
 def test_entrypoint_repair_skips_external_symlinked_destination(
@@ -1234,11 +1255,11 @@ def test_install_upgrade_applies_explicit_ambiguous_permission_override(
     stderr = capsys.readouterr().err
     assert "physical=5 refreshed=5 files_added=0 files_updated=5" in stderr
     assert "reconciled=1 skipped=0 permission_overrides=1" in stderr
-    for client in ("codex", "claude", "opencode", "goose", "kimi"):
+    for client in ("codex", "claude", "opencode", "goose", "kimi", "pi"):
         assert (engagement_dir / f"start_{client}.sh").is_file()
 
 
-@pytest.mark.parametrize("client", ["codex", "claude", "opencode", "goose", "kimi"])
+@pytest.mark.parametrize("client", ["codex", "claude", "opencode", "goose", "kimi", "pi"])
 def test_start_engagement_dispatches_to_exact_client_launcher(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, client: str
 ) -> None:
@@ -1247,6 +1268,9 @@ def test_start_engagement_dispatches_to_exact_client_launcher(
     engagement_dir.mkdir(parents=True)
     (install_root / "agent" / "AGENTS.md").write_text("web operator\n")
     (engagement_dir / "scope.json").write_text('{"engagement_type":"web","status":"active"}\n')
+    if client == "pi":
+        (engagement_dir / "scope.json").write_text('{"engagement_type":"remediation"}\n')
+        (install_root / "agent" / "operator-core-remediation.md").write_text("remediation operator\n")
     launcher = engagement_dir / f"start_{client}.sh"
     launcher.write_text("#!/usr/bin/env bash\n")
     monkeypatch.setenv("VIGIL_CONFIG", str(tmp_path / "config.json"))
@@ -1265,6 +1289,46 @@ def test_start_engagement_dispatches_to_exact_client_launcher(
         "execv": (str(launcher), [str(launcher), "--model", "test"]),
     }
     assert engagements.os.environ["VIGIL_REQUESTED_CLIENT"] == client
+
+
+@pytest.mark.parametrize(
+    ("scope", "mode"),
+    [({"engagement_type": kind}, mode) for kind in ("web", "code", "blue", "android") for mode in (None, kind)]
+    + [({"engagement_type": "both", "code_phase": "ingest"}, mode) for mode in (None, "web", "code")]
+    + [({"engagement_type": "offensive", "tracks": {"web": {}, "code": {}}}, mode) for mode in (None, "web", "code")],
+)
+def test_pi_start_rejects_modes_requiring_specialist_roster(tmp_path, monkeypatch, scope, mode):
+    monkeypatch.setattr(engagements.os, "chdir", lambda path: None)
+    monkeypatch.setattr(engagements.os, "execv", lambda path, argv: None)
+    monkeypatch.setenv("VIGIL_CONFIG", str(tmp_path / "config.json"))
+    engagement_dir = tmp_path / "engagement"
+    engagement_dir.mkdir()
+    (engagement_dir / "scope.json").write_text(json.dumps(scope))
+    (tmp_path / "agent").mkdir()
+    for name in ("AGENTS.md", "operator-core-code.md", "AGENTS-blue.md", "operator-core-android.md"):
+        (tmp_path / "agent" / name).write_text("operator\n")
+    (engagement_dir / "start_pi.sh").write_text("launcher\n")
+    with pytest.raises(SystemExit, match="Pi supports remediation engagements only"):
+        engagements.start_engagement(tmp_path, engagement_dir, "pi", [], mode)
+
+
+@pytest.mark.parametrize("mode", [None, "remediation"])
+def test_pi_remediation_start_preserves_native_provider_arguments(tmp_path, monkeypatch, mode):
+    engagement_dir = tmp_path / "engagement"
+    engagement_dir.mkdir()
+    (engagement_dir / "scope.json").write_text('{"engagement_type":"remediation"}')
+    (tmp_path / "agent").mkdir()
+    (tmp_path / "agent" / "operator-core-remediation.md").write_text("remediation operator\n")
+    launcher = engagement_dir / "start_pi.sh"
+    launcher.write_text("launcher\n")
+    calls = []
+    monkeypatch.setattr(engagements.os, "chdir", lambda path: None)
+    monkeypatch.setattr(engagements.os, "execv", lambda path, argv: calls.append((path, argv)))
+    monkeypatch.setenv("VIGIL_CONFIG", str(tmp_path / "config.json"))
+    arguments = ["--provider", "anthropic", "--model", "configured-model", "--mode", "rpc"]
+    engagements.start_engagement(tmp_path, engagement_dir, "pi", arguments, mode)
+    assert calls == [(str(launcher), [str(launcher), *arguments])]
+    assert engagements.os.environ["VIGIL_OPERATOR_MODE"] == "remediation"
 
 
 def test_noninteractive_selection_fails_before_starting_fzf(
@@ -2049,7 +2113,7 @@ def test_codex_launcher_bypasses_hook_trust_regardless_of_permission_mode(
         expected += ' --dangerously-bypass-hook-trust "$@"'
         assert codex_exec == [expected]
 
-        for client in ("claude", "opencode", "goose", "kimi"):
+        for client in ("claude", "opencode", "goose", "kimi", "pi"):
             body = (engagement_dir / f"start_{client}.sh").read_text()
             assert "--dangerously-bypass-hook-trust" not in body
 
@@ -2092,3 +2156,38 @@ def test_entrypoint_repair_backfills_codex_hook_trust_bypass(tmp_path: Path) -> 
     # The permission choice recorded in the legacy launcher must survive the
     # backfill: reading it as "prompt" would silently downgrade the engagement.
     assert "--dangerously-bypass-approvals-and-sandbox" in repaired
+
+
+@pytest.mark.parametrize("client", ["codex", "claude", "opencode", "goose", "kimi", "pi"])
+@pytest.mark.parametrize("source", ["config", "engagement", "install", "environment", "default"])
+def test_launcher_uses_canonical_backend_url(tmp_path, monkeypatch, client, source):
+    from vigil_cli.paths import resolve_orchestrator_base_url
+
+    install_root, engagement_dir, bin_dir = _build_entrypoint_fixture(tmp_path)
+    (engagement_dir / ".orchestrator.env").write_text("")
+    # Resolve at launch time: configuration can change after launcher generation.
+    (install_root / ".env").write_text('ORCHESTRATOR_BASE_URL="http://legacy.test:18000/"\n')
+    config = tmp_path / "config.json"
+    config.write_text(json.dumps({"orchestrator_base_url": "http://configured.test:18100/"}))
+    monkeypatch.setenv("VIGIL_CONFIG", str(config))
+    monkeypatch.delenv("ORCHESTRATOR_BASE_URL", raising=False)
+    if source == "engagement":
+        (engagement_dir / ".orchestrator.env").write_text(
+            'ORCHESTRATOR_BASE_URL="http://engagement.test:18200/"\n'
+        )
+    elif source == "environment":
+        monkeypatch.setenv("ORCHESTRATOR_BASE_URL", "http://override.test:18300")
+    elif source in {"install", "default"}:
+        config.write_text("{}")
+        if source == "default":
+            (install_root / ".env").write_text("")
+    expected = resolve_orchestrator_base_url(install_root, engagement_dir)
+    capture = tmp_path / "capture.json"
+    env = os.environ.copy()
+    env.update({"PATH": f"{bin_dir}{os.pathsep}{env['PATH']}", "VIGIL_ENTRYPOINT_CAPTURE": str(capture)})
+    result = subprocess.run(
+        [str(engagement_dir / f"start_{client}.sh")],
+        cwd=tmp_path, env=env, capture_output=True, text=True, timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(capture.read_text())["env"]["ORCHESTRATOR_BASE_URL"] == expected

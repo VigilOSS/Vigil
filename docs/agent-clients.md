@@ -1,7 +1,7 @@
 # Agent clients
 
 `--client` on `vigil engagement start` (and on `vigil bench run` for every client
-except `kimi`) selects which agent CLI drives the engagement. All five read the
+except `kimi` and `pi`) selects which agent CLI drives the engagement. All six read the
 same operator prompt and run the same methodology; they differ in the model behind
 them, in whether they can dispatch specialists headlessly, and in whether they
 expose the `vigil-*` session commands.
@@ -11,6 +11,7 @@ expose the `vigil-*` session commands.
 | `claude` | Claude Code (Anthropic) | Yes (`@agent`) | Yes (`/vigil-*`) |
 | `codex` | Codex CLI (OpenAI) | Yes (registered roster) | Yes (`$vigil-*`) |
 | `kimi` | Kimi Code (Moonshot K3, the CLI default) | No — runs inline | No |
+| `pi` | Pi with your configured provider/model (remediation only) | No | No Vigil commands |
 | `goose` | goose on direct DeepSeek | Yes — headless (`delegate`) | No |
 | `opencode` | opencode on direct DeepSeek | No — runs inline | No |
 
@@ -63,6 +64,34 @@ check for a provider key.
   operator inline from the same prompt; it has no generated specialist roster or
   activity hooks, and is not a `vigil bench run --client` option. Its model is
   deliberately not pinned.
+
+## Pi
+
+Install [Pi](https://github.com/earendil-works/pi/tree/main/packages/coding-agent)
+and configure a provider with `/login` inside Pi, or Pi's supported environment
+variables. Vigil uses Pi's own model and authentication settings.
+
+```bash
+vigil engagement start <remediation-key> --client pi
+vigil engagement start <remediation-key> --client pi -- --provider anthropic --model <model-id> --thinking medium
+```
+
+The launcher execs `pi` and forwards client arguments unchanged. Pi loads the
+engagement's `AGENTS.md` natively. Use `--` before Pi's `--thinking` or `--mode`
+flags because Vigil also owns flags with those names.
+
+Pi supports remediation engagements only. Other engagement modes require a
+specialist roster that Vigil does not install for Pi; start those engagements with
+`--client codex` or `--client claude`. Vigil installs no Pi activity hooks
+or `vigil-*` session commands, and Pi is not a benchmark client. `--skip-permissions`
+does not change the Pi launcher: Pi has no per-tool approval prompts by default.
+Its project-trust settings remain under Pi's control. See
+[Pi configuration](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/configuration.md)
+and [Pi permissions](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/security.md).
+
+New engagements receive `start_pi.sh` automatically. For an existing engagement,
+run `vigil install` after updating the CLI; the existing entrypoint repair adds it
+when the engagement's primary launcher configuration can be recognized.
 
 ## Open-model clients
 

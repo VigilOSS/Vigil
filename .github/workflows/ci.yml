@@ -1,52 +1,14 @@
 name: ci
 
-# PR gate for the orchestrator backend + deterministic evals.
-#
-# BLOCKING jobs (must be green to merge):
-#   - backend-tests : `uv run --directory orchestrator/backend pytest`
-#                     (the full backend suite, which includes the
-#                      markdown-vs-CLI sync-lint test_skill_cli_sync.py)
-#   - eval          : the deterministic eval harness under tests/eval, run
-#                     with an ABSOLUTE path. A *relative* path under
-#                     `--directory orchestrator/backend` resolves against the
-#                     backend cwd, collects zero tests, and pytest exits 0 —
-#                     a false green. The absolute path is load-bearing.
-#   - root-tests    : the root `tests/` suite (CLI + bench harness), minus
-#                     tests/eval which has its own job. ABSOLUTE path, same
-#                     false-green trap as `eval`.
-#   - assess-tests  : the whole `agent/scripts/assess/tests` suite. ABSOLUTE
-#                     path, same trap. Supersedes the two-file `code-readiness`
-#                     job's coverage but does not replace it: that job is kept
-#                     so a readiness-contract break names itself instead of
-#                     hiding in a 1400-test run.
-#   - code-readiness: target-specific assess transition/readiness contract tests.
-#   - frontend-build: installs the locked frontend dependencies, typechecks the
-#                     whole `src` tree (`tsc --noEmit`, wired into `npm run
-#                     build`) and compiles it. `vite build` transpiles per-file
-#                     via esbuild and checks no types on its own, so without the
-#                     `tsc` step this job compiled type errors happily.
-#   - report-build  : the same two gates for the single-file report template
-#                     (`orchestrator/report`), plus its `poc.ts` shell-quoting
-#                     tests. That package ships the HTML handed to a client and
-#                     had no CI gate of any kind before.
-#   - ruff / mypy   : lint (`uvx ruff@0.16.8 check .`) and types
-#                     (`uvx --from mypy==2.3.1 --with-editable . mypy src/vigil_cli`).
-#                     The tree is now lint- and type-clean, so these are blocking gates:
-#                     any new finding fails the PR. (Promoted from the former
-#                     non-blocking / continue-on-error state.)
-#
-# OFF the PR path:
-#   - nightly-live-eval-capture : a scheduled stub for the live
-#                     eval-capture e2e (needs a running runtime/orchestrator).
-#                     Guarded behind a repo secret so forks/PRs never trip it.
+# Each pytest scope stays a separate invocation: root and assess suites have
+# colliding module basenames. Absolute paths keep uv's backend cwd from changing
+# which suite is selected. Backend includes sync-lint; assess includes readiness.
+# Short eval/lint/type checks share one runner to avoid per-job minute rounding.
 
 on:
   pull_request:
   push:
     branches: [main]
-  schedule:
-    # Nightly at 07:00 UTC — drives the opt-in live eval-capture e2e only.
-    - cron: "0 7 * * *"
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -68,31 +30,25 @@ jobs:
         # [project.optional-dependencies].dev); `uv run` does NOT install
         # extras by default, so omitting this fails with "Failed to spawn: pytest"
         # in a clean CI env (passes locally only with a warm .venv).
-        run: uv run --directory orchestrator/backend --extra dev pytest
+        # Hosted private-repo runners expose two vCPUs; -n auto sees one physical core.
+        run: uv run --directory orchestrator/backend --extra dev pytest -n 2
 
-  sync-lint:
-    name: markdown-vs-CLI sync-lint (blocking)
+  quality-checks:
+    name: eval, lint and types (blocking)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Install uv
         uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
-      # Explicit, isolated run of the sync-lint so a failure points straight
-      # at doc/CLI drift. It is also exercised by the full backend-tests job.
-      - name: Run markdown-vs-CLI sync-lint
-        run: uv run --directory orchestrator/backend --extra dev pytest tests/test_skill_cli_sync.py -q
-
-  eval:
-    name: deterministic eval (blocking)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - name: Install uv
-        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
-      # ABSOLUTE path on purpose — see header note about the false-green trap
-      # when a relative path is resolved against --directory's cwd.
+      # Resolve the suite from the checkout, not uv's backend cwd.
       - name: Run deterministic eval harness
         run: uv run --directory orchestrator/backend --extra dev pytest "${GITHUB_WORKSPACE}/tests/eval" -q
+      - name: ruff check
+        if: ${{ !cancelled() }}
+        run: uvx ruff@0.16.8 check .
+      - name: mypy
+        if: ${{ !cancelled() }}
+        run: uvx --from mypy==2.3.1 --with-editable . mypy src/vigil_cli
 
   root-tests:
     name: root tests — CLI + bench harness (blocking)
@@ -101,9 +57,17 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Install uv
         uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
-      # ABSOLUTE path on purpose — see the header note about the false-green
-      # trap when a relative path is resolved against --directory's cwd.
-      # `tests/eval` is ignored here because the `eval` job owns it; running it
+      - name: Install JJ for workspace integration tests
+        run: |
+          curl --fail --location --silent --show-error \
+            https://github.com/jj-vcs/jj/releases/download/v0.40.0/jj-v0.40.0-x86_64-unknown-linux-musl.tar.gz \
+            --output "${RUNNER_TEMP}/jj.tar.gz"
+          echo "5c8979f46873e052f59bdd9535636dca6e6f9f70571b73f6d63c3b92acfaa037  ${RUNNER_TEMP}/jj.tar.gz" | sha256sum --check
+          mkdir -p "${RUNNER_TEMP}/jj-bin"
+          tar -xzf "${RUNNER_TEMP}/jj.tar.gz" -C "${RUNNER_TEMP}/jj-bin" ./jj
+          echo "${RUNNER_TEMP}/jj-bin" >> "$GITHUB_PATH"
+      # Resolve the suite from the checkout, not uv's backend cwd.
+      # `tests/eval` is ignored here because quality-checks owns it; running it
       # twice buys nothing and doubles the time to a red signal.
       # Never run a bare `pytest` from the repo root: duplicate
       # `test_vigil_cli.py` basenames in `tests/` and
@@ -122,24 +86,11 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Install uv
         uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
-      # ABSOLUTE path on purpose — same false-green trap as above.
+      # Resolve the suite from the checkout, not uv's backend cwd.
       - name: Run assess CLI test suite
         run: >-
           uv run --directory orchestrator/backend --extra dev pytest
           "${GITHUB_WORKSPACE}/agent/scripts/assess/tests" -q
-
-  code-readiness:
-    name: code readiness CLI (blocking)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - name: Install uv
-        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
-      - name: Run code transition/readiness contract tests
-        run: >-
-          uv run --directory orchestrator/backend --extra dev pytest
-          "${GITHUB_WORKSPACE}/agent/scripts/assess/tests/test_code_coverage_gate.py"
-          "${GITHUB_WORKSPACE}/agent/scripts/assess/tests/test_code_readiness_cli.py" -q
 
   frontend-build:
     name: frontend build (blocking)
@@ -183,54 +134,3 @@ jobs:
       # a security boundary (ADR 0018) and is asserted against a real bash.
       - name: Run report tests
         run: npm test
-
-  ruff:
-    name: ruff (blocking)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - name: Install uv
-        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
-      # Blocking gate: the tree is lint-clean, so any new ruff finding fails
-      # the PR.
-      - name: ruff check
-        run: uvx ruff@0.16.8 check .
-
-  mypy:
-    name: mypy (blocking)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - name: Install uv
-        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
-      # Blocking gate: src/vigil_cli is type-clean, so any new mypy error fails
-      # the PR.
-      - name: mypy
-        run: uvx --from mypy==2.3.1 --with-editable . mypy src/vigil_cli
-
-  nightly-live-eval-capture:
-    name: nightly live eval-capture e2e (opt-in)
-    # OFF the PR path: scheduled runs only. Scheduled workflows execute on the
-    # default branch of the base repo, so forks and PRs never trigger this.
-    # The opt-in secret is checked inside the step (env guard) rather than in a
-    # job-level `if`, which keeps the gate unambiguous and lint-clean. The body
-    # is a stub until the live capture harness has a CI-runnable entrypoint (it
-    # needs a runtime + orchestrator stack and a captured golden engagement).
-    if: github.event_name == 'schedule'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - name: Install uv
-        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
-      - name: Live eval-capture e2e (stub)
-        env:
-          ENABLE_LIVE_EVAL_CAPTURE: ${{ secrets.ENABLE_LIVE_EVAL_CAPTURE }}
-        run: |
-          if [ -z "${ENABLE_LIVE_EVAL_CAPTURE}" ]; then
-            echo "ENABLE_LIVE_EVAL_CAPTURE secret not set — skipping live eval-capture e2e."
-            exit 0
-          fi
-          echo "Live eval-capture e2e is not yet wired for CI."
-          echo "It requires a running runtime + orchestrator stack and a"
-          echo "captured golden engagement. Tracked separately; this job is"
-          echo "a scheduled placeholder kept off the PR path."

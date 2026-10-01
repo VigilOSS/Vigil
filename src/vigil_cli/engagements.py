@@ -214,6 +214,7 @@ class CreateEngagementOptions:
     alert_source: str | None = None
     severity_hint: str | None = None
     remediation_config: dict[str, object] = field(default_factory=dict)
+    remediation_project_path: Path | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -284,6 +285,21 @@ def repo_name(raw: str) -> str:
     return name.removesuffix(".git") or "repo"
 
 
+def remediation_repository(raw: str, *, install_root: Path | None = None) -> Path:
+    if "://" in raw:
+        raise SystemExit("remediation requires a local repository path")
+    repository = Path(raw).expanduser().resolve()
+    if not repository.is_dir():
+        raise SystemExit("remediation requires an existing local Git repository")
+    from .remediation_vcs import adapter
+    try:
+        if adapter(install_root).root(repository) != repository:
+            raise ValueError("not the repository root")
+    except (OSError, ValueError, subprocess.SubprocessError):
+        raise SystemExit("remediation requires an existing local Git repository root or Jujutsu workspace root") from None
+    return repository
+
+
 def plan_engagement(options: CreateEngagementOptions, *, now: datetime | None = None) -> EngagementPlan:
     """Validate options and derive the scope/manifest/report inputs.
 
@@ -291,6 +307,7 @@ def plan_engagement(options: CreateEngagementOptions, *, now: datetime | None = 
     database snapshot is taken, and the orchestrator is not contacted. Raises
     SystemExit on the same invalid inputs `create_engagement` rejects.
     """
+    remediation_project_snapshot = dict(options.remediation_config)
     if options.engagement_type not in ENGAGEMENT_TYPES:
         raise SystemExit("--type must be one of: web, code, android, blue, remediation")
     if options.dynamic_mode not in ANDROID_DYNAMIC_MODES:
@@ -305,17 +322,26 @@ def plan_engagement(options: CreateEngagementOptions, *, now: datetime | None = 
             raise SystemExit("remediation engagements require --name")
         if len(options.repos) != 1:
             raise SystemExit("remediation engagements require exactly one repository")
-        if "://" in options.repos[0]:
-            raise SystemExit("remediation requires a local repository path")
-        repository = Path(options.repos[0]).expanduser().resolve()
-        if not repository.is_dir():
-            raise SystemExit("remediation requires an existing local Git repository")
-        probe = subprocess.run(
-            ["git", "-C", str(repository), "rev-parse", "--show-toplevel"],
-            capture_output=True, text=True,
-        )
-        if probe.returncode or Path(probe.stdout.strip()).resolve() != repository:
-            raise SystemExit("remediation requires an existing local Git repository root")
+        repo = remediation_repository(options.repos[0], install_root=options.install_root)
+        from .project_config import project_module
+
+        project = project_module(options.install_root)
+        source = (options.remediation_project_path or repo / "PROJECT.md").expanduser().resolve()
+        try:
+            project.validate_project(options.remediation_config)
+            if source.exists():
+                config = project.load_project(source)
+                remediation_project_snapshot = config
+                if config.get("repository") != str(repo):
+                    raise ValueError(f"{source}: repository must identify the selected remediation repository")
+                if options.remediation_project_path is None and options.remediation_config:
+                    for key, value in options.remediation_config.items():
+                        if key != "repository" and config.get(key) != value:
+                            raise ValueError(f"{source} already exists; edit the canonical file explicitly instead of overwriting it with imported configuration")
+            elif options.remediation_project_path is not None:
+                raise ValueError(f"{source}: PROJECT.md does not exist")
+        except (OSError, ValueError) as exc:
+            raise SystemExit(f"invalid remediation PROJECT.md: {exc}") from exc
 
     if now is None:
         now = datetime.now(timezone.utc)
@@ -388,7 +414,7 @@ def plan_engagement(options: CreateEngagementOptions, *, now: datetime | None = 
             "name": name,
             "target": name,
             "repos": repos,
-            "remediation_project": dict(options.remediation_config),
+            "remediation_project": remediation_project_snapshot,
             "created_at": created_at,
         }
     elif options.engagement_type == "code":
@@ -1488,6 +1514,12 @@ def print_shell_cd_init(shell: str = "zsh") -> str:
 
 
 def start_engagement(install_root: Path, engagement_dir: Path, client: str, extra_args: list[str], mode: str | None = None) -> None:
+    if client == "pi" and _read_json(engagement_dir / "scope.json").get("engagement_type") != "remediation":
+        raise SystemExit(
+            "Pi supports remediation engagements only; Vigil installs no Pi specialist roster. "
+            "Start this engagement with --client codex or --client claude, "
+            "or create a remediation engagement for Pi."
+        )
     selected_mode = resolve_engagement_mode(engagement_dir, mode)
     prompt = engagement_mode_prompt(install_root, selected_mode)
     if not prompt.is_file():
@@ -2060,25 +2092,19 @@ def _write_issues_doc(eng_dir: Path) -> None:
 def _write_remediation_project_notes(eng_dir: Path, options: CreateEngagementOptions) -> None:
     """Seed only project-level notes; case history belongs to the backend."""
     repo = Path(options.repos[0]).expanduser().resolve()
-    _write_json(eng_dir / "remediation-project.json", {
-        **options.remediation_config,
-        "repository": str(repo),
-    })
-    (eng_dir / "PROJECT.md").write_text(
-        f"# {options.name} remediation\n\n"
-        f"Repository: `{repo}`\n\n"
-        "## Environment and accounts\n\n"
-        "Record development URL, account and fixture prerequisites, and approved model/account "
-        "in `remediation-project.json`. Never put credentials or session tokens here.\n\n"
-        "## Case workflow\n\n"
-        "Import each Jira issue or bounty report as a separate case. Keep one worktree per case. "
-        "Record exact baseline, red/green tests, Stagehand rehearsal, review, deployment identity, "
-        "and human verification through `vigil remediation`.\n\n"
-        "## Release\n\n"
-        "The first development deployment is a human GitHub Actions handoff. Record its run ID "
-        "and observed revision before claiming verification.\n",
-        encoding="utf-8",
-    )
+    from .project_config import project_module
+
+    project = project_module(options.install_root)
+    source = options.remediation_project_path or repo / "PROJECT.md"
+    source = source.expanduser().resolve()
+    if not source.exists():
+        config = dict(options.remediation_config)
+        config["repository"] = os.path.relpath(repo, source.parent)
+        source.write_text(project.render_project(config, options.name or repo.name), encoding="utf-8")
+    config = project.load_project(source)
+    if config.get("repository") != str(repo):
+        raise SystemExit(f"{source}: repository must identify the selected remediation repository")
+    (eng_dir / "PROJECT.md").symlink_to(os.path.relpath(source, eng_dir))
     (eng_dir / "cases" / "verification-plan.template.md").write_text(
         "# Human verification\n\n"
         "Environment and deployed revision: \n\n"
@@ -2812,6 +2838,7 @@ _ENTRYPOINT_REPAIR_DESTINATIONS = (
     "start_opencode.sh",
     "start_goose.sh",
     "start_kimi.sh",
+    "start_pi.sh",
 )
 
 
@@ -2895,6 +2922,10 @@ def _write_launchers(agent_root: Path, eng_dir: Path, client_kind: str, *, skip_
             "kimi",
             _SKIP_PERMISSION_ARGS["kimi"] if skip_permissions else "",
         )
+
+    # Pi loads AGENTS.md and uses its own model/auth settings; no permission flag.
+    if client_kind in {"codex", "claude", "both"}:
+        _write_launcher(agent_root, eng_dir, "pi", "")
 
 
 def _existing_engagement_client_kind(eng_dir: Path) -> str | None:
@@ -3206,11 +3237,9 @@ def _write_launcher(
             "  fi\n"
             "done\n"
         )
-    # The launcher exports operator-side env from the per-engagement
-    # .orchestrator.env, with install-root .orchestrator.env / .env kept as
-    # legacy fallbacks. Parent-shell ORCHESTRATOR_BASE_URL remains the
-    # explicit override; among files the first hit wins so an install-root
-    # default cannot retarget an engagement-local snapshot.
+    # Resolve through the CLI at session start, including persistent config and
+    # dotenv normalization, so a launcher cannot retarget the backend by applying
+    # a different precedence chain. The parent-shell override still wins.
     #
     # AGENT_NAME is no longer exported here. The kali helper now defaults
     # to "operator" when neither --agent-name nor $AGENT_NAME / $VIGIL_AGENT_NAME
@@ -3233,17 +3262,9 @@ VIGIL_INSTALL_DIR={shlex.quote(str(agent_root.parent))}
 export VIGIL_INSTALL_DIR
 export VIGIL_CLIENT_NAME="{client}"
 
-if [[ -z "${{ORCHESTRATOR_BASE_URL:-}}" ]]; then
-  for env_file in "$ENGAGEMENT_DIR/.orchestrator.env" "$VIGIL_INSTALL_DIR/.orchestrator.env" "$VIGIL_INSTALL_DIR/.env"; do
-    if [[ -f "$env_file" ]]; then
-      candidate="$(grep -E '^ORCHESTRATOR_BASE_URL=' "$env_file" | tail -n1 | cut -d= -f2- || true)"
-      if [[ -n "$candidate" ]]; then
-        export ORCHESTRATOR_BASE_URL="${{candidate%/}}"
-        break
-      fi
-    fi
-  done
-fi
+# Resolve at session start so config edits and dotenv quoting use the CLI contract.
+ORCHESTRATOR_BASE_URL="$(vigil --root "$VIGIL_INSTALL_DIR" config resolve orchestrator_base_url --engagement-dir "$ENGAGEMENT_DIR")"
+export ORCHESTRATOR_BASE_URL
 {provider_block}{extra_env_block}
 {exec_line}
 """

@@ -9,6 +9,30 @@ Durable design decisions live in [`docs/adr/`](docs/adr/).
 
 ### Changed
 
+- **Remediation shares one repository `PROJECT.md`.** TOML configuration and Markdown
+  instructions replace editable engagement JSON. Machine differences use environment overrides;
+  project changes invalidate approval. Legacy JSON is an explicit creation-time import.
+- **Remediation uses JJ when `.jj` exists.** Case workspaces/bookmarks, review diffs,
+  immutable revision evidence, and approved pushes use JJ; Git repositories retain Git.
+- **Remediation creation and help are clearer.** The terminal wizard offers remediation
+  and collects its local repository; Questionary adds keyboard selection and path completion.
+  Non-interactive output remains plain. Command help states prerequisites and results.
+- **CI uses fewer runners without dropping checks.** Scheduled placeholder runs are removed;
+  backend sync-lint and assess readiness tests run in their owning suites; deterministic eval,
+  Ruff, and mypy run as named steps in one job. Backend tests use both hosted-runner vCPUs.
+- **Large source ingests have explicit controls and progress.** `code-ingest` accepts
+  `--git-status-timeout` and repeatable `--exclude-path`; exclusions remain authenticated in
+  the snapshot. Dry-run documents its full hashing cost and reports progress. Refresh commit
+  response budgets scale with file count and copied bytes, and ctags receives a bounded file list.
+- **New sealed source snapshots use `code-source-manifest/v3`.** Both seal and independent
+  attestation derive logical lines and headers from BOM-aware UTF-8/16/32 decoding without
+  changing source bytes. Historical v2 snapshots retain their original verification semantics;
+  attestation reports all source metadata mismatches together.
+- **Structural artifacts advance to `structural-index/v7`.** Build and sync share metadata and
+  callable validation and report all offending files before publication. Commented-out JS/TS
+  exports no longer contribute export counts. Rebuild and sync after upgrading; historical v6
+  artifacts remain unchanged in their original directories.
+- **False-positive verification errors identify `details.kill_check` as an integer from 1 to 5.**
 - **Offensive engagements now store enabled web and code tracks separately from operator
   sessions.** New creation enables one track; `vigil engagement add-track <key> web|code`
   enables the other. `vigil engagement start` selects one prompt with `--mode web|code`
@@ -37,6 +61,14 @@ Durable design decisions live in [`docs/adr/`](docs/adr/).
   the shared methodology mid-engagement, which is a human review decision.
 
 ### Added
+
+- **`vigil engagement start --client pi`** launches Pi with its configured provider/model,
+  the engagement operator prompt, and standard Vigil environment. Install repair adds the
+  launcher to recognized existing engagements. Pi supports remediation; modes requiring
+  specialist dispatch are rejected before launch.
+- **`vigil remediation browser`** retains local browser rehearsal evidence using `browse`.
+  Claude Code or Codex supplies reasoning through its existing session; no separate model API key.
+  Stagehand remains an optional SDK driver with separately configured provider credentials.
 
 - **Claude and Codex now auto-compact at a 510,000-token window.** Claude applies the limit through
   `CLAUDE_CODE_AUTO_COMPACT_WINDOW` and steers the summary through `PreCompact`. Codex renders the

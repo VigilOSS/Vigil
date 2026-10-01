@@ -2831,7 +2831,8 @@ def verify_finding(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=(
                     "false_positive verification requires "
-                    "details.kill_reason and details.kill_check"
+                    "details.kill_reason and details.kill_check "
+                    "(kill_check must be an integer from 1 to 5)"
                 ),
             )
         _validate_kill_names_a_settling_test(

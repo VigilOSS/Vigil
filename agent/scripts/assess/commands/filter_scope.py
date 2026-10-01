@@ -101,7 +101,7 @@ def run(args: argparse.Namespace) -> None:
             value = line.strip()
             if not value or value.startswith("#"):
                 continue
-            host = host_from_token(value)
+            host = host_from_token(value, allow_single_label=True)
             if not host_admitted(host, entries, deny):
                 continue
             # Vendor-SaaS scope checkpoint: warn the first time an admitted

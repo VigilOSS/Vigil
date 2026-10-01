@@ -20,7 +20,7 @@ from .variant_scopes import (
 )
 
 STRUCTURAL_INPUT_IDENTITY_SCHEMA = "structural-input-identity/v1"
-STRUCTURAL_INDEX_SCHEMA = "structural-index/v6"
+STRUCTURAL_INDEX_SCHEMA = "structural-index/v7"
 STRUCTURAL_CALLABLE_IDENTITY_SCHEMA = "structural-callable/v1"
 # Dimensions the exact parser can only read inside a callable. When the index
 # declares one of them unavailable, the sink and call-site detectors returned

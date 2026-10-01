@@ -23,6 +23,7 @@ on:
       - "agent/commands/**"
       - "agent/scripts/render-operator-prompts.sh"
       - "agent/AGENTS.md"
+      - "agent/AGENTS-blue.md"
       - "agent/CLAUDE.md"
       - "agent/.claude/agents/**"
       - "agent/.claude/commands/**"

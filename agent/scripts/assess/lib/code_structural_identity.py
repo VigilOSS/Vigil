@@ -8,9 +8,9 @@ from typing import Any
 from assess.lib.code_languages import canonical_backend_language
 
 STRUCTURAL_INPUT_IDENTITY_SCHEMA = "structural-input-identity/v1"
-STRUCTURAL_INDEX_SCHEMA = "structural-index/v6"
+STRUCTURAL_INDEX_SCHEMA = "structural-index/v7"
 STRUCTURAL_AGGREGATE_SCHEMA = "structural-index-aggregate/v4"
-STRUCTURAL_INDEX_PATH_VERSION = "v6"
+STRUCTURAL_INDEX_PATH_VERSION = "v7"
 
 
 def parse_code_file_page(

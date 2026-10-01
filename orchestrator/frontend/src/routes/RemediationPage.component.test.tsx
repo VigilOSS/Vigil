@@ -80,6 +80,28 @@ afterEach(() => {
 });
 
 describe("remediation workspace", () => {
+  it("shows a failed queue load instead of an empty queue and retries", async () => {
+    vi.mocked(listRemediationCases).mockRejectedValueOnce(new Error("Queue unavailable"));
+    render(<RemediationPage engagementKey="Acme" onBack={() => {}} />);
+    expect(await screen.findByRole("alert")).toHaveProperty("textContent", "Queue unavailable");
+    expect(screen.queryByText("No remediation cases imported yet.")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Retry loading cases" }));
+    expect(await screen.findByLabelText("Human verification plan")).toBeTruthy();
+    expect(listRemediationCases).toHaveBeenCalledTimes(2);
+    expect(screen.queryByText("Queue unavailable")).toBeNull();
+  });
+
+  it("shows a failed case load instead of perpetual loading and retries", async () => {
+    vi.mocked(getRemediationCase).mockRejectedValueOnce(new Error("Case unavailable"));
+    render(<RemediationPage engagementKey="Acme" onBack={() => {}} initialCaseId={7} />);
+    expect(await screen.findByRole("alert")).toHaveProperty("textContent", "Case unavailable");
+    expect(screen.queryByText("Loading case…")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Retry loading case" }));
+    expect(await screen.findByLabelText("Human verification plan")).toBeTruthy();
+    expect(getRemediationCase).toHaveBeenCalledTimes(2);
+    expect(screen.queryByText("Case unavailable")).toBeNull();
+  });
+
   it("clears the previous case when switching engagements", async () => {
     vi.mocked(listRemediationCases).mockImplementation((key) => key === "first"
       ? Promise.resolve([reviewedCase])

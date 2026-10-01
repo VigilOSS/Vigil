@@ -13,7 +13,9 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, BinaryIO, Callable, Self
 
-SOURCE_MANIFEST_SCHEMA = "code-source-manifest/v2"
+SOURCE_MANIFEST_SCHEMA = "code-source-manifest/v3"
+_LEGACY_SOURCE_MANIFEST_SCHEMA = "code-source-manifest/v2"
+SOURCE_MANIFEST_SCHEMAS = frozenset({_LEGACY_SOURCE_MANIFEST_SCHEMA, SOURCE_MANIFEST_SCHEMA})
 _READ_CHUNK_SIZE = 1024 * 1024
 _MAX_REPO_KEY_BYTES = 255
 MAX_JSON_ARTIFACT_BYTES = 64 * 1024 * 1024
@@ -118,13 +120,17 @@ def _same_identity(left: os.stat_result, right: os.stat_result) -> bool:
     )
 
 
+def _source_encoding(prefix: bytes) -> str:
+    # UTF-32LE shares UTF-16LE's prefix, so inspect the longer BOM first.
+    if prefix.startswith((codecs.BOM_UTF32_LE, codecs.BOM_UTF32_BE)):
+        return "utf-32"
+    if prefix.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
+        return "utf-16"
+    return "utf-8-sig"
+
+
 def _header_from_bytes(data: bytes, *, max_lines: int = 50, max_chars: int = 8192) -> str:
-    if data.startswith((b"\xff\xfe", b"\xfe\xff")):
-        if len(data) % 2:
-            data = data[:-1]
-        decoded = data.decode("utf-16", errors="replace")
-    else:
-        decoded = data.decode("utf-8", errors="replace")
+    decoded = data.decode(_source_encoding(data), errors="replace")
     parts: list[str] = []
     count = 0
     for line_no, line in enumerate(decoded.splitlines(keepends=True)):
@@ -137,60 +143,59 @@ def _header_from_bytes(data: bytes, *, max_lines: int = 50, max_chars: int = 819
 
 
 class _StreamingLineCounter:
-    """Count logical source lines without materializing or misreading UTF-16."""
+    """Count logical lines from BOM-decoded text using bounded reads."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, legacy_text: bool = False) -> None:
         self._probe = bytearray()
-        self._mode: str | None = None
-        self._decoder = None
+        self._legacy_text = legacy_text
+        self._has_bytes = False
+        self._decoder: codecs.IncrementalDecoder | None = None
         self._line_breaks = 0
         self._previous_ended_cr = False
         self._last_was_break = False
+        self._has_content = False
 
     def feed(self, chunk: bytes) -> None:
-        if self._mode is None:
-            self._probe.extend(chunk)
-            if len(self._probe) < 2:
+        self._has_bytes = self._has_bytes or bool(chunk)
+        if self._decoder is None:
+            probe_size = 2 if self._legacy_text else 4
+            remaining = probe_size - len(self._probe)
+            self._probe.extend(chunk[:remaining])
+            chunk = chunk[remaining:]
+            if len(self._probe) < probe_size:
                 return
-            initial = bytes(self._probe)
-            self._probe.clear()
-            if initial.startswith((b"\xff\xfe", b"\xfe\xff")):
-                self._mode = "utf-16"
-                self._decoder = codecs.getincrementaldecoder("utf-16")(
-                    errors="replace"
-                )
-                self._feed_text(self._decoder.decode(initial, final=False))
-            else:
-                self._mode = "bytes"
-                self._feed_bytes(initial)
-            return
-        if self._mode == "utf-16":
-            assert self._decoder is not None
-            self._feed_text(self._decoder.decode(chunk, final=False))
+            self._start_decoder()
+        assert self._decoder is not None
+        self._feed_text(self._decoder.decode(chunk, final=False))
+
+    def _start_decoder(self) -> None:
+        initial = bytes(self._probe)
+        self._probe.clear()
+        if self._legacy_text:
+            # V2's two-byte probe interpreted UTF-32LE as UTF-16, and counted
+            # every other encoding as bytes. Existing seals retain that LOC.
+            encoding = (
+                "utf-16"
+                if initial.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE))
+                else "latin-1"
+            )
         else:
-            self._feed_bytes(chunk)
+            encoding = _source_encoding(initial)
+        self._decoder = codecs.getincrementaldecoder(encoding)(errors="replace")
+        self._feed_text(self._decoder.decode(initial, final=False))
 
-    def finish(self) -> tuple[int, bool]:
-        if self._mode is None:
-            self._feed_bytes(bytes(self._probe))
-        elif self._mode == "utf-16":
-            assert self._decoder is not None
-            self._feed_text(self._decoder.decode(b"", final=True))
-        return self._line_breaks, self._last_was_break
-
-    def _feed_bytes(self, chunk: bytes) -> None:
-        if not chunk:
-            return
-        self._line_breaks += chunk.count(b"\n") + chunk.count(b"\r")
-        self._line_breaks -= chunk.count(b"\r\n")
-        if self._previous_ended_cr and chunk.startswith(b"\n"):
-            self._line_breaks -= 1
-        self._previous_ended_cr = chunk.endswith(b"\r")
-        self._last_was_break = chunk.endswith((b"\r", b"\n"))
+    def finish(self) -> int:
+        if self._decoder is None:
+            self._start_decoder()
+        assert self._decoder is not None
+        self._feed_text(self._decoder.decode(b"", final=True))
+        has_content = self._has_bytes if self._legacy_text else self._has_content
+        return self._line_breaks + int(has_content and not self._last_was_break)
 
     def _feed_text(self, text: str) -> None:
         if not text:
             return
+        self._has_content = True
         self._line_breaks += text.count("\n") + text.count("\r")
         self._line_breaks -= text.count("\r\n")
         if self._previous_ended_cr and text.startswith("\n"):
@@ -207,6 +212,7 @@ def _capture_open_file(
     retain_spool: bool,
     materialize_limit: int | None,
     chunk_consumer: Callable[[bytes], None] | None,
+    legacy_text: bool = False,
 ) -> CapturedSourceFile:
     before = os.fstat(fd)
     if not stat.S_ISREG(before.st_mode):
@@ -221,7 +227,7 @@ def _capture_open_file(
     materialized = bytearray() if materialize_limit is not None else None
     header_prefix = bytearray()
     size = 0
-    line_counter = _StreamingLineCounter()
+    line_counter = _StreamingLineCounter(legacy_text=legacy_text)
     try:
         while True:
             chunk = os.read(fd, _READ_CHUNK_SIZE)
@@ -266,11 +272,10 @@ def _capture_open_file(
             spool.close()
         raise SourceSnapshotRaceError(f"{display_path} changed while being sealed")
 
-    line_breaks, last_was_break = line_counter.finish()
     return CapturedSourceFile(
         sha256=digest.hexdigest(),
         size=size,
-        loc=line_breaks + (1 if size and not last_was_break else 0),
+        loc=line_counter.finish(),
         header=_header_from_bytes(bytes(header_prefix)),
         executable=bool(before.st_mode & 0o111),
         materialized=bytes(materialized) if materialized is not None else None,
@@ -425,6 +430,7 @@ class RootedSourceTree:
         retain_spool: bool = True,
         materialize_limit: int | None = None,
         chunk_consumer: Callable[[bytes], None] | None = None,
+        legacy_text: bool = False,
     ) -> CapturedSourceFile:
         rel = _safe_relative_path(raw)
         parent_text = PurePosixPath(*rel.parts[:-1]).as_posix() if len(rel.parts) > 1 else ""
@@ -443,6 +449,7 @@ class RootedSourceTree:
                     retain_spool=retain_spool,
                     materialize_limit=materialize_limit,
                     chunk_consumer=chunk_consumer,
+                    legacy_text=legacy_text,
                 )
             finally:
                 os.close(fd)
@@ -700,7 +707,7 @@ class SnapshotBuilder:
             raise ValueError(
                 f"snapshot paths cannot be copied and excluded: {sorted(overlap)}"
             )
-        # V2 authenticates both copied bytes and the provenance/exclusion
+        # The manifest authenticates both copied bytes and the provenance/exclusion
         # boundary describing exactly what was reviewed and omitted.
         digest_payload = {
             "schema": SOURCE_MANIFEST_SCHEMA,
@@ -806,7 +813,7 @@ def validate_snapshot(snapshot_root: Path, *, expected_digest: str | None = None
         raise ValueError(f"sealed snapshot manifest must contain a JSON object: {manifest_path}")
     digest = str(manifest.get("snapshot_digest") or "")
     schema = str(manifest.get("schema") or "")
-    if schema != SOURCE_MANIFEST_SCHEMA or not digest:
+    if schema not in SOURCE_MANIFEST_SCHEMAS or not digest:
         raise ValueError(f"unsupported sealed snapshot manifest: {manifest_path}")
     if Path(str(manifest.get("source_path") or "")).resolve() != source.resolve():
         raise ValueError(f"sealed snapshot source path binding mismatch: {snapshot_root}")
@@ -836,7 +843,7 @@ def validate_snapshot(snapshot_root: Path, *, expected_digest: str | None = None
     exclusions = manifest.get("excluded_entries")
     git = manifest.get("git")
     if not isinstance(exclusions, list) or not isinstance(git, dict):
-        raise ValueError(f"sealed snapshot has invalid v2 identity: {manifest_path}")
+        raise ValueError(f"sealed snapshot has invalid identity: {manifest_path}")
     exclusion_paths: set[str] = set()
     ordered_exclusions: list[dict[str, Any]] = []
     for record in exclusions:
@@ -922,7 +929,11 @@ def validate_snapshot(snapshot_root: Path, *, expected_digest: str | None = None
                 expected_mode = 0o555 if item.get("executable") else 0o444
                 if stat.S_IMODE(entry_stat.st_mode) != expected_mode:
                     raise ValueError(f"sealed snapshot permission drift: {rel_text}")
-                captured = source_tree.capture(rel_text, retain_spool=False)
+                captured = source_tree.capture(
+                    rel_text,
+                    retain_spool=False,
+                    legacy_text=schema == _LEGACY_SOURCE_MANIFEST_SCHEMA,
+                )
                 if (
                     captured.sha256 != item.get("source_sha256")
                     or captured.size != item.get("size")

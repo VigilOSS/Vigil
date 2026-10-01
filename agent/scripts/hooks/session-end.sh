@@ -84,7 +84,7 @@ REASON=$(printf '%s' "$INPUT" | jq -r '.reason // empty' 2>/dev/null || true)
 # arbitrary environment content never changes the receipt shape.
 CLIENT_NAME=""
 case "${VIGIL_CLIENT_NAME:-}" in
-  claude|codex|goose|kimi|opencode) CLIENT_NAME="$VIGIL_CLIENT_NAME" ;;
+  claude|codex|goose|kimi|opencode|pi) CLIENT_NAME="$VIGIL_CLIENT_NAME" ;;
 esac
 NORMALIZED_CLIENT_NAME="${CLIENT_NAME:-unknown}"
 

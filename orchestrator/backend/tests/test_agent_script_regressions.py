@@ -1749,6 +1749,8 @@ def _write_bound_structural_fixture(
 ) -> dict[str, object]:
     from assess.lib.code_snapshot import SnapshotBuilder, capture_regular_file
     from assess.lib.code_structural_identity import (
+        STRUCTURAL_INDEX_PATH_VERSION,
+        STRUCTURAL_INDEX_SCHEMA,
         bind_structural_inputs,
         structural_input_digest,
     )
@@ -1790,7 +1792,7 @@ def _write_bound_structural_fixture(
     )
     index_root = manifest_dir / "structural-index"
     generation_dir = (
-        index_root / str(repo_id) / str(generation) / "v6" / digest / input_digest
+        index_root / str(repo_id) / str(generation) / STRUCTURAL_INDEX_PATH_VERSION / digest / input_digest
     )
     files_dir = generation_dir / "files"
     files_dir.mkdir(parents=True)
@@ -1845,7 +1847,7 @@ def _write_bound_structural_fixture(
     manifest_path.write_text(
         json.dumps(
             {
-                "schema": "structural-index/v6",
+                "schema": STRUCTURAL_INDEX_SCHEMA,
                 "repo_id": repo_id,
                 "repo_key": repo_key,
                 "repo_generation": generation,
@@ -2075,7 +2077,7 @@ def test_code_index_sync_repo_id_scopes_aggregate_to_matching_manifest(
     assert FakeClient.file_requests == ["code/files?limit=5000&offset=0&repo_id=2"]
     assert len(FakeClient.posts) == 1
     _, payload = FakeClient.posts[0]
-    assert payload["structural_index_schema"] == "structural-index/v6"
+    assert payload["structural_index_schema"] == module.STRUCTURAL_INDEX_SCHEMA
     assert payload["structural_input_digest"] == repo_b["summary"][
         "structural_input_digest"
     ]
@@ -2959,7 +2961,7 @@ def test_start_swarm_records_N_rows_with_worker_encoded_task(
                     "repo_path": "/sealed/swarm-repo/source",
                     "active_generation": 4,
                     "source_manifest_digest": "c" * 64,
-                    "structural_index_schema": "structural-index/v6",
+                    "structural_index_schema": "structural-index/v7",
                     "structural_index_manifest_path": "/sealed/swarm-repo/index/manifest.json",
                     "lsp_config": {},
                 }

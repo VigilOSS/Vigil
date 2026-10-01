@@ -16,6 +16,7 @@ import pytest
 from assess import cli
 from assess.commands import agent, artifact
 from assess.lib import contracts
+from assess.lib.code_structural_identity import STRUCTURAL_INDEX_SCHEMA
 from assess.lib.tenant_references import (
     TenantReferenceError,
     validate_tenant_reference_paths,
@@ -371,7 +372,7 @@ def test_agent_start_code_role_renders_backend_derived_source_identity(
                 "repo_path": "/sealed/example/source",
                 "active_generation": 3,
                 "source_manifest_digest": digest,
-                "structural_index_schema": "structural-index/v6",
+                "structural_index_schema": STRUCTURAL_INDEX_SCHEMA,
                 "structural_index_manifest_path": "/sealed/example/index/manifest.json",
                 "lsp_config": {
                     "ctags": {
@@ -417,7 +418,7 @@ def test_agent_start_code_role_renders_backend_derived_source_identity(
     assert "repo_generation: 3" in output
     assert f"source_manifest_digest: {digest}" in output
     assert "snapshot_path: /sealed/example/source" in output
-    assert "structural_index_schema: structural-index/v6" in output
+    assert f"structural_index_schema: {STRUCTURAL_INDEX_SCHEMA}" in output
     assert "structural_index_manifest_path: /sealed/example/index/manifest.json" in output
     assert "ctags_path: /sealed/example/ctags/tags" in output
     assert "pass it the Runtime Identity and Code Source Identity blocks above" in output
@@ -938,7 +939,7 @@ def test_agent_start_code_role_requires_repo_selection_before_recording(
             "repo_path": f"/sealed/repo-{repo_id}/source",
             "active_generation": 1,
             "source_manifest_digest": digest,
-            "structural_index_schema": "structural-index/v6",
+            "structural_index_schema": STRUCTURAL_INDEX_SCHEMA,
             "structural_index_manifest_path": f"/sealed/repo-{repo_id}/manifest.json",
             "lsp_config": {},
         }

@@ -231,7 +231,7 @@ def _mock_ingest_git(module, monkeypatch) -> None:
     monkeypatch.setattr(
         module,
         "_prepare_git_source",
-        lambda _repo_path: (
+        lambda _repo_path, _status_timeout: (
             "/trusted/git",
             {"head": "a" * 40, "branch": "main", "dirty": False},
         ),
@@ -843,6 +843,7 @@ def test_code_index_default_output_uses_engagement_analysis_state(monkeypatch, t
                 "security_sinks": 0,
                 "security_sources": 0,
             },
+            "total_lines": 1,
             "total_functions": 1,
             "total_exports": 0,
             "functions": [

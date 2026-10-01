@@ -668,6 +668,46 @@ def test_remediation_rejects_approval_of_truncated_review_diff(client, isolate_s
     assert _approve(client, case["id"]).status_code == 409
 
 
+@pytest.mark.parametrize("method", ["GET", "PATCH"])
+@pytest.mark.parametrize(
+    ("result", "result_missing"),
+    [
+        ([], True), (None, True), ("passed", True), (42, True), (True, True),
+        ({}, True),
+        ({"status": "passed", "purpose": "happy-path", "observed": "Form worked",
+          "proved": "Owner update saved", "steps": [
+              {"action": "Submit own form", "observation": "Own account changed"},
+          ]}, False),
+    ],
+    ids=["array", "null", "string", "number", "boolean", "incomplete-object", "valid-object"],
+)
+def test_remediation_stagehand_result_shape_preserves_case_access(
+    client, isolate_settings, method, result, result_missing,
+):
+    case = _case(client, isolate_settings)
+    root = isolate_settings["engagements_dir"] / KEY
+    artifact = root / "remediation" / "cases" / str(case["id"]) / "stagehand" / "result.json"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text(json.dumps(result))
+    endpoint = f"{BASE}/cases/{case['id']}"
+    evidence = client.post(f"{endpoint}/evidence", json={
+        "kind": "stagehand", "method": "stagehand", "environment": "local",
+        "command": "trusted script via Chrome CDP", "observed": "Browser run",
+        "proved": "Happy path", "artifact_path": str(artifact.relative_to(root)),
+    })
+    assert evidence.status_code == 201, evidence.text
+
+    response = client.request(method, endpoint, **({"json": {"title": "Updated case"}} if method == "PATCH" else {}))
+    assert response.status_code == 200, response.text
+    detail = response.json()
+    assert detail["review_evidence_ready"] is False
+    assert ("passed browser happy-path result.json at current revision" in detail["review_evidence_missing"]) is result_missing
+    assert detail["evidence"][0]["id"] == evidence.json()["id"]
+    if method == "PATCH":
+        assert detail["title"] == "Updated case"
+        assert client.get(endpoint).json()["title"] == "Updated case"
+
+
 @pytest.mark.parametrize(
     ("stagehand_steps", "screenshot_valid"),
     [(False, True), (True, False)],
@@ -860,8 +900,8 @@ def test_remediation_case_binds_registered_worktree_branch_across_revision_sync(
     worktree = isolate_settings["engagements_dir"] / KEY / "remediation" / "cases" / str(case["id"]) / "worktree"
     worktree.mkdir(parents=True)
     subprocess.run(["git", "init", "-q", "--initial-branch=fix/custom-case", str(worktree)], check=True)
-    (isolate_settings["engagements_dir"] / KEY / "remediation-project.json").write_text(
-        json.dumps({"repository": str(worktree)})
+    (isolate_settings["engagements_dir"] / KEY / "PROJECT.md").write_text(
+        '+++\nrepository = ' + json.dumps(str(worktree)) + '\n+++\n'
     )
     endpoint = f"{BASE}/cases/{case['id']}"
     registered = client.patch(endpoint, json={
@@ -899,8 +939,8 @@ def test_remediation_case_rejects_revision_sync_after_checkout_switch(client, is
     worktree = isolate_settings["engagements_dir"] / KEY / "remediation" / "cases" / str(case["id"]) / "worktree"
     worktree.mkdir(parents=True)
     subprocess.run(["git", "init", "-q", "--initial-branch=fix/custom-case", str(worktree)], check=True)
-    (isolate_settings["engagements_dir"] / KEY / "remediation-project.json").write_text(
-        json.dumps({"repository": str(worktree)})
+    (isolate_settings["engagements_dir"] / KEY / "PROJECT.md").write_text(
+        '+++\nrepository = ' + json.dumps(str(worktree)) + '\n+++\n'
     )
     endpoint = f"{BASE}/cases/{case['id']}"
     registered = client.patch(endpoint, json={
@@ -935,7 +975,7 @@ def test_remediation_configured_project_rejects_foreign_worktree(client, isolate
     repo = isolate_settings["data_dir"] / "source-repo"
     repo.mkdir()
     subprocess.run(["git", "init", "-q", "--initial-branch=main", str(repo)], check=True)
-    (root / "remediation-project.json").write_text(json.dumps({"repository": str(repo)}))
+    (root / "PROJECT.md").write_text('+++\nrepository = ' + json.dumps(str(repo)) + '\n+++\n')
     foreign = root / "remediation" / "cases" / str(case["id"]) / "worktree"
     foreign.mkdir(parents=True)
     subprocess.run(["git", "init", "-q", "--initial-branch=fix/case", str(foreign)], check=True)
@@ -954,7 +994,7 @@ def test_remediation_revision_sync_rejects_foreign_checkout_with_same_branch(cli
     (repo / "base.txt").write_text("base")
     subprocess.run(["git", "-C", str(repo), "add", "base.txt"], check=True)
     subprocess.run(["git", "-C", str(repo), "-c", "user.name=Vigil Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "Base"], check=True)
-    (root / "remediation-project.json").write_text(json.dumps({"repository": str(repo)}))
+    (root / "PROJECT.md").write_text('+++\nrepository = ' + json.dumps(str(repo)) + '\n+++\n')
     worktree = root / "remediation" / "cases" / str(case["id"]) / "worktree"
     worktree.parent.mkdir(parents=True)
     subprocess.run(["git", "-C", str(repo), "worktree", "add", "-qb", "fix/custom-case", str(worktree)], check=True)
@@ -981,7 +1021,7 @@ def test_remediation_approval_rejects_same_revision_on_another_branch(client, is
     (repo / "fix.php").write_text("base")
     subprocess.run(["git", "-C", str(repo), "add", "fix.php"], check=True)
     subprocess.run(["git", "-C", str(repo), "-c", "user.name=Vigil Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "Base"], check=True)
-    (root / "remediation-project.json").write_text(json.dumps({"repository": str(repo)}))
+    (root / "PROJECT.md").write_text('+++\nrepository = ' + json.dumps(str(repo)) + '\n+++\n')
     worktree = root / "remediation" / "cases" / str(case["id"]) / "worktree"
     worktree.parent.mkdir(parents=True)
     subprocess.run(["git", "-C", str(repo), "worktree", "add", "-qb", "fix/custom-case", str(worktree)], check=True)
@@ -1013,7 +1053,7 @@ def test_remediation_approval_rejects_same_revision_on_another_branch(client, is
     assert client.post(f"{endpoint}/transition", json={
         "status": "pr_draft", "actor": "operator", "reason": "Ready",
     }).status_code == 409
-    (root / "remediation-project.json").unlink()
+    (root / "PROJECT.md").unlink()
     assert client.get(endpoint).json()["approval_current"] is False
 
 
@@ -1186,3 +1226,43 @@ def test_remediation_fixture_flow_preserves_approval_through_development_evidenc
     assert client.post(f"{BASE}/cases/{case['id']}/transition", json={
         "status": "verified", "actor": "operator", "reason": "New plan verified",
     }).status_code == 200
+
+
+@pytest.mark.parametrize("damage", [None, "commands.json", "script.py", "screen.png", "served_revision", "failed_command"])
+def test_remediation_review_accepts_complete_browse_bundle(client, isolate_settings, damage):
+    case = _case(client, isolate_settings)
+    root = isolate_settings['engagements_dir'] / KEY
+    worktree = root / 'remediation' / 'cases' / str(case['id']) / 'worktree'
+    worktree.mkdir(parents=True)
+    subprocess.run(['git', 'init', '-q', '--initial-branch=main', str(worktree)], check=True)
+    _red_baseline(worktree)
+    _red_baseline(worktree)
+    revision = subprocess.check_output(['git', '-C', str(worktree), 'rev-parse', 'HEAD'], text=True).strip()
+    endpoint = f'{BASE}/cases/{case["id"]}'
+    assert client.patch(endpoint, json={'worktree_path': str(worktree), 'worktree_revision': revision}).status_code == 200
+    _review_evidence(client, root, case['id'], revision)
+    run = root / 'remediation' / 'cases' / str(case['id']) / 'stagehand' / 'local-happy'
+    result = json.loads((run / 'result.json').read_text())
+    result['served_revision'] = revision
+    (run / 'result.json').write_text(json.dumps(result))
+    (run / 'commands.json').write_text(json.dumps([{'argv': ['browse', 'snapshot', '--local', '--session', 'case'], 'returncode': 0, 'stdout': 'Form visible', 'stderr': ''}]))
+    if damage == "served_revision":
+        result["served_revision"] = "other"
+        (run / "result.json").write_text(json.dumps(result))
+    elif damage == "failed_command":
+        commands = json.loads((run / "commands.json").read_text())
+        commands[0]["returncode"] = 1
+        (run / "commands.json").write_text(json.dumps(commands))
+    with db.get_connection() as conn:
+        conn.execute('DELETE FROM remediation_evidence WHERE case_id=? AND method=?', (case['id'], 'stagehand'))
+    for file in run.iterdir():
+        response = client.post(endpoint + '/evidence', json={
+            'kind': 'screenshot' if file.suffix == '.png' else 'browse', 'method': 'browse',
+            'environment': 'local', 'command': 'trusted script with browse tools',
+            'observed': 'Form worked', 'proved': 'Owner update saved',
+            'artifact_path': str(file.relative_to(root)), 'revision': revision,
+        })
+        assert response.status_code == 201, response.text
+    if damage in {"commands.json", "script.py", "screen.png"}:
+        (run / damage).write_text("tampered")
+    assert client.get(endpoint).json()['review_evidence_ready'] is (damage is None)

@@ -145,6 +145,11 @@ When you are about to copy one of these into a second file, stop and import.
   `treesitter_lightweight.py` line-based extractors, and `treesitter_streaming.py` bounded fallback.
 - `agent/scripts/assess/commands/code_index.py` writes the engagement-local structural manifest;
   `code_index_sync.py` publishes validated metadata. Legacy or wrong-schema artifacts are rejected.
+- `agent/scripts/assess/lib/code_structural_identity.py` owns the structural schema/path epoch (v7);
+  `orchestrator/backend/app/services/code_analysis_support.py` mirrors the accepted schema. Rebuild and sync
+  publish v7 beside retained historical v6 artifacts. See: `orchestrator/backend/tests/test_code_analysis_api.py`.
+- `agent/scripts/assess/lib/code_structural_metadata.py` owns the artifact metadata and callable-identity
+  validators shared by structural build and sync. See: `agent/scripts/assess/tests/test_structural_artifact_validation.py`.
 - `agent/scripts/assess/lib/kali_audit.py` threads the command-run audit chain. A persisted Kali flag
   must also land in `kali_cli.py`, `orchestrator/backend/app/api/assessment.py`,
   `orchestrator/backend/app/db.py`, and `state_manager/command_runs.py`.
@@ -198,14 +203,14 @@ A prompt change is **not** prompt-only when the prompt defines an artifact the b
 ### agent/ — prompts and the assessment CLI
 
 - `agent/operator-core*.md` — web, code, blue, and remediation operator loops; remediation has case gates.
-- `agent/shared-constraints*.md` and `agent/shared-specialist-core.md` — the first-load specialist contract layer. A rule that must hold across many specialists belongs here or in the CLI, never in one role prompt.
-- `agent/agents/` — canonical specialist prompt sources. `agent/rules/` — always-active behavioural overlays. `agent/phases/` — the per-phase operator docs, whose filenames are pinned to the phase roster.
-- `agent/skills/` — the procedure layer, discovered by walking `agent/skills/*/SKILL.md` frontmatter. `agent/references/` — the payload/checklist library, discovered the same way.
+- `agent/shared-constraints*.md` and `agent/shared-specialist-core.md` — shared first-load specialist contracts.
+- `agent/agents/` — specialist sources; `agent/rules/` — always-active overlays; `agent/phases/` — operator docs pinned to the phase roster.
 - `agent/scripts/assess/cli.py` — the authoritative subcommand registry for `vigil assess`, including the `kali` subgroup that owns all target-facing tool execution.
 - `agent/scripts/assess/lib/scope.py` — scope parsing, matching, and locked atomic mutation. There is deliberately **no outbound destination filtering**: `enforce_execution_policy` never refuses a command for its destination host. Staying inside the authorized roots is the operator's responsibility.
 - `agent/scripts/assess/lib/config.py` — one fail-closed engagement-selection precedence for every `vigil assess` command: explicit `--engagement-dir`, else a root discovered from CWD, else the session variable exported by `vigil engagement start`.
 - `agent/scripts/assess/lib/code_snapshot.py` — race-checked, content-addressed source copies.
-  `orchestrator/backend/app/code_snapshot.py` independently attests them. See: ADR 0026.
+  `orchestrator/backend/app/code_snapshot.py` independently attests them; new v3 snapshots use
+  decoded logical lines, while historical v2 snapshots retain their original attestation semantics. See: ADR 0026.
 - `agent/scripts/assess/lib/parser_boundary.py` + `parser_worker.py` — the structural-parser process boundary. Every typed failure becomes an explicit all-byte fallback with declared unavailable dimensions, never a silent skip. See: ADR 0029.
 - `agent/scripts/assess/lib/reachability.py` — `classify_probe()` is the one per-host reachability verdict. A bare `connect=000` is NOT a blanket "blocked"; a verdict requires no TCP connect AND no resolved IP.
 - `agent/scripts/assess/commands/export_submission.py` and `export_reply.py` assemble and present;
@@ -216,28 +221,26 @@ A prompt change is **not** prompt-only when the prompt defines an artifact the b
 - `agent/scripts/hooks/` — shared host hooks for activity logging, compaction, post-compaction
   operator rehydration, and session end. Command filtering is deliberately absent (ADR 0019).
   `goose-hook-adapter.sh` adapts Goose tool names.
-- `agent/schemas/` — the durable JSON payload contracts. See the generated-vs-hand-written invariant above before editing one.
 - `agent/docker/runtime-full/Dockerfile` — the supported target-facing tool surface. All baked inputs participate in image-digest drift checks.
-- `agent/engagements/` — the engagement artifact root. Map the directory's role, never per-engagement contents.
 
 ### src/vigil_cli/ — the universal CLI
 
 - `src/vigil_cli/main.py` — the `vigil` entrypoint: install, config, doctor/status, runtime and orchestrator lifecycle, and the `vigil assess` passthrough.
 - `src/vigil_cli/engagements.py` + `blue.py` + `client_rosters.py` — engagement bootstrap: run directories, bounded operator pointers, generated launchers, and the per-client prompt/command links.
+- `src/vigil_cli/paths.py:resolve_orchestrator_base_url` — backend URL precedence and dotenv normalization; `vigil config resolve orchestrator_base_url` exposes it to generated client launchers at session start.
 - `src/vigil_cli/preflight.py` — `_preflight_engagement_start`, `_resolve_provider_key`, `_warn_if_install_stale`. It lives outside `main.py` so `blue.py` can import it without a cycle; `main.py` re-exports what it uses.
-- `src/vigil_cli/quickstart.py` — the onboarding wizard. Plans by default; only installs behind an explicit flag.
-- `src/vigil_cli/remediation.py` — host-side case commands and Stagehand evidence runner; backend APIs own case state.
+- `src/vigil_cli/remediation.py` — case commands; `remediation_browser.py` owns local browser execution. Backend APIs own case state.
+- `agent/scripts/assess/lib/remediation_project.py` and `remediation_vcs.py` — shared PROJECT.md parsing and Git/JJ identity, workspace, diff, and push contracts; CLI import bridges are `project_config.py` and `remediation_vcs.py`.
 - `src/vigil_cli/runtime.py` + `up.py` — one shared long-lived Kali container, reached host-side by `docker exec`. There is no in-container API server or MCP bridge.
 - `src/vigil_cli/mitmproxy.py` — the single owner of the proxy `docker build` argv, including the inputs-digest label without which the image can never be proven current.
-- `src/vigil_cli/bench/` — the benchmark harness. Verbs are `list`, `run`, `run-all`, `score`, `teardown`, `selftest`, `history`, and the `vm` group. `run-all` defaults to a **billed** launch; `run` does not. See: ADR 0020.
+- `src/vigil_cli/bench/` — benchmark harness; `run-all` defaults to billed launch. See ADR 0020.
 - `src/vigil_cli/bench/lima_guest_control.py` owns guest control payloads included in Lima controller attestation.
-- `src/vigil_cli/bench/anticheat.py` — the bench guards are **generated at runtime as strings** by this module, not committed files: `bench-guard.sh` is written into the off-tree bench home, `bench-guard.js` into the attempt engagement's OpenCode plugin dirs.
-- `src/vigil_cli/term.py` — the one place CLI output learns whether it is on a terminal. Off a TTY: same bytes or fewer, one record per line, no ESC. Style through it, never a raw escape at a call site.
+- `src/vigil_cli/bench/anticheat.py` — generates bench guards at runtime: shell in the off-tree bench home, JS in attempt OpenCode plugin directories.
+- `src/vigil_cli/term.py` — terminal-aware styling; non-TTY output emits no ESC. Callers use this instead of raw escapes.
 - `src/vigil_cli/oob_relay.py` — the single owner of the install's OOB relay-slot identity contract; `oob.py`, `install.py`, `up.py`, and `status.py` consume that record rather than deriving routes independently.
 
 ### orchestrator/backend
 
-- `orchestrator/backend/app/main.py` — FastAPI bootstrap. Routers are registered explicitly here.
 - `orchestrator/backend/app/db.py` — SQLite persistence and schema orchestration; `db_code_analysis_schema.py` owns code-analysis tables.
 - `orchestrator/backend/app/api/assessment.py` — live-state routes for recon, coverage, findings,
   command runs, and bulk ingestion; finding history supports summary and lossless transition reads.
@@ -253,7 +256,7 @@ A prompt change is **not** prompt-only when the prompt defines an artifact the b
   through `__init__.py` so public `state_manager.<fn>` paths remain stable.
 - `orchestrator/backend/app/services/state_manager/coverage_readiness.py` owns readiness and per-host verdicts; `finding_snapshots.py` owns finding snapshot/author provenance.
 - `orchestrator/backend/app/services/state_manager/command_runs.py` owns run writes and output integrity; `command_run_queries.py`, `assessment_jobs.py`, and `host_liveness.py` own their reads and ledgers.
-- `orchestrator/backend/app/services/submission_versions.py` — the one service behind `vigil assess export submission` and the web UI. It never changes `submission_status` and never submits externally. See: ADR 0025.
+- `orchestrator/backend/app/services/submission_versions.py` — CLI/UI submission snapshots; neither changes submission status nor submits externally. See ADR 0025.
 - `orchestrator/backend/app/reply_render.py` — the versioned exact-bytes outbound renderer; `agent/scripts/assess/lib/reply_render.py` is an import-only bridge so draft previews and the backend cannot fork the format.
 - `orchestrator/backend/app/services/operator_checkpoints.py` — writes `assessment_operator_checkpoints`, an append-only table enforced by SQLite triggers. The only permitted mutation is stamping a null `superseded_by_id`.
 - `orchestrator/backend/app/services/state_manager/run_accounting.py` owns run identity and lifecycle; `run_inventory.py` owns sources and obligations, `run_evidence.py` owns linked receipts, and `run_comparisons.py` owns comparisons. `proofs.py` owns immutable evidence receipts. See: ADR 0028.
@@ -262,9 +265,9 @@ A prompt change is **not** prompt-only when the prompt defines an artifact the b
 
 ### Frontend and the rest
 
-- `orchestrator/frontend/` — the operator SPA. `orchestrator/frontend/src/components/TabBar.tsx`
-  owns the tab contract; `orchestrator/frontend/src/lib/api.ts` owns REST helpers and types;
-  `orchestrator/frontend/src/lib/theme.ts` and `orchestrator/frontend/src/app.css` own presentation.
+- `orchestrator/frontend/` — operator SPA: `orchestrator/frontend/src/components/TabBar.tsx` owns tabs,
+  `orchestrator/frontend/src/lib/api.ts` REST, `orchestrator/frontend/src/lib/theme.ts` and
+  `orchestrator/frontend/src/app.css` presentation.
 - `orchestrator/frontend/src/routes/RemediationPage.tsx` — remediation queue, case review, evidence, and approval UI; not an assessment tab.
 - `orchestrator/report/` — a **third** Vite app (`vigil-report`), separate from the operator SPA. `orchestrator/report/src/lib/poc.ts` owns the copy-and-run `curl` quoting.
 - `tools/` — repo-root maintainer scripts that regenerate the reporting lookup tables. Distinct from `<engagement>/tools/analysis-state/`, which is engagement-local code-analysis artifact state.

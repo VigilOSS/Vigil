@@ -34,8 +34,8 @@ _REASONING = Literal["low", "medium", "high", "xhigh", "max"]
 _CONFIDENCE = Literal["low", "medium", "high"]
 _HANDOFF_STATUS = Literal["checkpointed", "ready", "blocked", "superseded"]
 # A dispatch can omit client identity, while a client binding cannot.
-_LAUNCHED_CLIENT = Literal["claude", "codex", "goose", "kimi", "opencode"]
-_DISPATCH_CLIENT = Literal["claude", "codex", "goose", "kimi", "opencode", "unknown"]
+_LAUNCHED_CLIENT = Literal["claude", "codex", "goose", "kimi", "opencode", "pi"]
+_DISPATCH_CLIENT = Literal["claude", "codex", "goose", "kimi", "opencode", "pi", "unknown"]
 
 
 class DispatchPromptPacket(BaseModel):

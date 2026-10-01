@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import codecs
 import errno
 import hashlib
 import json
@@ -11,7 +12,11 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 SOURCE_MANIFEST_VERSION = "v1"
-SEALED_SOURCE_MANIFEST_SCHEMA = "code-source-manifest/v2"
+SEALED_SOURCE_MANIFEST_SCHEMA = "code-source-manifest/v3"
+_LEGACY_SEALED_SOURCE_MANIFEST_SCHEMA = "code-source-manifest/v2"
+SEALED_SOURCE_MANIFEST_SCHEMAS = frozenset({
+    _LEGACY_SEALED_SOURCE_MANIFEST_SCHEMA, SEALED_SOURCE_MANIFEST_SCHEMA,
+})
 SEALED_SOURCE_REVIEW_IDENTITY_SCHEMA = "code-source-review-identity/v1"
 MAX_SEALED_MANIFEST_BYTES = 64 * 1024 * 1024
 MAX_SEALED_MANIFEST_NESTING = 64
@@ -74,17 +79,77 @@ def _same_identity(left: os.stat_result, right: os.stat_result) -> bool:
     )
 
 
-def _header_from_bytes(data: bytes) -> str:
-    decoded = data.decode("utf-8", errors="replace")
+def _source_encoding(prefix: bytes) -> str:
+    # UTF-32LE shares UTF-16LE's prefix, so inspect the longer BOM first.
+    if prefix.startswith((codecs.BOM_UTF32_LE, codecs.BOM_UTF32_BE)):
+        return "utf-32"
+    if prefix.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
+        return "utf-16"
+    return "utf-8-sig"
+
+
+def _header_from_bytes(data: bytes, *, legacy_text: bool = False) -> str:
+    encoding = "utf-8" if legacy_text else _source_encoding(data)
+    decoded = data.decode(encoding, errors="replace")
     parts: list[str] = []
     count = 0
-    for line_number, line in enumerate(decoded.splitlines(keepends=True)):
-        if line_number >= _HEADER_MAX_LINES or count >= _HEADER_MAX_CHARS:
+    for line_no, line in enumerate(decoded.splitlines(keepends=True)):
+        if line_no >= _HEADER_MAX_LINES or count >= _HEADER_MAX_CHARS:
             break
         remaining = _HEADER_MAX_CHARS - count
         parts.append(line[:remaining])
         count += min(len(line), remaining)
     return "".join(parts)
+
+
+class _StreamingLineCounter:
+    """Count logical lines from BOM-decoded text using bounded reads."""
+
+    def __init__(self, *, legacy_text: bool = False) -> None:
+        self._probe = bytearray()
+        self._legacy_text = legacy_text
+        self._decoder: codecs.IncrementalDecoder | None = None
+        self._line_breaks = 0
+        self._previous_ended_cr = False
+        self._last_was_break = False
+        self._has_content = False
+
+    def feed(self, chunk: bytes) -> None:
+        if self._decoder is None:
+            remaining = 4 - len(self._probe)
+            self._probe.extend(chunk[:remaining])
+            chunk = chunk[remaining:]
+            if len(self._probe) < 4:
+                return
+            self._start_decoder()
+        assert self._decoder is not None
+        self._feed_text(self._decoder.decode(chunk, final=False))
+
+    def _start_decoder(self) -> None:
+        initial = bytes(self._probe)
+        self._probe.clear()
+        # V2 independently attested raw CR/LF bytes, without BOM decoding.
+        encoding = "latin-1" if self._legacy_text else _source_encoding(initial)
+        self._decoder = codecs.getincrementaldecoder(encoding)(errors="replace")
+        self._feed_text(self._decoder.decode(initial, final=False))
+
+    def finish(self) -> int:
+        if self._decoder is None:
+            self._start_decoder()
+        assert self._decoder is not None
+        self._feed_text(self._decoder.decode(b"", final=True))
+        return self._line_breaks + int(self._has_content and not self._last_was_break)
+
+    def _feed_text(self, text: str) -> None:
+        if not text:
+            return
+        self._has_content = True
+        self._line_breaks += text.count("\n") + text.count("\r")
+        self._line_breaks -= text.count("\r\n")
+        if self._previous_ended_cr and text.startswith("\n"):
+            self._line_breaks -= 1
+        self._previous_ended_cr = text.endswith("\r")
+        self._last_was_break = text.endswith(("\r", "\n"))
 
 
 def _validate_json_nesting(data: bytes) -> None:
@@ -158,6 +223,7 @@ def _read_regular_at(
     *,
     display_path: Path,
     max_bytes: int | None,
+    legacy_text: bool = False,
 ) -> tuple[bytes | None, dict[str, Any], os.stat_result]:
     nofollow = getattr(os, "O_NOFOLLOW", 0)
     if not nofollow:
@@ -183,9 +249,7 @@ def _read_regular_at(
         materialized = bytearray() if max_bytes is not None else None
         header_prefix = bytearray()
         size = 0
-        line_breaks = 0
-        previous_ended_cr = False
-        last_was_break = False
+        line_counter = _StreamingLineCounter(legacy_text=legacy_text)
         while True:
             chunk = os.read(fd, _READ_CHUNK_SIZE)
             if not chunk:
@@ -201,12 +265,7 @@ def _read_regular_at(
             if len(header_prefix) < _HEADER_PREFIX_BYTES:
                 remaining = _HEADER_PREFIX_BYTES - len(header_prefix)
                 header_prefix.extend(chunk[:remaining])
-            line_breaks += chunk.count(b"\n") + chunk.count(b"\r")
-            line_breaks -= chunk.count(b"\r\n")
-            if previous_ended_cr and chunk.startswith(b"\n"):
-                line_breaks -= 1
-            previous_ended_cr = chunk.endswith(b"\r")
-            last_was_break = chunk.endswith((b"\r", b"\n"))
+            line_counter.feed(chunk)
         after = os.fstat(fd)
         path_after = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
         if not _same_identity(before, after) or not _same_identity(after, path_after):
@@ -218,8 +277,10 @@ def _read_regular_at(
             {
                 "source_sha256": digest.hexdigest(),
                 "size": size,
-                "loc": line_breaks + (1 if size and not last_was_break else 0),
-                "header_snippet": _header_from_bytes(bytes(header_prefix)),
+                "loc": line_counter.finish(),
+                "header_snippet": _header_from_bytes(
+                    bytes(header_prefix), legacy_text=legacy_text
+                ),
                 "executable": bool(before.st_mode & 0o111),
             },
             after,
@@ -569,7 +630,7 @@ def attest_verified_snapshot(
             ) from exc
         if not isinstance(manifest, dict):
             raise SnapshotAttestationError("sealed snapshot manifest must be an object")
-        if manifest.get("schema") != SEALED_SOURCE_MANIFEST_SCHEMA:
+        if manifest.get("schema") not in SEALED_SOURCE_MANIFEST_SCHEMAS:
             raise SnapshotAttestationError("sealed snapshot manifest schema is unsupported")
         if manifest.get("repo_key") != repo_key:
             raise SnapshotAttestationError("sealed snapshot manifest repo_key mismatch")
@@ -725,6 +786,7 @@ def attest_verified_snapshot(
                         name,
                         display_path=expected_source_path / file_path,
                         max_bytes=None,
+                        legacy_text=manifest["schema"] == _LEGACY_SEALED_SOURCE_MANIFEST_SCHEMA,
                     )
                     expected_mode = 0o555 if observed["executable"] else 0o444
                     if stat.S_IMODE(observed_stat.st_mode) != expected_mode:
@@ -742,14 +804,17 @@ def attest_verified_snapshot(
             raise SnapshotAttestationError(
                 f"sealed source path set mismatch (missing={missing}, extra={extra})"
             )
+        mismatches: list[str] = []
         for file_path, expected in manifest_files.items():
             observed = actual_files[file_path]
             for field_name in ("source_sha256", "size", "loc", "executable"):
                 if observed[field_name] != expected[field_name]:
-                    raise SnapshotAttestationError(
+                    mismatches.append(
                         f"sealed source {field_name} mismatch: {file_path}"
                     )
             expected["header_snippet"] = observed["header_snippet"]
+        if mismatches:
+            raise SnapshotAttestationError("; ".join(mismatches))
 
         attestation = VerifiedSnapshotAttestation(
             snapshot_digest=snapshot_digest,

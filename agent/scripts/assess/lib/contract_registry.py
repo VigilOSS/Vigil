@@ -9,6 +9,7 @@ from dataclasses import dataclass
 import re
 from typing import Any
 
+from .code_structural_identity import STRUCTURAL_INDEX_PATH_VERSION
 from .dependency_picture import (
     DEPENDENCY_OBSERVATION_ORIGINS,
     DEPENDENCY_QUALIFIERS,
@@ -201,7 +202,7 @@ FINDING_PATCH_FIELDS: tuple[tuple[str, str, str], ...] = (
 # `unknown` a dispatch row's client fields carry: a binding whose client is
 # unknown names no session the operator could reach.
 BINDABLE_CLIENTS: tuple[str, ...] = (
-    "claude", "codex", "goose", "kimi", "opencode",
+    "claude", "codex", "goose", "kimi", "opencode", "pi",
 )
 
 # Repository obligation role for `code-ingest --role`. MIRRORS the backend
@@ -1285,6 +1286,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "Confirmed and downgraded decisions require --proof-receipt-id from a completed verifier run under a dispatch distinct from the author's and --confirm-check-file with method, attempted_falsification, expected_result, observed_result, completed=true, and proof_receipt_ids drawn from the decision receipts, including one from an active finding-linked proof_run. The completed check is stored on the verification transition. This checks dispatch separation, not distinct human identity. False_positive requires --counter-check-file with method, expected_result, observed_result, falsified_claim, completed=true, and proof_receipt_ids.",
             "If chosen severity differs from its CVSS band, also pass --severity-variance-file with a JSON object {normal_band, chosen_severity, actor, reason, proof_receipt_id}. The proof_receipt_id must also be passed with --proof-receipt-id. The backend rejects a terminal decision lacking this attributed variance event.",
             "If a counter-check could not run, record blocked or pending_runtime_proof; free-text kill_reason/kill_check are not decision evidence.",
+            "False_positive also requires details.kill_reason (rationale) and details.kill_check (integer 1-5 naming the verification check). These annotations accompany the structured counter_check; they do not replace its evidence.",
             "Use explicit flags for ordinary transitions. --payload-file is for a final, complete verification-transition document: it is sent verbatim (no derived binding, no --agent-id), it is mutually exclusive with request-content flags, and --narrative may accompany it.",
             "--agent-id <your dispatch agent_id> is what makes a code verification attest to anything. The backend resolves it into the finding's stored code_snapshot_attestation; without it that attestation names no dispatch and the finding reads code_snapshot_attestation_status=unattested — a binding indistinguishable from one copied off another finding. It does NOT rebind the finding's immutable author, which stays the recording dispatch.",
             "Verifying a file: finding carries provenance.code_snapshot for the CURRENT verified snapshot, every time — the binding the AUTHOR recorded attests that the author read those bytes, never that you did. The CLI derives it from the finding's own repository, so there is nothing to copy; --provenance-inline still wins when you supply one, and the 400 (\"file findings require provenance.code_snapshot bound to the current verified repository snapshot\") is unchanged for a binding that is not current.",
@@ -1745,12 +1747,16 @@ _CONTRACTS: dict[str, CommandContract] = {
             ("--language", "unset (does NOT auto-tag unknown files)"),
             ("--default-language-for-unknown", "unset (unknown-extension files stay language-less)"),
             ("--max-included-skipped-bytes", "2000000"),
+            ("--git-status-timeout", "30 seconds per required worktree status check; accepts finite positive values"),
+            ("--exclude-path", "unset; repeatable relative file-path glob or directory, recorded as authenticated exclusions"),
             ("--skipped-manifest", "optional projection root; default writes tools/analysis-state/skipped-artifacts/<repo_id>/<repo_generation>/<source_manifest_digest>-<snapshot_digest>.json"),
         ),
         notes=(
             "First code step: run before code-index / code-index-sync. It stages a complete source manifest and atomically promotes it, returning the backend repo_id. Interrupted batches never replace the active tree; changed files invalidate their old analysis and removed files leave coverage in the same commit. Legacy scope.json repos/source_repos keys remain readable, but new ingests do not write them because the backend repository ledger is canonical.",
-            "Use --dry-run to report added, changed, renamed, and removed paths against the active backend generation without staging or committing.",
-            "The sealed code-source-manifest/v2 is authoritative: its content address authenticates repository identity, Git provenance, every copied file, and the complete excluded_entries inventory used at refresh commit.",
+            "Use --dry-run to report added, changed, renamed, and removed paths against the active backend generation without staging or committing. It reads and hashes the full admitted and excluded inventory and verifies that inventory again; it is not a cheap selection preview. Scan progress goes to stderr.",
+            "--exclude-path takes precedence over all inclusion overrides. Matching source files remain fingerprinted in the authenticated exclusion inventory; files are not deleted from the origin. --include-path overrides the default skip policy and is not a whitelist.",
+            "Git worktree status remains required before and after capture and before publication. Raise --git-status-timeout for a slow worktree; a timeout never turns unknown dirty state into a clean claim. Marker-free source directories use directory provenance instead.",
+            "The sealed code-source-manifest/v3 is authoritative: its content address authenticates repository identity, Git provenance, every copied file, and the complete excluded_entries inventory used at refresh commit. New snapshots derive logical LOC and headers from BOM-aware UTF-8/16/32 decoding without changing source bytes; historical v2 snapshots remain independently verified under their recorded format semantics.",
             "The skipped-artifacts file is an optional, atomically published audit projection of those authenticated exclusions, bound to repo ID, generation, backend source-manifest digest, and snapshot digest. --include-minified, --include-skipped, and --include-path <glob> (repeatable) opt specific artifacts back in, capped by --max-included-skipped-bytes.",
             "Derived repo keys normalize unsafe repository-name characters. Explicit --repo-key values must be at most 255 filesystem-encoded bytes and one safe path component: no slash, backslash, exact '.' or '..' value, or ASCII control character.",
             "--language sets only the repo's primary language; use --default-language-for-unknown to stamp a language on unrecognized-extension files (use sparingly — a wrong stamp pollutes coverage math and structural indexing).",
@@ -1760,7 +1766,7 @@ _CONTRACTS: dict[str, CommandContract] = {
         ),
         common_mistakes=(
             ("passing a path as --repo-key", "use one safe component without /, \\, or control characters, and do not use exactly '.' or '..'; derived keys normalize unsafe name characters"),
-            ("treating --skipped-manifest as authoritative state", "the sealed v2 snapshot manifest owns exclusions; this option selects only the optional audit-projection root"),
+            ("treating --skipped-manifest as authoritative state", "the sealed source snapshot manifest owns exclusions; this option selects only the optional audit-projection root"),
             ("--language to tag unknown files", "--language sets the repo primary language only; use --default-language-for-unknown to stamp unrecognized-extension files"),
             ("ingesting the host framework as analysis just to look symbols up", "use --role reference; it stays indexed and citable and owes no coverage"),
             ("re-ingesting a reference repo with --role analysis to 'refresh' it", "omit --role entirely — it keeps the recorded role; --role analysis is a deliberate promotion that makes every admitted file owe review"),
@@ -1831,14 +1837,14 @@ _CONTRACTS: dict[str, CommandContract] = {
         helper_defaults=(
             ("output_dir", "<engagement_dir>/tools/analysis-state"),
             ("aggregate manifest", "structural-index-manifest.json"),
-            ("per-repo manifest", "structural-index/<repo_id>/<generation>/v6/<source_manifest_digest>/<structural_input_digest>/manifest.json"),
+            ("per-repo manifest", f"structural-index/<repo_id>/<generation>/{STRUCTURAL_INDEX_PATH_VERSION}/<source_manifest_digest>/<structural_input_digest>/manifest.json"),
             ("per-file indexes", "the per-repo manifest's sibling files/<file-id>.json directory"),
         ),
         notes=(
             "The aggregate manifest is keyed by numeric backend repo ID, so multiple source repos share one engagement analysis-state tree without relative-path collisions.",
             "The build binds every artifact to the sealed snapshot, backend repository generation, source-manifest digest, source-file hash, and current canonical backend language. A language correction creates a new immutable structural-input identity without replacing the older derived artifact; an origin checkout is not an accepted input.",
             "Each per-file artifact declares complete/degraded/unsupported analysis, parser mode, bytes scanned, unavailable/truncated dimensions, and full observed signal counts. Resource-bounded files receive an all-byte streaming security fallback plus explicit debt instead of a silent structural skip.",
-            "After a complete v6 artifact validates, build can upgrade exactly the writer-shaped structural-index-aggregate/v3 contract in place: unique keys, canonical numeric/digest/path bindings, and self-consistent debt counts are required before it retains the exact bytes under structural-index/history/aggregates/v3/<sha256>.json. It then atomically starts v4 with only the freshly rebuilt repo and never imports stale v3 repo pointers; malformed and unknown schemas fail closed.",
+            f"After a complete {STRUCTURAL_INDEX_PATH_VERSION} artifact validates, build can upgrade exactly the writer-shaped structural-index-aggregate/v3 contract in place: unique keys, canonical numeric/digest/path bindings, and self-consistent debt counts are required before it retains the exact bytes under structural-index/history/aggregates/v3/<sha256>.json. It then atomically starts v4 with only the freshly rebuilt repo and never imports stale v3 repo pointers; malformed and unknown schemas fail closed.",
             "The default output directory is the one code-index sync consumes, so indexing and sync stay in one engagement-owned tree.",
             "Run inside the launched engagement session or pass --engagement-dir when outside its tree; the helper fails closed rather than write an unsynced .code-index tree into the source repo.",
         ),

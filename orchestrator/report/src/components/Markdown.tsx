@@ -19,6 +19,14 @@ export function Markdown({ text }: { text?: string }) {
           a: ({ node: _node, ...props }) => (
             <a {...props} target="_blank" rel="noopener noreferrer" />
           ),
+          // Target-controlled image URLs must not trigger a fetch on report open.
+          img: ({ node: _node, alt, src }) => (
+            <span className="md-image-reference">
+              <span>Image reference</span>
+              <strong>{alt?.trim() || "Unlabelled image"}</strong>
+              <code>{src || "Source blocked by Markdown URL policy"}</code>
+            </span>
+          ),
         }}
       >
         {text}

@@ -348,7 +348,7 @@ def test_code_index_sync_rejects_a_complete_file_with_no_callable_scope(
     module = _sync_module()
 
     with pytest.raises(ValueError, match="routes/web.php"):
-        module._validated_structural_metadata(
+        module.validated_structural_metadata(
             _complete_artifact(**overrides),
             rel_path="routes/web.php",
             source_size=12,
@@ -372,7 +372,7 @@ def test_code_index_sync_accepts_a_complete_file_with_no_signal_at_all() -> None
     """A blank or comment-only file really does measure empty."""
     module = _sync_module()
 
-    metadata = module._validated_structural_metadata(
+    metadata = module.validated_structural_metadata(
         _complete_artifact(), rel_path="pkg/__init__.py", source_size=12
     )
 
