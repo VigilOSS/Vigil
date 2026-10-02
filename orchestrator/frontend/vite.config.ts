@@ -6,6 +6,7 @@ export default defineConfig({
   plugins: [react()],
   server: {
     proxy: {
+      "/dashboard": "http://127.0.0.1:18000",
       "/engagements": "http://127.0.0.1:18000",
       "/artifacts": "http://127.0.0.1:18000",
       "/ws": {

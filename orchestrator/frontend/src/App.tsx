@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { Component, useEffect, useMemo, useState, type ReactNode } from "react";
 
 import { listEngagements } from "./lib/api";
 import type { Engagement } from "./lib/api";
@@ -6,6 +6,7 @@ import { EngagementPage } from "./routes/EngagementPage";
 import { EngagementsPage } from "./routes/EngagementsPage";
 import { RemediationPage } from "./routes/RemediationPage";
 import { parseRunAuditQuery } from "./lib/runAudit";
+import { engagementHref, parseWorkspaceRoute, positiveRouteId, remediationHref, writeWorkspaceHash } from "./lib/workspaceRoutes";
 
 function currentRoute(): string {
   const hashRoute = window.location.hash.replace(/^#/, "");
@@ -28,29 +29,19 @@ type EngagementRoute = {
 // Hash scheme: #/engagements/{key}?tab={tabKey}&finding={slug}&dtab={drawerTab},
 // #/engagements/{key}?tab=intel&intel_type={type}&intel_id={id},
 // or #/engagements/{key}?tab=runs&run={id}&section={childKind}&object={id}.
-// The `?query` tail, when present, is split off before decoding the key so
-// deep-link params don't get folded into it. FindingsTab rewrites these via
-// history.replaceState as the drawer opens/closes; replaceState doesn't emit
-// `hashchange`, so the listener below never re-routes on a self-write.
+// Explicit selections push canonical history; hashchange and popstate restore
+// the same record and section when the operator returns.
 function parseEngagementRoute(route: string): EngagementRoute | null {
-  const match = route.match(/^\/engagements\/([^?]+)(?:\?(.*))?$/);
-  if (!match) {
-    return null;
-  }
-  const engagementKey = decodeURIComponent(match[1]);
-  const params = new URLSearchParams(match[2] ?? "");
+  const parsed = parseWorkspaceRoute(route);
+  if (parsed.kind !== "engagement") return null;
+  const engagementKey = parsed.key;
+  const params = parsed.params;
   const initialTab = params.get("tab") ?? undefined;
   const initialFindingSlug = params.get("finding") ?? undefined;
   const initialDrawerTab = params.get("dtab") ?? undefined;
   const initialIntelType = params.get("intel_type") ?? undefined;
-  const parsedIntelId = Number(params.get("intel_id"));
-  const initialIntelId = Number.isInteger(parsedIntelId) && parsedIntelId > 0
-    ? parsedIntelId
-    : undefined;
-  const parsedRequestVariantId = Number(params.get("request"));
-  const initialRequestVariantId = Number.isInteger(parsedRequestVariantId) && parsedRequestVariantId > 0
-    ? parsedRequestVariantId
-    : undefined;
+  const initialIntelId = positiveRouteId(params, "intel_id");
+  const initialRequestVariantId = positiveRouteId(params, "request");
   const runAudit = parseRunAuditQuery(params);
   return {
     engagementKey,
@@ -67,10 +58,38 @@ function parseEngagementRoute(route: string): EngagementRoute | null {
 }
 
 function navigate(route: string) {
-  window.location.hash = route;
+  writeWorkspaceHash(route.startsWith("#") ? route : `#${route}`);
 }
 
 export default function App() {
+  return <InterfaceBoundary><AppContent /></InterfaceBoundary>;
+}
+
+class InterfaceBoundary extends Component<{ children: ReactNode }, { error: string | null }> {
+  state = { error: null as string | null };
+
+  static getDerivedStateFromError(error: unknown): { error: string } {
+    return { error: error instanceof Error ? `${error.name}: ${error.message}` : String(error) };
+  }
+
+  render() {
+    if (this.state.error !== null) {
+      return (
+        <main className="shell">
+          <section className="panel empty-state" role="alert">
+            <h1>Interface could not load</h1>
+            <p>Reload to load the current interface. If the error continues, retain the technical message below for diagnosis.</p>
+            <pre style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{this.state.error}</pre>
+            <button type="button" className="ghost-button" onClick={() => window.location.reload()}>Reload interface</button>
+          </section>
+        </main>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+function AppContent() {
   const [route, setRoute] = useState(currentRoute());
   const [engagements, setEngagements] = useState<Engagement[]>([]);
   const [engagementsError, setEngagementsError] = useState<string | null>(null);
@@ -78,19 +97,20 @@ export default function App() {
   // instead of the "no engagements" empty state.
   const [engagementsLoading, setEngagementsLoading] = useState(true);
   const engagementRoute = useMemo(() => parseEngagementRoute(route), [route]);
-  const remediationMatch = route.match(/^\/remediation\/([^?]+)(?:\?(.*))?$/);
-  const remediationKey = remediationMatch ? decodeURIComponent(remediationMatch[1]) : null;
-  const requestedCaseId = remediationMatch ? Number(new URLSearchParams(remediationMatch[2] ?? "").get("case")) : NaN;
+  const parsedRoute = useMemo(() => parseWorkspaceRoute(route), [route]);
+  const remediationKey = parsedRoute.kind === "remediation" ? parsedRoute.key : null;
+  const requestedCaseId = parsedRoute.kind === "remediation" ? positiveRouteId(parsedRoute.params, "case") : undefined;
   const engagementKey = engagementRoute?.engagementKey ?? null;
 
   useEffect(() => {
     const handler = () => setRoute(currentRoute());
     window.addEventListener("hashchange", handler);
-    return () => window.removeEventListener("hashchange", handler);
+    window.addEventListener("popstate", handler);
+    return () => { window.removeEventListener("hashchange", handler); window.removeEventListener("popstate", handler); };
   }, []);
 
   useEffect(() => {
-    if (engagementKey || remediationKey) {
+    if (parsedRoute.kind !== "index") {
       return;
     }
 
@@ -142,15 +162,20 @@ export default function App() {
       window.clearInterval(interval);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
-  }, [engagementKey, remediationKey]);
+  }, [parsedRoute.kind]);
+
+  if (parsedRoute.kind === "invalid") {
+    return <main className="shell"><section className="panel empty-state" role="alert"><h1>Workspace not found</h1><p>The address does not identify a Vigil workspace.</p><a href="#/engagements">Open engagements</a></section></main>;
+  }
 
   if (remediationKey) {
-    return <RemediationPage engagementKey={remediationKey} initialCaseId={Number.isInteger(requestedCaseId) && requestedCaseId > 0 ? requestedCaseId : undefined} onBack={() => navigate("/engagements")} />;
+    return <RemediationPage engagementKey={remediationKey} initialCaseId={requestedCaseId} onBack={() => navigate("/engagements")} />;
   }
 
   if (engagementRoute) {
     return (
       <EngagementPage
+        key={engagementRoute.engagementKey}
         engagementKey={engagementRoute.engagementKey}
         initialTab={engagementRoute.initialTab}
         initialFindingSlug={engagementRoute.initialFindingSlug}
@@ -173,7 +198,7 @@ export default function App() {
       loadError={engagementsError}
       onOpenEngagement={(engagementKey) => {
         const engagement = engagements.find((item) => item.key === engagementKey);
-        navigate(`${engagement?.engagement_type === "remediation" ? "/remediation" : "/engagements"}/${encodeURIComponent(engagementKey)}`);
+        navigate(engagement?.engagement_type === "remediation" ? remediationHref(engagementKey) : engagementHref(engagementKey));
       }}
       onEngagementDeleted={(engagementKey) => {
         setEngagements((current) => current.filter((engagement) => engagement.key !== engagementKey));

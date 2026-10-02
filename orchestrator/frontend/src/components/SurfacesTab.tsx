@@ -1,4 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
+import { engagementHref } from "../lib/workspaceRoutes";
 import type {
   AssessmentFinding,
   AssessmentFindingDetail,
@@ -13,11 +14,10 @@ import {
   listSurfaceRequestVariantLinks,
   patchAssessmentSurface,
 } from "../lib/api";
-import { Copy } from "lucide-react";
 import { useBodyScrollLock, useModalFocus } from "../lib/modalScrollLock";
 import { useToast } from "../contexts/ToastContext";
 import { RelTime } from "./formatting";
-import { KV, ProseSection, SectionHead } from "./drawer/DrawerKit";
+import { CopyChip, KV, ProseSection, SectionHead } from "./drawer/DrawerKit";
 import { TableSkeleton } from "./Skeletons";
 
 const SURFACE_RETRY_FETCH_LIMIT = 5000;
@@ -179,6 +179,7 @@ export function SurfacesTab({
   const { toast } = useToast();
   const [findingLinks, setFindingLinks] = useState<AssessmentFindingLink[]>([]);
   const [linksError, setLinksError] = useState<string | null>(null);
+  const [linksLoading, setLinksLoading] = useState(true);
   const [selected, setSelected] = useState<AssessmentSurface | null>(null);
   // Track the in-flight PATCH so the inline button shows a busy state and
   // disables itself until the network round-trip resolves.
@@ -309,6 +310,8 @@ export function SurfacesTab({
 
   useEffect(() => {
     let cancelled = false;
+    setLinksLoading(true);
+    setLinksError(null);
     listAssessmentFindingLinks(engagementKey)
       .then((rows) => {
         if (cancelled) return;
@@ -318,7 +321,8 @@ export function SurfacesTab({
         if (cancelled) return;
         setFindingLinks([]);
         setLinksError(err instanceof Error ? err.message : "Failed to load finding links");
-      });
+      })
+      .finally(() => { if (!cancelled) setLinksLoading(false); });
     return () => {
       cancelled = true;
     };
@@ -329,8 +333,8 @@ export function SurfacesTab({
     const map = new Map<number, AssessmentFindingLink[]>();
     for (const link of findingLinks) {
       if (link.target_kind !== "surface") continue;
-      const id = Number.parseInt(link.target_ref, 10);
-      if (!Number.isFinite(id)) continue;
+      const id = link.target_id ?? (/^\d+$/.test(link.target_ref) ? Number(link.target_ref) : NaN);
+      if (!Number.isSafeInteger(id) || id <= 0) continue;
       const list = map.get(id) ?? [];
       list.push(link);
       map.set(id, list);
@@ -650,6 +654,8 @@ export function SurfacesTab({
           engagementKey={engagementKey}
           surface={selected}
           links={selectedLinks}
+          linksLoading={linksLoading}
+          linksError={linksError}
           findingBySlug={findingBySlug}
           toast={toast}
           onClose={() => setSelected(null)}
@@ -678,6 +684,8 @@ function SurfaceDrawer({
   engagementKey,
   surface,
   links,
+  linksLoading,
+  linksError,
   findingBySlug,
   toast,
   onClose,
@@ -694,6 +702,8 @@ function SurfaceDrawer({
   engagementKey: string;
   surface: AssessmentSurface;
   links: AssessmentFindingLink[];
+  linksLoading: boolean;
+  linksError: string | null;
   findingBySlug: Map<string, FindingLike>;
   toast: (message: string, type?: "success" | "error" | "info") => void;
   onClose: () => void;
@@ -712,16 +722,16 @@ function SurfaceDrawer({
   useModalFocus(panelRef, onClose, true, returnFocusRef);
   const [variantLinks, setVariantLinks] = useState<SurfaceRequestVariantLink[]>([]);
   const [variantLinksError, setVariantLinksError] = useState<string | null>(null);
+  const [variantLinksLoading, setVariantLinksLoading] = useState(true);
   const rationale = surface.rationale || "";
-  const findingHref = (slug: string) =>
-    `#/engagements/${encodeURIComponent(engagementKey)}?tab=findings&finding=${encodeURIComponent(slug)}`;
-  const httpHref = (requestVariantId: number) =>
-    `#/engagements/${encodeURIComponent(engagementKey)}?tab=http&request=${requestVariantId}`;
+  const findingHref = (slug: string) => engagementHref(engagementKey, { tab: "findings", finding: slug });
+  const httpHref = (requestVariantId: number) => engagementHref(engagementKey, { tab: "http", request: requestVariantId });
 
   useEffect(() => {
     let cancelled = false;
     setVariantLinks([]);
     setVariantLinksError(null);
+    setVariantLinksLoading(true);
     listSurfaceRequestVariantLinks(engagementKey, surface.id)
       .then((rows) => {
         if (!cancelled) setVariantLinks(rows);
@@ -730,6 +740,9 @@ function SurfaceDrawer({
         if (!cancelled) {
           setVariantLinksError(err instanceof Error ? err.message : "Request-variant links unavailable");
         }
+      })
+      .finally(() => {
+        if (!cancelled) setVariantLinksLoading(false);
       });
     return () => {
       cancelled = true;
@@ -752,22 +765,7 @@ function SurfaceDrawer({
           <div className="drawer-top">
             <div className="drawer-slug">
               <span>{surface.surface_type || "surface"}</span>
-              <button
-                type="button"
-                className="copy-btn"
-                onClick={() => {
-                  try {
-                    void navigator.clipboard?.writeText(surface.target_descriptor);
-                    toast("Copied", "success");
-                  } catch {
-                    /* best-effort */
-                  }
-                }}
-                title="Copy target"
-                aria-label="Copy target descriptor"
-              >
-                <Copy size={12} />
-              </button>
+              <CopyChip text={surface.target_descriptor} toast={toast} label="Copy target descriptor" />
             </div>
             <div className="drawer-nav">
               <button
@@ -903,9 +901,11 @@ function SurfaceDrawer({
 
           <div className="section">
             <p className="section-title">
-              Request variants <span className="count">{variantLinks.length}</span>
+              Request variants {!variantLinksLoading && !variantLinksError && <span className="count">{variantLinks.length}</span>}
             </p>
-            {variantLinksError ? (
+            {variantLinksLoading ? (
+              <p className="meta-text" role="status">Loading request-variant links…</p>
+            ) : variantLinksError ? (
               <p className="meta-text" role="alert">Request-variant links unavailable: {variantLinksError}</p>
             ) : variantLinks.length === 0 ? (
               <p className="empty" style={{ padding: "12px 0" }}>No durable request-variant links.</p>
@@ -934,9 +934,13 @@ function SurfaceDrawer({
 
           <div className="section">
             <p className="section-title">
-              Linked findings <span className="count">{links.length}</span>
+              Linked findings {!linksLoading && !linksError && <span className="count">{links.length}</span>}
             </p>
-            {links.length === 0 ? (
+            {linksLoading ? (
+              <p className="meta-text" role="status">Loading finding links…</p>
+            ) : linksError ? (
+              <p className="error-text" role="alert">Finding links unavailable: {linksError}</p>
+            ) : links.length === 0 ? (
               <p className="empty" style={{ padding: "12px 0" }}>
                 No findings linked to this surface yet.
               </p>

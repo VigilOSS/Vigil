@@ -13,8 +13,9 @@ surface either imports it or must match it value-for-value:
   * ``app.services.state_manager.phase_readiness`` — the backend readiness
     assembly (the backend cannot import the agent tree at runtime, so it keeps
     its own tuple and this test is what stops the two from diverging)
-  * ``orchestrator/frontend/src/components/PhaseWaterfall.tsx`` and
-    ``CodeAnalysisTab.tsx`` — the display rosters, parsed out of the TSX
+  * ``orchestrator/frontend/src/components/CodeAnalysisTab.tsx`` — the code
+    display roster, parsed out of the TSX. The engagement track display consumes
+    literal backend state and no longer owns a phase-order roster.
   * ``agent/phases/*.md`` — the per-phase operator doc filenames
 
 Three rosters previously disagreed (the backend readiness tuple spelled the
@@ -256,15 +257,6 @@ def test_backend_rejects_a_non_roster_phase():
 
 
 # ── Display surfaces ─────────────────────────────────────────────────────────
-
-
-def test_frontend_waterfall_renders_every_web_phase_with_a_label():
-    keys, labels = _tsx_roster(_FRONTEND_SRC / "PhaseWaterfall.tsx", "PHASES")
-    assert keys == phases.WEB_PHASES
-    assert all(label.strip() for label in labels)
-    # The stored value and the display label are separate: the label map is the
-    # ONLY place a phase is spelled differently from its roster value.
-    assert dict(zip(keys, labels))["consume-test"] != "consume-test"
 
 
 def test_frontend_code_pipeline_renders_every_code_phase_with_a_label():

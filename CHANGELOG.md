@@ -9,6 +9,14 @@ Durable design decisions live in [`docs/adr/`](docs/adr/).
 
 ### Changed
 
+- **Remediation links use canonical finding IDs.** Cases can link several findings sharing a fix,
+  and findings show reciprocal case and deployment state. Case API `finding_ids` replaces
+  `linked_finding_engagement_key`/`linked_finding_slug`; CLI `import --finding-id <id>`
+  replaces the old `import --finding <slug> --finding-engagement <key>` pair. Direct Vigil
+  intake uses `vigil remediation -k <destination> from-finding --finding-engagement <source>
+  --finding <slug>` and retains `source_type=finding`. A backed-up atomic migration resolves
+  legacy links; unresolved links fail startup. Existing case ledgers and approval digests stay
+  intact, while approvals require review against the canonical finding identity set.
 - **Remediation shares one repository `PROJECT.md`.** TOML configuration and Markdown
   instructions replace editable engagement JSON. Machine differences use environment overrides;
   project changes invalidate approval. Legacy JSON is an explicit creation-time import.

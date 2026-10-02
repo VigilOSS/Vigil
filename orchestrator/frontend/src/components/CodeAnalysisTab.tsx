@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
+import { engagementHref } from "../lib/workspaceRoutes";
 
 import type {
   CodeAnalysisResult,
@@ -350,6 +351,15 @@ export function CodeAnalysisTab({
     setQuery("");
   };
 
+  function focusRepository(event: MouseEvent<HTMLAnchorElement>, repoId: number) {
+    if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    const target = document.getElementById(`code-repo-${repoId}`);
+    if (!target) return;
+    event.preventDefault();
+    target.scrollIntoView({ block: "start" });
+    target.focus({ preventScroll: true });
+  }
+
   const activeFilterCount =
     dispositionFilters.size +
     confidenceFilters.size +
@@ -378,7 +388,7 @@ export function CodeAnalysisTab({
                   <li key={`${blocker.code}-${index}`} className="meta-text">
                     <span>[{blocker.code}] {blocker.message}</span>
                     {targetRepo && (
-                      <> · <a href={`#code-repo-${targetRepo.id}`}>{targetRepo.name}</a></>
+                      <> · <a href={engagementHref(engagementKey, { tab: "code" })} onClick={event => focusRepository(event, targetRepo.id)}>{targetRepo.name}</a></>
                     )}
                     {!blocker.overrideable ? " (integrity; non-overrideable)" : ""}
                   </li>
@@ -401,7 +411,7 @@ export function CodeAnalysisTab({
         <div className="panel-header">
           <h2>Code Analysis Pipeline</h2>
         </div>
-        <div className="code-phase-pipeline">
+        {CODE_PHASES.some(phase => phase.key === persistedPhase) || persistedPhase === "complete" ? <div className="code-phase-pipeline">
           {CODE_PHASES.map((phase) => {
             const state = phaseState(phase.key, persistedPhase);
             return (
@@ -413,8 +423,8 @@ export function CodeAnalysisTab({
               </div>
             );
           })}
-        </div>
-        <p className="meta-text">Persisted phase: {persistedPhase.replace(/-/g, " ")}</p>
+        </div> : <p className="meta-text">Code phase ordering unavailable for the persisted state.</p>}
+        <p className="meta-text">Persisted phase: <code>{persistedPhase}</code></p>
       </section>
 
       {/* Repository overview */}
@@ -465,6 +475,7 @@ export function CodeAnalysisTab({
             <article
               key={repo.id}
               id={`code-repo-${repo.id}`}
+              tabIndex={-1}
               className={`code-repo-card${hasStructuralDebt ? " code-repo-has-debt" : ""}`}
             >
               <div className="code-repo-header">
@@ -551,27 +562,27 @@ export function CodeAnalysisTab({
         </div>
         <div className="stats-grid code-stats-grid">
           <article className="stat-card">
-            <span className="stat-value">{queueStats?.total ?? 0}</span>
+            <span className="stat-value">{queueStats?.total ?? "Unknown"}</span>
             <span className="meta-text">Queue items</span>
           </article>
           <article className="stat-card">
-            <span className="stat-value">{queueStats?.done ?? 0}</span>
+            <span className="stat-value">{queueStats?.done ?? "Unknown"}</span>
             <span className="meta-text">Completed</span>
           </article>
           <article className="stat-card">
-            <span className="stat-value">{queueStats?.processing ?? 0}</span>
+            <span className="stat-value">{queueStats?.processing ?? "Unknown"}</span>
             <span className="meta-text">Processing</span>
           </article>
           <article className="stat-card">
-            <span className="stat-value">{queueStats?.pending ?? 0}</span>
+            <span className="stat-value">{queueStats?.pending ?? "Unknown"}</span>
             <span className="meta-text">Pending</span>
           </article>
           <article className="stat-card">
-            <span className="stat-value">{queueStats?.needs_context ?? 0}</span>
+            <span className="stat-value">{queueStats?.needs_context ?? "Unknown"}</span>
             <span className="meta-text">Needs context</span>
           </article>
           <article className="stat-card">
-            <span className="stat-value">{queueStats?.error ?? 0}</span>
+            <span className="stat-value">{queueStats?.error ?? "Unknown"}</span>
             <span className="meta-text">Errors</span>
           </article>
         </div>
@@ -602,7 +613,7 @@ export function CodeAnalysisTab({
                 <li key={item.id}>
                   <span className={`badge code-status-${item.status}`}>{item.status.replace(/_/g, " ")}</span>
                   <span className="mono-text">{item.file_path}</span>
-                  <a href={`#code-repo-${item.repo_id}`}>{item.repo_key}</a>
+                  <a href={engagementHref(engagementKey, { tab: "code" })} onClick={event => focusRepository(event, item.repo_id)}>{item.repo_key}</a>
                   <span className="meta-text">priority {item.priority} · queue #{item.id}</span>
                 </li>
               ))}
@@ -1000,7 +1011,7 @@ export function CodeAnalysisTab({
                         <span className="code-result-label">Finding:</span>
                         <a
                           className="mono-text"
-                          href={`#/engagements/${encodeURIComponent(engagementKey)}?tab=findings&finding=${encodeURIComponent(r.finding_slug)}`}
+                          href={engagementHref(engagementKey, { tab: "findings", finding: r.finding_slug })}
                         >
                           {r.finding_slug}
                         </a>

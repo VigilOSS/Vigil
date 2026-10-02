@@ -1,3 +1,5 @@
+import { engagementHref, positiveRouteId } from "./workspaceRoutes.ts";
+
 export type RunAuditSection =
   | "sources"
   | "source-reads"
@@ -93,9 +95,8 @@ export function parseRunAuditQuery(params: URLSearchParams): {
   section?: RunAuditSection;
   object?: string;
 } {
-  const rawRunId = params.get("run");
-  const parsedRunId = rawRunId ? Number(rawRunId) : Number.NaN;
-  if (!Number.isInteger(parsedRunId) || parsedRunId < 1) return {};
+  const parsedRunId = positiveRouteId(params, "run");
+  if (parsedRunId === undefined) return {};
   const rawSection = params.get("section");
   const section = rawSection && ["sources", "source-reads", "dispatches", "commands", "observed-events", "decision-history", "proof-receipts", "obligations", "candidates", "tool-signals", "discovery-passes", "code-receipts", "comparisons"].includes(rawSection)
     ? rawSection as RunAuditSection
@@ -184,14 +185,13 @@ export function blockerDestination(
   runId: number,
   blocker: AuditBlocker,
 ): string {
-  const base = `#/engagements/${encodeURIComponent(engagementKey)}`;
   const objectType = String(blocker.object_type ?? "").toLowerCase();
   const objectId = blocker.object_id;
   if (objectType === "finding" && objectId !== null && String(objectId)) {
-    return `${base}?tab=findings&finding=${encodeURIComponent(String(objectId))}`;
+    return engagementHref(engagementKey, { tab: "findings", finding: String(objectId) });
   }
   if (objectType === "artifact") {
-    return `${base}?tab=artifacts`;
+    return engagementHref(engagementKey, { tab: "artifacts" });
   }
   const params = new URLSearchParams({ tab: "runs", run: String(runId) });
   const section = sectionForObject(objectType);
@@ -202,7 +202,7 @@ export function blockerDestination(
   if (section && identifiesChild && objectId !== null && String(objectId)) {
     params.set("object", String(objectId));
   }
-  return `${base}?${params.toString()}`;
+  return engagementHref(engagementKey, Object.fromEntries(params));
 }
 
 const COMPARISON_ORDER = ["new", "persisting", "resolved", "unknown"] as const;

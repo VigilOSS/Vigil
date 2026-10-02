@@ -36,9 +36,13 @@ def register_remediation_parser(sub: argparse._SubParsersAction) -> None:
     intake.add_argument("--title", required=True)
     intake.add_argument("--snapshot-file", required=True, type=Path)
     intake.add_argument("--attachment", action="append", type=Path, default=[], help="Local report attachment; repeatable")
-    intake.add_argument("--finding", help="Existing Vigil Finding slug, when present")
-    intake.add_argument("--finding-engagement", help="Engagement key that owns --finding")
+    intake.add_argument("--finding-id", type=int, action="append", default=[], help="Canonical Vigil finding ID sharing this fix; repeatable")
     intake.add_argument("--resume-case-id", help="Resume attachment registration after a partial import")
+
+    from_finding = commands.add_parser("from-finding", help="Create a case from a Vigil finding in this remediation engagement")
+    from_finding.add_argument("--finding-engagement", required=True, help="Source assessment engagement key")
+    from_finding.add_argument("--finding", required=True, help="Finding slug in the source engagement")
+    from_finding.add_argument("--title")
 
     list_cases = commands.add_parser("list", help="List cases")
     list_cases.add_argument("--json", action="store_true")
@@ -657,9 +661,12 @@ def run_remediation(args: argparse.Namespace, install_root: Path) -> None:
     case_id = getattr(args, "case_id", "")
     endpoint = _case_path(case_id) if case_id else "/cases"
     result: object
-    if cmd == "import":
-        if bool(args.finding) != bool(args.finding_engagement):
-            raise SystemExit("--finding and --finding-engagement must be supplied together")
+    if cmd == "from-finding":
+        payload = {"remediation_engagement_key": key}
+        if args.title:
+            payload["title"] = args.title
+        result = _api(install_root, eng_dir, args.finding_engagement, "POST", f"/findings/{quote(args.finding, safe='')}/cases", payload)
+    elif cmd == "import":
         try:
             source_file = args.snapshot_file.expanduser().resolve(strict=True)
             snapshot = json.loads(source_file.read_text(encoding="utf-8"))
@@ -687,8 +694,7 @@ def run_remediation(args: argparse.Namespace, install_root: Path) -> None:
         else:
             result = _api(install_root, eng_dir, key, "POST", "/cases", {
                 "source_type": args.source, "source_key": args.source_key, "title": args.title,
-                "snapshot": snapshot, "linked_finding_slug": args.finding,
-                "linked_finding_engagement_key": args.finding_engagement,
+                "snapshot": snapshot, "finding_ids": args.finding_id,
             })
         if not isinstance(result, dict) or "id" not in result:
             raise SystemExit("remediation API did not return a case ID")

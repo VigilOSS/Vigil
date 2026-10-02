@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ToastProvider } from "../contexts/ToastContext";
 import {
+  listAssessmentFindingLinks,
   listSurfaceRequestVariantLinks,
   patchAssessmentSurface,
 } from "../lib/api";
@@ -46,6 +47,7 @@ const surface = (overrides: Record<string, unknown>) => ({
 });
 
 beforeEach(() => {
+  vi.mocked(listAssessmentFindingLinks).mockResolvedValue([]);
   vi.mocked(listSurfaceRequestVariantLinks).mockResolvedValue([]);
   vi.mocked(patchAssessmentSurface).mockImplementation(async (_key, _id, payload) => (
     surface({ id: _id, ...payload }) as never
@@ -58,6 +60,38 @@ afterEach(() => {
 });
 
 describe("SurfacesTab evidence availability", () => {
+  it("does not report absent findings while their association ledger is pending or unavailable", async () => {
+    let rejectLinks!: (error: Error) => void;
+    vi.mocked(listAssessmentFindingLinks).mockReturnValue(new Promise((_resolve, reject) => { rejectLinks = reject; }));
+    render(<ToastProvider><SurfacesTab engagementKey="demo" surfaces={[surface({})] as never} /></ToastProvider>);
+    fireEvent.click(await screen.findByRole("button", { name: "https://example.test/login" }));
+    expect(screen.getByText("Loading finding links…")).toBeTruthy();
+    expect(screen.queryByText("No findings linked to this surface yet.")).toBeNull();
+    rejectLinks(new Error("association ledger unavailable"));
+    expect((await screen.findByRole("alert")).textContent).toContain("Finding links unavailable: association ledger unavailable");
+    expect(screen.queryByText("No findings linked to this surface yet.")).toBeNull();
+  });
+
+  it("does not report absent request-variant relations while their ledger is loading", async () => {
+    vi.mocked(listSurfaceRequestVariantLinks).mockReturnValue(new Promise(() => {}));
+    render(<ToastProvider><SurfacesTab engagementKey="demo" surfaces={[surface({})] as never} /></ToastProvider>);
+    fireEvent.click(await screen.findByRole("button", { name: "https://example.test/login" }));
+    expect(screen.getByText("Loading request-variant links…")).toBeTruthy();
+    expect(screen.queryByText("No durable request-variant links.")).toBeNull();
+  });
+
+  it("uses the stored surface identity rather than partially parsing a reference", async () => {
+    vi.mocked(listAssessmentFindingLinks).mockResolvedValue([
+      { id: 1, finding_slug: "VA-012", target_kind: "surface", target_id: 1, target_ref: "unstructured reference", role: "affected" },
+      { id: 2, finding_slug: "VA-999", target_kind: "surface", target_id: null, target_ref: "1garbage", role: "affected" },
+    ] as never);
+    render(<ToastProvider><SurfacesTab engagementKey="demo" surfaces={[surface({})] as never} /></ToastProvider>);
+    fireEvent.click(await screen.findByRole("button", { name: "https://example.test/login" }));
+    expect((await screen.findByRole("link", { name: /VA-012/ })).getAttribute("href"))
+      .toBe("#/engagements/demo?tab=findings&finding=VA-012");
+    expect(screen.queryByRole("link", { name: /VA-999/ })).toBeNull();
+  });
+
   it("warns when the surface snapshot reaches its fetch boundary", () => {
     render(
       <ToastProvider>

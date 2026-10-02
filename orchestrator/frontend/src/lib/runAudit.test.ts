@@ -37,6 +37,10 @@ test("drill-down selection is an explicit reducer transition", () => {
   }
 });
 
+test("an unsafe run ID cannot round into another audit identity", () => {
+  assert.deepEqual(parseRunAuditQuery(new URLSearchParams("run=9007199254740993&section=proof-receipts&object=99")), {});
+});
+
 test("paged drill-down rows append exactly once and preserve server continuation", () => {
   const first = appendAuditPage([], {
     items: [{ id: 1 }, { id: 2 }],

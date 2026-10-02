@@ -313,8 +313,9 @@ export function OastTab({ engagementKey, refreshVersion }: OastTabProps) {
   );
 
   useEffect(() => {
-    if (selected && !probes.some((p) => p.nonce === selected.nonce)) {
-      setSelected(null);
+    if (selected) {
+      const current = probes.find((probe) => probe.nonce === selected.nonce) ?? null;
+      if (current !== selected) setSelected(current);
     }
   }, [probes, selected]);
 

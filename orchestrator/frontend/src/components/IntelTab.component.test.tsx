@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ToastProvider } from "../contexts/ToastContext";
@@ -22,6 +22,7 @@ vi.mock("../lib/api", () => ({
 }));
 
 beforeEach(() => {
+  window.history.replaceState({}, "", "#/engagements");
   vi.mocked(listIntel).mockImplementation(async (_key, entityType) => ({
     entity_type: entityType,
     total: 0,
@@ -51,8 +52,132 @@ afterEach(() => {
 });
 
 describe("IntelTab deep links", () => {
+  it("restores a credential deep link and closes/reopens it with history", async () => {
+    vi.mocked(listIntelCredentials).mockResolvedValue([{ id: 42, identity: "operator@example.test", secret: "exact-token" }]);
+    window.history.replaceState({}, "", "#/engagements/demo?tab=intel&intel_type=credentials&intel_id=42");
+    const view = render(<ToastProvider><IntelTab engagementKey="demo" summary={{ counts: {} }} initialIntelType="credentials" initialIntelId={42} /></ToastProvider>);
+    expect(await screen.findByRole("heading", { level: 2, name: "operator@example.test" })).toBeTruthy();
+    expect(screen.getByText("exact-token")).toBeTruthy();
+    window.history.replaceState({}, "", "#/engagements/demo?tab=intel");
+    view.rerender(<ToastProvider><IntelTab engagementKey="demo" summary={{ counts: {} }} /></ToastProvider>);
+    expect(screen.queryByRole("dialog")).toBeNull();
+    window.history.replaceState({}, "", "#/engagements/demo?tab=intel&intel_type=credentials&intel_id=42");
+    view.rerender(<ToastProvider><IntelTab engagementKey="demo" summary={{ counts: {} }} initialIntelType="credentials" initialIntelId={42} /></ToastProvider>);
+    expect(await screen.findByRole("heading", { level: 2, name: "operator@example.test" })).toBeTruthy();
+    expect(window.location.hash).toContain("intel_type=credentials&intel_id=42");
+  });
+
+  it("closes a clicked credential when history returns to the intel ledger", async () => {
+    vi.mocked(listIntelCredentials).mockResolvedValue([{ id: 42, identity: "operator@example.test" }]);
+    const view = render(<ToastProvider><IntelTab engagementKey="demo" summary={{ counts: {} }} /></ToastProvider>);
+    fireEvent.click(await screen.findByRole("button", { name: /operator@example.test/ }));
+    expect(await screen.findByRole("dialog")).toBeTruthy();
+    view.rerender(<ToastProvider><IntelTab engagementKey="demo" summary={{ counts: {} }} initialIntelType="credentials" initialIntelId={42} /></ToastProvider>);
+    window.history.replaceState({}, "", "#/engagements/demo?tab=intel");
+    view.rerender(<ToastProvider><IntelTab engagementKey="demo" summary={{ counts: {} }} /></ToastProvider>);
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("contains intel-palette focus and restores its opener on Escape", async () => {
+    vi.mocked(listIntel).mockImplementation(async (_key, entityType) => ({ entity_type: entityType, total: entityType === "cve" ? 1 : 0, items: entityType === "cve" ? [{ id: 44, cve_id: "CVE-2026-4444" }] as never[] : [] }));
+    render(<ToastProvider><IntelTab engagementKey="demo" summary={{ counts: { cves: 1 } }} /></ToastProvider>);
+    await screen.findAllByText("CVE-2026-4444");
+    const opener = screen.getByRole("button", { name: /Jump to…/ });
+    opener.focus();
+    fireEvent.click(opener);
+    screen.getByRole("button", { name: "FTS" }).focus();
+    expect(document.querySelector(".cmd-box")?.contains(document.activeElement)).toBe(true);
+    const dialog = screen.getByRole("dialog", { name: "Jump to intel" });
+    const input = within(dialog).getByRole("textbox", { name: "Search intel to jump to" });
+    expect(document.body.classList.contains("detail-modal-open")).toBe(true);
+    fireEvent.keyDown(document, { key: "Tab", shiftKey: true });
+    expect(document.activeElement).toBe(within(dialog).getByRole("button", { name: /CVE-2026-4444/ }));
+    fireEvent.keyDown(document, { key: "Tab" });
+    expect(document.activeElement).toBe(input);
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(screen.queryByRole("dialog", { name: "Jump to intel" })).toBeNull();
+    expect(document.activeElement).toBe(opener);
+    expect(document.body.classList.contains("detail-modal-open")).toBe(false);
+  });
+  it("opens the arrow-selected intel record with its exact canonical identity", async () => {
+    vi.mocked(listIntel).mockImplementation(async (_key, entityType) => ({ entity_type: entityType, total: entityType === "cve" ? 2 : 0, items: entityType === "cve" ? [{ id: 44, cve_id: "CVE-2026-4444" }, { id: 45, cve_id: "CVE-2026-5555" }] as never[] : [] }));
+    render(<ToastProvider><IntelTab engagementKey="demo" summary={{ counts: { cves: 2 } }} /></ToastProvider>);
+    await screen.findAllByText("CVE-2026-4444");
+    fireEvent.click(screen.getByRole("button", { name: /Jump to…/ }));
+    const input = screen.getByPlaceholderText(/Jump to intel ·/);
+    fireEvent.keyDown(input, { key: "ArrowDown" });
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(await screen.findByRole("heading", { name: "CVE-2026-5555" })).toBeTruthy();
+    expect(document.querySelector(".cmd-overlay")).toBeNull();
+    expect(window.location.hash).toContain("intel_type=cve");
+    expect(window.location.hash).toContain("intel_id=45");
+  });
+  it("clears the detail route when CmdK hands off to the palette", async () => {
+    vi.mocked(listIntel).mockImplementation(async (_key, entityType) => ({ entity_type: entityType, total: entityType === "cve" ? 1 : 0, items: entityType === "cve" ? [{ id: 44, cve_id: "CVE-2026-4444" }] as never[] : [] }));
+    render(<ToastProvider><IntelTab engagementKey="demo" summary={{ counts: { cves: 1 } }} /></ToastProvider>);
+    await screen.findAllByText("CVE-2026-4444");
+    fireEvent.click(screen.getByRole("button", { name: /Jump to…/ }));
+    fireEvent.keyDown(screen.getByRole("textbox", { name: "Search intel to jump to" }), { key: "Enter" });
+    await screen.findByRole("heading", { name: "CVE-2026-4444" });
+    expect(window.location.hash).toContain("intel_id=44");
+    fireEvent.keyDown(screen.getByRole("button", { name: /close detail/i }), { key: "k", metaKey: true });
+    const palette = screen.getByRole("dialog", { name: "Jump to intel" });
+    expect(screen.queryByRole("heading", { name: "CVE-2026-4444" })).toBeNull();
+    expect(window.location.hash).toBe("#/engagements/demo?tab=intel");
+    fireEvent.keyDown(within(palette).getByRole("textbox"), { key: "Escape" });
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(window.location.hash).toBe("#/engagements/demo?tab=intel");
+  });
+  it("closes the palette when history restores an authoritative intel selection", async () => {
+    vi.mocked(listIntel).mockImplementation(async (_key, entityType) => ({ entity_type: entityType, total: entityType === "cve" ? 1 : 0, items: entityType === "cve" ? [{ id: 44, cve_id: "CVE-2026-4444" }] as never[] : [] }));
+    const view = render(<ToastProvider><IntelTab engagementKey="demo" summary={{ counts: { cves: 1 } }} /></ToastProvider>);
+    await screen.findAllByText("CVE-2026-4444");
+    fireEvent.click(screen.getByRole("button", { name: /Jump to…/ }));
+    fireEvent.keyDown(screen.getByRole("textbox", { name: "Search intel to jump to" }), { key: "Enter" });
+    await screen.findByRole("heading", { name: "CVE-2026-4444" });
+    fireEvent.keyDown(screen.getByRole("button", { name: /close detail/i }), { key: "k", metaKey: true });
+    expect(screen.getByRole("dialog", { name: "Jump to intel" })).toBeTruthy();
+    window.history.replaceState({}, "", "#/engagements/demo?tab=intel&intel_type=cve&intel_id=44");
+    view.rerender(<ToastProvider><IntelTab engagementKey="demo" summary={{ counts: { cves: 1 } }} initialIntelType="cve" initialIntelId={44} /></ToastProvider>);
+    expect(await screen.findByRole("heading", { name: "CVE-2026-4444" })).toBeTruthy();
+    expect(screen.queryByRole("dialog", { name: "Jump to intel" })).toBeNull();
+    expect(screen.getAllByRole("dialog")).toHaveLength(1);
+    expect(window.location.hash).toContain("intel_id=44");
+  });
+  it("leaves an empty filtered ledger alone when next/previous shortcuts are pressed", async () => {
+    render(<ToastProvider><IntelTab engagementKey="demo" summary={{ counts: {} }} /></ToastProvider>);
+    await screen.findByText(/0 records · page/);
+    const errors: string[] = [];
+    const record = (event: ErrorEvent) => { errors.push(event.message); event.preventDefault(); };
+    window.addEventListener("error", record);
+    try { for (const key of ["j", "k", "[", "]"]) fireEvent.keyDown(window, { key }); }
+    finally { window.removeEventListener("error", record); }
+    expect(errors).toEqual([]);
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+  it("does not move the record while a detail control handles a native key", async () => {
+    vi.mocked(listIntel).mockImplementation(async (_key, entityType) => ({ entity_type: entityType, total: entityType === "cve" ? 2 : 0, items: entityType === "cve" ? [{ id: 44, cve_id: "CVE-2026-4444" }, { id: 45, cve_id: "CVE-2026-5555" }] as never[] : [] }));
+    render(<ToastProvider><IntelTab engagementKey="demo" summary={{ counts: { cves: 2 } }} initialIntelType="cve" initialIntelId={44} /></ToastProvider>);
+    await screen.findByRole("dialog");
+    fireEvent.keyDown(screen.getByRole("button", { name: /close detail/i }), { key: "j" });
+    expect(screen.getByRole("heading", { level: 2, name: "CVE-2026-4444" })).toBeTruthy();
+  });
+  it("opens a recorded linked finding without inferring provenance from the intel text", async () => {
+    vi.mocked(listIntel).mockImplementation(async (_key, entityType) => ({
+      entity_type: entityType,
+      total: entityType === "cve" ? 1 : 0,
+      items: entityType === "cve"
+        ? [{ id: 44, cve_id: "CVE-2026-4444", linked_finding_slug: "VA-012" } as never]
+        : [],
+    }));
+    render(<ToastProvider><IntelTab engagementKey="demo" summary={{ counts: { cves: 1 } }} initialIntelType="cve" initialIntelId={44} /></ToastProvider>);
+    await screen.findByRole("dialog");
+    fireEvent.click(screen.getByRole("button", { name: /Links & tags/i }));
+    expect((await screen.findByRole("link", { name: "VA-012" })).getAttribute("href"))
+      .toBe("#/engagements/demo?tab=findings&finding=VA-012");
+  });
+
   it("opens the exact typed record after its entity cache loads", async () => {
-    const onInitialRecordConsumed = vi.fn();
     const hashChange = vi.fn();
     window.addEventListener("hashchange", hashChange);
     vi.mocked(listIntel).mockImplementation(async (_key, entityType) => ({
@@ -71,14 +196,13 @@ describe("IntelTab deep links", () => {
           summary={{ counts: { notes: 1 } }}
           initialIntelType="note"
           initialIntelId={42}
-          onInitialRecordConsumed={onInitialRecordConsumed}
         />
       </ToastProvider>,
     );
 
     expect(await screen.findByRole("dialog")).toBeTruthy();
     expect(screen.getByRole("heading", { level: 2, name: "OAuth boundary research" })).toBeTruthy();
-    expect(onInitialRecordConsumed).toHaveBeenCalledOnce();
+    expect(hashChange).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: /close detail/i }));
     expect(hashChange).toHaveBeenCalledOnce();
     view.rerender(
@@ -93,12 +217,12 @@ describe("IntelTab deep links", () => {
           summary={{ counts: { notes: 1 } }}
           initialIntelType="note"
           initialIntelId={42}
-          onInitialRecordConsumed={onInitialRecordConsumed}
         />
       </ToastProvider>,
     );
     expect(await screen.findByRole("dialog")).toBeTruthy();
-    expect(onInitialRecordConsumed).toHaveBeenCalledTimes(2);
+    expect(screen.getByRole("heading", { name: "OAuth boundary research" })).toBeTruthy();
+    expect(hashChange).toHaveBeenCalledOnce();
     window.removeEventListener("hashchange", hashChange);
   });
 

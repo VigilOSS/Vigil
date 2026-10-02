@@ -119,6 +119,61 @@ afterEach(() => {
 });
 
 describe("RunsTab", () => {
+  it("stops deep-link pagination after a failed page instead of retrying indefinitely", async () => {
+    arrangeSuccessfulAudit();
+    vi.mocked(listAssessmentRunChildren).mockResolvedValueOnce({ items: [{ id: 1, path: "src/first.py" }], total: 2, offset: 0, limit: 50, has_more: true })
+      .mockRejectedValueOnce(new Error("next page unavailable"))
+      .mockImplementation(() => new Promise(() => {}));
+    render(<RunsTab engagementKey="audit-test" initialRunId={41} initialSection="sources" initialObject="2" />);
+    expect(await screen.findByText(/next page unavailable/)).toBeTruthy();
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(listAssessmentRunChildren).toHaveBeenCalledTimes(2);
+    expect(screen.getByText("src/first.py")).toBeTruthy();
+  });
+
+  it("reports an unavailable exact deep-linked ledger record", async () => {
+    arrangeSuccessfulAudit();
+    vi.mocked(listAssessmentRunChildren).mockResolvedValue({ items: [], total: 0, offset: 0, limit: 50, has_more: false });
+    render(<RunsTab engagementKey="audit-test" initialRunId={41} initialSection="proof-receipts" initialObject="99" />);
+    expect(await screen.findByText(/Requested record #99 is not present/)).toBeTruthy();
+  });
+
+  it("retains the last recorded detail and child ledger on refresh failure", async () => {
+    arrangeSuccessfulAudit();
+    const view = render(<RunsTab engagementKey="audit-test" initialRunId={41} initialSection="sources" refreshVersion={0} />);
+    expect(await screen.findByText("src/first.py")).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: "run-current" })).toBeTruthy();
+    vi.mocked(getAssessmentRun).mockRejectedValue(new Error("detail refresh unavailable"));
+    vi.mocked(listAssessmentRunChildren).mockRejectedValue(new Error("ledger refresh unavailable"));
+    view.rerender(<RunsTab engagementKey="audit-test" initialRunId={41} initialSection="sources" refreshVersion={1} />);
+    expect(await screen.findByText(/detail refresh unavailable/)).toBeTruthy();
+    expect(await screen.findByText(/ledger refresh unavailable/)).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "run-current" })).toBeTruthy();
+    expect(screen.getByText("src/first.py")).toBeTruthy();
+    expect(screen.getAllByText(/last recorded/i).length).toBeGreaterThan(0);
+  });
+
+  it("writes run and section selection to canonical navigable history", async () => {
+    arrangeSuccessfulAudit();
+    vi.mocked(getAssessmentRun).mockImplementation(async (_key, id) => id === 40 ? baselineRun : currentRun);
+    window.history.replaceState(null, "", "#/engagements/audit-test?tab=runs&run=41");
+    render(<RunsTab engagementKey="audit-test" initialRunId={41} />);
+    await screen.findByRole("heading", { name: "run-current" });
+    fireEvent.click(screen.getByRole("button", { name: /run-baseline/ }));
+    expect(window.location.hash).toContain("run=40");
+    await screen.findByRole("heading", { name: "run-baseline" });
+    fireEvent.click(screen.getByRole("tab", { name: "Sources" }));
+    expect(window.location.hash).toContain("section=sources");
+  });
+
+  it("restores the default section when history drops an explicit section", async () => {
+    arrangeSuccessfulAudit();
+    const view = render(<RunsTab engagementKey="audit-test" initialRunId={41} initialSection="obligations" />);
+    await screen.findByRole("heading", { name: "run-current" });
+    view.rerender(<RunsTab engagementKey="audit-test" initialRunId={41} />);
+    await waitFor(() => expect(screen.getByRole("tab", { name: "Sources" }).getAttribute("aria-selected")).toBe("true"));
+  });
+
   it("renders loading, empty, and error states", async () => {
     let finishLoading: (runs: AssessmentRun[]) => void = () => undefined;
     vi.mocked(listAssessmentRuns).mockReturnValue(

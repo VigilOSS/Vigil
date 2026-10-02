@@ -152,6 +152,26 @@ def test_record_and_list_command_run_round_trips(client, isolate_settings):
     assert rows[0]["id"] == created["id"]
 
 
+def test_command_detail_projects_only_its_recorded_finding_identity(client, isolate_settings):
+    _write_engagement(isolate_settings["engagements_dir"])
+    created = _post(client, _base_payload(command="recorded", argv=["recorded"], tool_name="audit")).json()
+    with db_module.get_connection() as connection:
+        engagement_id = connection.execute("SELECT engagement_id FROM assessment_command_runs WHERE id=?", (created["id"],)).fetchone()[0]
+        finding_id = connection.execute(
+            "INSERT INTO assessment_findings(engagement_id,slug,title,severity) VALUES(?,?,?,?)",
+            (engagement_id, "canonical-claim", "Recorded claim", "high"),
+        ).lastrowid
+        connection.execute("UPDATE assessment_command_runs SET finding_id=? WHERE id=?", (finding_id, created["id"]))
+    endpoint = f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/{created['id']}"
+    response = client.get(endpoint)
+    assert response.status_code == 200
+    assert response.json()["finding_id"] == finding_id
+    assert response.json()["finding_slug"] == "canonical-claim"
+    with db_module.get_connection() as connection:
+        connection.execute("UPDATE assessment_command_runs SET finding_id=NULL WHERE id=?", (created["id"],))
+    assert client.get(endpoint).json()["finding_slug"] is None
+
+
 def test_one_shot_command_run_without_status_infers_terminal_state(
     client, isolate_settings
 ):

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
+import { engagementHref, writeWorkspaceHash } from "../lib/workspaceRoutes";
 
 import type {
   AssessmentRun,
@@ -245,6 +246,7 @@ export function RunsTab({
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const childrenRequestRef = useRef(0);
   const runsRequestRef = useRef(0);
+  const childrenIdentityRef = useRef("");
 
   const loadRuns = useCallback(async (showSpinner: boolean) => {
     const requestId = ++runsRequestRef.current;
@@ -265,7 +267,6 @@ export function RunsTab({
     } catch (error) {
       if (requestId !== runsRequestRef.current) return;
       setRunsError(error instanceof Error ? error.message : "Failed to load assessment runs");
-      if (showSpinner) setRuns([]);
     } finally {
       if (requestId === runsRequestRef.current) setRunsLoading(false);
     }
@@ -293,8 +294,7 @@ export function RunsTab({
   }, [initialRunId]);
 
   useEffect(() => {
-    const section = validSection(initialSection);
-    if (section) dispatchUi({ type: "select-section", section });
+    dispatchUi({ type: "select-section", section: validSection(initialSection) ?? initialAuditUiState.section });
   }, [initialSection]);
 
   useEffect(() => {
@@ -312,7 +312,6 @@ export function RunsTab({
       })
       .catch((error: unknown) => {
         if (!active) return;
-        setDetail(null);
         setDetailError(error instanceof Error ? error.message : "Failed to load run detail");
       })
       .finally(() => {
@@ -347,7 +346,6 @@ export function RunsTab({
       });
     } catch (error) {
       if (requestId !== childrenRequestRef.current) return;
-      if (replace) setChildren(EMPTY_CHILD_STATE);
       setChildrenError(error instanceof Error ? error.message : "Failed to load run records");
     } finally {
       if (requestId === childrenRequestRef.current) setChildrenLoading(false);
@@ -355,7 +353,11 @@ export function RunsTab({
   }, [engagementKey, selectedRunId, ui.section]);
 
   useEffect(() => {
-    setChildren(EMPTY_CHILD_STATE);
+    const identity = `${engagementKey}:${selectedRunId}:${ui.section}`;
+    if (childrenIdentityRef.current !== identity) {
+      childrenIdentityRef.current = identity;
+      setChildren(EMPTY_CHILD_STATE);
+    }
     if (selectedRunId !== null) void loadChildren(0, true);
   }, [selectedRunId, ui.section, refreshVersion, loadChildren]);
 
@@ -366,7 +368,7 @@ export function RunsTab({
   ) ? initialObject : undefined;
 
   useEffect(() => {
-    if (!focusedObject || childrenLoading) return;
+    if (!focusedObject || childrenLoading || childrenError) return;
     const target = rowDomId(ui.section, focusedObject);
     const element = target ? document.getElementById(target) : null;
     if (element) {
@@ -374,7 +376,7 @@ export function RunsTab({
       return;
     }
     if (children.hasMore) void loadChildren(children.nextOffset, false);
-  }, [children, childrenLoading, focusedObject, loadChildren, ui.section]);
+  }, [children, childrenLoading, childrenError, focusedObject, loadChildren, ui.section]);
 
   useEffect(() => {
     if (selectedRunId === null) {
@@ -463,6 +465,7 @@ export function RunsTab({
                 onClick={() => {
                   setSelectedRunId(run.id);
                   setBaseline("");
+                  writeWorkspaceHash(engagementHref(engagementKey, { tab: "runs", run: run.id, section: ui.section }));
                 }}
               >
                 <span className={`run-status-mark status-${run.status}`} aria-hidden="true" />
@@ -480,7 +483,7 @@ export function RunsTab({
           {detailLoading && !detail && (
             <section className="panel"><TableSkeleton rows={6} /></section>
           )}
-          {detailError && <section className="panel"><p className="error-text">{detailError}</p></section>}
+          {detailError && <section className="panel" role="alert"><p className="error-text">{detailError}{detail && " · Showing last recorded run detail."}</p></section>}
           {!detailLoading && !detailError && !detail && runs.length > 0 && (
             <section className="panel"><p className="empty-state">Select a run to inspect it.</p></section>
           )}
@@ -536,7 +539,7 @@ export function RunsTab({
                       {detail.finding_slugs.map((slug) => (
                         <a
                           key={slug}
-                          href={`#/engagements/${encodeURIComponent(engagementKey)}?tab=findings&finding=${encodeURIComponent(slug)}`}
+                          href={engagementHref(engagementKey, { tab: "findings", finding: slug })}
                         >
                           {slug}
                         </a>
@@ -546,7 +549,7 @@ export function RunsTab({
                 )}
                 {detail.resumed_from_run_id && (
                   <p className="run-resume-line">
-                    Continued from <a href={`#/engagements/${encodeURIComponent(engagementKey)}?tab=runs&run=${detail.resumed_from_run_id}`}>run #{detail.resumed_from_run_id}</a>
+                    Continued from <a href={engagementHref(engagementKey, { tab: "runs", run: detail.resumed_from_run_id })}>run #{detail.resumed_from_run_id}</a>
                   </p>
                 )}
               </section>
@@ -666,13 +669,19 @@ export function RunsTab({
                       role="tab"
                       aria-selected={ui.section === section.key}
                       key={section.key}
-                      onClick={() => dispatchUi({ type: "select-section", section: section.key })}
+                      onClick={() => {
+                        dispatchUi({ type: "select-section", section: section.key });
+                        writeWorkspaceHash(engagementHref(engagementKey, { tab: "runs", run: selectedRunId, section: section.key }));
+                      }}
                     >
                       {section.label}
                     </button>
                   ))}
                 </div>
-                {childrenError && <p className="error-text">{childrenError}</p>}
+                {childrenError && <p className="error-text" role="alert">{childrenError}{children.items.length > 0 && " · Showing last recorded ledger."}</p>}
+                {focusedObject && !childrenLoading && !childrenError && !children.hasMore && !children.items.some((row) => String(row.id) === focusedObject) && (
+                  <p className="error-text" role="alert">Requested record #{focusedObject} is not present in this run's recorded ledger.</p>
+                )}
                 {childrenLoading && children.items.length === 0 && <TableSkeleton rows={4} />}
                 {!childrenLoading && !childrenError && children.items.length === 0 && (
                   <p className="empty-state">No {statusLabel(ui.section)} recorded for this run.</p>

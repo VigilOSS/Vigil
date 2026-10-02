@@ -128,6 +128,7 @@ function deferred<T>() {
 }
 
 beforeEach(() => {
+  window.history.replaceState(null, "", "#/engagements/demo?tab=http");
   vi.mocked(getCapturePolicy).mockRejectedValue(new Error("policy unavailable"));
   vi.mocked(listHttpFlows).mockResolvedValue([]);
   vi.mocked(listRequestVariants).mockResolvedValue([variant]);
@@ -143,6 +144,44 @@ afterEach(() => {
 });
 
 describe("HttpTab live evidence", () => {
+  it("does not show a different selected request when a routed identity is outside the loaded snapshot", async () => {
+    const view = render(<ToastProvider><HttpTab engagementKey="demo" refreshVersion={0} initialRequestVariantId={1} /></ToastProvider>);
+    await screen.findByRole("dialog");
+    view.rerender(<ToastProvider><HttpTab engagementKey="demo" refreshVersion={0} initialRequestVariantId={999} /></ToastProvider>);
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.getByRole("status").textContent).toContain("Request #999 cannot be resolved from the loaded endpoint inventory");
+    vi.mocked(listRequestVariants).mockResolvedValue([{ ...variant, id: 999, normalized_path: "/other", canonical_url: "https://target.test/other" }]);
+    view.rerender(<ToastProvider><HttpTab engagementKey="demo" refreshVersion={1} initialRequestVariantId={999} /></ToastProvider>);
+    expect((await screen.findByRole("dialog")).textContent).toContain("/other");
+  });
+  it("records manually opened requests in canonical browser history and clears selection on close", async () => {
+    const push = vi.spyOn(window.history, "pushState");
+    render(<ToastProvider><HttpTab engagementKey="demo" refreshVersion={0} /></ToastProvider>);
+    fireEvent.click(await screen.findByRole("button", { name: "/admin" }));
+    expect(await screen.findByRole("dialog")).toBeTruthy();
+    expect(window.location.hash).toBe("#/engagements/demo?tab=http&request=1");
+    expect(push).toHaveBeenLastCalledWith(expect.anything(), "", "#/engagements/demo?tab=http&request=1");
+    fireEvent.click(screen.getByTitle("Close (Esc)"));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(window.location.hash).toBe("#/engagements/demo?tab=http");
+    fireEvent.click(screen.getByRole("button", { name: "/admin" }));
+    await screen.findByRole("dialog");
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(window.location.hash).toBe("#/engagements/demo?tab=http");
+    push.mockRestore();
+  });
+
+  it("closes on browser Back's empty request selection and restores the exact request on return", async () => {
+    const view = render(<ToastProvider><HttpTab engagementKey="demo" refreshVersion={0} initialRequestVariantId={1} /></ToastProvider>);
+    await screen.findByRole("dialog");
+    view.rerender(<ToastProvider><HttpTab engagementKey="demo" refreshVersion={0} /></ToastProvider>);
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    view.rerender(<ToastProvider><HttpTab engagementKey="demo" refreshVersion={0} initialRequestVariantId={1} /></ToastProvider>);
+    expect(await screen.findByRole("dialog")).toBeTruthy();
+    expect(screen.getByText("https://target.test/admin")).toBeTruthy();
+  });
+
   it("opens an explicitly deep-linked request variant", async () => {
     render(
       <ToastProvider>
@@ -347,7 +386,8 @@ describe("HttpTab live evidence", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Captured exchanges" }));
     fireEvent.click(await screen.findByRole("button", { name: "flow-1" }));
 
-    expect(await screen.findByText("Request variant #1")).toBeTruthy();
+    expect((await screen.findByRole("link", { name: "Request variant #1" })).getAttribute("href"))
+      .toBe("#/engagements/demo?tab=http&request=1");
     expect(screen.getByText("traffic/mitmproxy/bodies/request.bin")).toBeTruthy();
     expect(screen.getByText("traffic/mitmproxy/bodies/response.bin")).toBeTruthy();
     const har = screen.getByRole("link", { name: "Export this exchange as HAR" });

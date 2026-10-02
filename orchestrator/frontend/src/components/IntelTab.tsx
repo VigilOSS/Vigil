@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
+import { engagementHref, writeWorkspaceHash } from "../lib/workspaceRoutes";
 import type {
   IntelByUrlResponse,
   IntelEntityType,
@@ -21,6 +22,7 @@ import { JsonView } from "./JsonView";
 import { useBodyScrollLock, useModalFocus } from "../lib/modalScrollLock";
 import { ProvenanceBlock } from "./formatting";
 import {
+  CopyChip,
   KV,
   ProseModeToggle,
   ProseSection,
@@ -36,7 +38,6 @@ type IntelTabProps = {
   summary: IntelSummary | null;
   initialIntelType?: string;
   initialIntelId?: number;
-  onInitialRecordConsumed?: () => void;
 };
 
 // ── Entity types ─────────────────────────────────────────────────────
@@ -64,8 +65,8 @@ const ENTITY_FILTERS: FilterSpec[] = [
   { key: "note", summaryKey: "notes", label: "Notes", singular: "note" },
 ];
 
-function isIntelEntityType(value: string | undefined): value is IntelEntityType {
-  return Boolean(value && ENTITY_FILTERS.some((spec) => spec.key === value && spec.key !== "credentials"));
+function isEntityFilter(value: string | undefined): value is EntityFilter {
+  return Boolean(value && ENTITY_FILTERS.some((spec) => spec.key === value));
 }
 
 const ENTITY_LABEL = new Map<string, string>(
@@ -620,7 +621,6 @@ export function IntelTab({
   summary,
   initialIntelType,
   initialIntelId,
-  onInitialRecordConsumed,
 }: IntelTabProps) {
   // Per-entity caches (each entity is loaded lazily). Using a Map means we
   // only refetch an entity when its cache is cold.
@@ -643,6 +643,7 @@ export function IntelTab({
   const [sourceFilters, setSourceFilters] = useState<Set<string>>(new Set());
   const [page, setPage] = useState(0);
   const [cmdOpen, setCmdOpen] = useState(false);
+  const commandInvokerRef = useRef<HTMLElement | null>(null);
   // When true, rows whose ``superseded_by_id`` is set are filtered out
   // client-side. Default off so the audit trail remains visible by default;
   // operators flip this on to mirror the report-writer view.
@@ -664,7 +665,7 @@ export function IntelTab({
   const [detailOpen, setDetailOpen] = useState(false);
   const rowRefs = useRef<Map<string, HTMLButtonElement>>(new Map());
   const lastFocusIdRef = useRef<string | null>(null);
-  const consumedInitialRecordRef = useRef<string | null>(null);
+  const appliedRouteRecordRef = useRef<string | null>(null);
 
   // Column widths for the Intel list. Separate storage key from the
   // Findings list so the two don't collide.
@@ -782,20 +783,7 @@ export function IntelTab({
   }, [derivedList]);
 
   const writeIntelHash = useCallback((record?: Derived) => {
-    const base = `#/engagements/${encodeURIComponent(engagementKey)}`;
-    const params = new URLSearchParams({ tab: "intel" });
-    if (record) {
-      params.set("intel_type", record.entity);
-      params.set("intel_id", String(record.raw.id));
-    }
-    const next = `${base}?${params.toString()}`;
-    if (window.location.hash !== next) {
-      window.history.replaceState(null, "", next);
-      // replaceState is intentionally history-neutral but also silent. Keep
-      // App's parsed route synchronized so revisiting this exact deep link is
-      // not mistaken for the already-consumed route.
-      window.dispatchEvent(new HashChangeEvent("hashchange"));
-    }
+    writeWorkspaceHash(engagementHref(engagementKey, { tab: "intel", intel_type: record?.entity, intel_id: record ? String(record.raw.id) : undefined }));
   }, [engagementKey]);
 
   const openRecord = useCallback((record: Derived) => {
@@ -828,20 +816,23 @@ export function IntelTab({
   }, [cache, openRecord]);
 
   useEffect(() => {
-    if (!isIntelEntityType(initialIntelType) || initialIntelId == null) {
-      consumedInitialRecordRef.current = null;
+    if (!isEntityFilter(initialIntelType) || initialIntelId == null) {
+      if (appliedRouteRecordRef.current !== null) {
+        appliedRouteRecordRef.current = null;
+        setDetailOpen(false);
+      }
       return;
     }
     const key = `${initialIntelType}:${initialIntelId}`;
-    if (consumedInitialRecordRef.current === key) return;
+    if (appliedRouteRecordRef.current === key) return;
     const target = derivedById.get(key);
     if (!target) return;
-    consumedInitialRecordRef.current = key;
+    appliedRouteRecordRef.current = key;
     setSelectedId(target.id);
     lastFocusIdRef.current = target.id;
+    setCmdOpen(false);
     setDetailOpen(true);
-    onInitialRecordConsumed?.();
-  }, [initialIntelType, initialIntelId, derivedById, onInitialRecordConsumed]);
+  }, [initialIntelType, initialIntelId, derivedById]);
 
   // Filtering.
   const parsedQuery = useMemo(() => parseQuery(query), [query]);
@@ -981,15 +972,26 @@ export function IntelTab({
   const detailOpenRef = useRef(detailOpen);
   detailOpenRef.current = detailOpen;
 
+  const openCommandPalette = useCallback((invoker?: HTMLElement) => {
+    if (cmdOpen) return;
+    // Detail controls unmount before the palette, so keep the connected row opener.
+    const origin = invoker ?? (detailOpenRef.current
+      ? rowRefs.current.get(lastFocusIdRef.current ?? "") ?? searchRef.current
+      : document.activeElement);
+    commandInvokerRef.current = origin instanceof HTMLElement && origin.isConnected ? origin : searchRef.current;
+    if (detailOpenRef.current) writeIntelHash();
+    setDetailOpen(false);
+    setCmdOpen(true);
+  }, [cmdOpen, writeIntelHash]);
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      const target = e.target as HTMLElement | null;
-      const tag = (target?.tagName || "").toLowerCase();
-      const isTyping = tag === "input" || tag === "textarea";
+      const target = e.target instanceof HTMLElement ? e.target : null;
+      const isTyping = Boolean(target?.closest("input, textarea, select, [contenteditable]:not([contenteditable='false'])"));
+      const isInteractive = isTyping || Boolean(target?.closest("button, a, [role='button'], [role='combobox'], [role='listbox']"));
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
         e.preventDefault();
-        setDetailOpen(false);
-        setCmdOpen(true);
+        openCommandPalette();
         return;
       }
       if (!isTyping && e.key === "/") {
@@ -1009,9 +1011,10 @@ export function IntelTab({
         }
         return;
       }
-      if (!isTyping && (e.key === "[" || e.key === "]")) {
+      if (!isInteractive && (e.key === "[" || e.key === "]")) {
         e.preventDefault();
         const list = filteredRef.current;
+        if (!list.length) return;
         const cur = selectedRef.current;
         const idx = list.findIndex((f) => f.id === cur);
         if (idx < 0) {
@@ -1021,9 +1024,10 @@ export function IntelTab({
         const next = e.key === "[" ? Math.max(0, idx - 1) : Math.min(list.length - 1, idx + 1);
         setSelectedId(list[next].id);
       }
-      if (!isTyping && (e.key === "j" || e.key === "k")) {
+      if (!isInteractive && (e.key === "j" || e.key === "k")) {
         e.preventDefault();
         const list = filteredRef.current;
+        if (!list.length) return;
         const cur = selectedRef.current;
         const idx = list.findIndex((f) => f.id === cur);
         if (idx < 0 && list[0]) {
@@ -1033,14 +1037,14 @@ export function IntelTab({
         const next = e.key === "k" ? Math.max(0, idx - 1) : Math.min(list.length - 1, idx + 1);
         setSelectedId(list[next].id);
       }
-      if (!isTyping && e.key === "Enter" && selectedRef.current != null) {
+      if (!isInteractive && e.key === "Enter" && selectedRef.current != null) {
         e.preventDefault();
         setDetailOpen(true);
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  }, [openCommandPalette]);
 
   // Counts.
   const entityCounts = useMemo(() => {
@@ -1238,7 +1242,7 @@ export function IntelTab({
             <button type="button" className="qa-btn" onClick={runSearch} disabled={ftsLoading}>
               {ftsLoading ? "Searching…" : "FTS"}
             </button>
-            <button type="button" className="qa-btn" onClick={() => setCmdOpen(true)}>
+            <button type="button" className="qa-btn" onClick={(event) => openCommandPalette(event.currentTarget)}>
               Jump to… <span className="search-kbd" style={{ marginLeft: 4 }}>⌘K</span>
             </button>
           </div>
@@ -1346,7 +1350,8 @@ export function IntelTab({
                 borderRadius: 6,
                 padding: "6px 10px",
                 fontSize: "0.82rem",
-                minWidth: 260,
+                minWidth: 0,
+                width: "100%",
                 flex: "1 1 260px",
               }}
             />
@@ -1576,7 +1581,7 @@ export function IntelTab({
           }}
           titleId="intel-detail-modal-title"
         >
-          <Drawer d={selectedDerived} titleId="intel-detail-modal-title" />
+          <Drawer key={selectedDerived.id} d={selectedDerived} engagementKey={engagementKey} titleId="intel-detail-modal-title" />
         </DetailModal>
       )}
 
@@ -1592,6 +1597,7 @@ export function IntelTab({
       {cmdOpen && (
         <CommandPalette
           derivedList={derivedList}
+          returnFocusRef={commandInvokerRef}
           onSelect={(id) => {
             const record = derivedById.get(id);
             if (record) openRecord(record);
@@ -1716,21 +1722,16 @@ function IntelRow({
 // ── Drawer ───────────────────────────────────────────────────────────
 type DrawerProps = {
   d: Derived;
+  engagementKey: string;
   titleId?: string;
 };
 
 type TabId = "overview" | "references" | "provenance" | "raw";
 
-function Drawer({ d, titleId }: DrawerProps) {
+function Drawer({ d, engagementKey, titleId }: DrawerProps) {
   const { toast } = useToast();
   const [tab, setTab] = useState<TabId>("overview");
-  // Drawer-wide prose view mode (rendered markdown ↔ raw text), mirroring the
-  // Findings drawer. Reset per record so a raw toggle doesn't leak across rows.
   const [proseMode, setProseMode] = useState<ProseMode>("rendered");
-  useEffect(() => {
-    setTab("overview");
-    setProseMode("rendered");
-  }, [d?.id]);
 
   const provenance = (d.raw.provenance as Record<string, unknown>) || {};
   // The canonical provenance block (agent/captured/artifact/evidence) now
@@ -1768,15 +1769,6 @@ function Drawer({ d, titleId }: DrawerProps) {
   const heroPillClass = isCveWithSev ? sevClass : `itype-${d.entity}`;
   const heroDotColor = isCveWithSev ? sevDotColor(sevClass) : ITYPE_COLORS[d.entity];
 
-  const copyId = () => {
-    try {
-      void navigator.clipboard?.writeText(d.id);
-      toast("Copied", "success");
-    } catch {
-      // ignore
-    }
-  };
-
   // Prose toggle is only meaningful on Overview (notes / note body render as
   // markdown there); other tabs don't surface prose.
   const showProseToggle = tab === "overview";
@@ -1787,9 +1779,7 @@ function Drawer({ d, titleId }: DrawerProps) {
         <div className="drawer-top">
           <div className="drawer-slug">
             <span>{d.id}</span>
-            <button type="button" className="copy-btn" onClick={copyId} title="Copy id">
-              id
-            </button>
+            <CopyChip text={d.id} toast={toast} label="Copy id" />
           </div>
           {/* Maximize retired with the move to a centred modal. The
               modal's own × close button handles dismissal. */}
@@ -1823,7 +1813,7 @@ function Drawer({ d, titleId }: DrawerProps) {
       </div>
       <div className="drawer-body">
         {tab === "overview" && <OverviewPane d={d} proseMode={proseMode} toast={toast} />}
-        {tab === "references" && <ReferencesPane d={d} toast={toast} />}
+        {tab === "references" && <ReferencesPane d={d} engagementKey={engagementKey} toast={toast} />}
         {tab === "provenance" && <ProvenancePane d={d} />}
         {tab === "raw" && <RawPane d={d} />}
       </div>
@@ -2100,9 +2090,11 @@ function OverviewPane({
 
 function ReferencesPane({
   d,
+  engagementKey,
   toast,
 }: {
   d: Derived;
+  engagementKey: string;
   toast: ToastFn;
 }) {
   const raw = d.raw;
@@ -2130,7 +2122,7 @@ function ReferencesPane({
           <SectionHead title="Linked finding" copyText={linkedFindingSlug} toast={toast} />
           <ul className="ref-list">
             <li>
-              <span className="mono">{linkedFindingSlug}</span>
+              <a className="mono" href={engagementHref(engagementKey, { tab: "findings", finding: linkedFindingSlug })}>{linkedFindingSlug}</a>
             </li>
           </ul>
         </div>
@@ -2244,7 +2236,7 @@ function summarizeRow(row: Record<string, unknown>): string {
 }
 
 function intelWorkspaceHref(engagementKey: string, tab: "coverage" | "surfaces" | "http"): string {
-  return `#/engagements/${encodeURIComponent(engagementKey)}?tab=${tab}`;
+  return engagementHref(engagementKey, { tab });
 }
 
 // ── Command palette ──────────────────────────────────────────────────
@@ -2252,14 +2244,19 @@ function CommandPalette({
   derivedList,
   onSelect,
   onClose,
+  returnFocusRef,
 }: {
   derivedList: Derived[];
   onSelect: (id: string) => void;
   onClose: () => void;
+  returnFocusRef: RefObject<HTMLElement | null>;
 }) {
   const [q, setQ] = useState("");
   const [idx, setIdx] = useState(0);
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  useBodyScrollLock();
+  useModalFocus(panelRef, onClose, true, returnFocusRef);
 
   useEffect(() => {
     inputRef.current?.focus();
@@ -2311,20 +2308,18 @@ function CommandPalette({
     } else if (e.key === "Enter") {
       e.preventDefault();
       if (results[idx]) onSelect(results[idx].id);
-    } else if (e.key === "Escape") {
-      e.preventDefault();
-      onClose();
     }
   };
 
   return (
     <div className="cmd-overlay" onClick={onClose}>
-      <div className="cmd-box" onClick={(e) => e.stopPropagation()}>
+      <div ref={panelRef} className="cmd-box" role="dialog" aria-modal="true" aria-label="Jump to intel" tabIndex={-1} onClick={(e) => e.stopPropagation()}>
         <div className="cmd-input-row">
           <IconSearch />
           <input
             ref={inputRef}
             className="cmd-input"
+            aria-label="Search intel to jump to"
             placeholder="Jump to intel · try 'type:cve exploited' or a host"
             value={q}
             onChange={(e) => setQ(e.target.value)}
@@ -2337,10 +2332,12 @@ function CommandPalette({
             <div className="cmd-empty">No records match.</div>
           ) : (
             results.map((d, i) => (
-              <div
+              <button
+                type="button"
                 key={d.id}
                 className={`cmd-item ${i === idx ? "is-active" : ""}`}
                 onMouseEnter={() => setIdx(i)}
+                onFocus={() => setIdx(i)}
                 onClick={() => onSelect(d.id)}
               >
                 <span
@@ -2348,15 +2345,15 @@ function CommandPalette({
                   style={{ background: sevDotColor(d.sev || "info") }}
                 />
                 <span>
-                  <div className="cmd-title">{d.title}</div>
-                  <div className="cmd-sub">
+                  <span className="cmd-title">{d.title}</span>
+                  <span className="cmd-sub">
                     {d.entityLabel}
                     {d.source ? ` · ${d.source}` : ""}
                     {d.status ? ` · ${d.status}` : ""}
-                  </div>
+                  </span>
                 </span>
                 <span className="cmd-sub">{d.location || ""}</span>
-              </div>
+              </button>
             ))
           )}
         </div>

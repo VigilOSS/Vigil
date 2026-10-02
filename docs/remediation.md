@@ -1,7 +1,9 @@
-# Remediation operator pilot
+# Remediation workspace
 
-Use one long-lived engagement per repo (Acme here). Each Jira issue/direct bounty report gets its own
-case, worktree, and evidence under `<engagement>/remediation/cases/<id>/`.
+Use one long-lived remediation engagement per repo (Acme here), separate from assessment
+engagements. A case owns one fix, worktree, and evidence under
+`<engagement>/remediation/cases/<id>/`. It can link several assessment findings that share that fix.
+Jira issues, bounty reports, and Vigil findings retain their actual intake source.
 
 ## 1. Configure
 
@@ -55,7 +57,7 @@ rem() { vigil remediation -k '<engagement-key>' "$@"; }
 
 `rem` is only a shell shortcut for `vigil remediation -k <engagement-key>`.
 
-## 2. Import
+## 2. Intake and finding links
 
 Import a prepared JSON issue snapshot (report text and relevant metadata) from an authorized Jira MCP/export;
 this command does not fetch Jira/bounty data. Attachments are copied into the case and indexed as untrusted
@@ -68,8 +70,36 @@ rem show <case-id>
 ```
 
 Failed registration prints the created case ID: retry that import with `--resume-case-id <id>` to finish files
-without another case. Link only an existing Finding with `--finding <slug> --finding-engagement <key>`. Check
-Vigil's duplicate hints before deciding cases describe the same report.
+without another case. For an external report sharing an existing Vigil finding, add repeatable
+`--finding-id <canonical-id>` arguments to `import`. The ID is the backend finding ID returned by
+finding detail, rather than its engagement-local slug. Check Vigil's duplicate hints before
+deciding cases describe the same report.
+
+To start directly from a Vigil finding, name its source assessment engagement and slug. The
+`-k` engagement remains the explicit remediation destination:
+
+```bash
+rem from-finding --finding-engagement <assessment-key> --finding <finding-slug>
+```
+
+This creates a `finding` intake case and captures the complete finding record at intake. In the
+Findings workspace, **Create remediation case** offers the same operation after you choose a
+remediation engagement. The existing assessment engagement keeps its finding and verification
+history. An existing finding intake cannot be imported a second time into the same destination.
+
+The remediation **Overview** shows current linked finding titles, severity, and verification state,
+with links back to the exact source findings. **Link finding** resolves a slug in a selected source
+engagement before adding its canonical identity; **Unlink** removes the relationship. Several
+findings can share one case. Current assessment state remains separate from the immutable intake
+snapshot. The source finding shows reciprocal case status, worktree revision, and latest deployment.
+
+Case create and patch APIs accept `finding_ids`; case reads return `linked_findings`. Changing
+the identity set changes the review digest and requires approval of the new review package.
+On upgrade, the backend creates a verified adjacent backup and atomically converts legacy
+engagement-key/slug pairs to canonical finding IDs. Unresolved nonempty links stop startup with
+the case ID and source reference; fix the source identity before retrying. Case IDs, evidence,
+stored approval digests, deployments, and intake snapshots remain intact. Historical approvals
+are retained and require a new review against the canonical package.
 
 ## 3. Reproduce and fix
 
@@ -154,7 +184,7 @@ rem approve <case-id> --reviewer <owner> --review-digest <digest-shown-in-Vigil>
   --owner-instruction 'Approve the reviewed code and verification plan'
 ```
 
-Approval binds worktree revision, shared project configuration, plan, and evidence; changes require review again. Development verification
+Approval binds linked finding identities, worktree revision, shared project configuration, plan, and evidence; changes require review again. Development verification
 must match the latest approval and revision; earlier deployment/human results cannot verify a revised fix or
 newly approved plan. Map structured PR content to the repo's actual template; open a draft against `main`.
 Prepared/final bodies remain case-local and indexed in Vigil. Preserve the exact reviewed human plan and

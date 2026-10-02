@@ -1,10 +1,12 @@
-import type { ReactNode } from "react";
+import { useState } from "react";
 import type { Artifact, ArtifactContent } from "../lib/api";
+import { MarkdownBlock } from "./Markdown";
 
 type ArtifactViewerProps = {
   artifacts: Artifact[];
   selectedName: string | null;
   selectedArtifact: ArtifactContent | null;
+  loadError?: string | null;
   onSelect: (name: string) => void;
 };
 
@@ -68,140 +70,8 @@ export function JsonTree({ label, value, defaultOpen = false }: { label?: string
   );
 }
 
-function renderInlineMarkdown(text: string) {
-  const parts = text.split(/(\*\*[^*]+\*\*|`[^`]+`)/g).filter(Boolean);
-  return parts.map((part, index) => {
-    if (part.startsWith("**") && part.endsWith("**")) {
-      return <strong key={index}>{part.slice(2, -2)}</strong>;
-    }
-    if (part.startsWith("`") && part.endsWith("`")) {
-      return <code key={index}>{part.slice(1, -1)}</code>;
-    }
-    return part;
-  });
-}
-
 function MarkdownContent({ content }: { content: string }) {
-  const lines = content.split("\n");
-  const blocks: ReactNode[] = [];
-  let index = 0;
-
-  while (index < lines.length) {
-    const line = lines[index];
-
-    if (!line.trim()) {
-      index += 1;
-      continue;
-    }
-
-    if (line.startsWith("```")) {
-      const codeLines: string[] = [];
-      index += 1;
-      while (index < lines.length && !lines[index].startsWith("```")) {
-        codeLines.push(lines[index]);
-        index += 1;
-      }
-      index += 1;
-      blocks.push(<pre key={blocks.length} className="artifact-code-block">{codeLines.join("\n")}</pre>);
-      continue;
-    }
-
-    if (/^#{1,6}\s+/.test(line)) {
-      const depth = line.match(/^#+/)?.[0].length ?? 1;
-      const text = line.replace(/^#{1,6}\s+/, "");
-      if (depth === 1) blocks.push(<h1 key={blocks.length}>{text}</h1>);
-      else if (depth === 2) blocks.push(<h2 key={blocks.length}>{text}</h2>);
-      else if (depth === 3) blocks.push(<h3 key={blocks.length}>{text}</h3>);
-      else blocks.push(<p key={blocks.length} className="artifact-subheading">{text}</p>);
-      index += 1;
-      continue;
-    }
-
-    if (line.trim() === "---") {
-      blocks.push(<hr key={blocks.length} className="artifact-rule" />);
-      index += 1;
-      continue;
-    }
-
-    if (line.includes("|") && index + 1 < lines.length && /^[:|\-\s]+$/.test(lines[index + 1].trim())) {
-      const header = line.split("|").map((cell) => cell.trim()).filter(Boolean);
-      const rows: string[][] = [];
-      index += 2;
-      while (index < lines.length && lines[index].includes("|")) {
-        rows.push(lines[index].split("|").map((cell) => cell.trim()).filter(Boolean));
-        index += 1;
-      }
-      blocks.push(
-        <div key={blocks.length} className="artifact-table-wrap">
-          <table className="artifact-table">
-            <thead>
-              <tr>
-                {header.map((cell, cellIndex) => (
-                  <th key={cellIndex}>{renderInlineMarkdown(cell)}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((row, rowIndex) => (
-                <tr key={rowIndex}>
-                  {row.map((cell, cellIndex) => (
-                    <td key={cellIndex}>{renderInlineMarkdown(cell)}</td>
-                  ))}
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>,
-      );
-      continue;
-    }
-
-    if (/^[-*]\s+/.test(line)) {
-      const items: string[] = [];
-      while (index < lines.length && /^[-*]\s+/.test(lines[index])) {
-        items.push(lines[index].replace(/^[-*]\s+/, ""));
-        index += 1;
-      }
-      blocks.push(
-        <ul key={blocks.length} className="artifact-list-block">
-          {items.map((item, itemIndex) => (
-            <li key={itemIndex}>{renderInlineMarkdown(item)}</li>
-          ))}
-        </ul>,
-      );
-      continue;
-    }
-
-    if (/^\d+\.\s+/.test(line)) {
-      const items: string[] = [];
-      while (index < lines.length && /^\d+\.\s+/.test(lines[index])) {
-        items.push(lines[index].replace(/^\d+\.\s+/, ""));
-        index += 1;
-      }
-      blocks.push(
-        <ol key={blocks.length} className="artifact-list-block">
-          {items.map((item, itemIndex) => (
-            <li key={itemIndex}>{renderInlineMarkdown(item)}</li>
-          ))}
-        </ol>,
-      );
-      continue;
-    }
-
-    const paragraph: string[] = [];
-    while (index < lines.length && lines[index].trim() && !/^#{1,6}\s+/.test(lines[index]) && !/^[-*]\s+/.test(lines[index]) && !/^\d+\.\s+/.test(lines[index]) && !lines[index].startsWith("```")) {
-      paragraph.push(lines[index]);
-      index += 1;
-    }
-
-    blocks.push(
-      <p key={blocks.length}>
-        {renderInlineMarkdown(paragraph.join(" "))}
-      </p>,
-    );
-  }
-
-  return <div className="artifact-markdown">{blocks}</div>;
+  return <div className="artifact-markdown"><MarkdownBlock text={content} /></div>;
 }
 
 function JsonlContent({ content }: { content: string }) {
@@ -250,8 +120,11 @@ export function ArtifactViewer({
   artifacts,
   selectedName,
   selectedArtifact,
+  loadError,
   onSelect,
 }: ArtifactViewerProps) {
+  const [view, setView] = useState<"rendered" | "raw">("rendered");
+  const displayedArtifact = selectedArtifact?.name === selectedName ? selectedArtifact : null;
   return (
     <section className="panel artifact-panel">
       <div className="panel-header">
@@ -259,18 +132,19 @@ export function ArtifactViewer({
         <p className="meta-text">Root working documents; indexed evidence lives in the artifact ledger</p>
       </div>
       <div className="artifact-layout">
-        <aside className="artifact-list">
+        <aside className="artifact-list" aria-label="Engagement files">
           {artifacts.map((artifact) => (
             <button
               key={artifact.name}
               type="button"
               className={`artifact-row ${selectedName === artifact.name ? "artifact-active" : ""}`}
               disabled={!artifact.exists}
+              aria-pressed={selectedName === artifact.name}
               onClick={() => onSelect(artifact.name)}
             >
               <div>
                 <strong>{artifact.name}</strong>
-                <p className="meta-text">{artifact.relative_path}</p>
+                {artifact.relative_path !== artifact.name && <p className="meta-text">{artifact.relative_path}</p>}
               </div>
               <div className="artifact-tags">
                 <span className="badge">{artifact.exists ? "Available" : "Missing"}</span>
@@ -279,17 +153,22 @@ export function ArtifactViewer({
           ))}
         </aside>
         <article className="artifact-content">
-          {selectedArtifact ? (
+          {loadError && <p className="error-text" role="alert">{displayedArtifact ? `Showing last available content for ${selectedName}. Refresh failed: ${loadError}` : `${selectedName} unavailable: ${loadError}`}</p>}
+          {displayedArtifact ? (
             <>
               <div className="artifact-content-header">
-                <strong>{selectedArtifact.name}</strong>
-                <span className="meta-text">{selectedArtifact.media_type}</span>
+                <strong>{displayedArtifact.name}</strong>
+                <span className="meta-text">{displayedArtifact.media_type}</span>
+                <div className="artifact-view-switch" role="group" aria-label="File view">
+                  <button type="button" aria-pressed={view === "rendered"} onClick={() => setView("rendered")}>Rendered</button>
+                  <button type="button" aria-pressed={view === "raw"} onClick={() => setView("raw")}>Raw</button>
+                </div>
               </div>
-              <ArtifactBody artifact={selectedArtifact} />
+              {view === "raw" ? <pre>{displayedArtifact.content}</pre> : <ArtifactBody artifact={displayedArtifact} />}
             </>
-          ) : (
-            <p className="empty-state">Select an available artifact to inspect it.</p>
-          )}
+          ) : !loadError ? (
+            <p className="empty-state" role="status">{selectedName ? `Loading ${selectedName}…` : "Select an available artifact to inspect it."}</p>
+          ) : null}
         </article>
       </div>
     </section>

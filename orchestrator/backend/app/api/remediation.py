@@ -4,7 +4,7 @@ from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, status
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, PositiveInt, field_validator
 
 from ..services import remediation
 
@@ -12,18 +12,18 @@ router = APIRouter(prefix="/engagements/{engagement_key}/remediation", tags=["re
 
 
 class CaseCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     source_type: Literal["jira", "bounty"]
     source_key: str = Field(min_length=1)
     title: str = Field(min_length=1)
     snapshot: dict[str, Any]
-    linked_finding_engagement_key: str | None = None
-    linked_finding_slug: str | None = None
+    finding_ids: list[PositiveInt] = Field(default_factory=list)
 
 
 class CasePatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     title: str | None = Field(default=None, min_length=1)
-    linked_finding_slug: str | None = None
-    linked_finding_engagement_key: str | None = None
+    finding_ids: list[PositiveInt] = Field(default_factory=list)
     worktree_path: str | None = None
     worktree_branch: str | None = Field(default=None, min_length=1)
     worktree_revision: str | None = None
@@ -38,6 +38,22 @@ class CasePatch(BaseModel):
 
 class PlanPatch(BaseModel):
     verification_plan: str
+
+
+class FindingCaseCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    remediation_engagement_key: str = Field(min_length=1)
+    title: str | None = Field(default=None, min_length=1)
+
+
+@router.get("/findings/{finding_slug}/cases")
+def finding_cases(engagement_key: str, finding_slug: str):
+    return remediation.finding_cases(engagement_key, finding_slug)
+
+
+@router.post("/findings/{finding_slug}/cases", status_code=status.HTTP_201_CREATED)
+def create_finding_case(engagement_key: str, finding_slug: str, body: FindingCaseCreate):
+    return remediation.create_from_finding(engagement_key, finding_slug, body.remediation_engagement_key, body.title)
 
 
 class EvidenceCreate(BaseModel):

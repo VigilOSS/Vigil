@@ -38,8 +38,7 @@ def test_import_reports_invalid_snapshot_before_api_write(tmp_path: Path, monkey
     monkeypatch.setattr(remediation, "_project", lambda *_: (tmp_path, {}))
     calls = []
     monkeypatch.setattr(remediation, "_api", lambda *args: calls.append(args))
-    args = argparse.Namespace(engagement_key="project", remediation_command="import", finding=None,
-                              finding_engagement=None, snapshot_file=source)
+    args = argparse.Namespace(engagement_key="project", remediation_command="import", finding_id=[], snapshot_file=source)
     with pytest.raises(SystemExit, match="snapshot"):
         remediation.run_remediation(args, tmp_path)
     assert calls == []

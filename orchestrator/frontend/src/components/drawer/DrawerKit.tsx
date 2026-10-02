@@ -14,7 +14,7 @@
 // these components emit the exact class names that CSS already targets, so
 // no new markup contracts are introduced.
 
-import { useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Check, Code as CodeIcon, Copy, Eye } from "lucide-react";
 import { MarkdownBlock } from "../Markdown";
 
@@ -32,15 +32,36 @@ export type ProseMode = "rendered" | "raw";
 // ~1.2s and fires toast("Copied"). Renders a compact icon affordance suitable
 // for section-title headers.
 export function CopyChip({ text, toast, label }: { text: string; toast: ToastFn; label?: string }) {
-  const [copied, setCopied] = useState(false);
-  const onCopy = () => {
+  const scope = useMemo(() => ({}), [text]);
+  const activeScope = useRef<object | null>(scope);
+  const activeRequest = useRef<object | null>(null);
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [copiedScope, setCopiedScope] = useState<object | null>(null);
+  activeScope.current = scope;
+  const copied = copiedScope === scope;
+  useEffect(() => {
+    activeScope.current = scope;
+    return () => {
+      if (activeScope.current === scope) activeScope.current = null;
+      activeRequest.current = null;
+      if (timer.current !== null) clearTimeout(timer.current);
+    };
+  }, [scope]);
+  const onCopy = async () => {
+    const request = {};
+    activeRequest.current = request;
+    const current = () => activeScope.current === scope && activeRequest.current === request;
+    setCopiedScope(null);
+    if (timer.current !== null) clearTimeout(timer.current);
     try {
-      void navigator.clipboard?.writeText(text);
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 1200);
+      if (!navigator.clipboard) throw new Error("Clipboard unavailable");
+      await navigator.clipboard.writeText(text);
+      if (!current()) return;
+      setCopiedScope(scope);
+      timer.current = setTimeout(() => { if (current()) setCopiedScope(null); }, 1200);
       toast("Copied", "success");
     } catch {
-      // best-effort
+      if (current()) toast("Could not copy to clipboard", "error");
     }
   };
   return (

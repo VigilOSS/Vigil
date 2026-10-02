@@ -438,7 +438,11 @@ def get_command_run(engagement_id: int, command_run_id: int) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     with _common.get_connection() as connection:
         row = connection.execute(
-            "SELECT * FROM assessment_command_runs WHERE engagement_id = ? AND id = ?",
+            """SELECT c.*, f.slug AS finding_slug
+               FROM assessment_command_runs c
+               LEFT JOIN assessment_findings f ON f.id = c.finding_id
+                    AND f.engagement_id = c.engagement_id
+               WHERE c.engagement_id = ? AND c.id = ?""",
             (engagement.id, int(command_run_id)),
         ).fetchone()
     if not row:

@@ -78,6 +78,37 @@ afterEach(() => {
 });
 
 describe("OastTab detail evidence", () => {
+  it("updates an open drawer's lifecycle when the probe list refreshes", async () => {
+    vi.mocked(getOobProbe).mockResolvedValue({ ...probe, interactions: [] });
+    const view = render(<ToastProvider><OastTab engagementKey="demo" refreshVersion={0} /></ToastProvider>);
+    fireEvent.click(await screen.findByRole("gridcell", { name: probe.nonce }));
+    expect(within(await screen.findByRole("dialog")).getAllByText("Awaiting callback").length).toBeGreaterThan(0);
+
+    const fired = { ...probe, status: "fired", interaction_count: 1, client_name: "updated-client" };
+    vi.mocked(listOobProbes).mockResolvedValue([fired]);
+    vi.mocked(getOobProbe).mockResolvedValue({ ...fired, interactions: [] });
+    view.rerender(<ToastProvider><OastTab engagementKey="demo" refreshVersion={1} /></ToastProvider>);
+    await waitFor(() => expect(listOobProbes).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(getOobProbe).toHaveBeenCalledTimes(2));
+    await screen.findByText("Callback received · confirmation needed");
+
+    const dialog = screen.getByRole("dialog");
+    expect(within(dialog).getByText("Callback received · confirmation needed")).toBeTruthy();
+    expect(within(dialog).getByText("updated-client")).toBeTruthy();
+    expect(within(dialog).queryByText("Awaiting callback")).toBeNull();
+  });
+
+  it("closes the drawer when its selected probe is removed by a refreshed list", async () => {
+    vi.mocked(getOobProbe).mockResolvedValue({ ...probe, interactions: [] });
+    const view = render(<ToastProvider><OastTab engagementKey="demo" refreshVersion={0} /></ToastProvider>);
+    fireEvent.click(await screen.findByRole("gridcell", { name: probe.nonce }));
+    await screen.findByRole("dialog");
+    vi.mocked(listOobProbes).mockResolvedValue([]);
+    view.rerender(<ToastProvider><OastTab engagementKey="demo" refreshVersion={1} /></ToastProvider>);
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(document.body.classList.contains("detail-modal-open")).toBe(false);
+  });
+
   it("defaults to the actionable worklist and keeps the full inventory available", async () => {
     vi.mocked(listOobProbes).mockResolvedValue([
       { ...probe, nonce: "pending-probe", status: "pending" },

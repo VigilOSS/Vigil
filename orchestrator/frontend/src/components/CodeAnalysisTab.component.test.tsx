@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 
 import type {
@@ -147,6 +147,24 @@ function queueItem(overrides: Partial<CodeQueueItem> = {}): CodeQueueItem {
 afterEach(cleanup);
 
 describe("CodeAnalysisTab receipt identity", () => {
+  it("does not report zero queue work when queue statistics are unavailable", () => {
+    render(<CodeAnalysisTab engagementKey="demo" persistedPhase="hunt" loadError="Queue statistics unavailable" repos={[repo()]} modules={[]} queueStats={null} queueItems={[]} coverage={null} readiness={null} completionReadiness={null} results={[]} />);
+    const progress = screen.getByRole("heading", { name: "Analysis Progress" }).closest("section")!;
+    expect(within(progress).queryAllByText("0")).toHaveLength(0);
+    expect(within(progress).getAllByText("Unknown")).toHaveLength(6);
+  });
+
+  it("keeps a next-work repository jump within the code workspace", () => {
+    render(<CodeAnalysisTab engagementKey="demo" persistedPhase="hunt" loadError={null} repos={[repo()]} modules={[]} queueStats={queueStats} queueItems={[queueItem()]} coverage={null} readiness={null} completionReadiness={null} results={[]} />);
+    const link = screen.getByRole("link", { name: "api-service" });
+    expect(link.getAttribute("href")).toBe("#/engagements/demo?tab=code");
+    const target = document.getElementById("code-repo-7")!;
+    target.scrollIntoView = () => {};
+    const click = new MouseEvent("click", { bubbles: true, cancelable: true });
+    fireEvent(link, click);
+    expect(click.defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(target);
+  });
   it("distinguishes a current skipped receipt from legacy unbound history", () => {
     render(
       <CodeAnalysisTab
@@ -177,6 +195,12 @@ describe("CodeAnalysisTab receipt identity", () => {
 });
 
 describe("CodeAnalysisTab operator readiness", () => {
+  it("does not depict pending canonical phases when the persisted code phase is unknown", () => {
+    const view = render(<CodeAnalysisTab engagementKey="demo" persistedPhase="repair-required" loadError={null} repos={[]} modules={[]} queueStats={null} queueItems={[]} coverage={null} readiness={null} completionReadiness={null} results={[]} />);
+    expect(screen.getByText(/Code phase ordering unavailable/)).toBeTruthy();
+    expect(view.container.querySelector(".code-phase-step")).toBeNull();
+    expect(screen.getByText("repair-required")).toBeTruthy();
+  });
   it("leads with the next transition and keeps completion readiness secondary", () => {
     render(
       <CodeAnalysisTab
@@ -204,7 +228,15 @@ describe("CodeAnalysisTab operator readiness", () => {
     expect(screen.getByText("Next transition: Verify + Variant")).toBeTruthy();
     expect(screen.getByText("BLOCKED")).toBeTruthy();
     expect(screen.getByText("Completion readiness: READY")).toBeTruthy();
-    expect(screen.getByRole("link", { name: "API service" }).getAttribute("href")).toBe("#code-repo-7");
+    expect(screen.getByRole("link", { name: "API service" }).getAttribute("href")).toBe("#/engagements/demo?tab=code");
+    const target = document.getElementById("code-repo-7")!;
+    let scrolled = false;
+    target.scrollIntoView = () => { scrolled = true; };
+    const click = new MouseEvent("click", { bubbles: true, cancelable: true });
+    fireEvent(screen.getByRole("link", { name: "API service" }), click);
+    expect(click.defaultPrevented).toBe(true);
+    expect(scrolled).toBe(true);
+    expect(document.activeElement).toBe(target);
   });
 
   it("exposes full repository identity and stale, legacy, dirty, and generation mismatch truth", () => {
@@ -294,7 +326,7 @@ describe("CodeAnalysisTab operator readiness", () => {
     expect(screen.getByRole("heading", { name: "Next work" })).toBeTruthy();
     expect(screen.getByText("src/auth/session.py")).toBeTruthy();
     expect(screen.getByText("src/auth/policy.py")).toBeTruthy();
-    expect(screen.getAllByRole("link", { name: "api-service" })[0].getAttribute("href")).toBe("#code-repo-7");
+    expect(screen.getAllByRole("link", { name: "api-service" })[0].getAttribute("href")).toBe("#/engagements/demo?tab=code");
   });
 
   it("deep-links findings and exposes long evidence through an explicit keyboard control", () => {

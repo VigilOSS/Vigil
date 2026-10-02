@@ -1,83 +1,34 @@
-import { useMemo } from "react";
-import type { EventRecord } from "../lib/api";
-
-// The canonical web-track roster, in order, with the ONE place a phase is
-// displayed differently from the value the backend stores. Mirrors
-// `agent/scripts/assess/lib/phases.py:WEB_PHASES`; the terminal `complete`
-// state is not a card (it marks every card completed instead).
-// `orchestrator/backend/tests/test_phase_roster.py` pins this literal against
-// that roster, so a new phase cannot land without a card here.
-const PHASES = [
-  { key: "recon", label: "Recon" },
-  { key: "collect", label: "Collect" },
-  { key: "consume-test", label: "Consume & Test" },
-  { key: "verify", label: "Verify" },
-  { key: "exploit", label: "Exploit" },
-  { key: "report", label: "Report" },
-] as const;
-
-const TERMINAL_PHASE = "complete";
-
-const PHASE_KEYS: readonly string[] = PHASES.map((phase) => phase.key);
+import type { Engagement } from "../lib/api";
 
 type PhaseWaterfallProps = {
-  events: EventRecord[];
-  currentPhase: string;
+  currentPhase?: string;
+  trackState?: Engagement["track_state"];
+  aggregateComplete?: boolean;
 };
 
-function phaseState(events: EventRecord[], phase: string, currentPhase: string) {
-  const relevant = events.filter((event) => event.phase === phase);
-  if (relevant.some((event) => event.event_type === "phase.completed")) {
-    return "completed";
-  }
-  if (relevant.some((event) => event.event_type === "phase.started")) {
-    return "active";
-  }
-
-  if (currentPhase === TERMINAL_PHASE) {
-    return "completed";
-  }
-
-  const currentIndex = PHASE_KEYS.indexOf(currentPhase);
-  const phaseIndex = PHASE_KEYS.indexOf(phase);
-  if (currentIndex >= 0 && phaseIndex >= 0) {
-    if (phaseIndex < currentIndex) return "completed";
-    if (phaseIndex === currentIndex) return "active";
-  }
-
-  return "pending";
-}
-
-export function PhaseWaterfall({ events, currentPhase }: PhaseWaterfallProps) {
-  // Memoize the multi-pass scans of the whole events array (hasStructuredEvents
-  // + a phaseState() filter per phase), so on the 2s WebSocket refresh these
-  // only recompute when `events` / `currentPhase` actually change identity.
-  const { hasStructuredEvents, phaseStates } = useMemo(
-    () => ({
-      hasStructuredEvents: events.some((event) => event.event_type.startsWith("task.")),
-      phaseStates: PHASES.map((phase) => phaseState(events, phase.key, currentPhase)),
-    }),
-    [events, currentPhase],
-  );
+export function PhaseWaterfall({ trackState, aggregateComplete, currentPhase }: PhaseWaterfallProps) {
+  const tracks = Object.entries(trackState ?? {});
   return (
-    <section className="panel">
+    <section className="panel track-state-panel" aria-labelledby="enabled-tracks-title">
       <div className="panel-header">
-        <h2>Phase waterfall</h2>
-        <p className="meta-text">
-          {hasStructuredEvents ? `${PHASES.length}-phase autonomous workflow` : "Using workflow state because no structured task events were recorded"}
-        </p>
+        <h2 id="enabled-tracks-title">Enabled tracks</h2>
+        {tracks.length > 0 && <span className="meta-text">{aggregateComplete === true ? "All tracks complete" : aggregateComplete === false ? "Tracks in progress" : "Aggregate state unavailable"}</span>}
       </div>
-      <div className="waterfall">
-        {PHASES.map((phase, i) => {
-          const state = phaseStates[i];
-          return (
-            <article key={phase.key} className={`phase-card phase-${state}`}>
-              <p className="eyebrow">{state}</p>
-              <h3>{phase.label}</h3>
-            </article>
-          );
-        })}
-      </div>
+      {tracks.length === 0 ? (
+        <p className="meta-text">Track state unavailable.{currentPhase && <> Legacy phase: <code>{currentPhase}</code></>}</p>
+      ) : (
+        <div className="track-lanes">
+          {tracks.map(([track, state]) => (
+            <div key={track} className="track-lane">
+              <strong className="track-name">{track}</strong>
+              <code>{state.phase || "unknown"}</code>
+              <span className={`badge ${state.repair_required ? "severity-high" : state.complete ? "severity-low" : "severity-info"}`}>
+                {state.repair_required ? "Repair required" : state.complete ? "Complete" : "In progress"}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
     </section>
   );
 }

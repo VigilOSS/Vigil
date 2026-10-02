@@ -70,7 +70,7 @@ export function SeverityDonut({ counts, size = PIE_SIZE, centerLabel, legend = f
         viewBox={`0 0 ${PIE_SIZE} ${PIE_SIZE}`}
         className="v-donut-svg"
         role="img"
-        aria-label={total > 0 ? `Findings by severity, ${total} total` : "No findings"}
+        aria-label={total > 0 ? `Findings by severity, ${total} total: ${data.map(([severity, count]) => `${severity}: ${count}`).join(" · ")}` : "No findings"}
       >
         {/* Background ring — always rendered (also serves as the zero-total empty ring). */}
         <circle

@@ -71,6 +71,8 @@ import type { TabKey } from "../components/TabBar";
 import { ThemeToggle } from "../components/ThemeToggle";
 import { CardSkeleton, TableSkeleton } from "../components/Skeletons";
 import { useToast } from "../contexts/ToastContext";
+import { engagementHref, writeWorkspaceHash } from "../lib/workspaceRoutes";
+import "../styles/workspace.css";
 
 type EngagementPageProps = {
   engagementKey: string;
@@ -79,7 +81,7 @@ type EngagementPageProps = {
   // mount and re-applied whenever the PARSED ROUTE VALUES change (e.g. a
   // hashchange while this engagement is already mounted) via the sync effects
   // below. A normal manual tab click / drawer open does not change these
-  // props, so it is never reverted; FindingsTab's replaceState rewrite
+  // props, so it is never reverted; FindingsTab's route rewrite
   // reproduces the same values for the active selection, so the sync is
   // idempotent (compare-before-set guards against a redundant render).
   initialTab?: string;
@@ -117,22 +119,11 @@ function nextCodeReadinessTarget(persistedPhase: string): CodeReadinessTarget {
   }
 }
 
-// Rewrite the engagement deep-link hash WITHOUT emitting a `hashchange`
-// (replaceState is silent), so App's hashchange listener never re-routes on a
-// self-write. `tab` is omitted for the default "overview" to keep clean URLs;
-// the `finding` param is owned by FindingsTab and intentionally dropped here.
-function writeEngagementHash(engagementKey: string, tab: TabKey) {
-  const base = `#/engagements/${encodeURIComponent(engagementKey)}`;
-  const params = new URLSearchParams();
-  if (tab !== "overview") params.set("tab", tab);
-  const qs = params.toString();
-  const next = qs ? `${base}?${qs}` : base;
-  if (window.location.hash !== next) {
-    window.history.replaceState(null, "", next);
-  }
+export function EngagementPage(props: EngagementPageProps) {
+  return <EngagementWorkspace key={props.engagementKey} {...props} />;
 }
 
-export function EngagementPage({
+function EngagementWorkspace({
   engagementKey,
   onBack,
   initialTab,
@@ -163,17 +154,13 @@ export function EngagementPage({
   const [pendingDrawerTab, setPendingDrawerTab] = useState<string | undefined>(
     coerceTabKey(initialTab) === "findings" ? initialDrawerTab : undefined,
   );
-  const [pendingIntelType, setPendingIntelType] = useState<string | undefined>(
-    coerceTabKey(initialTab) === "intel" ? initialIntelType : undefined,
-  );
-  const [pendingIntelId, setPendingIntelId] = useState<number | undefined>(
-    coerceTabKey(initialTab) === "intel" ? initialIntelId : undefined,
-  );
   const [sessions, setSessions] = useState<EngagementSession[]>([]);
   const [events, setEvents] = useState<EventRecord[]>([]);
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
   const [assessmentSummary, setAssessmentSummary] = useState<AssessmentSummary | null>(null);
   const [assessmentFindings, setAssessmentFindings] = useState<AssessmentFindingDetail[]>([]);
+  const [assessmentFindingsLoaded, setAssessmentFindingsLoaded] = useState(false);
+  const [assessmentFindingsError, setAssessmentFindingsError] = useState<string | null>(null);
   const [assessmentChains, setAssessmentChains] = useState<AssessmentAttackChainDetail[]>([]);
   const [assessmentChainLinks, setAssessmentChainLinks] = useState<AssessmentAttackChainLink[]>([]);
   const [assessmentTargets, setAssessmentTargets] = useState<AssessmentTarget[]>([]);
@@ -195,6 +182,7 @@ export function EngagementPage({
   const [activityTotal, setActivityTotal] = useState<number>(0);
   const [selectedName, setSelectedName] = useState<string | null>(null);
   const [selectedArtifact, setSelectedArtifact] = useState<ArtifactContent | null>(null);
+  const [artifactLoadError, setArtifactLoadError] = useState<{ name: string; message: string } | null>(null);
   const [exportingReport, setExportingReport] = useState(false);
   const activeEngagement = engagement?.key === engagementKey ? engagement : null;
   const selectedNameRef = useRef<string | null>(selectedName);
@@ -207,6 +195,13 @@ export function EngagementPage({
   const liveFeedDroppedRef = useRef(false);
   const lastWsRefreshRef = useRef(0);
   const wsThrottleTimerRef = useRef<number | null>(null);
+  const mountedRef = useRef(true);
+  const artifactRequestRef = useRef(0);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; artifactRequestRef.current += 1; };
+  }, []);
 
   useEffect(() => {
     selectedNameRef.current = selectedName;
@@ -221,17 +216,15 @@ export function EngagementPage({
           setSelectedName(firstAvailable.name);
         }
       }
-    }).catch((error: unknown) => {
-      setArtifacts([]);
-      setSelectedArtifact(null);
-      throw error;
     });
   }
 
   function refreshSelectedArtifact(name: string) {
+    const request = ++artifactRequestRef.current;
+    setArtifactLoadError(null);
     return readArtifact(engagementKey, name)
-      .then(setSelectedArtifact)
-      .catch(() => setSelectedArtifact(null));
+      .then(value => { if (mountedRef.current && request === artifactRequestRef.current) { setSelectedArtifact(value); setArtifactLoadError(null); } })
+      .catch((error: unknown) => { if (mountedRef.current && request === artifactRequestRef.current) setArtifactLoadError({ name, message: error instanceof Error ? error.message : "Artifact refresh failed" }); });
   }
 
   async function refreshEngagement() {
@@ -264,8 +257,6 @@ export function EngagementPage({
               setCodeCompletionReadiness(value);
             })
             .catch((error: unknown) => {
-              setCodeReadiness(null);
-              setCodeCompletionReadiness(null);
               captureFailure("readiness", error);
             }),
         ]
@@ -273,13 +264,11 @@ export function EngagementPage({
           getCodeReadiness(engagementKey, targetPhase)
             .then(setCodeReadiness)
             .catch((error: unknown) => {
-              setCodeReadiness(null);
               captureFailure("next-transition readiness", error);
             }),
           getCodeReadiness(engagementKey, "complete")
             .then(setCodeCompletionReadiness)
             .catch((error: unknown) => {
-              setCodeCompletionReadiness(null);
               captureFailure("completion readiness", error);
             }),
         ];
@@ -287,19 +276,16 @@ export function EngagementPage({
       listCodeRepos(engagementKey)
         .then(setCodeRepos)
         .catch((error: unknown) => {
-          setCodeRepos([]);
           captureFailure("repositories", error);
         }),
       listCodeModules(engagementKey)
         .then(setCodeModules)
         .catch((error: unknown) => {
-          setCodeModules([]);
           captureFailure("modules", error);
         }),
       getCodeQueueStats(engagementKey)
         .then(setCodeQueueStats)
         .catch((error: unknown) => {
-          setCodeQueueStats(null);
           captureFailure("queue", error);
         }),
       Promise.all(
@@ -316,20 +302,17 @@ export function EngagementPage({
           );
         })
         .catch((error: unknown) => {
-          setCodeQueueItems([]);
           captureFailure("next work", error);
         }),
       getCodeCoverage(engagementKey)
         .then(setCodeCoverage)
         .catch((error: unknown) => {
-          setCodeCoverage(null);
           captureFailure("coverage", error);
         }),
       ...readinessRequests,
       listCodeAnalysisResults(engagementKey)
         .then(setCodeResults)
         .catch((error: unknown) => {
-          setCodeResults([]);
           captureFailure("results", error);
         }),
     ]);
@@ -345,35 +328,10 @@ export function EngagementPage({
       let refreshedEngagement: Engagement;
       try {
         refreshedEngagement = await refreshEngagement();
+        if (!mountedRef.current) return;
       } catch (error) {
         const message = error instanceof Error ? error.message : "Failed to load engagement";
         setLoadError(message);
-        setEngagement(null);
-        setSessions([]);
-        setEvents([]);
-        setArtifacts([]);
-        setAssessmentSummary(null);
-        setAssessmentFindings([]);
-        setAssessmentChains([]);
-        setAssessmentChainLinks([]);
-        setAssessmentTargets([]);
-        setAssessmentServices([]);
-        setAssessmentCoverageItems([]);
-        setCodeRepos([]);
-        setCodeModules([]);
-        setCodeQueueStats(null);
-        setCodeQueueItems([]);
-        setCodeCoverage(null);
-        setCodeReadiness(null);
-        setCodeCompletionReadiness(null);
-        setCodeResults([]);
-        setCodeLoadError(null);
-        setIntelSummary(null);
-        setAssessmentSurfaces([]);
-        setSurfaceLoadError(null);
-        setActivityTotal(0);
-        setSelectedName(null);
-        setSelectedArtifact(null);
         return;
       }
 
@@ -382,14 +340,12 @@ export function EngagementPage({
         refreshEvents(),
         getAssessmentSummary(engagementKey).then(setAssessmentSummary),
         // Intel summary is cheap and drives the Intel tab count + left-rail
-        // per-type counts. Any failure collapses to null rather than blocking
-        // the rest of the refresh.
-        getIntelSummary(engagementKey).then(setIntelSummary).catch(() => setIntelSummary(null)),
+        // per-type counts. Refresh failures retain the previous summary.
+        getIntelSummary(engagementKey).then(setIntelSummary),
         // Activity entry count for the Log tab badge. Fetch the first page
         // only — we just need `total`.
         listActivityEntries(engagementKey, { limit: 1 })
-          .then((resp) => setActivityTotal(resp.total))
-          .catch(() => setActivityTotal(0)),
+          .then((resp) => setActivityTotal(resp.total)),
       ];
 
       // Only fetch data needed by the active tab
@@ -398,7 +354,15 @@ export function EngagementPage({
         case "overview":
         case "findings":
           promises.push(
-            listAssessmentFindings(engagementKey).then(setAssessmentFindings),
+            listAssessmentFindings(engagementKey).then((findings) => {
+              if (!mountedRef.current) return;
+              setAssessmentFindings(findings);
+              setAssessmentFindingsLoaded(true);
+              setAssessmentFindingsError(null);
+            }).catch((error: unknown) => {
+              if (mountedRef.current) setAssessmentFindingsError(error instanceof Error ? error.message : String(error));
+              throw error;
+            }),
             listAssessmentAttackChains(engagementKey).then(setAssessmentChains),
             listAssessmentAttackChainLinks(engagementKey).then(setAssessmentChainLinks),
           );
@@ -411,11 +375,11 @@ export function EngagementPage({
           );
           break;
         case "code":
-          promises.push(
-            refreshCodeAnalysis(
-              refreshedEngagement.code_phase ?? refreshedEngagement.current_phase,
-            ),
-          );
+          if (refreshedEngagement.track_state?.code) {
+            promises.push(refreshCodeAnalysis(refreshedEngagement.track_state.code.phase));
+          } else {
+            setCodeLoadError("Canonical code track state unavailable.");
+          }
           break;
         case "activity":
           promises.push(refreshSessions());
@@ -467,7 +431,9 @@ export function EngagementPage({
           break;
       }
 
-      await Promise.all(promises);
+      const results = await Promise.allSettled(promises);
+      const errors = results.filter((result): result is PromiseRejectedResult => result.status === "rejected");
+      if (errors.length > 0) setLoadError(errors.map(result => result.reason instanceof Error ? result.reason.message : String(result.reason)).join("; "));
       setAssessmentRefreshVersion((version) => version + 1);
 
       const nextSelectedName = selectedNameRef.current;
@@ -481,6 +447,7 @@ export function EngagementPage({
   });
 
   const requestRefresh = useEffectEvent(() => {
+    if (!mountedRef.current) return;
     if (refreshInFlightRef.current) {
       refreshQueuedRef.current = true;
       return;
@@ -490,7 +457,7 @@ export function EngagementPage({
       do {
         refreshQueuedRef.current = false;
         await refreshPage();
-      } while (refreshQueuedRef.current);
+      } while (mountedRef.current && refreshQueuedRef.current);
     })().finally(() => {
       refreshInFlightRef.current = null;
     });
@@ -530,10 +497,13 @@ export function EngagementPage({
 
   useEffect(() => {
     if (!activeEngagement || !selectedName || activeTab !== "artifacts") {
+      artifactRequestRef.current += 1;
       setSelectedArtifact(null);
+      setArtifactLoadError(null);
       return;
     }
     void refreshSelectedArtifact(selectedName);
+    return () => { artifactRequestRef.current += 1; };
   }, [activeEngagement?.key, engagementKey, selectedName, activeTab]);
 
   useEffect(() => {
@@ -549,6 +519,7 @@ export function EngagementPage({
 
       socket = new WebSocket(engagementWebSocketUrl(engagementKey));
       socket.onopen = () => {
+        if (cancelled) return;
         socketConnectedRef.current = true;
         reconnectDelayMs = 1000;
         setLoadError((current) => current === "Live updates unavailable" ? null : current);
@@ -566,6 +537,7 @@ export function EngagementPage({
         }
       };
       socket.onerror = () => {
+        if (cancelled) return;
         liveFeedDroppedRef.current = true;
         setLoadError((current) => current ?? "Live updates unavailable");
       };
@@ -581,6 +553,7 @@ export function EngagementPage({
         reconnectDelayMs = Math.min(reconnectDelayMs * 2, 30000);
       };
       socket.onmessage = (message) => {
+        if (cancelled) return;
         const payload = JSON.parse(message.data);
         if (payload.type === "event.created") {
           setEvents((current) => {
@@ -639,13 +612,10 @@ export function EngagementPage({
 
   // Deep-link sync: re-apply the parsed-route entry params when they change.
   // This handles a hashchange that arrives while this engagement is ALREADY
-  // mounted (App renders EngagementPage without a `key`, so the same instance
-  // stays mounted) — without these, the lazy state initializers above would
+  // mounted — without these, the lazy state initializers above would
   // only fire on first mount and a pasted finding/tab deep-link would be a
-  // no-op. The deps are exactly the parsed-route props: a manual tab click or
-  // drawer interaction does NOT change them (FindingsTab's replaceState only
-  // rewrites the hash to the active selection's own values), so the user is
-  // never fought; compare-before-set keeps the sync idempotent and loop-free.
+  // no-op. Explicit selection updates the parsed props through canonical
+  // history; compare-before-set keeps incoming Back/Forward state idempotent.
   useEffect(() => {
     const nextTab = coerceTabKey(initialTab);
     setActiveTab((current) => (current === nextTab ? current : nextTab));
@@ -659,14 +629,6 @@ export function EngagementPage({
     setPendingDrawerTab((current) => (current === nextDrawerTab ? current : nextDrawerTab));
   }, [initialTab, initialFindingSlug, initialDrawerTab]);
 
-  useEffect(() => {
-    const nextTab = coerceTabKey(initialTab);
-    const nextType = nextTab === "intel" ? initialIntelType : undefined;
-    const nextId = nextTab === "intel" ? initialIntelId : undefined;
-    setPendingIntelType((current) => (current === nextType ? current : nextType));
-    setPendingIntelId((current) => (current === nextId ? current : nextId));
-  }, [initialTab, initialIntelType, initialIntelId]);
-
   const displayEvents = events;
   const displayFindings = assessmentFindings.length > 0 ? assessmentFindings : (assessmentSummary?.top_findings ?? []);
   const chains = assessmentChains.length > 0 ? assessmentChains : (assessmentSummary?.attack_chains ?? []);
@@ -676,14 +638,12 @@ export function EngagementPage({
     ? Object.values(intelSummary.counts).reduce((a, b) => a + b, 0)
     : undefined;
 
-  const tabCounts: Partial<Record<TabKey, number>> = {
-    findings: displaySummary?.finding_count ?? displayFindings.length,
+  const tabCounts: Partial<Record<TabKey, number | string>> = {
+    findings: displaySummary?.finding_count != null ? `${displaySummary.finding_count} current` : displayFindings.length > 0 ? `${displayFindings.length} loaded` : undefined,
     coverage: displaySummary?.coverage_count ?? 0,
     code: codeRepos.length > 0 ? codeResults.length : undefined,
     intel: intelTotal,
-    // `open_surface_count` is the closest cheap figure in the existing
-    // assessment summary; fall back to the loaded list if present.
-    surfaces: displaySummary?.open_surface_count ?? assessmentSurfaces.length,
+    surfaces: displaySummary?.open_surface_count != null ? `${displaySummary.open_surface_count} open` : assessmentSurfaces.length > 0 ? `${assessmentSurfaces.length} loaded` : undefined,
     // HTTP count = request-variant count, available cheaply in the summary
     // (already fetched for every tab). OAST has no summary figure, so its
     // count badge is owned by the tab (left undefined here).
@@ -700,11 +660,7 @@ export function EngagementPage({
       setPendingFindingSlug(undefined);
       setPendingDrawerTab(undefined);
     }
-    if (tab !== "intel") {
-      setPendingIntelType(undefined);
-      setPendingIntelId(undefined);
-    }
-    writeEngagementHash(engagementKey, tab);
+    writeWorkspaceHash(engagementHref(engagementKey, { tab }));
   };
 
   const handleExportReport = async () => {
@@ -714,6 +670,7 @@ export function EngagementPage({
       // Draft export — no readiness gate. (A future "final" control can pass
       // mode="final"; the helper + backend already enforce the 409 gate.)
       const result = await exportReport(engagementKey, "draft");
+      if (!mountedRef.current) return;
       toast("Report exported", "success");
       // Trigger a browser download by pointing a transient hidden anchor at
       // the attachment endpoint. Same-origin app URL, so no popup blocker.
@@ -752,25 +709,28 @@ export function EngagementPage({
   return (
     <main className="shell engagement-shell">
       {/* Header */}
-      <section className="dashboard-header">
+      <section className="dashboard-header workspace-header">
         <div>
-          <p className="eyebrow">Engagement detail</p>
+          <p className="eyebrow">Vigil / {engagementKey}</p>
           <h1>{activeEngagement?.target ?? engagementKey}</h1>
+          {activeEngagement && (Object.keys(activeEngagement.track_state ?? {}).length > 0 ? (
+            <ul className="workspace-header-tracks" aria-label="Enabled track status">
+              {Object.entries(activeEngagement.track_state ?? {}).map(([track, state]) => <li key={track}>
+                <span>{track}: {state.phase || "unknown"}</span>
+                {state.repair_required ? <span className="workspace-track-repair">Repair required</span> : state.complete && <span className="meta-text">Complete</span>}
+              </li>)}
+            </ul>
+          ) : <p className="workspace-header-track-unknown meta-text">Track state unavailable</p>)}
         </div>
         <div className="page-actions">
           <div className="status-summary">
             <div className="status-summary-row">
-              <span className="status-summary-label">Run status</span>
+              <span className="status-summary-label">Engagement lifecycle</span>
               <span className={`status-pill status-${engagement?.status ?? "queued"}`}>
                 {formatStatusLabel(activeEngagement?.status)}
               </span>
             </div>
-            <div className="status-summary-row">
-              <span className="status-summary-label">Phase</span>
-              <span className="meta-text">{formatStatusLabel(activeEngagement?.current_phase)}</span>
-            </div>
           </div>
-          {loadError && <span className="error-text">{loadError}</span>}
           <button
             className="ghost-button export-report-button"
             onClick={handleExportReport}
@@ -784,6 +744,7 @@ export function EngagementPage({
           <button className="ghost-button" onClick={onBack}>Back</button>
         </div>
       </section>
+      {loadError && <div className="workspace-refresh-error error-text" role="status">{activeEngagement ? "Refresh failed. Showing last available data: " : "Engagement unavailable: "}{loadError}</div>}
 
       {!activeEngagement ? (
         // Initial page load: show a skeleton until the engagement resolves.
@@ -796,8 +757,9 @@ export function EngagementPage({
           </section>
         )
       ) : (
-        <>
+        <div className="workspace-layout">
           <TabBar active={activeTab} onChange={handleTabChange} counts={tabCounts} />
+          <div className="workspace-main" id="workspace-panel" role="tabpanel" aria-labelledby={`workspace-tab-${activeTab}`} tabIndex={0}>
 
           {activeTab === "overview" && (
             <OverviewTab
@@ -805,9 +767,13 @@ export function EngagementPage({
               events={displayEvents}
               assessmentSummary={displaySummary}
               findings={displayFindings}
+              findingsLoading={!assessmentFindingsLoaded && assessmentFindingsError === null}
+              findingsLoadError={assessmentFindingsError}
               chains={chains}
               chainLinks={assessmentChainLinks}
               currentPhase={activeEngagement.current_phase}
+              trackState={activeEngagement.track_state}
+              aggregateComplete={activeEngagement.aggregate_complete}
               assessmentRefreshVersion={assessmentRefreshVersion}
             />
           )}
@@ -816,6 +782,8 @@ export function EngagementPage({
             <FindingsTab
               engagementKey={engagementKey}
               findings={displayFindings}
+              ledgerLoading={!assessmentFindingsLoaded && assessmentFindingsError === null}
+              ledgerError={assessmentFindingsError}
               fallbackFindings={displaySummary?.top_findings ?? []}
               chains={assessmentChains}
               chainLinks={assessmentChainLinks}
@@ -845,7 +813,7 @@ export function EngagementPage({
           {activeTab === "code" && (
             <CodeAnalysisTab
               engagementKey={engagementKey}
-              persistedPhase={activeEngagement.code_phase ?? activeEngagement.current_phase}
+              persistedPhase={activeEngagement.track_state?.code?.phase ?? "unknown"}
               loadError={codeLoadError}
               repos={codeRepos}
               modules={codeModules}
@@ -876,12 +844,8 @@ export function EngagementPage({
             <IntelTab
               engagementKey={engagementKey}
               summary={intelSummary}
-              initialIntelType={pendingIntelType}
-              initialIntelId={pendingIntelId}
-              onInitialRecordConsumed={() => {
-                setPendingIntelType(undefined);
-                setPendingIntelId(undefined);
-              }}
+              initialIntelType={initialTab === "intel" ? initialIntelType : undefined}
+              initialIntelId={initialTab === "intel" ? initialIntelId : undefined}
             />
           )}
 
@@ -919,10 +883,12 @@ export function EngagementPage({
               artifacts={artifacts}
               selectedName={selectedName}
               selectedArtifact={selectedArtifact}
+              loadError={artifactLoadError?.name === selectedName ? artifactLoadError.message : null}
               onSelect={setSelectedName}
             />
           )}
-        </>
+          </div>
+        </div>
       )}
     </main>
   );

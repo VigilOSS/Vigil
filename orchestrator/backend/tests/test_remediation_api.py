@@ -183,14 +183,13 @@ def test_historical_null_environment_keeps_review_digest(monkeypatch, tmp_path):
     monkeypatch.setattr(remediation, "_review_patch", lambda _: ("base", "head", b"patch", False, 5))
     monkeypatch.setattr(remediation, "_actual_revision", lambda _: "head")
     monkeypatch.setattr(remediation, "_worktree_digest", lambda _: "contents")
-    row = {"id": 1, "title": "Case", "snapshot_json": "{}", "linked_finding_engagement_key": None,
-           "linked_finding_slug": None, "worktree_path": "unused", "worktree_branch": None, "worktree_revision": "head",
+    row = {"id": 1, "title": "Case", "snapshot_json": "{}", "worktree_path": "unused", "worktree_branch": None, "worktree_revision": "head",
            "verification_plan": "Plan", "baseline_json": "{}", "release_plan_json": "{}"}
     old = {"id": 1, "case_id": 1, "kind": "baseline", "method": "HTTP", "command": "curl",
            "observed": "403", "proved": "Denied", "outcome": None, "artifact_path": None,
            "artifact_sha256": None, "revision": "head", "created_at": "2026-01-01"}
-    assert remediation._review_digest(row, [old], tmp_path) == remediation._review_digest(
-        row, [{**old, "environment": None}], tmp_path)
+    assert remediation._review_digest(row, [old], tmp_path, []) == remediation._review_digest(
+        row, [{**old, "environment": None}], tmp_path, [])
 
 
 def test_remediation_approval_invalidated_by_code_and_plan_changes(client, isolate_settings):
@@ -873,17 +872,16 @@ def test_remediation_link_can_reference_finding_in_assessment_engagement(client,
     source_root.mkdir()
     assessment = db.create_engagement("original-assessment", "Acme assessment", "in_progress", str(source_root), "web")
     with db.get_connection() as connection:
-        connection.execute(
+        finding_id = connection.execute(
             "INSERT INTO assessment_findings(engagement_id,slug,title) VALUES(?,?,?)",
             (assessment.id, "SEC-001", "Original vulnerability"),
-        )
+        ).lastrowid
     linked = client.post(f"{BASE}/cases", json={
         "source_type": "jira", "source_key": "SEC-42", "title": "Fix original vulnerability",
-        "snapshot": {}, "linked_finding_engagement_key": "original-assessment",
-        "linked_finding_slug": "SEC-001",
+        "snapshot": {}, "finding_ids": [finding_id],
     })
     assert linked.status_code == 201, linked.text
-    assert linked.json()["linked_finding_engagement_key"] == "original-assessment"
+    assert linked.json()["linked_findings"][0]["engagement_key"] == "original-assessment"
 
 
 def test_remediation_worktree_must_belong_to_case(client, isolate_settings):

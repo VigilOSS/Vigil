@@ -16,6 +16,7 @@ import type {
   SubmissionRecoveryResult,
 } from "../lib/api";
 import { MarkdownBlock } from "./Markdown";
+import { engagementHref } from "../lib/workspaceRoutes";
 
 
 type SubmissionsTabProps = {
@@ -124,6 +125,7 @@ export function SubmissionsTab({ engagementKey, refreshVersion = 0 }: Submission
   const listingRequestGeneration = useRef(0);
   const readinessRequestGeneration = useRef(0);
   const detailRequestGeneration = useRef(0);
+  const findingPageGeneration = useRef(0);
   const loadedListingEngagement = useRef("");
   const detailCache = useRef(new Map<string, SubmissionDetail>());
   const selectedFindingRef = useRef<{
@@ -133,6 +135,7 @@ export function SubmissionsTab({ engagementKey, refreshVersion = 0 }: Submission
 
   const refreshListing = useCallback(async () => {
     const requestGeneration = ++listingRequestGeneration.current;
+    setLoadingMoreFindings(false);
     const next = await listSubmissions(engagementKey);
     if (requestGeneration !== listingRequestGeneration.current) return;
     const previousSelection = selectedFindingRef.current?.engagementKey === engagementKey
@@ -206,6 +209,10 @@ export function SubmissionsTab({ engagementKey, refreshVersion = 0 }: Submission
     let cancelled = false;
     const requestGeneration = ++readinessRequestGeneration.current;
     const detailGeneration = ++detailRequestGeneration.current;
+    findingPageGeneration.current += 1;
+    setLoadingMoreAttachments(false);
+    setLoadingMoreVersions(false);
+    setLoadingMorePendingVersions(false);
     setCheckingPublicationReadiness(false);
     setSelectedAttachments(new Set());
     setNotice("");
@@ -214,6 +221,7 @@ export function SubmissionsTab({ engagementKey, refreshVersion = 0 }: Submission
       setDetail(null);
       return () => {
         cancelled = true;
+        findingPageGeneration.current += 1;
       };
     }
     const cacheKey = `${engagementKey}\n${selectedSlug}`;
@@ -237,6 +245,7 @@ export function SubmissionsTab({ engagementKey, refreshVersion = 0 }: Submission
       });
     return () => {
       cancelled = true;
+      findingPageGeneration.current += 1;
     };
   }, [engagementKey, selectedSlug]);
 
@@ -381,9 +390,9 @@ export function SubmissionsTab({ engagementKey, refreshVersion = 0 }: Submission
         return { ...next, findings: [...findings.values()] };
       });
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "More findings could not be loaded");
+      if (requestGeneration === listingRequestGeneration.current) setError(cause instanceof Error ? cause.message : "More findings could not be loaded");
     } finally {
-      setLoadingMoreFindings(false);
+      if (requestGeneration === listingRequestGeneration.current) setLoadingMoreFindings(false);
     }
   };
 
@@ -399,6 +408,7 @@ export function SubmissionsTab({ engagementKey, refreshVersion = 0 }: Submission
       || page.next_offset == null
     ) return;
     const findingSlug = selectedSlug;
+    const requestGeneration = findingPageGeneration.current;
     setLoadingMoreAttachments(true);
     setError("");
     try {
@@ -406,6 +416,7 @@ export function SubmissionsTab({ engagementKey, refreshVersion = 0 }: Submission
         attachmentOffset: page.next_offset,
         attachmentLimit: page.limit,
       });
+      if (requestGeneration !== findingPageGeneration.current) return;
       setDetail((current) => {
         if (!current || current.finding.slug !== findingSlug) return current;
         const candidates = new Map(
@@ -419,9 +430,9 @@ export function SubmissionsTab({ engagementKey, refreshVersion = 0 }: Submission
         };
       });
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "More attachments could not be loaded");
+      if (requestGeneration === findingPageGeneration.current) setError(cause instanceof Error ? cause.message : "More attachments could not be loaded");
     } finally {
-      setLoadingMoreAttachments(false);
+      if (requestGeneration === findingPageGeneration.current) setLoadingMoreAttachments(false);
     }
   };
 
@@ -429,6 +440,7 @@ export function SubmissionsTab({ engagementKey, refreshVersion = 0 }: Submission
     const page = detail?.versions_page;
     if (!detail || !page || loadingMoreVersions || !page.has_more || page.next_offset == null) return;
     const findingSlug = selectedSlug;
+    const requestGeneration = findingPageGeneration.current;
     setLoadingMoreVersions(true);
     setError("");
     try {
@@ -436,6 +448,7 @@ export function SubmissionsTab({ engagementKey, refreshVersion = 0 }: Submission
         versionOffset: page.next_offset,
         versionLimit: page.limit,
       });
+      if (requestGeneration !== findingPageGeneration.current) return;
       setDetail((current) => {
         if (!current || current.finding.slug !== findingSlug) return current;
         const versions = new Map(current.versions.map((version) => [version.id, version]));
@@ -447,9 +460,9 @@ export function SubmissionsTab({ engagementKey, refreshVersion = 0 }: Submission
         };
       });
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "More versions could not be loaded");
+      if (requestGeneration === findingPageGeneration.current) setError(cause instanceof Error ? cause.message : "More versions could not be loaded");
     } finally {
-      setLoadingMoreVersions(false);
+      if (requestGeneration === findingPageGeneration.current) setLoadingMoreVersions(false);
     }
   };
 
@@ -457,6 +470,7 @@ export function SubmissionsTab({ engagementKey, refreshVersion = 0 }: Submission
     const page = detail?.pending_versions_page;
     if (!detail || !page || loadingMorePendingVersions || !page.has_more || page.next_offset == null) return;
     const findingSlug = selectedSlug;
+    const requestGeneration = findingPageGeneration.current;
     setLoadingMorePendingVersions(true);
     setError("");
     try {
@@ -464,6 +478,7 @@ export function SubmissionsTab({ engagementKey, refreshVersion = 0 }: Submission
         pendingVersionOffset: page.next_offset,
         pendingVersionLimit: page.limit,
       });
+      if (requestGeneration !== findingPageGeneration.current) return;
       setDetail((current) => {
         if (!current || current.finding.slug !== findingSlug) return current;
         const versions = new Map(current.pending_versions.map((version) => [version.id, version]));
@@ -475,11 +490,11 @@ export function SubmissionsTab({ engagementKey, refreshVersion = 0 }: Submission
         };
       });
     } catch (cause) {
-      setError(
+      if (requestGeneration === findingPageGeneration.current) setError(
         cause instanceof Error ? cause.message : "More incomplete exports could not be loaded",
       );
     } finally {
-      setLoadingMorePendingVersions(false);
+      if (requestGeneration === findingPageGeneration.current) setLoadingMorePendingVersions(false);
     }
   };
 
@@ -661,6 +676,7 @@ export function SubmissionsTab({ engagementKey, refreshVersion = 0 }: Submission
                 setSelectedSlug(finding.slug);
               }}
               disabled={exporting || recovering || loadingMoreAttachments}
+              aria-pressed={finding.slug === selectedSlug}
             >
               <span className={`submission-severity severity-${finding.severity}`} aria-hidden="true" />
               <span className="submission-finding-copy">
@@ -705,6 +721,7 @@ export function SubmissionsTab({ engagementKey, refreshVersion = 0 }: Submission
             <p>
               {PLATFORM_LABELS[platform]} · backend finding row {selectedFinding?.row_version ?? "—"}
             </p>
+            {selectedFinding && <a href={engagementHref(engagementKey, { tab: "findings", finding: selectedFinding.slug })}>Open finding</a>}
           </div>
           <div className="submission-title-status">
             <span className={detail?.workspace.final_ready ? "is-ready" : "is-blocked"}>

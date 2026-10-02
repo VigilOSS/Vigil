@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ActivityEntry } from "../lib/api";
 import { listActivityEntries } from "../lib/api";
+import { engagementHref } from "../lib/workspaceRoutes";
+import { CopyInline } from "./formatting";
 
 type LogTabProps = { engagementKey: string; refreshVersion?: number };
 
@@ -28,14 +30,8 @@ function isMeaningful(entry: ActivityEntry): boolean {
   return !/\bbash\b/i.test(`${entry.title || ""} ${entry.action || ""}`);
 }
 
-function copyText(value: string) {
-  try { void navigator.clipboard?.writeText(value); } catch { /* value stays visible */ }
-}
-
 function linkTo(engagementKey: string, tab: string, params: Record<string, string | number> = {}) {
-  const query = new URLSearchParams({ tab });
-  Object.entries(params).forEach(([key, value]) => query.set(key, String(value)));
-  return `#/engagements/${encodeURIComponent(engagementKey)}?${query.toString()}`;
+  return engagementHref(engagementKey, { tab, ...params });
 }
 
 function Labeled({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {
@@ -57,8 +53,8 @@ function MetadataDetails({ entry, engagementKey }: { entry: ActivityEntry; engag
     <div style={{ marginTop: 8 }}>
       <div className="timeline-title-row" style={{ justifyContent: "flex-start", gap: 8 }}>
         <span className="filter-label">Metadata provenance</span>
-        <span className="meta-text">{typed ? "Verified typed relation fields" : "Raw metadata; no verified relation shape"}</span>
-        <button type="button" className="copy-btn" aria-label={`Copy metadata for entry ${entry.id}`} onClick={() => copyText(raw)}>copy metadata</button>
+        <span className="meta-text">{typed ? "Stored relation fields" : "Raw metadata; no typed relation fields"}</span>
+        <CopyInline text={raw} ariaLabel={`Copy metadata for entry ${entry.id}`}>copy metadata</CopyInline>
       </div>
       {typed && <div className="timeline-title-row" style={{ justifyContent: "flex-start", gap: 10, marginTop: 6 }}>
         {slug && <a href={linkTo(engagementKey, "findings", { finding: slug })}>Finding {slug}</a>}
@@ -186,10 +182,10 @@ export function LogTab({ engagementKey, refreshVersion = 0 }: LogTabProps) {
                 <Labeled label="Recorded" value={entry.created_at || "unknown"} mono />
               </div>
               {(entry.action || entry.result) && <div style={{ display: "grid", gap: 4, marginTop: 8 }}><Labeled label="Action" value={entry.action} mono /><Labeled label="Result" value={entry.result} mono /></div>}
-              {entry.artifact_ref && <div style={{ marginTop: 6 }}><Labeled label="Artifact reference" value={entry.artifact_ref} mono /><button type="button" className="copy-btn" aria-label={`Copy artifact reference for entry ${entry.id}`} onClick={() => copyText(entry.artifact_ref)}>copy</button></div>}
+              {entry.artifact_ref && <div style={{ marginTop: 6 }}><Labeled label="Artifact reference" value={entry.artifact_ref} mono /><CopyInline text={entry.artifact_ref} ariaLabel={`Copy artifact reference for entry ${entry.id}`}>copy</CopyInline></div>}
               <MetadataDetails entry={entry} engagementKey={engagementKey} />
               {hasBody && <button type="button" className="ghost-button" style={{ marginTop: 8 }} aria-expanded={open} aria-controls={bodyId} aria-label={`${open ? "Hide" : "Show"} body details for entry ${entry.id}`} onClick={() => setExpandedIds((current) => ({ ...current, [entry.id]: !current[entry.id] }))}>{open ? "Hide body" : "Show body"}</button>}
-              {hasBody && open && <div id={bodyId} style={{ marginTop: 8 }}><span className="filter-label">Body</span><pre className="finding-notes" style={{ whiteSpace: "pre-wrap", marginTop: 4 }}>{entry.body_markdown}</pre><button type="button" className="copy-btn" aria-label={`Copy body for entry ${entry.id}`} onClick={() => copyText(entry.body_markdown)}>copy body</button></div>}
+              {hasBody && open && <div id={bodyId} style={{ marginTop: 8 }}><span className="filter-label">Body</span><pre className="finding-notes" style={{ whiteSpace: "pre-wrap", marginTop: 4 }}>{entry.body_markdown}</pre><CopyInline text={entry.body_markdown} ariaLabel={`Copy body for entry ${entry.id}`}>copy body</CopyInline></div>}
             </div>
           </article>;
         })}

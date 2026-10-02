@@ -129,6 +129,32 @@ afterEach(() => {
 });
 
 describe("SubmissionsTab", () => {
+  it("does not carry a previous finding's version-page failure into the newly selected document", async () => {
+    const secondFinding = { ...listing.findings[0], id: 92, slug: "VA-002", title: "Second finding" };
+    const secondDetail = { ...detail, finding: { ...detail.finding, ...secondFinding }, workspace: { ...detail.workspace, markdown: "Second reviewed body." } };
+    let rejectOldPage!: (failure: Error) => void;
+    vi.mocked(listSubmissions).mockResolvedValue({ ...listing, findings: [listing.findings[0], secondFinding], findings_page: { ...listing.findings_page, total: 2, returned: 2 } });
+    vi.mocked(getSubmissionDetail).mockImplementation((_key, slug, options) => {
+      if (slug === "VA-002") return Promise.resolve(secondDetail);
+      if (options?.versionOffset) return new Promise((_resolve, reject) => { rejectOldPage = reject; });
+      return Promise.resolve({ ...detail, versions_page: { ...detail.versions_page, has_more: true, next_offset: 100, total: 101 } });
+    });
+    render(<SubmissionsTab engagementKey="demo" />);
+    fireEvent.click(await screen.findByRole("button", { name: "Load more versions" }));
+    fireEvent.click(screen.getByRole("button", { name: /Second finding/ }));
+    await screen.findByText("Second reviewed body.");
+    await act(async () => rejectOldPage(new Error("previous finding page unavailable")));
+    expect(screen.queryByText(/previous finding page unavailable/)).toBeNull();
+    expect(screen.getByText("Second reviewed body.")).toBeTruthy();
+  });
+  it("connects the reviewed submission back to its canonical finding record", async () => {
+    vi.mocked(listSubmissions).mockResolvedValue(listing);
+    vi.mocked(getSubmissionDetail).mockResolvedValue(detail);
+    render(<SubmissionsTab engagementKey="engagement one" />);
+    const link = await screen.findByRole("link", { name: "Open finding" });
+    expect(link.getAttribute("href")).toBe("#/engagements/engagement%20one?tab=findings&finding=VA-001");
+    expect(screen.getByRole("button", { name: /Missing authorization on admin API/ }).getAttribute("aria-pressed")).toBe("true");
+  });
   it("ignores a late preview refresh for a finding that is no longer selected", async () => {
     const secondFinding = { ...listing.findings[0], id: 92, slug: "VA-002", title: "Second finding" };
     const secondDetail = {

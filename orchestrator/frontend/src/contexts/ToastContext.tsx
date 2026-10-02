@@ -59,8 +59,10 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     (message: string, type: ToastType = "info") => {
       const id = `toast-${++nextId}`;
       setToasts((prev) => [...prev, { id, message, type }]);
-      const timer = setTimeout(() => dismiss(id), AUTO_DISMISS_MS);
-      timers.current.set(id, timer);
+      if (type !== "error") {
+        const timer = setTimeout(() => dismiss(id), AUTO_DISMISS_MS);
+        timers.current.set(id, timer);
+      }
     },
     [dismiss],
   );
@@ -113,8 +115,8 @@ export function ToastViewport() {
             key={t.id}
             className="toast"
             data-toast-type={t.type}
-            role="status"
-            aria-live="polite"
+            role={t.type === "error" ? "alert" : "status"}
+            aria-live={t.type === "error" ? "assertive" : "polite"}
           >
             <Icon className="toast-icon" size={16} aria-hidden="true" />
             <span className="toast-message">{t.message}</span>

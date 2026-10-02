@@ -1,7 +1,7 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
-import App from './App';
 import './app.css';
+import App from './App';
 import { ToastProvider, ToastViewport } from './contexts/ToastContext';
 import { applyTheme, detectInitialTheme } from './lib/theme';
 

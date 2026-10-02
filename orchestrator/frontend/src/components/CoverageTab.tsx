@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { engagementHref } from "../lib/workspaceRoutes";
 import type {
   AssessmentCoverageItem,
   AssessmentService,
@@ -178,7 +179,8 @@ export function CoverageTab({
   const hostOf = useCallback(
     (item: AssessmentCoverageItem): string => {
       if (item.service_id != null) {
-        return serviceHostMap.get(item.service_id) ?? "unknown";
+        const host = serviceHostMap.get(item.service_id);
+        if (host) return host;
       }
       if (item.canonical_url) return extractHost(item.canonical_url);
       if (item.service_endpoint) return extractHost(item.service_endpoint);
@@ -516,8 +518,9 @@ export function CoverageTab({
               <p className="meta-text">Open coverage work and service-level gaps.</p>
             </div>
           </div>
+          {!summaryAvailable && <p className="meta-text">Coverage debt summary unavailable. Open the full ledger to inspect loaded coverage rows.</p>}
           {needsActionItems.length === 0 && serviceGaps.length === 0 ? (
-            <p className="run-clear-state">No coverage debt in the available summary.</p>
+            summaryAvailable ? <p className="run-clear-state">No coverage debt in the available summary.</p> : null
           ) : (
             <div className="coverage-debt-groups">
               {needsActionItems.length > 0 && <section>
@@ -727,7 +730,7 @@ export function CoverageTab({
                                         <div><dt>Updated</dt><dd>{formatDate(item.updated_at)}</dd></div>
                                       </dl>
                                       {item.request_variant_id != null && (
-                                        <a href={`#/engagements/${encodeURIComponent(engagementKey)}?tab=http&request=${item.request_variant_id}`}>
+                                        <a href={engagementHref(engagementKey, { tab: "http", request: item.request_variant_id })}>
                                           Open request variant #{item.request_variant_id}
                                         </a>
                                       )}

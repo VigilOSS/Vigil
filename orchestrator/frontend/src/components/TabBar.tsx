@@ -43,10 +43,16 @@ export const TABS = [
 
 export type TabKey = (typeof TABS)[number]["key"];
 
+const TAB_GROUPS = [
+  { label: "Workspace", keys: ["overview", "runs", "intel"] },
+  { label: "Assessment", keys: ["findings", "submissions", "surfaces", "http", "coverage", "code"] },
+  { label: "Evidence", keys: ["commands", "oast", "activity", "log", "artifacts"] },
+] as const;
+
 type TabBarProps = {
   active: TabKey;
   onChange: (tab: TabKey) => void;
-  counts?: Partial<Record<TabKey, number>>;
+  counts?: Partial<Record<TabKey, number | string>>;
 };
 
 export function TabBar({ active, onChange, counts }: TabBarProps) {
@@ -54,8 +60,8 @@ export function TabBar({ active, onChange, counts }: TabBarProps) {
 
   function moveFrom(index: number, key: string) {
     let nextIndex: number | null = null;
-    if (key === "ArrowRight") nextIndex = (index + 1) % TABS.length;
-    if (key === "ArrowLeft") nextIndex = (index - 1 + TABS.length) % TABS.length;
+    if (key === "ArrowRight" || key === "ArrowDown") nextIndex = (index + 1) % TABS.length;
+    if (key === "ArrowLeft" || key === "ArrowUp") nextIndex = (index - 1 + TABS.length) % TABS.length;
     if (key === "Home") nextIndex = 0;
     if (key === "End") nextIndex = TABS.length - 1;
     if (nextIndex == null) return;
@@ -64,30 +70,37 @@ export function TabBar({ active, onChange, counts }: TabBarProps) {
   }
 
   return (
-    <nav className="tab-bar" role="tablist" aria-label="Engagement views">
-      {TABS.map((tab, index) => (
+    <nav className="tab-bar workspace-rail" role="tablist" aria-label="Engagement views" aria-orientation="vertical">
+      {TAB_GROUPS.map(group => <div className="workspace-nav-group" key={group.label} role="presentation">
+        <p className="workspace-nav-label">{group.label}</p>
+        {TABS.filter(tab => (group.keys as readonly string[]).includes(tab.key)).map((tab) => {
+          const index = TABS.findIndex(item => item.key === tab.key);
+          return (
         <button
           key={tab.key}
           ref={(node) => { buttonsRef.current[index] = node; }}
           type="button"
           role="tab"
+          id={`workspace-tab-${tab.key}`}
+          aria-controls="workspace-panel"
           aria-selected={active === tab.key}
           tabIndex={active === tab.key ? 0 : -1}
           className={`tab-button ${active === tab.key ? "tab-active" : ""}`}
           onClick={() => onChange(tab.key)}
           onKeyDown={(event) => {
-            if (["ArrowRight", "ArrowLeft", "Home", "End"].includes(event.key)) {
+            if (["ArrowRight", "ArrowLeft", "ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) {
               event.preventDefault();
             }
             moveFrom(index, event.key);
           }}
         >
           {tab.label}
-          {counts?.[tab.key] != null && counts[tab.key]! > 0 && (
+          {counts?.[tab.key] != null && (typeof counts[tab.key] === "string" || Number(counts[tab.key]) > 0) && (
             <span className="tab-count">{counts[tab.key]}</span>
           )}
         </button>
-      ))}
+      ); })}
+      </div>)}
     </nav>
   );
 }

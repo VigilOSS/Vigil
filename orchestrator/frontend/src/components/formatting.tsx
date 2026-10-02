@@ -4,7 +4,7 @@
 // inline code + auto-linked URLs, a provenance object with a canonical
 // four-field shape, and a copy-to-clipboard affordance for mono refs.
 
-import { useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 // ── Relative time helpers ─────────────────────────────────────────────
 
@@ -61,18 +61,43 @@ export function CopyInline({
   // non-drawer callers (IntelTab provenance) are unaffected.
   onCopied?: () => void;
 }) {
-  const [copied, setCopied] = useState(false);
-  const onCopy = () => {
+  const scope = useMemo(() => ({}), [text]);
+  const activeScope = useRef<object | null>(scope);
+  const activeRequest = useRef<object | null>(null);
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [feedback, setFeedback] = useState<{ scope: object; result: "copied" | "failed" } | null>(null);
+  activeScope.current = scope;
+  const copied = feedback?.scope === scope && feedback.result === "copied";
+  const failed = feedback?.scope === scope && feedback.result === "failed";
+
+  useEffect(() => {
+    activeScope.current = scope;
+    return () => {
+      if (activeScope.current === scope) activeScope.current = null;
+      activeRequest.current = null;
+      if (timer.current !== null) clearTimeout(timer.current);
+    };
+  }, [scope]);
+
+  const onCopy = async () => {
+    const request = {};
+    activeRequest.current = request;
+    const current = () => activeScope.current === scope && activeRequest.current === request;
+    setFeedback(null);
+    if (timer.current !== null) clearTimeout(timer.current);
     try {
-      void navigator.clipboard.writeText(text);
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 1200);
+      if (!navigator.clipboard) throw new Error("Clipboard unavailable");
+      await navigator.clipboard.writeText(text);
+      if (!current()) return;
+      setFeedback({ scope, result: "copied" });
+      timer.current = setTimeout(() => { if (current()) setFeedback(null); }, 1200);
       onCopied?.();
     } catch {
-      /* best-effort */
+      if (current()) setFeedback({ scope, result: "failed" });
     }
   };
   return (
+    <>
     <button
       type="button"
       className={`copy-inline ${copied ? "is-copied" : ""}`}
@@ -81,6 +106,8 @@ export function CopyInline({
     >
       {copied ? "Copied" : children ?? "Copy"}
     </button>
+    {failed && <span className="error-text" role="alert">Could not copy. Select and copy the text manually.</span>}
+    </>
   );
 }
 

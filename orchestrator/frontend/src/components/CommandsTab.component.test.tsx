@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { getAssessmentCommandRun, listAssessmentCommandRuns } from "../lib/api";
@@ -32,6 +32,7 @@ function deferred<T>() {
 
 beforeEach(() => {
   Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
+  vi.mocked(getAssessmentCommandRun).mockResolvedValue({ id: 11, finding_slug: null, stdout_preview: "", stderr_preview: "" } as never);
 });
 
 afterEach(() => {
@@ -40,6 +41,80 @@ afterEach(() => {
 });
 
 describe("CommandsTab live audit", () => {
+  it("contains command-palette focus and restores its opener on Escape", async () => {
+    vi.mocked(listAssessmentCommandRuns).mockResolvedValue([{ id: 11, tool_bin: "curl", status: "failed", argv: ["curl"], command: "curl stored-command", success: false, timed_out: false }] as never);
+    render(<CommandsTab engagementKey="demo" />);
+    await screen.findByRole("button", { name: /command grid 11/ });
+    const opener = screen.getByRole("button", { name: /Jump to…/ });
+    opener.focus();
+    fireEvent.click(opener);
+    screen.getByPlaceholderText(/Search command \/ argv/).focus();
+    expect(document.querySelector(".cmd-box")?.contains(document.activeElement)).toBe(true);
+    const dialog = screen.getByRole("dialog", { name: "Jump to command" });
+    const input = within(dialog).getByRole("textbox", { name: "Search commands to jump to" });
+    expect(document.body.classList.contains("detail-modal-open")).toBe(true);
+    fireEvent.keyDown(document, { key: "Tab", shiftKey: true });
+    expect(document.activeElement).toBe(within(dialog).getByRole("button", { name: /curl stored-command/ }));
+    fireEvent.keyDown(document, { key: "Tab" });
+    expect(document.activeElement).toBe(input);
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(screen.queryByRole("dialog", { name: "Jump to command" })).toBeNull();
+    expect(document.activeElement).toBe(opener);
+    expect(document.body.classList.contains("detail-modal-open")).toBe(false);
+  });
+  it("opens the arrow-selected command from the keyboard palette", async () => {
+    vi.mocked(listAssessmentCommandRuns).mockResolvedValue([{ id: 11, tool_bin: "curl", status: "failed", argv: [], command: "stored curl", success: false, timed_out: false }, { id: 12, tool_bin: "node", status: "failed", argv: [], command: "stored node", success: false, timed_out: false }] as never);
+    render(<CommandsTab engagementKey="demo" />);
+    await screen.findByRole("button", { name: /command grid 11/ });
+    fireEvent.click(screen.getByRole("button", { name: /Jump to…/ }));
+    const input = screen.getByPlaceholderText(/Jump to command ·/);
+    fireEvent.keyDown(input, { key: "ArrowDown" });
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(await screen.findByRole("heading", { name: "node" })).toBeTruthy();
+    expect(document.querySelector(".cmd-overlay")).toBeNull();
+  });
+  it("leaves an empty filtered ledger alone when next/previous shortcuts are pressed", async () => {
+    vi.mocked(listAssessmentCommandRuns).mockResolvedValue([]);
+    render(<CommandsTab engagementKey="demo" />);
+    await screen.findByText("No command runs match.");
+    const errors: string[] = [];
+    const record = (event: ErrorEvent) => { errors.push(event.message); event.preventDefault(); };
+    window.addEventListener("error", record);
+    try { for (const key of ["j", "k", "[", "]"]) fireEvent.keyDown(window, { key }); }
+    finally { window.removeEventListener("error", record); }
+    expect(errors).toEqual([]);
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+  it("does not move the record while a detail control handles a native key", async () => {
+    vi.mocked(listAssessmentCommandRuns).mockResolvedValue([{ id: 11, status: "failed", tool_bin: "first", argv: ["first"], command: "first", success: false, timed_out: false }, { id: 12, status: "failed", tool_bin: "second", argv: ["second"], command: "second", success: false, timed_out: false }] as never);
+    render(<CommandsTab engagementKey="demo" />);
+    fireEvent.click(await screen.findByRole("button", { name: /command grid 11/i }));
+    const heading = screen.getByRole("dialog").querySelector("h2")!.textContent;
+    fireEvent.keyDown(screen.getByRole("button", { name: /close detail/i }), { key: "k" });
+    expect(screen.getByRole("dialog").querySelector("h2")!.textContent).toBe(heading);
+  });
+  it("links a recorded finding association using the canonical slug from command detail", async () => {
+    vi.mocked(listAssessmentCommandRuns).mockResolvedValue([{ id: 11, status: "failed", argv: [], command: "recorded command", success: false, timed_out: false, finding_id: 74 }] as never);
+    vi.mocked(getAssessmentCommandRun).mockResolvedValue({ id: 11, finding_slug: "VA-012", stdout_preview: "", stderr_preview: "" } as never);
+    render(<CommandsTab engagementKey="demo" />);
+    fireEvent.click(await screen.findByRole("button", { name: /command grid 11/i }));
+    expect((await screen.findByRole("link", { name: "VA-012" })).getAttribute("href"))
+      .toBe("#/engagements/demo?tab=findings&finding=VA-012");
+    expect(screen.getByText("74")).toBeTruthy();
+    expect(getAssessmentCommandRun).toHaveBeenCalledWith("demo", 11);
+  });
+
+  it("keeps a numeric association visible without inventing a finding route when its detail lookup fails", async () => {
+    vi.mocked(listAssessmentCommandRuns).mockResolvedValue([{ id: 11, status: "failed", argv: [], command: "recorded command", success: false, timed_out: false, finding_id: 74 }] as never);
+    vi.mocked(getAssessmentCommandRun).mockRejectedValue(new Error("command detail unavailable"));
+    render(<CommandsTab engagementKey="demo" />);
+    fireEvent.click(await screen.findByRole("button", { name: /command grid 11/i }));
+    expect((await screen.findByRole("alert")).textContent).toContain("command detail unavailable");
+    expect(screen.getByText("74")).toBeTruthy();
+    expect(screen.queryByRole("link", { name: /74/ })).toBeNull();
+    expect(screen.getByRole("button", { name: "Retry command detail" })).toBeTruthy();
+  });
+
   it("does not render the grid's no-match overlay when the initial ledger request fails", async () => {
     vi.mocked(listAssessmentCommandRuns).mockRejectedValue(new Error("command ledger unavailable"));
 

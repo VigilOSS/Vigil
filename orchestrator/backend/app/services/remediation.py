@@ -16,6 +16,7 @@ from fastapi import HTTPException
 
 from .. import db
 from .engagements import get_engagement_or_404
+from .search import canonical_finding_alias
 
 _AGENT_SCRIPTS = Path(__file__).resolve().parents[4] / "agent" / "scripts"
 if str(_AGENT_SCRIPTS) not in sys.path:
@@ -349,7 +350,7 @@ def review_diff(key: str, case_id: int) -> dict[str, Any]:
     }
 
 
-def _review_digest(row, evidence: list[dict[str, Any]], engagement_root: Path) -> str:
+def _review_digest(row, evidence: list[dict[str, Any]], engagement_root: Path, finding_ids: list[int]) -> str:
     try:
         review_base, _, review_patch, patch_truncated, patch_size = _review_patch(row["worktree_path"])
         patch_sha = hashlib.sha256(review_patch).hexdigest()
@@ -367,8 +368,7 @@ def _review_digest(row, evidence: list[dict[str, Any]], engagement_root: Path) -
     material = {
         "title": row["title"],
         "snapshot": json.loads(row["snapshot_json"]),
-        "linked_finding_engagement_key": row["linked_finding_engagement_key"],
-        "linked_finding_slug": row["linked_finding_slug"],
+        "finding_ids": finding_ids,
         "worktree_path": row["worktree_path"],
         "worktree_branch": row["worktree_branch"],
         "worktree_revision": row["worktree_revision"],
@@ -537,16 +537,19 @@ def _details(connection, row, engagement_root: Path):
         "SELECT * FROM remediation_human_verifications WHERE case_id=? ORDER BY id", (case_id,)
     )]
     hint_details = _duplicate_details(connection, row)
-    digest = _review_digest(row, evidence, engagement_root)
+    linked_findings = _linked_findings(connection, case_id)
+    finding_ids = [item["id"] for item in linked_findings]
+    digest = _review_digest(row, evidence, engagement_root, finding_ids)
     approved_evidence = (
         [item for item in evidence if item["id"] <= approvals[-1]["evidence_cutoff_id"]]
         if approvals else []
     )
     approval_digest = (
-        _review_digest(row, approved_evidence, engagement_root)
+        _review_digest(row, approved_evidence, engagement_root, finding_ids)
         if approvals else None
     )
     result = dict(row)
+    result["linked_findings"] = linked_findings
     result["snapshot"] = json.loads(result.pop("snapshot_json"))
     result["baseline"] = json.loads(result.pop("baseline_json"))
     result["release_plan"] = json.loads(result.pop("release_plan_json"))
@@ -607,8 +610,9 @@ def list_cases(key: str) -> list[dict[str, Any]]:
                 "source_key": row["source_key"],
                 "title": row["title"],
                 "status": row["status"],
-                "linked_finding_engagement_key": row["linked_finding_engagement_key"],
-                "linked_finding_slug": row["linked_finding_slug"],
+                "linked_findings": _linked_findings(connection, row["id"]),
+                "worktree_path": row["worktree_path"],
+                "worktree_branch": row["worktree_branch"],
                 "worktree_revision": row["worktree_revision"],
                 "baseline_outcome": json.loads(row["baseline_json"]).get("outcome", "pending"),
                 "production_canary_decision": json.loads(row["release_plan_json"]).get("production_canary_decision"),
@@ -630,10 +634,7 @@ def get_case(key: str, case_id: int) -> dict[str, Any]:
 def create_case(key: str, data: dict[str, Any]) -> dict[str, Any]:
     owner = engagement(key)
     with db.get_connection() as connection:
-        if data.get("linked_finding_engagement_key") and not data.get("linked_finding_slug"):
-            raise HTTPException(400, "Linked finding slug is required")
-        if data.get("linked_finding_slug"):
-            _finding(connection, data.get("linked_finding_engagement_key") or key, data["linked_finding_slug"])
+        finding_ids = _validate_finding_ids(connection, data.get("finding_ids", []))
         exists = connection.execute(
             "SELECT 1 FROM remediation_cases WHERE engagement_id=? AND source_type=? AND source_key=?",
             (owner.id, data["source_type"], data["source_key"]),
@@ -641,19 +642,72 @@ def create_case(key: str, data: dict[str, Any]) -> dict[str, Any]:
         if exists:
             raise HTTPException(409, "Source already has a remediation case")
         cursor = connection.execute(
-            "INSERT INTO remediation_cases(engagement_id,source_type,source_key,title,snapshot_json,linked_finding_engagement_key,linked_finding_slug) VALUES(?,?,?,?,?,?,?)",
+            "INSERT INTO remediation_cases(engagement_id,source_type,source_key,title,snapshot_json) VALUES(?,?,?,?,?)",
             (owner.id, data["source_type"], data["source_key"], data["title"],
-             _json(data["snapshot"]), data.get("linked_finding_engagement_key"), data.get("linked_finding_slug")),
+             _json(data["snapshot"])),
         )
+        connection.executemany("INSERT INTO remediation_case_findings(case_id,finding_id) VALUES(?,?)", [(cursor.lastrowid, finding_id) for finding_id in finding_ids])
         return _details(connection, _row(connection, owner.id, cursor.lastrowid), Path(owner.engagement_root))
 
 
-def _finding(connection, engagement_key: str, slug: str) -> None:
-    if connection.execute(
-        "SELECT 1 FROM assessment_findings f JOIN engagements e ON e.id=f.engagement_id WHERE e.key=? AND f.slug=?",
+def _finding(connection, engagement_key: str, slug: str):
+    slug = canonical_finding_alias(slug) or slug
+    row = connection.execute(
+        "SELECT f.*,e.key AS engagement_key FROM assessment_findings f JOIN engagements e ON e.id=f.engagement_id WHERE e.key=? AND f.slug=?",
         (engagement_key, slug),
-    ).fetchone() is None:
-        raise HTTPException(400, "Linked finding does not exist in the named engagement")
+    ).fetchone()
+    if row is None:
+        raise HTTPException(404, "Finding does not exist in the named engagement")
+    return row
+
+
+def _linked_findings(connection, case_id: int) -> list[dict[str, Any]]:
+    return [dict(row) for row in connection.execute(
+        "SELECT f.id,e.key AS engagement_key,f.slug,f.title,f.severity,f.verification_status,f.root_cause_key "
+        "FROM remediation_case_findings l JOIN assessment_findings f ON f.id=l.finding_id "
+        "JOIN engagements e ON e.id=f.engagement_id WHERE l.case_id=? ORDER BY f.id", (case_id,),
+    )]
+
+
+def _validate_finding_ids(connection, finding_ids: list[int]) -> list[int]:
+    unique = sorted(set(finding_ids))
+    for finding_id in unique:
+        if connection.execute("SELECT 1 FROM assessment_findings WHERE id=?", (finding_id,)).fetchone() is None:
+            raise HTTPException(400, f"Linked finding {finding_id} does not exist")
+    return unique
+
+
+def finding_cases(key: str, slug: str) -> list[dict[str, Any]]:
+    get_engagement_or_404(key)
+    with db.get_connection() as connection:
+        finding = _finding(connection, key, slug)
+        rows = connection.execute(
+            "SELECT c.id,e.key AS engagement_key,c.title,c.status,c.worktree_path,c.worktree_branch,c.worktree_revision "
+            "FROM remediation_case_findings l JOIN remediation_cases c ON c.id=l.case_id "
+            "JOIN engagements e ON e.id=c.engagement_id WHERE l.finding_id=? ORDER BY c.updated_at DESC,c.id DESC", (finding["id"],),
+        ).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            deployed = connection.execute("SELECT * FROM remediation_deployments WHERE case_id=? ORDER BY id DESC LIMIT 1", (row["id"],)).fetchone()
+            item["latest_deployment"] = dict(deployed) if deployed else None
+            item["linked_findings"] = _linked_findings(connection, row["id"])
+            result.append(item)
+        return result
+
+
+def create_from_finding(key: str, slug: str, destination_key: str, title: str | None = None) -> dict[str, Any]:
+    get_engagement_or_404(key)
+    engagement(destination_key)
+    with db.get_connection() as connection:
+        finding = dict(_finding(connection, key, slug))
+        snapshot = {"source_engagement_key": key, "finding": finding}
+        result = create_case(destination_key, {
+            "source_type": "finding", "source_key": str(finding["id"]),
+            "title": title or finding["title"], "snapshot": snapshot, "finding_ids": [finding["id"]],
+        })
+        result["engagement_key"] = destination_key
+        return result
 
 
 def patch_case(key: str, case_id: int, changes: dict[str, Any]) -> dict[str, Any]:
@@ -662,12 +716,8 @@ def patch_case(key: str, case_id: int, changes: dict[str, Any]) -> dict[str, Any
         old = _row(connection, owner.id, case_id)
         if old["status"] == "closed":
             raise HTTPException(409, "Closed remediation cases cannot be changed")
-        finding_key = changes.get("linked_finding_engagement_key", old["linked_finding_engagement_key"]) or key
-        finding_slug = changes.get("linked_finding_slug", old["linked_finding_slug"])
-        if finding_key and finding_slug:
-            _finding(connection, finding_key, finding_slug)
-        elif changes.get("linked_finding_engagement_key") and not finding_slug:
-            raise HTTPException(400, "Linked finding slug is required")
+        changes = dict(changes)
+        finding_ids = _validate_finding_ids(connection, changes.pop("finding_ids")) if "finding_ids" in changes else None
         if "worktree_path" in changes and changes["worktree_path"]:
             path = Path(changes["worktree_path"])
             if not path.is_absolute() or not path.is_dir():
@@ -704,10 +754,13 @@ def patch_case(key: str, case_id: int, changes: dict[str, Any]) -> dict[str, Any
         if old["worktree_branch"] and "worktree_revision" in changes:
             if not _case_worktree_identity(old, Path(owner.engagement_root)):
                 raise HTTPException(409, "Case worktree is no longer registered with its repository")
-        if changes:
-            columns = ", ".join(f"{field}=?" for field in changes)
+        if finding_ids is not None:
+            connection.execute("DELETE FROM remediation_case_findings WHERE case_id=?", (case_id,))
+            connection.executemany("INSERT INTO remediation_case_findings(case_id,finding_id) VALUES(?,?)", [(case_id, finding_id) for finding_id in finding_ids])
+        if changes or finding_ids is not None:
+            columns = ", ".join([f"{field}=?" for field in changes] + ["updated_at=CURRENT_TIMESTAMP"])
             connection.execute(
-                f"UPDATE remediation_cases SET {columns}, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                f"UPDATE remediation_cases SET {columns} WHERE id=?",
                 (*changes.values(), case_id),
             )
         return _details(connection, _row(connection, owner.id, case_id), Path(owner.engagement_root))

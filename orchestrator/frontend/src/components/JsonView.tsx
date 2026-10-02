@@ -11,7 +11,8 @@
 // this avoids the classic "key looks like a value because a quote lived
 // in the string" class of bug.
 
-import { useMemo, useState, type ReactNode } from "react";
+import { useMemo, type ReactNode } from "react";
+import { CopyInline } from "./formatting";
 
 type Props = {
   value: unknown;
@@ -113,14 +114,15 @@ function renderTokens(tokens: Token[]): ReactNode[] {
 }
 
 function safeStringify(value: unknown): string {
-  const seen = new WeakSet<object>();
+  const ancestors: object[] = [];
   try {
     return JSON.stringify(
       value,
-      (_key, v) => {
+      function (_key, v) {
         if (typeof v === "object" && v !== null) {
-          if (seen.has(v)) return "[Circular]";
-          seen.add(v);
+          while (ancestors.length && ancestors[ancestors.length - 1] !== this) ancestors.pop();
+          if (ancestors.includes(v)) return "[Circular]";
+          ancestors.push(v);
         }
         if (typeof v === "bigint") return v.toString();
         if (typeof v === "function") return "[Function]";
@@ -140,21 +142,10 @@ export function JsonView({
   label,
   copyable = true,
 }: Props) {
-  const [copied, setCopied] = useState(false);
   const text = useMemo(() => safeStringify(value), [value]);
   const tokens = useMemo(() => tokenize(text), [text]);
   const lineCount = useMemo(() => text.split("\n").length, [text]);
   const showGutter = lineCount >= gutterThreshold;
-
-  const onCopy = () => {
-    try {
-      void navigator.clipboard.writeText(text);
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 1200);
-    } catch {
-      /* best-effort — pre-block text is still selectable */
-    }
-  };
 
   const rendered = renderTokens(tokens);
 
@@ -164,14 +155,7 @@ export function JsonView({
         <div className="json-view-header">
           {label ? <span className="json-view-meta">{label}</span> : <span />}
           {copyable && (
-            <button
-              type="button"
-              className={`copy-inline ${copied ? "is-copied" : ""}`}
-              onClick={onCopy}
-              aria-label="Copy JSON to clipboard"
-            >
-              {copied ? "Copied" : "Copy JSON"}
-            </button>
+            <CopyInline text={text} ariaLabel="Copy JSON to clipboard">Copy JSON</CopyInline>
           )}
         </div>
       )}

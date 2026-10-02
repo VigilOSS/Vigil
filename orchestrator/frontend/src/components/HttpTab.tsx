@@ -10,6 +10,7 @@
 // in the shared code-split chunk and never bloats the main entry bundle.
 
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
+import { engagementHref, writeWorkspaceHash } from "../lib/workspaceRoutes";
 import type {
   CapturePolicy,
   CapturePolicyUpdate,
@@ -143,6 +144,10 @@ export function HttpTab({ engagementKey, refreshVersion, initialRequestVariantId
   const searchRef = useRef<HTMLInputElement | null>(null);
   const drawerInvokerRef = useRef<HTMLElement | null>(null);
   const consumedRequestVariantRef = useRef<number | undefined>(undefined);
+  const closeRequest = useCallback(() => {
+    setSelected(null);
+    writeWorkspaceHash(engagementHref(engagementKey, { tab: "http" }));
+  }, [engagementKey]);
 
   // Fetch variants + observations together. Both are read-only and the
   // observations are grouped to variants client-side, so a single fetch
@@ -278,16 +283,20 @@ export function HttpTab({ engagementKey, refreshVersion, initialRequestVariantId
   // has loaded. Consume each id once so closing the drawer does not reopen it.
   useEffect(() => {
     if (!initialRequestVariantId) {
+      if (consumedRequestVariantRef.current !== undefined) setSelected(null);
       consumedRequestVariantRef.current = undefined;
       return;
     }
     if (loading) return;
     if (consumedRequestVariantRef.current === initialRequestVariantId) return;
-    consumedRequestVariantRef.current = initialRequestVariantId;
     const variant = variants.find((candidate) => candidate.id === initialRequestVariantId);
     if (variant) {
+      consumedRequestVariantRef.current = initialRequestVariantId;
       setView("variants");
       setSelected(variant);
+    } else {
+      consumedRequestVariantRef.current = undefined;
+      setSelected(null);
     }
   }, [initialRequestVariantId, loading, variants]);
 
@@ -363,12 +372,12 @@ export function HttpTab({ engagementKey, refreshVersion, initialRequestVariantId
       }
       if (e.key === "Escape") {
         if (isTyping) searchRef.current?.blur();
-        else if (selected) setSelected(null);
+        else if (selected) closeRequest();
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [selected, view]);
+  }, [selected, view, closeRequest]);
 
   const variantLimitReached = variants.length >= INITIAL_FETCH_LIMIT;
   const observationLimitReached = observations.length >= INITIAL_FETCH_LIMIT;
@@ -460,6 +469,7 @@ export function HttpTab({ engagementKey, refreshVersion, initialRequestVariantId
           </p>
         </div>
       )}
+      {!loading && initialRequestVariantId != null && !variants.some((variant) => variant.id === initialRequestVariantId) && <p className="meta-text" role="status">Request #{initialRequestVariantId} cannot be resolved from the loaded endpoint inventory. The bounded snapshot may be incomplete; refresh or inspect the full ledger.</p>}
       {observationError && (
         <div className="panel findings-toolbar-panel" style={{ padding: 12 }}>
           <p className="error-text" role="alert" style={{ textAlign: "left" }}>
@@ -499,6 +509,7 @@ export function HttpTab({ engagementKey, refreshVersion, initialRequestVariantId
               onRowOpen={(variant, invoker) => {
                 drawerInvokerRef.current = invoker ?? searchRef.current;
                 setSelected(variant);
+                writeWorkspaceHash(engagementHref(engagementKey, { tab: "http", request: variant.id }));
               }}
             />
           </Suspense>
@@ -512,7 +523,7 @@ export function HttpTab({ engagementKey, refreshVersion, initialRequestVariantId
           observationsLoaded={observationsLoaded}
           observationError={observationError}
           toast={toast}
-          onClose={() => setSelected(null)}
+          onClose={closeRequest}
           returnFocusRef={drawerInvokerRef}
         />
       )}
@@ -1567,7 +1578,7 @@ function FlowDrawer({
             )}
             {row.auth_context && <span className="tag">{row.auth_context}</span>}
             {row.request_variant_id != null && (
-              <span className="tag">Request variant #{row.request_variant_id}</span>
+              <a className="tag" href={engagementHref(engagementKey, { tab: "http", request: row.request_variant_id })}>Request variant #{row.request_variant_id}</a>
             )}
             {row.host_mismatch && (
               <span className="tag warning" title="URL authority / Host header / SNI disagree">

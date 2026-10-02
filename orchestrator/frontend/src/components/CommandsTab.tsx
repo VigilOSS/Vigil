@@ -1,4 +1,6 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
+import { engagementHref } from "../lib/workspaceRoutes";
+import { CopyInline } from "./formatting";
 import type {
   AssessmentCommandRun,
   AssessmentCommandRunDetail,
@@ -516,13 +518,6 @@ const IconClose = () => (
     <path d="M6 6l12 12M18 6L6 18" />
   </svg>
 );
-function copyToClipboard(text: string): void {
-  try {
-    void navigator.clipboard?.writeText(text);
-  } catch {
-    // ignore
-  }
-}
 
 // ── DetailModal ───────────────────────────────────────────────────────
 // Centred modal that hosts the per-row Drawer. Shared shell: three tabs
@@ -595,6 +590,7 @@ export function CommandsTab({ engagementKey }: CommandsTabProps) {
   const [techniqueFilters, setTechniqueFilters] = useState<Set<string>>(new Set());
   const [probeKindFilters, setProbeKindFilters] = useState<Set<string>>(new Set());
   const [cmdOpen, setCmdOpen] = useState(false);
+  const commandInvokerRef = useRef<HTMLElement | null>(null);
 
   const [selectedId, setSelectedId] = useState<number | null>(null);
   // Detail-modal open state. Separate from `selectedId` so j/k can walk
@@ -609,6 +605,7 @@ export function CommandsTab({ engagementKey }: CommandsTabProps) {
     () => new Map(),
   );
   const [detailLoading, setDetailLoading] = useState<Set<number>>(() => new Set());
+  const [detailErrors, setDetailErrors] = useState<Map<number, string>>(() => new Map());
 
   const searchRef = useRef<HTMLInputElement | null>(null);
 
@@ -943,6 +940,7 @@ export function CommandsTab({ engagementKey }: CommandsTabProps) {
     (id: number) => {
       if (detailCache.has(id)) return;
       if (detailLoading.has(id)) return;
+      setDetailErrors((errors) => { const next = new Map(errors); next.delete(id); return next; });
       setDetailLoading((s) => {
         const next = new Set(s);
         next.add(id);
@@ -956,8 +954,8 @@ export function CommandsTab({ engagementKey }: CommandsTabProps) {
             return next;
           });
         })
-        .catch(() => {
-          // Swallow — the drawer will keep showing the preview-less state.
+        .catch((error: unknown) => {
+          setDetailErrors((errors) => new Map(errors).set(id, error instanceof Error ? error.message : "Command detail unavailable"));
         })
         .finally(() => {
           setDetailLoading((s) => {
@@ -979,17 +977,23 @@ export function CommandsTab({ engagementKey }: CommandsTabProps) {
   const detailOpenRef = useRef(detailOpen);
   detailOpenRef.current = detailOpen;
 
+  const openCommandPalette = useCallback((invoker?: HTMLElement) => {
+    if (cmdOpen) return;
+    // Closing the detail removes its controls; restore its original table opener.
+    const origin = invoker ?? (detailOpenRef.current ? detailInvokerRef.current : document.activeElement);
+    commandInvokerRef.current = origin instanceof HTMLElement && origin.isConnected ? origin : searchRef.current;
+    setDetailOpen(false);
+    setCmdOpen(true);
+  }, [cmdOpen]);
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      const target = e.target as HTMLElement | null;
-      const tag = (target?.tagName || "").toLowerCase();
-      const isTyping = tag === "input" || tag === "textarea";
+      const target = e.target instanceof HTMLElement ? e.target : null;
+      const isTyping = Boolean(target?.closest("input, textarea, select, [contenteditable]:not([contenteditable='false'])"));
+      const isInteractive = isTyping || Boolean(target?.closest("button, a, [role='button'], [role='combobox'], [role='listbox']"));
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
         e.preventDefault();
-        // Cmd/Ctrl-K closes the detail modal before opening the palette
-        // so the palette sits cleanly on top of the table, not the modal.
-        setDetailOpen(false);
-        setCmdOpen(true);
+        openCommandPalette();
         return;
       }
       if (!isTyping && e.key === "/") {
@@ -1011,9 +1015,10 @@ export function CommandsTab({ engagementKey }: CommandsTabProps) {
         }
         return;
       }
-      if (!isTyping && (e.key === "[" || e.key === "]")) {
+      if (!isInteractive && (e.key === "[" || e.key === "]")) {
         e.preventDefault();
         const list = filteredRef.current;
+        if (!list.length) return;
         const cur = selectedRef.current;
         const idx = list.findIndex((d) => d.id === cur);
         if (idx < 0) {
@@ -1024,9 +1029,10 @@ export function CommandsTab({ engagementKey }: CommandsTabProps) {
           e.key === "[" ? Math.max(0, idx - 1) : Math.min(list.length - 1, idx + 1);
         setSelectedId(list[next].id);
       }
-      if (!isTyping && (e.key === "j" || e.key === "k")) {
+      if (!isInteractive && (e.key === "j" || e.key === "k")) {
         e.preventDefault();
         const list = filteredRef.current;
+        if (!list.length) return;
         const cur = selectedRef.current;
         const idx = list.findIndex((d) => d.id === cur);
         if (idx < 0 && list[0]) {
@@ -1039,14 +1045,14 @@ export function CommandsTab({ engagementKey }: CommandsTabProps) {
       }
       // Enter opens the modal for the currently selected row (handy when
       // j/k has moved the cursor but the modal is closed).
-      if (!isTyping && e.key === "Enter" && selectedRef.current != null) {
+      if (!isInteractive && e.key === "Enter" && selectedRef.current != null) {
         e.preventDefault();
         setDetailOpen(true);
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  }, [openCommandPalette]);
 
   // ── Chip toggle helpers ────
   const toggle = <T,>(set: Set<T>, setter: (s: Set<T>) => void, val: T) => {
@@ -1178,7 +1184,7 @@ export function CommandsTab({ engagementKey }: CommandsTabProps) {
             <span className="search-kbd">/</span>
           </div>
           <div className="toolbar-right">
-            <button type="button" className="qa-btn" onClick={() => setCmdOpen(true)}>
+            <button type="button" className="qa-btn" onClick={(event) => openCommandPalette(event.currentTarget)}>
               Jump to…{" "}
               <span className="search-kbd" style={{ marginLeft: 4 }}>
                 ⌘K
@@ -1377,8 +1383,10 @@ export function CommandsTab({ engagementKey }: CommandsTabProps) {
         >
           <Drawer
             d={selectedDerived}
+            engagementKey={engagementKey}
             detail={detailCache.get(selectedDerived.id) ?? null}
             detailLoading={detailLoading.has(selectedDerived.id)}
+            detailError={detailErrors.get(selectedDerived.id) ?? null}
             onRequestDetail={ensureDetail}
             titleId="commands-detail-modal-title"
           />
@@ -1409,9 +1417,10 @@ export function CommandsTab({ engagementKey }: CommandsTabProps) {
       {cmdOpen && (
         <CommandPalette
           derivedList={derivedList}
+          returnFocusRef={commandInvokerRef}
           onSelect={(id) => {
             setSelectedId(id);
-            detailInvokerRef.current = searchRef.current;
+            detailInvokerRef.current = commandInvokerRef.current ?? searchRef.current;
             setCmdOpen(false);
             setDetailOpen(true);
           }}
@@ -1457,14 +1466,18 @@ type DrawerTabId = "overview" | "stdout" | "stderr" | "audit";
 
 function Drawer({
   d,
+  engagementKey,
   detail,
   detailLoading,
+  detailError,
   onRequestDetail,
   titleId,
 }: {
   d: Derived;
+  engagementKey: string;
   detail: AssessmentCommandRunDetail | null;
   detailLoading: boolean;
+  detailError: string | null;
   onRequestDetail: (id: number) => void;
   titleId?: string;
 }) {
@@ -1473,13 +1486,12 @@ function Drawer({
     setTab("overview");
   }, [d?.id]);
 
-  // Lazily pull the detail fetch when switching to stdout/stderr.
   useEffect(() => {
     if (!d) return;
-    if (tab === "stdout" || tab === "stderr") {
+    if ((tab === "stdout" || tab === "stderr" || d.row.finding_id != null) && !detail && !detailError) {
       onRequestDetail(d.id);
     }
-  }, [tab, d, onRequestDetail]);
+  }, [tab, d, detail, detailError, onRequestDetail]);
 
   const color = STATUS_COLORS[d.status];
   const tabs: { id: DrawerTabId; label: string; count?: number }[] = [
@@ -1503,8 +1515,6 @@ function Drawer({
     { id: "audit", label: "Audit" },
   ];
 
-  const copyRunUuid = () => copyToClipboard(d.row.run_uuid);
-
   return (
     <aside className="drawer-panel panel">
       <div
@@ -1526,14 +1536,7 @@ function Drawer({
         <div className="drawer-top">
           <div className="drawer-slug">
             <span className="mono">{d.row.run_uuid}</span>
-            <button
-              type="button"
-              className="copy-btn"
-              onClick={copyRunUuid}
-              title="Copy run_uuid"
-            >
-              uuid
-            </button>
+            <CopyInline text={d.row.run_uuid} ariaLabel="Copy run UUID">uuid</CopyInline>
           </div>
           {/* Maximize was retired with the move to a centred modal — it
               already fills the viewport, so there's no "expand" left; the
@@ -1585,7 +1588,8 @@ function Drawer({
         ))}
       </div>
       <div className="drawer-body">
-        {tab === "overview" && <OverviewPane d={d} />}
+        {detailError && <p className="error-text" role="alert">{detailError} <button type="button" className="ghost-button" onClick={() => onRequestDetail(d.id)}>Retry command detail</button></p>}
+        {tab === "overview" && <OverviewPane d={d} engagementKey={engagementKey} detail={detail} detailLoading={detailLoading} />}
         {tab === "stdout" && (
           <StreamPane
             d={d}
@@ -1609,7 +1613,7 @@ function Drawer({
 }
 
 // ── Drawer panes ─────────────────────────────────────────────────────
-function KV({ k, v, mono, onCopy }: { k: string; v: unknown; mono?: boolean; onCopy?: () => void }) {
+function KV({ k, v, mono, copyText }: { k: string; v: unknown; mono?: boolean; copyText?: string }) {
   if (v === undefined || v === null || v === "") return null;
   const str = typeof v === "string" ? v : String(v);
   if (!str) return null;
@@ -1618,11 +1622,7 @@ function KV({ k, v, mono, onCopy }: { k: string; v: unknown; mono?: boolean; onC
       <p className="k">{k}</p>
       <p className={`v ${mono ? "mono" : ""}`} style={{ display: "flex", alignItems: "center", gap: 6 }}>
         <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{str}</span>
-        {onCopy && (
-          <button type="button" className="copy-btn" onClick={onCopy} title="Copy">
-            copy
-          </button>
-        )}
+        {copyText && <CopyInline text={copyText} ariaLabel={`Copy ${k}`}>copy</CopyInline>}
       </p>
     </div>
   );
@@ -1754,8 +1754,9 @@ function DestructiveKV({ destructive }: { destructive: boolean | null }) {
   );
 }
 
-function OverviewPane({ d }: { d: Derived }) {
+function OverviewPane({ d, engagementKey, detail, detailLoading }: { d: Derived; engagementKey: string; detail: AssessmentCommandRunDetail | null; detailLoading: boolean }) {
   const row = d.row;
+  const findingSlug = detail?.finding_slug ?? row.finding_slug;
   return (
     <>
       <div className="section">
@@ -1795,13 +1796,13 @@ function OverviewPane({ d }: { d: Derived }) {
             k="Command hash"
             v={row.command_hash ? `${row.command_hash.slice(0, 12)}…` : ""}
             mono
-            onCopy={() => copyToClipboard(row.command_hash)}
+            copyText={row.command_hash}
           />
           <KV
             k="Run UUID"
             v={row.run_uuid}
             mono
-            onCopy={() => copyToClipboard(row.run_uuid)}
+            copyText={row.run_uuid}
           />
           {d.target && (
             <KV
@@ -1813,6 +1814,7 @@ function OverviewPane({ d }: { d: Derived }) {
           <KV k="Auth context" v={row.auth_context} mono />
           <KV k="Scope version" v={row.scope_version} mono />
           <KV k="Finding ID" v={row.finding_id} mono />
+          {row.finding_id != null && <div className="kv"><span className="k">Linked finding</span><span className="v">{findingSlug ? <a className="mono" href={engagementHref(engagementKey, { tab: "findings", finding: findingSlug })}>{findingSlug}</a> : detailLoading ? "Loading finding association…" : "Finding route unavailable"}</span></div>}
           <KV k="Results" v={row.partial_results ? "partial" : "complete"} />
           {/* Command-metadata audit fields. Always render the row even when
               null so operators see "field is absent" vs. "field is missing
@@ -1899,7 +1901,7 @@ function StreamPane({
           <KV k="Preview chars" v={previewChars} />
           <KV k="Retention" v={retention || "unknown"} />
           <KV k="Integrity" v={integrity} />
-          <KV k="SHA-256" v={sha} mono onCopy={() => copyToClipboard(sha)} />
+          <KV k="SHA-256" v={sha} mono copyText={sha} />
         </div>
       </div>
     );
@@ -1918,7 +1920,7 @@ function StreamPane({
         </div>
         <div className="kv-grid">
           <KV k="Bytes captured" v={bytes} />
-          <KV k="SHA-256" v={sha} mono onCopy={() => copyToClipboard(sha)} />
+          <KV k="SHA-256" v={sha} mono copyText={sha} />
         </div>
       </div>
     );
@@ -1991,14 +1993,7 @@ function StreamPane({
             <span className="mono">{artifactRef}</span>
           </p>
           <div style={{ display: "flex", gap: 6 }}>
-            <button
-              type="button"
-              className="qa-btn"
-              onClick={() => copyToClipboard(artifactRef)}
-              aria-label="Copy artifact reference"
-            >
-              Copy artifact reference
-            </button>
+            <CopyInline text={artifactRef} ariaLabel="Copy artifact reference">Copy artifact reference</CopyInline>
           </div>
         </div>
       )}
@@ -2006,7 +2001,7 @@ function StreamPane({
         <KV k="Bytes captured" v={bytes} />
         <KV k="Preview chars" v={previewChars} />
         <KV k="Retention" v={retention || "retained"} />
-        <KV k="SHA-256" v={sha} mono onCopy={() => copyToClipboard(sha)} />
+        <KV k="SHA-256" v={sha} mono copyText={sha} />
       </div>
     </div>
   );
@@ -2024,13 +2019,13 @@ function AuditPane({ d }: { d: Derived }) {
             k="Run UUID"
             v={row.run_uuid}
             mono
-            onCopy={() => copyToClipboard(row.run_uuid)}
+            copyText={row.run_uuid}
           />
           <KV
             k="Command hash"
             v={row.command_hash}
             mono
-            onCopy={() => copyToClipboard(row.command_hash)}
+            copyText={row.command_hash}
           />
           <KV k="Engagement ID" v={row.engagement_id} mono />
         </div>
@@ -2042,14 +2037,14 @@ function AuditPane({ d }: { d: Derived }) {
             k="Stdout SHA-256"
             v={row.stdout_sha256}
             mono
-            onCopy={() => copyToClipboard(row.stdout_sha256)}
+            copyText={row.stdout_sha256}
           />
           <KV k="Stdout bytes" v={row.stdout_bytes} />
           <KV
             k="Stderr SHA-256"
             v={row.stderr_sha256}
             mono
-            onCopy={() => copyToClipboard(row.stderr_sha256)}
+            copyText={row.stderr_sha256}
           />
           <KV k="Stderr bytes" v={row.stderr_bytes} />
         </div>
@@ -2081,14 +2076,19 @@ function CommandPalette({
   derivedList,
   onSelect,
   onClose,
+  returnFocusRef,
 }: {
   derivedList: Derived[];
   onSelect: (id: number) => void;
   onClose: () => void;
+  returnFocusRef: RefObject<HTMLElement | null>;
 }) {
   const [q, setQ] = useState("");
   const [idx, setIdx] = useState(0);
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  useBodyScrollLock();
+  useModalFocus(panelRef, onClose, true, returnFocusRef);
 
   useEffect(() => {
     inputRef.current?.focus();
@@ -2169,20 +2169,18 @@ function CommandPalette({
     } else if (e.key === "Enter") {
       e.preventDefault();
       if (results[idx]) onSelect(results[idx].id);
-    } else if (e.key === "Escape") {
-      e.preventDefault();
-      onClose();
     }
   };
 
   return (
     <div className="cmd-overlay" onClick={onClose}>
-      <div className="cmd-box" onClick={(e) => e.stopPropagation()}>
+      <div ref={panelRef} className="cmd-box" role="dialog" aria-modal="true" aria-label="Jump to command" tabIndex={-1} onClick={(e) => e.stopPropagation()}>
         <div className="cmd-input-row">
           <IconSearch />
           <input
             ref={inputRef}
             className="cmd-input"
+            aria-label="Search commands to jump to"
             placeholder="Jump to command · try 'tool:curl target:example.com' or a run_uuid prefix"
             value={q}
             onChange={(e) => setQ(e.target.value)}
@@ -2195,10 +2193,12 @@ function CommandPalette({
             <div className="cmd-empty">No command runs match.</div>
           ) : (
             results.map((d, i) => (
-              <div
+              <button
+                type="button"
                 key={d.id}
                 className={`cmd-item ${i === idx ? "is-active" : ""}`}
                 onMouseEnter={() => setIdx(i)}
+                onFocus={() => setIdx(i)}
                 onClick={() => onSelect(d.id)}
               >
                 <span
@@ -2206,20 +2206,20 @@ function CommandPalette({
                   style={{ background: STATUS_COLORS[d.status] }}
                 />
                 <span>
-                  <div className="cmd-title mono">
+                  <span className="cmd-title mono">
                     {midTruncate(d.commandPreview, 96)}
-                  </div>
-                  <div className="cmd-sub">
+                  </span>
+                  <span className="cmd-sub">
                     {d.toolBin}
                     {d.agentName ? ` · ${d.agentName}` : ""}
                     {d.phase ? ` · ${d.phase}` : ""}
                     {d.target ? ` · ${d.target}` : ""}
-                  </div>
+                  </span>
                 </span>
                 <span className="cmd-sub">
                   {d.statusLabel}
                 </span>
-              </div>
+              </button>
             ))
           )}
         </div>

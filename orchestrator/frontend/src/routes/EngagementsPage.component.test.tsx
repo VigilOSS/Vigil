@@ -37,6 +37,25 @@ afterEach(() => {
 });
 
 describe("EngagementsPage delete dialog", () => {
+  it("renders an engagement ledger with independent track phases", () => {
+    render(<EngagementsPage engagements={[{ ...engagement, track_state: { web: { phase: "complete", complete: true }, code: { phase: "hunt", complete: false } }, aggregate_complete: false } as Engagement]} onOpenEngagement={vi.fn()} />);
+    expect(screen.getByRole("table", { name: "Engagements" })).toBeTruthy();
+    expect(screen.getByText("web: complete")).toBeTruthy();
+    expect(screen.getByText("code: hunt")).toBeTruthy();
+    expect(screen.queryByText("Phase: recon", { exact: false })).toBeNull();
+  });
+  it("keeps the complete ledger in a keyboard-focusable scroll region", () => {
+    render(<EngagementsPage engagements={[engagement]} onOpenEngagement={vi.fn()} />);
+    const ledger = screen.getByRole("region", { name: "Engagement ledger" });
+    expect(ledger.tabIndex).toBe(0);
+    expect(ledger.contains(screen.getByRole("table", { name: "Engagements" }))).toBe(true);
+    expect(screen.getAllByRole("columnheader")).toHaveLength(6);
+  });
+  it("names the filtered finding-count column and discloses its excluded statuses", () => {
+    render(<EngagementsPage engagements={[engagement]} onOpenEngagement={vi.fn()} />);
+    expect(screen.getByRole("columnheader", { name: "Current findings" })).toBeTruthy();
+    expect(screen.getByText("Current findings exclude merged and false-positive records.")).toBeTruthy();
+  });
   it("keeps delete-key events out of card navigation and exposes a semantic open control", () => {
     const onOpenEngagement = vi.fn();
     render(

@@ -27,6 +27,7 @@ type FindingsGridProps = {
   rows: Derived[];
   selected: string | null;
   onOpen: (slug: string) => void;
+  onOrderChange: (slugs: string[]) => void;
 };
 
 function SeverityCell({ data }: ICellRendererParams<Derived>) {
@@ -75,7 +76,7 @@ function UpdatedCell({ data }: ICellRendererParams<Derived>) {
   return <span style={{ color: "var(--muted)" }}>{relTime(data.updated_at)}</span>;
 }
 
-export default function FindingsGrid({ rows, selected, onOpen }: FindingsGridProps) {
+export default function FindingsGrid({ rows, selected, onOpen, onOrderChange }: FindingsGridProps) {
   const gridRef = useRef<AgGridReact<Derived>>(null);
 
   const columnDefs = useMemo<ColDef<Derived>[]>(
@@ -178,9 +179,14 @@ export default function FindingsGrid({ rows, selected, onOpen }: FindingsGridPro
         getRowId={(p) => p.data.slug}
         rowHeight={GRID_ROW_HEIGHT}
         headerHeight={GRID_HEADER_HEIGHT}
-        animateRows
+        animateRows={false}
         onRowClicked={onRowClicked}
         onCellKeyDown={onCellKeyDown}
+        onModelUpdated={(event) => {
+          const slugs: string[] = [];
+          event.api.forEachNodeAfterFilterAndSort((node) => { if (node.data) slugs.push(node.data.slug); });
+          onOrderChange(slugs);
+        }}
         rowClassRules={{
           "ag-row-selected": (p) => p.data?.slug === selected,
         }}

@@ -12,6 +12,7 @@ import { SeverityMiniBar } from "../components/charts/SeverityMiniBar";
 import { SummaryStatBar } from "../components/charts/SummaryStatBar";
 import type { SummaryStatBarItem } from "../components/charts/SummaryStatBar";
 import { useBodyScrollLock, useModalFocus } from "../lib/modalScrollLock";
+import "../styles/workspace.css";
 
 type EngagementsPageProps = {
   engagements: Engagement[];
@@ -74,6 +75,7 @@ export function EngagementsPage({
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [sort, setSort] = useState<EngagementSort>(() => readEngagementSort());
+  const [query, setQuery] = useState("");
   const deleteDialogRef = useRef<HTMLDivElement | null>(null);
   const deleteOpenerRef = useRef<HTMLButtonElement | null>(null);
 
@@ -143,7 +145,8 @@ export function EngagementsPage({
   // "Findings" joins the per-engagement count from the dashboard summary by key
   // (engagements with no summary row count as -1 so they sort last, desc).
   const sortedEngagements = useMemo(() => {
-    const copy = [...engagements];
+    const needle = query.trim().toLowerCase();
+    const copy = engagements.filter(row => !needle || `${row.target} ${row.key} ${row.status}`.toLowerCase().includes(needle));
     copy.sort((a, b) => {
       switch (sort) {
         case "created":
@@ -167,7 +170,7 @@ export function EngagementsPage({
       }
     });
     return copy;
-  }, [engagements, sort, findingByKey]);
+  }, [engagements, sort, findingByKey, query]);
 
   const statBarItems: SummaryStatBarItem[] = useMemo(() => {
     const counts = summary?.engagement_counts;
@@ -183,7 +186,7 @@ export function EngagementsPage({
     return [
       { label: "Engagements", value: counts?.total ?? 0 },
       { label: "In progress", value: inProgress },
-      { label: "Findings", value: totals?.total ?? 0 },
+      { label: "Current findings", value: totals?.total ?? 0 },
       { label: "Crit/High", value: critHigh, tone: critHigh > 0 ? "danger" : "ok" },
       { label: "Active phases", value: activePhases },
       { label: "Customers", value: customers },
@@ -236,16 +239,17 @@ export function EngagementsPage({
   const severityTotals = summary?.finding_totals.by_severity ?? {};
 
   return (
-    <main className="shell dashboard-shell">
+    <main className="shell dashboard-shell engagement-index">
       <section className="dashboard-header">
         <div>
-          <p className="eyebrow">Overview</p>
+          <p className="eyebrow">Vigil workspace</p>
           <h1>Engagements</h1>
           <p className="lead">
-            Local orchestrator view for the configured install root. Each engagement may carry multiple AI sessions.
+            Engagement state, enabled tracks, and the findings ledger.
           </p>
         </div>
         <div className="page-actions">
+          <input className="filter-input" type="search" aria-label="Search engagements" placeholder="Search engagements" value={query} onChange={event => setQuery(event.target.value)} />
           <div className="filter-select-group">
             <label className="filter-label" htmlFor="engagement-sort">Sort</label>
             <select
@@ -274,10 +278,10 @@ export function EngagementsPage({
             )}
           </div>
 
-          <div className="dashboard-charts-row">
+          <details className="index-distribution"><summary>Severity and lifecycle distribution</summary><div className="dashboard-charts-row">
             <div className="panel dashboard-chart-card v-card-enter v-stagger-2">
               <div className="panel-header">
-                <h2>Findings by severity</h2>
+                <h2>Current findings by severity</h2>
               </div>
               {summaryLoading ? (
                 <ChartSkeleton variant="donut" height={160} label="Severity mix" />
@@ -311,53 +315,46 @@ export function EngagementsPage({
                 <p className="meta-text">No engagements yet.</p>
               )}
             </div>
-          </div>
+          </div></details>
         </section>
       ) : null}
 
-      <section className="engagement-column">
+      <section className="engagement-ledger">
+        <p className="meta-text">Current findings exclude merged and false-positive records.</p>
         {loadError ? (
           <section className="panel empty-state error-text" role="alert">
             Engagement list unavailable: {loadError}
           </section>
         ) : null}
-        {sortedEngagements.map((engagement, index) => {
+        {sortedEngagements.length > 0 && <div className="engagement-ledger-scroll" role="region" aria-label="Engagement ledger" tabIndex={0}><table className="engagement-ledger-table" aria-label="Engagements">
+          <thead><tr><th>Engagement</th><th>Lifecycle</th><th>Enabled tracks</th><th>Current findings</th><th>Updated</th><th><span className="sr-only">Actions</span></th></tr></thead>
+          <tbody>{sortedEngagements.map((engagement) => {
           const rollup = findingByKey.get(engagement.key);
           return (
-            <article
-              className="panel engagement-card engagement-card-clickable v-card-enter"
-              style={{ animationDelay: `${Math.min(index, 6) * 60}ms` }}
-              key={engagement.key}
-              onClick={() => onOpenEngagement(engagement.key)}
-            >
-              <div className="engagement-heading">
-                <div>
-                  <h2>
+            <tr key={engagement.key}>
+              <td>
                     <button
                       type="button"
                       className="engagement-open-button"
                       aria-label={`Open engagement ${engagement.key}`}
+                      onClick={() => onOpenEngagement(engagement.key)}
                     >
                       {engagement.target}
                     </button>
-                  </h2>
                   <p className="meta-text">{engagement.key}</p>
-                </div>
-                <div className="engagement-actions">
-                  {rollup ? (
-                    <span
-                      className="badge engagement-finding-badge"
-                      title={`${rollup.count} live finding${rollup.count !== 1 ? "s" : ""}`}
-                    >
-                      {rollup.count} finding{rollup.count !== 1 ? "s" : ""}
-                    </span>
-                  ) : null}
-                  <span className={`status-pill status-${engagement.status}`}>{engagement.status}</span>
+              </td>
+              <td><span className={`status-pill status-${engagement.status}`}>{engagement.status.replace(/_/g, " ")}</span></td>
+              <td><div className="index-track-list">{Object.entries(engagement.track_state ?? {}).map(([name, state]) => <span key={name}>{name}: {state.phase || "unknown"}</span>)}
+                {Object.keys(engagement.track_state ?? {}).length === 0 && <span className="meta-text">Track state unavailable · legacy: {engagement.current_phase}</span>}
+                {engagement.aggregate_complete === true && <span className="meta-text">All tracks complete</span>}
+              </div></td>
+              <td>{rollup ? <><strong>{rollup.count}</strong>{rollup.count > 0 && <SeverityMiniBar counts={rollup.severities} />}</> : <span className="meta-text">Unavailable</span>}</td>
+              <td><time dateTime={engagement.updated_at}>{Number.isNaN(Date.parse(engagement.updated_at)) ? engagement.updated_at || "Unknown" : new Date(engagement.updated_at).toLocaleString()}</time><p className="meta-text">{engagement.session_count} sessions</p></td>
+              <td>
                   <button
                     type="button"
                     className="engagement-delete-button"
                     onClick={(e) => {
-                      e.stopPropagation();
                       deleteOpenerRef.current = e.currentTarget;
                       setPendingDelete(engagement);
                       setConfirmText("");
@@ -368,17 +365,11 @@ export function EngagementsPage({
                   >
                     Delete
                   </button>
-                </div>
-              </div>
-              <p className="meta-text">
-                Phase: {engagement.current_phase} &middot; {engagement.session_count} session{engagement.session_count !== 1 ? "s" : ""}
-              </p>
-              {rollup && rollup.count > 0 ? (
-                <SeverityMiniBar counts={rollup.severities} />
-              ) : null}
-            </article>
+              </td>
+            </tr>
           );
-        })}
+        })}</tbody></table></div>}
+        {engagements.length > 0 && sortedEngagements.length === 0 && <p className="empty-state">No engagements match your search.</p>}
         {engagements.length === 0 && loading ? (
           // Initial load: skeleton cards stand in for the engagement list
           // until the first listing resolves, so cold load doesn't flash the

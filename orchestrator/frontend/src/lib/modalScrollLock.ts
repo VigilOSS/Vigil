@@ -67,12 +67,26 @@ const FOCUSABLE_SELECTOR = [
   "input:not([disabled])",
   "select:not([disabled])",
   "textarea:not([disabled])",
+  "details > summary:first-of-type",
   '[tabindex]:not([tabindex="-1"])',
 ].join(",");
 
+const modalPanels: HTMLElement[] = [];
+
+function isExposed(element: HTMLElement): boolean {
+  if (element.closest('[hidden], [inert], [aria-hidden="true"]')) return false;
+  for (let ancestor: HTMLElement | null = element; ancestor; ancestor = ancestor.parentElement) {
+    if (ancestor instanceof HTMLDetailsElement && !ancestor.open) {
+      const summary = ancestor.querySelector(":scope > summary");
+      if (!summary?.contains(element)) return false;
+    }
+  }
+  return true;
+}
+
 function focusableElements(panel: HTMLElement): HTMLElement[] {
   return Array.from(panel.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)).filter(
-    (element) => element.getAttribute("aria-hidden") !== "true",
+    isExposed,
   );
 }
 
@@ -91,14 +105,30 @@ export function useModalFocus(
     const panel = panelRef.current;
     if (!panel) return undefined;
     const priorFocus = returnFocusRef?.current ?? document.activeElement;
+    modalPanels.push(panel);
+    let lastFocusedInside: HTMLElement = panel;
+
+    const onFocusIn = (event: FocusEvent) => {
+      if (modalPanels.at(-1) !== panel || !panel.isConnected) return;
+      const target = event.target;
+      if (target instanceof HTMLElement && panel.contains(target)) {
+        lastFocusedInside = target;
+        return;
+      }
+      const destination = lastFocusedInside.isConnected
+        && panel.contains(lastFocusedInside)
+        && isExposed(lastFocusedInside)
+        ? lastFocusedInside : panel;
+      destination.focus();
+    };
 
     queueMicrotask(() => {
-      if (!panel.isConnected || panel.contains(document.activeElement)) return;
+      if (modalPanels.at(-1) !== panel || !panel.isConnected || panel.contains(document.activeElement)) return;
       panel.focus();
     });
 
     const onKeyDown = (event: KeyboardEvent) => {
-      if (!panel.contains(document.activeElement)) return;
+      if (modalPanels.at(-1) !== panel) return;
       if (event.key === "Escape") {
         event.preventDefault();
         event.stopPropagation();
@@ -132,9 +162,14 @@ export function useModalFocus(
     };
 
     document.addEventListener("keydown", onKeyDown);
+    document.addEventListener("focusin", onFocusIn);
     return () => {
       document.removeEventListener("keydown", onKeyDown);
-      if (priorFocus instanceof HTMLElement && priorFocus.isConnected) priorFocus.focus();
+      document.removeEventListener("focusin", onFocusIn);
+      const wasTop = modalPanels.at(-1) === panel;
+      const index = modalPanels.indexOf(panel);
+      if (index >= 0) modalPanels.splice(index, 1);
+      if (wasTop && priorFocus instanceof HTMLElement && priorFocus.isConnected) priorFocus.focus();
     };
   }, [active, panelRef, returnFocusRef]);
 }

@@ -131,14 +131,27 @@ def test_import_preserves_snapshot_and_attachments(monkeypatch: pytest.MonkeyPat
         return {"id": 1}
 
     monkeypatch.setattr(remediation, "_api", fake_api)
-    args = argparse.Namespace(engagement_key="project", remediation_command="import", source="jira", source_key="SEC-1", title="A bug", snapshot_file=source, attachment=[attachment], finding=None, finding_engagement=None, resume_case_id=None)
+    args = argparse.Namespace(engagement_key="project", remediation_command="import", source="jira", source_key="SEC-1", title="A bug", snapshot_file=source, attachment=[attachment], finding_id=[3, 4], resume_case_id=None)
     remediation.run_remediation(args, tmp_path)
     snapshot = calls[0][2]["snapshot"]
+    assert calls[0][2]["finding_ids"] == [3, 4]
+    assert "linked_finding_slug" not in calls[0][2]
     assert snapshot["report"] == "untrusted report text"
     assert (eng / "remediation/cases/1/source/snapshot.json").is_file()
     assert (eng / "remediation/cases/1/source/1-report.txt").read_text() == "untrusted attachment"
     assert calls[1][1] == "/cases/1/evidence"
     assert '"id": 1' in capsys.readouterr().out
+
+
+def test_finding_intake_names_destination_without_fabricating_external_source(monkeypatch, tmp_path):
+    from vigil_cli import remediation
+
+    calls = []
+    monkeypatch.setattr(remediation, "_project", lambda *_: (tmp_path, {}))
+    monkeypatch.setattr(remediation, "_api", lambda *args: calls.append(args) or {"id": 7})
+    args = argparse.Namespace(engagement_key="repairs", remediation_command="from-finding", finding_engagement="assessment", finding="SEC/1", title=None)
+    remediation.run_remediation(args, tmp_path)
+    assert calls[0][2:6] == ("assessment", "POST", "/findings/SEC%2F1/cases", {"remediation_engagement_key": "repairs"})
 
 
 def test_create_pr_requires_current_approval_before_push(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -427,7 +440,7 @@ def test_import_registration_failure_exposes_resume_case_id(monkeypatch: pytest.
         raise SystemExit("backend unavailable")
 
     monkeypatch.setattr(remediation, "_api", fake_api)
-    args = argparse.Namespace(engagement_key="project", remediation_command="import", source="jira", source_key="SEC-7", title="Issue", snapshot_file=source, attachment=[], finding=None, finding_engagement=None, resume_case_id=None)
+    args = argparse.Namespace(engagement_key="project", remediation_command="import", source="jira", source_key="SEC-7", title="Issue", snapshot_file=source, attachment=[], finding_id=[], resume_case_id=None)
     with pytest.raises(SystemExit, match="--resume-case-id 7"):
         remediation.run_remediation(args, tmp_path)
     assert (eng / "remediation/cases/7/source/snapshot.json").is_file()

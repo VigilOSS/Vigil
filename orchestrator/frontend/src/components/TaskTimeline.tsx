@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { engagementHref } from "../lib/workspaceRoutes";
 import type { EventRecord } from "../lib/api";
 
 const PAGE_SIZE = 20;
@@ -81,7 +82,7 @@ export function TaskTimeline({ engagementKey, events }: TaskTimelineProps) {
       </div>
       <p className="event-history-boundary" role="note">
         Events shows at most the latest 200 rows; earlier history may exist. {" "}
-        <a href={`#/engagements/${encodeURIComponent(engagementKey)}?tab=log`}>
+        <a href={engagementHref(engagementKey, { tab: "log" })}>
           Open complete Audit log
         </a>
       </p>
@@ -107,7 +108,7 @@ export function TaskTimeline({ engagementKey, events }: TaskTimelineProps) {
             </div>
           </article>
         ))}
-        {activityEvents.length === 0 ? <p className="empty-state">No activity yet.</p> : null}
+        {activityEvents.length === 0 ? <p className="empty-state">{events.length === 0 || includeOperationalActivity ? "No events in the loaded history." : "No lifecycle or decision events in the loaded history."}</p> : null}
       </div>
       {totalPages > 1 && (
         <div className="pager">

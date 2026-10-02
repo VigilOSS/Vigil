@@ -54,7 +54,7 @@ export function TableSkeleton({
   className = "",
 }: TableSkeletonProps) {
   return (
-    <div className={`skeleton-table ${className}`.trim()} aria-busy="true" aria-live="polite">
+    <div className={`skeleton-table ${className}`.trim()} aria-busy="true" role="status" aria-label="Loading table">
       {showHeader && (
         <div className="skeleton-table-row skeleton-table-head">
           {columns.map((w, i) => (
@@ -88,7 +88,7 @@ export function ChartSkeleton({
 }: ChartSkeletonProps) {
   if (variant === "donut") {
     return (
-      <div className={`skeleton-chart-donut ${className}`.trim()} style={{ height }} aria-busy="true">
+      <div className={`skeleton-chart-donut ${className}`.trim()} style={{ height }} aria-busy="true" role="status" aria-label={`Loading ${label || "chart"}`}>
         <span
           className="v-skeleton"
           style={{
@@ -106,7 +106,7 @@ export function ChartSkeleton({
   }
   if (variant === "bar") {
     return (
-      <div className={`skeleton-chart-bar ${className}`.trim()} style={{ height }} aria-busy="true">
+      <div className={`skeleton-chart-bar ${className}`.trim()} style={{ height }} aria-busy="true" role="status" aria-label={`Loading ${label || "chart"}`}>
         {Array.from({ length: 12 }).map((_, i) => (
           <Skeleton
             key={i}
@@ -119,7 +119,7 @@ export function ChartSkeleton({
     );
   }
   return (
-    <div className={`skeleton-chart-line ${className}`.trim()} style={{ height }} aria-busy="true">
+    <div className={`skeleton-chart-line ${className}`.trim()} style={{ height }} aria-busy="true" role="status" aria-label={`Loading ${label || "chart"}`}>
       <Skeleton width="100%" height="100%" />
     </div>
   );
@@ -134,7 +134,7 @@ interface CardSkeletonProps {
 
 export function CardSkeleton({ lines = 3, title = true, className = "", children }: CardSkeletonProps) {
   return (
-    <div className={`skeleton-card ${className}`.trim()} aria-busy="true">
+    <div className={`skeleton-card ${className}`.trim()} aria-busy="true" role="status" aria-label="Loading content">
       {title && <Skeleton width="40%" height={12} style={{ marginBottom: 8 }} />}
       {Array.from({ length: lines }).map((_, i) => (
         <div key={i} style={{ marginBottom: 6 }}>

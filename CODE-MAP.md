@@ -96,9 +96,6 @@ When you are about to copy one of these into a second file, stop and import.
   `kali_cli.py:emit_result` is the output funnel and renders the help table.
 - `agent/skills/<name>/SKILL.md` directories own skill names. Discovery is a directory walk; there
   is no roster. `--skills` enforcement is CLI-only and advisory under ADR 0019.
-- `agent/scripts/assess/lib/findings.py:_AGENT_PREFIX_MAP` and
-  `orchestrator/backend/app/services/state_manager/findings.py:_FINDING_PREFIX_BY_SOURCE` jointly
-  own finding prefixes; operator prompt prefix tables mirror both.
 - `orchestrator/backend/app/api/report_export.py`'s five `_*_FIELDS` rosters own what the
   client-delivered HTML carries; `orchestrator/report/src/types.ts` is the other half, index signature
   dropped so a renderer reaching past them is a type error. See: `AGENTS.md` report-template section.
@@ -116,8 +113,6 @@ When you are about to copy one of these into a second file, stop and import.
   path. Arjun and proxy ingestion reuse already-filtered URLs.
 - `orchestrator/backend/app/services/state_manager/work_buffer.py:_scope_excluded_hosts` owns
   claim-time scope exclusion, applied before ordering and limits.
-- `agent/operator-core*.md` and `agent/agents/*.md` own prompt prose. Generated wrappers are never
-  authoring surfaces; remediation uses its own core rather than the assessment phases.
 - `src/vigil_cli/engagements.py` owns durable offensive track creation, explicit add-track,
   session mode validation, and engagement-local prompt routing. New offensive scopes store
   `tracks.web.phase` and/or `tracks.code.phase`; legacy scalar phase scopes remain readable.
@@ -171,8 +166,9 @@ A prompt change is **not** prompt-only when the prompt defines an artifact the b
 
 ## Easy-to-miss registration points
 
-- `agent/scripts/assess/lib/findings.py:_AGENT_PREFIX_MAP` — a new finding-recording agent needs its
-  prefix here, in the backend finding-prefix map, and in the applicable operator prompt table.
+- `agent/scripts/assess/lib/findings.py:_AGENT_PREFIX_MAP` owns finding prefixes with
+  `orchestrator/backend/app/services/state_manager/findings.py:_FINDING_PREFIX_BY_SOURCE`;
+  a new finding-recording agent needs both maps and the applicable operator prompt table.
 - `agent/scripts/assess/cli.py` — a verb can touch the import block, flat loop, four grouped
   registries, inline `kali` registry, and pre-parse action-help hook. See the recipe in `AGENTS.md`.
 - `agent/scripts/assess/lib/contract_registry.py:_INLINE_DOCUMENTED_NAMESPACES` — a `<verb> <action>` leaf documented on its parent contract must have that parent listed here, or `vigil assess contract` cannot resolve it.
@@ -229,7 +225,7 @@ A prompt change is **not** prompt-only when the prompt defines an artifact the b
 - `src/vigil_cli/engagements.py` + `blue.py` + `client_rosters.py` — engagement bootstrap: run directories, bounded operator pointers, generated launchers, and the per-client prompt/command links.
 - `src/vigil_cli/paths.py:resolve_orchestrator_base_url` — backend URL precedence and dotenv normalization; `vigil config resolve orchestrator_base_url` exposes it to generated client launchers at session start.
 - `src/vigil_cli/preflight.py` — `_preflight_engagement_start`, `_resolve_provider_key`, `_warn_if_install_stale`. It lives outside `main.py` so `blue.py` can import it without a cycle; `main.py` re-exports what it uses.
-- `src/vigil_cli/remediation.py` — case commands; `remediation_browser.py` owns local browser execution. Backend APIs own case state.
+- `src/vigil_cli/remediation.py` — case commands, external report import by canonical finding ID, and direct finding intake into an explicit remediation destination; `remediation_browser.py` owns local browser execution. Backend APIs own case state.
 - `agent/scripts/assess/lib/remediation_project.py` and `remediation_vcs.py` — shared PROJECT.md parsing and Git/JJ identity, workspace, diff, and push contracts; CLI import bridges are `project_config.py` and `remediation_vcs.py`.
 - `src/vigil_cli/runtime.py` + `up.py` — one shared long-lived Kali container, reached host-side by `docker exec`. There is no in-container API server or MCP bridge.
 - `src/vigil_cli/mitmproxy.py` — the single owner of the proxy `docker build` argv, including the inputs-digest label without which the image can never be proven current.
@@ -261,13 +257,14 @@ A prompt change is **not** prompt-only when the prompt defines an artifact the b
 - `orchestrator/backend/app/services/operator_checkpoints.py` — writes `assessment_operator_checkpoints`, an append-only table enforced by SQLite triggers. The only permitted mutation is stamping a null `superseded_by_id`.
 - `orchestrator/backend/app/services/state_manager/run_accounting.py` owns run identity and lifecycle; `run_inventory.py` owns sources and obligations, `run_evidence.py` owns linked receipts, and `run_comparisons.py` owns comparisons. `proofs.py` owns immutable evidence receipts. See: ADR 0028.
 - `orchestrator/backend/app/services/engagements.py` — filesystem-to-DB sync. Explicit deletes are tombstoned so a later sync cannot resurrect them from leftover files.
-- `orchestrator/backend/app/api/remediation.py` and `services/remediation.py` — remediation case API, evidence integrity, review/deployment gates, and state transitions; separate from assessment Findings.
+- `orchestrator/backend/app/api/remediation.py` and `services/remediation.py` — remediation case API, canonical many-finding links, finding-origin intake, reciprocal case summaries, evidence integrity, and review/deployment gates; remediation engagements remain separate from assessment Findings.
 
 ### Frontend and the rest
 
 - `orchestrator/frontend/` — operator SPA: `orchestrator/frontend/src/components/TabBar.tsx` owns tabs,
-  `orchestrator/frontend/src/lib/api.ts` REST, `orchestrator/frontend/src/lib/theme.ts` and
-  `orchestrator/frontend/src/app.css` presentation.
-- `orchestrator/frontend/src/routes/RemediationPage.tsx` — remediation queue, case review, evidence, and approval UI; not an assessment tab.
+  `orchestrator/frontend/src/lib/api.ts` REST, `orchestrator/frontend/src/lib/theme.ts` theme state,
+  `orchestrator/frontend/src/app.css` shared tokens and `styles/` workspace presentation.
+- `orchestrator/frontend/src/routes/RemediationPage.tsx` — remediation workspace entrypoint.
+- `orchestrator/frontend/src/lib/workspaceRoutes.ts` — canonical hash links/history. `App.tsx` routes separate assessment/remediation workspaces; `app.css` owns shared tokens and `styles/` workspace presentation.
 - `orchestrator/report/` — a **third** Vite app (`vigil-report`), separate from the operator SPA. `orchestrator/report/src/lib/poc.ts` owns the copy-and-run `curl` quoting.
 - `tools/` — repo-root maintainer scripts that regenerate the reporting lookup tables. Distinct from `<engagement>/tools/analysis-state/`, which is engagement-local code-analysis artifact state.

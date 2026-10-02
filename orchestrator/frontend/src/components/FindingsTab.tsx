@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import type {
   AssessmentAttackChainDetail,
   AssessmentAttackChainLink,
@@ -8,6 +8,7 @@ import type {
   AssessmentFindingLink,
   AssessmentFindingTransition,
   AssessmentFindingTransitionSummary,
+  AssessmentProofReceipt,
   AssessmentConfirmCheck,
   AssessmentVerificationAudit,
   FindingDetails,
@@ -21,9 +22,11 @@ import { Check, Copy, Link as LinkIcon, List, Table2 } from "lucide-react";
 import { getAssessmentFinding, getAssessmentFindingTransition, listAssessmentFindingGroups, listAssessmentFindingLinks, listAssessmentFindingTransitions, resolveIntelIds } from "../lib/api";
 import { JsonTree } from "./ArtifactViewer";
 import { JsonView } from "./JsonView";
+import { engagementHref, parseWorkspaceRoute, writeWorkspaceHash } from "../lib/workspaceRoutes";
 import { useBodyScrollLock, useModalFocus } from "../lib/modalScrollLock";
+import "../styles/findings.css";
 import { CodeBlock, isCurlLike } from "./formatting";
-import { KV, Prose, ProseModeToggle, SectionHead } from "./drawer/DrawerKit";
+import { CopyChip, KV, Prose, ProseModeToggle, SectionHead } from "./drawer/DrawerKit";
 import type { ProseMode, ToastFn } from "./drawer/DrawerKit";
 import { Skeleton, TableSkeleton } from "./Skeletons";
 
@@ -46,8 +49,19 @@ function readFindingsView(): FindingsView {
     return "grouped";
   }
 }
+
+function readQueueContext(engagementKey: string): { query: string; severity: string[]; workflow: string[]; verification: string[]; page: number } {
+  try {
+    const value = JSON.parse(window.sessionStorage.getItem(`findings.queue.${engagementKey}`) || "{}");
+    const strings = (items: unknown): string[] => Array.isArray(items) ? items.filter((item): item is string => typeof item === "string") : [];
+    return { query: typeof value.query === "string" ? value.query : "", severity: strings(value.severity), workflow: strings(value.workflow), verification: strings(value.verification), page: Number.isSafeInteger(value.page) && value.page >= 0 ? value.page : 0 };
+  } catch {
+    return { query: "", severity: [], workflow: [], verification: [], page: 0 };
+  }
+}
 import { useToast } from "../contexts/ToastContext";
 import { findingToMarkdown } from "../lib/findingMarkdown";
+import { FindingRemediation } from "./FindingRemediation";
 
 // ── Types & helpers ───────────────────────────────────────────────────
 
@@ -60,14 +74,15 @@ type FindingsTabProps = {
   chains: AssessmentAttackChainDetail[];
   chainLinks: AssessmentAttackChainLink[];
   assessmentRefreshVersion: number;
-  // Deep-link entry: slug to auto-select + open once findings load. Unknown
-  // slugs are silently ignored. Honored once per slug value (see effect).
+  // Resolve routed findings against the loaded queue or an exact lookup.
   initialFindingSlug?: string;
   // Deep-link entry: which drawer tab (?dtab=…) to open the auto-opened
   // finding on. Validated against the finding's visible tabs; falls back to
   // "overview" when absent / invalid / hidden. Only applies to the deep-link
   // auto-open, not to later manual drawer navigation.
   initialDrawerTab?: string;
+  ledgerLoading?: boolean;
+  ledgerError?: string | null;
 };
 
 const SEVERITY_ORDER = ["critical", "high", "medium", "low", "info"] as const;
@@ -518,19 +533,6 @@ const IconClose = () => (
     <path d="M6 6l12 12M18 6L6 18" />
   </svg>
 );
-const IconCopy = () => (
-  <svg
-    viewBox="0 0 24 24"
-    fill="none"
-    stroke="currentColor"
-    strokeWidth={2}
-    strokeLinecap="round"
-    strokeLinejoin="round"
-  >
-    <rect x={9} y={9} width={13} height={13} rx={2} />
-    <path d="M5 15V5a2 2 0 012-2h10" />
-  </svg>
-);
 const IconExternal = () => (
   <svg
     viewBox="0 0 24 24"
@@ -547,50 +549,47 @@ const IconExternal = () => (
     <path d="M19 14v6H4V4h6" />
   </svg>
 );
-// ── DetailModal ──────────────────────────────────────────────────────
-// Shared modal shell used across tabs. See CommandsTab.tsx for design
-// notes on focus trap, aria roles, and the z-index relationship with
-// the Cmd/Ctrl-K palette.
-function DetailModal({
+function InvestigationPanel({
   children,
   onClose,
-  titleId,
+  onPrevious,
+  onNext,
+  position,
 }: {
   children: React.ReactNode;
   onClose: () => void;
-  titleId?: string;
+  onPrevious?: () => void;
+  onNext?: () => void;
+  position: string;
 }) {
-  const panelRef = useRef<HTMLDivElement | null>(null);
-  useModalFocus(panelRef, onClose);
-  useBodyScrollLock();
+  const panelRef = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    panelRef.current?.focus({ preventScroll: true });
+    panelRef.current?.scrollIntoView?.({ block: "start", behavior: "instant" });
+  }, []);
   return (
-    <div
-      className="detail-modal-overlay"
-      onClick={(e) => {
-        if (e.target === e.currentTarget) onClose();
+    <section
+      ref={panelRef}
+      className="finding-investigation"
+      aria-label="Finding investigation"
+      tabIndex={-1}
+      onKeyDown={(event) => {
+        if (event.key === "Escape") {
+          event.stopPropagation();
+          onClose();
+        }
       }}
-      role="presentation"
     >
-      <div
-        ref={panelRef}
-        className="detail-modal-panel"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={titleId}
-        tabIndex={-1}
-      >
-        <button
-          type="button"
-          className="detail-modal-close"
-          onClick={onClose}
-          aria-label="Close detail"
-          title="Close (Esc)"
-        >
-          <IconClose />
-        </button>
-        {children}
+      <div className="finding-investigation-toolbar">
+        <button type="button" className="ghost-button" onClick={onClose} aria-label="Back to results">← Back to results</button>
+        <div className="finding-review-navigation" aria-label="Finding review navigation">
+          <span className="meta-text">{position}</span>
+          <button type="button" className="ghost-button" onClick={onPrevious} disabled={!onPrevious} aria-label="Previous finding">← Previous</button>
+          <button type="button" className="ghost-button" onClick={onNext} disabled={!onNext} aria-label="Next finding">Next →</button>
+        </div>
       </div>
-    </div>
+      {children}
+    </section>
   );
 }
 
@@ -635,13 +634,21 @@ export function FindingsTab({
   assessmentRefreshVersion,
   initialFindingSlug,
   initialDrawerTab,
+  ledgerLoading = false,
+  ledgerError = null,
 }: FindingsTabProps) {
-  const allFindingsRaw = findings.length > 0 ? findings : fallbackFindings;
+  const [routeFinding, setRouteFinding] = useState<{ engagementKey: string; requestedSlug: string; finding: AssessmentFindingDetail } | null>(null);
+  const resolvedInitialSlug = routeFinding?.engagementKey === engagementKey && routeFinding.requestedSlug === initialFindingSlug ? routeFinding.finding.slug : initialFindingSlug;
+  const [routeLookupError, setRouteLookupError] = useState<string | null>(null);
+  const [routeLookupLoading, setRouteLookupLoading] = useState(false);
+  const [routeLookupAttempt, setRouteLookupAttempt] = useState(0);
+  const allFindingsRaw = useMemo(() => {
+    const listed = findings.length > 0 ? findings : fallbackFindings;
+    if (routeFinding?.engagementKey === engagementKey && routeFinding.finding.slug === resolvedInitialSlug && !listed.some((item) => item.slug === resolvedInitialSlug)) return [...listed, routeFinding.finding];
+    if (routeFinding?.engagementKey === engagementKey) return listed.map((item) => item.slug === routeFinding.finding.slug && (!isDetail(item) || routeFinding.finding.row_version > item.row_version) ? routeFinding.finding : item);
+    return listed;
+  }, [findings, fallbackFindings, routeFinding, engagementKey, resolvedInitialSlug]);
   const { toast } = useToast();
-  // The active drawer-tab is owned by the Drawer, but FindingsTab needs it to
-  // write the deep-link hash, so the Drawer reports it up via onTabChange.
-  const [drawerTab, setDrawerTab] = useState<TabId>("overview");
-
   const [allFindingLinks, setAllFindingLinks] = useState<AssessmentFindingLink[]>([]);
   const [allFindingGroups, setAllFindingGroups] = useState<AssessmentFindingGroup[]>([]);
   const [findingLinksError, setFindingLinksError] = useState<string | null>(null);
@@ -650,16 +657,18 @@ export function FindingsTab({
   const [transitions, setTransitions] = useState<AssessmentFindingTransitionSummary[]>([]);
   const [transitionsLoading, setTransitionsLoading] = useState(false);
   const [transitionsError, setTransitionsError] = useState<string | null>(null);
+  const [transitionsSlug, setTransitionsSlug] = useState<string | null>(null);
 
-  const [query, setQuery] = useState("");
-  const [sevFilters, setSevFilters] = useState<Set<string>>(new Set());
-  const [workflowFilters, setWorkflowFilters] = useState<Set<string>>(new Set());
-  const [verifFilters, setVerifFilters] = useState<Set<string>>(new Set());
+  const [queueContext] = useState(() => readQueueContext(engagementKey));
+  const [query, setQuery] = useState(queueContext.query);
+  const [sevFilters, setSevFilters] = useState<Set<string>>(() => new Set(queueContext.severity));
+  const [workflowFilters, setWorkflowFilters] = useState<Set<string>>(() => new Set(queueContext.workflow));
+  const [verifFilters, setVerifFilters] = useState<Set<string>>(() => new Set(queueContext.verification));
   const [cmdOpen, setCmdOpen] = useState(false);
 
   const [selected, setSelected] = useState<string | null>(() => {
     try {
-      return window.localStorage.getItem("findings.selected");
+      return window.localStorage.getItem(`findings.selected.${engagementKey}`);
     } catch {
       return null;
     }
@@ -667,24 +676,32 @@ export function FindingsTab({
   // Grouped (default) vs flat table view. Persisted via the same
   // localStorage idiom as findings.selected below.
   const [view, setView] = useState<FindingsView>(() => readFindingsView());
-  // Detail-modal open state. See CommandsTab.tsx for design notes.
-  // Intentionally does NOT mirror the persisted `selected` — we don't
-  // want the modal to pop open automatically on a page refresh.
+  const [tableOrder, setTableOrder] = useState<string[] | null>(null);
+  const reportTableOrder = useCallback((slugs: string[]) => {
+    setTableOrder((previous) => previous?.length === slugs.length && previous.every((slug, index) => slug === slugs[index]) ? previous : slugs);
+  }, []);
+  const acceptFindingDetail = useCallback((finding: AssessmentFindingDetail) => { setRouteFinding({ engagementKey, requestedSlug: finding.slug, finding }); }, [engagementKey]);
   const [detailOpen, setDetailOpen] = useState(false);
-  const rowRefs = useRef<Map<string, HTMLButtonElement>>(new Map());
-  const lastFocusSlugRef = useRef<string | null>(null);
+  const [reviewSection, setReviewSection] = useState<TabId>(isDrawerTabId(initialDrawerTab) ? initialDrawerTab : "overview");
+  const returnFocusRef = useRef<HTMLElement | null>(null);
+  const commandInvokerRef = useRef<HTMLElement | null>(null);
+  const openCommandPalette = useCallback((invoker?: HTMLElement) => {
+    if (cmdOpen) return;
+    commandInvokerRef.current = invoker ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null);
+    setCmdOpen(true);
+  }, [cmdOpen]);
 
   const searchRef = useRef<HTMLInputElement | null>(null);
 
   // Persist selection
   useEffect(() => {
     try {
-      if (selected) window.localStorage.setItem("findings.selected", selected);
-      else window.localStorage.removeItem("findings.selected");
+      if (selected) window.localStorage.setItem(`findings.selected.${engagementKey}`, selected);
+      else window.localStorage.removeItem(`findings.selected.${engagementKey}`);
     } catch {
       // ignore
     }
-  }, [selected]);
+  }, [selected, engagementKey]);
 
   // Persist chosen view (grouped | table).
   useEffect(() => {
@@ -698,11 +715,28 @@ export function FindingsTab({
   // Tracks which deep-linked slug we've already auto-opened (see the
   // auto-open effect placed after derivedBySlug is in scope, below).
   const consumedInitialSlugRef = useRef<string | null>(null);
-  // The drawer-tab the deep-link auto-open should land on (resolved against the
-  // finding's visible tabs) plus the slug it applies to. Handed to the Drawer
-  // so it opens that finding on the intended pane; null = overview / no pending
-  // deep-link. Cleared on manual open + close so it can't leak.
-  const pendingDrawerTabRef = useRef<{ slug: string; tab: TabId } | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    const listed = findings.length > 0 ? findings : fallbackFindings;
+    setRouteLookupError(null);
+    if (!initialFindingSlug || listed.some((item) => item.slug === initialFindingSlug)) {
+      setRouteLookupLoading(false);
+      return;
+    }
+    setRouteLookupLoading(true);
+    getAssessmentFinding(engagementKey, initialFindingSlug).then((finding) => {
+      if (!active) return;
+      setRouteFinding({ engagementKey, requestedSlug: initialFindingSlug, finding });
+      const route = parseWorkspaceRoute(window.location.hash);
+      if (finding.slug !== initialFindingSlug && route.kind === "engagement" && route.key === engagementKey && route.params.get("finding") === initialFindingSlug) {
+        writeWorkspaceHash(engagementHref(engagementKey, { ...Object.fromEntries(route.params), finding: finding.slug }), "replace");
+      }
+    }).catch((error: unknown) => {
+      if (active) setRouteLookupError(error instanceof Error ? error.message : "Finding lookup failed");
+    }).finally(() => { if (active) setRouteLookupLoading(false); });
+    return () => { active = false; };
+  }, [engagementKey, initialFindingSlug, findings, fallbackFindings, routeLookupAttempt]);
 
   // Fetch finding links
   useEffect(() => {
@@ -1040,8 +1074,8 @@ export function FindingsTab({
     return list;
   }, [derivedList, sevFilters, workflowFilters, verifFilters, parsedQuery, matchesQuery]);
 
+  const filteredSlugs = useMemo(() => new Set(filtered.map((d) => d.slug)), [filtered]);
   const groupedFiltered = useMemo(() => {
-    const filteredSlugs = new Set(filtered.map((d) => d.slug));
     const groups = new Map<string, { root: Derived; siblings: Derived[]; highestSeverity: string }>();
     const standalone: Derived[] = [];
 
@@ -1093,7 +1127,7 @@ export function FindingsTab({
         return a.root.title.localeCompare(b.root.title);
       });
     return { groups: groupList, standalone };
-  }, [filtered, derivedBySlug]);
+  }, [filtered, filteredSlugs, derivedBySlug]);
 
   // ── Grouped-view pagination ──
   // Flatten the grouped render into the EXACT order it draws: every group (in
@@ -1109,35 +1143,17 @@ export function FindingsTab({
     return entries;
   }, [groupedFiltered]);
 
-  // Map every finding slug (a group's root + siblings, or a standalone) to the
-  // index of its top-level entry, so a deep-linked / keyboard-selected finding
-  // can be paged into view no matter which entry it lives in.
-  const entryIndexBySlug = useMemo(() => {
-    const m = new Map<string, number>();
-    displayEntries.forEach((entry, i) => {
-      if (entry.kind === "group") {
-        m.set(entry.group.root.slug, i);
-        for (const sib of entry.group.siblings) m.set(sib.slug, i);
-      } else {
-        m.set(entry.finding.slug, i);
-      }
-    });
-    return m;
-  }, [displayEntries]);
-
   const pageCount = Math.max(1, Math.ceil(displayEntries.length / GROUPED_PAGE_SIZE));
-  const [groupedPage, setGroupedPage] = useState(0);
-
-  // Reset to the first page whenever the filtered result set changes (search /
-  // chips). Depending on `displayEntries` identity ties the reset to the same
-  // memo the render reads, so it fires exactly when the visible list changes.
-  useEffect(() => {
-    setGroupedPage(0);
-  }, [displayEntries]);
+  const [groupedPage, setGroupedPage] = useState(queueContext.page);
 
   // Clamp if the page count shrinks (e.g. WebSocket refresh drops entries)
   // without otherwise changing identity in a way that resets the page.
   const safePage = Math.min(groupedPage, pageCount - 1);
+  useEffect(() => {
+    try {
+      window.sessionStorage.setItem(`findings.queue.${engagementKey}`, JSON.stringify({ query, severity: [...sevFilters], workflow: [...workflowFilters], verification: [...verifFilters], page: safePage }));
+    } catch { /* Browser storage may be unavailable. */ }
+  }, [engagementKey, query, sevFilters, workflowFilters, verifFilters, safePage]);
 
   // Window the entry list for the current page, then split the contiguous slice
   // back into { groups, standalone } so GroupedFindingsList renders unchanged.
@@ -1172,63 +1188,22 @@ export function FindingsTab({
 
   const selectedDerived = selected ? derivedBySlug.get(selected) ?? null : null;
 
-  // Auto-jump the grouped page to keep the selected finding reachable. This is
-  // the single guarantee that (a) a deep-linked / clicked finding's source row
-  // is on the visible page so the drawer has an anchor, and (b) keyboard nav
-  // (j/k/[/]) — which walks the flat `filtered` order, not the paged grouped
-  // order — never lands on an off-page row the user can't see: we follow it to
-  // its page instead of clamping. No-ops in Table view (ag-grid is unpaged) and
-  // when the selected slug isn't a visible grouped entry.
+  // Incoming selection and section are authoritative for browser history.
   useEffect(() => {
-    if (view !== "grouped" || !selected) return;
-    const entryIdx = entryIndexBySlug.get(selected);
-    if (entryIdx == null) return;
-    const targetPage = Math.floor(entryIdx / GROUPED_PAGE_SIZE);
-    setGroupedPage((cur) => (cur === targetPage ? cur : targetPage));
-  }, [selected, view, entryIndexBySlug]);
-
-  // Deep-link auto-open: when arriving with ?finding={slug}, select + open
-  // that finding's drawer once it exists in the loaded set. We track the
-  // last-consumed slug VALUE (not a boolean) so closing the drawer doesn't
-  // immediately re-open it, while re-deep-linking to a DIFFERENT finding
-  // (a new slug) while still mounted re-arms and re-opens. Unknown slugs are
-  // ignored silently. The drawer-tab is resolved from ?dtab= against the
-  // finding's visible tabs (invalid/hidden → overview) and handed to the
-  // Drawer via pendingDrawerTabRef so it opens on the intended pane.
-  useEffect(() => {
-    if (!initialFindingSlug) return;
-    if (consumedInitialSlugRef.current === initialFindingSlug) return;
-    const target = derivedBySlug.get(initialFindingSlug);
-    if (!target) return; // wait for load / ignore unknown
-    consumedInitialSlugRef.current = initialFindingSlug;
-    const resolvedDrawerTab =
-      isDrawerTabId(initialDrawerTab) && drawerTabVisible(target, initialDrawerTab)
-        ? initialDrawerTab
-        : "overview";
-    pendingDrawerTabRef.current = { slug: initialFindingSlug, tab: resolvedDrawerTab };
-    setSelected(initialFindingSlug);
-    lastFocusSlugRef.current = initialFindingSlug;
-    setDrawerTab(resolvedDrawerTab);
+    const routeIdentity = `${resolvedInitialSlug ?? ""}:${initialDrawerTab ?? "overview"}`;
+    if (consumedInitialSlugRef.current === routeIdentity) return;
+    if (!resolvedInitialSlug) {
+      if (consumedInitialSlugRef.current !== null) setDetailOpen(false);
+      consumedInitialSlugRef.current = routeIdentity;
+      return;
+    }
+    const target = derivedBySlug.get(resolvedInitialSlug);
+    if (!target) { consumedInitialSlugRef.current = null; setDetailOpen(false); return; }
+    consumedInitialSlugRef.current = routeIdentity;
+    setReviewSection(isDrawerTabId(initialDrawerTab) ? initialDrawerTab : "overview");
+    setSelected(resolvedInitialSlug);
     setDetailOpen(true);
-  }, [initialFindingSlug, initialDrawerTab, derivedBySlug]);
-
-  // Reflect drawer open-state + active drawer-tab in the URL via
-  // history.replaceState (silent — no `hashchange`, so App never re-routes
-  // and there is no loop). On close we drop the `finding`/`dtab` params but
-  // keep the findings tab. Back/forward still work because we never pushState.
-  useEffect(() => {
-    const base = `#/engagements/${encodeURIComponent(engagementKey)}`;
-    const params = new URLSearchParams();
-    params.set("tab", "findings");
-    if (detailOpen && selected) {
-      params.set("finding", selected);
-      if (drawerTab !== "overview") params.set("dtab", drawerTab);
-    }
-    const next = `${base}?${params.toString()}`;
-    if (window.location.hash !== next) {
-      window.history.replaceState(null, "", next);
-    }
-  }, [engagementKey, detailOpen, selected, drawerTab]);
+  }, [resolvedInitialSlug, initialDrawerTab, derivedBySlug]);
 
   // Transitions fetch
   useEffect(() => {
@@ -1236,10 +1211,12 @@ export function FindingsTab({
       setTransitions([]);
       setTransitionsLoading(false);
       setTransitionsError(null);
+      setTransitionsSlug(null);
       return;
     }
     let cancelled = false;
     setTransitionsLoading(true);
+    setTransitionsSlug(selected);
     setTransitionsError(null);
     listAssessmentFindingTransitions(engagementKey, selected)
       .then((rows) => {
@@ -1261,9 +1238,34 @@ export function FindingsTab({
     };
   }, [engagementKey, selected, assessmentRefreshVersion]);
 
+  const openFinding = useCallback((slug: string) => {
+    if (!detailOpen) returnFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const target = derivedBySlug.get(slug);
+    const section = target && drawerTabVisible(target, reviewSection) ? reviewSection : "overview";
+    setReviewSection(section);
+    setSelected(slug);
+    setDetailOpen(true);
+    writeWorkspaceHash(engagementHref(engagementKey, { tab: "findings", finding: slug, dtab: section === "overview" ? undefined : section }));
+  }, [engagementKey, detailOpen, derivedBySlug, reviewSection]);
+  const closeFinding = useCallback(() => {
+    setDetailOpen(false);
+    writeWorkspaceHash(engagementHref(engagementKey, { tab: "findings" }));
+    queueMicrotask(() => returnFocusRef.current?.isConnected && returnFocusRef.current.focus({ preventScroll: true }));
+  }, [engagementKey]);
+  const reviewFindings = useMemo(() => {
+    if (view === "table") {
+      const bySlug = new Map(filtered.map((item) => [item.slug, item]));
+      if (tableOrder === null) return filtered;
+      return tableOrder.flatMap((slug) => { const item = bySlug.get(slug); return item ? [item] : []; });
+    }
+    return displayEntries.flatMap((entry) => entry.kind === "standalone" ? [entry.finding] : [entry.group.root, ...entry.group.siblings]).filter((item) => filteredSlugs.has(item.slug));
+  }, [view, filtered, filteredSlugs, displayEntries, tableOrder]);
+  const reviewIndex = reviewFindings.findIndex((item) => item.slug === selected);
+  const investigating = detailOpen && selectedDerived !== null;
+
   // ── Keyboard ──
-  const filteredRef = useRef(filtered);
-  filteredRef.current = filtered;
+  const filteredRef = useRef(reviewFindings);
+  filteredRef.current = reviewFindings;
   const selectedRef = useRef(selected);
   selectedRef.current = selected;
 
@@ -1272,18 +1274,20 @@ export function FindingsTab({
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      const target = e.target as HTMLElement | null;
+      const target = e.target instanceof HTMLElement ? e.target : null;
       const tag = (target?.tagName || "").toLowerCase();
-      const isTyping = tag === "input" || tag === "textarea";
+      const isTyping = Boolean(target?.closest("input, textarea, select, [contenteditable]:not([contenteditable='false'])"));
+      const isInteractive = isTyping || Boolean(target?.closest("button, a, [role='button'], [role='combobox'], [role='listbox']"));
+      const selectFinding = openFinding;
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
         e.preventDefault();
-        setDetailOpen(false);
-        setCmdOpen(true);
+        openCommandPalette();
         return;
       }
       if (!isTyping && e.key === "/") {
         e.preventDefault();
-        searchRef.current?.focus();
+        if (detailOpenRef.current) closeFinding();
+        queueMicrotask(() => searchRef.current?.focus({ preventScroll: true }));
         return;
       }
       if (e.key === "Escape") {
@@ -1292,46 +1296,48 @@ export function FindingsTab({
           return;
         }
         if (detailOpenRef.current) {
-          setDetailOpen(false);
+          closeFinding();
         } else {
           setSelected(null);
         }
         return;
       }
-      if (!isTyping && (e.key === "[" || e.key === "]")) {
+      if (!isInteractive && (e.key === "[" || e.key === "]")) {
         e.preventDefault();
         const list = filteredRef.current;
+        if (!list.length) return;
         const cur = selectedRef.current;
         const idx = list.findIndex((f) => f.slug === cur);
         if (idx < 0) {
-          if (list[0]) setSelected(list[0].slug);
+          if (list[0]) selectFinding(list[0].slug);
           return;
         }
         const next =
           e.key === "[" ? Math.max(0, idx - 1) : Math.min(list.length - 1, idx + 1);
-        setSelected(list[next].slug);
+        selectFinding(list[next].slug);
       }
-      if (!isTyping && (e.key === "j" || e.key === "k")) {
+      if (!isInteractive && (e.key === "j" || e.key === "k")) {
         e.preventDefault();
         const list = filteredRef.current;
+        if (!list.length) return;
         const cur = selectedRef.current;
         const idx = list.findIndex((f) => f.slug === cur);
         if (idx < 0 && list[0]) {
-          setSelected(list[0].slug);
+          selectFinding(list[0].slug);
           return;
         }
         const next =
           e.key === "k" ? Math.max(0, idx - 1) : Math.min(list.length - 1, idx + 1);
-        setSelected(list[next].slug);
+        selectFinding(list[next].slug);
       }
-      if (!isTyping && e.key === "Enter" && selectedRef.current != null) {
+      if (!isTyping && tag !== "button" && tag !== "a" && e.key === "Enter" && selectedRef.current != null) {
         e.preventDefault();
-        setDetailOpen(true);
+        openFinding(selectedRef.current);
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  }, [openFinding, closeFinding, openCommandPalette]);
 
   // ── Counters ──
   const severityCounts = useMemo(() => {
@@ -1359,6 +1365,12 @@ export function FindingsTab({
     if (next.has(val)) next.delete(val);
     else next.add(val);
     setter(next);
+    setGroupedPage(0);
+  };
+
+  const changeQuery = (value: string) => {
+    setQuery(value);
+    setGroupedPage(0);
   };
 
   const clearAll = () => {
@@ -1366,54 +1378,49 @@ export function FindingsTab({
     setWorkflowFilters(new Set());
     setVerifFilters(new Set());
     setQuery("");
+    setGroupedPage(0);
   };
 
   const activeFilterCount =
     sevFilters.size + workflowFilters.size + verifFilters.size + (query ? 1 : 0);
 
-  // Shared open-drawer handler used by BOTH the grouped list and the flat
-  // table view, so the drawer / deep-link flow is identical in either view.
-  const openFinding = useCallback((slug: string) => {
-    // A manual open always lands on Overview — drop any pending deep-link
-    // drawer-tab so it can't leak into a hand-clicked finding.
-    pendingDrawerTabRef.current = null;
-    setSelected(slug);
-    lastFocusSlugRef.current = slug;
-    setDetailOpen(true);
-  }, []);
-
   return (
-    <div className="findings-redesign">
-      <div className="page-head">
+    <div className="findings-redesign findings-workspace">
+      <div className="page-head" hidden={investigating}>
         <div>
           <h1 className="page-title">Findings</h1>
           <div className="page-crumbs">
             Engagement <code>{engagementKey}</code> ·{" "}
             <span>
-              {filtered.length} of {derivedList.length} findings
+              {derivedList.length === 0 && (ledgerLoading || ledgerError) ? "Ledger pending" : `${filtered.length} of ${derivedList.length} findings`}
             </span>
           </div>
         </div>
-        <SevSpark counts={severityCounts} />
+        {!(derivedList.length === 0 && (ledgerLoading || ledgerError)) && <SevSpark counts={severityCounts} />}
       </div>
 
       {/* Toolbar */}
-      <div className="panel findings-toolbar-panel">
+      {routeLookupLoading && <p className="meta-text" role="status">Loading finding {initialFindingSlug}…</p>}
+      {routeLookupError && <p className="error-text" role="alert">Finding {initialFindingSlug} unavailable: {routeLookupError} <button type="button" className="ghost-button" onClick={() => setRouteLookupAttempt((value) => value + 1)}>Retry finding lookup</button></p>}
+      {ledgerLoading && <p className="meta-text" role="status">Loading finding ledger…</p>}
+      {ledgerError && <p className="error-text" role="alert">Finding ledger unavailable: {ledgerError}{derivedList.length > 0 ? " Showing previously loaded records; this list may be stale." : ""}</p>}
+      <div className="panel findings-toolbar-panel" hidden={investigating}>
         <div className="toolbar">
           <div className="search-wrap">
             <IconSearch />
             <input
               ref={searchRef}
               className="search-input"
+              aria-label="Search findings"
               placeholder="Search any field — title, CWE, slug, payload, endpoint… (try severity:high cwe:79)"
               value={query}
-              onChange={(e) => setQuery(e.target.value)}
+              onChange={(e) => changeQuery(e.target.value)}
             />
             {query && (
               <button
                 type="button"
                 className="icon-btn"
-                onClick={() => setQuery("")}
+                onClick={() => changeQuery("")}
                 title="Clear"
                 style={{ width: 22, height: 22 }}
               >
@@ -1449,7 +1456,7 @@ export function FindingsTab({
             <button
               type="button"
               className="qa-btn"
-              onClick={() => setCmdOpen(true)}
+              onClick={(event) => openCommandPalette(event.currentTarget)}
             >
               Jump to…{" "}
               <span className="search-kbd" style={{ marginLeft: 4 }}>
@@ -1459,28 +1466,30 @@ export function FindingsTab({
           </div>
         </div>
         <div className="filter-row">
-          <div className="filter-group">
+          <div className="filter-group" role="group" aria-label="Severity filters">
             <span className="filter-label">Severity</span>
-            {SEVERITY_ORDER.filter((s) => severityCounts[s]).map((s) => (
+            {SEVERITY_ORDER.filter((s) => severityCounts[s] || sevFilters.has(s)).map((s) => (
               <button
                 key={s}
                 type="button"
                 className={`filter-chip sev-${s} ${sevFilters.has(s) ? "is-active" : ""}`}
+                aria-pressed={sevFilters.has(s)}
                 onClick={() => toggle(sevFilters, setSevFilters, s)}
               >
                 <span className="sev-dot" style={{ background: sevDotColor(s) }} />
                 {s}
-                <span className="filter-count">{severityCounts[s]}</span>
+                <span className="filter-count">{severityCounts[s] ?? 0}</span>
               </button>
             ))}
           </div>
-          <div className="filter-group">
+          <div className="filter-group" role="group" aria-label="Workflow filters">
             <span className="filter-label">Workflow</span>
-            {Object.keys(workflowCounts).map((s) => (
+            {[...new Set([...Object.keys(workflowCounts), ...workflowFilters])].map((s) => (
               <button
                 key={s}
                 type="button"
                 className={`filter-chip ${workflowFilters.has(s) ? "is-active" : ""}`}
+                aria-pressed={workflowFilters.has(s)}
                 onClick={() => toggle(workflowFilters, setWorkflowFilters, s)}
               >
                 {/*
@@ -1489,38 +1498,37 @@ export function FindingsTab({
                   _-stripped value for statuses we don't label.
                 */}
                 {WORKFLOW_LABELS[s] || s.replace(/_/g, " ")}
-                <span className="filter-count">{workflowCounts[s]}</span>
+                <span className="filter-count">{workflowCounts[s] ?? 0}</span>
               </button>
             ))}
           </div>
-          <div className="filter-group">
+          <div className="filter-group" role="group" aria-label="Verification filters">
             <span className="filter-label">Verification</span>
-            {Object.keys(verifCounts).map((s) => (
+            {[...new Set([...Object.keys(verifCounts), ...verifFilters])].map((s) => (
               <button
                 key={s}
                 type="button"
                 className={`filter-chip ${verifFilters.has(s) ? "is-active" : ""}`}
+                aria-pressed={verifFilters.has(s)}
                 onClick={() => toggle(verifFilters, setVerifFilters, s)}
               >
                 {VERIFICATION_LABELS[s] || s.replace(/_/g, " ")}
-                <span className="filter-count">{verifCounts[s]}</span>
+                <span className="filter-count">{verifCounts[s] ?? 0}</span>
               </button>
             ))}
           </div>
-          {activeFilterCount > 0 && (
-            <button type="button" className="filter-clear" onClick={clearAll}>
+            <button type="button" className="filter-clear" disabled={activeFilterCount === 0} onClick={clearAll}>
               Clear all ({activeFilterCount})
             </button>
-          )}
         </div>
       </div>
 
-      {/* List (detail renders as a centred modal below) */}
-      <div className="findings-shell">
-        <section className="list-panel panel">
+      <div className={`findings-shell ${detailOpen && selectedDerived ? "has-investigation" : ""}`}>
+        <section className="list-panel panel" aria-label="Finding queue" hidden={investigating}>
+          {!(derivedList.length === 0 && (ledgerLoading || ledgerError)) && <>
           <div className="grouping-status">
             <div>
-              <strong>{filtered.length}</strong> of <strong>{derivedList.length}</strong> findings visible
+              <strong>{filtered.length}</strong> of <strong>{derivedList.length}</strong> findings {activeFilterCount > 0 ? "match" : "visible"}
               {activeFilterCount > 0 || query.trim() ? (
                 <span className="meta-text"> · filtered by the current search or chips</span>
               ) : (
@@ -1533,7 +1541,7 @@ export function FindingsTab({
               ) : findingGroupsError ? (
                 <span className="tag warning">Grouping unavailable</span>
               ) : allFindingGroups.length > 0 ? (
-                <span className="tag root">{allFindingGroups.length} root-cause groups</span>
+                <span className="tag root">{allFindingGroups.length} engagement root-cause groups</span>
               ) : (
                 <span className="tag">No root-cause groups</span>
               )}
@@ -1579,9 +1587,9 @@ export function FindingsTab({
               </button>
             </div>
           ) : null}
-          {view === "table" ? (
+          {derivedList.length === 0 ? <p className="empty">No findings recorded yet.</p> : view === "table" ? (
             <Suspense fallback={<TableSkeleton rows={10} showHeader={false} />}>
-              <FindingsGrid rows={filtered} selected={selected} onOpen={openFinding} />
+              <FindingsGrid rows={filtered} selected={selected} onOpen={openFinding} onOrderChange={reportTableOrder} />
             </Suspense>
           ) : (
             <GroupedFindingsList
@@ -1590,55 +1598,40 @@ export function FindingsTab({
               selected={selected}
               onOpen={openFinding}
               freeTerms={parsedQuery.freeTerms}
+              matchingSlugs={filteredSlugs}
             />
           )}
+          </>}
         </section>
-      </div>
-
       {detailOpen && selectedDerived && (
-        <DetailModal
-          onClose={() => {
-            setDetailOpen(false);
-            // Reset the drawer-tab so a stale `dtab` doesn't linger in the
-            // URL/state after close (the URL effect drops it once detailOpen
-            // is false, but keeping state honest avoids a flash on re-open).
-            setDrawerTab("overview");
-            // Drop any consumed deep-link drawer-tab so a re-open lands on
-            // Overview rather than the previously deep-linked pane.
-            pendingDrawerTabRef.current = null;
-            const el =
-              lastFocusSlugRef.current != null
-                ? rowRefs.current.get(lastFocusSlugRef.current)
-                : null;
-            queueMicrotask(() => el?.focus());
-          }}
-          titleId="findings-detail-modal-title"
+        <InvestigationPanel
+          onClose={closeFinding}
+          onPrevious={reviewIndex > 0 ? () => openFinding(reviewFindings[reviewIndex - 1].slug) : undefined}
+          onNext={reviewIndex >= 0 && reviewIndex < reviewFindings.length - 1 ? () => openFinding(reviewFindings[reviewIndex + 1].slug) : undefined}
+          position={reviewIndex >= 0 ? `${reviewIndex + 1} of ${reviewFindings.length} results` : "Outside current results"}
         >
           <Drawer
+            key={selectedDerived.slug}
             engagementKey={engagementKey}
+            refreshVersion={assessmentRefreshVersion}
             d={selectedDerived}
             derivedBySlug={derivedBySlug}
             chainsByKey={chainsByKey}
             chainMembersByKey={chainMembersByKey}
-            transitions={transitions}
-            transitionsLoading={transitionsLoading}
-            transitionsError={transitionsError}
-            onSelect={(slug) => {
-              // Cross-link selection from Relationships. Keep the
-              // modal open so the operator can navigate through related
-              // findings without re-clicking.
-              setSelected(slug);
-              if (slug) lastFocusSlugRef.current = slug;
-            }}
-            onTabChange={setDrawerTab}
-            initialTab={pendingDrawerTabRef.current?.tab}
-            initialTabSlug={pendingDrawerTabRef.current?.slug}
-            titleId="findings-detail-modal-title"
+            transitions={transitionsSlug === selected ? transitions : []}
+            transitionsLoading={transitionsSlug !== selected || transitionsLoading}
+            transitionsError={transitionsSlug === selected ? transitionsError : null}
+            onSelect={(slug) => { if (slug) openFinding(slug); }}
+            onSectionChange={setReviewSection}
+            onDetailLoaded={acceptFindingDetail}
+            initialTab={drawerTabVisible(selectedDerived, reviewSection) ? reviewSection : "overview"}
+            titleId="finding-investigation-title"
           />
-        </DetailModal>
+        </InvestigationPanel>
       )}
+      </div>
 
-      <div className="findings-shortcuts">
+      <div className="findings-shortcuts" hidden={investigating}>
         <span>
           <code>/</code> focus search
         </span>
@@ -1662,14 +1655,11 @@ export function FindingsTab({
       {cmdOpen && (
         <CommandPalette
           derivedList={derivedList}
+          returnFocusRef={commandInvokerRef}
           onSelect={(slug) => {
-            // Manual jump-to-finding lands on Overview; drop any pending
-            // deep-link drawer-tab so it can't leak into this open.
-            pendingDrawerTabRef.current = null;
-            setSelected(slug);
-            lastFocusSlugRef.current = slug;
             setCmdOpen(false);
-            setDetailOpen(true);
+            openFinding(slug);
+            if (!detailOpen) returnFocusRef.current = commandInvokerRef.current;
           }}
           onClose={() => setCmdOpen(false)}
         />
@@ -1715,12 +1705,14 @@ function GroupedFindingsList({
   selected,
   onOpen,
   freeTerms,
+  matchingSlugs,
 }: {
   groups: { root: Derived; siblings: Derived[]; highestSeverity: string }[];
   standalone: Derived[];
   selected: string | null;
   onOpen: (slug: string) => void;
   freeTerms: string[];
+  matchingSlugs: Set<string>;
 }) {
   if (groups.length === 0 && standalone.length === 0) {
     return <div className="empty">No findings match.</div>;
@@ -1734,6 +1726,7 @@ function GroupedFindingsList({
           selected={selected}
           onOpen={onOpen}
           freeTerms={freeTerms}
+          rootContext={!matchingSlugs.has(group.root.slug)}
         />
       ))}
       {standalone.length > 0 && (
@@ -1766,11 +1759,13 @@ function RootCauseGroupCard({
   selected,
   onOpen,
   freeTerms,
+  rootContext,
 }: {
   group: { root: Derived; siblings: Derived[]; highestSeverity: string };
   selected: string | null;
   onOpen: (slug: string) => void;
   freeTerms: string[];
+  rootContext: boolean;
 }) {
   const residualCount = group.siblings.filter((d) => d.root_cause_effect === "eliminates_attack_path").length;
   return (
@@ -1778,6 +1773,7 @@ function RootCauseGroupCard({
       <div className="group-card-head">
         <div>
           <p className="eyebrow">Root Cause</p>
+          {rootContext && <p className="meta-text">Root context outside current filters</p>}
           <button
             type="button"
             className={`group-root-title ${selected === group.root.slug ? "is-selected" : ""}`}
@@ -1861,6 +1857,7 @@ function FindingMiniRow({
 
 type DrawerProps = {
   engagementKey: string;
+  refreshVersion: number;
   d: Derived;
   derivedBySlug: Map<string, Derived>;
   chainsByKey: Map<string, AssessmentAttackChainDetail>;
@@ -1869,14 +1866,10 @@ type DrawerProps = {
   transitionsLoading: boolean;
   transitionsError: string | null;
   onSelect: (slug: string | null) => void;
-  // Report the active drawer-tab up so FindingsTab can mirror it in the URL.
-  onTabChange?: (tab: TabId) => void;
-  // Deep-link (?dtab=…) drawer-tab + the finding slug it applies to. Already
-  // validated by the caller. The drawer opens on `initialTab` whenever its
-  // current finding is `initialTabSlug` (mount OR a same-mount re-deep-link to
-  // that finding); every other finding resets to "overview".
+  onSectionChange: (tab: TabId) => void;
+  onDetailLoaded: (finding: AssessmentFindingDetail) => void;
+  // The parent owns review-section context and validates conditional tabs.
   initialTab?: TabId;
-  initialTabSlug?: string;
   titleId?: string;
 };
 
@@ -1902,7 +1895,7 @@ function isDrawerTabId(value: string | undefined): value is TabId {
 function drawerTabVisible(d: Derived, tab: TabId): boolean {
   switch (tab) {
     case "code":
-      return !!d.slot_type;
+      return !!(d.slot_type || d.entry_point || d.sink || d.provenance?.code_snapshot || d.canonical_location.startsWith("file:"));
     default:
       return true;
   }
@@ -1914,6 +1907,7 @@ function drawerTabVisible(d: Derived, tab: TabId): boolean {
 
 function Drawer({
   engagementKey,
+  refreshVersion,
   d,
   derivedBySlug,
   chainsByKey,
@@ -1922,54 +1916,74 @@ function Drawer({
   transitionsLoading,
   transitionsError,
   onSelect,
-  onTabChange,
+  onSectionChange,
+  onDetailLoaded,
   initialTab,
-  initialTabSlug,
   titleId,
 }: DrawerProps) {
   const { toast } = useToast();
-  // The drawer-tab for the deep-linked finding. Already validated by the
-  // caller against this finding's visible tabs, so an invalid/hidden value
-  // never reaches here. Applies only when the current finding IS the
-  // deep-linked one (mount OR same-mount re-deep-link); else "overview".
-  const deepLinkTab: TabId =
-    initialTab && d?.slug === initialTabSlug ? initialTab : "overview";
+  const deepLinkTab: TabId = initialTab ?? "overview";
   const [tab, setTabState] = useState<TabId>(deepLinkTab);
   const [proseMode, setProseMode] = useState<ProseMode>("rendered");
   const [verificationAudit, setVerificationAudit] = useState(d.verification_audit);
+  const [claimFinding, setClaimFinding] = useState<AssessmentFindingDetail | null>(isDetail(d.finding) ? d.finding : null);
   const [verificationAuditUnavailable, setVerificationAuditUnavailable] = useState(false);
+  const [detailRequestPending, setDetailRequestPending] = useState(!d.verification_audit);
+  const reviewIdentity = isDetail(d.finding) ? JSON.stringify([engagementKey, d.slug, d.finding.row_version, d.verification_status]) : null;
+  const lastReview = useRef<{ identity: string | null; finding: AssessmentFindingDetail } | null>(null);
+  const reviewFinding = claimFinding && (!isDetail(d.finding) || (claimFinding.row_version === d.finding.row_version && claimFinding.verification_status === d.verification_status)) ? claimFinding : null;
+  const currentAudit = reviewFinding ? verificationAudit : d.verification_audit;
+  const reviewRequestPending = detailRequestPending || (claimFinding !== null && reviewFinding === null);
   const [mdCopied, setMdCopied] = useState(false);
   const [linkCopied, setLinkCopied] = useState(false);
+  const copyMounted = useRef(true);
+  const mdCopyTimer = useRef<number | undefined>(undefined);
+  const linkCopyTimer = useRef<number | undefined>(undefined);
+  const mdCopyRequest = useRef(0);
+  const linkCopyRequest = useRef(0);
+  useEffect(() => {
+    copyMounted.current = true;
+    return () => {
+      copyMounted.current = false;
+      window.clearTimeout(mdCopyTimer.current);
+      window.clearTimeout(linkCopyTimer.current);
+    };
+  }, []);
   const setTab = (next: TabId) => {
     setTabState(next);
-    onTabChange?.(next);
+    onSectionChange(next);
+    writeWorkspaceHash(engagementHref(engagementKey, { tab: "findings", finding: d.slug, dtab: next === "overview" ? undefined : next }));
   };
   useEffect(() => {
-    // On each finding change, land on the deep-linked tab if this is the
-    // deep-linked finding, otherwise reset to "overview". Mirror it up so the
-    // URL stays in sync. (deepLinkTab is recomputed per render from the props.)
     setTabState(deepLinkTab);
-    onTabChange?.(deepLinkTab);
-    // Reset prose mode per finding so a raw-mode toggle doesn't leak across
-    // navigations. (onTabChange identity is stable from the parent.)
-    setProseMode("rendered");
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [d?.slug]);
+  }, [deepLinkTab]);
 
   useEffect(() => {
     let current = true;
-    setVerificationAudit(d.verification_audit);
+    const retained = reviewIdentity !== null && lastReview.current?.identity === reviewIdentity ? lastReview.current.finding : null;
+    setVerificationAudit(d.verification_audit ?? retained?.verification_audit);
+    setClaimFinding(retained ?? (isDetail(d.finding) ? d.finding : null));
     setVerificationAuditUnavailable(false);
-    if (d.verification_audit) return () => { current = false; };
+    setDetailRequestPending(!d.verification_audit);
+    if (d.verification_audit) {
+      if (isDetail(d.finding)) lastReview.current = { identity: reviewIdentity, finding: d.finding };
+      return () => { current = false; };
+    }
     getAssessmentFinding(engagementKey, d.slug)
       .then((finding) => {
-        if (current) setVerificationAudit(finding.verification_audit);
+        if (finding.slug !== d.slug) throw new Error("Finding detail returned a different identity");
+        if (current) {
+          setVerificationAudit(finding.verification_audit);
+          setClaimFinding(finding);
+          lastReview.current = { identity: JSON.stringify([engagementKey, finding.slug, finding.row_version, finding.verification_status]), finding };
+          onDetailLoaded(finding);
+        }
       })
       .catch(() => {
         if (current) setVerificationAuditUnavailable(true);
-      });
+      }).finally(() => { if (current) setDetailRequestPending(false); });
     return () => { current = false; };
-  }, [engagementKey, d.slug, d.verification_audit]);
+  }, [engagementKey, d.slug, d.finding, d.verification_audit, onDetailLoaded, reviewIdentity, refreshVersion]);
 
   const linkedFindings = d.links.filter((l) => l.target_kind === "finding");
   const linkedChains = d.links
@@ -1982,7 +1996,7 @@ function Drawer({
   const submissionCount =
     [d.poc_code, d.poc_request, d.poc_response, d.evidence].filter(Boolean)
       .length + (hasStepsForCount ? 1 : 0);
-  const codeCount = d.slot_type ? 1 : 0;
+  const codeCount = drawerTabVisible(d, "code") ? 1 : 0;
   const relationshipsCount =
     linkedFindings.length +
     linkedChains.length +
@@ -1991,48 +2005,46 @@ function Drawer({
   const historyCount = transitions.length;
 
   const tabs: { id: TabId; label: string; count?: number; hidden?: boolean }[] = [
-    { id: "overview", label: "Overview" },
+    { id: "overview", label: "Claim & evidence" },
     { id: "submission", label: "Submission", count: submissionCount || undefined },
     { id: "work", label: "Work" },
     { id: "relationships", label: "Relationships", count: relationshipsCount || undefined },
-    { id: "code", label: "Code", count: codeCount, hidden: !d.slot_type },
-    { id: "history", label: "History", count: historyCount },
+    { id: "code", label: "Code", count: codeCount, hidden: !codeCount },
+    { id: "history", label: "History", count: transitionsLoading || transitionsError ? undefined : historyCount },
   ];
   const visibleTabs = tabs.filter((t) => !t.hidden);
 
-  const copySlug = () => {
+  const copyMarkdown = async () => {
+    const request = ++mdCopyRequest.current;
+    setMdCopied(false);
     try {
-      void navigator.clipboard?.writeText(d.slug);
-      toast("Copied", "success");
-    } catch {
-      // ignore
-    }
-  };
-
-  // Copy-finding-as-markdown (reference-project ReportView pattern, adapted to our
-  // fields via lib/findingMarkdown). Flips the icon to a Check for 1.5s.
-  const copyMarkdown = () => {
-    try {
-      void navigator.clipboard?.writeText(findingToMarkdown(d));
+      if (!navigator.clipboard) throw new Error("Clipboard unavailable");
+      await navigator.clipboard.writeText(findingToMarkdown(d));
+      if (!copyMounted.current || request !== mdCopyRequest.current) return;
       setMdCopied(true);
-      window.setTimeout(() => setMdCopied(false), 1500);
+      window.clearTimeout(mdCopyTimer.current);
+      mdCopyTimer.current = window.setTimeout(() => setMdCopied(false), 1500);
       toast("Copied submission as Markdown", "success");
     } catch {
-      // ignore
+      if (!copyMounted.current || request !== mdCopyRequest.current) return;
+      toast("Could not copy submission. Use the submission fields to copy manually.", "error");
     }
   };
 
-  // Copy the deep-link URL. The parent's replaceState effect has already
-  // rewritten location.hash to include ?finding={slug}, so window.location.href
-  // is the canonical link to this finding's open drawer.
-  const copyLink = () => {
+  const copyLink = async () => {
+    const request = ++linkCopyRequest.current;
+    setLinkCopied(false);
     try {
-      void navigator.clipboard?.writeText(window.location.href);
+      if (!navigator.clipboard) throw new Error("Clipboard unavailable");
+      await navigator.clipboard.writeText(window.location.href);
+      if (!copyMounted.current || request !== linkCopyRequest.current) return;
       setLinkCopied(true);
-      window.setTimeout(() => setLinkCopied(false), 1500);
+      window.clearTimeout(linkCopyTimer.current);
+      linkCopyTimer.current = window.setTimeout(() => setLinkCopied(false), 1500);
       toast("Link copied", "success");
     } catch {
-      // ignore
+      if (!copyMounted.current || request !== linkCopyRequest.current) return;
+      toast("Could not copy link. Copy the address from your browser.", "error");
     }
   };
 
@@ -2042,20 +2054,14 @@ function Drawer({
         <div className="drawer-top">
           <div className="drawer-slug">
             <span>{d.slug}</span>
-            <button
-              type="button"
-              className="copy-btn"
-              onClick={copySlug}
-              title="Copy slug"
-            >
-              <IconCopy />
-            </button>
+            <CopyChip text={d.slug} toast={toast} label="Copy slug" />
           </div>
           <div className="drawer-header-actions">
             <button
               type="button"
               className="copy-btn"
               onClick={copyMarkdown}
+              disabled={!isDetail(d.finding)}
               title="Copy submission as Markdown"
               aria-label="Copy submission as Markdown"
             >
@@ -2084,11 +2090,8 @@ function Drawer({
             </span>
           )}
           <span className={`pill pill-${d.workflow_status}`}>{d.workflowLabel}</span>
-          {d.verificationKey !== "unreviewed" && (
-            <span className={`pill pill-${d.verificationKey}`}>
-              {d.verificationLabel}
-            </span>
-          )}
+          <span className={`pill pill-${d.verificationKey}`}>{d.verificationLabel}</span>
+          {!reviewRequestPending && <span className="finding-evidence-mode">{reviewFinding?.evidence_type?.replace(/-/g, " ") || "Evidence mode unrecorded"}</span>}
           {d.code_snapshot_status && d.code_snapshot_status !== "not_applicable" && (
             <span
               className={`pill pill-source-${d.code_snapshot_status}`}
@@ -2107,21 +2110,21 @@ function Drawer({
           )}
           {d.cwe_id && <span className="tag cwe">{d.cwe_id}</span>}
         </div>
-        {verificationAuditUnavailable && (
-          <div className="submission-blockers" role="status">Claim review status unavailable</div>
+        {verificationAuditUnavailable && !reviewRequestPending && (
+          <div className="submission-blockers" role="status">{lastReview.current?.identity === reviewIdentity && (reviewFinding?.proof_receipts !== undefined || currentAudit !== undefined) ? "Claim review refresh unavailable; showing previously loaded evidence for this unchanged claim." : "Claim review status unavailable"}</div>
         )}
-        {verificationAudit?.claim_review_pending && (
+        {currentAudit?.claim_review_pending && (
           <div className="submission-blockers" role="status" aria-label="Claim review pending">
             <strong>Claim review pending</strong>
-            <span>
-              Independent review required for claim transition {verificationAudit.claim_transition_id ?? "unknown"}.
-            </span>
-            {verificationAudit.current_claim_sha256 && (
-              <code>Current claim SHA-256: {verificationAudit.current_claim_sha256}</code>
-            )}
+            <span>Independent review is required for this claim.</span>
+            <details className="detail-disclosure"><summary>Claim review details</summary>
+              <p>Independent review required for claim transition {currentAudit.claim_transition_id ?? "unknown"}.</p>
+              {currentAudit.current_claim_sha256 && <code>Current claim SHA-256: {currentAudit.current_claim_sha256}</code>}
+            </details>
           </div>
         )}
       </div>
+      <FindingRemediation key={d.slug} engagementKey={engagementKey} findingSlug={d.slug} refreshVersion={refreshVersion} />
       <div className="drawer-tabs">
         {visibleTabs.map((t) => (
           <button
@@ -2129,6 +2132,7 @@ function Drawer({
             type="button"
             className={`drawer-tab ${tab === t.id ? "is-active" : ""}`}
             onClick={() => setTab(t.id)}
+            aria-current={tab === t.id ? "page" : undefined}
           >
             {t.label}
             {t.count != null && <span className="count">{t.count}</span>}
@@ -2145,11 +2149,13 @@ function Drawer({
         )}
       </div>
       <div className="drawer-body">
-        {tab === "overview" && <OverviewPane d={d} proseMode={proseMode} toast={toast} />}
-        {tab === "submission" && <SubmissionPane d={d} proseMode={proseMode} toast={toast} />}
-        {tab === "work" && <WorkPane d={d} proseMode={proseMode} toast={toast} />}
-        {tab === "code" && <CodePane d={d} toast={toast} />}
-        {tab === "relationships" && (
+        {detailRequestPending && !isDetail(d.finding) && <p role="status">Loading finding detail…</p>}
+        {!detailRequestPending && !isDetail(d.finding) && verificationAuditUnavailable && <p role="status">Finding detail unavailable. The ledger summary remains visible; reopen this finding to retry.</p>}
+        {tab === "overview" && isDetail(d.finding) && <OverviewPane engagementKey={engagementKey} d={d} receipts={reviewFinding?.proof_receipts} receiptsLoading={reviewRequestPending} proseMode={proseMode} toast={toast} />}
+        {tab === "submission" && isDetail(d.finding) && <SubmissionPane d={d} proseMode={proseMode} toast={toast} />}
+        {tab === "work" && isDetail(d.finding) && <WorkPane d={d} proseMode={proseMode} toast={toast} />}
+        {tab === "code" && isDetail(d.finding) && <CodePane d={d} toast={toast} />}
+        {tab === "relationships" && isDetail(d.finding) && (
           <RelationshipsPane
             engagementKey={engagementKey}
             d={d}
@@ -2187,31 +2193,73 @@ function previewWords(text: string, limit: number): { text: string; truncated: b
   return { text: `${words.slice(0, limit).join(" ")}…`, truncated: true };
 }
 
-function OverviewPane({ d, proseMode, toast }: { d: Derived; proseMode: ProseMode; toast: ToastFn }) {
-  const summary = previewWords(d.summary || "", 60);
+function OverviewPane({ engagementKey, d, receipts, receiptsLoading, proseMode, toast }: { engagementKey: string; d: Derived; receipts?: AssessmentProofReceipt[]; receiptsLoading: boolean; proseMode: ProseMode; toast: ToastFn }) {
   const followupCount = d.required_followup?.length ?? 0;
+  const runtimeLocation = d.canonical_location && !d.canonical_location.startsWith("file:") ? d.canonical_location : "";
+  const hasSource = Boolean(d.entry_point || d.sink || d.provenance?.code_snapshot || d.canonical_location.startsWith("file:"));
+  const request = d.poc_request ? formatHttp(d.poc_request, "req") : "";
+  const response = d.poc_response ? formatHttp(d.poc_response, "resp") : "";
   return (
     <>
-      {summary.text && (
+      {d.summary && (
         <div className="section">
-          <SectionHead title="At a glance" copyText={d.summary} toast={toast} />
-          <Prose text={summary.text} mode={proseMode} />
-          {summary.truncated && <p className="section-hint">Full summary is in Submission.</p>}
+          <SectionHead title="Security claim" copyText={d.summary} toast={toast} />
+          <Prose text={d.summary} mode={proseMode} />
         </div>
       )}
-      <div className="section">
-        <p className="section-title">Key facts</p>
-        <div className="kv-grid">
-          <KV k="Location" v={d.canonical_location} mono toast={toast} />
-          <KV k="Method" v={d.request_method} />
-          <KV k="Parameter" v={d.parameter} mono />
-          <KV k="Auth context" v={d.auth_context} />
-          <KV k="Source" v={d.source_name} />
+      {d.impact && <section className="section"><div className="section-head-row"><h3 className="section-title">Impact</h3><CopyChip text={d.impact} toast={toast} label="Copy impact" /></div><Prose text={d.impact} mode={proseMode} /></section>}
+      {d.verification_status === "pending_runtime_proof" && (
+        <p className="finding-proof-gap" role="status">Runtime proof outstanding</p>
+      )}
+      <div className="finding-evidence-contributions">
+        <section className="finding-contribution">
+          <h3>Runtime observation</h3>
+          {runtimeLocation || request || response ? (
+            <>
+              <KV k="Recorded location" v={runtimeLocation} mono toast={toast} />
+              <KV k="Auth context" v={d.auth_context} />
+              <KV k="Method" v={d.request_method} />
+              <KV k="Parameter" v={d.parameter} mono />
+              {request && <details className="detail-disclosure" open><summary>Recorded request</summary><CodeBlock text={request} onCopied={() => toast("Copied", "success")} /></details>}
+              {response && <details className="detail-disclosure"><summary>Recorded response</summary><CodeBlock text={response} onCopied={() => toast("Copied", "success")} /></details>}
+            </>
+          ) : <p className="finding-gap">No runtime observation recorded.</p>}
+        </section>
+        <section className="finding-contribution">
+          <h3>Source & root cause</h3>
+          {hasSource ? (
+            <>
+              {d.canonical_location.startsWith("file:") && <KV k="Source location" v={d.canonical_location} mono toast={toast} />}
+              <KV k="Entry point" v={d.entry_point} mono toast={toast} />
+              <KV k="Sink" v={d.sink} mono toast={toast} />
+              <KV k="Snapshot state" v={d.code_snapshot_status || "Unrecorded"} />
+              {d.taint_path?.length ? <details className="detail-disclosure"><summary>Recorded source path</summary><TaintFlow steps={d.taint_path} /></details> : <p className="finding-gap">No source path recorded.</p>}
+              <a className="finding-relation-link" href={engagementHref(engagementKey, { tab: "code" })}>Open code workspace ↗</a>
+            </>
+          ) : <p className="finding-gap">No source contribution recorded.</p>}
           <KV k="Defect family" v={d.defect_family} />
-          <KV k="OWASP" v={d.owasp_category} />
-          <KV k="Updated" v={relTime(d.updated_at)} />
-        </div>
+        </section>
       </div>
+      <section className="section finding-current-proof">
+        <h3>Current verification evidence</h3>
+        <p className="section-hint">Receipts supporting the current {d.verificationLabel.toLowerCase()} state. Earlier decisions remain in History.</p>
+        {receiptsLoading && receipts === undefined ? <p className="finding-gap" role="status">Loading current proof receipts…</p> : receipts === undefined ? <p className="finding-gap">Current proof receipts unavailable.</p> : receipts.length === 0 ? <p className="finding-gap">No proof receipts support the current verification state.</p> : (
+          <ul className="finding-receipts">
+            {receipts.map((receipt) => (
+              <li key={receipt.id}>
+                <a className="finding-receipt-link" href={engagementHref(engagementKey, { tab: "runs", run: receipt.run_id, section: "proof-receipts", object: receipt.id })}>
+                  <strong>Receipt #{receipt.id}</strong>
+                  <span>{receipt.evidence_kind.replace(/_/g, " ")}</span>
+                  <span className={`finding-proof-health health-${receipt.evidence_health}`}>{receipt.evidence_health}</span>
+                  <span>Run #{receipt.run_id} ↗</span>
+                </a>
+                <details className="finding-receipt-record"><summary>Exact receipt record</summary><JsonView value={receipt} /></details>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+      {d.evidence && <details className="detail-disclosure"><summary>Recorded evidence</summary><SectionHead title="Evidence" copyText={d.evidence} toast={toast} /><pre className="pre resp">{d.evidence}</pre></details>}
       {(d.block_reason || followupCount > 0 || d.root_cause_role) && (
         <div className="overview-attention" aria-label="Current attention">
           <p className="section-title">Current attention</p>
@@ -3200,14 +3248,19 @@ function CommandPalette({
   derivedList,
   onSelect,
   onClose,
+  returnFocusRef,
 }: {
   derivedList: Derived[];
   onSelect: (slug: string) => void;
   onClose: () => void;
+  returnFocusRef: RefObject<HTMLElement | null>;
 }) {
   const [q, setQ] = useState("");
   const [idx, setIdx] = useState(0);
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  useBodyScrollLock();
+  useModalFocus(panelRef, onClose, true, returnFocusRef);
 
   useEffect(() => {
     inputRef.current?.focus();
@@ -3274,20 +3327,18 @@ function CommandPalette({
     } else if (e.key === "Enter") {
       e.preventDefault();
       if (results[idx]) onSelect(results[idx].slug);
-    } else if (e.key === "Escape") {
-      e.preventDefault();
-      onClose();
     }
   };
 
   return (
     <div className="cmd-overlay" onClick={onClose}>
-      <div className="cmd-box" onClick={(e) => e.stopPropagation()}>
+      <div ref={panelRef} className="cmd-box" role="dialog" aria-modal="true" aria-label="Jump to finding" tabIndex={-1} onClick={(e) => e.stopPropagation()}>
         <div className="cmd-input-row">
           <IconSearch />
           <input
             ref={inputRef}
             className="cmd-input"
+            aria-label="Search findings to jump to"
             placeholder="Jump to finding · try 'severity:critical xss' or a slug"
             value={q}
             onChange={(e) => setQ(e.target.value)}
@@ -3300,9 +3351,11 @@ function CommandPalette({
             <div className="cmd-empty">No findings match.</div>
           ) : (
             results.map((d, i) => (
-              <div
+              <button
                 key={d.slug}
+                type="button"
                 className={`cmd-item ${i === idx ? "is-active" : ""}`}
+                onFocus={() => setIdx(i)}
                 onMouseEnter={() => setIdx(i)}
                 onClick={() => onSelect(d.slug)}
               >
@@ -3311,13 +3364,13 @@ function CommandPalette({
                   style={{ background: sevDotColor(d.severity) }}
                 />
                 <span>
-                  <div className="cmd-title">{d.title}</div>
-                  <div className="cmd-sub">
+                  <span className="cmd-title">{d.title}</span>
+                  <span className="cmd-sub">
                     {d.slug} · {d.severity} · {d.cwe_id || ""}
-                  </div>
+                  </span>
                 </span>
                 <span className="cmd-sub">{d.canonical_location || ""}</span>
-              </div>
+              </button>
             ))
           )}
         </div>

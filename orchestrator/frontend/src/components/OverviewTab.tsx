@@ -6,6 +6,7 @@ import type {
   AssessmentFinding,
   AssessmentFindingDetail,
   AssessmentSummary,
+  Engagement,
   EventRecord,
   PerHostCoverage,
   PerHostCoverageHost,
@@ -13,6 +14,7 @@ import type {
   ReportReadiness,
 } from "../lib/api";
 import { getReportReadiness } from "../lib/api";
+import { engagementHref } from "../lib/workspaceRoutes";
 import { PhaseWaterfall } from "./PhaseWaterfall";
 import { ChartSkeleton } from "./Skeletons";
 import { SeverityDonut } from "./charts/SeverityDonut";
@@ -53,9 +55,13 @@ type OverviewTabProps = {
   events: EventRecord[];
   assessmentSummary: AssessmentSummary | null;
   findings: (AssessmentFindingDetail | AssessmentFinding)[];
+  findingsLoading?: boolean;
+  findingsLoadError?: string | null;
   chains: (AssessmentAttackChainDetail | AssessmentAttackChain)[];
   chainLinks: AssessmentAttackChainLink[];
   currentPhase: string;
+  trackState?: Engagement["track_state"];
+  aggregateComplete?: boolean;
   assessmentRefreshVersion: number;
 };
 
@@ -110,7 +116,11 @@ function describeDeferralPayload(payload: Record<string, unknown>): string {
   return JSON.stringify(payload);
 }
 
-export function OverviewTab({ engagementKey, events, assessmentSummary, findings, chains, chainLinks, currentPhase, assessmentRefreshVersion }: OverviewTabProps) {
+export function OverviewTab(props: OverviewTabProps) {
+  return <OverviewWorkspace key={props.engagementKey} {...props} />;
+}
+
+function OverviewWorkspace({ engagementKey, events, assessmentSummary, findings, findingsLoading = false, findingsLoadError = null, chains, chainLinks, currentPhase, trackState, aggregateComplete, assessmentRefreshVersion }: OverviewTabProps) {
   const s = assessmentSummary;
   const [readiness, setReadiness] = useState<ReportReadiness | null>(null);
   const [readinessError, setReadinessError] = useState<string | null>(null);
@@ -171,17 +181,12 @@ export function OverviewTab({ engagementKey, events, assessmentSummary, findings
   const findingSeverities = s?.finding_severities;
   const critHigh = (findingSeverities?.critical ?? 0) + (findingSeverities?.high ?? 0);
   const statBarItems: SummaryStatBarItem[] = [
-    { label: "Findings", value: s?.finding_count ?? 0 },
+    { label: "Current findings", value: s?.finding_count ?? 0 },
     { label: "Crit/High", value: critHigh, tone: critHigh > 0 ? "danger" : "ok" },
-    { label: "Surfaces", value: s?.open_surface_count ?? 0 },
+    { label: "Open surfaces", value: s?.open_surface_count ?? 0 },
     { label: "Services", value: s?.service_count ?? 0 },
-    { label: "Chains", value: s?.attack_chain_count ?? 0 },
-    { label: "Exploitable", value: s?.exploit_candidate_count ?? 0 },
-    {
-      label: "Report blockers",
-      value: s?.report_blocker_count ?? 0,
-      tone: (s?.report_blocker_count ?? 0) > 0 ? "danger" : "ok",
-    },
+    { label: "Attack chains", value: s?.attack_chain_count ?? 0 },
+    { label: "Exploit candidates", value: s?.exploit_candidate_count ?? 0 },
   ];
 
   useEffect(() => {
@@ -203,7 +208,32 @@ export function OverviewTab({ engagementKey, events, assessmentSummary, findings
 
   return (
     <>
-      <PhaseWaterfall events={events} currentPhase={currentPhase} />
+      <section className="panel overview-attention" aria-labelledby="attention-title">
+        <div className="panel-header"><h2 id="attention-title">Needs attention</h2><a href={engagementHref(engagementKey, { tab: "runs" })}>Open runs</a></div>
+        {s === null ? <p className="meta-text">Loading engagement summary…</p> : <div className="attention-row">
+          <a href={engagementHref(engagementKey, { tab: "coverage" })}><strong>{s.coverage_blocker_count}</strong> coverage blockers</a>
+          <a href={engagementHref(engagementKey, { tab: "submissions" })}><strong>{s.report_blocker_count}</strong> report blockers</a>
+          <a href={engagementHref(engagementKey, { tab: "findings" })}><strong>{["unreviewed", "disputed", "pending_runtime_proof", "blocked"].reduce((total, status) => total + (s.finding_verification_statuses?.[status] ?? 0), 0)}</strong> findings awaiting verification</a>
+        </div>}
+      </section>
+
+      <section className="panel overview-finding-queue" aria-labelledby="finding-queue-title">
+        <div className="panel-header"><h2 id="finding-queue-title">Finding queue</h2><a href={engagementHref(engagementKey, { tab: "findings" })}>All findings</a></div>
+        <div className="finding-queue-list">
+          {sortedFindings.slice(0, 5).map(f => <div className="finding-queue-row" key={f.slug}>
+            <span className={`badge severity-${f.severity}`}>{f.severity}</span>
+            <a href={engagementHref(engagementKey, { tab: "findings", finding: f.slug })}>{f.title}</a>
+            <span className="meta-text">{f.workflow_status}</span>
+            <span className="meta-text">{verificationSummary(f)}</span>
+          </div>)}
+          {findingsLoading && <p className="meta-text" role="status">Loading finding ledger…</p>}
+          {findingsLoadError && <p className="error-text" role="status">{sortedFindings.length > 0 ? "Finding ledger refresh failed. Showing last available finding records: " : "Finding ledger unavailable: "}{findingsLoadError}</p>}
+          {sortedFindings.length === 0 && !findingsLoading && !findingsLoadError && <p className="meta-text">{s === null ? "Loading findings…" : "No findings recorded yet."}</p>}
+          {sortedFindings.length > 5 && <p className="meta-text">Showing 5 of {sortedFindings.length} loaded findings. Open all findings for the full ledger.</p>}
+        </div>
+      </section>
+
+      <PhaseWaterfall currentPhase={currentPhase} trackState={trackState} aggregateComplete={aggregateComplete} />
 
       {egressBannerVisible && (
         <section className="panel" data-testid="egress-reputation-banner">
@@ -212,31 +242,26 @@ export function OverviewTab({ engagementKey, events, assessmentSummary, findings
           </div>
           <p>
             <strong>{egressBlockedPct}%</strong> of representative live hosts returned 403 / 000-status from
-            the runtime egress IP (pattern: <code>{egressStatus?.pattern ?? "unknown"}</code>). Choose a
-            mitigation before continuing Phase 3 dispatch:
+            the runtime egress IP (pattern: <code>{egressStatus?.pattern ?? "unknown"}</code>).
+            Review mitigation options with the operator:
           </p>
           <ol>
             <li>
-              <button type="button" data-testid="egress-choice-allowlist">
-                Request IP allowlisting from the program
-              </button>
+              Request IP allowlisting from the program.
             </li>
             <li>
-              <button type="button" data-testid="egress-choice-proxy">
-                Route through a residential proxy or clean-IP VPS
-              </button>
+              Route through a residential proxy or clean-IP VPS.
             </li>
             <li>
-              <button type="button" data-testid="egress-choice-browser">
-                Use a browser-based tool inside the runtime
-              </button>
+              Use a browser-based tool inside the runtime.
             </li>
             <li>
-              <button type="button" data-testid="egress-choice-accept">
-                Accept the limited coverage and document the gap
-              </button>
+              Accept the limited coverage and document the gap.
             </li>
           </ol>
+          <p className="meta-text">
+            Record the operator decision in the engagement workflow. Review existing evidence in <a href={engagementHref(engagementKey, { tab: "http" })}>HTTP traffic</a> or <a href={engagementHref(engagementKey, { tab: "log" })}>the audit log</a>.
+          </p>
           <p className="meta-text">
             Detail: <code>agent/references/runtime-guides/cdn-ip-blocking.md</code>
           </p>
@@ -270,6 +295,7 @@ export function OverviewTab({ engagementKey, events, assessmentSummary, findings
         <div className="panel-header">
           <h2>At a glance</h2>
         </div>
+        <p className="meta-text">Current findings exclude merged and false-positive records.</p>
         <div className="overview-charts-row">
           {summaryLoading ? (
             <div className="overview-charts-donut">
@@ -288,7 +314,7 @@ export function OverviewTab({ engagementKey, events, assessmentSummary, findings
             )
           )}
           <div className="overview-charts-stats">
-            <SummaryStatBar items={statBarItems} />
+            {summaryLoading ? <ChartSkeleton variant="bar" height={80} label="Engagement summary" /> : <SummaryStatBar items={statBarItems} />}
           </div>
         </div>
       </section>
@@ -296,45 +322,12 @@ export function OverviewTab({ engagementKey, events, assessmentSummary, findings
       <section className="panel">
         <div className="panel-header">
           <h2>Coverage</h2>
+          <a href={engagementHref(engagementKey, { tab: "coverage" })}>Full coverage ledger</a>
         </div>
-        <div className="stats-grid">
-          <article className="stat-card">
-            <span className="stat-value">{s?.finding_count ?? 0}</span>
-            <span className="meta-text">Findings</span>
-          </article>
-          <article className="stat-card">
-            <span className="stat-value">{s?.attack_chain_count ?? 0}</span>
-            <span className="meta-text">Attack chains</span>
-          </article>
-          <article className="stat-card">
-            <span className="stat-value">{s?.probe_count ?? 0}</span>
-            <span className="meta-text">Probe runs</span>
-          </article>
-          <article className="stat-card">
-            <span className="stat-value">{s?.target_count ?? 0}</span>
-            <span className="meta-text">Targets</span>
-          </article>
-          <article className="stat-card">
-            <span className="stat-value">{s?.service_count ?? 0}</span>
-            <span className="meta-text">Services</span>
-          </article>
-          <article className="stat-card">
-            <span className="stat-value">{s?.open_surface_count ?? 0}</span>
-            <span className="meta-text">Open surfaces</span>
-          </article>
-          <article className="stat-card">
-            <span className="stat-value">{s?.exploit_candidate_count ?? 0}</span>
-            <span className="meta-text">Exploit candidates</span>
-          </article>
-          <article className="stat-card">
-            <span className="stat-value">{s?.coverage_blocker_count ?? 0}</span>
-            <span className="meta-text">Coverage blockers</span>
-          </article>
-          <article className="stat-card">
-            <span className="stat-value">{s?.report_blocker_count ?? 0}</span>
-            <span className="meta-text">Report blockers</span>
-          </article>
-        </div>
+        {s === null ? <p className="meta-text">Loading coverage summary…</p> : <SummaryStatBar items={[
+          { label: "Targets", value: s.target_count },
+          { label: "Probe runs", value: s.probe_count },
+        ]} />}
       </section>
 
       {readiness && (
@@ -355,7 +348,7 @@ export function OverviewTab({ engagementKey, events, assessmentSummary, findings
                   <div>
                     {affected.length > 0 && (
                       <p className="meta-text">
-                        Findings: {affected.map((slug) => <code key={slug}>{slug}</code>)}
+                        Findings: {affected.map((slug, index) => <span key={slug}>{index > 0 && ", "}<a href={engagementHref(engagementKey, { tab: "findings", finding: slug })}><code>{slug}</code></a></span>)}
                       </p>
                     )}
                     <p>{blocker.detail || "No detail provided."}</p>
@@ -371,26 +364,9 @@ export function OverviewTab({ engagementKey, events, assessmentSummary, findings
           <p className="meta-text">Report readiness unavailable: {readinessError}</p>
         </section>
       )}
+      {!readiness && !readinessError && <p className="meta-text" role="status">Loading report readiness…</p>}
 
       <section className="engagement-grid">
-        <article className="panel">
-          <p className="eyebrow">Findings</p>
-          <div style={{ display: "grid", gap: "12px", marginTop: "8px" }}>
-            {sortedFindings.slice(0, 5).map((f) => (
-              <div key={f.slug} style={{ display: "flex", alignItems: "baseline", gap: "8px", flexWrap: "wrap" }}>
-                <strong>{f.title}</strong>
-                <span className={`badge severity-${f.severity}`}>{f.severity}</span>
-                <span className="meta-text">{f.workflow_status}</span>
-                <span className="meta-text">{verificationSummary(f)}</span>
-              </div>
-            ))}
-            {sortedFindings.length > 5 && (
-              <p className="meta-text">+{sortedFindings.length - 5} more</p>
-            )}
-            {sortedFindings.length === 0 && <p className="meta-text">No findings recorded yet.</p>}
-          </div>
-        </article>
-
         <article className="panel">
           <p className="eyebrow">Attack chains</p>
           <div style={{ display: "grid", gap: "12px", marginTop: "8px" }}>
@@ -458,7 +434,7 @@ type ReadinessPanelProps = {
 };
 
 // C58 — Readiness panel renders:
-//  1. The Definition-of-Done summary (overall ready/blocked indicator + blocker count)
+//  1. Report checks (ready/blocked indicator + blocker count)
 //  2. The C40 per-host outcome matrix (5 objectives × N hosts)
 //  3. Active coverage_deferral decision rows surfaced inline so operators
 //     can audit which objectives were intentionally skipped.
@@ -523,7 +499,6 @@ function deriveScopeLiterals(scopeHosts: string[] | undefined): Set<string> {
 
 function ReadinessPanel({ readiness }: ReadinessPanelProps) {
   const perHost = readiness.per_host_coverage;
-  const hasHosts = !!perHost && perHost.hosts.length > 0;
   const totalUnmet = perHost
     ? perHost.hosts.reduce((sum, row) => sum + row.unmet_objectives.length, 0)
     : 0;
@@ -545,7 +520,7 @@ function ReadinessPanel({ readiness }: ReadinessPanelProps) {
   return (
     <section className="panel" data-testid="readiness-panel">
       <div className="panel-header">
-        <h2>Readiness</h2>
+        <h2>Report checks</h2>
         <span
           className={`badge ${readiness.ready ? "severity-low" : "severity-high"}`}
           data-testid="readiness-overall-badge"
@@ -557,18 +532,18 @@ function ReadinessPanel({ readiness }: ReadinessPanelProps) {
       <div className="stats-grid">
         <article className="stat-card">
           <span className="stat-value">{readiness.blocker_count}</span>
-          <span className="meta-text">Definition-of-Done blockers</span>
+          <span className="meta-text">Report blockers</span>
         </article>
         <article className="stat-card">
-          <span className="stat-value">{hasHosts ? perHost!.hosts.length : 0}</span>
+          <span className="stat-value">{perHost?.hosts.length ?? "Unknown"}</span>
           <span className="meta-text">Hosts with signal</span>
         </article>
         <article className="stat-card">
-          <span className="stat-value">{totalUnmet}</span>
+          <span className="stat-value">{perHost ? totalUnmet : "Unknown"}</span>
           <span className="meta-text">Per-host objectives unmet (WARN)</span>
         </article>
         <article className="stat-card">
-          <span className="stat-value">{totalDeferrals}</span>
+          <span className="stat-value">{perHost ? totalDeferrals : "Unknown"}</span>
           <span className="meta-text">Active coverage deferrals</span>
         </article>
       </div>
@@ -653,8 +628,7 @@ function PerHostCoverageMatrix({
   if (perHost.hosts.length === 0) {
     return (
       <p className="meta-text" data-testid="readiness-no-hosts">
-        No hosts have backend signal yet. Dispatch recon-specialist to populate
-        services / surfaces / intel tables before re-checking.
+        No per-host coverage signals are recorded.
       </p>
     );
   }

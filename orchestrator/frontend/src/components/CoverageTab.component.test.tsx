@@ -86,6 +86,15 @@ const summary = {
 afterEach(cleanup);
 
 describe("CoverageTab", () => {
+  it("groups and filters by the stored canonical host when its service is not loaded", () => {
+    render(<CoverageTab engagementKey="demo" summary={summary} targets={[]} services={[]} coverageItems={[item]} />);
+    fireEvent.click(screen.getByRole("button", { name: /^Full ledger/ }));
+    fireEvent.change(screen.getByRole("searchbox", { name: "Search coverage ledger" }), { target: { value: "host:api.example.test" } });
+    const host = screen.getByRole("button", { name: /api\.example\.test/i });
+    fireEvent.click(host);
+    expect(screen.getByRole("button", { name: /GET.*orders.*idor/i })).toBeTruthy();
+    expect(screen.queryByText("No coverage items match the current filters.")).toBeNull();
+  });
   it("shows actionable debt first and retains an accessible full ledger", () => {
     const view = render(
       <CoverageTab
@@ -140,5 +149,7 @@ describe("CoverageTab", () => {
       /Summary unavailable.*1 loaded row.*totals.*unknown/i,
     );
     expect(screen.queryByText("No coverage data recorded yet.")).toBeNull();
+    expect(screen.queryByText("No coverage debt in the available summary.")).toBeNull();
+    expect(screen.getByText(/Coverage debt summary unavailable/)).toBeTruthy();
   });
 });

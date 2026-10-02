@@ -6002,28 +6002,94 @@ def _create_post_migration_indexes(connection: sqlite3.Connection) -> None:
     )
 
 
-def _create_remediation_tables(connection: sqlite3.Connection) -> None:
-    connection.executescript("""
-        CREATE TABLE IF NOT EXISTS remediation_cases (
+_REMEDIATION_CASE_TABLE_SQL = """
+        CREATE TABLE {if_not_exists}{table} (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             engagement_id INTEGER NOT NULL REFERENCES engagements(id) ON DELETE CASCADE,
-            source_type TEXT NOT NULL CHECK(source_type IN ('jira', 'bounty')),
+            source_type TEXT NOT NULL CHECK(source_type IN ('jira', 'bounty', 'finding')),
             source_key TEXT NOT NULL,
             title TEXT NOT NULL,
             snapshot_json TEXT NOT NULL,
-            linked_finding_engagement_key TEXT,
-            linked_finding_slug TEXT,
             status TEXT NOT NULL DEFAULT 'intake',
             worktree_path TEXT,
             worktree_branch TEXT,
             worktree_revision TEXT,
             verification_plan TEXT NOT NULL DEFAULT '',
-            baseline_json TEXT NOT NULL DEFAULT '{}',
-            release_plan_json TEXT NOT NULL DEFAULT '{}',
+            baseline_json TEXT NOT NULL DEFAULT '{{}}',
+            release_plan_json TEXT NOT NULL DEFAULT '{{}}',
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(engagement_id, source_type, source_key)
-        );
+        )
+"""
+
+
+def _create_remediation_finding_links(connection: sqlite3.Connection) -> None:
+    connection.execute("""
+        CREATE TABLE IF NOT EXISTS remediation_case_findings (
+            case_id INTEGER NOT NULL REFERENCES remediation_cases(id) ON DELETE CASCADE,
+            finding_id INTEGER NOT NULL REFERENCES assessment_findings(id) ON DELETE CASCADE,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY(case_id, finding_id)
+        )
+    """)
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_remediation_case_findings_finding ON remediation_case_findings(finding_id, case_id)")
+
+
+def _database_needs_remediation_finding_link_migration(db_path: Path) -> bool:
+    if not db_path.exists():
+        return False
+    with closing(sqlite3.connect(str(db_path))) as connection:
+        return "linked_finding_slug" in _table_columns(connection, "remediation_cases")
+
+
+def _migrate_remediation_finding_links(db_path: Path) -> None:
+    # Disabling FK actions prevents rebuilding the parent from cascading into
+    # its immutable ledgers. The transaction and final check preserve integrity.
+    with closing(sqlite3.connect(str(db_path))) as connection, connection:
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys=OFF")
+        connection.execute("BEGIN IMMEDIATE")
+        columns = _table_columns(connection, "remediation_cases")
+        sequence = connection.execute("SELECT seq FROM sqlite_sequence WHERE name='remediation_cases'").fetchone()
+        linked_rows = []
+        for row in connection.execute("SELECT c.*,e.key AS owner_key FROM remediation_cases c JOIN engagements e ON e.id=c.engagement_id ORDER BY c.id"):
+            slug = row["linked_finding_slug"]
+            key = row["linked_finding_engagement_key"] if "linked_finding_engagement_key" in columns else None
+            if not slug and not key:
+                continue
+            matches = connection.execute(
+                "SELECT f.id FROM assessment_findings f JOIN engagements e ON e.id=f.engagement_id WHERE e.key=? AND f.slug=?",
+                (key or row["owner_key"], slug),
+            ).fetchall()
+            if len(matches) != 1:
+                raise RuntimeError(f"Cannot migrate remediation case {row['id']}: unresolved finding {key or row['owner_key']!r}/{slug!r}")
+            linked_rows.append((row["id"], matches[0]["id"]))
+        connection.execute(_REMEDIATION_CASE_TABLE_SQL.format(if_not_exists="", table="remediation_cases_next"))
+        next_columns = _table_columns(connection, "remediation_cases_next")
+        unknown_columns = columns - next_columns - {"linked_finding_slug", "linked_finding_engagement_key"}
+        if unknown_columns:
+            raise RuntimeError(f"Cannot migrate remediation cases with unknown columns: {sorted(unknown_columns)!r}")
+        shared_columns = sorted(columns & next_columns)
+        names = ",".join(shared_columns)
+        connection.execute(f"INSERT INTO remediation_cases_next({names}) SELECT {names} FROM remediation_cases")
+        connection.execute("DROP TABLE remediation_cases")
+        connection.execute("ALTER TABLE remediation_cases_next RENAME TO remediation_cases")
+        if sequence is not None:
+            updated = connection.execute("UPDATE sqlite_sequence SET seq=MAX(seq,?) WHERE name='remediation_cases'", (sequence["seq"],))
+            if not updated.rowcount:
+                connection.execute("INSERT INTO sqlite_sequence(name,seq) VALUES('remediation_cases',?)", (sequence["seq"],))
+        _create_remediation_finding_links(connection)
+        connection.executemany("INSERT INTO remediation_case_findings(case_id,finding_id) VALUES(?,?)", linked_rows)
+        failures = connection.execute("PRAGMA foreign_key_check").fetchall()
+        if failures:
+            raise RuntimeError(f"Remediation finding migration failed foreign-key validation: {failures!r}")
+
+
+def _create_remediation_tables(connection: sqlite3.Connection) -> None:
+    connection.execute(_REMEDIATION_CASE_TABLE_SQL.format(if_not_exists="IF NOT EXISTS ", table="remediation_cases"))
+    _create_remediation_finding_links(connection)
+    connection.executescript("""
         CREATE INDEX IF NOT EXISTS idx_remediation_cases_queue
             ON remediation_cases(engagement_id, status, updated_at DESC);
         CREATE TABLE IF NOT EXISTS remediation_evidence (
@@ -6084,8 +6150,6 @@ def _create_remediation_tables(connection: sqlite3.Connection) -> None:
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
     """)
-    if "linked_finding_engagement_key" not in _table_columns(connection, "remediation_cases"):
-        connection.execute("ALTER TABLE remediation_cases ADD COLUMN linked_finding_engagement_key TEXT")
     if "worktree_branch" not in _table_columns(connection, "remediation_cases"):
         connection.execute("ALTER TABLE remediation_cases ADD COLUMN worktree_branch TEXT")
     if "baseline_json" not in _table_columns(connection, "remediation_cases"):
@@ -6112,6 +6176,9 @@ def init_db() -> None:
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     db_path = database_path()
     _check_database_compatibility(db_path)
+    if _database_needs_remediation_finding_link_migration(db_path):
+        _create_adjacent_migration_backup(db_path, label="remediation-finding-links")
+        _migrate_remediation_finding_links(db_path)
     verification_backup = (
         _create_adjacent_verification_backup(db_path)
         if _database_needs_verification_status_migration(db_path)

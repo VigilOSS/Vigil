@@ -10,6 +10,8 @@ export type Engagement = {
   engagement_root: string;
   current_phase: string;
   code_phase?: string | null;
+  track_state?: Record<string, { phase: string; complete: boolean; repair_required?: boolean }>;
+  aggregate_complete?: boolean;
   exploit_policy: string;
   exploit_review_state: string;
   approved_targets: string[];
@@ -202,6 +204,26 @@ export type AssessmentFindingDetail = AssessmentFinding & {
   submission_url?: string;
   merged_into_slug?: string | null;
   verification_audit?: AssessmentVerificationAudit;
+  evidence_type?: string | null;
+  proof_receipts?: AssessmentProofReceipt[];
+};
+
+export type AssessmentProofReceipt = {
+  id: number;
+  run_id: number;
+  evidence_kind: string;
+  evidence_health: string;
+  created_at: string;
+  evidence_ref?: string | null;
+  evidence_sha256?: string | null;
+  producer_dispatch_id?: number | null;
+  source_read_id?: number | null;
+  command_run_id?: number | null;
+  artifact_id?: number | null;
+  request_variant_id?: number | null;
+  http_exchange_id?: number | null;
+  oob_probe_id?: number | null;
+  oob_event_id?: number | null;
 };
 
 export type SubmissionFindingSummary = {
@@ -818,11 +840,11 @@ export type RemediationCase = {
   title: string;
   status: string;
   snapshot: Record<string, unknown>;
-  linked_finding_slug: string | null;
-  linked_finding_engagement_key?: string | null;
+  linked_findings: LinkedRemediationFinding[];
   duplicate_hints: number[];
   duplicate_hint_details?: Array<{ case_id: number; reasons: string[] }>;
   worktree_path: string | null;
+  worktree_branch?: string | null;
   worktree_revision: string | null;
   verification_plan: string;
   baseline: Partial<RemediationBaseline>;
@@ -854,10 +876,46 @@ export type RemediationReleasePlan = {
   coralogix_monitoring: string;
 };
 
-export type RemediationCaseSummary = Pick<RemediationCase, "id" | "source_type" | "source_key" | "title" | "status"> & { duplicate_hints: number[]; duplicate_hint_details?: Array<{ case_id: number; reasons: string[] }> };
+export type LinkedRemediationFinding = {
+  id: number;
+  engagement_key: string;
+  slug: string;
+  title: string;
+  severity: string;
+  verification_status: string;
+  root_cause_key: string | null;
+};
+
+export type RemediationCaseSummary = Pick<RemediationCase, "id" | "source_type" | "source_key" | "title" | "status" | "linked_findings"> & {
+  duplicate_hints: number[];
+  duplicate_hint_details?: Array<{ case_id: number; reasons: string[] }>;
+  worktree_revision?: string | null;
+  baseline_outcome?: string | null;
+  approval_recorded?: boolean;
+};
+
+export type FindingRemediationSummary = {
+  id: number;
+  engagement_key: string;
+  title: string;
+  status: string;
+  worktree_path: string | null;
+  worktree_branch: string | null;
+  worktree_revision: string | null;
+  latest_deployment: RemediationCase["deployment"];
+  linked_findings: LinkedRemediationFinding[];
+};
 
 function remediationBase(engagementKey: string): string {
   return `/engagements/${encodeURIComponent(engagementKey)}/remediation`;
+}
+
+export function getFindingRemediationCases(engagementKey: string, slug: string) {
+  return request<FindingRemediationSummary[]>(`${remediationBase(engagementKey)}/findings/${encodeURIComponent(slug)}/cases`);
+}
+
+export function createRemediationFromFinding(engagementKey: string, slug: string, input: { remediation_engagement_key: string; title?: string }) {
+  return request<RemediationCase & { engagement_key: string }>(`${remediationBase(engagementKey)}/findings/${encodeURIComponent(slug)}/cases`, { method: "POST", body: JSON.stringify(input) });
 }
 
 export function listRemediationCases(engagementKey: string) {
@@ -866,6 +924,10 @@ export function listRemediationCases(engagementKey: string) {
 
 export function getRemediationCase(engagementKey: string, caseId: number) {
   return request<RemediationCase>(`${remediationBase(engagementKey)}/cases/${caseId}`);
+}
+
+export function updateRemediationFindings(engagementKey: string, caseId: number, findingIds: number[]) {
+  return request<RemediationCase>(`${remediationBase(engagementKey)}/cases/${caseId}`, { method: "PATCH", body: JSON.stringify({ finding_ids: findingIds }) });
 }
 
 export type RemediationDiff = {
@@ -1431,6 +1493,7 @@ export type AssessmentCommandRun = {
   timeout_seconds_requested?: number | null;
   partial_results?: boolean;
   finding_id?: number | null;
+  finding_slug?: string | null;
   // Command-metadata audit fields. All nullable — pre-migration rows
   // and calls that don't set the X-* headers land as null.
   technique?: string | null;
