@@ -15,6 +15,14 @@ expose the `vigil-*` session commands.
 | `goose` | goose on direct DeepSeek | Yes — headless (`delegate`) | No |
 | `opencode` | opencode on direct DeepSeek | No — runs inline | No |
 
+Claude and Codex compact automatically
+([compaction hooks](session-commands.md#compaction-claude-and-codex)) and run with their
+cross-session memory disabled, so the orchestrator ledger stays the engagement's single record.
+
+Run one lead operator per engagement at a time unless you are deliberately coordinating a
+dual-client run: both clients share durable orchestrator state, but filesystem artifacts under
+an engagement directory are still ordinary files.
+
 ## Closed-model clients
 
 `claude`, `codex`, and `kimi` need only the vendor CLI installed and
@@ -169,7 +177,8 @@ Every client's launcher exports `ENGAGEMENT_DIR`, `VIGIL_SESSION_ENGAGEMENT_DIR`
 `ENGAGEMENT_KEY`, `VIGIL_AGENT_ROOT`, `VIGIL_INSTALL_DIR`, `VIGIL_CLIENT_NAME`,
 and — only when not already set — `ORCHESTRATOR_BASE_URL`, resolved from the
 engagement's `.orchestrator.env`, then the install root's `.orchestrator.env`, then
-its `.env`.
+its `.env`. `vigil engagement start` also exports `VIGIL_OPERATOR_MODE` for the selected
+`--mode`.
 
 The specialist roster links (`.codex/agents`, `.claude/agents`, both opencode
 roster spellings, `.goose/recipes`) and the command surfaces (`.claude/commands`,

@@ -899,7 +899,7 @@ def _check_runtime_ulimits(container_name: str, *, runner: docker.Runner) -> Non
         print(
             "[vigil] WARN: dockerd default ulimits are low: "
             + ", ".join(warnings)
-            + ". See README 'Container resource limits' for the daemon.json fix.",
+            + ". See docs/operations.md 'File-descriptor and process limits' for the daemon.json fix.",
             file=sys.stderr,
         )
 
@@ -1021,7 +1021,7 @@ def _maybe_warn_tier_undersized(resources: RuntimeResources) -> None:
         print(
             f"hint\thost has {host_gb} GB RAM but runtime is set to {resources.memory_gb} GB; "
             "consider VIGIL_RUNTIME_MEMORY_GB=16 (or 32) for better parallelism. "
-            "See README Resource Sizing."
+            "See docs/operations.md 'Resource sizing'."
         )
 
 

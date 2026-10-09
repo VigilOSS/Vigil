@@ -4012,8 +4012,8 @@ def test_runtime_start_applies_resource_limits(tmp_path: Path, monkeypatch: pyte
     assert "--pids-limit=1024" in run_command
     assert "--shm-size=2g" in run_command
     assert "--oom-score-adj=-500" in run_command
-    # nofile/nproc are dockerd-side (default-ulimits in daemon.json); see README
-    # "Container resource limits". `vigil runtime start` probes them via
+    # nofile/nproc are dockerd-side (default-ulimits in daemon.json); see
+    # docs/operations.md "File-descriptor and process limits". `vigil runtime start` probes them via
     # _check_runtime_ulimits and warns to stderr when low.
 
 

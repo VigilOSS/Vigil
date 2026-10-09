@@ -4,7 +4,7 @@ How `vigil install` / `vigil up` copy the managed tree, and how
 Vigil detects a working root that has drifted behind the CLI binary.
 
 For the operator-facing summary — the two layers and the three warning surfaces —
-see [the README](../README.md#the-two-layers-cli-binary-vs-working-root).
+see [installation](installation.md#the-two-layers-cli-binary-vs-working-root).
 
 ## The install stamp
 

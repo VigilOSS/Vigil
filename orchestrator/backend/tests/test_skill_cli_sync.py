@@ -192,7 +192,8 @@ def _doc_files() -> list[Path]:
     - the ``docs/`` operator and maintainer pages that name concrete
       invocations — the assessment-CLI reference, the session-command
       reference, agent clients, authentication, blue engagements, code
-      analysis, OOB routing, operations, and install integrity. These are
+      analysis, OOB routing, operations, install integrity, installation, and
+      engagements. These are
       living user-facing docs: a verb renamed out from under one of them is
       exactly the copy-paste failure this lint exists to catch,
     - the editor-rule pointer (.cursor) and the eval harness README.
@@ -234,6 +235,8 @@ def _doc_files() -> list[Path]:
         _REPO_ROOT / "docs" / "oob-routing.md",
         _REPO_ROOT / "docs" / "operations.md",
         _REPO_ROOT / "docs" / "install-integrity.md",
+        _REPO_ROOT / "docs" / "installation.md",
+        _REPO_ROOT / "docs" / "engagements.md",
         _REPO_ROOT / "CODE-MAP.md",
         _REPO_ROOT / "AGENTS.md",
         _REPO_ROOT / ".cursor" / "rules" / "operator.md",

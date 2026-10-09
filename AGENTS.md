@@ -90,7 +90,7 @@ there for the full reference, env-var precedence, and resource sizing.
    `vigil install ~/vigil` seeds (or upgrades, in place) the working root that holds the
    shared prompt tree, generated client wrappers, runtime assets, and orchestrator state. Engagements,
    the orchestrator DB, and `.env` are never moved or deleted on re-install. See
-   [The two layers: CLI binary vs working root](README.md#the-two-layers-cli-binary-vs-working-root).
+   [The two layers: CLI binary vs working root](docs/installation.md#the-two-layers-cli-binary-vs-working-root).
 
 2. **Start the local stack.** One command brings up the Kali runtime, the orchestrator backend (which
    builds the frontend when needed), and any configured mitmproxy/OOB services:

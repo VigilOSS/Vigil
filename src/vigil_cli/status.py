@@ -732,7 +732,7 @@ def _host_recon_tools_check() -> Check:
         return Check(
             "host-recon-tools", "WARN",
             "missing " + ", ".join(missing_essential)
-            + " — see README 'Recon runtime: host vs. container' for install commands "
+            + " — see docs/installation.md 'Recon runtime: host vs container' for install commands "
             "(needed for --runtime host on Docker Desktop)",
         )
     present = [t.binary for t, present in statuses if present]

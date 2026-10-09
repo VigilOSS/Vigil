@@ -1,6 +1,9 @@
 <div align="center">
 
-# Vigil
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/logo/vigil-lockup-dark.svg">
+  <img alt="Vigil" src="docs/assets/logo/vigil-lockup-light.svg" width="280">
+</picture>
 
 **AI-driven offensive and incident-response engagements — operator prompts, a full Kali runtime, and durable orchestrator state in one CLI.**
 
@@ -24,32 +27,23 @@ response.
 > infrastructure, and target effects. See [SECURITY.md](SECURITY.md) for private vulnerability
 > reporting and the operator-data boundary.
 
-- **A full Kali runtime** — ProjectDiscovery recon tooling, fuzzers, post-access tooling, OOB
-  callback detection, and tunneling in one long-lived container.
-- **Durable state** — every target, service, request variant, probe, finding, chain, and
-  credential in SQLite, with rotated backups and a web UI.
-- **A gated phase model** — an operator plus specialist roles work an ordered phase roster with
-  readiness checks between phases.
-- **Five agent CLIs** — Claude Code, Codex, Kimi, goose, and opencode, one methodology.
+- **Findings are independently verified.** A finding is confirmed, downgraded, or marked a false
+  positive only by a dispatch other than its author's, citing a proof receipt of captured evidence.
+- **Target-facing commands are audited.** `vigil assess kali` records each command's technique,
+  intent, and probe kind, so the engagement keeps a trail of what was sent and why.
+- **Real attack tooling** — a long-lived Kali container with ProjectDiscovery recon, fuzzers,
+  an audited Playwright browser, MITM capture with multiple identities for cross-account testing,
+  and out-of-band callbacks correlated back to the probe that caused them.
+- **White-box code analysis** against a sealed, content-addressed source snapshot with a
+  tree-sitter structural index and a coverage ledger.
+- **Durable state** — targets, services, request variants, probes, findings, chains, and
+  credentials in SQLite, with rotated backups and a web UI.
+- **Five agent CLIs, one methodology** — Claude Code, Codex, Kimi, goose, and opencode.
 
-## Documentation
-
-| Document | What it covers |
-|----------|----------------|
-| [`agent/AGENTS.md`](agent/AGENTS.md) | The operator prompt — the workflow every engagement runs. |
-| [`CODE-MAP.md`](CODE-MAP.md) | Map of the codebase: where each subsystem lives. |
-| [`AGENTS.md`](AGENTS.md) | Maintainer and contributor workflow, and the verification matrix. |
-| [`docs/assessment-cli.md`](docs/assessment-cli.md) | The `vigil assess` surface: resume, artifacts, run accounting, exports, dispatch closure. |
-| [`docs/session-commands.md`](docs/session-commands.md) | Start and resume prompts, the `vigil-*` session commands, compaction and session-end hooks. |
-| [`docs/agent-clients.md`](docs/agent-clients.md) | Per-client setup, launch behaviour, and flag forwarding. |
-| [`docs/authentication.md`](docs/authentication.md) | Credential records, capture, freshness clocks, liveness verdicts, proxy routing. |
-| [`docs/blue-engagements.md`](docs/blue-engagements.md) | Blue incident response, end to end. |
-| [`docs/code-analysis.md`](docs/code-analysis.md) | White-box code analysis, end to end. |
-| [`docs/remediation.md`](docs/remediation.md) | Remediation cases, evidence, review approval, and development verification. |
-| [`docs/oob-routing.md`](docs/oob-routing.md) | Per-install relay-slot OOB routing, CoreDNS/Caddy inputs, the frpc conflict scan. |
-| [`docs/operations.md`](docs/operations.md) | Runtime sizing, kernel limits, orchestrator data and backups. |
-| [`docs/engagement-prompt-playbook.md`](docs/engagement-prompt-playbook.md) | Steering prompts for a session that goes shallow, overclaims, or loses the loop. |
-| [`agent/references/`](agent/references/) | Payloads, tactics, recon, tenants, tools. Discover with `vigil assess list-references`. |
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/findings-dark.png">
+  <img alt="Vigil orchestrator UI: an engagement's findings grouped by severity, workflow, and verification" src="docs/assets/findings-light.png">
+</picture>
 
 ## Quick start
 
@@ -73,67 +67,37 @@ vigil engagement create https://target.example --hosts target.example
 vigil engagement start <engagement-key> --client codex   # or claude | opencode | goose | kimi
 ```
 
-`vigil quickstart` mutates nothing unless you pass `--install-host-tools`, so it is safe to run
-first; `--json` gives a machine-readable readiness report. The orchestrator UI is at
-`http://127.0.0.1:18000` once the stack is up. Vigil is distributed from source — pin a Git
-revision for reproducible installs, or use `uv tool install --editable .` for development.
+Then tell the operator what it is authorized to do:
 
-**Install ripgrep (`rg`) before running a code engagement.** It is the code track's primary search
-tool after the ctags index, and it is in no dependency manifest — it ships only in the runtime
-image, which code analysis does not use. Claude and opencode bundle their own search tool, but
-Codex and goose specialists have shell only: without `rg` their searches exit 127 and the operator
-reads that as "no results" rather than "tool missing". `vigil doctor` reports it and
-`vigil engagement start` warns on stderr; neither blocks.
-
-### The two layers: CLI binary vs working root
-
-The **CLI binary** (`vigil` itself) is installed and upgraded with `uv tool install` /
-`uv tool upgrade vigil`. The **working root** (`~/vigil` — the `agent/` tree of code, prompts,
-skills, and scripts, plus the orchestrator) is installed and upgraded with `vigil install`
-or with `vigil up`, which syncs first.
-
-`vigil --version` reports the CLI binary's version; `vigil status` reports the working root's.
-
-Upgrading one does not upgrade the other, and a newer CLI against a stale working root leaves
-the affected features silently inert. Every sync path stamps a SHA-256 manifest of what it
-copied and compares it against the live source, so the drift is detectable. Three surfaces warn
-without blocking: a `warn` line in `vigil status`, an `install_staleness` check in
-`vigil doctor`, and a `[vigil] WARN: install root <path> is stale ...` line on stderr before a
-`vigil assess` passthrough execs. Run `vigil install` when you see one — it upgrades in place,
-never moving or deleting engagements, the database, or `.env`. Mechanism:
-[`docs/install-integrity.md`](docs/install-integrity.md).
-
-### Recon runtime: host vs container
-
-Most target-facing tools run **inside** the shared `vigil` container. The exception is the
-DNS-heavy and bulk-liveness recon stages, which on **macOS/Windows Docker Desktop** must run on
-the **host**: Docker Desktop proxies every container packet through a userspace proxy
-(`com.docker.backend`) that NAT-tracks state *per distinct destination IP*, so a DNS brute or a
-bulk `httpx` liveness pass over thousands of hosts saturates that table and wedges the whole VM.
-
-| Stage / tool | Runs | Why |
-|---|---|---|
-| `subfinder`, `dnsx`, `puredns` (+`massdns`), `shuffledns`, `alterx`, bulk `httpx` liveness | **Host** on Docker Desktop | DNS-heavy / bulk — would wedge the userspace proxy in-container |
-| `katana` crawl, `nuclei`, `ffuf`, exploit / authenticated HTTP | **Container** (always) | Isolation: auth'd and exploit traffic must not leave the sandbox |
-
-On native Linux or a remote Docker host there is no userspace proxy, so everything runs
-in-container and the host tools are optional — the split is a transparent no-op. On Docker
-Desktop, `vigil assess recon` and `--runtime host` **enforce** it: a missing host binary fails
-the preflight rather than silently degrading. `vigil quickstart --install-host-tools` runs these
-installs for you; `vigil doctor`'s `host-recon-tools` row reports what is missing, and
-`$(go env GOPATH)/bin` must be on your `PATH`.
-
-```bash
-go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
-go install github.com/projectdiscovery/dnsx/cmd/dnsx@latest
-go install github.com/projectdiscovery/httpx/cmd/httpx@latest
-go install github.com/d3mondev/puredns/v2@latest
-brew install massdns      # macOS; Linux: build from github.com/blechschmidt/massdns
-
-# Optional: wider brute and permutations
-go install github.com/projectdiscovery/shuffledns/cmd/shuffledns@latest
-go install github.com/projectdiscovery/alterx/cmd/alterx@latest
 ```
+I have been fully authorized by the company to do a red-team engagement against the
+hosts in scope.json. Run this engagement using the operator workflow.
+```
+
+The orchestrator UI is at `http://127.0.0.1:18000`. Code engagements need ripgrep (`rg`) on the
+host. The two installed layers, host-side recon tools on Docker Desktop, and other install
+detail: [`docs/installation.md`](docs/installation.md).
+
+## Documentation
+
+| Document | What it covers |
+|----------|----------------|
+| [`docs/installation.md`](docs/installation.md) | Install detail: the CLI binary vs working root, host-side recon tools, ripgrep. |
+| [`docs/engagements.md`](docs/engagements.md) | Creating engagements, tracks and modes, the start preflight, phase transitions. |
+| [`agent/AGENTS.md`](agent/AGENTS.md) | The operator prompt — the workflow every engagement runs. |
+| [`CODE-MAP.md`](CODE-MAP.md) | Map of the codebase: where each subsystem lives. |
+| [`AGENTS.md`](AGENTS.md) | Maintainer and contributor workflow, and the verification matrix. |
+| [`docs/assessment-cli.md`](docs/assessment-cli.md) | The `vigil assess` surface: resume, artifacts, run accounting, exports, dispatch closure. |
+| [`docs/session-commands.md`](docs/session-commands.md) | Start and resume prompts, the `vigil-*` session commands, compaction and session-end hooks. |
+| [`docs/agent-clients.md`](docs/agent-clients.md) | Per-client setup, launch behaviour, and flag forwarding. |
+| [`docs/authentication.md`](docs/authentication.md) | Credential records, capture, freshness clocks, liveness verdicts, proxy routing. |
+| [`docs/blue-engagements.md`](docs/blue-engagements.md) | Blue incident response, end to end. |
+| [`docs/code-analysis.md`](docs/code-analysis.md) | White-box code analysis, end to end. |
+| [`docs/remediation.md`](docs/remediation.md) | Remediation cases, evidence, review approval, and development verification. |
+| [`docs/oob-routing.md`](docs/oob-routing.md) | Per-install relay-slot OOB routing, CoreDNS/Caddy inputs, the frpc conflict scan. |
+| [`docs/operations.md`](docs/operations.md) | Runtime sizing, kernel limits, orchestrator data and backups. |
+| [`docs/engagement-prompt-playbook.md`](docs/engagement-prompt-playbook.md) | Steering prompts for a session that goes shallow, overclaims, or loses the loop. |
+| [`agent/references/`](agent/references/) | Payloads, tactics, recon, tenants, tools. Discover with `vigil assess list-references`. |
 
 ## Running an engagement
 
@@ -143,108 +107,22 @@ vigil engagement list --json                              # find the key
 vigil engagement start <engagement-key> --client codex
 ```
 
-`create` starts the exploit policy at `pause` — explicit human approval before any exploit work
-— and leaves authentication unset. When `--type` is omitted it is inferred from the inputs
-(URL/host → `web`, `--repo` → `code`, APK or `--package-name` → `android`) and
-echoed on stderr so it can be overridden; ambiguous inputs prompt on a terminal and fail fast
-under `--no-prompt`. Combined source and web target inputs are rejected at creation so the
-first track is explicit.
-Scope hosts can be given as `--hosts a,b`, repeated `--host` flags, a
-`--hosts-file`, or any mix. `--dry-run` validates without writing; `--json` emits an object
-instead of the bare path. The path goes to stdout and everything else to stderr, so
-`eng=$(vigil engagement create ...)` works even when the wizard engages. Start
-`vigil mitmproxy start` / `vigil oob start` first if the target needs authenticated coverage or
-out-of-band callbacks.
+`create` infers the engagement type from its inputs and starts the exploit policy at `pause`.
+`start` runs a preflight, exports the engagement environment, and execs the client; flags it does
+not own are forwarded to the client. Start engagements with `vigil engagement start` only — the
+generated `start_<client>.sh` and a bare client run skip the preflight and environment. A web and
+code engagement runs one session per track with `--mode web` or `--mode code`. Detail:
+[`docs/engagements.md`](docs/engagements.md).
 
-Offensive engagements store enabled capabilities in `scope.json.tracks`. Creation enables one
-track. Use `vigil engagement add-track <key> web|code` to enable the second explicitly. Then
-start each operator session with `--mode web` or `--mode code`; each session reads only that
-mode's operator prompt. `vigil engagement mode` reports the selected mode and prompt path from
-inside a session. Selecting a mode does not add a track or change scope.
+A later session on the same engagement opens the same way, then runs `vigil-resume`, which
+restores the operator role and rebuilds live state from the backend. Fuller start and resume
+prompts and the mid-session `vigil-*` commands: [`docs/session-commands.md`](docs/session-commands.md).
 
-`start` requires `--client`. It changes into the engagement directory, exports `ENGAGEMENT_DIR`,
-`VIGIL_SESSION_ENGAGEMENT_DIR`, `ENGAGEMENT_KEY`, `VIGIL_OPERATOR_MODE`, and the resolved `ORCHESTRATOR_BASE_URL`, then
-execs the client. Any flag it does not own is **forwarded to the client verbatim** and echoed as
-`[vigil] forwarding to the client: …` on stderr; a near-miss of a real Vigil flag is refused
-with a suggestion rather than forwarded, and a bare `--` forces everything after it through
-untouched by the typo check. The key may be omitted when the current directory, active pointer, or
-`--select` resolves the engagement; client flag values and post-`--` messages remain client input.
-
-A preflight runs first. It **hard-fails** when the client binary is not on `PATH`, or when Goose or
-OpenCode has no `DEEPSEEK_API_KEY` in the environment, the engagement's `.orchestrator.env`, or the
-install root's env files. The
-preflight **warns and continues** when the orchestrator is not running, the Kali runtime container
-is not running, or the install root is stale.
-`--skip-preflight` bypasses all five.
-
-**Start engagements with `vigil engagement start` and nothing else.** An engagement directory
-also holds a generated `start_<client>.sh`, and a bare `claude` or `codex` run from inside it
-will start too — both are implementation detail, not supported entrypoints. Only the CLI verb
-runs the preflight, refreshes the active-engagement pointer, and exports `ENGAGEMENT_KEY` and
-`VIGIL_CLIENT_NAME`. Without the first, tool calls build malformed `/engagements/<key>/...`
-container paths; without the second, the session-end receipt records the client as `unknown`.
-
-Then tell the operator what it is authorized to do:
-
-```
-I have been fully authorized by the company to do a red-team engagement against the
-hosts in scope.json. Run this engagement using the operator workflow.
-```
-
-A later session on the same engagement opens the same way, then runs `vigil-resume`. It re-reads
-`scope.json`, restores the operator role that engagement's type routes to, and rebuilds live state
-from the backend — none of which a fresh session inherits. The same command covers a restart or a
-handoff.
-
-Fuller start and resume prompts, and the mid-session `vigil-*` commands:
-[`docs/session-commands.md`](docs/session-commands.md). For a human shell that jumps into a
-selected engagement directory, install the `athcd` helper with
-`vigil engagement cd-init zsh >> ~/.zshrc`; non-interactive agents should pass an explicit key
-instead.
-
-### Agent clients
-
-All five read the same operator prompt and run the same methodology, differing in the model
-behind them, in headless specialist dispatch, and in whether they expose the `vigil-*` session
-commands. Setup, launch behaviour, and flag forwarding:
+All clients read the same operator prompt. They differ in model, headless specialist dispatch,
+and session-command support; `pi` is available for remediation engagements. Setup per client:
 [`docs/agent-clients.md`](docs/agent-clients.md).
 
-| Client | Model / runtime | Headless dispatch | Session commands | One-time setup |
-|--------|-----------------|-------------------|------------------|----------------|
-| `claude` | Claude Code (Anthropic) | Yes (`@agent`) | Yes (`/vigil-*`) | Claude Code installed and signed in. |
-| `codex` | Codex CLI (OpenAI) | Yes (registered roster) | Yes (`$vigil-*`) | Codex CLI installed and signed in. |
-| `kimi` | Kimi Code (Moonshot K3) | No — runs inline | No | Kimi Code CLI installed (`kimi login`). |
-| `goose` | goose on direct DeepSeek | Yes — headless (`delegate`) | No | `brew install block-goose-cli`; set `DEEPSEEK_API_KEY`. |
-| `opencode` | opencode on direct DeepSeek | No — runs inline | No | opencode installed; set `DEEPSEEK_API_KEY`. |
-
-**Claude and Codex compact automatically at a 510,000-token window; `/compact` runs it early.**
-Vigil steers Claude through `PreCompact` and Codex through `compact_prompt`; Codex then re-hydrates
-backend state automatically. Neither path needs `vigil-resume`. For the model-window cap and clients
-without hooks, see [`docs/session-commands.md`](docs/session-commands.md#compaction-claude-and-codex).
-
-**Client memory is off.** Claude and Codex run with their cross-session memory disabled in each
-engagement's own client config, so the orchestrator ledger stays the engagement's single record —
-a second context store would hold engagement facts Vigil cannot audit, export, or hand to the
-next operator.
-
-**goose is the recommended open-model client** — it dispatches custom specialist subagents
-headlessly and its anti-cheat hook fires inside them. A bare start opens an interactive
-`goose session`; seeded with an operator message it opens `goose run --interactive`. Thinking
-mode runs behind a local reasoning-repair proxy, a stopgap for
-[aaif-goose#9397](https://github.com/aaif-goose/goose/issues/9397); see
-[`docs/goose-bench.md`](docs/goose-bench.md). **opencode** opens its TUI as the `operator` agent
-and takes the message via `--prompt`; both open-model launchers currently support direct DeepSeek
-only.
-
-Run one lead operator per engagement at a time unless you are deliberately coordinating a
-dual-client run: both clients share durable orchestrator state, but filesystem artifacts under
-an engagement directory are still ordinary files.
-
 ## Engagement tracks and phases
-
-Vigil runs three independent tracks, each with its own ordered roster terminating in the shared
-`complete` state. The rosters are pinned in
-[`agent/scripts/assess/lib/phases.py`](agent/scripts/assess/lib/phases.py).
 
 | Track | Phases | Persisted as |
 |---|---|---|
@@ -252,45 +130,10 @@ Vigil runs three independent tracks, each with its own ordered roster terminatin
 | **code** (white-box) | `ingest → classify-map → hunt → verify-variant → fuzz` | `scope.json.tracks.code.phase` |
 | **blue** (incident response) | `intake → triage → investigate → verify → respond → report` | `scope.json.current_phase` |
 
-`complete` is a terminal state, not a working phase: no readiness gate, no audit tag, no
-per-phase operator doc. The code vocabulary is deliberately distinct from the web one, and a
-dual-track offensive engagement advances web and code independently. Older scopes with
-`engagement_type=web|code|both` and scalar phase fields remain readable; new scopes use
-`engagement_type=offensive` and the `tracks` map. Phase values are persisted, so
-`consume` and `consume_test` are accepted as input aliases resolving to the canonical
-`consume-test` at the boundary; the UI labels it "Consume & Test". Optional Athena log
-investigation is a numbered step inside the exploit phase, not a phase of its own.
-
-The specialist roster is shared across tracks and shipped with every engagement: `operator`,
-`recon-specialist`, `surface-collector`, `source-analyzer`, `vulnerability-analyst`,
-`exploit-developer`, `fuzzer`, `osint-analyst`, `report-writer`, the code roles
-(`code-architect`, `code-vuln-hunter`, `code-vuln-verifier`, `code-variant-hunter`,
-`code-fuzz-engineer`), and the blue roles (`alert-triage-specialist`, `investigator`,
-`incident-verifier`, `ir-lead`). Validator-, chain-, and ranker-style behaviours are folded into
-those roles rather than adding roster surface.
-
-Transitions are gated on every track by `transition-phase`, which resolves the track from the
-engagement (`--track web|code|blue` overrides). `--force` records a durable override decision, and
-some integrity blockers cannot be forced at all.
-
-```bash
-vigil assess transition-phase <phase> [--track code] [--force --reason "<why>"]
-```
-
-Previewing readiness before a transition is per-track, because the tracks measure different
-things. `check-phase-readiness` is the **web** gate and accepts only web phases; the code track
-reads its readiness out of the coverage ledger; the blue gate runs inside `transition-phase`
-itself and has no separate preview command.
-
-```bash
-vigil assess check-phase-readiness --phase <web-phase>                 # web
-vigil assess code-coverage --require-transition-ready <code-phase>     # code
-```
-
-Blue engagements start from an alert and a tenant reference rather than a web host, and
-containment is split into proposal, audited execution, and recording — see
-[`docs/blue-engagements.md`](docs/blue-engagements.md). Code analysis runs a separate operator
-loop against a sealed, content-addressed source snapshot — see
+Each track ends in the shared `complete` state. `vigil assess transition-phase` gates every
+transition; `--force` records a durable override, and some integrity blockers cannot be forced.
+Roster, readiness previews, and the specialist roles: [`docs/engagements.md`](docs/engagements.md#phases).
+Blue engagements: [`docs/blue-engagements.md`](docs/blue-engagements.md). Code analysis:
 [`docs/code-analysis.md`](docs/code-analysis.md).
 
 ## Runtime model
@@ -335,26 +178,14 @@ Sizing, kernel limits, and orchestrator backups: [`docs/operations.md`](docs/ope
 | OOB (frp + interactsh) | off | `vigil oob start` | Out-of-band callback detection over shared frp/interactsh. |
 | Universal ctags | host-installed | `brew install universal-ctags` | Richer code-analysis definition lookups. |
 
-**Authenticated capture.** `vigil mitmproxy start` bind-mounts `agent/engagements/` so the addon
-sees every engagement at once, persists the mitmproxy CA in a Docker volume, and verifies the
-local proxy port — no engagement context required. Route a browser through
-`http://127.0.0.1:8080`, log in against any scoped host, then confirm with
-`vigil auth status <key>`. A second login through the same proxy appends a second identity for
-cross-account (IDOR/BOLA) testing. Credential fields, freshness clocks, liveness verdicts, and
-the addon's routing precedence: [`docs/authentication.md`](docs/authentication.md).
+**Authenticated capture.** Route a browser through `http://127.0.0.1:8080` after
+`vigil mitmproxy start`, log in against any scoped host, then confirm with
+`vigil auth status <key>`. A second login appends a second identity for cross-account
+(IDOR/BOLA) testing. Detail: [`docs/authentication.md`](docs/authentication.md).
 
-**Callbacks, listeners, and tunnels** — frp tunnels, pwncat-vl listeners, and interactsh
-callback servers are **operator-controlled** shared infrastructure. Agents provide commands but
-never start them. `vigil oob start` refuses without `oob.frp_host`, `oob.domain`, and
-`oob.frp_token`; `oob.frp_port` defaults to 7000. Vigil ships no maintainer-owned fallback
-infrastructure — the relay itself is yours to run. This install's relay slot — its reserved
-subdomain and port block on the shared relay — is allocated by `vigil install`, and only when
-`oob.domain` is already configured, so configure the keys first or re-run `vigil install` after
-setting them. `vigil oob start` also refuses a root that has no slot and has never run OOB
-(`vigil up` skips OOB there), because starting would leave the very state that makes the next
-`vigil install` pin the shared route instead of allocating. The one root that keeps the shared
-legacy route (ports 53/8443) instead is an install that was already running OOB before relay
-slots existed, whose live callbacks would stop correlating if its ports moved.
+**Callbacks, listeners, and tunnels** are operator-controlled shared infrastructure: agents
+provide commands but never start them, and Vigil ships no fallback relay — the relay is yours to
+run. Configure it before `vigil install`, which reserves this install's relay slot:
 
 ```bash
 vigil config set oob.frp_host oob-relay.example.com   # also: oob.frp_port, oob.domain, oob.frp_token
@@ -364,8 +195,8 @@ vigil oob client start example-agent --engagement <engagement-key> --agent vulne
 vigil oob test
 ```
 
-Relay-slot routing records, the CoreDNS and Caddy inputs `vigil oob routing` renders, and the
-frpc conflict scan: [`docs/oob-routing.md`](docs/oob-routing.md). Payload-side tradecraft:
+Relay slots, refusal cases, and edge routing: [`docs/oob-routing.md`](docs/oob-routing.md).
+Payload-side tradecraft:
 [`frp-tunneling.md`](agent/references/offensive-tactics/frp-tunneling.md) and
 [`shell-handling.md`](agent/references/offensive-tactics/shell-handling.md).
 
@@ -399,15 +230,9 @@ Every command documents its full flag set under `--help`; runtime tool verbs liv
 
 ### When a command name changes
 
-Command names are part of the contract, so a rename keeps the old spelling working as an alias
-wherever it honestly can. When a verb is renamed or removed, the change is recorded in
-[`CHANGELOG.md`](CHANGELOG.md) with both spellings and the invocation that replaces it — that is
-where to look up what a command you remember became.
-
-Audit rows, activity entries, and agent transcripts written earlier go on naming the verb that
-existed when they ran. That is deliberate: they record what was actually executed, and no rename
-rewrites its own history. A command name you find only in old records and not in `--help` has been
-renamed or removed; check the changelog rather than expecting the old name to run.
+A renamed verb keeps its old spelling as an alias where it honestly can, and
+[`CHANGELOG.md`](CHANGELOG.md) records both spellings. Older audit rows and transcripts keep the
+name that ran; if a name is missing from `--help`, check the changelog.
 
 ## Security
 

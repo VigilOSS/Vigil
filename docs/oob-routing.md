@@ -1,8 +1,8 @@
 # Out-of-band routing (frp + interactsh)
 
 Deep reference for per-install relay-slot routing, the edge configuration Vigil renders,
-and the frpc conflict scan. The operator-facing setup sequence is in
-[the README](../README.md#optional-capabilities).
+and the frpc conflict scan. The README summary is in
+[Optional capabilities](../README.md#optional-capabilities).
 
 ## Configuration
 

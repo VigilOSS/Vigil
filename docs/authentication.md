@@ -120,4 +120,6 @@ addon to refresh its registry, and `vigil mitmproxy routes` prints the current
 mapping for verification.
 
 If you need HTTPS interception, install the mitmproxy CA certificate in the
-browser or device before logging in.
+browser or device before logging in. The CA lives in the `mitmproxy-ca` Docker
+volume, so it survives proxy restarts; `vigil mitmproxy cert` prints the commands to copy
+and trust it.

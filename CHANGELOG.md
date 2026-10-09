@@ -9,6 +9,10 @@ Durable design decisions live in [`docs/adr/`](docs/adr/).
 
 ### Changed
 
+- **The README is shorter.** Install detail moves to `docs/installation.md`; creation, start
+  preflight, and phase detail move to `docs/engagements.md`; client detail stays in
+  `docs/agent-clients.md`. CLI hints that pointed at missing README sections now name the docs
+  page.
 - **Remediation links use canonical finding IDs.** Cases can link several findings sharing a fix,
   and findings show reciprocal case and deployment state. Case API `finding_ids` replaces
   `linked_finding_engagement_key`/`linked_finding_slug`; CLI `import --finding-id <id>`
