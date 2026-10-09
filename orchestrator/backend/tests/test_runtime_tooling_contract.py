@@ -93,6 +93,11 @@ ANDROID_APK_BINARIES = (
 )
 
 
+def test_mitmproxy_base_image_is_digest_pinned():
+    first_instruction = MITMPROXY_DOCKERFILE.read_text(encoding="utf-8").splitlines()[0]
+    assert re.fullmatch(r"FROM python:3\.12-slim@sha256:[0-9a-f]{64}", first_instruction)
+
+
 def test_mitmproxy_dockerfile_copy_sources_exist_in_staged_build_context():
     """The managed proxy builder exposes only the Dockerfile's declared inputs."""
     from vigil_cli.mitmproxy import _proxy_build_context
@@ -272,6 +277,50 @@ def test_runtime_full_uses_pinned_playwright_without_selenium_driver():
     assert "import playwright.sync_api" in text
     assert "selenium==" not in text
     assert "chromium-driver" not in text
+
+
+def test_runtime_full_pins_cloned_tool_python_dependencies():
+    """Git-pinned tools still need reproducible Python environments.
+
+    An immutable source checkout is not enough when its manually installed
+    runtime dependencies float to whatever PyPI serves on image-build day.
+    """
+    text = RUNTIME_FULL_DOCKERFILE.read_text(encoding="utf-8")
+    expected_args = {
+        "CLOUD_ENUM_DNSPYTHON_VERSION",
+        "CLOUD_ENUM_REQUESTS_FUTURES_VERSION",
+        "REQUESTS_VERSION",
+        "JWT_TOOL_TERMCOLOR_VERSION",
+        "JWT_TOOL_CPRINT_VERSION",
+        "JWT_TOOL_PYCRYPTODOMEX_VERSION",
+        "JWT_TOOL_RATELIMIT_VERSION",
+    }
+    declared_args = set(re.findall(r"^ARG ([A-Z0-9_]+)=\S+$", text, re.MULTILINE))
+    assert expected_args <= declared_args
+
+    for package, version_arg in {
+        "dnspython": "CLOUD_ENUM_DNSPYTHON_VERSION",
+        "requests-futures": "CLOUD_ENUM_REQUESTS_FUTURES_VERSION",
+        "termcolor": "JWT_TOOL_TERMCOLOR_VERSION",
+        "cprint": "JWT_TOOL_CPRINT_VERSION",
+        "pycryptodomex": "JWT_TOOL_PYCRYPTODOMEX_VERSION",
+        "ratelimit": "JWT_TOOL_RATELIMIT_VERSION",
+    }.items():
+        assert f'"{package}==${{{version_arg}}}"' in text
+
+    assert text.count('"requests==${REQUESTS_VERSION}"') == 2
+
+
+def test_runtime_full_pins_n0kovo_wordlist_to_an_immutable_revision():
+    text = RUNTIME_FULL_DOCKERFILE.read_text(encoding="utf-8")
+    assert "wordlists-cdn.assetnote.io" not in text
+    assert "/main/" not in text
+    match = re.search(r"^ARG N0KOVO_REF=([0-9a-f]{40})$", text, re.MULTILINE)
+    assert match is not None
+    assert (
+        "https://raw.githubusercontent.com/n0kovo/n0kovo_subdomains/"
+        "${N0KOVO_REF}/n0kovo_subdomains_huge.txt"
+    ) in text
 
 
 def test_runtime_full_dockerfile_declares_cloud_exposure_tools():

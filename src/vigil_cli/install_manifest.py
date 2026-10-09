@@ -17,7 +17,6 @@ ROOT_MANAGED_NAMES = frozenset(
     {
         "README.md",
         "CODE-MAP.md",
-        "TODOs",
         "agent",
         "orchestrator",
         "docker",

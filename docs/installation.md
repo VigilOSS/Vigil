@@ -36,6 +36,11 @@ without blocking: a `warn` line in `vigil status`, an `install_staleness` check 
 never moving or deleting engagements, the database, or `.env`. Mechanism:
 [`install-integrity.md`](install-integrity.md).
 
+When an installed CLI cannot find a checkout or installed source bundle, it caches the source tag
+matching the installed version (for example, `v1.0.0`). It never pulls a mutable default branch.
+Maintainers testing an unreleased build can select an explicit tag with
+`VIGIL_SOURCE_REF` or `vigil config set source.ref <tag>`.
+
 ## Recon runtime: host vs container
 
 Most target-facing tools run **inside** the shared `vigil` container. The exception is the
@@ -57,15 +62,15 @@ installs for you; `vigil doctor`'s `host-recon-tools` row reports what is missin
 `$(go env GOPATH)/bin` must be on your `PATH`.
 
 ```bash
-go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
-go install github.com/projectdiscovery/dnsx/cmd/dnsx@latest
-go install github.com/projectdiscovery/httpx/cmd/httpx@latest
-go install github.com/d3mondev/puredns/v2@latest
+go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@v2.17.0
+go install github.com/projectdiscovery/dnsx/cmd/dnsx@v1.2.3
+go install github.com/projectdiscovery/httpx/cmd/httpx@v1.9.0
+go install github.com/d3mondev/puredns/v2@v2.1.1
 brew install massdns      # macOS; Linux: build from github.com/blechschmidt/massdns
 
 # Optional: wider brute and permutations
-go install github.com/projectdiscovery/shuffledns/cmd/shuffledns@latest
-go install github.com/projectdiscovery/alterx/cmd/alterx@latest
+go install github.com/projectdiscovery/shuffledns/cmd/shuffledns@v1.1.0
+go install github.com/projectdiscovery/alterx/cmd/alterx@v0.1.0
 ```
 
 Runtime sizing, kernel limits, and orchestrator backups: [`operations.md`](operations.md).

@@ -24,7 +24,7 @@ def _suggest_close_match(unknown_field: str, allowed_fields: list[str]) -> str |
     """Return a "Did you mean: <c1>, <c2>, <c3>?" hint for an unknown field name.
 
     Surfaces up to three suggestions joined by ``, `` so a single high-score
-    fluke like ``evidence`` -> ``evidence_ref`` doesn't drown out equally
+    outlier like ``evidence`` -> ``evidence_ref`` doesn't drown out equally
     plausible alternatives such as ``evidence_text`` or ``evidence_paths``.
     The cutoff is loose enough (0.55) to catch typos that previously slipped
     past the 0.6 wall while staying tight enough that genuinely unrelated

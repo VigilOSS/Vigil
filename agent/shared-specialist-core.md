@@ -255,7 +255,7 @@ register <path> --finding <slug>` (or another entity link) before the dispatch
 closes. Unlinked markdown notes are scratch only and are not valid resume or
 report input — the operator can confirm a note is scratch with `vigil assess
 artifact mark-scratch <path>` (single) or `--under <prefix>` (bulk). A
-`check-phase-readiness --phase report` `unlinked_markdown_note` blocker names the exact fix
+`check-phase-readiness --phase report` `unlinked_markdown_note` advisory names the exact fix
 per row.
 
 When the human asks you to put durable engagement state into a prose file that

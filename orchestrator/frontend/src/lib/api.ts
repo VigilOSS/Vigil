@@ -82,16 +82,6 @@ export type EgressStatus = {
   checked_at?: string | null;
 };
 
-export type AssessmentPhaseWorker = {
-  phase: string;
-  title: string;
-  workers: {
-    agent: string;
-    responsibility: string;
-  }[];
-  active_agents: string[];
-};
-
 export type AssessmentFinding = {
   slug: string;
   title: string;
@@ -619,7 +609,6 @@ export type AssessmentSummary = {
   open_coverage_items: AssessmentCoverageGap[];
   attack_chains: AssessmentAttackChain[];
   service_coverage_gaps: AssessmentServiceGap[];
-  phase_workers: AssessmentPhaseWorker[];
   vendor_saas_hosts_pending_decision?: VendorSaasPendingDecision[];
   egress_status?: EgressStatus;
 };

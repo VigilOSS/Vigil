@@ -102,7 +102,7 @@ Param-key matches:
 
 `/graphql` repeatedly fell to the generic `path:/` fallback at priority 0 across unrelated estates.
 Independent modern-SaaS review confirmed that GraphQL is a dominant production surface rather than
-a niche class. See `docs/plans/research/classify-surface-2026-06/README.md` for the public evidence
+a niche class. See `docs/research/classify-surface/README.md` for the public evidence
 summary.
 
 ## Sources

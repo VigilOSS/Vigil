@@ -23,6 +23,8 @@ the codebase clearer than you found it.
   second copy of a value that already has a single source of truth.
 - **Inspect existing functionality first.** Search the owning code, contracts, and tests before
   adding a helper or workflow; extend the existing path when it already owns the behavior.
+- **Keep the repository organization-agnostic.** Use Acme and reserved `example.com` domains in
+  examples and fixtures; never add employer, customer, or real-engagement names, domains, or data.
 - **Land changes whole.** Touch every registration point a change needs (see the recipes + `CODE-MAP.md`)
   so nothing half-lands, and keep generated artifacts, schemas, and the map in sync in the same change.
 - **Durable over expedient.** Fix the root cause, not the symptom. Choose the design that still reads
@@ -46,8 +48,8 @@ the codebase clearer than you found it.
   credentials, so such a control has no true positive to find and only its false positives are
   observable — a previous masker silently truncated whole command lines out of the audit view.
   [ADR 0019](docs/adr/0019-vigil-does-not-defend-against-its-own-operator.md) is the authority. It
-  carves out the four controls that *do* have a real adversary and must not be removed by citing it:
-  benchmark anti-cheat, scope/ROE enforcement, proof and evidence integrity, and the
+  carves out the controls and policy invariants that must not be removed by citing it:
+  exploit approval and tool-policy gates, proof and evidence integrity, and the
   untrusted-target-text boundary (ADR 0018), which requires prompt containment and safe technical
   rendering but not repetitive frontend warning labels. Before adding any control that withholds data,
   name the adversary it excludes; "the operator, from their own data" means it is theater.
@@ -606,7 +608,7 @@ edit through that ruleset in addition to the **Prompt edit checklist** above.
 # Tests & verification
 
 The verification surface is **not one command**: four pytest scopes, a render-check, a schema-check,
-lint/types, and the bench rungs. All four pytest scopes run on the backend venv; the other gates have
+and lint/types. All four pytest scopes run on the backend venv; the other gates have
 their own prerequisites and costs. `.github/workflows/ci.yml` is authoritative for what blocks —
 backend pytest (the markdown-vs-CLI sync-lint rides inside it), the deterministic eval, the root
 `tests/` suite, the assess CLI suite, the frontend and report builds, ruff, and mypy.
@@ -625,15 +627,12 @@ VIGIL_REPO=$(git rev-parse --show-toplevel)   # or: VIGIL_REPO=$(jj root)
 | Suite / gate | Command | Cost |
 |---|---|---|
 | Backend (incl. sync-lint) | `uv run --directory orchestrator/backend --extra dev pytest` | free, ~1 min |
-| Root CLI / bench harness (excluding eval) | `uv run --directory orchestrator/backend --extra dev pytest "$VIGIL_REPO/tests" --ignore="$VIGIL_REPO/tests/eval"` | free |
+| Root CLI (excluding eval) | `uv run --directory orchestrator/backend --extra dev pytest "$VIGIL_REPO/tests" --ignore="$VIGIL_REPO/tests/eval"` | free |
 | Assess CLI | `uv run --directory orchestrator/backend --extra dev pytest "$VIGIL_REPO/agent/scripts/assess/tests"` | free |
 | Deterministic eval | `uv run --directory orchestrator/backend --extra dev pytest "$VIGIL_REPO/tests/eval"` | free |
 | Prompt render-check | `cd agent && ./scripts/render-operator-prompts.sh check` | free |
 | Schema `--check` | `uv run --directory orchestrator/backend python scripts/generate_agent_schemas.py --check` | free |
 | Lint / types | `uvx ruff check .`  ·  `uvx --with-editable . mypy src/vigil_cli` | free |
-| Bench factory solvability gate | `python -m vigil_cli.bench.factory.verify --family <id> --seeds 0 1 2` | free, **docker** |
-| Bench selftest (pipeline, no LLM) | `vigil bench selftest` | free |
-| Bench run (live agent) | `vigil bench run --launch auto …` | **BILLED** — see Live tests |
 
 - **The backend suite runs in parallel by default.** `addopts` in
   `orchestrator/backend/pyproject.toml` carries `-n auto` (pytest-xdist, one worker per CPU),
@@ -650,17 +649,6 @@ VIGIL_REPO=$(git rev-parse --show-toplevel)   # or: VIGIL_REPO=$(jj root)
 - **The `**/data/` ignore trap.** Required resolver lists, fixtures, or golden files under `data/`
   need targeted `.gitignore` negations for every ignored path level. Track them with
   `jj file track <path>` and confirm with `jj file list <path>`; a local untracked file is absent in CI.
-- **`skeleton/` sidecars vs mypy.** Bench `skeleton/` `.py` files are container-runtime sidecars that import runtime-only siblings (e.g. `oracle_checkpoint`) mypy can't resolve. They are excluded from mypy via `[tool.mypy] exclude` in `pyproject.toml` (or keep sidecars as `.tmpl`, which mypy ignores). Do **not** "fix" such an `import-not-found` by adding the runtime module to the type path.
-
-## Live tests (billed — read before launching)
-
-`vigil bench run --launch auto` spawns real Claude/Codex agents against generated targets: it **costs money and runs for hours** (reference: a full K=5 × 3 seed-0 run is ~5–6h / ~$50). Validate without a model first via the free paths — `--launch scripted` (reference solver, docker) and `vigil bench selftest`. Do not launch `--launch auto` without an explicit go-ahead.
-
-## Per-family wall-clock timeouts
-
-`src/vigil_cli/bench/models.py:FAMILY_TIMEOUTS` owns measured family budgets. Set one only from an
-observed run (roughly 1.5–2× its maximum); unknown families deliberately use the generous fallback.
-
 # Orchestrator backend
 
 The backend is Python 3.11+ and `uv`-first. Use `uv`, not ad hoc `pip` installs:

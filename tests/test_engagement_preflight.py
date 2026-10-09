@@ -44,8 +44,8 @@ def blue_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, objec
     install_root = tmp_path / "install"
     tenant_dir = install_root / "agent" / "references" / "tenants"
     tenant_dir.mkdir(parents=True)
-    (tenant_dir / "northstar-workspace.md").write_text("# northstar\n")
-    engagement_dir = install_root / "agent" / "engagements" / "2026-01-01-0000-northstar"
+    (tenant_dir / "acme-workspace.md").write_text("# acme\n")
+    engagement_dir = install_root / "agent" / "engagements" / "2026-01-01-0000-acme"
     engagement_dir.mkdir(parents=True)
     (engagement_dir / ".orchestrator.env").write_text("DEEPSEEK_API_KEY=test-key\n")
 
@@ -82,12 +82,18 @@ def _blue_engage(install_root: Path, *extra: str) -> None:
             "blue",
             "engage",
             "--customer",
-            "northstar",
+            "acme",
             "--platform",
             "gws",
             *extra,
         ]
     )
+
+
+def test_blue_engage_can_start_kimi(blue_env: dict[str, object]) -> None:
+    _blue_engage(blue_env["install_root"], "--start", "kimi")  # type: ignore[arg-type]
+
+    assert blue_env["started"] == "kimi"
 
 
 @pytest.fixture
@@ -461,7 +467,7 @@ def test_blue_preflight_refusal_prints_nothing_on_stdout(
     captured = capsys.readouterr()
     assert captured.out == ""
     assert str(blue_env["dir"]) not in captured.out
-    assert "2026-01-01-0000-northstar" in captured.err
+    assert "2026-01-01-0000-acme" in captured.err
     assert "launching operator session" not in captured.err
 
 

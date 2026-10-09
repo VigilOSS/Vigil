@@ -87,7 +87,7 @@ Param-key matches (co-fire with path):
 
 Webhook registration and delivery routes recurred across independent reviews but remained a
 secondary signal, supporting the conservative P3 classification. See
-`docs/plans/research/classify-surface-2026-06/README.md` for the public evidence summary.
+`docs/research/classify-surface/README.md` for the public evidence summary.
 
 ## Sources
 

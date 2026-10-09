@@ -74,7 +74,7 @@ Generic API routes were the largest recurring missed class across unrelated surf
 modern SaaS review confirmed that routes such as `/api/v2/users/me.json`,
 `/api/v2/account/settings.json`, `/billing/api/subscriptions`, and onboarding workflows are common
 production surfaces. The low floor preserves that coverage without claiming every API route is
-urgent. See `docs/plans/research/classify-surface-2026-06/README.md` for the public evidence summary.
+urgent. See `docs/research/classify-surface/README.md` for the public evidence summary.
 
 ## Sources
 

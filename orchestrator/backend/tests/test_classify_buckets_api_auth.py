@@ -1,6 +1,6 @@
 """RED-phase classifier tests for the classify-surface 2026-06 buckets.
 
-Encodes the IMPLEMENTATION-SPEC (docs/plans/research/classify-surface-2026-06/
+Encodes the IMPLEMENTATION-SPEC (docs/research/classify-surface/
 IMPLEMENTATION-SPEC.md) TEST-MATRIX rows for the API/auth-family buckets:
 graphql, api, api-versioning, oauth-oidc, auth, jwt, sso, websocket, webhook —
 both positive matches and negative guards.

@@ -27,10 +27,3 @@ def test_runtime_recreation_stops_before_start_when_removal_fails(tmp_path, monk
     with pytest.raises(SystemExit, match='remove denied'):
         runtime.start_runtime(runtime.RuntimeOptions(install_root=tmp_path, recreate=True), runner=runner, validate_tools=False)
     assert not any(argv[:2] == ['docker', 'run'] for argv in calls)
-
-
-def test_bench_stop_reports_failed_removal_as_regular_exception():
-    def runner(argv):
-        return docker.DockerResult(0, 'vbench-kali-attempt\n', '') if argv[:2] == ['docker', 'ps'] else docker.DockerResult(1, '', 'remove denied')
-    with pytest.raises(RuntimeError, match='remove denied'):
-        runtime.stop_bench_runtime('vbench-kali-attempt', runner=runner)

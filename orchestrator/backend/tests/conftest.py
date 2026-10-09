@@ -11,7 +11,15 @@ from fastapi.testclient import TestClient
 
 repo_root = Path(__file__).resolve().parents[3]
 backend_root = repo_root / "orchestrator" / "backend"
-sys.path.insert(0, str(backend_root))
+# Every backend test selection gets the same canonical import roots. Individual
+# modules must not depend on a previously collected test mutating ``sys.path``:
+# that made focused commands fail while a full-suite run happened to pass.
+sys.path[:0] = [
+    str(backend_root),
+    str(repo_root / "agent" / "scripts"),
+    str(repo_root / "src"),
+    str(repo_root),
+]
 
 # Disable the scheduled backup timer for the entire test run — the timer
 # is a daemon thread that would otherwise fire against test-temp data dirs

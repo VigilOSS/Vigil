@@ -16,16 +16,14 @@ Report security issues privately through
 for this repository. Include the affected revision, impact, reproduction steps, and any suggested
 mitigation.
 
-If that form is unavailable to you, email the maintainer at
-`operator@example.com` with the same information, or with a short request to
-open a private channel. Public issues are not a fallback: blank issues are disabled and both issue
+If that form is temporarily unavailable, retry it later rather than disclosing the issue publicly.
+Public issues are not a fallback: blank issues are disabled and both issue
 templates are for non-sensitive defects and feature requests, so there is no way to file a minimal
 security placeholder there. Do not put exploit details in any public issue.
 
 The advisory form is for vulnerabilities only — it opens a draft security advisory, which is the
-wrong artifact for anything else. [Code of conduct](CODE_OF_CONDUCT.md) reports go to the same
-maintainer email address instead; say which kind of report you are filing in the first line, since
-the two are handled differently from there.
+wrong artifact for anything else. Follow the private contact instructions in
+[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md#enforcement) for conduct reports instead.
 
 The maintainer will acknowledge a complete report, validate it against a supported version, and
 coordinate disclosure after a fix is available. No response-time or bounty commitment is implied.
@@ -42,4 +40,4 @@ Vigil intentionally renders the authorized operator's credentials and evidence v
 operator's machine. This is documented in
 [ADR 0019](docs/adr/0019-vigil-does-not-defend-against-its-own-operator.md) and is not a
 vulnerability by itself. Reports remain welcome for actual cross-user exposure, unintended external
-transmission, scope/ROE bypass, benchmark answer-key leakage, or evidence/proof-integrity failures.
+transmission, scope/ROE bypass, or evidence/proof-integrity failures.

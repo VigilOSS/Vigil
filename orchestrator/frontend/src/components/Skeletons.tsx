@@ -1,8 +1,7 @@
 // Loading skeletons (UI/UX adoption wave, Tier 1a).
 //
-// Ported from the reference-project workbench Skeletons. Their markup leaned on
-// Tailwind utility classes; here those are translated to a small set of
-// plain-CSS classes (defined in app.css under "/* ---- skeletons ---- */")
+// Uses a small set of plain-CSS classes (defined in app.css under
+// "/* ---- skeletons ---- */")
 // plus inline styles for the dynamic dimensions. The shimmer itself lives on
 // the `v-skeleton` class so every variant shares one animation.
 //

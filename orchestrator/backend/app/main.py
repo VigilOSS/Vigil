@@ -32,7 +32,7 @@ from .config import settings
 from .db import database_readiness_flags, get_connection, init_db
 from .services.backup import start_scheduler as start_backup_scheduler, stop_scheduler as stop_backup_scheduler
 from .services.engagements import get_engagement_or_404, maybe_sync_engagements
-from .ws import broadcaster
+from .ws import broadcaster, websocket_origin_allowed
 
 logger = logging.getLogger(__name__)
 
@@ -432,6 +432,11 @@ def readyz() -> JSONResponse | dict[str, object]:
 
 @app.websocket("/ws/engagements/{engagement_key}")
 async def engagement_stream(websocket: WebSocket, engagement_key: str) -> None:
+    if not websocket_origin_allowed(
+        websocket.headers.get("origin"), settings.orchestrator_public_url
+    ):
+        await websocket.close(code=1008, reason="untrusted websocket origin")
+        return
     get_engagement_or_404(engagement_key)
     await broadcaster.connect(engagement_key, websocket)
     try:
@@ -450,8 +455,16 @@ def _engagement_api_segments() -> frozenset[str]:
     SPA fallback over a new API family.
     """
 
+    def registered_routes(routes):
+        for route in routes:
+            nested_router = getattr(route, "original_router", None)
+            if nested_router is not None:
+                yield from registered_routes(nested_router.routes)
+            else:
+                yield route
+
     segments: set[str] = set()
-    for route in app.routes:
+    for route in registered_routes(app.routes):
         parts = str(getattr(route, "path", "")).strip("/").split("/")
         if (
             len(parts) >= 3

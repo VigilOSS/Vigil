@@ -1,11 +1,7 @@
 # Eval Harness
 
-Deterministic quality checks for two different evidence rungs. The simple eval
-definitions replay captured JSON finding arrays without an assessment backend.
-The Wave 0 code-workflow harness instead drives the real in-process FastAPI,
-SQLite, sealed-source, structural-index, dispatch, queue, finding, verification,
-variant, fuzz-decision, and readiness surfaces. Neither rung calls an LLM or an
-external network.
+Deterministic quality checks that replay captured JSON finding arrays without an
+assessment backend, LLM, or external network.
 
 ## How to run
 
@@ -36,56 +32,6 @@ Assertions supported: `min_findings`, `max_findings`, `expected_cwes`,
 `white_box_finding_contract`. The white-box contract requires an exact code-finding
 identity set, the expected source snapshot, and per-finding provenance, location,
 proof, and verifier metadata.
-
-## Wave 0 production lifecycle reference
-
-`fixtures/code/cwe22-path-traversal-seed-0/` contains vulnerable, clean, and
-hostile-instruction near twins. `harnesses/code_workflow/fixture.py` validates
-their byte identities and exact oracle, `runner.py` sends reference-solver
-decisions through production HTTP contracts, `metrics.py` measures anti-choke
-facts, and `schema.py` validates the strict result in
-`schemas/code-workflow-result-v1.schema.json`.
-
-The reference solver proves lifecycle solvability only. Its result declares
-`measurement_kind=oracle_reference_solvability` and
-`model_efficacy_claimed=false`; zero LLM invocations is not a claim about model
-recall or precision. The runner also keeps publication and submission disabled.
-
-Run the lifecycle and its calibration regression through the backend suite:
-
-```bash
-uv run --directory orchestrator/backend --extra dev pytest \
-  tests/test_code_workflow_runner.py
-```
-
-`baselines/private-code-evaluation.json` is the committed runner-calibration
-envelope. It binds the exact fixture identity to seven distinct
-production-workflow observations, their observation/platform digests, and
-recomputed medians. Each bounded observation receipt is recomputable from its
-run index, platform fingerprint, retained metrics, and exact fixture and
-runtime identities. Ordinary runs load that envelope and require matching
-fixture and declared-runtime identity. The envelope deliberately carries no
-prompt or harness-source digest: what the baseline has to still describe is the
-*measured behaviour*, and the comparison below measures it directly. A byte
-digest over authored markdown would only re-report an edit the author just made,
-and it would fail the gate on every prompt and refactor commit (see the Markdown
-prompt/doc testing policy in `AGENTS.md`). Requests, mutations, exact
-dispatch topology, and assigned-input counts remain blocking across platforms;
-only wall-time and latency become informational when the platform fingerprint
-differs. An absent or mismatched calibration is explicitly unavailable and
-cannot produce a green overall gate; malformed or tampered evidence fails
-validation. The backend acceptance test separately compares a validated current
-seven-run median envelope with the committed seven-run medians at the unchanged
-20% same-platform threshold. It still exercises an ordinary single-run load,
-but does not treat sub-millisecond jitter in that one observation as stable
-acceptance evidence.
-
-To refresh the baseline intentionally, call
-`harnesses.code_workflow.runner.calibrate_workflow(...)` with the backend test
-client and isolated settings used by `test_code_workflow_runner.py`, review the
-returned seven-or-more runner-calibration envelope, then replace the committed JSON.
-The helper uses distinct engagement/workspace names for each repetition; it does
-not pretend that repetitions sharing one test process are isolated runtimes.
 
 ## Adding a new definition
 
@@ -139,4 +85,3 @@ python agent/scripts/assess/commands/eval_capture.py --engagement-dir <engagemen
 `--check` exits non-zero on a regression (fewer findings, a dropped CWE, a
 shrunken severity bucket, or a newly-empty `details.impact`) and writes nothing.
 Strictly-more coverage is not a regression.
-

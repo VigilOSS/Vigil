@@ -4326,7 +4326,10 @@ def test_finalize_broadcasts_via_websocket(client, isolate_settings):
             argv=["nmap", "-p", "22", "10.0.0.2"],
         ),
     ).json()
-    with client.websocket_connect(f"/ws/engagements/{ENGAGEMENT_KEY}") as websocket:
+    with client.websocket_connect(
+        f"/ws/engagements/{ENGAGEMENT_KEY}",
+        headers={"origin": "http://127.0.0.1:18000"},
+    ) as websocket:
         response = client.patch(
             f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/{created['id']}",
             json={

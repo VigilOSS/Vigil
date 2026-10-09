@@ -30,7 +30,7 @@ def _msg(**kwargs):
         subject="Your verification code",
         body="Your Acme Bank verification code is 482915. It expires in 10 minutes.",
         received_at=datetime(2026, 6, 22, 12, 0, 0, tzinfo=UTC),
-        account="researcher-example",
+        account="researcher",
         mailbox="Inbox",
     )
     defaults.update(kwargs)

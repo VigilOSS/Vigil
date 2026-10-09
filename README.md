@@ -38,7 +38,8 @@ response.
   tree-sitter structural index and a coverage ledger.
 - **Durable state** — targets, services, request variants, probes, findings, chains, and
   credentials in SQLite, with rotated backups and a web UI.
-- **Five agent CLIs, one methodology** — Claude Code, Codex, Kimi, goose, and opencode.
+- **Six client integrations, one methodology** — Claude Code, Codex, Kimi, goose, opencode, and
+  Pi; Pi is currently limited to remediation engagements.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/findings-dark.png">
@@ -49,9 +50,9 @@ response.
 
 ```bash
 # 1. Install the CLI
-uv tool install --from git+https://github.com/vigil-oss/vigil.git vigil
+uv tool install --from git+https://github.com/vigil-oss/vigil.git@v1.0.0 vigil
 # ...or over SSH, if you authenticate to GitHub with a key
-uv tool install --from git+ssh://git@github.com/vigil-oss/vigil.git vigil
+uv tool install --from git+ssh://git@github.com/vigil-oss/vigil.git@v1.0.0 vigil
 
 # 2. Check the host: prerequisites, missing recon tools, and the ordered setup checklist
 vigil quickstart
@@ -93,7 +94,7 @@ detail: [`docs/installation.md`](docs/installation.md).
 | [`docs/authentication.md`](docs/authentication.md) | Credential records, capture, freshness clocks, liveness verdicts, proxy routing. |
 | [`docs/blue-engagements.md`](docs/blue-engagements.md) | Blue incident response, end to end. |
 | [`docs/code-analysis.md`](docs/code-analysis.md) | White-box code analysis, end to end. |
-| [`docs/remediation.md`](docs/remediation.md) | Remediation cases, evidence, review approval, and development verification. |
+| [`docs/remediation.md`](docs/remediation.md) | Work-in-progress remediation cases, evidence, review approval, and development verification. |
 | [`docs/oob-routing.md`](docs/oob-routing.md) | Per-install relay-slot OOB routing, CoreDNS/Caddy inputs, the frpc conflict scan. |
 | [`docs/operations.md`](docs/operations.md) | Runtime sizing, kernel limits, orchestrator data and backups. |
 | [`docs/engagement-prompt-playbook.md`](docs/engagement-prompt-playbook.md) | Steering prompts for a session that goes shallow, overclaims, or loses the loop. |
@@ -215,14 +216,13 @@ Payload-side tradecraft:
 | `vigil engagement create \| list \| start \| open \| path \| current \| cd-init \| archive \| export \| export-pdf` | Create and drive engagements. Scope edits (`add-host`, `add-oos`, `set-header`, `add-track`, `set-rate-limit`, …) live here too — `vigil engagement --help`. |
 | `vigil use <key>` | Set the persisted active engagement for global services. |
 | `vigil assess ...` | The assessment surface — see [`docs/assessment-cli.md`](docs/assessment-cli.md). |
-| `vigil remediation ...` | Separate remediation engagements: Jira/bounty import, `from-finding` intake, shared-fix finding links, worktrees, evidence, review, and PR handoff — see [`docs/remediation.md`](docs/remediation.md). |
+| `vigil remediation ...` | **Work in progress.** Separate remediation engagements: Jira/bounty import, `from-finding` intake, shared-fix finding links, worktrees, evidence, review, and PR handoff — see [`docs/remediation.md`](docs/remediation.md). |
 | `vigil blue ...` | Blue incident response — see [`docs/blue-engagements.md`](docs/blue-engagements.md). |
 | `vigil auth status \| show \| edit \| clear \| export \| quarantine \| import \| alias \| env-check \| set-active \| keepalive` | Manage engagement credentials in the backend store. |
 | `vigil mitmproxy start \| stop \| status \| cert \| build \| reload \| routes` | Manage the shared MITM proxy. |
 | `vigil oob start \| stop \| restart \| status \| routing \| test \| clean \| mint \| poll \| client` | Manage shared OOB and render relay-slot edge-routing inputs. |
 | `vigil config path \| list \| get \| set \| unset \| edit` | Read and write persistent CLI config. |
 | `vigil backup create \| list \| show \| restore` | Manual orchestrator DB backup operations. |
-| `vigil bench ...` | Benchmark harness — see [`docs/benchmarking.md`](docs/benchmarking.md). |
 | `vigil email <mailbox>` | Read a local Mail.app test mailbox for verification codes during authenticated testing. |
 
 Every command documents its full flag set under `--help`; runtime tool verbs live under
@@ -240,8 +240,9 @@ Vigil ships a full offensive Kali runtime and drives autonomous specialist agent
 targets. Treat it accordingly.
 
 - **Authorized targets only.** Every operator start prompt begins with an explicit authorization
-  statement, and engagement scope is pinned in `scope.json`. Only run against hosts and tenants
-  you are contractually authorized to test.
+  statement, and engagement scope is pinned in `scope.json`. Scope drives recon shaping,
+  attribution, and coverage accounting; it is not a destination firewall. Only run against hosts
+  and tenants you are contractually authorized to test.
 - **Exploit work is gated.** The default exploit policy is `pause` — explicit human approval
   before any exploit-developer dispatch. Policies (`pause` / `selected` / `full_send`) are set
   per engagement in `scope.json` and enforced through the operator workflow.
@@ -257,7 +258,7 @@ Report vulnerabilities privately — see [SECURITY.md](SECURITY.md).
 
 | Path | Contents |
 |---|---|
-| `src/vigil_cli/` | The `vigil` CLI: install, runtime, orchestrator, engagements, auth, OOB, bench. |
+| `src/vigil_cli/` | The `vigil` CLI: install, runtime, orchestrator, engagements, auth, and OOB. |
 | `agent/` | Operator and specialist prompts, phase docs, rules, skills, the reference library, the `vigil assess` scripts, and the runtime Dockerfiles. |
 | `orchestrator/` | Backend and frontend for durable run state, events, artifacts, coverage, and phase visibility. |
 | `tests/` | CLI pytest suite. Backend tests live in `orchestrator/backend/tests/`. |

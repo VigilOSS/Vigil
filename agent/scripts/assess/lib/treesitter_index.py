@@ -125,7 +125,12 @@ def _ts_query_captures(lang_obj: Any, query_str: str, root_node: Any) -> dict[st
     if hasattr(tree_sitter, "QueryCursor"):
         try:
             query = _compiled_ts_query(lang_obj, query_str)
-        except Exception:
+        except Exception as exc:
+            warnings.warn(
+                f"tree-sitter query compilation failed; captures are degraded: {exc}",
+                RuntimeWarning,
+                stacklevel=2,
+            )
             return {}
         cursor = tree_sitter.QueryCursor(query)
         result: dict[str, list[Any]] = {}
@@ -136,7 +141,12 @@ def _ts_query_captures(lang_obj: Any, query_str: str, root_node: Any) -> dict[st
     # 0.23.x: Language.query() + Query.captures()
     try:
         query = _compiled_ts_query(lang_obj, query_str)
-    except Exception:
+    except Exception as exc:
+        warnings.warn(
+            f"tree-sitter query compilation failed; captures are degraded: {exc}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
         return {}
     return query.captures(root_node)  # type: ignore[return-value]
 

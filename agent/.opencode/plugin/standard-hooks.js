@@ -7,22 +7,17 @@
 // neither of those — it loads plugins from `.opencode/plugin/`:
 //   - tool.execute.after  -> scripts/hooks/post-tool-log.sh (PostToolUse logger).
 //       records the command into the backend activity log (`vigil assess log`)
-//       so activity_entries — and the bench taint audit that scans it — covers
-//       OpenCode's host commands, which never pass through assessment_command_runs.
+//       so OpenCode's host commands, which never pass through
+//       assessment_command_runs, remain visible in the activity trail.
 //       Best-effort: a logging failure never blocks the run.
 //
 // There is deliberately NO tool.execute.before hook here. Vigil does not filter
 // its own operator's shell commands (ADR 0019): a command-string filter cannot
 // see through the shell, and the only party it acted against was the operator.
-// On the bench, a GUARD-ONLY `bench-guard.js` plugin is layered BESIDE this one
-// (different filename) and owns tool.execute.before — its adversary is the
-// benchmarked model, not the operator.
-//
 // KNOWN LIMITATION (opencode#5894): tool.execute.before/after do NOT fire for
 // subagent (`task`) or MCP tool calls — only for the inline operator's own bash
 // calls. A dispatched specialist's host commands are therefore not activity-logged
-// here; network isolation still constrains all target traffic. See
-// docs/deepseek-openrouter.md.
+// here; network isolation still constrains all target traffic.
 import { execFileSync } from "node:child_process"
 import { existsSync } from "node:fs"
 import { resolve } from "node:path"
@@ -51,8 +46,7 @@ function resolveHook(name) {
 }
 
 export const VigilStandardHooks = async () => ({
-  // PostToolUse-equivalent, feeding the taint audit's activity_entries scan.
-  // Best-effort.
+  // PostToolUse-equivalent. Best-effort.
   "tool.execute.after": async (input, output) => {
     const tool = String((input && input.tool) || "").toLowerCase()
     if (tool !== "bash") return

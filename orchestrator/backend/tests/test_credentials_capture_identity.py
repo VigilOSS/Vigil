@@ -274,13 +274,13 @@ def test_derive_lossy_collision_disambiguated_by_hash():
     # Two DISTINCT principals whose claims sanitize to the SAME label must NOT
     # collapse into one identity (never a wrong cross-account merge).
     one = creds.derive_capture_identity(
-        {}, {}, {"access_token": _jwt({"sub": "a+tag@x.com"})}
+        {}, {}, {"access_token": _jwt({"sub": "a+tag@identity.example"})}
     )
     two = creds.derive_capture_identity(
-        {}, {}, {"access_token": _jwt({"sub": "a_tag@x.com"})}
+        {}, {}, {"access_token": _jwt({"sub": "a_tag@identity.example"})}
     )
-    assert one.startswith("cap-a_tag_x.com")
-    assert two.startswith("cap-a_tag_x.com")
+    assert one.startswith("cap-a_tag_identity.example")
+    assert two.startswith("cap-a_tag_identity.example")
     assert one != two  # disambiguating hash keeps distinct principals distinct
 
 

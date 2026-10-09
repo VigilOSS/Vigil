@@ -3,6 +3,7 @@ from __future__ import annotations
 import functools
 import hashlib
 import json
+import logging
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any, Literal
@@ -46,6 +47,7 @@ from ..services.engagements import get_engagement_or_404
 from ..ws import broadcaster
 
 router = APIRouter(prefix="/engagements/{engagement_key}/assessment", tags=["assessment"])
+logger = logging.getLogger(__name__)
 
 COMMAND_FINALIZE_PREVIEW_MAX_CHARS = 65_536
 MAX_BULK_ASSESSMENT_WRITE_ITEMS = 500
@@ -1584,13 +1586,10 @@ def get_report_readiness(engagement_key: str) -> dict[str, Any]:
         per_host = dict(state_manager.per_host_coverage(engagement.id))
         per_host["scope_hosts"] = _scope_hosts_for(engagement)
         readiness["per_host_coverage"] = per_host
-    except Exception:  # pragma: no cover — defensive; never block the call
-        readiness["per_host_coverage"] = {
-            "objectives": [],
-            "hosts": [],
-            "engagement_signals": {},
-            "scope_hosts": [],
-        }
+    except Exception:
+        logger.exception(
+            "per-host coverage projection failed for engagement %s", engagement_key
+        )
     return readiness
 
 

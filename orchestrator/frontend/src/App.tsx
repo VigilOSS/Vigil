@@ -100,7 +100,6 @@ function AppContent() {
   const parsedRoute = useMemo(() => parseWorkspaceRoute(route), [route]);
   const remediationKey = parsedRoute.kind === "remediation" ? parsedRoute.key : null;
   const requestedCaseId = parsedRoute.kind === "remediation" ? positiveRouteId(parsedRoute.params, "case") : undefined;
-  const engagementKey = engagementRoute?.engagementKey ?? null;
 
   useEffect(() => {
     const handler = () => setRoute(currentRoute());

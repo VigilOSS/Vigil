@@ -38,7 +38,7 @@ dispatch halts and re-routes to `alert-triage` first.
   signal, not two — corroboration requires telemetry from a different
   table or sensor.
 - The tenant ref named in `scope.json:tenant_reference_paths[]` — the
-  `_template-edr.md` derivative (e.g., `northstar-edr.md`) documenting
+  `_template-edr.md` derivative (e.g., `acme-edr.md`) documenting
   admin scripts, PUA-tolerant dev machines, vendor telemetry baselines,
   internal-binary hashes. Missing → `blocked` handoff per `triage.md`
   rule 12.

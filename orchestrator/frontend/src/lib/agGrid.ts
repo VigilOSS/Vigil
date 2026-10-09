@@ -1,7 +1,6 @@
 // ── ag-grid shared setup ──────────────────────────────────────────────
 //
-// Ported from the reference-project reference's `ag-grid-register.ts` once-guard
-// pattern, plus our own theme decision + shared column defaults.
+// A once-guard plus the shared theme decision and column defaults.
 //
 // THEME DECISION — legacy CSS-var theme (NOT the v35 Theming API).
 //

@@ -282,9 +282,14 @@ def test_wrapper_records_tool_pid_not_supervisor(tmp_path):
             except (OSError, ValueError):
                 time.sleep(0.05)
         assert pid is not None, "wrapper never wrote a pid file"
-        comm = subprocess.run(  # noqa: S603,S607
-            ["ps", "-o", "comm=", "-p", str(pid)], capture_output=True, text=True
-        ).stdout.strip()
+        comm = ""
+        for _ in range(40):
+            comm = subprocess.run(  # noqa: S603,S607
+                ["ps", "-o", "comm=", "-p", str(pid)], capture_output=True, text=True
+            ).stdout.strip()
+            if "sleep" in comm:
+                break
+            time.sleep(0.025)
         # The recorded PID must be the tool (sleep) — NOT a shell. Pre-fix this was
         # the wrapper's `sh`, so kill -TERM <recorded> killed the supervisor and
         # left `sleep` orphaned.

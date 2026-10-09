@@ -130,7 +130,7 @@ The exact account / host / IOC / key. Wildcards and group references
 are forbidden in `target` (except `enforce_signin_policy`, where the
 group is the target). Examples:
 
-- `user@northstar.example` (NOT `*@northstar.example`)
+- `user@acme.example` (NOT `*@acme.example`)
 - `MAC-12345` (NOT `all-laptops`)
 - `arn:aws:iam::123456:user/joe` (NOT `arn:aws:iam::123456:*`)
 - `8675309-abc.apps.googleusercontent.com` (NOT `oauth-clients`)
@@ -184,7 +184,7 @@ One of:
 #    approve-proposal + blue contain.
 vigil blue propose-contain <finding-slug> \
   --action revoke_session \
-  --target user@northstar.example \
+  --target user@acme.example \
   --platform gws \
   --rollback "No rollback needed — sessions re-issue on next sign-in. Confirm out-of-band with user before any further actions." \
   --blast-radius single-user \
@@ -348,7 +348,7 @@ dispatch (if a follow-on finding lands).
      "finding_slug": "<slug>",
      "evidence_refs": [<containment-proof-artifact-ids>],
      "containment_actions_executed": [
-       {"proposal_id": <id>, "action": "revoke_session", "target": "user@northstar.example", "blast_radius": "single-user", "rollback_window_utc": "2026-05-19T18:00:00Z"}
+       {"proposal_id": <id>, "action": "revoke_session", "target": "user@acme.example", "blast_radius": "single-user", "rollback_window_utc": "2026-05-19T18:00:00Z"}
      ],
      "eradication_actions_executed": [...],
      "recovery_actions_pending": [...],

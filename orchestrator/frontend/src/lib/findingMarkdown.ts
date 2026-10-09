@@ -1,7 +1,6 @@
 // Copy-finding-as-markdown (UI/UX adoption wave, Tier 1c).
 //
-// Ported shape: reference-project static-reports ReportView.findingToMarkdown(), adapted
-// to OUR finding fields. Produces a portable markdown document an operator
+// Produces a portable markdown document from Vigil finding fields that an operator
 // can paste into a ticket, report, or chat. Empty sections are skipped so a
 // sparse finding doesn't render a wall of empty headings.
 //

@@ -86,7 +86,6 @@ type FindingsTabProps = {
 };
 
 const SEVERITY_ORDER = ["critical", "high", "medium", "low", "info"] as const;
-type Severity = (typeof SEVERITY_ORDER)[number];
 const SEV_RANK: Record<string, number> = Object.fromEntries(
   SEVERITY_ORDER.map((s, i) => [s, i]),
 );
@@ -648,7 +647,6 @@ export function FindingsTab({
     if (routeFinding?.engagementKey === engagementKey) return listed.map((item) => item.slug === routeFinding.finding.slug && (!isDetail(item) || routeFinding.finding.row_version > item.row_version) ? routeFinding.finding : item);
     return listed;
   }, [findings, fallbackFindings, routeFinding, engagementKey, resolvedInitialSlug]);
-  const { toast } = useToast();
   const [allFindingLinks, setAllFindingLinks] = useState<AssessmentFindingLink[]>([]);
   const [allFindingGroups, setAllFindingGroups] = useState<AssessmentFindingGroup[]>([]);
   const [findingLinksError, setFindingLinksError] = useState<string | null>(null);
@@ -2759,7 +2757,7 @@ function RelationshipsPane({
                   <span className={`pill pill-${chain.status}`}>{chain.status}</span>
                   <span
                     className="tag"
-                    style={{ fontFamily: "'IBM Plex Mono', monospace" }}
+                    style={{ fontFamily: "'Source Code Pro', monospace" }}
                   >
                     {chain.chain_key}
                   </span>

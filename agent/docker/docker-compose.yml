@@ -1,8 +1,6 @@
 services:
   runtime-full:
-    build:
-      context: ../..
-      dockerfile: agent/docker/runtime-full/Dockerfile
+    # Build with `vigil runtime build`; the CLI stages an allowlisted context.
     image: vigil:latest
     cap_add:
       - NET_RAW
@@ -28,9 +26,7 @@ services:
     # Development-only image for faster local Dockerfile iteration. Operator
     # workflows and docs use the full runtime image.
     profiles: ["dev"]
-    build:
-      context: ../..
-      dockerfile: agent/docker/runtime-lightweight/Dockerfile
+    # Build with `vigil runtime build --variant lightweight`.
     image: vigil-lightweight:latest
     cap_add:
       - NET_RAW
@@ -38,7 +34,5 @@ services:
       - SYS_PTRACE
 
   mitmproxy:
-    build:
-      context: ..
-      dockerfile: docker/mitmproxy/Dockerfile
+    # Build with `vigil mitmproxy build`; the CLI stages an allowlisted context.
     image: vigil-proxy:latest

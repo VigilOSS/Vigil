@@ -74,8 +74,9 @@ the steps — this is the severity justification. See "Attack Scenario vs Impact
 ## HackerOne-specific notes
 
 - **Weakness replaces VRT.** Pick the single most specific CWE the fault maps to (`CWE-89`, not
-  `CWE-20`). If two CWEs are plausible, use the one the PoC actually exercises. Offline, grep
-  `agent/references/reporting/hackerone-weaknesses.tsv` for the candidate CWE.
+  `CWE-20`). If two CWEs are plausible, use the one the PoC actually exercises. Confirm that the
+  candidate is available in HackerOne's current weakness selector and use MITRE CWE to distinguish
+  it from broader parent categories.
 - **Severity is CVSS-derived, not a separate scale.** HackerOne computes the Critical/High/
   Medium/Low bucket directly from the submitted CVSS:3.1 vector through its own calculator — don't
   hand-pick a severity that disagrees with the vector; fix the vector instead. See

@@ -1778,35 +1778,25 @@ def ingest_scope_filter(
 ) -> tuple[list[dict[str, str]], list[dict[str, str]], bool]:
     """Return ``(allow_entries, deny_entries, active)`` for an ingest-time scope gate.
 
-    ``active`` is False — the gate admits every host — when scope.json cannot be
-    loaded, declares no allowlist, or enables the engagement-wide global bypass.
-    The no-scope case is a deliberate fail-open:
-    :func:`host_admitted` returns False for ALL hosts against an empty allowlist,
-    so activating the gate with no real scope entries would reject the entire
-    batch. The ``vigil assess recon`` pipeline scope-filters the resolved host set
-    upstream; this gate is defense-in-depth for the third-party / spec-declared
-    URL sources (gau/wayback history, an OpenAPI ``servers`` url, a curated
-    candidate row) that bypass that filter, not the primary scope boundary.
+    A valid, non-empty ``scope.json`` is required. ``active`` is False only when
+    the engagement explicitly enables the global scope bypass; a missing,
+    malformed, unreadable, or empty scope must stop ingestion rather than turn a
+    broken authorization boundary into permission to admit every host.
 
     The single resolver shared by ``ingest-endpoints`` / ``ingest-candidates``
     (per-URL via :func:`host_admitted`) and ``ingest-spec`` (per-base-host), so
-    every ingest path applies identical admission semantics and the same
-    fail-open rule.
+    every ingest path applies identical admission semantics.
     """
     try:
         scope = load_scope(engagement_dir)
         allow = scope_entries(scope)
         deny = out_of_scope_entries(scope)
     except SystemExit:
-        # No scope.json, or a shape load_scope/scope_entries rejects — treated as
-        # "no scope configured": gate inactive, every host admitted (the recon
-        # pipeline remains the primary scope gate).
-        return [], [], False
-    except Exception as exc:  # noqa: BLE001 — scope load must never abort an ingest batch
-        _warn_scope(
-            "ingest-scope-filter",
-            f"WARN: could not load scope for the ingest scope filter ({exc}); "
-            "admitting all hosts (gate inactive).",
-        )
-        return [], [], False
-    return allow, deny, bool(allow) and scope_enforcement(scope) != "bypass"
+        raise
+    except Exception as exc:  # noqa: BLE001 — normalize unexpected load failures for the CLI
+        raise SystemExit(f"could not load scope.json in {engagement_dir}: {exc}") from exc
+
+    enforcement = scope_enforcement(scope)
+    if enforcement != "bypass" and not allow:
+        raise SystemExit("scope.json must declare at least one host unless scope enforcement is bypassed")
+    return allow, deny, enforcement != "bypass"

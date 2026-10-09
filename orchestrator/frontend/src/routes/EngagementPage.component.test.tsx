@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { useEffect, useState } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import * as api from "../lib/api";
@@ -80,6 +80,31 @@ it("preserves the last good engagement and ledger while a refresh fails", async 
   await screen.findByText(/temporarily unavailable/);
   expect(screen.getByRole("heading", { name: "Target one" })).toBeTruthy();
   expect(screen.getByText("Finding one")).toBeTruthy();
+});
+
+it("degrades the live feed when a malformed WebSocket frame arrives", async () => {
+  class ControlledSocket {
+    static instance: ControlledSocket;
+    onopen: (() => void) | null = null;
+    onerror: (() => void) | null = null;
+    onclose: (() => void) | null = null;
+    onmessage: ((message: MessageEvent) => void) | null = null;
+    close = vi.fn();
+    constructor() { ControlledSocket.instance = this; }
+  }
+  vi.stubGlobal("WebSocket", ControlledSocket);
+  render(<EngagementPage engagementKey="one" onBack={vi.fn()} />);
+  await screen.findByRole("heading", { name: "Target one" });
+
+  act(() => {
+    ControlledSocket.instance.onopen?.();
+    ControlledSocket.instance.onmessage?.(
+      new MessageEvent("message", { data: "not-json" }),
+    );
+  });
+
+  expect(ControlledSocket.instance.close).toHaveBeenCalledOnce();
+  expect(await screen.findByText(/Live updates unavailable/)).toBeTruthy();
 });
 
 it("does not offer a remediation route owned by the assessment engagement", async () => {

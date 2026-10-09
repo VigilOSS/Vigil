@@ -1,7 +1,7 @@
 ---
 name: cicd-security
 description: GitHub Actions and CI/CD pipeline security testing — expression injection, untrusted checkout, artifact/cache poisoning, supply chain, self-hosted runner exploitation, AI agent security
-origin: Vigil (adapted from claude-bug-bounty sisakulint integration)
+origin: Vigil
 ---
 
 # CI/CD Pipeline Security Testing

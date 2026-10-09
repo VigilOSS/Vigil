@@ -1,7 +1,7 @@
 :root,
 :root[data-theme="light"] {
   color-scheme: light;
-  font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+  font-family: "Source Sans 3", "Segoe UI", sans-serif;
 
   /* ── Page background + primary ink ──────────────────────── */
   --page-bg-color: #f3f5f7;
@@ -80,8 +80,7 @@
   --count-ink-active: #17354c;
 
   /* HTTP method / status + OAST protocol colors (light).
-     Mapped onto our palette (the reference-project reference used its own method and
-     status tokens). Consumed by the HTTP and OAST tab method, status, and
+     Mapped onto the Vigil palette. Consumed by the HTTP and OAST tab method, status, and
      protocol badges plus filter chips; redefined under the dark block. */
   --m-get: #2f7f52;     /* green   — safe reads */
   --m-post: #17354c;    /* navy    — creates */
@@ -965,7 +964,7 @@ textarea {
 }
 
 .finding-mono {
-  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+  font-family: "Source Code Pro", "SFMono-Regular", monospace;
 }
 
 .finding-steps {
@@ -978,7 +977,7 @@ textarea {
 .finding-notes {
   white-space: pre-wrap;
   word-break: break-word;
-  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+  font-family: "Source Code Pro", "SFMono-Regular", monospace;
   font-size: 0.86rem;
   line-height: 1.45;
   background: rgba(16, 18, 26, 0.04);
@@ -1076,7 +1075,7 @@ textarea {
 .coverage-view-switch button span,
 .coverage-debt h3 span {
   color: var(--muted);
-  font: 0.72rem "IBM Plex Mono", "SFMono-Regular", monospace;
+  font: 0.72rem "Source Code Pro", "SFMono-Regular", monospace;
 }
 
 .coverage-debt,
@@ -1317,7 +1316,7 @@ button.coverage-items-row {
 }
 
 .mono-text {
-  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+  font-family: "Source Code Pro", "SFMono-Regular", monospace;
   font-size: 0.82rem;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1325,7 +1324,7 @@ button.coverage-items-row {
 }
 
 .panel code {
-  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+  font-family: "Source Code Pro", "SFMono-Regular", monospace;
   font-size: 0.86em;
   background: var(--count-bg);
   border-radius: 6px;
@@ -1375,7 +1374,7 @@ button.coverage-items-row {
   white-space: pre-wrap;
   word-break: break-word;
   margin: 16px 0 0;
-  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+  font-family: "Source Code Pro", "SFMono-Regular", monospace;
   font-size: 0.88rem;
   line-height: 1.45;
 }
@@ -2036,7 +2035,7 @@ button.coverage-items-row {
   border: 1px solid var(--border);
   background: var(--panel-strong);
   color: inherit;
-  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+  font-family: "Source Code Pro", "SFMono-Regular", monospace;
 }
 
 
@@ -2071,7 +2070,7 @@ button.coverage-items-row {
   letter-spacing: 0.02em;
 }
 .findings-redesign .page-crumbs code {
-  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+  font-family: "Source Code Pro", "SFMono-Regular", monospace;
   background: rgba(23, 53, 76, 0.07);
   border-radius: 6px;
   padding: 1px 6px;
@@ -2221,7 +2220,7 @@ button.coverage-items-row {
   display: inline-flex;
   align-items: center;
   gap: 2px;
-  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+  font-family: "Source Code Pro", "SFMono-Regular", monospace;
   font-size: 0.72rem;
   color: var(--muted);
   border: 1px solid var(--border);
@@ -2482,10 +2481,10 @@ button.coverage-items-row {
   overflow: hidden;
 }
 .findings-redesign .frow-meta .dot { width: 3px; height: 3px; border-radius: 50%; background: currentColor; opacity: 0.5; }
-.findings-redesign .frow-meta .mono { font-family: "IBM Plex Mono", "SFMono-Regular", monospace; font-size: 0.74rem; color: var(--ink-2); }
+.findings-redesign .frow-meta .mono { font-family: "Source Code Pro", "SFMono-Regular", monospace; font-size: 0.74rem; color: var(--ink-2); }
 .findings-redesign .hl { background: rgba(244, 162, 89, 0.28); color: var(--ink); padding: 0 2px; border-radius: 3px; }
 .findings-redesign .frow-loc {
-  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+  font-family: "Source Code Pro", "SFMono-Regular", monospace;
   font-size: 0.78rem;
   color: var(--ink-2);
   overflow: hidden;
@@ -2511,7 +2510,7 @@ button.coverage-items-row {
   align-items: center;
   gap: 4px;
   font-size: 0.7rem;
-  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+  font-family: "Source Code Pro", "SFMono-Regular", monospace;
   letter-spacing: 0.02em;
   padding: 2px 7px;
   border-radius: 6px;
@@ -2604,7 +2603,7 @@ button.coverage-items-row {
   color: var(--muted);
   font-size: 0.9rem;
 }
-.findings-redesign .empty code { font-family: "IBM Plex Mono", "SFMono-Regular", monospace; }
+.findings-redesign .empty code { font-family: "Source Code Pro", "SFMono-Regular", monospace; }
 
 .findings-redesign .grouping-status {
   display: flex;
@@ -2774,7 +2773,7 @@ button.coverage-items-row {
 .findings-redesign .icon-btn svg { width: 14px; height: 14px; }
 
 .findings-redesign .drawer-slug {
-  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+  font-family: "Source Code Pro", "SFMono-Regular", monospace;
   font-size: 0.76rem;
   color: var(--muted);
   display: flex;
@@ -2826,7 +2825,7 @@ button.coverage-items-row {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+  font-family: "Source Code Pro", "SFMono-Regular", monospace;
   font-size: 0.76rem;
   background: rgba(255, 255, 255, 0.8);
   border: 1px solid var(--border);
@@ -2904,7 +2903,7 @@ button.coverage-items-row {
   border-radius: 999px;
   background: var(--count-bg);
   color: var(--count-ink);
-  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+  font-family: "Source Code Pro", "SFMono-Regular", monospace;
   opacity: 1;
 }
 .findings-redesign .drawer-tab.is-active .count {
@@ -3014,7 +3013,7 @@ button.coverage-items-row {
 }
 .findings-redesign .intel-resolution-meta {
   color: var(--muted);
-  font: 0.72rem "IBM Plex Mono", "SFMono-Regular", monospace;
+  font: 0.72rem "Source Code Pro", "SFMono-Regular", monospace;
   white-space: nowrap;
 }
 .findings-redesign .intel-resolution-state {
@@ -3074,7 +3073,7 @@ button.coverage-items-row {
   overflow-wrap: anywhere;
 }
 .findings-redesign .kv .v.mono {
-  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+  font-family: "Source Code Pro", "SFMono-Regular", monospace;
   font-size: 0.82rem;
   color: var(--ink-2);
   word-break: break-all;
@@ -3123,7 +3122,7 @@ button.coverage-items-row {
 .findings-redesign .pre {
   white-space: pre-wrap;
   word-break: break-word;
-  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+  font-family: "Source Code Pro", "SFMono-Regular", monospace;
   font-size: 0.82rem;
   line-height: 1.5;
   background: rgba(16, 18, 26, 0.045);
@@ -3145,7 +3144,7 @@ button.coverage-items-row {
 }
 .findings-redesign .steps li { font-size: 0.9rem; }
 .findings-redesign .steps.mono li {
-  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+  font-family: "Source Code Pro", "SFMono-Regular", monospace;
   font-size: 0.82rem;
 }
 
@@ -3164,7 +3163,7 @@ button.coverage-items-row {
   width: 20px; height: 20px;
   border-radius: 6px;
   display: grid; place-items: center;
-  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+  font-family: "Source Code Pro", "SFMono-Regular", monospace;
   font-size: 0.72rem;
   color: white;
   background: var(--accent);
@@ -3172,7 +3171,7 @@ button.coverage-items-row {
 .findings-redesign .taint-row:first-child .taint-bubble { background: var(--accent-soft); color: var(--accent-soft-ink); }
 .findings-redesign .taint-row:last-child .taint-bubble { background: var(--danger); }
 .findings-redesign .taint-line {
-  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+  font-family: "Source Code Pro", "SFMono-Regular", monospace;
   font-size: 0.84rem;
   color: var(--ink-2);
   background: rgba(255, 255, 255, 0.7);
@@ -3241,7 +3240,7 @@ button.coverage-items-row {
 .findings-redesign .link-card:disabled { cursor: default; opacity: 0.8; }
 .findings-redesign .link-card .sev-dot { width: 8px; height: 8px; border-radius: 50%; }
 .findings-redesign .link-card .link-kind {
-  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+  font-family: "Source Code Pro", "SFMono-Regular", monospace;
   font-size: 0.7rem;
   letter-spacing: 0.04em;
   padding: 1px 6px;
@@ -3257,7 +3256,7 @@ button.coverage-items-row {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .findings-redesign .link-card .link-sub {
-  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+  font-family: "Source Code Pro", "SFMono-Regular", monospace;
   font-size: 0.74rem;
   color: var(--muted);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -3297,7 +3296,7 @@ button.coverage-items-row {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+  font-family: "Source Code Pro", "SFMono-Regular", monospace;
   font-size: 0.76rem;
   background: var(--elevated);
   border: 1px solid var(--border);
@@ -3372,7 +3371,7 @@ button.coverage-items-row {
   text-transform: capitalize;
 }
 .findings-redesign .tl-actor {
-  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+  font-family: "Source Code Pro", "SFMono-Regular", monospace;
   font-size: 0.74rem;
   color: var(--muted);
 }
@@ -3512,7 +3511,7 @@ button.coverage-items-row {
   align-items: center;
 }
 .findings-redesign .ref-card-url {
-  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+  font-family: "Source Code Pro", "SFMono-Regular", monospace;
   font-size: 0.72rem;
   color: var(--muted);
   white-space: nowrap;
@@ -3549,7 +3548,7 @@ button.coverage-items-row {
 }
 .findings-redesign .ref-list .ref-primary svg { color: var(--accent); }
 .findings-redesign .ref-list .ref-url {
-  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+  font-family: "Source Code Pro", "SFMono-Regular", monospace;
   font-size: 0.72rem;
   color: var(--muted);
   white-space: nowrap;
@@ -3613,7 +3612,7 @@ button.coverage-items-row {
 .findings-redesign .cmd-item .sev-dot { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
 .findings-redesign .cmd-item .cmd-title { font-size: 0.9rem; color: var(--ink); }
 .findings-redesign .cmd-item .cmd-sub {
-  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+  font-family: "Source Code Pro", "SFMono-Regular", monospace;
   font-size: 0.74rem;
   color: var(--muted);
 }
@@ -3634,7 +3633,7 @@ button.coverage-items-row {
   flex-wrap: wrap;
 }
 .findings-redesign .findings-shortcuts code {
-  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+  font-family: "Source Code Pro", "SFMono-Regular", monospace;
   background: rgba(23, 53, 76, 0.07);
   border-radius: 5px;
   padding: 1px 5px;
@@ -3964,7 +3963,7 @@ body.detail-modal-open {
   border: 1px solid var(--json-border);
   border-radius: 10px;
   padding: 10px 12px;
-  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+  font-family: "Source Code Pro", "SFMono-Regular", monospace;
   font-size: 13px;
   line-height: 1.55;
   overflow-x: hidden;
@@ -4013,7 +4012,7 @@ body.detail-modal-open {
 .json-view-header .json-view-meta {
   font-size: 0.74rem;
   color: var(--muted);
-  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+  font-family: "Source Code Pro", "SFMono-Regular", monospace;
 }
 
 /* ──────────────────────────────────────────────────────────
@@ -4085,7 +4084,7 @@ body.detail-modal-open {
 }
 .findings-redesign .notes-body a:hover { text-decoration-thickness: 2px; }
 .findings-redesign .notes-body code {
-  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+  font-family: "Source Code Pro", "SFMono-Regular", monospace;
   background: var(--json-bg);
   border: 1px solid var(--json-border);
   border-radius: 5px;
@@ -4147,7 +4146,7 @@ body.detail-modal-open {
   color: var(--ink);
 }
 .findings-redesign .provenance-value.mono {
-  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+  font-family: "Source Code Pro", "SFMono-Regular", monospace;
   font-size: 0.84rem;
   color: var(--ink-2);
   word-break: break-all;
@@ -4156,7 +4155,7 @@ body.detail-modal-open {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+  font-family: "Source Code Pro", "SFMono-Regular", monospace;
   font-size: 0.76rem;
   padding: 1px 8px;
   border-radius: 6px;
@@ -4174,11 +4173,11 @@ body.detail-modal-open {
 }
 /* Compact evidence callout for short prose observations in the
  * Findings PoC pane. Muted panel + accent bar; monospace tip-toed
- * in via IBM Plex Mono to help the eye tell evidence from flavor
+ * in via Source Code Pro to help the eye tell evidence from flavor
  * prose. Longer (>200 char, multi-paragraph) evidence falls back to
  * NotesBody so paragraph structure survives. */
 .findings-redesign .evidence-inline {
-  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+  font-family: "Source Code Pro", "SFMono-Regular", monospace;
   font-size: 0.85rem;
   line-height: 1.55;
   padding: 10px 14px;
@@ -4228,7 +4227,7 @@ body.detail-modal-open {
   line-height: 1.55;
 }
 .findings-redesign .code-block {
-  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+  font-family: "Source Code Pro", "SFMono-Regular", monospace;
   font-size: 0.84rem;
   line-height: 1.55;
   background: var(--json-bg);
@@ -4372,7 +4371,7 @@ body.detail-modal-open {
  * finding prose (notes/summary/impact/remediation). Sized to fit
  * inside the drawer; all colors via theme vars so light/dark both
  * read. Tables get borders via --border; inline + fenced code use
- * IBM Plex Mono on --panel-soft. NO raw HTML is rendered (see
+ * Source Code Pro on --panel-soft. NO raw HTML is rendered (see
  * Markdown.tsx) — react-markdown's default escaping is the sanitizer.
  * ────────────────────────────────────────────────────────── */
 .findings-redesign .md-body {
@@ -4427,7 +4426,7 @@ body.detail-modal-open {
 .findings-redesign .md-body strong { font-weight: 700; color: var(--ink); }
 .findings-redesign .md-body em { font-style: italic; }
 .findings-redesign .md-body code {
-  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+  font-family: "Source Code Pro", "SFMono-Regular", monospace;
   font-size: 0.88em;
   background: var(--panel-soft);
   border: 1px solid var(--border);
@@ -4435,7 +4434,7 @@ body.detail-modal-open {
   padding: 0 5px;
 }
 .findings-redesign .md-body pre {
-  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+  font-family: "Source Code Pro", "SFMono-Regular", monospace;
   font-size: 0.82rem;
   line-height: 1.5;
   background: var(--panel-soft);
@@ -4934,7 +4933,7 @@ body.detail-modal-open {
 }
 
 .v-statbar-value {
-  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+  font-family: "Source Code Pro", "SFMono-Regular", monospace;
   font-size: 1.3rem;
   font-weight: 700;
   font-variant-numeric: tabular-nums;
@@ -4988,7 +4987,7 @@ body.detail-modal-open {
 
   /* Type + density — mirror our .list-header / .frow look. The grid body
    * uses the sans stack; mono is applied per-cell via .ag-mono (below). */
-  --ag-font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+  --ag-font-family: "Source Sans 3", "Segoe UI", sans-serif;
   --ag-font-size: 0.82rem;
   --ag-row-height: 38px;
   --ag-header-height: 34px;
@@ -5005,7 +5004,7 @@ body.detail-modal-open {
 
 /* Mono cells (command / location / target) — opt in via cellClass. */
 .ag-theme-vigil .ag-mono {
-  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+  font-family: "Source Code Pro", "SFMono-Regular", monospace;
   font-size: 0.78rem;
 }
 
@@ -5097,9 +5096,8 @@ body.detail-modal-open {
 /* Cross-engagement landing dashboard (EngagementsPage). A KPI stat bar on top,
  * a two-column charts row (severity donut + by-status CSS bars), then the
  * existing engagement cards below, each enhanced with a severity mini-bar +
- * finding-count badge. The staggered card fade-in keyframes are ported from the
- * reference-project workbench globals.css (.v-card-enter / .v-stagger-N); they reuse the
- * same .v-fade-in-up keyframe and are disabled under prefers-reduced-motion.
+ * finding-count badge. The staggered card fade-in keyframes reuse the same
+ * .v-fade-in-up keyframe and are disabled under prefers-reduced-motion.
  * Vars only (--sev-*, --ink, --ink-2, --muted, --accent, --ok, --danger,
  * --border, --panel-soft) so both themes read correctly. */
 
@@ -5216,7 +5214,7 @@ body.detail-modal-open {
   height: 100%;
 }
 
-/* Staggered card fade-in (ported from reference-project workbench). */
+/* Staggered card fade-in. */
 @keyframes v-fade-in-up {
   from { opacity: 0; transform: translateY(4px); }
   to { opacity: 1; transform: translateY(0); }
@@ -5308,7 +5306,7 @@ body.detail-modal-open {
 .findings-redesign .method-badge {
   display: inline-flex;
   align-items: center;
-  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+  font-family: "Source Code Pro", "SFMono-Regular", monospace;
   font-size: 0.7rem;
   font-weight: 700;
   letter-spacing: 0.04em;
@@ -5349,7 +5347,7 @@ body.detail-modal-open {
 .findings-redesign .status-badge {
   display: inline-flex;
   align-items: center;
-  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+  font-family: "Source Code Pro", "SFMono-Regular", monospace;
   font-size: 0.7rem;
   font-weight: 700;
   padding: 2px 7px;
@@ -5437,7 +5435,7 @@ body.detail-modal-open {
 .findings-redesign .oob-proto-badge {
   display: inline-flex;
   align-items: center;
-  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+  font-family: "Source Code Pro", "SFMono-Regular", monospace;
   font-size: 0.68rem;
   font-weight: 700;
   letter-spacing: 0.04em;
@@ -5783,7 +5781,7 @@ body.detail-modal-open {
   background: var(--json-bg);
   border: 1px solid var(--json-border);
   color: var(--ink-2);
-  font: 0.76rem/1.55 "IBM Plex Mono", "SFMono-Regular", monospace;
+  font: 0.76rem/1.55 "Source Code Pro", "SFMono-Regular", monospace;
   overflow: auto;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
@@ -5822,7 +5820,7 @@ body.detail-modal-open {
   padding: 5px 9px;
   background: var(--count-bg);
   color: var(--accent);
-  font: 0.76rem "IBM Plex Mono", "SFMono-Regular", monospace;
+  font: 0.76rem "Source Code Pro", "SFMono-Regular", monospace;
   text-decoration: none;
 }
 
@@ -5982,7 +5980,7 @@ body.detail-modal-open {
 
 .run-record-list article:last-child { border-bottom: 0; }
 .run-record-list article > header { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; }
-.run-record-list article > header span { color: var(--muted); font: 0.74rem "IBM Plex Mono", "SFMono-Regular", monospace; }
+.run-record-list article > header span { color: var(--muted); font: 0.74rem "Source Code Pro", "SFMono-Regular", monospace; }
 .run-record-list article.is-focused { background: color-mix(in srgb, var(--accent-soft) 14%, transparent); box-shadow: 0 0 0 8px color-mix(in srgb, var(--accent-soft) 14%, transparent); }
 
 .run-load-more { justify-self: start; }
@@ -6242,7 +6240,7 @@ body.detail-modal-open {
 .submission-markdown .md-body pre,
 .submission-markdown .md-body code,
 .submission-raw,
-.submission-no-draft code { font-family: "IBM Plex Mono", "SFMono-Regular", monospace; }
+.submission-no-draft code { font-family: "Source Code Pro", "SFMono-Regular", monospace; }
 .submission-markdown .md-body pre,
 .submission-raw { background: var(--json-bg); border: 1px solid var(--json-border); }
 .submission-markdown .md-body pre { padding: 12px; overflow: auto; border-radius: 8px; }
@@ -6294,7 +6292,7 @@ body.detail-modal-open {
 .submission-attachment:hover { border-color: var(--border-strong); }
 .submission-attachment input { margin-top: 2px; accent-color: var(--accent); }
 .submission-attachment span { display: grid; gap: 4px; min-width: 0; }
-.submission-attachment strong { overflow-wrap: anywhere; font: 0.72rem "IBM Plex Mono", "SFMono-Regular", monospace; }
+.submission-attachment strong { overflow-wrap: anywhere; font: 0.72rem "Source Code Pro", "SFMono-Regular", monospace; }
 .submission-attachment small { color: var(--muted); font-size: 0.68rem; }
 .submission-attachment-pagination { display: grid; gap: 7px; margin-top: 10px; }
 .submission-attachment-pagination p { margin: 0; color: var(--warn); font-size: 0.72rem; }

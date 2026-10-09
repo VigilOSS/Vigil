@@ -174,13 +174,13 @@ vigil assess kali exec --technique CSRF \
   --probe-kind payload --phase consume-test --timeout 30 -- \
   curl -s -X POST http://target.example/api/action \
     -H "Cookie: session=VICTIM_SESSION" \
-    -d "email=test@test.com"
+    -d "email=test@test.example"
 
 # Check if endpoint accepts GET instead of POST
 vigil assess kali exec --technique CSRF \
   --intent "CSRF probe: method switch GET vs POST on /api/action" \
   --probe-kind payload --phase consume-test --timeout 30 -- \
-  curl -s "http://target.example/api/action?email=test@test.com" \
+  curl -s "http://target.example/api/action?email=test@test.example" \
     -H "Cookie: session=VICTIM_SESSION"
 
 # Check Referer validation
@@ -190,5 +190,5 @@ vigil assess kali exec --technique CSRF \
   curl -s -X POST http://target.example/api/action \
     -H "Cookie: session=VICTIM_SESSION" \
     -H "Referer: https://evil.example/" \
-    -d "email=test@test.com"
+    -d "email=test@test.example"
 ```

@@ -1349,8 +1349,7 @@ _INERT_TYPES = INERT_TYPES
 # That rules out `repr(frozenset(...))`, `str(set(...))`, and the builtin
 # `hash()` — all three are PYTHONHASHSEED-randomized, so their output varies run
 # to run. The same trap is documented at
-# `src/vigil_cli/bench/factory/axes.py:116` (blake2s chosen over `hash()` for
-# exactly this reason).
+# other deterministic digest code for exactly this reason.
 #
 # We instead CANONICALIZE the input: recursively turn every set/frozenset into a
 # SORTED list (order-independent), leave tuples/lists in declaration order

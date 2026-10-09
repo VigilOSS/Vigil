@@ -151,4 +151,4 @@ def generate_params_sig(query_params: dict | str, body_params: dict | str) -> st
 
     keys = sorted(set(list(query_params.keys()) + list(body_params.keys())))
     joined = ",".join(keys)
-    return hashlib.md5(joined.encode()).hexdigest()
+    return hashlib.md5(joined.encode(), usedforsecurity=False).hexdigest()

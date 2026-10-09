@@ -273,7 +273,7 @@ This turns an open redirect into reflected XSS. The validator may check for `htt
 
 ### Phishing Amplification
 
-A direct link from a trusted domain (`https://acme.example/redirect?url=https://bigcorp-login.evil.example`) is far more convincing in phishing campaigns than a naked `evil.example` link. Email filters and link scanners often trust known domains.
+A direct link from a trusted domain (`https://acme.example/redirect?url=https://login.evil.example`) is far more convincing in phishing campaigns than a naked `evil.example` link. Email filters and link scanners often trust known domains.
 
 **Severity context:** This is Low severity as a standalone finding. Mention the phishing potential in the finding narrative but do not inflate severity based on hypothetical phishing scenarios.
 

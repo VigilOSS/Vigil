@@ -1,7 +1,6 @@
 // Rendered-markdown wrapper for finding prose (UI/UX adoption wave, Tier 1c).
 //
-// Ported pattern: the reference-project FindingDetailPanel's rendered/raw Description
-// tabs. Our agents write markdown into notes/summary/impact/remediation, so
+// Our agents write markdown into notes/summary/impact/remediation, so
 // the drawer offers a rendered view (this component) toggled against the
 // existing mono <pre> raw view.
 //

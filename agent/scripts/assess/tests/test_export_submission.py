@@ -2345,7 +2345,7 @@ def test_length_advisory_quote_neutralizes_backticks_and_pipes():
             "\n"
             "HTTP/1.1 200 OK\n"
             "Content-Type: application/pdf\n"
-            "Content-Disposition: attachment; filename=invoice-41198-northwind.pdf\n",
+            "Content-Disposition: attachment; filename=invoice-41198-acme.pdf\n",
         ),
     ],
 )

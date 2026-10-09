@@ -169,25 +169,10 @@ case "$TOOL_NAME" in
     COMMAND=$(echo "$INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null || true)
     [ -z "$COMMAND" ] && exit 0
 
-    # Skip noise: pure file reads, git ops, test commands — but NEVER skip a
-    # command that is security-relevant, because the post-run taint audit
-    # (vigil_cli/bench/taint.py) scans these logged activity entries for cheat
-    # signatures. A skipped `cat /…/flag`, `cat /…/factory/…/dag.yaml`, or
-    # `cat /engagements/<other>/captured-flag.txt` would be INVISIBLE to that
-    # audit, letting a host-side flag/answer-key read or a cross-attempt steal go
-    # unrecorded. So the noise skip applies only when the command does NOT touch a
-    # taint-relevant surface: a flag artifact, the benchmark store / factory source
-    # (the answer key), an engagements path, or a host net/docker tool. These
-    # mirror taint.py's signatures so logging and auditing stay in lockstep.
+    # Skip routine local-only noise; target-facing commands remain auditable.
     case "$COMMAND" in
       cat\ *|ls\ *|git\ *|echo\ *|test\ *|"["*|pwd*)
-        if printf '%s' "$COMMAND" | grep -Eqi \
-            'flag|\.vigil-bench|xbow-benchmarks|validation-benchmarks|vigil_cli/bench|bench/factory|factory/families|dag\.yaml|injection\.yaml|family\.yaml|engagements/|(^|[^[:alnum:]_])(curl|wget|nc|ncat|nmap|masscan|httpie|telnet|socat|docker)([^[:alnum:]_]|$)'
-        then
-          : # security-relevant — fall through and log it for the taint audit
-        else
-          exit 0
-        fi
+        exit 0
         ;;
     esac
 

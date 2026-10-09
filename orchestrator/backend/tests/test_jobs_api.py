@@ -362,7 +362,10 @@ def test_patch_job_broadcasts_via_websocket(client, isolate_settings):
         f"/engagements/{ENGAGEMENT_KEY}/assessment/jobs",
         json={"status": "running"},
     ).json()
-    with client.websocket_connect(f"/ws/engagements/{ENGAGEMENT_KEY}") as websocket:
+    with client.websocket_connect(
+        f"/ws/engagements/{ENGAGEMENT_KEY}",
+        headers={"origin": "http://127.0.0.1:18000"},
+    ) as websocket:
         response = client.patch(
             f"/engagements/{ENGAGEMENT_KEY}/assessment/jobs/{created['id']}",
             json={"status": "completed", "exit_code": 0},

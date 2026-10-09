@@ -66,9 +66,9 @@ def test_plan_renders_go_install_and_brew_commands_when_missing():
     by_tool = {step.tool: step.command for step in plan}
     # Every declared recon tool with an auto command is planned when absent.
     assert by_tool["subfinder"] == (
-        "go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest"
+        "go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@v2.17.0"
     )
-    assert by_tool["httpx"] == "go install github.com/projectdiscovery/httpx/cmd/httpx@latest"
+    assert by_tool["httpx"] == "go install github.com/projectdiscovery/httpx/cmd/httpx@v1.9.0"
     # massdns is not go-installable; on macOS it gets a brew command.
     assert by_tool["massdns"] == "brew install massdns"
 
@@ -124,7 +124,7 @@ def test_install_runs_commands_only_with_flag():
     )
     assert rc == 0
     ran = {tuple(call) for call in runner.calls}
-    assert ("go", "install", "github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest") in ran
+    assert ("go", "install", "github.com/projectdiscovery/subfinder/v2/cmd/subfinder@v2.17.0") in ran
     assert ("brew", "install", "massdns") in ran
     # One call per planned tool, nothing more.
     assert len(runner.calls) == len(host_tool_plan(which=_which_missing, system=_darwin))
@@ -155,7 +155,7 @@ def test_text_output_renders_plan_and_next_steps(capsys):
     assert "vigil quickstart" in out
     assert "install root: /home/op/vigil" in out
     # Plan is printed but flagged as not executed.
-    assert "go install github.com/projectdiscovery/dnsx/cmd/dnsx@latest" in out
+    assert "go install github.com/projectdiscovery/dnsx/cmd/dnsx@v1.2.3" in out
     assert "--install-host-tools" in out
     # Next-step checklist keys to the resolved install root + supplied target.
     assert "vigil install /home/op/vigil" in out

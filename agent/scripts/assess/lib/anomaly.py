@@ -1,8 +1,7 @@
 """Response anomaly oracle — deterministic, no-LLM population outlier scoring.
 
 Scores a *population* of HTTP response records (dicts) to surface the odd-one-
-out(s). Ported from the reference-project ``pkg/anomaly`` approach (engine.go /
-weights.go):
+out(s):
 
 1. Build per-attribute frequency tables over the population.
 2. An attribute only contributes signal when it VARIES (>= 2 distinct values).
@@ -197,7 +196,7 @@ _MIN_WEIGHT = 0.05
 def _attribute_weight(distinct_count: int, population_size: int) -> float:
     """Compute the per-attribute weight.
 
-    Rules (matching reference-project weights.go philosophy):
+    Rules:
     - If distinct_count == 1: the attribute does not vary → weight 0.
     - If distinct_count == 2: binary split → maximum weight.
     - As distinct_count approaches population_size, weight degrades towards

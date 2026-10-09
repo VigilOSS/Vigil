@@ -1883,7 +1883,7 @@ def test_install_reconciles_file_directory_collisions_and_is_immediately_current
     monkeypatch.setenv("VIGIL_CONFIG", str(tmp_path / "config.json"))
     source = tmp_path / "source"
     _installable_source(source)
-    managed_source = source / "TODOs"
+    managed_source = source / "docker"
     if source_kind == "file":
         managed_source.write_text("source file\n", encoding="utf-8")
     else:
@@ -1891,7 +1891,7 @@ def test_install_reconciles_file_directory_collisions_and_is_immediately_current
         (managed_source / "nested.txt").write_text("source dir\n", encoding="utf-8")
     install = tmp_path / "install"
     install.mkdir()
-    managed_destination = install / "TODOs"
+    managed_destination = install / "docker"
     if destination_kind == "file":
         managed_destination.write_text("old file\n", encoding="utf-8")
     else:
@@ -2239,6 +2239,10 @@ def test_post_sync_phases_use_the_pinned_destination_inode(
     monkeypatch.setenv("VIGIL_CONFIG", str(tmp_path / "config.json"))
     source = tmp_path / "source"
     _installable_source(source)
+    if phase == "image":
+        for image_input in runtime_module.runtime_image_inputs(source):
+            image_input.parent.mkdir(parents=True, exist_ok=True)
+            image_input.write_text("build input\n", encoding="utf-8")
     install = tmp_path / "install"
     requested_install_root = Path(os.path.abspath(install))
     registry_path = tmp_path / "oob-allocations.json"

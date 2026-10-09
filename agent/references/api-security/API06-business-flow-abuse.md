@@ -32,7 +32,7 @@ skill: business-logic-testing
 - [ ] Check for missing rate limits on resource creation endpoints
 
 ## Email / SMS Bombing
-- [ ] Test email bombing via password reset: `for i in $(seq 1 100); do curl -s -X POST -d "email=victim@test.com" https://api/reset; done`
+- [ ] Test email bombing via password reset: `for i in $(seq 1 100); do curl -s -X POST -d "email=victim@test.example" https://api/reset; done`
 - [ ] Test SMS bombing via phone verification endpoint
 - [ ] Test notification triggers: can API calls generate unlimited push notifications?
 - [ ] Check for invite/share endpoints that send emails without rate limits

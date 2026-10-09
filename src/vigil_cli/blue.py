@@ -130,7 +130,7 @@ def register_blue_parser(sub: argparse._SubParsersAction) -> None:
         "--customer",
         required=False,
         default=None,
-        help="Customer kebab-case slug, e.g. 'northstar' (omit for interactive picker)",
+        help="Customer kebab-case slug, e.g. 'acme' (omit for interactive picker)",
     )
     engage_p.add_argument(
         "--platform",
@@ -149,7 +149,7 @@ def register_blue_parser(sub: argparse._SubParsersAction) -> None:
     )
     engage_p.add_argument(
         "--start",
-        choices=("codex", "claude", "opencode", "goose"),
+        choices=("codex", "claude", "opencode", "goose", "kimi"),
         default=None,
         help=(
             "After creating the engagement, immediately launch the operator session "
@@ -436,7 +436,7 @@ def _cmd_engage(args: argparse.Namespace, install_root: Path) -> None:
     if not KEBAB_SLUG_RE.match(customer):
         raise SystemExit(
             f"--customer must be lowercase kebab-case (got {customer!r}). "
-            "Example: --customer northstar"
+            "Example: --customer acme"
         )
 
     raw_platforms = [piece.strip() for piece in (args.platform or "").split(",") if piece.strip()]

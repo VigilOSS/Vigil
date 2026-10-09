@@ -2,10 +2,24 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import subprocess
+import tempfile
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Iterator
 from urllib.parse import urlsplit
+
+try:
+    import fcntl as _fcntl
+except ModuleNotFoundError:  # Windows
+    _fcntl = None  # type: ignore[assignment]
+
+try:
+    import msvcrt as _msvcrt
+except ModuleNotFoundError:  # POSIX
+    _msvcrt = None  # type: ignore[assignment]
 
 CONFIG_ENV = "VIGIL_CONFIG"
 CONFIG_DIR = Path.home() / ".config" / "vigil"
@@ -202,7 +216,27 @@ def load_config(path: Path | None = None) -> dict[str, str]:
 def save_config(values: dict[str, str], path: Path | None = None) -> Path:
     target = path or config_path()
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(json.dumps(dict(sorted(values.items())), indent=2) + "\n", encoding="utf-8")
+    payload = json.dumps(dict(sorted(values.items())), indent=2) + "\n"
+    fd, raw_tmp_path = tempfile.mkstemp(
+        dir=target.parent,
+        prefix=f".{target.name}.",
+        suffix=".tmp",
+    )
+    tmp_path = Path(raw_tmp_path)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as tmp_file:
+            tmp_file.write(payload)
+            tmp_file.flush()
+            os.fsync(tmp_file.fileno())
+        os.replace(tmp_path, target)
+        dir_fd = os.open(target.parent, os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
     return target
 
 
@@ -210,21 +244,66 @@ def get_config_value(key: str, default: str | None = None) -> str | None:
     return load_config().get(key, default)
 
 
+@contextmanager
+def _config_mutation_lock(target: Path) -> Iterator[None]:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = target.parent / f".{target.name}.lock"
+    with lock_path.open("a+") as lock_file:
+        if _fcntl is not None:
+            _fcntl.flock(lock_file.fileno(), _fcntl.LOCK_EX)
+        elif _msvcrt is not None:
+            if lock_file.tell() == 0:
+                lock_file.write("\0")
+                lock_file.flush()
+            lock_file.seek(0)
+            _msvcrt.locking(lock_file.fileno(), _msvcrt.LK_LOCK, 1)
+        else:
+            raise RuntimeError("this platform does not provide file locking")
+        try:
+            yield
+        finally:
+            if _fcntl is not None:
+                _fcntl.flock(lock_file.fileno(), _fcntl.LOCK_UN)
+            else:
+                assert _msvcrt is not None
+                lock_file.seek(0)
+                _msvcrt.locking(lock_file.fileno(), _msvcrt.LK_UNLCK, 1)
+
+
 def set_config_value(key: str, value: str) -> Path:
-    values = load_config()
-    values[key] = value
-    return save_config(values)
+    target = config_path()
+    with _config_mutation_lock(target):
+        values = load_config(target)
+        values[key] = value
+        return save_config(values, target)
 
 
 def unset_config_value(key: str) -> Path:
-    values = load_config()
-    values.pop(key, None)
-    return save_config(values)
+    target = config_path()
+    with _config_mutation_lock(target):
+        values = load_config(target)
+        values.pop(key, None)
+        return save_config(values, target)
+
+
+def run_editor(target: Path) -> int:
+    editor = os.environ.get("VISUAL") or os.environ.get("EDITOR") or "vi"
+    try:
+        argv = shlex.split(editor)
+    except ValueError as exc:
+        raise SystemExit(f"invalid editor command: {exc}") from exc
+    if not argv:
+        raise SystemExit("editor command is empty")
+    try:
+        return subprocess.call([*argv, str(target)])
+    except OSError as exc:
+        raise SystemExit(f"could not launch editor {argv[0]!r}: {exc}") from exc
 
 
 def edit_config() -> None:
     target = config_path()
     if not target.exists():
-        save_config({})
-    editor = os.environ.get("VISUAL") or os.environ.get("EDITOR") or "vi"
-    raise SystemExit(subprocess.call([editor, str(target)]))
+        with _config_mutation_lock(target):
+            if not target.exists():
+                save_config({}, target)
+    raise SystemExit(run_editor(target))

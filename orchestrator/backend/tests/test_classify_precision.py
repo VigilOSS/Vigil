@@ -17,7 +17,7 @@ behaviour and calls `classify_from_fields` exactly as `test_work_buffer.py`
 does (via the `_classify_buckets()` import helper). Both positive matches and
 the negative guards are covered.
 
-Source of truth: docs/plans/research/classify-surface-2026-06/IMPLEMENTATION-SPEC.md
+Source of truth: docs/research/classify-surface/IMPLEMENTATION-SPEC.md
 """
 from __future__ import annotations
 

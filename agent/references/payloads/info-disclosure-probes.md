@@ -195,7 +195,7 @@ curl -H "Metadata: true" "http://169.254.169.254/metadata/instance?api-version=2
 curl -H "Metadata: true" "http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https://management.azure.com/"
 ```
 
-### DigitalOcean
+### DigitalAcme
 
 ```bash
 curl http://169.254.169.254/metadata/v1/

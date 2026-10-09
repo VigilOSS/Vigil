@@ -20,7 +20,6 @@ from typing import Any, NoReturn, TextIO
 
 from . import auth as auth_module
 from . import backup as backup_module
-from . import bench as bench_module
 from . import blue as blue_module
 from . import config as config_module
 from . import email as email_module
@@ -282,8 +281,8 @@ class _SiblingHintParser(argparse.ArgumentParser):
 def _cli_version() -> str:
     """Installed distribution version, or a marker when there is no metadata.
 
-    The bench participant bundle runs this CLI from a copied source tree with no
-    installed distribution, so resolving the version must never raise — an
+    Source checkouts may run this CLI without installed distribution metadata,
+    so resolving the version must never raise — an
     exception here is built at parser-construction time and would break every
     invocation, not just `--version`.
     """
@@ -673,7 +672,6 @@ def main(argv: list[str] | None = None) -> None:
 
     blue_module.register_blue_parser(sub)
     remediation_module.register_remediation_parser(sub)
-    bench_module.register_bench_parser(sub)
 
     orch_p = sub.add_parser("orchestrator")
     orch_sub = orch_p.add_subparsers(dest="orchestrator_command", required=True)
@@ -755,15 +753,15 @@ def main(argv: list[str] | None = None) -> None:
         help="Read recent messages from a local Mail.app mailbox (e.g. fetch a verification code)",
         description=(
             "Read recent messages addressed to a test mailbox via local Mail.app automation "
-            "(same mechanism as email-utility; no SMTP/IMAP/API, no stored "
-            "credentials). The mailbox must be a configured Mail.app account on this host. "
+            "(no SMTP/IMAP/API and no stored credentials). The mailbox must be a configured "
+            "Mail.app account on this host. "
             "Primary use: retrieving short-lived email-verification codes sent to a test "
             "mailbox during authenticated security testing."
         ),
     )
     email_p.add_argument(
         "mailbox",
-        help="recipient mailbox address to read (e.g. researcher@example.com)",
+        help="recipient mailbox address to read (e.g. tester@example.com)",
     )
     email_p.add_argument(
         "--from",
@@ -1387,8 +1385,6 @@ def main(argv: list[str] | None = None) -> None:
         blue_module.run_blue(args, install_root)
     elif args.command == "remediation":
         remediation_module.run_remediation(args, install_root)
-    elif args.command == "bench":
-        bench_module.run_bench(args, install_root)
     elif args.command == "orchestrator":
         _orchestrator(args, install_root)
     elif args.command == "runtime":

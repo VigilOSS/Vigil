@@ -19,7 +19,7 @@ category: Disclosure & Reporting Formats
 
 ### Summary
 
-A Meridian Ops user the organization denies Payroll access runs their own Payroll query through a colleague's shared dashboard widget. I hold no Payroll role and I'm refused at Payroll's own API. A `params` override on the widget-data route still returns a live computation for a department the widget's creator never configured. The route authorizes on the widget's stored creator, not the requester, and never re-checks an override's target against anyone's permission.
+A Acme Operations user the organization denies Payroll access runs their own Payroll query through a colleague's shared dashboard widget. I hold no Payroll role and I'm refused at Payroll's own API. A `params` override on the widget-data route still returns a live computation for a department the widget's creator never configured. The route authorizes on the widget's stored creator, not the requester, and never re-checks an override's target against anyone's permission.
 
 **Exploit flow**
 1. A Payroll admin creates a dashboard widget scoped to one department and shares the dashboard with an ordinary viewer.

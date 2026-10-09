@@ -295,7 +295,7 @@ ws.close()
 # Query with non-existing user
 curl -s -X POST "http://target/graphql" \
   -H "Content-Type: application/json" \
-  -d '{"query":"{ user(email: \"nonexistent@x.com\") { id } }"}' \
+  -d '{"query":"{ user(email: \"nonexistent@identity.example\") { id } }"}' \
   -o "$TMPDIR_ENUM/gql_invalid.txt"
 
 # Query with likely-existing user
@@ -313,7 +313,7 @@ diff "$TMPDIR_ENUM/gql_invalid.txt" "$TMPDIR_ENUM/gql_valid.txt"
 ```bash
 # Some SSO flows redirect differently for valid vs invalid users
 curl -s -o /dev/null -w "%{redirect_url}" \
-  "http://target/auth/login?email=nonexistent@x.com"
+  "http://target/auth/login?email=nonexistent@identity.example"
 curl -s -o /dev/null -w "%{redirect_url}" \
   "http://target/auth/login?email=admin@target.example"
 # Different redirect destination = enumerable

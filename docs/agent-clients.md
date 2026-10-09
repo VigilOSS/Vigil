@@ -1,7 +1,6 @@
 # Agent clients
 
-`--client` on `vigil engagement start` (and on `vigil bench run` for every client
-except `kimi` and `pi`) selects which agent CLI drives the engagement. All six read the
+`--client` on `vigil engagement start` selects which agent CLI drives the engagement. All six read the
 same operator prompt and run the same methodology; they differ in the model behind
 them, in whether they can dispatch specialists headlessly, and in whether they
 expose the `vigil-*` session commands.
@@ -70,7 +69,7 @@ check for a provider key.
   2C dispatch that has to re-derive it independently.
 - **kimi** — execs `kimi`, with `--auto` under `--skip-permissions`. Runs the
   operator inline from the same prompt; it has no generated specialist roster or
-  activity hooks, and is not a `vigil bench run --client` option. Its model is
+  activity hooks. Its model is
   deliberately not pinned.
 
 ## Pi
@@ -91,7 +90,7 @@ flags because Vigil also owns flags with those names.
 Pi supports remediation engagements only. Other engagement modes require a
 specialist roster that Vigil does not install for Pi; start those engagements with
 `--client codex` or `--client claude`. Vigil installs no Pi activity hooks
-or `vigil-*` session commands, and Pi is not a benchmark client. `--skip-permissions`
+or `vigil-*` session commands. `--skip-permissions`
 does not change the Pi launcher: Pi has no per-tool approval prompts by default.
 Its project-trust settings remain under Pi's control. See
 [Pi configuration](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/configuration.md)
@@ -122,8 +121,7 @@ ambient Goose/OpenAI endpoint settings cannot redirect that credential.
 
 ### goose — the recommended open-model client
 
-Unlike opencode it dispatches custom specialist subagents headlessly, *and* its
-anti-cheat hook fires inside them.
+Unlike opencode it dispatches custom specialist subagents headlessly.
 
 ```bash
 brew install block-goose-cli
@@ -146,13 +144,13 @@ engagement-local recipe roster, and unattended safety/session settings. An expli
 **The thinking path depends on a stopgap.** Thinking-mode DeepSeek-V4 on goose's
 direct provider works around
 [aaif-goose#9397](https://github.com/aaif-goose/goose/issues/9397) with a local
-reasoning-content repair proxy (`src/vigil_cli/bench/goose_reasoning_proxy.py`),
+reasoning-content repair proxy (`src/vigil_cli/goose_reasoning_proxy.py`),
 started by the launcher. goose splits a parallel-tool-call assistant turn into N
 messages but keeps `reasoning_content` only on the first, and DeepSeek 400s on the
 rest; the proxy re-attaches it. `parallel_tool_calls:false` does not help —
 DeepSeek ignores the flag. Remove the proxy when #9397 is fixed upstream. Opt out
 with `VIGIL_GOOSE_REASONING_PROXY=0`, and thinking then regresses to the #9397 400
-on any batched-tool turn. Full detail: [`goose-bench.md`](goose-bench.md).
+on any batched-tool turn.
 
 ### opencode
 
@@ -163,13 +161,11 @@ vigil engagement start <key> --client opencode --thinking high
 The launcher execs opencode's **default TUI** as `--agent operator`, not the
 one-shot `opencode run`. The operator message is passed with `--prompt`.
 
-`--thinking off|high|max` sets the DeepSeek reasoning level; it is optional here
-and required only on `vigil bench run --client opencode`. opencode runs the
+`--thinking off|high|max` sets the DeepSeek reasoning level. opencode runs the
 operator inline — it cannot dispatch custom specialists headlessly
 (opencode#29616).
 
-OpenRouter is not a supported launcher path; future evaluation is tracked in
-[`TODO.md`](../TODO.md).
+OpenRouter is not a supported launcher path.
 
 ## What the launcher exports
 

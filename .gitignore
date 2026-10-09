@@ -5,6 +5,8 @@
 **/.venv/
 **/node_modules/
 **/dist/
+README.html
+README_files/
 **/data/
 # Shipped recon resolver lists are REQUIRED at runtime and asserted by
 # test_recon_foundations; un-ignore just this dir's .txt lists so a clean CI
@@ -18,7 +20,11 @@
 *.sqlite3
 *.db
 .env
+.env.*
+!.env.example
+!agent/.env.example
 .runtime-data/
+.playwright-mcp/
 workspace/
 opencode-home/
 agent/engagements/*
@@ -30,24 +36,11 @@ agent/references/tenants/*
 !agent/references/tenants/_template-*.md
 tools/analysis-state/
 
-# Preserve the synthetic classifier contract, not the real-target labeling
-# corpus used to derive it.
-docs/plans/research/classify-surface-2026-06/*
-!docs/plans/research/classify-surface-2026-06/README.md
-!docs/plans/research/classify-surface-2026-06/IMPLEMENTATION-SPEC.md
 CLAUDE-REVIEW.md
 CODEX-FINDINGS.md
-docs/plans/_session-handoff-*.md
 
 # Build artifacts (note: `**/*.egg-info/` is already covered above; `**/build/`
 # catches build/ at any path including the repo root)
 **/build/
 prev-issues.md
 potentially-updated-issues.md
-
-# Benchmark harness (`vigil bench`). Artifacts, manifests, the judge-only
-# answer key, and the plaintext per-run flags live off-tree under
-# $VIGIL_BENCH_HOME (default ~/.vigil-bench) by design; these patterns are a
-# defensive backstop in case that home is ever pointed inside the repo.
-.vigil-bench/
-bench-results/

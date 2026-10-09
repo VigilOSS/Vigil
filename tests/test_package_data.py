@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import os
 from pathlib import Path
 import shutil
@@ -11,8 +10,12 @@ import sys
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_installed_wheel_can_list_and_render_generated_family(tmp_path: Path) -> None:
-    """A wheel built from the sdist must carry the benchmark factory data."""
+def test_sdist_builds_an_installable_wheel_with_a_working_cli(tmp_path: Path) -> None:
+    """Prove the published path, not an editable checkout.
+
+    Build an sdist, build the wheel from that archive, install it in an isolated
+    environment, and invoke the console entrypoint from an unrelated directory.
+    """
     uv = shutil.which("uv")
     assert uv is not None, "the repository test matrix requires uv"
 
@@ -46,7 +49,7 @@ def test_installed_wheel_can_list_and_render_generated_family(tmp_path: Path) ->
     )
     python = venv_dir / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
     subprocess.run(
-        [str(python), "-m", "pip", "install", "--no-deps", str(wheels[0])],
+        [str(python), "-m", "pip", "install", str(wheels[0])],
         check=True,
         capture_output=True,
         text=True,
@@ -54,37 +57,36 @@ def test_installed_wheel_can_list_and_render_generated_family(tmp_path: Path) ->
 
     probe_dir = tmp_path / "probe"
     probe_dir.mkdir()
-    probe = """
-import json
-from pathlib import Path
-
-from vigil_cli.bench import factory
-
-families = factory.list_families()
-manifest = factory.render("bola-rest-graph", 0, Path("rendered"))
-required = [
-    "Dockerfile",
-    "app.py",
-    "docker-compose.yml",
-    "requirements.txt",
-    "solve.py",
-    ".oracle/dag.json",
-    ".oracle/decoys.json",
-]
-missing = [name for name in required if not (manifest.source_dir / name).is_file()]
-print(json.dumps({"families": families, "missing": missing}, sort_keys=True))
-"""
     env = os.environ.copy()
     env.pop("PYTHONPATH", None)
     env["PYTHONNOUSERSITE"] = "1"
-    completed = subprocess.run(
-        [str(python), "-I", "-c", probe],
+    version = subprocess.run(
+        [str(python), "-I", "-c", "import vigil_cli; print(vigil_cli.__version__)"],
         cwd=probe_dir,
         env=env,
         check=True,
         capture_output=True,
         text=True,
     )
-    result = json.loads(completed.stdout)
-    assert "bola-rest-graph" in result["families"]
-    assert result["missing"] == []
+    assert version.stdout.strip() == "1.0.0"
+
+    executable = venv_dir / ("Scripts/vigil.exe" if os.name == "nt" else "bin/vigil")
+    cli_version = subprocess.run(
+        [str(executable), "--version"],
+        cwd=probe_dir,
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert "1.0.0" in cli_version.stdout
+    help_result = subprocess.run(
+        [str(executable), "--help"],
+        cwd=probe_dir,
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert "usage: vigil" in help_result.stdout.lower()
+    assert "engagement" in help_result.stdout

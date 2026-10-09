@@ -50,8 +50,8 @@ When adding a bucket, update `_BUCKETS`, add or update the matching `gf-patterns
 **Decision of record:** `docs/adr/0004-modern-surface-taxonomy.md` (deterministic-first taxonomy:
 type-floor + 13 buckets + normalization + precision). **Research basis:** adjudicated reviews across
 unrelated public-sector API, consumer-service, and modern SaaS surface shapes, synthesized in
-`docs/plans/research/classify-surface-2026-06/README.md`; the implementation contract is
-`docs/plans/research/classify-surface-2026-06/IMPLEMENTATION-SPEC.md`. Tests in
+`docs/research/classify-surface/README.md`; the implementation contract is
+`docs/research/classify-surface/IMPLEMENTATION-SPEC.md`. Tests in
 `orchestrator/backend/tests/test_classify_buckets_api_auth.py` and
 `orchestrator/backend/tests/test_classify_buckets_storage_deser_debug.py`.
 
@@ -210,7 +210,7 @@ regex rule: `api-versioning` → `/v[0-9]+(?=[/?#]|$)`.
 
 Independent authorized reviews covered public-sector API, consumer-service, and modern SaaS surface
 shapes. They consistently exposed the same missing classes and precision traps described above.
-Public research artifacts under `docs/plans/research/classify-surface-2026-06/` retain only the synthetic
+Public research artifacts under `docs/research/classify-surface/` retain only the synthetic
 evidence summary and executable implementation contract; source captures, row counts, and local
 storage details are outside the public evidence boundary.
 Test files: `orchestrator/backend/tests/test_classify_buckets_api_auth.py`,

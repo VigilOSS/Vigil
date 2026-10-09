@@ -30,6 +30,18 @@ This repository itself is a colocated Jujutsu repository. If you work in a check
 for commits, bookmarks, conflict resolution, and pushes, and keep Git for read-only inspection.
 Mixing raw `git commit` into a colocated checkout desynchronizes the two repositories.
 
+Maintainers of the canonical `vigil-oss/vigil` repository must configure the neutral project
+identity and tracked hooks in every clone:
+
+```bash
+python3 tools/check_public_commit_identity.py --install
+```
+
+This sets only repository-local Git and jj identity. The pre-commit hook rejects a misconfigured
+clone; the pre-push hook rejects known private identity residue while continuing to allow external
+contributors to retain their own attribution. CI runs the same history audit independently because
+Git does not activate cloned hooks automatically and jj pushes do not rely on Git hook execution.
+
 There is no commit-message convention. Write a message that says what changed and why.
 
 ## Development and verification

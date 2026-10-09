@@ -82,7 +82,7 @@ Cross-corpus review repeatedly found `/v1/` through `/v4/`, deeply nested versio
 `/templates/v2/:namespace/:templateName` falling through at priority 0. The boundary-aware regex
 recovers that generic version signal without matching `/version/1.0` or `/v1beta/`. See the public
 evidence summary and the regex-fragment contract in
-`docs/plans/research/classify-surface-2026-06/IMPLEMENTATION-SPEC.md` section 3.
+`docs/research/classify-surface/IMPLEMENTATION-SPEC.md` section 3.
 
 ## Sources
 

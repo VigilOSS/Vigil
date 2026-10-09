@@ -894,6 +894,9 @@ def test_ingest_candidates_preserve_metadata_and_route(
     )
     engagement_dir = tmp_path / "engagement"
     engagement_dir.mkdir()
+    (engagement_dir / "scope.json").write_text(
+        json.dumps({"hosts": ["portal.acme-agency.example"]}), encoding="utf-8"
+    )
 
     candidate_path = tmp_path / "candidate_records.jsonl"
     candidate_path.write_text(
@@ -1006,6 +1009,9 @@ def test_ingest_candidates_route_real_bia_candidate_shapes(
     )
     engagement_dir = tmp_path / "engagement"
     engagement_dir.mkdir()
+    (engagement_dir / "scope.json").write_text(
+        json.dumps({"hosts": ["www.acme-agency.example"]}), encoding="utf-8"
+    )
 
     candidate_path = tmp_path / "candidate_records.jsonl"
     records = [

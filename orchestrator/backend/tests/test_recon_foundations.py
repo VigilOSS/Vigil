@@ -293,11 +293,6 @@ def test_warn_noop_on_native_linux(capsys):
     assert capsys.readouterr().err == ""
 
 
-def test_warn_never_raises_even_with_huge_count():
-    # Pure smoke: the guard is advisory; it must never throw.
-    rr.warn_excessive_resolver_ips(10**9, threshold=50, route="container", runtime=_DESKTOP)
-
-
 def test_resolver_ip_cap_env_override(monkeypatch):
     monkeypatch.setenv("VIGIL_RESOLVER_IP_CAP", "5")
     assert rr.resolver_ip_cap() == 5

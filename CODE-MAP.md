@@ -102,7 +102,7 @@ When you are about to copy one of these into a second file, stop and import.
 - `agent/scripts/assess/lib/contract_registry.py` owns executable CLI metadata; `contracts.py`
   resolves and renders it for `contract.py` and `list_commands.py`.
 - `src/vigil_cli/engagements.py:CLIENT_PROVIDER_KEYS` and `CLIENT_MESSAGE_FLAGS` own client launch
-  identity. Generated launchers, preflight, and the benchmark consume them.
+  identity. Generated launchers and preflight consume them.
 - `src/vigil_cli/image_freshness.py` owns the content-digest mechanism every freshness check uses —
   input entries, digests, the image label, exclusions. Content, never mtime.
 - `src/vigil_cli/restart_manifest.py:consumer_states` owns what an install invalidated, per consumer.
@@ -229,9 +229,6 @@ A prompt change is **not** prompt-only when the prompt defines an artifact the b
 - `agent/scripts/assess/lib/remediation_project.py` and `remediation_vcs.py` — shared PROJECT.md parsing and Git/JJ identity, workspace, diff, and push contracts; CLI import bridges are `project_config.py` and `remediation_vcs.py`.
 - `src/vigil_cli/runtime.py` + `up.py` — one shared long-lived Kali container, reached host-side by `docker exec`. There is no in-container API server or MCP bridge.
 - `src/vigil_cli/mitmproxy.py` — the single owner of the proxy `docker build` argv, including the inputs-digest label without which the image can never be proven current.
-- `src/vigil_cli/bench/` — benchmark harness; `run-all` defaults to billed launch. See ADR 0020.
-- `src/vigil_cli/bench/lima_guest_control.py` owns guest control payloads included in Lima controller attestation.
-- `src/vigil_cli/bench/anticheat.py` — generates bench guards at runtime: shell in the off-tree bench home, JS in attempt OpenCode plugin directories.
 - `src/vigil_cli/term.py` — terminal-aware styling; non-TTY output emits no ESC. Callers use this instead of raw escapes.
 - `src/vigil_cli/oob_relay.py` — the single owner of the install's OOB relay-slot identity contract; `oob.py`, `install.py`, `up.py`, and `status.py` consume that record rather than deriving routes independently.
 

@@ -226,7 +226,7 @@ No host-exec required (no tenant data): `jq` over a registered artifact,
 - **`--scope-host <slug>`** — set to the tenant / customer slug. Never an IP
   or hostname in blue mode.
 - **`--target-host <id>`** — set when the command narrows to a specific
-  identity / principal / device. Examples: `user@northstar.example`,
+  identity / principal / device. Examples: `user@acme.example`,
   `okta-user-00uabc`, `arn:aws:iam::123456:user/joe`, `MAC-12345`.
 
 The wrapper fails closed when required flags are missing — the audit row stays

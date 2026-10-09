@@ -626,7 +626,7 @@ def estimate_list_sweep_seconds(
 
 
 # The caller's own wall-clock ceiling, set by the caller that imposes one (a
-# bench harness, a CI job, an operator). Nothing in Vigil exports it. It exists
+# CI job or an operator). Nothing in Vigil exports it. It exists
 # because ``--timeout`` is a promise only the RECORDER can keep: the docker-exec
 # worker is spawned into its own session, so when the caller kills the recorder
 # first, the worker keeps running against a live tenant with no audit row to

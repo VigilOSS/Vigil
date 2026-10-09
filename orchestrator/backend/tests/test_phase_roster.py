@@ -26,7 +26,6 @@ scripts root on ``sys.path``, mirroring ``test_vuln_taxonomy.py``.
 """
 from __future__ import annotations
 
-import ast
 import importlib
 import re
 import sys
@@ -45,19 +44,6 @@ from assess.lib import contracts, kali_audit, phases  # noqa: E402
 pr_mod = importlib.import_module("app.services.state_manager.phase_readiness")
 
 _FRONTEND_SRC = _REPO_ROOT / "orchestrator" / "frontend" / "src" / "components"
-
-
-def _module_constant(path: Path, name: str) -> object:
-    """Read one module-level literal out of a .py file without importing it."""
-    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-    for node in tree.body:
-        targets = (
-            [node.target] if isinstance(node, ast.AnnAssign) else getattr(node, "targets", [])
-        )
-        for target in targets:
-            if isinstance(target, ast.Name) and target.id == name:
-                return ast.literal_eval(node.value)
-    raise AssertionError(f"{path.name}: no module-level `{name}` assignment")
 
 
 def _tsx_roster(path: Path, const_name: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
@@ -226,16 +212,6 @@ def test_code_readiness_targets_are_the_code_roster_after_ingest():
     )
     assert union, "CodeReadinessTarget union not found in api.ts"
     assert tuple(re.findall(r'"([^"]+)"', union.group(1))) == expected
-
-    # The eval harness lives under the ROOT `tests/` tree, whose package name
-    # collides with the backend's own `tests` package, so read its literal with
-    # `ast` rather than importing it.
-    harness = _module_constant(
-        _REPO_ROOT / "tests" / "eval" / "harnesses" / "code_workflow" / "schema.py",
-        "_EXPECTED_PHASES",
-    )
-    assert harness == expected
-
 
 def test_backend_readiness_roster_matches_the_shared_web_roster():
     """The backend cannot import the agent tree at runtime, so it declares its

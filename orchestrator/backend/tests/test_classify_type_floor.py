@@ -2,7 +2,7 @@
 
 Encodes the §2 ("Type → (bucket, floor weight) table") and the §2.2 floor
 application rule from the authoritative spec
-``docs/plans/research/classify-surface-2026-06/IMPLEMENTATION-SPEC.md`` —
+``docs/research/classify-surface/IMPLEMENTATION-SPEC.md`` —
 specifically the T-group rows of the consolidated test matrix (§12.1).
 
 These tests describe TARGET behaviour for

@@ -263,7 +263,7 @@ def test_apply_resolve_pin_skips_loopback_targets_for_extra_hosts(monkeypatch):
     # extra_hosts mapping that routes the name to the host for every tool. No pin
     # is emitted — in-container DNS (the injected /etc/hosts entry) resolves it.
     monkeypatch.setattr(kali_resolve, "resolve_host_ips", lambda _h: ["127.0.0.1"])
-    cmd = ["curl", "-sk", "https://app.acme.example/"]
+    cmd = ["curl", "-sk", "https://www.acme.example.local/"]
 
     pinned = kali_resolve.apply_resolve_pin(cmd, "curl", runtime=_docker_desktop())
 

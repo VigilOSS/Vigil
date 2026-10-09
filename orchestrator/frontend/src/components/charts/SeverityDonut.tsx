@@ -1,7 +1,6 @@
 // Severity donut (UI/UX adoption wave, Tier 1b).
 //
-// Pure-SVG donut ported from the reference-project workbench DonutChart
-// (designs/dark/FindingsChart.tsx): stroke-dasharray segments drawn on a
+// Pure-SVG donut with stroke-dasharray segments drawn on a
 // single circle (r=36, strokeWidth=16, viewBox 100), animated by flipping each
 // segment's dash length from 0 → length on the first rAF tick so the CSS
 // transition on `.v-donut-segment` sweeps the ring in. The legend treatment

@@ -554,10 +554,21 @@ function EngagementWorkspace({
       };
       socket.onmessage = (message) => {
         if (cancelled) return;
-        const payload = JSON.parse(message.data);
+        let payload: { type?: string; event?: EventRecord };
+        try {
+          if (typeof message.data !== "string") throw new TypeError("non-text frame");
+          payload = JSON.parse(message.data) as { type?: string; event?: EventRecord };
+        } catch {
+          socketConnectedRef.current = false;
+          liveFeedDroppedRef.current = true;
+          setLoadError((current) => current ?? "Live updates unavailable");
+          socket?.close();
+          return;
+        }
         if (payload.type === "event.created") {
           setEvents((current) => {
-            const nextEvent = payload.event as EventRecord;
+            const nextEvent = payload.event;
+            if (!nextEvent) return current;
             if (current.at(-1)?.id === nextEvent.id) return current;
             return [...current, nextEvent].slice(-RECENT_EVENT_LIMIT);
           });

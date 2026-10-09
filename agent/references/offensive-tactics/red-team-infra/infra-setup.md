@@ -8,10 +8,10 @@ description: Terraform, GoPhish, Modlishka reverse proxy, SMTP
 - Infrastructure as Code: define servers, DNS, firewalls in config files
 - Architecture: 3 long-term servers (phishing, payload, C2) + 3 redirectors
 - Redirectors are disposable; rebuild with `terraform apply` when burned
-- Providers: DigitalOcean/AWS for VPS, CloudFlare for DNS
+- Providers: DigitalAcme/AWS for VPS, CloudFlare for DNS
 ```hcl
 # Example: create redirector droplet
-resource "digitalocean_droplet" "c2-redirector" {
+resource "digitalacme_droplet" "c2-redirector" {
   image  = "ubuntu-18-04-x64"
   name   = "c2-redir"
   region = "nyc1"

@@ -8,9 +8,7 @@ attack variant sets keyed by INTENT.
 This is a different concern from ``assess.lib.classify`` (which classifies
 REQUEST shapes like graphql/api/page) — keep the two modules separate.
 
-Ported from reference-project ``pkg/mutation/types.go`` ValueType taxonomy and
-``pkg/mutation`` IntentNeighbor / IntentBoundary / IntentEscalation /
-IntentFormat / IntentEmpty intent taxonomy.
+The value and intent taxonomies keep classification separate from generation.
 
 Design: pure functions, pre-compiled regexes, deterministic output, no
 network, no LLM, no new dependencies (stdlib only).
@@ -203,7 +201,7 @@ def classify_value(value: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Mutation generators — one per intent, ported from reference-project
+# Mutation generators — one per intent
 # ---------------------------------------------------------------------------
 
 def _mutate_neighbor(value: str, vtype: str, max_n: int) -> list[str]:

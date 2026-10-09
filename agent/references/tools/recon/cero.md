@@ -9,7 +9,7 @@ skill: subdomain-enumeration
 
 For live engagement targets, run cero via `vigil assess kali cero` (typed verb, audit-flag-aware).
 
-**Where it lives:** `/usr/local/bin/cero` in `runtime-full` (`go install github.com/glebarez/cero@latest` — see `agent/docker/runtime-full/Dockerfile`).
+**Where it lives:** `/usr/local/bin/cero` in `runtime-full` (`go install github.com/glebarez/cero@v1.3.0` — see `agent/docker/runtime-full/Dockerfile`).
 
 ## Wrapper flag mapping (read first)
 

@@ -170,7 +170,7 @@ def _derive_technique_key(technique: str, target_kind: str, target_ref: str) -> 
     # Bound it: a 12-hex-char digest of the FULL key keeps distinct long refs
     # distinct (identical refs still collide → still upsert), appended to a
     # truncated readable prefix so the total never exceeds the 256-char cap.
-    digest = hashlib.sha1(key.encode("utf-8")).hexdigest()[:12]
+    digest = hashlib.sha1(key.encode("utf-8"), usedforsecurity=False).hexdigest()[:12]
     suffix = f"-{digest}"
     prefix = key[: _MAX_TECHNIQUE_KEY_LEN - len(suffix)].rstrip("-")
     return f"{prefix}{suffix}"

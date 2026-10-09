@@ -1,35 +1,26 @@
 ---
-description: "HackerOne CWE-weakness offline lookup: map a finding to its most-specific CWE weakness (data in hackerone-weaknesses.tsv). Severity is CVSS-derived and SEPARATE from the weakness (None/Low/Medium/High/Critical from the CVSS score) - do not conflate with Bugcrowd's P1-P5 leaf priority."
+description: "HackerOne CWE-weakness selection guidance: map a finding to its most-specific current platform weakness. Severity is CVSS-derived and SEPARATE from the weakness (None/Low/Medium/High/Critical from the CVSS score) - do not conflate with Bugcrowd's P1-P5 leaf priority."
 skill: report-generation
 category: Disclosure & Reporting Formats
 ---
 
-# HackerOne CWE Weaknesses — offline lookup
+# HackerOne CWE Weakness Selection
 
-Companion to `agent/references/reporting/hackerone-weaknesses.tsv` — HackerOne's CWE-based
-weakness taxonomy. The TSV columns are:
+HackerOne uses a curated subset of MITRE CWE for its weakness field. Consult the current weakness
+choices in the HackerOne submission form or HackerOne's documentation, then use MITRE's CWE entry
+to distinguish a specific weakness from its broader parent.
 
-`cwe_id⇥weakness_name⇥cluster⇥top25`
+The platform taxonomy can change independently of Vigil, so this repository deliberately does not
+vendor a snapshot of HackerOne's weakness list.
 
-- **cwe_id** — the CWE identifier (e.g. `CWE-639`).
-- **weakness_name** — HackerOne's label for that CWE (e.g. "Authorization Bypass Through
-  User-Controlled Key").
-- **cluster** — the broader grouping HackerOne buckets it under.
-- **top25** — whether it's on the current CWE Top 25 Most Dangerous Software Weaknesses list.
+Useful sources:
 
-## How to grep it
-
-```bash
-grep -i "authorization bypass" agent/references/reporting/hackerone-weaknesses.tsv
-grep -i "CWE-89" agent/references/reporting/hackerone-weaknesses.tsv
-```
-
-Grep the bug class in plain English or by CWE number if you already suspect one, then compare the
-candidate rows before picking.
+- HackerOne weakness documentation: <https://docs.hackerone.com/en/articles/8475333-weaknesses>
+- MITRE CWE search: <https://cwe.mitre.org/find/index.html>
 
 ## Pick the single MOST SPECIFIC CWE
 
-HackerOne wants one weakness, not a category. `CWE-89` (SQL Injection) beats `CWE-74` (Injection,
+HackerOne wants one weakness, not a broad category. `CWE-89` (SQL Injection) beats `CWE-74` (Injection,
 the parent) for a SQL injection finding; `CWE-639` (Authorization Bypass Through User-Controlled
 Key — the IDOR-shaped CWE) beats `CWE-284` (Improper Access Control, the parent) for a
 by-parameter IDOR. If two CWEs are plausible, use the one the PoC actually exercises, not the one

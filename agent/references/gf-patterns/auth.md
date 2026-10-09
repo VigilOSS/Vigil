@@ -93,7 +93,7 @@ Param-key matches:
 Authentication entry points repeatedly fell through at priority 0 across unrelated estates,
 including `/efi/*` account lifecycle, Spring Security login, PIV login, and portal-session routes.
 The dedicated bucket gives that security-critical surface a stable home without widening generic
-email or token parameters. See `docs/plans/research/classify-surface-2026-06/README.md` for the public
+email or token parameters. See `docs/research/classify-surface/README.md` for the public
 evidence summary.
 
 ## Sources

@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlencode, urlparse
 
+from .config import run_editor
 from .paths import resolve_install_root, resolve_orchestrator_base_url
 
 DEFAULT_IDENTITY = "default"
@@ -473,14 +474,13 @@ def edit_auth(engagement_dir: Path, identity: str | None = None) -> None:
         material = _api(engagement_dir, "GET", f"/{identity}")
     if not material:
         material = _empty_auth()
-    editor = os.environ.get("VISUAL") or os.environ.get("EDITOR") or "vi"
     with tempfile.NamedTemporaryFile(
         "w", suffix=".json", delete=False, encoding="utf-8"
     ) as fh:
         json.dump(material, fh, indent=2, sort_keys=True)
         tmp_path = Path(fh.name)
     try:
-        if subprocess.call([editor, str(tmp_path)]) != 0:
+        if run_editor(tmp_path) != 0:
             raise SystemExit("editor exited non-zero; credentials unchanged")
         edited = json.loads(tmp_path.read_text(encoding="utf-8"))
         if not isinstance(edited, dict):

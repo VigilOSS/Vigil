@@ -1,8 +1,7 @@
 // Toast notifications (UI/UX adoption wave, Tier 1a).
 //
-// Ported from the reference-project workbench ToastContext — the implementation is
-// clean (Map of timers, cleanup on unmount, manual + auto dismiss) so the
-// logic is kept verbatim. The only structural changes for our codebase:
+// Map-backed timers with cleanup on unmount and manual or automatic dismiss.
+// Structural constraints for this codebase:
 //   - no Next.js "use client" directive (plain Vite/React build);
 //   - styling is driven by our CSS vars via plain `app.css` classes instead
 //     of Tailwind utilities, so toasts read correctly in both themes;

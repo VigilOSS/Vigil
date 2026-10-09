@@ -1,9 +1,22 @@
 # Third-party notices
 
 Vigil is licensed under Apache-2.0. Portions of the tracked reference material and pattern
-taxonomy were adapted from the projects below under their respective MIT licenses. Those licenses
-apply to the upstream material, not to Vigil as a whole. Exact license texts are retained under
-`third_party/licenses/` and are included in Vigil source distributions and wheels.
+taxonomy were adapted from the projects below under their respective licenses. Those licenses
+apply to the upstream material, not to Vigil as a whole. Exact MIT license texts are retained
+under `third_party/licenses/` and are included in Vigil source distributions and wheels.
+
+The Bugcrowd Vulnerability Rating Taxonomy below is distributed under Apache-2.0. A copy of that
+license is included as Vigil's root `LICENSE` file.
+
+## Bugcrowd Vulnerability Rating Taxonomy
+
+- Upstream: <https://github.com/bugcrowd/vulnerability-rating-taxonomy>
+- Revision: v1.19 (released 2026-06-24)
+- License: Apache-2.0; Copyright 2017 Bugcrowd, Inc.
+- License text: `LICENSE`
+
+`agent/references/reporting/bugcrowd-vrt.tsv` is a flattened representation of the v1.19 taxonomy.
+`tools/flatten_vrt.py` is Vigil's project-authored converter for regenerating that representation.
 
 ## PayloadsAllTheThings
 

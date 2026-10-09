@@ -762,6 +762,25 @@ def test_doctor_reports_missing_database_without_touching_sqlite(tmp_path):
     assert _database_check(tmp_path / "absent.sqlite3").status == "MISSING"
 
 
+def test_doctor_bounds_database_integrity_scan(tmp_path):
+    import sqlite3 as _sqlite3
+
+    from vigil_cli.status import _database_check
+
+    database = tmp_path / "large.sqlite3"
+    with _sqlite3.connect(database) as connection:
+        connection.execute("CREATE TABLE rows (value TEXT NOT NULL)")
+        connection.executemany(
+            "INSERT INTO rows (value) VALUES (?)",
+            [(f"row-{index}" * 20,) for index in range(20_000)],
+        )
+
+    result = _database_check(database, timeout_seconds=0.0)
+
+    assert result.status == "WARN"
+    assert "timed out" in result.detail
+
+
 @pytest.mark.parametrize(("cpus", "expected"), [(2, "2"), (2.0, "2"), (0.5, "0.5")])
 def test_runtime_cpu_argument_accepts_integer_and_fractional_limits(cpus, expected):
     from vigil_cli.runtime import _format_cpus

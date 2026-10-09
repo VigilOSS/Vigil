@@ -11,14 +11,14 @@ from assess.lib.discovery import denoise_hosts, is_noise_host  # noqa: E402
 
 def test_is_noise_host_matches_known_patterns():
     noisy = [
-        "_dmarc.northstar.example",
-        "_dkim.foo.northstar.example",
-        "dhcp-10-1-2-3.northstar.example",
-        "dha-12-345.health.northstar.example",
-        "dhpcile7.hq.northstar.example",
-        "jdoe-laptop.northstar.example",
-        "00-08-74-ab.ops.northstar.example",
-        "3.2.1.10.in-addr.rev.northstar.example",
+        "_dmarc.acme.example",
+        "_dkim.foo.acme.example",
+        "dhcp-10-1-2-3.acme.example",
+        "dha-12-345.health.acme.example",
+        "dhpcile7.hq.acme.example",
+        "jdoe-laptop.acme.example",
+        "00-08-74-ab.ops.acme.example",
+        "3.2.1.10.in-addr.rev.acme.example",
     ]
     for h in noisy:
         assert is_noise_host(h) is True, h
@@ -26,9 +26,9 @@ def test_is_noise_host_matches_known_patterns():
 
 def test_is_noise_host_keeps_real_origins():
     for h in (
-        "api.northstar.example",
-        "portal.ocean.example",
-        "gitlab.lab.ocean.example",
+        "api.acme.example",
+        "portal.acme.example",
+        "gitlab.lab.acme.example",
         "vault.research.example",
     ):
         assert is_noise_host(h) is False, h
@@ -36,31 +36,31 @@ def test_is_noise_host_keeps_real_origins():
 
 def test_denoise_hosts_dedupes_normalizes_and_counts():
     lines = [
-        "https://Api.Northstar.Example/login",  # scheme+path stripped, lowercased
-        "api.northstar.example",                 # dup of the above
-        "_dmarc.northstar.example",              # noise
-        "dhcp-1-2-3.northstar.example",          # noise
+        "https://Api.Acme.Example/login",  # scheme+path stripped, lowercased
+        "api.acme.example",                 # dup of the above
+        "_dmarc.acme.example",              # noise
+        "dhcp-1-2-3.acme.example",          # noise
         "",                                  # blank
         "# comment",                        # comment
-        "portal.ocean.example:8443",              # port preserved (distinct target)
+        "portal.acme.example:8443",              # port preserved (distinct target)
     ]
     kept, dropped = denoise_hosts(lines)
-    assert kept == ["api.northstar.example", "portal.ocean.example:8443"]
+    assert kept == ["api.acme.example", "portal.acme.example:8443"]
     assert dropped == 2
 
 
 def test_mac_ptr_regex_does_not_drop_real_hex_prefixed_hosts():
     # Two leading hex pairs is too common in corporate naming — must be KEPT.
     for h in (
-        "ad-01-portal.northstar.example",
-        "fe-80-gw.northstar.example",
-        "ba-be-portal.northstar.example",
+        "ad-01-portal.acme.example",
+        "fe-80-gw.acme.example",
+        "ba-be-portal.acme.example",
         "ce-12-34.example.com",
     ):
         assert is_noise_host(h) is False, h
     # Real MAC-octet PTR names (>=3 leading hex octets) are still dropped.
-    assert is_noise_host("00-08-74-ab-cd-ef.ops.northstar.example") is True
-    assert is_noise_host("00-08-74-xx.ops.northstar.example") is True  # 3 hex octets → MAC-noise
+    assert is_noise_host("00-08-74-ab-cd-ef.ops.acme.example") is True
+    assert is_noise_host("00-08-74-xx.ops.acme.example") is True  # 3 hex octets → MAC-noise
 
 
 def test_normalize_host_bare_ipv6_and_trailing_dot():

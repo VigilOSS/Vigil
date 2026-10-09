@@ -36,19 +36,8 @@ package-dir = {"" = "src"}
 [tool.setuptools.packages.find]
 where = ["src"]
 
-[tool.setuptools.package-data]
-vigil_cli = [
-    "bench/factory/families/*/*",
-    "bench/factory/families/*/skeleton/*",
-]
-
 [tool.mypy]
-# Bench `skeleton/` files are container-runtime sidecars: they import runtime-only
-# siblings copied into the image at build time (e.g. `oracle_checkpoint`) that
-# mypy cannot resolve. They are not part of the `vigil_cli` type surface, so
-# exclude the skeleton dirs from type-checking. (Applies during mypy's directory
-# walk, which is how CI invokes it: `mypy src/vigil_cli`.)
-exclude = "src/vigil_cli/bench/factory/families/.*/skeleton/"
+files = ["src/vigil_cli"]
 
 [tool.ruff.lint]
 # Keep the blocking lint gate stable across unpinned Ruff releases. These are

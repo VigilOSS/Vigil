@@ -11,10 +11,6 @@ so nothing in CI could notice either half of its failure mode.
     dispatch just quietly loses the axis it was supposed to set. **Asserted
     (blocking).**
 
-(b) ORPHAN — `agent/rules/mindsets/framework-archaeology.md` was authored and
-    then never wired into any dispatch path: fully written, referenced by
-    nothing an operator or specialist reads. **Advisory only (never fails).**
-
 Why the split — the Markdown prompt/doc testing policy
 =====================================================
 `AGENTS.md` ("Markdown prompt/doc testing policy") forbids repository tests that
@@ -34,15 +30,6 @@ phrasing. Both halves of this module were measured against that rationale:
   keep. It is the same shape as `test_reference_frontmatter.py` in this
   directory, which blocks so "the orphaned-arjun.md class of bug cannot recur".
   Kept blocking.
-
-* The ORPHAN check is closer to prompt/doc health: it requires the prose corpus
-  to *contain* a mention, so a legitimate rewrite that drops the last mention of
-  a packet would fail a build over an editing decision. Rule 10 covers that case
-  explicitly and permits at most an advisory WARN, so it emits a `UserWarning`
-  and always passes. It also matters less now that
-  `vigil assess list-mindsets` enumerates the library from disk: a packet is
-  reachable by discovery even when no doc names it, which was not true when
-  framework-archaeology.md went orphaned.
 
 Nothing here asserts heading text, prose wording, or a line count.
 
@@ -69,7 +56,6 @@ tighten this to the full-path form for that name.
 from __future__ import annotations
 
 import re
-import warnings
 from pathlib import Path
 
 import pytest
@@ -215,50 +201,3 @@ def test_every_referenced_mindset_path_exists(corpus):
         + ", ".join(sorted(on_disk))
         + "\n(`vigil assess list-mindsets` enumerates them from disk.)"
     )
-
-
-# --------------------------------------------------------------------------
-# (b) ADVISORY — packets with no inbound reference. Never fails the build.
-# --------------------------------------------------------------------------
-def _orphan_packets(corpus: list[tuple[str, str]]) -> list[str]:
-    orphans: list[str] = []
-    for packet in _mindset_packets():
-        pattern = _reference_re(packet.stem)
-        if not any(pattern.search(text) for _, text in corpus):
-            orphans.append(f"agent/rules/mindsets/{packet.name}")
-    return orphans
-
-
-def test_unreferenced_mindset_packets_warn_but_do_not_fail(corpus):
-    """ADVISORY (Rule 10 of docs/prompt-authoring-standards.md: prompt/doc health
-    is "at most an advisory WARN — never a blocking CI wording test").
-
-    Emits a `UserWarning` naming any packet that no canonical prompt source
-    references, so the framework-archaeology.md case is visible in the pytest
-    warnings summary instead of invisible. It deliberately does NOT fail: a
-    legitimate rewrite that drops the last mention of a packet is an authoring
-    decision, not a build break.
-    """
-    orphans = _orphan_packets(corpus)
-    if orphans:
-        warnings.warn(
-            "ADVISORY — unreferenced mindset packets. Nothing in the canonical "
-            "prompt corpus (agent/operator-core*.md, agent/agents/, "
-            "agent/phases/, agent/rules/*.md, agent/references/, agent/skills/, "
-            "agent/AGENTS.md) names these, so no dispatch can select them by "
-            "path:\n  "
-            + "\n  ".join(orphans)
-            + "\n\nTwo valid fixes:\n"
-            "  (1) WIRE IT IN — name the packet on the dispatch path that "
-            "should carry it (the `mindset lens` row in agent/operator-core*.md, "
-            "the phased mindset flow in agent/phases/phase-4-consume-test.md, or "
-            "the Load First / Dispatch Mindset section of the role in "
-            "agent/agents/ that hunts under it).\n"
-            "  (2) REMOVE IT — delete the file. An unreachable lens is not a "
-            "library entry, it is unmaintained prose that reads as shipped.\n"
-            "A reference from a generated mirror (agent/.claude, .codex, .goose, "
-            ".opencode) does NOT count — those are rendered from the canonical "
-            "sources, so they cannot be the origin of the wiring.",
-            UserWarning,
-            stacklevel=2,
-        )

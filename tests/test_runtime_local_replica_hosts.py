@@ -36,10 +36,10 @@ def test_local_replica_hosts_unions_local_names_and_excludes_wildcards(tmp_path:
         {
             "engagement_type": "web",
             "hosts": [
-                "app.acme.example",
-                "app.acme.example",
-                "*.app.acme.example",  # wildcard — never injectable
-                "app.acme.example",  # real host, not .local
+                "www.acme.example.local",
+                "api.acme.example.local",
+                "*.acme.example.local",  # wildcard — never injectable
+                "developer.dev.acme.example",  # non-local host — never injectable
             ],
         },
     )
@@ -48,14 +48,14 @@ def test_local_replica_hosts_unions_local_names_and_excludes_wildcards(tmp_path:
         "eng-b",
         {
             "engagement_type": "web",
-            "hosts": ["service.acme.example", "app.acme.example"],  # dup across engagements
+            "hosts": ["app.acme-health.example.local", "www.acme.example.local"],  # dup across engagements
         },
     )
 
     assert runtime.local_replica_hosts(tmp_path) == [
-        "app.acme.example",
-        "service.acme.example",
-        "app.acme.example",
+        "api.acme.example.local",
+        "app.acme-health.example.local",
+        "www.acme.example.local",
     ]
 
 

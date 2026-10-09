@@ -8,8 +8,8 @@ feeding raw interactsh-client output. The CLI mint smoke drives
 and a fake AssessmentClient so it asserts the wiring (nonce → URL → recorded
 probe) without a live runtime.
 
-The live frp + container round-trip is covered by an ``integration``-marked
-test that is deselected by default — it cannot run in this environment.
+Live frp + container verification is an operator-run environment check, not a
+test that can produce a meaningful automated pass or failure in this suite.
 """
 from __future__ import annotations
 
@@ -1144,19 +1144,3 @@ def test_interaction_dedup_hash_distinguishes_pipe_placement():
 
     # Identical fields still hash identically (dedup of true duplicates holds).
     assert b == _interaction_hash(*fields_b)
-
-
-@pytest.mark.integration
-def test_oob_mint_poll_live_round_trip():
-    """End-to-end OAST correlation over the live interactsh/frp transport.
-
-    Requires `vigil oob start` + a running interactsh-client and the
-    orchestrator backend. Deselected by default (`-m 'not integration'`);
-    cannot run in CI/this environment. Documents the manual verification:
-
-      1. `vigil oob mint --technique ssrf` -> nonce + callback URL.
-      2. curl the callback URL (or fire a payload at a target).
-      3. `vigil oob poll --client <name>` -> the probe shows status=fired
-         with the matched interaction.
-    """
-    pytest.skip("requires live interactsh/frp runtime (operator-controlled)")

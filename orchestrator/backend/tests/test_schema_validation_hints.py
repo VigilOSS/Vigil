@@ -58,7 +58,7 @@ def test_did_you_mean_omitted_for_truly_unknown_field():
 
 
 def test_did_you_mean_returns_multiple_suggestions_when_close():
-    """The hint surfaces up to three candidates so a single high-score fluke
+    """The hint surfaces up to three candidates so a single high-score outlier
     (`evidence` -> `evidence_ref`) does not drown out alternatives like
     `evidence_quote` that are equally plausible.
     """

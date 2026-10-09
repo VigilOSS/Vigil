@@ -3,7 +3,7 @@
  * Mirrors the operator console's CSS-var approach (data-theme="light"|"dark")
  * and reuses the same --sev-* / --ink / --panel / --accent values from
  * orchestrator/frontend/src/app.css so severity colours read identically. No
- * webfonts are fetched — IBM Plex falls back to system-ui so the file is fully
+ * webfonts are fetched; native sans and monospace stacks keep the file fully
  * offline. The @media print block at the bottom hides nav/buttons for a clean
  * printed document. */
 
@@ -88,7 +88,7 @@ body {
 }
 
 body {
-  font-family: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
   color: var(--ink);
   background:
     radial-gradient(circle at top left, var(--page-bg-gradient-1), transparent 34%),
@@ -103,7 +103,7 @@ body {
 .rpt-code,
 code,
 pre {
-  font-family: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
 }
 
 a {
@@ -317,7 +317,7 @@ a {
 }
 
 .rpt-chip-mono {
-  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
   font-size: 11px;
 }
 

@@ -108,7 +108,7 @@ set_output_paths() {
   # Goose specialist roster: one recipe .yaml per role. Unlike OpenCode/Claude/Codex,
   # Goose has NO operator wrapper — the operator prompt is carried via the engagement's
   # `.goosehints` and the default `goose run` agent dispatches specialists via the
-  # `delegate` tool by recipe name. See docs/goose-bench.md.
+  # `delegate` tool by recipe name.
   GOOSE_RECIPES_DIR="$OUTPUT_DIR/.goose/recipes"
   # Operator commands. ONE canonical source per command under agent/commands/,
   # rendered to one wrapper path per client (ADR 0017). Claude reads project
@@ -451,7 +451,7 @@ agent_description() {
 #   deepseek-v4-pro   — the operator/primary and HARD multi-step reasoning roles:
 #       exploit chaining, auth/access-control reasoning, deep taint analysis,
 #       false-positive verification, and full-state synthesis. Pro is also the
-#       safe default for anything ambiguous (Terminal-Bench agentic: Pro 67.9%).
+#       safe default for anything ambiguous.
 #   deepseek-v4-flash — BOUNDED recon / parsing / enumeration / high-fan-out
 #       sweep roles where the work is mechanical and cheap (Flash 56.9%; only
 #       used where the task is simple and bounded).
@@ -525,11 +525,10 @@ opencode_variant_desc_suffix() {
 #
 # #9397 (verified live 2026-06-19): goose v1.38.0's openai-compat provider drops
 # DeepSeek-V4 thinking-mode `reasoning_content` from the 2nd..Nth assistant messages it
-# emits when it splits a parallel-tool-call turn, so DeepSeek 400s. The bench's
+# emits when it splits a parallel-tool-call turn, so DeepSeek 400s. Vigil's
 # reasoning-content repair proxy (goose_reasoning_proxy.py, launched by start_goose.sh)
 # re-attaches it, so thinking-mode V4 now works on the DIRECT path — per-role pro/flash
 # routing is restored. Goose addresses DeepSeek by the BARE id (no `deepseek/` prefix).
-# See docs/goose-bench.md.
 GOOSE_PRO_MODEL="deepseek-v4-pro"
 GOOSE_FLASH_MODEL="deepseek-v4-flash"
 

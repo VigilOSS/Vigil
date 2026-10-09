@@ -219,8 +219,8 @@ curl -X POST "{SP_ACS_URL}" \
 <saml:NameID>admin＠target.example</saml:NameID>
 
 <!-- Case manipulation -->
-<saml:NameID>ADMIN@TARGET.COM</saml:NameID>
-<saml:NameID>Admin@Target.Com</saml:NameID>
+<saml:NameID>ADMIN@TARGET.EXAMPLE</saml:NameID>
+<saml:NameID>Admin@Target.Example</saml:NameID>
 
 <!-- Whitespace injection -->
 <saml:NameID> admin@target.example</saml:NameID>

@@ -493,7 +493,7 @@ grep -rn "email\|@.*\.com\|phone\|token\|session\|password\|user" apps/<package_
 # Re-authenticate with deleted account credentials (should fail)
 curl -X POST https://api.target.example/auth/login \
     -H "Content-Type: application/json" \
-    -d '{"email":"deleted_user@test.com","password":"testpass"}'
+    -d '{"email":"deleted_user@test.example","password":"testpass"}'
 
 # Attempt to access user-specific API endpoints with cached token
 curl -H "Authorization: Bearer <cached_token>" \
@@ -505,7 +505,7 @@ curl -H "Authorization: Bearer <other_user_token>" \
 
 # Test account re-registration with same email
 curl -X POST https://api.target.example/auth/register \
-    -d '{"email":"deleted_user@test.com","password":"newpass"}'
+    -d '{"email":"deleted_user@test.example","password":"newpass"}'
 # If re-registration succeeds, check if old data reappears
 ```
 

@@ -9,7 +9,7 @@
 - **Date:** 2026-06-15 (decided 2026-06-15; shipped same day).
 - **Decider:** Project owner.
 - **Supersedes / relates to:** the authoritative implementation contract is
-  `docs/plans/research/classify-surface-2026-06/IMPLEMENTATION-SPEC.md`; the public evidence
+  `docs/research/classify-surface/IMPLEMENTATION-SPEC.md`; the public evidence
   basis is the adjacent README and synthetic classifier regressions. Relates to ADR 0001
   (the "no silent drops" philosophy this extends to the classifier).
 
@@ -92,8 +92,8 @@ the research `README.md`).
 4. **Add a bare `/api/` path fragment to the `api` bucket** (the research §4b proposal). Rejected: a bare `/api/` fragment fires on `/api/users/avatar` and corrupts the regression-pinned reason chain. The generic params-less `/api/...` rescue is delivered by the `api_route` type-floor (the semantically correct home); `/api/v<n>/` is covered by the `api-versioning` regex.
 
 ## References
-- `docs/plans/research/classify-surface-2026-06/IMPLEMENTATION-SPEC.md` — the authoritative implementation CONTRACT (bucket declaration order, the `_TYPE_FLOOR` table, the `_PATH_OBJECT_REF_SEGMENT` redesign, `normalize_path_for_cluster`, the 11 soundness overrides, and the 93-row test matrix). Where the spec conflicts with the research findings, the spec wins.
-- `docs/plans/research/classify-surface-2026-06/README.md` — the public evidence summary and synthetic
+- `docs/research/classify-surface/IMPLEMENTATION-SPEC.md` — the authoritative implementation CONTRACT (bucket declaration order, the `_TYPE_FLOOR` table, the `_PATH_OBJECT_REF_SEGMENT` redesign, `normalize_path_for_cluster`, the 11 soundness overrides, and the 93-row test matrix). Where the spec conflicts with the research findings, the spec wins.
+- `docs/research/classify-surface/README.md` — the public evidence summary and synthetic
   cross-corpus conclusions.
 - `agent/references/gf-patterns/DRIFT.md` — the per-bucket accept/skip drift rationale (type-floor mechanism, all 13 buckets, precision tightenings, regex mechanism, corpus grounding).
 - `agent/references/gf-patterns/*.md` — per-bucket reference docs (`graphql.md`, `api.md`, `auth.md`, `api-versioning.md`, `oauth-oidc.md`, `object-storage.md`, `deserialization.md`, `sso.md`, `webhook.md`, etc.), each carrying its corpus grounding and attack-class notes.

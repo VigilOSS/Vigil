@@ -4,7 +4,6 @@ import type {
   IntelByUrlResponse,
   IntelEntityType,
   IntelReadiness,
-  IntelRecord,
   IntelSearchHit,
   IntelSummary,
   ListIntelResponse,

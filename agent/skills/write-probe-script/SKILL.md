@@ -72,9 +72,8 @@ add `--destructive` on the `kali exec` call.
 
 > **Drift caveat:** this cheat-sheet mirrors the real `vigil assess kali exec`
 > surface defined in `agent/scripts/assess/lib/kali.py` + `kali_cli.py` and the
-> `vigil oob mint` surface in the top-level CLI. It is a convenience copy, like
-> reference-project's `reference-project.d.ts` is a copy of the live extension API — when the CLI
-> flags change, this section must be re-synced. When in doubt, the live truth is
+> `vigil oob mint` surface in the top-level CLI. When the CLI flags change, this
+> section must be re-synced. When in doubt, the live truth is
 > `vigil assess kali exec --help`, `vigil assess contract kali exec`, and
 > `vigil oob mint --help`. Do not trust a stale cheat-sheet over the CLI.
 

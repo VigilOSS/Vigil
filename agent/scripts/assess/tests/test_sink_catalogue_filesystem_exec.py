@@ -7,7 +7,7 @@ realistic code get a case in ``CASES`` -- DEAD / REDUNDANT / MISROUTED
 patterns are named, with the file:line evidence, in ``_EXCLUDED`` instead,
 and ``test_case_table_covers_every_live_pattern_in_the_assigned_slice``
 proves the two lists together account for all 108 patterns, so the catalogue
-cannot silently regain a dead pattern or lose a live one.
+cannot silently restore a dead pattern or lose a live one.
 
 Taxonomy note. Three defects this audit recorded have since been fixed in the
 catalogue, and the tests below now pin the corrected values so a regression

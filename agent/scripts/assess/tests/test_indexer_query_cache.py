@@ -28,10 +28,11 @@ def test_same_language_query_is_compiled_once_for_multiple_files(monkeypatch) ->
     assert calls == 1
 
 
-def test_invalid_query_keeps_empty_capture_fallback() -> None:
+def test_invalid_query_warns_before_empty_capture_fallback() -> None:
     parser = treesitter_index._get_parser("python")
     assert parser is not None
     root = parser.parse(b"def a(): pass\n").root_node
-    assert treesitter_index._ts_query_captures(
-        parser.language, "(not_a_python_node) @bad", root
-    ) == {}
+    with pytest.warns(RuntimeWarning, match="tree-sitter query compilation failed"):
+        assert treesitter_index._ts_query_captures(
+            parser.language, "(not_a_python_node) @bad", root
+        ) == {}

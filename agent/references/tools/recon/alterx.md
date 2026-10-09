@@ -9,7 +9,7 @@ skill: subdomain-enumeration
 
 For live engagement targets, run alterx via `vigil assess kali alterx` (typed verb, audit-flag-aware).
 
-**Where it lives:** `/usr/local/bin/alterx` in `runtime-full` (`go install github.com/projectdiscovery/alterx/cmd/alterx@latest` — see `agent/docker/runtime-full/Dockerfile`).
+**Where it lives:** `/usr/local/bin/alterx` in `runtime-full` (`go install github.com/projectdiscovery/alterx/cmd/alterx@v0.1.0` — see `agent/docker/runtime-full/Dockerfile`).
 
 ## Resource-safe invocation (always estimate first)
 

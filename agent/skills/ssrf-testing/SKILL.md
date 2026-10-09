@@ -340,7 +340,7 @@ https://kubernetes.default.svc/api/v1/namespaces
 https://kubernetes.default.svc/api/v1/secrets
 ```
 
-### DigitalOcean
+### DigitalAcme
 
 ```
 # No header requirement — straightforward

@@ -1,11 +1,9 @@
 """Read recent messages from a local Mail.app mailbox for verification-code retrieval.
 
-This module drives macOS Mail.app through JXA / ``osascript`` — the same
-mechanism ``email-utility`` uses to scan inbox replies. It does NOT
-use SMTP/IMAP/an API: the mailbox being read must be configured as a Mail.app
-account on this host (e.g. the ``researcher.example`` test mailbox used during
-authenticated security testing). No credentials are stored by Vigil — Mail.app
-owns the account auth.
+This module drives macOS Mail.app through JXA / ``osascript``. It does not use
+SMTP, IMAP, or an API: the mailbox being read must be configured as a Mail.app
+account on this host. No credentials are stored by Vigil; Mail.app owns the
+account authentication.
 
 The primary use is retrieving short-lived email-verification codes (6-8 digit
 OTPs or verification links) sent to a test mailbox: ``vigil email`` filters by

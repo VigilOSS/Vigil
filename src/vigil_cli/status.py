@@ -5,6 +5,7 @@ import os
 import shutil
 import sqlite3
 import subprocess
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, replace
@@ -749,7 +750,7 @@ def _binary_check(command: str) -> Check:
     return Check(command, "OK" if result.returncode == 0 else "FAIL")
 
 
-def _database_check(path: Path) -> Check:
+def _database_check(path: Path, *, timeout_seconds: float = 2.0) -> Check:
     """Report the orchestrator database's integrity.
 
     ``PRAGMA quick_check`` reports corruption in its RESULT ROW — it returns the
@@ -760,10 +761,28 @@ def _database_check(path: Path) -> Check:
     """
     if not path.exists():
         return Check("orchestrator-db", "MISSING", str(path))
+    timed_out = False
+    deadline = time.monotonic() + max(timeout_seconds, 0.0)
+
+    def _cancel_when_expired() -> int:
+        nonlocal timed_out
+        timed_out = time.monotonic() >= deadline
+        return int(timed_out)
+
     try:
         with sqlite3.connect(str(path)) as connection:
-            row = connection.execute("PRAGMA quick_check").fetchone()
+            connection.set_progress_handler(_cancel_when_expired, 1_000)
+            try:
+                row = connection.execute("PRAGMA quick_check").fetchone()
+            finally:
+                connection.set_progress_handler(None, 0)
     except sqlite3.Error as exc:
+        if timed_out and "interrupted" in str(exc).lower():
+            return Check(
+                "orchestrator-db",
+                "WARN",
+                f"{path}: integrity scan timed out after {timeout_seconds:g}s",
+            )
         return Check("orchestrator-db", "FAIL", str(exc))
     if not row or row[0] != "ok":
         detail = str(row[0]) if row else "quick_check returned no result"

@@ -53,8 +53,7 @@ function fmtBytes(n: number | null | undefined): string {
 type HttpView = "variants" | "flows";
 
 // ── HTTP method colors ────────────────────────────────────────────────
-// Mapped onto our palette (the reference-project reference used --m-* vars that
-// don't exist in our theme). The class drives the colored .method-badge in
+// Mapped onto the Vigil palette. The class drives the colored .method-badge in
 // both the grid and the drawer hero — see app.css "HTTP method colors".
 const METHOD_CLASSES: Record<string, string> = {
   GET: "m-get",
@@ -246,7 +245,7 @@ export function HttpTab({ engagementKey, refreshVersion, initialRequestVariantId
     void reload(false);
   }, [refreshVersion, reload]);
 
-  // Background refresh on visibility regain so the tab stays live alongside
+  // Background refresh when visibility returns so the tab stays live alongside
   // the EngagementPage WS refresh (which re-mounts/keeps this tab and the
   // parent throttle owns the cadence). A light visibility refresh matches
   // CommandsTab's self-owned refresh approach.

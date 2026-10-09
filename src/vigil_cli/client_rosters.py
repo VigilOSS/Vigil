@@ -451,20 +451,18 @@ def ensure_goose_recipes_link(agent_root: Path, goose_dir: Path) -> None:
     )
 
 
-def _goose_hook_command(agent_root: Path, target: Path, *, env_prefix: str = "") -> str:
+def _goose_hook_command(agent_root: Path, target: Path) -> str:
     """The shell command a Goose hook runs: reshape the payload, then the target script.
 
     Goose's PreToolUse/PostToolUse payload uses the bare shell tool name ``shell`` (goose
     v1.38.0; ``developer__shell`` in older/doc-form builds) with the command at
-    ``tool_input.command``; the shared hook scripts (post-tool-log.sh, bench-guard.sh)
+    ``tool_input.command``; the shared hook scripts
     key on the Claude ``tool_name == "Bash"`` contract.
     ``goose-hook-adapter.sh`` reshapes Goose's payload to that contract and pipes it to
-    ``<target>``, propagating the exit code (2 = block). ``env_prefix`` lets the bench
-    bake in ``VIGIL_BENCH_OWN_ENGAGEMENT=<key>`` for the guard's cross-attempt isolation.
+    ``<target>``, propagating the exit code.
     """
     adapter = agent_root / "scripts" / "hooks" / "goose-hook-adapter.sh"
-    base = f"bash '{adapter}' '{target}'"
-    return f"{env_prefix} {base}" if env_prefix else base
+    return f"bash '{adapter}' '{target}'"
 
 
 def ensure_goose_standard_hooks(
@@ -476,13 +474,11 @@ def ensure_goose_standard_hooks(
     """Write the standard Goose hooks plugin (activity log) into an engagement.
 
     Mirrors ``ensure_opencode_plugin``: Goose hooks invoke shell scripts directly, so
-    this reuses the SHARED post-tool-log.sh (activity log for the taint audit) on
+    this reuses the SHARED post-tool-log.sh (activity log) on
     PostToolUse, via goose-hook-adapter.sh (payload reshape). Deterministic content →
     idempotent overwrite, refreshed on repair so a hook-path fix reaches existing
     engagements. There is no standard PreToolUse hook: Vigil does not filter its own
-    operator's commands (ADR 0019). The bench layers its guard-only PreToolUse hook
-    beside this (anticheat._patch_goose_hooks), exactly like the Claude/Codex/OpenCode
-    guard layers on the standard hooks.
+    operator's commands (ADR 0019).
     """
     hooks_src = agent_root / "scripts" / "hooks"
     command_agent_root = rendered_agent_root or agent_root

@@ -128,7 +128,7 @@ Param-key only:
 OIDC discovery and related `.well-known` routes repeatedly fell through without a dedicated
 classification, while independent modern-SaaS review corroborated their production relevance. The
 bucket separates identity discovery and authorization-flow surfaces from generic authentication
-and redirect handling. See `docs/plans/research/classify-surface-2026-06/README.md` for the public
+and redirect handling. See `docs/research/classify-surface/README.md` for the public
 evidence summary.
 
 ## Sources

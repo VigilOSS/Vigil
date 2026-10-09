@@ -44,6 +44,9 @@ def _ns(records_file: str, engagement_dir: str) -> argparse.Namespace:
 def test_ingest_candidates_rejects_noncanonical_observation_receipt(
     tmp_path, monkeypatch
 ) -> None:
+    (tmp_path / "scope.json").write_text(
+        json.dumps({"hosts": ["target.example"]}), encoding="utf-8"
+    )
     records_file = tmp_path / "candidates.jsonl"
     records_file.write_text(
         json.dumps({"method": "GET", "url": "https://target.example/one"}) + "\n",
@@ -71,6 +74,9 @@ def test_ingest_candidates_rejects_noncanonical_observation_receipt(
 def test_ingest_candidates_skips_whitespace_url_without_losing_later_records(
     tmp_path, monkeypatch
 ) -> None:
+    (tmp_path / "scope.json").write_text(
+        json.dumps({"hosts": ["target.example"]}), encoding="utf-8"
+    )
     records_file = tmp_path / "candidates.jsonl"
     records_file.write_text(
         json.dumps({"url": "   "}) + "\n"
@@ -132,15 +138,20 @@ def test_ingest_candidates_scope_filter_excludes_out_of_scope_hosts(
     assert observed_urls == {"https://good.example.com/api/v1/users"}
 
 
-def test_ingest_scope_filter_active_and_fail_open(tmp_path):
-    """The shared resolver: active with a real allowlist, fail-open (inactive)
-    when scope.json is absent — the contract every ingest path depends on so an
-    unloadable/empty scope never rejects an entire batch."""
-    # No scope.json -> SystemExit inside load_scope -> inactive (admit all).
-    allow, deny, active = ingest_scope_filter(str(tmp_path))
-    assert active is False and allow == [] and deny == []
+def test_ingest_scope_filter_requires_valid_nonempty_scope(tmp_path):
+    with pytest.raises(SystemExit, match="scope.json not found"):
+        ingest_scope_filter(str(tmp_path))
 
-    # A real allowlist -> active, with entries the gate can match against.
+    (tmp_path / "scope.json").write_text("{not-json", encoding="utf-8")
+    with pytest.raises(SystemExit, match="scope.json is not valid JSON"):
+        ingest_scope_filter(str(tmp_path))
+
+    (tmp_path / "scope.json").write_text(json.dumps({"hosts": []}), encoding="utf-8")
+    with pytest.raises(SystemExit, match="must declare at least one host"):
+        ingest_scope_filter(str(tmp_path))
+
+
+def test_ingest_scope_filter_activates_for_real_allowlist(tmp_path):
     (tmp_path / "scope.json").write_text(
         json.dumps({"hosts": ["*.example.com"], "out_of_scope": ["bad.example.com"]}),
         encoding="utf-8",
@@ -148,10 +159,6 @@ def test_ingest_scope_filter_active_and_fail_open(tmp_path):
     allow, deny, active = ingest_scope_filter(str(tmp_path))
     assert active is True
     assert allow and deny
-
-    # An allowlist of only un-admittable entries still yields active=False is NOT
-    # asserted here (bool(allow) is True for any parsed entry); the fail-open path
-    # is specifically the no-scope / unloadable case above.
 
 
 def test_ingest_scope_filter_global_bypass_disables_allow_and_deny_gate(tmp_path):

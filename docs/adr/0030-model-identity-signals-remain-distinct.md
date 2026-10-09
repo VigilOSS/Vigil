@@ -7,8 +7,8 @@
 
 The model and reasoning configuration an operator requests can differ from the
 configuration carried by the launcher, and either can differ from what a provider
-actually served. Collapsing those signals makes model comparisons and benchmark
-claims look more certain than their evidence.
+actually served. Collapsing those signals makes model comparisons look more
+certain than their evidence.
 
 ## Decision
 
@@ -25,8 +25,8 @@ unavailable; requested identity is never reported as effective or observed, and 
 pricing fallback is never provider identity. Aggregates preserve disagreement
 instead of selecting a convenient label.
 
-The benchmark manifest and supported session telemetry implement all three model
-layers. Ordinary dispatches persist nullable launcher-effective model, reasoning,
+Supported session telemetry implements all three model layers. Ordinary dispatches
+persist nullable launcher-effective model, reasoning,
 and source fields, but no current ordinary launcher/session integration attests
 a specific child invocation. Those values therefore remain unavailable for all
 ordinary clients. Static OpenCode agent definitions, project configuration, and
@@ -36,7 +36,7 @@ provider-owned session record exists.
 
 ## Consequences
 
-- Benchmark and run comparisons state what is known and how it was known.
+- Run comparisons state what is known and how it was known.
 - Unsupported clients can complete work while identity telemetry remains honestly
   unavailable.
 - New launchers need an exact effective-config capture and a verified observed

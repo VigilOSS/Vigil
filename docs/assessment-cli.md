@@ -258,4 +258,3 @@ by an operator:
 | `vigil auth keepalive --anchor-cookie <name>` | Fire one read-only authed GET per identity per interval to defeat an enterprise **idle** timeout, teeing a LIVE/DEAD verdict to a log. Anchor cookie names are engagement-specific and required. |
 | `vigil email <mailbox>` | Read recent messages from a local Mail.app mailbox — primarily to retrieve a short-lived email-verification code during authenticated testing. |
 | `vigil use <key>` | Set the persisted engagement for global services and non-`assess` verbs. (`vigil assess` binds to its launched session, CWD, or an explicit flag instead.) |
-| `vigil bench ...` | The generated-suite benchmark harness — see [`benchmarking.md`](benchmarking.md). |

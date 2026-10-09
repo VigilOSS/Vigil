@@ -198,6 +198,7 @@ def report_build_inputs(report_dir: Path) -> list[Path]:
         report_dir / "index.html",
         report_dir / "vite.config.ts",
         report_dir / "tsconfig.json",
+        report_dir / "scripts",
         report_dir / "src",
     ]
 

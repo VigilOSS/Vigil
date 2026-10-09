@@ -23,8 +23,7 @@ import { MarkdownBlock } from "../Markdown";
 export type ToastFn = (message: string, type?: "success" | "error" | "info") => void;
 
 // View-mode for prose fields (notes/summary/impact/remediation/rationale). A
-// single drawer-wide toggle (not per-section) keeps the header light and
-// matches the reference-project Description tabs pattern. Rendered is the default
+// single drawer-wide toggle (not per-section) keeps the header light. Rendered is the default
 // (MarkdownBlock); raw shows the existing mono <pre> presentation.
 export type ProseMode = "rendered" | "raw";
 

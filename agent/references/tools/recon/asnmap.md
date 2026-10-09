@@ -9,7 +9,7 @@ skill: subdomain-enumeration
 
 For live engagement targets, run asnmap via `vigil assess kali asnmap` (typed verb, audit-flag-aware).
 
-**Where it lives:** `/usr/local/bin/asnmap` in `runtime-full` (`go install github.com/projectdiscovery/asnmap/cmd/asnmap@latest` — see `agent/docker/runtime-full/Dockerfile`).
+**Where it lives:** `/usr/local/bin/asnmap` in `runtime-full` (`go install github.com/projectdiscovery/asnmap/cmd/asnmap@v1.1.1` — see `agent/docker/runtime-full/Dockerfile`).
 
 ## Requires a PDCP API key (or it returns empty)
 

@@ -1,5 +1,5 @@
 FROM kalilinux/kali-rolling@sha256:dddc31e0f4bc57b4b91e9027762544506bf91c7cdd7ff52104daaa4449b4c726
-ARG INSTALL_VERSION_STAMP=2026.05.05-84a231c
+ARG INSTALL_VERSION_STAMP=2026.10.09-public-release
 LABEL vigil.install-versions="${INSTALL_VERSION_STAMP}"
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]

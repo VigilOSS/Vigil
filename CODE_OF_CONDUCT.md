@@ -30,10 +30,10 @@ inappropriate in a professional setting is not acceptable.
 
 ## Enforcement
 
-Report conduct concerns privately by email to `operator@example.com`, with
-`[Conduct]` in the subject line. Do not file a conduct report as a public issue, and do not file one
-through the security advisory form — that form is for vulnerabilities and opens a draft security
-advisory. Security vulnerabilities go to [SECURITY.md](SECURITY.md#reporting-a-vulnerability).
+Report conduct concerns privately using the current contact method published on the
+[maintainers' GitHub profile](https://github.com/vigil-oss). Do not file a conduct report as a public
+issue or through the security advisory form. Security vulnerabilities go to
+[SECURITY.md](SECURITY.md#reporting-a-vulnerability).
 
 The maintainer may edit, remove, or reject contributions and may temporarily or permanently restrict
 participation when behavior violates this policy. Reports will be handled as privately as practical,

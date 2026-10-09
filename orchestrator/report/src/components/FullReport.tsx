@@ -9,7 +9,6 @@ import {
   flattenFindings,
   formatDateTime,
   formatLabel,
-  referenceLink,
   SEVERITY_RANK,
 } from "../lib/format";
 import { asPocRequest, asPocResponse, pocCurl, pocResponseText } from "../lib/poc";

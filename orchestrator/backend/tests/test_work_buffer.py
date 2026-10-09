@@ -596,6 +596,9 @@ def _run_ingest_bridge(monkeypatch, tmp_path, lines, *, variant_id=501):
         "test_ingest_endpoints_bridge",
         "agent/scripts/assess/commands/ingest_endpoints.py",
     )
+    (tmp_path / "scope.json").write_text(
+        json.dumps({"hosts": ["shop.example.com"]}), encoding="utf-8"
+    )
 
     monkeypatch.setattr(
         module,
@@ -913,7 +916,20 @@ def test_s12_ingest_endpoints_admits_ip_localhost_ipv6_and_skips_malformed(
     module = _load_ingest_module()
     engagement_dir = tmp_path / "engagement"
     engagement_dir.mkdir()
-    (engagement_dir / "scope.json").write_text("{}", encoding="utf-8")
+    (engagement_dir / "scope.json").write_text(
+        json.dumps(
+            {
+                "hosts": [
+                    "10.0.0.5",
+                    "127.0.0.1",
+                    "localhost",
+                    "::1",
+                    "app.example.com",
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
 
     input_file = tmp_path / "endpoints.txt"
     input_file.write_text(

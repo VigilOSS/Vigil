@@ -59,26 +59,25 @@ theater and the evidence cost is the only real effect.
 
 ### What this ADR does not touch
 
-Four existing controls are security mechanisms with a real adversary and a real
+Three existing controls are security mechanisms with a real adversary and a real
 boundary. They are explicitly out of scope and must not be removed, weakened or
 deleted by citing this ADR:
 
-1. **Benchmark anti-cheat** (`src/vigil_cli/bench/anticheat.py`). The adversary
-   is the benchmarked model, and the boundary protects benchmark *integrity*,
-   not secrecy. Without it every model score is meaningless. See ADR 0002 and
-   ADR 0005.
-2. **Scope and ROE enforcement** (in-scope host validation, `exploit_policy:
-   pause`). These protect third parties and the engagement's legal boundary —
-   people who did not consent, rather than the operator who did. An earlier
-   revision of this list also named `scope-check.sh` and its destructive-command
-   blocks here. That was wrong on the facts: every filter in that hook guarded
-   the operator's own machine, not a third party, and the hook has since been
-   removed (see below).
-3. **Proof and evidence integrity** (artifact digest revalidation, receipt
+1. **Engagement-policy enforcement** (`exploit_policy: pause`, tool denylists,
+   required scope declarations, and scope-backed recon/attribution/coverage).
+   These controls keep the operator workflow aligned with the recorded ROE.
+   They do not form a destination firewall: an undeclared host in an argv is not
+   rejected, because custom clients, raw sockets, and dynamic code make lexical
+   destination admission incomplete. Authorization and destination discipline
+   remain the operator's responsibility. An earlier revision of this list also
+   named `scope-check.sh` and its destructive-command blocks here. That was
+   wrong on the facts: every filter in that hook guarded the operator's own
+   machine, not a third party, and the hook has since been removed (see below).
+2. **Proof and evidence integrity** (artifact digest revalidation, receipt
    health, transactionally immutable producer attribution, terminal-state
    immutability). These make evidence *trustworthy*. They add information rather
    than removing it, which is the precise inverse of masking.
-4. **The untrusted-target-text boundary** (ADR 0018). The adversary is the
+3. **The untrusted-target-text boundary** (ADR 0018). The adversary is the
    target, whose text can carry instructions for an agent or forge structure in
    an export. Prompt-facing renderers delimit it and receiving instructions deny
    it authority; HTML, Markdown, link, image, and export renderers keep their
@@ -111,12 +110,13 @@ no guard, because it is trusted.
 
 A future agent-error guardrail must therefore act where the command is executed
 rather than where it is spelled — the client's own permission layer, or a
-constrained execution surface Vigil owns. `TODO.md` carries the scoping.
+constrained execution surface Vigil owns. [Issue #35](https://github.com/vigil-oss/vigil/issues/35)
+carries the scoping.
 
 The distinguishing question is always the same: *who is the adversary, and what
 does this stop them reaching?* If the answer is "the operator, from their own
-data", it is theater. If the answer names the target, the benchmarked model, or
-a non-consenting third party, it is a control and it stays.
+data", it is theater. If the answer names the target or a non-consenting third
+party, it is a control and it stays.
 
 ## Consequences
 

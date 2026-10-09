@@ -99,7 +99,7 @@ Siteforce loader-state (path-fragment):
 Repeated review found static-looking Salesforce/Siteforce `/sfsites/l/{json}/...` loader-state
 URLs incorrectly treated as inert assets. The `/sfsites/` fragment preserves the encoded Aura-state
 signal even when a path ends in `.js`, without globally boosting encoded or JavaScript paths. See
-`docs/plans/research/classify-surface-2026-06/README.md` and the synthetic cases in the implementation
+`docs/research/classify-surface/README.md` and the synthetic cases in the implementation
 contract.
 
 ## Sources

@@ -582,7 +582,7 @@ describe("finding investigation workspace", () => {
     expect(clear.disabled).toBe(false);
   });
 
-  it.each([{ group: "Severity filters", name: /^low/ }, { group: "Workflow filters", name: /^Blocked/ }, { group: "Verification filters", name: /^Verified/ }])("keeps an active zero-count $group option removable after refresh", async ({ group, name }) => {
+  it.each([{ group: "Severity filters", name: /^low/ }, { group: "Workflow filters", name: /^Blocked/ }, { group: "Verification filters", name: /^Verified/ }])("keeps an active zero-count $group option removable after refresh", async ({ name }) => {
     const first = { ...finding, verification_status: "unreviewed" };
     const second = { ...finding, id: 13, slug: "VA-013", title: "Z second claim", severity: "low", workflow_status: "blocked" };
     const props = { engagementKey: "demo", findings: [first, second] as never[], fallbackFindings: [], chains: [], chainLinks: [], assessmentRefreshVersion: 0 };

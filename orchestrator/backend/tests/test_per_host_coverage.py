@@ -397,6 +397,23 @@ def test_report_readiness_includes_per_host_coverage(client, isolate_settings):
     assert "api.target.example" in rows
 
 
+def test_report_readiness_omits_per_host_projection_when_projection_fails(
+    client, isolate_settings, monkeypatch, caplog
+):
+    _seed(client, isolate_settings)
+
+    def fail_projection(_engagement_id):
+        raise RuntimeError("projection failed")
+
+    monkeypatch.setattr(state_manager, "per_host_coverage", fail_projection)
+
+    response = client.get(f"{ASSESSMENT_BASE}/report-readiness")
+
+    assert response.status_code == 200, response.text
+    assert "per_host_coverage" not in response.json()
+    assert "projection failed" in caplog.text
+
+
 # ---------------------------------------------------------------------------
 # FU2: coverage_deferral payload validation
 # ---------------------------------------------------------------------------

@@ -410,7 +410,7 @@ def derive_capture_identity(
         return principal
 
     key_material = "\n".join(sorted(f"{name}={value}" for name, value in anchor_pairs))
-    digest = hashlib.sha1(key_material.encode("utf-8")).hexdigest()[:10]
+    digest = hashlib.sha1(key_material.encode("utf-8"), usedforsecurity=False).hexdigest()[:10]
     return f"cap-{digest}"
 
 
@@ -467,7 +467,7 @@ def _principal_identity(jwt_anchor: tuple[str, str] | None) -> str | None:
         return None  # claim was all-unsafe/empty — fall back to the fingerprint
     if _label_is_lossy(raw, label):
         disamb = hashlib.sha1(
-            f"{claim_name}={raw}".encode("utf-8")
+            f"{claim_name}={raw}".encode("utf-8"), usedforsecurity=False
         ).hexdigest()[:6]
         return f"cap-{label}-{disamb}"
     return f"cap-{label}"
@@ -592,7 +592,9 @@ def _bearer_principal_scope(
 
     if not scope_terms:
         return None
-    digest = hashlib.sha1("\n".join(scope_terms).encode("utf-8")).hexdigest()[:6]
+    digest = hashlib.sha1(
+        "\n".join(scope_terms).encode("utf-8"), usedforsecurity=False
+    ).hexdigest()[:6]
     return f"{'ctx' if audiences else 'iss'}{digest}"
 
 
@@ -601,7 +603,9 @@ def _capture_host_scope(host: str) -> str | None:
     normalized = str(host or "").strip().lower().rstrip(".")
     if not normalized:
         return None
-    digest = hashlib.sha1(f"host={normalized}".encode("utf-8")).hexdigest()[:6]
+    digest = hashlib.sha1(
+        f"host={normalized}".encode("utf-8"), usedforsecurity=False
+    ).hexdigest()[:6]
     return f"host{digest}"
 
 

@@ -1,15 +1,33 @@
 from __future__ import annotations
 
+import hashlib
 import os
+import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
+from . import __version__
 from .config import get_config_value
 
 DEFAULT_INSTALL_ROOT = Path.home() / "vigil"
 CONFIG_DIR = Path.home() / ".config" / "vigil"
 DEFAULT_SOURCE_REPO = "https://github.com/vigil-oss/vigil.git"
+SOURCE_CLONE_TIMEOUT_SECONDS = 120
+
+
+def _source_cache_path(config_dir: Path, repo_url: str, source_ref: str) -> Path:
+    """Return a cache path bound to the exact repository and ref strings.
+
+    The readable ref prefix is diagnostic only. The digest prevents two repos
+    sharing a tag, or refs such as ``feature/x`` and ``feature-x``, from silently
+    reusing one another's checkout after filename sanitization.
+    """
+    label = re.sub(r"[^A-Za-z0-9._-]+", "-", source_ref).strip("-")[:48]
+    label = label or "ref"
+    identity = hashlib.sha256(f"{repo_url}\0{source_ref}".encode("utf-8")).hexdigest()[:16]
+    return config_dir / f"source-{label}-{identity}"
 
 
 def default_runtime_container() -> str:
@@ -108,13 +126,73 @@ def _ensure_cached_source() -> Path | None:
         return None
     if not shutil_which("git"):
         return None
-    source_dir = CONFIG_DIR / "source"
-    repo_url = os.environ.get("VIGIL_SOURCE_REPO") or get_config_value("source.repo", DEFAULT_SOURCE_REPO) or DEFAULT_SOURCE_REPO
+    source_ref = (
+        os.environ.get("VIGIL_SOURCE_REF")
+        or get_config_value("source.ref")
+        or f"v{__version__}"
+    )
+    if source_ref == "v0.0.0+unknown":
+        return None
+    repo_url = (
+        os.environ.get("VIGIL_SOURCE_REPO")
+        or get_config_value("source.repo", DEFAULT_SOURCE_REPO)
+        or DEFAULT_SOURCE_REPO
+    )
+    source_dir = _source_cache_path(CONFIG_DIR, repo_url, source_ref)
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    if looks_like_repo_root(source_dir):
+        return source_dir.resolve()
     if source_dir.exists():
-        subprocess.run(["git", "-C", str(source_dir), "pull", "--ff-only"], text=True, capture_output=True, check=False)
-    else:
-        subprocess.run(["git", "clone", "--depth", "1", repo_url, str(source_dir)], text=True, capture_output=True, check=False)
+        return None
+    with tempfile.TemporaryDirectory(prefix=".source-cache-", dir=CONFIG_DIR) as tmp:
+        staging = Path(tmp) / "source"
+        argv = [
+            "git",
+            "clone",
+            "--depth",
+            "1",
+            "--branch",
+            source_ref,
+            "--single-branch",
+            repo_url,
+            str(staging),
+        ]
+        try:
+            completed = subprocess.run(
+                argv,
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=SOURCE_CLONE_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired:
+            print(
+                f"[vigil] warning: source sync for {source_ref} timed out after "
+                f"{SOURCE_CLONE_TIMEOUT_SECONDS} seconds",
+                file=sys.stderr,
+            )
+            return None
+        except OSError as exc:
+            print(
+                f"[vigil] warning: source sync could not start for {source_ref}: {exc}",
+                file=sys.stderr,
+            )
+            return None
+        if completed.returncode != 0 or not looks_like_repo_root(staging):
+            detail = (
+                getattr(completed, "stderr", "")
+                or "git clone did not produce a Vigil source tree"
+            ).strip()
+            print(
+                f"[vigil] warning: source sync failed for {source_ref}: {detail}",
+                file=sys.stderr,
+            )
+            return None
+        try:
+            staging.rename(source_dir)
+        except FileExistsError:
+            if not looks_like_repo_root(source_dir):
+                return None
     return source_dir.resolve() if looks_like_repo_root(source_dir) else None
 
 

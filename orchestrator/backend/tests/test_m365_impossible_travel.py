@@ -156,17 +156,17 @@ class TestLoadEvents:
         self.mod = _load_mod()
 
     def test_bare_list(self):
-        evs = [_signin("a@x.com", "2023-12-01T16:00:00Z", NEW_YORK)]
+        evs = [_signin("a@identity.example", "2023-12-01T16:00:00Z", NEW_YORK)]
         out = self.mod.load_events(json.dumps(evs))
-        assert len(out) == 1 and out[0]["userPrincipalName"] == "a@x.com"
+        assert len(out) == 1 and out[0]["userPrincipalName"] == "a@identity.example"
 
     def test_graph_value_wrapper(self):
         payload = {
             "@odata.context": "https://graph.microsoft.com/v1.0/$metadata#auditLogs/signIns",
             "@odata.nextLink": "https://graph.microsoft.com/v1.0/auditLogs/signIns?$skiptoken=x",
             "value": [
-                _signin("a@x.com", "2023-12-01T16:00:00Z", NEW_YORK),
-                _signin("a@x.com", "2023-12-01T17:00:00Z", TOKYO),
+                _signin("a@identity.example", "2023-12-01T16:00:00Z", NEW_YORK),
+                _signin("a@identity.example", "2023-12-01T17:00:00Z", TOKYO),
             ],
         }
         out = self.mod.load_events(json.dumps(payload))
@@ -174,15 +174,15 @@ class TestLoadEvents:
 
     def test_jsonl(self):
         evs = [
-            _signin("a@x.com", "2023-12-01T16:00:00Z", NEW_YORK),
-            _signin("a@x.com", "2023-12-01T17:00:00Z", TOKYO),
+            _signin("a@identity.example", "2023-12-01T16:00:00Z", NEW_YORK),
+            _signin("a@identity.example", "2023-12-01T17:00:00Z", TOKYO),
         ]
         text = "\n".join(json.dumps(e) for e in evs)
         out = self.mod.load_events(text)
         assert len(out) == 2
 
     def test_single_object(self):
-        ev = _signin("a@x.com", "2023-12-01T16:00:00Z", NEW_YORK)
+        ev = _signin("a@identity.example", "2023-12-01T16:00:00Z", NEW_YORK)
         out = self.mod.load_events(json.dumps(ev))
         assert len(out) == 1
 
@@ -219,7 +219,7 @@ class TestDetectImpossibleTravel:
 
     def test_upn_grouping_is_case_insensitive(self):
         events = [
-            _signin("Alice@Contoso.com", "2023-12-01T16:00:00Z", NEW_YORK),
+            _signin("Alice@Acme.Example", "2023-12-01T16:00:00Z", NEW_YORK),
             _signin("alice@acme.example", "2023-12-01T17:00:00Z", TOKYO),
         ]
 

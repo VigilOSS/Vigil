@@ -67,6 +67,11 @@ def _retype_ns(engagement_dir: str, **overrides) -> argparse.Namespace:
 
 
 def _install(monkeypatch, tmp_path, fake: FakeAssessmentClient) -> None:
+    scope_path = tmp_path / "scope.json"
+    if not scope_path.exists():
+        scope_path.write_text(
+            json.dumps({"scope_enforcement": "bypass"}), encoding="utf-8"
+        )
     monkeypatch.setattr(
         ingest_endpoints, "load_config", lambda *a, **k: _Cfg(str(tmp_path))
     )

@@ -189,7 +189,7 @@ def _nuclei_lock_path_for(output_arg: str, engagement_dir: Path | None) -> Path 
     host_out = _resolve_output_host_path(output_arg, engagement_dir)
     if host_out is not None:
         return host_out.parent / f".{host_out.name}.lock"
-    digest = hashlib.sha1(output_arg.encode("utf-8")).hexdigest()[:16]
+    digest = hashlib.sha1(output_arg.encode("utf-8"), usedforsecurity=False).hexdigest()[:16]
     return engagement_dir / "scans" / f".nuclei-{digest}.lock"
 
 

@@ -99,7 +99,7 @@ consume:
 
 | Field | Example | Notes |
 |-------|---------|-------|
-| `actor` | `user@northstar.example`, `okta-user-00uabc`, `arn:aws:iam::123456:user/joe`, `MAC-12345` | Email address OR identity provider ID. If both are present, prefer the canonical IdP identifier and keep the email in `actor_aliases[]`. |
+| `actor` | `user@acme.example`, `okta-user-00uabc`, `arn:aws:iam::123456:user/joe`, `MAC-12345` | Email address OR identity provider ID. If both are present, prefer the canonical IdP identifier and keep the email in `actor_aliases[]`. |
 | `target` | account email, host ID, IOC (IP, domain, hash), AWS resource ARN | What the actor allegedly acted against. May be the same as `actor` (e.g., self-grant of OAuth scope). |
 | `action` | `signin_anomaly`, `oauth_grant`, `mailbox_rule_add`, `iam_access_key_create`, `host_isolation_triggered` | The verb that fired the rule. Use the platform's native event name when available; otherwise normalize to one of the IR-tag verbs. |
 | `time_window_utc` | `["2026-05-17T03:22:14Z", "2026-05-17T03:24:58Z"]` | UTC ISO-8601, ALWAYS. Convert from any timezone the SIEM emitted before storing. The earliest plausible trigger anchors the look-back window (rule 6). |
@@ -162,8 +162,8 @@ register entry already carries the rigor of a previous five-check pass.
    to L2 even if the pattern matches — they exist precisely because a human
    needs to confirm them each time.
 2. The actor in the alert matches an **explicit identity** named in the
-   register (e.g., `vendor-sync@northstar.example`). Wildcard identities
-   (`*@northstar.example`) in the register do NOT satisfy the match
+   register (e.g., `vendor-sync@acme.example`). Wildcard identities
+   (`*@acme.example`) in the register do NOT satisfy the match
    condition — the register author flagged them with a wildcard because the
    pattern is too broad for a mechanical false-positive proposal.
 3. The action verb in the alert matches the register entry's `action_verb`
@@ -357,7 +357,7 @@ verifier rejects it on intake and reopens the finding.
   "mechanical_fp_checked": true,
   "mechanical_fp_outcome": "miss",
   "tenant_ref_paths_consulted": [
-    "agent/references/tenants/northstar-gws.md"
+    "agent/references/tenants/acme-gws.md"
   ],
   "evidence_refs": [<artifact-id-of-alert-intake>],
   "next_specialist": "investigator",
@@ -409,8 +409,8 @@ durable backend record.
 
 ```
 alert_id        actor                       target                      severity  platform  mitre               downstream_skill        disposition
-ALERT-12345     joe@northstar.example       joe@northstar.example       high      gws       T1078.004,T1098.001 google-workspaces       dispatched
-ALERT-12346     vendor@northstar.example    drive.googleapis.com        info      gws       T1078.004           alert-fp-verification   fp-proposed
+ALERT-12345     joe@acme.example       joe@acme.example       high      gws       T1078.004,T1098.001 google-workspaces       dispatched
+ALERT-12346     vendor@acme.example    drive.googleapis.com        info      gws       T1078.004           alert-fp-verification   fp-proposed
 ```
 
 Columns:
@@ -437,7 +437,7 @@ already at the top of the dispatch prompt; re-emitting it wastes context.
   sections mix mechanical and manual-review entries; the tag is the
   discriminator.
 - **Wildcard identity passed as mechanical match.** A register entry with
-  `actor: "*@northstar.example"` is NOT mechanical-eligible — it is a
+  `actor: "*@acme.example"` is NOT mechanical-eligible — it is a
   pattern the operator wrote for L2 to filter against, not for L1 to
   propose a false-positive on.
 - **`mitre_techniques: []`** on the draft finding. Empty is forbidden by

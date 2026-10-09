@@ -39,9 +39,9 @@ curl -s -D - -H "Authorization: Bearer $TENANT_A_TOKEN" \
 **Cross-tenant read.** Step 3's downloaded PDF, rendered to text:
 ```
 $ pdftotext other-invoice.pdf - | head -5
-Northwind Fixtures LLC                                           <-- not Tenant A's company
+Acme Fixtures LLC                                           <-- not Tenant A's company
 Invoice #41198  —  Due 2026-06-30
-Bill To: accounts@northwindfixtures.example
+Bill To: accounts@acme.example
 Line 1: Annual platform license — $18,400.00                    <-- proof of cross-tenant read
 Line 2: Overage — API calls (Q2)  — $2,150.00
 ```

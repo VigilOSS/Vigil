@@ -21,8 +21,7 @@ offline, or non-target-facing.
 
 Deliberate live validation belongs on an explicitly activated web track. Vigil
 does not add a CODE firewall, VM, destination allowlist, global code/web network
-switch, or per-command approval loop. Benchmark-only Lima isolation remains a
-separate boundary under ADR 0020.
+switch, or per-command approval loop.
 
 ## Consequences
 

@@ -127,7 +127,7 @@ Param-key matches:
 
 Deep review found actionable SSO routes—including login, profile, and configuration surfaces—that
 legacy gf matching left without a classification. See
-`docs/plans/research/classify-surface-2026-06/README.md` for the public evidence summary.
+`docs/research/classify-surface/README.md` for the public evidence summary.
 
 ## Sources
 

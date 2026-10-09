@@ -435,7 +435,9 @@ def _run_ingest(monkeypatch, tmp_path: Path, lines: list[str]) -> dict[str, str]
     """
     engagement_dir = tmp_path / "engagement"
     engagement_dir.mkdir()
-    (engagement_dir / "scope.json").write_text("{}", encoding="utf-8")
+    (engagement_dir / "scope.json").write_text(
+        json.dumps({"scope_enforcement": "bypass"}), encoding="utf-8"
+    )
 
     monkeypatch.setattr(
         ingest_endpoints,

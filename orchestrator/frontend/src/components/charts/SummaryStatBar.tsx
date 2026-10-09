@@ -1,9 +1,7 @@
 // Summary stat bar (UI/UX adoption wave, Tier 1b).
 //
-// Generic KPI bar ported from the reference-project workbench SummaryCards
-// (designs/dark/SummaryCards.tsx): an inline row of LABEL / big-mono-value
-// pairs separated by `|` dividers. Translated from their Tailwind + hard-coded
-// hex to our plain CSS — the small uppercase label uses `--muted`, the value
+// Generic KPI bar: an inline row of LABEL / big-mono-value pairs separated by
+// `|` dividers. The small uppercase label uses `--muted`, the value
 // uses our mono font + `tabular-nums`, and a per-item `tone` maps to a theme
 // var (`--ok` / `--danger` / `--warn` / `--muted` / `--accent`) so it reads
 // correctly in both themes. Wraps onto multiple rows on narrow screens.

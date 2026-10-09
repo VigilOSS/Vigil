@@ -767,7 +767,7 @@ def test_collection_gate_ignores_superdomain_substring_false_positive(monkeypatc
     # Surfaces are all for unrelated hosts that merely contain the string
     # "target.example" — they must NOT count toward collection coverage.
     surfaces = [
-        {"target_descriptor": "https://target.example.evil.org/"},
+        {"target_descriptor": "https://target.example.evil.example/"},
         {"target_descriptor": "https://nottarget.example/path"},
     ]
 

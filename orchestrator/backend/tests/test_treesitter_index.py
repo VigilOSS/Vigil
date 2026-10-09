@@ -251,11 +251,11 @@ def test_go_imports_keep_the_path_of_aliased_and_blank_specs():
 
 CPP_HEADER_SOURCE = b"""\
 extern "C" {
-size_t AcmeClient_write_data_cb(void *ptr, size_t size);
-size_t AcmeClient_read_data_cb(void *ptr, size_t size);
+size_t sample_write_data_cb(void *ptr, size_t size);
+size_t sample_read_data_cb(void *ptr, size_t size);
 }
 
-class AcmeClient {
+class SampleClient {
 public:
     class Exception {
     public:
@@ -263,8 +263,8 @@ public:
         Exception(int error) {}
     };
 
-    AcmeClient(const char* url);
-    ~AcmeClient();
+    SampleClient(const char* url);
+    ~SampleClient();
     const char* fetch();
     const char* post(const char* data);
     const char* put(const char* data);
@@ -273,7 +273,7 @@ public:
     size_t upload_data(void* ptr, size_t size);
 
 private:
-    AcmeClient(const AcmeClient&);
+    SampleClient(const SampleClient&);
     void setOptions();
     void setHTTPHeaders() const;
     void curlPerform();
@@ -283,16 +283,16 @@ private:
 
 @needs_treesitter
 def test_cpp_header_indexes_function_and_method_declarations():
-    idx = index_file("AcmeClient.h", "cpp", source=CPP_HEADER_SOURCE)
+    idx = index_file("sample_client.h", "cpp", source=CPP_HEADER_SOURCE)
     functions = idx["functions"]
     names = [function["name"] for function in functions]
 
     assert set(names) == {
-        "AcmeClient_write_data_cb",
-        "AcmeClient_read_data_cb",
+        "sample_write_data_cb",
+        "sample_read_data_cb",
         "Exception",
-        "AcmeClient",
-        "~AcmeClient",
+        "SampleClient",
+        "~SampleClient",
         "fetch",
         "post",
         "put",
@@ -304,16 +304,16 @@ def test_cpp_header_indexes_function_and_method_declarations():
         "curlPerform",
     }
     assert names.count("Exception") == 2
-    assert names.count("AcmeClient") == 2
+    assert names.count("SampleClient") == 2
     assert len(functions) == 16
     assert {
         function["qualified_name"]
         for function in functions
-        if function["name"] in {"fetch", "~AcmeClient", "setHTTPHeaders"}
+        if function["name"] in {"fetch", "~SampleClient", "setHTTPHeaders"}
     } == {
-        "AcmeClient.fetch",
-        "AcmeClient.~AcmeClient",
-        "AcmeClient.setHTTPHeaders",
+        "SampleClient.fetch",
+        "SampleClient.~SampleClient",
+        "SampleClient.setHTTPHeaders",
     }
 
 

@@ -554,10 +554,8 @@ def create_engagement(
 ) -> CreatedEngagement:
     """Materialize an engagement, optionally as an offline isolated staging tree.
 
-    Ordinary callers use the default installed registry and backend checks. The
-    benchmark Lima path supplies a judge-side staging root and disables all host
-    database/network interaction; the copied guest tree is registered only by
-    the attempt-local backend.
+    Ordinary callers use the default installed registry and backend checks. Tests and
+    offline tooling can supply an isolated staging root and disable backend contact.
     """
 
     install_root = options.install_root.expanduser().resolve()
@@ -662,16 +660,13 @@ def create_engagement(
             _write_claude_config(agent_root, eng_dir)
         # OpenCode parity: the standard plugin (activity-log) and the
         # specialist roster install for every kind that also gets start_opencode.sh
-        # (codex/claude/both), so an `--client opencode` run — including `vigil bench`,
-        # whose engagement creation routes through here — has the standard logging
-        # plugin in place. The bench then layers its guard-only plugin beside it.
+        # (codex/claude/both), so every `--client opencode` run has the standard
+        # logging plugin in place.
         if client_kind in {"codex", "claude", "both"}:
             _write_opencode_config(agent_root, eng_dir)
         # Goose parity: the operator prompt (`.goosehints`), the specialist recipe roster
         # (`.goose/recipes` link), and the standard hooks plugin (activity-log)
-        # install for every kind that also gets start_goose.sh, so an `--client goose` run —
-        # including `vigil bench` — has them in place. The bench layers its guard-only hook
-        # beside the standard one (anticheat._patch_goose_hooks). Written AFTER
+        # install for every kind that also gets start_goose.sh. Written AFTER
         # _write_prompt_wrappers so AGENTS.md exists to seed .goosehints.
         if client_kind in {"codex", "claude", "both"}:
             _write_goose_config(agent_root, eng_dir)
@@ -1621,6 +1616,51 @@ def _strip_operator_details(markdown: str) -> str:
     return head.rstrip() + "\n"
 
 
+def _make_report_resources_inert(node: Any) -> Any:
+    """Preserve target-controlled content without letting it execute or fetch."""
+    if isinstance(node, list):
+        return [_make_report_resources_inert(item) for item in node]
+    if not isinstance(node, dict):
+        return node
+
+    kind = node.get("t")
+    content = node.get("c")
+    if kind == "Image" and isinstance(content, list) and len(content) == 3:
+        alt = _make_report_resources_inert(content[1])
+        target = content[2]
+        source = str(target[0]) if isinstance(target, list) and target else ""
+        label = list(alt) if isinstance(alt, list) else []
+        if label:
+            label.append({"t": "Space"})
+        label.append(
+            {
+                "t": "Code",
+                "c": [["", [], []], f"[image source: {source}]"],
+            }
+        )
+        return {"t": "Span", "c": [["", [], []], label]}
+    if kind == "RawInline" and isinstance(content, list) and len(content) == 2:
+        return {"t": "Code", "c": [["", [], []], str(content[1])]}
+    if kind == "RawBlock" and isinstance(content, list) and len(content) == 2:
+        return {"t": "CodeBlock", "c": [["", [], []], str(content[1])]}
+    return {key: _make_report_resources_inert(value) for key, value in node.items()}
+
+
+def _complete_pdf(path: Path) -> bool:
+    """Return whether Chrome left a complete PDF before a lingering timeout."""
+    try:
+        size = path.stat().st_size
+        if size < 10:
+            return False
+        with path.open("rb") as handle:
+            if handle.read(5) != b"%PDF-":
+                return False
+            handle.seek(max(0, size - 1024))
+            return b"%%EOF" in handle.read()
+    except OSError:
+        return False
+
+
 def export_pdf(eng_dir: Path, output: Path | None = None) -> Path:
     # Blue incident engagements still scaffold a report.md; render it as before.
     # Red/code/android engagements no longer seed one — their closeout is the
@@ -1652,34 +1692,79 @@ def export_pdf(eng_dir: Path, output: Path | None = None) -> Path:
     if output is None:
         output = eng_dir / "report.pdf"
 
-    html_path = eng_dir / ".report_tmp.html"
-    # Render from stripped copies so the internal-only OPERATOR DETAILS reference
-    # section in each submission.md never lands in the pasteable report.pdf.
-    stripped_dir = eng_dir / ".submission_tmp"
-    try:
-        stripped_dir.mkdir(exist_ok=True)
+    # Render inside a unique engagement-local directory. Engagement locality
+    # keeps Chrome's file:// access bounded to the engagement, while uniqueness
+    # prevents concurrent exports from sharing or deleting one another's input.
+    with tempfile.TemporaryDirectory(dir=eng_dir, prefix=".report-export-") as raw_tmp_dir:
+        tmp_dir = Path(raw_tmp_dir)
+        html_path = tmp_dir / "report.html"
+        # Render from stripped copies so the internal-only OPERATOR DETAILS
+        # reference section never lands in the pasteable report.pdf.
+        stripped_dir = tmp_dir / "submissions"
+        stripped_dir.mkdir()
         render_sources: list[Path] = []
         for idx, src in enumerate(sources):
             stripped = _strip_operator_details(src.read_text(encoding="utf-8"))
             tmp = stripped_dir / f"{idx:03d}-{src.parent.name}.md"
             tmp.write_text(stripped, encoding="utf-8")
             render_sources.append(tmp)
-        subprocess.run(
-            [pandoc, *[str(src) for src in render_sources], "-o", str(html_path),
-             "--standalone", "--embed-resources",
-             "--metadata", "title=Engagement Report"],
-            check=True,
-        )
-        subprocess.run(
-            [chrome, "--headless", "--disable-gpu", "--no-sandbox",
-             f"--print-to-pdf={output}", "--print-to-pdf-no-header",
-             html_path.resolve().as_uri()],
+        ast_result = subprocess.run(
+            [
+                pandoc,
+                *[str(src) for src in render_sources],
+                "--from=gfm",
+                "--to=json",
+            ],
             check=True,
             capture_output=True,
+            text=True,
         )
-    finally:
-        html_path.unlink(missing_ok=True)
-        shutil.rmtree(stripped_dir, ignore_errors=True)
+        safe_ast = _make_report_resources_inert(json.loads(ast_result.stdout))
+        subprocess.run(
+            [
+                pandoc,
+                "--from=json",
+                "--to=html5",
+                "-o",
+                str(html_path),
+                "--standalone",
+                "--metadata",
+                "title=Engagement Report",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            input=json.dumps(safe_ast),
+        )
+        chrome_argv = [
+            chrome,
+            "--headless",
+            "--disable-gpu",
+            "--disable-background-networking",
+            "--disable-component-update",
+            "--disable-default-apps",
+            "--disable-extensions",
+            "--disable-sync",
+            "--no-first-run",
+            "--no-default-browser-check",
+            f"--user-data-dir={tmp_dir / 'chrome-profile'}",
+            f"--print-to-pdf={output}",
+            "--no-pdf-header-footer",
+            html_path.resolve().as_uri(),
+        ]
+        try:
+            subprocess.run(
+                chrome_argv,
+                check=True,
+                capture_output=True,
+                timeout=10,
+            )
+        except subprocess.TimeoutExpired:
+            # Some Chrome/macOS versions write and close the complete PDF but
+            # leave the headless parent alive. subprocess.run has terminated it
+            # by this point; accept only an intact PDF trailer, never a partial.
+            if not _complete_pdf(output):
+                raise
 
     return output
 
@@ -2518,10 +2603,7 @@ def _write_opencode_config(agent_root: Path, eng_dir: Path) -> None:
     documents both; the singular ``plugin/`` is predominant). The specialist roster
     is exposed via symlink, exactly like Codex/Claude.
 
-    This is the source of the standard PostToolUse logging for OpenCode — on the
-    bench the guard-only ``bench-guard.js`` plugin is layered beside this file, so
-    blocking (bench) and logging (standard) are both present, exactly like the
-    Claude/Codex layering.
+    This is the source of the standard PostToolUse logging for OpenCode.
     """
     src = agent_root / ".opencode" / "plugin" / "standard-hooks.js"
     if src.exists():
@@ -2540,12 +2622,11 @@ def _write_opencode_config(agent_root: Path, eng_dir: Path) -> None:
 # Appended to the engagement's `.goosehints` (Goose ONLY — never touches the shared
 # operator prompt or the other clients). The live SSRF/BOLA runs showed deepseek-chat
 # (non-thinking) solving INLINE with 0 `delegate` calls and writing no backend state —
-# behaving like a lone CTF solver, not the Vigil orchestrator (a benchmark-validity issue:
-# we want to measure the ORCHESTRATED agent, the way claude/codex run it). `delegate` IS
+# behaving like a lone solver, not the Vigil orchestrator. `delegate` IS
 # available on Goose (verified), so this is a prompting gap: the shared prompt's concrete
 # "Sanctioned inline form" example out-pulls the delegate bullet for a non-thinking model.
 # This goose-scoped, imperative reinforcement counters that without re-steering any other
-# client. See docs/goose-bench.md.
+# client.
 GOOSE_DISPATCH_DIRECTIVE = (
     "\n\n---\n"
     "## Goose runtime — dispatch, do not solo (read this first)\n\n"
@@ -2572,7 +2653,7 @@ def _write_goose_config(
 ) -> None:
     """Install Goose's operator prompt, specialist roster, and standard hooks.
 
-    Mirrors ``_write_opencode_config`` but Goose-native (see docs/goose-bench.md):
+    Mirrors ``_write_opencode_config`` but Goose-native:
 
     - ``.goosehints`` — Goose auto-loads this from the cwd. We copy the engagement
       ``AGENTS.md`` (written by ``_write_prompt_wrappers`` just before this call) into it, so
@@ -2580,14 +2661,12 @@ def _write_goose_config(
       ``AGENTS.md`` is a thin POINTER for every engagement type, and
       ``engagement_type`` selects the canonical installed prompt it names
       (assessment, blue, or remediation); the operator resolves the
-      pointer by reading the referenced file — the bench CTF message and the human start
-      prompt both say "Read AGENTS.md", which drives that. There is no ``--agent operator``
+      pointer by reading the referenced file. There is no ``--agent operator``
       step — the default ``goose run`` agent already holds the ``delegate`` tool.
     - ``.goose/recipes`` — symlink to the generated specialist roster; the operator
       dispatches by name (``delegate source <role>``), resolved via ``GOOSE_RECIPE_PATH``.
     - ``.agents/plugins/vigil-standard`` — the standard hooks plugin (activity-log),
-      running the SHARED shell script via the payload adapter. The bench layers its
-      guard-only hook beside it (anticheat._patch_goose_hooks).
+      running the SHARED shell script via the payload adapter.
     """
     agents_md = eng_dir / "AGENTS.md"
     base = agents_md.read_text(encoding="utf-8") if agents_md.is_file() else ""
@@ -2643,23 +2722,22 @@ def write_opencode_reasoning_config(eng_dir: Path, thinking: str) -> None:
 # multi-tool-call turn, and DeepSeek 400s ("reasoning_content ... must be passed
 # back"). DeepSeek ignores `parallel_tool_calls:false`, so we cannot stop the model
 # emitting parallel calls; instead a tiny local proxy
-# (vigil_cli/bench/goose_reasoning_proxy.py, stdlib-only) re-attaches the dropped
+# (vigil_cli/goose_reasoning_proxy.py, stdlib-only) re-attaches the dropped
 # reasoning_content on the way to the API. The launcher starts it on an ephemeral
 # port, repoints OPENAI_HOST at it (real DeepSeek host becomes the proxy's UPSTREAM),
-# and trap-kills it on exit so it is auto-cleaned per attempt. The proxy is a no-op
+# and trap-kills it on exit so it is auto-cleaned per client run. The proxy is a no-op
 # for non-thinking models (no reasoning_content to repair), so it is always safe to
 # run. Disable with VIGIL_GOOSE_REASONING_PROXY=0 (then thinking-mode V4 regresses to
-# the #9397 400). See docs/goose-bench.md.
+# the #9397 400). See docs/agent-clients.md.
 _GOOSE_EXTRA_ENV = (
     "# Goose: direct DeepSeek via the OpenAI-compatible provider. OPENAI_API_KEY\n"
     "# is derived from DEEPSEEK_API_KEY; recipe roster + headless hygiene.\n"
-    "# See docs/goose-bench.md.\n"
+    "# See docs/agent-clients.md.\n"
     'export GOOSE_PROVIDER="openai"\n'
     '_VIGIL_DEEPSEEK_HOST="https://api.deepseek.com"\n'
     'export OPENAI_API_KEY="${{DEEPSEEK_API_KEY:-}}"\n'
     "# Pin the model to a thinking V4 id so a bare `vigil engagement start\n"
-    "# --client goose` (no --model) works; the bench passes --model on the CLI,\n"
-    "# which OVERRIDES GOOSE_MODEL. Thinking mode is supported via the repair proxy below.\n"
+    "# --client goose` (no --model) works. Thinking mode is supported via the repair proxy below.\n"
     'export GOOSE_MODEL="deepseek-v4-pro"\n'
     'export GOOSE_RECIPE_PATH="$ENGAGEMENT_DIR/.goose/recipes"\n'
     'export GOOSE_DISABLE_KEYRING="1"\n'
@@ -2670,7 +2748,7 @@ _GOOSE_EXTRA_ENV = (
     "# Start the stdlib-only repair proxy in front of DeepSeek, repoint OPENAI_HOST\n"
     "# at it, and kill it when this launcher exits (auto-cleaned per attempt).\n"
     'if [[ "${{VIGIL_GOOSE_REASONING_PROXY:-1}}" != "0" ]]; then\n'
-    '  _vigil_proxy_script="{install_dir}/src/vigil_cli/bench/goose_reasoning_proxy.py"\n'
+    '  _vigil_proxy_script="{install_dir}/src/vigil_cli/goose_reasoning_proxy.py"\n'
     '  if [[ -f "$_vigil_proxy_script" ]]; then\n'
     "    # Prefer the install venv python (always present); any python3 works (stdlib only).\n"
     '    _vigil_py="{install_dir}/.venv/bin/python"\n'
@@ -2745,8 +2823,6 @@ _LEGACY_SKIP_PERMISSION_ARGS = {
 # operator's global `~/.codex/config.toml`; those are the operator's own hooks,
 # and Vigil does not defend against its own operator (ADR 0019).
 #
-# `vigil bench` passes the same flag for a different reason (an unattended run
-# cannot answer the review at all) — see docs/benchmarking.md.
 _REQUIRED_CLIENT_ARGS: dict[str, tuple[str, ...]] = {
     "codex": ("--dangerously-bypass-hook-trust",),
 }
@@ -2860,8 +2936,8 @@ def _write_launchers(agent_root: Path, eng_dir: Path, client_kind: str, *, skip_
         )
     # OpenCode reads the same engagement-local AGENTS.md as Codex (written for every
     # real client kind), so the operator prompt drives it unchanged. We always emit
-    # start_opencode.sh so `--client opencode` (engagement start and `vigil bench`)
-    # works regardless of install kind. It execs OpenCode's DEFAULT command (the TUI),
+    # start_opencode.sh so `--client opencode` works regardless of install kind. It
+    # execs OpenCode's DEFAULT command (the TUI),
     # not `opencode run`: `run` is a one-shot headless invocation that exits after a
     # single reply, so a launcher built on it can never hold the operator loop that
     # `vigil engagement start` exists to open. The operator message rides OpenCode's
@@ -2885,7 +2961,7 @@ def _write_launchers(agent_root: Path, eng_dir: Path, client_kind: str, *, skip_
             exec_cmd="opencode --agent operator",
             provider_key=CLIENT_PROVIDER_KEY["opencode"],
         )
-    # Goose: the PRIMARY open-model bench client. Like OpenCode it reads the engagement
+    # Goose reads the engagement
     # prompt natively (Goose auto-loads `.goosehints`, written by _write_goose_config),
     # so we always emit start_goose.sh for every real client kind. Both exec forms load
     # the `developer` builtin (shell+editor) and — crucially — omit `--no-profile`, so

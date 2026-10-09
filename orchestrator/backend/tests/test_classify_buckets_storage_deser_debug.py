@@ -1,7 +1,7 @@
 """RED-phase contract tests for new classify_buckets behaviour.
 
 Encodes the TEST-MATRIX rows from
-``docs/plans/research/classify-surface-2026-06/IMPLEMENTATION-SPEC.md`` for four
+``docs/research/classify-surface/IMPLEMENTATION-SPEC.md`` for four
 bucket families:
 
 * object-storage (§6.6 / matrix §12.6, rows B1-B6) — Domino + cloud discriminators,

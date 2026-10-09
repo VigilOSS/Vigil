@@ -14,6 +14,8 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 
 # ---------------------------------------------------------------------------
 # Wildcard-includes-apex semantics — `vigil assess filter-scope` regressions (1F.1)
@@ -479,11 +481,8 @@ def test_ingest_admits_apex_under_wildcard_scope(
     assert skipped_posts == []
 
 
-def test_ingest_runs_without_scope_json(monkeypatch, tmp_path: Path, capsys) -> None:
-    """Ingestion no longer reads scope.json — Round 4 deleted the only consumer
-    (the strict-apex check). The ingest path admits URLs based on the
-    egress-blocked + per-host budget gates alone, so a missing scope.json
-    must not block ingestion."""
+def test_ingest_rejects_missing_scope_json(monkeypatch, tmp_path: Path, capsys) -> None:
+    """A missing authorization boundary stops ingestion before any URL is posted."""
     eng = tmp_path / "engagement"
     eng.mkdir()
     module, args, fake = _ingest_setup(
@@ -493,13 +492,9 @@ def test_ingest_runs_without_scope_json(monkeypatch, tmp_path: Path, capsys) -> 
         input_lines=["https://example.test/login"],
     )
 
-    module.run(args)
-    posted_urls = [
-        payload["url"]
-        for endpoint, payload in fake.posts
-        if endpoint == "request-observations"
-    ]
-    assert "https://example.test/login" in posted_urls
+    with pytest.raises(SystemExit, match="scope.json not found"):
+        module.run(args)
+    assert fake.posts == []
 
 
 def test_ingest_idn_apex_a_label_url_admitted_under_u_label_wildcard(

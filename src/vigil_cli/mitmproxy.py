@@ -235,8 +235,8 @@ def start_proxy(
         "engagements_root=/engagements",
         "--set",
         "block_global=false",
-        # Akamai-fronted sites (LastPass, Salesforce Experience Cloud, and
-        # other large CDNs) serve CSP / cache-control headers with trailing
+        # Some Akamai-fronted enterprise portals serve CSP / cache-control
+        # headers with trailing
         # whitespace that hyper-h2 strict mode rejects per RFC 7540
         # §8.1.2.2. Without disabling h2 the proxy 502s every admin-portal
         # request. Disabling h2 forces the upstream to HTTP/1.1, which all

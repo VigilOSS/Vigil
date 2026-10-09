@@ -126,7 +126,7 @@ Domino/Lotus Notes:
 Deep-tail review repeatedly found Domino/Lotus `.nsf`, `$FILE`, `docscat`, and document-library
 paths hidden in the fallback set. The Domino-specific discriminators (`$file`, `.nsf`, `files.nsf`,
 `docscat`, `didc`) capture that material long-tail class without widening generic file delivery.
-See `docs/plans/research/classify-surface-2026-06/README.md` for the public evidence summary.
+See `docs/research/classify-surface/README.md` for the public evidence summary.
 
 ## Sources
 

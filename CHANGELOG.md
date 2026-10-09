@@ -5,72 +5,33 @@ versioning follows [Semantic Versioning][semver].
 
 Durable design decisions live in [`docs/adr/`](docs/adr/).
 
-## [Unreleased]
+## [1.0.0] - 2026-10-09
 
-### Changed
+First public release. Vigil is operator-run offensive-security and incident-response tooling: a
+`vigil` CLI, an orchestrator backend that owns durable engagement state, a containerized recon
+runtime, and a prompt corpus that drives an agent through an engagement. See the
+[README](README.md) for setup and [`docs/adr/`](docs/adr/) for the decisions behind the behavior
+described here.
 
-- **The README is shorter.** Install detail moves to `docs/installation.md`; creation, start
-  preflight, and phase detail move to `docs/engagements.md`; client detail stays in
-  `docs/agent-clients.md`. CLI hints that pointed at missing README sections now name the docs
-  page.
-- **Remediation links use canonical finding IDs.** Cases can link several findings sharing a fix,
-  and findings show reciprocal case and deployment state. Case API `finding_ids` replaces
-  `linked_finding_engagement_key`/`linked_finding_slug`; CLI `import --finding-id <id>`
-  replaces the old `import --finding <slug> --finding-engagement <key>` pair. Direct Vigil
-  intake uses `vigil remediation -k <destination> from-finding --finding-engagement <source>
-  --finding <slug>` and retains `source_type=finding`. A backed-up atomic migration resolves
-  legacy links; unresolved links fail startup. Existing case ledgers and approval digests stay
-  intact, while approvals require review against the canonical finding identity set.
-- **Remediation shares one repository `PROJECT.md`.** TOML configuration and Markdown
-  instructions replace editable engagement JSON. Machine differences use environment overrides;
-  project changes invalidate approval. Legacy JSON is an explicit creation-time import.
-- **Remediation uses JJ when `.jj` exists.** Case workspaces/bookmarks, review diffs,
-  immutable revision evidence, and approved pushes use JJ; Git repositories retain Git.
-- **Remediation creation and help are clearer.** The terminal wizard offers remediation
-  and collects its local repository; Questionary adds keyboard selection and path completion.
-  Non-interactive output remains plain. Command help states prerequisites and results.
-- **CI uses fewer runners without dropping checks.** Scheduled placeholder runs are removed;
-  backend sync-lint and assess readiness tests run in their owning suites; deterministic eval,
-  Ruff, and mypy run as named steps in one job. Backend tests use both hosted-runner vCPUs.
-- **Large source ingests have explicit controls and progress.** `code-ingest` accepts
-  `--git-status-timeout` and repeatable `--exclude-path`; exclusions remain authenticated in
-  the snapshot. Dry-run documents its full hashing cost and reports progress. Refresh commit
-  response budgets scale with file count and copied bytes, and ctags receives a bounded file list.
-- **New sealed source snapshots use `code-source-manifest/v3`.** Both seal and independent
-  attestation derive logical lines and headers from BOM-aware UTF-8/16/32 decoding without
-  changing source bytes. Historical v2 snapshots retain their original verification semantics;
-  attestation reports all source metadata mismatches together.
-- **Structural artifacts advance to `structural-index/v7`.** Build and sync share metadata and
-  callable validation and report all offending files before publication. Commented-out JS/TS
-  exports no longer contribute export counts. Rebuild and sync after upgrading; historical v6
-  artifacts remain unchanged in their original directories.
-- **False-positive verification errors identify `details.kill_check` as an integer from 1 to 5.**
-- **Offensive engagements now store enabled web and code tracks separately from operator
-  sessions.** New creation enables one track; `vigil engagement add-track <key> web|code`
-  enables the other. `vigil engagement start` selects one prompt with `--mode web|code`
-  when both are enabled. `vigil engagement mode` reports the active selection and prompt.
-  `--type both` no longer creates engagements; existing web/code/both scopes remain
-  readable, and `repair-tracks` converts a legacy both scope missing its code phase.
+### Breaking
 
-### Removed
-
-- **`vigil update` is gone.** It was a verbatim duplicate of `vigil install` with no behavior of
-  its own. Use `vigil install` — it upgrades a working root in place.
-- **The `PreToolUse` command-filtering hook is gone.** `scope-check.sh` matched every shell command
-  against four destructive shapes. It could not do the job: `rm -rf /tmp/x` was blocked but
-  `bash -c "rm -rf /tmp/x"` was not, `git clean -fd` was blocked but `eval`, `sh -c`, `$(echo git)`
-  and a `subprocess.run` list all sailed through, and `find . -delete` and `git reset --hard` were
-  never covered at all — the same wrapped-shell blind spot that condemned the masking layer in
-  ADR 0019. It also cost two silent failures: one spelling of the flags missed four of six orderings,
-  and matching an option value as a run of non-space characters disabled the guard entirely for any
-  repository path containing a space. A guard that fails silently is worse than none, because it is
-  trusted. ADR 0019 records why it is not coming back in that form, and `TODO.md` scopes what a
-  guardrail that acts where commands execute — rather than where they are spelled — would have to
-  answer. Activity logging, compaction and session-end hooks are unaffected, as is the benchmark
-  anti-cheat `PreToolUse` guard, which has a real adversary in the benchmarked model.
-- **Two session commands are gone.** `vigil-escalate-honestly` paraphrased the FP/severity gate a
-  session already runs; `vigil-encapsulate-win` told the model to write its own conclusions into
-  the shared methodology mid-engagement, which is a human review decision.
+- **`oob.frp_host` and `oob.domain` have no default.** Out-of-band callback handling requires
+  operator-provided relay infrastructure. Vigil ships no fallback host, and OOB startup fails with
+  the exact `vigil config set` commands needed. Everything else installs and runs without it.
+- **Engagement credentials live in the backend, not on disk.** The `engagement_credentials` table
+  holds one record per `(engagement, identity)`, managed through `vigil auth`. There is no
+  `auth.json` file to read, edit, or back up separately. See the
+  [authentication reference](docs/authentication.md).
+- **The durable work buffer is a backend table.** `assessment_work_items` replaces the former
+  per-engagement `cases.db`, with the same engagement scoping and inline classification applied
+  server-side in the ingest transaction. See
+  [ADR 0013](docs/adr/0013-work-buffer-folded-into-backend-ledger.md).
+- **New engagement scope stops writing legacy repository fields.** Repository intent belongs to the
+  engagement manifest and the code-ingest contract. Existing `scope.json` `repos` / `source_repos`
+  values stay readable.
+- **`--attribution-scope` takes `scope` or `all`.** The `document-origin` value is removed; scope
+  routing already covers its stated purpose, and keeping it would preserve the cross-origin
+  deconfliction defect it caused.
 
 ### Added
 
@@ -312,7 +273,84 @@ Durable design decisions live in [`docs/adr/`](docs/adr/).
   verb that existed when they ran, and no rename rewrites its own history, so a retroactive alias or
   a display-time backfill is never the answer.
 
+- **A continuous source-to-live workflow.** Web and code are independent durable tracks; a
+  structural index records stable callable identities and spans; coverage separates facts, advice,
+  and blockers. See [ADR 0022](docs/adr/0022-web-and-code-tracks-advance-independently.md).
+- **One defect stays one finding across source and live validation.** Live proof enriches the
+  source-anchored finding rather than forking a duplicate; materially different behavior is a
+  variant. See [ADR 0023](docs/adr/0023-source-and-live-proof-enrich-one-finding.md).
+- **Sealed, generation-bound source snapshots.** Analysis binds to the exact snapshot it read.
+  Historical analysis is retained as history and is never reused as coverage for a newer
+  generation. See [ADR 0026](docs/adr/0026-sealed-source-generations-own-current-code-truth.md).
+- **File-level analysis leases.** A lease coordinates writes and recovery. It never limits which
+  files a model may read or how far it may trace. See
+  [ADR 0027](docs/adr/0027-code-analysis-leases-coordinate-files-not-reasoning.md).
+- **Findings carry their own reproduction.** `details.repro_runs` binds each reproduction step to
+  the `command-run` id that produced it, so a written repro can be diffed against what actually
+  executed. Report readiness blocks on an empty reproduction.
+- **Three-layer model identity.** Requested, launcher-effective, and provider-observed model and
+  reasoning are separate fields. Disagreement between them is data, not an error to hide. See
+  [ADR 0030](docs/adr/0030-model-identity-signals-remain-distinct.md).
+- **Bounded structural parsing.** Exact parsers run in a resource-capped child process with typed
+  failure outcomes and a complete streaming fallback, so a hostile or oversized file degrades
+  visibly instead of taking the run down. See
+  [ADR 0029](docs/adr/0029-structural-parsers-are-contained-with-honest-fallback.md).
+- **`vigil assess prompt-census` and `vigil assess export triage-packet`.** The census measures
+  expected prompt structure and bytes without pinning authored wording. The packet assembles
+  canonical inputs into a content-addressed, symlink-safe bundle with a digest manifest.
+
 ### Changed
+
+- **Public-release defaults are reproducible and organization-agnostic.** Host recon and auxiliary
+  CLI tools use reviewed version pins, installed source fallback resolves the tag matching the
+  installed Vigil version instead of pulling a mutable default branch, and examples use reserved
+  Acme/example domains. A valid `scope.json` is now always required for candidate ingest; at least
+  one host is required unless scope enforcement is explicitly bypassed.
+- **Remediation is identified as work in progress.** The README no longer presents that surface as
+  a finished peer of the engagement workflows, while its current vendor integration remains
+  documented honestly.
+- **The README is shorter.** Install detail moves to `docs/installation.md`; creation, start
+  preflight, and phase detail move to `docs/engagements.md`; client detail stays in
+  `docs/agent-clients.md`. CLI hints that pointed at missing README sections now name the docs
+  page.
+- **Remediation links use canonical finding IDs.** Cases can link several findings sharing a fix,
+  and findings show reciprocal case and deployment state. Case API `finding_ids` replaces
+  `linked_finding_engagement_key`/`linked_finding_slug`; CLI `import --finding-id <id>`
+  replaces the old `import --finding <slug> --finding-engagement <key>` pair. Direct Vigil
+  intake uses `vigil remediation -k <destination> from-finding --finding-engagement <source>
+  --finding <slug>` and retains `source_type=finding`. A backed-up atomic migration resolves
+  legacy links; unresolved links fail startup. Existing case ledgers and approval digests stay
+  intact, while approvals require review against the canonical finding identity set.
+- **Remediation shares one repository `PROJECT.md`.** TOML configuration and Markdown
+  instructions replace editable engagement JSON. Machine differences use environment overrides;
+  project changes invalidate approval. Legacy JSON is an explicit creation-time import.
+- **Remediation uses JJ when `.jj` exists.** Case workspaces/bookmarks, review diffs,
+  immutable revision evidence, and approved pushes use JJ; Git repositories retain Git.
+- **Remediation creation and help are clearer.** The terminal wizard offers remediation
+  and collects its local repository; Questionary adds keyboard selection and path completion.
+  Non-interactive output remains plain. Command help states prerequisites and results.
+- **CI uses fewer runners without dropping checks.** Scheduled placeholder runs are removed;
+  backend sync-lint and assess readiness tests run in their owning suites; deterministic eval,
+  Ruff, and mypy run as named steps in one job. Backend tests use both hosted-runner vCPUs.
+- **Large source ingests have explicit controls and progress.** `code-ingest` accepts
+  `--git-status-timeout` and repeatable `--exclude-path`; exclusions remain authenticated in
+  the snapshot. Dry-run documents its full hashing cost and reports progress. Refresh commit
+  response budgets scale with file count and copied bytes, and ctags receives a bounded file list.
+- **New sealed source snapshots use `code-source-manifest/v3`.** Both seal and independent
+  attestation derive logical lines and headers from BOM-aware UTF-8/16/32 decoding without
+  changing source bytes. Historical v2 snapshots retain their original verification semantics;
+  attestation reports all source metadata mismatches together.
+- **Structural artifacts advance to `structural-index/v7`.** Build and sync share metadata and
+  callable validation and report all offending files before publication. Commented-out JS/TS
+  exports no longer contribute export counts. Rebuild and sync after upgrading; historical v6
+  artifacts remain unchanged in their original directories.
+- **False-positive verification errors identify `details.kill_check` as an integer from 1 to 5.**
+- **Offensive engagements now store enabled web and code tracks separately from operator
+  sessions.** New creation enables one track; `vigil engagement add-track <key> web|code`
+  enables the other. `vigil engagement start` selects one prompt with `--mode web|code`
+  when both are enabled. `vigil engagement mode` reports the active selection and prompt.
+  `--type both` no longer creates engagements; existing web/code/both scopes remain
+  readable, and `repair-tracks` converts a legacy both scope missing its code phase.
 
 - **Bulk artifact registration no longer echoes the files it registered.** `POST
   /assessment/artifacts/bulk` returned each path's full `indexed_text` — the whole file — so
@@ -374,8 +412,35 @@ Durable design decisions live in [`docs/adr/`](docs/adr/).
   that would ship content the specialist did not write. The cap itself is unchanged, and the backend
   remains its authority.
 
+- **Sent replies are bound to immutable renderer bytes.** At the sent transition Vigil stores the
+  exact reply body, byte length, SHA-256, renderer identity, and reply sequence, and verifies the
+  digest on every read. A correction creates a new linked version; drafts stay editable. See
+  [ADR 0025](docs/adr/0025-final-external-communications-are-versioned-and-immutable.md).
+- **A CVSS score that contradicts its own vector is rejected at write time.** `finding record`,
+  `finding update`, and the verify checkpoint all name both values instead of silently
+  recomputing. Merge reports the contradiction as a warning rather than stranding two duplicates.
+- **`vigil assess kali <verb>` exits non-zero on a terminal failure status.** `failed` is 3,
+  `timed_out` 4, `killed` 5, `transport_error` 6 — distinct from Vigil's own 1 and argparse's 2. A
+  run that produced output, `waf_challenge` included, still exits 0, and the JSON is always
+  emitted in full before the exit.
+- **Unavailable measurements are typed, never relabelled clean.** Parser failure, missing provider
+  telemetry, and unresolvable identity render as incomplete or `unknown`. See
+  [ADR 0015](docs/adr/0015-honest-instruments-distinguish-no-measurement-from-clean.md).
+- **Install freshness compares the managed bytes actually copied.** A recorded revision is
+  provenance, not proof that unsnapshotted source bytes reached the working root. See
+  [ADR 0024](docs/adr/0024-installed-freshness-follows-managed-content.md).
+- **CODE-track network access is advisory, not a sandbox.** Ordinary code work keeps normal network
+  access; recognized declared-target contact warns and proceeds. Absence of a warning does not
+  prove no target was reached. See
+  [ADR 0021](docs/adr/0021-code-network-access-is-advisory-not-a-sandbox.md).
+
 ### Fixed
 
+- **Release validation now exercises the real frontend, offline report, and PDF paths.** Malformed
+  WebSocket events fall back to polling instead of leaving the UI falsely connected; report
+  readiness omits unavailable projections instead of fabricating an empty success; non-object
+  Goose payloads pass through safely; and `vigil doctor` bounds SQLite integrity scans on large
+  local databases.
 - **A live command proof can now actually back a terminal verification.** Three defects in the
   runtime-proof path compounded, and between them almost no `vigil assess kali` run could produce a
   healthy proof receipt — a run had to write bytes to BOTH streams and then be followed by a manual
@@ -685,110 +750,6 @@ Durable design decisions live in [`docs/adr/`](docs/adr/).
   of them is on the live spelling. Rows written before this change keep the old title, which is
   correct — they record what actually ran.
 
-### Security
-
-- **A target's response body can no longer break out of the evidence block of a delivered report.**
-  Every fenced block in the Markdown export and in Copy as Markdown opened with a fixed ` ``` `, and
-  CommonMark closes a fenced block at the first line whose fence is at least as long. The content
-  inside is target-derived — `evidence_detail`, a recorded `body_excerpt`, `poc_code` — so a response
-  body containing a ` ``` ` line escaped the block, and every byte after it became live Markdown in a
-  document the operator was about to paste into a submission form: the target writes headings, links
-  and plausible report prose beside the operator's own words, and the reader cannot tell which is
-  which. That is the untrusted-target-text boundary ([ADR 0018](docs/adr/0018-target-derived-text-is-untrusted-data.md))
-  failing in exactly the direction it exists to prevent, in the one Vigil artifact whose reader is
-  the client. Nothing is escaped, trimmed or removed to fix it — ADR 0019 rules that out and the
-  evidence has to stay byte-exact — the delimiter outgrows the content instead: one backtick longer
-  than the longest run present, which by construction no run inside can match.
-
-## [1.0.0] - 2026-09-12
-
-First public release. Vigil is operator-run offensive-security and incident-response tooling: a
-`vigil` CLI, an orchestrator backend that owns durable engagement state, a containerized recon
-runtime, and a prompt corpus that drives an agent through an engagement. See the
-[README](README.md) for setup and [`docs/adr/`](docs/adr/) for the decisions behind the behavior
-described here.
-
-### Breaking
-
-- **`oob.frp_host` and `oob.domain` have no default.** Out-of-band callback handling requires
-  operator-provided relay infrastructure. Vigil ships no fallback host, and OOB startup fails with
-  the exact `vigil config set` commands needed. Everything else installs and runs without it.
-- **Engagement credentials live in the backend, not on disk.** The `engagement_credentials` table
-  holds one record per `(engagement, identity)`, managed through `vigil auth`. There is no
-  `auth.json` file to read, edit, or back up separately. See the
-  [authentication reference](docs/authentication.md).
-- **The durable work buffer is a backend table.** `assessment_work_items` replaces the former
-  per-engagement `cases.db`, with the same engagement scoping and inline classification applied
-  server-side in the ingest transaction. See
-  [ADR 0013](docs/adr/0013-work-buffer-folded-into-backend-ledger.md).
-- **New engagement scope stops writing legacy repository fields.** Repository intent belongs to the
-  engagement manifest and the code-ingest contract. Existing `scope.json` `repos` / `source_repos`
-  values stay readable.
-- **`--attribution-scope` takes `scope` or `all`.** The `document-origin` value is removed; scope
-  routing already covers its stated purpose, and keeping it would preserve the cross-origin
-  deconfliction defect it caused.
-
-### Added
-
-- **A continuous source-to-live workflow.** Web and code are independent durable tracks; a
-  structural index records stable callable identities and spans; coverage separates facts, advice,
-  and blockers. See [ADR 0022](docs/adr/0022-web-and-code-tracks-advance-independently.md).
-- **One defect stays one finding across source and live validation.** Live proof enriches the
-  source-anchored finding rather than forking a duplicate; materially different behavior is a
-  variant. See [ADR 0023](docs/adr/0023-source-and-live-proof-enrich-one-finding.md).
-- **Sealed, generation-bound source snapshots.** Analysis binds to the exact snapshot it read.
-  Historical analysis is retained as history and is never reused as coverage for a newer
-  generation. See [ADR 0026](docs/adr/0026-sealed-source-generations-own-current-code-truth.md).
-- **File-level analysis leases.** A lease coordinates writes and recovery. It never limits which
-  files a model may read or how far it may trace. See
-  [ADR 0027](docs/adr/0027-code-analysis-leases-coordinate-files-not-reasoning.md).
-- **Findings carry their own reproduction.** `details.repro_runs` binds each reproduction step to
-  the `command-run` id that produced it, so a written repro can be diffed against what actually
-  executed. Report readiness blocks on an empty reproduction.
-- **Three-layer model identity.** Requested, launcher-effective, and provider-observed model and
-  reasoning are separate fields. Disagreement between them is data, not an error to hide. See
-  [ADR 0030](docs/adr/0030-model-identity-signals-remain-distinct.md).
-- **Bounded structural parsing.** Exact parsers run in a resource-capped child process with typed
-  failure outcomes and a complete streaming fallback, so a hostile or oversized file degrades
-  visibly instead of taking the run down. See
-  [ADR 0029](docs/adr/0029-structural-parsers-are-contained-with-honest-fallback.md).
-- **`vigil assess prompt-census` and `vigil assess export triage-packet`.** The census measures
-  expected prompt structure and bytes without pinning authored wording. The packet assembles
-  canonical inputs into a content-addressed, symlink-safe bundle with a digest manifest.
-- **Benchmark participants run in fresh mountless Lima clones.** Judge, oracle, family, and solver
-  material stays on the host, with no host-manual launcher. See
-  [ADR 0020](docs/adr/0020-benchmark-participants-run-in-mountless-lima-clones.md).
-
-### Changed
-
-- **Sent replies are bound to immutable renderer bytes.** At the sent transition Vigil stores the
-  exact reply body, byte length, SHA-256, renderer identity, and reply sequence, and verifies the
-  digest on every read. A correction creates a new linked version; drafts stay editable. See
-  [ADR 0025](docs/adr/0025-final-external-communications-are-versioned-and-immutable.md).
-- **A CVSS score that contradicts its own vector is rejected at write time.** `finding record`,
-  `finding update`, and the verify checkpoint all name both values instead of silently
-  recomputing. Merge reports the contradiction as a warning rather than stranding two duplicates.
-- **`vigil assess kali <verb>` exits non-zero on a terminal failure status.** `failed` is 3,
-  `timed_out` 4, `killed` 5, `transport_error` 6 — distinct from Vigil's own 1 and argparse's 2. A
-  run that produced output, `waf_challenge` included, still exits 0, and the JSON is always
-  emitted in full before the exit.
-- **Benchmark outcome and contamination are independent axes.** `clean`, `answer_key_exposed`,
-  `confirmed_read`, and `telemetry_incomplete` are typed states. Any non-clean attempt scores zero
-  qualifying credit while keeping its diagnostic progress. See
-  [ADR 0003](docs/adr/0003-benchmark-decoy-scoring-decoupled-from-competence.md).
-- **Unavailable measurements are typed, never relabelled clean.** Parser failure, missing provider
-  telemetry, and unresolvable identity render as incomplete or `unknown`. See
-  [ADR 0015](docs/adr/0015-honest-instruments-distinguish-no-measurement-from-clean.md).
-- **Install freshness compares the managed bytes actually copied.** A recorded revision is
-  provenance, not proof that unsnapshotted source bytes reached the working root. See
-  [ADR 0024](docs/adr/0024-installed-freshness-follows-managed-content.md).
-- **CODE-track network access is advisory, not a sandbox.** Ordinary code work keeps normal network
-  access; recognized declared-target contact warns and proceeds. Absence of a warning does not
-  prove no target was reached. See
-  [ADR 0021](docs/adr/0021-code-network-access-is-advisory-not-a-sandbox.md).
-
-### Fixed
-
 - **Terminal verification requires an attributable author.** `finding record` takes `--agent-id`,
   the generated schema admits `provenance.agent_id`, and the backend refuses a missing or invalid
   author. The independence check stands: the author dispatch must differ from the verifier's.
@@ -809,6 +770,29 @@ described here.
 
 ### Removed
 
+- **The private code-workflow evaluation suite and generated README website are not part of the public
+  source tree.** The evaluation suite is retained in private external storage; the repository keeps only
+  deterministic product tests and the canonical `README.md`.
+- **Private release-planning artifacts and organization-specific examples are gone.** Completed
+  plans were deleted, durable unfinished work moved to GitHub issues, and the repository-level
+  `TODO.md` was retired so GitHub is the sole backlog.
+- **`vigil update` is gone.** It was a verbatim duplicate of `vigil install` with no behavior of
+  its own. Use `vigil install` — it upgrades a working root in place.
+- **The `PreToolUse` command-filtering hook is gone.** `scope-check.sh` matched every shell command
+  against four destructive shapes. It could not do the job: `rm -rf /tmp/x` was blocked but
+  `bash -c "rm -rf /tmp/x"` was not, `git clean -fd` was blocked but `eval`, `sh -c`, `$(echo git)`
+  and a `subprocess.run` list all sailed through, and `find . -delete` and `git reset --hard` were
+  never covered at all — the same wrapped-shell blind spot that condemned the masking layer in
+  ADR 0019. It also cost two silent failures: one spelling of the flags missed four of six orderings,
+  and matching an option value as a run of non-space characters disabled the guard entirely for any
+  repository path containing a space. A guard that fails silently is worse than none, because it is
+  trusted. ADR 0019 records why it is not coming back in that form, and issue #35 scopes what a
+  guardrail that acts where commands execute — rather than where they are spelled — would have to
+  answer. Activity logging, compaction and session-end hooks are unaffected.
+- **Two session commands are gone.** `vigil-escalate-honestly` paraphrased the FP/severity gate a
+  session already runs; `vigil-encapsulate-win` told the model to write its own conclusions into
+  the shared methodology mid-engagement, which is a human review decision.
+
 - **Credential and secret masking from every operator-facing surface.** The run-audit regex pass and
   its reveal toggle, name-only `auth list --json`, `Bearer (length=40)` projections, proxy-userinfo
   stripping, and cookie/header counts are gone with their constants, helpers, and call sites. See
@@ -822,20 +806,47 @@ described here.
 
 ### Security
 
+- **Container builds now use allowlisted staging contexts.** Runtime builds can no longer send an
+  install root containing `.env`, engagement workspaces, or the orchestrator database to Docker;
+  the distributable Compose file consumes CLI-built images rather than reintroducing broad build
+  contexts.
+- **Local WebSocket and PDF-export boundaries are explicit.** The backend rejects missing or
+  foreign WebSocket origins before accepting a connection. PDF export converts target Markdown to
+  a sanitized Pandoc AST, renders images and raw HTML as inert evidence, disables Chrome background
+  networking, and no longer launches Chrome with `--no-sandbox`.
+- **The offline report verifier rejects active external resources.** Resource-bearing HTML tags,
+  CSS imports, and non-inline CSS URLs fail the build regardless of attribute order.
+- **A target's response body can no longer break out of the evidence block of a delivered report.**
+  Every fenced block in the Markdown export and in Copy as Markdown opened with a fixed ` ``` `, and
+  CommonMark closes a fenced block at the first line whose fence is at least as long. The content
+  inside is target-derived — `evidence_detail`, a recorded `body_excerpt`, `poc_code` — so a response
+  body containing a ` ``` ` line escaped the block, and every byte after it became live Markdown in a
+  document the operator was about to paste into a submission form: the target writes headings, links
+  and plausible report prose beside the operator's own words, and the reader cannot tell which is
+  which. That is the untrusted-target-text boundary ([ADR 0018](docs/adr/0018-target-derived-text-is-untrusted-data.md))
+  failing in exactly the direction it exists to prevent, in the one Vigil artifact whose reader is
+  the client. Nothing is escaped, trimmed or removed to fix it — ADR 0019 rules that out and the
+  evidence has to stay byte-exact — the delimiter outgrows the content instead: one backtick longer
+  than the longest run present, which by construction no run inside can match.
+
 - **Vigil does not defend against its own operator, by design.** Credentials, tokens, cookies,
   `Authorization` headers, and raw argv render verbatim in the CLI, the API, `--json`, exports, and
   the frontend. This is expected behavior on the operator's own machine and is not a vulnerability.
   See [ADR 0019](docs/adr/0019-vigil-does-not-defend-against-its-own-operator.md) and
   [SECURITY.md](SECURITY.md#operator-data-boundary).
-- **Four controls have a real adversary and are enforced.** Benchmark anti-cheat (the benchmarked
-  model), scope and ROE enforcement (non-consenting third parties), proof and evidence integrity,
-  and the untrusted-target-text boundary. ADR 0019 may not be cited to weaken any of them.
+- **Engagement policy remains visible and auditable.** Required scope declarations shape recon,
+  attribution, and coverage; tool denylists and exploit-approval policy are enforced without
+  claiming that Vigil is a destination firewall. Proof/evidence integrity and the
+  untrusted-target-text boundary remain security controls. ADR 0019 may not be cited to weaken
+  them.
 - **Target-derived text is untrusted data.** Text captured from a target is labelled and delimited
   before an agent reads it, never deleted or rewritten. See
   [ADR 0018](docs/adr/0018-target-derived-text-is-untrusted-data.md).
-- **Scope and ROE are enforced before target-facing work.** In-scope host validation, the
-  `exploit_policy` gate, and destructive-command blocks protect parties who did not consent.
-  Authorization remains the operator's responsibility; see [SECURITY.md](SECURITY.md#authorized-use).
+- **Scope is declarative, not an outbound-request veto.** Vigil requires a canonical host set for
+  target-facing web work and uses it for recon shaping, attribution, and coverage accounting. It
+  enforces tool denylists and the `exploit_policy` approval gate, but it does not reject a command
+  merely because its destination is undeclared. Authorization and destination discipline remain
+  the operator's responsibility; see [SECURITY.md](SECURITY.md#authorized-use).
 - **Proof integrity is additive.** Artifact digest revalidation, receipt health, immutable producer
   attribution, and terminal-state immutability add information rather than removing it. See
   [ADR 0028](docs/adr/0028-producer-provenance-binds-proof-to-work.md).

@@ -407,7 +407,7 @@ def _mint_discovered_identity(
         # Defensive: a session artifact should always derive an anchor, but never
         # skip minting on a surprise — fall back to a stable per-credential name.
         identity_name = "disc-" + hashlib.sha1(
-            (credential_key or secret).encode("utf-8")
+            (credential_key or secret).encode("utf-8"), usedforsecurity=False
         ).hexdigest()[:10]
     material.setdefault("mode", "discovered")
     material.setdefault("auth_context", "authenticated")
