@@ -12,7 +12,7 @@ Do not open a public issue for a vulnerability that would expose users, credenti
 engagement data, or a working exploit before remediation.
 
 Report security issues privately through
-[GitHub private vulnerability reporting](https://github.com/vigil-oss/vigil/security/advisories/new)
+[GitHub private vulnerability reporting](https://github.com/VigilOSS/Vigil/security/advisories/new)
 for this repository. Include the affected revision, impact, reproduction steps, and any suggested
 mitigation.
 

@@ -533,6 +533,15 @@ def test_non_terminal_coverage_status_does_not_drain(client, isolate_settings) -
     assert _pending_hosts(client, base) == {"app.example.com"}
 
 
+# --------------------------------------------------------------------------- #
+# I-10 — literal out_of_scope carve-outs must NOT apex-expand
+#
+# Regression for the 2026-07-24 coverage regression: the denylist reused the
+# ALLOW-side apex-expanding matcher, so the single literal carve-out
+# ``acme-planner.example`` swallowed every explicitly in-scope
+# ``*.acme-planner.example`` product host. Allow and deny are asymmetric on
+# purpose: only a ``*.`` carve-out extends to a subtree.
+# --------------------------------------------------------------------------- #
 @pytest.mark.parametrize(
     "host,admitted",
     [

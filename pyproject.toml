@@ -9,7 +9,7 @@ description = "Universal CLI for Vigil installs, engagements, runtime, and orche
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md", "third_party/licenses/*"]
-authors = [{name = "Vigil OSS Maintainers"}]
+authors = [{name = "Vigil OSS Maintainers", email = "vigil.oss@proton.me"}]
 requires-python = ">=3.11"
 dependencies = ["questionary>=2.1.1,<3"]
 classifiers = [
@@ -23,9 +23,9 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/vigil-oss/vigil"
-Issues = "https://github.com/vigil-oss/vigil/issues"
-Source = "https://github.com/vigil-oss/vigil"
+Homepage = "https://github.com/VigilOSS/Vigil"
+Issues = "https://github.com/VigilOSS/Vigil/issues"
+Source = "https://github.com/VigilOSS/Vigil"
 
 [project.scripts]
 vigil = "vigil_cli.main:main"

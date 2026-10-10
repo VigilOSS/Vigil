@@ -225,7 +225,9 @@ A prompt change is **not** prompt-only when the prompt defines an artifact the b
 - `src/vigil_cli/engagements.py` + `blue.py` + `client_rosters.py` — engagement bootstrap: run directories, bounded operator pointers, generated launchers, and the per-client prompt/command links.
 - `src/vigil_cli/paths.py:resolve_orchestrator_base_url` — backend URL precedence and dotenv normalization; `vigil config resolve orchestrator_base_url` exposes it to generated client launchers at session start.
 - `src/vigil_cli/preflight.py` — `_preflight_engagement_start`, `_resolve_provider_key`, `_warn_if_install_stale`. It lives outside `main.py` so `blue.py` can import it without a cycle; `main.py` re-exports what it uses.
-- `src/vigil_cli/remediation.py` — case commands, external report import by canonical finding ID, and direct finding intake into an explicit remediation destination; `remediation_browser.py` owns local browser execution. Backend APIs own case state.
+- `src/vigil_cli/remediation.py` — case intake/context rendering, configured workspace/checks, reviewed PR publication, and consented development workflow commands; `remediation_browser.py` owns local browser execution. Backend APIs own case state.
+- `src/vigil_cli/remediation_sessions.py` — Claude repository-context launch, role routing, and native conversation binding/attachment; `agent/commands/vigil-remediate.md` selects the remediation role and profile references.
+  Command frontmatter `clients` limits generated client discovery.
 - `agent/scripts/assess/lib/remediation_project.py` and `remediation_vcs.py` — shared PROJECT.md parsing and Git/JJ identity, workspace, diff, and push contracts; CLI import bridges are `project_config.py` and `remediation_vcs.py`.
 - `src/vigil_cli/runtime.py` + `up.py` — one shared long-lived Kali container, reached host-side by `docker exec`. There is no in-container API server or MCP bridge.
 - `src/vigil_cli/mitmproxy.py` — the single owner of the proxy `docker build` argv, including the inputs-digest label without which the image can never be proven current.
@@ -254,9 +256,13 @@ A prompt change is **not** prompt-only when the prompt defines an artifact the b
 - `orchestrator/backend/app/services/operator_checkpoints.py` — writes `assessment_operator_checkpoints`, an append-only table enforced by SQLite triggers. The only permitted mutation is stamping a null `superseded_by_id`.
 - `orchestrator/backend/app/services/state_manager/run_accounting.py` owns run identity and lifecycle; `run_inventory.py` owns sources and obligations, `run_evidence.py` owns linked receipts, and `run_comparisons.py` owns comparisons. `proofs.py` owns immutable evidence receipts. See: ADR 0028.
 - `orchestrator/backend/app/services/engagements.py` — filesystem-to-DB sync. Explicit deletes are tombstoned so a later sync cannot resurrect them from leftover files.
-- `orchestrator/backend/app/api/remediation.py` and `services/remediation.py` — remediation case API, canonical many-finding links, finding-origin intake, reciprocal case summaries, evidence integrity, and review/deployment gates; remediation engagements remain separate from assessment Findings.
+- `orchestrator/backend/app/api/remediation.py` and `services/remediation.py` — case/source
+  resolution, canonical finding links, captured review policy/base, typed verification, shared
+  environment ownership/runtime identity, and approval/deployment gates; separate from assessment Findings.
 
 ### Frontend and the rest
+
+- `tools/public_identity_policy.py` — local/CI private audit policy loading; tracked identity guards contain no private fingerprints.
 
 - `orchestrator/frontend/` — operator SPA: `orchestrator/frontend/src/components/TabBar.tsx` owns tabs,
   `orchestrator/frontend/src/lib/api.ts` REST, `orchestrator/frontend/src/lib/theme.ts` theme state,

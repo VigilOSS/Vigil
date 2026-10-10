@@ -109,24 +109,39 @@ async function findSibling() {
 }
 
 describe("remediation workspace", () => {
+  it("shows verification alternatives and distinguishes reasoned evidence", async () => {
+    vi.mocked(getRemediationCase).mockResolvedValue({
+      ...reviewedCase,
+      verification_requirements: {
+        alternatives_reason: "Caller analysis covers a deletion without a mirrored regression test",
+        requirements: [{ kind: "caller-analysis", methods: ["code-review"], execution: "reasoned", outcome: "passed", revision: "current", rationale: "" }],
+      },
+      evidence: [{ ...reviewedCase.evidence[0], execution: "reasoned" }],
+    });
+    render(<RemediationPage engagementKey="acme" onBack={() => {}} />);
+    await openSection("Evidence");
+    expect(screen.getByText("Reasoned evidence")).toBeTruthy();
+    await openSection("Review");
+    expect(screen.getByText("Caller analysis covers a deletion without a mirrored regression test")).toBeTruthy();
+  });
   it("keeps edits and tells the truth when discarding stored drafts fails", async () => {
-    const view = render(<RemediationPage engagementKey="Acme" initialCaseId={7} onBack={() => {}} />);
+    const view = render(<RemediationPage engagementKey="acme" initialCaseId={7} onBack={() => {}} />);
     await openSection("Review");
     fireEvent.change(screen.getByLabelText("Human verification plan"), { target: { value: "Stored draft must remain" } });
-    const stored = window.sessionStorage.getItem("vigil.remediation.drafts.Acme:7");
+    const stored = window.sessionStorage.getItem("vigil.remediation.drafts.acme:7");
     vi.spyOn(Storage.prototype, "removeItem").mockImplementation(() => { throw new Error("Removal denied"); });
     fireEvent.click(screen.getByRole("button", { name: "Discard local drafts" }));
     expect((screen.getByLabelText("Human verification plan") as HTMLTextAreaElement).value).toBe("Stored draft must remain");
     expect(screen.getByText(/Could not discard stored drafts/)).toBeTruthy();
     expect(screen.queryByText(/Unsaved edits remain only in this page/)).toBeNull();
-    expect(window.sessionStorage.getItem("vigil.remediation.drafts.Acme:7")).toBe(stored);
+    expect(window.sessionStorage.getItem("vigil.remediation.drafts.acme:7")).toBe(stored);
     view.unmount();
-    render(<RemediationPage engagementKey="Acme" initialCaseId={7} onBack={() => {}} />);
+    render(<RemediationPage engagementKey="acme" initialCaseId={7} onBack={() => {}} />);
     await screen.findByRole("heading", { name: reviewedCase.title });
     expect((screen.getByLabelText("Human verification plan") as HTMLTextAreaElement).value).toBe("Stored draft must remain");
   });
   it("retains other page-local drafts after a successful save when session writes fail", async () => {
-    render(<RemediationPage engagementKey="Acme" initialCaseId={7} onBack={() => {}} />);
+    render(<RemediationPage engagementKey="acme" initialCaseId={7} onBack={() => {}} />);
     await screen.findByRole("heading", { name: reviewedCase.title });
     vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => { throw new Error("Storage denied"); });
     fireEvent.change(screen.getByLabelText("Baseline method"), { target: { value: "Page-local baseline" } });
@@ -147,9 +162,9 @@ describe("remediation workspace", () => {
     JSON.stringify({ baseline: { value: { outcome: "unknown" }, base_value: {}, review_digest: digest, worktree_revision: "abc123" } }),
     JSON.stringify({ releasePlan: { value: { production_canary_decision: "unknown" }, base_value: {}, review_digest: digest, worktree_revision: "abc123" } }),
   ])("preserves malformed draft text without crashing and offers explicit discard (%s)", async (stored) => {
-    const key = "vigil.remediation.drafts.Acme:7";
+    const key = "vigil.remediation.drafts.acme:7";
     window.sessionStorage.setItem(key, stored);
-    render(<RemediationPage engagementKey="Acme" initialCaseId={7} onBack={() => {}} />);
+    render(<RemediationPage engagementKey="acme" initialCaseId={7} onBack={() => {}} />);
     await screen.findByRole("heading", { name: reviewedCase.title });
     expect(screen.getByText(/Draft storage unavailable/)).toBeTruthy();
     expect(window.sessionStorage.getItem(key)).toBe(stored);
@@ -164,7 +179,7 @@ describe("remediation workspace", () => {
   it("retains verbatim edits through Back navigation and engagement changes without leaking case identity", async () => {
     const onBack = vi.fn();
     const value = "Authorization: Bearer full-token\nCookie: exact-cookie\nRun the operator's recorded command.";
-    let view = render(<RemediationPage engagementKey="Acme" initialCaseId={7} onBack={onBack} />);
+    let view = render(<RemediationPage engagementKey="acme" initialCaseId={7} onBack={onBack} />);
     await openSection("Review");
     fireEvent.change(screen.getByLabelText("Human verification plan"), { target: { value } });
     fireEvent.click(screen.getByRole("button", { name: "← Engagements" }));
@@ -174,7 +189,7 @@ describe("remediation workspace", () => {
     await screen.findByRole("heading", { name: reviewedCase.title });
     expect((screen.getByLabelText("Human verification plan") as HTMLTextAreaElement).value).toBe(reviewedCase.verification_plan);
     view.unmount();
-    render(<RemediationPage engagementKey="Acme" initialCaseId={7} onBack={onBack} />);
+    render(<RemediationPage engagementKey="acme" initialCaseId={7} onBack={onBack} />);
     await screen.findByRole("heading", { name: reviewedCase.title });
     expect((screen.getByLabelText("Human verification plan") as HTMLTextAreaElement).value).toBe(value);
     fireEvent.click(screen.getByRole("button", { name: "History" }));
@@ -183,7 +198,7 @@ describe("remediation workspace", () => {
   });
 
   it("preserves drafts through an explicit refresh of changed backend state", async () => {
-    render(<RemediationPage engagementKey="Acme" initialCaseId={7} onBack={() => {}} />);
+    render(<RemediationPage engagementKey="acme" initialCaseId={7} onBack={() => {}} />);
     await openSection("Review");
     fireEvent.change(screen.getByLabelText("Human verification plan"), { target: { value: "Retained edits" } });
     vi.mocked(getRemediationCase).mockResolvedValue({ ...reviewedCase, verification_plan: "Latest server plan", worktree_revision: "latest-commit" });
@@ -200,23 +215,23 @@ describe("remediation workspace", () => {
     vi.mocked(updateRemediationVerificationPlan).mockReturnValue(pending.promise);
     const second = { ...reviewedCase, id: 8, title: "Second case", source_key: "SEC-43" };
     vi.mocked(getRemediationCase).mockImplementation(async (_key, id) => id === 8 ? second : reviewedCase);
-    const view = render(<RemediationPage engagementKey="Acme" initialCaseId={7} onBack={() => {}} />);
+    const view = render(<RemediationPage engagementKey="acme" initialCaseId={7} onBack={() => {}} />);
     await openSection("Review");
     fireEvent.change(screen.getByLabelText("Human verification plan"), { target: { value: "Submitted older edits" } });
     fireEvent.click(screen.getByRole("button", { name: "Save plan" }));
-    view.rerender(<RemediationPage engagementKey="Acme" initialCaseId={8} onBack={() => {}} />);
+    view.rerender(<RemediationPage engagementKey="acme" initialCaseId={8} onBack={() => {}} />);
     await screen.findByRole("heading", { name: "Second case" });
-    view.rerender(<RemediationPage engagementKey="Acme" initialCaseId={7} onBack={() => {}} />);
+    view.rerender(<RemediationPage engagementKey="acme" initialCaseId={7} onBack={() => {}} />);
     await openSection("Review");
     fireEvent.change(screen.getByLabelText("Human verification plan"), { target: { value: "Newer unsubmitted edits" } });
     await act(async () => pending.resolve({ ...reviewedCase, verification_plan: "Submitted older edits" }));
     expect((screen.getByLabelText("Human verification plan") as HTMLTextAreaElement).value).toBe("Newer unsubmitted edits");
-    const stored = JSON.parse(window.sessionStorage.getItem("vigil.remediation.drafts.Acme:7") || "{}");
+    const stored = JSON.parse(window.sessionStorage.getItem("vigil.remediation.drafts.acme:7") || "{}");
     expect(stored.plan.value).toBe("Newer unsubmitted edits");
   });
 
   it.each(["baseline", "releasePlan"] as const)("clears a successfully saved %s draft without removing the plan draft", async (field) => {
-    render(<RemediationPage engagementKey="Acme" initialCaseId={7} onBack={() => {}} />);
+    render(<RemediationPage engagementKey="acme" initialCaseId={7} onBack={() => {}} />);
     await screen.findByRole("heading", { name: reviewedCase.title });
     await openSection("Review");
     fireEvent.change(screen.getByLabelText("Human verification plan"), { target: { value: "Retained unsaved plan" } });
@@ -224,7 +239,7 @@ describe("remediation workspace", () => {
     fireEvent.change(screen.getByLabelText(field === "baseline" ? "Baseline method" : "Canary rationale"), { target: { value: "Updated decision" } });
     fireEvent.click(screen.getByRole("button", { name: field === "baseline" ? "Save baseline" : "Save release plan" }));
     await screen.findByText(field === "baseline" ? /Baseline saved\./ : /Release plan saved\./);
-    const stored = JSON.parse(window.sessionStorage.getItem("vigil.remediation.drafts.Acme:7") || "{}");
+    const stored = JSON.parse(window.sessionStorage.getItem("vigil.remediation.drafts.acme:7") || "{}");
     expect(stored[field]).toBeUndefined();
     expect(stored.plan.value).toBe("Retained unsaved plan");
   });
@@ -232,17 +247,17 @@ describe("remediation workspace", () => {
     const second = { ...reviewedCase, id: 8, title: "Second case", source_key: "SEC-43" };
     vi.mocked(listRemediationCases).mockResolvedValue([reviewedCase, second]);
     vi.mocked(getRemediationCase).mockImplementation(async (_key, id) => id === 8 ? second : reviewedCase);
-    const view = render(<RemediationPage engagementKey="Acme" initialCaseId={7} onBack={() => {}} />);
+    const view = render(<RemediationPage engagementKey="acme" initialCaseId={7} onBack={() => {}} />);
     await screen.findByRole("heading", { name: reviewedCase.title });
     fireEvent.change(screen.getByLabelText("Baseline method"), { target: { value: "Unsaved baseline method" } });
     await openSection("Delivery");
     fireEvent.change(screen.getByLabelText("Canary rationale"), { target: { value: "Unsaved release rationale" } });
     await openSection("Review");
     fireEvent.change(screen.getByLabelText("Human verification plan"), { target: { value: "Unsaved human plan" } });
-    view.rerender(<RemediationPage engagementKey="Acme" initialCaseId={8} onBack={() => {}} />);
+    view.rerender(<RemediationPage engagementKey="acme" initialCaseId={8} onBack={() => {}} />);
     await screen.findByRole("heading", { name: "Second case" });
     expect((screen.getByLabelText("Human verification plan") as HTMLTextAreaElement).value).toBe(reviewedCase.verification_plan);
-    view.rerender(<RemediationPage engagementKey="Acme" initialCaseId={7} onBack={() => {}} />);
+    view.rerender(<RemediationPage engagementKey="acme" initialCaseId={7} onBack={() => {}} />);
     await screen.findByRole("heading", { name: reviewedCase.title });
     expect((screen.getByLabelText("Baseline method") as HTMLInputElement).value).toBe("Unsaved baseline method");
     expect((screen.getByLabelText("Canary rationale") as HTMLTextAreaElement).value).toBe("Unsaved release rationale");
@@ -254,7 +269,7 @@ describe("remediation workspace", () => {
 
   it("retains failed-save drafts and clears only the successfully saved field", async () => {
     vi.mocked(updateRemediationVerificationPlan).mockRejectedValueOnce(new Error("Save unavailable"));
-    let view = render(<RemediationPage engagementKey="Acme" initialCaseId={7} onBack={() => {}} />);
+    let view = render(<RemediationPage engagementKey="acme" initialCaseId={7} onBack={() => {}} />);
     await screen.findByRole("heading", { name: reviewedCase.title });
     fireEvent.change(screen.getByLabelText("Baseline method"), { target: { value: "Retained baseline" } });
     await openSection("Review");
@@ -262,35 +277,35 @@ describe("remediation workspace", () => {
     fireEvent.click(screen.getByRole("button", { name: "Save plan" }));
     await screen.findByText("Save unavailable");
     view.unmount();
-    view = render(<RemediationPage engagementKey="Acme" initialCaseId={7} onBack={() => {}} />);
+    view = render(<RemediationPage engagementKey="acme" initialCaseId={7} onBack={() => {}} />);
     await screen.findByRole("heading", { name: reviewedCase.title });
     expect((screen.getByLabelText("Human verification plan") as HTMLTextAreaElement).value).toBe("Retained plan");
     expect((screen.getByLabelText("Baseline method") as HTMLInputElement).value).toBe("Retained baseline");
     await openSection("Review");
     fireEvent.click(screen.getByRole("button", { name: "Save plan" }));
     await screen.findByText(/Verification plan saved/);
-    const stored = JSON.parse(window.sessionStorage.getItem("vigil.remediation.drafts.Acme:7") || "{}");
+    const stored = JSON.parse(window.sessionStorage.getItem("vigil.remediation.drafts.acme:7") || "{}");
     expect(stored.plan).toBeUndefined();
     expect(stored.baseline.value.method).toBe("Retained baseline");
   });
 
   it("restores drafts without silently rebasing them onto changed server state", async () => {
-    let view = render(<RemediationPage engagementKey="Acme" initialCaseId={7} onBack={() => {}} />);
+    let view = render(<RemediationPage engagementKey="acme" initialCaseId={7} onBack={() => {}} />);
     await openSection("Review");
     fireEvent.change(screen.getByLabelText("Human verification plan"), { target: { value: "Unsaved original draft" } });
     view.unmount();
     vi.mocked(getRemediationCase).mockResolvedValue({ ...reviewedCase, verification_plan: "Changed server plan", worktree_revision: "new-commit", review_digest: "b".repeat(64) });
-    view = render(<RemediationPage engagementKey="Acme" initialCaseId={7} onBack={() => {}} />);
+    view = render(<RemediationPage engagementKey="acme" initialCaseId={7} onBack={() => {}} />);
     await screen.findByRole("heading", { name: reviewedCase.title });
     expect((screen.getByLabelText("Human verification plan") as HTMLTextAreaElement).value).toBe("Unsaved original draft");
     expect(screen.getByText(/Server snapshot changed since these drafts began/)).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Discard local drafts" }));
     expect((screen.getByLabelText("Human verification plan") as HTMLTextAreaElement).value).toBe("Changed server plan");
-    expect(window.sessionStorage.getItem("vigil.remediation.drafts.Acme:7")).toBeNull();
+    expect(window.sessionStorage.getItem("vigil.remediation.drafts.acme:7")).toBeNull();
   });
 
   it("does not promise navigation-safe persistence when session storage fails", async () => {
-    render(<RemediationPage engagementKey="Acme" initialCaseId={7} onBack={() => {}} />);
+    render(<RemediationPage engagementKey="acme" initialCaseId={7} onBack={() => {}} />);
     await openSection("Review");
     vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => { throw new Error("Storage denied"); });
     fireEvent.change(screen.getByLabelText("Human verification plan"), { target: { value: "Page-local draft" } });
@@ -304,7 +319,7 @@ describe("remediation workspace", () => {
     const nextDigest = "b".repeat(64);
     vi.mocked(getRemediationDiff).mockReturnValueOnce(initialDiff.promise).mockResolvedValue({ text: "Current saved package", truncated: false, bytes_total: 21, base_revision: "main123", head_revision: "abc123", review_digest: nextDigest });
     vi.mocked(updateRemediationVerificationPlan).mockImplementation(async (_key, _id, plan) => ({ ...reviewedCase, verification_plan: plan, review_digest: nextDigest }));
-    render(<RemediationPage engagementKey="Acme" initialCaseId={7} onBack={() => {}} />);
+    render(<RemediationPage engagementKey="acme" initialCaseId={7} onBack={() => {}} />);
     await openSection("Review");
     fireEvent.change(screen.getByLabelText("Human verification plan"), { target: { value: "Updated rehearsed plan" } });
     fireEvent.click(screen.getByRole("button", { name: "Save plan" }));
@@ -315,7 +330,7 @@ describe("remediation workspace", () => {
   });
   it("keeps a closed case inspectable while preventing edits to its plans", async () => {
     vi.mocked(getRemediationCase).mockResolvedValue({ ...reviewedCase, status: "closed" });
-    render(<RemediationPage engagementKey="Acme" initialCaseId={7} onBack={() => {}} />);
+    render(<RemediationPage engagementKey="acme" initialCaseId={7} onBack={() => {}} />);
     await screen.findByRole("heading", { name: reviewedCase.title });
     expect(within(screen.getByRole("complementary", { name: "Case queue" })).getByText(/closed · 1 finding/)).toBeTruthy();
     expect(screen.getByLabelText("Baseline method").matches(":disabled")).toBe(true);
@@ -331,7 +346,7 @@ describe("remediation workspace", () => {
   it("keeps intake prose prominent and exact administrative records in secondary disclosures", async () => {
     const approval = { id: 1, reviewer: "owner", approved_revision: "abc123", review_digest: digest };
     vi.mocked(getRemediationCase).mockResolvedValue({ ...reviewedCase, approvals: [approval] });
-    render(<RemediationPage engagementKey="Acme" initialCaseId={7} onBack={() => {}} />);
+    render(<RemediationPage engagementKey="acme" initialCaseId={7} onBack={() => {}} />);
     expect(await screen.findByText(reviewedCase.snapshot.description as string)).toBeTruthy();
     const intake = screen.getByText("Original intake record").closest("details");
     expect(intake?.hasAttribute("open")).toBe(false);
@@ -349,7 +364,7 @@ describe("remediation workspace", () => {
     expect(record.deployment).toEqual(reviewedCase.deployment);
   });
   it("keeps the loaded detail when the current queue case is selected again", async () => {
-    render(<RemediationPage engagementKey="Acme" initialCaseId={7} onBack={() => {}} />);
+    render(<RemediationPage engagementKey="acme" initialCaseId={7} onBack={() => {}} />);
     await screen.findByRole("heading", { name: reviewedCase.title });
     const queue = screen.getByRole("complementary", { name: "Case queue" });
     fireEvent.click(within(queue).getByRole("button", { name: /Manage profile authorization/ }));
@@ -359,7 +374,7 @@ describe("remediation workspace", () => {
   });
 
   it("refreshes authoritative case state even when the code diff refresh fails", async () => {
-    render(<RemediationPage engagementKey="Acme" initialCaseId={7} onBack={() => {}} />);
+    render(<RemediationPage engagementKey="acme" initialCaseId={7} onBack={() => {}} />);
     await screen.findByRole("heading", { name: reviewedCase.title });
     vi.mocked(getRemediationCase).mockResolvedValue({ ...reviewedCase, title: "Updated case from backend" });
     vi.mocked(getRemediationDiff).mockRejectedValue(new Error("Worktree unavailable"));
@@ -370,7 +385,7 @@ describe("remediation workspace", () => {
     expect(screen.getByRole("button", { name: "Approve reviewed snapshot" }).hasAttribute("disabled")).toBe(true);
   });
   it("shows current severity, verification and causal identity in queue and linked detail", async () => {
-    render(<RemediationPage engagementKey="Acme" onBack={() => {}} />);
+    render(<RemediationPage engagementKey="acme" onBack={() => {}} />);
     const queue = screen.getByRole("complementary", { name: "Case queue" });
     expect(await within(queue).findByText(/SEC-001 · high · confirmed/)).toBeTruthy();
     expect(within(queue).getByText("Current finding title")).toBeTruthy();
@@ -385,7 +400,7 @@ describe("remediation workspace", () => {
     const second = { ...reviewedCase, id: 8, title: "Second case", source_key: "SEC-43" };
     vi.mocked(listRemediationCases).mockResolvedValue([reviewedCase, second]);
     const onBack = vi.fn();
-    render(<RemediationPage engagementKey="Acme" onBack={onBack} />);
+    render(<RemediationPage engagementKey="acme" onBack={onBack} />);
     await findSibling();
     fireEvent.click(screen.getByRole("button", { name: "Add to case" }));
     expect((screen.getByLabelText("Source engagement") as HTMLSelectElement).disabled).toBe(true);
@@ -412,27 +427,27 @@ describe("remediation workspace", () => {
     const second = { ...reviewedCase, id: 8, title: "Second case", source_key: "SEC-43" };
     vi.mocked(listRemediationCases).mockResolvedValue([reviewedCase, second]);
     vi.mocked(getRemediationCase).mockImplementation(async (_key, id) => id === 8 ? second : reviewedCase);
-    const { rerender } = render(<RemediationPage engagementKey="Acme" initialCaseId={7} onBack={() => {}} />);
+    const { rerender } = render(<RemediationPage engagementKey="acme" initialCaseId={7} onBack={() => {}} />);
     await findSibling();
     fireEvent.click(screen.getByRole("button", { name: "Add to case" }));
-    rerender(<RemediationPage engagementKey="Acme" initialCaseId={8} onBack={() => {}} />);
+    rerender(<RemediationPage engagementKey="acme" initialCaseId={8} onBack={() => {}} />);
     await screen.findByRole("heading", { name: "Second case" });
     await act(async () => pending.resolve({ ...reviewedCase, title: "Old mutation result", linked_findings: [] }));
     expect(screen.getByRole("heading", { name: "Second case" })).toBeTruthy();
     expect(screen.queryByRole("heading", { name: "Old mutation result" })).toBeNull();
-    expect(updateRemediationFindings).toHaveBeenCalledWith("Acme", 7, [11, 22]);
+    expect(updateRemediationFindings).toHaveBeenCalledWith("acme", 7, [11, 22]);
   });
   it("keeps finding intake identity independent of current linked findings", async () => {
     const movedLinks = { ...reviewedCase, source_type: "finding", source_key: "11", linked_findings: [{ id: 22, engagement_key: "assessment", slug: "SEC-002", title: "Shared fix sibling", severity: "medium", verification_status: "confirmed", root_cause_key: "authorization" }] };
     vi.mocked(listRemediationCases).mockResolvedValue([movedLinks]);
     vi.mocked(getRemediationCase).mockResolvedValue(movedLinks);
-    render(<RemediationPage engagementKey="Acme" onBack={() => {}} />);
+    render(<RemediationPage engagementKey="acme" onBack={() => {}} />);
     expect(await screen.findByText("Finding #11")).toBeTruthy();
     expect(await screen.findByRole("link", { name: /Shared fix sibling/ })).toBeTruthy();
     expect(screen.getByText(/Original proof receipts were not captured/)).toBeTruthy();
   });
   it("separates current linked finding state from immutable intake and links exactly", async () => {
-    render(<RemediationPage engagementKey="Acme" onBack={() => {}} />);
+    render(<RemediationPage engagementKey="acme" onBack={() => {}} />);
     const link = await screen.findByRole("link", { name: /Current finding title/ });
     expect(link.getAttribute("href")).toBe("#/engagements/assessment?tab=findings&finding=SEC-001");
     expect(screen.getByText("confirmed")).toBeTruthy();
@@ -443,7 +458,7 @@ describe("remediation workspace", () => {
   it("resolves a finding in the selected source before adding its canonical identity", async () => {
     vi.mocked(getAssessmentFinding).mockResolvedValue({ id: 22, slug: "SEC-002", title: "Same root cause", severity: "medium", verification_status: "unreviewed", root_cause_key: "authorization" } as Awaited<ReturnType<typeof getAssessmentFinding>>);
     vi.mocked(updateRemediationFindings).mockResolvedValue({ ...reviewedCase, linked_findings: [...reviewedCase.linked_findings, { id: 22, engagement_key: "assessment", slug: "SEC-002", title: "Same root cause", severity: "medium", verification_status: "unreviewed", root_cause_key: "authorization" }] });
-    render(<RemediationPage engagementKey="Acme" onBack={() => {}} />);
+    render(<RemediationPage engagementKey="acme" onBack={() => {}} />);
     fireEvent.click(await screen.findByRole("button", { name: "Link finding" }));
     fireEvent.change(await screen.findByLabelText("Source engagement"), { target: { value: "assessment" } });
     fireEvent.change(screen.getByLabelText("Finding slug"), { target: { value: "SEC-002" } });
@@ -451,12 +466,12 @@ describe("remediation workspace", () => {
     await screen.findByText("Same root cause");
     expect(updateRemediationFindings).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "Add to case" }));
-    await waitFor(() => expect(updateRemediationFindings).toHaveBeenCalledWith("Acme", 7, [11, 22]));
+    await waitFor(() => expect(updateRemediationFindings).toHaveBeenCalledWith("acme", 7, [11, 22]));
     expect(await screen.findByRole("link", { name: /Same root cause/ })).toBeTruthy();
   });
   it("shows a failed queue load instead of an empty queue and retries", async () => {
     vi.mocked(listRemediationCases).mockRejectedValueOnce(new Error("Queue unavailable"));
-    render(<RemediationPage engagementKey="Acme" onBack={() => {}} />);
+    render(<RemediationPage engagementKey="acme" onBack={() => {}} />);
     expect(await screen.findByRole("alert")).toHaveProperty("textContent", "Queue unavailable");
     expect(screen.queryByText("No remediation cases imported yet.")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Retry loading cases" }));
@@ -467,7 +482,7 @@ describe("remediation workspace", () => {
 
   it("shows a failed case load instead of perpetual loading and retries", async () => {
     vi.mocked(getRemediationCase).mockRejectedValueOnce(new Error("Case unavailable"));
-    render(<RemediationPage engagementKey="Acme" onBack={() => {}} initialCaseId={7} />);
+    render(<RemediationPage engagementKey="acme" onBack={() => {}} initialCaseId={7} />);
     expect(await screen.findByRole("alert")).toHaveProperty("textContent", "Case unavailable");
     expect(screen.queryByText("Loading case…")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Retry loading case" }));
@@ -490,7 +505,7 @@ describe("remediation workspace", () => {
   });
 
   it("shows the queue, source snapshot, duplicate hint, worktree and deployment identity", async () => {
-    render(<RemediationPage engagementKey="Acme" onBack={() => {}} />);
+    render(<RemediationPage engagementKey="acme" onBack={() => {}} />);
 
     expect(await screen.findByText("Manage profile authorization")).toBeTruthy();
     expect(screen.getByText("SEC-42")).toBeTruthy();
@@ -508,21 +523,21 @@ describe("remediation workspace", () => {
   });
 
   it("saves a changed human plan and requires an explicit approval action", async () => {
-    render(<RemediationPage engagementKey="Acme" onBack={() => {}} />);
+    render(<RemediationPage engagementKey="acme" onBack={() => {}} />);
     await openSection("Review");
     const plan = await screen.findByLabelText("Human verification plan");
     fireEvent.change(plan, { target: { value: "Open Manage as owner; save the verified fixture." } });
     fireEvent.click(screen.getByRole("button", { name: "Save plan" }));
-    await waitFor(() => expect(updateRemediationVerificationPlan).toHaveBeenCalledWith("Acme", 7,
+    await waitFor(() => expect(updateRemediationVerificationPlan).toHaveBeenCalledWith("acme", 7,
       "Open Manage as owner; save the verified fixture."));
     expect(approveRemediationCase).not.toHaveBeenCalled();
     fireEvent.change(screen.getByLabelText("Reviewer"), { target: { value: "owner" } });
     fireEvent.click(screen.getByRole("button", { name: "Approve reviewed snapshot" }));
-    await waitFor(() => expect(approveRemediationCase).toHaveBeenCalledWith("Acme", 7, "owner", digest, "ui"));
+    await waitFor(() => expect(approveRemediationCase).toHaveBeenCalledWith("acme", 7, "owner", digest, "ui"));
   });
 
   it("never submits approval while plan edits are unsaved", async () => {
-    render(<RemediationPage engagementKey="Acme" onBack={() => {}} />);
+    render(<RemediationPage engagementKey="acme" onBack={() => {}} />);
     await openSection("Review");
     const plan = await screen.findByLabelText("Human verification plan");
     fireEvent.change(plan, { target: { value: "A changed procedure" } });
@@ -531,7 +546,7 @@ describe("remediation workspace", () => {
 
   it("blocks approval when the review diff is truncated", async () => {
     vi.mocked(getRemediationDiff).mockResolvedValue({ text: "partial diff", truncated: true, bytes_total: 2000000, base_revision: "main123", head_revision: "abc123", review_digest: digest });
-    render(<RemediationPage engagementKey="Acme" onBack={() => {}} />);
+    render(<RemediationPage engagementKey="acme" onBack={() => {}} />);
     await openSection("Review");
     await screen.findByText("partial diff");
     fireEvent.change(screen.getByLabelText("Reviewer"), { target: { value: "owner" } });
@@ -545,7 +560,7 @@ describe("remediation workspace", () => {
       review_evidence_ready: false,
       review_evidence_missing: ["Red Laravel test output", "Green Laravel test output", "Stagehand happy-path result, script, and screenshot"],
     });
-    render(<RemediationPage engagementKey="Acme" onBack={() => {}} />);
+    render(<RemediationPage engagementKey="acme" onBack={() => {}} />);
     await openSection("Review");
     expect(await screen.findByText("Red Laravel test output")).toBeTruthy();
     expect(screen.getByText("Green Laravel test output")).toBeTruthy();
@@ -557,7 +572,7 @@ describe("remediation workspace", () => {
 
   it("blocks approval when the diff digest differs from the case", async () => {
     vi.mocked(getRemediationDiff).mockResolvedValue({ text: "changed diff", truncated: false, bytes_total: 12, base_revision: "main123", head_revision: "abc123", review_digest: "b".repeat(64) });
-    render(<RemediationPage engagementKey="Acme" onBack={() => {}} />);
+    render(<RemediationPage engagementKey="acme" onBack={() => {}} />);
     await openSection("Review");
     await screen.findByText("changed diff");
     fireEvent.change(screen.getByLabelText("Reviewer"), { target: { value: "owner" } });
@@ -570,7 +585,7 @@ describe("remediation workspace", () => {
     vi.mocked(approveRemediationCase).mockRejectedValue(new ApiError("Review package changed", 409, {}));
     vi.mocked(getRemediationCase).mockResolvedValueOnce(reviewedCase).mockResolvedValueOnce({ ...reviewedCase, review_digest: nextDigest });
     vi.mocked(getRemediationDiff).mockResolvedValueOnce({ text: "original diff", truncated: false, bytes_total: 12, base_revision: "main123", head_revision: "abc123", review_digest: digest }).mockResolvedValueOnce({ text: "new diff", truncated: false, bytes_total: 12, base_revision: "main123", head_revision: "abc123", review_digest: nextDigest });
-    render(<RemediationPage engagementKey="Acme" onBack={() => {}} />);
+    render(<RemediationPage engagementKey="acme" onBack={() => {}} />);
     await openSection("Review");
     await screen.findByText("original diff");
     fireEvent.change(screen.getByLabelText("Reviewer"), { target: { value: "owner" } });
@@ -580,24 +595,24 @@ describe("remediation workspace", () => {
   });
 
   it("saves the production canary decision and monitoring plan before approval", async () => {
-    render(<RemediationPage engagementKey="Acme" onBack={() => {}} />);
+    render(<RemediationPage engagementKey="acme" onBack={() => {}} />);
     await openSection("Delivery");
     const decision = await screen.findByLabelText("Production canary decision");
     fireEvent.change(decision, { target: { value: "required" } });
     fireEvent.change(screen.getByLabelText("Canary rationale"), { target: { value: "Needs human production proof" } });
     fireEvent.change(screen.getByLabelText("Safe canary procedure"), { target: { value: "Use owner account and harmless fixture" } });
-    fireEvent.change(screen.getByLabelText("Coralogix monitoring"), { target: { value: "Watch profile authorization errors" } });
+    fireEvent.change(screen.getByLabelText("Monitoring plan"), { target: { value: "Watch profile authorization errors" } });
     await openSection("Review");
     expect((screen.getByRole("button", { name: "Approve reviewed snapshot" }) as HTMLButtonElement).disabled).toBe(true);
     await openSection("Delivery");
     fireEvent.click(screen.getByRole("button", { name: "Save release plan" }));
-    await waitFor(() => expect(updateRemediationReleasePlan).toHaveBeenCalledWith("Acme", 7, {
-      production_canary_decision: "required", production_canary_rationale: "Needs human production proof", safe_procedure: "Use owner account and harmless fixture", coralogix_monitoring: "Watch profile authorization errors",
+    await waitFor(() => expect(updateRemediationReleasePlan).toHaveBeenCalledWith("acme", 7, {
+      production_canary_decision: "required", production_canary_rationale: "Needs human production proof", safe_procedure: "Use owner account and harmless fixture", monitoring: "Watch profile authorization errors",
     }));
   });
 
   it("records the owner's decision when baseline reproduction was unavailable", async () => {
-    render(<RemediationPage engagementKey="Acme" onBack={() => {}} />);
+    render(<RemediationPage engagementKey="acme" onBack={() => {}} />);
     await screen.findByLabelText("Baseline outcome");
     fireEvent.change(screen.getByLabelText("Baseline outcome"), { target: { value: "code_test_confirmed" } });
     fireEvent.change(screen.getByLabelText("Baseline method"), { target: { value: "Laravel failing test" } });
@@ -606,7 +621,7 @@ describe("remediation workspace", () => {
     fireEvent.change(screen.getByLabelText("Owner actor"), { target: { value: "owner" } });
     fireEvent.change(screen.getByLabelText("Owner reason"), { target: { value: "Safe local replay unavailable" } });
     fireEvent.click(screen.getByRole("button", { name: "Save baseline" }));
-    await waitFor(() => expect(updateRemediationBaseline).toHaveBeenCalledWith("Acme", 7, {
+    await waitFor(() => expect(updateRemediationBaseline).toHaveBeenCalledWith("acme", 7, {
       outcome: "code_test_confirmed", method: "Laravel failing test", proved: "Code and failing test support report", owner_decision: "proceed", owner_actor: "owner", owner_reason: "Safe local replay unavailable",
     }));
   });
@@ -614,14 +629,14 @@ describe("remediation workspace", () => {
   it("records a human development result against the confirmed deployed revision", async () => {
     vi.mocked(listRemediationCases).mockResolvedValue([{ ...reviewedCase, status: "development" }]);
     vi.mocked(getRemediationCase).mockResolvedValue({ ...reviewedCase, status: "development" });
-    render(<RemediationPage engagementKey="Acme" onBack={() => {}} />);
+    render(<RemediationPage engagementKey="acme" onBack={() => {}} />);
     await openSection("Delivery");
     await screen.findByLabelText("Human verification result");
     fireEvent.change(screen.getByLabelText("Human verification actor"), { target: { value: "owner" } });
     fireEvent.change(screen.getByLabelText("Human verification notes"), { target: { value: "Followed the saved steps; owner could save." } });
     fireEvent.change(screen.getByLabelText("Human verification result"), { target: { value: "passed" } });
     fireEvent.click(screen.getByRole("button", { name: "Record human verification" }));
-    await waitFor(() => expect(recordRemediationHumanVerification).toHaveBeenCalledWith("Acme", 7, {
+    await waitFor(() => expect(recordRemediationHumanVerification).toHaveBeenCalledWith("acme", 7, {
       actor: "owner", result: "passed", observed_revision: "abc123", notes: "Followed the saved steps; owner could save.",
     }));
   });

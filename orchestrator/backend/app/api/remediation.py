@@ -4,7 +4,7 @@ from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, status
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field, PositiveInt, field_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, PositiveInt, field_validator, model_validator
 
 from ..services import remediation
 
@@ -13,7 +13,7 @@ router = APIRouter(prefix="/engagements/{engagement_key}/remediation", tags=["re
 
 class CaseCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    source_type: Literal["jira", "bounty"]
+    source_type: str = Field(min_length=1, pattern=r"^[a-z][a-z0-9_-]*$")
     source_key: str = Field(min_length=1)
     title: str = Field(min_length=1)
     snapshot: dict[str, Any]
@@ -27,6 +27,8 @@ class CasePatch(BaseModel):
     worktree_path: str | None = None
     worktree_branch: str | None = Field(default=None, min_length=1)
     worktree_revision: str | None = None
+    base_branch: str | None = Field(default=None, min_length=1)
+    base_revision: str | None = Field(default=None, min_length=1)
 
     @field_validator("worktree_branch")
     @classmethod
@@ -36,8 +38,83 @@ class CasePatch(BaseModel):
         return value
 
 
+class VerificationRequirement(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    kind: str = Field(min_length=1)
+    methods: list[str] = Field(min_length=1)
+    outcome: str = Field(default="passed", min_length=1)
+    revision: Literal["current", "ancestor"] = "current"
+    execution: Literal["executed", "reasoned"] = "executed"
+    rationale: str = ""
+    shared_environment: str | None = Field(default=None, min_length=1)
+    runtime_identity_required: bool = False
+    browser_purpose: Literal["happy-path", "bad-path", "other"] | None = None
+    legitimate_use_control: bool = False
+
+    @field_validator("methods")
+    @classmethod
+    def nonempty_methods(cls, value: list[str]) -> list[str]:
+        if any(not method.strip() for method in value):
+            raise ValueError("Verification methods must be nonempty")
+        return value
+
+    @model_validator(mode="after")
+    def validate_browser_control(self):
+        methods = {method.casefold() for method in self.methods}
+        browser = methods & {"stagehand", "browse"}
+        if self.browser_purpose is not None and (not browser or methods - {"stagehand", "browse"}):
+            raise ValueError("Browser purpose requires only browser methods")
+        if browser and (self.execution != "executed" or self.revision != "current" or self.outcome != "passed"):
+            raise ValueError("Browser verification requires executed passing evidence at the current revision")
+        if self.legitimate_use_control:
+            if self.execution != "executed" or self.revision != "current" or self.outcome != "passed" or not self.rationale.strip():
+                raise ValueError("Legitimate-use controls require a rationale and executed passing evidence at the current revision")
+            if browser and self.browser_purpose in {"bad-path", "other"}:
+                raise ValueError("A browser legitimate-use control requires happy-path purpose")
+        return self
+
+
 class PlanPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     verification_plan: str
+    requirements: list[VerificationRequirement] | None = Field(default=None, min_length=1)
+    alternatives_reason: str = ""
+
+    @model_validator(mode="after")
+    def explain_alternatives(self):
+        if self.requirements is not None and not self.alternatives_reason.strip():
+            raise ValueError("Explicit verification requirements need an alternatives reason")
+        if self.requirements is not None and any(
+            {method.casefold() for method in requirement.methods} & {"stagehand", "browse"}
+            for requirement in self.requirements
+        ) and not any(
+            requirement.legitimate_use_control
+            or (set(method.casefold() for method in requirement.methods) <= {"stagehand", "browse"}
+                and requirement.browser_purpose in {None, "happy-path"})
+            for requirement in self.requirements
+        ):
+            raise ValueError("Browser verification needs a legitimate-use control in the plan")
+        return self
+
+
+class EnvironmentAcquire(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    environment: str = Field(min_length=1)
+    case_id: PositiveInt
+    revision: str = Field(min_length=1)
+    actor: str = Field(min_length=1)
+
+
+class EnvironmentRelease(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    environment: str = Field(min_length=1)
+    case_id: PositiveInt
+    token: str = Field(min_length=1)
+    actor: str = Field(min_length=1)
+
+
+class EnvironmentConfirm(EnvironmentRelease):
+    observed_revision: str = Field(min_length=1)
 
 
 class FindingCaseCreate(BaseModel):
@@ -57,6 +134,7 @@ def create_finding_case(engagement_key: str, finding_slug: str, body: FindingCas
 
 
 class EvidenceCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     kind: str = Field(min_length=1)
     method: str = Field(min_length=1)
     environment: Literal["local", "development", "test", "production", "not_applicable"]
@@ -66,6 +144,11 @@ class EvidenceCreate(BaseModel):
     outcome: str | None = None
     artifact_path: str | None = None
     revision: str | None = None
+    execution: Literal["executed", "reasoned", "unavailable"] = "executed"
+    executed_revision: str | None = None
+    executed_directory: str | None = None
+    shared_environment: str | None = None
+    environment_token: str | None = None
 
 
 class ApprovalCreate(BaseModel):
@@ -88,7 +171,7 @@ class ReleasePlanPatch(BaseModel):
     production_canary_decision: Literal["required", "not_required", "defer"]
     production_canary_rationale: str = Field(min_length=1)
     safe_procedure: str = ""
-    coralogix_monitoring: str = Field(min_length=1)
+    monitoring: str = Field(min_length=1, validation_alias=AliasChoices("monitoring", "coralogix_monitoring"))
 
 
 class TransitionCreate(BaseModel):
@@ -123,6 +206,26 @@ def create_case(engagement_key: str, body: CaseCreate):
     return remediation.create_case(engagement_key, body.model_dump())
 
 
+@router.post("/cases/{case_id}/resolve-source")
+def resolve_source(engagement_key: str, case_id: int, body: CaseCreate):
+    return remediation.resolve_source(engagement_key, case_id, body.model_dump())
+
+
+@router.post("/environments/acquire", status_code=status.HTTP_201_CREATED)
+def acquire_environment(engagement_key: str, body: EnvironmentAcquire):
+    return remediation.acquire_environment(engagement_key, body.model_dump())
+
+
+@router.post("/environments/release")
+def release_environment(engagement_key: str, body: EnvironmentRelease):
+    return remediation.release_environment(engagement_key, body.model_dump())
+
+
+@router.post("/environments/confirm")
+def confirm_environment(engagement_key: str, body: EnvironmentConfirm):
+    return remediation.confirm_environment(engagement_key, body.model_dump())
+
+
 @router.get("/cases/{case_id}")
 def get_case(engagement_key: str, case_id: int):
     return remediation.get_case(engagement_key, case_id)
@@ -140,7 +243,10 @@ def patch_case(engagement_key: str, case_id: int, body: CasePatch):
 
 @router.patch("/cases/{case_id}/verification-plan")
 def patch_plan(engagement_key: str, case_id: int, body: PlanPatch):
-    return remediation.patch_case(engagement_key, case_id, {"verification_plan": body.verification_plan})
+    data = body.model_dump()
+    if "requirements" not in body.model_fields_set:
+        data.pop("requirements")
+    return remediation.patch_verification_plan(engagement_key, case_id, data)
 
 
 @router.patch("/cases/{case_id}/baseline")

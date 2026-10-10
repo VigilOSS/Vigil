@@ -3,35 +3,27 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import hashlib
-import re
+import sys
+
+import pytest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 _BANNED_PLACEHOLDERS = (
-    "target.example",
-    "attacker.example",
-    "evil.example",
-    "trusted.example",
-    "acme.example",
-    "acme.example",
-    "legitimate.example",
+    "target.com",
+    "attacker.com",
+    "evil.com",
+    "trusted.com",
+    "contoso.com",
+    "bigcorp.com",
+    "legit.com",
 )
-_BANNED_IDENTITY_TOKEN_DIGESTS = {
-    "eaececc3bfbba9c2def506f0596898fd0dd2605722e2665d489930b143a82e4e",
-    "eaececc3bfbba9c2def506f0596898fd0dd2605722e2665d489930b143a82e4e",
-    "eaececc3bfbba9c2def506f0596898fd0dd2605722e2665d489930b143a82e4e",
-    "eaececc3bfbba9c2def506f0596898fd0dd2605722e2665d489930b143a82e4e",
-    "eaececc3bfbba9c2def506f0596898fd0dd2605722e2665d489930b143a82e4e",
-    "eaececc3bfbba9c2def506f0596898fd0dd2605722e2665d489930b143a82e4e",
-    "eaececc3bfbba9c2def506f0596898fd0dd2605722e2665d489930b143a82e4e",
-    "eaececc3bfbba9c2def506f0596898fd0dd2605722e2665d489930b143a82e4e",
-    "eaececc3bfbba9c2def506f0596898fd0dd2605722e2665d489930b143a82e4e",
-    "eaececc3bfbba9c2def506f0596898fd0dd2605722e2665d489930b143a82e4e",
-    "eaececc3bfbba9c2def506f0596898fd0dd2605722e2665d489930b143a82e4e",
-    "eaececc3bfbba9c2def506f0596898fd0dd2605722e2665d489930b143a82e4e",
-    "eaececc3bfbba9c2def506f0596898fd0dd2605722e2665d489930b143a82e4e",
-    "eaececc3bfbba9c2def506f0596898fd0dd2605722e2665d489930b143a82e4e",
-}
+sys.path.insert(0, str(REPO_ROOT / "tools"))
+from public_identity_policy import identity_token_digests, load_private_identity_digests  # noqa: E402
+
+_BANNED_IDENTITY_TOKEN_DIGESTS = load_private_identity_digests(REPO_ROOT)
+
+
 def _public_text_files() -> list[Path]:
     files: list[Path] = []
     for directory, names, filenames in os.walk(REPO_ROOT):
@@ -75,17 +67,96 @@ def test_public_examples_do_not_use_registered_placeholder_domains() -> None:
 
 
 def test_public_tree_has_no_private_identity_fragments() -> None:
+    if not _BANNED_IDENTITY_TOKEN_DIGESTS:
+        pytest.skip("private identity policy is available in maintainer audits and trusted CI")
     violations: list[str] = []
-    for path in _public_text_files():
+    for path in [*_public_text_files(), Path(__file__)]:
         try:
             text = path.read_text(encoding="utf-8")
         except UnicodeDecodeError:
             continue
-        token_digests = {
-            hashlib.sha256(token.encode()).hexdigest()
-            for token in re.findall(r"[a-z0-9]+", text.lower())
-        }
+        token_digests = identity_token_digests(text)
         if token_digests & _BANNED_IDENTITY_TOKEN_DIGESTS:
             violations.append(f"{path.relative_to(REPO_ROOT)}: private identity token")
 
     assert not violations, "remove private identity fragments:\n" + "\n".join(violations)
+
+
+def test_identity_guard_scans_its_own_source(monkeypatch, tmp_path: Path) -> None:
+    import sys
+    import pytest
+
+    sentinel = "syntheticprivatemarker"
+    source = tmp_path / "source_guard.py"
+    source.write_text(sentinel, encoding="utf-8")
+    monkeypatch.setattr(sys.modules[__name__], "__file__", str(source))
+    monkeypatch.setattr(sys.modules[__name__], "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(sys.modules[__name__], "_BANNED_IDENTITY_TOKEN_DIGESTS", {
+        hashlib.sha256(sentinel.encode()).hexdigest(),
+    })
+
+    with pytest.raises(AssertionError, match="private identity token"):
+        test_public_tree_has_no_private_identity_fragments()
+
+
+def test_identity_guard_rejects_compound_private_markers(monkeypatch, tmp_path: Path) -> None:
+    import sys
+    import pytest
+
+    sentinel = "synthetic-private-marker"
+    source = tmp_path / "example.py"
+    source.write_text(sentinel, encoding="utf-8")
+    monkeypatch.setattr(sys.modules[__name__], "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(sys.modules[__name__], "__file__", str(source))
+    monkeypatch.setattr(sys.modules[__name__], "_public_text_files", lambda: [source])
+    monkeypatch.setattr(sys.modules[__name__], "_BANNED_IDENTITY_TOKEN_DIGESTS", {
+        hashlib.sha256(sentinel.encode()).hexdigest(),
+    })
+
+    with pytest.raises(AssertionError, match="private identity token"):
+        test_public_tree_has_no_private_identity_fragments()
+
+
+def test_identity_guard_rejects_spaced_private_markers(monkeypatch, tmp_path: Path) -> None:
+    import sys
+    import pytest
+
+    source = tmp_path / "example.py"
+    source.write_text("synthetic private", encoding="utf-8")
+    monkeypatch.setattr(sys.modules[__name__], "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(sys.modules[__name__], "__file__", str(source))
+    monkeypatch.setattr(sys.modules[__name__], "_public_text_files", lambda: [source])
+    monkeypatch.setattr(sys.modules[__name__], "_BANNED_IDENTITY_TOKEN_DIGESTS", {
+        hashlib.sha256(b"syntheticprivate").hexdigest(),
+    })
+
+    with pytest.raises(AssertionError, match="private identity token"):
+        test_public_tree_has_no_private_identity_fragments()
+
+
+def test_public_tree_does_not_embed_private_audit_fingerprints() -> None:
+    if not _BANNED_IDENTITY_TOKEN_DIGESTS:
+        pytest.skip("private identity policy is available in maintainer audits and trusted CI")
+    for path in [*_public_text_files(), Path(__file__)]:
+        try:
+            text = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            continue
+        assert not any(digest in text for digest in _BANNED_IDENTITY_TOKEN_DIGESTS), (
+            f"{path.relative_to(REPO_ROOT)}: private audit fingerprint belongs outside the public tree"
+        )
+
+
+@pytest.mark.parametrize("text", ["Synthetic Private Audit", "synthetic@example.test"])
+def test_identity_guard_matches_full_private_identifiers(monkeypatch, tmp_path: Path, text: str) -> None:
+    source = tmp_path / "example.py"
+    source.write_text(text, encoding="utf-8")
+    monkeypatch.setattr(sys.modules[__name__], "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(sys.modules[__name__], "__file__", str(source))
+    monkeypatch.setattr(sys.modules[__name__], "_public_text_files", lambda: [source])
+    monkeypatch.setattr(sys.modules[__name__], "_BANNED_IDENTITY_TOKEN_DIGESTS", {
+        hashlib.sha256(text.lower().encode()).hexdigest(),
+    })
+
+    with pytest.raises(AssertionError, match="private identity token"):
+        test_public_tree_has_no_private_identity_fragments()

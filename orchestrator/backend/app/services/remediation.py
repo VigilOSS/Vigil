@@ -4,6 +4,7 @@ import hashlib
 import difflib
 import json
 import os
+import secrets
 import select
 import stat
 import subprocess
@@ -48,6 +49,17 @@ def engagement(key: str):
 
 def _json(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def _field(row, name: str, default=None):
+    return row[name] if name in row.keys() else default
+
+
+def _case_project(row, engagement_root: Path) -> dict[str, Any]:
+    stored = _field(row, "review_policy_json")
+    if stored:
+        return json.loads(stored)
+    return load_engagement_project(engagement_root)
 
 
 def _sha256_stream(source: BinaryIO) -> str:
@@ -214,7 +226,7 @@ def _case_worktree_identity(row, engagement_root: Path) -> bool:
     if not row["worktree_branch"] or not row["worktree_path"]:
         return False
     try:
-        repo_value = load_engagement_project(engagement_root)["repository"]
+        repo_value = _case_project(row, engagement_root)["repository"]
         if not isinstance(repo_value, str) or not Path(repo_value).is_absolute():
             return False
         if not _registered_worktree(Path(repo_value), Path(row["worktree_path"])):
@@ -264,13 +276,13 @@ def _bounded_vcs_diff(path_value: str, *revisions: str, limit: int) -> tuple[byt
         process.stdout.close()
 
 
-def _review_patch(path_value: str | None) -> tuple[str, str, bytes, bool, int]:
+def _review_patch(path_value: str | None, base_branch: str = "main", base_revision: str | None = None) -> tuple[str, str, bytes, bool, int]:
     head = _actual_revision(path_value)
     if not head or not path_value:
         raise HTTPException(409, "Case worktree has no confirmed revision")
     root = Path(path_value)
     try:
-        base = _vcs.review_base(root)
+        base = _vcs.review_base(root, base_branch, base_revision) if base_revision or base_branch != "main" else _vcs.review_base(root)
         committed, committed_truncated = _bounded_vcs_diff(
             path_value, base, "HEAD", limit=_REVIEW_DIFF_LIMIT,
         )
@@ -283,7 +295,7 @@ def _review_patch(path_value: str | None) -> tuple[str, str, bytes, bool, int]:
             return base, head, (committed + b"\n" + local)[:_REVIEW_DIFF_LIMIT], True, _REVIEW_DIFF_LIMIT + 1
         untracked = _vcs.untracked(root)
     except (OSError, ValueError, subprocess.SubprocessError):
-        raise HTTPException(409, "Cannot establish review diff against main") from None
+        raise HTTPException(409, f"Cannot establish review diff against {base_branch}") from None
     chunks = [committed, local]
     total = len(committed) + len(local) + 1
     truncated = total > _REVIEW_DIFF_LIMIT
@@ -337,9 +349,9 @@ def review_diff(key: str, case_id: int) -> dict[str, Any]:
         raise HTTPException(409, "Case worktree is not registered")
     root = Path(path_value)
     expected = Path(owner.engagement_root).resolve() / "remediation" / "cases" / str(case_id)
-    if not root.resolve().is_relative_to(expected):
+    if not root.resolve().is_relative_to(expected) and not _case_worktree_identity(row, Path(owner.engagement_root)):
         raise HTTPException(409, "Case worktree is outside its case directory")
-    base, head, whole, truncated, bytes_total = _review_patch(path_value)
+    base, head, whole, truncated, bytes_total = _row_review_patch(row)
     return {
         "text": whole.decode("utf-8", errors="replace"),
         "truncated": truncated,
@@ -350,9 +362,15 @@ def review_diff(key: str, case_id: int) -> dict[str, Any]:
     }
 
 
+def _row_review_patch(row):
+    branch = _field(row, "base_branch")
+    revision = _field(row, "base_revision")
+    return _review_patch(row["worktree_path"], branch or "main", revision) if branch or revision else _review_patch(row["worktree_path"])
+
+
 def _review_digest(row, evidence: list[dict[str, Any]], engagement_root: Path, finding_ids: list[int]) -> str:
     try:
-        review_base, _, review_patch, patch_truncated, patch_size = _review_patch(row["worktree_path"])
+        review_base, _, review_patch, patch_truncated, patch_size = _row_review_patch(row)
         patch_sha = hashlib.sha256(review_patch).hexdigest()
     except HTTPException:
         review_base, patch_sha, patch_size = "unavailable", "unavailable", -1
@@ -382,11 +400,16 @@ def _review_digest(row, evidence: list[dict[str, Any]], engagement_root: Path, f
         "baseline": json.loads(row["baseline_json"]),
         "release_plan": json.loads(row["release_plan_json"]),
         "evidence": [
-            {key: value for key, value in item.items() if key != "environment" or value is not None}
+            {key: value for key, value in item.items() if key not in {
+                "environment", "execution", "executed_revision", "executed_directory", "shared_environment", "environment_token", "runtime_revision"
+            } or value is not None}
             for item in evidence
         ],
         "current_artifact_sha256": artifact_state,
     }
+    for field in ("base_branch", "base_revision", "review_policy_json", "verification_requirements_json"):
+        if _field(row, field) is not None:
+            material[field] = row[field]
     project_path = engagement_root / "PROJECT.md"
     if project_path.exists() or project_path.is_symlink():
         from assess.lib.remediation_project import load_engagement_project
@@ -396,19 +419,93 @@ def _review_digest(row, evidence: list[dict[str, Any]], engagement_root: Path, f
                 "source_sha256": _sha256_file(project_path),
                 "configuration": load_engagement_project(engagement_root),
             }
+            if _field(row, "review_policy_json"):
+                from assess.lib.remediation_project import policy_digest
+                material["effective_policy_digest"] = policy_digest(json.loads(row["review_policy_json"]))
         except (OSError, ValueError):
             material["project"] = "unavailable"
     return hashlib.sha256(_json(material).encode()).hexdigest()
 
 
 def _review_evidence_missing(row, evidence: list[dict[str, Any]], engagement_root: Path) -> list[str]:
+    plan = _field(row, "verification_requirements_json")
+    if plan is not None:
+        missing = _explicit_evidence_missing(row, evidence, engagement_root, json.loads(plan))
+    else:
+        missing = _legacy_review_evidence_missing(row, evidence, engagement_root)
+    return missing + _profile_checks_missing(row, evidence, engagement_root)
+
+
+def _explicit_evidence_missing(row, evidence, engagement_root, plan):
+    def satisfies(item, requirement):
+        if (item["kind"] != requirement["kind"]
+                or item["method"].casefold() not in {value.casefold() for value in requirement["methods"]}
+                or item["outcome"] != requirement["outcome"]
+                or item.get("execution") != requirement["execution"]
+                or not item.get("artifact_path") or not item.get("revision")):
+            return False
+        if requirement["revision"] == "current" and item["revision"] != row["worktree_revision"]:
+            return False
+        if requirement["revision"] == "ancestor" and not _commit_ancestor(row["worktree_path"], item["revision"], row["worktree_revision"]):
+            return False
+        if requirement["execution"] == "executed" and (
+            not item["command"].strip() or item.get("executed_revision") != item["revision"]
+        ):
+            return False
+        if requirement.get("shared_environment") and item.get("shared_environment") != requirement["shared_environment"]:
+            return False
+        browser = item["method"].casefold() in {"stagehand", "browse"}
+        if (requirement.get("runtime_identity_required") or browser) and not _evidence_runtime_confirmed(item):
+            return False
+        if not _evidence_current(engagement_root, row["id"], [item]):
+            return False
+        if browser:
+            driver_evidence = [proof for proof in evidence if proof["method"].casefold() == item["method"].casefold()]
+            purpose = requirement.get("browser_purpose") or "happy-path"
+            if not item["artifact_path"].endswith("/result.json") or _browser_evidence_missing(
+                row, driver_evidence, engagement_root, purpose=purpose,
+                require_screenshot=purpose == "happy-path", result_path=item["artifact_path"],
+            ):
+                return False
+        return bool(_artifact(engagement_root, row["id"], item["artifact_path"]).stat().st_size)
+
+    missing = []
+    for requirement in plan["requirements"]:
+        if not any(satisfies(item, requirement) for item in evidence):
+            missing.append(f"{requirement['kind']} ({requirement['execution']}, {requirement['revision']} revision)")
+    return missing
+
+
+def _profile_checks_missing(row, evidence, engagement_root):
+    missing = []
+    policy = json.loads(_field(row, "review_policy_json") or "{}")
+    shared_environment = policy.get("remediation", {}).get("shared_environment", "")
+    for check in policy.get("remediation", {}).get("check_commands", []):
+        if not any(
+            item["kind"] == "profile-check" and item["method"] == check["name"]
+            and item["command"] == check["command"] and item.get("execution") == "executed"
+            and item.get("revision") == row["worktree_revision"]
+            and item.get("executed_revision") == row["worktree_revision"]
+            and item.get("executed_directory") == str((Path(row["worktree_path"] or ".") / check.get("directory", ".")).resolve())
+            and (not shared_environment or (item.get("shared_environment") == shared_environment and item.get("environment_token")))
+            and item["outcome"] == "passed" and item.get("artifact_path")
+            and _evidence_current(engagement_root, row["id"], [item])
+            and _artifact(engagement_root, row["id"], item["artifact_path"]).stat().st_size
+            for item in evidence
+        ):
+            missing.append(f"profile check: {check['name']}")
+    return missing
+
+
+def _legacy_review_evidence_missing(row, evidence: list[dict[str, Any]], engagement_root: Path) -> list[str]:
     case_id = row["id"]
 
     def valid_test(kind: str, outcome: str) -> bool:
         for item in evidence:
             if (item["kind"] != kind or (item["method"] or "").casefold() != "laravel"
                     or item["outcome"] != outcome or not item["command"].strip()
-                    or not item["revision"] or not item["artifact_path"]):
+                    or not item["revision"] or not item["artifact_path"]
+                    or item.get("execution") not in {None, "executed"}):
                 continue
             if kind == "green-test" and item["revision"] != row["worktree_revision"]:
                 continue
@@ -427,6 +524,12 @@ def _review_evidence_missing(row, evidence: list[dict[str, Any]], engagement_roo
         missing.append("red test with expected failure and saved Laravel output")
     if not valid_test("green-test", "passed"):
         missing.append("green test with passing Laravel output at current revision")
+    return missing + _browser_evidence_missing(row, evidence, engagement_root)
+
+
+def _browser_evidence_missing(row, evidence, engagement_root, *, purpose="happy-path", require_screenshot=True, result_path=None):
+    case_id = row["id"]
+    missing = []
     stagehand_result = False
     stagehand_script = False
     stagehand_screenshot = False
@@ -436,7 +539,9 @@ def _review_evidence_missing(row, evidence: list[dict[str, Any]], engagement_roo
         driver = (item["method"] or "").casefold()
         if (driver not in {"stagehand", "browse"} or item["kind"] != driver
                 or not artifact.endswith("/result.json") or not item["command"].strip()
-                or item["revision"] != row["worktree_revision"]):
+                or (result_path is not None and artifact != result_path)
+                or item["revision"] != row["worktree_revision"]
+                or item.get("execution") not in {None, "executed"}):
             continue
         if not _evidence_current(engagement_root, case_id, [item]):
             continue
@@ -447,7 +552,7 @@ def _review_evidence_missing(row, evidence: list[dict[str, Any]], engagement_roo
         if not isinstance(result, dict):
             continue
         steps = result.get("steps")
-        if (result.get("status") != "passed" or result.get("purpose") != "happy-path"
+        if (result.get("status") != "passed" or result.get("purpose") != purpose
                 or not str(result.get("observed") or "").strip()
                 or not str(result.get("proved") or "").strip()
                 or not isinstance(steps, list) or not steps
@@ -484,7 +589,8 @@ def _review_evidence_missing(row, evidence: list[dict[str, Any]], engagement_roo
         script = registered.get(f"{parent}/script.py")
         stagehand_script = bool(script and script["method"].casefold() == driver
                                 and script["revision"] == row["worktree_revision"]
-                                and _evidence_current(engagement_root, case_id, [script]))
+                                and _evidence_current(engagement_root, case_id, [script])
+                                and _artifact(engagement_root, case_id, script["artifact_path"]).stat().st_size)
         stagehand_screenshot = any(
             path.startswith(f"{parent}/") and Path(path).suffix.lower() in {".png", ".jpg", ".jpeg"}
             and proof["kind"] == "screenshot" and proof["method"].casefold() == driver
@@ -493,13 +599,13 @@ def _review_evidence_missing(row, evidence: list[dict[str, Any]], engagement_roo
             and _valid_screenshot(_artifact(engagement_root, case_id, path))
             for path, proof in registered.items()
         )
-        if stagehand_script and stagehand_screenshot:
+        if stagehand_script and (stagehand_screenshot or not require_screenshot):
             break
     if not stagehand_result:
-        missing.append("passed browser happy-path result.json at current revision")
+        missing.append(f"passed browser {purpose} result.json at current revision")
     if not stagehand_script:
         missing.append("registered browser script.py")
-    if not stagehand_screenshot:
+    if require_screenshot and not stagehand_screenshot:
         missing.append("registered browser screenshot")
     return missing
 
@@ -553,6 +659,11 @@ def _details(connection, row, engagement_root: Path):
     result["snapshot"] = json.loads(result.pop("snapshot_json"))
     result["baseline"] = json.loads(result.pop("baseline_json"))
     result["release_plan"] = json.loads(result.pop("release_plan_json"))
+    if "coralogix_monitoring" in result["release_plan"] and "monitoring" not in result["release_plan"]:
+        result["release_plan"]["monitoring"] = result["release_plan"]["coralogix_monitoring"]
+    result["review_policy"] = json.loads(result.pop("review_policy_json") or "null")
+    result["verification_requirements"] = json.loads(result.pop("verification_requirements_json") or "null")
+    result["source_resolved"] = result["source_type"] != "reference"
     result["duplicate_hints"] = [hint["case_id"] for hint in hint_details]
     result["duplicate_hint_details"] = hint_details
     result["evidence"] = evidence
@@ -560,6 +671,9 @@ def _details(connection, row, engagement_root: Path):
     result["transitions"] = transitions
     result["deployment"] = dict(deployment) if deployment else None
     result["human_verifications"] = human_verifications
+    result["environment_leases"] = [dict(item) for item in connection.execute(
+        "SELECT * FROM remediation_environment_leases WHERE case_id=? ORDER BY acquired_at,token", (case_id,),
+    )]
     result["review_digest"] = digest
     result["review_evidence_missing"] = _review_evidence_missing(row, evidence, engagement_root)
     result["review_evidence_ready"] = not result["review_evidence_missing"]
@@ -614,6 +728,8 @@ def list_cases(key: str) -> list[dict[str, Any]]:
                 "worktree_path": row["worktree_path"],
                 "worktree_branch": row["worktree_branch"],
                 "worktree_revision": row["worktree_revision"],
+                "base_branch": row["base_branch"],
+                "base_revision": row["base_revision"],
                 "baseline_outcome": json.loads(row["baseline_json"]).get("outcome", "pending"),
                 "production_canary_decision": json.loads(row["release_plan_json"]).get("production_canary_decision"),
                 "approval_recorded": approved,
@@ -634,13 +750,14 @@ def get_case(key: str, case_id: int) -> dict[str, Any]:
 def create_case(key: str, data: dict[str, Any]) -> dict[str, Any]:
     owner = engagement(key)
     with db.get_connection() as connection:
+        connection.execute("BEGIN IMMEDIATE")
         finding_ids = _validate_finding_ids(connection, data.get("finding_ids", []))
         exists = connection.execute(
-            "SELECT 1 FROM remediation_cases WHERE engagement_id=? AND source_type=? AND source_key=?",
+            "SELECT id FROM remediation_cases WHERE engagement_id=? AND source_type=? AND source_key=?",
             (owner.id, data["source_type"], data["source_key"]),
         ).fetchone()
         if exists:
-            raise HTTPException(409, "Source already has a remediation case")
+            raise HTTPException(409, {"message": "Source already has a remediation case", "existing_case_id": exists["id"]})
         cursor = connection.execute(
             "INSERT INTO remediation_cases(engagement_id,source_type,source_key,title,snapshot_json) VALUES(?,?,?,?,?)",
             (owner.id, data["source_type"], data["source_key"], data["title"],
@@ -648,6 +765,32 @@ def create_case(key: str, data: dict[str, Any]) -> dict[str, Any]:
         )
         connection.executemany("INSERT INTO remediation_case_findings(case_id,finding_id) VALUES(?,?)", [(cursor.lastrowid, finding_id) for finding_id in finding_ids])
         return _details(connection, _row(connection, owner.id, cursor.lastrowid), Path(owner.engagement_root))
+
+
+def resolve_source(key: str, case_id: int, data: dict[str, Any]) -> dict[str, Any]:
+    owner = engagement(key)
+    if data["source_type"] == "reference":
+        raise HTTPException(400, "Resolved source must identify the actual report provider")
+    with db.get_connection() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        old = _row(connection, owner.id, case_id)
+        if old["source_type"] != "reference" or old["status"] != "intake" or old["worktree_path"]:
+            raise HTTPException(409, "Only pending intake can resolve its source")
+        existing = connection.execute(
+            "SELECT id FROM remediation_cases WHERE engagement_id=? AND source_type=? AND source_key=? AND id<>?",
+            (owner.id, data["source_type"], data["source_key"], case_id),
+        ).fetchone()
+        if existing:
+            raise HTTPException(409, {"message": "Source already has a remediation case", "existing_case_id": existing["id"]})
+        finding_ids = _validate_finding_ids(connection, data.get("finding_ids", []))
+        snapshot = dict(data["snapshot"])
+        snapshot["intake_reference"] = {"source_key": old["source_key"], "snapshot": json.loads(old["snapshot_json"])}
+        connection.execute(
+            "UPDATE remediation_cases SET source_type=?,source_key=?,title=?,snapshot_json=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
+            (data["source_type"], data["source_key"], data["title"], _json(snapshot), case_id),
+        )
+        connection.executemany("INSERT OR IGNORE INTO remediation_case_findings(case_id,finding_id) VALUES(?,?)", [(case_id, finding_id) for finding_id in finding_ids])
+        return _details(connection, _row(connection, owner.id, case_id), Path(owner.engagement_root))
 
 
 def _finding(connection, engagement_key: str, slug: str):
@@ -723,20 +866,45 @@ def patch_case(key: str, case_id: int, changes: dict[str, Any]) -> dict[str, Any
             if not path.is_absolute() or not path.is_dir():
                 raise HTTPException(400, "Worktree path must be an existing absolute directory")
             expected = Path(owner.engagement_root).resolve() / "remediation" / "cases" / str(case_id)
-            if not path.resolve().is_relative_to(expected):
+            engagement_root = Path(owner.engagement_root)
+            has_project = (engagement_root / "PROJECT.md").exists() or (engagement_root / "remediation-project.json").exists()
+            if not path.resolve().is_relative_to(expected) and not has_project:
                 raise HTTPException(400, "Worktree must belong to this case")
             if old["worktree_path"] and path.resolve() != Path(old["worktree_path"]).resolve():
                 raise HTTPException(409, "Case worktree path is already registered")
-            engagement_root = Path(owner.engagement_root)
-            if (engagement_root / "PROJECT.md").exists() or (engagement_root / "remediation-project.json").exists():
+            for other in connection.execute("SELECT id,worktree_path FROM remediation_cases WHERE id<>? AND worktree_path IS NOT NULL", (case_id,)):
+                if Path(other["worktree_path"]).resolve() == path.resolve():
+                    raise HTTPException(409, "Worktree is already owned by another remediation case")
+            if has_project:
                 try:
-                    repo_value = load_engagement_project(engagement_root)["repository"]
+                    config = _case_project(old, engagement_root)
+                    repo_value = config["repository"]
                 except (OSError, ValueError, KeyError, TypeError):
                     raise HTTPException(400, "Remediation project repository is invalid") from None
                 if not isinstance(repo_value, str) or not Path(repo_value).is_absolute() or not _registered_worktree(Path(repo_value), path):
                     raise HTTPException(400, "Worktree is not registered with the remediation repository")
                 if not (changes.get("worktree_branch") or old["worktree_branch"]):
                     raise HTTPException(400, "Worktree branch is required for this remediation project")
+                if old["review_policy_json"] is None:
+                    changes["review_policy_json"] = _json(config)
+                    changes.setdefault("base_branch", config.get("base_branch") or "main")
+        for field in ("base_branch", "base_revision"):
+            if field in changes:
+                value = changes[field]
+                if not isinstance(value, str) or not value.strip():
+                    raise HTTPException(400, f"{field} must be nonempty")
+                if old[field] and old[field] != value:
+                    raise HTTPException(409, f"Case {field} is immutable")
+        if changes.get("base_branch") or changes.get("base_revision"):
+            path_value = changes.get("worktree_path") or old["worktree_path"]
+            if not path_value:
+                raise HTTPException(400, "Worktree path is required to register a review base")
+            try:
+                base = _vcs.review_base(Path(path_value), changes.get("base_branch") or old["base_branch"] or "main",
+                                        changes.get("base_revision") or old["base_revision"])
+            except (OSError, ValueError, subprocess.SubprocessError):
+                raise HTTPException(400, "Case review base cannot be resolved in its worktree") from None
+            changes["base_revision"] = base
         if "worktree_branch" in changes:
             branch = changes["worktree_branch"]
             if not isinstance(branch, str) or not branch.strip():
@@ -773,7 +941,20 @@ def patch_baseline(key: str, case_id: int, data: dict[str, str | None]) -> dict[
     return patch_case(key, case_id, {"baseline_json": _json(data)})
 
 
+def patch_verification_plan(key: str, case_id: int, data: dict[str, Any]) -> dict[str, Any]:
+    changes = {"verification_plan": data["verification_plan"]}
+    if "requirements" in data:
+        if not data["requirements"] or not data.get("alternatives_reason", "").strip():
+            raise HTTPException(400, "Verification alternatives require evidence requirements and a reason")
+        changes["verification_requirements_json"] = _json({
+            "requirements": data["requirements"], "alternatives_reason": data["alternatives_reason"],
+        })
+    return patch_case(key, case_id, changes)
+
+
 def patch_release_plan(key: str, case_id: int, data: dict[str, str]) -> dict[str, Any]:
+    if "coralogix_monitoring" in data and "monitoring" not in data:
+        data = {**data, "monitoring": data["coralogix_monitoring"]}
     return patch_case(key, case_id, {"release_plan_json": _json(data)})
 
 
@@ -799,6 +980,99 @@ def _evidence_revision(path_value: str | None, revision: str) -> str:
         raise HTTPException(400, "Evidence revision must identify a commit in the case worktree") from None
 
 
+def _environment_scope(row, engagement_root: Path) -> str:
+    try:
+        repository = _case_project(row, engagement_root).get("repository")
+    except (OSError, ValueError):
+        repository = None
+    return str(Path(repository).resolve()) if repository else str(engagement_root.resolve())
+
+
+def _owned_environment(connection, row, engagement_root: Path, environment: str, token: str | None, revision: str | None):
+    lease = connection.execute(
+        "SELECT * FROM remediation_environment_leases WHERE scope=? AND environment=? AND released_at IS NULL",
+        (_environment_scope(row, engagement_root), environment),
+    ).fetchone()
+    if not lease or lease["case_id"] != row["id"] or lease["token"] != token or lease["revision"] != revision:
+        raise HTTPException(409, "Shared environment is not owned by this case at the evidence revision")
+    return lease
+
+
+def _evidence_runtime_confirmed(item) -> bool:
+    if (not item.get("shared_environment") or not item.get("environment_token") or not item.get("revision")
+            or item.get("runtime_revision") != item["revision"]):
+        return False
+    with db.get_connection() as connection:
+        return connection.execute(
+            "SELECT 1 FROM remediation_environment_leases WHERE token=? AND case_id=? AND environment=? AND revision=? AND observed_revision=?",
+            (item["environment_token"], item["case_id"], item["shared_environment"], item["revision"], item["revision"]),
+        ).fetchone() is not None
+
+
+def acquire_environment(key: str, data: dict[str, Any]) -> dict[str, Any]:
+    owner = engagement(key)
+    with db.get_connection() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        row = _row(connection, owner.id, data["case_id"])
+        if row["status"] == "closed" or not _case_worktree_identity(row, Path(owner.engagement_root)):
+            raise HTTPException(409, "Shared testing requires an open case and registered workspace")
+        revision = _evidence_revision(row["worktree_path"], data["revision"])
+        if revision != row["worktree_revision"] or revision != _actual_revision(row["worktree_path"]):
+            raise HTTPException(409, "Shared testing revision differs from the current case workspace")
+        if not _worktree_clean(row["worktree_path"]):
+            raise HTTPException(409, "Shared testing requires committed case source")
+        scope = _environment_scope(row, Path(owner.engagement_root))
+        current = connection.execute(
+            "SELECT * FROM remediation_environment_leases WHERE scope=? AND environment=? AND released_at IS NULL",
+            (scope, data["environment"]),
+        ).fetchone()
+        if current:
+            if current["case_id"] == row["id"] and current["revision"] == revision and current["actor"] == data["actor"]:
+                return {**dict(current), "created": False}
+            raise HTTPException(409, {"message": "Shared environment is already owned", "case_id": current["case_id"], "revision": current["revision"]})
+        token = secrets.token_hex(24)
+        connection.execute(
+            "INSERT INTO remediation_environment_leases(scope,environment,case_id,revision,actor,token) VALUES(?,?,?,?,?,?)",
+            (scope, data["environment"], row["id"], revision, data["actor"], token),
+        )
+        return {**dict(connection.execute("SELECT * FROM remediation_environment_leases WHERE token=?", (token,)).fetchone()), "created": True}
+
+
+def release_environment(key: str, data: dict[str, Any]) -> dict[str, Any]:
+    owner = engagement(key)
+    with db.get_connection() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        row = _row(connection, owner.id, data["case_id"])
+        lease = connection.execute(
+            "SELECT * FROM remediation_environment_leases WHERE scope=? AND environment=? AND released_at IS NULL",
+            (_environment_scope(row, Path(owner.engagement_root)), data["environment"]),
+        ).fetchone()
+        if not lease or lease["case_id"] != row["id"] or lease["token"] != data["token"]:
+            raise HTTPException(409, "Only the owning case and lease token can release a shared environment")
+        connection.execute(
+            "UPDATE remediation_environment_leases SET released_at=CURRENT_TIMESTAMP,released_by=? WHERE token=?",
+            (data["actor"], data["token"]),
+        )
+        return dict(connection.execute("SELECT * FROM remediation_environment_leases WHERE token=?", (data["token"],)).fetchone())
+
+
+def confirm_environment(key: str, data: dict[str, Any]) -> dict[str, Any]:
+    owner = engagement(key)
+    with db.get_connection() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        row = _row(connection, owner.id, data["case_id"])
+        observed = _evidence_revision(row["worktree_path"], data["observed_revision"])
+        lease = _owned_environment(connection, row, Path(owner.engagement_root), data["environment"], data["token"], observed)
+        if observed != row["worktree_revision"] or observed != _actual_revision(row["worktree_path"]) or not _worktree_clean(row["worktree_path"]):
+            raise HTTPException(409, "Served runtime revision differs from current committed case source")
+        if lease["observed_revision"] is None:
+            connection.execute(
+                "UPDATE remediation_environment_leases SET observed_revision=?,confirmed_at=CURRENT_TIMESTAMP,confirmed_by=? WHERE token=?",
+                (observed, data["actor"], data["token"]),
+            )
+        return dict(connection.execute("SELECT * FROM remediation_environment_leases WHERE token=?", (data["token"],)).fetchone())
+
+
 def add_evidence(key: str, case_id: int, data: dict[str, Any]) -> dict[str, Any]:
     owner = engagement(key)
     with db.get_connection() as connection:
@@ -808,13 +1082,33 @@ def add_evidence(key: str, case_id: int, data: dict[str, Any]) -> dict[str, Any]
         revision = data.get("revision")
         if revision is not None:
             revision = _evidence_revision(row["worktree_path"], revision)
+        execution = data.get("execution", "executed")
+        executed_revision = data.get("executed_revision")
+        if executed_revision is not None:
+            executed_revision = _evidence_revision(row["worktree_path"], executed_revision)
+            if execution != "executed" or executed_revision != revision:
+                raise HTTPException(400, "Executed revision must match the evidence revision and executed evidence")
+        executed_directory = data.get("executed_directory")
+        if executed_directory is not None:
+            directory = Path(executed_directory)
+            if execution != "executed" or not directory.is_absolute() or not directory.is_dir():
+                raise HTTPException(400, "Executed directory must identify the actual absolute command working directory")
+            executed_directory = str(directory.resolve())
+        runtime_revision = None
+        if data.get("shared_environment"):
+            lease = _owned_environment(connection, row, Path(owner.engagement_root), data["shared_environment"],
+                                       data.get("environment_token"), revision)
+            if data["method"].casefold() in {"stagehand", "browse"} and lease["observed_revision"] != revision:
+                raise HTTPException(409, "Browser evidence requires confirmed served runtime revision")
+            runtime_revision = lease["observed_revision"]
         artifact_sha = None
         if data.get("artifact_path"):
             artifact_sha = _sha256_file(_artifact(Path(owner.engagement_root), case_id, data["artifact_path"]))
         cursor = connection.execute(
-            "INSERT INTO remediation_evidence(case_id,kind,method,environment,command,observed,proved,outcome,artifact_path,artifact_sha256,revision) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO remediation_evidence(case_id,kind,method,environment,command,observed,proved,outcome,artifact_path,artifact_sha256,revision,execution,executed_revision,executed_directory,shared_environment,environment_token,runtime_revision) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (case_id, data["kind"], data["method"], data["environment"], data.get("command", ""), data["observed"],
-             data["proved"], data.get("outcome"), data.get("artifact_path"), artifact_sha, revision),
+             data["proved"], data.get("outcome"), data.get("artifact_path"), artifact_sha, revision,
+             execution, executed_revision, executed_directory, data.get("shared_environment"), data.get("environment_token"), runtime_revision),
         )
         return dict(connection.execute("SELECT * FROM remediation_evidence WHERE id=?", (cursor.lastrowid,)).fetchone())
 
@@ -841,7 +1135,9 @@ def approve(
             raise HTTPException(409, "Claimed revision differs from worktree HEAD")
         if not _worktree_clean(row["worktree_path"]):
             raise HTTPException(409, "Commit or remove worktree changes before approval")
-        _, _, _, review_truncated, _ = _review_patch(row["worktree_path"])
+        if row["source_type"] == "reference":
+            raise HTTPException(409, "Pending source must be resolved before approval")
+        _, _, _, review_truncated, _ = _row_review_patch(row)
         if review_truncated:
             raise HTTPException(409, "Review diff is truncated; split or narrow the change before approval")
         package = _details(connection, row, Path(owner.engagement_root))
@@ -877,7 +1173,7 @@ def transition(key: str, case_id: int, status: str, actor: str, reason: str) -> 
                 raise HTTPException(409, "Review approval is no longer current")
         if status == "pr_draft":
             release = json.loads(row["release_plan_json"])
-            if release.get("production_canary_decision") not in {"required", "not_required"} or not release.get("production_canary_rationale") or not release.get("coralogix_monitoring"):
+            if release.get("production_canary_decision") not in {"required", "not_required"} or not release.get("production_canary_rationale") or not (release.get("monitoring") or release.get("coralogix_monitoring")):
                 raise HTTPException(409, "Production canary decision and monitoring plan are required")
             if release["production_canary_decision"] == "required" and not release.get("safe_procedure"):
                 raise HTTPException(409, "Production canary procedure is required")

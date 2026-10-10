@@ -5,49 +5,45 @@ Research collection: `classify-surface-2026-06`.
 Status: synthetic public evidence summary. ADR 0004 records the accepted design and
 `IMPLEMENTATION-SPEC.md` records the executable classifier contract.
 
-The June 2026 research used a synthetic corpus designed to exercise unrelated surface shapes. This
-summary preserves the conclusions needed to maintain and review the classifier. The checked-in test
-matrix supplies the reproducible regression evidence.
+This public summary explains the design rationale needed to maintain and review the classifier.
+The checked-in synthetic test matrix supplies reproducible regression evidence; it does not
+reproduce private engagement measurements.
 
 ## Evidence shape
 
-Four independent surface shapes were used:
+The synthetic regressions cover four surface shapes:
 
-- a large public-sector web estate with a deep priority-zero tail;
-- a consumer application corpus used as an independent quantitative contrast;
-- a modern SaaS corpus used for qualitative API and GraphQL validation; and
-- a broad legacy estate used to stress archive, file-transfer, and older application paths.
+- a large fictional Acme web estate with nested routes;
+- a fictional consumer application with unrelated route shapes;
+- a fictional SaaS application with API and GraphQL routes; and
+- a fictional legacy estate with archive, file-transfer, and older application paths.
 
-The research progressed from a small stratified sample through two deep-tail passes and a targeted
-pass over risky route families. A second-pass review corrected systematic over-classification of
-ordinary content routes. Raw row counts are intentionally omitted because they are not part of the
-runtime contract; the checked-in cases are the reproducible evidence.
+Raw engagement measurements are excluded from this public contract. The synthetic cases pin
+runtime behavior without identifying targets or claiming to reproduce those measurements.
 
-## Cross-corpus conclusions
+## Design rationale
 
 ### GraphQL and API
 
-GraphQL routes repeatedly fell through to the generic path bucket even though they represented an
-important application surface in unrelated estates. The accepted `graphql` bucket therefore has a
-high-value floor. Generic REST-like API paths were the largest missed class by volume, but were not
-uniformly high-value; the lower `api` floor preserves coverage without treating every API route as
+GraphQL routes need a distinct bucket because a generic path label loses the application shape. The accepted `graphql` bucket therefore has a
+high-value floor. Generic REST-like API paths are not uniformly high-value; the lower `api` floor preserves coverage without treating every API route as
 an urgent finding. The bare `/api/` fragment/type-floor reconciliation is specified in
 `IMPLEMENTATION-SPEC.md` section 6.3.
 
 ### Deserialization
 
-Encoded application-state routes remained security-relevant even when their suffix resembled a
+Encoded application-state routes can remain security-relevant even when their suffix resembled a
 static JavaScript asset. The accepted rule recognizes the narrow loader-state path family rather
 than globally boosting encoded or `.js` paths.
 
 ### Object storage
 
-Legacy document-library routes formed a material long-tail class. The rule is deliberately
+Legacy document-library routes need product-aware classification. The rule is deliberately
 product-shape-aware; a blanket `/files/` rule would misclassify ordinary static documents.
 
 ### Authentication and identity
 
-Authentication entry points, SSO routes, and OIDC discovery documents were repeatedly under-ranked.
+Authentication entry points, SSO routes, and OIDC discovery documents need distinct classification.
 They have distinct buckets because their security value and false-positive profiles differ.
 
 ## Public reproducibility

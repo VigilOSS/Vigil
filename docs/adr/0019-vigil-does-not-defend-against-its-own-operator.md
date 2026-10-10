@@ -110,8 +110,8 @@ no guard, because it is trusted.
 
 A future agent-error guardrail must therefore act where the command is executed
 rather than where it is spelled — the client's own permission layer, or a
-constrained execution surface Vigil owns. [Issue #35](https://github.com/vigil-oss/vigil/issues/35)
-carries the scoping.
+constrained execution surface Vigil owns. Such a change requires a separate review of that
+trust boundary.
 
 The distinguishing question is always the same: *who is the adversary, and what
 does this stop them reaching?* If the answer is "the operator, from their own

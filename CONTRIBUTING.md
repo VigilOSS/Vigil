@@ -30,17 +30,24 @@ This repository itself is a colocated Jujutsu repository. If you work in a check
 for commits, bookmarks, conflict resolution, and pushes, and keep Git for read-only inspection.
 Mixing raw `git commit` into a colocated checkout desynchronizes the two repositories.
 
-Maintainers of the canonical `vigil-oss/vigil` repository must configure the neutral project
+Maintainers of the canonical `VigilOSS/Vigil` repository must configure the neutral project
 identity and tracked hooks in every clone:
 
 ```bash
 python3 tools/check_public_commit_identity.py --install
 ```
 
-This sets only repository-local Git and jj identity. The pre-commit hook rejects a misconfigured
-clone; the pre-push hook rejects known private identity residue while continuing to allow external
-contributors to retain their own attribution. CI runs the same history audit independently because
-Git does not activate cloned hooks automatically and jj pushes do not rely on Git hook execution.
+This sets repository-local Git and jj identity. Hooks check configured and effective identities;
+pre-push and CI require the neutral project identity for every author and committer in canonical
+history. Maintainers import approved contributions using that identity; contributor attribution
+remains in the pull request. Git does not activate cloned hooks automatically, and jj pushes do not
+rely on Git hook execution.
+
+Private source checks read audit fingerprints from `.git/vigil-private-identity-digests.json` or
+`VIGIL_PRIVATE_IDENTITY_DIGESTS` (a JSON array of SHA-256 digests). Keep this policy out of tracked
+files: even a hash of a private name can be matched against guesses. Trusted push CI receives the
+policy from a repository secret; fork PRs run the portable guards and explicitly skip the private
+policy checks. Maintainer release audits must supply the policy.
 
 There is no commit-message convention. Write a message that says what changed and why.
 

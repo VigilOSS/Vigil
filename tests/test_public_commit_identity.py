@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-import hashlib
 import importlib.util
 import sys
 
@@ -25,32 +24,22 @@ def test_repository_provides_portable_identity_hooks() -> None:
     assert SCRIPT.is_file()
 
 
-def test_identity_audit_rejects_private_identity_but_allows_contributors() -> None:
+def test_identity_audit_requires_approved_author_and_committer() -> None:
     checker = _load_checker()
-    private_email = "private@example.com"
-    checker._BANNED_EMAIL_DIGESTS = {hashlib.sha256(private_email.encode()).hexdigest()}
     records = [
-        checker.CommitIdentity(
-            "a" * 40,
-            "External Contributor",
-            "contributor@example.com",
-            "External Contributor",
-            "contributor@example.com",
-        ),
-        checker.CommitIdentity(
-            "b" * 40,
-            checker.APPROVED_NAME,
-            private_email,
-            checker.APPROVED_NAME,
-            checker.APPROVED_EMAIL,
-        ),
+        checker.CommitIdentity("a" * 40, "External Contributor", "contributor@example.com",
+                               "External Contributor", "contributor@example.com"),
+        checker.CommitIdentity("b" * 40, checker.APPROVED_NAME, "private@example.com",
+                               checker.APPROVED_NAME, checker.APPROVED_EMAIL),
+        checker.CommitIdentity("c" * 40, checker.APPROVED_NAME, checker.APPROVED_EMAIL,
+                               checker.APPROVED_NAME, checker.APPROVED_EMAIL),
     ]
 
     errors = checker.identity_errors(records)
 
-    assert len(errors) == 2
-    assert "private author email" in errors[0]
-    assert "must use" in errors[1]
+    assert len(errors) == 3
+    assert all("must use" in error for error in errors)
+    assert not any("c" * 40 in error for error in errors)
 
 
 def test_pre_push_ranges_cover_new_updates_and_skip_deletions() -> None:
@@ -68,3 +57,29 @@ def test_pre_push_ranges_cover_new_updates_and_skip_deletions() -> None:
     )
 
     assert revisions == [f"{remote}..{local}", local]
+
+
+def test_config_check_rejects_effective_identity_overrides(monkeypatch) -> None:
+    checker = _load_checker()
+    monkeypatch.chdir(REPO_ROOT)
+    monkeypatch.setattr(checker, "_local_config", lambda key: {
+        "user.name": checker.APPROVED_NAME,
+        "user.email": checker.APPROVED_EMAIL,
+    }[key])
+    monkeypatch.setattr(checker, "_run", lambda command: (
+        "Other Maintainer <maintainer@example.com> 0 +0000"
+        if command[:2] == ("git", "var") else "maintainer@example.com"
+    ))
+
+    errors = checker._check_local_config()
+
+    assert any("effective Git author" in error for error in errors)
+    assert any("effective Git committer" in error for error in errors)
+    assert any("jj" in error for error in errors)
+
+
+def test_fork_history_can_retain_contributor_attribution() -> None:
+    checker = _load_checker()
+    records = [checker.CommitIdentity("a" * 40, "External Contributor", "contributor@example.com",
+                                      "External Contributor", "contributor@example.com")]
+    assert checker.identity_errors(records, allow_contributors=True) == []

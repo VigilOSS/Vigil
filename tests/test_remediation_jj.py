@@ -319,6 +319,7 @@ def test_jj_github_pr_creation_and_reconciliation_use_same_explicit_origin(
         for index, kind in enumerate(("red-test", "green-test", "stagehand"), 1)
     ]
     case = {
+        "id": 1,
         "status": "approved",
         "approval_current": True,
         "approvals": [{"review_digest": digest, "evidence_cutoff_id": 3}],

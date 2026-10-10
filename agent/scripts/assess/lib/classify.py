@@ -115,13 +115,12 @@ _MANIFEST_CT = re.compile(r"application/manifest\+json", re.IGNORECASE)
 # below is the resolution order on the (rare) co-occurring single segment.
 #
 # AUTH-MANAGEMENT extension (account-takeover surfaces). A recurring,
-# cross-corpus pocket of genuinely high-value auth-management routes — password
+# set of high-value auth-management routes — password
 # reset, account activation/unlock, signup/registration, account recovery,
 # email verification — fell through the original auth set
-# (`login|signin|sso|...`) and landed `type='unknown'`. Confirmed real examples:
-# The nested route fixtures's camelCase `/efi/security/forgotPassword`,
+# (`login|signin|sso|...`) and landed `type='unknown'`. Regression examples include camelCase `/efi/security/forgotPassword`,
 # `/efi/security/activateUserAccount`, `/efi/security/unlockUserAccount`,
-# `/efi/signup`; acme's hyphenated `/forgot-password`. These rescue to
+# `/efi/signup` and the hyphenated `/forgot-password`. These rescue to
 # `auth_entry` (floor 40) alongside the base auth keywords.
 #
 # classify_type matches on the (case-insensitive) path, so each keyword tolerates
@@ -133,8 +132,7 @@ _MANIFEST_CT = re.compile(r"application/manifest\+json", re.IGNORECASE)
 # `/unlockable-content`, `/recovery-stories`, `/account-benefits` all fail
 # because the keyword is not followed by a `/`, `?`, `#`, or end-of-path.
 #
-# The `/security/` route-segment hint (the nested route fixtures groups auth-management under a
-# `/security/` path prefix) is covered IMPLICITLY by these verb-anchored rules:
+# The `/security/` route-segment hint is covered by these verb-anchored rules:
 # `/efi/security/forgotPassword` matches the `forgot-?password` keyword on its
 # own segment, while `/efi/security/dashboard` does NOT match any auth verb and
 # so is correctly left alone — no separate `/security/`-prefixed rule is needed
@@ -164,7 +162,7 @@ _LEXICAL_ROUTE_RULES: tuple[tuple["re.Pattern[str]", str], ...] = (
         # (`forgot-password`, `activate-account`) both match. The
         # `activate`/`unlock` variants accept an optional trailing
         # `(-?user)?-?account` so `/activate`, `/activate-account`, and
-        # the nested route fixtures's `/activateUserAccount` all fire, while
+        # `/activateUserAccount` all fire, while
         # `/activate-your-warranty-online` (no boundary after `activate`) does
         # not.
         re.compile(

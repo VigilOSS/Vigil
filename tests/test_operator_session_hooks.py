@@ -662,10 +662,7 @@ def test_session_end_exits_zero_with_no_runner_available(tmp_path: Path) -> None
     shutil.copy2(SESSION_END, script)
     # The engagement-resolution lib is present; only the runners are absent.
     shutil.copytree(HOOKS_DIR.parent / "lib", scripts_dir / "lib")
-    jq = shutil.which("jq")
-    assert jq is not None, "jq is required by every Vigil hook"
-    path_without_vigil = f"{Path(jq).parent}:/usr/bin:/bin"
-    assert shutil.which("vigil", path=path_without_vigil) is None
+    path_without_vigil = _path_without_vigil(tmp_path)
 
     result = _run_hook(
         script,
@@ -830,10 +827,13 @@ def _fake_assess_py(scripts_dir: Path, capture: Path) -> Path:
     return assess
 
 
-def _path_without_vigil() -> str:
+def _path_without_vigil(tmp_path: Path) -> str:
     jq = shutil.which("jq")
     assert jq is not None, "jq is required by every Vigil hook"
-    path = f"{Path(jq).parent}:/usr/bin:/bin"
+    bin_dir = tmp_path / "hook-bin"
+    bin_dir.mkdir()
+    (bin_dir / "jq").symlink_to(jq)
+    path = f"{bin_dir}:/usr/bin:/bin"
     assert shutil.which("vigil", path=path) is None
     return path
 
@@ -889,7 +889,7 @@ def test_post_tool_log_fallback_execs_assess_py_through_its_own_shebang(
         hook,
         {**_BASH_PAYLOAD, "cwd": str(engagement_dir)},
         cwd=engagement_dir,
-        env={"PATH": _path_without_vigil()},
+        env={"PATH": _path_without_vigil(tmp_path)},
     )
 
     assert result.returncode == 0
@@ -914,7 +914,7 @@ def test_post_tool_log_is_silent_and_clean_when_no_runner_is_available(
         hook,
         {**_BASH_PAYLOAD, "cwd": str(engagement_dir)},
         cwd=engagement_dir,
-        env={"PATH": _path_without_vigil()},
+        env={"PATH": _path_without_vigil(tmp_path)},
     )
 
     assert result.returncode == 0

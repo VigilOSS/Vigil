@@ -12,7 +12,7 @@ from app import db
 from app.services import remediation
 
 
-KEY = "Acme-remediation"
+KEY = "acme-remediation"
 BASE = f"/engagements/{KEY}/remediation"
 
 
@@ -897,7 +897,9 @@ def test_remediation_case_binds_registered_worktree_branch_across_revision_sync(
     case = _case(client, isolate_settings)
     worktree = isolate_settings["engagements_dir"] / KEY / "remediation" / "cases" / str(case["id"]) / "worktree"
     worktree.mkdir(parents=True)
-    subprocess.run(["git", "init", "-q", "--initial-branch=fix/custom-case", str(worktree)], check=True)
+    subprocess.run(["git", "init", "-q", "--initial-branch=main", str(worktree)], check=True)
+    _red_baseline(worktree)
+    subprocess.run(["git", "-C", str(worktree), "switch", "-qc", "fix/custom-case"], check=True)
     (isolate_settings["engagements_dir"] / KEY / "PROJECT.md").write_text(
         '+++\nrepository = ' + json.dumps(str(worktree)) + '\n+++\n'
     )
@@ -936,7 +938,9 @@ def test_remediation_case_rejects_revision_sync_after_checkout_switch(client, is
     case = _case(client, isolate_settings)
     worktree = isolate_settings["engagements_dir"] / KEY / "remediation" / "cases" / str(case["id"]) / "worktree"
     worktree.mkdir(parents=True)
-    subprocess.run(["git", "init", "-q", "--initial-branch=fix/custom-case", str(worktree)], check=True)
+    subprocess.run(["git", "init", "-q", "--initial-branch=main", str(worktree)], check=True)
+    _red_baseline(worktree)
+    subprocess.run(["git", "-C", str(worktree), "switch", "-qc", "fix/custom-case"], check=True)
     (isolate_settings["engagements_dir"] / KEY / "PROJECT.md").write_text(
         '+++\nrepository = ' + json.dumps(str(worktree)) + '\n+++\n'
     )

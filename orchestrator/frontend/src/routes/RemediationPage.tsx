@@ -392,7 +392,7 @@ function RemediationWorkspace({ engagementKey, onBack, initialCaseId }: Props) {
   }
 
   async function saveReleasePlan() {
-    if (!selected || busy || !releasePlan.production_canary_decision || !releasePlan.production_canary_rationale?.trim() || !releasePlan.coralogix_monitoring?.trim()) return;
+    if (!selected || busy || !releasePlan.production_canary_decision || !releasePlan.production_canary_rationale?.trim() || !(releasePlan.monitoring ?? releasePlan.coralogix_monitoring)?.trim()) return;
     if (releasePlan.production_canary_decision === "required" && !releasePlan.safe_procedure?.trim()) return;
     caseReads.current += 1;
     setBusy(true);
@@ -402,7 +402,7 @@ function RemediationWorkspace({ engagementKey, onBack, initialCaseId }: Props) {
         production_canary_decision: releasePlan.production_canary_decision,
         production_canary_rationale: releasePlan.production_canary_rationale,
         safe_procedure: releasePlan.safe_procedure || "",
-        coralogix_monitoring: releasePlan.coralogix_monitoring,
+        monitoring: releasePlan.monitoring ?? releasePlan.coralogix_monitoring,
       });
       clearDraft("releasePlan", selected.id, releasePlan);
       setSelected(next);
@@ -607,7 +607,7 @@ function RemediationWorkspace({ engagementKey, onBack, initialCaseId }: Props) {
                       const label = detailLabel(item);
                       return <figure key={item.id} className="remediation-evidence">
                         {evidenceIsImage(item) && <a href={url} target="_blank" rel="noreferrer"><img src={url} alt={label} loading="lazy" /></a>}
-                        <figcaption><strong>{label}</strong><span>{item.kind.replace(/_/g, " ")} · {item.method}{item.outcome ? ` · ${item.outcome.replace(/_/g, " ")}` : ""}</span><span>Environment: {item.environment ?? "unknown (historical record)"}</span><span>{item.proved}</span>{item.command && <code>{item.command}</code>}<span>Observed: {item.observed}</span>{item.revision && <span>Revision: {item.revision}</span>}{item.artifact_path && <a href={url} target="_blank" rel="noreferrer">Open evidence ↗</a>}</figcaption>
+                        <figcaption><strong>{label}</strong><span>{item.kind.replace(/_/g, " ")} · {item.method}{item.outcome ? ` · ${item.outcome.replace(/_/g, " ")}` : ""}</span><span>Environment: {item.environment ?? "unknown (historical record)"}</span>{item.execution && <span>{item.execution === "executed" ? "Executed evidence" : item.execution === "reasoned" ? "Reasoned evidence" : "Execution unavailable"}</span>}<span>{item.proved}</span>{item.command && <code>{item.command}</code>}<span>Observed: {item.observed}</span>{item.revision && <span>Revision: {item.revision}</span>}{item.runtime_revision && <span>Confirmed runtime revision: {item.runtime_revision}</span>}{item.artifact_path && <a href={url} target="_blank" rel="noreferrer">Open evidence ↗</a>}</figcaption>
                       </figure>;
                     })}
                   </div>
@@ -632,9 +632,9 @@ function RemediationWorkspace({ engagementKey, onBack, initialCaseId }: Props) {
                 <textarea id="remediation-canary-rationale" value={releasePlan.production_canary_rationale || ""} onChange={(event) => editReleasePlan({ ...releasePlan, production_canary_rationale: event.target.value })} rows={3} />
                 <label htmlFor="remediation-safe-procedure">Safe canary procedure</label>
                 <textarea id="remediation-safe-procedure" value={releasePlan.safe_procedure || ""} onChange={(event) => editReleasePlan({ ...releasePlan, safe_procedure: event.target.value })} rows={3} placeholder="Required when a production canary is needed" />
-                <label htmlFor="remediation-coralogix">Coralogix monitoring</label>
-                <textarea id="remediation-coralogix" value={releasePlan.coralogix_monitoring || ""} onChange={(event) => editReleasePlan({ ...releasePlan, coralogix_monitoring: event.target.value })} rows={3} />
-                <div className="remediation-plan-actions"><span>{releasePlanDirty ? "Unsaved release decision" : "Release plan saved"}</span><button type="button" onClick={saveReleasePlan} disabled={!releasePlanDirty || busy || !releasePlan.production_canary_decision || !releasePlan.production_canary_rationale?.trim() || !releasePlan.coralogix_monitoring?.trim() || (releasePlan.production_canary_decision === "required" && !releasePlan.safe_procedure?.trim())}>Save release plan</button></div>
+                <label htmlFor="remediation-monitoring">Monitoring plan</label>
+                <textarea id="remediation-monitoring" value={releasePlan.monitoring ?? releasePlan.coralogix_monitoring ?? ""} onChange={(event) => editReleasePlan({ ...releasePlan, monitoring: event.target.value })} rows={3} />
+                <div className="remediation-plan-actions"><span>{releasePlanDirty ? "Unsaved release decision" : "Release plan saved"}</span><button type="button" onClick={saveReleasePlan} disabled={!releasePlanDirty || busy || !releasePlan.production_canary_decision || !releasePlan.production_canary_rationale?.trim() || !(releasePlan.monitoring ?? releasePlan.coralogix_monitoring)?.trim() || (releasePlan.production_canary_decision === "required" && !releasePlan.safe_procedure?.trim())}>Save release plan</button></div>
                 </fieldset>
               </section>
 
@@ -660,8 +660,13 @@ function RemediationWorkspace({ engagementKey, onBack, initialCaseId }: Props) {
 
               <section className="remediation-section remediation-review" hidden={activePane !== "review"}>
                 <div className="remediation-section-heading"><h3>Review approval</h3><span>{selected.approval_current ? "Current" : "Needs approval"}</span></div>
+                {selected.verification_requirements && <div className="remediation-verification-requirements">
+                  <h4>Verification alternatives</h4>
+                  <p>{selected.verification_requirements.alternatives_reason}</p>
+                  <ul>{selected.verification_requirements.requirements.map((requirement, index) => <li key={index}>{requirement.kind} · {requirement.methods.join(", ")} · {requirement.execution} · {requirement.revision} revision{requirement.browser_purpose ? ` · ${requirement.browser_purpose}` : ""}{requirement.legitimate_use_control ? " · legitimate-use control" : ""}{requirement.rationale ? ` · ${requirement.rationale}` : ""}</li>)}</ul>
+                </div>}
                 <p>Review the code diff, baseline, tests, screenshots, and human plan before approving. Approval applies to this exact code and plan snapshot.</p>
-                {selected.review_evidence_ready ? <p className="remediation-ok">Required red/green Laravel and Stagehand happy-path evidence is registered.</p> : <div className="remediation-evidence-gate"><strong>Required evidence is missing</strong><ul>{selected.review_evidence_missing.map((item, index) => <li key={index}>{item}</li>)}</ul></div>}
+                {selected.review_evidence_ready ? <p className="remediation-ok">The case’s required verification evidence is registered.</p> : <div className="remediation-evidence-gate"><strong>Required evidence is missing</strong><ul>{selected.review_evidence_missing.map((item, index) => <li key={index}>{item}</li>)}</ul></div>}
                 <div className="remediation-diff">
                   <div className="remediation-section-heading"><h3>Code diff</h3><span>{diff ? `${diff.base_revision} → ${diff.head_revision}` : ""}</span></div>
                   {diffError ? <p role="alert">Diff unavailable: {diffError}</p> : !diff ? <p>Loading code diff…</p> : <>
