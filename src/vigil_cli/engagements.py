@@ -312,6 +312,10 @@ def plan_engagement(options: CreateEngagementOptions, *, now: datetime | None = 
     remediation_project_snapshot = dict(options.remediation_config)
     if options.engagement_type not in ENGAGEMENT_TYPES:
         raise SystemExit("--type must be one of: web, code, android, blue, remediation")
+    if options.engagement_type == "code" and options.repos:
+        raise SystemExit("place code engagement source files in its source/ folder after creation")
+    if options.engagement_type not in {"code", "remediation"} and options.repos:
+        raise SystemExit("repository inputs apply only to remediation engagements")
     if options.dynamic_mode not in ANDROID_DYNAMIC_MODES:
         raise SystemExit("--dynamic-mode must be one of: static_only, device, emulator")
     if options.engagement_type == "blue":
@@ -431,7 +435,7 @@ def plan_engagement(options: CreateEngagementOptions, *, now: datetime | None = 
             "approved_targets": [],
             "status": "in_progress",
         }
-        manifest = {"key": key, "name": name, "target": name, "repos": repos, "created_at": created_at}
+        manifest = {"key": key, "name": name, "target": name, "created_at": created_at}
     elif options.engagement_type == "android":
         scope = {
             "engagement_type": "android",
@@ -686,11 +690,21 @@ def create_engagement(
     # Blue engagements own their own footer (blue.py:_cmd_engage) and must not
     # emit the red-infra footer (mitmproxy/oob are irrelevant to incident
     # response). Skip entirely for blue so blue.py has sole footer ownership.
-    if contact_backend and options.engagement_type not in {"blue", "remediation"}:
+    if options.engagement_type == "code":
+        _emit_code_source_footer(eng_dir)
+    elif contact_backend and options.engagement_type not in {"blue", "remediation"}:
         print("[vigil] Checking local services...", file=sys.stderr, flush=True)
         _emit_post_create_footer(key)
     print("[vigil] Engagement created.", file=sys.stderr, flush=True)
     return CreatedEngagement(key=key, path=eng_dir)
+
+
+def _emit_code_source_footer(engagement_dir: Path) -> None:
+    source = engagement_source_state(engagement_dir)
+    print(f"[vigil] source: {source['path']} ({source['state']})", file=sys.stderr)
+    print("[vigil] Place the source files to review in that folder. A Git repository is not required.", file=sys.stderr)
+    print("[vigil] The code client will ask you to confirm the source before reading it for analysis.", file=sys.stderr)
+    print(f"[vigil] start: vigil engagement start {engagement_dir.name} --client codex   (or --client claude)", file=sys.stderr)
 
 
 def _emit_post_create_footer(key: str, *, runner: docker.Runner = docker.run_command) -> None:
@@ -1136,6 +1150,7 @@ def engagement_mode_state(install_root: Path, engagement_dir: Path, *, client: s
         "mode": mode,
         "prompt": str(engagement_mode_prompt(install_root, mode)) if mode else None,
         "enabled_tracks": list(tracks),
+        **({"source": engagement_source_state(engagement_dir)} if "code" in tracks else {}),
         "tracks": {
             name: {
                 "phase": track["phase"],
@@ -1145,6 +1160,39 @@ def engagement_mode_state(install_root: Path, engagement_dir: Path, *, client: s
             for name, track in tracks.items()
         },
     }
+
+
+def engagement_source_state(engagement_dir: Path) -> dict[str, Any]:
+    """Describe staged files without reading code or claiming user confirmation."""
+    source = engagement_dir / "source"
+    state: dict[str, Any] = {"path": str(source), "state": "waiting", "file_count": 0, "entries": []}
+    metadata = {".git", ".jj", ".DS_Store"}
+    try:
+        try:
+            directory_stat = source.stat()
+        except FileNotFoundError:
+            return state
+        if not stat.S_ISDIR(directory_stat.st_mode):
+            raise ValueError("source path is not a directory")
+        state["entries"] = sorted(entry.name for entry in source.iterdir() if entry.name not in metadata)
+
+        def fail(exc: OSError) -> None:
+            raise exc
+
+        count = 0
+        for directory, dirs, files in os.walk(source, followlinks=False, onerror=fail):
+            dirs[:] = [name for name in dirs if name not in metadata]
+            count += sum(
+                stat.S_ISREG((Path(directory) / name).stat().st_mode)
+                for name in files if name not in metadata
+            )
+        state["file_count"] = count
+        if count:
+            state["state"] = "present"
+    except (OSError, ValueError) as exc:
+        state["state"] = "unavailable"
+        state["detail"] = str(exc)
+    return state
 
 
 def _append_track_transition(
@@ -1633,6 +1681,16 @@ def start_engagement(install_root: Path, engagement_dir: Path, client: str, extr
         file=sys.stderr,
         flush=True,
     )
+    if selected_mode == "code":
+        source = engagement_source_state(engagement_dir)
+        print(f"source: {source['path']} ({source['state']})", file=sys.stderr, flush=True)
+        flags, message = split_operator_message(extra_args)
+        setup = (
+            "Follow the source confirmation step in the canonical code operator prompt. "
+            "Show me the source folder and ask me to confirm its contents before analysis. "
+            "If it is empty, ask me to place the source files there and wait."
+        )
+        extra_args = [*flags, setup + (f"\n\nAdditional context:\n{message}" if message else "")]
     os.chdir(engagement_dir)
     os.execv(str(launcher), [str(launcher), *client_launch_argv(client, extra_args)])
 

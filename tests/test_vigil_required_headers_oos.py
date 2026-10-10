@@ -146,7 +146,6 @@ def test_new_scope_does_not_write_legacy_repository_keys(engagement_type):
         install_root=Path("/tmp"),
         engagement_type=engagement_type,
         name="project",
-        repos=["/src/project"],
     )
 
     plan = plan_engagement(opts)

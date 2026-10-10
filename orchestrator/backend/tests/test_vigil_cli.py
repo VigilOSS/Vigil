@@ -614,7 +614,7 @@ def test_engagement_create_cli_ambiguous_type_requires_explicit_flag(
     assert not list((install_root / "agent" / "engagements").iterdir())
 
 
-def test_engagement_create_cli_repo_flag_infers_code_type(
+def test_engagement_create_cli_repo_flag_requires_explicit_remediation_type(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     from vigil_cli import main as main_module
@@ -622,6 +622,16 @@ def test_engagement_create_cli_repo_flag_infers_code_type(
     _isolate_orchestrator_url(monkeypatch)
     install_root = tmp_path / "install"
     _copy_agent_fixture(repo_root / "agent", install_root)
+    repository = tmp_path / "acme"
+    subprocess.run(["git", "init", str(repository)], check=True, capture_output=True)
+
+    with pytest.raises(SystemExit, match="--type remediation"):
+        main_module.main([
+            "--root", str(install_root), "engagement", "create", "Acme",
+            "--repo", str(repository), "--no-prompt",
+        ])
+    assert not (repository / "PROJECT.md").exists()
+    assert not list((install_root / "agent/engagements").iterdir())
 
     main_module.main(
         [
@@ -629,9 +639,11 @@ def test_engagement_create_cli_repo_flag_infers_code_type(
             str(install_root),
             "engagement",
             "create",
-            "my-project",
+            "--type",
+            "remediation",
+            "Acme",
             "--repo",
-            str(tmp_path / "repo"),
+            str(repository),
             "--no-prompt",
         ]
     )
@@ -639,13 +651,12 @@ def test_engagement_create_cli_repo_flag_infers_code_type(
     captured = capsys.readouterr()
     created_path = _created_path_from_stdout(captured.out)
     scope = json.loads((created_path / "scope.json").read_text(encoding="utf-8"))
-    assert scope["engagement_type"] == "offensive"
-    assert scope["tracks"] == {"code": {"phase": "ingest"}}
-    assert scope["name"] == "my-project"
-    assert "inferred type: code" in captured.err
+    assert scope["engagement_type"] == "remediation"
+    assert scope["current_phase"] == "intake"
+    assert scope["name"] == "Acme"
 
 
-def test_engagement_create_cli_repo_plus_web_target_requires_explicit_first_track(
+def test_engagement_create_cli_repo_plus_web_target_rejects_mixed_workflows(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from vigil_cli import main as main_module
@@ -654,7 +665,7 @@ def test_engagement_create_cli_repo_plus_web_target_requires_explicit_first_trac
     install_root = tmp_path / "install"
     _copy_agent_fixture(repo_root / "agent", install_root)
 
-    with pytest.raises(SystemExit, match="explicit first track"):
+    with pytest.raises(SystemExit, match="remediation"):
         main_module.main(
             [
                 "--root", str(install_root), "engagement", "create",
@@ -973,8 +984,6 @@ def test_engagement_create_rate_limit_rejected_for_code_engagement(
                 "--type",
                 "code",
                 "myproj",
-                "--repo",
-                str(tmp_path / "repo"),
                 "--no-prompt",
                 "--rate-limit",
                 "5",

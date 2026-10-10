@@ -8,16 +8,18 @@ and flag forwarding: [`agent-clients.md`](agent-clients.md). Start and resume pr
 ## Creating an engagement
 
 ```bash
-vigil engagement create https://target.example --hosts target.example
+vigil engagement create                                  # follow the interactive questions
 vigil engagement list --json                              # find the key
 ```
 
 `create` starts the exploit policy at `pause` — explicit human approval before any exploit work
 — and leaves authentication unset. When `--type` is omitted it is inferred from the inputs
-(URL/host → `web`, `--repo` → `code`, APK or `--package-name` → `android`) and
+(URL/host → `web`, APK or `--package-name` → `android`) and
 echoed on stderr so it can be overridden; ambiguous inputs prompt on a terminal and fail fast
-under `--no-prompt`. Combined source and web target inputs are rejected at creation so the
-first track is explicit.
+under `--no-prompt`. Repository selection requires explicit `--type remediation`.
+Code creation asks for a name and prepares a `source/` folder;
+place the files to review there. The code client asks you to confirm those files at startup.
+Ordinary source folders and loose files work without Git. See [`code-analysis.md`](code-analysis.md).
 
 Scope hosts can be given as `--hosts a,b`, repeated `--host` flags, a
 `--hosts-file`, or any mix. `--dry-run` validates without writing; `--json` emits an object

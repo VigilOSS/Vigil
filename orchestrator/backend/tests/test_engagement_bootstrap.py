@@ -471,23 +471,18 @@ def test_repair_refreshes_stale_claude_hook_settings(tmp_path: Path) -> None:
     assert (claude_dir / "agents").is_symlink()
 
 
-def test_aith_engagement_create_code_mode_with_local_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_aith_engagement_create_code_mode_with_loose_source(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _isolate_orchestrator_url(monkeypatch)
     repo_root = Path(__file__).resolve().parents[3]
     install_root = tmp_path / "install"
     sandbox_root = install_root / "agent"
     sandbox_root.mkdir(parents=True)
     _copy_agent_fixture(repo_root / "agent", sandbox_root, client="claude")
-    fake_repo = tmp_path / "my-cool-project"
-    fake_repo.mkdir()
-    (fake_repo / "main.py").write_text("print('hello')\n", encoding="utf-8")
-
     created = create_engagement(
         CreateEngagementOptions(
             install_root=install_root,
             engagement_type="code",
-            name="my-cool-project",
-            repos=[str(fake_repo)],
+            name="Acme",
         )
     )
 
@@ -496,7 +491,7 @@ def test_aith_engagement_create_code_mode_with_local_repo(tmp_path: Path, monkey
 
     assert scope["engagement_type"] == "offensive"
     assert scope["tracks"] == {"code": {"phase": "ingest"}}
-    assert scope["name"] == "my-cool-project"
+    assert scope["name"] == "Acme"
     assert "repos" not in scope
     assert "source_repos" not in scope
     assert scope["hosts"] == []
@@ -506,10 +501,14 @@ def test_aith_engagement_create_code_mode_with_local_repo(tmp_path: Path, monkey
     assert "current_phase" not in scope
     # Credentials are centralized in the backend store; no auth.json scaffold.
     assert not (created.path / "auth.json").exists()
-    assert manifest["name"] == "my-cool-project"
-    assert manifest["target"] == "my-cool-project"
-    assert manifest["repos"] == [{"path": str(fake_repo), "name": "my-cool-project"}]
+    assert manifest["name"] == "Acme"
+    assert manifest["target"] == "Acme"
+    assert "repos" not in manifest
     assert (created.path / "source").is_dir()
+    assert not list((created.path / "source").iterdir())
+    (created.path / "source/main.py").write_text("print('Acme')\n", encoding="utf-8")
+    from vigil_cli.engagements import engagement_mode_state
+    assert engagement_mode_state(install_root, created.path)["source"]["state"] == "present"
     assert (created.path / "start_claude.sh").exists()
     assert not (created.path / "start_codex.sh").exists()
 
