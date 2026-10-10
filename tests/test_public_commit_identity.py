@@ -63,9 +63,12 @@ def test_pre_push_ranges_cover_new_updates_and_skip_deletions() -> None:
     assert revisions == [f"{remote}..{local}", local]
 
 
-def test_config_check_rejects_effective_identity_overrides(monkeypatch) -> None:
+@pytest.mark.parametrize("colocated", [False, True])
+def test_config_check_rejects_effective_identity_overrides(monkeypatch, tmp_path, colocated) -> None:
     checker = _load_checker()
-    monkeypatch.chdir(REPO_ROOT)
+    if colocated:
+        (tmp_path / ".jj").mkdir()
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(checker, "_local_config", lambda key: {
         "user.name": checker.APPROVED_NAME,
         "user.email": checker.APPROVED_EMAIL,
@@ -79,7 +82,7 @@ def test_config_check_rejects_effective_identity_overrides(monkeypatch) -> None:
 
     assert any("effective Git author" in error for error in errors)
     assert any("effective Git committer" in error for error in errors)
-    assert any("jj" in error for error in errors)
+    assert any("jj" in error for error in errors) == colocated
 
 
 def test_fork_history_can_retain_contributor_attribution() -> None:

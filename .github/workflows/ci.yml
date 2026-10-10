@@ -25,6 +25,15 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Install uv
         uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+      - name: Install JJ for workspace integration tests
+        run: |
+          curl --fail --location --silent --show-error \
+            https://github.com/jj-vcs/jj/releases/download/v0.40.0/jj-v0.40.0-x86_64-unknown-linux-musl.tar.gz \
+            --output "${RUNNER_TEMP}/jj.tar.gz"
+          echo "5c8979f46873e052f59bdd9535636dca6e6f9f70571b73f6d63c3b92acfaa037  ${RUNNER_TEMP}/jj.tar.gz" | sha256sum --check
+          mkdir -p "${RUNNER_TEMP}/jj-bin"
+          tar -xzf "${RUNNER_TEMP}/jj.tar.gz" -C "${RUNNER_TEMP}/jj-bin" ./jj
+          echo "${RUNNER_TEMP}/jj-bin" >> "$GITHUB_PATH"
       - name: Run backend test suite
         # --extra dev installs pytest/httpx (declared under
         # [project.optional-dependencies].dev); `uv run` does NOT install
