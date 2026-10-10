@@ -16,6 +16,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 repo_root = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(repo_root))
 sys.path.insert(0, str(repo_root / "src"))
@@ -25,6 +27,7 @@ from vigil_cli.auth import (  # noqa: E402
     _parse_probe_blob,
     _vigil_assess_argv,
 )
+from vigil_cli import auth  # noqa: E402
 
 # A real tunnelled `curl -i` blob: the proxy answers CONNECT, then the origin
 # rejects the revoked session.
@@ -103,8 +106,17 @@ def test_blob_with_no_status_line_stays_unparsed():
     assert parsed["status"] is None and parsed["status_line"] == "?"
 
 
-def test_probe_argv_suppresses_the_connect_block(tmp_path):
-    argv = _vigil_assess_argv(tmp_path, "cap-target", "https://app.example.com/me")
+@pytest.mark.parametrize("cli_on_path", [True, False])
+def test_probe_argv_suppresses_the_connect_block(tmp_path, monkeypatch, cli_on_path):
+    workspace = tmp_path / "workspace"
+    engagement = workspace / "engagements" / "acme"
+    engagement.mkdir(parents=True)
+    monkeypatch.setenv("VIGIL_INSTALL_DIR", str(workspace))
+    monkeypatch.setenv("VIGIL_CONFIG", str(tmp_path / "missing-config.json"))
+    monkeypatch.setenv("VIGIL_APPLICATION_DIR", str(repo_root))
+    monkeypatch.setattr(auth.shutil, "which", lambda _name: "/usr/local/bin/vigil" if cli_on_path else None)
+    argv = _vigil_assess_argv(engagement, "cap-target", "https://app.example.com/me")
+    assert argv[0] == ("/usr/local/bin/vigil" if cli_on_path else str(repo_root / "agent/scripts/assess.py"))
     assert "--suppress-connect-headers" in argv
     # It is a curl flag, so it must sit after the `--` argv separator.
     assert argv.index("--") < argv.index("--suppress-connect-headers")
