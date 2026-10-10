@@ -74,9 +74,10 @@ def validate_bundle(root: Path, *, materialized: bool = False, launcher_root: Pa
                 relative = entry.relative_to(root)
                 if entry.is_symlink():
                     raise ValueError(f"Symbolic link in application bundle: {entry}")
-                # pip may compile package-data Python files at install time.
-                # These bytes are never imported or copied from the bundled tree.
-                if not materialized and "__pycache__" in relative.parts and (entry.is_dir() or entry.suffix == ".pyc"):
+                # pip compiles package data at install time, and importing helpers
+                # from a materialized cache writes bytecode beside them. Python
+                # regenerates it from the verified sources; it is never copied.
+                if "__pycache__" in relative.parts and (entry.is_dir() or entry.suffix == ".pyc"):
                     continue
                 if entry.is_file():
                     actual.add(entry.relative_to(root).as_posix())

@@ -163,3 +163,15 @@ def test_cache_detachment_before_reuse_does_not_return_an_unattached_release(tmp
     assert moved
     assert (detached / root.name / "agent/AGENTS.md").is_file()
     assert list(cache.iterdir()) == []
+
+
+def test_materialized_cache_survives_bytecode_written_by_its_own_imports(tmp_path, monkeypatch):
+    _bundle(tmp_path, monkeypatch)
+    root = application.resolve_application_root()
+    subprocess.run(
+        [sys.executable, "-c", "import vigil_cli"],
+        cwd=tmp_path, env={**os.environ, "PYTHONPATH": str(root / "cli"), "PYTHONDONTWRITEBYTECODE": ""},
+        check=True,
+    )
+    assert list((root / "cli/vigil_cli/__pycache__").glob("*.pyc"))
+    assert application.resolve_application_root() == root
