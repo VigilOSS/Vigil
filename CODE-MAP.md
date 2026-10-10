@@ -98,7 +98,7 @@ When you are about to copy one of these into a second file, stop and import.
   is no roster. `--skills` enforcement is CLI-only and advisory under ADR 0019.
 - `orchestrator/backend/app/api/report_export.py`'s five `_*_FIELDS` rosters own what the
   client-delivered HTML carries; `orchestrator/report/src/types.ts` is the other half, index signature
-  dropped so a renderer reaching past them is a type error. See: `AGENTS.md` report-template section.
+  dropped so a renderer reaching past them is a type error. See: `docs/maintainer-guide.md` report-template section.
 - `agent/scripts/assess/lib/contract_registry.py` owns executable CLI metadata; `contracts.py`
   resolves and renders it for `contract.py` and `list_commands.py`.
 - `src/vigil_cli/engagements.py:CLIENT_PROVIDER_KEYS` and `CLIENT_MESSAGE_FLAGS` own client launch
@@ -106,7 +106,7 @@ When you are about to copy one of these into a second file, stop and import.
 - `src/vigil_cli/image_freshness.py` owns the content-digest mechanism every freshness check uses —
   input entries, digests, the image label, exclusions. Content, never mtime.
 - `src/vigil_cli/restart_manifest.py:consumer_states` owns what an install invalidated, per consumer.
-  Presenters consume its rows; do not derive freshness beside it. See: `AGENTS.md` freshness section.
+  Presenters consume its rows; do not derive freshness beside it. See: `docs/maintainer-guide.md` freshness section.
 - `src/vigil_cli/install_manifest.py` and `src/vigil_cli/install_fs.py` own managed install paths,
   pinned/no-follow operations, and content digests.
 - `agent/scripts/assess/lib/scope.py:ingest_scope_filter` must run on every new file-to-buffer ingest
@@ -170,7 +170,7 @@ A prompt change is **not** prompt-only when the prompt defines an artifact the b
   `orchestrator/backend/app/services/state_manager/findings.py:_FINDING_PREFIX_BY_SOURCE`;
   a new finding-recording agent needs both maps and the applicable operator prompt table.
 - `agent/scripts/assess/cli.py` — a verb can touch the import block, flat loop, four grouped
-  registries, inline `kali` registry, and pre-parse action-help hook. See the recipe in `AGENTS.md`.
+  registries, inline `kali` registry, and pre-parse action-help hook. See the recipe in `docs/maintainer-guide.md`.
 - `agent/scripts/assess/lib/contract_registry.py:_INLINE_DOCUMENTED_NAMESPACES` — a `<verb> <action>` leaf documented on its parent contract must have that parent listed here, or `vigil assess contract` cannot resolve it.
 - `orchestrator/backend/app/services/code_analysis_support.py:_analysis_repo_sql` / `_analysis_repo_files_sql`
   — every query counting an OBLIGATION over `code_files` must carry one, or a `reference` repository

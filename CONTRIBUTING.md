@@ -37,17 +37,11 @@ identity and tracked hooks in every clone:
 python3 tools/check_public_commit_identity.py --install
 ```
 
-This sets repository-local Git and jj identity. Hooks check configured and effective identities;
+This sets repository-local Git/jj identity and a jj push guard. Hooks check effective identities;
 pre-push and CI require the neutral project identity for every author and committer in canonical
 history. Maintainers import approved contributions using that identity; contributor attribution
 remains in the pull request. Git does not activate cloned hooks automatically, and jj pushes do not
 rely on Git hook execution.
-
-Private source checks read audit fingerprints from `.git/vigil-private-identity-digests.json` or
-`VIGIL_PRIVATE_IDENTITY_DIGESTS` (a JSON array of SHA-256 digests). Keep this policy out of tracked
-files: even a hash of a private name can be matched against guesses. Trusted push CI receives the
-policy from a repository secret; fork PRs run the portable guards and explicitly skip the private
-policy checks. Maintainer release audits must supply the policy.
 
 There is no commit-message convention. Write a message that says what changed and why.
 

@@ -44,3 +44,6 @@ CODEX-FINDINGS.md
 **/build/
 prev-issues.md
 potentially-updated-issues.md
+
+# Operator-local issue archives and maintainer notes are never distributable.
+/.private/

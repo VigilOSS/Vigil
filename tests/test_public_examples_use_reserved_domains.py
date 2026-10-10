@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import hashlib
 import sys
+import subprocess
 
 import pytest
 
@@ -24,7 +25,35 @@ from public_identity_policy import identity_token_digests, load_private_identity
 _BANNED_IDENTITY_TOKEN_DIGESTS = load_private_identity_digests(REPO_ROOT)
 
 
+def test_public_file_scan_excludes_local_private_storage(monkeypatch, tmp_path: Path) -> None:
+    private = tmp_path / ".private" / "issues.json"
+    private.parent.mkdir()
+    private.write_text("operator-local archive", encoding="utf-8")
+    public = tmp_path / "example.py"
+    public.write_text("public fixture", encoding="utf-8")
+    monkeypatch.setattr(sys.modules[__name__], "REPO_ROOT", tmp_path)
+    assert public in _public_text_files()
+    assert private not in _public_text_files()
+
+
+def test_public_file_scan_rejects_tracked_private_storage(monkeypatch, tmp_path: Path) -> None:
+    (tmp_path / ".jj").mkdir()
+    monkeypatch.setattr(sys.modules[__name__], "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(subprocess, "check_output", lambda *args, **kwargs: ".private/issues.json\n")
+    with pytest.raises(AssertionError, match="private storage must not be tracked"):
+        _public_text_files()
+
+
 def _public_text_files() -> list[Path]:
+    if (REPO_ROOT / ".jj").is_dir():
+        command = ["jj", "file", "list", ".private"]
+    elif (REPO_ROOT / ".git").exists():
+        command = ["git", "ls-files", "--", ".private"]
+    else:
+        command = None
+    if command:
+        tracked = subprocess.check_output(command, cwd=REPO_ROOT, text=True).splitlines()
+        assert not tracked, "private storage must not be tracked: " + ", ".join(tracked)
     files: list[Path] = []
     for directory, names, filenames in os.walk(REPO_ROOT):
         names[:] = [
@@ -34,6 +63,7 @@ def _public_text_files() -> list[Path]:
             not in {
                 ".git",
                 ".jj",
+                ".private",
                 ".mypy_cache",
                 ".pytest_cache",
                 ".ruff_cache",
@@ -68,7 +98,7 @@ def test_public_examples_do_not_use_registered_placeholder_domains() -> None:
 
 def test_public_tree_has_no_private_identity_fragments() -> None:
     if not _BANNED_IDENTITY_TOKEN_DIGESTS:
-        pytest.skip("private identity policy is available in maintainer audits and trusted CI")
+        pytest.skip("private identity policy is available in local maintainer audits")
     violations: list[str] = []
     for path in [*_public_text_files(), Path(__file__)]:
         try:
