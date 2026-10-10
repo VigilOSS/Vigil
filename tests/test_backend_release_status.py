@@ -64,3 +64,14 @@ def test_doctor_reports_backend_release_restart_without_an_extra_readiness_probe
     assert rows["backend-runtime"].status == "STALE"
     assert "vigil orchestrator restart" in rows["backend-runtime"].detail
     assert probes == [root]
+
+
+def test_status_and_doctor_name_why_the_application_is_unavailable(backend_status, monkeypatch, capsys):
+    root, application = backend_status
+    monkeypatch.setenv("VIGIL_APPLICATION_DIR", str(root / "missing-application"))
+    monkeypatch.setattr(status, "_orchestrator_readyz_snapshot", lambda _workspace: (False, {}))
+    status.print_status(status.collect_status(root, runner=lambda *_args, **_kwargs: DockerResult(1, "", "")))
+    assert "Invalid Vigil application directory" in capsys.readouterr().out
+    rows = {row.name: row for row in status.collect_doctor_checks(root)}
+    assert rows["application"].status == "MISSING"
+    assert "Invalid Vigil application directory" in rows["application"].detail

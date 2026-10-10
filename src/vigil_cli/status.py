@@ -387,7 +387,10 @@ def print_status(status: dict[str, object], *, json_output: bool = False) -> Non
     print(f"install\t{status['install_root']}")
     application = status.get("application")
     if isinstance(application, dict):
-        print(f"application\t{application.get('root', '-')}\tversion={application.get('version', 'unknown')}")
+        if application.get("state") == "unavailable":
+            print(f"application\tunavailable\t{application.get('detail', '-')}")
+        else:
+            print(f"application\t{application.get('root', '-')}\tversion={application.get('version', 'unknown')}")
     client_sessions = status.get("client_sessions")
     if isinstance(client_sessions, dict) and client_sessions.get("state") == "stale":
         print(f"warn\tclient sessions require restart: {client_sessions.get('detail')}; {client_sessions.get('remedy')}")
@@ -574,18 +577,20 @@ def collect_doctor_checks(install_root: Path, *, runner: docker.Runner = docker.
             required=not workspace_ready,
         )
     )
+    application_error = "matched application unavailable"
     try:
         application_agent = agent_root(install_root)
         agent_dir_present = application_agent.is_dir()
-    except (OSError, SystemExit, ValueError):
+    except (OSError, SystemExit, ValueError) as exc:
         application_agent = None
         agent_dir_present = False
+        application_error = f"{application_error}: {exc}"
     if application_agent is not None:
         from .application import application_provenance
         provenance = application_provenance(application_agent.parent)
         checks.append(Check("application", "OK", f"version={provenance['version']} root={provenance['root']}"))
     else:
-        checks.append(Check("application", "MISSING", "matched application unavailable", required=True))
+        checks.append(Check("application", "MISSING", application_error, required=True))
     from .restart_manifest import client_sessions_state
     sessions = client_sessions_state(install_root)
     session_status = "STALE" if sessions.state == "stale" else "WARN" if sessions.state == "unknown" else "OK"
