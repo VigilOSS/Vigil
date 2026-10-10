@@ -137,7 +137,7 @@ def test_sdist_builds_an_installable_wheel_with_a_working_cli(tmp_path: Path) ->
     }
     env.pop("PYTHONPATH", None)
     env["PYTHONNOUSERSITE"] = "1"
-    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    env["PYTHONDONTWRITEBYTECODE"] = ""
     env["HOME"] = str(tmp_path / "home")
     env["VIGIL_CONFIG"] = str(tmp_path / "config.json")
     env["VIGIL_APPLICATION_CACHE"] = str(tmp_path / "applications")
@@ -197,11 +197,29 @@ def test_sdist_builds_an_installable_wheel_with_a_working_cli(tmp_path: Path) ->
     assert (workspace / "state").is_dir()
     assert not (workspace / "agent").exists()
     assert not (workspace / "orchestrator").exists()
+    project_repo = tmp_path / "acme-repo"
+    subprocess.run(["git", "init", str(project_repo)], check=True, capture_output=True, text=True)
+    project = project_repo / "PROJECT.md"
+    project.write_text('+++\nrepository = "."\ndevelopment_url = "https://dev.example"\n+++\n# Acme\n')
+    create_plan = subprocess.run(
+        [str(executable), "engagement", "create", "--type", "remediation", "--name", "Acme",
+         "--repo", str(project_repo), "--project-config", str(project), "--no-prompt", "--dry-run", "--json"],
+        cwd=probe_dir, env={**env, "PATH": os.environ["PATH"]}, check=True, capture_output=True, text=True,
+    )
+    assert json.loads(create_plan.stdout)["manifest"]["remediation_project"]["development_url"] == "https://dev.example"
+    # Reading PROJECT.md imports helpers from the retained application. Their
+    # bytecode must not prevent subsequent installed commands from using it.
+    assert list(application.rglob("__pycache__/*.pyc"))
     assess_help = subprocess.run(
         [str(executable), "assess", "--help"],
         cwd=probe_dir, env=env, check=True, capture_output=True, text=True,
     )
     assert "usage:" in assess_help.stdout.lower()
+    repeated_assess_help = subprocess.run(
+        [str(executable), "assess", "--help"],
+        cwd=probe_dir, env=env, check=True, capture_output=True, text=True,
+    )
+    assert "usage:" in repeated_assess_help.stdout.lower()
     # A source archive cannot combine a newer entrypoint with an older retained
     # helper snapshot, even if both independently remain valid Python.
     tampered = tmp_path / "tampered-sdist"
