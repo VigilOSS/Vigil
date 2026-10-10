@@ -26,13 +26,13 @@ phishing chains.
 `redirect, return, returnto, return_to, next, redir, forward, continue, url, rurl, u, target,
 dest, destination, redirect_uri, go, goto, rt, to, domain, site`
 
-### Upstream gf param additions (2026-06)
+### Upstream gf vocabulary
 
-The single-token keys `goto`, `rt`, `to`, `domain`, `site` were folded in from the upstream
-gf pattern sets, which carry classic open-redirect params our set lacked.
+The single-token keys `goto`, `rt`, `to`, `domain`, `site` come from the upstream
+gf pattern sets and describe navigation destinations.
 
 The compound `*_url`/`*_uri`/`*_to` open-redirect family (`return_url`, `redirect_url`,
-`callback_url`, `next_url`, …) is handled on TWO layers (Fix 4, landed — see `DRIFT.md` → "Fix 4"):
+`callback_url`, `next_url`, …) is handled on TWO layers (see `DRIFT.md` → "Fix 4"):
 
 1. **Curated whole keys (precision).** The common compound names are listed as whole keys above,
    in both `snake_case` and `concatenated` (camelCase-lowercased) forms, so a bare `?return_url=`

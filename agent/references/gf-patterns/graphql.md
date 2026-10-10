@@ -31,8 +31,8 @@ These are the canonical GraphQL-over-HTTP request keys (POST body or query-strin
 
 `mutation`, `subscription`, `operationname` and `variables` are unambiguous and fire on their own.
 **`query` alone does not** — it is simultaneously a member of `sqli` (40) and `xss` (20), and only
-`rce` (50) outranks this bucket, so a bare `?query=shoes` on a REST search route used to win
-`gf:graphql` at 45 with no GraphQL evidence at all. `_suppress_graphql_on_bare_query` therefore
+`rce` (50) outranks this bucket. To distinguish a REST search such as `?query=shoes` from
+GraphQL evidence, `_suppress_graphql_on_bare_query`
 requires a `query`-only row to be **corroborated** by one of:
 
 - a GraphQL path fragment (below), or
@@ -64,7 +64,7 @@ signal for true GraphQL requests, but only once corroborated (see above) — an 
 
 Path-fragment matches:
 
-- `https://target.example/graphql` — canonical GraphQL endpoint that previously fell through to the generic path fallback
+- `https://target.example/graphql` — canonical GraphQL endpoint
 - `https://target.example/graphiql` — GraphiQL IDE, often left enabled in production
 - `https://target.example/api/graphql` — common SaaS mounting point
 - `https://target.example/api/lotus/graphql` — product-namespaced mounting point

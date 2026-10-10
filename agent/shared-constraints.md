@@ -336,10 +336,7 @@ states them for that track.)
 - **Every skill's `## Extended Resources` list, without exception — including a MANDATORY
   skill's own list.** This is the load-bearing half: Extended Resources are a menu the skill
   itself points at, loaded when the skill's own procedure needs one of them — never auto-required
-  just because you loaded (or were required to load) the skill. Following the old "required
-  reading" rule literally cost a `recon-specialist` dispatch ~126,000 tokens (two skills plus the
-  union of 29 Extended Resources) and a `code-vuln-hunter` dispatch ~109,000 (one skill plus 23
-  CWE pattern files) before either read anything real.
+   just because you loaded (or were required to load) the skill.
 
 When your dispatch names a skill, load it before acting on that signal; when it doesn't and you
 observe a signal a skill exists for, load that skill yourself — `vigil assess list-skills`
@@ -428,8 +425,7 @@ proved the finding. The field allows up to 20 KB. If the operator or another age
 reproduce the finding later, the notes field alone should be sufficient without re-discovering
 the request format, session tokens, or tool parameters.
 
-**Failure to use `vigil assess finding record` is the single most common subagent defect.** Every
-payload in a `#### Findings` block must have been recorded during your session — do not defer
+Every payload in a `#### Findings` block must have been recorded during your session — do not defer
 recording to the operator.
 
 ---

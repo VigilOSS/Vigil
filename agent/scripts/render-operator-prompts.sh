@@ -11,7 +11,7 @@ SOURCE_DIR=$(cd "$SCRIPT_DIR/.." && pwd)
 #   render-operator-prompts.sh [MODE] [OUTPUT_DIR] [--type red|blue]
 #
 # MODE: repo | claude-install | codex-install | check | render-check | source-sha
-#   - `check` and `render-check` are aliases (CI/tests historically pass `check`).
+#   - `check` and `render-check` are aliases (CI/tests use `check`).
 #   - `source-sha` prints the current prompt-source digest for --type and exits;
 #     it is the value a consumer compares an already-rendered copy's stamp
 #     against (see "Prompt stamp" below).
@@ -534,12 +534,12 @@ opencode_variant_desc_suffix() {
 # verified per-subagent override path — NOT the GOOSE_SUBAGENT_* env vars, which
 # aaif-goose#9644 lets the orchestrator confabulate/override).
 #
-# #9397 (verified live 2026-06-19): goose v1.38.0's openai-compat provider drops
+# Goose v1.38.0's openai-compat provider drops
 # DeepSeek-V4 thinking-mode `reasoning_content` from the 2nd..Nth assistant messages it
 # emits when it splits a parallel-tool-call turn, so DeepSeek 400s. Vigil's
 # reasoning-content repair proxy (goose_reasoning_proxy.py, launched by start_goose.sh)
-# re-attaches it, so thinking-mode V4 now works on the DIRECT path — per-role pro/flash
-# routing is restored. Goose addresses DeepSeek by the BARE id (no `deepseek/` prefix).
+# re-attaches it for thinking-mode V4 on the direct path. Goose addresses
+# DeepSeek by the bare id (no `deepseek/` prefix).
 GOOSE_PRO_MODEL="deepseek-v4-pro"
 GOOSE_FLASH_MODEL="deepseek-v4-flash"
 
@@ -605,25 +605,6 @@ render_prompt_locality() {
 EOF
 }
 
-render_agent_roster() {
-  cat <<'EOF'
-## Agent Roster
-
-| Agent | Role | Dispatched When |
-|---|---|---|
-| `operator` | Lead red team operator. Drives methodology, coordinates phases, manages state. | Always active. Entry point. |
-| `recon-specialist` | Recon-completeness assessment over the `vigil assess recon` job + bounded per-host web fingerprinting. | Phase 1 (after the recon job). |
-| `source-analyzer` | Deep static analysis of HTML/JS/CSS for hidden routes, API endpoints, secrets. | Phase 1 (parallel with recon). |
-| `surface-collector` | URL collection, dedup, intelligent triage, work-buffer population. | Phase 2. |
-| `vulnerability-analyst` | Primary hunter — surveys wide then deep, confirms leads with targeted probes, produces durable evidence, reviews findings in Phase 5. | Phase 4 + Phase 5 verification. |
-| `exploit-developer` | Crafts exploits, confirms impact, and builds realistic attack chains. | Phase 6. |
-| `fuzzer` | High-volume parameter/directory/protocol fuzzing with bounded objectives. | When FUZZER_NEEDED. |
-| `osint-analyst` | External intelligence gathering, CVE/disclosure research, and prioritization support. | Phase 6 (parallel with exploit). |
-| `report-writer` | Generates structured engagement report from durable backend finding state. | Phase 8 or on-demand. |
-
-EOF
-}
-
 render_code_agent_roster() {
   cat <<'EOF'
 ### Code Analysis Agents (operator-core-code.md mode)
@@ -659,7 +640,6 @@ When a session starts, display:
 
 EOF
     render_prompt_locality
-    render_agent_roster
     render_code_agent_roster
     cat "$CORE_FILE"
     cat <<'EOF'
@@ -670,11 +650,6 @@ EOF
 - Make file edits through the coding environment's patch/edit tool rather than shell redirection
   (`cat >`, `echo >`), so every change lands as a reviewable diff.
 
-## Tool Promotion Workflow
-
-After an engagement, review generated tools in `agent/engagements/<...>/tools/`:
-1. Identify reusable tools -> create a skill in `agent/skills/<name>/SKILL.md`
-2. Skills and references self-register — `vigil assess list-skills` / `list-references` discover new files from their frontmatter, so there is no index to update; just note the new skill in the relevant Claude/Codex instructions if it needs workflow wiring
 EOF
   } > "$out"
   perl -0pi -e 's/\n+\z/\n/' "$out"
@@ -706,12 +681,8 @@ EOF
 }
 
 render_claude() {
-  # CLAUDE.md is intentionally a thin pointer — AGENTS.md is the single
-  # canonical full prompt. Rendering both as full copies caused Cursor /
-  # Claude Code to load the whole operator prompt 2-4x per turn (engagement
-  # wrapper + agent/CLAUDE.md + agent/AGENTS.md). Keeping CLAUDE.md as a
-  # pointer collapses that to a single load. `vigil assess prompt-census`
-  # reports what one load currently costs; a size named here would go stale.
+  # Keep CLAUDE.md as a pointer to the canonical AGENTS.md prompt so clients
+  # that discover both entrypoints load the full instructions only once.
   {
     cat <<'EOF'
 <!-- GENERATED FILE — DO NOT EDIT. -->
@@ -728,8 +699,7 @@ EOF
 
 Read `AGENTS.md` (in this same directory) for the complete operator prompt.
 
-Load `AGENTS.md` OR this file, not both — they would otherwise be identical.
-`AGENTS.md` is canonical.
+If `AGENTS.md` is already loaded, use that copy.
 EOF
   } > "$CLAUDE_OUT"
 }

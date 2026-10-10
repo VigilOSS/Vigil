@@ -39,7 +39,7 @@ Discovery and metadata:
 Protocol endpoints:
 `/oauth2/`, `/oidc/`, `/connect/authorize`, `/connect/token`, `/connect/userinfo`
 
-### Dynamic Client Registration (DCR) and PingFederate (classify-context-and-surface 2026-06, Part 3 §C.11)
+### Dynamic Client Registration (DCR) and PingFederate
 
 Part 3 §C.11 extends this bucket with dynamic-client-registration (DCR) and
 PingFederate surfaces, realized through one new literal fragment
@@ -82,7 +82,7 @@ tie-break resolves to `gf:oauth-oidc`. The bare `/oauth/callback` does NOT conta
 
 Discovery:
 
-- `https://target.example/.well-known/openid-configuration` — OIDC discovery (exposes full provider endpoint map; was priority 0 before 2026-06)
+- `https://target.example/.well-known/openid-configuration` — OIDC discovery (exposes full provider endpoint map)
 - `https://target.example/.well-known/oauth-authorization-server` — RFC 8414 metadata
 - `https://target.example/.well-known/jwks.json` — JWKS public key set
 

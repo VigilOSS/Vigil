@@ -264,7 +264,7 @@ instructions: |2
   7. **Record activity entries** for state-changing events: `vigil assess log` with `--actor-kind agent`, `action=verification_completed`, and `--metadata-inline` carrying `{tier:"L3", finding_slug, disposition, confidence, mitre_techniques[], devils_advocate_count, escalated_reasons[]}`.
 
   8. **Emit the handoff JSON** via `vigil assess agent handoff --from-json <path>`. Required fields:
-     - `disposition` — set to the disposition for this dispatch's finding (singular when the dispatch was one finding; an array of `{slug, disposition}` when item-iterating was authorized, though `deep-manual` is the v1 default)
+     - `disposition` — set to the disposition for this dispatch's finding (singular when the dispatch was one finding; an array of `{slug, disposition}` when item-iterating was authorized, though `deep-manual` is the default)
      - `evidence_refs[]` — artifact IDs (NOT local paths) for every artifact cited across the five checks
      - `coverage_gaps[]` — every gap the verifier surfaced (missing cross-platform correlation, missing tenant-ref consultation, retention-expired telemetry, identity-mapping ambiguity)
      - `mitre_techniques[]` — the final post-audit technique list

@@ -3,8 +3,8 @@
 # Reads hook JSON from stdin, extracts tool info + agent context, POSTs to the
 # orchestrator's /engagements/{key}/activity-entries endpoint.
 #
-# The backend is now authoritative for the narrative activity log (formerly
-# log.md). This script constructs a JSON payload and delegates the HTTP call
+# The backend owns the narrative activity log. This script constructs a
+# JSON payload and delegates the HTTP call
 # to `vigil assess log`, which centralizes URL resolution, retry, and auth.
 #
 # Hook JSON fields used:
@@ -94,11 +94,8 @@ json_preview() {
 # DIRECTLY — never `python3 assess.py`. assess.py is a PEP 723 script whose
 # `#!/usr/bin/env -S uv run --script` shebang provisions its inline dependency
 # set (psutil, the tree-sitter grammars); invoking it under a bare interpreter
-# skips that provisioning entirely. `log` happens to reach nothing outside the
-# stdlib today, which is the only reason the old `python3` form worked — the day
-# it does, every engagement loses its audit trail silently. Same resolution
-# order as session-end.sh, deliberately: two hooks writing to the same CLI
-# should not disagree about how to reach it.
+# skips that provisioning. Use the same resolution order as session-end.sh
+# so both hooks reach the CLI with its declared dependencies.
 #
 # Best-effort and SILENT on every path. This fires after each tool call, so a
 # diagnostic on failure would be noise on a per-command cadence, and a non-zero

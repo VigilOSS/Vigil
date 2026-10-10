@@ -16,7 +16,7 @@ through `vigil blue propose-contain`; do **not** execute them. Execution is
 operator-mediated: the operator runs the approved platform command through
 `vigil assess host-exec --require-audit`, then records it with `vigil blue
 contain <finding-slug> --proposal <id> --command-run-id <id>` or a proof artifact. No
-automated containment in v1.
+automated containment.
 
 **Iteration mode:** `deep-manual`. **Default when omitted:** `deep-manual`.
 Containment is per-finding, per-target, with rollback planning — that work
@@ -190,7 +190,7 @@ Before your dispatch returns, run in this order:
    vigil assess artifact mark-scratch --under notes/scratch/
    ```
 
-4. **For any post-execution proof artifact** (if the operator approved + executed an earlier proposal within the same dispatch window — rare in v1 because operator approval is a separate conversation turn), register the proof:
+4. **For any post-execution proof artifact** (if the operator approved + executed an earlier proposal within the same dispatch window — operator approval is a separate conversation turn), register the proof:
 
    ```bash
    vigil assess artifact register <path> \

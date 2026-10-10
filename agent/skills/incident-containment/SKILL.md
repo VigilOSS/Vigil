@@ -51,7 +51,7 @@ proposal record is the audit gate, not a comment field.
 | Verb | Purpose |
 |------|---------|
 | `vigil blue propose-contain` | Author a containment proposal with `target`, `action`, `rollback`, `blast_radius`, and `note`; prints the backend `decision_id` for approval |
-| `vigil blue contain <finding-slug> --proposal <id> --command-run-id <id>` | Records an already-executed proposal: logs to `activity_entries`, bumps finding `workflow_status` to `contained`, and can also register `--proof-artifact <path>`. **Does not** run the platform command itself in v1 — the operator runs `vigil assess host-exec --require-audit ... -- <cmd>` first, then passes the command-run id or captured stdout/screenshot proof. |
+| `vigil blue contain <finding-slug> --proposal <id> --command-run-id <id>` | Records an already-executed proposal: logs to `activity_entries`, bumps finding `workflow_status` to `contained`, and can also register `--proof-artifact <path>`. **Does not** run the platform command itself — the operator runs `vigil assess host-exec --require-audit ... -- <cmd>` first, then passes the command-run id or captured stdout/screenshot proof. |
 | `vigil assess log` | Record the containment decision (proposed, approved, executed, rolled-back) with structured `metadata_json` |
 | `vigil assess artifact register` | Register containment-proof artifacts (`kind=containment_proof`) — screenshots, command output, ticket links |
 | `vigil assess host-exec` | Out-of-band evidence pulls during eradication / recovery (e.g., post-containment verification that the session is actually revoked) |
@@ -198,8 +198,8 @@ vigil blue propose-contain <finding-slug> \
 #    vigil assess approve-proposal <decision-id> --approved-by <operator>
 
 # 3) Operator executes the platform command through host-exec so the
-#    underlying command and its stdout are audited. v1 keeps this as a
-#    separate step from `vigil blue contain` so the operator inspects the
+#    underlying command and its stdout are audited. Keep this separate
+#    from `vigil blue contain` so the operator inspects the
 #    command's output before recording the activity row.
 #
 # IMPORTANT: when dispatching containment commands through
@@ -373,7 +373,7 @@ dispatch (if a follow-on finding lands).
 - **Missing rollback condition.** "No rollback" is acceptable on
   irreversible actions only when accompanied by the standard recovery
   procedure (URL or document reference). "Unknown" is not.
-- **Skipping the audit linkage.** In v1 the operator runs the platform
+- **Skipping the audit linkage.** The operator runs the platform
   command through `vigil assess host-exec --require-audit` and then records
   the containment with `vigil blue contain --command-run-id <id>` so the
   audit row and stdout are linked. UI-driven actions (clicked through the

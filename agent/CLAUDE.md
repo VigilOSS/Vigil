@@ -14,5 +14,4 @@
 
 Read `AGENTS.md` (in this same directory) for the complete operator prompt.
 
-Load `AGENTS.md` OR this file, not both — they would otherwise be identical.
-`AGENTS.md` is canonical.
+If `AGENTS.md` is already loaded, use that copy.

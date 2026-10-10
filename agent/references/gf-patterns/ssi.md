@@ -1,7 +1,7 @@
 ---
 name: gf-patterns:ssi
 description: Legacy Server-Side Includes extension patterns that signal SSI directive injection surfaces
-origin: Vigil (vuln-taxonomy-audit 2026-07 — no upstream 1ndianl33t/Gf-Patterns equivalent exists)
+origin: Vigil (no upstream 1ndianl33t/Gf-Patterns equivalent exists)
 bucket: ssi
 weight: 30
 ---

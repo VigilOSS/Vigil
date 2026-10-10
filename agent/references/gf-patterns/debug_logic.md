@@ -25,9 +25,7 @@ auth bypass, or direct RCE without any parameter fuzzing required.
 
 `debug`, `dbg`, `test`.
 
-This bucket was path-only until the 2026-06 Part 6 expansion. The `?debug=1` /
-`?dbg=1` / `?test=1` toggles are a real debug-mode signal it previously missed,
-so those three param keys now also fire the bucket.
+The `?debug=1`, `?dbg=1`, and `?test=1` toggles match this bucket as debug-mode signals.
 
 `admin`, `grant`, and `access` are deliberately kept **out** of the debug param
 set — those route to the `privileged_action` bucket (class `bfla`) instead, so

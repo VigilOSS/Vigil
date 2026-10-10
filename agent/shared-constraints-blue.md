@@ -134,10 +134,8 @@ transient working notes as scratch in a separate call, either
 `vigil assess artifact mark-scratch --under notes/scratch/` for bulk, so they
 do not appear in resume briefs or reports.
 
-**Manual `shasum -a 256 ... > SHA256SUMS.txt` is deprecated.** The backend
-computes SHA-256 on register/refresh into `assessment_artifacts.sha256`. The
-legacy `ir/reports/SHA256SUMS.txt` pattern is superseded by the artifact
-index.
+The backend computes SHA-256 on register/refresh into
+`assessment_artifacts.sha256`.
 
 Skip registration and your artifacts are invisible to resume-brief, search,
 and the verifier's evidence_refs check.

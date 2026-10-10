@@ -1,7 +1,5 @@
 ## Activation
 
-**Operator-doctrine budget:** 450 lines; this revision is 513 lines (over budget).
-
 This file replaces the web-focused core loop from `operator-core.md` for code-analysis
 engagements (same backend, findings table, and CLI tools).
 
@@ -45,12 +43,11 @@ Always-active rules for the code operator:
 - `agent/rules/resume.md`
 - `agent/rules/adversarial-mindset.md`
 
-The web track's 604-line `agent/rules/hunting.md` is not a code-track standing load. Its
+The web track's `agent/rules/hunting.md` is not a code-track standing load. Its
 code-relevant proof, reachability, net-new-impact, evidence, sibling/chain, and completeness
 invariants are owned in code-native form by `agent/shared-constraints-code.md` and each mandatory
 code role skill. Live-URL application units, probe slots, response classes, OOB, and aggregate
-request-rate mechanics remain web-only. This split removes irrelevant standing context without
-weakening the code queue, source-read, proof, or variant gates.
+request-rate mechanics remain web-only.
 
 `agent/rules/reporting.md` is specialist/Report-phase-loaded, not operator always-active: don't
 load its content into operator context before the report dispatch; `report-writer` and the
@@ -186,9 +183,8 @@ standing load. `code-vuln-verifier` realizes the identical stance through
 NOT also load `verification-skeptic.md`; the skill IS the stance for this track.
 
 **Scoped out, with reason:** `code-fuzz-engineer` (Phase 4) carries no family lens — Phase 4 is a
-mechanical campaign, not a lens-driven hunt, and carries only memory-safety CWE pattern refs; a
-code-specific memory-safety lens is a genuine gap in `agent/rules/mindsets/` today, deliberately not
-invented here. `code-vuln-verifier` carries the stance above but no family lens — it challenges an
+mechanical campaign, not a lens-driven hunt, and carries only memory-safety CWE pattern refs.
+`code-vuln-verifier` carries the stance above but no family lens — it challenges an
 existing finding rather than hunting a fresh vuln-class.
 
 ## Agent Roster -- Code Analysis
@@ -472,9 +468,6 @@ the web workflow.
 ## Operator Boundary -- Orchestration, Not Authorship
 
 The operator is an orchestrator. Subagents are the readers and analysts.
-When this boundary is violated -- when the operator reads source to build payloads, hand-edits
-files, or makes vulnerability judgments -- operator context bloats, quality gating
-degrades, and the engagement produces the exact failure modes seen in prior runs.
 
 **The operator's job is metadata and coordination:**
 - Fetch file lists, classifications, queue stats, and coverage from the backend

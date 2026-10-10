@@ -15,8 +15,7 @@ This document has two parts:
   (positive instructions with reasoning, division of labor, role clarity, checklists).
 
 The root [`AGENTS.md`](../AGENTS.md) maintainer guide points here from its **Prompt system flow**
-section. Apply this alongside the **Prompt edit checklist** there — that checklist runs the
-cross-layer coherence pass; this ruleset governs prompt-health quality.
+section. Apply its cross-layer review requirements alongside this ruleset.
 
 ## The prompt health ruleset
 
@@ -27,30 +26,19 @@ is not just its role file — it is the role file **plus every `## Load First` e
 standing load grows silently whenever a rule gets re-authored in a second place instead of
 pointed to.
 
-### 1. State a per-role Load-First budget
+### 1. Review the complete standing context
 
-A role's real context cost is its own body plus every file listed under **MANDATORY** in its
-`## Load First` section — not the role file's line count in isolation. When you add a role or a
-mandatory Load-First entry, note the resulting total against the role's stated budget (or set one
-if none exists). Growth past the budget is a signal to trim or hoist content out (per Rule 3),
-not to accept a creeping standing load.
+Review the role body together with every **MANDATORY** entry in `## Load First`.
+Keep unconditional instructions necessary for every dispatch; give conditional material
+an explicit loading trigger. Do not put frozen file sizes or line-count ceilings in prompts.
 
 Run `vigil assess prompt-census` for the advisory structural and approximate-byte view. Pass
 `--read-bytes <n>` when a reader reports a bounded read so the census shows whether that boundary
 missed or cut through the Load First section; this is visibility, never a progress gate.
 
-Three things to know when reading its output. It measures the tree it names in `prompt_root` —
-`vigil assess` execs the *installed* agent tree, so running it inside a checkout measures the
-installed prompts unless you pass `--prompt-root`, and the output names any checkout tree it did
-not measure. A role whose mandatory bundle is an exclusive choice (`exploit-developer`,
-`source-analyzer`) reports one total per track rather than a single figure, because summing both
-halves describes a dispatch that never happens. And `agent/operator-core*.md` is reported
-separately, by measured size only: it is session load, not per-dispatch load, and this ruleset
-sets no budget for it. Nor do the cores set their own consistently today —
-`operator-core-code.md` is the only one that states a figure in its header, and it currently
-declares itself over that figure; `operator-core.md` and `operator-core-blue.md` state none. Read
-the census output as the measurement, and set core budgets after the prompt-reduction pass, at
-what the trimmed files measure — not from a number invented ahead of the trim.
+The census measures the tree named in `prompt_root`. Pass `--prompt-root` to measure a
+checkout rather than the installed agent tree. Exclusive mandatory bundles are measured
+per track; operator cores are measured separately as session context.
 
 ### 2. Split Load First into MANDATORY vs LOAD-ON-FIRST-USE
 
@@ -61,13 +49,12 @@ lazily, trigger-gated on the situation that needs it — see `agent/agents/recon
 the L1 ffuf pass (step 6)"). A file that only a subset of dispatches ever need belongs in the lazy
 list with its trigger named, not in MANDATORY by default.
 
-### 3. DRY — a rule lives in one file
+### 3. Give each rule an owner
 
-Author a procedure, contract, or piece of judgment exactly once, in its owning file; every other
-site gets a short pointer, not a restatement. Duplication drifts (two copies of the same OOB
-mint→poll sequence, or a CVSS-table cross-reference that goes stale when the table moves) and each
-copy adds standing-load weight the specialist pays on every dispatch. Use a pointer, not a
-paraphrase — for example, the canonical cross-family pointer used by every offensive/code role for
+Keep procedures and contracts in their owning files, with short pointers from callers.
+A brief reminder can be useful at a decision point, or necessary when separate roles do not
+load the same source. Verify that every affected role still receives the rule before deleting
+a copy. Avoid repeating full procedures or persuasive framing. For example, the cross-family pointer for
 context-isolation, the Contract-First Rule, finding-recording format, and closing-sequence wrapper is:
 
 > **Specialist context isolation, the Contract-First Rule, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-specialist-core.md (in your Load First). This role adds only its own closing verbs below.
@@ -91,7 +78,7 @@ jobs.
 
 Position beats verbosity: content that is specific to one dispatch (a mindset lens, `hunt_scope`,
 coverage/ROE state) goes in a named field at the very TOP of the dispatch prompt, ahead of the
-~400-line role body. Content buried after a long fixed role body is the "lost in the middle"
+fixed role body. Content buried after a long fixed role body is the "lost in the middle"
 failure mode — the per-dispatch instruction that should govern the run gets out-competed by
 generic role prose the model read first.
 
@@ -118,11 +105,12 @@ it as a field in the existing Dispatch Context Template / Specialist Dispatch Co
 file to carry the new dimension — that reintroduces the duplication Rule 3 forbids and splits a
 single specialist's contract across two authoritative sources.
 
-### 9. Length changes restate the budget
+### 9. Make conditional requirements easy to find
 
-When a role file's or shared layer's line count changes meaningfully, restate its new total against
-the Rule 1 budget in the same change — a trim that isn't reflected in the stated budget, or a
-growth that silently blows past it, is exactly the drift this checklist exists to catch.
+State the action first. Put distinct conditions in separate bullets, name the applicable
+role or mode, and keep exceptions beside the requirement. Split dense table cells into a
+short field definition and a list of conditions below the table. Preserve the requirement's
+meaning and any scope, approval, or evidence boundary when changing its presentation.
 
 ### 10. No self-reported or wording-only gates
 
@@ -133,7 +121,7 @@ closure. Never tell the agent how many bugs exist or imply that a clean target m
 finding; unknown facts remain unknown.
 
 Per the **Markdown prompt/doc testing policy** in [`AGENTS.md`](../AGENTS.md), prompt/doc health
-(including any per-role line-count check) is enforced as a human authoring checklist plus, at most,
+(including standing-context review) is enforced as a human authoring checklist plus, at most,
 an advisory WARN — never a blocking CI wording test. A wording or line-count assertion that fails
 the build turns normal prompt editing into fixture maintenance and rewards preserving stale
 phrasing over improving the instructions; keep any automated signal non-blocking.

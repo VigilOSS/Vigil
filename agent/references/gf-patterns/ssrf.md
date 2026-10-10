@@ -26,7 +26,7 @@ internal services, and cross-protocol smuggling (gopher/file/dict/ldap).
 
 `url, uri, host, port, feed, window`
 
-### Curated server-fetch compound family (Fix 4, 2026-06)
+### Curated server-fetch compound family
 
 Both `snake_case` and concatenated (camelCase-lowercased) forms of names that mean "a URL the
 **server** fetches" (as opposed to `redirect`'s "a URL the **browser** follows"):
@@ -34,24 +34,22 @@ Both `snake_case` and concatenated (camelCase-lowercased) forms of names that me
 `fetch_url, fetchurl, proxy_url, proxyurl, remote_url, remoteurl, webhook_url, webhookurl,
 feed_url, feedurl, dest_uri, desturi, target_uri, targeturi, request_uri, requesturi`
 
-### Image/avatar-fetch compound family (deepened, vuln-taxonomy-audit 2026-07)
+### Image/avatar-fetch compound family
 
 "SSRF via avatar/profile-picture URL" (the server downloads a user-supplied image URL
 server-side to resize/re-host it) is one of the most frequently reported bug-bounty SSRF
-variants and was previously unclassified — the bare `image`/`photo`/`avatar` keys exist only
+variants. The bare `image`/`photo`/`avatar` keys exist only
 in `img_traversal` (local path traversal) and `upload_fields` (multipart upload), neither of
 which carries server-fetch-a-remote-URL semantics:
 
 `image_url, imageurl, avatar_url, avatarurl, photo_url, photourl, picture_url, pictureurl,
 logo_url, logourl, thumbnail_url, thumbnailurl, icon_url, iconurl`
 
-### Historical note — key set narrowed (override #7)
+### Navigation keys
 
-`redirect, callback, continue, next, link, dest` were **moved OUT** of this bucket's key set
-to `redirect` during a prior precision review: the prior generic set produced too many false
-positives on benign navigation params. `ssrf` still fires on a `/proxy/`/`/fetch/`-pathed
-request carrying those params via the path fragments below, just not via the bare param key
-alone. See `redirect.md` and `DRIFT.md` → "Fix 4" for the full rationale.
+`redirect, callback, continue, next, link, dest` belong to `redirect`, not this bucket's key set.
+`ssrf` can match a `/proxy/` or `/fetch/` request carrying those parameters through the path
+fragments below, but not through the bare parameter key. See `redirect.md` for key matching.
 
 ## Path patterns that match
 

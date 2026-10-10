@@ -495,16 +495,14 @@ high-confidence** `deep_required` unit that fails either one is a
   or touched, but a specific class its gf coverage_items flagged
   (`signal_classes_uncovered`) was never class-specifically probed — a
   sibling class (e.g. `ssti`) can satisfy the whole `injection` family while
-  `sqli` was never demanded. This is the single-class blind spot the
-  family-only view used to miss entirely, and it fires even on a unit that
-  is otherwise family-satisfied or touched.
+  `sqli` has no class-specific probe. The class gate applies even when the
+  unit is otherwise family-satisfied or touched.
 
 Both block the terminal `report`/`complete` edge unless you deep-test the
 gap or clear it with a recorded `depth_deferral` decision (exact escape
 command, the touched-but-unfinished WARN downgrade, and the non-decisive/
 low-confidence exemption: `agent/phases/phase-8-report.md` Definition of Done
-and `agent/operator-core.md` Mandatory Phase-Exit Passes). This is not
-"advisory until it suddenly blocks" — the discontinuity was the bug.
+and `agent/operator-core.md` Mandatory Phase-Exit Passes).
 `check-phase-readiness --phase report` previews the same ledger every phase
 from Phase 4 on, so the hold is legible the whole way and never a surprise at
 report time.

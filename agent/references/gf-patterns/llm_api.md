@@ -49,7 +49,7 @@ The bare token `prompt` is **not** a key — see "What it does NOT classify".
 - Baseline priority score: 40 — the tier of `auth` / `deserialization` / `sqli`. An LLM endpoint is a
   first-class application surface (prompt injection, tool-calling SSRF, system-prompt disclosure,
   unbounded token spend), and it must outrank the `api-versioning` (25) and `api` (20) family-level
-  hints that were previously the only thing these routes matched.
+  hints.
 - **Declared LAST in the weight-40 run** (after `xxe`). At equal weight the first-declared bucket
   wins `cluster_key`, so this position guarantees the addition cannot re-cluster any pre-existing
   weight-40 row — the additive rule of ADR 0008. Pinned by
@@ -58,11 +58,10 @@ The bare token `prompt` is **not** a key — see "What it does NOT classify".
 
 ## Example URLs that match
 
-- `https://target.example/v1/chat/completions` — previously reached only `25 gf:api-versioning`
+- `https://target.example/v1/chat/completions` — chat-completion endpoint
 - `https://target.example/openai/deployments/gpt-4o/chat/completions` — Azure OpenAI deployment route
 - `https://target.example/api/inference` — self-hosted model server
-- `https://target.example/api/assistant?system_prompt=…` — previously scored **0** and fell back to
-  `cluster_key = path:/api/assistant`
+- `https://target.example/api/assistant?system_prompt=…` — system-prompt request key
 - `https://target.example/support/ask` with body `{"messages":[…],"max_tokens":4096}` — the request
   KEYS are what catch an Anthropic/OpenAI-shaped proxy, at whatever path it is mounted
 
@@ -138,5 +137,4 @@ keywords to `ai-ml-security` — so the web track was the only one blind to it.
 - `agent/skills/llm-api-testing/SKILL.md` — the procedure this bucket dispatches.
 - `agent/references/gf-patterns/ssrf.md` — a tool-calling fetch lands here; prove it with OOB.
 - `agent/references/gf-patterns/idor.md` — conversation/thread scope is object-level authorization.
-- `agent/references/gf-patterns/api-versioning.md` — co-fires on `/v1/...`; the generic version hint
-  is what these routes used to be reduced to.
+- `agent/references/gf-patterns/api-versioning.md` — co-fires on `/v1/...` as a generic version hint.
