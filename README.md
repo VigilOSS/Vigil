@@ -35,6 +35,11 @@ Cyber Verification Program (CVP) and **GPT-5.6 Sol** with OpenAI's Trusted Acces
 Those results reflect the models, clients, and access available in my own setup; blocking can
 vary with your account, access tier, model version, and engagement.
 
+To select Opus 5 in Claude Code, run `/model claude-opus-5[1m]` in the session, if that
+model is available to your account. `/model` opens the model picker. The `[1m]` suffix
+requests the extended context window; Opus 5 already has native 1M context. See
+[Claude Code's model configuration](https://code.claude.com/docs/en/model-config).
+
 **I have not yet validated Vigil's engagement workflows with Claude Opus 5.5 or GPT-6.1 Sol.**
 As of October 2026, Anthropic calls its defensive CVP tier **Defense Access**; **Red Team Access**
 is a separate tier currently limited to qualifying organizations. OpenAI calls its defensive
@@ -50,6 +55,8 @@ with more predictable access to these workflows. That will take substantial work
 orchestration overhead, adapting prompts to the models, and refining integrations with **OpenCode**
 and other harnesses. This is planned work; Claude Code and Codex remain the integrations I have
 refined most extensively today.
+
+## What Vigil provides
 
 - **Findings are independently verified.** A finding is confirmed, downgraded, or marked a false
   positive only by a dispatch other than its author's, citing a proof receipt of captured evidence.
@@ -302,9 +309,8 @@ Report vulnerabilities privately — see [SECURITY.md](SECURITY.md).
 | `tests/` | CLI pytest suite. Backend tests live in `orchestrator/backend/tests/`. |
 | `docs/` | Deep reference, ADRs, and plans. |
 
-Extending Vigil is a contributor workflow, documented in the root [`AGENTS.md`](AGENTS.md): the
-clone-to-first-dispatch walkthrough, recipes for adding a skill, a `vigil assess` verb, a
-deterministic oracle, or an eval case, and the authoritative
+Extending Vigil is a contributor workflow, documented in the [maintainer recipes](docs/maintainer-guide.md):
+adding a skill, a `vigil assess` verb, a deterministic oracle, or an eval case. Use the authoritative
 [test and verification matrix](AGENTS.md#tests--verification). Durable design decisions live in
 [`docs/adr/`](docs/adr/). To confirm a *running install* is healthy rather than the contributor
 suite, use `vigil doctor` and `vigil status`.

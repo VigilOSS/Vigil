@@ -3,6 +3,10 @@ from __future__ import annotations
 from pathlib import Path
 import importlib.util
 import sys
+import os
+import subprocess
+
+import pytest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -83,3 +87,48 @@ def test_fork_history_can_retain_contributor_attribution() -> None:
     records = [checker.CommitIdentity("a" * 40, "External Contributor", "contributor@example.com",
                                       "External Contributor", "contributor@example.com")]
     assert checker.identity_errors(records, allow_contributors=True) == []
+
+
+@pytest.mark.parametrize("role", ["author", "committer"])
+@pytest.mark.parametrize("tagged", [False, True])
+def test_installed_jj_guard_blocks_wrong_identity_pushes(tmp_path: Path, role: str, tagged: bool) -> None:
+    checker = _load_checker()
+    repo = tmp_path / "maintainer"
+    remote = tmp_path / "remote.git"
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith(("GIT_AUTHOR_", "GIT_COMMITTER_"))}
+    env.update(JJ_CONFIG="/dev/null", GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_NOSYSTEM="1")
+
+    def jj(*args: str, check: bool = True):
+        return subprocess.run(["jj", *args], cwd=repo, env=env,
+                              check=check, capture_output=True, text=True)
+
+    subprocess.run(["jj", "git", "init", "--colocate", str(repo)], env=env,
+                   check=True, capture_output=True, text=True)
+    subprocess.run(["git", "init", "--bare", str(remote)], env=env,
+                   check=True, capture_output=True, text=True)
+    subprocess.run([sys.executable, str(SCRIPT), "--install"], cwd=repo, env=env,
+                   check=True, capture_output=True, text=True)
+    jj("git", "remote", "add", "probe", str(remote))
+    jj("describe", "-m", "Synthetic identity guard check")
+    jj("bookmark", "create", "probe")
+    if role == "author":
+        jj("describe", "--author", "External Contributor <contributor@example.com>",
+           "-m", "Synthetic identity guard check")
+    else:
+        jj("--config", 'user.name="External Contributor"',
+           "--config", 'user.email="contributor@example.com"',
+           "describe", "-m", "Synthetic committer override")
+    actual = jj("log", "-r", "@", "--no-graph", "-T",
+                f'{role}.name() ++ " <" ++ {role}.email() ++ ">"')
+    assert actual.stdout.strip() == "External Contributor <contributor@example.com>"
+    if tagged:
+        jj("tag", "set", "v99.0.0", "--revision", "probe")
+    rejected = jj("git", "push", "--remote", "probe", "--bookmark", "probe", "--dry-run", check=False)
+    assert rejected.returncode != 0, "jj must reject a non-maintainer identity before pushing"
+    assert "private" in rejected.stderr.lower()
+    jj("describe", "probe", "--ignore-immutable",
+       "--author", f"{checker.APPROVED_NAME} <{checker.APPROVED_EMAIL}>",
+       "-m", "Synthetic identity guard check")
+    approved = jj("git", "push", "--remote", "probe", "--bookmark", "probe", "--dry-run")
+    assert approved.returncode == 0

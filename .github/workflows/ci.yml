@@ -64,9 +64,6 @@ jobs:
   root-tests:
     name: root tests — CLI (blocking)
     runs-on: ubuntu-latest
-    env:
-      VIGIL_PRIVATE_IDENTITY_DIGESTS: ${{ github.event_name == 'push' && github.repository == 'VigilOSS/Vigil' && secrets.VIGIL_PRIVATE_IDENTITY_DIGESTS || '' }}
-      VIGIL_REQUIRE_PRIVATE_IDENTITY_POLICY: ${{ github.event_name == 'push' && github.repository == 'VigilOSS/Vigil' }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Install uv

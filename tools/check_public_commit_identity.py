@@ -14,6 +14,13 @@ from typing import Iterable, Sequence
 
 APPROVED_NAME = "Vigil OSS Maintainers"
 APPROVED_EMAIL = "vigil.oss@proton.me"
+_JJ_PRIVATE_COMMITS = "~(" + " & ".join(
+    f'{role}_{field}(exact:"{value}")'
+    for role in ("author", "committer")
+    for field, value in (("name", APPROVED_NAME), ("email", APPROVED_EMAIL))
+) + ")"
+# Local tags must not exempt unpublished commits from identity checks.
+_JJ_IMMUTABLE_HEADS = "remote_bookmarks(remote=origin)"
 _ZERO_OID = "0" * 40
 _OID = re.compile(r"^[0-9a-f]{40}$")
 @dataclass(frozen=True)
@@ -81,6 +88,10 @@ def _check_local_config() -> list[str]:
         for key, value in (("user.name", APPROVED_NAME), ("user.email", APPROVED_EMAIL)):
             if _run(("jj", "config", "get", key)) != value:
                 errors.append(f"effective jj {key} must be {value!r}")
+        if _run(("jj", "config", "get", "git.private-commits")) != _JJ_PRIVATE_COMMITS:
+            errors.append("effective jj push policy must reject non-maintainer identities")
+        if _run(("jj", "config", "get", 'revset-aliases."immutable_heads()"')) != _JJ_IMMUTABLE_HEADS:
+            errors.append("effective jj immutability must follow the canonical remote")
     return errors
 
 
@@ -134,6 +145,16 @@ def _install(repo_root: Path) -> None:
         )
         subprocess.run(
             ("jj", "config", "set", "--repo", "user.email", APPROVED_EMAIL),
+            cwd=repo_root,
+            check=True,
+        )
+        subprocess.run(
+            ("jj", "config", "set", "--repo", "git.private-commits", _JJ_PRIVATE_COMMITS),
+            cwd=repo_root,
+            check=True,
+        )
+        subprocess.run(
+            ("jj", "config", "set", "--repo", 'revset-aliases."immutable_heads()"', _JJ_IMMUTABLE_HEADS),
             cwd=repo_root,
             check=True,
         )
