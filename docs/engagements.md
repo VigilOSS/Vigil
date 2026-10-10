@@ -28,15 +28,25 @@ out-of-band callbacks.
 
 ## Tracks and modes
 
-Offensive engagements store enabled capabilities in `scope.json.tracks`. Creation enables one
-track. Use `vigil engagement add-track <key> web|code` to enable the second explicitly. Then
-start each operator session with `--mode web` or `--mode code`; each session reads only that
-mode's operator prompt. `vigil engagement mode` reports the selected mode and prompt path from
-inside a session. Selecting a mode does not add a track or change scope.
+The creation type (`--type web` or `--type code`) selects the first durable track.
+Offensive engagements persist enabled tracks and their independent phases in
+`scope.json.tracks`; the stored engagement type is `offensive`. Use
+`vigil engagement add-track <key> web|code` to enable the second explicitly.
+
+A session mode selects one enabled track's operator prompt for one client process. A single
+enabled track is selected automatically; with two tracks, `start` requires `--mode web` or
+`--mode code`. Change mode by starting a new client process. Selecting a session mode does
+not enable a track, reset its phase, or change scope.
+
+`vigil engagement mode <key>` inspects enabled tracks, their phases, prompt paths, and complete
+start commands without requiring a session selection. `--json` returns a `tracks` object and
+nullable `mode` and `prompt` fields. In a session bound to that engagement, the selected mode
+and prompt are reported too; an inherited mode from another engagement is ignored.
 
 ## Starting a session
 
-`start` requires `--client`. It changes into the engagement directory, exports the engagement
+`start` requires `--client`. Before launching, it prints the workspace, engagement, client,
+selected mode, and track phase to stderr. It changes into the engagement directory, exports the engagement
 environment ([what the launcher exports](agent-clients.md#what-the-launcher-exports)), then execs
 the client. Flags it does not own are forwarded to the client
 ([forwarding rules](agent-clients.md#forwarding-flags-to-the-client)). The key may be omitted when
@@ -44,9 +54,14 @@ the current directory, active pointer, or `--select` resolves the engagement.
 
 A preflight runs first. It **hard-fails** when the client binary is not on `PATH`, or when Goose or
 OpenCode has no `DEEPSEEK_API_KEY` in the environment, the engagement's `.orchestrator.env`, or the
-install root's env files. It **warns and continues** when the orchestrator is not running, the
-Kali runtime container is not running, or the install root is stale. `--skip-preflight` bypasses
+workspace's env files. It **warns and continues** when the orchestrator is not running, the
+Kali runtime container is not running, or an application consumer needs restarting. `--skip-preflight` bypasses
 all five.
+
+Startup refreshes generated client files only for the selected engagement. After an
+application upgrade, an older official session on that same engagement must be ended
+before the new release can refresh those shared files. The older process keeps its
+matched assets and helpers available; startup never kills it automatically.
 
 **Start engagements with `vigil engagement start` and nothing else.** An engagement directory
 also holds a generated `start_<client>.sh`, and a bare `claude` or `codex` run from inside it

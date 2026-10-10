@@ -95,17 +95,22 @@ def build_dispatch_instruction_identity(
     """
     agent_root = agent_root.resolve()
     install_root = agent_root.parent
+    workspace_root = Path(os.environ.get("VIGIL_INSTALL_DIR", str(install_root))).expanduser()
     engagement_dir = engagement_dir.resolve()
     warnings: list[str] = []
     launcher_client = _launcher_effective_client(client_name)
     requested_client = _known_client(os.environ.get("VIGIL_REQUESTED_CLIENT", ""))
-    meta = _load_object(install_root / ".vigil-install-meta.json")
+    meta = _load_object(workspace_root / ".vigil-install-meta.json")
+    bundle = _load_object(install_root / "bundle.json")
     raw_revision = meta.get("source_sha")
     source_revision = (
         raw_revision.strip()
         if isinstance(raw_revision, str) and raw_revision.strip()
         else "unknown"
     )
+    bundle_digest = bundle.get("content_sha256")
+    if isinstance(bundle_digest, str) and len(bundle_digest) == 64:
+        source_revision = f"bundle:{bundle_digest}"
     if source_revision == "unknown":
         warnings.append("installed Vigil source revision is unavailable")
 
@@ -152,13 +157,21 @@ def build_dispatch_instruction_identity(
 
     complete = operator_digest is not None and specialist_digest is not None
     instructions_stale: bool | None = None
+    bundle_files = bundle.get("files")
+    if complete and isinstance(bundle_files, dict):
+        expected_operator = bundle_files.get(str(operator_relative))
+        expected_specialist = bundle_files.get(str(specialist_relative))
+        if isinstance(expected_operator, str) and isinstance(expected_specialist, str):
+            instructions_stale = expected_operator != operator_digest or expected_specialist != specialist_digest
+            if instructions_stale:
+                warnings.append("installed instructions differ from the matched application bundle")
     raw_source_root = meta.get("source_root")
     source_root = (
         Path(raw_source_root).expanduser()
         if isinstance(raw_source_root, str) and raw_source_root.strip()
         else None
     )
-    if complete and source_root is not None:
+    if complete and source_root is not None and not bundle:
         assert operator_relative is not None
         source_operator = source_root / operator_relative
         assert specialist_relative is not None

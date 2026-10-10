@@ -22,6 +22,13 @@ from vigil_cli.engagements import CreateEngagementOptions, create_engagement  # 
 from vigil_cli.client_rosters import repair_engagement_client_rosters  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def application_pin(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Each copied application fixture below can replace this pin; monkeypatch
+    # restores the original caller environment at the end of the test.
+    monkeypatch.setenv("VIGIL_APPLICATION_DIR", str(repo_root))
+
+
 @pytest.fixture
 def vigil_cli_on_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     bin_dir = tmp_path / "vigil-bin"
@@ -54,6 +61,8 @@ def _copy_agent_fixture(agent_root: Path, sandbox_root: Path, *, client: str) ->
         shutil.copytree(agent_root / ".claude", sandbox_root / ".claude")
         shutil.copy2(agent_root / "CLAUDE.md", sandbox_root / "CLAUDE.md")
     shutil.copy2(agent_root / "SKILL.md", sandbox_root / "SKILL.md")
+    (sandbox_root.parent / "orchestrator").mkdir(exist_ok=True)
+    os.environ["VIGIL_APPLICATION_DIR"] = str(sandbox_root.parent)
 
 
 def _isolate_orchestrator_url(monkeypatch: pytest.MonkeyPatch) -> None:

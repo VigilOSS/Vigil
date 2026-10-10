@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import hashlib
 import shutil
 import signal
 import socket
@@ -11,6 +12,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import restart_manifest
+from .application import application_root_for_workspace
+from .paths import engagements_root, resolve_logs_dir, resolve_orchestrator_data_dir, resolve_runtime_state_dir
+from .workspace import workspace_path
 
 
 # E1: opt-in multi-worker uvicorn. Default stays 1 (single-process) so existing
@@ -20,6 +24,7 @@ from . import restart_manifest
 # explicit value still pick up the knob.
 WORKERS_ENV = "VIGIL_ORCHESTRATOR_WORKERS"
 ORCHESTRATOR_START_TIMEOUT_SECONDS = 30.0
+BACKEND_DEPENDENCY_SYNC_TIMEOUT_SECONDS = 120.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,21 +64,22 @@ def _resolve_worker_count(options: OrchestratorOptions) -> int:
 
 def start_orchestrator(options: OrchestratorOptions) -> None:
     install_root = options.install_root.expanduser().resolve()
-    runtime_dir = install_root / ".runtime-data"
+    application_root = application_root_for_workspace(install_root)
+    runtime_dir = resolve_runtime_state_dir(install_root)
     pid_file = runtime_dir / "pids" / "orchestrator.pid"
-    log_file = runtime_dir / "logs" / "orchestrator.log"
+    log_file = resolve_logs_dir(install_root) / "orchestrator.log"
     runtime_dir.joinpath("pids").mkdir(parents=True, exist_ok=True)
-    runtime_dir.joinpath("logs").mkdir(parents=True, exist_ok=True)
+    log_file.parent.mkdir(parents=True, exist_ok=True)
 
-    if _frontend_build_needed(install_root, force=options.build):
+    if _frontend_build_needed(application_root, force=options.build):
         print("frontend\tbuilding")
-        _build_frontend(install_root)
+        _build_frontend(application_root)
     else:
         print("frontend\tcurrent")
 
-    if _report_build_needed(install_root, force=options.build):
+    if _report_build_needed(application_root, force=options.build):
         print("report\tbuilding")
-        _build_report(install_root)
+        _build_report(application_root)
     else:
         print("report\tcurrent")
 
@@ -89,10 +95,20 @@ def start_orchestrator(options: OrchestratorOptions) -> None:
     env = {
         **os.environ,
         "VIGIL_INSTALL_DIR": str(install_root),
+        "VIGIL_APPLICATION_DIR": str(application_root),
+        "VIGIL_ENGAGEMENTS_DIR": str(engagements_root(install_root)),
+        "VIGIL_DATA_DIR": str(resolve_orchestrator_data_dir(install_root)),
+        "UV_PROJECT_ENVIRONMENT": str(_backend_environment(install_root, application_root)),
+        "PYTHONDONTWRITEBYTECODE": "1",
     }
+    cli_directory = application_root / ("cli" if (application_root / "cli/vigil_cli").is_dir() else "src")
+    inherited_pythonpath = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = str(cli_directory) + (os.pathsep + inherited_pythonpath if inherited_pythonpath else "")
     argv = [
         "uv",
         "run",
+        "--frozen",
+        "--no-sync",
         "--directory",
         "orchestrator/backend",
         "python",
@@ -111,14 +127,15 @@ def start_orchestrator(options: OrchestratorOptions) -> None:
     if workers > 1:
         argv += ["--workers", str(workers)]
         _warn_multiworker_caveats(workers)
+    _sync_backend_environment(application_root, env=env, log_file=log_file)
     if options.foreground:
-        os.chdir(install_root)
+        os.chdir(application_root)
         os.execvpe("uv", argv, env)
     print(f"orchestrator\tstarting\thost={options.host}\tport={options.port}")
     with log_file.open("ab") as log, open(os.devnull, "rb") as stdin:
         process = subprocess.Popen(
             argv,
-            cwd=install_root,
+            cwd=application_root,
             env=env,
             stdin=stdin,
             stdout=log,
@@ -144,6 +161,38 @@ def start_orchestrator(options: OrchestratorOptions) -> None:
         f"orchestrator\trunning\thealthy=True\tpid={process.pid}\t"
         f"url=http://{options.host}:{options.port}"
     )
+
+
+def _backend_environment(workspace: Path, application_root: Path) -> Path:
+    """Keep backend dependencies outside immutable release assets."""
+    digest = hashlib.sha256(str(application_root).encode())
+    for name in ("pyproject.toml", "uv.lock"):
+        path = application_root / "orchestrator" / "backend" / name
+        digest.update(path.read_bytes() if path.is_file() else b"<absent>")
+    return workspace_path(workspace, "cache") / f"backend-{digest.hexdigest()[:24]}"
+
+
+def _sync_backend_environment(application_root: Path, *, env: dict[str, str], log_file: Path) -> None:
+    """Provision only locked dependencies outside the immutable application."""
+    environment = env["UV_PROJECT_ENVIRONMENT"]
+    print(f"backend\tsynchronizing dependencies\tenvironment={environment}", flush=True)
+    argv = ["uv", "sync", "--frozen", "--no-install-project", "--directory", "orchestrator/backend"]
+    try:
+        with log_file.open("ab") as log:
+            subprocess.run(
+                argv, cwd=application_root, env=env, stdout=log, stderr=subprocess.STDOUT,
+                check=True, timeout=BACKEND_DEPENDENCY_SYNC_TIMEOUT_SECONDS,
+            )
+    except subprocess.TimeoutExpired as exc:
+        raise SystemExit(
+            f"Backend dependency synchronization timed out after {BACKEND_DEPENDENCY_SYNC_TIMEOUT_SECONDS:g}s "
+            f"(environment {environment}; see {log_file}); no backend was started."
+        ) from exc
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise SystemExit(
+            f"Backend dependency synchronization failed (environment {environment}; see {log_file}); "
+            "check uv and dependency availability, then retry. No backend was started."
+        ) from exc
 
 
 def _warn_multiworker_caveats(workers: int) -> None:
@@ -173,7 +222,7 @@ def _warn_multiworker_caveats(workers: int) -> None:
 
 
 def stop_orchestrator(install_root: Path, *, host: str = "127.0.0.1", port: int = 18000) -> None:
-    pid_file = install_root / ".runtime-data" / "pids" / "orchestrator.pid"
+    pid_file = resolve_runtime_state_dir(install_root) / "pids" / "orchestrator.pid"
     if not pid_file.exists():
         return
     pid = _read_pid(pid_file)
@@ -205,14 +254,14 @@ def stop_orchestrator(install_root: Path, *, host: str = "127.0.0.1", port: int 
 
 
 def orchestrator_status(install_root: Path) -> str:
-    pid_file = install_root / ".runtime-data" / "pids" / "orchestrator.pid"
+    pid_file = resolve_runtime_state_dir(install_root) / "pids" / "orchestrator.pid"
     return "running" if _pid_running(pid_file) else "stopped"
 
 
 def orchestrator_status_payload(install_root: Path, *, host: str = "127.0.0.1", port: int = 18000) -> dict[str, object]:
     """Structured status — backs `vigil orchestrator status --json`."""
     install_root = install_root.expanduser().resolve()
-    pid_file = install_root / ".runtime-data" / "pids" / "orchestrator.pid"
+    pid_file = resolve_runtime_state_dir(install_root) / "pids" / "orchestrator.pid"
     pid = _read_pid(pid_file)
     alive = pid is not None and _pid_alive(pid)
     return {
@@ -258,6 +307,7 @@ def _npm_ci(project_dir: Path) -> None:
 
 
 def _build_frontend(install_root: Path) -> None:
+    _require_editable_build(install_root)
     frontend_dir = install_root / "orchestrator" / "frontend"
     _npm_ci(frontend_dir)
     subprocess.run(["npm", "run", "build"], cwd=frontend_dir, check=True)
@@ -277,7 +327,7 @@ def build_frontend(install_root: Path, *, force: bool = False) -> None:
     builds the single-file report template alongside it so
     `report-export` has a template to inject into.
     """
-    install_root = install_root.expanduser().resolve()
+    install_root = application_root_for_workspace(install_root)
     if not _frontend_build_needed(install_root, force=force):
         print(f"frontend already built: {install_root / 'orchestrator' / 'frontend' / 'dist' / 'index.html'}")
     else:
@@ -293,10 +343,19 @@ def build_frontend(install_root: Path, *, force: bool = False) -> None:
 
 
 def _build_report(install_root: Path) -> None:
+    _require_editable_build(install_root)
     report_dir = install_root / "orchestrator" / "report"
     _npm_ci(report_dir)
     subprocess.run(["npm", "run", "build"], cwd=report_dir, check=True)
     restart_manifest.record_report_build(install_root)
+
+
+def _require_editable_build(application_root: Path) -> None:
+    if (application_root / "bundle.json").is_file():
+        raise SystemExit(
+            "This application release includes prebuilt frontend/report assets. "
+            "Upgrade or reinstall Vigil to replace release assets; rebuild only in an editable checkout."
+        )
 
 
 def _report_build_needed(install_root: Path, *, force: bool = False) -> bool:

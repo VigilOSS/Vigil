@@ -12,6 +12,7 @@ from pathlib import Path
 
 from . import docker
 from . import image_freshness
+from .application import application_root_for_workspace
 from .config import (
     RuntimeEgress,
     RuntimeResources,
@@ -21,8 +22,10 @@ from .config import (
 from .paths import (
     container_host_url,
     default_runtime_container,
+    engagements_root,
     read_env_file,
     resolve_orchestrator_base_url,
+    resolve_runtime_state_dir,
 )
 from .scope_entries import classify_scope_entry
 
@@ -84,7 +87,7 @@ def _resolve_runtime_data_dir(install_root: Path) -> Path:
         or dotenv.get("KALI_MCP_DATA_DIR")
     )
     if not value:
-        return install_root / ".runtime-data"
+        return resolve_runtime_state_dir(install_root)
     path = Path(value).expanduser()
     return path if path.is_absolute() else install_root / path
 
@@ -318,6 +321,7 @@ def build_runtime(
     if variant == "lightweight" and not dev:
         raise SystemExit("The lightweight runtime is development-only. Re-run with --dev to build it.")
     docker.require_daemon("build the runtime image", runner=daemon_runner)
+    install_root = application_root_for_workspace(install_root)
     dockerfile = install_root / "agent" / "docker" / ("runtime-lightweight" if variant == "lightweight" else "runtime-full") / "Dockerfile"
     image = "vigil-lightweight:latest" if variant == "lightweight" else "vigil:latest"
     with _runtime_build_context(install_root, variant=variant) as build_context:
@@ -404,7 +408,7 @@ def local_replica_hosts(install_root: Path) -> list[str]:
     Wildcard ``*.<domain>`` roots are excluded: ``extra_hosts`` / ``/etc/hosts``
     cannot express a wildcard, so only exact names are injected.
     """
-    engagements_dir = install_root / "agent" / "engagements"
+    engagements_dir = engagements_root(install_root)
     if not engagements_dir.is_dir():
         return []
     hosts: set[str] = set()
@@ -485,7 +489,7 @@ def start_runtime(
 ) -> None:
     install_root = options.install_root.expanduser().resolve()
     data_dir = _resolve_runtime_data_dir(install_root)
-    engagements_dir = install_root / "agent" / "engagements"
+    engagements_dir = engagements_root(install_root)
     data_dir.mkdir(parents=True, exist_ok=True)
     engagements_dir.mkdir(parents=True, exist_ok=True)
 
@@ -642,7 +646,7 @@ def runtime_mounts_ok(install_root: Path, container_name: str | None = None, *, 
     container_name = container_name or default_runtime_container()
     install_root = install_root.expanduser().resolve()
     data_dir = _resolve_runtime_data_dir(install_root)
-    engagements_dir = install_root / "agent" / "engagements"
+    engagements_dir = engagements_root(install_root)
     try:
         _validate_mounts(container_name, data_dir, engagements_dir, runner=runner)
     except SystemExit:

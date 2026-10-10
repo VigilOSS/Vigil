@@ -17,7 +17,7 @@ def test_distributable_compose_file_cannot_build_from_the_install_root() -> None
     assert "context:" not in compose
 
 
-def test_runtime_build_stages_only_declared_image_inputs(tmp_path: Path) -> None:
+def test_runtime_build_stages_only_declared_image_inputs(tmp_path: Path, monkeypatch) -> None:
     install_root = tmp_path / "install"
     for source in runtime.runtime_image_inputs(install_root):
         source.parent.mkdir(parents=True, exist_ok=True)
@@ -30,6 +30,7 @@ def test_runtime_build_stages_only_declared_image_inputs(tmp_path: Path) -> None
     database = install_root / "orchestrator" / "backend" / "data"
     database.mkdir(parents=True)
     (database / "orchestrator.sqlite3").write_bytes(b"private-state")
+    monkeypatch.setenv("VIGIL_APPLICATION_DIR", str(install_root))
 
     observed_context: Path | None = None
 

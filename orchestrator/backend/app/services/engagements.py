@@ -70,7 +70,7 @@ _LEGACY_FINDING_PREFIX = "FINDING" + "-"
 
 
 def engagements_root() -> Path:
-    return settings.install_dir / "agent" / "engagements"
+    return settings.engagements_dir or settings.install_dir / "agent" / "engagements"
 
 
 def _deleted_engagement_marker_path(engagement_key: str) -> Path:

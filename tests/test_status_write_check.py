@@ -61,7 +61,8 @@ def test_database_write_check_missing_database_does_not_create_it(tmp_path: Path
     from vigil_cli import status as status_module
 
     install_root = tmp_path / "install"
-    path = _database_path(install_root)
+    from vigil_cli.paths import resolve_orchestrator_data_dir
+    path = resolve_orchestrator_data_dir(install_root) / "orchestrator.sqlite3"
 
     result = status_module.database_write_check(install_root, timeout_seconds=0.01)
 

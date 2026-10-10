@@ -65,20 +65,25 @@ def test_creation_refuses_combined_inputs_instead_of_dropping_host_scope(tmp_pat
         ])
 
 
-def test_mode_command_reports_only_session_selected_prompt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+def test_mode_command_reports_session_selected_prompt_and_tracks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     from vigil_cli.main import main
 
-    _engagement(tmp_path, {
+    path = _engagement(tmp_path, {
         "engagement_type": "offensive",
         "tracks": {"web": {"phase": "recon"}, "code": {"phase": "hunt"}},
     })
     monkeypatch.setenv("VIGIL_OPERATOR_MODE", "code")
+    monkeypatch.setenv("ENGAGEMENT_DIR", str(path))
+    monkeypatch.delenv("VIGIL_SESSION_ENGAGEMENT_DIR", raising=False)
 
     main(["--root", str(tmp_path), "engagement", "mode", "example"])
 
-    assert capsys.readouterr().out == (
-        f"mode: code\nprompt: {tmp_path / 'agent' / 'operator-core-code.md'}\n"
+    output = capsys.readouterr().out
+    assert output.startswith(
+        f"mode: code\nprompt: {engagements.engagement_mode_prompt(tmp_path, 'code')}\n"
     )
+    assert "web: phase=recon" in output
+    assert "code: phase=hunt" in output
 
 
 def test_start_passes_explicit_session_mode_to_launcher(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -221,6 +226,8 @@ def test_install_repairs_legacy_code_pointer_to_absolute_code_core(tmp_path: Pat
     agent_root.mkdir()
     (agent_root / "AGENTS.md").write_text("web prompt\n")
     (agent_root / "operator-core-code.md").write_text("code prompt\n")
+    (tmp_path / "orchestrator").mkdir()
+    monkeypatch.setenv("VIGIL_APPLICATION_DIR", str(tmp_path))
     old = _engagement(tmp_path, {"engagement_type": "code", "current_phase": "hunt"})
     engagements._write_prompt_wrappers(agent_root, old, "codex", engagement_type="web")
 
@@ -229,3 +236,95 @@ def test_install_repairs_legacy_code_pointer_to_absolute_code_core(tmp_path: Pat
         Path("."), rendered_install_root=tmp_path
     ) == ("example",)
     assert str(agent_root / "operator-core-code.md") in (old / "AGENTS.md").read_text()
+
+
+def test_mode_inspects_dual_tracks_without_selecting_a_session(tmp_path, monkeypatch, capsys):
+    from vigil_cli.main import main
+
+    _engagement(tmp_path, {"engagement_type": "offensive", "tracks": {
+        "web": {"phase": "recon"}, "code": {"phase": "hunt"},
+    }})
+    monkeypatch.delenv("VIGIL_OPERATOR_MODE", raising=False)
+    main(["--root", str(tmp_path), "engagement", "mode", "example", "--json"])
+    state = json.loads(capsys.readouterr().out)
+    assert state["mode"] is None
+    assert state["prompt"] is None
+    assert {name: row["phase"] for name, row in state["tracks"].items()} == {
+        "web": "recon", "code": "hunt",
+    }
+    for name, row in state["tracks"].items():
+        assert row["prompt"] == str(engagements.engagement_mode_prompt(tmp_path, name))
+        assert f"engagement start example --client claude --mode {name}" in row["start_command"]
+
+
+@pytest.mark.parametrize("binding", ["same", "other", "none"])
+def test_mode_uses_only_the_inspected_engagement_session(tmp_path, monkeypatch, capsys, binding):
+    from vigil_cli.main import main
+
+    path = _engagement(tmp_path, {"engagement_type": "offensive", "tracks": {
+        "web": {"phase": "collect"}, "code": {"phase": "hunt"},
+    }})
+    monkeypatch.setenv("VIGIL_OPERATOR_MODE", "code")
+    monkeypatch.delenv("VIGIL_SESSION_ENGAGEMENT_DIR", raising=False)
+    monkeypatch.delenv("ENGAGEMENT_KEY", raising=False)
+    monkeypatch.delenv("ENGAGEMENT_DIR", raising=False)
+    if binding != "none":
+        monkeypatch.setenv("ENGAGEMENT_DIR", str(path if binding == "same" else path.parent / "other"))
+    main(["--root", str(tmp_path), "engagement", "mode", "example", "--json"])
+    state = json.loads(capsys.readouterr().out)
+    assert state["mode"] == ("code" if binding == "same" else None)
+
+
+def test_ambiguous_start_reports_complete_client_relaunch_commands(tmp_path):
+    path = _engagement(tmp_path, {"engagement_type": "offensive", "tracks": {
+        "web": {"phase": "recon"}, "code": {"phase": "hunt"},
+    }})
+    with pytest.raises(SystemExit) as error:
+        engagements.start_engagement(tmp_path, path, "codex", [])
+    message = str(error.value)
+    for mode in ("web", "code"):
+        assert f"vigil engagement start example --client codex --mode {mode}" in message
+
+
+def test_start_reports_workspace_client_mode_and_phase_before_exec(tmp_path, monkeypatch, capsys):
+    path = _engagement(tmp_path, {"engagement_type": "offensive", "tracks": {
+        "code": {"phase": "hunt"},
+    }})
+    prompt = tmp_path / "application" / "agent" / "operator-core-code.md"
+    (tmp_path / "application" / "orchestrator").mkdir(parents=True)
+    monkeypatch.setenv("VIGIL_APPLICATION_DIR", str(tmp_path / "application"))
+    prompt.parent.mkdir(parents=True, exist_ok=True)
+    prompt.write_text("synthetic prompt\n")
+    launcher = path / "start_codex.sh"
+    launcher.write_text("#!/bin/sh\n")
+    monkeypatch.setattr(engagements, "set_active_engagement", lambda *args: None)
+    monkeypatch.setattr(engagements.os, "chdir", lambda *args: None)
+    monkeypatch.setattr(engagements.os, "execv", lambda *args: None)
+    monkeypatch.setenv("VIGIL_REQUESTED_CLIENT", "old")
+    monkeypatch.setenv("VIGIL_OPERATOR_MODE", "web")
+    engagements.start_engagement(tmp_path, path, "codex", [])
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert f"workspace: {tmp_path}" in output.err
+    assert "engagement: example" in output.err
+    assert "client: codex" in output.err
+    assert "mode: code" in output.err
+    assert "phase: hunt" in output.err
+
+
+@pytest.mark.parametrize("session_binding", ["same", "other"])
+def test_mode_prefers_session_binding_over_artifact_directory(tmp_path, monkeypatch, capsys, session_binding):
+    from vigil_cli.main import main
+
+    path = _engagement(tmp_path, {"engagement_type": "offensive", "tracks": {
+        "web": {"phase": "recon"}, "code": {"phase": "hunt"},
+    }})
+    monkeypatch.setenv("VIGIL_OPERATOR_MODE", "code")
+    monkeypatch.setenv("ENGAGEMENT_DIR", str(path))
+    monkeypatch.setenv("VIGIL_SESSION_ENGAGEMENT_DIR", str(
+        path if session_binding == "same" else path.parent / "other"
+    ))
+    main(["--root", str(tmp_path), "engagement", "mode", "example", "--json"])
+
+    state = json.loads(capsys.readouterr().out)
+    assert state["mode"] == ("code" if session_binding == "same" else None)

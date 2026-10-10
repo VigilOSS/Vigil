@@ -170,11 +170,15 @@ OpenRouter is not a supported launcher path.
 ## What the launcher exports
 
 Every client's launcher exports `ENGAGEMENT_DIR`, `VIGIL_SESSION_ENGAGEMENT_DIR`,
-`ENGAGEMENT_KEY`, `VIGIL_AGENT_ROOT`, `VIGIL_INSTALL_DIR`, `VIGIL_CLIENT_NAME`,
+`ENGAGEMENT_KEY`, `VIGIL_AGENT_ROOT`, `VIGIL_INSTALL_DIR`, `VIGIL_APPLICATION_DIR`,
+`VIGIL_CLIENT_NAME`,
 and — only when not already set — `ORCHESTRATOR_BASE_URL`, resolved from the
-engagement's `.orchestrator.env`, then the install root's `.orchestrator.env`, then
+engagement's `.orchestrator.env`, then the workspace's `.orchestrator.env`, then
 its `.env`. `vigil engagement start` also exports `VIGIL_OPERATOR_MODE` for the selected
-`--mode`.
+`--mode`. `VIGIL_INSTALL_DIR` identifies private workspace state;
+`VIGIL_APPLICATION_DIR` and `VIGIL_AGENT_ROOT` identify this session's release assets.
+The launcher pins its helper CLI to the same release so package upgrades do not
+silently change an active session's contracts.
 
 The specialist roster links (`.codex/agents`, `.claude/agents`, both opencode
 roster spellings, `.goose/recipes`) and the command surfaces (`.claude/commands`,

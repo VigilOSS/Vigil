@@ -24,7 +24,7 @@ from pydantic import BaseModel
 
 from .. import db
 from ..config import settings
-from ..services.engagements import maybe_sync_engagements
+from ..services.engagements import engagements_root, maybe_sync_engagements
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -51,7 +51,7 @@ def get_install_root() -> InstallRootResponse:
     """
     return InstallRootResponse(
         install_root=str(settings.install_dir),
-        engagements_root=str(settings.install_dir / "agent" / "engagements"),
+        engagements_root=str(engagements_root()),
     )
 
 

@@ -15,6 +15,7 @@ import uuid
 from urllib.parse import unquote, urlsplit
 
 from .remediation_vcs import adapter
+from .paths import agent_root as application_agent_root
 
 _TICKET = re.compile(r"[A-Za-z][A-Za-z0-9_]*-\d+")
 
@@ -69,8 +70,8 @@ def route_context(install_root: Path, engagement: Path, project: dict, reference
     context = {
         "inputs": requested,
         "role": role,
-        "instructions": str(install_root / "agent" / f"remediation-{role}.md"),
-        "essentials": str(install_root / "agent" / "operator-core-remediation.md"),
+        "instructions": str(application_agent_root(install_root) / f"remediation-{role}.md"),
+        "essentials": str(application_agent_root(install_root) / "operator-core-remediation.md"),
         "profile": str(project.get("_profile_path") or engagement / "PROJECT.md"),
         "repository": project["repository"],
         "source_reader": project.get("remediation", {}).get("source_reader", ""),
@@ -129,8 +130,10 @@ def _uuid(value: str | None) -> str:
 
 
 def _command_overlay(install_root: Path, engagement: Path) -> Path:
-    root = engagement / "remediation" / "client-context"
-    source = install_root / "agent" / ".claude" / "commands" / "vigil-remediate.md"
+    agent = application_agent_root(install_root)
+    release = hashlib.sha256(str(agent.parent).encode()).hexdigest()[:16]
+    root = engagement / "remediation" / "client-context" / release
+    source = agent / ".claude" / "commands" / "vigil-remediate.md"
     if not source.is_file():
         raise SystemExit("Missing generated vigil-remediate command; reinstall Vigil before starting")
     destination = root / ".claude" / "commands" / source.name
@@ -147,13 +150,20 @@ def _command_overlay(install_root: Path, engagement: Path) -> Path:
     return root
 
 
-def _settings(project: dict, engagement: Path | None = None, key: str | None = None) -> dict:
+def _settings(project: dict, engagement: Path | None = None, key: str | None = None,
+              install_root: Path | None = None) -> dict:
     settings: dict = {"worktree": {"bgIsolation": "none"}}
     if project.get("remediation", {}).get("hook_policy", "inherit") == "disabled":
         settings["disableAllHooks"] = True
     if engagement is not None and key is not None:
         # Native background hosts retain session settings across process restarts.
-        settings["env"] = {"ENGAGEMENT_DIR": str(engagement), "ENGAGEMENT_KEY": key, "VIGIL_CLIENT_NAME": "claude"}
+        environment = _environment(engagement, key, install_root)
+        settings["env"] = {name: environment[name] for name in (
+            "ENGAGEMENT_DIR", "VIGIL_SESSION_ENGAGEMENT_DIR", "ENGAGEMENT_KEY", "VIGIL_CLIENT_NAME",
+            "VIGIL_APPLICATION_DIR", "VIGIL_AGENT_ROOT", "PATH",
+        )}
+        if install_root is not None:
+            settings["env"]["VIGIL_INSTALL_DIR"] = str(install_root)
     return settings
 
 
@@ -164,9 +174,19 @@ def _notice(project: dict) -> str:
     return "Repository and personal hooks retain their configured policy for this session."
 
 
-def _environment(engagement: Path, key: str) -> dict[str, str]:
+def _environment(engagement: Path, key: str, install_root: Path | None = None) -> dict[str, str]:
+    from .application import session_cli_directory
+    from .paths import resolve_install_root
+
+    root = install_root or resolve_install_root()
+    agent = application_agent_root(root)
     environment = dict(os.environ)
-    environment.update(ENGAGEMENT_DIR=str(engagement), ENGAGEMENT_KEY=key, VIGIL_CLIENT_NAME="claude")
+    environment.update(ENGAGEMENT_DIR=str(engagement), VIGIL_SESSION_ENGAGEMENT_DIR=str(engagement),
+                       ENGAGEMENT_KEY=key, VIGIL_CLIENT_NAME="claude", VIGIL_INSTALL_DIR=str(root),
+                       VIGIL_APPLICATION_DIR=str(agent.parent), VIGIL_AGENT_ROOT=str(agent))
+    helpers = session_cli_directory(agent.parent)
+    if helpers is not None:
+        environment["PATH"] = f"{helpers}{os.pathsep}{environment.get('PATH', os.defpath)}"
     environment.pop("VIGIL_OPERATOR_MODE", None)
     # Native background workers are independent full conversations, not nested
     # interactive clients in the invoking conversation.
@@ -177,7 +197,7 @@ def _environment(engagement: Path, key: str) -> dict[str, str]:
 def _launch_arguments(install_root: Path, engagement: Path, project: dict, session_id: str, key: str) -> list[str]:
     overlay = _command_overlay(install_root, engagement)
     return ["claude", "--session-id", session_id, "--add-dir", str(overlay),
-            "--add-dir", str(engagement / "remediation"), "--settings", json.dumps(_settings(project, engagement, key))]
+            "--add-dir", str(engagement / "remediation"), "--settings", json.dumps(_settings(project, engagement, key, install_root))]
 
 
 def _case_directory(engagement: Path, case_id: str) -> Path:
@@ -287,7 +307,7 @@ def run_session_command(args: argparse.Namespace, install_root: Path, engagement
     if not repository.is_dir():
         raise SystemExit("The selected profile requires an existing repository directory")
     key = args.engagement_key
-    environment = _environment(engagement, key)
+    environment = _environment(engagement, key, install_root)
     notice = _notice(project)
     if command != "join":
         print(notice, flush=True)
@@ -300,7 +320,7 @@ def run_session_command(args: argparse.Namespace, install_root: Path, engagement
                    "Keep this conversation as the developer for one bug or coordinator for several. "
                    "Read repository instructions and relevant profile-selected skills when the task begins.")
         entry_binding = {"engagement_key": key, "session_cwd": str(repository),
-                         "session_id": session_id, "job_id": None, "settings": _settings(project, engagement, key)}
+                         "session_id": session_id, "job_id": None, "settings": _settings(project, engagement, key, install_root)}
         path = engagement / "remediation" / "sessions" / f"{session_id}.json"
         entry_row = _launch_background(command_line, opening, entry_binding, path, repository, environment)
         return subprocess.run(["claude", "attach", entry_row["id"]], cwd=repository, env=environment).returncode
@@ -368,13 +388,13 @@ def run_session_command(args: argparse.Namespace, install_root: Path, engagement
             session_id = str(uuid.uuid4())
             binding = {"case_id": str(args.case_id), "engagement_key": key, "workspace": str(workspace),
                        "session_cwd": str(repository), "session_id": session_id, "job_id": None,
-                       "settings": _settings(project, engagement, key), "workspace_branch": case["worktree_branch"]}
+                       "settings": _settings(project, engagement, key, install_root), "workspace_branch": case["worktree_branch"]}
             command_line = _launch_arguments(install_root, engagement, project, session_id, key)
             profile_path = project.get("_profile_path") or engagement / "PROJECT.md"
             opening = (f"Case: {args.case_id}. Code workspace: {workspace}. Handoff: {handoff}. "
                        f"Profile: {profile_path}. Developer instructions: "
-                       f"{install_root / 'agent' / 'remediation-developer.md'}. Essentials: "
-                       f"{install_root / 'agent' / 'operator-core-remediation.md'}. {notice}\n"
+                       f"{application_agent_root(install_root) / 'remediation-developer.md'}. Essentials: "
+                       f"{application_agent_root(install_root) / 'operator-core-remediation.md'}. {notice}\n"
                        "Read the handoff, profile, and repository instructions. Validate the report and "
                        "present your proposed fix before editing. Keep all case code edits in its registered "
                        "workspace; this repository directory supplies native MCPs, skills, and settings.")

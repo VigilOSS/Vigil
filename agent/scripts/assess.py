@@ -21,6 +21,11 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from assess.cli import main
+# Raw script execution and uv's isolated script environment need the CLI
+# snapshot shipped with these assets, not an unrelated installed distribution.
+_application = Path(__file__).resolve().parents[2]
+_cli = _application / ("cli" if (_application / "cli/vigil_cli").is_dir() else "src")
+sys.path.insert(0, str(_cli))
+from assess.cli import main  # noqa: E402 — import after matched CLI bootstrap
 
 main()

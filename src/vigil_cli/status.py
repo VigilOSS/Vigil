@@ -20,13 +20,11 @@ from .image_freshness import proxy_image_drift
 from .install_fs import atomic_write_bytes, open_pinned_directory
 from .install_manifest import (
     INSTALL_META_FILENAME,
-    install_content_sha256_from_fd,
-    install_source_content_sha256,
 )
 from .oob import oob_options, oob_status
 from .oob_relay import has_pre_routing_oob_state, load_relay_route
 from .orchestrator import orchestrator_status
-from .paths import default_runtime_container, engagements_root, resolve_orchestrator_base_url
+from .paths import agent_root, default_runtime_container, engagements_root, resolve_orchestrator_base_url, resolve_orchestrator_data_dir
 from .runtime import runtime_mounts_ok, runtime_resource_state, runtime_status
 
 
@@ -101,6 +99,9 @@ def source_revision_sha(repo: Path | None) -> str | None:
     git unchanged. jj working-copy commits are real git objects in a colocated
     repo, so the result remains useful for provenance and commit-distance output.
     """
+    # Release provenance is its validated content manifest, never a checkout.
+    if repo is not None and (repo / "bundle.json").is_file():
+        return None
     return _jj_working_copy_sha(repo) or git_head_sha(repo)
 
 
@@ -110,7 +111,9 @@ def source_content_sha256(repo: Path | None) -> str | None:
     if repo is None:
         return None
     try:
-        return install_source_content_sha256(repo)
+        from .application import application_provenance
+
+        return application_provenance(repo)["content_sha256"]
     except OSError:
         return None
 
@@ -136,25 +139,15 @@ def write_install_meta(
     *,
     install_fd: int | None = None,
 ) -> dict[str, object]:
-    """Stamp ``.vigil-install-meta.json`` at install time.
+    """Record legacy-compatible application provenance, not copied workspace code.
 
-    Records the normalized content actually present in the installed managed
-    tree, the best-effort source revision, and an install timestamp. Status
-    compares that installed-tree digest with the same manifest over the live
-    source. This closes the copy-then-source-hash race while the revision remains
-    useful for provenance and commit-distance output. Best-effort: a write
-    failure never aborts the install.
+    Canonical initialization truth lives in ``workspace.json``. This stamp
+    retains revision/distance information for older workspace readers.
     """
     meta: dict[str, object] = {
         "source_sha": source_revision_sha(source_root),
-        # Keep the field name for stamp compatibility. Its value is the
-        # normalized installed content copied from source, not a second read of
-        # source after the copy has completed.
-        "source_content_sha256": (
-            install_content_sha256_from_fd(install_fd, display_root=install_root)
-            if install_fd is not None
-            else install_source_content_sha256(install_root)
-        ),
+        # Keep the legacy field name; the bytes now belong to the application.
+        "source_content_sha256": source_content_sha256(source_root),
         "source_root": str(source_root),
         "installed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
@@ -185,39 +178,13 @@ def write_install_meta(
 
 
 def _resolve_source_root_offline(install_root: Path) -> Path | None:
-    """Best-effort, NETWORK-FREE discovery of the live source checkout.
+    """Resolve the imported/pinned application without network or CWD discovery."""
+    from .application import application_root_for_workspace
 
-    Mirrors ``paths.resolve_source_root``'s *local* candidate order but never
-    triggers the git clone/pull fallback — ``vigil status`` must stay cheap and
-    offline. Returns None when no local checkout is found (staleness then reads as
-    ``unknown``, never falsely ``stale``).
-    """
-    from .paths import CONFIG_DIR, find_repo_root, looks_like_repo_root
-
-    candidates: list[Path] = []
-    env_value = os.environ.get("VIGIL_SOURCE_DIR")
-    if env_value:
-        candidates.append(Path(env_value).expanduser())
-    config_value = get_config_value("source.dir")
-    if config_value:
-        candidates.append(Path(config_value).expanduser())
-    discovered = find_repo_root()
-    if discovered is not None:
-        candidates.append(discovered)
-    cwd_discovered = find_repo_root(Path.cwd())
-    if cwd_discovered is not None:
-        candidates.append(cwd_discovered)
-    # An already-present cached clone (uv-tool install path) — never fetched here.
-    candidates.append(CONFIG_DIR / "source")
-
-    for candidate in candidates:
-        try:
-            resolved = candidate.resolve()
-        except OSError:
-            continue
-        if looks_like_repo_root(resolved):
-            return resolved
-    return None
+    try:
+        return application_root_for_workspace(install_root)
+    except (SystemExit, OSError, ValueError):
+        return None
 
 
 def _commits_behind(source_root: Path | None, installed_sha: str, current_sha: str) -> int | None:
@@ -246,25 +213,25 @@ def _commits_behind(source_root: Path | None, installed_sha: str, current_sha: s
 def install_staleness(
     install_root: Path, *, source_root: Path | None = None
 ) -> dict[str, object]:
-    """Compare installed source content with the live install-managed inputs.
+    """Compare workspace initialization provenance with the matched application.
 
-    Two-layer model: ``vigil install``/``update`` upgrades the WORKING ROOT (the
-    ``~/vigil/agent`` code/prompts/skills/scripts), while ``uv tool upgrade vigil``
-    upgrades only the CLI BINARY. When the binary (or the source checkout) moves
-    ahead but ``vigil install`` is not re-run, the working root silently lags and
-    the new feature set is inert (I-5). This surfaces that drift.
+    CLI, backend, prompts, docs and UI are one application release. This
+    comparison describes workspace adoption; process restart requirements are
+    derived separately by ``restart_manifest.consumer_states``.
 
     ``state`` is one of:
-      - ``current``  installed content == live install-managed source content
-      - ``stale``    installed content != live source content (definite drift)
+      - ``current``  workspace provenance matches application content
+      - ``stale``    workspace provenance differs from application content
       - ``no-stamp`` install predates stamping (or the meta is unreadable) but a
-                     live source is resolvable — likely stale; recommend reinstall
+                     application is resolvable — recommend initialize/adopt
       - ``unknown``  no live source content is readable to compare against
 
     Legacy revision-only stamps retain their original SHA comparison and commit
     distance behavior until the next install writes a content digest.
     """
     meta = read_install_meta(install_root)
+    from .workspace import read_workspace
+    workspace = read_workspace(install_root)
     installed_sha: str | None = None
     installed_content_sha256: str | None = None
     if isinstance(meta, dict):
@@ -274,6 +241,12 @@ def install_staleness(
         installed_content_sha256 = (
             raw_content if isinstance(raw_content, str) and raw_content else None
         )
+    if workspace is not None:
+        application = workspace.get("application")
+        if isinstance(application, dict):
+            digest = application.get("content_sha256")
+            if isinstance(digest, str) and digest:
+                installed_content_sha256 = digest
     if source_root is None:
         source_root = _resolve_source_root_offline(install_root)
     current_sha = source_revision_sha(source_root)
@@ -285,7 +258,7 @@ def install_staleness(
         "installed_content_sha256": installed_content_sha256,
         "current_source_content_sha256": current_content_sha256,
         "source_root": str(source_root) if source_root is not None else None,
-        "meta_present": meta is not None,
+        "meta_present": workspace is not None or meta is not None,
     }
     if installed_content_sha256 is not None:
         result["comparison_basis"] = "content"
@@ -351,8 +324,17 @@ def collect_status(
     backup = latest_backup(install_root)
     oob_token_configured = bool(os.environ.get("VIGIL_FRP_TOKEN") or get_config_value("oob.frp_token"))
     resolved_oob = oob_options(install_root)
+    from .application import application_provenance, application_root_for_workspace
+    from .restart_manifest import client_sessions_state
+    from dataclasses import asdict
+    try:
+        application: dict[str, object] = dict(application_provenance(application_root_for_workspace(install_root)))
+    except (OSError, SystemExit, ValueError) as exc:
+        application = {"state": "unavailable", "detail": str(exc)}
     return {
         "install_root": str(install_root),
+        "application": application,
+        "client_sessions": asdict(client_sessions_state(install_root)),
         "install_exists": install_root.exists(),
         "engagement_count": len(rows),
         "orchestrator": {
@@ -403,6 +385,12 @@ def print_status(status: dict[str, object], *, json_output: bool = False) -> Non
         print(json.dumps(status, indent=2))
         return
     print(f"install\t{status['install_root']}")
+    application = status.get("application")
+    if isinstance(application, dict):
+        print(f"application\t{application.get('root', '-')}\tversion={application.get('version', 'unknown')}")
+    client_sessions = status.get("client_sessions")
+    if isinstance(client_sessions, dict) and client_sessions.get("state") == "stale":
+        print(f"warn\tclient sessions require restart: {client_sessions.get('detail')}; {client_sessions.get('remedy')}")
     orchestrator_blk = status["orchestrator"]  # type: ignore[index]
     runtime = status["runtime"]  # type: ignore[index]
     mitmproxy = status["mitmproxy"]  # type: ignore[index]
@@ -419,7 +407,13 @@ def print_status(status: dict[str, object], *, json_output: bool = False) -> Non
     print(
         f"orchestrator\t{orchestrator_blk['state']}\thealthy={orchestrator_blk['healthy']}{ready_bits}"  # type: ignore[index]
     )
-    if isinstance(readiness, dict):
+    backend_state = orchestrator_blk.get("backend_runtime_state") if isinstance(orchestrator_blk, dict) else None
+    if isinstance(backend_state, dict) and backend_state.get("state") == "stale":
+        print(
+            f"warn\tbackend restart required: {backend_state.get('detail')}; "
+            f"run `{backend_state.get('remedy')}`"
+        )
+    elif isinstance(readiness, dict):
         backend_runtime = readiness.get("backend_runtime")
         if isinstance(backend_runtime, dict) and backend_runtime.get("restart_required"):
             changed = backend_runtime.get("changed_inputs")
@@ -472,11 +466,7 @@ def print_status(status: dict[str, object], *, json_output: bool = False) -> Non
 
 
 def _print_install_staleness_warning(staleness: object) -> None:
-    """Non-fatal WARN when the working root lags the source it was installed from.
-
-    Two-layer model, see :func:`install_staleness` (I-5). Nudges the operator to
-    re-run `vigil install` rather than failing anything.
-    """
+    """Non-fatal workspace-adoption notice; process restart truth is separate."""
     if not isinstance(staleness, dict):
         return
     state = staleness.get("state")
@@ -490,26 +480,24 @@ def _print_install_staleness_warning(staleness: object) -> None:
             installed_content = _short_sha(staleness.get("installed_content_sha256"))
             current_content = _short_sha(staleness.get("current_source_content_sha256"))
             print(
-                "warn\tworking root is stale: source files changed without a new "
-                f"revision (revision {current}; installed content {installed_content}, "
-                f"source content {current_content}); run `vigil install` to refresh "
-                "the working root (code/prompts/skills/scripts) — `uv tool upgrade "
-                "vigil` updates only the CLI binary"
+                "warn\tworkspace provenance is stale: application files changed without a new "
+                f"revision (revision {current}; recorded content {installed_content}, "
+                f"application content {current_content}); run `vigil install` to adopt "
+                "the matched application without copying source; check restart requirements above"
             )
             return
         relationship = (
-            f"is behind source{behind_str}" if positively_behind else "differs from source"
+            f"is behind source{behind_str}" if positively_behind else "differs from application"
         )
         print(
-            f"warn\tworking root {relationship}: installed {installed} "
-            f"vs source {current}; run `vigil install` to refresh the working root "
-            "(code/prompts/skills/scripts) — `uv tool upgrade vigil` updates only the CLI binary"
+            f"warn\tworkspace provenance {relationship}: recorded {installed} "
+            f"vs application {current}; run `vigil install` to adopt the matched application "
+            "without copying source; check restart requirements above"
         )
     elif state == "no-stamp":
         print(
-            "warn\tworking root has no install stamp (predates staleness tracking); "
-            "run `vigil install` to refresh it and record the source version "
-            "(`uv tool upgrade vigil` updates only the CLI binary)"
+            "warn\tworkspace has no application provenance; run `vigil install` to adopt "
+            "the matched application and preserve existing private data in place"
         )
 
 
@@ -518,18 +506,13 @@ def _short_sha(value: object) -> str:
 
 
 def _install_staleness_check(install_root: Path) -> Check:
-    """Working-root-vs-source drift, as a doctor check.
-
-    ``vigil status`` already surfaced this, but doctor is where an operator looks
-    when a documented verb is missing — which is exactly the symptom a working
-    root lagging its source produces.
-    """
+    """Workspace adoption provenance, as a doctor check."""
     staleness = install_staleness(install_root)
     state = str(staleness.get("state") or "unknown")
     if state == "current":
         return Check("install-staleness", "OK")
     if state == "unknown":
-        return Check("install-staleness", "SKIPPED", "no source checkout to compare against")
+        return Check("install-staleness", "SKIPPED", "no matched application available")
     installed = _short_sha(staleness.get("installed_sha"))
     current = _short_sha(staleness.get("current_source_sha"))
     if staleness.get("reason") == "source_content_changed_without_revision":
@@ -541,7 +524,7 @@ def _install_staleness_check(install_root: Path) -> Check:
     return Check(
         "install-staleness",
         "STALE",
-        f"{state}: working root at {installed}, source at {current}; run `vigil install`",
+        f"{state}: workspace provenance at {installed}, application at {current}; run `vigil install`",
     )
 
 
@@ -564,41 +547,59 @@ _RIPGREP_DEGRADATION = (
 def collect_doctor_checks(install_root: Path, *, runner: docker.Runner = docker.run_command) -> list[Check]:
     checks: list[Check] = []
     binary_status: dict[str, str] = {}
-    for command in ("uv", "docker", "npm", "codex", "claude", "fzf", "rg"):
+    for command in ("uv", "docker", "codex", "claude", "fzf", "rg"):
         check = _binary_check(command)
         # Docker alone is required: every runtime, orchestrator, and proxy path
         # goes through it. The client binaries are not — Vigil supports five and
         # an operator needs one — and `uv`/`npm` are build-time tools an install
         # can already have run. `rg` is advisory for the same reason `fzf` is:
         # useful, not universally installed, and not needed by a web engagement.
-        if command == "docker" and check.status != "OK":
+        if command in {"uv", "docker"} and check.status != "OK":
             check = replace(check, required=True)
         elif command == "rg" and check.status != "OK":
             check = replace(check, detail=_RIPGREP_DEGRADATION)
         checks.append(check)
         binary_status[command] = check.status
     install_root = install_root.expanduser().resolve()
+    from .install import has_prior_install_state
+    workspace_ready = has_prior_install_state(install_root)
     # Required: `vigil doctor` is the post-install health check AGENTS.md points
     # at after `vigil up`. With no install root or no agent tree there is nothing
     # to be healthy, and reporting that as advisory made the command exit 0.
     checks.append(
         Check(
             "install-root",
-            "OK" if install_root.exists() else "MISSING",
+            "OK" if workspace_ready else "MISSING",
             str(install_root),
-            required=not install_root.exists(),
+            required=not workspace_ready,
         )
     )
-    agent_dir_present = (install_root / "agent").is_dir()
+    try:
+        application_agent = agent_root(install_root)
+        agent_dir_present = application_agent.is_dir()
+    except (OSError, SystemExit, ValueError):
+        application_agent = None
+        agent_dir_present = False
+    if application_agent is not None:
+        from .application import application_provenance
+        provenance = application_provenance(application_agent.parent)
+        checks.append(Check("application", "OK", f"version={provenance['version']} root={provenance['root']}"))
+    else:
+        checks.append(Check("application", "MISSING", "matched application unavailable", required=True))
+    from .restart_manifest import client_sessions_state
+    sessions = client_sessions_state(install_root)
+    session_status = "STALE" if sessions.state == "stale" else "WARN" if sessions.state == "unknown" else "OK"
+    checks.append(Check("client-sessions", session_status,
+                        f"{sessions.detail}; {sessions.remedy}" if sessions.remedy else sessions.detail))
     checks.append(
         Check(
             "agent-dir",
             "OK" if agent_dir_present else "MISSING",
-            str(install_root / "agent"),
+            str(application_agent) if application_agent is not None else "matched application assets unavailable",
             required=not agent_dir_present,
         )
     )
-    data_dir = install_root / "orchestrator" / "backend" / "data"
+    data_dir = resolve_orchestrator_data_dir(install_root)
     checks.append(Check("backend-data", "OK" if data_dir.is_dir() else "MISSING"))
     checks.append(_database_check(data_dir / "orchestrator.sqlite3"))
     if binary_status.get("docker") == "OK":
@@ -634,6 +635,7 @@ def collect_doctor_checks(install_root: Path, *, runner: docker.Runner = docker.
             elif readiness.get("http_status") is not None:
                 detail = f"/readyz HTTP {readiness['http_status']}"
         checks.append(Check("orchestrator-health", "OK" if healthy else "FAIL", detail))
+        checks.append(_backend_runtime_check(install_root, readiness))
     backup = latest_backup(install_root)
     checks.append(Check("backup-latest", "OK" if backup else "MISSING", str(backup.path) if backup else ""))
     checks.append(_install_staleness_check(install_root))
@@ -947,7 +949,30 @@ def _merge_readyz_payload(readiness: dict[str, object], raw: bytes) -> None:
 
 def _orchestrator_readyz_bundle(install_root: Path) -> dict[str, object]:
     healthy, readiness = _orchestrator_readyz_snapshot(install_root)
-    return {"healthy": healthy, "readiness": readiness}
+    return {
+        "healthy": healthy, "readiness": readiness,
+        "backend_runtime_state": _backend_runtime_state(install_root, readiness),
+    }
+
+
+def _backend_runtime_state(install_root: Path, readiness: dict[str, object]) -> dict[str, object]:
+    from dataclasses import asdict
+    from .restart_manifest import backend_state_from_readiness
+
+    try:
+        return asdict(backend_state_from_readiness(install_root, readiness))
+    except (OSError, SystemExit, ValueError) as exc:
+        return {"key": "backend", "state": "unknown", "remedy": "", "detail": str(exc)}
+
+
+def _backend_runtime_check(install_root: Path, readiness: dict[str, object]) -> Check:
+    state = _backend_runtime_state(install_root, readiness)
+    detail = str(state.get("detail") or "")
+    if state["state"] == "stale":
+        return Check("backend-runtime", "STALE", f"{detail}; run `{state['remedy']}`")
+    if state["state"] == "current":
+        return Check("backend-runtime", "OK")
+    return Check("backend-runtime", "WARN", detail)
 
 
 def list_failed_audit_markers(engagement_dir: Path) -> list[Path]:

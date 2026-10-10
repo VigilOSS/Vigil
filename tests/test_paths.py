@@ -1,168 +1,102 @@
+import hashlib
+import json
 from pathlib import Path
-from types import SimpleNamespace
+import subprocess
 
 import pytest
 
-from vigil_cli import paths
+from vigil_cli import application, paths
 
 
-def test_cached_source_clones_the_installed_release_tag(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    calls: list[tuple[list[str], dict[str, object]]] = []
-
-    def run(argv: list[str], **kwargs: object) -> SimpleNamespace:
-        calls.append((argv, kwargs))
-        destination = Path(argv[-1])
-        (destination / "agent").mkdir(parents=True)
-        (destination / "orchestrator").mkdir()
-        return SimpleNamespace(returncode=0)
-
-    monkeypatch.setattr(paths, "CONFIG_DIR", tmp_path)
-    monkeypatch.setattr(paths, "__version__", "1.0.0", raising=False)
-    monkeypatch.setattr(paths, "shutil_which", lambda _command: "/usr/bin/git")
-    monkeypatch.setattr(paths, "get_config_value", lambda *_args: None)
-    monkeypatch.setattr(paths.subprocess, "run", run)
-
-    resolved = paths._ensure_cached_source()
-
-    expected = paths._source_cache_path(tmp_path, paths.DEFAULT_SOURCE_REPO, "v1.0.0")
-    assert resolved == expected.resolve()
-    argv, kwargs = calls[0]
-    assert argv[:-1] == [
-        "git",
-        "clone",
-        "--depth",
-        "1",
-        "--branch",
-        "v1.0.0",
-        "--single-branch",
-        paths.DEFAULT_SOURCE_REPO,
-    ]
-    assert kwargs["timeout"] == paths.SOURCE_CLONE_TIMEOUT_SECONDS
-    assert Path(argv[-1]).name == "source"
-    assert Path(argv[-1]).parent.name.startswith(".source-cache-")
+def _application(root: Path) -> Path:
+    (root / "agent").mkdir(parents=True)
+    (root / "orchestrator").mkdir()
+    return root
 
 
-def test_cached_source_reuses_versioned_checkout_without_network(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    cached = paths._source_cache_path(tmp_path, paths.DEFAULT_SOURCE_REPO, "v1.0.0")
-    (cached / "agent").mkdir(parents=True)
-    (cached / "orchestrator").mkdir()
-    monkeypatch.setattr(paths, "CONFIG_DIR", tmp_path)
-    monkeypatch.setattr(paths, "__version__", "1.0.0", raising=False)
-    monkeypatch.setattr(paths, "shutil_which", lambda _command: "/usr/bin/git")
-    monkeypatch.setattr(paths, "get_config_value", lambda *_args: None)
-    monkeypatch.setattr(
-        paths.subprocess,
-        "run",
-        lambda *_args, **_kwargs: pytest.fail("an immutable cached release must not pull"),
-    )
-
-    assert paths._ensure_cached_source() == cached.resolve()
+def _bundle(root: Path, *, version="1.1.0", prompt=b"Acme prompt\n") -> Path:
+    _application(root)
+    (root / "agent/AGENTS.md").write_bytes(prompt)
+    files = {"agent/AGENTS.md": hashlib.sha256(prompt).hexdigest()}
+    inventory = {"files": files, "executables": []}
+    (root / "bundle.json").write_text(json.dumps({
+        "schema_version": 1, "version": version, **inventory,
+        "content_sha256": hashlib.sha256(json.dumps(inventory, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
+    }))
+    return root
 
 
-def test_cached_source_ref_can_be_explicitly_overridden(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    calls: list[list[str]] = []
-
-    def run(argv: list[str], **_kwargs: object) -> SimpleNamespace:
-        calls.append(argv)
-        destination = Path(argv[-1])
-        (destination / "agent").mkdir(parents=True)
-        (destination / "orchestrator").mkdir()
-        return SimpleNamespace(returncode=0)
-
-    monkeypatch.setattr(paths, "CONFIG_DIR", tmp_path)
-    monkeypatch.setattr(paths, "__version__", "1.0.0", raising=False)
-    monkeypatch.setattr(paths, "shutil_which", lambda _command: "/usr/bin/git")
-    monkeypatch.setattr(
-        paths,
-        "get_config_value",
-        lambda key, default=None: "release-candidate" if key == "source.ref" else default,
-    )
-    monkeypatch.setattr(paths.subprocess, "run", run)
-
-    paths._ensure_cached_source()
-
-    assert calls[0][calls[0].index("--branch") + 1] == "release-candidate"
-    assert Path(calls[0][-1]).name == "source"
+def test_source_resolution_uses_imported_checkout_instead_of_destination_or_cwd(tmp_path, monkeypatch):
+    checkout = _application(tmp_path / "checkout")
+    module = checkout / "src/vigil_cli/application.py"
+    module.parent.mkdir(parents=True)
+    module.write_text("# module location fixture\n")
+    destination = _application(tmp_path / "legacy-workspace")
+    cwd = _application(tmp_path / "unrelated-checkout")
+    monkeypatch.delenv("VIGIL_APPLICATION_DIR", raising=False)
+    monkeypatch.setattr(application, "__file__", str(module))
+    monkeypatch.chdir(cwd)
+    monkeypatch.setattr(subprocess, "run", lambda *_a, **_kw: pytest.fail("source resolution must be offline"))
+    assert paths.resolve_source_root(install_root=destination) == checkout
 
 
-def test_cached_source_failed_clone_does_not_poison_future_retry(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    def run(argv: list[str], **_kwargs: object) -> SimpleNamespace:
-        destination = Path(argv[-1])
-        destination.mkdir(parents=True)
-        (destination / "partial-download").write_text("incomplete", encoding="utf-8")
-        return SimpleNamespace(returncode=1)
-
-    monkeypatch.setattr(paths, "CONFIG_DIR", tmp_path)
-    monkeypatch.setattr(paths, "__version__", "1.0.0", raising=False)
-    monkeypatch.setattr(paths, "shutil_which", lambda _command: "/usr/bin/git")
-    monkeypatch.setattr(paths, "get_config_value", lambda *_args: None)
-    monkeypatch.setattr(paths.subprocess, "run", run)
-
-    assert paths._ensure_cached_source() is None
-    expected = paths._source_cache_path(tmp_path, paths.DEFAULT_SOURCE_REPO, "v1.0.0")
-    assert not expected.exists()
-    assert "source sync failed for v1.0.0" in capsys.readouterr().err
+def test_explicit_application_override_wins_over_environment(tmp_path, monkeypatch):
+    explicit = _application(tmp_path / "explicit")
+    inherited = _application(tmp_path / "inherited")
+    monkeypatch.setenv("VIGIL_APPLICATION_DIR", str(inherited))
+    assert paths.resolve_source_root(explicit) == explicit
+    assert paths.resolve_source_root() == inherited
 
 
-def test_cached_source_timeout_is_reported_and_retryable(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    def run(argv: list[str], **_kwargs: object) -> SimpleNamespace:
-        destination = Path(argv[-1])
-        destination.mkdir(parents=True)
-        raise paths.subprocess.TimeoutExpired(argv, paths.SOURCE_CLONE_TIMEOUT_SECONDS)
-
-    monkeypatch.setattr(paths, "CONFIG_DIR", tmp_path)
-    monkeypatch.setattr(paths, "__version__", "1.0.0", raising=False)
-    monkeypatch.setattr(paths, "shutil_which", lambda _command: "/usr/bin/git")
-    monkeypatch.setattr(paths, "get_config_value", lambda *_args: None)
-    monkeypatch.setattr(paths.subprocess, "run", run)
-
-    assert paths._ensure_cached_source() is None
-    expected = paths._source_cache_path(tmp_path, paths.DEFAULT_SOURCE_REPO, "v1.0.0")
-    assert not expected.exists()
-    assert "timed out" in capsys.readouterr().err
+def test_legacy_source_ref_and_repository_settings_cannot_select_old_assets(tmp_path, monkeypatch):
+    current = _application(tmp_path / "current")
+    old = _application(tmp_path / "source-v1.0.0")
+    monkeypatch.setenv("VIGIL_APPLICATION_DIR", str(current))
+    monkeypatch.setenv("VIGIL_SOURCE_DIR", str(old))
+    monkeypatch.setenv("VIGIL_SOURCE_REF", "v1.0.0")
+    monkeypatch.setenv("VIGIL_SOURCE_REPO", "https://example.com/acme/vigil.git")
+    monkeypatch.setattr(paths, "get_config_value", lambda *_a, **_kw: str(old))
+    assert paths.resolve_source_root(install_root=old) == current
 
 
-def test_source_cache_identity_binds_repository_and_unsanitized_ref(tmp_path: Path) -> None:
-    default = paths._source_cache_path(tmp_path, "https://example.test/acme/vigil.git", "v1.0.0")
-    fork = paths._source_cache_path(tmp_path, "https://example.test/fork/vigil.git", "v1.0.0")
-    slash = paths._source_cache_path(tmp_path, "https://example.test/acme/vigil.git", "feature/x")
-    dash = paths._source_cache_path(tmp_path, "https://example.test/acme/vigil.git", "feature-x")
+def test_invalid_bundle_does_not_publish_a_cache_and_retry_is_clean(tmp_path, monkeypatch):
+    bundle = _bundle(tmp_path / "bundle")
+    cache = tmp_path / "cache"
+    monkeypatch.setenv("VIGIL_APPLICATION_CACHE", str(cache))
+    (bundle / "agent/AGENTS.md").write_bytes(b"changed source\n")
+    with pytest.raises(ValueError, match="content mismatch"):
+        application.materialize_bundle(bundle)
+    assert not cache.exists()
+    (bundle / "agent/AGENTS.md").write_bytes(b"Acme prompt\n")
+    release = application.materialize_bundle(bundle)
+    assert (release / "agent/AGENTS.md").read_bytes() == b"Acme prompt\n"
 
-    assert default != fork
-    assert slash != dash
-    assert default.name.startswith("source-v1.0.0-")
+
+def test_missing_application_never_fetches_a_source_checkout(tmp_path, monkeypatch):
+    module = tmp_path / "missing/src/vigil_cli/application.py"
+    module.parent.mkdir(parents=True)
+    module.write_text("# missing application fixture\n")
+    monkeypatch.delenv("VIGIL_APPLICATION_DIR", raising=False)
+    monkeypatch.setattr(application, "__file__", str(module))
+    monkeypatch.setattr(subprocess, "run", lambda *_a, **_kw: pytest.fail("missing assets must not trigger a fetch"))
+    with pytest.raises(SystemExit, match="matched Vigil application bundle"):
+        paths.resolve_source_root()
 
 
-def test_same_release_ref_from_two_repositories_uses_distinct_caches(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    def run(argv: list[str], **_kwargs: object) -> SimpleNamespace:
-        destination = Path(argv[-1])
-        (destination / "agent").mkdir(parents=True)
-        (destination / "orchestrator").mkdir()
-        return SimpleNamespace(returncode=0, stderr="")
+def test_content_addressed_release_identity_binds_version_and_content(tmp_path, monkeypatch):
+    monkeypatch.setenv("VIGIL_APPLICATION_CACHE", str(tmp_path / "cache"))
+    one = application.materialize_bundle(_bundle(tmp_path / "one"))
+    another_version = application.materialize_bundle(_bundle(tmp_path / "version", version="1.2.0"))
+    another_content = application.materialize_bundle(_bundle(tmp_path / "content", prompt=b"Second Acme prompt\n"))
+    assert len({one, another_version, another_content}) == 3
+    assert one.name.startswith("1.1.0-") and another_version.name.startswith("1.2.0-")
+    assert (one / "agent/AGENTS.md").read_bytes() == b"Acme prompt\n"
 
-    monkeypatch.setattr(paths, "CONFIG_DIR", tmp_path)
-    monkeypatch.setattr(paths, "__version__", "1.0.0", raising=False)
-    monkeypatch.setattr(paths, "shutil_which", lambda _command: "/usr/bin/git")
-    monkeypatch.setattr(paths, "get_config_value", lambda *_args: None)
-    monkeypatch.setattr(paths.subprocess, "run", run)
 
-    monkeypatch.setenv("VIGIL_SOURCE_REPO", "https://example.test/acme/vigil.git")
-    first = paths._ensure_cached_source()
-    monkeypatch.setenv("VIGIL_SOURCE_REPO", "https://example.test/fork/vigil.git")
-    second = paths._ensure_cached_source()
-
-    assert first is not None and second is not None
-    assert first != second
-    assert first.is_dir() and second.is_dir()
+def test_identical_release_content_reuses_retained_cache_without_network(tmp_path, monkeypatch):
+    monkeypatch.setenv("VIGIL_APPLICATION_CACHE", str(tmp_path / "cache"))
+    monkeypatch.setattr(subprocess, "run", lambda *_a, **_kw: pytest.fail("retained release must not fetch source"))
+    first = application.materialize_bundle(_bundle(tmp_path / "first"))
+    second = application.materialize_bundle(_bundle(tmp_path / "second"))
+    assert first == second
+    assert (first / "bin/vigil").stat().st_mode & 0o777 == 0o755

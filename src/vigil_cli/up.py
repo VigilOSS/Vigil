@@ -9,8 +9,9 @@ from pathlib import Path
 
 from . import config as config_module
 from . import docker
+from .application import resolve_application_root
+from .workspace import initialize_workspace
 from .image_freshness import image_outdated, proxy_image_drift
-from .install import InstallOptions, install_from_source
 from .mitmproxy import MitmproxyOptions, build_image as build_mitmproxy_image, mitmproxy_image_inputs, start_proxy
 from .oob import (
     OOB_CONFIGURATION_HELP,
@@ -22,7 +23,7 @@ from .oob import (
     start_oob,
 )
 from .orchestrator import OrchestratorOptions, start_orchestrator
-from .paths import default_runtime_container, resolve_source_root
+from .paths import default_runtime_container, engagements_root
 from .runtime import RuntimeOptions, build_runtime, runtime_image_inputs, start_runtime, stop_runtime
 
 
@@ -52,35 +53,34 @@ def run_up(
     """
     install_root = Path(os.path.abspath(options.install_root.expanduser()))
 
+    application_root = resolve_application_root(options.source_root, preserve_path=True)
+    initialize_workspace(install_root, application_root=application_root)
+    previous_application = os.environ.get("VIGIL_APPLICATION_DIR")
+    os.environ["VIGIL_APPLICATION_DIR"] = str(application_root)
     try:
-        source_root = resolve_source_root(
-            options.source_root,
-            install_root=install_root,
-            preserve_path=True,
-        )
-    except SystemExit:
-        if options.source_root is not None:
-            raise
-        print("source sync\tskipped (no source checkout found)")
-    else:
-        print("source sync\tupdating install root")
-        install_from_source(
-            InstallOptions(
-                source_root=source_root,
-                install_root=install_root,
-                verify_docker_image=False,
-            ),
-            runner=runner,
-            build_runner=build_runner,
-        )
+        _start_stack(install_root, application_root, options, runner=runner, build_runner=build_runner)
+    finally:
+        if previous_application is None:
+            os.environ.pop("VIGIL_APPLICATION_DIR", None)
+        else:
+            os.environ["VIGIL_APPLICATION_DIR"] = previous_application
 
+
+def _start_stack(
+    install_root: Path,
+    application_root: Path,
+    options: UpOptions,
+    *,
+    runner: docker.Runner,
+    build_runner: docker.Runner,
+) -> None:
     runtime_was_running = docker.container_running(default_runtime_container(), runner=runner)
 
     runtime_built = False
     if options.no_build:
         print("runtime image\tbuild skipped")
     elif image_outdated(
-        "vigil:latest", _runtime_image_inputs(install_root), root=install_root, runner=runner
+        "vigil:latest", _runtime_image_inputs(application_root), root=application_root, runner=runner
     ):
         print("runtime image\tbuilding")
         build_runtime(install_root, runner=build_runner, daemon_runner=runner)
@@ -94,8 +94,8 @@ def run_up(
         print("mitmproxy image\tbuild skipped")
     elif image_outdated(
         "vigil-proxy:latest",
-        mitmproxy_image_inputs(install_root),
-        root=install_root,
+        mitmproxy_image_inputs(application_root),
+        root=application_root,
         runner=runner,
     ):
         print("mitmproxy image\tbuilding")
@@ -188,11 +188,11 @@ def _start_mitmproxy_if_needed(
         else:
             print("mitmproxy\talready running")
         return
-    engagements_root = install_root / "agent" / "engagements"
-    engagements_root.mkdir(parents=True, exist_ok=True)
+    engagement_directory = engagements_root(install_root)
+    engagement_directory.mkdir(parents=True, exist_ok=True)
     print("mitmproxy\tstarting (serves all active engagements)")
     start_proxy(
-        MitmproxyOptions(install_root=install_root, engagements_root=engagements_root),
+        MitmproxyOptions(install_root=install_root, engagements_root=engagement_directory),
         runner=runner,
         build_runner=build_runner,
     )

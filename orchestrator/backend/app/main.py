@@ -44,6 +44,7 @@ _BACKEND_PACKAGE_ROOT = _BACKEND_SOURCE_ROOT.parent
 # let a later override make the snapshot and the check disagree about which
 # files they are even talking about.
 _BACKEND_INSTALL_ROOT = settings.install_dir.expanduser().resolve()
+_BACKEND_APPLICATION_ROOT = settings.application_dir.expanduser().resolve()
 
 # Files the backend is built from that are NOT under `app/`. A new dependency
 # lands here and nowhere else, which is precisely the change that cannot work
@@ -118,11 +119,11 @@ def _loaded_cross_tree_inputs() -> dict[str, str]:
             path = Path(raw).resolve()
         except (OSError, ValueError):
             continue
-        if not path.is_relative_to(_BACKEND_INSTALL_ROOT):
+        if not path.is_relative_to(_BACKEND_APPLICATION_ROOT):
             continue
         if path.is_relative_to(_BACKEND_SOURCE_ROOT) or not _is_source_file(path):
             continue
-        inputs[path.relative_to(_BACKEND_INSTALL_ROOT).as_posix()] = _file_digest(path)
+        inputs[path.relative_to(_BACKEND_APPLICATION_ROOT).as_posix()] = _file_digest(path)
     return inputs
 
 
@@ -186,9 +187,9 @@ class _ImportDigestRecorder:
             resolved = Path(origin).resolve()
         except (OSError, ValueError):
             return spec
-        if not resolved.is_relative_to(_BACKEND_INSTALL_ROOT) or not _is_source_file(resolved):
+        if not resolved.is_relative_to(_BACKEND_APPLICATION_ROOT) or not _is_source_file(resolved):
             return spec
-        label = resolved.relative_to(_BACKEND_INSTALL_ROOT).as_posix()
+        label = resolved.relative_to(_BACKEND_APPLICATION_ROOT).as_posix()
         with _LAZY_BASELINE_LOCK:
             if label in _LAZY_INPUT_BASELINE:
                 return spec
@@ -335,6 +336,7 @@ def _backend_runtime_snapshot() -> dict[str, object]:
     return {
         "source_root": str(_BACKEND_SOURCE_ROOT),
         "install_root": str(_BACKEND_INSTALL_ROOT),
+        "application_root": str(_BACKEND_APPLICATION_ROOT),
         "process_started_at": datetime.fromtimestamp(
             _BACKEND_PROCESS_STARTED_AT,
             tz=timezone.utc,

@@ -353,6 +353,7 @@ def test_fresh_install_accepts_ambient_value_as_its_persisted_base_domain(
     source_root = tmp_path / "source"
     install_root = tmp_path / "fresh"
     (source_root / "agent").mkdir(parents=True)
+    (source_root / "orchestrator").mkdir(exist_ok=True)
     (source_root / "agent/README").write_text("managed", encoding="utf-8")
     monkeypatch.setenv("VIGIL_CONFIG", str(tmp_path / "config.json"))
     monkeypatch.setenv("VIGIL_OOB_DOMAIN", "custom.example.test")
@@ -391,6 +392,7 @@ def test_install_reads_relative_config_from_caller_context_before_pinning_cwd(
     )
     source_root = tmp_path / "source"
     (source_root / "agent").mkdir(parents=True)
+    (source_root / "orchestrator").mkdir(exist_ok=True)
     (source_root / "agent/README").write_text("managed", encoding="utf-8")
     install_root = tmp_path / "install"
     monkeypatch.chdir(caller_root)
@@ -425,6 +427,7 @@ def test_fresh_install_without_oob_configuration_does_not_persist_owner_defaults
     source_root = tmp_path / "source"
     install_root = tmp_path / "fresh"
     (source_root / "agent").mkdir(parents=True)
+    (source_root / "orchestrator").mkdir(exist_ok=True)
     (source_root / "agent/README").write_text("managed", encoding="utf-8")
     monkeypatch.setenv("VIGIL_CONFIG", str(tmp_path / "config.json"))
     monkeypatch.delenv("VIGIL_OOB_DOMAIN", raising=False)
@@ -470,6 +473,7 @@ def test_fresh_install_allocates_route_but_live_oob_state_pins_legacy_route(
     monkeypatch.setenv("VIGIL_CONFIG", str(tmp_path / "config.json"))
     monkeypatch.setenv("VIGIL_OOB_DOMAIN", "oob.example.test")
     (source_root / "agent").mkdir(parents=True)
+    (source_root / "orchestrator").mkdir(exist_ok=True)
     (source_root / "agent/README").write_text("managed", encoding="utf-8")
     fresh_root = tmp_path / "fresh-slot"
     fresh = install_from_source(
@@ -1200,6 +1204,7 @@ def test_upgrade_pins_ambient_domain_that_was_effective_before_metadata(
     source_root = tmp_path / "source"
     install_root = tmp_path / "upgrade"
     (source_root / "agent").mkdir(parents=True)
+    (source_root / "orchestrator").mkdir(exist_ok=True)
     (source_root / "agent/README").write_text("managed", encoding="utf-8")
     (install_root / "agent/engagements/existing").mkdir(parents=True)
     # The state a pre-routing `vigil oob start` left on that ambient domain —
@@ -1522,6 +1527,7 @@ def test_install_says_why_it_allocated_no_oob_route(
     monkeypatch.delenv("VIGIL_OOB_DOMAIN", raising=False)
     source = tmp_path / "source"
     (source / "agent" / "engagements").mkdir(parents=True)
+    (source / "orchestrator").mkdir(exist_ok=True)
     (source / "orchestrator" / "backend" / "data").mkdir(parents=True)
     (source / "README.md").write_text("managed source\n", encoding="utf-8")
 
@@ -1711,6 +1717,7 @@ def test_install_honours_pre_rename_oob_tenant_config_key(
     )
     source_root = tmp_path / "source"
     (source_root / "agent").mkdir(parents=True)
+    (source_root / "orchestrator").mkdir(exist_ok=True)
     (source_root / "agent/README").write_text("managed", encoding="utf-8")
     install_root = tmp_path / "install"
     monkeypatch.setenv("VIGIL_CONFIG", str(config_path))
@@ -1748,6 +1755,7 @@ def test_current_oob_slot_config_key_wins_over_the_pre_rename_one(
     )
     source_root = tmp_path / "source"
     (source_root / "agent").mkdir(parents=True)
+    (source_root / "orchestrator").mkdir(exist_ok=True)
     (source_root / "agent/README").write_text("managed", encoding="utf-8")
     install_root = tmp_path / "install"
     monkeypatch.setenv("VIGIL_CONFIG", str(config_path))
@@ -2055,6 +2063,7 @@ def test_configuring_oob_after_the_first_install_allocates_a_dedicated_slot(
     monkeypatch.delenv("KALI_MCP_DATA_DIR", raising=False)
     source = tmp_path / "source"
     (source / "agent" / "engagements").mkdir(parents=True)
+    (source / "orchestrator").mkdir(exist_ok=True)
     (source / "orchestrator" / "backend" / "data").mkdir(parents=True)
     (source / "README.md").write_text("managed\n", encoding="utf-8")
     install_root = tmp_path / "install"
@@ -2112,6 +2121,7 @@ def test_install_preserves_the_legacy_route_of_a_root_that_already_ran_oob(
     monkeypatch.delenv("KALI_MCP_DATA_DIR", raising=False)
     source = tmp_path / "source"
     (source / "agent" / "engagements").mkdir(parents=True)
+    (source / "orchestrator").mkdir(exist_ok=True)
     (source / "README.md").write_text("managed\n", encoding="utf-8")
     install_root = tmp_path / "install"
 
@@ -2163,6 +2173,7 @@ def test_relocated_runtime_data_dir_still_proves_a_live_legacy_oob_install(
     monkeypatch.delenv("KALI_MCP_DATA_DIR", raising=False)
     source = tmp_path / "source"
     (source / "agent" / "engagements").mkdir(parents=True)
+    (source / "orchestrator").mkdir(exist_ok=True)
     (source / "README.md").write_text("managed\n", encoding="utf-8")
     install_root = tmp_path / "install"
     (install_root / "agent" / "engagements" / "existing").mkdir(parents=True)
@@ -2194,6 +2205,7 @@ def test_deferred_configuration_leaves_an_allocated_slot_untouched(
     monkeypatch.delenv("KALI_MCP_DATA_DIR", raising=False)
     source = tmp_path / "source"
     (source / "agent" / "engagements").mkdir(parents=True)
+    (source / "orchestrator").mkdir(exist_ok=True)
     (source / "README.md").write_text("managed\n", encoding="utf-8")
     install_root = tmp_path / "install"
 
@@ -2251,6 +2263,7 @@ def test_deferred_configuration_keeps_a_pre_rename_record_and_slot_key(
     monkeypatch.delenv("KALI_MCP_DATA_DIR", raising=False)
     source = tmp_path / "source"
     (source / "agent" / "engagements").mkdir(parents=True)
+    (source / "orchestrator").mkdir(exist_ok=True)
     (source / "README.md").write_text("managed\n", encoding="utf-8")
 
     # A root whose only routing record is the pre-rename file.

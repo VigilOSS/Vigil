@@ -37,7 +37,7 @@ from .engagements import (
     clear_active_engagement,
     create_engagement,
     current_engagement_path,
-    engagement_mode_prompt,
+    engagement_mode_state,
     export_pdf,
     list_engagements,
     mutate_scope_file,
@@ -47,7 +47,6 @@ from .engagements import (
     remove_out_of_scope,
     repair_engagement_tracks,
     resolve_current_engagement,
-    resolve_engagement_mode,
     resolve_engagement_path,
     resolve_out_of_scope,
     resolve_rate_limit,
@@ -103,7 +102,7 @@ from .orchestrator import (
     start_orchestrator,
     stop_orchestrator,
 )
-from .paths import default_runtime_container, resolve_install_root, resolve_source_root
+from .paths import agent_root, default_runtime_container, engagements_root, resolve_install_root, resolve_source_root, resolve_logs_dir, resolve_runtime_state_dir, resolve_orchestrator_data_dir
 from .preflight import _preflight_engagement_start
 from .quickstart import QuickstartOptions, run_quickstart
 from .runtime import RuntimeOptions, vigil_runtime_resources, build_runtime, runtime_status, start_runtime, stop_runtime, warn_if_local_hosts_need_restart
@@ -114,15 +113,11 @@ from .up import UpOptions, run_up
 _CREATE_ENGAGEMENT_TYPES = ["web", "code", "android", "remediation"]
 
 
-# The operator cannot deduce the two-layer model from the CLI's output, and
-# without it a stale CLI binary is not comprehensible. It used to print after
-# EVERY install, turning a genuinely useful paragraph into scenery; it now
-# prints only on a first install (new information) or when the CLI binary
-# itself lags.
-_TWO_LAYER_MODEL = (
-    "Two layers: `vigil install` upgrades the WORKING ROOT "
-    "(code/prompts/skills/scripts); `uv tool upgrade vigil` upgrades only the CLI binary. "
-    "`vigil status` warns when the working root differs from its source."
+# Explain release/workspace ownership on first initialization or CLI drift.
+_APPLICATION_WORKSPACE_MODEL = (
+    "The release wheel contains the matched CLI, backend, prompts, docs, and prebuilt UI. "
+    "`vigil install` initializes or adopts private workspace data in place. "
+    "Upgrade the application by installing the new release wheel; `vigil status` reports restart requirements."
 )
 
 
@@ -230,7 +225,7 @@ def _print_post_install(
 
     if cli_lags or not result.is_upgrade:
         print(file=stream)
-        print(term.wrap(_TWO_LAYER_MODEL, stream=stream), file=stream)
+        print(term.wrap(_APPLICATION_WORKSPACE_MODEL, stream=stream), file=stream)
     print(file=stream)
 
 
@@ -286,6 +281,9 @@ def _cli_version() -> str:
     exception here is built at parser-construction time and would break every
     invocation, not just `--version`.
     """
+    from . import __version__
+    if Path(__file__).resolve().parent.parent.name == "cli":
+        return __version__
     try:
         return importlib.metadata.version("vigil")
     except importlib.metadata.PackageNotFoundError:
@@ -300,10 +298,9 @@ def main(argv: list[str] | None = None) -> None:
         _exec_assess_passthrough(raw_argv, command_idx)
         return
     parser = argparse.ArgumentParser(prog="vigil", description="Vigil operator CLI")
-    parser.add_argument("--root", help="Install root (default: $VIGIL_INSTALL_DIR or ~/vigil)")
-    parser.add_argument("--source", help="Source checkout root for install/upgrade")
-    # The CLI binary and the working root upgrade separately, so reconciling a
-    # stale-install warning starts with knowing which CLI is installed.
+    parser.add_argument("--root", help="Private workspace (default: $VIGIL_INSTALL_DIR or ~/vigil)")
+    parser.add_argument("--source", help="Application directory for install/up/assess (development); never fetches source")
+    # Report the matched application version, including a retained CLI snapshot.
     parser.add_argument(
         "--version",
         "-V",
@@ -315,7 +312,7 @@ def main(argv: list[str] | None = None) -> None:
         dest="command", required=True, parser_class=_SiblingHintParser
     )
 
-    install_p = sub.add_parser("install", help="Install or update the working root from source")
+    install_p = sub.add_parser("install", help="Initialize or adopt a private workspace in place")
     install_p.add_argument("install_dir", nargs="?")
     install_p.add_argument("--dry-run", action="store_true")
     install_p.add_argument("--force-image", action="store_true")
@@ -341,7 +338,7 @@ def main(argv: list[str] | None = None) -> None:
         help="Onboarding wizard: probe host prerequisites/recon tools and print the setup checklist",
         description=(
             "macOS-first onboarding wizard. Reports the bootstrap prerequisites "
-            "(uv/git/docker/go/npm), detects missing host-side recon tools, and "
+            "(uv/docker/go), detects missing host-side recon tools, and "
             "prints the ordered next-command checklist for the resolved install "
             "root. It only mutates the host when --install-host-tools is passed "
             "(and never under --dry-run); without it the host-tool installs are "
@@ -432,7 +429,7 @@ def main(argv: list[str] | None = None) -> None:
         "create",
         help="Create a new engagement workspace",
         description=(
-            "Create an engagement workspace under <install-root>/agent/engagements/.\n"
+            "Create an engagement under <workspace>/engagements/ (adopted paths are preserved).\n"
             "When --type is omitted it is inferred from the inputs (URL/host → web,\n"
             "--repo → code, APK/--package-name → android); combined web and code\n"
             "evidence requires choosing one initial track explicitly.\n"
@@ -463,7 +460,7 @@ def main(argv: list[str] | None = None) -> None:
         "--type",
         choices=_CREATE_ENGAGEMENT_TYPES,
         default=None,
-        help="Engagement type; inferred from the other inputs when omitted",
+        help="Creation type; inferred when omitted. Web/code enables the first durable track; start --mode selects one client process",
     )
     create_p.add_argument("--name", help="Engagement name (required for code/remediation)")
     create_p.add_argument("--project-config", help="Shared repository PROJECT.md with +++ TOML frontmatter (legacy JSON is imported once)")
@@ -605,21 +602,26 @@ def main(argv: list[str] | None = None) -> None:
     path_p = engagement_sub.add_parser("path")
     path_p.add_argument("key", nargs="?")
     path_p.add_argument("--select", action="store_true")
-    mode_p = engagement_sub.add_parser("mode", help="Resolve this session's operator mode and prompt")
+    mode_p = engagement_sub.add_parser("mode", help="Inspect enabled tracks, phases, prompts, and session selection")
     mode_p.add_argument("key", nargs="?")
     mode_p.add_argument("--json", action="store_true")
+    mode_p.add_argument("--client", choices=["codex", "claude", "opencode", "goose", "kimi", "pi"],
+                        default="claude", help="Client for displayed start commands (default: claude)")
     engagement_sub.add_parser(
         "current",
         help="Print the resolved active engagement and which tier won (flag/cwd/pointer/env).",
     )
     cd_p = engagement_sub.add_parser("cd-init")
     cd_p.add_argument("shell", choices=["zsh", "bash"], default="zsh", nargs="?")
-    start_p = engagement_sub.add_parser("start")
+    start_p = engagement_sub.add_parser(
+        "start", description="Start one client process in one enabled track. A single track "
+        "selects automatically; two tracks require --mode. Switch modes by starting a new process.",
+    )
     start_p.add_argument("key", nargs="?")
     start_p.add_argument("--select", action="store_true")
     start_p.add_argument("--client", choices=["codex", "claude", "opencode", "goose", "kimi", "pi"], required=True)
     start_p.add_argument("--mode", choices=["web", "code", "blue", "remediation", "android"],
-                         help="Session prompt; required when web and code tracks are both enabled")
+                         help="Session prompt for this client process; required with two enabled tracks")
     start_p.add_argument("--thinking", choices=["off", "high", "max"], default=None,
                          help="DeepSeek thinking level for --client opencode: off=disabled, "
                               "high=on, max=maximum (default: client default — thinking on). "
@@ -1264,7 +1266,7 @@ def main(argv: list[str] | None = None) -> None:
                 install_root=install_root,
                 dry_run=args.dry_run,
                 force_image=args.force_image,
-                verify_docker_image=not args.skip_image_check,
+                verify_docker_image=args.force_image and not args.skip_image_check,
                 repair_ambiguous_client_permissions_as_skip=(
                     args.repair_ambiguous_client_permissions_as_skip
                 ),
@@ -1394,13 +1396,21 @@ def main(argv: list[str] | None = None) -> None:
     elif args.command == "email":
         _email(args)
     elif args.command == "auth":
-        _auth(args, install_root)
+        previous_workspace = os.environ.get("VIGIL_INSTALL_DIR")
+        os.environ["VIGIL_INSTALL_DIR"] = str(install_root)
+        try:
+            _auth(args, install_root)
+        finally:
+            if previous_workspace is None:
+                os.environ.pop("VIGIL_INSTALL_DIR", None)
+            else:
+                os.environ["VIGIL_INSTALL_DIR"] = previous_workspace
     elif args.command == "backup":
         _backup(args, install_root)
     elif args.command == "oob":
         _oob(args, install_root)
     elif args.command == "assess":
-        assess = install_root / "agent" / "scripts" / "assess.py"
+        assess = agent_root(install_root) / "scripts" / "assess.py"
         os.execvpe(
             str(assess),
             [str(assess), *args.assess_args],
@@ -1590,20 +1600,29 @@ def _exec_assess_passthrough(raw_argv: list[str], idx: int) -> None:
             source_value = value
         i += 1 if inline_value else 2
     install_root = resolve_install_root(root_value)
-    assess = install_root / "agent" / "scripts" / "assess.py"
-    if not assess.exists():
-        source_root = resolve_source_root(source_value, install_root=install_root)
-        assess = source_root / "agent" / "scripts" / "assess.py"
+    source_root = resolve_source_root(source_value, install_root=install_root)
+    assess = source_root / "agent" / "scripts" / "assess.py"
     os.execvpe(
         str(assess),
         [str(assess), *raw_argv[idx + 1 :]],
-        _assess_exec_environment(install_root),
+        _assess_exec_environment(install_root, application_root=source_root),
     )
 
 
-def _assess_exec_environment(install_root: Path) -> dict[str, str]:
+def _assess_exec_environment(install_root: Path, *, application_root: Path | None = None) -> dict[str, str]:
     """Export CLI-owned runtime configuration across the assess exec boundary."""
     env = dict(os.environ)
+    from .application import application_root_for_workspace
+    application_root = application_root or application_root_for_workspace(install_root)
+    cli = application_root / ("cli" if (application_root / "cli" / "vigil_cli").is_dir() else "src")
+    env["VIGIL_APPLICATION_DIR"] = str(application_root)
+    env["VIGIL_INSTALL_DIR"] = str(install_root)
+    env["VIGIL_ENGAGEMENTS_DIR"] = str(engagements_root(install_root))
+    env["VIGIL_DATA_DIR"] = str(resolve_orchestrator_data_dir(install_root))
+    env["PYTHONPATH"] = str(cli) + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    from .workspace import workspace_path
+    env["UV_CACHE_DIR"] = str(workspace_path(install_root, "cache") / "uv")
     options = _oob_options(install_root)
     env["VIGIL_OOB_DOMAIN"] = options.oob_domain.strip().rstrip(".")
     slot_prefix = getattr(options, "slot_prefix", "legacy")
@@ -1699,7 +1718,7 @@ def _logs(args: argparse.Namespace, install_root: Path) -> None:
             _logs(argparse.Namespace(target=target, follow=False, lines=args.lines), install_root)
         return
     if args.target == "orchestrator":
-        log_file = install_root / ".runtime-data" / "logs" / "orchestrator.log"
+        log_file = resolve_logs_dir(install_root) / "orchestrator.log"
         argv = ["tail", "-n", str(args.lines)]
         if args.follow:
             argv.append("-f")
@@ -1756,7 +1775,7 @@ def _engagement(args: argparse.Namespace, install_root: Path) -> None:
             mutation_result = add_engagement_hosts(install_root, args.key, args.entries)
         else:
             mutation_result = set_engagement_rate_limit(install_root, args.key, args.value)
-        eng_dir = install_root / "agent" / "engagements" / args.key
+        eng_dir = engagements_root(install_root) / args.key
         if not _verify_backend_install_root(install_root, eng_dir):
             raise SystemExit(
                 f"scope mutation committed at {eng_dir / 'scope.json'}, but backend "
@@ -1775,12 +1794,13 @@ def _engagement(args: argparse.Namespace, install_root: Path) -> None:
         print(_resolve_current_or_selected_engagement(install_root, key=args.key, select=args.select))
     elif command == "mode":
         path = _resolve_current_or_selected_engagement(install_root, key=args.key, select=False)
-        mode = resolve_engagement_mode(path, os.environ.get("VIGIL_OPERATOR_MODE"))
-        prompt = engagement_mode_prompt(install_root, mode)
+        state = engagement_mode_state(install_root, path, client=args.client)
         if args.json:
-            print(json.dumps({"mode": mode, "prompt": str(prompt)}, sort_keys=True))
+            print(json.dumps(state, sort_keys=True))
         else:
-            print(f"mode: {mode}\nprompt: {prompt}")
+            print(f"mode: {state['mode'] or 'unselected'}\nprompt: {state['prompt'] or 'unselected'}")
+            for name, track in state["tracks"].items():
+                print(f"{name}: phase={track['phase']}\n  prompt: {track['prompt']}\n  start: {track['start_command']}")
     elif command == "current":
         _engagement_current(install_root)
     elif command == "cd-init":
@@ -1790,9 +1810,8 @@ def _engagement(args: argparse.Namespace, install_root: Path) -> None:
         if not args.skip_preflight:
             _preflight_engagement_start(install_root, path, args.client)
         if args.client == "opencode":
-            from .engagements import write_opencode_reasoning_config
-            write_opencode_reasoning_config(path, args.thinking)
-        if args.mode is None:
+            start_engagement(install_root, path, args.client, args.client_args, args.mode, thinking=args.thinking)
+        elif args.mode is None:
             start_engagement(install_root, path, args.client, args.client_args)
         else:
             start_engagement(install_root, path, args.client, args.client_args, args.mode)
@@ -1812,14 +1831,14 @@ def _engagement(args: argparse.Namespace, install_root: Path) -> None:
             output = (
                 Path(args.output).expanduser()
                 if args.output
-                else install_root / ".runtime-data" / "exports" / f"{path.name}-findings"
+                else resolve_runtime_state_dir(install_root) / "exports" / f"{path.name}-findings"
             )
             with _build_assessment_client(install_root, path.name) as client:
                 result = export_engagement_tree(client, output, fmt="markdown-tree")
             print(f"[vigil] exported {result.finding_count} finding(s) to {result.output_root}", file=sys.stderr)
             print(result.output_root)
         else:
-            output = Path(args.output).expanduser() if args.output else install_root / ".runtime-data" / "exports" / f"{path.name}.tar.gz"
+            output = Path(args.output).expanduser() if args.output else resolve_runtime_state_dir(install_root) / "exports" / f"{path.name}.tar.gz"
             output.parent.mkdir(parents=True, exist_ok=True)
             with tarfile.open(output, "w:gz") as tar:
                 tar.add(path, arcname=path.name)
@@ -2296,13 +2315,13 @@ def _runtime_shell_exec(command_parts: list[str]) -> None:
 
 
 def _mitmproxy(args: argparse.Namespace, install_root: Path) -> None:
-    engagements_root = install_root / "agent" / "engagements"
+    engagement_directory = engagements_root(install_root)
     if args.mitmproxy_command == "start":
-        engagements_root.mkdir(parents=True, exist_ok=True)
+        engagement_directory.mkdir(parents=True, exist_ok=True)
         start_proxy(
             MitmproxyOptions(
                 install_root=install_root,
-                engagements_root=engagements_root,
+                engagements_root=engagement_directory,
                 port=args.port,
             ),
             force_rebuild=args.build,
@@ -2312,7 +2331,7 @@ def _mitmproxy(args: argparse.Namespace, install_root: Path) -> None:
     elif args.mitmproxy_command == "build":
         build_proxy_image(install_root, force=args.force)
     elif args.mitmproxy_command == "status":
-        payload = proxy_status_payload(install_root, engagements_root)
+        payload = proxy_status_payload(install_root, engagement_directory)
         if args.json:
             print(json.dumps(payload, indent=2))
         else:
@@ -2321,13 +2340,13 @@ def _mitmproxy(args: argparse.Namespace, install_root: Path) -> None:
         print("docker cp vigil-proxy:/root/.mitmproxy/mitmproxy-ca-cert.pem ~/Desktop/mitmproxy-ca-cert.pem")
         print("sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain ~/Desktop/mitmproxy-ca-cert.pem")
     elif args.mitmproxy_command == "reload":
-        request_proxy_reload(engagements_root)
-        print(f"[vigil] mitmproxy reload requested ({engagements_root})")
+        request_proxy_reload(engagement_directory)
+        print(f"[vigil] mitmproxy reload requested ({engagement_directory})")
     elif args.mitmproxy_command == "routes":
-        snapshot = read_proxy_routes(engagements_root)
+        snapshot = read_proxy_routes(engagement_directory)
         if snapshot is None:
             raise SystemExit(
-                f"No routes cache at {engagements_root}/.mitmproxy-routes.json — "
+                f"No routes cache at {engagement_directory}/.mitmproxy-routes.json — "
                 "is the proxy running and has it loaded its registry yet?"
             )
         if args.json:
@@ -2905,7 +2924,7 @@ def _build_assessment_client(install_root: Path, engagement_key: str):
     except ImportError as exc:  # pragma: no cover - defensive
         raise SystemExit(
             "Cannot import the assessment HTTP client (assess.lib.client). "
-            "Run from a source checkout or a completed `vigil install`."
+            "Reinstall the matched release wheel or use its editable development checkout."
         ) from exc
     return AssessmentClient(base_url, engagement_key)
 

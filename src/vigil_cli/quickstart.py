@@ -1,7 +1,7 @@
 """`vigil quickstart` — a macOS-first onboarding wizard.
 
 Gets a new operator from a bare checkout to a running engagement: it probes the
-host prerequisites (uv/git/docker/go/npm), reports which host-side recon tools
+host prerequisites (uv/docker/go), reports which host-side recon tools
 are missing, and either PLANS or (behind an explicit flag) RUNS their install
 commands. It never touches the working root, backend, or Docker on its own — the
 only side effect it can take is running the host-tool install commands, and only
@@ -47,14 +47,12 @@ class Prerequisite:
 
 PREREQUISITES: tuple[Prerequisite, ...] = (
     Prerequisite("uv", "brew install uv", "Python runner behind the CLI and the assess scripts"),
-    Prerequisite("git", "brew install git", "source sync for `vigil install` / `vigil up`"),
     Prerequisite(
         "docker",
         "brew install --cask docker",
         "Kali runtime + mitmproxy containers (the orchestrator runs on the host)",
     ),
     Prerequisite("go", "brew install go", "builds the go-installable host recon tools"),
-    Prerequisite("npm", "brew install node", "orchestrator frontend build"),
 )
 
 

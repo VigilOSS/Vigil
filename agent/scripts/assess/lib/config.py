@@ -21,7 +21,7 @@ class Config:
     base_url: str
     engagement_dir: str
     engagement_key: str
-    agent_root: str  # <install_root>/agent
+    agent_root: str  # matched application assets, independent of engagement data
 
 
 def _read_env_file(path: str) -> dict[str, str]:
@@ -186,7 +186,7 @@ def _candidate_env_files(engagement_dir: str, agent_root: str) -> list[str]:
     over install-root legacy defaults so an old install .env cannot retarget a
     specific engagement.
     """
-    install_root = str(Path(agent_root).parent)
+    install_root = os.environ.get("VIGIL_INSTALL_DIR") or _read_vigil_config_value("install.root") or str(Path(agent_root).parent)
     candidates = []
     if engagement_dir:
         candidates.append(os.path.join(engagement_dir, ".orchestrator.env"))
@@ -263,8 +263,8 @@ def resolve_base_url(engagement_dir: str, agent_root: str) -> str:
 def load_config(engagement_dir_flag: str | None = None) -> Config:
     """Load full config from environment and file chain."""
     eng_dir = resolve_engagement_dir(engagement_dir_flag)
-    # agent_root is <eng_dir>/../.. (engagements/<key> -> <install_root>/agent)
-    agent_root = str(Path(eng_dir).parent.parent)
+    from vigil_cli.application import resolve_application_root
+    agent_root = str(resolve_application_root() / "agent")
     eng_key = Path(eng_dir).name
     base_url = resolve_base_url(eng_dir, agent_root)
     cfg = Config(

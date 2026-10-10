@@ -1,72 +1,57 @@
-# Install integrity and staleness detection
+# Application integrity and restart requirements
 
-How `vigil install` / `vigil up` copy the managed tree, and how
-Vigil detects a working root that has drifted behind the CLI binary.
+Vigil 1.1 separates versioned application assets from private workspace state.
+For setup and upgrade commands, see
+[installation](installation.md#application-release-and-private-workspace).
 
-For the operator-facing summary — the two layers and the three warning surfaces —
-see [installation](installation.md#the-two-layers-cli-binary-vs-working-root).
+## Release provenance
 
-## The install stamp
+The release wheel contains a matched CLI, backend, agent corpus, schemas,
+documentation, Docker definitions, and prebuilt frontend/report. `bundle.json`
+records the release version, each file's SHA-256, the executable roster, and an
+aggregate content digest. Application materialization validates the manifest and
+restores normalized file modes into a persistent version/content-addressed cache.
 
-Every sync path stamps a SHA-256 manifest of the managed tree it actually copied
-into `<install-root>/.vigil-install-meta.json`. Status then compares that stamp
-against the same normalized manifest computed over the live source tree.
+The application root comes from an explicit application override, the packaged
+bundle, or the actual checkout containing an editable CLI module. The current
+directory and copied source in a private workspace do not select application code.
+No Git fetch or version-tag source-cache fallback is part of consumer startup.
 
-Each manifest entry records the entry type, path, file mode, length, and exact
-bytes. Caches, build outputs, installer-created preserved-path ancestors, and
-preserved engagement/database state are normalized by the same rules the copier
-uses, so they cannot produce a false difference.
+## Workspace adoption
 
-The stamp also retains the source revision, which is what drives provenance and
-commit-distance reporting. Freshness therefore sees unsnapshotted Jujutsu edits
-without mutating the working copy, while later snapshotting identical bytes does
-not create a false stale warning.
+`vigil install` initializes or adopts the selected workspace, records its private
+paths and application provenance in `workspace.json`. Explicit maintenance flags repair
+generated client entrypoints; ordinary adoption preserves them. `vigil up` performs the same initialization before starting services.
+Existing engagement/database paths, evidence references, environment files,
+tenant references, and custom client content are preserved in place. Old copied
+application trees remain on disk but are no longer read as release assets.
 
-Because the write happens inside the sync itself, the three sync paths cannot
-disagree about what is installed.
+Fresh workspaces hold private engagements, state, tenant references, logs, and
+caches. The application bundle is outside that tree, so a CLI upgrade cannot
+replace an engagement's evidence or database as part of an asset update.
 
-## What the manifest catches
+## Running consumers
 
-- The copy-then-hash race: the manifest is of the bytes actually written.
-- Executable-bit changes, which a content-only hash would miss.
-- Removals, and file↔directory type changes.
-- Hardlink aliases being overwritten in place.
+Launchers bind the session to its application release and matched helper CLI.
+Persistent application caches keep those paths available across a package
+upgrade. New client processes use the current release; already running sessions
+keep their original assets until restarted.
 
-## Descriptor-pinned copy
+Official client starts register their process ID, process birth identity, engagement, and
+release provenance in private runtime state. A new release cannot refresh the same
+engagement's shared client files while an older registered process is alive. End that
+session before launching the new release on that engagement. PID reuse and dead processes
+do not keep a stale session active; registry records are retained. Direct client/launcher
+invocations bypass this binding and remain unsupported entrypoints.
 
-Source and destination ancestry, plus every copied child, are opened through
-pinned, no-follow directory descriptors. Candidate files are opened nonblocking
-and accepted only after descriptor type checks; regular destination files
-(including the install stamp) are atomically replaced. The destination-root
-descriptor stays open for the duration of the install.
+Backend, runtime image, proxy image, frontend, and report freshness use declared
+input sets and content digests. `vigil status` and `vigil doctor` report which
+consumers require restart or rebuild, with the applicable commands. Content
+changes drive these checks; timestamps do not. See the
+[maintainer freshness recipe](maintainer-guide.md#freshness-and-restart-manifest-maintenance).
 
-Later roster, entrypoint, OOB, stamp, and image-build helpers run inside a
-globally locked, scoped working directory established with `fchdir` on that
-descriptor, so root-relative filesystem and Docker-context paths start from the
-copied root inode even if its public name is replaced. The original working
-directory is descriptor-restored on success or failure, and attachment checks
-abort after a detected replacement.
-
-Scope of the guarantee: this bridge pins the root name only. Preflight and the
-descriptor-native copy reject child links, but the path-based repair and build
-helpers do not claim to defeat a concurrent same-UID replacement of a descendant
-after validation.
-
-Because `fchdir` changes process-global state, the lock serializes installer
-scopes. Unrelated threads must not perform relative-path I/O concurrently; the
-supported CLI callers are synchronous.
-
-## Derived root entrypoints
-
-`AGENTS.md`, `CLAUDE.md`, `.codex`, and `.claude` at the install root are
-reconciled in the same pass, including removal when their source disappears.
-Generated launcher and hook content retains the requested absolute install path.
-
-## Recovering from a stale root
-
-Run `vigil install` (or `vigil up`) to refresh the working root. To upgrade the
-CLI binary itself, run `uv tool upgrade vigil`.
-
-A stale working root is the first thing to check when a documented `vigil assess`
-verb, flag, or skill appears not to exist: argparse reports it as an "invalid
-choice" rather than as a version mismatch.
+Upgrade with the next release wheel, then run `vigil install` to reconcile the
+workspace metadata. New starts reconcile their selected engagement's generated entrypoints;
+explicit maintenance repair also checks active release bindings. Apply the restart commands reported for
+running consumers. Historical audit records continue to describe the release
+and commands that actually ran.

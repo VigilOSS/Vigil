@@ -1,43 +1,20 @@
-"""What this install actually invalidated — per consumer, derived, not asserted.
+"""Content provenance and restart requirements for each workspace consumer.
 
-``vigil install`` used to end with a fixed list telling the operator to restart
-the runtime, restart the orchestrator, and consider rebuilding the image. It
-said that after every install, including the overwhelmingly common one that
-changed nothing but prompt markdown under ``agent/`` — which needs no restart at
-all, because ``vigil assess`` re-execs the working root on every call and
-``/engagements`` is a bind mount. A notice that is wrong nearly every time
-trains the operator to skip it, which is worse than printing nothing: the one
-install that *does* need a restart looks identical.
+Application inputs belong to the matched release, while service identity and
+engagement data belong to the private workspace. Image and UI freshness use
+declared SHA256 input digests. Backend freshness also asks the process which
+release it retained and which cross-tree modules it loaded, including imports
+first loaded after startup. No comparison depends on file timestamps.
 
-This module computes the answer instead. Every consumer is judged by the same
-mechanism :mod:`image_freshness` established for Docker images — **a sha256
-content digest over a declared input set, stamped onto the consumer when it is
-built, re-derived and compared on every check** — because ``install.py`` rewrites
-every managed file unconditionally (``_sync_dir_fds`` → ``copy_regular_file`` →
-``atomic_write_bytes``, with no content comparison). Every ``vigil install``
-therefore bumps the mtime of every managed file, and any mtime high-water mark
-reads as stale immediately afterwards. That defect had already shipped twice
-(see the :mod:`image_freshness` docstring) and twice more here: ``/readyz``
-reported ``restart_required`` with twenty files listed for a byte-identical
-backend, and ``vigil up`` ran a full ``npm run build`` for a byte-identical
-frontend.
-
-Where a consumer's inputs live outside its own tree, the digest cannot be
-derived from a path table. ``taxonomy_bridge`` puts ``agent/scripts`` on
-``sys.path`` and imports ``assess.lib.vuln_taxonomy`` at module import time, so a
-file under ``agent/`` genuinely *is* loaded into the backend process and
-"``agent/**`` is only prompts" is not universally true. The robust way to know
-what a running process loaded is to ask it: :func:`loaded_module_files` walks
-``sys.modules``. That catches this cross-tree import for free and needs no
-maintenance when the next one appears.
-
-:func:`consumer_states` is the seam between detection and presentation. It
-answers only "what is the state of each consumer, and what command fixes it";
-choosing which rows are worth an operator's attention belongs to the caller.
+An upgraded CLI leaves existing services on their retained application paths;
+the backend row names the intentional restart that moves one to the current
+release. ``consumer_states`` owns these verdicts and remedies, and presenters
+choose which rows to display.
 """
 from __future__ import annotations
 
 import re
+import json
 import shlex
 import sys
 from collections.abc import Callable
@@ -51,8 +28,8 @@ from .runtime import runtime_image_build_state
 # Filename written inside a built `dist/` carrying the sha256 of the inputs that
 # build was produced from — the frontend/report analogue of
 # `image_freshness.IMAGE_INPUTS_LABEL`. It lives INSIDE `dist/` on purpose:
-# `dist` is in `EXCLUDED_INPUT_NAMES`, so `vigil install` never copies over it
-# and the stamp survives an upgrade exactly as the built assets beside it do.
+# `dist` is excluded from its own build inputs, and the package builder retains
+# both prebuilt assets and their stamps in every immutable application release.
 BUILD_INPUTS_STAMP = ".vigil-inputs"
 
 _BACKEND_LABEL = "orchestrator backend"
@@ -72,6 +49,7 @@ CONSUMER_KEYS = (
     "proxy-image",
     "runtime-container",
     "proxy-container",
+    "client-sessions",
     "agent-tree",
 )
 
@@ -297,49 +275,32 @@ _CLI_LABEL = "vigil CLI binary"
 
 
 def _install_remedy(source_root: Path | None) -> str:
-    """``vigil install``, pinned to the checkout the verdict was computed from.
-
-    A bare ``vigil install`` re-resolves its own source through
-    :func:`paths.resolve_source_root` — ``--source``, then ``VIGIL_SOURCE_DIR``,
-    then ``source.dir``, then the running checkout, then the current directory,
-    then a cached clone — and only the FIRST of those is what these verdicts
-    compared against. On a box with two checkouts the unpinned remedy therefore
-    copies a DIFFERENT tree over the working root than the one just reported
-    stale, so an operator who does exactly what the summary said ends up further
-    from correct than before it was printed. Naming the root reproduces the
-    comparison; quoting it keeps a checkout under ``Mobile Documents`` working.
-
-    ``--source`` is a top-level option, so it precedes the subcommand.
-    """
+    """Initialize/adopt against the same explicit application used by the check."""
     if source_root is None:
         return "vigil install"
     return f"vigil --source {shlex.quote(str(source_root))} install"
 
 
 def _cli_stale_remedy(source_root: Path | None) -> str:
-    """Upgrade the binary, then re-run the install that recomputes everything.
+    """Install the matched release/development CLI, then recompute adoption."""
+    if source_root is not None and (source_root / "src/vigil_cli").is_dir():
+        upgrade = shlex.join(["uv", "tool", "install", "--force", "--editable", str(source_root)])
+    else:
+        from . import __version__
 
-    The re-run is part of the remedy, not an optional extra. Several consumers
-    are judged THROUGH the running binary, so replacing it changes what they
-    should be compared against — and nothing re-runs this summary on its own.
-    """
-    return f"uv tool upgrade vigil && {_install_remedy(source_root)}"
+        version = __version__
+        if source_root is not None and (source_root / "bundle.json").is_file():
+            version = json.loads((source_root / "bundle.json").read_text())["version"]
+        wheel = f"https://github.com/VigilOSS/Vigil/releases/download/v{version}/vigil-{version}-py3-none-any.whl"
+        upgrade = shlex.join(["uv", "tool", "install", "--force", "--from", wheel, "vigil"])
+    return f"{upgrade} && {_install_remedy(source_root)}"
 
 
 def cli_state(*, source_root: Path | None) -> ConsumerState:
-    """Is the ``vigil`` binary running this checkout's CLI code?
+    """Does the imported CLI match the editable or retained release snapshot?
 
-    ``vigil install`` upgrades the WORKING ROOT; ``uv tool upgrade vigil``
-    upgrades the CLI binary. When the source moves ahead of the installed tool,
-    the operator is running old code against a new working root, and the
-    two-layer model is exactly the thing they need told.
-
-    ``sys.modules`` locates the package this process actually imported — not a
-    guess from ``sys.path`` — and the package DIRECTORY is then digested, because
-    for ``vigil_cli`` the directory is a strict superset of the loaded set
-    (lazily imported submodules included). A module loaded from OUTSIDE that
-    directory means the superset claim is false, and the honest answer is then
-    ``unknown`` rather than a comparison over the wrong files.
+    The package directory covers lazily imported modules as well. Embedded
+    assets are verified separately and excluded from this code-only comparison.
     """
     running = _running_cli_package()
     if running is None:
@@ -353,7 +314,9 @@ def cli_state(*, source_root: Path | None) -> ConsumerState:
         return _cli_unknown(f"{len(stray)} vigil_cli module(s) loaded from outside {running}")
     if source_root is None:
         return _cli_unknown("no local source checkout to compare against")
-    source_package = (source_root / "src" / "vigil_cli").expanduser()
+    source_package = (source_root / "cli" / "vigil_cli").expanduser()
+    if not source_package.is_dir():
+        source_package = (source_root / "src" / "vigil_cli").expanduser()
     if not source_package.is_dir():
         return _cli_unknown(f"no CLI package at {source_package}")
     source_package = source_package.resolve()
@@ -368,8 +331,8 @@ def cli_state(*, source_root: Path | None) -> ConsumerState:
     # Both digests label files relative to their own package directory, so an
     # editable checkout and a uv-tool venv copy land in the same label space and
     # only CONTENT can separate them.
-    running_digest = image_freshness.inputs_digest([running], root=running.parent)
-    source_digest = image_freshness.inputs_digest([source_package], root=source_package.parent)
+    running_digest = _cli_inputs_digest(running)
+    source_digest = _cli_inputs_digest(source_package)
     if running_digest == source_digest:
         return ConsumerState(key="cli", label=_CLI_LABEL, state="current", remedy="", detail="")
     return ConsumerState(
@@ -379,6 +342,12 @@ def cli_state(*, source_root: Path | None) -> ConsumerState:
         remedy=_cli_stale_remedy(source_root),
         detail=f"the installed binary at {running} predates {source_package}",
     )
+
+
+def _cli_inputs_digest(package: Path) -> str:
+    # Embedded application assets do not belong to the executable CLI snapshot.
+    inputs = [entry for entry in package.iterdir() if entry.name != "_bundle"]
+    return image_freshness.inputs_digest(inputs, root=package.parent)
 
 
 def _cli_unknown(detail: str) -> ConsumerState:
@@ -405,7 +374,15 @@ def _backend_state(install_root: Path) -> ConsumerState:
     re-derives it per request, so no second implementation of the input set has
     to agree with it from out here.
     """
-    probe = _readyz_backend_runtime(install_root)
+    return _backend_state_from_probe(install_root, _readyz_backend_runtime(install_root))
+
+
+def backend_state_from_readiness(install_root: Path, readiness: dict[str, object]) -> ConsumerState:
+    """Derive release/restart truth from a readiness snapshot already fetched."""
+    return _backend_state_from_probe(install_root, _backend_probe_from_readiness(readiness))
+
+
+def _backend_state_from_probe(install_root: Path, probe: BackendProbe) -> ConsumerState:
     if not probe.reachable:
         return _backend_offline_state(install_root, probe)
     runtime_block = probe.runtime
@@ -424,6 +401,26 @@ def _backend_state(install_root: Path) -> ConsumerState:
         return _backend_unknown("/readyz did not report which install root it serves")
     if Path(served).resolve() != install_root.resolve():
         return _backend_unknown(f"the backend on this port serves a different install root ({served})")
+    from .application import application_root_for_workspace
+
+    serving_application = runtime_block.get("application_root")
+    application_root = application_root_for_workspace(install_root)
+    if not isinstance(serving_application, str) or not serving_application:
+        return ConsumerState(
+            key="backend",
+            label=_BACKEND_LABEL,
+            state="stale",
+            remedy="vigil orchestrator restart",
+            detail="running a legacy backend without a pinned application release",
+        )
+    if isinstance(serving_application, str) and Path(serving_application).resolve() != application_root.resolve():
+        return ConsumerState(
+            key="backend",
+            label=_BACKEND_LABEL,
+            state="stale",
+            remedy="vigil orchestrator restart",
+            detail=f"running retained application release {serving_application}; current release is {application_root}",
+        )
     if not runtime_block.get("restart_required"):
         return ConsumerState(
             key="backend",
@@ -547,6 +544,10 @@ def _readyz_backend_runtime(install_root: Path) -> BackendProbe:
     from .status import _orchestrator_readyz_snapshot
 
     _, readiness = _orchestrator_readyz_snapshot(install_root)
+    return _backend_probe_from_readiness(readiness)
+
+
+def _backend_probe_from_readiness(readiness: dict[str, object]) -> BackendProbe:
     if not readiness.get("reachable"):
         reason = readiness.get("unreachable_reason")
         detail = readiness.get("unreachable_detail")
@@ -637,33 +638,11 @@ def _proxy_image_state(
     *,
     runner: docker.Runner,
     docker_ok: bool,
-    cli_stale: bool = False,
-    source_root: Path | None = None,
 ) -> ConsumerState:
     from .mitmproxy import mitmproxy_image_inputs
 
     if not docker_ok:
         return _docker_unavailable("proxy-image", "mitmproxy image")
-    if cli_stale:
-        # `mitmproxy_image_inputs` resolves the canonical scope parser through
-        # the IMPORTED `vigil_cli.scope_entries` — the old binary's copy while
-        # the CLI lags — and `_proxy_build_context` bakes that same copy. So an
-        # upgrade touching only the parser compares old against old and reads
-        # `current`, while the upgrade the summary prescribes is precisely what
-        # changes the answer. Digesting the install root's copy instead would be
-        # worse: the build would still use the binary's, so the mismatch would
-        # name a rebuild that cannot clear it.
-        return ConsumerState(
-            key="proxy-image",
-            label="mitmproxy image",
-            state="unknown",
-            remedy="",
-            detail=(
-                "its baked scope parser comes from the CLI binary; re-check after "
-                f"`{_cli_stale_remedy(source_root)}`"
-            ),
-        )
-
     try:
         inputs = mitmproxy_image_inputs(install_root)
     except SystemExit as exc:
@@ -778,20 +757,7 @@ def _runtime_container_state(*, runner: docker.Runner, docker_ok: bool) -> Consu
 
 
 def _agent_tree_state(install_root: Path, *, source_root: Path | None) -> ConsumerState:
-    """The residual: does the working root itself still match its source?
-
-    This is the ONE consumer that normally needs no restart — ``vigil assess``
-    re-execs the working root on every call and ``/engagements`` is a bind mount,
-    so a prompt or skill edit is live the moment ``vigil install`` copies it. It
-    is listed anyway because the install that FAILED to land is the case an
-    operator cannot otherwise see.
-
-    ``source_root`` is the same checkout :func:`cli_state` is judged against, for
-    the same reason: ``install_staleness`` rediscovers one when it is not given
-    one, and the tree discovery lands on is not necessarily the tree this
-    install copied. Comparing the just-synchronised working root against a
-    sibling checkout reports it stale and prescribes overwriting it.
-    """
+    """Report whether workspace adoption/provenance matches its application."""
     from .status import install_staleness
 
     try:
@@ -840,6 +806,36 @@ def _changed_summary(changed: list[object], *, limit: int = 3) -> str:
     return f"{preview} +{more} more changed" if more > 0 else f"{preview} changed"
 
 
+def client_sessions_state(install_root: Path) -> ConsumerState:
+    """One release comparison for retained official client processes."""
+    from .application import application_provenance, application_root_for_workspace
+    from .client_sessions import active_client_sessions
+
+    sessions = active_client_sessions(install_root)
+    if not sessions:
+        return ConsumerState("client-sessions", "client sessions", "not-running", "", "no registered live sessions")
+    try:
+        current = application_provenance(application_root_for_workspace(install_root))
+    except (OSError, SystemExit, ValueError) as exc:
+        return ConsumerState("client-sessions", "client sessions", "unknown", "", str(exc))
+    older = [session for session in sessions if (
+        session["application"]["version"], session["application"]["content_sha256"]
+    ) != (current["version"], current["content_sha256"])]
+    if not older:
+        return ConsumerState("client-sessions", "client sessions", "current", "", f"{len(sessions)} live session(s) use the current application")
+    detail = "; ".join(
+        f"{Path(session['engagement']).name}: release={session['application']['version']} pid={session['pid']}"
+        for session in older
+    )
+    commands = [shlex.join([
+        "vigil", "engagement", "start", Path(session["engagement"]).name,
+        "--client", str(session.get("client") or "claude"),
+        "--mode", str(session.get("mode") or "web"), "--root", str(install_root),
+    ]) for session in older]
+    return ConsumerState("client-sessions", "client sessions", "stale",
+                         "End the listed sessions, then " + "; ".join(commands), detail)
+
+
 def consumer_states(
     install_root: Path,
     *,
@@ -853,19 +849,17 @@ def consumer_states(
     reported rather than suppressed here: ``vigil status`` wants the full
     inventory and ``vigil install`` wants only the obligations.
 
-    ``source_root`` is the checkout the caller KNOWS this install came from.
-    `vigil install` has it — it resolved ``--source`` before copying a byte — and
-    passing it is the difference between judging the working root against the
-    tree it was installed from and judging it against whichever checkout a fresh
-    discovery happens to land on. Only callers with no install to name (``vigil
-    status``) leave it unset and accept the discovered best effort.
+    ``source_root`` is an explicit application comparison override. Otherwise
+    the imported release selects code independently of workspace data.
     """
     # `status` imports `orchestrator`, which imports this module for the
     # frontend/report build state — so these two reach in at call time. By then
     # both modules are fully initialised and the cycle cannot bite.
     from .status import _resolve_source_root_offline
+    from .application import application_root_for_workspace
 
     install_root = install_root.expanduser().resolve()
+    application_root = application_root_for_workspace(install_root)
     # One probe up front rather than eleven bounded queries that each wait out
     # the daemon timeout, and — the reason it is here rather than an
     # optimisation — the only thing that separates "no image" from "no answer".
@@ -882,17 +876,16 @@ def consumer_states(
     return [
         cli,
         _backend_state(install_root),
-        _frontend_state(install_root),
-        _report_state(install_root),
-        _runtime_image_state(install_root, runner=runner, docker_ok=docker_ok),
+        _frontend_state(application_root),
+        _report_state(application_root),
+        _runtime_image_state(application_root, runner=runner, docker_ok=docker_ok),
         _proxy_image_state(
-            install_root,
+            application_root,
             runner=runner,
             docker_ok=docker_ok,
-            cli_stale=cli.state == "stale",
-            source_root=resolved_source,
         ),
         _runtime_container_state(runner=runner, docker_ok=docker_ok),
         _proxy_container_state(runner=runner, docker_ok=docker_ok),
+        client_sessions_state(install_root),
         _agent_tree_state(install_root, source_root=resolved_source),
     ]
