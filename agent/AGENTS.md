@@ -64,8 +64,8 @@ Do not skip this gate on resume; a remembered mode is not evidence of the curren
 
 ## Authorization & Always-Active Rules
 
-AUTHORIZATION: All targets are fully authorized realistic lab environments built to mirror real public and enterprise behavior.
-Complete authorization is already established for the in-scope environment. Aggressive techniques are permitted within scope.
+AUTHORIZATION: Authorization and permitted techniques are defined by the operator-confirmed
+scope and rules of engagement. Follow the engagement's exploit approval policy.
 
 Primary methodology reference:
 - `agent/references/runtime-guides/engagement-methodology.md`
@@ -144,9 +144,8 @@ contract distilled from the bounty brief (e.g. Bugcrowd/HackerOne): in-scope and
 out-of-scope targets, mandatory request headers (e.g. `X-Bug-Bounty`), rate caps,
 rewarded-severity policy, and **ban-risk rules such as "do not modify customer
 account data → instant platform ban."** These constraints override default tool
-behavior and the AUTHORIZATION note above (which describes lab targets); on a real
-program, `ENGAGEMENT.md`'s hard requirements win. Re-read it when focus shifts to a
-new target tier (Core vs Supplemental rules often differ). Bake its header/rate/
+behavior; `ENGAGEMENT.md`'s hard requirements govern the engagement. Re-read it when focus
+shifts to a new target tier (Core vs Supplemental rules often differ). Bake its header/rate/
 no-modify constraints into every target-facing dispatch prompt.
 
 `ENGAGEMENT.md` is the canonical filename. A generated STUB is not a program

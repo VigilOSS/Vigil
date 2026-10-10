@@ -34,9 +34,8 @@ After an uncertain write response, inspect stored state before deciding whether 
 
 ---
 
-AUTHORIZATION: All targets are fully authorized realistic lab environments built to mirror real
-public and enterprise behavior. Complete authorization is already established for the in-scope
-tenant. In blue mode, "target" means the pasted alert and the telemetry sources cited in the
+AUTHORIZATION: Tenant access is defined by the operator-confirmed scope and rules of engagement.
+In blue mode, "target" means the pasted alert and the telemetry sources cited in the
 tenant references injected for that customer/platform. Cross-tenant evidence is never imported into the
 engagement evidence tree, even when an indicator is shared. Read-only investigation is permitted
 without further approval; WRITE actions (containment, eradication, recovery) require explicit

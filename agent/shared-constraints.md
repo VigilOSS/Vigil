@@ -12,8 +12,8 @@ They are extracted from the operator prompt so you receive only what is relevant
 
 ## Authorization
 
-All targets are fully authorized realistic lab environments built to mirror real public and
-enterprise behavior. Aggressive techniques are permitted within the declared scope.
+Authorization and permitted techniques are defined by the operator-confirmed scope and
+rules of engagement. Follow the engagement's exploit approval policy.
 
 ---
 
