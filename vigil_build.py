@@ -167,6 +167,11 @@ def _validate_cli_snapshot(outer: Path, bundle: Path) -> None:
 
 
 def _build_bundle(source: Path, bundle: Path, version: str, *, tracked: frozenset[Path]) -> None:
+    if shutil.which("npm") is None:
+        raise ValueError(
+            "Building Vigil from a source checkout requires Node.js and npm on PATH to build the web UI. "
+            "Install Node.js, or install the release wheel or bundled sdist instead."
+        )
     for name in _ROOT_FILES:
         _copy_file(source / name, bundle / name, tracked=tracked)
     _copy_tree(source / "docs", bundle / "docs", tracked=tracked)
