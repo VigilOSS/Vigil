@@ -175,3 +175,24 @@ def test_materialized_cache_survives_bytecode_written_by_its_own_imports(tmp_pat
     )
     assert list((root / "cli/vigil_cli/__pycache__").glob("*.pyc"))
     assert application.resolve_application_root() == root
+
+
+@pytest.mark.parametrize("xdg", ["symlink", "empty", "relative"])
+def test_application_cache_location_tolerates_common_home_layouts(tmp_path, monkeypatch, xdg):
+    bundle, metadata = _bundle(tmp_path, monkeypatch)
+    monkeypatch.delenv("VIGIL_APPLICATION_CACHE")
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.chdir(tmp_path)
+    expected = home / ".cache"
+    if xdg == "symlink":
+        # Dotfile setups commonly link the cache to another disk.
+        expected = tmp_path / "other-disk"
+        expected.mkdir()
+        (home / ".cache").symlink_to(expected)
+        monkeypatch.setenv("XDG_CACHE_HOME", str(home / ".cache"))
+    else:
+        monkeypatch.setenv("XDG_CACHE_HOME", "" if xdg == "empty" else "relative-cache")
+    root = application.resolve_application_root()
+    assert root == expected.resolve() / "vigil/applications" / f"1.1.0-{metadata['content_sha256']}"

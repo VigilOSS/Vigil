@@ -117,8 +117,13 @@ def _launcher(root: Path, cli: Path | None = None) -> bytes:
 
 def _application_cache() -> Path:
     configured = os.environ.get("VIGIL_APPLICATION_CACHE")
-    default = Path(os.environ.get("XDG_CACHE_HOME", str(Path.home() / ".cache"))) / "vigil" / "applications"
-    return Path(os.path.abspath(Path(configured).expanduser() if configured else default))
+    if configured:
+        return Path(configured).expanduser().resolve()
+    # XDG requires an absolute path; ignore empty or relative values. Resolving
+    # accepts a symlinked cache, which pinned directory traversal would refuse.
+    xdg = os.environ.get("XDG_CACHE_HOME", "")
+    base = Path(xdg) if os.path.isabs(xdg) else Path.home() / ".cache"
+    return (base / "vigil" / "applications").resolve()
 
 
 def session_cli_directory(root: Path) -> Path | None:
