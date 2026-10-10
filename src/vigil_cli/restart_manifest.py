@@ -345,8 +345,12 @@ def cli_state(*, source_root: Path | None) -> ConsumerState:
 
 
 def _cli_inputs_digest(package: Path) -> str:
-    # Embedded application assets do not belong to the executable CLI snapshot.
-    inputs = [entry for entry in package.iterdir() if entry.name != "_bundle"]
+    # Embedded application assets and bytecode caches do not belong to the
+    # executable CLI snapshot.
+    inputs = sorted(
+        entry for entry in package.iterdir()
+        if entry.name != "_bundle" and not image_freshness.is_excluded_input(entry.name)
+    )
     return image_freshness.inputs_digest(inputs, root=package.parent)
 
 

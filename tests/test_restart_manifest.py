@@ -540,6 +540,9 @@ def test_cli_matches_retained_release_snapshot_without_digesting_asset_bundle(tm
     assets = running / "_bundle"
     assets.mkdir()
     (assets / "bundle.json").write_text('{"content_sha256":"assets"}')
+    # Running any installed CLI command writes bytecode the snapshot never has.
+    (running / "__pycache__").mkdir()
+    (running / "__pycache__/__init__.cpython-312.pyc").write_bytes(b"bytecode")
     monkeypatch.setattr(restart_manifest, "_running_cli_package", lambda: running)
     monkeypatch.setattr(restart_manifest, "loaded_module_files", lambda **kwargs: set())
     state = restart_manifest.cli_state(source_root=tmp_path / "release")
