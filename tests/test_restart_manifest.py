@@ -271,6 +271,7 @@ def test_mitmproxy_dockerfile_copy_sources_all_exist_in_the_staged_build_context
         Path("agent/docker/mitmproxy/Dockerfile"),
         Path("agent/scripts/proxy_addon.py"),
         Path("agent/scripts/assess/__init__.py"),
+        Path("src/vigil_cli/scope_entries.py"),
     ):
         target = tmp_path / relative
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -462,11 +463,13 @@ def test_a_missing_runtime_image_is_missing_not_stale(tmp_path: Path) -> None:
     assert states["runtime-image"].state == "missing"
 
 
-def test_a_runtime_image_built_from_current_inputs_is_current(tmp_path: Path) -> None:
+def test_a_runtime_image_built_from_current_inputs_is_current(tmp_path: Path, monkeypatch) -> None:
     for path in runtime.runtime_image_inputs(tmp_path):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("baked\n", encoding="utf-8")
     digest = runtime.runtime_inputs_digest(tmp_path)
+    (tmp_path / "orchestrator").mkdir()
+    monkeypatch.setenv("VIGIL_APPLICATION_DIR", str(tmp_path))
     states = _states(tmp_path, runner=_fake_runner(images={"vigil:latest": digest}))
     assert states["runtime-image"].state == "current"
 
@@ -487,6 +490,7 @@ def test_the_backend_is_stale_when_readyz_says_restart_required(
             reachable=True,
             runtime={
                 "install_root": str(root),
+                "application_root": str(REPO_ROOT),
                 "restart_required": True,
                 "changed_inputs": ["app/db.py", "uv.lock"],
             },
@@ -518,13 +522,28 @@ def test_the_cli_is_stale_when_the_source_package_differs(
     # consumers judged THROUGH it should be compared against, and nothing
     # re-runs this summary on its own. It reinstalls from the checkout this
     # verdict was computed against, not from whichever one discovery finds.
-    assert state.remedy == f"uv tool upgrade vigil && vigil --source {fake_source} install"
+    assert state.remedy == f"uv tool install --force --editable {fake_source} && vigil --source {fake_source} install"
 
 
 def test_the_cli_is_unknown_without_a_resolvable_source(tmp_path: Path) -> None:
     state = restart_manifest.cli_state(source_root=None)
     assert state.state == "unknown"
     assert state.remedy == ""
+
+
+def test_cli_matches_retained_release_snapshot_without_digesting_asset_bundle(tmp_path, monkeypatch):
+    running = tmp_path / "installed/vigil_cli"
+    snapshot = tmp_path / "release/cli/vigil_cli"
+    for package in (running, snapshot):
+        package.mkdir(parents=True)
+        (package / "__init__.py").write_text("VERSION = 'matched'\n")
+    assets = running / "_bundle"
+    assets.mkdir()
+    (assets / "bundle.json").write_text('{"content_sha256":"assets"}')
+    monkeypatch.setattr(restart_manifest, "_running_cli_package", lambda: running)
+    monkeypatch.setattr(restart_manifest, "loaded_module_files", lambda **kwargs: set())
+    state = restart_manifest.cli_state(source_root=tmp_path / "release")
+    assert state.state == "current"
 
 
 # --- post-install presentation ------------------------------------------------
@@ -626,7 +645,7 @@ def test_post_install_lists_only_the_consumers_that_need_action() -> None:
     assert "vigil runtime restart" not in text
 
 
-def test_post_install_explains_the_two_layers_only_when_the_cli_lags() -> None:
+def test_post_install_reports_cli_upgrade_remedy() -> None:
     states = [
         restart_manifest.ConsumerState(
             key="cli",
@@ -639,7 +658,7 @@ def test_post_install_explains_the_two_layers_only_when_the_cli_lags() -> None:
     text = _post_install_output(states, tty=False)
 
     assert "uv tool upgrade vigil" in text
-    assert "working root" in text.lower()
+    assert "binary predates this source" in text
 
 
 def test_post_install_rows_are_tab_separated_off_a_tty() -> None:
@@ -799,6 +818,25 @@ def test_a_reachable_backend_with_no_runtime_block_is_unknown_not_cleared(
     assert state.detail
 
 
+def test_backend_keeps_old_release_and_reports_restart_after_upgrade(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    workspace = tmp_path / "workspace"
+    application = tmp_path / "new-release"
+    (application / "agent").mkdir(parents=True)
+    (application / "orchestrator").mkdir()
+    monkeypatch.setenv("VIGIL_APPLICATION_DIR", str(application))
+    readiness = _readiness(backend_runtime={
+        "install_root": str(workspace),
+        "application_root": str(tmp_path / "old-release"),
+        "restart_required": False,
+    })
+    state = _backend_state_for(monkeypatch, readiness, install_root=workspace)
+    assert state.state == "stale"
+    assert state.remedy == "vigil orchestrator restart"
+    assert "old-release" in state.detail
+
+
 def test_an_unreachable_backend_is_not_running(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -943,9 +981,16 @@ def test_a_backend_serving_this_install_root_is_authoritative(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     readiness = _readiness(
-        backend_runtime={"install_root": str(tmp_path), "restart_required": False}
+        backend_runtime={"install_root": str(tmp_path), "application_root": str(REPO_ROOT), "restart_required": False}
     )
     assert _backend_state_for(monkeypatch, readiness, install_root=tmp_path).state == "current"
+
+
+def test_legacy_backend_without_release_pin_requires_restart(monkeypatch, tmp_path):
+    readiness = _readiness(backend_runtime={"install_root": str(tmp_path), "restart_required": False})
+    state = _backend_state_for(monkeypatch, readiness, install_root=tmp_path)
+    assert state.state == "stale"
+    assert state.remedy == "vigil orchestrator restart"
 
 
 def test_a_stale_backend_for_this_root_still_reports_its_remedy(
@@ -954,6 +999,7 @@ def test_a_stale_backend_for_this_root_still_reports_its_remedy(
     readiness = _readiness(
         backend_runtime={
             "install_root": str(tmp_path),
+            "application_root": str(REPO_ROOT),
             "restart_required": True,
             "changed_inputs": ["app/main.py"],
         }
@@ -1023,7 +1069,7 @@ def test_is_build_config_name_rejects_a_non_config(name: str) -> None:
 _PROXY_COPY_TO_DECLARED = {
     "scripts/assess": "agent/scripts/assess",
     "scripts/proxy_addon.py": "agent/scripts/proxy_addon.py",
-    "vigil_cli/scope_entries.py": None,  # supplied by `_scope_entries_source()`
+    "vigil_cli/scope_entries.py": "src/vigil_cli/scope_entries.py",
 }
 
 
@@ -1037,7 +1083,7 @@ def test_every_proxy_dockerfile_copy_is_covered_by_the_declared_image_inputs() -
     """
     from vigil_cli import mitmproxy
 
-    install_root = Path("/install")
+    install_root = REPO_ROOT
     declared = mitmproxy.mitmproxy_image_inputs(install_root)
     declared_relative = set()
     for path in declared:
@@ -1120,6 +1166,9 @@ def test_a_stale_proxy_image_under_a_running_proxy_prescribes_a_rebuild_and_rest
         restart_manifest.image_freshness, "image_inputs_state", lambda *a, **k: "stale"
     )
     monkeypatch.setattr(restart_manifest.docker, "container_running", lambda *a, **k: True)
+    parser = tmp_path / "cli/vigil_cli/scope_entries.py"
+    parser.parent.mkdir(parents=True)
+    parser.write_text("release parser")
 
     state = restart_manifest._proxy_image_state(
         tmp_path, runner=_fake_runner(), docker_ok=True
@@ -1154,31 +1203,25 @@ def test_a_stopped_proxy_container_needs_nothing(monkeypatch: pytest.MonkeyPatch
     assert state.remedy == ""
 
 
-def test_a_stale_cli_makes_the_proxy_image_verdict_undeterminable(
+def test_proxy_image_state_uses_explicit_application_when_cli_differs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The proxy's input set is resolved THROUGH the running binary.
-
-    `mitmproxy_image_inputs` includes `_scope_entries_source()`, which is the
-    *imported* `vigil_cli.scope_entries` — the old binary's copy while the CLI
-    lags. So an upgrade that changes only the scope parser leaves the proxy
-    image comparing old-against-old and reading `current`, the summary names
-    only the CLI upgrade, and nothing re-runs afterwards to notice the proxy is
-    now baked with a superseded parser. A verdict computed through a binary that
-    is about to change is not a verdict.
-    """
+    """The application supplies its own pinned parser, independently of the CLI."""
     monkeypatch.setattr(
         restart_manifest.image_freshness, "image_inputs_state", lambda *a, **k: "current"
     )
     monkeypatch.setattr(restart_manifest.docker, "container_running", lambda *a, **k: False)
+    parser = tmp_path / "cli/vigil_cli/scope_entries.py"
+    parser.parent.mkdir(parents=True)
+    parser.write_text("pinned application parser")
 
     state = restart_manifest._proxy_image_state(
-        tmp_path, runner=_fake_runner(), docker_ok=True, cli_stale=True
+        tmp_path, runner=_fake_runner(), docker_ok=True
     )
 
-    assert state.state == "unknown"
+    assert state.state == "current"
     assert state.remedy == ""
-    assert "CLI" in state.detail or "binary" in state.detail
+    assert state.detail == ""
 
 
 def test_a_current_cli_leaves_the_proxy_verdict_alone(
@@ -1188,9 +1231,12 @@ def test_a_current_cli_leaves_the_proxy_verdict_alone(
         restart_manifest.image_freshness, "image_inputs_state", lambda *a, **k: "current"
     )
     monkeypatch.setattr(restart_manifest.docker, "container_running", lambda *a, **k: False)
+    parser = tmp_path / "cli/vigil_cli/scope_entries.py"
+    parser.parent.mkdir(parents=True)
+    parser.write_text("release parser")
 
     state = restart_manifest._proxy_image_state(
-        tmp_path, runner=_fake_runner(), docker_ok=True, cli_stale=False
+        tmp_path, runner=_fake_runner(), docker_ok=True
     )
 
     assert state.state == "current"
@@ -1213,11 +1259,22 @@ def test_the_cli_remedy_reruns_the_install_that_recomputes_everything() -> None:
         remedy=rm._cli_stale_remedy(Path("/checkout")),
         detail="",
     )
-    assert "uv tool upgrade vigil" in state.remedy
+    assert "uv tool install --force --from https://github.com/VigilOSS/Vigil/releases/download/" in state.remedy
     assert "vigil --source /checkout install" in state.remedy, (
         "after the binary moves, the working root's verdicts must be recomputed"
     )
     del running
+
+
+def test_cli_release_remedy_installs_matched_wheel_not_unpublished_registry_package(tmp_path):
+    import json
+
+    release = tmp_path / "release"
+    release.mkdir()
+    (release / "bundle.json").write_text(json.dumps({"version": "1.1.0"}))
+    remedy = restart_manifest._cli_stale_remedy(release)
+    assert "--from https://github.com/VigilOSS/Vigil/releases/download/v1.1.0/vigil-1.1.0-py3-none-any.whl vigil" in remedy
+    assert "uv tool upgrade vigil" not in remedy
 
 
 # --- the source this install actually copied from -----------------------------
@@ -1266,19 +1323,14 @@ def test_the_post_install_verdict_compares_against_the_source_it_installed_from(
 def test_a_real_install_records_the_source_its_bytes_came_from(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """The real install path, with a second checkout present to be mistaken for it.
-
-    `install_from_source` resolves the source once and copies from it. Unless
-    that exact root rides out on the result, the freshness verdict has to guess
-    again — and `other` here is precisely the kind of checkout a fresh discovery
-    would find instead.
-    """
+    """Workspace initialization records the selected application's provenance."""
     from vigil_cli.install import InstallOptions, install_from_source
 
     monkeypatch.setenv("VIGIL_CONFIG", str(tmp_path / "config.json"))
     monkeypatch.delenv("VIGIL_OOB_DOMAIN", raising=False)
     installed_from = _fake_cli_source(tmp_path / "chosen", "VERSION = 'chosen'\n")
     (installed_from / "agent").mkdir(parents=True, exist_ok=True)
+    (installed_from / "orchestrator").mkdir()
     (installed_from / "agent" / "README").write_text("managed", encoding="utf-8")
     _fake_cli_source(tmp_path / "other", "VERSION = 'other'\n")
 
@@ -1343,13 +1395,8 @@ def test_the_cli_remedy_reinstalls_from_the_source_it_was_judged_against(
 ) -> None:
     """A bare `vigil install` re-resolves its source and can pick a different one.
 
-    `paths.resolve_source_root` tries `--source`, then `VIGIL_SOURCE_DIR`, then
-    `source.dir`, then the running checkout, then the current directory, then a
-    cached clone — and only the FIRST of those is what this verdict compared
-    against. So on a box with two checkouts the printed remedy can copy tree A
-    over a working root that was just synchronised from tree B: the operator
-    does exactly what the summary said and ends up further from correct than
-    before it was printed.
+    On a box with two application overrides the remedy must install the CLI
+    from the same explicit development checkout used for this comparison.
     """
     import shlex
 
@@ -1359,7 +1406,7 @@ def test_the_cli_remedy_reinstalls_from_the_source_it_was_judged_against(
 
     assert state.state == "stale"
     assert state.remedy == (
-        "uv tool upgrade vigil && vigil --source "
+        f"uv tool install --force --editable {shlex.quote(str(installed_from))} && vigil --source "
         f"{shlex.quote(str(installed_from))} install"
     )
 
@@ -1455,17 +1502,10 @@ def test_the_working_root_remedy_names_the_source_it_was_judged_against(
         assert states["agent-tree"].remedy == expected, reported
 
 
-def test_the_undeterminable_proxy_detail_names_the_same_pinned_reinstall(
+def test_proxy_release_state_is_independent_of_a_different_cli_source(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The third consumer: a detail that spells a command is a remedy too.
-
-    This row tells the operator which command makes its verdict determinable. A
-    bare `vigil install` there sends them to the same wrong checkout the two
-    real remedies were just pinned away from, and a summary that prints two
-    different reinstall commands for one install is worse than either alone.
-    """
-    import shlex
+    """Comparing a CLI checkout cannot change the pinned proxy application."""
 
     installed_from = _fake_cli_source(tmp_path / "chosen", "VERSION = 'chosen'\n")
     monkeypatch.setattr(
@@ -1481,11 +1521,8 @@ def test_the_undeterminable_proxy_detail_names_the_same_pinned_reinstall(
     )
 
     assert states["cli"].state == "stale"
-    assert states["proxy-image"].state == "unknown"
-    assert (
-        f"vigil --source {shlex.quote(str(installed_from))} install"
-        in states["proxy-image"].detail
-    )
+    assert states["proxy-image"].state == "current"
+    assert states["proxy-image"].detail == ""
 
 
 def test_the_pinned_reinstall_remedy_is_a_command_the_cli_actually_accepts(

@@ -107,8 +107,8 @@ When you are about to copy one of these into a second file, stop and import.
   input entries, digests, the image label, exclusions. Content, never mtime.
 - `src/vigil_cli/restart_manifest.py:consumer_states` owns what an install invalidated, per consumer.
   Presenters consume its rows; do not derive freshness beside it. See: `docs/maintainer-guide.md` freshness section.
-- `src/vigil_cli/install_manifest.py` and `src/vigil_cli/install_fs.py` own managed install paths,
-  pinned/no-follow operations, and content digests.
+- `src/vigil_cli/install_manifest.py` owns editable application input digests;
+  `src/vigil_cli/install_fs.py` owns pinned/no-follow workspace and cache operations.
 - `agent/scripts/assess/lib/scope.py:ingest_scope_filter` must run on every new file-to-buffer ingest
   path. Arjun and proxy ingestion reuse already-filtered URLs.
 - `orchestrator/backend/app/services/state_manager/work_buffer.py:_scope_excluded_hosts` owns
@@ -119,8 +119,8 @@ When you are about to copy one of these into a second file, stop and import.
   `agent/scripts/assess/lib/tracks.py` and
   `orchestrator/backend/app/services/engagement_tracks.py` read that contract for their
   respective assessment and backend paths. `VIGIL_OPERATOR_MODE` selects one prompt per
-  session and never grants a track. `src/vigil_cli/install.py` calls the generated-pointer
-  repair in `engagements.py` so existing engagement directories route to the selected prompt.
+  session and never grants a track. Official starts repair only their selected engagement;
+  `src/vigil_cli/install.py` repairs shared client files only under explicit maintenance flags.
 - `orchestrator/backend/app/services/state_manager/app_units.py:score_application_units` and
   `depth_ledger.py` own the web-only terminal depth gate. See: ADR 0012.
 - `orchestrator/backend/app/services/assessment_memory.py` and `artifact_index.py` own the bounded
@@ -198,9 +198,6 @@ A prompt change is **not** prompt-only when the prompt defines an artifact the b
 
 ### agent/ — prompts and the assessment CLI
 
-- `agent/operator-core*.md` — web, code, blue, and remediation operator loops; remediation has case gates.
-- `agent/shared-constraints*.md` and `agent/shared-specialist-core.md` — shared first-load specialist contracts.
-- `agent/agents/` — specialist sources; `agent/rules/` — always-active overlays; `agent/phases/` — operator docs pinned to the phase roster.
 - `agent/scripts/assess/cli.py` — the authoritative subcommand registry for `vigil assess`, including the `kali` subgroup that owns all target-facing tool execution.
 - `agent/scripts/assess/lib/scope.py` — scope parsing, matching, and locked atomic mutation. There is deliberately **no outbound destination filtering**: `enforce_execution_policy` never refuses a command for its destination host. Staying inside the authorized roots is the operator's responsibility.
 - `agent/scripts/assess/lib/config.py` — one fail-closed engagement-selection precedence for every `vigil assess` command: explicit `--engagement-dir`, else a root discovered from CWD, else the session variable exported by `vigil engagement start`.
@@ -222,6 +219,10 @@ A prompt change is **not** prompt-only when the prompt defines an artifact the b
 ### src/vigil_cli/ — the universal CLI
 
 - `src/vigil_cli/main.py` — the `vigil` entrypoint: install, config, doctor/status, runtime and orchestrator lifecycle, and the `vigil assess` passthrough.
+- `src/vigil_cli/application.py` — explicit/imported release resolution, bundle validation and persistent content-addressed assets/helper CLI. Never discover source from workspace or CWD.
+- `src/vigil_cli/workspace.py` — canonical private paths and in-place legacy adoption; `paths.py:workspace_root_for_engagement` resolves private ownership independently of application assets.
+- `vigil_build.py` — tracked publisher inputs, matched CLI/backend/agent/docs/legal bundle and locked prebuilt UI provenance; its sdist builds wheels without Git or Node.
+- `src/vigil_cli/client_sessions.py` — live PID/birth-identity release bindings and shared-file bootstrap lock; old releases retain assets and must end before rebinding the same engagement.
 - `src/vigil_cli/engagements.py` + `blue.py` + `client_rosters.py` — engagement bootstrap: run directories, bounded operator pointers, generated launchers, and the per-client prompt/command links.
 - `src/vigil_cli/paths.py:resolve_orchestrator_base_url` — backend URL precedence and dotenv normalization; `vigil config resolve orchestrator_base_url` exposes it to generated client launchers at session start.
 - `src/vigil_cli/preflight.py` — `_preflight_engagement_start`, `_resolve_provider_key`, `_warn_if_install_stale`. It lives outside `main.py` so `blue.py` can import it without a cycle; `main.py` re-exports what it uses.
@@ -231,12 +232,10 @@ A prompt change is **not** prompt-only when the prompt defines an artifact the b
 - `agent/scripts/assess/lib/remediation_project.py` and `remediation_vcs.py` — shared PROJECT.md parsing and Git/JJ identity, workspace, diff, and push contracts; CLI import bridges are `project_config.py` and `remediation_vcs.py`.
 - `src/vigil_cli/runtime.py` + `up.py` — one shared long-lived Kali container, reached host-side by `docker exec`. There is no in-container API server or MCP bridge.
 - `src/vigil_cli/mitmproxy.py` — the single owner of the proxy `docker build` argv, including the inputs-digest label without which the image can never be proven current.
-- `src/vigil_cli/term.py` — terminal-aware styling; non-TTY output emits no ESC. Callers use this instead of raw escapes.
 - `src/vigil_cli/oob_relay.py` — the single owner of the install's OOB relay-slot identity contract; `oob.py`, `install.py`, `up.py`, and `status.py` consume that record rather than deriving routes independently.
 
 ### orchestrator/backend
 
-- `orchestrator/backend/app/db.py` — SQLite persistence and schema orchestration; `db_code_analysis_schema.py` owns code-analysis tables.
 - `orchestrator/backend/app/api/assessment.py` — live-state routes for recon, coverage, findings,
   command runs, and bulk ingestion; finding history supports summary and lossless transition reads.
 - `orchestrator/backend/app/api/assessment_operator.py` owns dispatch, handoff, decision, and checkpoint routes included by `assessment.py`.
@@ -270,4 +269,3 @@ A prompt change is **not** prompt-only when the prompt defines an artifact the b
 - `orchestrator/frontend/src/routes/RemediationPage.tsx` — remediation workspace entrypoint.
 - `orchestrator/frontend/src/lib/workspaceRoutes.ts` — canonical hash links/history. `App.tsx` routes separate assessment/remediation workspaces; `app.css` owns shared tokens and `styles/` workspace presentation.
 - `orchestrator/report/` — a **third** Vite app (`vigil-report`), separate from the operator SPA. `orchestrator/report/src/lib/poc.ts` owns the copy-and-run `curl` quoting.
-- `tools/` — repo-root maintainer scripts that regenerate the reporting lookup tables. Distinct from `<engagement>/tools/analysis-state/`, which is engagement-local code-analysis artifact state.

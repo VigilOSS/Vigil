@@ -75,6 +75,8 @@ def prepared(tmp_path, monkeypatch):
     command = installation / "agent/.claude/commands/vigil-remediate.md"
     command.parent.mkdir(parents=True)
     command.write_text("command")
+    (installation / "orchestrator").mkdir()
+    monkeypatch.setenv("VIGIL_APPLICATION_DIR", str(installation))
     engagement = tmp_path / "engagement"
     repository = tmp_path / "acme"
     repository.mkdir()
@@ -130,7 +132,10 @@ def test_start_hosts_and_attaches_same_native_conversation_with_repository_confi
     argv, opts = launches[0]
     settings = json.loads(argv[argv.index("--settings") + 1])
     assert settings == {"disableAllHooks": True, "worktree": {"bgIsolation": "none"}, "env": {
-        "ENGAGEMENT_DIR": str(prepared.engagement), "ENGAGEMENT_KEY": "acme", "VIGIL_CLIENT_NAME": "claude"}}
+        "ENGAGEMENT_DIR": str(prepared.engagement), "VIGIL_SESSION_ENGAGEMENT_DIR": str(prepared.engagement),
+        "ENGAGEMENT_KEY": "acme", "VIGIL_CLIENT_NAME": "claude", "VIGIL_INSTALL_DIR": str(prepared.installation),
+        "VIGIL_APPLICATION_DIR": str(prepared.installation), "VIGIL_AGENT_ROOT": str(prepared.installation / "agent"),
+        "PATH": "/usr/bin"}}
     assert opts["cwd"] == prepared.repository
     assert "VIGIL_OPERATOR_MODE" not in opts["env"]
     assert opts["env"].get("CLAUDECODE") is None
@@ -140,11 +145,12 @@ def test_start_hosts_and_attaches_same_native_conversation_with_repository_confi
     assert "--strict-mcp-config" not in argv
     assert "--dangerously-skip-permissions" not in argv
     added_directories = [argv[index + 1] for index, item in enumerate(argv) if item == "--add-dir"]
-    assert added_directories == [str(prepared.engagement / "remediation/client-context"),
-                                 str(prepared.engagement / "remediation")]
+    assert len(added_directories) == 2
+    assert Path(added_directories[0]).parent == prepared.engagement / "remediation/client-context"
+    assert added_directories[1] == str(prepared.engagement / "remediation")
     assert str(prepared.repository / "PROJECT.md") in argv[-1]
     assert "Non-managed hooks are disabled" in capsys.readouterr().out
-    overlay = prepared.engagement / "remediation/client-context/.claude/commands"
+    overlay = Path(added_directories[0]) / ".claude/commands"
     assert [path.name for path in overlay.iterdir()] == ["vigil-remediate.md"]
     assert not (prepared.repository / ".claude").exists()
 

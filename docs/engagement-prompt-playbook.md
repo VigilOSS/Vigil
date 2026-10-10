@@ -337,7 +337,7 @@ clients.
   identical to the rendered client commands.
 
 Commands reach an engagement as pointers, not copies: `<engagement>/.claude/commands/<name>.md`
-and `<engagement>/.codex/skills/<name>/` are per-entry symlinks into the install root, so an
+and `<engagement>/.codex/skills/<name>/` are per-entry symlinks into the session's application release, so an
 engagement never carries a stale copy. A command you write yourself in an engagement's
 `.claude/commands/` is preserved and wins over the shipped one of the same name.
 

@@ -30,10 +30,12 @@ from .client_rosters import (
     ensure_goose_standard_hooks,
     ensure_opencode_agents_link,
     refresh_codex_compact_prompt,
+    repair_engagement_client_rosters,
     unsafe_symlink_destination,
 )
 from .paths import (
     DEFAULT_ORCHESTRATOR_BASE_URL,
+    agent_root as application_agent_root,
     engagements_root,
     resolve_orchestrator_base_url,
     resolve_orchestrator_data_dir,
@@ -559,7 +561,7 @@ def create_engagement(
     """
 
     install_root = options.install_root.expanduser().resolve()
-    agent_root = install_root / "agent"
+    agent_root = application_agent_root(install_root)
     # Validate and derive everything before taking any side effect: an invalid
     # option set, or an install root that cannot back an engagement, must not
     # leave behind a DB snapshot or a half-made directory.
@@ -656,7 +658,7 @@ def create_engagement(
 
         print("[vigil] Preparing client prompts and launchers...", file=sys.stderr, flush=True)
         client_kind = _install_client_kind(agent_root)
-        _write_prompt_wrappers(agent_root, eng_dir, client_kind, engagement_type=options.engagement_type)
+        _write_prompt_wrappers(agent_root, eng_dir, client_kind, engagement_type=options.engagement_type, workspace_root=install_root)
         if client_kind in {"codex", "both"}:
             _write_codex_config(agent_root, eng_dir)
         if client_kind in {"claude", "both"}:
@@ -673,7 +675,7 @@ def create_engagement(
         # _write_prompt_wrappers so AGENTS.md exists to seed .goosehints.
         if client_kind in {"codex", "claude", "both"}:
             _write_goose_config(agent_root, eng_dir)
-        _write_launchers(agent_root, eng_dir, client_kind, skip_permissions=options.skip_permissions)
+        _write_launchers(agent_root, eng_dir, client_kind, skip_permissions=options.skip_permissions, workspace_root=install_root)
     except BaseException:
         shutil.rmtree(eng_dir, ignore_errors=True)
         raise
@@ -1072,13 +1074,31 @@ def _track_state(scope: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def resolve_engagement_mode(engagement_dir: Path, requested_mode: str | None = None) -> str:
-    """Select one operator prompt from the engagement's durable capabilities."""
-    scope = _read_json(engagement_dir / "scope.json")
+def _engagement_modes(scope: dict[str, Any]) -> dict[str, dict[str, str]]:
     kind = str(scope.get("engagement_type") or "web")
     if kind not in {"offensive", "web", "code", "both", "blue", "remediation", "android"}:
         raise SystemExit(f"unknown engagement type '{kind}' in scope.json")
-    available = set(_offensive_tracks(scope)) if kind in {"offensive", "web", "code", "both"} else {kind}
+    if kind in {"offensive", "web", "code", "both"}:
+        return _offensive_tracks(scope)
+    return {kind: {"phase": str(scope.get("current_phase") or "unknown")}}
+
+
+def _engagement_start_command(engagement_dir: Path, client: str, mode: str, install_root: Path | None = None) -> str:
+    argv = ["vigil", "engagement", "start", engagement_dir.name, "--client", client, "--mode", mode]
+    if install_root is not None:
+        argv.extend(["--root", str(install_root)])
+    return shlex.join(argv)
+
+
+def resolve_engagement_mode(
+    engagement_dir: Path,
+    requested_mode: str | None = None,
+    *,
+    client: str = "claude",
+    install_root: Path | None = None,
+) -> str:
+    """Select one operator prompt from the engagement's durable capabilities."""
+    available = _engagement_modes(_read_json(engagement_dir / "scope.json"))
     if requested_mode == "both" or (requested_mode and requested_mode not in {"web", "code", "blue", "remediation", "android"}):
         raise SystemExit(f"invalid operator mode '{requested_mode}'")
     if requested_mode:
@@ -1087,11 +1107,44 @@ def resolve_engagement_mode(engagement_dir: Path, requested_mode: str | None = N
         return requested_mode
     if len(available) == 1:
         return next(iter(available))
-    raise SystemExit("select an operator session with --mode web or --mode code")
+    commands = "\n".join(
+        f"  {_engagement_start_command(engagement_dir, client, name, install_root)}"
+        for name in available
+    )
+    raise SystemExit(
+        "select an operator session with --mode web or --mode code; "
+        "start a new client process with one of:\n" + commands
+    )
 
 
 def engagement_mode_prompt(install_root: Path, mode: str) -> Path:
-    return _canonical_operator_prompt(install_root / "agent", mode)
+    return _canonical_operator_prompt(application_agent_root(install_root), mode)
+
+
+def engagement_mode_state(install_root: Path, engagement_dir: Path, *, client: str = "claude") -> dict[str, Any]:
+    """Inspect tracks without choosing a prompt for an ambiguous engagement."""
+    tracks = _engagement_modes(_read_json(engagement_dir / "scope.json"))
+    requested_mode = None
+    binding = os.environ.get("VIGIL_SESSION_ENGAGEMENT_DIR") or os.environ.get("ENGAGEMENT_DIR")
+    if binding and Path(binding).expanduser().resolve() == engagement_dir.resolve():
+        requested_mode = os.environ.get("VIGIL_OPERATOR_MODE") or None
+    mode = (
+        resolve_engagement_mode(engagement_dir, requested_mode)
+        if requested_mode or len(tracks) == 1 else None
+    )
+    return {
+        "mode": mode,
+        "prompt": str(engagement_mode_prompt(install_root, mode)) if mode else None,
+        "enabled_tracks": list(tracks),
+        "tracks": {
+            name: {
+                "phase": track["phase"],
+                "prompt": str(engagement_mode_prompt(install_root, name)),
+                "start_command": _engagement_start_command(engagement_dir, client, name, install_root),
+            }
+            for name, track in tracks.items()
+        },
+    }
 
 
 def _append_track_transition(
@@ -1123,13 +1176,13 @@ def _prepare_operator_pointer_rewrite(install_root: Path, engagement_dir: Path) 
         unsafe_destination = unsafe_symlink_destination(engagement_dir, ("AGENTS.md", "CLAUDE.md"))
         if unsafe_destination is not None:
             raise SystemExit(f"unsafe operator pointer path: {unsafe_destination} contains a symlink.")
-        _require_install_prerequisites(install_root / "agent", "offensive")
+        _require_install_prerequisites(application_agent_root(install_root), "offensive")
     return generated
 
 
 def _rewrite_operator_pointer(install_root: Path, engagement_dir: Path) -> None:
     client_kind = "both" if (engagement_dir / "CLAUDE.md").is_file() else "codex"
-    _write_prompt_wrappers(install_root / "agent", engagement_dir, client_kind, engagement_type="offensive")
+    _write_prompt_wrappers(application_agent_root(install_root), engagement_dir, client_kind, engagement_type="offensive", workspace_root=install_root)
 
 
 def add_engagement_track(
@@ -1191,7 +1244,7 @@ def add_engagement_track(
     if rewrite_pointer:
         _rewrite_operator_pointer(install_root, engagement_dir)
     if codex_config.is_file():
-        refresh_codex_compact_prompt(install_root / "agent", engagement_dir / ".codex")
+        refresh_codex_compact_prompt(application_agent_root(install_root), engagement_dir / ".codex")
     return _track_state(scope)
 
 
@@ -1514,17 +1567,35 @@ def print_shell_cd_init(shell: str = "zsh") -> str:
     return 'athcd() { cd "$(vigil engagement path --select)"; }\n'
 
 
-def start_engagement(install_root: Path, engagement_dir: Path, client: str, extra_args: list[str], mode: str | None = None) -> None:
+def start_engagement(install_root: Path, engagement_dir: Path, client: str, extra_args: list[str], mode: str | None = None, *, thinking: str | None = None) -> None:
     if client == "pi" and _read_json(engagement_dir / "scope.json").get("engagement_type") != "remediation":
         raise SystemExit(
             "Pi supports remediation engagements only; Vigil installs no Pi specialist roster. "
             "Start this engagement with --client codex or --client claude, "
             "or create a remediation engagement for Pi."
         )
-    selected_mode = resolve_engagement_mode(engagement_dir, mode)
+    selected_mode = resolve_engagement_mode(engagement_dir, mode, client=client, install_root=install_root)
     prompt = engagement_mode_prompt(install_root, selected_mode)
     if not prompt.is_file():
         raise SystemExit(f"operator prompt not found at {prompt}; run `vigil install {install_root}`")
+    from .client_sessions import client_session_bootstrap, record_client_session
+
+    with client_session_bootstrap(install_root, engagement_dir):
+        previous_pointer_path = engagement_dir / "AGENTS.md"
+        previous_operator_pointer = previous_pointer_path.read_text(encoding="utf-8") if previous_pointer_path.is_file() else ""
+        repair = repair_engagement_client_entrypoints(install_root, engagement_dir=engagement_dir, preserve_operator_config=True)
+        if engagement_dir.name in repair.reconciled:
+            repair_engagement_client_rosters(install_root, engagement_dir=engagement_dir, preserve_operator_config=True)
+            repair_engagement_operator_pointers(install_root, engagement_dir=engagement_dir)
+            # Goose eagerly reads its copied router, not AGENTS.md itself. Rebase
+            # it after the shared pointer changes, retaining operator additions.
+            _write_goose_config(
+                application_agent_root(install_root), engagement_dir,
+                preserve_existing=True, previous_operator_pointer=previous_operator_pointer,
+            )
+        if client == "opencode" and thinking is not None:
+            write_opencode_reasoning_config(engagement_dir, thinking)
+        record_client_session(install_root, engagement_dir, client, selected_mode)
     pointer = engagement_dir / "AGENTS.md"
     if pointer.is_file():
         body = pointer.read_text(encoding="utf-8")
@@ -1555,6 +1626,13 @@ def start_engagement(install_root: Path, engagement_dir: Path, client: str, extr
     # provider-owned observation.
     os.environ["VIGIL_REQUESTED_CLIENT"] = client
     os.environ["VIGIL_OPERATOR_MODE"] = selected_mode
+    phase = _engagement_modes(_read_json(engagement_dir / "scope.json"))[selected_mode]["phase"]
+    print(
+        f"workspace: {install_root}\nengagement: {engagement_dir.name}\n"
+        f"client: {client}\nmode: {selected_mode}\nphase: {phase}",
+        file=sys.stderr,
+        flush=True,
+    )
     os.chdir(engagement_dir)
     os.execv(str(launcher), [str(launcher), *client_launch_argv(client, extra_args)])
 
@@ -1834,21 +1912,19 @@ def _finding_render():
     ``_build_assessment_client``): the production ``vigil engagement export`` path puts
     ``agent/scripts`` on ``sys.path`` before this runs (via
     ``_build_assessment_client``), but tests and any direct caller may not — so
-    fall back to discovering the repo root from this module's own location and
-    bridging the path ourselves before retrying.
+    bridge the matched application's scripts before retrying, including when
+    this module lives in an installed wheel rather than a checkout.
     """
     try:
         from assess.lib import finding_render  # type: ignore[import-not-found]
 
         return finding_render
     except ImportError:
-        from .paths import agent_root, find_repo_root
+        from .application import resolve_application_root
 
-        repo_root = find_repo_root(Path(__file__))
-        if repo_root is not None:
-            scripts_dir = agent_root(repo_root) / "scripts"
-            if str(scripts_dir) not in sys.path:
-                sys.path.insert(0, str(scripts_dir))
+        scripts_dir = resolve_application_root() / "agent/scripts"
+        if str(scripts_dir) not in sys.path:
+            sys.path.insert(0, str(scripts_dir))
         from assess.lib import finding_render  # type: ignore[import-not-found]
 
         return finding_render
@@ -2411,8 +2487,11 @@ def _require_install_prerequisites(agent_root: Path, engagement_type: str) -> No
         )
 
 
-def _write_prompt_wrappers(agent_root: Path, eng_dir: Path, client_kind: str, *, engagement_type: str) -> None:
-    install_root = agent_root.parent
+def _write_prompt_wrappers(
+    agent_root: Path, eng_dir: Path, client_kind: str, *, engagement_type: str,
+    workspace_root: Path | None = None,
+) -> None:
+    install_root = workspace_root or agent_root.parent
     scope = _read_json(eng_dir / "scope.json")
     tracks = _offensive_tracks(scope) if engagement_type == "offensive" else {}
     if engagement_type == "offensive":
@@ -2460,7 +2539,7 @@ def _write_prompt_wrappers(agent_root: Path, eng_dir: Path, client_kind: str, *,
         )
     common = f"""This engagement directory is only the run-artifact root. Resolve shared prompts, skills, references, and scripts through:
 - Install root: {install_root}
-- Agent workspace root: {agent_root}
+- Application agent root: {agent_root}
 - Scripts: {agent_root / "scripts"}
 
 Artifacts:
@@ -2497,15 +2576,16 @@ Artifacts:
 
 
 def repair_engagement_operator_pointers(
-    install_root: Path, *, rendered_install_root: Path | None = None
+    install_root: Path, *, rendered_install_root: Path | None = None,
+    engagement_dir: Path | None = None,
 ) -> tuple[str, ...]:
     """Upgrade generated local pointers to the durable session-mode router."""
     root = engagements_root(install_root)
-    rendered_agent_root = (rendered_install_root or install_root.resolve()) / "agent"
-    if not root.is_dir():
+    rendered_agent_root = application_agent_root(rendered_install_root or install_root.resolve())
+    if engagement_dir is None and not root.is_dir():
         return ()
     repaired: list[str] = []
-    for eng_dir in sorted(root.iterdir()):
+    for eng_dir in ((engagement_dir,) if engagement_dir is not None else sorted(root.iterdir())):
         pointer = eng_dir / "AGENTS.md"
         if eng_dir.is_symlink() or not eng_dir.is_dir() or pointer.is_symlink() or not pointer.is_file():
             continue
@@ -2513,7 +2593,7 @@ def repair_engagement_operator_pointers(
         if not body.startswith(_SPECIALIST_STOP_SIGN):
             continue
         scope = _read_json(eng_dir / "scope.json")
-        kind = str(scope.get("engagement_type") or "")
+        kind = str(scope.get("engagement_type") or "web")
         if kind not in {"offensive", "web", "code", "both"}:
             continue
         try:
@@ -2527,7 +2607,7 @@ def repair_engagement_operator_pointers(
         if (eng_dir / "CLAUDE.md").is_symlink():
             continue
         client_kind = "both" if (eng_dir / "CLAUDE.md").is_file() else "codex"
-        _write_prompt_wrappers(rendered_agent_root, eng_dir, client_kind, engagement_type="offensive")
+        _write_prompt_wrappers(rendered_agent_root, eng_dir, client_kind, engagement_type="offensive", workspace_root=rendered_install_root or install_root)
         repaired.append(eng_dir.name)
     return tuple(repaired)
 
@@ -2537,12 +2617,14 @@ def _write_codex_config(
     eng_dir: Path,
     *,
     rendered_agent_root: Path | None = None,
+    preserve_operator_config: bool = False,
 ) -> None:
     codex_dir = eng_dir / ".codex"
     ensure_codex_config(
         agent_root,
         codex_dir,
         rendered_agent_root=rendered_agent_root,
+        preserve_existing=preserve_operator_config,
     )
     ensure_codex_agents_link(agent_root, codex_dir)
     ensure_codex_skills_link(agent_root, codex_dir)
@@ -2553,12 +2635,14 @@ def _write_claude_config(
     eng_dir: Path,
     *,
     rendered_agent_root: Path | None = None,
+    preserve_operator_config: bool = False,
 ) -> None:
     claude_dir = eng_dir / ".claude"
     ensure_claude_settings(
         agent_root,
         claude_dir,
         rendered_agent_root=rendered_agent_root,
+        preserve_existing=preserve_operator_config,
     )
     ensure_claude_agents_link(agent_root, claude_dir)
     ensure_claude_commands_link(agent_root, claude_dir)
@@ -2656,6 +2740,8 @@ def _write_goose_config(
     eng_dir: Path,
     *,
     rendered_agent_root: Path | None = None,
+    preserve_existing: bool = False,
+    previous_operator_pointer: str | None = None,
 ) -> None:
     """Install Goose's operator prompt, specialist roster, and standard hooks.
 
@@ -2681,7 +2767,18 @@ def _write_goose_config(
     # own operator pointer. Preserve the directive for assessment engagements.
     engagement_type = _read_json(eng_dir / "scope.json").get("engagement_type")
     directive = "" if engagement_type == "remediation" else GOOSE_DISPATCH_DIRECTIVE
-    (eng_dir / ".goosehints").write_text(base + directive, encoding="utf-8")
+    hints_path = eng_dir / ".goosehints"
+    body = base + directive
+    if preserve_existing and hints_path.is_file():
+        existing = hints_path.read_text(encoding="utf-8")
+        previous_body = (base if previous_operator_pointer is None else previous_operator_pointer) + directive
+        if existing.startswith(previous_body):
+            body += existing[len(previous_body):]
+        else:
+            # An unrecognized custom hints file is not ours to replace.
+            body = existing
+    if not hints_path.is_file() or hints_path.read_text(encoding="utf-8") != body:
+        hints_path.write_text(body, encoding="utf-8")
     ensure_goose_recipes_link(agent_root, eng_dir / ".goose")
     ensure_goose_standard_hooks(
         agent_root,
@@ -2754,9 +2851,9 @@ _GOOSE_EXTRA_ENV = (
     "# Start the stdlib-only repair proxy in front of DeepSeek, repoint OPENAI_HOST\n"
     "# at it, and kill it when this launcher exits (auto-cleaned per attempt).\n"
     'if [[ "${{VIGIL_GOOSE_REASONING_PROXY:-1}}" != "0" ]]; then\n'
-    '  _vigil_proxy_script="{install_dir}/src/vigil_cli/goose_reasoning_proxy.py"\n'
+    '  _vigil_proxy_script={proxy_script}\n'
     '  if [[ -f "$_vigil_proxy_script" ]]; then\n'
-    "    # Prefer the install venv python (always present); any python3 works (stdlib only).\n"
+    "    # The proxy is stdlib-only; prefer a workspace venv when available.\n"
     '    _vigil_py="{install_dir}/.venv/bin/python"\n'
     '    [[ -x "$_vigil_py" ]] || _vigil_py="$(command -v python3 || true)"\n'
     '    if [[ -n "$_vigil_py" ]]; then\n'
@@ -2924,13 +3021,17 @@ _ENTRYPOINT_REPAIR_DESTINATIONS = (
 )
 
 
-def _write_launchers(agent_root: Path, eng_dir: Path, client_kind: str, *, skip_permissions: bool) -> None:
+def _write_launchers(
+    agent_root: Path, eng_dir: Path, client_kind: str, *, skip_permissions: bool,
+    workspace_root: Path | None = None,
+) -> None:
     if client_kind in {"codex", "both"}:
         _write_launcher(
             agent_root,
             eng_dir,
             "codex",
             _SKIP_PERMISSION_ARGS["codex"] if skip_permissions else "",
+            workspace_root=workspace_root,
         )
     if client_kind in {"claude", "both"}:
         _write_launcher(
@@ -2939,6 +3040,7 @@ def _write_launchers(agent_root: Path, eng_dir: Path, client_kind: str, *, skip_
             "claude",
             _SKIP_PERMISSION_ARGS["claude"] if skip_permissions else "",
             extra_env=_CLAUDE_EXTRA_ENV,
+            workspace_root=workspace_root,
         )
     # OpenCode reads the same engagement-local AGENTS.md as Codex (written for every
     # real client kind), so the operator prompt drives it unchanged. We always emit
@@ -2966,6 +3068,7 @@ def _write_launchers(agent_root: Path, eng_dir: Path, client_kind: str, *, skip_
             _SKIP_PERMISSION_ARGS["opencode"] if skip_permissions else "",
             exec_cmd="opencode --agent operator",
             provider_key=CLIENT_PROVIDER_KEY["opencode"],
+            workspace_root=workspace_root,
         )
     # Goose reads the engagement
     # prompt natively (Goose auto-loads `.goosehints`, written by _write_goose_config),
@@ -2989,7 +3092,14 @@ def _write_launchers(agent_root: Path, eng_dir: Path, client_kind: str, *, skip_
             exec_cmd="goose run --interactive --with-builtin developer",
             uninstructed_cmd="goose session --with-builtin developer",
             provider_key=CLIENT_PROVIDER_KEY["goose"],
-            extra_env=_GOOSE_EXTRA_ENV.format(install_dir="$VIGIL_INSTALL_DIR"),
+            extra_env=_GOOSE_EXTRA_ENV.format(
+                install_dir="$VIGIL_INSTALL_DIR",
+                proxy_script=shlex.quote(str(
+                    agent_root.parent / ("cli" if (agent_root.parent / "cli/vigil_cli/goose_reasoning_proxy.py").is_file() else "src")
+                    / "vigil_cli/goose_reasoning_proxy.py"
+                )),
+            ),
+            workspace_root=workspace_root,
         )
     # Kimi Code reads the same engagement-local AGENTS.md natively and needs no
     # generated roster, so — like opencode/goose — always emit start_kimi.sh.
@@ -3003,11 +3113,12 @@ def _write_launchers(agent_root: Path, eng_dir: Path, client_kind: str, *, skip_
             eng_dir,
             "kimi",
             _SKIP_PERMISSION_ARGS["kimi"] if skip_permissions else "",
+            workspace_root=workspace_root,
         )
 
     # Pi loads AGENTS.md and uses its own model/auth settings; no permission flag.
     if client_kind in {"codex", "claude", "both"}:
-        _write_launcher(agent_root, eng_dir, "pi", "")
+        _write_launcher(agent_root, eng_dir, "pi", "", workspace_root=workspace_root)
 
 
 def _existing_engagement_client_kind(eng_dir: Path) -> str | None:
@@ -3110,6 +3221,8 @@ def repair_engagement_client_entrypoints(
     *,
     ambiguous_permissions_as_skip: bool = False,
     rendered_install_root: Path | None = None,
+    engagement_dir: Path | None = None,
+    preserve_operator_config: bool = False,
 ) -> ClientEntrypointRepairResult:
     """Refresh installer-owned client entrypoints in existing engagements.
 
@@ -3124,16 +3237,16 @@ def repair_engagement_client_entrypoints(
     overwrites an unrecognized/custom launcher or invents a client for a clientless
     engagement.
     """
-    agent_root = install_root / "agent"
-    rendered_agent_root = (rendered_install_root or install_root) / "agent"
-    root = agent_root / "engagements"
-    if not root.is_dir():
+    agent_root = application_agent_root(install_root)
+    rendered_agent_root = application_agent_root(rendered_install_root or install_root)
+    root = engagements_root(install_root)
+    if engagement_dir is None and not root.is_dir():
         return ClientEntrypointRepairResult(scanned_count=0, reconciled=(), skipped=())
 
     plans: list[tuple[Path, str, bool, bool]] = []
     skipped: list[ClientEntrypointRepairSkip] = []
     scanned_count = 0
-    for eng_dir in sorted(root.iterdir(), key=lambda path: path.name):
+    for eng_dir in ((engagement_dir,) if engagement_dir is not None else sorted(root.iterdir(), key=lambda path: path.name)):
         if eng_dir.is_symlink():
             if eng_dir.is_dir() and (eng_dir / "scope.json").is_file():
                 scanned_count += 1
@@ -3189,24 +3302,28 @@ def repair_engagement_client_entrypoints(
                 agent_root,
                 eng_dir,
                 rendered_agent_root=rendered_agent_root,
+                preserve_operator_config=preserve_operator_config,
             )
         if client_kind in {"claude", "both"}:
             _write_claude_config(
                 agent_root,
                 eng_dir,
                 rendered_agent_root=rendered_agent_root,
+                preserve_operator_config=preserve_operator_config,
             )
         _write_opencode_config(agent_root, eng_dir)
         _write_goose_config(
             agent_root,
             eng_dir,
             rendered_agent_root=rendered_agent_root,
+            preserve_existing=preserve_operator_config,
         )
         _write_launchers(
             rendered_agent_root,
             eng_dir,
             client_kind,
             skip_permissions=skip_permissions,
+            workspace_root=rendered_install_root or install_root,
         )
         reconciled.append(eng_dir.name)
         if permission_overridden:
@@ -3230,6 +3347,7 @@ def _write_launcher(
     uninstructed_cmd: str | None = None,
     provider_key: str | None = None,
     extra_env: str = "",
+    workspace_root: Path | None = None,
 ) -> None:
     # Permission choice first, then the client's unconditional arguments, so the
     # repair-side exec parser can keep reading the permission slot in one place.
@@ -3241,6 +3359,13 @@ def _write_launcher(
     # pinned agent (opencode, goose) passes it explicitly. The launcher FILE is
     # still start_<client>.sh.
     exec_cmd = exec_cmd or client
+    from .application import session_cli_directory
+
+    helper_directory = session_cli_directory(agent_root.parent)
+    helper_path_block = (
+        f'export PATH={shlex.quote(str(helper_directory))}:"$PATH"\n'
+        if helper_directory is not None else ""
+    )
     # The launcher never parses "$@": it forwards argv verbatim, and Vigil places the
     # operator message where the client wants it (a trailing positional, or the
     # client's own message flag — see CLIENT_MESSAGE_FLAGS / client_launch_argv).
@@ -3340,9 +3465,12 @@ ENGAGEMENT_KEY="$(basename "$ENGAGEMENT_DIR")"
 export ENGAGEMENT_KEY
 VIGIL_AGENT_ROOT={shlex.quote(str(agent_root))}
 export VIGIL_AGENT_ROOT
-VIGIL_INSTALL_DIR={shlex.quote(str(agent_root.parent))}
+VIGIL_INSTALL_DIR={shlex.quote(str(workspace_root or agent_root.parent))}
 export VIGIL_INSTALL_DIR
+VIGIL_APPLICATION_DIR={shlex.quote(str(agent_root.parent))}
+export VIGIL_APPLICATION_DIR
 export VIGIL_CLIENT_NAME="{client}"
+{helper_path_block}
 
 # Resolve at session start so config edits and dotenv quoting use the CLI contract.
 ORCHESTRATOR_BASE_URL="$(vigil --root "$VIGIL_INSTALL_DIR" config resolve orchestrator_base_url --engagement-dir "$ENGAGEMENT_DIR")"

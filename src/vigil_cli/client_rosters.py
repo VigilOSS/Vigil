@@ -7,8 +7,11 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path
+
+from .paths import agent_root as application_agent_root, engagements_root as workspace_engagements_root
 
 
 @dataclass(frozen=True, slots=True)
@@ -296,6 +299,7 @@ def ensure_codex_config(
     codex_dir: Path,
     *,
     rendered_agent_root: Path | None = None,
+    preserve_existing: bool = False,
 ) -> None:
     """Copy Codex config with hooks bound to the installed agent root."""
     config_src = agent_root / ".codex" / "config.toml"
@@ -307,6 +311,8 @@ def ensure_codex_config(
         "post-compact-resume.sh",
         "session-end.sh",
     )
+    source_config = tomllib.loads(config_src.read_text(encoding="utf-8"))
+    source_commands = _hook_commands(source_config.get("hooks", {}))
     rendered_lines: list[str] = []
     for line in config_src.read_text(encoding="utf-8").splitlines(keepends=True):
         script_name = next((name for name in script_names if name in line), None)
@@ -337,9 +343,73 @@ def ensure_codex_config(
         config_dest.unlink()
     elif config_dest.exists() and not config_dest.is_file():
         return
+    if preserve_existing and config_dest.is_file():
+        original = config_dest.read_text(encoding="utf-8")
+        # Validate without round-tripping: custom tables, comments and formatting
+        # remain operator-owned. Only recognizable Vigil hook bindings move.
+        existing_config = tomllib.loads(original)
+        rendered_lines = []
+        in_hooks = False
+        for line in original.splitlines(keepends=True):
+            if line.lstrip().startswith("["):
+                in_hooks = line.lstrip().startswith(("[hooks.", "[[hooks."))
+            if in_hooks and line.split("=", 1)[0].strip() == "command":
+                command_value = tomllib.loads(line.strip()).get("command")
+                script_name = _generated_hook_script(command_value, script_names, source_commands)
+                if script_name is not None:
+                    command = shlex.join(["bash", str(target_root / "scripts/hooks" / script_name)])
+                    indent = line[:len(line) - len(line.lstrip())]
+                    line = f"{indent}command = {json.dumps(command)}" + ("\n" if line.endswith("\n") else "")
+            rendered_lines.append(line)
+        config_text = "".join(rendered_lines)
+        if config_text != original:
+            config_dest.write_text(config_text, encoding="utf-8")
+        existing_prompt = existing_config.get("compact_prompt")
+        recognizable_prompt = (
+            existing_prompt is None or existing_prompt == compact_prompt_sentinel
+            or compact_prompt_sentinel in config_src.read_text(encoding="utf-8") and existing_prompt == compact_prompt
+        )
+        if compact_prompt_sentinel in config_src.read_text(encoding="utf-8") and recognizable_prompt:
+            refresh_codex_compact_prompt(agent_root, codex_dir, rendered_agent_root=rendered_agent_root)
+        return
     if config_dest.exists() and config_dest.read_text(encoding="utf-8") == config_text:
         return
     config_dest.write_text(config_text, encoding="utf-8")
+
+
+def _hook_commands(hooks: object) -> set[str]:
+    """Commands from the canonical client template, before path rendering."""
+    commands: set[str] = set()
+    if not isinstance(hooks, dict):
+        return commands
+    for entries in hooks.values():
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict) or not isinstance(entry.get("hooks"), list):
+                continue
+            for hook in entry["hooks"]:
+                if isinstance(hook, dict) and isinstance(hook.get("command"), str):
+                    commands.add(hook["command"])
+    return commands
+
+
+def _generated_hook_script(command: object, scripts: tuple[str, ...], source_commands: set[str]) -> str | None:
+    """Only exact templates and generated ``bash SCRIPT`` bindings are owned."""
+    if not isinstance(command, str):
+        return None
+    script = next((name for name in scripts if f"scripts/hooks/{name}" in command), None)
+    if script is None:
+        return None
+    if command in source_commands:
+        return script
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return None
+    if len(tokens) == 2 and tokens[0] == "bash" and tokens[1].endswith(f"scripts/hooks/{script}"):
+        return script
+    return None
 
 
 def ensure_claude_settings(
@@ -347,6 +417,7 @@ def ensure_claude_settings(
     claude_dir: Path,
     *,
     rendered_agent_root: Path | None = None,
+    preserve_existing: bool = False,
 ) -> None:
     """Copy generated Claude settings into an engagement cwd when present.
 
@@ -367,6 +438,7 @@ def ensure_claude_settings(
     claude_dir.mkdir(parents=True, exist_ok=True)
     settings_dest = claude_dir / "settings.json"
     settings = json.loads(settings_src.read_text(encoding="utf-8"))
+    source_commands = _hook_commands(settings.get("hooks", {}))
     settings["autoMemoryEnabled"] = False
     hooks = settings.get("hooks", {})
     post_hooks = hooks.get("PostToolUse")
@@ -402,6 +474,59 @@ def ensure_claude_settings(
                         ) / "scripts" / "hooks" / script_name
                         command["command"] = shlex.join(["bash", str(target)])
                         break
+    if preserve_existing and settings_dest.is_file():
+        original_settings = json.loads(settings_dest.read_text(encoding="utf-8"))
+        if not isinstance(original_settings, dict):
+            raise ValueError(f"Claude settings must contain an object: {settings_dest}")
+        # Retain operator preferences, environment, MCP configuration and custom
+        # commands. The generated commands alone are release-managed bindings.
+        existing_hooks = original_settings.setdefault("hooks", {})
+        if not isinstance(existing_hooks, dict):
+            raise ValueError(f"Claude hooks must contain an object: {settings_dest}")
+        for phase, canonical_entries in hooks.items():
+            if not isinstance(canonical_entries, list):
+                continue
+            entries = existing_hooks.setdefault(phase, [])
+            if not isinstance(entries, list):
+                raise ValueError(f"Claude {phase} hooks must contain a list: {settings_dest}")
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                for command in entry.get("hooks", []):
+                    if not isinstance(command, dict) or not isinstance(command.get("command"), str):
+                        continue
+                    recognized_script = _generated_hook_script(
+                        command["command"], ("post-tool-log.sh", "pre-compact.sh", "session-end.sh"), source_commands,
+                    )
+                    if recognized_script is not None:
+                        command["command"] = shlex.join(["bash", str((rendered_agent_root or agent_root) / "scripts/hooks" / recognized_script)])
+            for canonical_entry in canonical_entries:
+                if not isinstance(canonical_entry, dict):
+                    continue
+                canonical_commands = canonical_entry.get("hooks", [])
+                for canonical_command in canonical_commands:
+                    if not isinstance(canonical_command, dict):
+                        continue
+                    canonical_script = _generated_hook_script(
+                        canonical_command.get("command"), ("post-tool-log.sh", "pre-compact.sh", "session-end.sh"), source_commands,
+                    )
+                    exists = any(
+                        isinstance(entry, dict)
+                        and entry.get("matcher") == canonical_entry.get("matcher")
+                        and any(isinstance(command, dict) and (
+                                    command.get("command") == canonical_command.get("command")
+                                    or canonical_script is not None and isinstance(command.get("command"), str)
+                                    and f"scripts/hooks/{canonical_script}" in command["command"])
+                                for command in entry.get("hooks", []))
+                        for entry in entries
+                    )
+                    if not exists:
+                        entries.append({**canonical_entry, "hooks": [canonical_command]})
+        for key, value in settings.items():
+            if key != "hooks":
+                original_settings.setdefault(key, value)
+        original_settings["autoMemoryEnabled"] = False
+        settings = original_settings
     settings_text = json.dumps(settings, indent=2) + "\n"
     if settings_dest.is_symlink():
         settings_dest.unlink()
@@ -574,8 +699,18 @@ def _strict_physical_destination(roster: _PhysicalRoster) -> bool:
                 try:
                     if (
                         roster.source.is_dir()
-                        and current.resolve(strict=True) == roster.source.resolve(strict=True)
+                        and (
+                            current.resolve(strict=True) == roster.source.resolve(strict=True)
+                            or (
+                                current.resolve(strict=True).name == roster.source.name
+                                and current.resolve(strict=True).parent.name == roster.source.parent.name
+                                and current.resolve(strict=True).parent.parent.name == "agent"
+                            )
+                        )
                     ):
+                        # Generated directory links may name an earlier release.
+                        # They are replaced as opaque entries; their targets are
+                        # never refreshed as physical engagement-owned rosters.
                         return False
                 except FileNotFoundError:
                     pass
@@ -724,6 +859,8 @@ def repair_engagement_client_rosters(
     *,
     refresh_physical_client_rosters: bool = False,
     rendered_install_root: Path | None = None,
+    engagement_dir: Path | None = None,
+    preserve_operator_config: bool = False,
 ) -> ClientRosterRepairResult:
     """Backfill generated client rosters for existing engagement workdirs.
 
@@ -732,14 +869,15 @@ def repair_engagement_client_rosters(
     candidate before any writes, then atomically adds or refreshes canonical files
     in place without deleting unknown entries.
     """
-    agent_root = install_root / "agent"
-    rendered_agent_root = (rendered_install_root or install_root) / "agent"
-    engagements_root = agent_root / "engagements"
-    if not engagements_root.is_dir():
+    agent_root = application_agent_root(install_root)
+    rendered_agent_root = application_agent_root(rendered_install_root or install_root)
+    display_root = rendered_install_root or install_root
+    engagements_root = workspace_engagements_root(install_root)
+    if engagement_dir is None and not engagements_root.is_dir():
         return ClientRosterRepairResult()
 
     plans: list[_EngagementClientPlan] = []
-    for eng_dir in sorted(engagements_root.iterdir(), key=lambda entry: entry.name):
+    for eng_dir in ((engagement_dir,) if engagement_dir is not None else sorted(engagements_root.iterdir(), key=lambda entry: entry.name)):
         if eng_dir.is_symlink():
             if refresh_physical_client_rosters and (eng_dir / "scope.json").is_file():
                 raise _unsafe_physical_roster("engagement path is a symlink", eng_dir)
@@ -804,6 +942,7 @@ def repair_engagement_client_rosters(
                 agent_root,
                 claude_dir,
                 rendered_agent_root=rendered_agent_root,
+                preserve_existing=preserve_operator_config,
             )
             ensure_claude_agents_link(agent_root, claude_dir)
             ensure_claude_commands_link(agent_root, claude_dir)
@@ -826,7 +965,7 @@ def repair_engagement_client_rosters(
     if refresh_physical_client_rosters:
         for roster in physical_rosters:
             roster_added, roster_updated, roster_unchanged, roster_extras = (
-                _refresh_physical_roster(roster, install_root=install_root)
+                _refresh_physical_roster(roster, install_root=display_root)
             )
             added.extend(roster_added)
             updated.extend(roster_updated)
@@ -834,7 +973,7 @@ def repair_engagement_client_rosters(
             extras.extend(roster_extras)
 
     physical_paths = tuple(
-        sorted(_display_path(roster.destination, install_root) for roster in physical_rosters)
+        sorted(_display_path(roster.destination, display_root) for roster in physical_rosters)
     )
     return ClientRosterRepairResult(
         scanned_engagement_count=len(plans),

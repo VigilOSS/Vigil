@@ -90,8 +90,18 @@ def open_pinned_directory(
                         os.close(descriptor)
                         return None
                     raise
-                os.mkdir(part, dir_fd=descriptor)
-                child = os.open(part, _DIRECTORY_FLAGS, dir_fd=descriptor)
+                try:
+                    os.mkdir(part, dir_fd=descriptor)
+                except FileExistsError:
+                    # Another first-use process may have created this component.
+                    # Reopen through the same no-follow parent descriptor below.
+                    pass
+                try:
+                    child = os.open(part, _DIRECTORY_FLAGS, dir_fd=descriptor)
+                except OSError as exc:
+                    if exc.errno in {errno.ELOOP, errno.ENOTDIR}:
+                        raise unsafe_path(walked) from exc
+                    raise
             except OSError as exc:
                 if exc.errno in {errno.ELOOP, errno.ENOTDIR}:
                     raise unsafe_path(walked) from exc

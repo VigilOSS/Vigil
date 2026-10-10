@@ -530,6 +530,8 @@ def test_the_assess_passthrough_does_not_warn_about_a_stale_install(
     (install_root / "agent" / "scripts").mkdir(parents=True)
     assess = install_root / "agent" / "scripts" / "assess.py"
     assess.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+    (install_root / "orchestrator").mkdir()
+    monkeypatch.setenv("VIGIL_APPLICATION_DIR", str(install_root))
 
     monkeypatch.setattr(main_module, "resolve_install_root", lambda _value: install_root)
     monkeypatch.setattr(

@@ -34,6 +34,12 @@ from tests.proof_fixtures import completed_confirm_check, post_artifact_backed_s
 from vigil_cli import restart_manifest  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def application_pin(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Restore per-test explicit application fixtures to the caller's environment."""
+    monkeypatch.setenv("VIGIL_APPLICATION_DIR", str(repo_root))
+
+
 def _copy_agent_fixture(agent_root: Path, install_root: Path) -> Path:
     target_agent = install_root / "agent"
     target_agent.mkdir(parents=True)
@@ -1224,12 +1230,12 @@ def test_resolve_runtime_data_dir_honours_runtime_then_legacy_then_default(
 
     # Neither env var set -> default under the install root.
     monkeypatch.delenv("KALI_MCP_DATA_DIR", raising=False)
-    assert _resolve_runtime_data_dir(install_root) == install_root / ".runtime-data"
+    assert _resolve_runtime_data_dir(install_root) == install_root / "state" / "runtime"
 
     # The orchestrator's VIGIL_DATA_DIR must NOT relocate the runtime dir — the two
     # are deliberately decoupled (regression guard for the env-collision fix).
     monkeypatch.setenv("VIGIL_DATA_DIR", "/mnt/orchestrator-data")
-    assert _resolve_runtime_data_dir(install_root) == install_root / ".runtime-data"
+    assert _resolve_runtime_data_dir(install_root) == install_root / "state" / "runtime"
 
     # A value in the install-root .env is honoured host-side, not silently only inside
     # the container (Codex P2: docker --env-file never reaches this resolver).
@@ -1248,7 +1254,7 @@ def test_resolve_runtime_data_dir_honours_runtime_then_legacy_then_default(
     assert _resolve_runtime_data_dir(install_root) == install_root / "custom-data"
 
 
-def test_resolve_source_root_prefers_cached_source_before_install_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_resolve_source_root_uses_matched_application_instead_of_legacy_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from vigil_cli import paths as paths_module
 
     install_root = tmp_path / "install"
@@ -1259,12 +1265,11 @@ def test_resolve_source_root_prefers_cached_source_before_install_root(tmp_path:
     monkeypatch.delenv("VIGIL_SOURCE_DIR", raising=False)
     monkeypatch.setattr(paths_module, "get_config_value", lambda *args: None)
     monkeypatch.setattr(paths_module, "find_repo_root", lambda start=None: None)
-    monkeypatch.setattr(paths_module, "_ensure_cached_source", lambda: cached_source)
-
+    monkeypatch.setenv("VIGIL_APPLICATION_DIR", str(cached_source))
     assert paths_module.resolve_source_root(install_root=install_root) == cached_source.resolve()
 
 
-def test_install_preserves_local_state_and_replaces_managed_files(tmp_path: Path) -> None:
+def test_install_adopts_local_state_without_replacing_legacy_application(tmp_path: Path) -> None:
     from vigil_cli.install import InstallOptions, install_from_source
 
     source_root = tmp_path / "source"
@@ -1303,21 +1308,19 @@ def test_install_preserves_local_state_and_replaces_managed_files(tmp_path: Path
         )
     )
 
-    assert (install_root / "README.md").read_text(encoding="utf-8") == "new readme\n"
-    root_agents = (install_root / "AGENTS.md").read_text(encoding="utf-8")
-    assert root_agents != "managed agent\n"
-    assert "agent/AGENTS.md" in root_agents
-    assert "bounded parts" in root_agents
-    assert "end of the file" in root_agents
-    assert (install_root / "agent" / "AGENTS.md").read_text(encoding="utf-8") == "managed agent\n"
+    assert (install_root / "README.md").read_text(encoding="utf-8") == "old readme\n"
+    assert not (install_root / "AGENTS.md").exists()
+    assert not (install_root / "agent" / "AGENTS.md").exists()
     assert marker.exists()
     codex_agents = marker.parent / ".codex" / "agents"
-    assert codex_agents.is_symlink()
-    assert codex_agents.resolve() == (install_root / "agent" / ".codex" / "agents").resolve()
-    assert (codex_agents / "vulnerability-analyst.toml").exists()
+    assert not codex_agents.exists()
     assert database.read_text(encoding="utf-8") == "db"
-    assert not (install_root / "agent" / "old-managed.txt").exists()
-    assert not legacy_installer.exists()
+    assert (install_root / "agent" / "old-managed.txt").read_text() == "remove me\n"
+    assert legacy_installer.read_text() == "old installer\n"
+    metadata = json.loads((install_root / "workspace.json").read_text())
+    assert metadata["paths"]["engagements"] == str(marker.parent.parent)
+    assert metadata["paths"]["data"] == str(database.parent)
+    assert metadata["application"]["root"] == str(source_root)
 
 
 # --------------------------------------------------------------------------- #
@@ -1449,7 +1452,7 @@ def test_install_staleness_stale_when_source_advances(tmp_path: Path) -> None:
     assert result["behind_count"] == 1
 
 
-def test_install_stamp_uses_copied_tree_when_source_mutates_before_stamp(
+def test_install_stamp_records_current_application_bytes_without_copying_source(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from vigil_cli import install as install_module
@@ -1477,12 +1480,10 @@ def test_install_stamp_uses_copied_tree_when_source_mutates_before_stamp(
         )
     )
 
-    assert (install / "src" / "vigil_cli" / "feature.py").read_text() == (
-        "version = 'one'\n"
-    )
+    assert not (install / "src").exists()
     assert source_file.read_text() == "version = 'two'\n"
     assert status_module.install_staleness(install, source_root=source)["state"] == (
-        "stale"
+        "current"
     )
 
 
@@ -1509,7 +1510,8 @@ def test_install_manifest_tracks_executable_mode_and_reinstall_repairs_it(
 
     assert install_staleness(install, source_root=source)["state"] == "stale"
     install_module.install_from_source(options)
-    assert (install / "src" / "vigil_cli" / "feature.py").stat().st_mode & 0o777 == 0o755
+    assert not (install / "src").exists()
+    assert source_file.stat().st_mode & 0o777 == 0o755
     assert install_staleness(install, source_root=source)["state"] == "current"
 
 
@@ -1543,8 +1545,9 @@ def test_client_entrypoint_copy_excludes_cache_and_build_artifacts(
 
     install_module.install_from_source(options)
 
-    assert (install / ".codex" / "agents" / "role.toml").is_file()
-    assert (install / ".claude" / "agents" / "role.md").is_file()
+    assert not (install / ".codex").exists()
+    assert not (install / ".claude").exists()
+    assert codex_role.is_file() and claude_role.is_file()
     assert not (install / ".codex" / "__pycache__").exists()
     assert not (install / ".claude" / "node_modules").exists()
     first_digest = (read_install_meta(install) or {})["source_content_sha256"]
@@ -1594,7 +1597,7 @@ def test_install_rejects_source_symlink_before_destination_mutation(
     assert not (install / ".vigil-install-meta.json").exists()
 
 
-def test_install_rejects_symlinked_destination_before_external_mutation(
+def test_install_preserves_symlinked_legacy_source_without_external_mutation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from vigil_cli import install as install_module
@@ -1613,18 +1616,17 @@ def test_install_rejects_symlinked_destination_before_external_mutation(
     except OSError as exc:
         pytest.skip(f"symlinks unavailable: {exc}")
 
-    with pytest.raises(OSError, match="unsafe symbolic link"):
-        install_module.install_from_source(
-            install_module.InstallOptions(
-                source_root=source,
-                install_root=install,
-                verify_docker_image=False,
-            )
+    install_module.install_from_source(
+        install_module.InstallOptions(
+            source_root=source,
+            install_root=install,
+            verify_docker_image=False,
         )
-
+    )
     assert sentinel.read_text(encoding="utf-8") == "outside\n"
     assert not (outside / "vigil_cli").exists()
-    assert not (install / ".vigil-install-meta.json").exists()
+    assert (install / ".vigil-install-meta.json").exists()
+    assert (install / "src").is_symlink()
 
 
 def test_install_rejects_symlinked_runtime_state_before_external_mutation(
@@ -1748,13 +1750,13 @@ def test_install_rejects_destination_root_swap_after_validation(
 def test_install_rejects_destination_child_swap_between_check_and_copy(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from vigil_cli import install as install_module
+    from vigil_cli import install as install_module, workspace as workspace_module
 
     monkeypatch.setenv("VIGIL_CONFIG", str(tmp_path / "config.json"))
     source = tmp_path / "source"
     _installable_source(source)
     install = tmp_path / "install"
-    destination_child = install / "src"
+    destination_child = install / "state"
     destination_child.mkdir(parents=True)
     (destination_child / "old.txt").write_text("old\n", encoding="utf-8")
     detached = tmp_path / "detached-src"
@@ -1762,18 +1764,19 @@ def test_install_rejects_destination_child_swap_between_check_and_copy(
     outside.mkdir()
     sentinel = outside / "sentinel.txt"
     sentinel.write_text("outside untouched\n", encoding="utf-8")
-    real_reject = install_module._reject_symlink
+    real_open = workspace_module.open_pinned_directory
     swapped = False
 
-    def check_then_swap(path: Path) -> None:
+    def check_then_swap(path: Path, **kwargs):
         nonlocal swapped
-        real_reject(path)
+        boundary = real_open(path, **kwargs)
         if path == destination_child and not swapped:
             path.rename(detached)
             path.symlink_to(outside, target_is_directory=True)
             swapped = True
+        return boundary
 
-    monkeypatch.setattr(install_module, "_reject_symlink", check_then_swap)
+    monkeypatch.setattr(workspace_module, "open_pinned_directory", check_then_swap)
 
     with pytest.raises(OSError, match="unsafe symbolic link"):
         install_module.install_from_source(
@@ -1797,7 +1800,7 @@ def test_install_rejects_destination_child_swap_between_check_and_copy(
         ("CLAUDE.md", "# Claude source\n"),
     ],
 )
-def test_install_atomically_replaces_hardlinked_managed_and_derived_files(
+def test_install_preserves_hardlinked_legacy_application_and_custom_files(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     destination_name: str,
@@ -1825,8 +1828,8 @@ def test_install_atomically_replaces_hardlinked_managed_and_derived_files(
     )
 
     assert outside.read_text(encoding="utf-8") == "outside untouched\n"
-    assert (install / destination_name).read_text(encoding="utf-8").startswith(expected)
-    assert (install / destination_name).stat().st_ino != outside.stat().st_ino
+    assert (install / destination_name).read_text(encoding="utf-8") == "outside untouched\n"
+    assert (install / destination_name).stat().st_ino == outside.stat().st_ino
 
 
 def test_install_removes_derived_entrypoints_when_their_sources_are_removed(
@@ -1906,8 +1909,12 @@ def test_install_reconciles_file_directory_collisions_and_is_immediately_current
         )
     )
 
-    assert managed_destination.is_file() is (source_kind == "file")
-    assert managed_destination.is_dir() is (source_kind == "directory")
+    assert managed_destination.is_file() is (destination_kind == "file")
+    assert managed_destination.is_dir() is (destination_kind == "directory")
+    if destination_kind == "file":
+        assert managed_destination.read_text() == "old file\n"
+    else:
+        assert (managed_destination / "old.txt").read_text() == "old dir\n"
     assert install_staleness(install, source_root=source)["state"] == "current"
 
 
@@ -1932,7 +1939,8 @@ def test_install_manifest_normalizes_installer_created_preserved_ancestors(
         )
     )
 
-    assert (install / "orchestrator" / "backend" / "data").is_dir()
+    assert (install / "state").is_dir()
+    assert not (install / "orchestrator").exists()
     assert install_staleness(install, source_root=source)["state"] == "current"
 
 
@@ -1985,7 +1993,7 @@ def test_install_metadata_alias_never_mutates_external_inode(
         pytest.skip(f"filesystem alias unavailable: {exc}")
 
     if alias_kind == "symlink":
-        with pytest.raises(OSError, match="unsafe symbolic link"):
+        with pytest.raises(OSError, match="unsafe symbolic link|non-regular workspace file"):
             install_module.install_from_source(
                 install_module.InstallOptions(
                     source_root=source,
@@ -2031,7 +2039,7 @@ def test_public_sync_commands_preserve_source_and_install_aliases(
     install_alias = alias_parent / "install"
     monkeypatch.setenv("VIGIL_CONFIG", str(tmp_path / "config.json"))
     if carrier == "environment":
-        monkeypatch.setenv("VIGIL_SOURCE_DIR", str(source_alias))
+        monkeypatch.setenv("VIGIL_APPLICATION_DIR", str(source_alias))
         monkeypatch.setenv("VIGIL_INSTALL_DIR", str(install_alias))
         arguments = [command]
     elif carrier == "config":
@@ -2074,11 +2082,11 @@ def test_public_sync_commands_preserve_source_and_install_aliases(
 
     main_module.main(arguments)
 
-    assert captured == {"install": install_alias, "source": source_alias}
+    assert captured == {"install": install_alias, "source": repo_root if carrier == "config" else source_alias}
 
 
 @pytest.mark.parametrize("carrier", ["explicit", "environment", "config"])
-def test_public_up_preserves_source_and_install_aliases_until_sync(
+def test_public_up_preserves_workspace_alias_until_initialization(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, carrier: str
 ) -> None:
     from vigil_cli import paths as paths_module
@@ -2095,7 +2103,7 @@ def test_public_up_preserves_source_and_install_aliases_until_sync(
     source_alias = alias_parent / "source"
     install_alias = alias_parent / "install"
     if carrier == "environment":
-        monkeypatch.setenv("VIGIL_SOURCE_DIR", str(source_alias))
+        monkeypatch.setenv("VIGIL_APPLICATION_DIR", str(source_alias))
         source_value = None
     elif carrier == "config":
         monkeypatch.setattr(
@@ -2109,14 +2117,14 @@ def test_public_up_preserves_source_and_install_aliases_until_sync(
 
     captured: dict[str, Path] = {}
 
-    def capture_install(options, **_kwargs):
-        captured["install"] = options.install_root
-        captured["source"] = options.source_root
-        raise RuntimeError("captured sync boundary")
+    def capture_install(root, *, application_root):
+        captured["install"] = root
+        captured["source"] = application_root
+        raise RuntimeError("captured initialization boundary")
 
-    monkeypatch.setattr(up_module, "install_from_source", capture_install)
+    monkeypatch.setattr(up_module, "initialize_workspace", capture_install)
 
-    with pytest.raises(RuntimeError, match="captured sync boundary"):
+    with pytest.raises(RuntimeError, match="captured initialization boundary"):
         up_module.run_up(
             up_module.UpOptions(
                 install_root=install_alias,
@@ -2124,7 +2132,7 @@ def test_public_up_preserves_source_and_install_aliases_until_sync(
             )
         )
 
-    assert captured == {"install": install_alias, "source": source_alias}
+    assert captured == {"install": install_alias, "source": repo_root if carrier == "config" else source_alias}
 
 
 def test_main_passes_explicit_source_alias_to_up(
@@ -2178,31 +2186,32 @@ def test_install_keeps_destination_boundary_attached_through_post_sync_phases(
     outside.mkdir()
     sentinel = outside / "sentinel.txt"
     sentinel.write_text("outside untouched\n", encoding="utf-8")
-    real_sync = install_module._sync_install_files
+    real_initialize = install_module.initialize_workspace
     post_sync_called = False
 
-    def sync_then_swap(source_root: Path, install_root: Path):
-        boundary = real_sync(source_root, install_root)
+    def initialize_then_swap(install_root: Path, **kwargs):
+        metadata = real_initialize(install_root, **kwargs)
         install_root.rename(detached)
         install_root.symlink_to(outside, target_is_directory=True)
-        return boundary
+        return metadata
 
     def unexpected_repair(*_args, **_kwargs):
         nonlocal post_sync_called
         post_sync_called = True
         raise AssertionError("post-sync path work touched a replaced root")
 
-    monkeypatch.setattr(install_module, "_sync_install_files", sync_then_swap)
+    monkeypatch.setattr(install_module, "initialize_workspace", initialize_then_swap)
     monkeypatch.setattr(
         install_module, "repair_engagement_client_rosters", unexpected_repair
     )
 
-    with pytest.raises(OSError, match="replaced directory"):
+    with pytest.raises(OSError, match="unsafe symbolic link"):
         install_module.install_from_source(
             install_module.InstallOptions(
                 source_root=source,
                 install_root=install,
                 verify_docker_image=False,
+                refresh_physical_client_rosters=True,
             )
         )
 
@@ -2265,14 +2274,15 @@ def test_post_sync_phases_use_the_pinned_destination_inode(
     swapped = False
     received_roots: list[Path] = []
 
-    def swap_public_root(root: Path) -> None:
+    def swap_public_root(root: Path, *, write_effect: bool = True) -> None:
         nonlocal swapped
         received_roots.append(root)
         if not swapped:
             install.rename(detached)
             install.symlink_to(outside, target_is_directory=True)
             swapped = True
-        (root / f"{phase}-effect").write_text("phase effect\n", encoding="utf-8")
+        if write_effect:
+            (root / f"{phase}-effect").write_text("phase effect\n", encoding="utf-8")
 
     def roster(root: Path, **_kwargs) -> ClientRosterRepairResult:
         if phase == "roster":
@@ -2299,14 +2309,16 @@ def test_post_sync_phases_use_the_pinned_destination_inode(
 
     def stamp(root: Path, source_root: Path, **kwargs: int) -> dict[str, object]:
         if phase == "stamp":
-            swap_public_root(root)
+            swap_public_root(root, write_effect=False)
+            from vigil_cli.install_fs import atomic_write_bytes
+            atomic_write_bytes(kwargs["install_fd"], "stamp-effect", b"phase effect\n", mode=0o644, display=root / "stamp-effect")
         return real_write_install_meta(root, source_root, **kwargs)
 
     real_build_runtime = runtime_module.build_runtime
 
     def image(root: Path, **kwargs) -> None:
         if phase == "image":
-            swap_public_root(root)
+            swap_public_root(root, write_effect=False)
         real_build_runtime(root, **kwargs)
 
     def runner(argv: list[str], **_kwargs) -> DockerResult:
@@ -2333,12 +2345,13 @@ def test_post_sync_phases_use_the_pinned_destination_inode(
                 install_root=install,
                 force_image=phase == "image",
                 verify_docker_image=phase == "image",
+                refresh_physical_client_rosters=phase in {"roster", "entrypoint"},
             ),
             runner=runner,
             build_runner=runner,
         )
 
-    assert received_roots == [Path(".")]
+    assert received_roots == [install if phase in {"stamp", "image"} else Path(".")]
     assert Path.cwd() == original_cwd
     assert sentinel.read_text(encoding="utf-8") == "outside untouched\n"
     assert sorted(path.name for path in outside.iterdir()) == ["sentinel.txt"]
@@ -2454,11 +2467,10 @@ def test_atomic_publication_failure_cleans_temp_and_preserves_destination(
     assert sorted(path.name for path in destination.iterdir()) == ["payload"]
 
 
-def test_install_prunes_removed_required_root_except_preserved_state(
+def test_install_rejects_incomplete_application_and_preserves_existing_state(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from vigil_cli import install as install_module
-    from vigil_cli.status import install_staleness
 
     monkeypatch.setenv("VIGIL_CONFIG", str(tmp_path / "config.json"))
     source = tmp_path / "source"
@@ -2471,16 +2483,21 @@ def test_install_prunes_removed_required_root_except_preserved_state(
         install_root=install,
         verify_docker_image=False,
     )
-    install_module.install_from_source(options)
     preserved = install / "orchestrator" / "backend" / "data" / "keep.db"
+    preserved.parent.mkdir(parents=True)
     preserved.write_bytes(b"keep")
+    legacy_source = install / "orchestrator" / "stale.txt"
+    legacy_source.write_text("old application retained\n")
+    install_module.install_from_source(options)
+    stamp = (install / ".vigil-install-meta.json").read_bytes()
     shutil.rmtree(source / "orchestrator")
 
-    install_module.install_from_source(options)
+    with pytest.raises(SystemExit, match="Invalid Vigil application directory"):
+        install_module.install_from_source(options)
 
     assert preserved.read_bytes() == b"keep"
-    assert not (install / "orchestrator" / "stale.txt").exists()
-    assert install_staleness(install, source_root=source)["state"] == "current"
+    assert legacy_source.read_text() == "old application retained\n"
+    assert (install / ".vigil-install-meta.json").read_bytes() == stamp
 
 
 def test_install_staleness_unknown_without_resolvable_source(tmp_path: Path) -> None:
@@ -2526,7 +2543,8 @@ def test_print_status_warns_when_working_root_behind_source(
     out = capsys.readouterr().out
     assert "warn" in out
     assert "vigil install" in out
-    assert "uv tool upgrade vigil" in out
+    assert "matched application" in out
+    assert "without copying source" in out
     assert "3" in out
 
 
@@ -2815,6 +2833,7 @@ def test_install_from_source_dry_run_preflights_and_reports_state_without_writes
 
     source = tmp_path / "source"
     (source / "agent" / "engagements").mkdir(parents=True)
+    (source / "orchestrator").mkdir()
     (source / "README.md").write_text("managed source\n", encoding="utf-8")
     install = tmp_path / "install"
     install.mkdir()
@@ -2831,7 +2850,7 @@ def test_install_from_source_dry_run_preflights_and_reports_state_without_writes
     def forbidden(*_args: object, **_kwargs: object) -> None:
         raise AssertionError("dry-run crossed a mutating install phase")
 
-    monkeypatch.setattr("vigil_cli.install._sync_install_files", forbidden)
+    monkeypatch.setattr("vigil_cli.install.initialize_workspace", forbidden)
     monkeypatch.setattr("vigil_cli.install.config_module.load_config", forbidden)
     monkeypatch.setattr("vigil_cli.install.initialize_relay_route", forbidden)
     monkeypatch.setattr("vigil_cli.install.repair_engagement_client_rosters", forbidden)
@@ -2865,7 +2884,7 @@ def test_install_from_source_dry_run_rejects_unsafe_destination(
     from vigil_cli.install import InstallOptions, install_from_source
 
     source = tmp_path / "source"
-    source.mkdir()
+    _installable_source(source)
     outside = tmp_path / "outside"
     outside.mkdir()
     sentinel = outside / "sentinel"
@@ -2888,6 +2907,7 @@ def test_install_from_source_dry_run_rejects_unsafe_managed_source(
 
     source = tmp_path / "source"
     source.mkdir()
+    (source / "orchestrator").mkdir()
     outside = tmp_path / "outside"
     outside.mkdir()
     (source / "agent").symlink_to(outside, target_is_directory=True)
@@ -2901,26 +2921,24 @@ def test_install_from_source_dry_run_rejects_unsafe_managed_source(
     assert not install.exists()
 
 
-def test_up_source_sync_restamps_the_working_root(
+def test_up_updates_workspace_application_provenance_without_copying_sources(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """`vigil up` is the README-blessed path; it must leave the stamp current.
-
-    Deliberately exercises the REAL install_from_source — stubbing it (as the
-    other `up` tests do, for their own subject) is what made this hole
-    invisible.
-    """
+    """Bring-up initializes private state and records matched release content."""
     from vigil_cli import up as up_module
-    from vigil_cli.status import install_staleness, read_install_meta
+    from vigil_cli.workspace import read_workspace
 
     monkeypatch.setenv("VIGIL_CONFIG", str(tmp_path / "config.json"))
     source = tmp_path / "source"
     (source / "agent" / "engagements").mkdir(parents=True)
     (source / "orchestrator" / "backend" / "data").mkdir(parents=True)
-    _init_git_repo(source, {"README.md": "seed\n"})
+    (source / "README.md").write_text("seed\n")
+    canonical = source / "cli" / "vigil_cli" / "scope_entries.py"
+    canonical.parent.mkdir(parents=True)
+    shutil.copy2(repo_root / "src" / "vigil_cli" / "scope_entries.py", canonical)
     install = tmp_path / "install"
 
-    monkeypatch.setattr(up_module, "resolve_source_root", lambda *_a, **_k: source)
+    monkeypatch.setattr(up_module, "resolve_application_root", lambda *_a, **_k: source)
     monkeypatch.setattr(up_module, "image_outdated", lambda *_a, **_k: False)
     monkeypatch.setattr(up_module, "_runtime_image_drift", lambda *_a, **_k: False)
     monkeypatch.setattr(up_module, "proxy_image_drift", lambda **_k: False)
@@ -2935,13 +2953,17 @@ def test_up_source_sync_restamps_the_working_root(
 
     up_module.run_up(up_module.UpOptions(install_root=install), runner=lambda *_a, **_k: None)
     capsys.readouterr()
+    first = read_workspace(install)
 
-    advanced = _git_commit(source, "README.md", "advanced\n")
+    (source / "README.md").write_text("advanced\n")
     up_module.run_up(up_module.UpOptions(install_root=install), runner=lambda *_a, **_k: None)
     capsys.readouterr()
 
-    assert (read_install_meta(install) or {})["source_sha"] == advanced
-    assert install_staleness(install, source_root=source)["state"] == "current"
+    latest = read_workspace(install)
+    assert latest is not None and first is not None
+    assert latest["application"] != first["application"]
+    assert not (install / "agent").exists()
+    assert not (install / "orchestrator").exists()
 
 
 def test_doctor_reports_install_staleness(
@@ -2960,7 +2982,7 @@ def test_doctor_reports_install_staleness(
     install.mkdir()
     status_module.write_install_meta(install, source)
     current_sha = _git_commit(source, "README.md", "advanced\n")
-    monkeypatch.setenv("VIGIL_SOURCE_DIR", str(source))
+    monkeypatch.setenv("VIGIL_APPLICATION_DIR", str(source))
     monkeypatch.setattr(status_module.shutil, "which", lambda _command: None)
     monkeypatch.setattr(status_module, "runtime_status", lambda **_k: "stopped")
 
@@ -2980,12 +3002,8 @@ def test_assess_passthrough_stays_silent_even_when_the_install_is_stale(
 ) -> None:
     """One warning per engagement, not one per `vigil assess` call.
 
-    The passthrough execs the INSTALL ROOT's assess.py, so a lagging root does
-    silently expose an older verb set — but an operator and its specialists run
-    this path for every finding, fetch and queue closeout, so warning here
-    produced hundreds of identical stderr lines per engagement on the channel
-    real failures use. `vigil engagement start` owns the warning now; it is read
-    once, before anything is in flight. The exec itself is unchanged."""
+    The passthrough executes the selected application's assess.py. Startup owns
+    restart diagnostics, so repeated helper calls preserve clean output."""
     from vigil_cli import main as main_module
     from vigil_cli.status import write_install_meta
 
@@ -2995,11 +3013,11 @@ def test_assess_passthrough_stays_silent_even_when_the_install_is_stale(
     _init_git_repo(source, {"README.md": "seed\n"})
     install = tmp_path / "install"
     (install / "agent" / "scripts").mkdir(parents=True)
-    assess = install / "agent" / "scripts" / "assess.py"
+    assess = source / "agent" / "scripts" / "assess.py"
     assess.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
     write_install_meta(install, source)
     _git_commit(source, "README.md", "advanced\n")
-    monkeypatch.setenv("VIGIL_SOURCE_DIR", str(source))
+    monkeypatch.setenv("VIGIL_APPLICATION_DIR", str(source))
 
     execs: list[list[str]] = []
     monkeypatch.setattr(main_module.os, "execvpe", lambda path, argv, env: execs.append(argv))
@@ -3042,6 +3060,7 @@ def test_runtime_start_uses_expected_docker_mounts(tmp_path: Path) -> None:
 
     install_root = tmp_path / "install"
     (install_root / "agent" / "engagements").mkdir(parents=True)
+    (install_root / ".runtime-data").mkdir()
     commands: list[list[str]] = []
 
     def runner(argv: list[str], **_: object) -> DockerResult:
@@ -3100,6 +3119,7 @@ def test_runtime_start_grants_sys_ptrace_capability(tmp_path: Path) -> None:
 
     install_root = tmp_path / "install"
     (install_root / "agent" / "engagements").mkdir(parents=True)
+    (install_root / ".runtime-data").mkdir()
     commands: list[list[str]] = []
 
     def runner(argv: list[str], **_: object) -> DockerResult:
@@ -3130,6 +3150,7 @@ def test_runtime_start_retries_without_host_gateway_when_docker_rejects_flag(tmp
 
     install_root = tmp_path / "install"
     (install_root / "agent" / "engagements").mkdir(parents=True)
+    (install_root / ".runtime-data").mkdir()
     commands: list[list[str]] = []
 
     def runner(argv: list[str], **_: object) -> DockerResult:
@@ -3527,6 +3548,8 @@ def test_orchestrator_foreground_execs_from_install_root(tmp_path: Path, monkeyp
     frontend_dist = install_root / "orchestrator" / "frontend" / "dist"
     frontend_dist.mkdir(parents=True)
     (frontend_dist / "index.html").write_text("ok", encoding="utf-8")
+    (install_root / "agent").mkdir()
+    monkeypatch.setenv("VIGIL_APPLICATION_DIR", str(install_root))
     # Freshness is a content stamp, not an mtime: an unstamped `dist/` cannot be
     # proven current and would trigger a real `npm ci` inside the test.
     restart_manifest.record_frontend_build(install_root)
@@ -3544,6 +3567,7 @@ def test_orchestrator_foreground_execs_from_install_root(tmp_path: Path, monkeyp
 
     monkeypatch.setattr(orchestrator_module.os, "execvpe", fake_execvpe)
     monkeypatch.setattr(orchestrator_module, "_check_port_available", lambda *_, **__: None)
+    monkeypatch.setattr(orchestrator_module, "_sync_backend_environment", lambda *_, **__: None)
 
     with pytest.raises(RuntimeError, match="exec blocked"):
         orchestrator_module.start_orchestrator(
@@ -3554,7 +3578,7 @@ def test_orchestrator_foreground_execs_from_install_root(tmp_path: Path, monkeyp
     assert captured["cwd"] == install_root.resolve()
     argv = captured["argv"]
     assert isinstance(argv, list)
-    assert argv[:4] == ["uv", "run", "--directory", "orchestrator/backend"]
+    assert argv[:6] == ["uv", "run", "--frozen", "--no-sync", "--directory", "orchestrator/backend"]
     env = captured["env"]
     assert isinstance(env, dict)
     assert env["VIGIL_INSTALL_DIR"] == str(install_root.resolve())
@@ -3570,6 +3594,8 @@ def test_orchestrator_start_builds_frontend_then_errors_when_backend_already_run
     (frontend_dir / "src").mkdir(parents=True)
     (frontend_dir / "package.json").write_text("{}", encoding="utf-8")
     (frontend_dir / "src" / "main.tsx").write_text("console.log('ok')\n", encoding="utf-8")
+    (install_root / "agent").mkdir()
+    monkeypatch.setenv("VIGIL_APPLICATION_DIR", str(install_root))
     pid_file = install_root / ".runtime-data" / "pids" / "orchestrator.pid"
     pid_file.parent.mkdir(parents=True)
     pid_file.write_text("123\n", encoding="utf-8")
@@ -3657,10 +3683,12 @@ def test_orchestrator_start_terminates_child_when_health_times_out(tmp_path: Pat
     frontend_dist = install_root / "orchestrator" / "frontend" / "dist"
     frontend_dist.mkdir(parents=True)
     (frontend_dist / "index.html").write_text("ok", encoding="utf-8")
+    (install_root / "agent").mkdir()
+    monkeypatch.setenv("VIGIL_APPLICATION_DIR", str(install_root))
     # Freshness is a content stamp, not an mtime: an unstamped `dist/` cannot be
     # proven current and would trigger a real `npm ci` inside the test.
     restart_manifest.record_frontend_build(install_root)
-    pid_file = install_root / ".runtime-data" / "pids" / "orchestrator.pid"
+    pid_file = install_root / "state" / "runtime" / "pids" / "orchestrator.pid"
 
     class FakeProcess:
         pid = 4321
@@ -3696,6 +3724,7 @@ def test_orchestrator_start_terminates_child_when_health_times_out(tmp_path: Pat
     monkeypatch.setattr(orchestrator_module.os, "killpg", fake_killpg)
     monkeypatch.setattr(orchestrator_module, "_check_port_available", lambda *_, **__: None)
     monkeypatch.setattr(orchestrator_module, "_wait_for_health", lambda *_, **__: False)
+    monkeypatch.setattr(orchestrator_module, "_sync_backend_environment", lambda *_, **__: None)
 
     with pytest.raises(SystemExit, match="did not become healthy"):
         orchestrator_module.start_orchestrator(orchestrator_module.OrchestratorOptions(install_root=install_root))
@@ -3713,10 +3742,12 @@ def test_orchestrator_start_terminates_child_when_readiness_times_out(tmp_path: 
     frontend_dist = install_root / "orchestrator" / "frontend" / "dist"
     frontend_dist.mkdir(parents=True)
     (frontend_dist / "index.html").write_text("ok", encoding="utf-8")
+    (install_root / "agent").mkdir()
+    monkeypatch.setenv("VIGIL_APPLICATION_DIR", str(install_root))
     # Freshness is a content stamp, not an mtime: an unstamped `dist/` cannot be
     # proven current and would trigger a real `npm ci` inside the test.
     restart_manifest.record_frontend_build(install_root)
-    pid_file = install_root / ".runtime-data" / "pids" / "orchestrator.pid"
+    pid_file = install_root / "state" / "runtime" / "pids" / "orchestrator.pid"
 
     class FakeProcess:
         pid = 4322
@@ -3742,6 +3773,7 @@ def test_orchestrator_start_terminates_child_when_readiness_times_out(tmp_path: 
     monkeypatch.setattr(orchestrator_module, "_check_port_available", lambda *_, **__: None)
     monkeypatch.setattr(orchestrator_module, "_wait_for_health", lambda *_, **__: True)
     monkeypatch.setattr(orchestrator_module, "_wait_for_readiness", lambda *_, **__: False)
+    monkeypatch.setattr(orchestrator_module, "_sync_backend_environment", lambda *_, **__: None)
 
     with pytest.raises(SystemExit, match="did not become ready"):
         orchestrator_module.start_orchestrator(orchestrator_module.OrchestratorOptions(install_root=install_root))
@@ -3759,6 +3791,8 @@ def test_orchestrator_start_refuses_when_port_already_in_use(
     frontend_dist = install_root / "orchestrator" / "frontend" / "dist"
     frontend_dist.mkdir(parents=True)
     (frontend_dist / "index.html").write_text("ok", encoding="utf-8")
+    (install_root / "agent").mkdir()
+    monkeypatch.setenv("VIGIL_APPLICATION_DIR", str(install_root))
     # Freshness is a content stamp, not an mtime: an unstamped `dist/` cannot be
     # proven current and would trigger a real `npm ci` inside the test.
     restart_manifest.record_frontend_build(install_root)
@@ -3956,6 +3990,7 @@ def test_main_assess_passthrough_execs_assess_script(tmp_path: Path, monkeypatch
 
     install_root = tmp_path / "install"
     _copy_agent_fixture(repo_root / "agent", install_root)
+    monkeypatch.setenv("VIGIL_APPLICATION_DIR", str(repo_root))
     captured: dict[str, object] = {}
 
     def fake_execvpe(path: str, argv: list[str], env: dict[str, str]) -> None:
@@ -3975,8 +4010,10 @@ def test_main_assess_passthrough_execs_assess_script(tmp_path: Path, monkeypatch
         main_module.main(["--root", str(install_root), "assess", "--help"])
 
     assert excinfo.value.code == 0
-    assert captured["path"] == str(install_root / "agent" / "scripts" / "assess.py")
-    assert captured["argv"] == [str(install_root / "agent" / "scripts" / "assess.py"), "--help"]
+    assert captured["path"] == str(repo_root / "agent" / "scripts" / "assess.py")
+    assert captured["argv"] == [str(repo_root / "agent" / "scripts" / "assess.py"), "--help"]
+    assert captured["env"]["VIGIL_INSTALL_DIR"] == str(install_root)
+    assert captured["env"]["VIGIL_APPLICATION_DIR"] == str(repo_root)
     assert captured["env"]["VIGIL_OOB_DOMAIN"] == "configured.oob.test"
 
 
@@ -3986,6 +4023,7 @@ def test_runtime_start_applies_resource_limits(tmp_path: Path, monkeypatch: pyte
 
     install_root = tmp_path / "install"
     (install_root / "agent" / "engagements").mkdir(parents=True)
+    (install_root / ".runtime-data").mkdir()
     monkeypatch.setenv("VIGIL_RUNTIME_MEMORY_GB", "16")
     monkeypatch.setenv("VIGIL_RUNTIME_CPUS", "8")
     monkeypatch.setenv("VIGIL_RUNTIME_PIDS_LIMIT", "1024")
@@ -4027,6 +4065,7 @@ def test_runtime_start_rejects_already_running_container_with_clear_message(tmp_
 
     install_root = tmp_path / "install"
     (install_root / "agent" / "engagements").mkdir(parents=True)
+    (install_root / ".runtime-data").mkdir()
 
     def runner(argv: list[str], **_: object) -> DockerResult:
         if argv[:3] == ["docker", "image", "inspect"]:
@@ -4061,6 +4100,7 @@ def test_check_runtime_ulimits_warns_when_below_threshold(tmp_path: Path, capsys
 
     install_root = tmp_path / "install"
     (install_root / "agent" / "engagements").mkdir(parents=True)
+    (install_root / ".runtime-data").mkdir()
 
     def runner(argv: list[str], **_: object) -> DockerResult:
         if argv[:3] == ["docker", "image", "inspect"]:
@@ -4093,6 +4133,7 @@ def test_check_runtime_ulimits_silent_when_limits_ok(tmp_path: Path, capsys: pyt
 
     install_root = tmp_path / "install"
     (install_root / "agent" / "engagements").mkdir(parents=True)
+    (install_root / ".runtime-data").mkdir()
 
     def runner(argv: list[str], **_: object) -> DockerResult:
         if argv[:3] == ["docker", "image", "inspect"]:
@@ -4122,6 +4163,7 @@ def test_check_runtime_ulimits_silent_on_exec_failure(tmp_path: Path, capsys: py
 
     install_root = tmp_path / "install"
     (install_root / "agent" / "engagements").mkdir(parents=True)
+    (install_root / ".runtime-data").mkdir()
 
     def runner(argv: list[str], **_: object) -> DockerResult:
         if argv[:3] == ["docker", "image", "inspect"]:
@@ -6564,8 +6606,8 @@ def test_up_passes_injected_runner_to_image_builds(tmp_path: Path, monkeypatch: 
     def fake_runner(*_args, **_kwargs):
         return None
 
-    monkeypatch.setattr(up_module, "resolve_source_root", lambda *_args, **_kwargs: tmp_path)
-    monkeypatch.setattr(up_module, "install_from_source", lambda *args, **kwargs: None)
+    monkeypatch.setattr(up_module, "resolve_application_root", lambda *_args, **_kwargs: repo_root)
+    monkeypatch.setattr(up_module, "initialize_workspace", lambda *args, **kwargs: None)
     monkeypatch.setattr(up_module.docker, "container_running", lambda name, runner=None: False)
     monkeypatch.setattr(up_module, "image_outdated", lambda *args, **kwargs: True)
     monkeypatch.setattr(up_module, "_start_or_restart_runtime", lambda *args, **kwargs: None)
@@ -6614,6 +6656,11 @@ def _make_mitmproxy_inputs(install_root: Path) -> tuple[Path, Path]:
     assess = install_root / "agent" / "scripts" / "assess"
     assess.mkdir()
     (assess / "__init__.py").write_text("", encoding="utf-8")
+    (install_root / "orchestrator").mkdir(exist_ok=True)
+    canonical = install_root / "cli" / "vigil_cli" / "scope_entries.py"
+    canonical.parent.mkdir(parents=True)
+    shutil.copy2(repo_root / "src" / "vigil_cli" / "scope_entries.py", canonical)
+    os.environ["VIGIL_APPLICATION_DIR"] = str(install_root)
     return dockerfile, addon
 
 
@@ -6775,9 +6822,8 @@ def test_mitmproxy_freshness_detects_canonical_scope_parser_change(
 
     install_root = tmp_path / "install"
     _make_mitmproxy_inputs(install_root)
-    canonical = tmp_path / "scope_entries.py"
+    canonical = install_root / "cli" / "vigil_cli" / "scope_entries.py"
     canonical.write_text("# canonical v1\n", encoding="utf-8")
-    monkeypatch.setattr(mitmproxy_module.scope_entries, "__file__", str(canonical))
     stamped = _mitmproxy_digest(install_root)
 
     canonical.write_text("# canonical v2\n", encoding="utf-8")
@@ -6961,8 +7007,8 @@ def test_up_warns_when_proxy_container_predates_image(
     from vigil_cli import up as up_module
 
     calls: list[str] = []
-    monkeypatch.setattr(up_module, "resolve_source_root", lambda *_a, **_k: tmp_path)
-    monkeypatch.setattr(up_module, "install_from_source", lambda *a, **k: None)
+    monkeypatch.setattr(up_module, "resolve_application_root", lambda *_a, **_k: repo_root)
+    monkeypatch.setattr(up_module, "initialize_workspace", lambda *a, **k: None)
     monkeypatch.setattr(up_module, "image_outdated", lambda *a, **k: False)
     monkeypatch.setattr(up_module, "_runtime_image_drift", lambda *a, **k: False)
     monkeypatch.setattr(up_module, "proxy_image_drift", lambda **k: True)
@@ -17093,6 +17139,7 @@ def _preflight_runner(commands, *, info_stdout: str, install_root: Path, cotenan
 def _preflight_install_root(tmp_path: Path) -> Path:
     install_root = tmp_path / "install"
     (install_root / "agent" / "engagements").mkdir(parents=True)
+    (install_root / ".runtime-data").mkdir()
     return install_root
 
 
@@ -17590,6 +17637,7 @@ def test_install_built_image_carries_runtime_inputs_label(tmp_path):
     source_root = tmp_path / "source"
     install_root = tmp_path / "install"
     (source_root / "agent" / "docker" / "runtime-full").mkdir(parents=True)
+    (source_root / "orchestrator").mkdir()
     (source_root / "agent" / "docker" / "patches").mkdir(parents=True)
     (source_root / "docker").mkdir(parents=True)
     (source_root / "agent" / "docker" / "runtime-full" / "Dockerfile").write_text("FROM kali\n")
@@ -17618,7 +17666,7 @@ def test_install_built_image_carries_runtime_inputs_label(tmp_path):
     build = next(c for c in calls if c[:3] == ["docker", "build", "-t"])
     assert "--label" in build, f"install build must stamp the digest label; got {build}"
     label_value = build[build.index("--label") + 1]
-    expected = f"com.vigil.runtime-inputs-sha256={runtime.runtime_inputs_digest(install_root)}"
+    expected = f"com.vigil.runtime-inputs-sha256={runtime.runtime_inputs_digest(source_root)}"
     assert label_value == expected
 
 
@@ -17700,8 +17748,8 @@ def test_up_routes_both_image_builds_to_the_unbounded_streaming_runner(
 
     seen: dict[str, object] = {}
 
-    monkeypatch.setattr(up_module, "install_from_source", lambda *_a, **_k: None)
-    monkeypatch.setattr(up_module, "resolve_source_root", lambda *_a, **_k: tmp_path / "src")
+    monkeypatch.setattr(up_module, "initialize_workspace", lambda *_a, **_k: None)
+    monkeypatch.setattr(up_module, "resolve_application_root", lambda *_a, **_k: repo_root)
     monkeypatch.setattr(up_module, "image_outdated", lambda *_a, **_k: True)
     monkeypatch.setattr(up_module, "_runtime_image_inputs", lambda *_a, **_k: ())
     monkeypatch.setattr(up_module, "mitmproxy_image_inputs", lambda *_a, **_k: ())
@@ -17753,8 +17801,8 @@ def test_up_no_build_still_keeps_the_bounded_runner_out_of_the_proxy_build(
     def build_runner(*_args, **_kwargs):
         return None
 
-    monkeypatch.setattr(up_module, "resolve_source_root", lambda *_a, **_k: tmp_path)
-    monkeypatch.setattr(up_module, "install_from_source", lambda *_a, **_k: None)
+    monkeypatch.setattr(up_module, "resolve_application_root", lambda *_a, **_k: repo_root)
+    monkeypatch.setattr(up_module, "initialize_workspace", lambda *_a, **_k: None)
     monkeypatch.setattr(up_module.docker, "container_running", lambda *_a, **_k: False)
     monkeypatch.setattr(up_module, "proxy_image_drift", lambda **_k: False)
     monkeypatch.setattr(up_module, "_start_or_restart_runtime", lambda *_a, **_k: None)

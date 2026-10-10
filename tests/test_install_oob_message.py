@@ -170,6 +170,7 @@ def test_install_prints_the_notice_to_stderr_when_no_domain_is_configured(
     monkeypatch.delenv("VIGIL_OOB_DOMAIN", raising=False)
     source_root = tmp_path / "source"
     (source_root / "agent").mkdir(parents=True)
+    (source_root / "orchestrator").mkdir(exist_ok=True)
     (source_root / "agent" / "README").write_text("managed", encoding="utf-8")
 
     install_from_source(
@@ -194,6 +195,7 @@ def test_install_is_silent_about_the_route_when_a_domain_is_configured(
     monkeypatch.setenv("VIGIL_OOB_DOMAIN", "oob.example.test")
     source_root = tmp_path / "source"
     (source_root / "agent").mkdir(parents=True)
+    (source_root / "orchestrator").mkdir(exist_ok=True)
     (source_root / "agent" / "README").write_text("managed", encoding="utf-8")
 
     install_from_source(

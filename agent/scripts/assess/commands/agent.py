@@ -1007,8 +1007,11 @@ def _dispatch_prompt(
                 )
                 raise SystemExit(1)
             try:
+                from vigil_cli.paths import tenant_references_root, workspace_root_for_engagement
+
+                workspace_root = workspace_root_for_engagement(engagement_dir)
                 validated_refs = validate_tenant_reference_paths(
-                    refs, agent_root=agent_root
+                    refs, tenant_root=tenant_references_root(workspace_root), relative_root=workspace_root,
                 )
             except TenantReferenceError as exc:
                 print(

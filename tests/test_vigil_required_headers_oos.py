@@ -250,7 +250,8 @@ def test_add_track_refreshes_a_present_codex_compaction_contract(
 
     engagements.add_engagement_track(tmp_path, "eng1", "code")
 
-    assert refreshes == [(tmp_path / "agent", eng / ".codex")]
+    from vigil_cli.paths import agent_root
+    assert refreshes == [(agent_root(tmp_path), eng / ".codex")]
 
 
 def test_add_track_rejects_a_symlinked_codex_config_before_scope_changes(tmp_path):

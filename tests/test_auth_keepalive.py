@@ -371,11 +371,13 @@ def test_env_preflight_reports_presence_and_source_per_key(monkeypatch):
     ]
 
 
-def test_packaged_cli_loads_single_classifier_from_install_root(tmp_path):
+def test_packaged_cli_loads_single_classifier_from_matched_application(tmp_path):
     package_root = tmp_path / "package"
     shutil.copytree(Path(auth.__file__).resolve().parent, package_root / "vigil_cli")
     install_root = tmp_path / "install"
-    classifier = install_root / "agent" / "scripts" / "assess" / "lib" / "auth_liveness.py"
+    application_root = tmp_path / "application"
+    (application_root / "orchestrator").mkdir(parents=True)
+    classifier = application_root / "agent" / "scripts" / "assess" / "lib" / "auth_liveness.py"
     classifier.parent.mkdir(parents=True)
     shutil.copy2(
         REPO_ROOT / "agent" / "scripts" / "assess" / "lib" / "auth_liveness.py",
@@ -396,6 +398,7 @@ def test_packaged_cli_loads_single_classifier_from_install_root(tmp_path):
             **os.environ,
             "PYTHONPATH": str(package_root),
             "VIGIL_INSTALL_DIR": str(install_root),
+            "VIGIL_APPLICATION_DIR": str(application_root),
         },
         capture_output=True,
         text=True,

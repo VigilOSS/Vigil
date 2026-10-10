@@ -177,7 +177,7 @@ def test_json_output_shape(capsys):
     assert {row["binary"] for row in payload["host_tools"]} == {t.binary for t in HOST_RECON_TOOLS}
     assert any(step["tool"] == "subfinder" for step in payload["install_plan"])
     binaries = {p["binary"] for p in payload["prerequisites"]}
-    assert {"uv", "git", "docker", "go", "npm"} <= binaries
+    assert {"uv", "docker", "go"} == binaries
 
 
 def test_prerequisite_status_reports_presence():
@@ -188,7 +188,7 @@ def test_prerequisite_status_reports_presence():
     assert all(row.present for row in rows)
     rows = prerequisite_status(which=_which_missing, daemon_available=lambda: False)
     assert all(not row.present for row in rows)
-    assert [row.binary for row in rows] == ["uv", "git", "docker", "go", "npm"]
+    assert [row.binary for row in rows] == ["uv", "docker", "go"]
 
 
 def test_quickstart_docker_row_reflects_the_daemon_not_just_the_binary() -> None:
@@ -319,7 +319,9 @@ def test_doctor_marks_docker_and_install_root_required_when_absent(
 
     assert checks["docker"].required is True
     assert checks["install-root"].required is True
-    assert checks["agent-dir"].required is True
+    # Imported release assets are available even before workspace initialization.
+    assert checks["agent-dir"].status == "OK"
+    assert checks["agent-dir"].required is False
     # A client binary is not a prerequisite: Vigil supports five and needs one.
     assert checks["claude"].required is False
     assert checks["codex"].required is False

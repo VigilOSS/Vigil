@@ -23,6 +23,13 @@ from vigil_cli import install as install_module
 from vigil_cli import client_rosters
 
 
+@pytest.fixture(autouse=True)
+def _restore_application_selection(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Source builders below explicitly select their synthetic application.
+    # Register restoration before those builders update the process environment.
+    monkeypatch.setenv("VIGIL_APPLICATION_DIR", "")
+
+
 _CAPTURE_STUB = """#!/usr/bin/env python3
 import json
 import os
@@ -83,6 +90,8 @@ Path(os.environ["VIGIL_ENTRYPOINT_CAPTURE"]).write_text(
 
 
 def _write_agent_sources(agent_root: Path) -> None:
+    (agent_root.parent / "orchestrator").mkdir(parents=True, exist_ok=True)
+    os.environ["VIGIL_APPLICATION_DIR"] = str(agent_root.parent)
     (agent_root / ".codex" / "agents").mkdir(parents=True)
     (agent_root / ".codex" / "agents" / "operator.toml").write_text("name = 'operator'\n")
     (agent_root / ".codex" / "config.toml").write_text("model = 'test'\n")
@@ -602,6 +611,7 @@ def test_install_upgrade_reconciles_all_client_entrypoints_for_existing_engageme
             source_root=source_root,
             install_root=install_root,
             verify_docker_image=False,
+            refresh_physical_client_rosters=True,
         )
     )
 
@@ -706,7 +716,7 @@ def test_install_upgrade_reconciles_all_client_entrypoints_for_existing_engageme
         assert payload["env"]["VIGIL_CLIENT_NAME"] == client
         assert payload["env"]["VIGIL_SESSION_ENGAGEMENT_DIR"] == str(engagement_dir)
         assert payload["env"]["ORCHESTRATOR_BASE_URL"] == "http://engagement.test:8000"
-        assert str(agent_root / "AGENTS.md") in payload["files"]["AGENTS.md"]
+        assert str(source_agent_root / "AGENTS.md") in payload["files"]["AGENTS.md"]
         if client == "codex":
             assert payload["files"][".codex/config.toml"] == "model = 'test'\n"
             assert payload["files"][".codex/agents/operator.toml"] == "name = 'operator'\n"
@@ -1175,7 +1185,8 @@ def test_install_cli_plumbs_explicit_ambiguous_permission_override(
     from vigil_cli import main as main_module
 
     source_root = tmp_path / "source"
-    source_root.mkdir()
+    (source_root / "agent").mkdir(parents=True)
+    (source_root / "orchestrator").mkdir()
     install_root = tmp_path / "install"
     seen: list[install_module.InstallOptions] = []
 

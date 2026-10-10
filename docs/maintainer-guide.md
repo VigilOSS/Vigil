@@ -307,14 +307,27 @@ quality checks — no LLM, no network, no real backend. Cases live under `tests/
 `src/vigil_cli/restart_manifest.py` derives what an install invalidated; read its docstring before
 changing this area.
 
-**Never judge install-managed content by mtime.** `install.py` rewrites every managed file
-unconditionally, so any timestamp comparison reads stale the instant an install finishes. Use a
-content digest stamped on the consumer — see `src/vigil_cli/image_freshness.py`.
+**Never judge application content by mtime.** A release is one matched CLI/backend/agent/docs/UI
+bundle; `install.py` initializes or adopts private data without copying source. Compare content
+digests stamped on consumers — see `src/vigil_cli/image_freshness.py`. `workspace.json` records
+initialization provenance; it is not the release identity of an already-running process.
+
+`application.py` validates the exact bundle inventory and materializes immutable version/digest
+cache paths. Do not delete retained releases on upgrade: backend processes and client helpers may
+still use them. Official client starts serialize shared-file repair and PID/birth-identity receipts
+through `client_sessions.py`; explicit global client maintenance uses the same lock. Routine adoption
+does not refresh client files. Restart requirements belong to `restart_manifest.consumer_states`.
+
+`vigil_build.py` reads the tracked publisher inventory, excludes private/state/auth files, builds both
+locked UI projects in a temporary stage, and records input/output digests. Snapshot intended JJ files
+before a publisher build. The resulting sdist carries matched assets and prebuilt UI; its wheel build
+must work without Git or Node. Keep bundle inputs and CLI snapshots matched, including hidden client
+trees, backend lockfile, Docker definitions, documentation and legal notices.
 
 Sets derived from `sys.modules` need no upkeep, with one qualification: the startup snapshot is
 taken once at import, so a module first imported LATER is in neither the snapshot nor the declared
 set. `app/main.py:_ImportDigestRecorder` sits in `sys.meta_path` ahead of `PathFinder` and digests
-each install-root source file as it is imported, so the comparison uses the bytes the import
+each application source file as it is imported, so the comparison uses the bytes the import
 actually read — read it before changing how cross-tree imports are compared, and note that mtime
 cannot substitute for it (a byte-identical `vigil install` rewrite would then report a restart).
 

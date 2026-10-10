@@ -24,45 +24,33 @@ from typing import Any, Callable
 from urllib.parse import urlencode, urlparse
 
 from .config import run_editor
-from .paths import resolve_install_root, resolve_orchestrator_base_url
+from .paths import agent_root, resolve_install_root, resolve_orchestrator_base_url, workspace_root_for_engagement
 
 DEFAULT_IDENTITY = "default"
 
 
-@lru_cache(maxsize=1)
 def _load_liveness_classifier() -> Callable[
     [int | None, str | None, dict[str, Any] | None], tuple[str, str]
 ]:
-    """Load the assess-owned classifier from imports or the installed agent tree."""
-    try:
-        from assess.lib.auth_liveness import classify_liveness  # type: ignore[import-not-found]
-    except ModuleNotFoundError as import_error:
-        candidates = (
-            resolve_install_root() / "agent" / "scripts" / "assess" / "lib" / "auth_liveness.py",
-            Path(__file__).resolve().parents[2]
-            / "agent"
-            / "scripts"
-            / "assess"
-            / "lib"
-            / "auth_liveness.py",
-        )
-        for candidate in candidates:
-            if not candidate.is_file():
-                continue
-            spec = importlib.util.spec_from_file_location(
-                "_vigil_shared_auth_liveness", candidate
-            )
-            if spec is None or spec.loader is None:
-                continue
-            module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
-            classifier = getattr(module, "classify_liveness", None)
-            if callable(classifier):
-                return classifier
-        raise ModuleNotFoundError(
-            "Vigil auth liveness classifier is missing from the installed agent tree"
-        ) from import_error
-    return classify_liveness
+    """Load the assess-owned classifier from this process's matched release."""
+    candidate = agent_root(resolve_install_root()) / "scripts/assess/lib/auth_liveness.py"
+    return _liveness_classifier_for_path(candidate)
+
+
+@lru_cache(maxsize=8)
+def _liveness_classifier_for_path(candidate: Path) -> Callable[
+    [int | None, str | None, dict[str, Any] | None], tuple[str, str]
+]:
+    spec = importlib.util.spec_from_file_location("_vigil_shared_auth_liveness", candidate)
+    if candidate.is_file() and spec is not None and spec.loader is not None:
+        module = importlib.util.module_from_spec(spec)
+        # Release caches have an exact immutable inventory; importing a data-file
+        # helper through SourceFileLoader would create an unlisted __pycache__.
+        exec(compile(candidate.read_bytes(), str(candidate), "exec", dont_inherit=True), module.__dict__)
+        classifier = getattr(module, "classify_liveness", None)
+        if callable(classifier):
+            return classifier
+    raise ModuleNotFoundError(f"Vigil auth liveness classifier is missing from the matched application: {candidate}")
 
 
 def _classify_liveness(
@@ -140,8 +128,7 @@ def _csrf_export_arg(
 
 
 def _install_root(engagement_dir: Path) -> Path:
-    # engagement_dir = <install_root>/agent/engagements/<key>
-    return engagement_dir.expanduser().resolve().parents[2]
+    return workspace_root_for_engagement(engagement_dir)
 
 
 def _key(engagement_dir: Path) -> str:
@@ -996,7 +983,7 @@ def _vigil_assess_argv(
     if vigil:
         prefix = [vigil, "assess", "--engagement-dir", str(engagement_dir)]
     else:
-        assess = _install_root(engagement_dir) / "agent" / "scripts" / "assess.py"
+        assess = agent_root(_install_root(engagement_dir)) / "scripts" / "assess.py"
         prefix = [str(assess), "--engagement-dir", str(engagement_dir)]
     return [
         *prefix,

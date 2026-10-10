@@ -50,6 +50,7 @@ from .engagements import (
     write_opencode_reasoning_config,
 )
 from .preflight import _preflight_engagement_start
+from .paths import agent_root as application_agent_root, tenant_references_root
 
 # Platform → tenant-file suffix. Google Workspace tenant references use the
 # descriptive ``workspace`` suffix, while the CLI keeps the familiar ``gws``
@@ -449,8 +450,7 @@ def _cmd_engage(args: argparse.Namespace, install_root: Path) -> None:
             f"Supported: {sorted(PLATFORM_TO_TENANT_SUFFIX.keys())}"
         )
 
-    agent_root = install_root / "agent"
-    tenant_dir = agent_root / "references" / "tenants"
+    tenant_dir = tenant_references_root(install_root)
     resolved_paths: list[str] = []
     missing: list[tuple[str, list[Path]]] = []
     for platform in raw_platforms:
@@ -588,7 +588,7 @@ def _cmd_customers(args: argparse.Namespace, install_root: Path) -> None:
 
 
 def _discover_blue_customers(install_root: Path) -> list[dict[str, str | list[str]]]:
-    tenant_dir = install_root / "agent" / "references" / "tenants"
+    tenant_dir = tenant_references_root(install_root)
     if not tenant_dir.is_dir():
         return []
 
@@ -1517,10 +1517,12 @@ def _cmd_tenant_init(args: argparse.Namespace, install_root: Path) -> None:
         raise SystemExit(
             f"--platform must be one of {sorted(PLATFORM_TO_TENANT_SUFFIX.keys())} (got {platform!r})"
         )
-    tenant_dir = install_root / "agent" / "references" / "tenants"
-    template = tenant_dir / f"_template-{platform}.md"
+    tenant_dir = tenant_references_root(install_root)
+    template = application_agent_root(install_root) / "references" / "tenants" / f"_template-{platform}.md"
     suffix = PLATFORM_TO_TENANT_SUFFIX[platform]
     dest = tenant_dir / f"{customer}-{suffix}.md"
+    if dest.resolve().is_relative_to(application_agent_root(install_root).resolve()):
+        raise SystemExit(f"Tenant references must be private workspace data, not application assets: {dest}")
     if not template.is_file():
         raise SystemExit(
             f"Tenant template not found at {template}. "
@@ -1529,6 +1531,7 @@ def _cmd_tenant_init(args: argparse.Namespace, install_root: Path) -> None:
         )
     if dest.exists() and not args.force:
         raise SystemExit(f"Tenant ref already exists at {dest}. Pass --force to overwrite.")
+    tenant_dir.mkdir(parents=True, exist_ok=True)
     dest.write_text(template.read_text(encoding="utf-8"), encoding="utf-8")
     # Show both input + output so operators can see how the alias map
     # (e.g. ``gws → workspace``) was applied to the on-disk filename — this
@@ -1584,15 +1587,14 @@ def _utc_now_iso() -> str:
 
 
 def _build_assess_argv(install_root: Path, eng_dir: Path, assess_args: list[str]) -> list[str]:
-    assess = install_root / "agent" / "scripts" / "assess.py"
+    assess = application_agent_root(install_root) / "scripts" / "assess.py"
     return [str(assess), "--engagement-dir", str(eng_dir), *assess_args]
 
 
 def _run_assess(install_root: Path, eng_dir: Path, assess_args: list[str], *, check: bool = True) -> int:
     """Invoke ``vigil assess ...`` via the assess.py entry script.
 
-    Matches the pattern main.py uses for assess pass-through (see
-    ``_exec_assess_passthrough`` / ``main()``: ``install_root / agent / scripts / assess.py``).
+    Resolves the same application assets as main.py's assess pass-through.
     We use ``subprocess.run`` instead of ``os.execv`` because the blue wrapper
     composes multiple assess calls per blue verb — execv would replace this
     process and clobber the chain.

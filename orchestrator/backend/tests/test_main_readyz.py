@@ -140,7 +140,7 @@ def test_readyz_flags_changed_backend_source_content(client, backend_input_copy)
     assert "app/config.py" in runtime["changed_inputs"]
 
 
-def test_readyz_exposes_both_startup_and_current_input_digests(client) -> None:
+def test_readyz_exposes_both_startup_and_current_input_digests(client, backend_input_copy) -> None:
     runtime = client.get("/readyz").json()["backend_runtime"]
     assert len(runtime["startup_inputs_sha256"]) == 64
     assert len(runtime["current_inputs_sha256"]) == 64
@@ -264,7 +264,7 @@ def test_cross_tree_detection_actually_finds_the_agent_tree_import() -> None:
     assert any("vuln_taxonomy" in label for label in agent_labels), agent_labels
     # Every entry must be a real digest of a real file, not a placeholder.
     for label in agent_labels:
-        assert (backend_main._BACKEND_INSTALL_ROOT / label).is_file(), label
+        assert (backend_main._BACKEND_APPLICATION_ROOT / label).is_file(), label
         assert len(cross_tree[label]) == 64, label
 
 
@@ -288,7 +288,7 @@ def _import_recorded_module(tmp_path, monkeypatch, body: str, name: str):
     package.mkdir(parents=True, exist_ok=True)
     module_path = package / f"{name}.py"
     module_path.write_text(body, encoding="utf-8")
-    monkeypatch.setattr(main_module, "_BACKEND_INSTALL_ROOT", tmp_path)
+    monkeypatch.setattr(main_module, "_BACKEND_APPLICATION_ROOT", tmp_path)
     monkeypatch.syspath_prepend(str(package))
     sys.modules.pop(name, None)
     importlib.import_module(name)
@@ -494,7 +494,12 @@ def test_the_recorder_does_not_skip_a_finder_installed_after_it(monkeypatch) -> 
         "meta_path",
         sys.meta_path[: index + 1] + [_Interposed] + sys.meta_path[index + 1 :],
     )
-    sys.modules.pop("json.decoder", None)
+    # Restore both the module cache and its parent attribute: reimporting the
+    # decoder otherwise leaves json.JSONDecodeError and the scanner using
+    # different class identities in later malformed-JSON tests.
+    import json
+    monkeypatch.setattr(json, "decoder", json.decoder)
+    monkeypatch.delitem(sys.modules, "json.decoder", raising=False)
     importlib.import_module("json.decoder")
 
     assert "json.decoder" in calls

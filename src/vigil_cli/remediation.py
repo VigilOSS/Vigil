@@ -19,7 +19,7 @@ from urllib.parse import quote, urlsplit
 from urllib.request import Request, urlopen
 
 from .engagements import resolve_engagement_path
-from .paths import resolve_orchestrator_base_url
+from .paths import engagements_root, resolve_orchestrator_base_url
 from .remediation_vcs import adapter as _vcs
 from .remediation_browser import execute as _execute_browse
 from .project_config import project_module
@@ -739,7 +739,7 @@ def _engagement_key(args: argparse.Namespace, install_root: Path) -> str:
     if os.environ.get("ENGAGEMENT_KEY"):
         return os.environ["ENGAGEMENT_KEY"]
     candidates = []
-    for scope_file in (install_root / "agent/engagements").glob("*/scope.json"):
+    for scope_file in engagements_root(install_root).glob("*/scope.json"):
         try:
             if json.loads(scope_file.read_text(encoding="utf-8")).get("engagement_type") == "remediation":
                 candidates.append(scope_file.parent.name)

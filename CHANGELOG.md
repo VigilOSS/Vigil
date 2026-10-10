@@ -7,6 +7,43 @@ Durable design decisions live in [`docs/adr/`](docs/adr/).
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-10-10
+
+### Changed
+
+- Application releases bundle matched CLI, backend, prompts, schemas, documentation, legal
+  files, Docker definitions, and prebuilt frontend/report. Install the GitHub release wheel;
+  consumers no longer need Git or Node, or a separately synchronized source tree.
+- `vigil install [path]` now initializes or adopts a private workspace in place;
+  `vigil up` initializes automatically. Fresh workspaces separate engagements, state,
+  tenant references, logs, and caches from application assets. Adoption records existing
+  data paths and retains evidence, databases, configuration, custom client files, and old
+  copied source without relocating them. Old copied source is no longer executed.
+- Application assets and session helpers retain release and content provenance across
+  upgrades. Running consumers keep their matched release until explicitly restarted;
+  new sessions use the current release and status reports required restarts.
+- Official client starts record process birth and release identity. A live session from
+  another release blocks refresh of that engagement's shared client files until it ends;
+  other engagements can start on the current release. Routine workspace adoption preserves
+  generated client files; explicit maintenance flags request repair.
+
+### Fixed
+
+- Application resolution follows the installed release or the imported editable checkout,
+  eliminating destination/CWD source discovery and stale offline source-cache fallback.
+- `vigil engagement mode` inspects dual tracks without selecting a session, including
+  phases, prompt paths, and complete start commands. Selected mode and prompt are nullable,
+  and inherited selection applies only to the engagement that bound the session.
+- Ambiguous dual-track starts show complete relaunch commands with the selected client.
+  Session startup prints workspace, engagement, client, mode, and phase to stderr while
+  preserving stdout contracts.
+
+### Added
+
+- Documentation and help distinguish creation type, durable enabled track, and one-client
+  session mode. One track selects automatically; two require explicit selection; switching
+  modes starts another client process.
+
 ### Added
 
 - Repository-context remediation sessions and `/vigil-remediate` route one ticket
@@ -20,8 +57,8 @@ Durable design decisions live in [`docs/adr/`](docs/adr/).
 
 ### Fixed
 
-- Working-root installs include the documentation linked by the README. Installed
-  remediation smoke tests now use the actual installer synchronization path.
+- Application bundles include the documentation linked by the README. Installed
+  remediation smoke tests use the actual workspace adoption path.
 
 ## [1.0.0] - 2026-10-09
 

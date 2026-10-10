@@ -73,13 +73,16 @@ does not invoke a PAM session.
 The orchestrator UI is served from the backend at `http://127.0.0.1:18000` once
 `vigil up` — or `vigil orchestrator start` for a targeted start — is running.
 
-- **Live DB**: `<install-root>/orchestrator/backend/data/orchestrator.sqlite3`
+- **Live DB**: `<workspace>/state/orchestrator.sqlite3` in a fresh workspace
 - **Scheduled backups**:
-  `<install-root>/orchestrator/backend/data/backups/orchestrator.<UTC-timestamp>.sqlite3`
+  `<workspace>/state/backups/orchestrator.<UTC-timestamp>.sqlite3`
   — a WAL-coherent snapshot every 15 minutes, last 12 copies retained by default
   (override with `VIGIL_BACKUP_MAX_COPIES`), written by the backend process
   itself. This is independent of the per-engagement snapshot
   `vigil engagement create` takes before creating an engagement.
+
+Adopted workspaces keep their original database and backup paths, registered in
+`workspace.json`; initialization does not relocate them.
 
 `VIGIL_BACKUP_DISABLED=1` turns the scheduled backup off entirely. Running several
 backend workers against one database means several concurrent backups, so set it
@@ -101,14 +104,15 @@ The backend resolves its data directory in this order:
 2. `REDTEAM_ORCHESTRATOR_DATA_DIR` — legacy alias of the same setting
 3. `<backend>/data`
 
-`VIGIL_INSTALL_DIR` is **not** part of that chain. The CLI derives its own path
-from the install root separately, so setting only one of the two can point the CLI
-and the backend at different files. If you relocate the data, set
-`VIGIL_DATA_DIR`.
+The CLI resolves private paths from workspace metadata and passes explicit
+`VIGIL_DATA_DIR` and `VIGIL_ENGAGEMENTS_DIR` values to the backend, alongside
+`VIGIL_INSTALL_DIR` for the workspace and `VIGIL_APPLICATION_DIR` for release
+assets. If running the backend directly or relocating its data, set
+`VIGIL_DATA_DIR` consistently for both CLI and backend.
 
 ### Deletion
 
 Engagement deletion is explicit: `DELETE /engagements/<key>?confirm=<key>`, or the
 frontend delete button with a typed-key confirmation. Renaming or removing an
-engagement directory under `agent/engagements/` leaves the DB row intact — there
+engagement directory under the registered engagements path leaves the DB row intact — there
 is no cascade delete.

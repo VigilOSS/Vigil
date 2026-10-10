@@ -29,6 +29,13 @@ from vigil_cli.engagements import CreateEngagementOptions  # noqa: E402
 from vigil_cli.main import main  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _synthetic_application(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    application = tmp_path / "install"
+    (application / "orchestrator").mkdir(parents=True)
+    monkeypatch.setenv("VIGIL_APPLICATION_DIR", str(application))
+
+
 def _install_root(tmp_path: Path, *, with_prompt: bool = True) -> Path:
     install_root = tmp_path / "install"
     agent_root = install_root / "agent"
@@ -141,7 +148,7 @@ def test_create_rolls_the_directory_back_when_a_later_writer_fails(
             )
         )
 
-    assert list((install_root / "agent" / "engagements").iterdir()) == []
+    assert list(engagements.engagements_root(install_root).iterdir()) == []
     assert "Engagement created." not in capsys.readouterr().err
 
 
@@ -173,7 +180,7 @@ def test_create_keeps_a_fully_written_engagement_when_backend_sync_fails(
             )
         )
 
-    created = list((install_root / "agent" / "engagements").iterdir())
+    created = list(engagements.engagements_root(install_root).iterdir())
     assert len(created) == 1
     assert (created[0] / "scope.json").is_file()
 

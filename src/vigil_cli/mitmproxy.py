@@ -12,7 +12,7 @@ from pathlib import Path
 
 from . import docker
 from . import image_freshness
-from . import scope_entries
+from .application import application_root_for_workspace
 from .paths import container_host_url, resolve_orchestrator_base_url
 
 _PORT_WAIT_ATTEMPTS = 30
@@ -34,14 +34,13 @@ class MitmproxyOptions:
     volume_name: str = "mitmproxy-ca"
 
 
-def _scope_entries_source() -> Path:
-    module_path = getattr(scope_entries, "__file__", None)
-    if not module_path:
-        raise SystemExit("canonical vigil_cli scope parser source is unavailable")
-    source = Path(module_path).resolve()
-    if not source.is_file():
-        raise SystemExit(f"canonical vigil_cli scope parser source is missing: {source}")
-    return source
+def _scope_entries_source(application_root: Path) -> Path:
+    """Read the matched release's parser, including an explicitly pinned release."""
+    for tree in ("cli", "src"):
+        source = application_root / tree / "vigil_cli" / "scope_entries.py"
+        if source.is_file():
+            return source
+    raise SystemExit(f"canonical scope parser missing from application: {application_root}")
 
 
 def _ignore_build_artifacts(_directory: str, names: list[str]) -> list[str]:
@@ -77,7 +76,7 @@ def _proxy_build_context(install_root: Path) -> Iterator[Path]:
         shutil.copy2(addon_source, context / "scripts" / "proxy_addon.py")
         canonical_destination = context / "vigil_cli" / "scope_entries.py"
         canonical_destination.parent.mkdir()
-        shutil.copy2(_scope_entries_source(), canonical_destination)
+        shutil.copy2(_scope_entries_source(install_root), canonical_destination)
         yield context
 
 
@@ -91,7 +90,7 @@ def build_image(
     daemon_runner: docker.Runner | None = None,
 ) -> None:
     """Build the proxy image. ``--force`` rebuilds even if the tag exists."""
-    install_root = install_root.expanduser().resolve()
+    install_root = application_root_for_workspace(install_root)
     dockerfile = install_root / "agent" / "docker" / "mitmproxy" / "Dockerfile"
     if not dockerfile.is_file():
         raise SystemExit(f"mitmproxy Dockerfile missing: {dockerfile}")
@@ -150,7 +149,7 @@ def build_image(
 def mitmproxy_image_inputs(install_root: Path) -> list[Path]:
     """Every source path copied into the proxy image (see the mitmproxy
     Dockerfile: it COPYs `scripts/assess` wholesale, `proxy_addon.py`, and the
-    canonical scope-entry parser from the installed ``vigil_cli`` package).
+    canonical scope-entry parser from the matched application CLI snapshot).
 
     The whole `assess` package is genuinely baked in, so the directory is the
     honest input. Build artifacts inside it (`__pycache__`, `.pyc`, tool caches)
@@ -161,7 +160,7 @@ def mitmproxy_image_inputs(install_root: Path) -> list[Path]:
         install_root / "agent" / "docker" / "mitmproxy" / "Dockerfile",
         install_root / "agent" / "scripts" / "assess",
         install_root / "agent" / "scripts" / "proxy_addon.py",
-        _scope_entries_source(),
+        _scope_entries_source(install_root),
     ]
 
 
@@ -177,6 +176,7 @@ def start_proxy(
     if options.mode != "docker":
         raise SystemExit("Only Docker mitmproxy mode is managed by the CLI. Use host mitmproxy directly for --host workflows.")
     install_root = options.install_root.expanduser().resolve()
+    application_root = application_root_for_workspace(install_root)
     engagements_root = options.engagements_root.expanduser().resolve()
     if not engagements_root.is_dir():
         raise SystemExit(f"Engagements root does not exist: {engagements_root}")
@@ -191,7 +191,7 @@ def start_proxy(
     # build call so `build_image` can still pick the streaming default itself.
     exec_runner = runner or docker.run_command
     if force_rebuild or image_freshness.image_outdated(
-        options.image, mitmproxy_image_inputs(install_root), root=install_root, runner=exec_runner
+        options.image, mitmproxy_image_inputs(application_root), root=application_root, runner=exec_runner
     ):
         build_image(
             install_root,

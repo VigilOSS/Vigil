@@ -506,7 +506,7 @@ def test_install_staleness_tracks_unsnapshotted_source_bytes_not_stale_jj_commit
         assert stale["reason"] == "source_content_changed_without_revision"
         assert stale["installed_sha"] == stale["current_source_sha"]
         _print_install_staleness_warning(stale)
-        assert "source files changed without a new revision" in capsys.readouterr().out
+        assert "application files changed without a new revision" in capsys.readouterr().out
 
         source_file.write_bytes(installed_file.read_bytes())
         revision["sha"] = "b" * 40
@@ -526,6 +526,7 @@ def test_install_cli_dry_run_names_plan_and_preserves_destination(
 
     source = tmp_path / "source"
     (source / "agent").mkdir(parents=True)
+    (source / "orchestrator").mkdir()
     (source / "README.md").write_text("new\n", encoding="utf-8")
     install = tmp_path / "install"
     install.mkdir()
@@ -718,7 +719,7 @@ def test_status_stale_warning_is_neutral_without_positive_commit_distance(
     )
 
     output = capsys.readouterr().out
-    assert "working root differs from source" in output
+    assert "workspace provenance differs from application" in output
     assert "behind" not in output
 
 

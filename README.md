@@ -10,16 +10,17 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![CI](https://github.com/VigilOSS/Vigil/actions/workflows/ci.yml/badge.svg)](https://github.com/VigilOSS/Vigil/actions/workflows/ci.yml)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
-[![Version](https://img.shields.io/badge/version-1.0.0-green.svg)](https://github.com/VigilOSS/Vigil)
+[![Version](https://img.shields.io/badge/version-1.1.0-green.svg)](https://github.com/VigilOSS/Vigil)
 
 </div>
 
 Vigil drives a security engagement end to end from one CLI. An LLM operator reads a phased
 workflow prompt, dispatches specialist agents, runs real tooling inside a shared Kali
 container, and records every target, service, request variant, probe, finding, and attack
-chain into a durable orchestrator database. Five modes run against the same backend: web red-team,
-white-box code analysis, combined web and code, Android application analysis, and blue incident
-response.
+chain into a durable orchestrator database. Web red-team, white-box code analysis, Android
+application analysis, and blue incident response share the same backend. An offensive
+engagement can enable web and code tracks together, with each client process selecting one
+operator mode.
 
 > **Authorized use only.** Vigil can autonomously drive offensive tooling against live systems.
 > Use it only where you have explicit authorization and a reviewed scope. It is provided without
@@ -80,17 +81,15 @@ refined most extensively today.
 ## Quick start
 
 ```bash
-# 1. Install the CLI
-uv tool install --from git+https://github.com/VigilOSS/Vigil.git@v1.0.0 vigil
-# ...or over SSH, if you authenticate to GitHub with a key
-uv tool install --from git+ssh://git@github.com/VigilOSS/Vigil.git@v1.0.0 vigil
+# 1. Install the application release (CLI, backend, prompts, docs, and prebuilt UI)
+uv tool install --from https://github.com/VigilOSS/Vigil/releases/download/v1.1.0/vigil-1.1.0-py3-none-any.whl vigil
 
 # 2. Check the host: prerequisites, missing recon tools, and the ordered setup checklist
 vigil quickstart
 
-# 3. Install a working root and bring the local stack up (Kali runtime + orchestrator)
+# 3. Bring the local stack up; ~/vigil is initialized as your private workspace
 #    First run builds the Kali image — several GB, and it needs Docker running.
-vigil install ~/vigil && vigil up
+vigil up
 
 # 4. Create an engagement against an authorized target
 vigil engagement create https://target.example --hosts target.example
@@ -107,14 +106,14 @@ hosts in scope.json. Run this engagement using the operator workflow.
 ```
 
 The orchestrator UI is at `http://127.0.0.1:18000`. Code engagements need ripgrep (`rg`) on the
-host. The two installed layers, host-side recon tools on Docker Desktop, and other install
+host. Application releases and private workspaces, host-side recon tools on Docker Desktop, and other install
 detail: [`docs/installation.md`](docs/installation.md).
 
 ## Documentation
 
 | Document | What it covers |
 |----------|----------------|
-| [`docs/installation.md`](docs/installation.md) | Install detail: the CLI binary vs working root, host-side recon tools, ripgrep. |
+| [`docs/installation.md`](docs/installation.md) | Application releases, private workspaces, upgrades, host-side recon tools, ripgrep. |
 | [`docs/engagements.md`](docs/engagements.md) | Creating engagements, tracks and modes, the start preflight, phase transitions. |
 | [`agent/AGENTS.md`](agent/AGENTS.md) | The operator prompt — the workflow every engagement runs. |
 | [`CODE-MAP.md`](CODE-MAP.md) | Map of the codebase: where each subsystem lives. |
@@ -139,11 +138,15 @@ vigil engagement list --json                              # find the key
 vigil engagement start <engagement-key> --client codex
 ```
 
-`create` infers the engagement type from its inputs and starts the exploit policy at `pause`.
-`start` runs a preflight, exports the engagement environment, and execs the client; flags it does
+`create` infers the creation type from its inputs, enables the first durable track, and starts
+the exploit policy at `pause`. `start` selects one session mode, runs a preflight, prints the
+workspace, engagement, client, mode, and phase to stderr, exports the engagement environment,
+and execs the client; flags it does
 not own are forwarded to the client. Start engagements with `vigil engagement start` only — the
 generated `start_<client>.sh` and a bare client run skip the preflight and environment. A web and
-code engagement runs one session per track with `--mode web` or `--mode code`. Detail:
+code engagement requires `--mode web` or `--mode code`; a single enabled track is selected
+automatically. Change modes by starting a new client process. `vigil engagement mode <key>`
+inspects enabled tracks, phases, prompt paths, and complete start commands. Detail:
 [`docs/engagements.md`](docs/engagements.md).
 
 A later session on the same engagement opens the same way, then runs `vigil-resume`, which
@@ -192,7 +195,8 @@ survive operator session exit.
 
 The container mounts shared runtime data at `.runtime-data/`, bind-mounts the engagement root at
 `/engagements` so tool calls can write `/engagements/<key>/...` directly, and receives the root
-`.env` when present. Durable artifacts stay on the host under `agent/engagements/<key>/`. For
+`.env` when present. Fresh workspaces keep durable artifacts under `engagements/<key>/`;
+adopted workspaces retain their existing engagement paths. For
 non-interactive maintenance inside the container use `vigil runtime shell-exec "<cmd>"`, so
 quoting and exit codes stay under the CLI.
 
@@ -251,14 +255,14 @@ Payload-side tradecraft:
 | Command | Purpose |
 |---------|---------|
 | `vigil quickstart` | Probe host prerequisites and recon tools, print the setup checklist. Installs host tools only with `--install-host-tools`. |
-| `vigil install [path]` | Install or upgrade the working root in place. Engagements, DB, and `.env` are preserved. Builds the Kali image when it is missing, so it needs a running Docker daemon — `--skip-image-check` syncs without one. |
-| `vigil up` | Sync source, build stale images, start the local stack. |
+| `vigil install [path]` | Initialize or adopt a private workspace in place. Register existing data paths and preserve engagements, DB, `.env`, and client files. Explicit maintenance flags repair generated client entrypoints. Application upgrades use a release wheel. |
+| `vigil up` | Initialize or adopt the workspace, build stale images, start the local stack from matched application assets. |
 | `vigil doctor` | Check local readiness and prerequisites. Exits non-zero on a `FAIL` row; `--json` for a machine-readable report. |
 | `vigil status` | Report live service state. |
 | `vigil logs <target> [--lines N]` | Tail logs for `orchestrator`, `runtime`, `mitmproxy`, `oob`, or `all`. |
 | `vigil runtime build \| start \| stop \| restart \| status \| shell \| shell-exec \| resources` | Manage the shared Kali runtime container. |
 | `vigil orchestrator start \| stop \| restart \| status \| open \| build` | Manage the orchestrator backend and UI. |
-| `vigil engagement create \| list \| start \| open \| path \| current \| cd-init \| archive \| export \| export-pdf` | Create and drive engagements. Scope edits (`add-host`, `add-oos`, `set-header`, `add-track`, `set-rate-limit`, …) live here too — `vigil engagement --help`. |
+| `vigil engagement create \| list \| mode \| start \| open \| path \| current \| cd-init \| archive \| export \| export-pdf` | Create, inspect, and drive engagements. Scope edits (`add-host`, `add-oos`, `set-header`, `add-track`, `set-rate-limit`, …) live here too — `vigil engagement --help`. |
 | `vigil use <key>` | Set the persisted active engagement for global services. |
 | `vigil assess ...` | The assessment surface — see [`docs/assessment-cli.md`](docs/assessment-cli.md). |
 | `vigil remediation ...` | **Work in progress.** Separate remediation engagements: Jira/bounty import, `from-finding` intake, shared-fix finding links, worktrees, evidence, review, and PR handoff — see [`docs/remediation.md`](docs/remediation.md). |

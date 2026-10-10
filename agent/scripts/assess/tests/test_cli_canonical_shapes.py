@@ -715,7 +715,9 @@ def test_agent_start_emit_prompt_injects_blue_tenant_context(
     tenant_ref = agent_root / "references/tenants/acme-okta.md"
     tenant_ref.parent.mkdir(parents=True)
     tenant_ref.write_text("# Acme Okta\n", encoding="utf-8")
-    (tmp_path / "scope.json").write_text(
+    engagement = tmp_path / "engagements/acme"
+    engagement.mkdir(parents=True)
+    (engagement / "scope.json").write_text(
         json.dumps(
             {
                 "engagement_type": "blue",
@@ -754,7 +756,7 @@ def test_agent_start_emit_prompt_injects_blue_tenant_context(
         lambda _args: (
             _DispatchClient(),
             SimpleNamespace(
-                engagement_dir=str(tmp_path), agent_root=str(agent_root)
+                    engagement_dir=str(engagement), agent_root=str(agent_root)
             ),
         ),
     )
@@ -795,7 +797,9 @@ def test_agent_start_emit_prompt_refuses_missing_blue_tenant_reference_before_wr
 ) -> None:
     agent_root = tmp_path / "agent"
     (agent_root / "references/tenants").mkdir(parents=True)
-    (tmp_path / "scope.json").write_text(
+    engagement = tmp_path / "engagements/acme"
+    engagement.mkdir(parents=True)
+    (engagement / "scope.json").write_text(
         '{"engagement_type":"blue","tenant_reference_paths":'
         '["agent/references/tenants/missing.md"]}\n',
         encoding="utf-8",
@@ -836,7 +840,7 @@ def test_agent_start_emit_prompt_refuses_missing_blue_tenant_reference_before_wr
         lambda _args: (
             client,
             SimpleNamespace(
-                engagement_dir=str(tmp_path), agent_root=str(agent_root)
+                    engagement_dir=str(engagement), agent_root=str(agent_root)
             ),
         ),
     )
@@ -856,7 +860,9 @@ def test_agent_start_emit_prompt_refuses_tenant_reference_outside_owned_root(
     (agent_root / "references/tenants").mkdir(parents=True)
     outside = tmp_path / "outside.md"
     outside.write_text("# Unowned\n", encoding="utf-8")
-    (tmp_path / "scope.json").write_text(
+    engagement = tmp_path / "engagements/acme"
+    engagement.mkdir(parents=True)
+    (engagement / "scope.json").write_text(
         json.dumps(
             {
                 "engagement_type": "blue",
@@ -902,7 +908,7 @@ def test_agent_start_emit_prompt_refuses_tenant_reference_outside_owned_root(
         lambda _args: (
             client,
             SimpleNamespace(
-                engagement_dir=str(tmp_path), agent_root=str(agent_root)
+                    engagement_dir=str(engagement), agent_root=str(agent_root)
             ),
         ),
     )
@@ -925,7 +931,7 @@ def test_tenant_reference_validation_rejects_symlinked_file(tmp_path: Path) -> N
     linked.symlink_to(outside)
 
     with pytest.raises(TenantReferenceError, match="outside|symlink"):
-        validate_tenant_reference_paths([str(linked)], agent_root=agent_root)
+        validate_tenant_reference_paths([str(linked)], tenant_root=tenant_root)
 
 
 def test_agent_start_code_role_requires_repo_selection_before_recording(
