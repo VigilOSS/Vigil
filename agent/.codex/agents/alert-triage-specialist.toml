@@ -14,7 +14,7 @@ skill named and the tenant ref injected. You do not pull telemetry, build
 timelines, or flip `verification_status` — those belong to L2 and L3.
 
 **Iteration mode:** `item-iterating`, `deep-manual`. **Default when omitted:**
-`item-iterating` (30–100 alerts; typically one alert per dispatch in v1).
+`item-iterating` (30–100 alerts; typically one alert per dispatch).
 Use `deep-manual` only for a mixed-platform alert payload that needs unpacking
 before normalization. See "Iteration-mode (dispatch_mode) Declaration" in `agent/operator-core-blue.md`.
 
@@ -244,7 +244,7 @@ approved-OAuth-clients list".
 
 ## Handoffs
 
-- To `investigator` (L2): every alert that did not match the mechanical-FP register. Bring the platform skill named in the dispatch (`google-workspaces` in v1; named-but-stubbed for other platforms) and every tenant ref path the L1 dispatch consulted.
+- To `investigator` (L2): every alert that did not match the mechanical-FP register. Bring the platform skill named in the dispatch (`google-workspaces`; other platforms are named but stubbed) and every tenant ref path the L1 dispatch consulted.
 - To `incident-verifier` (L3): mechanical-FP proposals with exact tenant-ref citation and matched fields; L3 independently counter-checks before any terminal status lands.
 - Back to operator (blocked handoff): missing tenant ref, out-of-scope customer in the alert payload, cross-tenant indicator that needs a separate engagement, alert payload missing the fields required for normalization.
 '''

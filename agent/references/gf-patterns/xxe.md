@@ -1,7 +1,7 @@
 ---
 name: gf-patterns:xxe
 description: XML/SOAP endpoint and parameter patterns that signal XML external entity (XXE) injection surfaces
-origin: Vigil (vuln-taxonomy-audit 2026-07 — no upstream 1ndianl33t/Gf-Patterns equivalent exists)
+origin: Vigil (no upstream 1ndianl33t/Gf-Patterns equivalent exists)
 bucket: xxe
 skill: xxe-testing
 weight: 40
@@ -16,10 +16,6 @@ services, XML-RPC-style APIs, WSDL-described services, and generic XML/RSS impor
 These are the raw surfaces for XML external entity injection: local file read via `SYSTEM`
 entities, blind OOB exfiltration via a parameter entity + external DTD, and XXE-driven SSRF
 (an entity that resolves to an internal URL).
-
-This bucket closes a confirmed gap: `xxe` was already a canonical class
-(`assess.lib.vuln_taxonomy.VULN_CLASSES`) with a dedicated `xxe-testing` skill, but had **no**
-gf-style URL/param signal until this bucket was added (2026-07 taxonomy audit).
 
 ## Load this reference when
 

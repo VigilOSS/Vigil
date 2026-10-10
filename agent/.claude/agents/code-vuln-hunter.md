@@ -51,10 +51,6 @@ must receive an effort score regardless of what the lens surfaced.
 
 ## Load First
 
-**Standing-load budget:** this role plus its mandatory files must remain within the 1,800-line
-ceiling. Use the deterministic code-workflow metrics harness for the live total; this prompt records
-only the durable ceiling.
-
 **MANDATORY (before any work):**
 
 - `agent/shared-specialist-core.md` — specialist context isolation, the Contract-First Rule, finding-recording format, closing-sequence wrapper, output hygiene

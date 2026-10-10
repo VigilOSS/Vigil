@@ -1,7 +1,5 @@
 # Shared Subagent Constraints -- Code Analysis Mode
 
-**Standing-load budget:** 560 lines; this revision is 559 lines.
-
 Load this file as part of your Load First set -- together with your role file and
 `agent/shared-specialist-core.md` -- before any source code work. All three load together, not
 in a race to be "first"; the one ordered load sequence (Load First batch -> skill/reference
@@ -429,9 +427,6 @@ before doing any analysis. That pairing does not change per dispatch.
 
 Everything else in `agent/references/` is trigger-gated: load a specific reference when your
 reading surfaces the signal it matches, not as a blanket preload before you open a source file.
-Loading every plausible reference up front is the failure mode this section exists to prevent —
-under the old always-preload reading of this rule, a hunter dispatch spent ~109,000 tokens on
-skill + 23 CWE pattern files before opening a single source file.
 
 **CWE pattern references** from `agent/references/code-vuln-patterns/` are trigger-gated by slot
 type and code pattern: when your reading surfaces a signal (a parser over FILE-CONTENT, a crypto

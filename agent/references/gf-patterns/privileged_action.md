@@ -1,7 +1,7 @@
 ---
 name: gf-patterns:privileged_action
 description: State-change verb routes and dangerous-action params that signal function-level-authz (BFLA) / business-logic surfaces
-origin: local overlay (classify-context-and-surface 2026-06; no upstream gf equivalent)
+origin: local overlay (no upstream gf equivalent)
 bucket: privileged_action
 skill: auth-bypass
 weight: 30

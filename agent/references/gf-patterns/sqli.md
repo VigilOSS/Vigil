@@ -26,25 +26,25 @@ endpoint is confirmed reachable.
 `id, uid, pid, sid, tid, order, sort, filter, q, search, query, category, where, select, table,
 column, field, from, row, sleep, fetch`
 
-### Upstream gf param additions (2026-06)
+### Upstream gf vocabulary
 
 The SQL-keyword-flavored keys `where`, `select`, `table`, `column`, `field`, `from`, `row`,
-`sleep`, and `fetch` were folded in from the upstream gf pattern sets. A param literally named
+`sleep`, and `fetch` come from the upstream gf pattern sets. A param literally named
 after a SQL clause or function (`?where=`, `?select=`, `?sleep=`) is a genuine injection signal,
 and `sleep`/`fetch` in particular hint at time-based and cursor-style query surfaces.
 
 FP guard: `where` and `select` also overlap the `nosqli` bucket (Mongo/ES `$`-operators flow in
 via compound-key expansion), so both buckets firing on the same row is expected and fine — the
 reason chain is multi-bucket, and bucket weight only orders triage rather than gating inclusion,
-so the overlap never suppresses a row. No path fragments were added.
+so the overlap never suppresses a row.
 
-### ORM sort/group compound family (deepened, vuln-taxonomy-audit 2026-07)
+### ORM sort/group compound family
 
 "SQLi via sort/orderBy parameter" — an ORM building `ORDER BY <param>` or `GROUP BY <param>`
 directly from a request value (column names generally cannot be parameterized/bound the way
 literal values can) — is a recurring bug-bounty pattern and a direct extension of the same
-rationale as the upstream additions above. `order`/`sort` bare keys already existed; the
-compound `_by` forms and `having` did not:
+rationale as the upstream vocabulary above. The bucket includes bare `order`/`sort`,
+compound `_by` forms, and `having`:
 
 `order_by, orderby, sort_by, sortby, group_by, groupby, having`
 

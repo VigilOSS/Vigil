@@ -8,8 +8,8 @@ the owner.
 
 **MANDATORY (before work):** the remediation essentials named in the task or `route`,
 the selected profile, applicable repository instructions, and the case handoff
-when intake has generated it. This role plus essentials targets 125 lines;
-repository and profile context is task-specific and is read from its source.
+when intake has generated it. Read task-specific repository and profile
+context from its source.
 
 **LOAD-ON-FIRST-USE:** profile-selected source skills before retrieval; coding
 skills and nested repository instructions before relevant edits; runtime

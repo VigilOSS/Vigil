@@ -1,7 +1,7 @@
 ---
 name: gf-patterns:mass-assignment
 description: Privilege/state-field body parameter patterns that signal mass assignment (autobinding / over-posting) surfaces
-origin: Vigil (vuln-taxonomy-audit 2026-07 — no upstream 1ndianl33t/Gf-Patterns equivalent exists)
+origin: Vigil (no upstream 1ndianl33t/Gf-Patterns equivalent exists)
 bucket: mass-assignment
 skill: bff-parameter-override, mass-assignment
 weight: 30

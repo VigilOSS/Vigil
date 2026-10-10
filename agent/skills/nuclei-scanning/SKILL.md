@@ -169,7 +169,7 @@ Hosts where `-as` is known to suppress:
 
 When you see `Templates loaded for current scan: NNNN` in stderr but zero result rows in stdout, do NOT report nuclei as broken. Re-run with explicit `-t` paths against the same target. Confirm with `vigil assess command-run get <id>` — the stderr preview is the source of truth for "did the run actually execute templates."
 
-### Dedup across runs (Option A — no schema change)
+### Dedup across runs
 
 Use `vigil assess command-run list --q nuclei --tool-bin nuclei --json` to compute the "already-scanned" set from prior
 reactive runs, then subtract it from the current delta before invoking nuclei. The artifact

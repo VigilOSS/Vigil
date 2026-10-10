@@ -6,8 +6,8 @@ the owner can join any developer's full conversation.
 ## Load First
 
 **MANDATORY (before work):** the remediation essentials returned by `route`,
-the selected profile, and applicable repository instructions. This role plus
-essentials targets 100 lines; repository/profile context stays in its source.
+the selected profile, and applicable repository instructions. Read repository
+and profile context from its source.
 
 **LOAD-ON-FIRST-USE:** profile-selected intake skills before retrieving reports;
 case handoffs before discussing their status; runtime runbooks before arranging

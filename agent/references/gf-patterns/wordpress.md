@@ -1,7 +1,7 @@
 ---
 name: gf-patterns:wordpress
 description: WordPress surface patterns (REST user/media enumeration, XML-RPC pingback, login/admin, debug log)
-origin: local overlay (no upstream gf equivalent; added in the classify-context-and-surface 2026-06 expansion)
+origin: local overlay (no upstream gf equivalent)
 bucket: wordpress
 skill: user-enumeration
 weight: 35

@@ -10,7 +10,7 @@ go stale. Implementation detail belongs in the code it describes.
 
 **Size budget: this file stays under 25 KB**, enforced by
 `orchestrator/backend/tests/test_doc_dead_paths.py`. A map is only useful while it
-can be scanned; this one reached 156 KB before it was cut by 87%. If an addition
+can be scanned. If an addition
 would break the budget, something here has stopped earning its place: cut it, or
 push it into a docstring. Rewording until it fits is not the intended response —
 a byte ceiling cannot be satisfied that way.

@@ -105,7 +105,7 @@ proves nothing about the platform command or investigation state. Prefer a Vigil
 
 | Agent | Role | When |
 |-------|------|------|
-| operator | Lead blue team operator. Drives intake, coordinates phases, manages state, approves WRITE actions. Brain, not hands. | Every phase |
+| operator | Lead blue team operator. Drives intake, coordinates phases, manages state, approves WRITE actions. | Every phase |
 | alert-triage-specialist | L1. Normalize and classify pasted alerts; auto-close mechanical noise; dispatch to L2 with cited platform skill + tenant ref. | Triage |
 | investigator | L2. Pull platform telemetry, build evidence ladder, draft full finding with timeline + IOCs + suspected MITRE techniques. | Investigate |
 | incident-verifier | L3. Five-check FP-elimination; symmetric evidence bar; only role allowed to transition `verification_status` away from `unreviewed`. | Verify |
@@ -113,9 +113,8 @@ proves nothing about the platform command or investigation state. Prefer a Vigil
 | osint-analyst | Support. IOC / threat-intel enrichment via `ioc-enrichment` skill; writes to `intel_*` tables. | Investigate / Verify (parallel) |
 | report-writer | Reuse. Final closeout summary or incident report from durable backend state using blue templates. | Report |
 
-Tier vocabulary maps to L1/L2/L3/L4. Verifier (L3) and responder (L4) are
-split intentionally — mixing five-check FP discipline with WRITE-action
-approval corrupts both.
+Tier vocabulary maps to L1/L2/L3/L4. Verifier (L3) owns five-check FP
+verification; responder (L4) proposes WRITE actions for operator approval.
 
 ## Resume Gate
 
@@ -255,9 +254,9 @@ overrides with a stated reason.
 - **Invocation rule:** only on `confirmed` findings of severity ≥ high unless the operator explicitly dispatches L4 for a stated response rationale. `false_positive` and `downgraded` findings do not enter respond.
 - **Definition of Done:**
   - [ ] For each in-scope confirmed finding, ir-lead emits one or more containment proposals via `vigil blue propose-contain <slug> --action <revoke_session|reset_credential|disable_account|isolate_host|block_ioc|...> --target <id> --platform <gws|m365|aws|okta|edr|network|generic> --rollback "<plan>" --blast-radius <single-user|multi-user|multi-tenant|cross-platform> --note "..."`.
-  - [ ] Operator reviews and approves per-action — no automated containment in v1.
+  - [ ] Operator reviews and approves per-action — no automated containment.
   - [ ] Each approved proposal is executed through `vigil assess host-exec --phase respond --technique CONTAINMENT --finding <slug> --intent "containment proposal=<id> action=<action>" --scope-host <customer> --require-audit -- <cmd> <exact-target-argument>` so stdout/stderr and the command-run id are audited. The target must be a distinct argv argument. Then record via `vigil blue contain <slug> --proposal <id> --command-run-id <run-id>` or `--proof-artifact <path>`; command-run proof is checked against the approved finding, proposal, action, and target before workflow status changes.
-  - [ ] Any benign pattern discovered during respond that the tenant ref does not document is queued for `known-benign register` update via handoff `next_steps` (file + pattern). v1 is manual; closed-loop ingest is out of scope.
+  - [ ] Any benign pattern discovered during respond that the tenant ref does not document is queued for `known-benign register` update via handoff `next_steps` (file + pattern). Registration is manual; closed-loop ingest is out of scope.
 - **Transition:** `vigil assess transition-phase report`
 - **Dispatch hint:** `vigil assess agent start --role ir-lead --tier L4 --skills incident-containment[,<platform-skill-in-containment-mode>] --dispatch-mode deep-manual --rate-budget '<authored tenant query budget>' --prompt-context-json dispatch-context.json --emit-prompt`.
 
@@ -297,7 +296,7 @@ Template: `agent/references/tenants/_template-gws.md` is the canonical example.
 
 Every durable IR pull (raw log dump, evidence markdown, exported timeline,
 screenshot, IOC list, containment proof) registers to `assessment_artifacts`.
-Manual `SHA256SUMS.txt` is deprecated; the backend computes SHA-256 on
+The backend computes SHA-256 on
 register/refresh into `assessment_artifacts.sha256`.
 
 ```bash
@@ -364,8 +363,8 @@ Every containment WRITE — session revoke, credential reset, account disable,
 host isolate, IOC block, mailbox quarantine, OAuth-app removal — flows through:
 
 1. **Propose.** ir-lead emits `vigil blue propose-contain <finding-slug> --action <name> --target <id> --platform <platform> --rollback "<plan>" --blast-radius <radius> --note "<rationale + scope>"`. The proposal row carries action, target, rollback, blast radius, finding slug, and proposing context.
-2. **Approve.** Operator reviews each proposal — NUMBERED choice in the operator CLI — and explicitly approves or rejects. No `--auto-approve` in v1.
-3. **Execute.** v1 keeps execution and recording as two operator steps so the operator sees command output before recording:
+2. **Approve.** Operator reviews each proposal — NUMBERED choice in the operator CLI — and explicitly approves or rejects. No `--auto-approve`.
+3. **Execute.** Execution and recording are two operator steps so the operator sees command output before recording:
    1. `vigil assess host-exec --tool <cli> --intent "<action>" --technique <T> --phase respond --scope-host <customer> --require-audit -- <cmd>` performs the action; host-exec audits and stores stdout/stderr. If the audit row cannot be created, the wrapper exits non-zero so the action cannot be silently treated as complete.
    2. `vigil blue contain <finding-slug> --proposal <id> --command-run-id <id>` (or `--proof-artifact <path>` when the operator captured stdout/screenshot separately) writes the action and result to `activity_entries` with structured containment metadata, registers proof when provided, and updates finding workflow status to `contained`.
 4. **Log.** `activity_entries` is canonical. Use `vigil assess fetch 'activity-entries?limit=1000'` and filter rows by `metadata.finding_slug` / `metadata.containment_action`.
@@ -391,13 +390,8 @@ operator-relevant essentials:
 
 ## Operator Role Clarity
 
-**You are the orchestrator brain. You do not run platform CLIs. You do not write analysis.**
-
 The operator selects, sequences, approves, and reviews state. Specialists
-carry the skill context and methodology depth. Operator-run `gam`,
-`gcloud logging read`, `az ad signedin-user`, `crowdstrike`, or `splunk search`
-is a division-of-labor failure — the resulting analysis is shallower than the
-specialist's would have been.
+run platform CLIs and write analysis, except for the operator steps below.
 
 **Operator-executed exceptions** (mechanical pipeline steps; all via
 `vigil assess` helpers, never raw bash):
@@ -539,7 +533,7 @@ object (stored in SQLite as `metadata_json`):
 }
 ```
 
-Searchable via existing FTS. No schema change.
+Searchable via FTS.
 
 ## Error Recovery Loops
 

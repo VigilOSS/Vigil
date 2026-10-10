@@ -29,14 +29,12 @@ object download.
 
 `bucket, blob, prefix, list-type, marker, delimiter, continuation-token`
 
-`bucket`, `blob`, and `prefix` are the original keys. `list-type`, `marker`,
-`delimiter`, and `continuation-token` were added (classify-context-and-surface
-2026-06, Part 3 §C.14): these are the S3/GCS/Azure bucket-LISTING query
+`list-type`, `marker`, `delimiter`, and `continuation-token` are S3/GCS/Azure bucket-listing query
 parameters (`list-type=2` selects the S3 ListObjectsV2 API; `marker` /
 `continuation-token` page a listing; `delimiter` / `prefix` scope it). Their
 presence on a request is a strong open-bucket object-enumeration signal.
 
-`key` and `object` were considered but rejected: they are too generic (HTTP caching, GraphQL
+`key` and `object` are excluded: they are too generic (HTTP caching, GraphQL
 object fields) and would generate substantial cross-bucket false positives.
 
 ## Path patterns that match
@@ -53,7 +51,7 @@ Only cloud-specific discriminators and the Domino-specific token set are allowed
 the queue with benign CDN paths.
 See override #2 in `classify_buckets.py`.
 
-## Host markers (full-URL regex, classify-context-and-surface 2026-06, Part 3 §C.14)
+## Host markers (full-URL regex)
 
 Cloud-storage object URLs carry the bucket in the URL AUTHORITY, not the path, so
 these markers are matched by `_REGEX_BUCKET_RULES["object-storage"]` against the

@@ -39,13 +39,12 @@ These are the canonical SAML 2.0 POST-binding parameter names (lowercased after
 `/saml/metadata` but NOT `/saml2` — the `2` is not a boundary character. `/saml2` is
 listed separately for SAML 2.0 explicit paths.
 
-### Federation-metadata extension (classify-context-and-surface 2026-06, Part 3 §C.12)
+### Federation metadata
 
-`/federationmetadata` was added to catch the AD FS federation-metadata document
+`/federationmetadata` matches the AD FS federation-metadata document
 (`/FederationMetadata/2007-06/FederationMetadata.xml`) — a SAML/WS-Fed metadata
 disclosure and SP-enumeration surface. It is a metadata-only route with no auth
-sibling, so it cleanly raises previously-unmatched federation-metadata URLs from
-priority 0 to `gf:sso` (additive, never a demotion).
+sibling and matches `gf:sso`.
 
 The other §C.12 candidates were deliberately NOT added, to keep the change additive:
 

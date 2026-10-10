@@ -25,10 +25,10 @@ hit usually translates to direct pre-auth RCE.
 
 `cmd, exec, command, shell, run, execute, ping, exe, func, function, cli, daemon`
 
-### Upstream gf param additions (2026-06)
+### Upstream gf vocabulary
 
-The command-exec keys `ping`, `exe`, `func`, `function`, `cli`, and `daemon` were folded in from
-the upstream gf pattern sets, which carry a wider exec param list than our original 6-key set.
+The command-exec keys `ping`, `exe`, `func`, `function`, `cli`, and `daemon` come from
+the upstream gf pattern sets.
 These all name a shell helper, binary, callable, or service-control surface (`?ping=`, `?exe=`,
 `?cli=`, `?daemon=restart`) that commonly feeds a subprocess.
 

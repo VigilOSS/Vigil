@@ -68,7 +68,7 @@ param key fires (e.g. `SAMLResponse` on a `/login` landing page).
 
 Path-fragment matches:
 
-- `https://target.example/login` — credential entry point (was priority 0 before 2026-06)
+- `https://target.example/login` — credential entry point
 - `https://target.example/efi/signin` — custom-prefix sign-in surface
 - `https://target.example/api/auth/sessions/ttl` — session lifetime API
 - `https://target.example/mfa` — MFA challenge surface
