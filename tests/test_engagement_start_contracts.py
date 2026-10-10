@@ -41,6 +41,42 @@ def _install_root(tmp_path: Path, *, with_prompt: bool = True) -> Path:
 # ── engagement create: no half-made engagements ──────────────────────────────
 
 
+@pytest.mark.parametrize("contact_backend", [True, False])
+def test_create_reports_progress_before_slow_steps_on_stderr(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys, contact_backend: bool
+) -> None:
+    install_root = _install_root(tmp_path)
+    (install_root / "agent" / "operator-core-code.md").write_text("# Code overlay\n")
+    monkeypatch.setattr(engagements, "_install_client_kind", lambda *_: "none")
+    messages = []
+
+    def expect_progress(stage):
+        def check(*_args, **_kwargs):
+            output = capsys.readouterr()
+            assert output.out == ""
+            assert stage in output.err
+            messages.append(output.err)
+        return check
+
+    monkeypatch.setattr(engagements, "_snapshot_orchestrator_database", expect_progress("snapshot"))
+    monkeypatch.setattr(engagements, "_write_issues_doc", expect_progress("files"))
+    monkeypatch.setattr(engagements, "_write_launchers", expect_progress("client"))
+    monkeypatch.setattr(engagements, "_verify_backend_install_root", expect_progress("orchestrator"))
+    monkeypatch.setattr(engagements, "_emit_post_create_footer", expect_progress("services"))
+
+    created = engagements.create_engagement(
+        CreateEngagementOptions(install_root=install_root, engagement_type="code", name="Acme"),
+        contact_backend=contact_backend,
+    )
+
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert "created" in output.err
+    assert (created.path / "scope.json").is_file()
+    if not contact_backend:
+        assert not any(word in "".join(messages) for word in ("snapshot", "orchestrator", "services"))
+
+
 def test_create_refuses_before_any_side_effect_without_an_installed_prompt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -85,7 +121,7 @@ def test_create_refuses_for_blue_without_the_installed_blue_prompt(
 
 
 def test_create_rolls_the_directory_back_when_a_later_writer_fails(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
     install_root = _install_root(tmp_path)
     monkeypatch.setattr(engagements, "_snapshot_orchestrator_database", lambda *a, **k: None)
@@ -106,6 +142,7 @@ def test_create_rolls_the_directory_back_when_a_later_writer_fails(
         )
 
     assert list((install_root / "agent" / "engagements").iterdir()) == []
+    assert "Engagement created." not in capsys.readouterr().err
 
 
 def test_create_keeps_a_fully_written_engagement_when_backend_sync_fails(

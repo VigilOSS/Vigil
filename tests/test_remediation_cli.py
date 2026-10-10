@@ -452,7 +452,7 @@ def test_worktree_retry_reuses_existing_case_branch(monkeypatch: pytest.MonkeyPa
     eng = tmp_path / "eng"
     worktree = eng / "remediation/cases/3/worktree"
     repo = tmp_path / "source"
-    subprocess.run(["git", "init", str(repo)], check=True, capture_output=True)
+    subprocess.run(["git", "init", "--initial-branch=main", str(repo)], check=True, capture_output=True)
     subprocess.run(["git", "-C", str(repo), "config", "user.email", "test@example.com"], check=True)
     subprocess.run(["git", "-C", str(repo), "config", "user.name", "Test"], check=True)
     subprocess.run(["git", "-C", str(repo), "commit", "--allow-empty", "-m", "initial"], check=True, capture_output=True)

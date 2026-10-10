@@ -573,6 +573,7 @@ def create_engagement(
     )
     root.mkdir(parents=True, exist_ok=True)
     if contact_backend:
+        print("[vigil] Taking orchestrator database snapshot...", file=sys.stderr, flush=True)
         _snapshot_orchestrator_database(install_root)
 
     eng_dir = root / f"{plan.date_label}-{plan.time_label}-{plan.label}"
@@ -588,6 +589,7 @@ def create_engagement(
     # (backend sync verification, footers) report on a durable engagement and
     # must not delete it -- their own messages tell the operator how to recover.
     try:
+        print("[vigil] Writing engagement files...", file=sys.stderr, flush=True)
         for subdir in plan.subdirs:
             (eng_dir / subdir).mkdir()
 
@@ -652,6 +654,7 @@ def create_engagement(
         # orchestrator backend (assessment_work_items) and is populated on first
         # ingest (ADR 0013). Fresh engagements start with an empty backend buffer.
 
+        print("[vigil] Preparing client prompts and launchers...", file=sys.stderr, flush=True)
         client_kind = _install_client_kind(agent_root)
         _write_prompt_wrappers(agent_root, eng_dir, client_kind, engagement_type=options.engagement_type)
         if client_kind in {"codex", "both"}:
@@ -676,12 +679,15 @@ def create_engagement(
         raise
     _emit_bootstrap_scope_summary(scope)
     if contact_backend:
+        print("[vigil] Checking orchestrator and registering engagement...", file=sys.stderr, flush=True)
         _verify_backend_install_root(install_root, eng_dir)
     # Blue engagements own their own footer (blue.py:_cmd_engage) and must not
     # emit the red-infra footer (mitmproxy/oob are irrelevant to incident
     # response). Skip entirely for blue so blue.py has sole footer ownership.
     if contact_backend and options.engagement_type not in {"blue", "remediation"}:
+        print("[vigil] Checking local services...", file=sys.stderr, flush=True)
         _emit_post_create_footer(key)
+    print("[vigil] Engagement created.", file=sys.stderr, flush=True)
     return CreatedEngagement(key=key, path=eng_dir)
 
 
