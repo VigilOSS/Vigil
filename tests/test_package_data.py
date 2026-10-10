@@ -290,3 +290,13 @@ def test_bundle_validation_uses_staged_helpers_and_restores_parent_imports(tmp_p
     (bundle / "bundle.json").write_text(json.dumps(backend._manifest(bundle, "1.1.0")))
     backend._validate_bundle(bundle, "1.1.0")
     assert sys.modules["vigil_cli.restart_manifest"] is restart_manifest
+
+
+def test_source_build_without_node_names_the_requirement(tmp_path, monkeypatch):
+    import pytest
+    spec = importlib.util.spec_from_file_location("vigil_build", REPO_ROOT / "vigil_build.py")
+    backend = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(backend)
+    monkeypatch.setattr(backend.shutil, "which", lambda _name: None)
+    with pytest.raises(ValueError, match="Node.*npm.*release wheel"):
+        backend._build_bundle(REPO_ROOT, tmp_path / "bundle", "1.1.0", tracked=frozenset())
