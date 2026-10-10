@@ -449,7 +449,7 @@ describe("finding investigation workspace", () => {
     expect(window.location.hash).toBe("#/engagements/demo?tab=findings&finding=VA-012&dtab=history");
     expect(replace).toHaveBeenCalledOnce();
     expect(getAssessmentFinding).toHaveBeenCalledWith("demo", alias);
-    expect(listAssessmentFindingTransitions).toHaveBeenCalledWith("demo", "VA-012");
+    await waitFor(() => expect(listAssessmentFindingTransitions).toHaveBeenCalledWith("demo", "VA-012"));
     expect(screen.queryByRole("alert")).toBeNull();
     replace.mockRestore();
   });
