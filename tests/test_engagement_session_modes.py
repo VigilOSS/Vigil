@@ -23,7 +23,6 @@ def test_new_engagement_has_one_track_and_enabling_second_preserves_its_phase(tm
             install_root=tmp_path,
             engagement_type="code",
             name="example",
-            repos=[str(tmp_path / "source")],
         )
     )
     assert plan.scope["engagement_type"] == "offensive"
@@ -39,7 +38,7 @@ def test_new_engagement_has_one_track_and_enabling_second_preserves_its_phase(tm
 def test_explicit_code_creation_retains_declared_hosts_without_enabling_web(tmp_path: Path) -> None:
     plan = engagements.plan_engagement(engagements.CreateEngagementOptions(
         install_root=tmp_path, engagement_type="code", name="example",
-        target="https://example.test", repos=[str(tmp_path / "source")],
+        target="https://example.test",
     ))
     assert plan.scope["hosts"] == ["example.test"]
     assert plan.scope["tracks"] == {"code": {"phase": "ingest"}}
@@ -58,7 +57,7 @@ def test_new_creation_rejects_combined_operator_type(tmp_path: Path) -> None:
 def test_creation_refuses_combined_inputs_instead_of_dropping_host_scope(tmp_path: Path) -> None:
     from vigil_cli.main import main
 
-    with pytest.raises(SystemExit, match="explicit first track"):
+    with pytest.raises(SystemExit, match="remediation"):
         main([
             "--root", str(tmp_path), "engagement", "create", "--no-prompt",
             "--name", "example", "--repo", str(tmp_path), "--hosts", "example.test",

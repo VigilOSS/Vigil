@@ -7,6 +7,17 @@ Durable design decisions live in [`docs/adr/`](docs/adr/).
 
 ## [Unreleased]
 
+### Changed
+
+- Code engagement creation prepares an empty `source/` folder and prints its location.
+  Code sessions open with a source confirmation question; loose files and ordinary project
+  folders are supported without Git. Empty source remains waiting until files are supplied.
+- Removed source path/URL inputs from code engagement creation. `--repo` now selects a local
+  repository for remediation only; scripts creating code engagements use a name and populate
+  the printed source folder. Existing engagement records retain their historical inputs.
+- Code creation shows source setup instead of optional proxy and callback service hints.
+  Mode inspection and startup report the current staged-source state.
+
 ## [1.1.0] - 2026-10-10
 
 ### Changed

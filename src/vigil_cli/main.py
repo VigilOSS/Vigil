@@ -431,16 +431,15 @@ def main(argv: list[str] | None = None) -> None:
         description=(
             "Create an engagement under <workspace>/engagements/ (adopted paths are preserved).\n"
             "When --type is omitted it is inferred from the inputs (URL/host → web,\n"
-            "--repo → code, APK/--package-name → android); combined web and code\n"
-            "evidence requires choosing one initial track explicitly.\n"
-            "and the inferred type is echoed so it can be overridden. On a terminal,\n"
+            "APK/--package-name → android). Repository selection requires --type remediation.\n"
+            "The inferred type is echoed so it can be overridden. On a terminal,\n"
             "missing required fields are asked for interactively; pass --no-prompt to\n"
             "fail instead of asking."
         ),
         epilog=(
             "Examples:\n"
             "  vigil engagement create https://app.example.com --hosts app.example.com\n"
-            "  vigil engagement create --type code my-project --repo ~/src/my-project\n"
+            "  vigil engagement create --type code my-project\n"
             "  vigil engagement create --type remediation --name my-project --repo ~/src/my-project\n"
             "  vigil engagement create --type android ./app.apk\n"
             "  vigil engagement create https://app.example.com --dry-run\n"
@@ -480,7 +479,7 @@ def main(argv: list[str] | None = None) -> None:
         "--repo",
         action="append",
         default=[],
-        help="Source repository path or URL (code); repeatable",
+        help="Local repository root for remediation engagements",
     )
     create_p.add_argument("--apk", action="append", default=[], help="Android APK/AAB/XAPK artifact path")
     create_p.add_argument("--package-name", help="Android package name, for example com.example.app")
@@ -1801,6 +1800,12 @@ def _engagement(args: argparse.Namespace, install_root: Path) -> None:
             print(f"mode: {state['mode'] or 'unselected'}\nprompt: {state['prompt'] or 'unselected'}")
             for name, track in state["tracks"].items():
                 print(f"{name}: phase={track['phase']}\n  prompt: {track['prompt']}\n  start: {track['start_command']}")
+            source = state.get("source")
+            if isinstance(source, dict):
+                print(f"source: {source['path']}\n  state: {source['state']}\n  files: {source['file_count']}")
+                print(f"  entries: {json.dumps(source['entries'], ensure_ascii=False)}")
+                if source.get("detail"):
+                    print(f"  detail: {source['detail']}")
     elif command == "current":
         _engagement_current(install_root)
     elif command == "cd-init":
@@ -1861,17 +1866,14 @@ def _engagement_create(args: argparse.Namespace, install_root: Path) -> None:
     asked = False
     engagement_type = args.type
     if engagement_type is None:
-        if args.repo and (target or hosts or (positional and _looks_like_web_target(positional))):
+        if args.repo:
             raise SystemExit(
-                "source and web target inputs require an explicit first track: create with "
-                "--type code --name <name> --repo <path>, then add hosts and run "
-                "`vigil engagement add-track <key> web`."
+                "repository inputs apply only to remediation engagements; pass --type remediation"
             )
         engagement_type = _infer_engagement_type(
             positional,
             target=target,
             hosts=hosts,
-            repos=args.repo,
             apks=args.apk,
             package_name=android_package,
         )
@@ -2079,14 +2081,13 @@ def _infer_engagement_type(
     *,
     target: str | None,
     hosts: list[str],
-    repos: list[str],
     apks: list[str],
     package_name: str | None,
 ) -> str | None:
     """Infer the engagement type from corroborating evidence, or None.
 
     Returns None when the inputs are ambiguous (e.g. a bare name with no
-    repo/host/APK evidence) — the caller then asks interactively or fails
+    host/APK evidence) — the caller then asks interactively or fails
     with a clear message instead of silently defaulting, which used to
     misclassify bare names as code engagements.
     """
@@ -2094,13 +2095,8 @@ def _infer_engagement_type(
     if android_evidence:
         return "android"
     web_evidence = bool(target) or bool(hosts) or bool(positional and _looks_like_web_target(positional))
-    code_evidence = bool(repos)
-    if web_evidence and code_evidence:
-        return None
     if web_evidence:
         return "web"
-    if code_evidence:
-        return "code"
     return None
 
 

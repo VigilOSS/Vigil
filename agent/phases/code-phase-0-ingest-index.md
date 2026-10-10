@@ -1,7 +1,7 @@
 # Code Phase 0 — Ingest + Index
 
 **Read-on-phase-entry.** When you ENTER Code Phase 0 (Ingest + Index), Read this doc before running
-the clone/ingest/index commands, and re-read it on a method re-anchor (Core Loop -- Code Analysis
+the ingest/index commands, and re-read it on a method re-anchor (Core Loop -- Code Analysis
 Mode, "Re-anchor on method mid-run" equivalent in `agent/operator-core-code.md`) if the current phase
 is uncertain. It carries the full ingest → index → sync → verify bash walkthrough, what `code-ingest`
 and `code-index` each do, and the Phase 0 exit gate. Cross-phase machinery — the Core Loop, the
@@ -12,17 +12,18 @@ Phased mindset flow (code), the Agent Roster, and the Dispatch Context Template 
 
 Operator-mechanical. No agent dispatch.
 
+Complete `agent/operator-core-code.md`'s Source confirmation step first. Use the confirmed
+`source/` folder itself for loose files, or a confirmed project subdirectory for one project.
+
 ```bash
-# 1. Clone or locate the repository
-git clone <repo-url> $DIR/source/<repo-name>
-# Or: cp -r /path/to/source $DIR/source/<repo-name>
+# 1. Use the source folder or project subdirectory confirmed by the human.
 
 # 2. For recovered browser source maps, extract first and review the manifest.
 # Run the separate code-ingest command printed by this command.
 vigil assess code-sourcemap-extract "$DIR/source-maps/<name>"
 
 # 3. Ingest into backend (use the printed source-map handoff when applicable)
-vigil assess code-ingest "$DIR/source/<repo-name>" --name <repo-name> --language <primary-lang>
+vigil assess code-ingest "<confirmed-source-directory>" --name <project-name> --language <primary-lang>
 
 # 4. Copy repo_id and the "Sealed source:" path from the ingest summary — it already points at
 #    the snapshot's source/ directory, which is what code-index binds to. Pass it unchanged.

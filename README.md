@@ -91,14 +91,19 @@ vigil quickstart
 #    First run builds the Kali image — several GB, and it needs Docker running.
 vigil up
 
-# 4. Create an engagement against an authorized target
-vigil engagement create https://target.example --hosts target.example
+# 4. Create an engagement; follow the questions to choose its type and give it a name/target
+vigil engagement create
 
 # 5. Start the operator on it
 vigil engagement start <engagement-key> --client codex   # or claude | opencode | goose | kimi
 ```
 
-Then tell the operator what it is authorized to do:
+For a **code** engagement, place your source files or project folders in the `source/`
+location printed by creation. Git is optional. When the code client opens, it asks you
+to confirm that those are the intended files; an empty folder leaves it waiting for source.
+Details: [`docs/code-analysis.md`](docs/code-analysis.md).
+
+For a **web** engagement, tell the operator what it is authorized to do:
 
 ```
 I have been fully authorized by the company to do a red-team engagement against the

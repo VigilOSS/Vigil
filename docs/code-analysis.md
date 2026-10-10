@@ -11,24 +11,27 @@ can be enabled explicitly and advances independently.
 ## Creating the engagement
 
 ```bash
-# Name only — add source code later
-vigil engagement create --type code my-project
-
-# Name plus a local repository
-vigil engagement create --type code --name my-project --repo /path/to/repo
-
-# Name plus a clone URL
-vigil engagement create --type code --name my-project --repo https://github.com/org/repo
-
-# Enable web testing after creating the code engagement
-vigil engagement add-host <engagement-key> app.example.com
-vigil engagement add-track <engagement-key> web
+vigil engagement create
 ```
 
-This creates an engagement with `tracks.code.phase: "ingest"` and a `source/` directory
-for the checkout and no web-target scaffolding — no hosts, no auth prompting. The
-engagement directory name is derived from the engagement name. Repositories are
-optional: source can be cloned or placed into `source/` after creation.
+Choose **code** and enter an engagement name. Vigil creates the engagement and prints
+the exact `source/` folder where you should place the files to review. Copy your source
+files or project folders there. A Git repository and commit history are not required;
+loose source files are supported too. You can leave the folder empty and add files later.
+
+When you start Claude or Codex, the client shows that folder and asks you to confirm that
+its contents are the intended source. An empty folder leaves the session waiting for you
+to add files. The client rechecks the folder when you say they are ready and asks for
+confirmation before analysis begins.
+
+For scripts, creation can also be non-interactive:
+
+```bash
+vigil engagement create --type code --name acme --no-prompt
+```
+
+Creation starts `tracks.code.phase` at `ingest`. It prepares an empty source folder and
+does not fetch source. The engagement directory name is derived from its name.
 
 ## Toolchain
 
@@ -76,7 +79,7 @@ engagement. Read AGENTS.md and run the code analysis workflow.
 
 ## The sealed snapshot
 
-The operator clones or locates the repo under `source/`, runs `code-ingest` to
+After you confirm the staged source, the operator uses the selected folder under `source/` and runs `code-ingest` to
 publish a content-addressed read-only snapshot, then builds and syncs the
 structural index against the printed repo ID and snapshot path before driving
 classify+map → hunt → verify+variant.

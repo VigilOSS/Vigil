@@ -121,6 +121,9 @@ When you are about to copy one of these into a second file, stop and import.
   respective assessment and backend paths. `VIGIL_OPERATOR_MODE` selects one prompt per
   session and never grants a track. Official starts repair only their selected engagement;
   `src/vigil_cli/install.py` repairs shared client files only under explicit maintenance flags.
+- `src/vigil_cli/engagements.py:engagement_source_state` owns staged code-source inventory;
+  creation, mode inspection and startup present it. The code operator core owns conversational
+  source confirmation before analysis; staging files never grants consent or replaces a sealed generation.
 - `orchestrator/backend/app/services/state_manager/app_units.py:score_application_units` and
   `depth_ledger.py` own the web-only terminal depth gate. See: ADR 0012.
 - `orchestrator/backend/app/services/assessment_memory.py` and `artifact_index.py` own the bounded
@@ -223,7 +226,6 @@ A prompt change is **not** prompt-only when the prompt defines an artifact the b
 - `src/vigil_cli/workspace.py` — canonical private paths and in-place legacy adoption; `paths.py:workspace_root_for_engagement` resolves private ownership independently of application assets.
 - `vigil_build.py` — tracked publisher inputs, matched CLI/backend/agent/docs/legal bundle and locked prebuilt UI provenance; its sdist builds wheels without Git or Node.
 - `src/vigil_cli/client_sessions.py` — live PID/birth-identity release bindings and shared-file bootstrap lock; old releases retain assets and must end before rebinding the same engagement.
-- `src/vigil_cli/engagements.py` + `blue.py` + `client_rosters.py` — engagement bootstrap: run directories, bounded operator pointers, generated launchers, and the per-client prompt/command links.
 - `src/vigil_cli/paths.py:resolve_orchestrator_base_url` — backend URL precedence and dotenv normalization; `vigil config resolve orchestrator_base_url` exposes it to generated client launchers at session start.
 - `src/vigil_cli/preflight.py` — `_preflight_engagement_start`, `_resolve_provider_key`, `_warn_if_install_stale`. It lives outside `main.py` so `blue.py` can import it without a cycle; `main.py` re-exports what it uses.
 - `src/vigil_cli/remediation.py` — case intake/context rendering, configured workspace/checks, reviewed PR publication, and consented development workflow commands; `remediation_browser.py` owns local browser execution. Backend APIs own case state.
