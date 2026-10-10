@@ -1108,15 +1108,12 @@ def regex_fragment_in_path(pattern: str, url_path_lower: str) -> bool:
 #
 #   * `assess.lib.classify.classify_type()` — the dominant categorizer that every
 #     ingest path (ingest-endpoints / ingest-spec / ingest-candidates / dispatch)
-#     runs. It emits the canonical, content-derived types: `api` (the dominant
-#     API type — 1,002 rows in the nested route fixtures, 92 in the consumer-service
-#     corpus), `api-spec` (HYPHEN — the
+#     runs. It emits the canonical, content-derived types: `api`, `api-spec` (the
 #     OpenAPI/Swagger/api-docs type), `graphql`, `sourcemap`, `host_root`, etc.
 #   * `assess.lib.candidate_records.candidate_type()` — a SECONDARY signal-driven
 #     path that RELABELS `api` → `api_route` (underscore) and adds the
 #     surface-flavored types `auth_entry`, `portal_session`, `debug_config`,
-#     `event_feed`, `workflow`. These are the minority types (e.g. 41 `api_route`
-#     in the nested route fixtures) layered on top of the `classify_type` output.
+#     `event_feed`, `workflow`. These types are layered on top of the `classify_type` output.
 #
 # Therefore:
 #   * `api` and `api_route` are the SAME semantic type (api_route is just

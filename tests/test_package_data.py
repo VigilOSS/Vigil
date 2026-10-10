@@ -5,6 +5,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import tarfile
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -28,6 +29,12 @@ def test_sdist_builds_an_installable_wheel_with_a_working_cli(tmp_path: Path) ->
     )
     sdists = list(dist_dir.glob("vigil-*.tar.gz"))
     assert len(sdists) == 1
+    with tarfile.open(sdists[0]) as archive:
+        members = archive.getmembers()
+        assert members
+        assert all(member.uid == 0 and member.uname == "root" for member in members)
+        assert all(member.gname == "daemon" for member in members)
+        assert all("uname" not in member.pax_headers for member in members)
 
     # Build the wheel from the source archive, not the working tree, so ignored
     # build directories cannot make a missing package-data declaration pass.

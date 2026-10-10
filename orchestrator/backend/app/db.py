@@ -6006,7 +6006,7 @@ _REMEDIATION_CASE_TABLE_SQL = """
         CREATE TABLE {if_not_exists}{table} (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             engagement_id INTEGER NOT NULL REFERENCES engagements(id) ON DELETE CASCADE,
-            source_type TEXT NOT NULL CHECK(source_type IN ('jira', 'bounty', 'finding')),
+            source_type TEXT NOT NULL,
             source_key TEXT NOT NULL,
             title TEXT NOT NULL,
             snapshot_json TEXT NOT NULL,
@@ -6014,6 +6014,10 @@ _REMEDIATION_CASE_TABLE_SQL = """
             worktree_path TEXT,
             worktree_branch TEXT,
             worktree_revision TEXT,
+            base_branch TEXT,
+            base_revision TEXT,
+            review_policy_json TEXT,
+            verification_requirements_json TEXT,
             verification_plan TEXT NOT NULL DEFAULT '',
             baseline_json TEXT NOT NULL DEFAULT '{{}}',
             release_plan_json TEXT NOT NULL DEFAULT '{{}}',
@@ -6040,7 +6044,10 @@ def _database_needs_remediation_finding_link_migration(db_path: Path) -> bool:
     if not db_path.exists():
         return False
     with closing(sqlite3.connect(str(db_path))) as connection:
-        return "linked_finding_slug" in _table_columns(connection, "remediation_cases")
+        table = connection.execute("SELECT sql FROM sqlite_master WHERE name='remediation_cases'").fetchone()
+        return "linked_finding_slug" in _table_columns(connection, "remediation_cases") or bool(
+            table and "CHECK(source_type IN" in table[0]
+        )
 
 
 def _migrate_remediation_finding_links(db_path: Path) -> None:
@@ -6054,7 +6061,7 @@ def _migrate_remediation_finding_links(db_path: Path) -> None:
         sequence = connection.execute("SELECT seq FROM sqlite_sequence WHERE name='remediation_cases'").fetchone()
         linked_rows = []
         for row in connection.execute("SELECT c.*,e.key AS owner_key FROM remediation_cases c JOIN engagements e ON e.id=c.engagement_id ORDER BY c.id"):
-            slug = row["linked_finding_slug"]
+            slug = row["linked_finding_slug"] if "linked_finding_slug" in columns else None
             key = row["linked_finding_engagement_key"] if "linked_finding_engagement_key" in columns else None
             if not slug and not key:
                 continue
@@ -6149,7 +6156,29 @@ def _create_remediation_tables(connection: sqlite3.Connection) -> None:
             notes TEXT NOT NULL,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
+        CREATE TABLE IF NOT EXISTS remediation_environment_leases (
+            scope TEXT NOT NULL,
+            environment TEXT NOT NULL,
+            case_id INTEGER NOT NULL REFERENCES remediation_cases(id) ON DELETE CASCADE,
+            revision TEXT NOT NULL,
+            actor TEXT NOT NULL,
+            token TEXT NOT NULL UNIQUE,
+            acquired_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            released_at TEXT,
+            released_by TEXT
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_remediation_environment_owner
+            ON remediation_environment_leases(scope, environment) WHERE released_at IS NULL;
     """)
+    for column in ("base_branch", "base_revision", "review_policy_json", "verification_requirements_json"):
+        if column not in _table_columns(connection, "remediation_cases"):
+            connection.execute(f"ALTER TABLE remediation_cases ADD COLUMN {column} TEXT")
+    for column in ("execution", "executed_revision", "executed_directory", "shared_environment", "environment_token", "runtime_revision"):
+        if column not in _table_columns(connection, "remediation_evidence"):
+            connection.execute(f"ALTER TABLE remediation_evidence ADD COLUMN {column} TEXT")
+    for column in ("observed_revision", "confirmed_at", "confirmed_by"):
+        if column not in _table_columns(connection, "remediation_environment_leases"):
+            connection.execute(f"ALTER TABLE remediation_environment_leases ADD COLUMN {column} TEXT")
     if "worktree_branch" not in _table_columns(connection, "remediation_cases"):
         connection.execute("ALTER TABLE remediation_cases ADD COLUMN worktree_branch TEXT")
     if "baseline_json" not in _table_columns(connection, "remediation_cases"):

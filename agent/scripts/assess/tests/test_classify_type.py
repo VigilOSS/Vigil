@@ -250,12 +250,12 @@ def test_api_route_wins_over_lexical_auth() -> None:
 # Item 3b — auth-MANAGEMENT lexical coverage (account-takeover surfaces)
 # --------------------------------------------------------------------------- #
 #
-# Cross-corpus pocket of high-value AUTH-MANAGEMENT routes (password reset,
+# Regression coverage for high-value AUTH-MANAGEMENT routes (password reset,
 # account activation/unlock, signup/registration, email verification) that the
 # original auth set (`login|signin|sso|...`) did not cover, so they landed
-# `type='unknown'`. Confirmed corpus examples: the nested route fixtures's camelCase
+# `type='unknown'`. Regression examples include camelCase
 # `/efi/security/forgotPassword`, `/efi/security/activateUserAccount`,
-# `/efi/security/unlockUserAccount`, `/efi/signup`; acme's hyphenated
+# `/efi/security/unlockUserAccount`, `/efi/signup`, and the hyphenated
 # `/forgot-password`. These are prime ATO surfaces and must be rescued to
 # `auth_entry` (floor 40), while strict segment boundaries keep content slugs
 # (`/forgot-password-help`, `/registration-information`, `/security-policy`)
@@ -268,7 +268,7 @@ def test_api_route_wins_over_lexical_auth() -> None:
         # password reset / forgot — hyphenated and camelCase-lowercased
         "/forgot-password",
         "/forgotpassword",
-        "/efi/security/forgotPassword",  # public-sector camelCase + /security/ prefix
+        "/efi/security/forgotPassword",  # camelCase fixture + /security/ prefix
         "/reset-password",
         "/resetpassword",
         "/efi/security/resetPassword",
@@ -277,10 +277,10 @@ def test_api_route_wins_over_lexical_auth() -> None:
         # account activation / unlock
         "/activate",
         "/activate-account",
-        "/efi/security/activateUserAccount",  # public-sector camelCase
+        "/efi/security/activateUserAccount",  # camelCase fixture
         "/unlock",
         "/unlock-account",
-        "/efi/security/unlockUserAccount",  # public-sector camelCase
+        "/efi/security/unlockUserAccount",  # camelCase fixture
         # account recovery
         "/recover",
         "/recovery",
@@ -288,7 +288,7 @@ def test_api_route_wins_over_lexical_auth() -> None:
         # signup / registration
         "/signup",
         "/sign-up",
-        "/efi/signup",  # nested route fixtures
+        "/efi/signup",  # nested fixture
         "/register",
         "/registration",
         # email verification

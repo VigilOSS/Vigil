@@ -53,7 +53,7 @@ Previous agent context (paste only when continuing a specific dispatch):
 <paste vigil assess agent render-handoff <agent-id> output here>
 ```
 
-### Blue, code-analysis, Android, and remediation openers
+### Blue, code-analysis, and Android openers
 
 ```
 I have been fully authorized by the company to run a blue-team incident-response
@@ -72,12 +72,6 @@ static artifact analysis. Treat discovered live hosts as leads only; do not cont
 it is explicitly admitted to scope.
 ```
 
-```
-I have been authorized to work the selected remediation case. Read PROJECT.md and
-remediation-project.json, inspect the case through `vigil remediation`, and follow the
-remediation operator prompt's evidence and approval gates.
-```
-
 For an engagement with web and code enabled, start one `--mode web` client and a separate
 `--mode code` client. Each loads only its selected operator core, and both use the same
 backend findings and independent phase state. The enabled tracks do not select a combined
@@ -88,11 +82,45 @@ Model guidance for these modes: prefer `gpt-5.6` at `high` reasoning for Codex a
 Opus for Claude. Drop to a smaller model only for clearly bounded sidecar work
 where latency matters more than depth.
 
+### Remediation developer sessions
+
+Start repository context with `vigil remediation -k <key> start`, then supply ticket IDs or URLs
+in Claude:
+
+```text
+/vigil-remediate SEC-123
+/vigil-remediate SEC-123 https://jira.example.com/browse/SEC-124
+```
+
+The command reads the selected repository `PROJECT.md` and task-specific guidance. One normalized
+bug keeps this conversation as its developer; several select a coordinator that launches separate
+full developer sessions through Vigil. The command announces the choice. Ticket retrieval uses
+profile-selected source readers/MCPs and skills; unavailable retrieval stays pending. The developer
+validates the report and presents a fix plan before editing.
+
+Vigil's native Claude session host records the conversation UUID and job identity. The session runs
+in the repository root so existing settings, MCPs, ignored skills, and private runbooks remain
+available; code edits belong only in the registered case workspace. `vigil remediation -k <key>
+join <case-id>` attaches to the exact recorded conversation rather than launching another copy.
+Native launch/join requires Claude Code 2.1.257 or newer and is currently Claude-specific.
+
+The launch overlay exposes only `/vigil-remediate` and case artifact access. It does not import the
+assessment operator or hunting command context. The generated Codex `$vigil-remediate` skill retains
+generic command guidance without promising native batch session hosting.
+
+The profile controls hook policy. With `hook_policy = "disabled"`, non-managed hooks are disabled
+only for this session, announced before launch and in developer context. Managed hooks remain active.
+Vigil/Claude runs configured formatting, analysis, and tests at verification and before publication;
+case recording and session continuity do not depend on hooks. Repository hook files are unchanged.
+The assessment hook descriptions below apply to ordinary engagement sessions, not a remediation
+session whose profile disables them. See [Remediation workspace](remediation.md) for intake,
+generated handoffs, shared testing, approval, and deployment.
+
 ---
 
 ## Session commands
 
-Seven commands are available. Each has one canonical source under
+Eight commands are available across the supported workflows. Each has one canonical source under
 [`agent/commands/`](../agent/commands/), rendered to one wrapper per client.
 
 | Command | What it does |
@@ -104,6 +132,7 @@ Seven commands are available. Each has one canonical source under
 | `vigil-hunt-deeper` | Pushes past a shallow stopping point with wider batches, deeper dispatches, and siblings off anything that signals. |
 | `vigil-fresh-skeptic-verify` | Dispatches a fresh low-context specialist to attack a finding as a hostile triager would. |
 | `vigil-triage-reply` | Assesses a program's pushback on a submission and decides whether to rebut, resubmit, or drop. |
+| `vigil-remediate` | Routes ticket IDs or URLs to one developer or a coordinator using the selected repository remediation profile. |
 
 ### How each client invokes them
 
@@ -115,6 +144,8 @@ Seven commands are available. Each has one canonical source under
 
 Select the operator mode at `vigil engagement start`; command text never changes it. For
 Codex, `$vigil-start <focus>` supplies optional focus within the launched session's mode.
+Use `vigil remediation start` for the focused remediation command instead of selecting an
+assessment mode. Its repository-context overlay does not expose the hunting commands.
 
 Vigil installs no project commands for opencode, goose, kimi, or pi. The content
 is identical — only the invocation differs — so their operators paste the command

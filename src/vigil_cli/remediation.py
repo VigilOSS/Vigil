@@ -3,11 +3,13 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import fcntl
 import hashlib
 import importlib.util
 import json
 import os
 import posixpath
+import re
 import shutil
 import subprocess
 import uuid
@@ -20,18 +22,21 @@ from .engagements import resolve_engagement_path
 from .paths import resolve_orchestrator_base_url
 from .remediation_vcs import adapter as _vcs
 from .remediation_browser import execute as _execute_browse
+from .project_config import project_module
+from .remediation_sessions import register_session_parsers, run_session_command
 
 
 def register_remediation_parser(sub: argparse._SubParsersAction) -> None:
     parser = sub.add_parser("remediation", help="Manage remediation cases in one project engagement")
-    parser.add_argument("--engagement-key", "-k", required=True)
+    parser.add_argument("--engagement-key", "-k")
     commands = parser.add_subparsers(dest="remediation_command", required=True)
+    register_session_parsers(commands)
 
     intake = commands.add_parser(
-        "import", help="Import a Jira issue or bounty report snapshot",
+        "import", help="Import a retrieved ticket or direct report snapshot",
         description="Import a prepared local JSON snapshot and attachments. This command does not fetch Jira or bounty data. Resume a partial import with --resume-case-id.",
     )
-    intake.add_argument("--source", choices=("jira", "bounty"), required=True)
+    intake.add_argument("--source", required=True, help="Actual report provider, or report/manual for direct input")
     intake.add_argument("--source-key", required=True)
     intake.add_argument("--title", required=True)
     intake.add_argument("--snapshot-file", required=True, type=Path)
@@ -48,10 +53,23 @@ def register_remediation_parser(sub: argparse._SubParsersAction) -> None:
     list_cases.add_argument("--json", action="store_true")
     show = commands.add_parser("show", help="Show case and review state")
     show.add_argument("case_id")
+    handoff_case = commands.add_parser("handoff", help="Render the current case context for its developer")
+    handoff_case.add_argument("case_id")
+    checks = commands.add_parser("checks", help="Execute profile checks against the registered case source")
+    checks.add_argument("case_id")
+    checks.add_argument("--actor", required=True)
+    checks.add_argument("--name", action="append", default=[], help="Run a named check; repeatable, defaults to all")
+    checks.add_argument("--shared-environment", help="Acquire exclusive use of the named shared test environment")
+    environment = commands.add_parser("environment", help="Acquire or release shared test-environment ownership")
+    environment.add_argument("action", choices=("acquire", "release"))
+    environment.add_argument("case_id")
+    environment.add_argument("--name", required=True)
+    environment.add_argument("--actor", required=True)
+    environment.add_argument("--token", help="Owning token required for release")
 
     worktree = commands.add_parser("worktree", help="Create a dedicated JJ workspace or Git worktree for a case")
     worktree.add_argument("case_id")
-    worktree.add_argument("--base", default="main")
+    worktree.add_argument("--base", help="Override the profile's integration branch for this case")
     worktree.add_argument("--branch")
 
     sync_revision = commands.add_parser(
@@ -65,6 +83,9 @@ def register_remediation_parser(sub: argparse._SubParsersAction) -> None:
     runtime.add_argument("--compose-file", required=True, type=Path)
     runtime.add_argument("--service", required=True)
     runtime.add_argument("--container-path", required=True, help="Application path inside the service container")
+    runtime.add_argument("--shared-environment")
+    runtime.add_argument("--environment-token")
+    runtime.add_argument("--actor")
 
     evidence = commands.add_parser("evidence", help="Record one evidence run")
     evidence.add_argument("case_id")
@@ -76,7 +97,12 @@ def register_remediation_parser(sub: argparse._SubParsersAction) -> None:
     evidence.add_argument("--proved", required=True)
     evidence.add_argument("--artifact", type=Path)
     evidence.add_argument("--revision")
-    evidence.add_argument("--outcome", choices=("failed_as_expected", "passed"), help="Typed red/green test outcome")
+    evidence.add_argument("--outcome", choices=("failed_as_expected", "passed", "failed", "blocked"))
+    evidence.add_argument("--execution", choices=("executed", "reasoned", "unavailable"), default="executed")
+    evidence.add_argument("--executed-revision")
+    evidence.add_argument("--executed-directory")
+    evidence.add_argument("--shared-environment")
+    evidence.add_argument("--environment-token")
 
     baseline = commands.add_parser(
         "baseline", help="Record runtime reproduction or code/test support and owner decision",
@@ -90,16 +116,18 @@ def register_remediation_parser(sub: argparse._SubParsersAction) -> None:
     baseline.add_argument("--owner-actor")
     baseline.add_argument("--owner-reason")
 
-    plan = commands.add_parser("plan", help="Save a rehearsed human verification brief")
+    plan = commands.add_parser("plan", help="Save human preparation and verification requirements")
     plan.add_argument("case_id")
     plan.add_argument("--file", required=True, type=Path)
+    plan.add_argument("--requirements-file", type=Path, help="JSON list of case-specific verification requirements")
+    plan.add_argument("--alternatives-reason", help="Explain the selected verification methods")
 
     release = commands.add_parser("release-plan", help="Record production canary decision and monitoring")
     release.add_argument("case_id")
     release.add_argument("--production-canary", choices=("required", "not_required", "defer"), required=True)
     release.add_argument("--rationale", required=True)
     release.add_argument("--safe-procedure", default="")
-    release.add_argument("--coralogix-monitoring", required=True)
+    release.add_argument("--monitoring", "--coralogix-monitoring", dest="monitoring", required=True)
 
     approve = commands.add_parser("approve", help="Approve the current code and plan snapshot")
     approve.add_argument("case_id")
@@ -122,7 +150,7 @@ def register_remediation_parser(sub: argparse._SubParsersAction) -> None:
     deployment.add_argument("--environment", choices=("development",), default="development")
     deployment.add_argument("--actor", required=True)
 
-    human = commands.add_parser("human-verification", help="Record the Security Developer's rehearsed procedure result")
+    human = commands.add_parser("human-verification", help="Record the owner's development verification result")
     human.add_argument("case_id")
     human.add_argument("--actor", required=True)
     human.add_argument("--result", choices=("passed", "failed", "blocked"), required=True)
@@ -140,6 +168,8 @@ def register_remediation_parser(sub: argparse._SubParsersAction) -> None:
     stagehand.add_argument("--purpose", choices=("happy-path", "bad-path", "other"), required=True)
     stagehand.add_argument("--production-decision", help="Case owner decision for production Stagehand use")
     stagehand.add_argument("--production-evidence-policy", choices=("retain-screenshots", "no-screenshots"), help="Case-specific production screenshot retention decision")
+    stagehand.add_argument("--shared-environment")
+    stagehand.add_argument("--environment-token")
 
     browser = commands.add_parser(
         "browser", help="Run a trusted browser UI rehearsal and retain evidence",
@@ -153,6 +183,8 @@ def register_remediation_parser(sub: argparse._SubParsersAction) -> None:
     browser.add_argument("--purpose", choices=("happy-path", "bad-path", "other"), required=True)
     browser.add_argument("--production-decision")
     browser.add_argument("--production-evidence-policy", choices=("retain-screenshots", "no-screenshots"))
+    browser.add_argument("--shared-environment")
+    browser.add_argument("--environment-token")
 
     draft = commands.add_parser(
         "prepare-pr", help="Generate draft PR content after review approval",
@@ -162,15 +194,26 @@ def register_remediation_parser(sub: argparse._SubParsersAction) -> None:
     draft.add_argument("--output", required=True, type=Path)
     draft.add_argument("--root-cause", required=True, help="Concrete root cause found in the reviewed diff")
     draft.add_argument("--fix-summary", required=True, help="Concrete code change and security boundary restored")
+    draft.add_argument("--body-file", type=Path, help="Body authored using the profile's template and writing guidance")
 
     create_pr = commands.add_parser(
-        "create-pr", help="Push approved branch and open draft PR against main",
-        description="Requires current approval, a template-mapped body, a final canary decision, origin remote, and authenticated gh. Push the exact approved case bookmark with JJ when .jj exists, otherwise the Git branch; open a draft against main. Retry with the same body to reconcile an existing draft after a partial failure.",
+        "create-pr", help="Push approved branch and open a draft PR against the case base",
+        description="Requires current approval, a template-mapped body, a final canary decision, origin remote, and authenticated gh. Push the exact approved Git/JJ revision against the captured case base. Retry after partial failure to reconcile the existing draft.",
     )
     create_pr.add_argument("case_id")
     create_pr.add_argument("--body-file", required=True, type=Path, help="Final body mapped to the repository PR template")
     create_pr.add_argument("--actor", required=True)
     create_pr.add_argument("--template-mapped", action="store_true", help="Assert final body maps required content to the actual repository PR template")
+    create_pr.add_argument("--update", action="store_true", help="Publish a requested revision to the same draft PR")
+    create_pr.add_argument("--owner-instruction", help="Explicit request to publish the requested PR update")
+    create_pr.add_argument("--title", help="Title authored using the profile's repository conventions")
+    deploy = commands.add_parser("deployment-run", help="Trigger the profile's development workflow after owner consent")
+    deploy.add_argument("case_id")
+    deploy.add_argument("--actor", required=True)
+    deploy.add_argument("--owner-instruction", required=True, help="Explicit instruction approving this development deployment")
+    deploy.add_argument("--input", action="append", default=[], help="Approved workflow input KEY=VALUE; repeatable")
+    deploy.add_argument("--additional-tests-decision", choices=("run", "skip"), help="Owner's explicit choice about optional additional test suites")
+    deploy.add_argument("--new-request", action="store_true", help="Explicitly request another deployment instead of reconciling a previous attempt")
 
     handoff = commands.add_parser(
         "development-handoff", help="Prepare manual GitHub Actions development deployment",
@@ -192,6 +235,18 @@ def _project(install_root: Path, key: str) -> tuple[Path, dict[str, object]]:
     except (OSError, ValueError) as exc:
         raise SystemExit(f"cannot read remediation PROJECT.md: {exc}") from exc
     return path, config
+
+
+def _policy(config: dict[str, object]) -> dict:
+    policy = config.get("remediation", {})
+    if not isinstance(policy, dict):
+        raise SystemExit("remediation policy must be a table in PROJECT.md")
+    return policy
+
+
+def _case_config(case: dict, live: dict) -> dict:
+    recorded = case.get("review_policy")
+    return recorded if isinstance(recorded, dict) and recorded.get("repository") else live
 
 
 def _api(install_root: Path, eng_dir: Path, key: str, method: str, suffix: str, payload: dict | None = None) -> object:
@@ -376,20 +431,19 @@ def _approved_digest(case: dict) -> str:
     return digest
 
 
-def _github_repository(worktree: Path) -> str | None:
+def _github_repository(worktree: Path) -> str:
     adapter = _vcs()
-    if not adapter.is_jj(worktree):
-        return None
     try:
         return adapter.github_repository(worktree)
     except (OSError, ValueError, subprocess.SubprocessError) as error:
-        raise SystemExit(f"cannot resolve GitHub repository from JJ origin: {error}") from None
+        raise SystemExit(f"cannot resolve GitHub repository from the publishing origin: {error}") from None
 
 
-def _existing_draft_pr(worktree: Path, branch: str, body: str, *, repository: str | None = None) -> str | None:
+def _existing_draft_pr(worktree: Path, branch: str, body: str, *, repository: str | None = None,
+                       base_branch: str = "main", allow_update: bool = False) -> str | None:
     repository = repository or _github_repository(worktree)
     listed = subprocess.run(
-        ["gh", "pr", "list", "--head", branch, "--base", "main", "--state", "all",
+        ["gh", "pr", "list", "--head", branch, "--base", base_branch, "--state", "all",
          "--json", "url,state,isDraft,headRefName,baseRefName,headRefOid,body", *(["--repo", repository] if repository else [])],
         cwd=worktree, text=True, capture_output=True,
     )
@@ -398,7 +452,7 @@ def _existing_draft_pr(worktree: Path, branch: str, body: str, *, repository: st
     rows = json.loads(listed.stdout)
     if not isinstance(rows, list):
         raise SystemExit("GitHub returned an invalid pull request listing")
-    matches = [row for row in rows if isinstance(row, dict) and row.get("headRefName") == branch and row.get("baseRefName") == "main"]
+    matches = [row for row in rows if isinstance(row, dict) and row.get("headRefName") == branch and row.get("baseRefName") == base_branch]
     if len(matches) > 1:
         raise SystemExit("multiple pull requests already use this branch; inspect manually")
     if not matches:
@@ -406,9 +460,9 @@ def _existing_draft_pr(worktree: Path, branch: str, body: str, *, repository: st
     row = matches[0]
     if row.get("state") != "OPEN" or row.get("isDraft") is not True or not row.get("url"):
         raise SystemExit("an existing pull request for this branch is not an open draft")
-    if row.get("headRefOid") != _revision(worktree):
+    if not allow_update and row.get("headRefOid") != _revision(worktree):
         raise SystemExit("draft PR head revision differs from the approved case worktree; inspect the remote branch before retrying")
-    if row.get("body") != body:
+    if not allow_update and row.get("body") != body:
         raise SystemExit("draft PR body differs from the reviewed PR content; inspect the draft before retrying")
     return str(row["url"])
 
@@ -434,6 +488,14 @@ def _required_reviewed_evidence_lines(case: dict) -> list[str]:
     approvals = case.get("approvals") or []
     cutoff = int(approvals[-1].get("evidence_cutoff_id") or 0) if approvals else 0
     evidence = [row for row in case.get("evidence") or [] if isinstance(row, dict) and int(row.get("id") or 0) <= cutoff]
+    plan = case.get("verification_requirements")
+    if plan:
+        requirements = plan.get("requirements", []) if isinstance(plan, dict) else plan
+        required = {row["kind"] for row in requirements}
+        if not required.issubset({row.get("kind") for row in evidence}):
+            raise SystemExit("reviewed case-specific verification evidence is missing")
+        lines = _reviewed_evidence_lines(case)
+        return [line for line, row in zip(lines, evidence) if row.get("kind") in required]
     required = {"red-test", "green-test"}
     kinds = {str(row.get("kind")) for row in evidence}
     if not required.issubset(kinds) or not kinds.intersection({"stagehand", "browse"}):
@@ -557,14 +619,26 @@ async def _execute_stagehand(script: Path, output: Path, config: dict[str, objec
 
 def _run_stagehand(install_root: Path, eng_dir: Path, key: str, args: argparse.Namespace, config: dict[str, object]) -> object:
     driver = getattr(args, "driver", "stagehand")
-    if driver == "stagehand":
-        validate_stagehand_config(config, dict(os.environ))
-    validate_production_stagehand_policy(args)
     case_id = args.case_id
     _case_path(case_id)
     case = _case(install_root, eng_dir, key, case_id)
+    config = _case_config(case, config)
+    if driver == "stagehand":
+        validate_stagehand_config(config, dict(os.environ))
+    validate_production_stagehand_policy(args)
     if case.get("status") == "closed":
         raise SystemExit("closed remediation cases cannot accept browser evidence")
+    shared_environment = getattr(args, "shared_environment", None) or _policy(config).get("shared_environment")
+    lease = None
+    if shared_environment:
+        leases = [row for row in case.get("environment_leases", [])
+                  if row.get("environment") == shared_environment and row.get("released_at") is None
+                  and row.get("revision") == args.revision and row.get("observed_revision") == args.revision]
+        if len(leases) != 1:
+            raise SystemExit("acquire the shared environment and confirm its served case revision before browser verification")
+        lease = leases[0]
+        if getattr(args, "environment_token", None) and args.environment_token != lease["token"]:
+            raise SystemExit("browser evidence token differs from the active case environment lease")
     script = args.script.expanduser().resolve(strict=True)
     if not script.is_file() or script.suffix != ".py":
         raise SystemExit("--script must name a Python file")
@@ -583,6 +657,8 @@ def _run_stagehand(install_root: Path, eng_dir: Path, key: str, args: argparse.N
         result["driver"] = driver
         result["purpose"] = args.purpose
         result["environment"] = args.environment
+        if lease:
+            result.update(shared_environment=shared_environment, environment_token=lease["token"])
         if args.production_decision:
             result["production_decision"] = args.production_decision
             result["production_evidence_policy"] = args.production_evidence_policy
@@ -614,6 +690,9 @@ def _register_stagehand_files(install_root: Path, eng_dir: Path, key: str, case_
             "proved": str(result.get("proved") or "See recorded run result; no broader claim"),
             "artifact_path": str(file.relative_to(eng_dir)),
             "revision": revision,
+            "execution": "executed", "executed_revision": revision,
+            "outcome": "passed" if result.get("status") == "passed" else "failed",
+            "shared_environment": result.get("shared_environment"), "environment_token": result.get("environment_token"),
         }))
     return registered
 
@@ -654,15 +733,278 @@ def _register_intake_files(
         })
 
 
+def _engagement_key(args: argparse.Namespace, install_root: Path) -> str:
+    if args.engagement_key:
+        return args.engagement_key
+    if os.environ.get("ENGAGEMENT_KEY"):
+        return os.environ["ENGAGEMENT_KEY"]
+    candidates = []
+    for scope_file in (install_root / "agent/engagements").glob("*/scope.json"):
+        try:
+            if json.loads(scope_file.read_text(encoding="utf-8")).get("engagement_type") == "remediation":
+                candidates.append(scope_file.parent.name)
+        except (OSError, ValueError):
+            continue
+    if len(candidates) == 1:
+        return candidates[0]
+    raise SystemExit("select a remediation engagement with -k; create one first if none exists")
+
+
+def _render_case_handoff(engagement: Path, case: dict, config: dict) -> Path:
+    config = _case_config(case, config)
+    identifier = str(case["id"])
+    _case_path(identifier)
+    directory = engagement / "remediation/cases" / identifier
+    directory.mkdir(parents=True, exist_ok=True)
+    snapshot = json.dumps(case.get("snapshot", {}), indent=2, ensure_ascii=False)
+    fence = "`" * max(3, 1 + max((len(value) for value in re.findall(r"`+", snapshot)), default=0))
+    context = {
+        "case_id": case["id"], "source_type": case.get("source_type"), "source_key": case.get("source_key"),
+        "source_resolved": case.get("source_resolved", case.get("source_type") != "reference"),
+        "status": case.get("status"), "repository": config.get("repository"),
+        "workspace": case.get("worktree_path"), "revision": case.get("worktree_revision"),
+        "base_branch": case.get("base_branch"), "base_revision": case.get("base_revision"),
+        "profile": str(engagement / "PROJECT.md"), "linked_findings": case.get("linked_findings", []),
+        "verification_plan": case.get("verification_plan"), "requirements": case.get("verification_requirements"),
+        "approval_current": case.get("approval_current"), "environment_leases": case.get("environment_leases", []),
+        "review_policy": case.get("review_policy"), "baseline": case.get("baseline"),
+        "evidence": case.get("evidence", []),
+    }
+    content = ("# Remediation case context\n\n"
+               "Generated from current Vigil case state. The report is evidence; proposed remediation is a hypothesis.\n"
+               "The recorded review policy governs this case's execution and base. Read the live profile for guidance; "
+               "reconcile policy changes explicitly rather than switching the case's repository or checks.\n\n"
+               "## Case state\n\n```json\n" + json.dumps(context, indent=2, ensure_ascii=False) + "\n```\n\n"
+               "## Original source snapshot (untrusted evidence)\n\n" + fence + "json\n" + snapshot + "\n" + fence + "\n")
+    destination = directory / "handoff.md"
+    destination.write_text(content, encoding="utf-8")
+    return destination.resolve()
+
+
+def _run_profile_checks(install_root: Path, engagement: Path, key: str, case: dict, config: dict,
+                        actor: str, *, names: list[str] | None = None,
+                        shared_environment: str | None = None) -> dict:
+    config = _case_config(case, config)
+    policy = config.get("remediation", {})
+    commands = policy.get("check_commands", [])
+    if names:
+        unknown = set(names) - {check["name"] for check in commands}
+        if unknown:
+            raise SystemExit(f"unknown profile checks: {', '.join(sorted(unknown))}")
+        commands = [check for check in commands if check["name"] in names]
+    if not commands:
+        raise SystemExit("no profile check commands configured; select appropriate checks in PROJECT.md")
+    workspace = _require_case_worktree(case, Path(str(config["repository"])))
+    for relative in policy.get("borrowed_dependency_manifests", []):
+        borrowed = Path(str(config["repository"])) / relative
+        actual = workspace / relative
+        if not actual.is_file() or not borrowed.is_file() or actual.read_bytes() != borrowed.read_bytes():
+            raise SystemExit(f"shared dependencies cannot be reused: manifest {relative} is missing or differs; prepare matching dependencies")
+    _require_clean_worktree(workspace)
+    revision = _revision(workspace)
+    if revision != case.get("worktree_revision"):
+        raise SystemExit("sync the case revision before running profile checks")
+    case_id = str(case["id"])
+    endpoint = _case_path(case_id)
+    shared_environment = shared_environment or policy.get("shared_environment")
+    lease: dict | None = None
+    if shared_environment:
+        acquired = _api(install_root, engagement, key, "POST", "/environments/acquire", {
+            "environment": shared_environment, "case_id": int(case_id), "revision": revision, "actor": actor,
+        })
+        if not isinstance(acquired, dict) or not acquired.get("token"):
+            raise SystemExit("shared environment acquisition returned no owning token")
+        lease = acquired
+    results = []
+    try:
+        for check in commands:
+            cwd = (workspace / check.get("directory", ".")).resolve()
+            if not cwd.is_dir() or not cwd.is_relative_to(workspace.resolve()):
+                raise SystemExit(f"check directory is missing or outside the case workspace: {cwd}")
+            environment = {**os.environ, "VIGIL_CASE_WORKTREE": str(workspace),
+                           "VIGIL_REPOSITORY": str(config["repository"]), "VIGIL_CASE_REVISION": revision,
+                           "VIGIL_CASE_BASE_REVISION": str(case.get("base_revision") or "")}
+            run = subprocess.run(["/bin/sh", "-c", check["command"]], cwd=cwd, env=environment,
+                                 capture_output=True, text=True)
+            after = _revision(workspace)
+            changed = after != revision or bool(_worktree_status(workspace))
+            passed = run.returncode == 0 and not changed
+            output = engagement / "remediation/cases" / case_id / "checks" / f"{uuid.uuid4().hex}.txt"
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(
+                f"Check: {check['name']}\nCommand: {check['command']}\nDirectory: {cwd}\n"
+                f"Revision: {revision}\nExit code: {run.returncode}\nSource changed: {changed}\n\n"
+                f"stdout:\n{run.stdout}\nstderr:\n{run.stderr}", encoding="utf-8",
+            )
+            evidence = {"kind": "profile-check", "method": check["name"], "environment": "local",
+                        "command": check["command"], "observed": f"exit {run.returncode}; source changed: {changed}",
+                        "proved": "Configured check passed against the recorded source" if passed else "Check did not pass at the recorded source",
+                        "outcome": "passed" if passed else "failed", "revision": revision,
+                        "execution": "executed", "executed_revision": revision, "executed_directory": str(cwd),
+                        "artifact_path": str(output.relative_to(engagement))}
+            if lease:
+                evidence.update(shared_environment=shared_environment, environment_token=lease["token"])
+            _api(install_root, engagement, key, "POST", endpoint + "/evidence", evidence)
+            results.append({"name": check["name"], "outcome": evidence["outcome"], "artifact": str(output)})
+            if not passed:
+                raise SystemExit(f"check {check['name']} failed or changed source; inspect {output}, commit/sync changes, and rerun")
+    finally:
+        if lease and lease.get("created", True):
+            _api(install_root, engagement, key, "POST", "/environments/release", {
+                "environment": shared_environment, "case_id": int(case_id), "token": lease["token"], "actor": actor,
+            })
+    return {"revision": revision, "checks": results}
+
+
+def _validate_pr_template(body: str, config: dict) -> None:
+    template_path = config.get("remediation", {}).get("pr_template")
+    if not template_path:
+        return
+    template = Path(template_path).read_text(encoding="utf-8")
+    preserved = [*re.findall(r"^#{1,6}\s+.+$", template, re.MULTILINE),
+                 *re.findall(r"<!--.*?-->", template, re.DOTALL)]
+    if any(section not in body for section in preserved):
+        raise SystemExit("PR body must preserve the selected template's headings and comments")
+
+
+def _run_deployment(install_root: Path, engagement: Path, key: str, args: argparse.Namespace, config: dict) -> dict:
+    _case_path(args.case_id)
+    directory = engagement / "remediation/cases" / args.case_id / "deployments"
+    directory.mkdir(parents=True, exist_ok=True)
+    # The accepted marker prevents retry dispatch; the lock prevents two callers
+    # from both passing the marker check before either has recorded acceptance.
+    with (directory / ".dispatch.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        return _run_locked_deployment(install_root, engagement, key, args, config)
+
+
+def _run_locked_deployment(install_root: Path, engagement: Path, key: str, args: argparse.Namespace, config: dict) -> dict:
+    instruction = args.owner_instruction.strip()
+    if not instruction:
+        raise SystemExit("development deployment requires the owner's explicit instruction")
+    case = _case(install_root, engagement, key, args.case_id)
+    config = _case_config(case, config)
+    workflow = str(config.get("deployment_workflow") or "")
+    if not workflow:
+        raise SystemExit("select the development workflow through PROJECT.md before deployment")
+    policy = config.get("remediation", {})
+    inputs = dict(policy.get("deployment_inputs", {}))
+    for value in args.input:
+        name, separator, setting = value.partition("=")
+        if not separator or not name.strip():
+            raise SystemExit("workflow inputs must use KEY=VALUE")
+        inputs[name] = setting
+    requested_tests = [name for name in policy.get("deployment_test_inputs", [])
+                       if str(inputs.get(name, "false")).casefold() not in {"false", "", "0", "none"}]
+    if requested_tests and args.additional_tests_decision != "run":
+        if args.additional_tests_decision == "skip":
+            raise SystemExit("the owner chose skip; disable the optional test suite inputs before dispatch")
+        raise SystemExit("ask the owner about the optional test suites and pass --additional-tests-decision run")
+    workspace = _approved_current(case, Path(str(config["repository"])))
+    if case.get("status") not in {"pr_draft", "development"}:
+        raise SystemExit("publish the reviewed draft before development deployment")
+    branch = str(case["worktree_branch"])
+    revision = str(case["worktree_revision"])
+    if _vcs().origin_revision(workspace, branch) != revision:
+        raise SystemExit("the remote branch differs from the approved case revision; do not deploy it")
+    repository = _github_repository(workspace)
+    repo_args = ["--repo", repository] if repository else []
+    listing = ["gh", "run", "list", "--workflow", workflow, "--branch", branch,
+               "--limit", "30", "--json", "databaseId,headSha,event", *repo_args]
+    command = ["gh", "workflow", "run", workflow, "--ref", branch, *repo_args]
+    for name, value in inputs.items():
+        command.extend(["--field", f"{name}={str(value).lower() if isinstance(value, bool) else value}"])
+    request = {"workflow": workflow, "branch": branch, "expected_revision": revision, "run_id": None,
+               "owner_instruction": instruction, "additional_tests_decision": args.additional_tests_decision,
+               "inputs": inputs,
+               "verification": "pending; observe the deployed revision before recording deployment evidence"}
+    identity = hashlib.sha256(json.dumps(request, sort_keys=True).encode()).hexdigest()
+    directory = engagement / "remediation/cases" / str(case["id"]) / "deployments"
+    directory.mkdir(parents=True, exist_ok=True)
+    marker = directory / f"request-{identity}.json"
+    if getattr(args, "new_request", False):
+        marker = directory / f"request-{identity}-{uuid.uuid4().hex}.json"
+    if marker.exists():
+        request = json.loads(marker.read_text(encoding="utf-8"))
+        if request.get("request_state") != "accepted":
+            raise SystemExit(f"previous deployment may already have been dispatched; reconcile {marker} before a --new-request")
+    else:
+        before = subprocess.run(listing, cwd=workspace, capture_output=True, text=True, check=True)
+        request.update(previous_run_ids=[row["databaseId"] for row in json.loads(before.stdout)], request_state="dispatching")
+        marker.write_text(json.dumps(request, indent=2) + "\n", encoding="utf-8")
+        triggered = subprocess.run(command, cwd=workspace, capture_output=True, text=True)
+        request["trigger_output"] = triggered.stdout
+        if triggered.returncode:
+            request.update(request_state="unconfirmed", trigger_error=triggered.stderr)
+            marker.write_text(json.dumps(request, indent=2) + "\n", encoding="utf-8")
+            raise SystemExit(f"workflow dispatch was not confirmed; reconcile {marker}: {triggered.stderr.strip()}")
+        request["request_state"] = "accepted"
+        marker.write_text(json.dumps(request, indent=2) + "\n", encoding="utf-8")
+    previous = set(request.get("previous_run_ids", []))
+    try:
+        after = subprocess.run(listing, cwd=workspace, capture_output=True, text=True, check=True)
+        matches = [row for row in json.loads(after.stdout) if row["databaseId"] not in previous
+                   and row.get("headSha") == revision and row.get("event") == "workflow_dispatch"]
+        request["run_id"] = str(matches[0]["databaseId"]) if len(matches) == 1 else None
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        request["lookup_error"] = str(exc)
+    marker.write_text(json.dumps(request, indent=2) + "\n", encoding="utf-8")
+    artifact = directory / f"accepted-{hashlib.sha256(json.dumps(request, sort_keys=True).encode()).hexdigest()}.json"
+    artifact.write_text(json.dumps(request, indent=2) + "\n", encoding="utf-8")
+    if not any(row.get("artifact_path") == str(artifact.relative_to(engagement)) for row in case.get("evidence", [])):
+        _api(install_root, engagement, key, "POST", _case_path(str(case["id"])) + "/evidence", {
+            "kind": "deployment_request", "method": "github-actions", "environment": "development",
+            "command": json.dumps(command), "observed": request.get("trigger_output", "").strip() or "Workflow dispatch accepted",
+            "proved": "Deployment was requested; served revision is not yet verified",
+            "revision": revision, "artifact_path": str(artifact.relative_to(engagement)),
+        })
+    if case.get("status") == "pr_draft":
+        _api(install_root, engagement, key, "POST", _case_path(str(case["id"])) + "/transition", {
+            "status": "development", "actor": args.actor, "reason": f"Owner-approved development workflow request: {workflow}",
+        })
+    return request
+
+
+def _record_publication(install_root: Path, engagement: Path, key: str, case: dict, url: str, body: str) -> None:
+    publication = {"url": url, "revision": case["worktree_revision"], "branch": case["worktree_branch"],
+                   "base_branch": case.get("base_branch") or "main", "review_digest": _approved_digest(case),
+                   "body_sha256": hashlib.sha256(body.encode()).hexdigest()}
+    encoded = json.dumps(publication, indent=2, sort_keys=True) + "\n"
+    digest = hashlib.sha256(encoded.encode()).hexdigest()
+    path = engagement / "remediation/cases" / str(case["id"]) / "pr" / f"publication-{digest}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(encoded, encoding="utf-8")
+    relative = str(path.relative_to(engagement))
+    if not any(row.get("kind") == "pr_publication" and row.get("artifact_path") == relative for row in case.get("evidence", [])):
+        _api(install_root, engagement, key, "POST", _case_path(str(case["id"])) + "/evidence", {
+            "kind": "pr_publication", "method": "github", "environment": "not_applicable",
+            "command": "create-pr", "observed": f"Verified draft PR: {url}",
+            "proved": "This revision and body were verified on the case's draft PR",
+            "revision": case["worktree_revision"], "artifact_path": relative,
+        })
+
+
 def run_remediation(args: argparse.Namespace, install_root: Path) -> None:
-    key = args.engagement_key
+    key = _engagement_key(args, install_root)
+    args.engagement_key = key
     eng_dir, config = _project(install_root, key)
     cmd = args.remediation_command
+    if cmd in {"start", "route", "session", "join"}:
+        if cmd in {"session", "join"}:
+            config = _case_config(_case(install_root, eng_dir, key, args.case_id), config)
+        def read_case(identifier):
+            case = _case(install_root, eng_dir, key, identifier)
+            _render_case_handoff(eng_dir, case, config)
+            return case
+        code = run_session_command(args, install_root, eng_dir, config, case_reader=read_case)
+        if code:
+            raise SystemExit(code)
+        return
     case_id = getattr(args, "case_id", "")
     endpoint = _case_path(case_id) if case_id else "/cases"
     result: object
     if cmd == "from-finding":
-        payload = {"remediation_engagement_key": key}
+        payload: dict = {"remediation_engagement_key": key}
         if args.title:
             payload["title"] = args.title
         result = _api(install_root, eng_dir, args.finding_engagement, "POST", f"/findings/{quote(args.finding, safe='')}/cases", payload)
@@ -709,6 +1051,26 @@ def run_remediation(args: argparse.Namespace, install_root: Path) -> None:
         result = _api(install_root, eng_dir, key, "GET", "/cases")
     elif cmd == "show":
         result = _case(install_root, eng_dir, key, case_id)
+    elif cmd == "handoff":
+        case = _case(install_root, eng_dir, key, case_id)
+        result = {"path": str(_render_case_handoff(eng_dir, case, config))}
+    elif cmd == "checks":
+        case = _case(install_root, eng_dir, key, case_id)
+        result = _run_profile_checks(install_root, eng_dir, key, case, config, args.actor,
+                                     names=args.name, shared_environment=args.shared_environment)
+    elif cmd == "environment":
+        case = _case(install_root, eng_dir, key, case_id)
+        revision = str(case.get("worktree_revision") or "")
+        if not revision:
+            raise SystemExit("record the case revision before acquiring a shared environment")
+        payload = {"environment": args.name, "case_id": int(case_id), "actor": args.actor}
+        if args.action == "release":
+            if not args.token:
+                raise SystemExit("environment release requires the owning --token")
+            payload["token"] = args.token
+        else:
+            payload["revision"] = revision
+        result = _api(install_root, eng_dir, key, "POST", "/environments/" + args.action, payload)
     elif cmd == "worktree":
         case = _case(install_root, eng_dir, key, case_id)
         if case.get("worktree_path"):
@@ -717,47 +1079,59 @@ def run_remediation(args: argparse.Namespace, install_root: Path) -> None:
         if not repo.is_dir():
             raise SystemExit(f"configured repository is missing: {repo}")
         safe_key = "".join(ch if ch.isalnum() or ch == "-" else "-" for ch in key.lower()).strip("-")
-        branch = args.branch or f"codex/remediation-{safe_key}-{case_id}"
-        path = eng_dir / "remediation" / "cases" / case_id / "worktree"
+        branch = args.branch or f"remediation/{safe_key}-{case_id}"
+        base_branch = args.base or str(config.get("base_branch") or "main")
+        path = project_module(install_root).workspace_path(config, eng_dir / "remediation/cases" / case_id, branch)
         path.parent.mkdir(parents=True, exist_ok=True)
         if path.exists():
             if not path.is_dir():
                 raise SystemExit(f"existing case worktree path is not a directory: {path}")
+            legacy_branch = f"codex/remediation-{safe_key}-{case_id}"
+            if not args.branch and _vcs().branch_matches(path, legacy_branch):
+                branch = legacy_branch
             if not _vcs().branch_matches(path, branch):
                 raise SystemExit("existing case worktree branch differs from requested branch; inspect before retry")
             if not _is_registered_worktree(repo, path):
                 raise SystemExit("existing case worktree is not registered to the configured repository; inspect before retry")
         else:
             try:
-                _vcs().create_workspace(repo, path, branch, args.base)
+                _vcs().create_workspace(repo, path, branch, base_branch)
             except (OSError, ValueError, subprocess.SubprocessError) as error:
                 raise SystemExit(f"worktree creation failed: {error}") from None
         result = _api(install_root, eng_dir, key, "PATCH", endpoint, {
             "worktree_path": str(path), "worktree_branch": branch, "worktree_revision": _revision(path),
+            "base_branch": base_branch, "base_revision": _vcs().review_base(path, base_branch=base_branch),
         })
     elif cmd == "sync-revision":
         case = _case(install_root, eng_dir, key, case_id)
-        worktree = Path(str(case.get("worktree_path") or ""))
-        expected = eng_dir.resolve() / "remediation" / "cases" / case_id / "worktree"
-        if not worktree.is_dir() or worktree.resolve() != expected:
-            raise SystemExit("case worktree is missing or outside its case directory")
-        _require_case_worktree(case, Path(str(config["repository"])))
+        config = _case_config(case, config)
+        if not config.get("repository"):
+            raise SystemExit("case worktree cannot be verified without its configured repository")
+        worktree = _require_case_worktree(case, Path(str(config["repository"])))
         _require_clean_worktree(worktree)
         result = _api(install_root, eng_dir, key, "PATCH", endpoint, {"worktree_revision": _revision(worktree)})
     elif cmd == "runtime-identity":
         case = _case(install_root, eng_dir, key, case_id)
-        worktree = Path(str(case.get("worktree_path") or ""))
-        if not worktree.is_dir():
-            raise SystemExit("case has no local worktree")
+        config = _case_config(case, config)
+        worktree = _require_case_worktree(case, Path(str(config["repository"])))
         result = inspect_compose_identity(worktree, args.compose_file, args.service, args.container_path, str(case.get("worktree_revision") or ""))
+        if getattr(args, "shared_environment", None):
+            if not args.environment_token or not args.actor:
+                raise SystemExit("persisting runtime identity requires --environment-token and --actor")
+            if result.get("status") == "matched":
+                result["lease"] = _api(install_root, eng_dir, key, "POST", "/environments/confirm", {
+                    "environment": args.shared_environment, "case_id": int(case_id),
+                    "token": args.environment_token, "actor": args.actor,
+                    "observed_revision": case["worktree_revision"],
+                })
     elif cmd == "evidence":
         if args.kind in {"red-test", "green-test"}:
             expected_outcome = "failed_as_expected" if args.kind == "red-test" else "passed"
-            if (args.outcome != expected_outcome or args.method.lower() != "laravel"
+            if (args.outcome != expected_outcome
                     or not (args.command or "").strip() or args.artifact is None
                     or not (args.revision or "").strip()):
                 raise SystemExit(
-                    f"{args.kind} requires Laravel method, nonempty command, saved output artifact, --revision, "
+                    f"{args.kind} requires nonempty command, saved output artifact, --revision, "
                     f"and --outcome {expected_outcome}"
                 )
         artifact = None
@@ -772,6 +1146,11 @@ def run_remediation(args: argparse.Namespace, install_root: Path) -> None:
             "environment": args.environment,
             "observed": args.observed, "proved": args.proved,
             "artifact_path": artifact, "revision": args.revision, "outcome": args.outcome,
+            "execution": getattr(args, "execution", "executed"),
+            "executed_revision": getattr(args, "executed_revision", None),
+            "executed_directory": getattr(args, "executed_directory", None),
+            "shared_environment": getattr(args, "shared_environment", None),
+            "environment_token": getattr(args, "environment_token", None),
         })
     elif cmd == "baseline":
         if args.owner_decision and (not args.owner_actor or not args.owner_reason):
@@ -782,9 +1161,11 @@ def run_remediation(args: argparse.Namespace, install_root: Path) -> None:
             "owner_reason": args.owner_reason,
         })
     elif cmd == "plan":
-        result = _api(install_root, eng_dir, key, "PATCH", endpoint + "/verification-plan", {
-            "verification_plan": args.file.expanduser().read_text(encoding="utf-8"),
-        })
+        payload = {"verification_plan": args.file.expanduser().read_text(encoding="utf-8")}
+        if getattr(args, "requirements_file", None):
+            payload["requirements"] = json.loads(args.requirements_file.expanduser().read_text(encoding="utf-8"))
+            payload["alternatives_reason"] = getattr(args, "alternatives_reason", None)
+        result = _api(install_root, eng_dir, key, "PATCH", endpoint + "/verification-plan", payload)
     elif cmd == "release-plan":
         if args.production_canary == "required" and not args.safe_procedure.strip():
             raise SystemExit("a required production canary needs a safe procedure")
@@ -792,10 +1173,11 @@ def run_remediation(args: argparse.Namespace, install_root: Path) -> None:
             "production_canary_decision": args.production_canary,
             "production_canary_rationale": args.rationale,
             "safe_procedure": args.safe_procedure,
-            "coralogix_monitoring": args.coralogix_monitoring,
+            "monitoring": getattr(args, "monitoring", getattr(args, "coralogix_monitoring", "")),
         })
     elif cmd == "approve":
         case = _case(install_root, eng_dir, key, case_id)
+        config = _case_config(case, config)
         worktree = _require_case_worktree(case, Path(str(config["repository"])))
         if _revision(worktree) != str(case.get("worktree_revision") or ""):
             raise SystemExit("case worktree revision must match recorded revision before approval")
@@ -834,8 +1216,20 @@ def run_remediation(args: argparse.Namespace, install_root: Path) -> None:
         result = _run_stagehand(install_root, eng_dir, key, args, config)
     elif cmd == "prepare-pr":
         case = _case(install_root, eng_dir, key, case_id)
+        config = _case_config(case, config)
         _approved_current(case, Path(str(config["repository"])))
-        body = _pr_body(case, config, args.root_cause, args.fix_summary)
+        if getattr(args, "body_file", None):
+            body = args.body_file.expanduser().read_text(encoding="utf-8")
+            _explanation(args.root_cause, "root cause")
+            _explanation(args.fix_summary, "fix summary")
+            _release_plan(case)
+            if not body.strip():
+                raise SystemExit("authored PR body must be nonempty")
+            _validate_pr_template(body, config)
+        else:
+            if _policy(config).get("pr_template"):
+                raise SystemExit("author the body using the profile's template/writing guidance and pass --body-file")
+            body = _pr_body(case, config, args.root_cause, args.fix_summary)
         args.output.expanduser().write_text(body, encoding="utf-8")
         retained = _register_pr_body(install_root, eng_dir, key, case_id, case, body, "prepared")
         content_path = eng_dir / "remediation" / "cases" / case_id / "pr-content.json"
@@ -848,6 +1242,7 @@ def run_remediation(args: argparse.Namespace, install_root: Path) -> None:
         result = {"path": str(args.output.expanduser().resolve()), "case_artifact": str(retained), "review_digest": _approved_digest(case)}
     elif cmd == "create-pr":
         case = _case(install_root, eng_dir, key, case_id)
+        config = _case_config(case, config)
         repo = Path(str(config["repository"]))
         worktree = _approved_current(case, repo)
         if case.get("status") not in {"approved", "pr_draft"}:
@@ -858,6 +1253,7 @@ def run_remediation(args: argparse.Namespace, install_root: Path) -> None:
         if not body_file.is_file() or not body_file.read_text(encoding="utf-8").strip():
             raise SystemExit("--body-file must contain the reviewed PR content")
         body = body_file.read_text(encoding="utf-8")
+        _validate_pr_template(body, config)
         release = _release_plan(case)
         content_path = eng_dir / "remediation" / "cases" / case_id / "pr-content.json"
         if not content_path.is_file():
@@ -866,26 +1262,84 @@ def run_remediation(args: argparse.Namespace, install_root: Path) -> None:
         digest = _approved_digest(case)
         if content.get("approval_digest") != digest:
             raise SystemExit("prepared PR content is bound to a different approval; prepare it again")
-        required = [digest, str(case.get("worktree_revision") or ""),
-                    str(release["production_canary_decision"]), str(release["production_canary_rationale"]),
-                    str(release["coralogix_monitoring"]),
-                    _explanation(str(content.get("root_cause") or ""), "root cause"),
-                    _explanation(str(content.get("fix_summary") or ""), "fix summary")]
-        required.append(str(case.get("verification_plan") or ""))
-        required.extend(_required_reviewed_evidence_lines(case))
-        if release["production_canary_decision"] == "required":
-            required.append(str(release["safe_procedure"]))
-        if any(not item or item not in body for item in required):
-            raise SystemExit("final PR body is missing reviewed plan, evidence, code explanation, revision, digest, or canary details")
+        explanations = [_explanation(str(content.get("root_cause") or ""), "root cause"),
+                        _explanation(str(content.get("fix_summary") or ""), "fix summary")]
+        if not case.get("verification_requirements"):
+            required = [digest, str(case.get("worktree_revision") or ""),
+                        str(release["production_canary_decision"]), str(release["production_canary_rationale"]),
+                        str(release["monitoring"]), *explanations, str(case.get("verification_plan") or ""),
+                        *_required_reviewed_evidence_lines(case)]
+            if release["production_canary_decision"] == "required":
+                required.append(str(release["safe_procedure"]))
+            if any(not item or item not in body for item in required):
+                raise SystemExit("final PR body is missing reviewed plan, evidence, code explanation, revision, digest, or canary details")
+        elif any(explanation not in body for explanation in explanations):
+            raise SystemExit("final PR body must include the prepared root cause and fix explanation")
+        if _policy(config).get("check_commands"):
+            _run_profile_checks(install_root, eng_dir, key, case, config, args.actor)
+            case = _case(install_root, eng_dir, key, case_id)
+            _approved_current(case, repo)
         branch = str(case["worktree_branch"])
-        if branch == "main":
+        base_branch = str(case.get("base_branch") or config.get("base_branch") or "main")
+        if branch == base_branch:
             raise SystemExit("case worktree must be on a dedicated branch")
         github_repository = _github_repository(worktree)
         retained_final = _register_pr_body(install_root, eng_dir, key, case_id, case, body, "final")
-        url = _existing_draft_pr(worktree, branch, body, repository=github_repository)
-        if case.get("status") == "pr_draft":
+        update = getattr(args, "update", False)
+        if update and not (getattr(args, "owner_instruction", "") or "").strip():
+            raise SystemExit("PR updates require the owner's explicit --owner-instruction to publish")
+        options: dict = {"repository": github_repository}
+        if base_branch != "main":
+            options["base_branch"] = base_branch
+        if update:
+            options["allow_update"] = True
+        url = _existing_draft_pr(worktree, branch, body, **options)
+        if update:
+            if not url:
+                raise SystemExit("no existing open draft PR to update; use initial create-pr instead")
+            remote = subprocess.run(["gh", "pr", "view", url, "--json", "headRefOid", "--jq", ".headRefOid"],
+                                    cwd=worktree, text=True, capture_output=True, check=True)
+            publications = [row for row in case.get("evidence", []) if row.get("kind") == "pr_publication" and row.get("method") == "github"]
+            if not publications:
+                raise SystemExit("this case has no recorded published revision; reconcile the existing PR before updating")
+            published = max(publications, key=lambda row: int(row["id"]))["revision"]
+            intent = {"url": url, "previous_revision": published, "target_revision": case["worktree_revision"],
+                      "owner_instruction": args.owner_instruction}
+            intent_directory = eng_dir / "remediation/cases" / case_id / "pr"
+            intent_directory.mkdir(parents=True, exist_ok=True)
+            previous_intents = [json.loads(path.read_text(encoding="utf-8")) for path in intent_directory.glob("update-intent-*.json")]
+            own_partial_push = remote.stdout.strip() == case["worktree_revision"] and any(
+                row.get("url") == url and row.get("previous_revision") == published
+                and row.get("target_revision") == case["worktree_revision"] for row in previous_intents)
+            if remote.stdout.strip() != published and not own_partial_push:
+                raise SystemExit("remote PR changed since Vigil's last publication; review and reconcile those changes before updating")
+            _approved_current(case, repo)
+            if not own_partial_push:
+                intent_path = intent_directory / f"update-intent-{hashlib.sha256(json.dumps(intent, sort_keys=True).encode()).hexdigest()}.json"
+                intent_path.write_text(json.dumps(intent, indent=2) + "\n", encoding="utf-8")
+                _vcs().push(worktree, branch, str(case["worktree_revision"]), expected_remote_revision=published)
+            edited = subprocess.run(["gh", "pr", "edit", url, "--body-file", str(body_file)],
+                                    cwd=worktree, text=True, capture_output=True)
+            if edited.returncode:
+                raise SystemExit(f"code pushed, but PR body update failed; reconcile {url}: {edited.stderr.strip()}")
+            if _existing_draft_pr(worktree, branch, body, repository=github_repository, base_branch=base_branch) != url:
+                raise SystemExit("updated PR revision or body could not be confirmed; reconcile the existing PR")
+            _record_publication(install_root, eng_dir, key, case, url, body)
+            _api(install_root, eng_dir, key, "POST", endpoint + "/evidence", {
+                "kind": "pr_update", "method": "github", "environment": "not_applicable",
+                "command": "create-pr --update", "observed": f"Updated draft PR: {url}",
+                "proved": args.owner_instruction, "revision": case["worktree_revision"],
+                "artifact_path": str(retained_final.relative_to(eng_dir)),
+            })
+            if case.get("status") == "approved":
+                _api(install_root, eng_dir, key, "POST", endpoint + "/transition", {
+                    "status": "pr_draft", "actor": args.actor, "reason": f"Updated draft PR: {url}",
+                })
+            result = {"pull_request": url, "case_artifact": str(retained_final), "transition": "updated"}
+        elif case.get("status") == "pr_draft":
             if not url:
                 raise SystemExit("case claims draft PR state, but no open draft PR exists for its branch")
+            _record_publication(install_root, eng_dir, key, case, url, body)
             result = {"pull_request": url, "case_artifact": str(retained_final), "transition": "already_recorded"}
         else:
             if not url:
@@ -895,16 +1349,17 @@ def run_remediation(args: argparse.Namespace, install_root: Path) -> None:
                 except (OSError, ValueError, subprocess.SubprocessError) as error:
                     raise SystemExit(f"branch push failed: {error}") from None
                 opened = subprocess.run([
-                    "gh", "pr", "create", "--draft", "--base", "main", "--head", branch,
-                    "--title", str(case.get("title") or f"Remediate case {case_id}"),
+                    "gh", "pr", "create", "--draft", "--base", base_branch, "--head", branch,
+                    "--title", getattr(args, "title", None) or str(case.get("title") or f"Remediate case {case_id}"),
                     "--body-file", str(body_file), *(["--repo", github_repository] if github_repository else []),
                 ], cwd=worktree, text=True, capture_output=True)
-                url = _existing_draft_pr(worktree, branch, body, repository=github_repository)
+                url = _existing_draft_pr(worktree, branch, body, **options)
                 if not url:
                     raise SystemExit(opened.stderr.strip() or "draft PR head revision could not be confirmed; retry create-pr after checking the remote branch")
                 if opened.returncode == 0 and opened.stdout.strip() != url:
                     raise SystemExit("created draft PR URL differs from the branch's verified draft; inspect before retrying")
             _approved_current(case, repo)
+            _record_publication(install_root, eng_dir, key, case, url, body)
             try:
                 transition_result = _api(install_root, eng_dir, key, "POST", endpoint + "/transition", {
                     "status": "pr_draft", "actor": args.actor, "reason": f"Draft PR: {url}",
@@ -915,8 +1370,11 @@ def run_remediation(args: argparse.Namespace, install_root: Path) -> None:
                     "Retry create-pr with the same body file to reconcile it."
                 ) from exc
             result = {"pull_request": url, "case_artifact": str(retained_final), "transition": transition_result}
+    elif cmd == "deployment-run":
+        result = _run_deployment(install_root, eng_dir, key, args, config)
     elif cmd == "development-handoff":
         case = _case(install_root, eng_dir, key, case_id)
+        config = _case_config(case, config)
         _approved_current(case, Path(str(config["repository"])))
         workflow = str(config.get("deployment_workflow") or "")
         if not workflow:
@@ -929,6 +1387,8 @@ def run_remediation(args: argparse.Namespace, install_root: Path) -> None:
         result = {"workflow": workflow, "expected_revision": case["worktree_revision"], "action": "Human triggers the existing GitHub Actions development deployment and records run ID and observed revision", "transition": transition_result}
     else:
         raise SystemExit(f"unknown remediation command: {cmd}")
+    if cmd in {"import", "from-finding"} and isinstance(result, dict) and result.get("id"):
+        result["handoff_path"] = str(_render_case_handoff(eng_dir, result, config))
     print(json.dumps(result, indent=2, sort_keys=True))
 
 
@@ -940,6 +1400,16 @@ def _pr_body(case: dict, config: dict[str, object], root_cause: str, fix_summary
     if not str(case.get("verification_plan") or "").strip():
         raise SystemExit("verification plan is required before preparing a PR")
     _required_reviewed_evidence_lines(case)
+    if case.get("verification_requirements"):
+        test_results = "\n".join(
+            f"- {row.get('method')}: {row.get('observed')}"
+            for row in case.get("evidence", []) if row.get("outcome") == "passed"
+            and row.get("revision") == case.get("worktree_revision")
+        )
+        return (f"## Root cause\n\n{root_cause}\n\n## Fix\n\n{fix_summary}\n\n"
+                f"## Verification\n\n{case['verification_plan']}\n\n{test_results}\n\n"
+                f"## Release notes\n\n{release['production_canary_rationale']}\n"
+                f"{release['safe_procedure']}\n{release['monitoring']}\n")
     evidence_lines = _reviewed_evidence_lines(case)
     evidence_section = "\n".join(evidence_lines) or "- No evidence recorded."
     return (
@@ -975,8 +1445,8 @@ def _release_plan(case: dict) -> dict:
         raise SystemExit("case release plan is required before preparing a PR")
     decision = str(release.get("production_canary_decision") or "")
     rationale = str(release.get("production_canary_rationale") or "").strip()
-    monitoring = str(release.get("coralogix_monitoring") or "").strip()
+    monitoring = str(release.get("monitoring") or release.get("coralogix_monitoring") or "").strip()
     procedure = str(release.get("safe_procedure") or "").strip()
     if decision not in {"required", "not_required"} or not rationale or not monitoring or (decision == "required" and not procedure):
-        raise SystemExit("PR release plan needs a final canary decision, rationale, Coralogix monitoring, and safe procedure when required")
-    return release
+        raise SystemExit("PR release plan needs a final canary decision, rationale, monitoring, and safe procedure when required")
+    return {**release, "monitoring": monitoring, "coralogix_monitoring": monitoring}

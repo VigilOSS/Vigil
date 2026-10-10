@@ -27,7 +27,7 @@ def test_deployment_parser_only_accepts_development(environment: str, capsys: py
 
 
 def test_remediation_engagement_is_case_queue_without_offensive_phase(tmp_path: Path) -> None:
-    repo = tmp_path / "Acme"
+    repo = tmp_path / "acme"
     repo.mkdir()
     subprocess.run(["git", "init", str(repo)], check=True, capture_output=True)
     plan = plan_engagement(
@@ -42,7 +42,7 @@ def test_remediation_engagement_is_case_queue_without_offensive_phase(tmp_path: 
     assert plan.scope["current_phase"] == "intake"
     assert "exploit_policy" not in plan.scope
     assert "cases" in plan.subdirs
-    assert plan.manifest["repos"] == [{"path": str(tmp_path / "Acme"), "name": "Acme"}]
+    assert plan.manifest["repos"] == [{"path": str(tmp_path / "acme"), "name": "acme"}]
 
 
 def test_remediation_engagement_requires_one_local_repo(tmp_path: Path) -> None:
@@ -68,7 +68,7 @@ def test_stagehand_gate_requires_approved_model_and_loopback_browser() -> None:
 
 def test_remediation_project_config_is_saved_in_plan(tmp_path: Path) -> None:
     config = {"development_url": "https://dev.example", "deployment_workflow": "develop.yml"}
-    repo = tmp_path / "Acme"
+    repo = tmp_path / "acme"
     repo.mkdir()
     subprocess.run(["git", "init", str(repo)], check=True, capture_output=True)
     plan = plan_engagement(CreateEngagementOptions(
@@ -464,7 +464,8 @@ def test_worktree_retry_reuses_existing_case_branch(monkeypatch: pytest.MonkeyPa
     args = argparse.Namespace(engagement_key="project", remediation_command="worktree", case_id="3", base="main", branch=None)
     remediation.run_remediation(args, tmp_path)
     assert calls == [{"worktree_path": str(worktree), "worktree_branch": "codex/remediation-project-3",
-                      "worktree_revision": remediation._revision(worktree)}]
+                      "worktree_revision": remediation._revision(worktree), "base_branch": "main",
+                      "base_revision": remediation._revision(worktree)}]
 
 
 def test_worktree_retry_rejects_matching_branch_from_unrelated_repository(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -656,6 +657,8 @@ def test_sync_revision_rejects_foreign_worktree(monkeypatch: pytest.MonkeyPatch,
 
 def test_create_pr_reconciles_existing_draft_without_second_push(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     from vigil_cli import remediation
+    monkeypatch.setattr(remediation, "_github_repository", lambda *_: None)
+    monkeypatch.setattr(remediation, "_record_publication", lambda *_: None)
     import subprocess
 
     eng = tmp_path / "eng"
@@ -729,6 +732,7 @@ def test_create_pr_reconciles_existing_draft_without_second_push(monkeypatch: py
 
 def test_existing_draft_pr_rejects_remote_head_that_differs_from_case_worktree(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     from vigil_cli import remediation
+    monkeypatch.setattr(remediation, "_github_repository", lambda *_: None)
 
     worktree = tmp_path / "worktree"
     worktree.mkdir()
@@ -753,6 +757,8 @@ def test_existing_draft_pr_rejects_remote_head_that_differs_from_case_worktree(m
 
 def test_create_pr_creates_and_verifies_new_draft_before_transition(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     from vigil_cli import remediation
+    monkeypatch.setattr(remediation, "_github_repository", lambda *_: None)
+    monkeypatch.setattr(remediation, "_record_publication", lambda *_: None)
 
     eng = tmp_path / "eng"
     worktree = eng / "remediation/cases/1/worktree"
@@ -790,8 +796,10 @@ def test_create_pr_creates_and_verifies_new_draft_before_transition(monkeypatch:
                      "headRefName": "codex/remediation-1", "baseRefName": "main", "headRefOid": "sha",
                      "body": remote_body["value"]}] if created["value"] else []
             return subprocess.CompletedProcess(command, 0, json.dumps(rows), "")
-        if command[-2:] == ["branch", "--show-current"]:
+        if command[-2:] == ["branch", "--show-current"] or "symbolic-ref" in command:
             return subprocess.CompletedProcess(command, 0, "codex/remediation-1\n", "")
+        if "rev-parse" in command:
+            return subprocess.CompletedProcess(command, 0, "sha\n", "")
         if command[:3] == ["gh", "pr", "create"]:
             created["value"] = True
             return subprocess.CompletedProcess(command, 0, "https://github.com/example/repo/pull/1\n", "")

@@ -87,9 +87,9 @@ describe("App engagement loading", () => {
   });
 
   it("opens a remediation case on its dedicated route", async () => {
-    window.location.hash = "#/remediation/Acme?case=7";
+    window.location.hash = "#/remediation/acme?case=7";
     render(<App />);
-    expect(await screen.findByText("Remediation Acme case 7")).toBeTruthy();
+    expect(await screen.findByText("Remediation acme case 7")).toBeTruthy();
     expect(listEngagements).not.toHaveBeenCalled();
   });
 

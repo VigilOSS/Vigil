@@ -17,7 +17,7 @@ banner, `x-cache: Error from cloudfront`, and no application `x-request-id` is
 evidence that this response was generated at the edge rather than by the application.
 That full conjunction is deployment-specific evidence, not a universal AWS-WAF signature;
 CloudFront/S3 headers by themselves identify infrastructure only. A CloudFront-fronted estate that runs AWS WAF commonly
-enforces a **rate-based rule** 
+enforces a **rate-based rule**
 that trips on request volume from a single source IP within a rolling window, independent of
 payload content — see §C before you conclude a host is "protected everywhere."
 

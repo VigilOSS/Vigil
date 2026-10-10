@@ -5,6 +5,24 @@ versioning follows [Semantic Versioning][semver].
 
 Durable design decisions live in [`docs/adr/`](docs/adr/).
 
+## [Unreleased]
+
+### Added
+
+- Repository-context remediation sessions and `/vigil-remediate` route one ticket
+  to the current developer conversation or several to separate joinable workers.
+- Repository profiles configure source readers, context, Git/JJ workspaces and
+  base branches, automatic checks, hook policy, PR guidance, and deployment inputs.
+- Case handoffs, explicit verification requirements, shared runtime ownership,
+  and served-revision confirmation support native tests and optional browser proof.
+- Reviewed PR updates use recorded publication identity and remote leases;
+  development workflow requests require owner consent and optional-suite choices.
+
+### Fixed
+
+- Working-root installs include the documentation linked by the README. Installed
+  remediation smoke tests now use the actual installer synchronization path.
+
 ## [1.0.0] - 2026-10-09
 
 First public release. Vigil is operator-run offensive-security and incident-response tooling: a

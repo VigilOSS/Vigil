@@ -820,6 +820,11 @@ export type RemediationEvidence = {
   artifact_sha256: string | null;
   created_at?: string;
   revision?: string | null;
+  execution?: "executed" | "reasoned" | "unavailable" | null;
+  executed_revision?: string | null;
+  executed_directory?: string | null;
+  shared_environment?: string | null;
+  runtime_revision?: string | null;
 };
 
 export type RemediationCase = {
@@ -835,6 +840,14 @@ export type RemediationCase = {
   worktree_path: string | null;
   worktree_branch?: string | null;
   worktree_revision: string | null;
+  base_branch?: string | null;
+  base_revision?: string | null;
+  source_resolved?: boolean;
+  review_policy?: Record<string, unknown> | null;
+  verification_requirements?: {
+    requirements: Array<{ kind: string; methods: string[]; outcome: string; revision: "current" | "ancestor"; execution: "executed" | "reasoned"; rationale: string; shared_environment?: string | null; runtime_identity_required?: boolean; browser_purpose?: "happy-path" | "bad-path" | "other" | null; legitimate_use_control?: boolean }>;
+    alternatives_reason: string;
+  } | null;
   verification_plan: string;
   baseline: Partial<RemediationBaseline>;
   release_plan: Partial<RemediationReleasePlan>;
@@ -862,7 +875,8 @@ export type RemediationReleasePlan = {
   production_canary_decision: "required" | "not_required" | "defer";
   production_canary_rationale: string;
   safe_procedure: string;
-  coralogix_monitoring: string;
+  monitoring?: string;
+  coralogix_monitoring?: string;
 };
 
 export type LinkedRemediationFinding = {

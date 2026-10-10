@@ -204,14 +204,28 @@ def branch_matches(path: Path, name: str) -> bool:
         return False
 
 
+def _base_candidates(path: Path, branch: str) -> tuple[str, str]:
+    if is_jj(path):
+        return f'{json.dumps(branch)}@origin', f'bookmarks(exact:{json.dumps(branch)})'
+    return f'refs/remotes/origin/{branch}', f'refs/heads/{branch}'
+
+
 def create_workspace(repo: Path, path: Path, name: str, base: str) -> None:
+    for candidate in _base_candidates(repo, base):
+        try:
+            resolved = resolve_revision(repo, candidate)
+            break
+        except (ValueError, subprocess.CalledProcessError):
+            continue
+    else:
+        raise ValueError(f'Base branch {base!r} is unavailable for workspace creation')
     if is_jj(repo):
         existing = _run(
             command(repo, "bookmark", "list", f"exact:{name}", "-T", 'name ++ "\\n"')
         )
         if existing:
             raise ValueError("Case bookmark already exists")
-        resolved = resolve_revision(repo, base)
+        path.parent.mkdir(parents=True, exist_ok=True)
         # The workspace identifier is independent of the slash-containing bookmark.
         workspace_name = (
             "remediation-"
@@ -231,21 +245,36 @@ def create_workspace(repo: Path, path: Path, name: str, base: str) -> None:
         )
         _run(command(path, "bookmark", "create", name, "-r", "@"))
     else:
-        _run(["git", "-C", str(repo), "worktree", "add", "-b", name, str(path), base])
+        _run(["git", "-C", str(repo), "worktree", "add", "-b", name, str(path), resolved])
 
 
-def push(path: Path, name: str, approved: str) -> None:
+def push(path: Path, name: str, approved: str, *, expected_remote_revision: str | None = None) -> None:
+    if revision(path) != approved or status(path) or not branch_matches(path, name):
+        raise ValueError("Worktree changed after approval")
+    if expected_remote_revision is not None:
+        if origin_revision(path, name) != expected_remote_revision:
+            raise ValueError("The remote branch changed since the recorded pull request revision")
+        if is_jj(path):
+            tracked = resolve_revision(path, f'{json.dumps(name)}@origin')
+            if tracked != expected_remote_revision:
+                raise ValueError("The remote bookmark tracking revision is stale; fetch it before retrying")
     if is_jj(path):
-        if revision(path) != approved or status(path) or not branch_matches(path, name):
-            raise ValueError("Worktree changed after approval")
-        _run(command(path, "bookmark", "move", name, "--to", approved))
+        _run(command(path, "bookmark", "move", f"exact:{name}", "--to", approved, "--allow-backwards"))
+        operation = _run(command(path, "op", "log", "--limit", "1", "--no-graph", "-T", "id"))
+        target = _run(command(path, "--at-operation", operation, "log", "-r",
+                              f"bookmarks(exact:{json.dumps(name)})", "--no-graph", "-T", "commit_id"))
+        if target != approved:
+            raise ValueError("Case bookmark changed after approval")
+        # Pin the operation as well as the commit: a concurrently moved local
+        # bookmark must never change the revision published under this name.
         _run(
             command(
-                path, "git", "push", "--remote", "origin", "--bookmark", f"exact:{name}"
+                path, "--at-operation", operation, "git", "push", "--remote", "origin", "--bookmark", f"exact:{name}"
             )
         )
     else:
-        _run(["git", "-C", str(path), "push", "-u", "origin", name])
+        lease = [f"--force-with-lease=refs/heads/{name}:{expected_remote_revision}"] if expected_remote_revision is not None else []
+        _run(["git", "-C", str(path), "push", *lease, "origin", f"{approved}:refs/heads/{name}"])
 
 
 def ancestor(path: Path, older: str, newer: str) -> bool:
@@ -306,26 +335,36 @@ def untracked(path: Path) -> list[bytes]:
     ).stdout.split(b"\0")
 
 
-def review_base(path: Path) -> str:
+def review_base(path: Path, base_branch: str = "main", base_revision: str | None = None) -> str:
+    if base_revision:
+        base = resolve_revision(path, base_revision)
+        head = revision(path)
+        if base != head and not ancestor(path, base, head):
+            raise ValueError("Stored review base is not an ancestor of the case revision")
+        return base
     if is_jj(path):
-        for candidate in ("main@origin", "main"):
+        for candidate in _base_candidates(path, base_branch):
             try:
-                main = resolve_revision(path, candidate)
-                return _log(path, f"heads(ancestors(@) & ancestors({main}))")
+                base = resolve_revision(path, candidate)
+                return _log(path, f"heads(ancestors(@) & ancestors({base}))")
             except (ValueError, subprocess.CalledProcessError):
                 continue
-        raise ValueError("Main bookmark is unavailable for review")
-    for candidate in ("refs/remotes/origin/main", "refs/heads/main"):
+        raise ValueError(f"Base bookmark {base_branch!r} is unavailable for review")
+    for candidate in _base_candidates(path, base_branch):
         try:
-            resolve_revision(path, candidate)
-            return _run(["git", "-C", str(path), "merge-base", "HEAD", candidate])
+            base = resolve_revision(path, candidate)
+            return _run(["git", "-C", str(path), "merge-base", "HEAD", base])
         except subprocess.CalledProcessError:
             continue
-    raise ValueError("Main branch is unavailable for review")
+    raise ValueError(f"Base branch {base_branch!r} is unavailable for review")
 
 
-def github_repository(path: Path) -> str:
-    """Resolve the exact GitHub host/owner/repository from a JJ origin."""
+def _origin_url(path: Path) -> str:
+    if not is_jj(path):
+        urls = _run(["git", "-C", str(path), "remote", "get-url", "--push", "--all", "origin"]).splitlines()
+        if len(urls) != 1:
+            raise ValueError("Repository requires one origin push URL")
+        return urls[0]
     remotes = _run(command(path, "git", "remote", "list"))
     origins = [
         line.split(maxsplit=1)[1]
@@ -336,7 +375,27 @@ def github_repository(path: Path) -> str:
         raise ValueError(
             "JJ repository requires one origin remote for GitHub pull requests"
         )
-    remote = origins[0]
+    return origins[0]
+
+
+def origin_revision(path: Path, name: str) -> str:
+    """Read exactly the branch on the origin used for publishing."""
+    ref = f"refs/heads/{name}"
+    try:
+        observed = _run(["git", "ls-remote", "--exit-code", "--", _origin_url(path), ref])
+    except subprocess.CalledProcessError as exc:
+        if exc.returncode == 2:
+            raise ValueError(f"The origin branch {name!r} does not exist") from exc
+        raise
+    lines = [line.split() for line in observed.splitlines()]
+    if len(lines) != 1 or len(lines[0]) != 2 or lines[0][1] != ref:
+        raise ValueError(f"The origin branch {name!r} is ambiguous")
+    return lines[0][0]
+
+
+def github_repository(path: Path) -> str:
+    """Resolve the exact GitHub host/owner/repository from the publishing origin."""
+    remote = _origin_url(path)
     if "://" in remote:
         parsed = urlsplit(remote)
         if (

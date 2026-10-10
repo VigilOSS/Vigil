@@ -13,7 +13,7 @@ from .config import get_config_value
 
 DEFAULT_INSTALL_ROOT = Path.home() / "vigil"
 CONFIG_DIR = Path.home() / ".config" / "vigil"
-DEFAULT_SOURCE_REPO = "https://github.com/vigil-oss/vigil.git"
+DEFAULT_SOURCE_REPO = "https://github.com/VigilOSS/Vigil.git"
 SOURCE_CLONE_TIMEOUT_SECONDS = 120
 
 

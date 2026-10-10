@@ -163,6 +163,7 @@ BLUE_AGENT_NAMES=(
 #   ---
 #   name: vigil-resume
 #   description: one line, shown in the client's command picker
+#   clients: claude  # optional; omitted means claude and codex
 #   ---
 #   <shared markdown body>
 #
@@ -192,6 +193,7 @@ COMMAND_NAMES=(
   vigil-hunt-deeper
   vigil-fresh-skeptic-verify
   vigil-triage-reply
+  vigil-remediate
 )
 
 COMMANDS_SRC_DIR="$SOURCE_DIR/commands"
@@ -207,6 +209,13 @@ command_field() {
       if (index($0, key) == 1) { print substr($0, length(key) + 2); exit }
     }
   ' "$src"
+}
+
+# Omitted clients means both supported command surfaces.
+command_supports_client() {
+  local clients
+  clients=$(command_field "$1" clients)
+  [[ -z "$clients" || " ${clients//,/ } " == *" $2 "* ]]
 }
 
 # Canonical body for one client: frontmatter stripped, capability blocks for
@@ -265,6 +274,7 @@ render_claude_command() {
   local name="$1"
   local src="$COMMANDS_SRC_DIR/$name.md"
   [[ -f "$src" ]] || return 0
+  command_supports_client "$src" claude || return 0
   local description out
   description=$(command_field "$src" description)
   out="$CLAUDE_COMMANDS_DIR/$name.md"
@@ -295,6 +305,7 @@ render_codex_skill() {
   local name="$1"
   local src="$COMMANDS_SRC_DIR/$name.md"
   [[ -f "$src" ]] || return 0
+  command_supports_client "$src" codex || return 0
   local description out
   description=$(command_field "$src" description)
   out="$CODEX_SKILLS_DIR/$name/SKILL.md"
@@ -1168,6 +1179,9 @@ check_render_one() {
     local codex_skill_rel=".codex/skills/$command_name/SKILL.md"
     local rel
     for rel in "$claude_command_rel" "$codex_skill_rel"; do
+      if [[ ! -f "$tmp_dir/$rel" ]]; then
+        continue
+      fi
       if [[ ! -f "$source_output_dir/$rel" ]]; then
         printf 'DRIFT (%s): %s missing — expected rendered command not present in repo\n' \
           "$check_type" "$rel" >&2
@@ -1212,7 +1226,7 @@ check_render_one() {
     for rendered in "$COMMANDS_SRC_DIR"/*.md; do
       [[ -e "$rendered" ]] || continue
       orphan_name=$(basename "$rendered" .md)
-      if [[ ! -f "$tmp_dir/.claude/commands/$orphan_name.md" ]]; then
+      if [[ ! -f "$tmp_dir/.claude/commands/$orphan_name.md" && ! -f "$tmp_dir/.codex/skills/$orphan_name/SKILL.md" ]]; then
         printf 'DRIFT (%s): commands/%s.md is not in COMMAND_NAMES — it renders to nothing\n' \
           "$check_type" "$orphan_name" >&2
         drift=1

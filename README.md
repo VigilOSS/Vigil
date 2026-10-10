@@ -8,9 +8,9 @@
 **AI-driven offensive and incident-response engagements — operator prompts, a full Kali runtime, and durable orchestrator state in one CLI.**
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-[![CI](https://github.com/vigil-oss/vigil/actions/workflows/ci.yml/badge.svg)](https://github.com/vigil-oss/vigil/actions/workflows/ci.yml)
+[![CI](https://github.com/VigilOSS/Vigil/actions/workflows/ci.yml/badge.svg)](https://github.com/VigilOSS/Vigil/actions/workflows/ci.yml)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
-[![Version](https://img.shields.io/badge/version-1.0.0-green.svg)](https://github.com/vigil-oss/vigil)
+[![Version](https://img.shields.io/badge/version-1.0.0-green.svg)](https://github.com/VigilOSS/Vigil)
 
 </div>
 
@@ -26,6 +26,30 @@ response.
 > warranty under the [Apache License 2.0](LICENSE); you are responsible for commands, credentials,
 > infrastructure, and target effects. See [SECURITY.md](SECURITY.md) for private vulnerability
 > reporting and the operator-data boundary.
+
+## Models, access, and what I have tested
+
+I have built and refined Vigil primarily around **Claude Code and Codex**. In my testing,
+authorized web red-team engagements have worked with **Claude Opus 5** under Anthropic's
+Cyber Verification Program (CVP) and **GPT-5.6 Sol** with OpenAI's Trusted Access for Cyber.
+Those results reflect the models, clients, and access available in my own setup; blocking can
+vary with your account, access tier, model version, and engagement.
+
+**I have not yet validated Vigil's engagement workflows with Claude Opus 5.5 or GPT-6.1 Sol.**
+As of October 2026, Anthropic calls its defensive CVP tier **Defense Access**; **Red Team Access**
+is a separate tier currently limited to qualifying organizations. OpenAI calls its defensive
+offering **Daybreak Blue**, with **Daybreak Red** requiring separate approval and provisioning.
+Defensive access alone should not be treated as assurance that a web red-team engagement will
+run through without refusals. Check the provider's current terms and the access enabled for your
+specific model and client before starting. See [Anthropic's CVP tiers](https://www.anthropic.com/news/cyber-verification-program)
+and [OpenAI's model and access guidance](https://learn.chatgpt.com/docs/cyber-safety).
+
+I want Vigil to remain practical for independent researchers doing authorized work. As frontier
+model access becomes more restrictive, I plan to broaden support for **GLM 5.3** and other models
+with more predictable access to these workflows. That will take substantial work: reducing
+orchestration overhead, adapting prompts to the models, and refining integrations with **OpenCode**
+and other harnesses. This is planned work; Claude Code and Codex remain the integrations I have
+refined most extensively today.
 
 - **Findings are independently verified.** A finding is confirmed, downgraded, or marked a false
   positive only by a dispatch other than its author's, citing a proof receipt of captured evidence.
@@ -50,9 +74,9 @@ response.
 
 ```bash
 # 1. Install the CLI
-uv tool install --from git+https://github.com/vigil-oss/vigil.git@v1.0.0 vigil
+uv tool install --from git+https://github.com/VigilOSS/Vigil.git@v1.0.0 vigil
 # ...or over SSH, if you authenticate to GitHub with a key
-uv tool install --from git+ssh://git@github.com/vigil-oss/vigil.git@v1.0.0 vigil
+uv tool install --from git+ssh://git@github.com/VigilOSS/Vigil.git@v1.0.0 vigil
 
 # 2. Check the host: prerequisites, missing recon tools, and the ordered setup checklist
 vigil quickstart
@@ -122,6 +146,20 @@ prompts and the mid-session `vigil-*` commands: [`docs/session-commands.md`](doc
 All clients read the same operator prompt. They differ in model, headless specialist dispatch,
 and session-command support; `pi` is available for remediation engagements. Setup per client:
 [`docs/agent-clients.md`](docs/agent-clients.md).
+
+Remediation uses the repository's `PROJECT.md` for ticket readers, MCPs, skills,
+branch/workspace policy, checks, PR guidance, and deployment choices. Open its
+repository-context Claude session with `vigil remediation -k <key> start`, then
+use `/vigil-remediate SEC-123` or supply several ticket IDs/URLs. One bug uses the
+current developer conversation; batches coordinate separate joinable sessions.
+Case code lives in its registered Git/JJ workspace while native project context
+remains at the repository root. See [`docs/remediation.md`](docs/remediation.md).
+
+When the profile selects `hook_policy = "disabled"`, Vigil announces that
+non-managed hooks are disabled only for that remediation session. Required
+formatting, analysis, and tests run explicitly against case source during
+verification and before publishing. Managed policy hooks remain active; ordinary
+sessions and repository hook files are unchanged.
 
 ## Engagement tracks and phases
 

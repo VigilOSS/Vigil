@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
-import hashlib
 from pathlib import Path
 import re
 import subprocess
@@ -17,18 +16,6 @@ APPROVED_NAME = "Vigil OSS Maintainers"
 APPROVED_EMAIL = "vigil.oss@proton.me"
 _ZERO_OID = "0" * 40
 _OID = re.compile(r"^[0-9a-f]{40}$")
-_BANNED_NAME_DIGESTS = {
-    "eaececc3bfbba9c2def506f0596898fd0dd2605722e2665d489930b143a82e4e",
-    "eaececc3bfbba9c2def506f0596898fd0dd2605722e2665d489930b143a82e4e",
-}
-_BANNED_EMAIL_DIGESTS = {
-    "eaececc3bfbba9c2def506f0596898fd0dd2605722e2665d489930b143a82e4e",
-    "eaececc3bfbba9c2def506f0596898fd0dd2605722e2665d489930b143a82e4e",
-    "eaececc3bfbba9c2def506f0596898fd0dd2605722e2665d489930b143a82e4e",
-    "eaececc3bfbba9c2def506f0596898fd0dd2605722e2665d489930b143a82e4e",
-}
-
-
 @dataclass(frozen=True)
 class CommitIdentity:
     oid: str
@@ -38,7 +25,9 @@ class CommitIdentity:
     committer_email: str
 
 
-def identity_errors(records: Iterable[CommitIdentity]) -> list[str]:
+def identity_errors(
+    records: Iterable[CommitIdentity], *, allow_contributors: bool = False
+) -> list[str]:
     errors: list[str] = []
     for record in records:
         identities = (
@@ -46,15 +35,11 @@ def identity_errors(records: Iterable[CommitIdentity]) -> list[str]:
             ("committer", record.committer_name, record.committer_email),
         )
         for role, name, email in identities:
-            name_digest = hashlib.sha256(name.lower().encode()).hexdigest()
-            email_digest = hashlib.sha256(email.lower().encode()).hexdigest()
-            if name_digest in _BANNED_NAME_DIGESTS:
-                errors.append(f"{record.oid}: private {role} name")
-            if email_digest in _BANNED_EMAIL_DIGESTS:
-                errors.append(f"{record.oid}: private {role} email")
-            if name == APPROVED_NAME and email != APPROVED_EMAIL:
+            if allow_contributors and name != APPROVED_NAME:
+                continue
+            if (name, email) != (APPROVED_NAME, APPROVED_EMAIL):
                 errors.append(
-                    f"{record.oid}: {role} {APPROVED_NAME!r} must use {APPROVED_EMAIL!r}"
+                    f"{record.oid}: {role} must use {APPROVED_NAME} <{APPROVED_EMAIL}>"
                 )
     return errors
 
@@ -87,6 +72,15 @@ def _check_local_config() -> list[str]:
         errors.append(f"local user.name must be {APPROVED_NAME!r}, got {configured_name!r}")
     if configured_email != APPROVED_EMAIL:
         errors.append(f"local user.email must be {APPROVED_EMAIL!r}, got {configured_email!r}")
+    expected = f"{APPROVED_NAME} <{APPROVED_EMAIL}>"
+    for role, variable in (("author", "GIT_AUTHOR_IDENT"), ("committer", "GIT_COMMITTER_IDENT")):
+        identity = _run(("git", "var", variable))
+        if identity.rsplit(" ", 2)[0] != expected:
+            errors.append(f"effective Git {role} must be {expected!r}")
+    if (Path.cwd() / ".jj").is_dir():
+        for key, value in (("user.name", APPROVED_NAME), ("user.email", APPROVED_EMAIL)):
+            if _run(("jj", "config", "get", key)) != value:
+                errors.append(f"effective jj {key} must be {value!r}")
     return errors
 
 
@@ -165,6 +159,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     mode.add_argument("--config", action="store_true", help="Check this clone's local identity.")
     mode.add_argument("--pre-push", action="store_true", help="Check refs received on stdin.")
     mode.add_argument("--revision", action="append", help="Audit a revision or revision range.")
+    parser.add_argument("--allow-contributors", action="store_true",
+                        help="Allow contributor attribution in fork and PR history.")
     args = parser.parse_args(argv)
 
     if args.install:
@@ -175,7 +171,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.pre_push:
         revisions = pre_push_revisions(sys.stdin)
         return _print_errors(_check_local_config() + identity_errors(_commit_records(revisions)))
-    return _print_errors(identity_errors(_commit_records(args.revision)))
+    return _print_errors(identity_errors(_commit_records(args.revision), allow_contributors=args.allow_contributors))
 
 
 if __name__ == "__main__":
