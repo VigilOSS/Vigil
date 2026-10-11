@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import json
+import tomllib
 
 import pytest
 
@@ -9,6 +10,7 @@ from vigil_cli import paths
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+RELEASE_VERSION = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text())["project"]["version"]
 
 
 def test_agent_assets_follow_imported_release_not_workspace(tmp_path, monkeypatch):
@@ -352,6 +354,6 @@ def test_doctor_reports_application_identity_and_old_client_restart(tmp_path, mo
         "application": {"root": str(tmp_path / "old"), "version": "1.0.0", "content_sha256": "a" * 64},
     },))
     rows = {row.name: row for row in status.collect_doctor_checks(tmp_path)}
-    assert "version=1.1.0" in rows["application"].detail
+    assert f"version={RELEASE_VERSION}" in rows["application"].detail
     assert rows["client-sessions"].status == "STALE"
     assert "vigil engagement start acme --client codex --mode web" in rows["client-sessions"].detail
