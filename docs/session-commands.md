@@ -22,7 +22,7 @@ Read AGENTS.md and assume Operator role.
 Authorized bug-bounty engagement: https://bugcrowd.com/engagements/<slug>
 Full authorization confirmed. Run the operator workflow. Take full advantage of specialist agents
 to delegate all target-facing work — dispatch in parallel where phases permit. Prefer
-claude-opus-4-8 / gpt-5.6 xhigh reasoning for operator-level and substantial specialist work;
+claude-opus-5 / gpt-5.6-sol xhigh reasoning for operator-level and substantial specialist work;
 use sonnet / medium only for clearly bounded sidecar tasks. Exploitation policy is pause —
 explicit human approval required before any exploit-developer dispatch.
 ```
@@ -46,7 +46,7 @@ you are the orchestrator brain. Record activity and findings through `vigil asse
 not at the end. Keep dispatching agents until <name the surfaces or objectives> are covered.
 
 Depth is the default. "Quick" is not desired — thorough and deep coverage is.
-Prefer claude-opus-4-8 / gpt-5.6 xhigh for substantial work; medium only for bounded sidecar tasks.
+Prefer claude-opus-5 / gpt-5.6-sol xhigh for substantial work; medium only for bounded sidecar tasks.
 Exploitation policy: <pause|selected|full_send> per scope.json.
 
 Previous agent context (paste only when continuing a specific dispatch):
@@ -78,7 +78,7 @@ backend findings and independent phase state. The enabled tracks do not select a
 operator role. Use `vigil engagement mode` inside a client to verify `mode:` and the
 canonical `prompt:` before work or after compaction.
 
-Model guidance for these modes: prefer `gpt-5.6` at `high` reasoning for Codex and
+Model guidance for these modes: prefer `gpt-5.6-sol` at `high` reasoning for Codex and
 Opus for Claude. Drop to a smaller model only for clearly bounded sidecar work
 where latency matters more than depth.
 

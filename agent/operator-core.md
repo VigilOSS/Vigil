@@ -178,9 +178,9 @@ After engagement initialization completes, repeat until all attack paths exhaust
    - Name the action, tool, target, rationale, subagent, and skill that drives the work.
    - In recon, explicitly name which skill each dispatched subagent loads before it begins.
    - Pick the model and reasoning for the dispatch (recorded on the `vigil assess agent start` audit row; the runtime wrapper pins the spawn's actual model):
-     - High-stakes specialist dispatches (exploit chains, deep code review, novel vulnerability hypotheses) — Claude operator/workers: `claude-opus-4-8` at `max` reasoning. Codex operator/workers: `gpt-5.6` at `xhigh` reasoning. (`max` is Claude-only.)
+     - High-stakes specialist dispatches (exploit chains, deep code review, novel vulnerability hypotheses) — Claude operator/workers: `claude-opus-5` at `max` reasoning. Codex operator/workers: `gpt-5.6-sol` at `xhigh` reasoning. (`max` is Claude-only.)
      - Standard specialist work — same model, `high` reasoning.
-     - Bounded sidecar work where latency or cost matters more than depth — drop to `gpt-5.6 medium` or `claude-sonnet-4-6`.
+     - Bounded sidecar work where latency or cost matters more than depth — drop to `gpt-5.6-sol medium` or `claude-sonnet-5`.
      - Evidence-complete per-finding `report-writer` authoring and QA — use `claude-sonnet-5` or `gpt-5.6-terra` at medium reasoning. Escalate when proof, severity, or causality remains contested; the independent reproduction and blind triage keep their stronger reviewer model.
 4. **PRESENT OR PROCEED** — Default to CLI-first human steering with NUMBERED choices when a decision matters. Continue autonomously only when the human explicitly asks for it in the current session.
 5. **SKILLS ARE THE SPECIALIST'S OWN TRIGGER-GATED PROCEDURE** — the specialist loads a skill when it observes the signal that skill is for (a URL/hostname-shaped input → `ssrf-testing`, a JWT on the wire → `jwt-testing`), not because the operator pre-assigned it. Prompts define behavior, skills define procedures, references provide the payload libraries and checklists that make skills actionable.
@@ -391,7 +391,7 @@ Optional fields:
 
 | Field | Values |
 |---|---|
-| `model` | `claude-opus-4-8` / `claude-sonnet-4-6` / `gpt-5.6` / etc. (per the default-model policy in the Core Loop) |
+| `model` | `claude-opus-5` / `claude-sonnet-5` / `gpt-5.6-sol` / etc. (per the default-model policy in the Core Loop) |
 | `reasoning` | `low` / `medium` / `high` / `xhigh` / `max` (`max` is Claude-only; Codex caps at `xhigh`) |
 | `application_unit_id` | (`--application-unit-id` on `agent start`) positive id of the concrete application unit this dispatch targets. Set it on a Phase-4 DEEP dispatch aimed at a `deep_required` unit when the depth ledger should credit that dedicated lane; omit it for multi-unit or non-app-unit work. |
 | `vuln_classes` | (`--vuln-classes` on `agent start`) OPTIONAL comma-list of canonical vuln classes (`vigil assess list-skills --json` / vuln-taxonomy) labeling what this dispatch actually covered, filled in after the fact — never a precondition. The depth ledger's dedicated-dispatch check reads `application_unit_id` plus completion status and probe/finding evidence; it never reads a dispatch's self-declared `vuln_classes` as coverage, so leaving the field unset costs nothing structurally. That check itself is ADVISORY (feeds the EV-ranked ledger, never blocks) — the terminal hard blocks (`depth_unsatisfied_units`, `depth_uncovered_classes` below) are driven entirely by recorded probe/coverage-item evidence, independent of this field. |
@@ -457,7 +457,7 @@ vigil assess agent start-swarm \
     --workers 10 --batch-size 50 \
     --items-file /engagements/$ENGAGEMENT_KEY/scans/exposed-bucket/files.txt \
     --skills code-vulnerability-analysis \
-    --model gpt-5.6 --reasoning low \
+    --model gpt-5.6-sol --reasoning low \
     --no-target-traffic \
     --task "scan batch for hardcoded credentials, API keys, exploitable patterns; record findings as code-vuln-hunter prefix"
 ```
@@ -478,9 +478,9 @@ workers: 10 | batch_size: 50 | mode: swarm | role: code-vuln-hunter
 
 Worked example use cases:
 
-- **Exposed-bucket secret scan.** 500-file corpus → 10 workers × 50 files at `gpt-5.6 low`. Reasoning is `low` because the workload is grep-like pattern matching, not deep analysis.
-- **Large URL coverage sweep.** 2000-URL gau corpus → 20 workers × 100 URLs at `gpt-5.6 medium`, each agent classifying URL shape (admin/api/static/auth) and recording surfaces. Beats one `surface-collector` at iteration cap.
-- **Corpus-scale CWE pattern hunt.** 300-file code repo → 6 workers × 50 files at `gpt-5.6 medium` with `--skills code-vulnerability-analysis`, each agent applying one or two CWE-pattern references.
+- **Exposed-bucket secret scan.** 500-file corpus → 10 workers × 50 files at `gpt-5.6-sol low`. Reasoning is `low` because the workload is grep-like pattern matching, not deep analysis.
+- **Large URL coverage sweep.** 2000-URL gau corpus → 20 workers × 100 URLs at `gpt-5.6-sol medium`, each agent classifying URL shape (admin/api/static/auth) and recording surfaces. Beats one `surface-collector` at iteration cap.
+- **Corpus-scale CWE pattern hunt.** 300-file code repo → 6 workers × 50 files at `gpt-5.6-sol medium` with `--skills code-vulnerability-analysis`, each agent applying one or two CWE-pattern references.
 
 When the swarm completes, the operator queries `vigil assess agent list --filter-role <role> --task-q "[swarm"` to see all worker rows and their `status`/`finding_slugs`, then runs one consolidating dispatch (typically `vulnerability-analyst` or `exploit-developer`) over the union of recorded findings.
 
