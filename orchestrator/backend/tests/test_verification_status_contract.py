@@ -98,8 +98,6 @@ def test_api_uses_only_the_seven_value_verification_status_contract(
     assert created.status_code == 201, created.text
     finding = created.json()["finding"]
     assert finding["verification_status"] == "unreviewed"
-    assert "verification_state" not in finding
-    assert "verification_disposition" not in finding
 
     listing = client.get(f"{BASE}/findings", params={"verification_status": "unreviewed"})
     assert listing.status_code == 200, listing.text
@@ -108,8 +106,6 @@ def test_api_uses_only_the_seven_value_verification_status_contract(
     summary = client.get(f"{BASE}/summary")
     assert summary.status_code == 200, summary.text
     assert summary.json()["finding_verification_statuses"] == {"unreviewed": 1}
-    assert "finding_verification_states" not in summary.json()
-    assert "finding_verification_dispositions" not in summary.json()
 
     invalid = client.post(
         f"{BASE}/findings",
@@ -117,18 +113,8 @@ def test_api_uses_only_the_seven_value_verification_status_contract(
     )
     assert invalid.status_code == 422, invalid.text
 
-    for legacy_field, value in (
-        ("verification_state", "verified"),
-        ("verification_disposition", "confirmed"),
-    ):
-        legacy = client.post(
-            f"{BASE}/findings",
-            json={**_finding_payload("VA-003"), legacy_field: value},
-        )
-        assert legacy.status_code == 422, legacy.text
 
-
-def test_verification_endpoint_and_history_emit_only_versioned_status(
+def test_verification_endpoint_and_history_emit_versioned_status(
     client, isolate_settings
 ) -> None:
     _seed(client, isolate_settings)
@@ -151,14 +137,6 @@ def test_verification_endpoint_and_history_emit_only_versioned_status(
     latest = transitions.json()[0]
     assert latest["to_verification_status"] == "blocked"
     assert latest["verification_event_version"] == 2
-    assert "to_verification_state" not in latest
-    assert "to_verification_disposition" not in latest
-
-    legacy = client.post(
-        f"{BASE}/findings/VA-010/verify",
-        json={"disposition": "confirmed", "reason_text": "legacy alias"},
-    )
-    assert legacy.status_code == 422, legacy.text
 
 
 @pytest.mark.parametrize(

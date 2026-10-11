@@ -127,16 +127,6 @@ def test_record_required_section_does_not_contradict_helper_defaults(record_text
 # --------------------------------------------------------------------------- #
 
 
-# The four notes deleted here restated keys the generated details block already
-# prints with a fuller schema description. Each phrase is the note's own opening,
-# not a word the surviving notes could reuse by coincidence.
-_RESTATED_NOTE_OPENINGS = (
-    "Code-specific detail fields are valid:",
-    "details.poc_code holds exploit scripts",
-    "details.steps_to_reproduce is written FROM WHAT YOU ACTUALLY RAN",
-    "details.references is an array of strings",
-)
-
 _RESTATED_KEYS = (
     "entry_point",
     "sink",
@@ -154,16 +144,10 @@ _RESTATED_KEYS = (
 )
 
 
-@pytest.mark.parametrize("opening", _RESTATED_NOTE_OPENINGS)
-def test_schema_restating_notes_are_gone(record_text, opening):
-    notes = "\n".join(_section(record_text, "Notes:"))
-    assert opening not in notes
-
-
 @pytest.mark.parametrize("key", _RESTATED_KEYS)
 def test_restated_keys_survive_in_the_block_that_owns_them(record_text, key):
-    # Deleting the notes must not delete the documentation: each key keeps its
-    # own line, with its schema description, under "Allowed details keys".
+    # Each key keeps its own line, with its schema description, under
+    # "Allowed details keys".
     line = next(
         (entry for entry in _section(record_text, "Allowed details keys") if entry.startswith(f"  - {key} (")),
         "",

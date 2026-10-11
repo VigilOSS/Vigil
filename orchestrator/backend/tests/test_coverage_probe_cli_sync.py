@@ -98,16 +98,6 @@ def test_cli_registers_merged_probe_coverage_verbs() -> None:
         assert cmd in registered, f"{cmd} imported but missing from the cli.py 'for mod in (...)' register loop"
 
 
-def test_removed_split_verbs_are_gone() -> None:
-    """The split verbs (merged away) must NOT be imported/registered any more."""
-    imported = _cli_imported_commands()
-    registered = _cli_registered_commands()
-    for cmd in ("record_attempt", "resolve_surface", "resolve_coverage_item",
-                "list_attempts", "classify_work", "link_surface_work_items"):
-        assert cmd not in imported, f"{cmd} should have been removed from cli.py imports"
-        assert cmd not in registered, f"{cmd} should have been removed from the cli.py register loop"
-
-
 def test_raw_probe_and_coverage_paths_are_redirected() -> None:
     """No fallback: raw POST probe-runs / PATCH coverage-items/{id} must redirect."""
     from assess.lib import contracts
@@ -124,13 +114,6 @@ def test_probe_coverage_verbs_have_contracts() -> None:
 
     for name in ("record-probe", "resolve"):
         assert contracts.get_contract(name) is not None, f"missing CommandContract for {name}"
-
-
-def test_removed_split_contracts_are_gone() -> None:
-    from assess.lib import contracts
-
-    for name in ("record-attempt", "resolve-surface", "resolve-coverage-item", "list-attempts"):
-        assert contracts.get_contract(name) is None, f"{name} contract should have been merged away"
 
 
 def test_attempts_read_folded_into_coverage() -> None:

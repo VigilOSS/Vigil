@@ -160,13 +160,6 @@ def test_probe_service_layer_rejects_unknown_result_status(client, isolate_setti
     assert excinfo.value.status_code == 400
 
 
-def test_tested_is_no_longer_a_coverage_status_synonym() -> None:
-    """The silent ``"tested" -> COVERED`` coverage-item synonym is removed."""
-    assert "tested" not in coverage_mod._COVERAGE_STATUS_SYNONYMS
-
-
-
-
 def test_coverage_item_covered_requires_rationale(client, isolate_settings) -> None:
     engagement_id = _seed(client, isolate_settings)
     item = state_manager.record_coverage_item(

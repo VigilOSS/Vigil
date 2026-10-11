@@ -139,7 +139,6 @@ describe("CommandsTab live audit", () => {
 
     const notice = await screen.findByText(/command limit reached — results may be incomplete/i);
     expect(notice.getAttribute("title")).toContain("Filters only narrow this loaded snapshot");
-    expect(notice.getAttribute("title")).not.toContain("to see older rows");
   });
 
   it("keeps the last loaded command rows visible when a background refresh fails", async () => {

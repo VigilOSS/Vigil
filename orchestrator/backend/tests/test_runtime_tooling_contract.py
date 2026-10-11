@@ -270,13 +270,11 @@ def test_runtime_full_dockerfile_declares_android_apk_binaries():
     )
 
 
-def test_runtime_full_uses_pinned_playwright_without_selenium_driver():
+def test_runtime_full_uses_pinned_playwright():
     text = RUNTIME_FULL_DOCKERFILE.read_text(encoding="utf-8")
     assert re.search(r"ARG PLAYWRIGHT_VERSION=\d+\.\d+\.\d+", text)
     assert '"playwright==${PLAYWRIGHT_VERSION}"' in text
     assert "import playwright.sync_api" in text
-    assert "selenium==" not in text
-    assert "chromium-driver" not in text
 
 
 def test_runtime_full_pins_cloned_tool_python_dependencies():

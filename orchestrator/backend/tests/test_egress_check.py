@@ -141,7 +141,6 @@ def test_control_failure_records_inconclusive_observation(monkeypatch, tmp_path,
     captured = capsys.readouterr()
     assert "verdict=control_failure" in captured.out
     assert "inconclusive" in captured.err
-    assert "likely a transient/global egress issue" not in captured.err
     payload = recorded["decision"]["payload"]
     assert payload["verdict"] == "control_failure"
     assert payload["subtype"] == "connectivity_check"

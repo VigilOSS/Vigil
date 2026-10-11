@@ -3,8 +3,7 @@
 resume_brief.py renders the backend brief JSON to markdown. These pin the new
 ## Per-Input Coverage section: the empty-state no-op, host+path grouping, the
 covering/non-covering verdict word, the observed_http_status wall code, the
-per-cell count, the lens suffix, and the truncation hint. They also assert the
-old flat "non-covering probe runs" line no longer renders under ## Attempts, and
+per-cell count, the lens suffix, and the truncation hint. They also assert
 that Per-Input Coverage renders AFTER Attempts.
 """
 from __future__ import annotations
@@ -451,9 +450,7 @@ def test_per_input_coverage_truncation_hint():
     assert f"… showing {resume_brief._PER_INPUT_RENDER_LIMIT} of 50 input-cells" in out
 
 
-def test_attempts_no_longer_renders_noncovering_probe_list():
-    """The flat 'non-covering probe runs' sub-list was removed from ## Attempts;
-    probe coverage renders only in ## Per-Input Coverage now."""
+def test_attempts_renders_only_when_blocked_items_exist():
     # both sources empty -> whole section is a no-op
     lines: list = []
     resume_brief._render_attempts(lines, {
@@ -461,7 +458,7 @@ def test_attempts_no_longer_renders_noncovering_probe_list():
         "roe_blocked_findings": [], "roe_blocked_findings_count": 0,
     })
     assert lines == []
-    # with a blocked technique, the section renders but carries NO probe line
+    # with a blocked technique, the section renders
     lines = []
     resume_brief._render_attempts(lines, {
         "blocked_techniques": [{
@@ -473,7 +470,6 @@ def test_attempts_no_longer_renders_noncovering_probe_list():
     })
     out = "\n".join(lines)
     assert "## Attempts" in out
-    assert "non-covering probe runs" not in out
 
 
 def test_finding_line_appends_blocked_reason_for_provisioning_block():

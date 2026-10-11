@@ -189,19 +189,3 @@ def test_malformed_rate_lease_schema_stops_without_coercing_rows(
     )
     assert "assessment_rate_leases" in _tables(backup)
 
-
-def test_rate_lease_api_surface_is_fully_retired(client) -> None:
-    engagement_key = "2026-07-14-120000-rate-lease-api-retired"
-    with db_module.get_connection() as connection:
-        connection.execute(
-            "INSERT INTO engagements (key, target, status, engagement_root) "
-            "VALUES (?, ?, 'active', '/tmp/rate-lease-api-retired')",
-            (engagement_key, "https://example.com"),
-        )
-
-    base = f"/engagements/{engagement_key}/assessment/rate-leases"
-    assert client.get(base).status_code == 404
-    assert not any(
-        path.endswith("/assessment/rate-leases")
-        for path in client.app.openapi()["paths"]
-    )

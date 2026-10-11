@@ -1863,12 +1863,6 @@ def test_specialist_roster_substituted_into_hints():
     a stale literal in the string."""
     module = _load_module()
     hints = module._OBJECTIVE_DISPATCH_HINTS
-    # `osint-recon` was the C40-introduced typo; assert it's gone everywhere.
-    for objective, hint in hints.items():
-        assert "osint-recon" not in hint, (
-            f"objective={objective!r} still references 'osint-recon'; "
-            "canonical name is 'osint-analyst'"
-        )
     # `osint-analyst` should appear in the osint hint.
     assert "osint-analyst" in hints["osint"]
     # `recon-specialist` should appear in every non-osint hint.

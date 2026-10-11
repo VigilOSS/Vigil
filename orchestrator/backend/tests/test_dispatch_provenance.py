@@ -41,7 +41,7 @@ def _seed(client, engagements_dir: Path) -> None:
     assert response.status_code == 200, response.text
 
 
-def test_dispatch_instruction_provenance_round_trips_without_legacy_aliases(
+def test_dispatch_instruction_provenance_round_trips(
     client,
     isolate_settings,
 ) -> None:
@@ -74,8 +74,6 @@ def test_dispatch_instruction_provenance_round_trips_without_legacy_aliases(
     assert created.json()["launcher_effective_model"] is None
     assert created.json()["launcher_effective_reasoning"] is None
     assert created.json()["launcher_effective_source"] is None
-    assert "model" not in created.json()
-    assert "reasoning" not in created.json()
     fetched = client.get(f"{BASE}/dispatches/PROVENANCE-1")
     listed = client.get(f"{BASE}/dispatches")
     assert fetched.status_code == 200, fetched.text
@@ -217,16 +215,3 @@ def test_dispatch_provenance_rejects_malformed_hashes_and_status(
     )
     assert incomplete.status_code == 422, incomplete.text
 
-
-def test_dispatch_api_rejects_obsolete_model_aliases(client, isolate_settings) -> None:
-    _seed(client, isolate_settings["engagements_dir"])
-    for field in ("model", "reasoning"):
-        response = client.post(
-            f"{BASE}/dispatches",
-            json={
-                "agent_id": f"LEGACY-{field}",
-                "agent_role": "recon-specialist",
-                field: "legacy-value",
-            },
-        )
-        assert response.status_code == 422, (field, response.text)

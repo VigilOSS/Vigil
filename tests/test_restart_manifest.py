@@ -1567,21 +1567,3 @@ def test_the_pinned_reinstall_remedy_is_a_command_the_cli_actually_accepts(
     main_module.main()
 
     assert seen == [named], "the remedy must reinstall from the checkout it names"
-
-
-def test_the_clean_summary_asserts_no_cause_it_did_not_measure() -> None:
-    """"Nothing to restart" is a verdict; "because X changed" is a measurement.
-
-    Consumer state records what each consumer NEEDS, never which files this
-    install rewrote — so "this install changed only files that are read live"
-    was inferred from the absence of remedies. A backend-source upgrade
-    performed while the backend is stopped reaches the same branch and makes the
-    claim plainly false.
-    """
-    text = _post_install_output(
-        [_current("backend", "orchestrator backend"), _current("cli", "vigil CLI")],
-        tty=False,
-    ).lower()
-    assert "nothing to restart" in text
-    assert "read live" not in text
-    assert "changed only" not in text

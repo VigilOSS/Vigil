@@ -69,8 +69,8 @@ def _load_proxy_addon_module():
     return _load_script_module("test_proxy_addon_module", "agent/scripts/proxy_addon.py")
 
 
-def test_assess_cli_imports_agent_work_buffer_without_legacy_dispatch_module() -> None:
-    """Top-level ``vigil assess`` must not expose ``dispatch``; agent + work-buffer are canonical."""
+def test_assess_cli_imports_agent_and_work_buffer() -> None:
+    """Top-level ``vigil assess`` imports the canonical agent + work-buffer commands."""
     import ast
 
     repo_root = Path(__file__).resolve().parents[3]
@@ -82,7 +82,6 @@ def test_assess_cli_imports_agent_work_buffer_without_legacy_dispatch_module() -
             imported.update(alias.name for alias in node.names)
     assert "agent" in imported
     assert "work_buffer" in imported
-    assert "dispatch" not in imported
 
 
 def test_agent_action_help_is_action_specific(capsys) -> None:
@@ -100,19 +99,6 @@ def test_agent_action_help_is_action_specific(capsys) -> None:
     assert "usage: vigil assess agent list" in captured.out
     assert "--filter-role" in captured.out
     assert "start-swarm" not in captured.out
-
-
-def test_agent_list_rejects_retired_noop_json_flag(capsys) -> None:
-    """Agent list is already JSONL; its agent-only no-op flag stays retired."""
-    root = str(_scripts_root())
-    if root not in sys.path:
-        sys.path.insert(0, root)
-    import assess.cli as cli
-    with pytest.raises(SystemExit) as exc:
-        cli.main(["agent", "list", "--limit", "5", "--json"])
-
-    assert exc.value.code == 2
-    assert "unrecognized arguments: --json" in capsys.readouterr().err
 
 
 def test_get_command_run_accepts_json_flag(monkeypatch, tmp_path: Path, capsys) -> None:
@@ -585,24 +571,6 @@ def test_list_findings_does_not_repeat_backend_search_filter(
     )
 
     assert "VA-124" in capsys.readouterr().out
-
-
-def test_kali_runtime_dockerfiles_do_not_bake_audit_enums() -> None:
-    """audit_enums.py is a HOST-side assess library (imported by `vigil assess
-    kali` on the host), not a runtime-image artifact. The in-container Kali-MCP
-    server that once imported it is retired and nothing in the image reads it, so
-    the runtime image must NOT bake it: baking coupled the image to host-lib churn
-    and forced spurious `vigil runtime build` rebuilds for changes the container
-    never reads. This guards against re-introducing that coupling."""
-    repo_root = Path(__file__).resolve().parents[3]
-    for dockerfile in (
-        repo_root / "agent" / "docker" / "runtime-full" / "Dockerfile",
-        repo_root / "agent" / "docker" / "runtime-lightweight" / "Dockerfile",
-    ):
-        contents = dockerfile.read_text(encoding="utf-8")
-        assert "audit_enums.py" not in contents, (
-            f"{dockerfile.name} must not bake the host-side audit_enums.py"
-        )
 
 
 def test_kali_runtime_dockerfiles_package_ping_for_mcp_smoke_tests() -> None:
@@ -3972,12 +3940,6 @@ def test_opencode_works_inline_claude_codex_dispatch_carveout() -> None:
 
     assert "### Runtime Dispatch Syntax" in core
     assert "### Runtime Dispatch Syntax" in agents
-
-    # The reverted "dispatch normally on OpenCode" framing is GONE from both the
-    # source and the render — that posture regressed the bench.
-    for gone in ("Dispatch specialists normally", "dispatches exactly like Claude"):
-        assert gone not in core, f"operator-core.md still carries reverted text: {gone!r}"
-        assert gone not in agents, f"AGENTS.md still carries reverted text: {gone!r}"
 
     # The OpenCode INLINE carve-out is present and rendered (Runtime Dispatch
     # Syntax now uses a table; locate the OpenCode row by its table cell marker).

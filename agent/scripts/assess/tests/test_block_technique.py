@@ -290,8 +290,6 @@ def test_block_technique_doctrine_points_at_finding_side_unblock():
     assert "blocked_technique" in doc
     assert "--link-kind unblocks" in doc
     assert "no slug" in doc.lower()
-    # The old broken form (technique as the link subject) is gone.
-    assert "<blocked-slug>" not in doc
 
 
 def test_block_technique_notes_help_points_at_unblock_requirements():

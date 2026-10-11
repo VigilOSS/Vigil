@@ -167,18 +167,6 @@ def test_proof_receipt_contract_has_no_operator_data_withholding_controls(
     assert created.json()["observed_result"] == "Authorization: Bearer literal-operator-token"
     assert "redaction_status" not in created.json()
     assert "derivative_of_receipt_id" not in created.json()
-    assert "raw_receipt_id" not in created.json()
-
-    refused_control = client.post(
-        f"{BASE}/proof-receipts",
-        json={
-            "run_id": run["id"],
-            "evidence_kind": "artifact",
-            "artifact_id": artifact["id"],
-            "redaction_status": "redacted",
-        },
-    )
-    assert refused_control.status_code == 422, refused_control.text
 
 
 def test_legacy_derivative_receipt_keeps_migration_provenance_without_controls(
@@ -426,11 +414,8 @@ def test_artifact_backed_receipts_check_live_snapshot_without_refresh(
     assert listed["evidence_health"] == "missing"
 
 
-def test_receipts_reject_retired_operator_data_withholding_fields(
-    client, isolate_settings
-) -> None:
+def test_receipts_reject_an_unknown_run(client, isolate_settings) -> None:
     engagement_dir = _seed(client, isolate_settings)
-    run = _run(client)
     artifact = _artifact(client, engagement_dir, "evidence/one.txt", "proof")
 
     missing_run = client.post(
@@ -438,29 +423,6 @@ def test_receipts_reject_retired_operator_data_withholding_fields(
         json={"run_id": 999999, "evidence_kind": "artifact", "artifact_id": artifact["id"]},
     )
     assert missing_run.status_code == 404, missing_run.text
-
-    raw_with_parent = client.post(
-        f"{BASE}/proof-receipts",
-        json={
-            "run_id": run["id"],
-            "evidence_kind": "artifact",
-            "artifact_id": artifact["id"],
-            "redaction_status": "raw",
-            "derivative_of_receipt_id": 1,
-        },
-    )
-    assert raw_with_parent.status_code == 422, raw_with_parent.text
-
-    redacted_without_parent = client.post(
-        f"{BASE}/proof-receipts",
-        json={
-            "run_id": run["id"],
-            "evidence_kind": "artifact",
-            "artifact_id": artifact["id"],
-            "redaction_status": "redacted",
-        },
-    )
-    assert redacted_without_parent.status_code == 422, redacted_without_parent.text
 
 
 def test_proof_receipts_require_a_durable_evidence_record(

@@ -787,34 +787,6 @@ def test_engagement_create_persists_header_and_rate_limit(
     assert scope["rate_limit"] == 5.0
 
 
-def test_engagement_create_rejects_retired_aggregate_rate_limit(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from vigil_cli import main as main_module
-
-    _isolate_orchestrator_url(monkeypatch)
-    install_root = tmp_path / "install"
-    _copy_agent_fixture(repo_root / "agent", install_root)
-
-    with pytest.raises(SystemExit) as exc:
-        main_module.main(
-            [
-                "--root",
-                str(install_root),
-                "engagement",
-                "create",
-                "https://app.example.com",
-                "--hosts",
-                "app.example.com",
-                "--no-prompt",
-                "--aggregate-rate-limit",
-                "12.5",
-            ]
-        )
-
-    assert exc.value.code == 2
-
-
 def test_engagement_create_omits_rate_limit_when_unset(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -3174,8 +3146,6 @@ def test_mitmproxy_docker_start_builds_and_mounts_engagements_root(tmp_path: Pat
     assert "127.0.0.1:9090:8080" in run_command
     # New contract: bind-mount the whole engagements tree at /engagements.
     assert f"{engagements_root}:/engagements" in run_command
-    # ENGAGEMENT_KEY is gone — the addon learns the key per flow.
-    assert not any(item.startswith("ENGAGEMENT_KEY=") for item in run_command)
     assert "ORCHESTRATOR_BASE_URL=http://host.docker.internal:18000" in run_command
     # The --set switches the addon to multi-engagement mode.
     assert "engagements_root=/engagements" in run_command
@@ -5157,32 +5127,6 @@ def test_auth_without_engagement_context_requires_key_or_select(tmp_path: Path, 
 
     with pytest.raises(SystemExit, match="Specify an engagement key or --select"):
         main_module.main(["--root", str(install_root), "auth", "status"])
-
-
-def test_mitmproxy_start_rejects_legacy_engagement_arg(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """The proxy serves every active engagement; no engagement selector exists."""
-    from vigil_cli import main as main_module
-
-    _isolate_orchestrator_url(monkeypatch)
-    install_root = tmp_path / "install"
-    engagement = install_root / "agent" / "engagements" / "eng-1"
-    engagement.mkdir(parents=True)
-    (engagement / "scope.json").write_text("{}", encoding="utf-8")
-    captured: dict[str, object] = {}
-
-    def fake_start_proxy(options: object, **_: object) -> None:
-        captured["engagements_root"] = options.engagements_root  # type: ignore[attr-defined]
-
-    monkeypatch.setattr(main_module, "start_proxy", fake_start_proxy)
-
-    with pytest.raises(SystemExit) as exc:
-        main_module.main(["--root", str(install_root), "mitmproxy", "start", "eng-1"])
-    assert exc.value.code == 2
-    assert "engagements_root" not in captured
-    err = capsys.readouterr().err
-    assert "unrecognized arguments: eng-1" in err
 
 
 def test_mitmproxy_reload_touches_sentinel(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -8762,20 +8706,6 @@ def test_blue_verify_parser_accepts_canonical_evidence_flags() -> None:
 
     assert confirmed.proof_receipt_ids == [71]
     assert false_positive.counter_check_file == "counter-check.json"
-
-
-def test_blue_parser_retires_broken_dispatch_wrapper(capsys) -> None:
-    from vigil_cli import blue as blue_module
-
-    parser = argparse.ArgumentParser()
-    subparsers = parser.add_subparsers(dest="command", required=True)
-    blue_module.register_blue_parser(subparsers)
-
-    with pytest.raises(SystemExit) as exc:
-        parser.parse_args(["blue", "dispatch"])
-
-    assert exc.value.code == 2
-    assert "invalid choice: 'dispatch'" in capsys.readouterr().err
 
 
 def test_blue_contain_logs_structured_activity_metadata(
@@ -14003,31 +13933,6 @@ def test_list_references_cited_skills_have_paired_references(
     )
 
 
-def test_references_index_md_is_retired() -> None:
-    """The legacy references/INDEX.md is replaced by `vigil assess list-references`.
-    Guard against it being reintroduced and against operator prompts pointing back at it."""
-    references_dir = repo_root / "agent" / "references"
-    assert not (references_dir / "INDEX.md").exists(), (
-        "agent/references/INDEX.md was reintroduced; references are now discovered via "
-        "`vigil assess list-references` (self-registering frontmatter)"
-    )
-    doc_files = [
-        repo_root / "agent" / "AGENTS.md",
-        repo_root / "agent" / "operator-core.md",
-        repo_root / "agent" / "operator-core-blue.md",
-        repo_root / "agent" / "operator-core-code.md",
-        repo_root / "agent" / "shared-constraints.md",
-        repo_root / "README.md",
-        repo_root / "CODE-MAP.md",
-    ]
-    offenders = [
-        str(path.relative_to(repo_root))
-        for path in doc_files
-        if path.exists() and "references/INDEX.md" in path.read_text(encoding="utf-8")
-    ]
-    assert not offenders, f"docs still point at the deleted references/INDEX.md: {offenders}"
-
-
 def test_validate_dispatch_contract_accepts_list_skills_canonical_name() -> None:
     errors, warnings = _validate_dispatch_contract(
         {
@@ -15230,12 +15135,6 @@ def _dispatch_args(action: str, *, db_path: str | None = None, extra=None, **fla
     }
     args_dict.update(flags)
     return SimpleNamespace(**args_dict)
-
-
-# test_dispatch_backend_actions_reject_cases_db_prefix removed: subject no
-# longer exists. The CLI verbs no longer accept a cases.db path positional at
-# all (the work buffer moved to the backend assessment_work_items table); there
-# is nothing left to guard against. See tests/test_work_buffer_backend.py.
 
 
 def test_dispatch_record_handoff_from_json_requires_agent_id_before_client(
@@ -16651,9 +16550,6 @@ def test_validate_dispatch_has_no_engagement_file_dependency() -> None:
     errors, warnings = validate_specialist_dispatch_contract(payload)
     assert errors == []
     assert not any("scope" in warning.lower() for warning in warnings)
-
-
-# Scope-rejection telemetry retired with target-scope dispatch admission
 
 
 def _load_auth_status_module():

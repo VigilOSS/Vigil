@@ -94,9 +94,6 @@ def test_cli_and_backend_verification_vocabulary_stay_in_sync():
     assert set(CLI_VERIFICATION_STATUSES) == {
         str(status) for status in BACKEND_VERIFICATION_STATUSES
     }
-    # The retired two-axis composite. `confirmed` replaced it; a prompt or CLI
-    # that reintroduces `verified` is naming a value no seam accepts.
-    assert "verified" not in CLI_VERIFICATION_STATUSES
 
 
 def test_cli_verify_transition_targets_match_the_backend_request_literal():

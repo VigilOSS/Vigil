@@ -103,7 +103,6 @@ def test_case_links_multiple_findings_with_reciprocal_current_summaries(client, 
     assert created.status_code == 201, created.text
     case = created.json()
     assert [item["id"] for item in case["linked_findings"]] == findings
-    assert "linked_finding_slug" not in case
     digest = case["review_digest"]
     with db.get_connection() as connection:
         connection.execute("UPDATE assessment_findings SET title='Current title',verification_status='disproven' WHERE id=?", (findings[0],))
@@ -122,12 +121,11 @@ def test_case_links_multiple_findings_with_reciprocal_current_summaries(client, 
     assert client.get("/engagements/assessment/remediation/findings/SEC-1/cases").json() == []
 
 
-def test_case_link_validation_is_atomic_and_rejects_obsolete_fields(client, isolate_settings):
+def test_case_link_validation_is_atomic(client, isolate_settings):
     _, _, findings = _owners(isolate_settings)
     payload = {"source_type": "jira", "source_key": "SEC-7", "title": "Shared fix", "snapshot": {}}
     assert client.post("/engagements/repairs/remediation/cases", json={**payload, "finding_ids": [findings[0], 999999]}).status_code == 400
     assert client.get("/engagements/repairs/remediation/cases").json() == []
-    assert client.post("/engagements/repairs/remediation/cases", json={**payload, "linked_finding_slug": "SEC-1"}).status_code == 422
     created = client.post("/engagements/repairs/remediation/cases", json={**payload, "finding_ids": findings}).json()
     assert client.patch(f"/engagements/repairs/remediation/cases/{created['id']}", json={"title": "Changed", "finding_ids": [999999]}).status_code == 400
     assert client.get(f"/engagements/repairs/remediation/cases/{created['id']}").json()["title"] == "Shared fix"

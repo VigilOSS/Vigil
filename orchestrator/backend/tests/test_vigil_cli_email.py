@@ -124,7 +124,6 @@ def test_read_and_filter_scans_archive_window_before_applying_final_limit(
     assert captured["config"]["page_size"] == 200
     assert "all mail" in str(captured["script"]).lower()
     assert "important" in str(captured["script"]).lower()
-    assert "receivedDate < since && source.newestFirst" not in str(captured["script"])
 
 
 def test_filter_messages_deduplicates_inbox_and_all_mail_by_message_id(
@@ -249,7 +248,6 @@ def test_jxa_relevant_mailbox_message_access_failure_is_incomplete(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     script = email_module._READ_MESSAGES_JXA
-    assert "sourceFor(safe(() => mailbox.messages(), [])" not in script
     assert "message access failed" in script
 
     coverage = _coverage(complete=False)

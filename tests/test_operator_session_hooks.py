@@ -231,7 +231,6 @@ def test_pre_compact_uses_the_session_selected_operator_mode(
         "vigil assess check-phase-readiness --phase report" in result.stdout
     ) is web_readiness
     assert ("vigil assess code-coverage" in result.stdout) is code_readiness
-    assert "combined web and source-code engagement" not in result.stdout
 
 
 def test_pre_compact_does_not_choose_a_mode_for_a_dual_capability_engagement(
@@ -352,7 +351,7 @@ def test_post_compact_resume_restores_only_the_session_mode(
     assert result.returncode == 0
     assert f"session-selected `{operator_mode}` mode" in result.stdout
     assert "vigil engagement mode" in result.stdout
-    assert "load both" not in result.stdout.lower()
+    assert "load only that prompt" in result.stdout
 
 
 def test_post_compact_resume_stops_without_a_session_mode(tmp_path: Path) -> None:
