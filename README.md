@@ -51,6 +51,26 @@ survives context limits and restarts and can be audited afterward.
   commands and compaction hooks, and opencode and Kimi run specialists inline. Pi supports
   remediation engagements only.
 
+### How Vigil hunts
+
+- **No pre-named bugs.** Over-prompting caps what a model finds. Dispatches carry the surface,
+  scope, and rules of engagement, never the bug to look for or a checklist. Web specialists choose
+  what to probe within that surface; code hunters get a file batch and the vulnerability classes
+  to score.
+- **One lens per hunt.** Each hunting dispatch sets how wide to go, how to work through its
+  inputs, and at most one mindset lens: developer, injection, access control, business logic,
+  chain impact, or skeptical verifier.
+- **Independent verification.** A finding is confirmed only by a different agent working from
+  captured evidence. Code engagements add an anchor-free re-read of the highest-risk files and a
+  variant sweep across every file; web testing walks every sibling route, method, and content type
+  that shares the vulnerable code path.
+- **Kill-first triage.** Web leads must pass eight ordered questions, including whether a real
+  request reproduces it and whether the impact is proven. Code findings must earn PASS with the
+  same evidence a KILL would need.
+- **A skill library, not pasted prompts.** 90+ skills and 200+ references are found through
+  `vigil assess list-skills` and `vigil assess list-references`. Web specialists load them when
+  they see the matching signal; the code operator names them in each dispatch.
+
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/findings-dark.png">
   <img alt="Vigil orchestrator UI: an engagement's findings grouped by severity, workflow, and verification" src="docs/assets/findings-light.png">
