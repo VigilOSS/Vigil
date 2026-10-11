@@ -6,7 +6,6 @@ import os
 import re
 import shlex
 import shutil
-import sqlite3
 import stat
 import subprocess
 import sys
@@ -38,7 +37,6 @@ from .paths import (
     agent_root as application_agent_root,
     engagements_root,
     resolve_orchestrator_base_url,
-    resolve_orchestrator_data_dir,
 )
 from .scope_entries import ScopeEntryError, canonicalize_scope_entry
 
@@ -49,8 +47,6 @@ ACTIVE_ENGAGEMENT_CONFIG_KEY = "active_engagement_dir"
 
 ENGAGEMENT_TYPES = {"web", "code", "android", "blue", "remediation"}
 ANDROID_DYNAMIC_MODES = {"static_only", "device", "emulator"}
-ENGAGEMENT_DB_SNAPSHOT_MAX_COPIES_ENV = "VIGIL_ENGAGEMENT_DB_SNAPSHOT_MAX_COPIES"
-DEFAULT_ENGAGEMENT_DB_SNAPSHOT_MAX_COPIES = 2
 CODE_TARGET_CONTACT_POLICY = "warn-do-not-contact-declared-hosts"
 
 # Engagement types that probe a live HTTP target at creation time and so can be
@@ -568,7 +564,7 @@ def create_engagement(
     agent_root = application_agent_root(install_root)
     # Validate and derive everything before taking any side effect: an invalid
     # option set, or an install root that cannot back an engagement, must not
-    # leave behind a DB snapshot or a half-made directory.
+    # leave behind a half-made directory.
     plan = plan_engagement(options)
     _require_install_prerequisites(agent_root, options.engagement_type)
 
@@ -578,9 +574,6 @@ def create_engagement(
         else engagements_root(install_root)
     )
     root.mkdir(parents=True, exist_ok=True)
-    if contact_backend:
-        print("[vigil] Taking orchestrator database snapshot...", file=sys.stderr, flush=True)
-        _snapshot_orchestrator_database(install_root)
 
     eng_dir = root / f"{plan.date_label}-{plan.time_label}-{plan.label}"
     counter = 2
@@ -1615,7 +1608,7 @@ def print_shell_cd_init(shell: str = "zsh") -> str:
     return 'athcd() { cd "$(vigil engagement path --select)"; }\n'
 
 
-def start_engagement(install_root: Path, engagement_dir: Path, client: str, extra_args: list[str], mode: str | None = None, *, thinking: str | None = None) -> None:
+def start_engagement(install_root: Path, engagement_dir: Path, client: str, extra_args: list[str], mode: str | None = None, *, thinking: str | None = None, no_autoprompt: bool = False) -> None:
     if client == "pi" and _read_json(engagement_dir / "scope.json").get("engagement_type") != "remediation":
         raise SystemExit(
             "Pi supports remediation engagements only; Vigil installs no Pi specialist roster. "
@@ -1684,6 +1677,7 @@ def start_engagement(install_root: Path, engagement_dir: Path, client: str, extr
     if selected_mode == "code":
         source = engagement_source_state(engagement_dir)
         print(f"source: {source['path']} ({source['state']})", file=sys.stderr, flush=True)
+    if selected_mode == "code" and not no_autoprompt:
         flags, message = split_operator_message(extra_args)
         setup = (
             "Follow the source confirmation step in the canonical code operator prompt. "
@@ -2424,56 +2418,6 @@ def _write_engagement_brief_stub(agent_root: Path, eng_dir: Path) -> None:
     for heading, guidance in _ENGAGEMENT_BRIEF_SECTIONS:
         lines.extend([f"## {heading}", "", f"<!-- {guidance} -->", ""])
     (eng_dir / "ENGAGEMENT.md").write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
-
-
-def _snapshot_orchestrator_database(install_root: Path) -> None:
-    data_dir = resolve_orchestrator_data_dir(install_root)
-    db_path = data_dir / "orchestrator.sqlite3"
-    if not db_path.exists():
-        return
-    backup = db_path.with_name(f"{db_path.name}.bak.{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.{os.getpid()}")
-    try:
-        with sqlite3.connect(str(db_path)) as source, sqlite3.connect(str(backup)) as dest:
-            source.backup(dest)
-        _prune_orchestrator_database_snapshots(
-            data_dir,
-            max_copies=_engagement_db_snapshot_max_copies(),
-        )
-    except sqlite3.Error as exc:
-        print(f"[vigil] warning: orchestrator DB snapshot failed for {db_path}: {exc}", file=sys.stderr)
-    except OSError as exc:
-        print(f"[vigil] warning: orchestrator DB snapshot pruning failed for {data_dir}: {exc}", file=sys.stderr)
-
-
-def _engagement_db_snapshot_max_copies() -> int:
-    raw = os.environ.get(ENGAGEMENT_DB_SNAPSHOT_MAX_COPIES_ENV, "").strip()
-    if not raw:
-        return DEFAULT_ENGAGEMENT_DB_SNAPSHOT_MAX_COPIES
-    try:
-        value = int(raw)
-    except ValueError as exc:
-        raise SystemExit(f"{ENGAGEMENT_DB_SNAPSHOT_MAX_COPIES_ENV} must be an integer >= 1") from exc
-    if value < 1:
-        raise SystemExit(f"{ENGAGEMENT_DB_SNAPSHOT_MAX_COPIES_ENV} must be an integer >= 1")
-    return value
-
-
-def _prune_orchestrator_database_snapshots(data_dir: Path, *, max_copies: int) -> list[Path]:
-    if max_copies < 1:
-        raise ValueError("max_copies must be >= 1")
-    snapshots = sorted(data_dir.glob("orchestrator.sqlite3.bak.*"), key=lambda path: path.name)
-    if len(snapshots) <= max_copies:
-        return []
-    removed: list[Path] = []
-    for path in snapshots[: len(snapshots) - max_copies]:
-        try:
-            path.unlink()
-        except FileNotFoundError:
-            # Another engagement creator may have pruned the same snapshot after
-            # this process enumerated it. The retention postcondition already holds.
-            continue
-        removed.append(path)
-    return removed
 
 
 def _install_client_kind(agent_root: Path) -> str:

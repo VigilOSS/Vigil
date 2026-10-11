@@ -78,8 +78,7 @@ The orchestrator UI is served from the backend at `http://127.0.0.1:18000` once
   `<workspace>/state/backups/orchestrator.<UTC-timestamp>.sqlite3`
   — a WAL-coherent snapshot every 15 minutes, last 12 copies retained by default
   (override with `VIGIL_BACKUP_MAX_COPIES`), written by the backend process
-  itself. This is independent of the per-engagement snapshot
-  `vigil engagement create` takes before creating an engagement.
+  itself.
 
 Adopted workspaces keep their original database and backup paths, registered in
 `workspace.json`; initialization does not relocate them.

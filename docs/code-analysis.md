@@ -24,14 +24,18 @@ its contents are the intended source. An empty folder leaves the session waiting
 to add files. The client rechecks the folder when you say they are ready and asks for
 confirmation before analysis begins.
 
+To open the client without an automatic opening message, add `--no-autoprompt` to
+`vigil engagement start`. You can enter your own request; the client still needs your
+source confirmation before analysis.
+
 For scripts, creation can also be non-interactive:
 
 ```bash
 vigil engagement create --type code --name acme --no-prompt
 ```
 
-Creation starts `tracks.code.phase` at `ingest`. It prepares an empty source folder and
-does not fetch source. The engagement directory name is derived from its name.
+Creation starts `tracks.code.phase` at `ingest` and prepares an empty source folder.
+The engagement directory name is derived from its name.
 
 ## Toolchain
 

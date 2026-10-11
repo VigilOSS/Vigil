@@ -626,6 +626,11 @@ def main(argv: list[str] | None = None) -> None:
                               "high=on, max=maximum (default: client default — thinking on). "
                               "Ignored for claude/codex/kimi/pi; use -- --thinking for Pi.")
     start_p.add_argument(
+        "--no-autoprompt",
+        action="store_true",
+        help="Open the client without Vigil's automatic opening message; explicit client messages are preserved.",
+    )
+    start_p.add_argument(
         "--skip-preflight",
         action="store_true",
         help="Start the client without the preflight checks (client binary, provider key, "
@@ -1815,11 +1820,11 @@ def _engagement(args: argparse.Namespace, install_root: Path) -> None:
         if not args.skip_preflight:
             _preflight_engagement_start(install_root, path, args.client)
         if args.client == "opencode":
-            start_engagement(install_root, path, args.client, args.client_args, args.mode, thinking=args.thinking)
+            start_engagement(install_root, path, args.client, args.client_args, args.mode, thinking=args.thinking, no_autoprompt=args.no_autoprompt)
         elif args.mode is None:
-            start_engagement(install_root, path, args.client, args.client_args)
+            start_engagement(install_root, path, args.client, args.client_args, no_autoprompt=args.no_autoprompt)
         else:
-            start_engagement(install_root, path, args.client, args.client_args, args.mode)
+            start_engagement(install_root, path, args.client, args.client_args, args.mode, no_autoprompt=args.no_autoprompt)
     elif command == "open":
         path = _resolve_current_or_selected_engagement(install_root, key=args.key, select=args.select)
         webbrowser.open(path.as_uri())

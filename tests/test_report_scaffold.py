@@ -96,7 +96,6 @@ def _create(tmp_path, monkeypatch, etype, **extra):
     (agent_root / "AGENTS-blue.md").write_text("# Canonical blue operator instructions\n")
 
     for name in (
-        "_snapshot_orchestrator_database",
         "_write_prompt_wrappers",
         "_write_codex_config",
         "_write_claude_config",

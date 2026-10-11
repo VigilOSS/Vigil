@@ -134,3 +134,19 @@ def test_code_client_starts_with_source_confirmation_before_user_context(workspa
     assert "source" in launched[0][-1].lower()
     if message:
         assert launched[0][-1].endswith(message)
+
+
+@pytest.mark.parametrize("client", ["claude", "codex"])
+@pytest.mark.parametrize("message", [None, "Focus on Acme's parser."])
+def test_start_no_autoprompt_preserves_only_explicit_client_arguments(workspace, monkeypatch, client, message):
+    path = _code_engagement(workspace)
+    monkeypatch.chdir(workspace)
+    launched = []
+    monkeypatch.setattr(engagements.os, "execv", lambda executable, argv: launched.append(argv))
+    forwarded = ["--model", "acme-model"] + ([message] if message else [])
+    main([
+        "--root", str(workspace), "engagement", "start", path.name,
+        "--client", client, "--no-autoprompt", "--skip-preflight", *forwarded,
+    ])
+    assert len(launched) == 1
+    assert launched[0][1:] == forwarded
