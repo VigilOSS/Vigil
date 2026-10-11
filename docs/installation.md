@@ -1,47 +1,54 @@
 # Installation
 
-Install detail behind the README [Quick start](../README.md#quick-start): what
-`vigil quickstart` checks, application releases and private workspaces, host-side recon tools on Docker Desktop,
-and the code-track search dependency.
+Install detail behind the README [Quick start](../README.md#quick-start).
 
-## Before the first engagement
+## Install
 
-`vigil quickstart` mutates nothing unless you pass `--install-host-tools`, so it is safe to run
-first; `--json` gives a machine-readable readiness report. The orchestrator UI is at
-`http://127.0.0.1:18000` once the stack is up. Install the versioned wheel from the
-[GitHub release](https://github.com/VigilOSS/Vigil/releases/tag/v1.2.0):
+Install the versioned wheel from the
+[GitHub release](https://github.com/VigilOSS/Vigil/releases/tag/v1.2.1), check the host, and
+bring the stack up:
 
 ```bash
-uv tool install --from https://github.com/VigilOSS/Vigil/releases/download/v1.2.0/vigil-1.2.0-py3-none-any.whl vigil
+uv tool install --from https://github.com/VigilOSS/Vigil/releases/download/v1.2.1/vigil-1.2.1-py3-none-any.whl vigil
+vigil quickstart
 vigil up
 ```
 
 The release includes the CLI, backend, prompts, schemas, Docker definitions, documentation,
-legal files, and prebuilt frontend/report. Consumer installation needs neither Git nor Node
-and does not fetch a source checkout. Docker must be running to bring up the local stack.
+legal files, and prebuilt frontend and report. It needs neither Git nor Node. Docker must be
+running for `vigil up`, and the orchestrator UI is then at `http://127.0.0.1:18000`.
 
-To install directly from the repository instead, run
-`uv tool install git+https://github.com/VigilOSS/Vigil vigil`. That builds the frontend and
-report locally, so it needs Git, Node.js, and npm on `PATH`.
-For development, use `uv tool install --editable .` in the source checkout; the imported
-CLI's checkout supplies application assets.
+- **From the repository:** `uv tool install git+https://github.com/VigilOSS/Vigil vigil` builds
+  the frontend and report locally, so it needs Git, Node.js, and npm on `PATH`.
+- **For development:** run `uv tool install --editable .` in a source checkout; the checkout
+  supplies the application assets.
 
-**Install ripgrep (`rg`) before running a code engagement.** It is the code track's primary search
-tool after the ctags index, and it is in no dependency manifest — it ships only in the runtime
-image, which code analysis does not use. Claude and opencode bundle their own search tool, but
-Codex and goose specialists have shell only: without `rg` their searches exit 127 and the operator
-reads that as "no results" rather than "tool missing". `vigil doctor` reports it and
-`vigil engagement start` warns on stderr; neither blocks.
+`vigil quickstart` changes nothing unless you pass `--install-host-tools`; `--json` prints a
+machine-readable readiness report.
 
-## Application release and private workspace
+## Upgrade
 
-One application release supplies matched CLI, backend, prompts, schemas, docs, and UI assets.
-Application assets are materialized in a persistent cache identified by version and content
-digest. Changing directory does not select another application tree.
+1. Install the next release wheel: `uv tool install --force --from <wheel-url> vigil`.
+2. Run `vigil install` to reconcile workspace metadata. Generated client files are preserved;
+   explicit maintenance flags repair them.
+3. Restart what `vigil status` or `vigil doctor` reports as stale.
 
-Your private workspace defaults to `~/vigil`. Select another with `vigil --root <path>` or
-`vigil install <path>`. `vigil up` initializes it automatically; `vigil install` is the
-explicit initialize/adopt command. Fresh workspaces contain:
+Running services and client sessions keep their original release until restarted, and new
+sessions use the current one. Starting a session refreshes that engagement's generated
+entrypoints, so end any official client process on that engagement from the previous release
+first. Freshness compares content digests, never timestamps; see
+[`install-integrity.md`](install-integrity.md).
+
+The frontend and report ship prebuilt. `vigil orchestrator build` reports their installed state;
+to replace them, upgrade or reinstall the release.
+
+## Workspace
+
+Each release is materialized once in a persistent cache keyed by version and content digest;
+changing directory does not switch releases.
+Your private workspace holds only operator data and defaults to `~/vigil`; choose another with
+`vigil --root <path>` or `vigil install <path>`. `vigil up` initializes it, and `vigil install`
+initializes or adopts one explicitly:
 
 ```text
 workspace.json       # registered private paths and application provenance
@@ -53,47 +60,27 @@ logs/                # service logs
 cache/               # dependency environments and disposable build inputs
 ```
 
-Application source and prompt trees are not copied into fresh workspaces. Documentation and
-legal files live together in the application bundle so relative links work there.
+Existing workspaces are adopted in place: `workspace.json` registers their engagement, database,
+and tenant-reference locations, and evidence, `.env`, and custom client files stay where they
+are.
 
-Existing workspaces are adopted in place. `workspace.json` registers the existing engagement,
-database, and tenant-reference locations, including legacy `agent/engagements/` and backend
-data directories. Evidence paths, `.env`, custom client files, and all operator data stay at
-their original locations. Old copied application source remains on disk but is no longer used.
+## Host recon tools on Docker Desktop
 
-To upgrade, install the next release wheel with `uv tool install --force --from <wheel-url>
-vigil`, then run `vigil install` to reconcile workspace metadata. Routine adoption preserves
-existing generated client files; explicit maintenance flags request their repair.
-Running services and sessions retain their original release assets until restarted; new
-sessions use the current release. Starting a session refreshes that engagement's generated
-entrypoints. If it still has an official client process from another release, end that process
-first: shared client files cannot be rebound while the original session is alive. Sessions on
-other engagements can start with the new release. `vigil status` and `vigil doctor` report application identity
-and affected consumers that require restart. Freshness compares content digests, never file
-timestamps. See [`install-integrity.md`](install-integrity.md).
-
-The frontend and report ship prebuilt. `vigil orchestrator build` reports their installed
-state for packaged releases; rebuilding with Node is a source-development operation. To
-replace packaged UI assets, upgrade or reinstall the release.
-
-## Recon runtime: host vs container
-
-Most target-facing tools run **inside** the shared `vigil` container. The exception is the
-DNS-heavy and bulk-liveness recon stages, which on **macOS/Windows Docker Desktop** must run on
-the **host**: Docker Desktop proxies every container packet through a userspace proxy
-(`com.docker.backend`) that NAT-tracks state *per distinct destination IP*, so a DNS brute or a
-bulk `httpx` liveness pass over thousands of hosts saturates that table and wedges the whole VM.
+Most target-facing tools run inside the shared `vigil` container. On macOS and Windows Docker
+Desktop, DNS-heavy and bulk-liveness recon runs on the host instead: Docker Desktop routes
+container traffic through a userspace proxy (`com.docker.backend`) that tracks state per
+destination IP, and a DNS brute or bulk `httpx` pass over thousands of hosts fills that table
+and wedges the VM.
 
 | Stage / tool | Runs | Why |
 |---|---|---|
-| `subfinder`, `dnsx`, `puredns` (+`massdns`), `shuffledns`, `alterx`, bulk `httpx` liveness | **Host** on Docker Desktop | DNS-heavy / bulk — would wedge the userspace proxy in-container |
-| `katana` crawl, `nuclei`, `ffuf`, exploit / authenticated HTTP | **Container** (always) | Isolation: auth'd and exploit traffic must not leave the sandbox |
+| `subfinder`, `dnsx`, `puredns` (+`massdns`), `shuffledns`, `alterx`, bulk `httpx` liveness | Host on Docker Desktop | DNS-heavy or bulk traffic would wedge the proxy in-container |
+| `katana` crawl, `nuclei`, `ffuf`, exploit and authenticated HTTP | Container (always) | Authenticated and exploit traffic stays in the sandbox |
 
-On native Linux or a remote Docker host there is no userspace proxy, so everything runs
-in-container and the host tools are optional — the split is a transparent no-op. On Docker
-Desktop, `vigil assess recon` and `--runtime host` **enforce** it: a missing host binary fails
-the preflight rather than silently degrading. `vigil quickstart --install-host-tools` runs these
-installs for you; `vigil doctor`'s `host-recon-tools` row reports what is missing, and
+On native Linux or a remote Docker host everything runs in-container and the host tools are
+optional. On Docker Desktop, `vigil assess recon` and `--runtime host` require them: a missing
+binary fails the preflight instead of silently degrading. `vigil quickstart --install-host-tools`
+installs them, `vigil doctor` reports what is missing in its `host-recon-tools` row, and
 `$(go env GOPATH)/bin` must be on your `PATH`.
 
 ```bash
@@ -107,5 +94,13 @@ brew install massdns      # macOS; Linux: build from github.com/blechschmidt/mas
 go install github.com/projectdiscovery/shuffledns/cmd/shuffledns@v1.1.0
 go install github.com/projectdiscovery/alterx/cmd/alterx@v0.1.0
 ```
+
+## ripgrep for code engagements
+
+Install ripgrep (`rg`) before a code engagement. It is the code track's main search tool after
+the ctags index and ships only in the runtime image, which code analysis does not use. Claude
+and opencode bundle their own search, but Codex and goose specialists have only a shell: without
+`rg`, their searches exit 127 and read as "no results". `vigil doctor` reports it and
+`vigil engagement start` warns; neither blocks.
 
 Runtime sizing, kernel limits, and orchestrator backups: [`operations.md`](operations.md).

@@ -501,12 +501,11 @@ def _cmd_engage(args: argparse.Namespace, install_root: Path) -> None:
         # stderr — everything is printed and flushed BEFORE start_engagement,
         # which does os.chdir + os.execv and never returns.
         #
-        # The engagement key goes out first, on stderr, because the preflight
-        # below can refuse: the engagement is already created and durable, so
-        # the operator needs its key to retry with `vigil engagement start`.
-        # The preflight runs BEFORE the stdout path line so a refusal never
-        # leaves a bare path behind for `eng=$(…)` to capture as success.
-        print(f"[vigil blue] engagement: {created.key}", file=sys.stderr)
+        # create_engagement already printed the key and start command on stderr,
+        # so a preflight refusal below leaves the operator able to retry with
+        # `vigil engagement start`. The preflight runs BEFORE the stdout path
+        # line so a refusal never leaves a bare path behind for `eng=$(…)` to
+        # capture as success.
         if not getattr(args, "skip_preflight", False):
             _preflight_engagement_start(install_root, created.path, args.start)
         print(created.path)
@@ -528,10 +527,8 @@ def _cmd_engage(args: argparse.Namespace, install_root: Path) -> None:
         return
 
     print(created.path)
-    print(f"[vigil blue] engagement: {created.key}", file=sys.stderr)
     print("next:", file=sys.stderr)
-    print(f"  vigil engagement start {created.key} --client codex   (or --client claude)", file=sys.stderr)
-    print("  Then paste the alert into the operator chat; the operator records intake", file=sys.stderr)
+    print("  After starting, paste the alert into the operator chat; the operator records intake", file=sys.stderr)
     print(
         "  (vigil blue alert record), then dispatches triage with "
         "`vigil assess agent start ... --prompt-context-json <file> --emit-prompt`.",

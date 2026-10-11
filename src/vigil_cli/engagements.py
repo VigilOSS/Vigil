@@ -680,16 +680,28 @@ def create_engagement(
     if contact_backend:
         print("[vigil] Checking orchestrator and registering engagement...", file=sys.stderr, flush=True)
         _verify_backend_install_root(install_root, eng_dir)
-    # Blue engagements own their own footer (blue.py:_cmd_engage) and must not
-    # emit the red-infra footer (mitmproxy/oob are irrelevant to incident
-    # response). Skip entirely for blue so blue.py has sole footer ownership.
+    # Blue and remediation skip the red-infra footer (mitmproxy/oob are irrelevant
+    # to them); blue.py adds its alert hints after creation. Every type gets the
+    # same key and start-command lines from _emit_engagement_identity.
     if options.engagement_type == "code":
         _emit_code_source_footer(eng_dir)
     elif contact_backend and options.engagement_type not in {"blue", "remediation"}:
         print("[vigil] Checking local services...", file=sys.stderr, flush=True)
         _emit_post_create_footer(key)
-    print("[vigil] Engagement created.", file=sys.stderr, flush=True)
+    print("[vigil] Engagement created.", file=sys.stderr)
+    _emit_engagement_identity(key, options.engagement_type)
     return CreatedEngagement(key=key, path=eng_dir)
+
+
+def _emit_engagement_identity(key: str, engagement_type: str) -> None:
+    """Print the key and its start command the same way for every engagement type."""
+    start = (
+        f"vigil remediation -k {key} start"
+        if engagement_type == "remediation"
+        else f"vigil engagement start {key} --client codex   (or --client claude)"
+    )
+    print(f"[vigil] engagement: {key}", file=sys.stderr)
+    print(f"[vigil] start: {start}", file=sys.stderr, flush=True)
 
 
 def _emit_code_source_footer(engagement_dir: Path) -> None:
@@ -697,7 +709,6 @@ def _emit_code_source_footer(engagement_dir: Path) -> None:
     print(f"[vigil] source: {source['path']} ({source['state']})", file=sys.stderr)
     print("[vigil] Place the source files to review in that folder. A Git repository is not required.", file=sys.stderr)
     print("[vigil] The code client will ask you to confirm the source before reading it for analysis.", file=sys.stderr)
-    print(f"[vigil] start: vigil engagement start {engagement_dir.name} --client codex   (or --client claude)", file=sys.stderr)
 
 
 def _emit_post_create_footer(key: str, *, runner: docker.Runner = docker.run_command) -> None:
@@ -724,13 +735,8 @@ def _emit_post_create_footer(key: str, *, runner: docker.Runner = docker.run_com
     mitm_hint = "" if mitm_running else "   (auth capture: vigil mitmproxy start)"
     oob_hint = "" if oob_state == "running" else "   (callbacks: vigil oob start)"
 
-    print(f"[vigil] engagement: {key}", file=sys.stderr)
     print(f"[vigil] mitmproxy: {mitm_label}{mitm_hint}", file=sys.stderr)
     print(f"[vigil] oob:       {oob_state}{oob_hint}", file=sys.stderr)
-    print(
-        f"[vigil] start:     vigil engagement start {key} --client codex   (or --client claude)",
-        file=sys.stderr,
-    )
 
 
 def _verify_backend_install_root(install_root: Path, eng_dir: Path) -> bool:

@@ -9384,9 +9384,7 @@ def test_blue_engage_guides_operator_to_start_session_and_paste_alert(
     assert captured.out.strip() == str(created_path)
     # Single blue footer on stderr — no red-infra noise, no duplicate paste hint.
     assert "vigil blue alert paste" not in captured.err
-    assert "[vigil blue] engagement: eng-1" in captured.err
-    assert "vigil engagement start eng-1 --client codex" in captured.err
-    assert "Then paste the alert into the operator chat" in captured.err
+    assert "paste the alert into the operator chat" in captured.err
     assert "vigil blue alert record" in captured.err
     assert (
         "Shortcut next time: vigil blue engage --customer acme "
@@ -9569,7 +9567,6 @@ def test_engagement_create_blue_skips_red_footer(
     captured = capsys.readouterr()
     assert "mitmproxy" not in captured.err
     assert "oob" not in captured.err
-    assert "vigil engagement start" not in captured.err
 
 
 def test_blue_alert_record_body_file_stdin_reads_piped_alert(

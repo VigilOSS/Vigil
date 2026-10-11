@@ -88,9 +88,10 @@ key instead.
 
 ## Phases
 
-The three track rosters (see the README
-[tracks table](../README.md#engagement-tracks-and-phases)) are pinned in
-[`agent/scripts/assess/lib/phases.py`](../agent/scripts/assess/lib/phases.py).
+The web, code, and blue phase rosters are pinned in
+[`agent/scripts/assess/lib/phases.py`](../agent/scripts/assess/lib/phases.py). The README
+[tracks table](../README.md#engagement-tracks-and-phases) lists web and code; blue phases are in
+[`blue-engagements.md`](blue-engagements.md).
 
 `complete` is a terminal state, not a working phase: no readiness gate, no audit tag, no
 per-phase operator doc. The code vocabulary is deliberately distinct from the web one, and a
