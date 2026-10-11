@@ -622,9 +622,10 @@ def main(argv: list[str] | None = None) -> None:
     start_p.add_argument("--mode", choices=["web", "code", "blue", "remediation", "android"],
                          help="Session prompt for this client process; required with two enabled tracks")
     start_p.add_argument("--thinking", choices=["off", "high", "max"], default=None,
-                         help="DeepSeek thinking level for --client opencode: off=disabled, "
+                         help="Deprecated. DeepSeek thinking level for --client opencode: off=disabled, "
                               "high=on, max=maximum (default: client default — thinking on). "
-                              "Ignored for claude/codex/kimi/pi; use -- --thinking for Pi.")
+                              "Ignored for claude/codex/kimi/pi; use -- --thinking for Pi. "
+                              "Set reasoning effort in the client instead.")
     start_p.add_argument(
         "--no-autoprompt",
         action="store_true",
@@ -1816,6 +1817,12 @@ def _engagement(args: argparse.Namespace, install_root: Path) -> None:
     elif command == "cd-init":
         print(print_shell_cd_init(args.shell), end="")
     elif command == "start":
+        if args.thinking is not None:
+            print(
+                "vigil: --thinking is deprecated and will be removed; set reasoning effort in the client "
+                "(opencode.json, or the client's /model picker).",
+                file=sys.stderr,
+            )
         path = _resolve_current_or_selected_engagement(install_root, key=args.key, select=args.select)
         if not args.skip_preflight:
             _preflight_engagement_start(install_root, path, args.client)

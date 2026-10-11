@@ -399,6 +399,41 @@ def test_start_refuses_a_near_miss_of_its_own_flag_instead_of_forwarding_it(
     assert "client_args" not in started
 
 
+@pytest.mark.parametrize("client", ["opencode", "claude"])
+def test_start_warns_that_thinking_is_deprecated_and_still_applies_it(
+    started: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    client: str,
+) -> None:
+    calls: dict[str, object] = {}
+    monkeypatch.setattr(
+        main_module,
+        "start_engagement",
+        lambda root, path, client, client_args, mode=None, *, thinking=None, no_autoprompt=False: calls.update(
+            client=client, thinking=thinking
+        ),
+    )
+    main(
+        [
+            "--root",
+            str(started["install_root"]),
+            "engagement",
+            "start",
+            "2026-01-01-0000-target",
+            "--client",
+            client,
+            "--thinking",
+            "high",
+        ]
+    )
+
+    assert "--thinking is deprecated" in capsys.readouterr().err
+    assert calls["client"] == client
+    if client == "opencode":
+        assert calls["thinking"] == "high"
+
+
 def test_start_forwards_a_client_flag_that_merely_resembles_a_vigil_flag(
     started: dict[str, object],
 ) -> None:

@@ -155,14 +155,15 @@ on any batched-tool turn.
 ### opencode
 
 ```bash
-vigil engagement start <key> --client opencode --thinking high
+vigil engagement start <key> --client opencode
 ```
 
 The launcher execs opencode's **default TUI** as `--agent operator`, not the
 one-shot `opencode run`. The operator message is passed with `--prompt`.
 
-`--thinking off|high|max` sets the DeepSeek reasoning level. opencode runs the
-operator inline — it cannot dispatch custom specialists headlessly
+Set the DeepSeek reasoning level in the engagement's `opencode.json`
+(`provider.deepseek.models.deepseek-v4-pro.options`: `thinking` and `reasoningEffort`).
+opencode runs the operator inline — it cannot dispatch custom specialists headlessly
 (opencode#29616).
 
 OpenRouter is not a supported launcher path.
