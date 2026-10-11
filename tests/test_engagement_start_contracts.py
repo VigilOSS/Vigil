@@ -83,6 +83,46 @@ def test_create_reports_progress_before_slow_steps_on_stderr(
         assert not any(word in "".join(messages) for word in ("snapshot", "orchestrator", "services"))
 
 
+@pytest.mark.parametrize("engagement_type", ["web", "code", "blue", "remediation"])
+def test_create_prints_the_key_and_start_command_uniformly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys, engagement_type: str
+) -> None:
+    import subprocess
+
+    install_root = _install_root(tmp_path)
+    (install_root / "agent" / "operator-core-code.md").write_text("# Code overlay\n")
+    monkeypatch.setattr(engagements, "_install_client_kind", lambda *_: "none")
+    options = {
+        "web": CreateEngagementOptions(install_root=install_root, engagement_type="web", target="https://target.example"),
+        "code": CreateEngagementOptions(install_root=install_root, engagement_type="code", name="Acme"),
+        "blue": CreateEngagementOptions(
+            install_root=install_root, engagement_type="blue", customer="Acme", platforms=["m365"]
+        ),
+    }
+    (install_root / "agent" / "AGENTS-blue.md").write_text("# Blue operator\n")
+    if engagement_type == "remediation":
+        repo = tmp_path / "acme"
+        repo.mkdir()
+        subprocess.run(["git", "init", str(repo)], check=True, capture_output=True)
+        # Remediation creation resolves its VCS adapter from the installed assess scripts.
+        (install_root / "agent" / "scripts").symlink_to(Path(__file__).resolve().parents[1] / "agent" / "scripts")
+        (install_root / "agent" / "operator-core-remediation.md").write_text("# Remediation core\n")
+        options["remediation"] = CreateEngagementOptions(
+            install_root=install_root, engagement_type="remediation", name="Acme", repos=[str(repo)]
+        )
+
+    created = engagements.create_engagement(options[engagement_type], contact_backend=False)
+
+    err = capsys.readouterr().err
+    start = (
+        f"vigil remediation -k {created.key} start"
+        if engagement_type == "remediation"
+        else f"vigil engagement start {created.key} --client codex"
+    )
+    assert err.count(f"[vigil] engagement: {created.key}\n") == 1
+    assert err.count(f"[vigil] start: {start}") == 1
+
+
 def test_create_refuses_before_any_side_effect_without_an_installed_prompt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

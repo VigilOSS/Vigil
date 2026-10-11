@@ -5,6 +5,15 @@ versioning follows [Semantic Versioning][semver].
 
 Durable design decisions live in [`docs/adr/`](docs/adr/).
 
+## [1.2.1] - 2026-10-11
+
+### Changed
+
+- `vigil engagement create` prints the engagement key and its start command the same way for
+  every engagement type.
+- README and installation guide rewritten around web and code engagements, with client support
+  levels stated per client.
+
 ## [1.2.0] - 2026-10-10
 
 ### Changed

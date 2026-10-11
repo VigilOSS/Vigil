@@ -27,6 +27,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from vigil_cli import blue as blue_module  # noqa: E402
+from vigil_cli import engagements as engagements_module  # noqa: E402
 from vigil_cli import main as main_module  # noqa: E402
 from vigil_cli import preflight as preflight_module  # noqa: E402
 from vigil_cli.engagements import CreatedEngagement  # noqa: E402
@@ -55,7 +56,13 @@ def blue_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, objec
         "dir": engagement_dir,
         "started": None,
     }
-    monkeypatch.setattr(blue_module, "create_engagement", lambda _options: created)
+
+    def create(_options: object) -> CreatedEngagement:
+        # Creation owns the key and start-command lines on stderr.
+        engagements_module._emit_engagement_identity(created.key, "blue")
+        return created
+
+    monkeypatch.setattr(blue_module, "create_engagement", create)
     monkeypatch.setattr(
         blue_module,
         "start_engagement",
@@ -457,7 +464,7 @@ def test_blue_preflight_refusal_prints_nothing_on_stdout(
     """A refusal must not leave a bare path behind for `eng=$(…)` to capture.
 
     The engagement is already created at this point, so the operator still
-    needs its key — that goes to stderr, where the launch hints already live.
+    needs the key that creation printed on stderr.
     """
     monkeypatch.setattr(preflight_module.shutil, "which", lambda _name: None)
 

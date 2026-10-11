@@ -2,7 +2,7 @@
 
 Vigil 1.1 separates versioned application assets from private workspace state.
 For setup and upgrade commands, see
-[installation](installation.md#application-release-and-private-workspace).
+[installation](installation.md#upgrade).
 
 ## Release provenance
 
