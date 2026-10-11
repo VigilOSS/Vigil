@@ -218,7 +218,7 @@ vigil assess agent start \
     --agent-id va-idor-b7c2 --role vulnerability-analyst \
     --task "Deep IDOR/BAC pass on orders+invoices, cross-identity replay user_a/user_b" \
     --application-unit-id 42 \
-    --model claude-opus-4-8 --reasoning high --dispatch-mode item-iterating \
+    --model claude-opus-5 --reasoning high --dispatch-mode item-iterating \
     --skills "idor-testing,split-brain-idor" \
     --rate-budget "rate=4 / one request in flight per identity (5 req/s program cap)" \
     --prompt-context-json dispatch-context.json --emit-prompt
@@ -296,7 +296,7 @@ are `exploit-developer.md`'s own doctrine — this template does not restate the
 vigil assess agent start \
     --agent-id ex-chain-d4e1 --role exploit-developer \
     --task "Chain-construction pass: admin SSO auth-bypass -> orders IDOR, full endpoint map self-served" \
-    --model claude-opus-4-8 --reasoning high --dispatch-mode deep-manual \
+    --model claude-opus-5 --reasoning high --dispatch-mode deep-manual \
     --skills "exploit-playbook-authoring" \
     --rate-budget "rate=1 sequential — chain steps are low-volume, precision work" \
     --prompt-context-json dispatch-context.json --emit-prompt

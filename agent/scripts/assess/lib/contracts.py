@@ -2041,7 +2041,7 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
                     "command": (
                         "vigil assess agent start --agent-id va-7f3 "
                         "--role vulnerability-analyst --task 'review SSRF candidates' "
-                        "--application-unit-id 42 --model claude-opus-4-8 "
+                        "--application-unit-id 42 --model claude-opus-5 "
                         "--reasoning high --dispatch-mode item-iterating "
                         "--skills 'ssrf-testing,case-dispatching' "
                         "--rate-budget 'rate=4; concurrency=2' "
