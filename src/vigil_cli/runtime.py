@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import shutil
 import sys
@@ -35,6 +36,14 @@ HEAVY_TIER_TARGET_GB = 16
 
 ULIMIT_NOFILE_RECOMMENDED = 65536
 ULIMIT_NPROC_RECOMMENDED = 8192
+
+
+class RuntimeCapacityError(SystemExit):
+    """A refused memory limit, with capacity facts for CLI consumers."""
+
+    def __init__(self, message: str, *, requested_gib: int, docker_gib: float):
+        super().__init__(message)
+        self.details = {"requested_gib": requested_gib, "docker_gib": docker_gib}
 
 # subfinder reads provider API keys ONLY from an on-disk provider-config.yaml
 # (subfinder's native schema), NOT from arbitrary SUBFINDER_* env vars. We pass
@@ -839,6 +848,7 @@ def _preflight_shared_vm(
     mem_total = info.get("MemTotal")
     ncpu = info.get("NCPU")
     if not isinstance(mem_total, (int, float)) or mem_total <= 0:
+        print("Warning: Docker memory capacity is unavailable; resource safety check skipped.", file=sys.stderr)
         _maybe_warn_tier_undersized(resources)
         return
 
@@ -847,36 +857,38 @@ def _preflight_shared_vm(
     cotenants = sorted(docker.container_names(runner=runner) - {options.container_name})
 
     if frac >= 0.85 and not options.allow_oversubscribe:
-        detail = (
-            f" and {len(cotenants)} other container(s) are running "
-            f"({', '.join(cotenants[:5])}{'…' if len(cotenants) > 5 else ''})"
-            if cotenants else ""
+        safe_gib = math.floor(vm_mem_gb * 0.75)
+        retry_command = "vigil runtime start --recreate" if options.recreate else "vigil up"
+        recovery = (
+            f"  Retry: VIGIL_RUNTIME_MEMORY_GB={safe_gib} {retry_command}\n"
+            if safe_gib >= 1 else ""
         )
-        raise SystemExit(
-            f"Refusing to start runtime: memory tier {resources.memory_gb} GB is "
-            f"{frac:.0%} of the Docker VM's {vm_mem_gb:.1f} GB{detail}.\n"
-            "  This oversubscribes a shared VM and can OOM-kill co-located containers.\n"
-            "  Lower VIGIL_RUNTIME_MEMORY_GB / VIGIL_RUNTIME_CPUS, stop co-tenant containers,\n"
-            "  use a dedicated Docker context/VM, or pass --allow-oversubscribe to override."
+        raise RuntimeCapacityError(
+            f"Runtime blocked: {resources.memory_gb} GiB memory limit / "
+            f"{vm_mem_gb:.1f} GiB Docker memory ({frac:.0%}; must be below 85%).\n"
+            f"{recovery}"
+            f"  Or increase Docker memory. Override: {retry_command} --allow-oversubscribe",
+            requested_gib=resources.memory_gb, docker_gib=vm_mem_gb,
         )
 
-    if frac >= 0.6 or cotenants:
+    if frac >= 0.6:
         note = (
-            f"warning: runtime tier {resources.memory_gb} GB is {frac:.0%} of the "
-            f"{vm_mem_gb:.1f} GB Docker VM"
+            f"Warning: runtime memory limit is {resources.memory_gb} GiB / "
+            f"{vm_mem_gb:.1f} GiB Docker memory ({frac:.0%})."
         )
         if cotenants:
             note += (
-                f"; {len(cotenants)} co-tenant container(s) running "
+                f" {len(cotenants)} other container(s) running "
                 f"({', '.join(cotenants[:5])}{'…' if len(cotenants) > 5 else ''})"
             )
-        note += ". Heavy recon may contend with neighbors — prefer a dedicated runtime."
-        print(note)
+        note += " Reduce the limit or increase Docker memory for more headroom."
+        print(note, file=sys.stderr)
 
     if isinstance(ncpu, (int, float)) and ncpu > 0 and resources.cpus >= ncpu:
         print(
-            f"warning: runtime --cpus={_format_cpus(resources.cpus)} claims the VM's entire "
-            f"CPU allocation (NCPU={int(ncpu)}); this can starve the Docker daemon and host."
+            f"Warning: runtime CPU limit is {_format_cpus(resources.cpus)} / {int(ncpu)} Docker CPUs. "
+            "Lower VIGIL_RUNTIME_CPUS to leave headroom for other services.",
+            file=sys.stderr,
         )
 
     # Also keep the host-RAM undersizing hint for dedicated boxes with headroom.
@@ -892,7 +904,8 @@ def _maybe_warn_tier_undersized(resources: RuntimeResources) -> None:
         print(
             f"hint\thost has {host_gb} GB RAM but runtime is set to {resources.memory_gb} GB; "
             "consider VIGIL_RUNTIME_MEMORY_GB=16 (or 32) for better parallelism. "
-            "See docs/operations.md 'Resource sizing'."
+            "See docs/operations.md 'Resource sizing'.",
+            file=sys.stderr,
         )
 
 

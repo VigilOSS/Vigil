@@ -6442,9 +6442,9 @@ def test_up_skips_oob_when_only_client_sessions_exist_but_endpoint_is_unconfigur
 
     assert calls == ["runtime", "orchestrator"]
     output = capsys.readouterr().out
-    assert "oob\tskipped; infrastructure is not configured" in output
-    assert "vigil config set oob.frp_host <host>" in output
-    assert "vigil config set oob.domain <domain>" in output
+    assert "Callbacks" in output and "skipped; not configured (optional)" in output
+    assert "Callback setup:" in output
+    assert "vigil install && vigil oob start" in output
 
 
 def test_up_does_not_prompt_for_token_until_oob_endpoint_is_configured(
@@ -6483,8 +6483,9 @@ def test_up_does_not_prompt_for_token_until_oob_endpoint_is_configured(
 
     assert calls == ["runtime", "orchestrator", "mitmproxy"]
     output = capsys.readouterr().out
-    assert "oob\tskipped; infrastructure is not configured" in output
-    assert "vigil config set oob.frp_host <host>" in output
+    assert "Callbacks" in output and "skipped; not configured (optional)" in output
+    assert "Callback setup:" in output
+    assert "vigil install && vigil oob start" in output
 
 
 def test_up_passes_injected_runner_to_image_builds(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -6915,7 +6916,7 @@ def test_up_warns_when_proxy_container_predates_image(
     up_module.run_up(up_module.UpOptions(install_root=tmp_path), runner=lambda *a, **k: None)
 
     out = capsys.readouterr().out
-    assert "running old image; restart to pick up rebuilt image" in out
+    assert "running; image update pending" in out
     assert "Run `vigil mitmproxy start` to recreate the container on the current image." in out
     # The proxy is already running, so `up` warns instead of recreating it.
     assert "mitmproxy" not in calls
@@ -17050,7 +17051,7 @@ def test_runtime_start_allow_oversubscribe_bypasses_refusal(tmp_path, monkeypatc
     assert any(c[:3] == ["docker", "run", "-d"] for c in commands)
 
 
-def test_runtime_start_warns_with_cotenants_but_proceeds(tmp_path, monkeypatch, capsys):
+def test_runtime_start_warns_at_high_limit_with_cotenants_but_proceeds(tmp_path, monkeypatch, capsys):
     import json as _json
 
     from vigil_cli.runtime import RuntimeOptions, start_runtime
@@ -17058,16 +17059,16 @@ def test_runtime_start_warns_with_cotenants_but_proceeds(tmp_path, monkeypatch, 
     monkeypatch.setenv("VIGIL_RUNTIME_MEMORY_GB", "8")
     install_root = _preflight_install_root(tmp_path)
     commands: list[list[str]] = []
-    # Ample 64 GB VM (frac 0.125) but co-tenant containers present => warn, proceed.
+    # 8 GiB limit on a 12 GiB VM leaves little headroom => warn, proceed.
     runner = _preflight_runner(
         commands,
-        info_stdout=_json.dumps({"MemTotal": _gib(64), "NCPU": 12}),
+        info_stdout=_json.dumps({"MemTotal": _gib(12), "NCPU": 12}),
         install_root=install_root,
-        cotenants=["bigcapital-local-mysql", "database-mssql-1"],
+        cotenants=["acme-db", "acme-cache"],
     )
     start_runtime(RuntimeOptions(install_root=install_root), runner=runner, validate_tools=False)
     assert any(c[:3] == ["docker", "run", "-d"] for c in commands)
-    assert "co-tenant" in capsys.readouterr().out
+    assert "acme-db" in capsys.readouterr().err
 
 
 def test_runtime_start_proceeds_when_docker_info_unparseable(tmp_path, monkeypatch):

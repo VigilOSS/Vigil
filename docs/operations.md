@@ -7,14 +7,14 @@ Vigil install.
 
 The Kali runtime container is started with `--memory`, `--memory-swap` pinned
 equal to `--memory` (so the container cannot swap), `--memory-swappiness=0`,
-`--pids-limit`, and `--shm-size`. Those four values are the only container
-resources Vigil sets, and each is an environment variable read before
-`vigil runtime start`:
+`--pids-limit`, and `--shm-size`. Memory, CPU, process, and shared-memory limits are configurable through
+environment variables read before startup. These are limits, not reserved resources;
+the backend and proxy have separate resource use:
 
 | Variable | Default | Effect |
 |---|---|---|
-| `VIGIL_RUNTIME_MEMORY_GB` | `8` | `--memory` and `--memory-swap` |
-| `VIGIL_RUNTIME_CPUS` | `4` | `--cpus` |
+| `VIGIL_RUNTIME_MEMORY_GB` | `2` | `--memory` and `--memory-swap` |
+| `VIGIL_RUNTIME_CPUS` | `1` | `--cpus` |
 | `VIGIL_RUNTIME_PIDS_LIMIT` | `512` | `--pids-limit` |
 | `VIGIL_RUNTIME_SHM_SIZE` | `1g` | `--shm-size` |
 
@@ -26,19 +26,28 @@ Sizing guidance:
 
 | Workload | Memory | CPU |
 |---|---|---|
-| Single-target sequential testing | 4 GB | 2 |
-| Small bounty target, 2-3 parallel agents (default) | 8 GB | 4 |
-| Large enterprise scope, 4-6 parallel specialists | 16 GB | 8 |
-| All tools warm, continuous engagement | 32 GB | 12 |
+| Light, sequential testing (default) | 2 GiB | 1 |
+| Single-target testing with larger tools | 4 GiB | 2 |
+| Small bounty target, 2-3 parallel agents | 8 GiB | 4 |
+| Large enterprise scope, 4-6 parallel specialists | 16 GiB | 8 |
+| All tools warm, continuous engagement | 32 GiB | 12 |
 
-`vigil runtime start` refuses a tier that claims too large a fraction of the
-Docker VM, and prints an upward hint when the host has RAM to spare. Live cgroup
-state: `vigil runtime resources`.
+`vigil up` and `vigil runtime start` refuse a memory limit of 85% or more of
+Docker memory, and warn at 60% or more. This checks configured headroom, not
+current memory usage. Lower `VIGIL_RUNTIME_MEMORY_GB` or increase Docker memory.
+An intentional override is available with `vigil up --allow-oversubscribe` or
+`vigil runtime start --allow-oversubscribe`. Restart checks run before replacing
+the existing container. Existing containers keep their limits until recreated.
+
+The 2 GiB default suits light work; larger tools and parallel workloads may need
+an explicit higher limit. `vigil up --json` emits one result with service states
+and any startup error; progress and resource warnings go to stderr. Inspect
+configured and live limits with `vigil runtime resources --json`.
 
 ### Host gotchas
 
-- **Docker Desktop on macOS** defaults to 4 GB — raise it under Settings →
-  Resources before running the 8 GB default tier.
+- **Docker Desktop on macOS:** check Settings → Resources when increasing
+  the runtime limit; Docker memory must leave room for the daemon and other containers.
 - **WSL2** defaults to 50% of host RAM capped at 8 GB — pin it in
   `%USERPROFILE%\.wslconfig`: `[wsl2] memory=12GB processors=8 swap=4GB`.
 - **Apple Silicon** unified memory tolerates up to 50% of host RAM.

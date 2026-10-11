@@ -6,6 +6,7 @@ import shutil
 import signal
 import socket
 import subprocess
+import sys
 import time
 import urllib.request
 from dataclasses import dataclass
@@ -295,7 +296,7 @@ def _npm_ci(project_dir: Path) -> None:
     subsequent run because npm hits the same tree. Removing the tree
     ourselves and retrying clears it; a second failure is a real one.
     """
-    first = subprocess.run(["npm", "ci"], cwd=project_dir)
+    first = subprocess.run(["npm", "ci"], cwd=project_dir, stdout=sys.stdout)
     if first.returncode == 0:
         return
     node_modules = project_dir / "node_modules"
@@ -303,14 +304,14 @@ def _npm_ci(project_dir: Path) -> None:
         raise subprocess.CalledProcessError(first.returncode, first.args)
     print(f"npm ci failed; clearing {node_modules} and retrying")
     shutil.rmtree(node_modules, ignore_errors=True)
-    subprocess.run(["npm", "ci"], cwd=project_dir, check=True)
+    subprocess.run(["npm", "ci"], cwd=project_dir, check=True, stdout=sys.stdout)
 
 
 def _build_frontend(install_root: Path) -> None:
     _require_editable_build(install_root)
     frontend_dir = install_root / "orchestrator" / "frontend"
     _npm_ci(frontend_dir)
-    subprocess.run(["npm", "run", "build"], cwd=frontend_dir, check=True)
+    subprocess.run(["npm", "run", "build"], cwd=frontend_dir, check=True, stdout=sys.stdout)
     # Stamp AFTER the build: vite empties `dist/` on the way in, so a stamp
     # written first would not survive. An unstamped build can never be proven
     # current, and would be rebuilt on every launch forever.
@@ -346,7 +347,7 @@ def _build_report(install_root: Path) -> None:
     _require_editable_build(install_root)
     report_dir = install_root / "orchestrator" / "report"
     _npm_ci(report_dir)
-    subprocess.run(["npm", "run", "build"], cwd=report_dir, check=True)
+    subprocess.run(["npm", "run", "build"], cwd=report_dir, check=True, stdout=sys.stdout)
     restart_manifest.record_report_build(install_root)
 
 

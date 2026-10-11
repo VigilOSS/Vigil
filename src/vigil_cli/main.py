@@ -387,6 +387,8 @@ def main(argv: list[str] | None = None) -> None:
     up_p.add_argument("--engagement", help=argparse.SUPPRESS)
     up_p.add_argument("--select", action="store_true", help=argparse.SUPPRESS)
     up_p.add_argument("--no-build", action="store_true")
+    up_p.add_argument("--json", action="store_true", help="Emit one startup result as JSON; progress goes to stderr")
+    up_p.add_argument("--allow-oversubscribe", action="store_true", help="Allow a runtime memory limit of 85%% or more of Docker memory")
     up_p.add_argument("--runtime-restart-timeout", type=int, default=10)
     up_p.add_argument("--yes-restart-runtime", action="store_true")
     up_p.add_argument("--no-restart-runtime", action="store_true")
@@ -1374,6 +1376,8 @@ def main(argv: list[str] | None = None) -> None:
                     else None
                 ),
                 no_build=args.no_build,
+                json_output=args.json,
+                allow_oversubscribe=args.allow_oversubscribe,
                 runtime_restart_timeout=args.runtime_restart_timeout,
                 yes_restart_runtime=args.yes_restart_runtime,
                 no_restart_runtime=args.no_restart_runtime,
@@ -2294,7 +2298,6 @@ def _runtime(args: argparse.Namespace, install_root: Path) -> None:
     elif args.runtime_command == "stop":
         stop_runtime()
     elif args.runtime_command == "restart":
-        stop_runtime()
         start_runtime(RuntimeOptions(install_root=install_root, recreate=True))
     elif args.runtime_command == "status":
         print(runtime_status())
