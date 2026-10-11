@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import getpass
+import json
 import os
 import select
+import subprocess
 import sys
-from dataclasses import dataclass
+from contextlib import nullcontext, redirect_stdout
+from dataclasses import asdict, dataclass
+from functools import partial
 from pathlib import Path
 
 from . import config as config_module
@@ -14,7 +18,7 @@ from .workspace import initialize_workspace
 from .image_freshness import image_outdated, proxy_image_drift
 from .mitmproxy import MitmproxyOptions, build_image as build_mitmproxy_image, mitmproxy_image_inputs, start_proxy
 from .oob import (
-    OOB_CONFIGURATION_HELP,
+    OOB_CONFIGURATION_FIELDS,
     OOB_UNRESERVED_SLOT_HELP,
     OobOptions,
     oob_options as _oob_options,
@@ -24,7 +28,7 @@ from .oob import (
 )
 from .orchestrator import OrchestratorOptions, start_orchestrator
 from .paths import default_runtime_container, engagements_root
-from .runtime import RuntimeOptions, build_runtime, runtime_image_inputs, start_runtime, stop_runtime
+from .runtime import RuntimeCapacityError, RuntimeOptions, build_runtime, runtime_image_inputs, start_runtime
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,6 +39,12 @@ class UpOptions:
     runtime_restart_timeout: int = 10
     yes_restart_runtime: bool = False
     no_restart_runtime: bool = False
+    allow_oversubscribe: bool = False
+    json_output: bool = False
+
+
+def _progress(component: str, message: str) -> None:
+    print(f"  {component:<14} {message}")
 
 
 def run_up(
@@ -53,17 +63,40 @@ def run_up(
     """
     install_root = Path(os.path.abspath(options.install_root.expanduser()))
 
-    application_root = resolve_application_root(options.source_root, preserve_path=True)
-    initialize_workspace(install_root, application_root=application_root)
     previous_application = os.environ.get("VIGIL_APPLICATION_DIR")
-    os.environ["VIGIL_APPLICATION_DIR"] = str(application_root)
+    state: dict[str, object] = {"status": "ready", "services": {}}
     try:
-        _start_stack(install_root, application_root, options, runner=runner, build_runner=build_runner)
+        with redirect_stdout(sys.stderr) if options.json_output else nullcontext():
+            application_root = resolve_application_root(options.source_root, preserve_path=True)
+            initialize_workspace(install_root, application_root=application_root)
+            os.environ["VIGIL_APPLICATION_DIR"] = str(application_root)
+            resources = config_module.runtime_resources()
+            state["configured_resources"] = asdict(resources)
+            print("Starting Vigil")
+            _progress("Runtime limits", f"{resources.memory_gb} GiB RAM · {resources.cpus:g} CPU")
+            if options.json_output and build_runner is docker.run_command_streaming:
+                build_runner = partial(docker.run_command_streaming, stderr_output=True)
+            _start_stack(install_root, application_root, options, runner=runner, build_runner=build_runner, state=state)
+    except (SystemExit, OSError, subprocess.CalledProcessError) as exc:
+        if not options.json_output:
+            raise
+        state["status"] = "error"
+        state["error"] = {
+            "code": "runtime_memory_limit" if isinstance(exc, RuntimeCapacityError) else "startup_failed",
+            "message": str(exc),
+            **({"resources": exc.details} if isinstance(exc, RuntimeCapacityError) else {}),
+        }
+        print(json.dumps(state, indent=2))
+        raise SystemExit(1) from exc
     finally:
         if previous_application is None:
             os.environ.pop("VIGIL_APPLICATION_DIR", None)
         else:
             os.environ["VIGIL_APPLICATION_DIR"] = previous_application
+    if options.json_output:
+        print(json.dumps(state, indent=2))
+    else:
+        print("Vigil startup complete.")
 
 
 def _start_stack(
@@ -73,39 +106,44 @@ def _start_stack(
     *,
     runner: docker.Runner,
     build_runner: docker.Runner,
+    state: dict[str, object],
 ) -> None:
     runtime_was_running = docker.container_running(default_runtime_container(), runner=runner)
 
     runtime_built = False
     if options.no_build:
-        print("runtime image\tbuild skipped")
+        _progress("Runtime image", "build skipped")
     elif image_outdated(
         "vigil:latest", _runtime_image_inputs(application_root), root=application_root, runner=runner
     ):
-        print("runtime image\tbuilding")
+        _progress("Runtime image", "building…")
         build_runtime(install_root, runner=build_runner, daemon_runner=runner)
         runtime_built = True
     else:
-        print("runtime image\tcurrent")
+        _progress("Runtime image", "current")
 
-    _start_or_restart_runtime(install_root, runtime_was_running, runtime_built, options, runner=runner)
+    services: dict[str, str] = {}
+    state["services"] = services
+    services["runtime"] = _start_or_restart_runtime(install_root, runtime_was_running, runtime_built, options, runner=runner)
 
     if options.no_build:
-        print("mitmproxy image\tbuild skipped")
+        _progress("Proxy image", "build skipped")
     elif image_outdated(
         "vigil-proxy:latest",
         mitmproxy_image_inputs(application_root),
         root=application_root,
         runner=runner,
     ):
-        print("mitmproxy image\tbuilding")
+        _progress("Proxy image", "building…")
         _build_mitmproxy_image(install_root, runner=build_runner)
     else:
-        print("mitmproxy image\tcurrent")
+        _progress("Proxy image", "current")
 
     start_orchestrator(OrchestratorOptions(install_root=install_root, allow_existing=True))
-    _start_mitmproxy_if_needed(install_root, options, runner=runner, build_runner=build_runner)
-    _start_oob_if_needed(install_root, runner=runner)
+    services["orchestrator"] = "running"
+    _progress("Orchestrator", "running")
+    services["mitmproxy"] = _start_mitmproxy_if_needed(install_root, options, runner=runner, build_runner=build_runner)
+    services["oob"] = _start_oob_if_needed(install_root, runner=runner)
 
 
 def _start_or_restart_runtime(
@@ -115,26 +153,28 @@ def _start_or_restart_runtime(
     options: UpOptions,
     *,
     runner: docker.Runner,
-) -> None:
-    runtime_options = RuntimeOptions(install_root=install_root)
+) -> str:
+    runtime_options = RuntimeOptions(install_root=install_root, allow_oversubscribe=options.allow_oversubscribe)
     if not runtime_was_running:
-        print("runtime\tstarting")
+        _progress("Runtime", "starting…")
         start_runtime(runtime_options, runner=runner)
-        return
+        _progress("Runtime", "running")
+        return "running"
 
     drifted = _runtime_image_drift(runtime_options, runner=runner)
     if runtime_built or drifted:
         if _confirm_runtime_restart(options):
-            print("runtime\trestarting")
-            stop_runtime(runner=runner)
-            start_runtime(RuntimeOptions(install_root=install_root, recreate=True), runner=runner)
-            return
-        print("runtime\trunning old image; restart skipped")
+            _progress("Runtime", "restarting…")
+            start_runtime(RuntimeOptions(install_root=install_root, recreate=True, allow_oversubscribe=options.allow_oversubscribe), runner=runner)
+            _progress("Runtime", "running")
+            return "running"
+        _progress("Runtime", "running; image update pending")
         print("Run `vigil runtime restart` when you are ready to pick up the new image.")
-        return
+        return "running_old_image"
 
-    print("runtime\talready running")
+    _progress("Runtime", "already running")
     start_runtime(runtime_options, runner=runner, allow_existing=True)
+    return "running"
 
 
 def _confirm_runtime_restart(options: UpOptions) -> bool:
@@ -167,7 +207,7 @@ def _start_mitmproxy_if_needed(
     *,
     runner: docker.Runner,
     build_runner: docker.Runner,
-) -> None:
+) -> str:
     """Start the proxy, building its image first if `start_proxy` finds it stale.
 
     `build_runner` is not optional here: `start_proxy` runs its own freshness
@@ -183,23 +223,26 @@ def _start_mitmproxy_if_needed(
     """
     if docker.container_running("vigil-proxy", runner=runner):
         if proxy_image_drift(runner=runner):
-            print("mitmproxy\trunning old image; restart to pick up rebuilt image")
+            _progress("Proxy", "running; image update pending")
             print("Run `vigil mitmproxy start` to recreate the container on the current image.")
+            return "running_old_image"
         else:
-            print("mitmproxy\talready running")
-        return
+            _progress("Proxy", "already running")
+        return "running"
     engagement_directory = engagements_root(install_root)
     engagement_directory.mkdir(parents=True, exist_ok=True)
-    print("mitmproxy\tstarting (serves all active engagements)")
+    _progress("Proxy", "starting…")
     start_proxy(
         MitmproxyOptions(install_root=install_root, engagements_root=engagement_directory),
         runner=runner,
         build_runner=build_runner,
     )
     del options  # accepted for signature parity; the proxy no longer pins to an engagement
+    _progress("Proxy", "running")
+    return "running"
 
 
-def _start_oob_if_needed(install_root: Path, *, runner: docker.Runner) -> None:
+def _start_oob_if_needed(install_root: Path, *, runner: docker.Runner) -> str:
     options = _oob_options(install_root)
     status = oob_status(
         oob_domain=options.oob_domain,
@@ -218,13 +261,13 @@ def _start_oob_if_needed(install_root: Path, *, runner: docker.Runner) -> None:
                 "OOB sessions are already active for another relay slot, or their relay route cannot be verified. "
                 "Run `vigil oob restart` intentionally before switching relay routes."
             )
-        print("oob\talready active; existing FRP/interactsh sessions left untouched")
-        return
+        _progress("Callbacks", "already active")
+        return "active"
 
     if not options.frp_host or not options.oob_domain:
-        print("oob\tskipped; infrastructure is not configured")
+        _progress("Callbacks", "skipped; not configured (optional)")
         _print_oob_configuration_help()
-        return
+        return "skipped_unconfigured"
 
     # `start_oob` refuses this outright; `vigil up` skips it instead, the same
     # way it skips OOB for any other missing prerequisite — the rest of the
@@ -233,9 +276,9 @@ def _start_oob_if_needed(install_root: Path, *, runner: docker.Runner) -> None:
     # to the refusal so the token prompt below never asks for a credential this
     # run cannot use.
     if requires_relay_slot_reservation(install_root):
-        print("oob\tskipped; no relay slot reserved for this install")
+        _progress("Callbacks", "skipped; no relay slot reserved (optional)")
         print(OOB_UNRESERVED_SLOT_HELP)
-        return
+        return "skipped_unreserved"
 
     if not options.frp_token:
         token = _prompt_frp_token()
@@ -253,13 +296,14 @@ def _start_oob_if_needed(install_root: Path, *, runner: docker.Runner) -> None:
                 relay_route=options.relay_route,
             )
         else:
-            print("oob\tskipped; missing FRP token")
+            _progress("Callbacks", "skipped; missing FRP token (optional)")
             print("Configure it with: vigil config set oob.frp_token <token>")
             print("Then start OOB with: vigil oob start")
-            return
+            return "skipped_missing_token"
 
-    print("oob\tstarting")
+    _progress("Callbacks", "starting…")
     start_oob(options, runner=runner)
+    return "active"
 
 
 def _prompt_frp_token() -> str:
@@ -280,13 +324,10 @@ def _runtime_image_drift(options: RuntimeOptions, *, runner: docker.Runner) -> b
 
 
 def _print_oob_configuration_help() -> None:
-    """Print the same checklist `vigil oob start` aborts with.
-
-    One source of truth, so the skip message here and the refusal there cannot
-    drift into naming different keys.
-    """
-    print(OOB_CONFIGURATION_HELP)
-    print("Then start OOB with: vigil oob start")
+    """Point at the callback command's canonical setup checklist."""
+    keys = ", ".join(key for key, _ in OOB_CONFIGURATION_FIELDS)
+    print(f"  Callback setup: set {keys} with vigil config set.")
+    print("  Then: vigil install && vigil oob start")
 
 def _build_mitmproxy_image(install_root: Path, *, runner: docker.Runner = docker.run_command_streaming) -> None:
     """Delegate to the one proxy-image builder.

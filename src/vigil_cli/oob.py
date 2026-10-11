@@ -90,10 +90,17 @@ def oob_options(install_root: Path) -> OobOptions:
     )
 
 
-OOB_CONFIGURATION_HELP = (
-    "Configure it with: vigil config set oob.frp_host <host>\n"
-    "                   vigil config set oob.domain <domain>\n"
-    "                   vigil config set oob.frp_token <token>\n"
+OOB_CONFIGURATION_FIELDS = (
+    ("oob.frp_host", "host"),
+    ("oob.domain", "domain"),
+    ("oob.frp_token", "token"),
+)
+OOB_CONFIGURATION_HELP = "\n".join(
+    ("Configure it with: " if index == 0 else "                   ")
+    + f"vigil config set {key} <{placeholder}>"
+    for index, (key, placeholder) in enumerate(OOB_CONFIGURATION_FIELDS)
+) + (
+    "\n"
     "Then run `vigil install` — the relay slot (this install's subdomain and\n"
     "port block) is reserved during install, and only when a domain is already\n"
     "configured, so a domain set afterwards needs one more install to take\n"

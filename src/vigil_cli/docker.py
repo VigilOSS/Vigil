@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -77,7 +78,7 @@ def run_command(argv: list[str], *, cwd: Path | None = None, env: dict[str, str]
     return DockerResult(completed.returncode, completed.stdout, completed.stderr)
 
 
-def run_command_streaming(argv: list[str], *, cwd: Path | None = None, env: dict[str, str] | None = None) -> DockerResult:
+def run_command_streaming(argv: list[str], *, cwd: Path | None = None, env: dict[str, str] | None = None, stderr_output: bool = False) -> DockerResult:
     """Run a command with stdout/stderr inherited so output streams to the terminal."""
     try:
         completed = subprocess.run(
@@ -85,6 +86,7 @@ def run_command_streaming(argv: list[str], *, cwd: Path | None = None, env: dict
             cwd=str(cwd) if cwd else None,
             env=env,
             check=False,
+            stdout=sys.stderr if stderr_output else None,
         )
     except FileNotFoundError as exc:
         return DockerResult(127, "", str(exc))

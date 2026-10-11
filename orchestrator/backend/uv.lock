@@ -795,7 +795,7 @@ wheels = [
 
 [[package]]
 name = "vigil-orchestrator-backend"
-version = "1.2.1"
+version = "1.2.2"
 source = { editable = "." }
 dependencies = [
     { name = "fastapi" },

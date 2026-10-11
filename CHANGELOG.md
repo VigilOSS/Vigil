@@ -5,6 +5,27 @@ versioning follows [Semantic Versioning][semver].
 
 Durable design decisions live in [`docs/adr/`](docs/adr/).
 
+## [1.2.2] - 2026-10-12
+
+### Changed
+
+- The shared Kali runtime defaults to a 2 GiB memory limit and 1 CPU. Larger workloads
+  can set explicit limits; existing containers retain their limits until recreated.
+- `vigil up` shows concise, aligned startup progress and optional callback setup.
+- Resource warnings describe configured limits and available Docker capacity, go to
+  stderr, and appear for limited headroom rather than merely having other containers.
+
+### Fixed
+
+- Runtime restarts check capacity before replacing a running container.
+- Memory refusals give effective recovery commands; `vigil up --allow-oversubscribe`
+  supports the advertised override.
+
+### Added
+
+- `vigil up --json` returns one startup result with service states, configured limits,
+  and structured memory-refusal facts. Build progress goes to stderr.
+
 ## [1.2.1] - 2026-10-11
 
 ### Changed
