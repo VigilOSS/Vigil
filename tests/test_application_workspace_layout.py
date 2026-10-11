@@ -280,8 +280,6 @@ def test_stale_workspace_notice_explains_matched_release_without_source_copy(cap
     message = capsys.readouterr().out
     assert "workspace" in message and "vigil install" in message
     assert "matched application" in message
-    assert "updates only the CLI" not in message
-    assert "refresh the working root" not in message
 
 
 def test_release_provenance_does_not_probe_git(tmp_path, monkeypatch):

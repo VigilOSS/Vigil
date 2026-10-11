@@ -23,9 +23,6 @@ from assess.lib.tenant_references import (
 )
 
 
-REPO_ROOT = Path(__file__).resolve().parents[4]
-
-
 def _artifact_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers()
@@ -87,17 +84,12 @@ def test_artifact_search_rejects_positional_query_with_q_guidance(capsys) -> Non
 def test_canonical_contracts_have_one_cli_shape() -> None:
     artifact_contract = contracts.render_contract("artifact")
     link_contract = contracts.render_contract("finding link")
-    agent_contract = contracts.render_contract("agent")
     start_contract = contracts.render_contract("agent start")
 
     assert "artifact search --q" in artifact_contract
     assert "search: --q" in artifact_contract
-    assert "artifact search VA-047" not in artifact_contract
     assert "Producer agent/command attribution is immutable" in artifact_contract
     assert "--reason" in link_contract
-    assert "--note" not in link_contract
-    assert "<db_path>" not in agent_contract
-    assert "work-buffer cases.db" not in agent_contract
     assert "does not spawn" in start_contract.lower()
 
 
@@ -115,20 +107,6 @@ def test_host_exec_contract_exposes_the_authoritative_cli_shapes() -> None:
     assert "--require-audit" in rendered
     assert "--allow-destructive" in rendered
     assert "--finding" in rendered
-
-
-def test_operator_prompt_does_not_advertise_local_work_buffer_database() -> None:
-    prompt_sources = (
-        REPO_ROOT / "agent" / "shared-constraints.md",
-        REPO_ROOT / "agent" / "operator-core.md",
-        REPO_ROOT / "agent" / "operator-core-blue.md",
-    )
-
-    for path in prompt_sources:
-        text = path.read_text(encoding="utf-8")
-        assert "work-buffer <db>" not in text, path
-        assert "work-buffer <db_path>" not in text, path
-        assert "work-buffer cases.db" not in text, path
 
 
 class _DispatchClient:
@@ -448,14 +426,6 @@ def test_agent_actions_reject_flags_owned_by_other_actions(capsys) -> None:
 
     assert exc.value.code == 2
     assert "unrecognized arguments: --task" in capsys.readouterr().err
-
-
-def test_agent_list_rejects_retired_noop_json_flag(capsys) -> None:
-    with pytest.raises(SystemExit) as exc:
-        _agent_parser().parse_args(["agent", "list", "--json"])
-
-    assert exc.value.code == 2
-    assert "unrecognized arguments: --json" in capsys.readouterr().err
 
 
 def test_agent_handoff_is_json_only(capsys) -> None:

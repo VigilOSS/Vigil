@@ -142,7 +142,7 @@ authoritative registry, but registration shape depends on the command.
 
 A shipped verb is a contract. Its callers are prompts, references, transcripts, and operator muscle
 memory — none of which a compiler checks — so a rename breaks them even when the behavior is
-identical. Removing or renaming one is therefore a change you record, not just a change you make.
+identical. Removing or renaming one therefore means sweeping every caller, not just the parser.
 
 1. **Prefer an alias to a hard break, and know when the shape of the rename forbids one.** Two
    renames are possible and only one of them has an alias mechanism.
@@ -156,7 +156,7 @@ identical. Removing or renaming one is therefore a change you record, not just a
    ones do.
 
    *Top level folded into a group action* — `list-command-runs` → `command-run list`,
-   `code-record-analysis` → `code-record analysis`, the two renames the changelog records. There is
+   `code-record-analysis` → `code-record analysis`, the two shipped folds. There is
    no alias for this. `_register_subcommand_group` (`agent/scripts/assess/cli.py:98`) takes
    `name`, `help_text`, `dest` and `leaf_modules` and no `aliases`, and an alias on the `list` leaf
    would only add `command-run list-command-runs` — it cannot put a hyphenated spelling back at the
@@ -172,9 +172,8 @@ identical. Removing or renaming one is therefore a change you record, not just a
    exists — or when the fold above makes the shim cost more than the callers are worth. Say which,
    in the change.
 
-2. **Record it in `CHANGELOG.md`.** `### Removed` for a removal, `### Changed` for a rename, naming
-   both spellings and the invocation that replaces the old one. That entry is where an operator
-   looks up what the verb they remember became.
+2. **Keep the old spelling out of the README, docs, and `CHANGELOG.md`.** History lives only in
+   ADRs; write one when the decision behind the change is durable.
 
 3. **Move the contract surface with the verb.** `agent/scripts/assess/lib/contract_registry.py` owns
    declarative contract entries; `contracts.py` resolves and renders them. Update the dict key,

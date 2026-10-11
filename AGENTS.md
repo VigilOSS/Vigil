@@ -16,6 +16,7 @@ extension, freshness, or report-template procedure.
   classification coverage for convenience; use pinned regressions to establish correctness.
 - For behavior changes, run the smallest regression before production edits and confirm
   it fails for the intended behavior, then make it pass and run the impacted suite.
+- Never write tests that assert code, files, flags, or text were removed.
 - Keep changes cohesive: update registrations, generated artifacts, schemas, and callers
   together. Match surrounding idioms; remove obsolete code and unnecessary abstractions.
 - Use Acme and reserved `example.com` / `.example` domains in fixtures and examples.
@@ -60,8 +61,9 @@ exploit approval, tool-policy gates, proof integrity, or untrusted-target-text c
   a skill, reference, assess verb, oracle, language/index catalogue, or eval case.
 - Use content digests for install-managed freshness, never mtimes. Keep declared image
   and build input sets synchronized with consumers; see the maintainer freshness recipe.
-- Keep CLI rename/removal notes in CHANGELOG.md and update every live caller and contract.
-  Preserve historical audit records as records of what actually ran.
+- Never mention deprecated, renamed, or removed things in the README, docs, or CHANGELOG.md;
+  history lives only in ADRs. Update every live caller and contract, and preserve historical
+  audit records as records of what actually ran.
 
 ## Prompt system flow
 

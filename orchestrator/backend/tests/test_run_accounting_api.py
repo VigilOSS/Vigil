@@ -533,8 +533,7 @@ def test_run_dispatch_listing_carries_the_current_client_binding(
 
     This listing builds an operator-facing dispatch record, so it goes through
     `_DISPATCH_SELECT` like every other dispatch read — otherwise a run's
-    specialists all report as unbound while `agent list` shows them bound, and
-    the retired legacy columns leak back out here alone.
+    specialists all report as unbound while `agent list` shows them bound.
     """
     _seed(client, isolate_settings)
     run = _create_scan(client, run_uuid="bound-dispatches")
@@ -558,7 +557,6 @@ def test_run_dispatch_listing_carries_the_current_client_binding(
     assert row["client_binding_count"] == 1
     assert row["client_binding"]["asserted_client_handle"] == "conv_9c02"
     assert row["client_binding"]["binding_version"] == 1
-    assert "model" not in row and "reasoning" not in row
 
 
 def test_scan_lifecycle_inventory_reads_and_parser_debt_are_durable(

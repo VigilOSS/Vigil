@@ -191,7 +191,6 @@ def test_run_builds_python_playwright_driver_argv(monkeypatch):
     assert config["wait_selector"] == ""
     assert cap["tool_name"] == "browser"
     assert "playwright.sync_api" in kb._BROWSER_DRIVER
-    assert "selenium" not in kb._BROWSER_DRIVER.lower()
 
 
 def test_run_threads_audit_flags(monkeypatch):
@@ -574,8 +573,6 @@ def test_run_threads_steps_and_capture_options(tmp_path, monkeypatch):
     assert config["har_out"] == "scans/browser/run.har"
     assert config["capture_bodies"] is True
     assert config["max_body_bytes"] == 4096
-    assert "destinations" not in cap["kwargs"]
-    assert "no_fire_regex" not in config
 
 
 def test_run_exposes_declared_navigation_urls_as_policy_anchors(tmp_path, monkeypatch):
@@ -713,7 +710,6 @@ def test_driver_records_origins_it_left_unattributed():
 
 def test_driver_never_aborts_a_network_request_from_scope_policy():
     route_body = _route_body()
-    assert "blocked_request" not in kb._BROWSER_DRIVER
     assert "route.abort" not in route_body
     assert "route.continue_" in route_body
 
@@ -724,7 +720,7 @@ def test_scope_data_only_decides_attribution_never_whether_a_request_runs():
     driver = kb._BROWSER_DRIVER
     assert driver.count("host_admitted(") == 2  # the definition and its one call
     assert "host_admitted(request_host)" in _route_body()
-    for gating in ("route.abort", "route.fulfill", "blocked_request", "no_fire_regex"):
+    for gating in ("route.abort", "route.fulfill"):
         assert gating not in driver
     goto_call = driver.split("response = page.goto", 1)[1].split("\n", 1)[0]
     assert "admitted" not in goto_call and "allow_entries" not in goto_call

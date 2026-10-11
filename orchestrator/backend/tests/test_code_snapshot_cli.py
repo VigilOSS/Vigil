@@ -4592,7 +4592,6 @@ def test_javascript_complete_index_never_augments_ast_with_line_regex_callables(
     monkeypatch.setattr(module, "_extract_functions_ts", lambda *_args: [])
     monkeypatch.setattr(module, "_extract_classes_ts", lambda *_args: [])
     monkeypatch.setattr(module, "_extract_imports_ts", lambda *_args: [])
-    assert not hasattr(module, "_detect_arrow_functions")
     monkeypatch.setattr(module, "_detect_entry_points", lambda *_args: [])
     monkeypatch.setattr(module, "_detect_top_level_entry_points", lambda *_args: [])
     monkeypatch.setattr(module, "_detect_sinks", lambda *_args: [])

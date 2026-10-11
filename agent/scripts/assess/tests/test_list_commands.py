@@ -63,7 +63,6 @@ def test_finding_update_contract_uses_public_details_shape_and_replacement_seman
     text = " ".join(contract.notes)
 
     assert "returns it back as `details`" in text
-    assert "details_json` on read" not in text
     assert "replaces that stored value" in text
 
 

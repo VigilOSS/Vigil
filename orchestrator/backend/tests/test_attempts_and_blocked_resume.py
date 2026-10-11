@@ -187,8 +187,6 @@ def test_resume_brief_attempts_section_surfaces_all_three_sources(client, isolat
     # notes (the documented unblock-requirement home) is projected into the brief.
     assert blocked[0]["notes"] == "retry after VA-101 yields an org-admin session token"
 
-    # Probe runs moved out of the flat attempts ledger into the grid.
-    assert "noncovering_probe_runs" not in attempts
     grid = brief["per_input_coverage"]
     by_family = {c["attack_family"]: c for c in grid["cells"]}
     # non-covering no-signal probe: a cell, marked NOT covering.

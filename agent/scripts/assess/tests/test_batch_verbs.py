@@ -404,7 +404,7 @@ def test_verify_rejects_positional_json_blob(tmp_path, monkeypatch, capsys):
     assert exc.value.code == 1
     err = capsys.readouterr().err
     assert "looks like a JSON payload" in err
-    assert "--payload-file" in err and "--inline" not in err
+    assert "--payload-file" in err
     assert fake.posts == []
 
 

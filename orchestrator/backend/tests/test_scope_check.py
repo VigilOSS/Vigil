@@ -301,8 +301,6 @@ def test_apex_match_with_explicit_entry(monkeypatch, tmp_path: Path, capsys) -> 
         "https://example.test/login",
         "https://corp.example.test/api",
     ]
-    # No warning when the apex is explicitly listed.
-    assert "wildcard-only entries lacking explicit apex" not in captured.err
 
 
 # ---------------------------------------------------------------------------

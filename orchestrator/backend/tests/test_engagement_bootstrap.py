@@ -424,13 +424,6 @@ def test_aith_engagement_create_writes_engagement_brief_stub(
     # ENGAGEMENT-NEUTRAL: no host/program specifics are seeded at creation time.
     assert "app.example.com" not in text
 
-    # Keep the mandatory startup read limited to rules of engagement. Product
-    # setup advice and discovery credentials belong in product documentation,
-    # not in every engagement's authoritative ROE surface.
-    assert "Passive-DNS / Recon Coverage Keys" not in text
-    assert "SUBFINDER_CHAOS_API_KEY" not in text
-    assert "SUBFINDER_GITHUB_TOKEN" not in text
-
 
 def test_repair_refreshes_stale_claude_hook_settings(tmp_path: Path) -> None:
     repo_root = Path(__file__).resolve().parents[3]
@@ -533,59 +526,6 @@ def test_aith_engagement_create_emits_scope_summary(tmp_path: Path, capsys, monk
 
     err = capsys.readouterr().err
     assert "[vigil] scope: 2 entries" in err
-    # All entries are bare hosts — no wildcard-only-no-apex warning.
-    assert "wildcard-only entries lacking explicit apex" not in err
-
-
-def test_aith_engagement_create_no_warning_under_wildcard_only_scope(
-    tmp_path: Path, capsys, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Wildcard scope admits the bare apex (HackerOne / Bugcrowd / VDP convention),
-    so bootstrap emits no apex warning."""
-    _isolate_orchestrator_url(monkeypatch)
-    repo_root = Path(__file__).resolve().parents[3]
-    install_root = tmp_path / "install"
-    sandbox_root = install_root / "agent"
-    sandbox_root.mkdir(parents=True)
-    _copy_agent_fixture(repo_root / "agent", sandbox_root, client="both")
-
-    create_engagement(
-        CreateEngagementOptions(
-            install_root=install_root,
-            engagement_type="web",
-            target="https://example.test",
-            hosts=["*.example.test"],
-        )
-    )
-
-    err = capsys.readouterr().err
-    assert "[vigil] scope: 1 entries" in err
-    assert "wildcard-only entries lacking explicit apex" not in err
-
-
-def test_aith_engagement_create_no_warning_when_apex_listed_alongside_wildcard(
-    tmp_path: Path, capsys, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """No warning when both apex and wildcard are listed (operator-confirmed apex inclusion)."""
-    _isolate_orchestrator_url(monkeypatch)
-    repo_root = Path(__file__).resolve().parents[3]
-    install_root = tmp_path / "install"
-    sandbox_root = install_root / "agent"
-    sandbox_root.mkdir(parents=True)
-    _copy_agent_fixture(repo_root / "agent", sandbox_root, client="both")
-
-    create_engagement(
-        CreateEngagementOptions(
-            install_root=install_root,
-            engagement_type="web",
-            target="https://example.test",
-            hosts=["example.test", "*.example.test"],
-        )
-    )
-
-    err = capsys.readouterr().err
-    assert "[vigil] scope: 2 entries" in err
-    assert "wildcard-only entries lacking explicit apex" not in err
 
 
 @pytest.mark.usefixtures("vigil_cli_on_path")

@@ -96,7 +96,7 @@ describe("CoverageTab", () => {
     expect(screen.queryByText("No coverage items match the current filters.")).toBeNull();
   });
   it("shows actionable debt first and retains an accessible full ledger", () => {
-    const view = render(
+    render(
       <CoverageTab
         engagementKey="demo engagement"
         summary={summary}
@@ -110,7 +110,6 @@ describe("CoverageTab", () => {
     for (const status of ["pending", "queued", "deferred", "covered", "not applicable", "blocked"]) {
       expect(screen.getByText(new RegExp(`${status}: 1`, "i"))).toBeTruthy();
     }
-    expect(view.container.querySelector(".coverage-segment-tested")).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: /^Full ledger/ }));
     const host = screen.getByRole("button", { name: /api\.example\.test/i });

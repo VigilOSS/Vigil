@@ -4,7 +4,7 @@ from __future__ import annotations
 from app.services.state_manager import _common
 
 
-def test_verification_status_vocabulary_is_complete_and_unranked() -> None:
+def test_verification_status_vocabulary_is_complete() -> None:
     assert {status.value for status in _common.VERIFICATION_STATUSES} == {
         "unreviewed",
         "confirmed",
@@ -14,4 +14,3 @@ def test_verification_status_vocabulary_is_complete_and_unranked() -> None:
         "false_positive",
         "disputed",
     }
-    assert not hasattr(_common, "VERIFICATION_DISPOSITION_RANK")

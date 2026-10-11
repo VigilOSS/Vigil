@@ -64,16 +64,6 @@ def test_host_exec_parser_keeps_cli_command_argv_separate_from_root_command() ->
     assert args.exec_argv == ["printf", "ok"]
 
 
-def test_host_exec_rejects_retired_aggregate_rate_override_flag(capsys) -> None:
-    with pytest.raises(SystemExit) as exc:
-        _host_exec_parser().parse_args(
-            ["host-exec", "--rate-override-reason", "approved", "printf", "ok"]
-        )
-
-    assert exc.value.code == 2
-    assert "unrecognized arguments: --rate-override-reason" in capsys.readouterr().err
-
-
 @pytest.mark.parametrize("json_key", ["command", "argv"])
 def test_host_exec_from_json_command_aliases_preserve_root_command(json_key: str) -> None:
     args = _host_exec_parser().parse_args(["host-exec", "--from-json", "request.json"])

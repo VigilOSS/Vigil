@@ -11,5 +11,4 @@ test("shared Runs tab renders a read-only audit entry state", () => {
   assert.match(html, /Shared audit/);
   assert.match(html, /Assessment runs/);
   assert.match(html, /Code, web, blue, and shared work/);
-  assert.doesNotMatch(html, /data-trust=/i);
 });

@@ -485,8 +485,6 @@ def test_dispatch_requested_actual_fields_post_get_list(client, isolate_settings
     assert posted["actual_model"] == "unknown"
     assert posted["requested_reasoning"] == "high"
     assert posted["actual_reasoning"] == "unknown"
-    assert "model" not in posted
-    assert "reasoning" not in posted
 
     fetched = client.get(f"{BASE}/dispatches/RQ-ACT-1").json()
     for key in (

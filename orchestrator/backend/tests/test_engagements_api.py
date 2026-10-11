@@ -2638,28 +2638,6 @@ def test_bulk_artifact_register_upserts_an_already_registered_path(client, isola
     assert paths.count("notes/again.md") == 1
 
 
-def test_legacy_finding_status_field_is_rejected(client, isolate_settings):
-    write_engagement(isolate_settings["engagements_dir"])
-
-    response = client.post(
-        "/engagements/2026-03-30-120000-example/assessment/findings",
-        json={
-            "title": "Legacy status payload",
-            "severity": "medium",
-            "status": "confirmed",
-            "defect_family": "idor",
-            "root_cause_key": "legacy-status",
-            "auth_context": "anonymous",
-            "canonical_location": "https://example.com/orders/7",
-            "summary": "Old clients should fail hard.",
-            "evidence_ref": "findings.md",
-            "notes": "This should be rejected.",
-            "details": {"evidence": "legacy payload", "impact": "validation drift"},
-        },
-    )
-    assert response.status_code == 422
-
-
 def test_findings_patch_can_revive_false_positive_and_lower_severity(client, isolate_settings):
     write_engagement(isolate_settings["engagements_dir"])
 

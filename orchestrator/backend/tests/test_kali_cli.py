@@ -765,14 +765,6 @@ def test_extra_args_not_exposed_on_kali_exec():
     assert exc.value.code != 0
 
 
-def test_kali_exec_has_no_second_engagement_key_selector():
-    """API/audit attribution derives from the resolved engagement config."""
-    import inspect
-
-    kali = _import("assess.lib.kali")
-    assert "engagement_key" not in inspect.signature(kali.kali_exec).parameters
-
-
 def test_kali_exec_rejects_explicit_dir_that_conflicts_with_injected_config(
     monkeypatch, fake_engagement
 ):
@@ -2891,10 +2883,9 @@ def test_contract_kali_asnmap_is_registered():
     assert "vigil assess kali asnmap" in rendered
 
 
-def test_contract_kali_exec_does_not_advertise_removed_strace():
+def test_contract_kali_exec_renders_command_separator():
     contracts = _import("assess.lib.contracts")
     rendered = contracts.render_contract("kali exec")
-    assert "--strace" not in rendered
     assert "-- <command...>" in rendered
 
 
@@ -3329,53 +3320,6 @@ def test_kali_job_start_rejects_caller_owned_parent_command_run(
 
     with pytest.raises(mod.AssessError, match="system-owned"):
         mod._run_start(args)
-
-
-def test_kali_job_start_does_not_enforce_legacy_aggregate_rate(
-    monkeypatch, fake_engagement
-):
-    mod = _import("assess.commands.kali_job")
-    (fake_engagement / "scope.json").write_text(
-        json.dumps(
-            {
-                "hosts": ["allowed.example"],
-                "rate_limit_aggregate_rps": 10,
-            }
-        ),
-        encoding="utf-8",
-    )
-    cfg = SimpleNamespace(
-        base_url="http://127.0.0.1:18000",
-        engagement_dir=str(fake_engagement),
-        engagement_key=fake_engagement.name,
-    )
-    monkeypatch.setattr(mod, "_load_job_config", lambda _args: cfg)
-    captured = {}
-    monkeypatch.setattr(
-        mod,
-        "start_job",
-        lambda cmd, *, audit_meta, **kwargs: captured.update(audit_meta=audit_meta)
-        or {"id": 10, "status": "running"},
-    )
-    args = SimpleNamespace(
-        technique="RECON",
-        intent="background liveness",
-        probe_kind="fingerprint",
-        phase="recon",
-        timeout=60,
-        destructive=False,
-        agent_name="recon-specialist",
-        target_host="allowed.example",
-        engagement_dir=str(fake_engagement),
-        command=["httpx", "-u", "https://allowed.example", "-rate-limit", "7"],
-        container_name="vigil",
-        parent_command_run_id=None,
-    )
-
-    mod._run_start(args)
-
-    assert "effective_rate_rps" not in captured["audit_meta"]
-    assert "rate_override_reason" not in captured["audit_meta"]
 
 
 def test_kali_job_start_derives_inner_shell_tool_for_policy(monkeypatch, fake_engagement):

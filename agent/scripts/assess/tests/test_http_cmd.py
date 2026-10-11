@@ -315,19 +315,6 @@ def test_policy_set_partial_update_only_sends_provided_fields(tmp_path, monkeypa
     assert "content_type_deny" not in payload
 
 
-def test_policy_set_rejects_retired_operator_data_withholding_option(tmp_path, monkeypatch):
-    fake = _FakeClient()
-    _install(monkeypatch, tmp_path, fake)
-
-    with pytest.raises(SystemExit):
-        _parse(
-            ["http", "policy", "set", "--redaction-profile", "none"],
-            str(tmp_path),
-        )
-
-    assert fake.puts == []
-
-
 def test_policy_set_no_enabled_sends_false(tmp_path, monkeypatch, capsys):
     fake = _FakeClient()
     _install(monkeypatch, tmp_path, fake)

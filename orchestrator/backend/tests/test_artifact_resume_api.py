@@ -286,12 +286,6 @@ def test_artifact_contract_has_no_operator_data_suppression_flag(
     assert "sensitive" not in registered.json()
     assert "Authorization: Bearer literal-operator-token" in registered.json()["indexed_text"]
 
-    retired = client.post(
-        f"{BASE}/artifacts",
-        json={"path": "notes/literal-token.md", "sensitive": True},
-    )
-    assert retired.status_code == 422, retired.text
-
 
 def test_artifact_search_indexes_text_beyond_legacy_16k_boundary(
     client, isolate_settings

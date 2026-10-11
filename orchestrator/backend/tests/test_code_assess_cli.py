@@ -2728,7 +2728,6 @@ def test_post_rejects_raw_verify_endpoint_and_points_to_helper(capsys):
     err = capsys.readouterr().err
     assert "finding verify" in err
     assert "finding verify --status false_positive" in err
-    assert "kill-finding" not in err
     assert "vigil assess contract finding verify" in err
 
 
@@ -2839,7 +2838,7 @@ def test_verify_finding_help_is_rendered_from_contract_registry(capsys):
     assert "Contract:" not in out
 
 
-def test_update_finding_help_drops_patch_finding_alias(capsys):
+def test_update_finding_help_shows_payload_file_usage(capsys):
     cli = _load_cli_module()
 
     with pytest.raises(SystemExit) as excinfo:
@@ -2848,8 +2847,6 @@ def test_update_finding_help_drops_patch_finding_alias(capsys):
     assert excinfo.value.code == 0
     out = capsys.readouterr().out
     assert "vigil assess finding update <slug> --payload-file" in out
-    assert "--inline INLINE" not in out
-    assert "patch-finding" not in out
 
 
 def test_verify_finding_builds_false_positive_payload_from_flags(monkeypatch, tmp_path, capsys):

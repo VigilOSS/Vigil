@@ -18,8 +18,7 @@ records every GET and POST. Pins the behaviour the plan locks down:
     in a draft when absent) — the raw structured proof (poc_* / evidence_ref) and
     the linked command runs are NOT rendered into it; they, the finding metadata,
     and any hygiene warnings are consolidated into the single OPERATOR DETAILS
-    section (mirrored by the context JSON `linked_command_runs` array). The old
-    separate "OPERATOR NOTES" and "COMMAND REFERENCE" blocks no longer exist;
+    section (mirrored by the context JSON `linked_command_runs` array);
   * `direct` drops the VRT/weakness taxonomy fields (and its gate);
   * the generated submission is registered as `kind="submission"` and NO payload
     ever carries `submission_status`;
@@ -316,9 +315,6 @@ def test_draft_writes_with_needs_markers(tmp_path, monkeypatch, capsys):
     assert "### Summary" in body and "### Evidence" in body
     # The single OPERATOR DETAILS reference section is present below the second divider.
     assert "## OPERATOR DETAILS — NOT FOR SUBMISSION" in body
-    # The retired separate blocks no longer exist.
-    assert "## OPERATOR NOTES" not in body
-    assert "## COMMAND REFERENCE" not in body
     # draft still registers the artifact.
     assert any(ep == "artifacts" for ep, _ in fake.posts)
 
@@ -358,16 +354,13 @@ def test_final_passes_with_complete_finding(tmp_path, monkeypatch, capsys):
     evidence = body[body.index("### Evidence"):body.index("### Impact")]
     assert "member B's order fields" in evidence
     assert "PoC Request" not in evidence and "PoC Response" not in evidence
-    # The single OPERATOR DETAILS section is present; the retired blocks are gone.
+    # The single OPERATOR DETAILS section is present.
     assert "## OPERATOR DETAILS — NOT FOR SUBMISSION" in body
-    assert "## OPERATOR NOTES" not in body
-    assert "## COMMAND REFERENCE" not in body
     # context companion written alongside.
     ctx = json.loads((tmp_path / "submissions" / "VA-047" / "submission-context.json").read_text())
     assert ctx["mode"] == "final" and ctx["missing"] == []
     assert ctx["proof"]["has_content_proof"] is True
     assert ctx["proof"]["has_durable_proof"] is True
-    assert "has_proof" not in ctx["proof"]
     assert ctx["linked_command_runs"] == []
 
 
@@ -1527,9 +1520,8 @@ def test_correction_history_is_preserved_only_below_submission_boundary(
 def test_operator_details_consolidates_all_reference(tmp_path, monkeypatch, capsys):
     """One OPERATOR DETAILS section holds metadata + structured proof + linked runs.
 
-    Pins the consolidation: the three previously-separate mechanisms (raw poc_* in
-    Evidence, a COMMAND REFERENCE block, an OPERATOR NOTES block) are now one
-    section, and `### Evidence` carries only the authored prose.
+    Pins the consolidation: raw poc_* proof, linked runs, and finding metadata
+    share one section, and `### Evidence` carries only the authored prose.
     """
     links = [{"finding_slug": "VA-047", "target_kind": "command_run", "target_id": 5}]
     command_runs = {
@@ -1549,10 +1541,8 @@ def test_operator_details_consolidates_all_reference(tmp_path, monkeypatch, caps
 
     body = _submission_path(tmp_path).read_text()
 
-    # Exactly one reference section, below a second `---`; the retired blocks are gone.
+    # Exactly one reference section, below a second `---`.
     assert body.count("## OPERATOR DETAILS — NOT FOR SUBMISSION") == 1
-    assert "## OPERATOR NOTES" not in body
-    assert "## COMMAND REFERENCE" not in body
     assert body.count("\n---\n") >= 2  # header separator + OPERATOR DETAILS separator
 
     details_section = body[body.index("## OPERATOR DETAILS"):]
@@ -1869,7 +1859,6 @@ def test_json_summary_shape(tmp_path, monkeypatch, capsys):
     assert out["hygiene_warnings"] == []  # clean finding: no internal-id leaks
     assert out["has_content_proof"] is True
     assert out["has_durable_proof"] is True
-    assert "has_proof" not in out
 
 
 def test_final_output_must_be_inside_engagement(tmp_path, monkeypatch):

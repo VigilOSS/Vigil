@@ -417,12 +417,7 @@ def test_capture_policy_default_off_and_put(client, isolate_settings):
     assert body["capture_response_bodies"] is False
     assert body["max_body_bytes"] == 102400
     assert body["content_type_allow"] == []
-    assert "redaction_profile" not in body
-    assert "redaction_warning" not in body
     assert body["retention"] == "until_engagement_deletion"
-
-    unsupported = client.put(policy_url, json={"redaction_profile": "default"})
-    assert unsupported.status_code == 422
 
     updated = client.put(
         policy_url,
@@ -443,30 +438,6 @@ def test_capture_policy_default_off_and_put(client, isolate_settings):
     mirror = json.loads((root / "capture-policy.json").read_text(encoding="utf-8"))
     assert mirror["enabled"] is True
     assert mirror["max_body_bytes"] == 4096
-
-
-def test_capture_policy_does_not_expose_retired_legacy_withholding_metadata(
-    client, isolate_settings
-):
-    from app import db as db_module
-
-    key = "2026-06-01-000007-legacy-redaction"
-    write_engagement(isolate_settings["engagements_dir"], key)
-    policy_url = f"/engagements/{key}/assessment/capture-policy"
-    assert client.put(policy_url, json={"enabled": True}).status_code == 200
-    engagement_id = client.get(f"/engagements/{key}").json()["id"]
-    with db_module.get_connection() as connection:
-        connection.execute(
-            "UPDATE assessment_capture_policy SET redaction_profile = 'legacy-default' "
-            "WHERE engagement_id = ?",
-            (engagement_id,),
-        )
-
-    response = client.get(policy_url)
-
-    assert response.status_code == 200
-    assert "redaction_profile" not in response.json()
-    assert "redaction_warning" not in response.json()
 
 
 def test_http_flow_capture_status_additive_migration_preserves_legacy_rows(

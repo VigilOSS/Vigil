@@ -203,7 +203,6 @@ test("the copied body follows the canonical submission order", () => {
   for (let index = 1; index < headings.length; index += 1) {
     assert.ok(md.indexOf(headings[index - 1]) < md.indexOf(headings[index]), md);
   }
-  assert.doesNotMatch(md, /### Proof of Concept|### PoC Request|### PoC Response/);
 });
 
 test("authored evidence remains Markdown while raw HTTP evidence stays fenced", () => {

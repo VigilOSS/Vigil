@@ -145,37 +145,6 @@ def test_proof_receipt_create_binds_command_evidence_to_an_execution(
     assert posted[0]["command_run_id"] == 88
 
 
-def test_proof_receipt_create_rejects_retired_operator_data_withholding_fields(
-    tmp_path, monkeypatch, capsys
-) -> None:
-    engagement = _engagement(tmp_path)
-    monkeypatch.setattr(config, "_verify_backend", lambda _cfg: None)
-    monkeypatch.setattr(
-        AssessmentClient,
-        "post",
-        lambda *_args, **_kwargs: pytest.fail("retired controls must not reach the API"),
-    )
-    with pytest.raises(SystemExit) as exc:
-        cli.main(
-            [
-                "--engagement-dir",
-                str(engagement),
-                "proof-receipt",
-                "create",
-                "--run-id",
-                "17",
-                "--kind",
-                "http_exchange",
-                "--redaction-status",
-                "redacted",
-                "--derivative-of-receipt-id",
-                "31",
-            ]
-        )
-    assert exc.value.code == 2
-    assert "unrecognized arguments" in capsys.readouterr().err
-
-
 def test_proof_receipt_get_and_bounded_list_validate_canonical_rows(
     tmp_path, monkeypatch, capsys
 ) -> None:

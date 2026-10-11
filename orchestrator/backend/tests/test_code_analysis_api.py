@@ -2829,24 +2829,6 @@ def test_repo_refresh_and_preview_reject_repo_keys_over_portable_component_limit
     assert client.get(f"{base}/repos").json() == []
 
 
-def test_legacy_repo_and_file_create_routes_are_not_public(client, isolate_settings):
-    engagement_key = "2026-07-14-code-refresh-only-api"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    base = f"/engagements/{engagement_key}/assessment/code"
-
-    repo_response = client.post(
-        f"{base}/repos",
-        json=_repo_payload("legacy-route", "/tmp/legacy-route"),
-    )
-    files_response = client.post(
-        f"{base}/files",
-        json={"repo_id": 1, "files": []},
-    )
-
-    assert repo_response.status_code == 405
-    assert files_response.status_code == 405
-
-
 def test_code_file_listing_is_bounded_envelope_with_current_queue_join(
     client, isolate_settings
 ):
@@ -6841,7 +6823,6 @@ def test_repo_refresh_is_atomic_and_reconciles_changed_retired_and_renamed_files
     assert committed.json()["renamed"] == 1
     assert committed.json()["inserted"] == 1
     assert committed.json()["retired"] == 0
-    assert "deleted" not in committed.json()
 
     after = client.get(
         f"/engagements/{engagement_key}/assessment/code/files?repo_id={repo['id']}&limit=20"
@@ -6894,7 +6875,6 @@ def test_repo_refresh_complete_empty_manifest_retires_last_file(client, isolate_
     )
     assert committed.status_code == 200, committed.text
     assert committed.json()["retired"] == 2
-    assert "deleted" not in committed.json()
     files = client.get(
         f"/engagements/{engagement_key}/assessment/code/files?repo_id={repo['id']}&limit=20"
     )
@@ -7186,7 +7166,6 @@ def test_queue_fetch_returns_file_direct_work_items(client, isolate_settings):
     assert item["repo"]["lsp_config"]["ctags"]["available"] is True
     assert "applicable_vuln_classes" in item
     assert "web-app-injection" in item["applicable_vuln_classes"]
-    assert "context" not in item
 
     file_after_fetch = client.get(
         f"/engagements/{engagement_key}/assessment/code/files/{parser_file['id']}"
@@ -13026,7 +13005,7 @@ def test_repo_refresh_reuses_existing_repo_key_within_engagement(client, isolate
 
 def test_file_only_queue_create_and_fetch(client, isolate_settings):
     """Queue items with only file_id (no context_id) + batch_theme + slot_types
-    should be created, fetched with context=None, and completed with cwe_coverage."""
+    should be created, fetched, and completed with cwe_coverage."""
     engagement_key = "2026-04-04-file-only-queue"
     write_engagement(isolate_settings["engagements_dir"], engagement_key)
     repo = _create_repo(client, engagement_key, repo_key="file-only-repo")
@@ -13059,7 +13038,7 @@ def test_file_only_queue_create_and_fetch(client, isolate_settings):
     assert file_after_queue.status_code == 200
     assert file_after_queue.json()["analysis_status"] == "queued"
 
-    # Fetch the item — context should be None, batch_theme preserved
+    # Fetch the item — batch_theme preserved
     fetch_response = client.post(
         f"/engagements/{engagement_key}/assessment/code/analysis-queue/fetch",
         json={"limit": 1, "agent_name": "code-vuln-hunter"},
@@ -13068,7 +13047,6 @@ def test_file_only_queue_create_and_fetch(client, isolate_settings):
     payload = fetch_response.json()
     assert len(payload) == 1
     work_item = payload[0]
-    assert "context" not in work_item
     assert work_item["batch_theme"] == "network-input-analysis"
     assert work_item["slot_types"] == ["NETWORK-INPUT", "FILE-CONTENT"]
     assert work_item["guidance_hypotheses"] == ["Check for buffer overflow in parse()"]
@@ -13704,8 +13682,6 @@ def test_analysis_results_include_linked_finding_lifecycle(client, isolate_setti
     assert result_response.status_code == 201
     assert result_response.json()["finding_workflow_status"] == "active"
     assert result_response.json()["finding_verification_status"] == "unreviewed"
-    assert "finding_verification_state" not in result_response.json()
-    assert "finding_verification_disposition" not in result_response.json()
 
     with db_module.get_connection() as connection:
         connection.execute(
@@ -13726,8 +13702,6 @@ def test_analysis_results_include_linked_finding_lifecycle(client, isolate_setti
     assert len(results_list.json()) == 1
     assert results_list.json()[0]["finding_workflow_status"] == "false_positive"
     assert results_list.json()[0]["finding_verification_status"] == "false_positive"
-    assert "finding_verification_state" not in results_list.json()[0]
-    assert "finding_verification_disposition" not in results_list.json()[0]
 
 
 def test_coverage_detail_cwe(client, isolate_settings):
