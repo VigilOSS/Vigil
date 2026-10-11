@@ -9,10 +9,12 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import tomllib
 import zipfile
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+RELEASE_VERSION = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text())["project"]["version"]
 
 
 def test_sdist_builds_an_installable_wheel_with_a_working_cli(tmp_path: Path) -> None:
@@ -83,7 +85,7 @@ def test_sdist_builds_an_installable_wheel_with_a_working_cli(tmp_path: Path) ->
         prefix = "vigil_cli/_bundle/"
         manifest = json.loads(archive.read(prefix + "bundle.json"))
         assert manifest["schema_version"] == 1
-        assert manifest["version"] == "1.1.0"
+        assert manifest["version"] == RELEASE_VERSION
         payload = {key: manifest[key] for key in ("files", "executables")}
         assert manifest["content_sha256"] == hashlib.sha256(
             json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
@@ -152,7 +154,7 @@ def test_sdist_builds_an_installable_wheel_with_a_working_cli(tmp_path: Path) ->
         capture_output=True,
         text=True,
     )
-    assert version.stdout.strip() == "1.1.0"
+    assert version.stdout.strip() == RELEASE_VERSION
 
     executable = venv_dir / ("Scripts/vigil.exe" if os.name == "nt" else "bin/vigil")
     cli_version = subprocess.run(
@@ -163,7 +165,7 @@ def test_sdist_builds_an_installable_wheel_with_a_working_cli(tmp_path: Path) ->
         capture_output=True,
         text=True,
     )
-    assert "1.1.0" in cli_version.stdout
+    assert RELEASE_VERSION in cli_version.stdout
     help_result = subprocess.run(
         [str(executable), "--help"],
         cwd=probe_dir,

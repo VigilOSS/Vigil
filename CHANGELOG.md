@@ -5,7 +5,7 @@ versioning follows [Semantic Versioning][semver].
 
 Durable design decisions live in [`docs/adr/`](docs/adr/).
 
-## [Unreleased]
+## [1.2.0] - 2026-10-10
 
 ### Changed
 
@@ -21,6 +21,8 @@ Durable design decisions live in [`docs/adr/`](docs/adr/).
   use a name and populate the printed source folder.
 - Code creation shows source setup instead of optional proxy and callback service hints.
   Mode inspection and startup report the current staged-source state.
+- The README states which models support web and code engagements, recommends reasoning
+  effort and plan sizing, and adds a direct repository install that builds the UI locally.
 
 ## [1.1.0] - 2026-10-10
 

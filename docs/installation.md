@@ -9,16 +9,20 @@ and the code-track search dependency.
 `vigil quickstart` mutates nothing unless you pass `--install-host-tools`, so it is safe to run
 first; `--json` gives a machine-readable readiness report. The orchestrator UI is at
 `http://127.0.0.1:18000` once the stack is up. Install the versioned wheel from the
-[GitHub release](https://github.com/VigilOSS/Vigil/releases/tag/v1.1.0):
+[GitHub release](https://github.com/VigilOSS/Vigil/releases/tag/v1.2.0):
 
 ```bash
-uv tool install --from https://github.com/VigilOSS/Vigil/releases/download/v1.1.0/vigil-1.1.0-py3-none-any.whl vigil
+uv tool install --from https://github.com/VigilOSS/Vigil/releases/download/v1.2.0/vigil-1.2.0-py3-none-any.whl vigil
 vigil up
 ```
 
 The release includes the CLI, backend, prompts, schemas, Docker definitions, documentation,
 legal files, and prebuilt frontend/report. Consumer installation needs neither Git nor Node
 and does not fetch a source checkout. Docker must be running to bring up the local stack.
+
+To install directly from the repository instead, run
+`uv tool install git+https://github.com/VigilOSS/Vigil vigil`. That builds the frontend and
+report locally, so it needs Git, Node.js, and npm on `PATH`.
 For development, use `uv tool install --editable .` in the source checkout; the imported
 CLI's checkout supplies application assets.
 
