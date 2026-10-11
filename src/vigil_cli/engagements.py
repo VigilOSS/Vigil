@@ -1677,7 +1677,15 @@ def start_engagement(install_root: Path, engagement_dir: Path, client: str, extr
     if selected_mode == "code":
         source = engagement_source_state(engagement_dir)
         print(f"source: {source['path']} ({source['state']})", file=sys.stderr, flush=True)
-    if selected_mode == "code" and not no_autoprompt:
+    resume_requested = (
+        client == "codex" and "resume" in extra_args
+    ) or (
+        client == "claude" and any(
+            arg in {"-r", "--resume"} or arg.startswith(("-r=", "--resume="))
+            for arg in extra_args
+        )
+    )
+    if selected_mode == "code" and not no_autoprompt and not resume_requested:
         flags, message = split_operator_message(extra_args)
         setup = (
             "Follow the source confirmation step in the canonical code operator prompt. "

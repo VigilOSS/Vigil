@@ -150,3 +150,29 @@ def test_start_no_autoprompt_preserves_only_explicit_client_arguments(workspace,
     ])
     assert len(launched) == 1
     assert launched[0][1:] == forwarded
+
+
+@pytest.mark.parametrize(("client", "forwarded"), [
+    ("codex", ["resume"]),
+    ("codex", ["resume", "acme-session"]),
+    ("codex", ["resume", "--last"]),
+    ("codex", ["--model", "acme-model", "resume", "acme-session"]),
+    ("codex", ["resume", "acme-session", "Focus on Acme's parser."]),
+    ("claude", ["-r"]),
+    ("claude", ["-r", "acme-session"]),
+    ("claude", ["--resume"]),
+    ("claude", ["--resume", "acme-session"]),
+    ("claude", ["--resume=acme-session"]),
+    ("claude", ["--resume", "acme-session", "Focus on Acme's parser."]),
+])
+def test_resume_starts_preserve_client_arguments_without_automatic_message(workspace, monkeypatch, client, forwarded):
+    path = _code_engagement(workspace)
+    monkeypatch.chdir(workspace)
+    launched = []
+    monkeypatch.setattr(engagements.os, "execv", lambda executable, argv: launched.append(argv))
+    main([
+        "--root", str(workspace), "engagement", "start", path.name,
+        "--client", client, "--skip-preflight", *forwarded,
+    ])
+    assert len(launched) == 1
+    assert launched[0][1:] == forwarded

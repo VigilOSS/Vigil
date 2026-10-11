@@ -9,6 +9,8 @@ Durable design decisions live in [`docs/adr/`](docs/adr/).
 
 ### Changed
 
+- Claude `-r`/`--resume` and Codex `resume` requests preserve their native arguments
+  and start without an automatic opening message.
 - `vigil engagement start --no-autoprompt` opens the client without Vigil's automatic
   opening message and preserves explicitly supplied client messages.
 - Database backups are handled by the backend scheduler and database migrations.

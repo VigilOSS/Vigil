@@ -68,6 +68,7 @@ vigil engagement start <engagement-key> --client codex --no-autoprompt
 
 Explicit client messages are still forwarded. In code mode, source confirmation remains
 required before analysis when you ask the client to begin work.
+Claude's `-r`/`--resume` and Codex's `resume` requests start without an automatic opening message.
 
 Startup refreshes generated client files only for the selected engagement. After an
 application upgrade, an older official session on that same engagement must be ended
