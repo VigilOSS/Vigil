@@ -173,8 +173,8 @@ before a draft PR. The repository's `PROJECT.md` configures ticket
 readers, checks, and publishing. Start with `vigil remediation -k <key> start`, then
 `/vigil-remediate SEC-123`. See [`docs/remediation.md`](docs/remediation.md).
 
-Android app analysis and blue incident response also run on the same backend; see
-[`docs/engagements.md`](docs/engagements.md) and [`docs/blue-engagements.md`](docs/blue-engagements.md).
+Blue incident response also runs on the same backend; see
+[`docs/blue-engagements.md`](docs/blue-engagements.md).
 
 ## Runtime model
 
