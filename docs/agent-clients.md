@@ -204,6 +204,6 @@ unambiguous prefix of a Vigil flag is consumed by Vigil rather than forwarded; a
 the optional engagement key is omitted, Vigil resolves the current engagement without
 consuming the first client flag value or post-`--` message.
 
-`vigil engagement start` owns exactly `key`, `--select`, `--client`, `--thinking`,
-and `--skip-preflight`. There is no `--model` flag — `--model` is forwarded to the
+`vigil engagement start` owns exactly `key`, `--select`, `--client`, `--mode`, `--thinking`,
+`--no-autoprompt`, and `--skip-preflight`. There is no `--model` flag — `--model` is forwarded to the
 client like any other unknown flag.

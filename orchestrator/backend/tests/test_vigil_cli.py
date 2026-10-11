@@ -392,7 +392,7 @@ def test_engagement_create_android_cli_infers_apk_without_interactive_prompt(
     assert scope["hosts"] == []
 
 
-def test_engagement_create_snapshots_backend_data_dir_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_engagement_create_leaves_database_and_backups_untouched(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys) -> None:
     from vigil_cli.engagements import CreateEngagementOptions, create_engagement
 
     install_root = tmp_path / "install"
@@ -401,6 +401,9 @@ def test_engagement_create_snapshots_backend_data_dir_env(tmp_path: Path, monkey
     default_data = install_root / "orchestrator" / "backend" / "data"
     _write_marker_database(custom_data / "orchestrator.sqlite3", "custom")
     _write_marker_database(default_data / "orchestrator.sqlite3", "default")
+    old_backup = custom_data / "orchestrator.sqlite3.bak.20260425T010000Z.11111"
+    old_backup.write_bytes(b"retained backup")
+    original_database = (custom_data / "orchestrator.sqlite3").read_bytes()
     _isolate_orchestrator_url(monkeypatch)
     monkeypatch.delenv("VIGIL_DATA_DIR", raising=False)
     monkeypatch.setenv("REDTEAM_ORCHESTRATOR_DATA_DIR", str(custom_data))
@@ -414,78 +417,11 @@ def test_engagement_create_snapshots_backend_data_dir_env(tmp_path: Path, monkey
     )
 
     custom_snapshots = sorted(custom_data.glob("orchestrator.sqlite3.bak.*"))
-    assert len(custom_snapshots) == 1
+    assert custom_snapshots == [old_backup]
+    assert old_backup.read_bytes() == b"retained backup"
+    assert (custom_data / "orchestrator.sqlite3").read_bytes() == original_database
     assert not list(default_data.glob("orchestrator.sqlite3.bak.*"))
-    with sqlite3.connect(custom_snapshots[0]) as connection:
-        assert connection.execute("SELECT value FROM marker").fetchone() == ("custom",)
-
-
-def test_engagement_create_prunes_old_backend_snapshots(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from vigil_cli import engagements as engagements_module
-
-    install_root = tmp_path / "install"
-    _copy_agent_fixture(repo_root / "agent", install_root)
-    data_dir = install_root / "orchestrator" / "backend" / "data"
-    _write_marker_database(data_dir / "orchestrator.sqlite3", "live")
-    old_snapshots = []
-    for idx in range(4):
-        path = data_dir / f"orchestrator.sqlite3.bak.20260425T01000{idx}Z.11111"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("old\n", encoding="utf-8")
-        old_snapshots.append(path)
-    _isolate_orchestrator_url(monkeypatch)
-    monkeypatch.setenv("VIGIL_ENGAGEMENT_DB_SNAPSHOT_MAX_COPIES", "3")
-    monkeypatch.setattr(engagements_module, "_emit_post_create_footer", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(engagements_module, "_verify_backend_install_root", lambda *_args, **_kwargs: None)
-
-    engagements_module.create_engagement(
-        engagements_module.CreateEngagementOptions(
-            install_root=install_root,
-            engagement_type="web",
-            target="https://app.example.com",
-        )
-    )
-
-    remaining = sorted(data_dir.glob("orchestrator.sqlite3.bak.*"))
-    assert len(remaining) == 3
-    assert not old_snapshots[0].exists()
-    assert not old_snapshots[1].exists()
-    assert old_snapshots[2].exists()
-    assert old_snapshots[3].exists()
-    created = next(path for path in remaining if path not in old_snapshots)
-    with sqlite3.connect(created) as connection:
-        assert connection.execute("SELECT value FROM marker").fetchone() == ("live",)
-
-
-def test_snapshot_pruning_tolerates_a_concurrent_pruner(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from vigil_cli import engagements as engagements_module
-
-    snapshots = [
-        tmp_path / f"orchestrator.sqlite3.bak.20260910T12000{index}Z.100"
-        for index in range(3)
-    ]
-    for snapshot in snapshots:
-        snapshot.write_text("snapshot\n", encoding="utf-8")
-
-    real_unlink = Path.unlink
-    raced = False
-
-    def unlink_after_peer(path: Path, *args, **kwargs) -> None:
-        nonlocal raced
-        if path == snapshots[0] and not raced:
-            raced = True
-            real_unlink(path)
-        real_unlink(path, *args, **kwargs)
-
-    monkeypatch.setattr(Path, "unlink", unlink_after_peer)
-
-    removed = engagements_module._prune_orchestrator_database_snapshots(tmp_path, max_copies=2)
-
-    assert raced is True
-    assert removed == []
-    assert sorted(tmp_path.glob("orchestrator.sqlite3.bak.*")) == snapshots[1:]
+    assert "database snapshot" not in capsys.readouterr().err
 
 
 class _TTYStdin:

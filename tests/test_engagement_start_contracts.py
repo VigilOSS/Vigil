@@ -65,7 +65,6 @@ def test_create_reports_progress_before_slow_steps_on_stderr(
             messages.append(output.err)
         return check
 
-    monkeypatch.setattr(engagements, "_snapshot_orchestrator_database", expect_progress("snapshot"))
     monkeypatch.setattr(engagements, "_write_issues_doc", expect_progress("files"))
     monkeypatch.setattr(engagements, "_write_launchers", expect_progress("client"))
     monkeypatch.setattr(engagements, "_verify_backend_install_root", expect_progress("orchestrator"))
@@ -88,7 +87,6 @@ def test_create_refuses_before_any_side_effect_without_an_installed_prompt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     install_root = _install_root(tmp_path, with_prompt=False)
-    monkeypatch.setattr(engagements, "_snapshot_orchestrator_database", lambda *a, **k: None)
 
     with pytest.raises(SystemExit) as excinfo:
         engagements.create_engagement(
@@ -111,7 +109,6 @@ def test_create_refuses_for_blue_without_the_installed_blue_prompt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     install_root = _install_root(tmp_path)  # red AGENTS.md only
-    monkeypatch.setattr(engagements, "_snapshot_orchestrator_database", lambda *a, **k: None)
 
     with pytest.raises(SystemExit) as excinfo:
         engagements.create_engagement(
@@ -131,7 +128,6 @@ def test_create_rolls_the_directory_back_when_a_later_writer_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
     install_root = _install_root(tmp_path)
-    monkeypatch.setattr(engagements, "_snapshot_orchestrator_database", lambda *a, **k: None)
     monkeypatch.setattr(engagements, "_install_client_kind", lambda *a, **k: "none")
 
     def explode(*_args: object, **_kwargs: object) -> None:
@@ -162,7 +158,6 @@ def test_create_keeps_a_fully_written_engagement_when_backend_sync_fails(
     would be the worse bug.
     """
     install_root = _install_root(tmp_path)
-    monkeypatch.setattr(engagements, "_snapshot_orchestrator_database", lambda *a, **k: None)
     monkeypatch.setattr(engagements, "_install_client_kind", lambda *a, **k: "none")
     monkeypatch.setattr(engagements, "_emit_bootstrap_scope_summary", lambda *a, **k: None)
 
@@ -204,7 +199,7 @@ def started(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, object
     monkeypatch.setattr(
         main_module,
         "start_engagement",
-        lambda root, path, client, client_args: calls.update(
+        lambda root, path, client, client_args, *, no_autoprompt=False: calls.update(
             client=client, client_args=list(client_args)
         ),
     )
@@ -586,7 +581,7 @@ def test_start_skips_the_preflight_on_request(
     monkeypatch.setattr(
         main_module,
         "start_engagement",
-        lambda root, path, client, client_args: started.update(client=client),
+        lambda root, path, client, client_args, *, no_autoprompt=False: started.update(client=client),
     )
 
     main(

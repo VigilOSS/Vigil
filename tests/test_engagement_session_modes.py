@@ -93,7 +93,7 @@ def test_start_passes_explicit_session_mode_to_launcher(tmp_path: Path, monkeypa
         "tracks": {"web": {"phase": "recon"}, "code": {"phase": "hunt"}},
     })
     calls = []
-    monkeypatch.setattr(main_module, "start_engagement", lambda *args: calls.append(args))
+    monkeypatch.setattr(main_module, "start_engagement", lambda *args, **kwargs: calls.append(args))
 
     main_module.main([
         "--root", str(tmp_path), "engagement", "start", "example",

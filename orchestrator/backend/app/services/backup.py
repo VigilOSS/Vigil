@@ -4,11 +4,9 @@ Every 15 minutes a WAL-coherent snapshot is written to
 ``<data_dir>/backups/orchestrator.YYYYMMDDTHHMMSSZ.sqlite3``. The last 12
 snapshots are retained (3 hours of continuous coverage at default cadence).
 
-This complements the per-engagement snapshot taken by
-``vigil engagement create``: that command protects against accidents during setup,
-while the scheduled task protects against everything in between — operator
-mistakes against a live DB, filesystem renames of engagement dirs that used
-to trigger the sync cascade-delete, and general OS-level corruption.
+The scheduled task provides recovery points for operator mistakes against a live
+database and general logical corruption. Database migrations own their separate
+pre-migration backups.
 
 Backups are sibling files next to the live DB, so they land on the same
 volume. That's deliberate — they're for fast recovery from logical data

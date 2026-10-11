@@ -59,7 +59,7 @@ def blue_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, objec
     monkeypatch.setattr(
         blue_module,
         "start_engagement",
-        lambda root, path, client, client_args: calls.update(started=client),
+        lambda root, path, client, client_args, *, no_autoprompt=False: calls.update(started=client),
     )
     monkeypatch.setattr(
         blue_module, "write_opencode_reasoning_config", lambda *a, **k: None
@@ -108,7 +108,7 @@ def red_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, object
     monkeypatch.setattr(
         main_module,
         "start_engagement",
-        lambda root, path, client, client_args: calls.update(started=client),
+        lambda root, path, client, client_args, *, no_autoprompt=False: calls.update(started=client),
     )
     monkeypatch.setattr(preflight_module.shutil, "which", lambda _name: "/usr/bin/client")
     monkeypatch.setattr(preflight_module, "orchestrator_status", lambda _root: "running")

@@ -60,6 +60,15 @@ workspace's env files. It **warns and continues** when the orchestrator is not r
 Kali runtime container is not running, or an application consumer needs restarting. `--skip-preflight` bypasses
 all five.
 
+For a client session without Vigil's automatic opening message, pass `--no-autoprompt`:
+
+```bash
+vigil engagement start <engagement-key> --client codex --no-autoprompt
+```
+
+Explicit client messages are still forwarded. In code mode, source confirmation remains
+required before analysis when you ask the client to begin work.
+
 Startup refreshes generated client files only for the selected engagement. After an
 application upgrade, an older official session on that same engagement must be ended
 before the new release can refresh those shared files. The older process keeps its
