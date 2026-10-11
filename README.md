@@ -64,15 +64,10 @@ limits quickly.
 | Code, hardened codebase | High | $200/month |
 | Web | High or above | $200/month |
 
-State lives in the backend: after a limit resets, start the engagement again and run
-`vigil-resume`.
-
 > [!TIP]
-> **Bug bounties:** look for source maps, an exposed `.git`, or backups first. A code engagement
-> on recovered source has much greater success than black-box testing. Add the code track to the
-> same engagement with `vigil engagement add-track <key> code`; its findings land in the same
-> findings table as the web session's
-> ([details](docs/code-analysis.md#mid-engagement-code-analysis)).
+> **Bug bounties:** look for source maps. Run a code engagement on the recovered source, then
+> `vigil engagement add-track <key> web` so web testing builds on its findings
+> ([tracks](docs/engagements.md#tracks-and-modes)).
 
 ## What Vigil provides
 
