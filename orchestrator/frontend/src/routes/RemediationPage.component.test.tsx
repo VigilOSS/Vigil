@@ -58,7 +58,7 @@ const reviewedCase: RemediationCase = {
   review_evidence_missing: [],
   review_digest: digest,
   baseline: { outcome: "runtime_reproduced", method: "Laravel HTTP test", proved: "Unauthorized update rejected" },
-  release_plan: { production_canary_decision: "not_required", production_canary_rationale: "Local and development coverage sufficient", safe_procedure: "", coralogix_monitoring: "Watch authorization failures" },
+  release_plan: { production_canary_decision: "not_required", production_canary_rationale: "Local and development coverage sufficient", safe_procedure: "", monitoring: "Watch authorization failures" },
   approvals: [],
   human_verifications: [],
   evidence: [

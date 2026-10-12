@@ -464,7 +464,7 @@ def main(argv: list[str] | None = None) -> None:
         help="Creation type; inferred when omitted. Web/code enables the first durable track; start --mode selects one client process",
     )
     create_p.add_argument("--name", help="Engagement name (required for code/remediation)")
-    create_p.add_argument("--project-config", help="Shared repository PROJECT.md with +++ TOML frontmatter (legacy JSON is imported once)")
+    create_p.add_argument("--project-config", help="Shared repository PROJECT.md with +++ TOML frontmatter")
     create_p.add_argument("--target", help="Primary target URL or host (web)")
     create_p.add_argument("--hosts", help="Comma-separated in-scope hosts")
     create_p.add_argument(
@@ -1985,24 +1985,15 @@ def _engagement_create(args: argparse.Namespace, install_root: Path) -> None:
         if not _confirm("Create engagement? [Y/n]"):
             raise SystemExit("aborted: engagement not created")
 
-    remediation_config: dict[str, object] = {}
     remediation_project_path: Path | None = None
     if args.project_config:
         if engagement_type != "remediation":
             raise SystemExit("--project-config applies only to remediation engagements")
         from .project_config import project_module
 
-        source = Path(args.project_config).expanduser().resolve()
+        remediation_project_path = Path(args.project_config).expanduser().resolve()
         try:
-            project = project_module(install_root)
-            if source.suffix.lower() == ".json":
-                remediation_config = json.loads(source.read_text(encoding="utf-8"))
-                if not isinstance(remediation_config, dict):
-                    raise ValueError("legacy project JSON must be an object")
-                project.validate_project(remediation_config)
-            else:
-                remediation_config = project.load_project(source)
-                remediation_project_path = source
+            project_module(install_root).load_project(remediation_project_path)
         except (OSError, ValueError) as exc:
             raise SystemExit(f"cannot read --project-config {args.project_config}: {exc}") from exc
 
@@ -2020,7 +2011,6 @@ def _engagement_create(args: argparse.Namespace, install_root: Path) -> None:
         required_headers=required_headers,
         out_of_scope=out_of_scope,
         rate_limit=rate_limit,
-        remediation_config=remediation_config,
         remediation_project_path=remediation_project_path,
     )
 

@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 from datetime import date, datetime, time
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -114,7 +113,7 @@ def load_project(path: Path) -> dict[str, object]:
 def load_engagement_project(root: Path) -> dict[str, object]:
     path = root / 'PROJECT.md'
     if not path.is_file():
-        raise ValueError('Missing canonical PROJECT.md; explicitly import legacy remediation-project.json with engagement create --project-config into a repository PROJECT.md before continuing')
+        raise ValueError('Missing canonical PROJECT.md; create the engagement with --project-config naming the repository PROJECT.md')
     return load_project(path)
 
 
@@ -145,26 +144,6 @@ def workspace_path(config: dict[str, object], case_directory: Path, branch: str)
     if not path.is_relative_to(parent):
         raise ValueError('Case branch must identify a repository-local workspace')
     return path
-
-
-def policy_digest(config: dict[str, object]) -> str:
-    """Bind approvals to effective configuration and the referenced guidance bytes."""
-    policy = effective_policy(config)
-    paths = [*policy['instruction_files'], *policy['pr_guidance']]
-    if policy['pr_template']:
-        paths.append(policy['pr_template'])
-    if config.get('_profile_path'):
-        paths.append(config['_profile_path'])
-    references = {}
-    for value in paths:
-        path = Path(value)
-        try:
-            references[str(path)] = hashlib.sha256(path.read_bytes()).hexdigest()
-        except OSError as exc:
-            # Removal or loss of access invalidates an earlier approval too.
-            references[str(path)] = {'unavailable': type(exc).__name__}
-    payload = {'configuration': config, 'references': references}
-    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(',', ':'), default=str).encode()).hexdigest()
 
 
 def _toml_value(value: object) -> str:

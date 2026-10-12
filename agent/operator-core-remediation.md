@@ -27,12 +27,9 @@ working directories. Git and JJ are both supported; follow repository VCS
 instructions and bind evidence to immutable revisions. Preserve conflicts and
 scratch changes for deliberate resolution.
 
-Hooks follow the selected profile's session policy. When disabled, explain that
-personal, repository, and ordinary plugin Claude hooks do not run in this
-conversation; organization-managed hooks remain enabled if configured, and Git
-hooks are unaffected. Before editing, account for the repository's required
-formatting, analysis, and tests in profile check commands or explicit case
-verification requirements. Inspect hook path assumptions before reusing their
+Hooks follow the selected profile's session policy; Vigil reports it at launch.
+Before editing, account for the repository's required formatting, analysis, and
+tests in profile check commands or explicit case verification requirements. Inspect hook path assumptions before reusing their
 commands; all checks must exercise case source. Record case state explicitly.
 Hook policy does not change permissions, instruction, skill, or MCP discovery.
 

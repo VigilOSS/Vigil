@@ -42,7 +42,7 @@ normal result, not a failure:
 <!-- vigil:end -->
 
 **4. Re-establish live state from the backend.** The backend is canonical; recollection is not.
-For `remediation`, read `PROJECT.md` and `remediation-project.json`, run
+For `remediation`, read `PROJECT.md`, run
 `vigil remediation -k <key> list`, then `vigil remediation -k <key> show <case-id>`
 for the selected case. Follow the case's evidence and approval state in the
 remediation operator prompt. For other modes, `agent/rules/resume.md` owns the

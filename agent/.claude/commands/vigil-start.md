@@ -17,8 +17,8 @@ work and start a new client with an explicit `--mode`. Do not infer the session'
 from enabled tracks. `scope.json` and `ENGAGEMENT.md` remain the scope and ROE authorities.
 
 **2. Check whether this is actually a start.** A fresh start over live backend state can duplicate
-ownership and repeat completed work. For `remediation`, read `PROJECT.md` and
-`remediation-project.json`, then run `vigil remediation -k <key> list` and inspect any
+ownership and repeat completed work. For `remediation`, read `PROJECT.md`,
+then run `vigil remediation -k <key> list` and inspect any
 selected case with `vigil remediation -k <key> show <case-id>`. If case work is
 already under way, use `vigil-resume`. For other modes, use the bounded assessment brief:
 

@@ -66,20 +66,6 @@ def test_stagehand_gate_requires_approved_model_and_loopback_browser() -> None:
         validate_stagehand_config(config, {"TEST_STAGEHAND_KEY": "key"})
 
 
-def test_remediation_project_config_is_saved_in_plan(tmp_path: Path) -> None:
-    config = {"development_url": "https://dev.example", "deployment_workflow": "develop.yml"}
-    repo = tmp_path / "acme"
-    repo.mkdir()
-    subprocess.run(["git", "init", str(repo)], check=True, capture_output=True)
-    plan = plan_engagement(CreateEngagementOptions(
-        install_root=tmp_path, engagement_type="remediation", name="Acme",
-        repos=[str(repo)], remediation_config=config,
-    ))
-    assert plan.manifest["remediation_project"] == config
-    assert "remediation_project" not in plan.scope
-    assert plan.scope["hosts"] == []
-
-
 def test_remediation_engagement_rejects_missing_or_non_git_repository(tmp_path: Path) -> None:
     with pytest.raises(SystemExit, match="existing local Git repository"):
         plan_engagement(CreateEngagementOptions(install_root=tmp_path, engagement_type="remediation", name="Acme", repos=[str(tmp_path / "missing")]))
@@ -97,7 +83,7 @@ def test_pr_requires_final_production_canary_decision() -> None:
             "production_canary_decision": "defer",
             "production_canary_rationale": "Awaiting owner decision",
             "safe_procedure": "",
-            "coralogix_monitoring": "Watch authorization failures",
+            "monitoring": "Watch authorization failures",
         }})
 
 
@@ -207,7 +193,7 @@ def test_pr_body_requires_production_decision_and_monitoring() -> None:
     case = {"title": "Fix", "review_digest": "newer-digest", "approval_current": True, "approvals": [{"review_digest": "approved-digest", "evidence_cutoff_id": 3}], "evidence": evidence, "worktree_revision": "sha", "verification_plan": "Open Manage and verify result"}
     with pytest.raises(SystemExit, match="release plan"):
         _pr_body(case, {}, "Controller authorizes wrong tenant context", "Validate tenant ownership before update")
-    case["release_plan"] = {"production_canary_decision": "required", "production_canary_rationale": "Infrastructure behavior", "safe_procedure": "Use test account", "coralogix_monitoring": "Watch errors"}
+    case["release_plan"] = {"production_canary_decision": "required", "production_canary_rationale": "Infrastructure behavior", "safe_procedure": "Use test account", "monitoring": "Watch errors"}
     body = _pr_body(case, {}, "Controller authorizes wrong tenant context", "Validate tenant ownership before update")
     assert "approved-digest" in body
     assert "newer-digest" not in body
@@ -232,7 +218,7 @@ def test_pr_body_includes_reviewed_evidence_environments() -> None:
             "evidence": evidence, "worktree_revision": "sha",
             "verification_plan": "Open the tested form and verify the saved result",
             "release_plan": {"production_canary_decision": "not_required", "production_canary_rationale": "Route coverage",
-                             "safe_procedure": "", "coralogix_monitoring": "Watch errors"}}
+                             "safe_procedure": "", "monitoring": "Watch errors"}}
 
     body = _pr_body(case, {}, "Controller selects an unscoped record by ID", "Load records through the authorized tenant relation")
 
@@ -667,7 +653,7 @@ def test_create_pr_reconciles_existing_draft_without_second_push(monkeypatch: py
     digest = "a" * 64
     root_cause = "Missing ownership check in update controller"
     fix = "Validate ownership before performing the update"
-    release = {"production_canary_decision": "not_required", "production_canary_rationale": "Laravel route coverage", "safe_procedure": "", "coralogix_monitoring": "Watch authorization failures"}
+    release = {"production_canary_decision": "not_required", "production_canary_rationale": "Laravel route coverage", "safe_procedure": "", "monitoring": "Watch authorization failures"}
     evidence = [{"id": index, "kind": kind, "method": "Laravel" if kind != "stagehand" else "stagehand",
                  "environment": "local" if kind != "stagehand" else "development",
                  "observed": "observed", "proved": "proved"}
@@ -768,7 +754,7 @@ def test_create_pr_creates_and_verifies_new_draft_before_transition(monkeypatch:
     fix = "Load records through the authorized tenant relation"
     plan = "Open the tested page and confirm the saved value"
     release = {"production_canary_decision": "not_required", "production_canary_rationale": "Laravel route coverage",
-               "safe_procedure": "", "coralogix_monitoring": "Watch authorization failures"}
+               "safe_procedure": "", "monitoring": "Watch authorization failures"}
     evidence = [{"id": index, "kind": kind, "method": "Laravel" if kind != "stagehand" else "stagehand", "observed": "observed", "proved": "proved"}
                 for index, kind in enumerate(("red-test", "green-test", "stagehand"), 1)]
     case = {"status": "approved", "approval_current": True, "approvals": [{"review_digest": digest, "evidence_cutoff_id": 3}],
@@ -930,7 +916,7 @@ def test_prepare_pr_retains_and_indexes_reviewed_body(monkeypatch: pytest.Monkey
         "approval_current": True, "approvals": [{"review_digest": "d" * 64, "evidence_cutoff_id": 3}],
         "evidence": [{"id": i, "kind": kind, "method": "Laravel" if kind != "stagehand" else "stagehand", "observed": "ran", "proved": "boundary"} for i, kind in enumerate(("red-test", "green-test", "stagehand"), 1)],
         "worktree_revision": "sha", "verification_plan": "Open Manage and confirm the saved value",
-        "release_plan": {"production_canary_decision": "not_required", "production_canary_rationale": "Local route coverage", "safe_procedure": "", "coralogix_monitoring": "Watch errors"},
+        "release_plan": {"production_canary_decision": "not_required", "production_canary_rationale": "Local route coverage", "safe_procedure": "", "monitoring": "Watch errors"},
     }
     monkeypatch.setattr(remediation, "_project", lambda *_: (eng, {"repository": str(tmp_path)}))
     monkeypatch.setattr(remediation, "_case", lambda *_: case)

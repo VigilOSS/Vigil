@@ -232,7 +232,7 @@ CONTRACT
 if [ "$OPERATOR_MODE" = "remediation" ]; then
   cat <<'CONTRACT'
 
-    Read PROJECT.md and remediation-project.json.
+    Read PROJECT.md.
     vigil remediation -k <key> list
     vigil remediation -k <key> show <case-id>          # selected case, evidence, approvals
 CONTRACT

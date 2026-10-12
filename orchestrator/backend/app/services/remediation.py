@@ -221,7 +221,7 @@ def _registered_worktree(repo: Path, path: Path) -> bool:
 
 
 def _case_worktree_identity(row, engagement_root: Path) -> bool:
-    if not (engagement_root / "PROJECT.md").exists() and not (engagement_root / "remediation-project.json").exists():
+    if not (engagement_root / "PROJECT.md").exists():
         return not row["worktree_branch"]
     if not row["worktree_branch"] or not row["worktree_path"]:
         return False
@@ -411,17 +411,13 @@ def _review_digest(row, evidence: list[dict[str, Any]], engagement_root: Path, f
         if _field(row, field) is not None:
             material[field] = row[field]
     project_path = engagement_root / "PROJECT.md"
-    if project_path.exists() or project_path.is_symlink():
+    if _field(row, "review_policy_json"):
+        material["project_available"] = project_path.is_file()
+    elif project_path.exists() or project_path.is_symlink():
         from assess.lib.remediation_project import load_engagement_project
 
         try:
-            material["project"] = {
-                "source_sha256": _sha256_file(project_path),
-                "configuration": load_engagement_project(engagement_root),
-            }
-            if _field(row, "review_policy_json"):
-                from assess.lib.remediation_project import policy_digest
-                material["effective_policy_digest"] = policy_digest(json.loads(row["review_policy_json"]))
+            material["project"] = load_engagement_project(engagement_root)
         except (OSError, ValueError):
             material["project"] = "unavailable"
     return hashlib.sha256(_json(material).encode()).hexdigest()
@@ -431,8 +427,10 @@ def _review_evidence_missing(row, evidence: list[dict[str, Any]], engagement_roo
     plan = _field(row, "verification_requirements_json")
     if plan is not None:
         missing = _explicit_evidence_missing(row, evidence, engagement_root, json.loads(plan))
+    elif not (row["verification_plan"] or "").strip():
+        missing = ["verification plan with evidence requirements"]
     else:
-        missing = _legacy_review_evidence_missing(row, evidence, engagement_root)
+        missing = _prose_plan_evidence_missing(row, evidence, engagement_root)
     return missing + _profile_checks_missing(row, evidence, engagement_root)
 
 
@@ -497,13 +495,12 @@ def _profile_checks_missing(row, evidence, engagement_root):
     return missing
 
 
-def _legacy_review_evidence_missing(row, evidence: list[dict[str, Any]], engagement_root: Path) -> list[str]:
+def _prose_plan_evidence_missing(row, evidence: list[dict[str, Any]], engagement_root: Path) -> list[str]:
     case_id = row["id"]
 
     def valid_test(kind: str, outcome: str) -> bool:
         for item in evidence:
-            if (item["kind"] != kind or (item["method"] or "").casefold() != "laravel"
-                    or item["outcome"] != outcome or not item["command"].strip()
+            if (item["kind"] != kind or item["outcome"] != outcome or not item["command"].strip()
                     or not item["revision"] or not item["artifact_path"]
                     or item.get("execution") not in {None, "executed"}):
                 continue
@@ -521,9 +518,9 @@ def _legacy_review_evidence_missing(row, evidence: list[dict[str, Any]], engagem
 
     missing = []
     if not valid_test("red-test", "failed_as_expected"):
-        missing.append("red test with expected failure and saved Laravel output")
+        missing.append("red test with expected failure and saved output")
     if not valid_test("green-test", "passed"):
-        missing.append("green test with passing Laravel output at current revision")
+        missing.append("green test with passing output at current revision")
     return missing + _browser_evidence_missing(row, evidence, engagement_root)
 
 
@@ -870,7 +867,7 @@ def patch_case(key: str, case_id: int, changes: dict[str, Any]) -> dict[str, Any
                 raise HTTPException(400, "Worktree path must be an existing absolute directory")
             expected = Path(owner.engagement_root).resolve() / "remediation" / "cases" / str(case_id)
             engagement_root = Path(owner.engagement_root)
-            has_project = (engagement_root / "PROJECT.md").exists() or (engagement_root / "remediation-project.json").exists()
+            has_project = (engagement_root / "PROJECT.md").exists()
             if not path.resolve().is_relative_to(expected) and not has_project:
                 raise HTTPException(400, "Worktree must belong to this case")
             if old["worktree_path"] and path.resolve() != Path(old["worktree_path"]).resolve():
@@ -958,8 +955,6 @@ def patch_verification_plan(key: str, case_id: int, data: dict[str, Any]) -> dic
 
 
 def patch_release_plan(key: str, case_id: int, data: dict[str, str]) -> dict[str, Any]:
-    if "coralogix_monitoring" in data and "monitoring" not in data:
-        data = {**data, "monitoring": data["coralogix_monitoring"]}
     return patch_case(key, case_id, {"release_plan_json": _json(data)})
 
 

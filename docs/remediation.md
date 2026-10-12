@@ -1,13 +1,14 @@
 # Remediation workspace
 
-Vigil provides intake, investigation, fix planning, independent code workspaces, verification,
-approval, draft PRs, and development deployment records. The repository's `PROJECT.md` selects ticket
-readers, MCPs, skills, coding instructions, checks, and publishing policy. A ticket or direct report
-is sufficient; no prior assessment engagement is required.
+Vigil's remediation workflow takes a security ticket or report from investigation to a draft PR.
+For each ticket it keeps a case: the original report, a separate copy of the code to fix it in (a
+Git worktree or JJ workspace), the agreed verification plan, the evidence that the fix works, and
+your approvals. The repository's `PROJECT.md` profile says how to read tickets, which tools and
+instructions to use, which checks must pass, and how to publish. A ticket or a written report is
+enough; no earlier Vigil assessment is required.
 
-Use one long-lived remediation engagement per repository. Each case owns its source snapshot,
-evidence, approval history, and a registered Git worktree or JJ workspace. Several assessment findings
-can link to one case when they share the same fix.
+Create one remediation engagement per repository and keep using it. Several assessment findings can
+share one case when one fix covers them.
 
 ## First ticket, end to end
 
@@ -34,7 +35,7 @@ can link to one case when they share the same fix.
    or explicitly invoke `/vigil-remediate SEC-123`. The agent
    retrieves the report, creates the case/workspace/handoff, and proposes its fix
    and verification plan. Check the diagnosis and scope, then approve the plan.
-5. The agent implements the fix, runs checks against case source, records proof,
+5. The agent implements the fix, runs checks against the case's copy of the code, records proof,
    and presents the diff and human Prep/Test steps. For the first pilot, test
    `join <case-id>` from another terminal and confirm it opens this conversation.
 6. Ask to publish when ready. Vigil checks the reviewed revision and opens a draft.
@@ -83,7 +84,7 @@ source_reader = "Use the approved issue-reader MCP to retrieve the original repo
 mcps = ["issue-reader"]
 skills = ["fix-security-issue", "write-test-plan"]
 instruction_files = ["AGENTS.md"]
-hook_policy = "disabled"
+hook_policy = "inherit"
 pr_template = ".github/pull_request_template.md"
 pr_guidance = ["docs/development/pr-writing.md"]
 development_ticket_required = false
@@ -119,14 +120,12 @@ apply. Surface conflicting requirements with their sources before dependent work
 `<repository>/worktrees/fix/SEC-123`. Without it, the workspace stays under the case directory.
 `base_branch` defaults to `main`, but each case records its selected branch and base commit for review
 and PR creation. Existing cases retain their registered workspace and review policy; later profile
-changes cannot silently retarget them. Referenced guidance changes invalidate approval.
+changes cannot silently retarget them.
 New workspaces prefer the already-fetched origin branch/bookmark tip, then the local
 base when no origin ref exists. Refresh origin before creating a case workspace.
 
 Top-level machine overrides use `VIGIL_REMEDIATION_<FIELD>`; Stagehand overrides use
-`VIGIL_REMEDIATION_STAGEHAND_<FIELD>`. Legacy JSON can be imported explicitly once with
-`--project-config project.json` on creation; a conflicting repository profile is rejected. Do not
-maintain a second editable JSON configuration beside the shared file.
+`VIGIL_REMEDIATION_STAGEHAND_<FIELD>`.
 
 ## Start and supply tickets
 
@@ -134,48 +133,73 @@ maintain a second editable JSON configuration beside the shared file.
 vigil remediation -k <engagement-key> start
 ```
 
-Vigil launches and attaches to a full native Claude conversation in the repository root, preserving
-native settings, ignored skills, private runbooks, project plugins, and MCP discovery. Its additional
-context exposes the remediation command and case artifacts without loading the hunting operator.
-Then use the command in Claude:
+Vigil opens a full Claude conversation in the repository root and attaches you to it, so Claude
+sees the repository's own settings, skills, plugins, MCP servers, and any private (gitignored)
+runbooks. Vigil adds only the remediation command and the case files, not its assessment
+instructions. Then use the command in Claude:
 
 ```text
 /vigil-remediate SEC-123
 /vigil-remediate SEC-123 https://jira.example.com/browse/SEC-124
 ```
 
-One normalized bug keeps this conversation as its developer. Several select a coordinator that
-starts separate full developer conversations through Vigil. The command announces its role and loads
-only relevant profile and role guidance. A key and its `/browse/` URL count as one input; the reader
-must still establish canonical identity. Arguments remain untrusted input data.
-For several cases, the coordinator presents each diagnosis, proposed fix, verification
-requirements, approval status, and `join` command. Approve each plan in its developer
-conversation. One case's approval does not authorize another worker.
+### Where the session runs
 
-Vigil starts and records native sessions; Claude retrieves tickets through profile-selected tools
-and investigates code. References remain pending until retrieval succeeds. Source resolution detects
-an existing case and requires deliberate reuse rather than silently merging reports. When a reader
-is unavailable, retain pending input rather than inventing descriptions or remediation claims.
+Every case conversation starts in the repository root, even when several cases run at once. Claude
+Code reads project settings, hooks, skills, and project MCP servers from the directory a session
+starts in ([settings](https://code.claude.com/docs/en/settings),
+[skills](https://code.claude.com/docs/en/skills), [mcp](https://code.claude.com/docs/en/mcp)), and
+gitignored files such as local settings and private runbooks exist only in the main checkout. Each
+case edits only its own registered workspace through absolute paths; the root checkout is not case
+source.
 
-Claude validates the report against current code and proposes the fix and meaningful verification
-before editing. It waits for owner plan approval. An inaccurate, already fixed, or unproven report
-is reported with evidence. Include approved siblings sharing the root cause; use separate cases for
-unrelated issues. A profile can require a linked development ticket for publishing without making
-that universal or creating a ticket automatically.
+With `workspace_directory` inside the repository, the workspace sits under the session directory:
 
-Claude Code 2.1.257 or newer and native session hosting are required for launch and attachment.
-`start` launches a hosted conversation before attaching, keeping the exact conversation joinable.
-Vigil records the native host's actual conversation UUID. If startup exits before attachment,
-inspect `claude agents --json --all` and the engagement's `remediation/sessions/` receipts.
-Recover a recorded launch using its receipt UUID; this never starts another conversation:
+- Instruction files inside the workspace load on demand when Claude reads files there. Claude Code
+  loads a subdirectory's `CLAUDE.md`, or its `AGENTS.md` when no `CLAUDE.md` applies, the first time
+  it opens a file in that subdirectory ([memory](https://code.claude.com/docs/en/memory)).
+  Instructions from the root checkout load at launch, so a root file that differs from the case base
+  is read from the root checkout.
+- A Bash `cd` into the workspace persists between commands because it stays inside the project
+  directory ([tools reference](https://code.claude.com/docs/en/tools-reference)). Commands without
+  an explicit path or directory run wherever the shell currently is.
+- Hooks receive `CLAUDE_PROJECT_DIR` as the root checkout
+  ([hooks](https://code.claude.com/docs/en/hooks)). Inspect how a hook maps edited paths before
+  relying on it; one that assumes the root checkout may act on the wrong copy of a file.
+
+Vigil's own gates do not depend on where the shell is: checks, diffs, review digests, and evidence
+always use the registered workspace and its recorded revision.
+
+With one ticket, this conversation becomes the case's developer. With several, it becomes a
+coordinator that starts a separate Claude conversation for each case and shows you each diagnosis,
+proposed fix, verification requirements, approval status, and `join` command. Approve each plan
+inside that case's own conversation; one case's approval never covers another. A ticket key and its
+`/browse/` URL count as one ticket. Ticket text is treated as untrusted data, never as instructions.
+
+Claude fetches each ticket with the tools the profile names. A ticket stays pending until it has
+actually been retrieved; if the reader is unavailable, it stays pending rather than Claude guessing
+its contents. When a case already exists for the same ticket, Vigil says so instead of quietly
+merging the two.
+
+Before editing anything, Claude checks the report against the current code, proposes the fix and how
+to verify it, and waits for your approval. If the report is wrong, already fixed, or unproven, Claude
+says so with evidence. Bugs with the same root cause can share a case; unrelated issues get their
+own. A profile can require a linked development ticket before publishing; Vigil never creates one.
+
+Launching and attaching need Claude Code 2.1.257 or newer. `start` runs the conversation in the
+background and attaches you to it, so you can always rejoin the same conversation. Ctrl-D detaches
+without stopping it; reopening it from the agents view reattaches the same conversation with its
+original settings. To pick up changed profile settings, stop it with `claude stop <id>` and run
+`start` again. If startup exits before attaching, look in `claude agents --json --all` and the
+engagement's `remediation/sessions/` receipts, then recover the recorded launch by its receipt UUID;
+this never starts another conversation:
 
 ```bash
 vigil remediation -k <engagement-key> start --session-id <recorded-launch-uuid>
 ```
 
-The session's context root stays the main repository; all code edits belong in the case's registered
-workspace. Native background isolation is disabled only for these sessions to avoid a second workspace.
-For an existing case:
+Claude Code's own background worktree isolation is turned off for these sessions, because each case
+already has its own workspace. For an existing case:
 
 ```bash
 vigil remediation -k <engagement-key> session <case-id>
@@ -191,27 +215,20 @@ Claude only.
 
 ### Hook policy
 
-`hook_policy = "inherit"` is the default and keeps configured Claude hooks.
-`"disabled"` turns off personal/global, repository/local, and ordinary plugin Claude
-hooks for this conversation. Organization-managed hooks remain enabled if configured.
-These are Claude lifecycle actions such as automatic checks after edits or session
-logging; Git pre-commit and pre-push hooks are unaffected. Vigil applies the profile setting
-before launching Claude. The opening prompt asks Claude to read the profile and explain
-settings or checks that affect the work. Reattachment reports the recorded session policy.
-Case/session recording uses explicit commands.
+Claude Code hooks are automatic actions such as formatting after an edit or logging a session.
+`hook_policy = "inherit"`, the default, keeps them. `"disabled"` turns off personal, repository,
+local, and ordinary plugin hooks for the session; organization-managed hooks stay on, and Claude Code
+also hides any custom status line. Git hooks such as pre-commit are never affected. Reattaching
+reports the policy the session started with.
 
-With hooks disabled, the agent runs profile checks automatically during verification and publishing:
-required formatting, lint, analysis, and tests. The user need not replay hook commands. Existing
-helpers may be used only when they operate on case source. Claude starts in the main
-repository while case edits belong in a separate workspace; a hook that assumes the
-main checkout may check the wrong source. No repository hook edits are needed.
-
-Vigil does not import hook commands into `check_commands`. Before editing, the developer
-identifies required checks from repository instructions and hook configuration, accounts
-for them in profile check commands or case verification requirements, and confirms any
-unclear requirements with the owner. Startup reports when no profile checks are configured.
-Configure recurring required commands in `PROJECT.md`; case-specific checks belong in the
-case plan. All configured profile checks remain required for approval and publication.
+Because the session starts in the repository root while edits happen in the case workspace, check
+what each repository hook acts on before relying on it (see [Where the session runs](#where-the-session-runs)).
+Hooks are a convenience, not proof: Vigil does not copy hook commands into `check_commands`. Before
+editing, Claude works out which checks the repository requires from its instructions and hook
+configuration, makes sure the profile's check commands or the case plan cover them, and asks you
+when unclear. Startup says when no profile checks are configured. Put checks every case needs in
+`PROJECT.md` and case-specific ones in the case plan. Every profile check must pass before approval
+and publishing.
 
 ## Intake and generated handoff
 
@@ -253,13 +270,19 @@ remain available; a portable remediation package is not required.
 
 ## Workspaces, checks, and shared runtime
 
-Both Git and JJ use registered independent case source. JJ creates a workspace and bookmark,
-snapshots edits, and rejects conflicts. Git requires a clean worktree for revision-bound review.
-Evidence uses immutable commit IDs, never JJ change IDs; an empty single-parent JJ child retains its
-parent's tested identity. New content invalidates approval. Vigil never automatically discards
-scratch changes. Foreign or unregistered replacement repositories at the recorded path are rejected.
+Each case has its own workspace: a separate checkout created with `jj workspace add` (plus a
+bookmark) or `git worktree add`. It shares the repository's history but has its own files, so cases
+never edit each other's code. Gitignored files such as installed dependencies and local
+configuration are not copied into it.
 
-Commit the relevant changes, then synchronize and check:
+Evidence is recorded against commit IDs, never JJ change IDs. With JJ, Vigil snapshots the workspace
+and refuses conflicts; with Git, everything must be committed. An empty JJ child commit counts as its
+parent. Any new content after approval makes the approval stale. Vigil never discards uncommitted or
+scratch changes for you, and refuses a different repository found at a case's recorded path. With JJ
+on a case-insensitive filesystem, tracked paths that differ only in letter case show up as renames in
+every snapshot and land in the case commit; remove them before review.
+
+Commit the relevant changes, record the commit, then run checks:
 
 ```bash
 rem sync-revision <case-id>
@@ -267,23 +290,26 @@ rem checks <case-id> --actor <owner>
 rem checks <case-id> --actor <owner> --name tests
 ```
 
-Checks use the case's saved review policy. Each runs in its workspace-relative `directory`, with
-`VIGIL_CASE_WORKTREE`, `VIGIL_REPOSITORY`, and `VIGIL_CASE_REVISION` available to the command.
-`VIGIL_CASE_BASE_REVISION` supplies the case's merge base with its base branch for checks scoped
-to committed case changes. `sync-revision` moves it forward when the case is rebased onto a newer
-base branch; it never moves backwards and cannot be set directly.
-Vigil records output, exit status, source identity, and execution directory. A check that edits source
-is not a pass at the old revision: inspect, commit/sync, and rerun. All configured checks are required
-for review and rerun before publishing; named execution is useful during development.
+Checks use the profile settings the case started with. Each runs from its `directory` inside the
+workspace with `VIGIL_CASE_WORKTREE`, `VIGIL_REPOSITORY`, `VIGIL_CASE_REVISION`, and
+`VIGIL_CASE_BASE_REVISION` set. The base revision is the case's merge base with its base branch;
+`sync-revision` moves it forward when the case is rebased onto a newer base, never backwards, and it
+cannot be set directly. Vigil saves each check's output, exit code, commit, and directory. A check
+that changes files, such as a formatter, does not count as a pass: commit the change, sync, and
+rerun. All profile checks must pass for review and again before publishing; `--name` runs a single
+check during development.
 
-An isolated runner can mount case source while borrowing shared services/dependencies; there is no
-full environment per worktree. Configured `borrowed_dependency_manifests` must exist and match the
-shared repository before checks borrow dependencies. Prepare matching dependencies when a lockfile
-differs rather than testing against the wrong packages.
+There is one shared local environment, not one per workspace. A check can run in a throwaway
+container that mounts the case workspace and borrows dependencies installed in the main checkout.
+`borrowed_dependency_manifests` lists the files that must match for that to be safe, such as a
+lockfile. If the case's copy differs from the main checkout's, Vigil refuses rather than test
+against the wrong packages: update the main checkout's dependencies, or base the case on a commit
+whose manifests match.
 
-Configured shared checks acquire exclusive case/revision-bound ownership and release it afterward.
-Browser access additionally needs confirmed served identity. Coding and review can overlap; only one
-case tests or changes a particular shared environment at a time.
+Only one case at a time may use a shared environment, and Vigil tracks this with a lease. `checks`
+takes and releases it automatically. Coding and review can overlap freely. For browser or runtime
+testing, take the lease yourself, point the environment at the case workspace, confirm what it
+serves, test, point it back, and release:
 
 ```bash
 rem environment acquire <case-id> --name acme-local --actor <owner>
@@ -294,13 +320,17 @@ rem runtime-identity <case-id> --compose-file /path/to/compose.yml --service web
 rem environment release <case-id> --name acme-local --token <token> --actor <owner>
 ```
 
-Identity matches only when the inspected running service serves case source through its mount or a
-matching revision-labelled image. A temporary command runner mounting case source does not prove the
-shared browser application serves it. `runtime-identity` confirms the lease only on a match. Released
-lease history retains evidence provenance.
-Leases do not expire, so release before waiting on owner input unless background work still
-uses the environment. Release only records ownership; point the environment back at its default
-source first.
+`runtime-identity` reports `matched` only when the running service serves the case workspace,
+through a mount or an image labelled with the case commit, and only then confirms the lease. Choose a
+`--container-path` that holds only case code: anything under it mounted from elsewhere, such as
+dependencies borrowed from the main checkout, makes the result `unproven`. A throwaway container that
+mounts the case does not prove what the shared application serves. Released leases stay in the case
+history.
+
+Leases never expire, so release before waiting on owner input unless background work still uses the
+environment. Releasing only records ownership: point the environment back at its default source
+first. If a conversation ends while holding a lease, `rem show <case-id>` lists its token so you can
+release it.
 
 ## Select verification for the case
 
@@ -337,15 +367,15 @@ rem baseline <case-id> --outcome runtime_reproduced --method pytest \
   --proved 'The original account boundary failure was reproduced'
 ```
 
-Requirements select evidence kind, allowed methods, outcome, current/ancestor revision, and
-executed/reasoned status. Runtime requirements may also set `shared_environment` and
-`runtime_identity_required`. Explain the alternatives; an empty list cannot waive verification.
-The backend checks matching evidence and case-source profile checks before approval. Static reasoning
-uses `--execution reasoned`; unavailable checks use `--execution unavailable` and do not become
-executed proof. Runtime evidence carries its lease token and confirmed identity where required.
-The first recorded plan requires both the readable brief and structured requirements.
-Vigil rejects a first plan containing only prose. Once established, a text-only update
-retains the recorded requirements; supply a requirements file to change them deliberately.
+Each requirement names the evidence kind, the allowed methods, the expected outcome, whether the
+evidence must be from the current commit or may come from an earlier one (`ancestor`), and whether it
+must actually run (`executed`) or may be reasoned from code (`reasoned`). Runtime requirements can
+also name a `shared_environment` and set `runtime_identity_required`. Explain your choice of methods
+with `--alternatives-reason`; an empty list cannot waive verification. Before approval, Vigil checks
+that every requirement and every profile check has matching evidence. Evidence recorded with
+`--execution reasoned` or `--execution unavailable` never satisfies an executed requirement. The
+first plan must include both the readable brief and the requirements file; a later text-only update
+keeps the recorded requirements, and a new requirements file replaces them.
 
 For a code/test-confirmed baseline without safe runtime reproduction, `baseline` needs the explicit
 owner decision: `--owner-decision proceed --owner-actor <owner> --owner-reason <reason>`. Existing case
@@ -353,7 +383,7 @@ plans and evidence remain recorded; changing requirements does not reinterpret p
 
 ### Optional browser proof
 
-Recommend browser/Stagehand work for uncertain UI behavior, role-dependent navigation, frontend side
+Recommend browser work for uncertain UI behavior, role-dependent navigation, frontend side
 effects, or screenshots that improve QA instructions. Explain the use and ask first. Trace labels
 and navigation from frontend code when sufficient, distinguishing them from rehearsed steps.
 Declining browser proof does not block sufficient explicit alternatives.
@@ -378,8 +408,15 @@ rem browser <case-id> --script happy_path.py --purpose happy-path --environment 
   --revision <served-commit> --shared-environment acme-local --environment-token <token>
 ```
 
-The optional Stagehand SDK uses `async def run(stagehand, output_dir)` and `--driver stagehand`;
-`stagehand` remains supported. Configure dedicated loopback CDP, an approved model/account, and
+Playwright or another browser test runner works too. Run it against the served case while holding
+the lease, save its output and screenshots under the case directory, and record it with
+`rem evidence --method playwright --shared-environment <name> --environment-token <token>` against
+an executed requirement that sets `runtime_identity_required`. The `browser` command's own checks
+(recorded steps, screenshot, legitimate-use control) do not apply to these runs, so plan the
+legitimate-use run as its own requirement.
+
+The optional Stagehand SDK uses `async def run(stagehand, output_dir)` with `--driver stagehand`
+or the `stagehand` command. Configure dedicated loopback CDP, an approved model/account, and
 `api_key_env` naming the approved provider key. A client subscription does not authenticate the SDK.
 Preserve account/browser restrictions. Production runs need separate `--production-decision` and
 `--production-evidence-policy retain-screenshots|no-screenshots`; production happy-path proof requires
@@ -387,10 +424,12 @@ screenshot retention.
 
 ## Review and publish the draft
 
-Present the diff, baseline, verification, human brief, and limits. Approval binds code, applicable
-policy/guidance, linked findings, plan, and evidence. Approve in Vigil's UI or give an explicit
-instruction for CLI approval. Development verification must match the current approved revision;
-old deployments and tests remain history after changes.
+Before approving, review the diff, baseline, verification, human brief, and limits. Approval
+records the code, the case's profile settings, linked findings, plan, and evidence. Changing any of
+them makes the approval stale, which blocks the PR and deployment until you approve again; editing
+instruction or template files does not. Approve in Vigil's UI or tell Claude explicitly to approve
+through the CLI. Development verification must match the current approved commit; earlier
+deployments and tests stay as history.
 
 ```bash
 rem release-plan <case-id> --production-canary not_required \

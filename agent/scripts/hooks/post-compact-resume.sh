@@ -53,7 +53,7 @@ the remediation case is canonical. Before acting:
 
 1. Run `vigil engagement mode`, verify `mode: remediation`, read this
    engagement's `AGENTS.md`, then only its selected remediation prompt.
-2. Read `PROJECT.md` and `remediation-project.json`.
+2. Read `PROJECT.md`.
 3. Run `vigil remediation -k <key> list`, then
    `vigil remediation -k <key> show <case-id>` for the selected case.
 4. Reconcile the summary against case evidence, worktree revision, approvals,

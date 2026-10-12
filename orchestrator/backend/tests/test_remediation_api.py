@@ -63,7 +63,7 @@ def _review_evidence(
     stagehand_steps: bool = True, screenshot_valid: bool = True,
     red_revision: str | None = None,
     green_revision: str | None = None, stagehand_revision: str | None = None,
-    stagehand_artifact_revisions: dict[str, str] | None = None,
+    stagehand_artifact_revisions: dict[str, str] | None = None, method: str = "Laravel",
 ) -> None:
     case_root = root / "remediation" / "cases" / str(case_id)
     if red_revision is None:
@@ -76,7 +76,7 @@ def _review_evidence(
         file = proof_dir / f"{kind}.txt"
         file.write_text(f"{kind}: {outcome}\n")
         response = client.post(f"{BASE}/cases/{case_id}/evidence", json={
-            "kind": kind, "method": "Laravel", "environment": "local", "outcome": outcome,
+            "kind": kind, "method": method, "environment": "local", "outcome": outcome,
             "command": "php artisan test --filter AccountScopeTest",
             "observed": outcome, "proved": "Security boundary regression",
             "artifact_path": str(file.relative_to(root)),
@@ -305,6 +305,32 @@ def test_remediation_review_requires_red_test_commit_ancestor(
     detail = client.get(f"{BASE}/cases/{case['id']}").json()
     assert detail["review_evidence_ready"] is expected_ready
     assert _approve(client, case["id"]).status_code == (201 if expected_ready else 409)
+
+
+def test_remediation_case_without_plan_requires_plan_requirements(client, isolate_settings):
+    _engagement(isolate_settings)
+    response = client.post(f"{BASE}/cases", json={
+        "source_type": "jira", "source_key": "SEC-202", "title": "Missing plan", "snapshot": {},
+    })
+    detail = client.get(f"{BASE}/cases/{response.json()['id']}").json()
+    assert detail["review_evidence_missing"] == ["verification plan with evidence requirements"]
+
+
+def test_remediation_prose_plan_accepts_red_green_from_any_test_runner(client, isolate_settings):
+    case = _case(client, isolate_settings)
+    root = isolate_settings["engagements_dir"] / KEY
+    worktree = root / "remediation" / "cases" / str(case["id"]) / "worktree"
+    worktree.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", "--initial-branch=main", str(worktree)], check=True)
+    _red_baseline(worktree)
+    (worktree / "fix.py").write_text("fixed")
+    subprocess.run(["git", "-C", str(worktree), "add", "fix.py"], check=True)
+    subprocess.run(["git", "-C", str(worktree), "-c", "user.name=Vigil Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "Fix"], check=True)
+    revision = subprocess.check_output(["git", "-C", str(worktree), "rev-parse", "HEAD"], text=True).strip()
+    endpoint = f"{BASE}/cases/{case['id']}"
+    assert client.patch(endpoint, json={"worktree_path": str(worktree), "worktree_revision": revision}).status_code == 200
+    _review_evidence(client, root, case["id"], revision, method="pytest")
+    assert client.get(endpoint).json()["review_evidence_missing"] == []
 
 
 @pytest.mark.parametrize("revision_form", ["HEAD", "abbreviated", "uppercase"])
@@ -811,7 +837,7 @@ def test_remediation_deployment_requires_approved_revision(client, isolate_setti
         ("/baseline", {"outcome": "unreproduced", "method": "HTTP", "proved": "Changed after close"}),
         ("/release-plan", {
             "production_canary_decision": "defer", "production_canary_rationale": "Changed after close",
-            "coralogix_monitoring": "Monitor",
+            "monitoring": "Monitor",
         }),
     ],
     ids=["case", "verification-plan", "baseline", "release-plan"],
@@ -1020,6 +1046,48 @@ def test_remediation_revision_sync_rejects_foreign_checkout_with_same_branch(cli
     assert client.get(endpoint).json()["worktree_revision"] == "a" * 40
 
 
+def test_remediation_approval_survives_guidance_edits_but_not_code_changes(client, isolate_settings):
+    case = _case(client, isolate_settings)
+    root = isolate_settings["engagements_dir"] / KEY
+    repo = isolate_settings["data_dir"] / "source-repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", "--initial-branch=main", str(repo)], check=True)
+    (repo / "fix.php").write_text("base")
+    subprocess.run(["git", "-C", str(repo), "add", "fix.php"], check=True)
+    subprocess.run(["git", "-C", str(repo), "-c", "user.name=Vigil Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "Base"], check=True)
+    (root / "AGENTS.md").write_text("Check tenant access.\n")
+    (root / "template.md").write_text("## What\n## Test\n")
+    (root / "PROJECT.md").write_text(
+        '+++\nrepository = ' + json.dumps(str(repo))
+        + '\n[remediation]\ninstruction_files = ["AGENTS.md"]\npr_template = "template.md"\n+++\n# Notes\n'
+    )
+    worktree = root / "remediation" / "cases" / str(case["id"]) / "worktree"
+    worktree.parent.mkdir(parents=True)
+    subprocess.run(["git", "-C", str(repo), "worktree", "add", "-qb", "fix/guidance", str(worktree)], check=True)
+    (worktree / "fix.php").write_text("fixed")
+    subprocess.run(["git", "-C", str(worktree), "add", "fix.php"], check=True)
+    subprocess.run(["git", "-C", str(worktree), "-c", "user.name=Vigil Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "Fix"], check=True)
+    revision = subprocess.check_output(["git", "-C", str(worktree), "rev-parse", "HEAD"], text=True).strip()
+    endpoint = f"{BASE}/cases/{case['id']}"
+    assert client.patch(endpoint, json={
+        "worktree_path": str(worktree), "worktree_branch": "fix/guidance", "worktree_revision": revision,
+    }).status_code == 200
+    assert client.patch(f"{endpoint}/baseline", json={
+        "outcome": "runtime_reproduced", "method": "pytest", "proved": "Cross-account write blocked",
+    }).status_code == 200
+    _review_evidence(client, root, case["id"], revision)
+    assert client.post(f"{endpoint}/transition", json={
+        "status": "review", "actor": "operator", "reason": "Ready",
+    }).status_code == 200
+    assert _approve(client, case["id"]).status_code == 201
+    (root / "AGENTS.md").write_text("Check tenant and role access.\n")
+    (root / "template.md").write_text("## What\n## Prep\n## Test\n")
+    (root / "PROJECT.md").write_text((root / "PROJECT.md").read_text() + "Review caller permissions.\n")
+    assert client.get(endpoint).json()["approval_current"] is True
+    (worktree / "fix.php").write_text("changed after approval")
+    assert client.get(endpoint).json()["approval_current"] is False
+
+
 def test_remediation_approval_rejects_same_revision_on_another_branch(client, isolate_settings):
     case = _case(client, isolate_settings)
     root = isolate_settings["engagements_dir"] / KEY
@@ -1108,7 +1176,7 @@ def test_remediation_fixture_flow_preserves_approval_through_development_evidenc
     assert client.patch(f"{BASE}/cases/{case['id']}/release-plan", json={
         "production_canary_decision": "not_required",
         "production_canary_rationale": "Laravel boundary test and development human proof cover this route",
-        "safe_procedure": "", "coralogix_monitoring": "Watch account update errors and denied cross-account writes",
+        "safe_procedure": "", "monitoring": "Watch account update errors and denied cross-account writes",
     }).status_code == 200
     assert client.post(f"{BASE}/cases/{case['id']}/transition", json={
         "status": "review", "actor": "operator", "reason": "Evidence ready",
