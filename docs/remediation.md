@@ -158,6 +158,14 @@ that universal or creating a ticket automatically.
 
 Claude Code 2.1.257 or newer and native session hosting are required for launch and attachment.
 `start` launches a hosted conversation before attaching, keeping the exact conversation joinable.
+Vigil records the native host's actual conversation UUID. If startup exits before attachment,
+inspect `claude agents --json --all` and the engagement's `remediation/sessions/` receipts.
+Recover a recorded launch using its receipt UUID; this never starts another conversation:
+
+```bash
+vigil remediation -k <engagement-key> start --session-id <recorded-launch-uuid>
+```
+
 The session's context root stays the main repository; all code edits belong in the case's registered
 workspace. Native background isolation is disabled only for these sessions to avoid a second workspace.
 For an existing case:

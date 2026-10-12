@@ -162,6 +162,93 @@ def test_inherited_hooks_are_not_disabled_by_generic_launcher(prepared) -> None:
     assert "disableAllHooks" not in json.loads(argv[argv.index("--settings") + 1])
 
 
+def test_background_host_assigned_uuid_is_recorded_and_bindable(prepared, monkeypatch) -> None:
+    native_run = prepared.module.subprocess.run
+    actual_id = "638131c5-4bcd-4a2f-898b-ecb1a5489638"
+
+    def host_assigns_identity(argv, **kwargs):
+        result = native_run(argv, **kwargs)
+        if "--bg" in argv:
+            prepared.rows[-1].update(sessionId=actual_id, name=argv[argv.index("--name") + 1])
+        return result
+
+    monkeypatch.setattr(prepared.module.subprocess, "run", host_assigns_identity)
+    monkeypatch.setattr(prepared.module.time, "sleep", lambda _: None)
+    args = argparse.Namespace(remediation_command="start", engagement_key="acme", client="claude")
+    assert prepared.module.run_session_command(args, prepared.installation, prepared.engagement, prepared.project) == 0
+    launch = next(argv for argv, _ in prepared.calls if "--bg" in argv)
+    requested_id = launch[launch.index("--session-id") + 1]
+    for identity in (requested_id, actual_id):
+        manifest = prepared.engagement / f"remediation/sessions/{identity}.json"
+        assert json.loads(manifest.read_text())["session_id"] == actual_id
+    run_case(prepared, bind=True, session_id=actual_id)
+    run_case(prepared, command="join")
+    assert prepared.calls[-1][0] == ["claude", "attach", "job1"]
+
+
+def test_start_recovers_pending_launch_by_exact_name_without_dispatch(prepared) -> None:
+    session_id = "638131c5-4bcd-4a2f-898b-ecb1a5489638"
+    actual_id = "f715d449-0960-46cc-b875-a88e4abc71b2"
+    path = prepared.engagement / f"remediation/sessions/{session_id}.json"
+    prepared.module._write_json(path, {
+        "engagement_key": "acme", "session_cwd": str(prepared.repository),
+        "session_id": session_id, "job_id": None,
+        "settings": prepared.module._settings(prepared.project),
+    })
+    prepared.rows.append({"id": "existing", "sessionId": actual_id,
+                          "cwd": str(prepared.repository), "name": f"vigil-{session_id}"})
+    args = argparse.Namespace(remediation_command="start", engagement_key="acme", client="claude", session_id=session_id)
+    assert prepared.module.run_session_command(args, prepared.installation, prepared.engagement, prepared.project) == 0
+    assert not any("--bg" in argv for argv, _ in prepared.calls)
+    assert prepared.calls[-1][0] == ["claude", "attach", "existing"]
+    assert json.loads(path.read_text())["session_id"] == actual_id
+
+
+@pytest.mark.parametrize("variant", ["duplicate", "wrong-directory", "invalid-uuid"])
+def test_launch_name_reconciliation_rejects_ambiguous_or_invalid_host_identity(prepared, variant) -> None:
+    session_id = "638131c5-4bcd-4a2f-898b-ecb1a5489638"
+    binding = {"session_id": session_id, "job_id": None, "session_cwd": str(prepared.repository)}
+    row = {"id": "existing", "sessionId": "f715d449-0960-46cc-b875-a88e4abc71b2",
+           "cwd": str(prepared.repository), "name": f"vigil-{session_id}"}
+    rows = [row]
+    if variant == "duplicate":
+        rows.append(dict(row, id="other"))
+    elif variant == "wrong-directory":
+        row["cwd"] = str(prepared.repository / "other")
+    else:
+        row["sessionId"] = "invalid"
+    with pytest.raises(SystemExit):
+        prepared.module._launched_session(binding, rows)
+
+
+@pytest.mark.parametrize("command", ["session", "join"])
+def test_case_recovers_pending_host_identity_without_dispatch(prepared, command) -> None:
+    requested_id = "638131c5-4bcd-4a2f-898b-ecb1a5489638"
+    actual_id = "f715d449-0960-46cc-b875-a88e4abc71b2"
+    path = prepared.engagement / "remediation/cases/1/session.json"
+    prepared.module._write_json(path, {
+        "case_id": "1", "engagement_key": "acme", "workspace": str(prepared.workspace),
+        "session_cwd": str(prepared.repository), "session_id": requested_id, "job_id": None,
+        "settings": prepared.module._settings(prepared.project),
+    })
+    prepared.rows.append({"id": "existing", "sessionId": actual_id,
+                          "cwd": str(prepared.repository), "name": f"vigil-{requested_id}"})
+    run_case(prepared, command=command)
+    assert json.loads(path.read_text())["session_id"] == actual_id
+    assert not any("--bg" in argv for argv, _ in prepared.calls)
+    run_case(prepared, command="join")
+    assert prepared.calls[-1][0] == ["claude", "attach", "existing"]
+
+
+def test_resolved_binding_does_not_follow_a_reused_launch_name(prepared) -> None:
+    run_case(prepared)
+    binding = json.loads((prepared.engagement / "remediation/cases/1/session.json").read_text())
+    prepared.rows[:] = [{"id": "other", "sessionId": "f715d449-0960-46cc-b875-a88e4abc71b2",
+                        "cwd": str(prepared.repository), "name": f"vigil-{binding['session_id']}"}]
+    with pytest.raises(SystemExit, match="absent"):
+        run_case(prepared, command="join")
+
+
 def test_worker_binding_is_idempotent_and_join_attaches_exact_job(prepared) -> None:
     run_case(prepared)
     binding_path = prepared.engagement / "remediation/cases/1/session.json"

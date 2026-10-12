@@ -23,6 +23,7 @@ _TICKET = re.compile(r"[A-Za-z][A-Za-z0-9_]*-\d+")
 def register_session_parsers(commands: argparse._SubParsersAction) -> None:
     start = commands.add_parser("start", help="Open repository Claude context for /vigil-remediate")
     start.add_argument("--client", choices=("claude",), default="claude")
+    start.add_argument("--session-id", help="Recover and attach an existing Vigil launch without starting another")
     route = commands.add_parser("route", help="Resolve input references and choose remediation role context")
     route.add_argument("references", nargs="+")
     session = commands.add_parser("session", help="Start a full case developer session or bind this conversation")
@@ -258,14 +259,42 @@ def _launch_background(command_line: list[str], opening: str, binding: dict,
     if result.returncode:
         raise SystemExit(f"Claude session launch failed; binding retained for recovery:\n{result.stderr or result.stdout}")
     for attempt in range(20):
-        row = _matching_session(binding, _inventory())
+        row = _launched_session(binding, _inventory())
         if row and row.get("id"):
-            binding["job_id"] = row["id"]
-            _write_json(path, binding)
+            _record_launched_session(binding, row, path)
             return row
         if attempt < 19:
             time.sleep(0.1)
     raise SystemExit("Claude started but has not reported its conversation identity; binding retained, do not relaunch")
+
+
+def _launched_session(binding: dict, rows: list[dict]) -> dict | None:
+    if binding.get("job_id"):
+        return _matching_session(binding, rows)
+    # The native background host may assign its own UUID despite --session-id.
+    # The unique launch name correlates that host with our pre-dispatch receipt.
+    name = f"vigil-{binding.get('launch_id', binding['session_id'])}"
+    matches = [row for row in rows if row.get("name") == name
+               or row.get("sessionId") == binding["session_id"]]
+    if len(matches) > 1:
+        raise SystemExit("Native conversation identity is ambiguous; no session was joined or replaced")
+    if not matches:
+        return None
+    row = matches[0]
+    _uuid(row.get("sessionId"))
+    if not row.get("cwd") or Path(row["cwd"]).resolve() != Path(binding["session_cwd"]).resolve():
+        raise SystemExit("Native session repository directory differs from its launch binding")
+    return row
+
+
+def _record_launched_session(binding: dict, row: dict, path: Path) -> None:
+    binding.setdefault("launch_id", binding["session_id"])
+    binding["session_id"] = _uuid(row.get("sessionId"))
+    binding["job_id"] = row["id"]
+    _write_json(path, binding)
+    # Case binding looks up the launch settings by the actual conversation UUID.
+    sessions = path.parent if path.parent.name == "sessions" else path.parent.parent.parent / "sessions"
+    _write_json(sessions / f"{binding['session_id']}.json", binding)
 
 
 def _binding_document(path: Path) -> dict | None:
@@ -309,9 +338,25 @@ def run_session_command(args: argparse.Namespace, install_root: Path, engagement
     key = args.engagement_key
     environment = _environment(engagement, key, install_root)
     notice = _notice(project)
-    if command != "join":
+    if command != "join" and not (command == "start" and getattr(args, "session_id", None)):
         print(notice, flush=True)
     if command == "start":
+        if getattr(args, "session_id", None):
+            session_id = _uuid(args.session_id)
+            path = engagement / "remediation" / "sessions" / f"{session_id}.json"
+            with _session_lock(path.parent):
+                entry_binding = _binding_document(path)
+                if (entry_binding is None or entry_binding.get("engagement_key") != key
+                        or entry_binding.get("session_cwd") != str(repository)
+                        or session_id not in (entry_binding.get("session_id"), entry_binding.get("launch_id"))):
+                    raise SystemExit("Recorded launch differs from the selected engagement or repository")
+                entry_row = _launched_session(entry_binding, _inventory())
+                if entry_row is None or not entry_row.get("id"):
+                    raise SystemExit("Recorded native launch is absent; refusing to create a replacement")
+                _record_launched_session(entry_binding, entry_row, path)
+                recorded_policy = "disabled" if entry_binding.get("settings", {}).get("disableAllHooks") else "inherit"
+                print(_notice({"remediation": {"hook_policy": recorded_policy}}), flush=True)
+            return subprocess.run(["claude", "attach", entry_row["id"]], cwd=repository, env=environment).returncode
         session_id = str(uuid.uuid4())
         command_line = _launch_arguments(install_root, engagement, project, session_id, key)
         profile_path = project.get("_profile_path") or engagement / "PROJECT.md"
@@ -340,10 +385,11 @@ def run_session_command(args: argparse.Namespace, install_root: Path, engagement
                 raise SystemExit("This case has no recorded developer conversation")
             recorded_policy = "disabled" if binding.get("settings", {}).get("disableAllHooks") else "inherit"
             print(_notice({"remediation": {"hook_policy": recorded_policy}}), flush=True)
-            row = _matching_session(binding, rows)
+            row = _launched_session(binding, rows)
             if row is None:
                 raise SystemExit("Recorded native conversation is absent; refusing to create a replacement")
             if row.get("id"):
+                _record_launched_session(binding, row, path)
                 command_line = ["claude", "attach", row["id"]]
             elif row.get("pid"):
                 raise SystemExit("This conversation is already interactive; return to its terminal or background it before joining")
@@ -375,10 +421,10 @@ def run_session_command(args: argparse.Namespace, install_root: Path, engagement
             return 0
         else:
             if binding:
-                row = _matching_session(binding, rows)
+                row = _launched_session(binding, rows)
                 if row:
-                    binding["job_id"] = row.get("id")
-                    _write_json(path, binding)
+                    if row.get("id"):
+                        _record_launched_session(binding, row, path)
                     print(json.dumps(binding, indent=2))
                     return 0
                 raise SystemExit("Case already has a recorded conversation; recover it instead of launching a duplicate")

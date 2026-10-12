@@ -194,8 +194,6 @@ A prompt change is **not** prompt-only when the prompt defines an artifact the b
   mirror in `agent/scripts/assess/lib/coverage_checks.py` and a `coverage_deferral` API literal.
 - `state_manager/command_runs.py` registers output artifacts before and after execution, both
   gated on `route != "host_exec"`; a third route needs both registrations.
-- `orchestrator/backend/app/main.py` registers each API router explicitly; a new router is inert
-  until it is added there.
 
 ## Boundaries worth knowing
 
@@ -221,7 +219,6 @@ A prompt change is **not** prompt-only when the prompt defines an artifact the b
 
 ### src/vigil_cli/ — the universal CLI
 
-- `src/vigil_cli/main.py` — the `vigil` entrypoint: install, config, doctor/status, runtime and orchestrator lifecycle, and the `vigil assess` passthrough.
 - `src/vigil_cli/application.py` — explicit/imported release resolution, bundle validation and persistent content-addressed assets/helper CLI. Never discover source from workspace or CWD.
 - `src/vigil_cli/workspace.py` — canonical private paths and in-place legacy adoption; `paths.py:workspace_root_for_engagement` resolves private ownership independently of application assets.
 - `vigil_build.py` — tracked publisher inputs, matched CLI/backend/agent/docs/legal bundle and locked prebuilt UI provenance; its sdist builds wheels without Git or Node.
@@ -230,6 +227,7 @@ A prompt change is **not** prompt-only when the prompt defines an artifact the b
 - `src/vigil_cli/preflight.py` — `_preflight_engagement_start`, `_resolve_provider_key`, `_warn_if_install_stale`. It lives outside `main.py` so `blue.py` can import it without a cycle; `main.py` re-exports what it uses.
 - `src/vigil_cli/remediation.py` — case intake/context rendering, configured workspace/checks, reviewed PR publication, and consented development workflow commands; `remediation_browser.py` owns local browser execution. Backend APIs own case state.
 - `src/vigil_cli/remediation_sessions.py` — Claude repository-context launch, role routing, and native conversation binding/attachment; `agent/commands/vigil-remediate.md` selects the remediation role and profile references.
+  Launch receipts correlate the unique native job name with the host-assigned UUID; `start --session-id` recovers a receipt without dispatching another conversation.
   Command frontmatter `clients` limits generated client discovery.
 - `agent/scripts/assess/lib/remediation_project.py` and `remediation_vcs.py` — shared PROJECT.md parsing and Git/JJ identity, workspace, diff, and push contracts; CLI import bridges are `project_config.py` and `remediation_vcs.py`.
 - `src/vigil_cli/runtime.py` + `up.py` — one shared long-lived Kali container, reached host-side by `docker exec`. There is no in-container API server or MCP bridge.
