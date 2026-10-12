@@ -28,9 +28,10 @@ can link to one case when they share the same fix.
    ```
 
    `start` launches Claude and attaches automatically. It displays the repository,
-   profile, hook policy, and configured check names; no Continue confirmation is needed.
+   profile, and configured check names; no Continue confirmation is needed.
 
-4. In Claude, run `/vigil-remediate SEC-123` with a real ticket ID or URL. The agent
+4. Give Claude the ticket IDs or URLs and ask it to use the remediation workflow,
+   or explicitly invoke `/vigil-remediate SEC-123`. The agent
    retrieves the report, creates the case/workspace/handoff, and proposes its fix
    and verification plan. Check the diagnosis and scope, then approve the plan.
 5. The agent implements the fix, runs checks against case source, records proof,
@@ -192,8 +193,10 @@ Claude only.
 `"disabled"` turns off personal/global, repository/local, and ordinary plugin Claude
 hooks for this conversation. Organization-managed hooks remain enabled if configured.
 These are Claude lifecycle actions such as automatic checks after edits or session
-logging; Git pre-commit and pre-push hooks are unaffected. Vigil announces the selected
-policy before launch and in developer context. Case/session recording uses explicit commands.
+logging; Git pre-commit and pre-push hooks are unaffected. Vigil applies the profile setting
+before launching Claude. The opening prompt asks Claude to read the profile and explain
+settings or checks that affect the work. Reattachment reports the recorded session policy.
+Case/session recording uses explicit commands.
 
 With hooks disabled, the agent runs profile checks automatically during verification and publishing:
 required formatting, lint, analysis, and tests. The user need not replay hook commands. Existing

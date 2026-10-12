@@ -14,7 +14,8 @@ Durable design decisions live in [`docs/adr/`](docs/adr/).
 
 ### Changed
 
-- Remediation startup shows the selected repository, profile, hook policy, and configured checks.
+- Remediation startup shows the selected repository, profile, and configured checks.
+  Claude reads the profile and explains settings or checks that affect the work.
 - First verification plans require explicit evidence requirements appropriate to the case.
 - Remediation developers account for required checks before editing; coordinators keep owner
   approvals separate for each case.

@@ -176,16 +176,17 @@ def _notice(project: dict) -> str:
     return "Repository and personal hooks retain their configured policy for this session."
 
 
-def _start_prompt(project: dict, repository: Path, engagement: Path, key: str, notice: str) -> str:
+def _start_prompt(project: dict, repository: Path, engagement: Path, key: str) -> str:
     profile = project.get("_profile_path") or engagement / "PROJECT.md"
     return (f"Start a Vigil defensive remediation session for engagement {key}.\n\n"
             f"Repository: {repository}\nProject profile: {profile}\n\n"
-            "Read the project profile and applicable repository instructions. Wait for the owner's "
+            "Read the selected project profile and applicable repository instructions. Tell the owner "
+            "about hook settings, required checks, or instruction conflicts that affect the work. "
+            "Wait for the owner's "
             "ticket IDs, URLs, or report before beginning investigation. Use /vigil-remediate to route "
             "supplied references and load the appropriate role.\n\n"
             "For one case, retain this conversation as its developer. For several cases, coordinate "
             "separate developer conversations through Vigil.\n\n"
-            f"{notice}\n\n"
             "Present the diagnosis and proposed fix plan for owner approval before editing.")
 
 
@@ -375,11 +376,10 @@ def run_session_command(args: argparse.Namespace, install_root: Path, engagement
         command_line = _launch_arguments(install_root, engagement, project, session_id, key)
         profile_path = project.get("_profile_path") or engagement / "PROJECT.md"
         print(f"Starting Claude remediation session\nRepository: {repository}\nProfile: {profile_path}", flush=True)
-        print(notice, flush=True)
         checks = project.get("remediation", {}).get("check_commands", [])
         print("Profile checks: " + (", ".join(check["name"] for check in checks)
               if checks else "none configured; agree required checks before editing"), flush=True)
-        opening = _start_prompt(project, repository, engagement, key, notice)
+        opening = _start_prompt(project, repository, engagement, key)
         entry_binding = {"engagement_key": key, "session_cwd": str(repository),
                          "session_id": session_id, "job_id": None, "settings": _settings(project, engagement, key, install_root)}
         path = engagement / "remediation" / "sessions" / f"{session_id}.json"

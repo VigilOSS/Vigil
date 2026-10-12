@@ -149,10 +149,26 @@ def test_start_hosts_and_attaches_same_native_conversation_with_repository_confi
     assert Path(added_directories[0]).parent == prepared.engagement / "remediation/client-context"
     assert added_directories[1] == str(prepared.engagement / "remediation")
     assert str(prepared.repository / "PROJECT.md") in argv[-1]
-    assert "This profile disables" in capsys.readouterr().out
+    assert f"Profile: {prepared.repository / 'PROJECT.md'}" in capsys.readouterr().out
     overlay = Path(added_directories[0]) / ".claude/commands"
     assert [path.name for path in overlay.iterdir()] == ["vigil-remediate.md"]
     assert not (prepared.repository / ".claude").exists()
+
+
+def test_start_reports_profile_checks_before_attaching(prepared, capsys) -> None:
+    prepared.project["remediation"]["check_commands"] = [
+        {"name": "lint", "command": "npm run lint", "directory": "."},
+        {"name": "tests", "command": "npm test", "directory": "."},
+    ]
+    args = argparse.Namespace(remediation_command="start", engagement_key="acme", client="claude")
+    assert prepared.module.run_session_command(args, prepared.installation, prepared.engagement, prepared.project) == 0
+    assert capsys.readouterr().out.splitlines()[:4] == [
+        "Starting Claude remediation session",
+        f"Repository: {prepared.repository}",
+        f"Profile: {prepared.repository / 'PROJECT.md'}",
+        "Profile checks: lint, tests",
+    ]
+    assert prepared.calls[-1][0] == ["claude", "attach", "job1"]
 
 
 def test_inherited_hooks_are_not_disabled_by_generic_launcher(prepared) -> None:
