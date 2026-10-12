@@ -27,11 +27,14 @@ working directories. Git and JJ are both supported; follow repository VCS
 instructions and bind evidence to immutable revisions. Preserve conflicts and
 scratch changes for deliberate resolution.
 
-Hooks follow the selected profile's session policy. When non-managed hooks are
-disabled, tell the owner; managed hooks remain active. Run required formatting,
-analysis, and tests during verification and before publishing, and record case
-state explicitly. Hook disabling changes neither permissions nor instruction,
-skill, or MCP discovery. Existing company hook configuration remains unchanged.
+Hooks follow the selected profile's session policy. When disabled, explain that
+personal, repository, and ordinary plugin Claude hooks do not run in this
+conversation; organization-managed hooks remain enabled if configured, and Git
+hooks are unaffected. Before editing, account for the repository's required
+formatting, analysis, and tests in profile check commands or explicit case
+verification requirements. Inspect hook path assumptions before reusing their
+commands; all checks must exercise case source. Record case state explicitly.
+Hook policy does not change permissions, instruction, skill, or MCP discovery.
 
 Present a diagnosis and fix plan for approval before code edits. Verify what the
 report claims, include approved siblings with the same root cause, and keep
@@ -39,6 +42,10 @@ unrelated issues in separate cases. Test and evidence requirements follow the
 case verification plan. Runtime, test-runner, and browser identities are
 distinct: prove which case revision each execution exercised. Record actual
 commands, observations, artifacts, and limits without inflating their claim.
+The first recorded plan needs both a readable brief and nonempty structured
+evidence requirements through `plan --requirements-file`, with the reason for
+the selected methods. Consult CLI help and the remediation documentation for
+the executable contract. A conversational plan alone does not configure gates.
 
 One explicit initial publishing approval authorizes the reviewed patch's push
 and draft PR. Requested updates to an existing PR authorize their corresponding

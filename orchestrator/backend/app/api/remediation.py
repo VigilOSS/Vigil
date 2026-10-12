@@ -80,6 +80,13 @@ class PlanPatch(BaseModel):
     requirements: list[VerificationRequirement] | None = Field(default=None, min_length=1)
     alternatives_reason: str = ""
 
+    @field_validator("verification_plan")
+    @classmethod
+    def nonempty_plan(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("Verification plan must be nonempty")
+        return value
+
     @model_validator(mode="after")
     def explain_alternatives(self):
         if self.requirements is not None and not self.alternatives_reason.strip():

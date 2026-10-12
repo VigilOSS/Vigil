@@ -28,6 +28,11 @@ bindings reuse the same conversation. Give the owner its case and `join`
 command, and read native session state rather than guessing completion.
 
 Workers investigate and propose their plans for owner approval before edits.
+Present each case's diagnosis, proposed change, verification requirements, and
+approval status together with its `join` command. The owner approves the plan
+in that case's developer conversation; direct them there for technical questions
+or revisions. Approval for one case never authorizes another worker. Confirm
+that each worker records its agreed plan and requirements before implementation.
 Coding and review may overlap. Shared runtime execution needs recorded ownership
 through `environment acquire`; keep a worker's tests queued until it is available,
 and confirm the actual served case revision before counting results. The holder

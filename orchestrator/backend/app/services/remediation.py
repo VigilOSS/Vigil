@@ -860,6 +860,9 @@ def patch_case(key: str, case_id: int, changes: dict[str, Any]) -> dict[str, Any
         if old["status"] == "closed":
             raise HTTPException(409, "Closed remediation cases cannot be changed")
         changes = dict(changes)
+        if ("verification_plan" in changes and not (old["verification_plan"] or "").strip()
+                and not changes.get("verification_requirements_json")):
+            raise HTTPException(400, "The first verification plan requires explicit evidence requirements and a reason")
         finding_ids = _validate_finding_ids(connection, changes.pop("finding_ids")) if "finding_ids" in changes else None
         if "worktree_path" in changes and changes["worktree_path"]:
             path = Path(changes["worktree_path"])

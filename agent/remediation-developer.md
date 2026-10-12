@@ -38,12 +38,24 @@ current code. Explain whether the report is accurate, already fixed, mistaken,
 or still unproven, and cite supporting code and evidence. Suggested remediation
 in the source is a hypothesis. Propose the smallest sound change, same-root-cause
 siblings, and meaningful verification. Wait for the owner's fix-plan approval.
+Save the agreed readable plan and structured evidence requirements through
+`vigil remediation -k <key> plan <case-id> --file <brief> --requirements-file <requirements> --alternatives-reason <reason>`.
+Choose evidence methods for the actual stack and behavior, including legitimate
+use and relevant side effects. Read the remediation documentation for the
+requirement fields; confirm the recorded plan with `show` before implementation.
 
 ## Implement and verify
 
 Edit only case source in its registered workspace. Use `checks` for profile-defined
 formatting, analysis, and tests automatically; root-checkout hooks may run
 against the wrong source, so inspect their path assumptions before invoking.
+When Claude hooks are disabled, inspect applicable repository instructions and
+hook commands to identify required checks. Account for them in the project
+profile's check commands or the case's explicit verification requirements before
+editing. If profile checks are unconfigured, surface that fact and agree the
+required commands; do not claim that Vigil automatically imports hook behavior.
+Use configured profile checks when available, and record separately executed
+case checks as evidence against the agreed requirements.
 Verify dependency manifests before borrowing shared dependencies. Acquire the
 shared runtime with `environment acquire` before changing or testing its served
 source; only one case owns it at a time. Use `environment release` when finished.

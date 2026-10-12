@@ -119,7 +119,7 @@ def register_remediation_parser(sub: argparse._SubParsersAction) -> None:
     plan = commands.add_parser("plan", help="Save human preparation and verification requirements")
     plan.add_argument("case_id")
     plan.add_argument("--file", required=True, type=Path)
-    plan.add_argument("--requirements-file", type=Path, help="JSON list of case-specific verification requirements")
+    plan.add_argument("--requirements-file", type=Path, help="JSON list of case-specific evidence requirements; required for the first plan")
     plan.add_argument("--alternatives-reason", help="Explain the selected verification methods")
 
     release = commands.add_parser("release-plan", help="Record production canary decision and monitoring")
@@ -1161,6 +1161,10 @@ def run_remediation(args: argparse.Namespace, install_root: Path) -> None:
             "owner_reason": args.owner_reason,
         })
     elif cmd == "plan":
+        if not getattr(args, "requirements_file", None):
+            case = _case(install_root, eng_dir, key, case_id)
+            if not (case.get("verification_plan") or "").strip():
+                raise SystemExit("The first plan requires --requirements-file and --alternatives-reason")
         payload = {"verification_plan": args.file.expanduser().read_text(encoding="utf-8")}
         if getattr(args, "requirements_file", None):
             payload["requirements"] = json.loads(args.requirements_file.expanduser().read_text(encoding="utf-8"))

@@ -27,6 +27,9 @@ can link to one case when they share the same fix.
    vigil remediation -k <key> start
    ```
 
+   `start` launches Claude and attaches automatically. It displays the repository,
+   profile, hook policy, and configured check names; no Continue confirmation is needed.
+
 4. In Claude, run `/vigil-remediate SEC-123` with a real ticket ID or URL. The agent
    retrieves the report, creates the case/workspace/handoff, and proposes its fix
    and verification plan. Check the diagnosis and scope, then approve the plan.
@@ -144,6 +147,9 @@ One normalized bug keeps this conversation as its developer. Several select a co
 starts separate full developer conversations through Vigil. The command announces its role and loads
 only relevant profile and role guidance. A key and its `/browse/` URL count as one input; the reader
 must still establish canonical identity. Arguments remain untrusted input data.
+For several cases, the coordinator presents each diagnosis, proposed fix, verification
+requirements, approval status, and `join` command. Approve each plan in its developer
+conversation. One case's approval does not authorize another worker.
 
 Vigil starts and records native sessions; Claude retrieves tickets through profile-selected tools
 and investigates code. References remain pending until retrieval succeeds. Source resolution detects
@@ -182,18 +188,25 @@ Claude only.
 
 ### Hook policy
 
-`hook_policy = "inherit"` keeps configured hooks. `"disabled"` disables non-managed hooks only in
-the remediation session. Vigil announces it before launch and in developer context. Managed policy
-hooks remain active. Repository files and ordinary sessions are unchanged. Vigil's non-managed hooks
-are also disabled, so case/session recording uses explicit commands instead of hook receipts.
+`hook_policy = "inherit"` is the default and keeps configured Claude hooks.
+`"disabled"` turns off personal/global, repository/local, and ordinary plugin Claude
+hooks for this conversation. Organization-managed hooks remain enabled if configured.
+These are Claude lifecycle actions such as automatic checks after edits or session
+logging; Git pre-commit and pre-push hooks are unaffected. Vigil announces the selected
+policy before launch and in developer context. Case/session recording uses explicit commands.
 
 With hooks disabled, the agent runs profile checks automatically during verification and publishing:
 required formatting, lint, analysis, and tests. The user need not replay hook commands. Existing
-helpers may be used only when they operate on case source. No repository hook edits are needed.
+helpers may be used only when they operate on case source. Claude starts in the main
+repository while case edits belong in a separate workspace; a hook that assumes the
+main checkout may check the wrong source. No repository hook edits are needed.
 
-A future alternative is a Vigil-owned remediation hook that schedules the same profile checks.
-It would need case workspace identity, shared environment ownership, and hook-independent session
-recording. The explicit check path keeps this iteration simple and leaves company hooks intact.
+Vigil does not import hook commands into `check_commands`. Before editing, the developer
+identifies required checks from repository instructions and hook configuration, accounts
+for them in profile check commands or case verification requirements, and confirms any
+unclear requirements with the owner. Startup reports when no profile checks are configured.
+Configure recurring required commands in `PROJECT.md`; case-specific checks belong in the
+case plan. All configured profile checks remain required for approval and publication.
 
 ## Intake and generated handoff
 
@@ -320,11 +333,13 @@ executed/reasoned status. Runtime requirements may also set `shared_environment`
 The backend checks matching evidence and case-source profile checks before approval. Static reasoning
 uses `--execution reasoned`; unavailable checks use `--execution unavailable` and do not become
 executed proof. Runtime evidence carries its lease token and confirmed identity where required.
+The first recorded plan requires both the readable brief and structured requirements.
+Vigil rejects a first plan containing only prose. Once established, a text-only update
+retains the recorded requirements; supply a requirements file to change them deliberately.
 
 For a code/test-confirmed baseline without safe runtime reproduction, `baseline` needs the explicit
-owner decision: `--owner-decision proceed --owner-actor <owner> --owner-reason <reason>`. Cases without
-explicit requirements retain historical Laravel red/green and browser gates; a new plan changes the
-case contract deliberately rather than reinterpreting old evidence.
+owner decision: `--owner-decision proceed --owner-actor <owner> --owner-reason <reason>`. Existing case
+plans and evidence remain recorded; changing requirements does not reinterpret prior evidence.
 
 ### Optional browser proof
 

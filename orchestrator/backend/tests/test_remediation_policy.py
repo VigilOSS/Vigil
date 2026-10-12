@@ -83,6 +83,48 @@ def test_alternative_verification_requires_reason_and_cannot_be_empty(client, is
     assert client.patch(endpoint, json={"verification_plan": "Skip all", "requirements": [], "alternatives_reason": "No tests"}).status_code == 422
 
 
+def test_first_verification_plan_requires_structured_evidence_requirements(client, isolate_settings):
+    _, item = case(client, isolate_settings)
+    endpoint = f"{BASE}/cases/{item['id']}"
+    response = client.patch(f"{endpoint}/verification-plan", json={"verification_plan": "Run native API tests"})
+    assert response.status_code == 400, response.text
+    assert client.get(endpoint).json()["verification_plan"] == ""
+
+
+def test_plan_text_update_preserves_established_evidence_requirements(client, isolate_settings):
+    _, item = case(client, isolate_settings)
+    endpoint = f"{BASE}/cases/{item['id']}"
+    plan = {"verification_plan": "Check API access", "requirements": [
+        {"kind": "api-test", "methods": ["pytest"]},
+    ], "alternatives_reason": "Native API coverage"}
+    assert client.patch(f"{endpoint}/verification-plan", json=plan).status_code == 200
+    before = client.get(endpoint).json()["verification_requirements"]
+    assert client.patch(f"{endpoint}/verification-plan", json={"verification_plan": "Check API access and cleanup"}).status_code == 200
+    assert client.get(endpoint).json()["verification_requirements"] == before
+
+
+def test_blank_verification_plan_is_rejected(client, isolate_settings):
+    _, item = case(client, isolate_settings)
+    response = client.patch(f"{BASE}/cases/{item['id']}/verification-plan", json={
+        "verification_plan": "  ", "requirements": [{"kind": "api-test", "methods": ["pytest"]}],
+        "alternatives_reason": "Native tests",
+    })
+    assert response.status_code == 422, response.text
+
+
+def test_recorded_prose_plan_retains_its_evidence_contract(client, isolate_settings):
+    _, item = case(client, isolate_settings)
+    with db.get_connection() as connection:
+        connection.execute("UPDATE remediation_cases SET verification_plan=? WHERE id=?",
+                           ("Recorded owner test steps", item['id']))
+    endpoint = f"{BASE}/cases/{item['id']}"
+    before = client.get(endpoint).json()["review_evidence_missing"]
+    response = client.patch(f"{endpoint}/verification-plan", json={"verification_plan": "Clarified owner test steps"})
+    assert response.status_code == 200, response.text
+    assert response.json()["verification_requirements"] is None
+    assert response.json()["review_evidence_missing"] == before
+
+
 def test_evidence_cannot_claim_different_executed_revision(client, isolate_settings):
     root, item = case(client, isolate_settings)
     _, revision = workspace(client, root, item)

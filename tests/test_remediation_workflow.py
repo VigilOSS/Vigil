@@ -16,6 +16,18 @@ def parser():
     return result
 
 
+def test_first_plan_cannot_be_sent_without_evidence_requirements(monkeypatch, tmp_path):
+    monkeypatch.setattr(remediation, '_engagement_key', lambda *_: 'acme')
+    monkeypatch.setattr(remediation, '_project', lambda *_: (tmp_path, {'repository': str(tmp_path)}))
+    monkeypatch.setattr(remediation, '_case', lambda *_: {'id': 1, 'verification_plan': ''})
+    monkeypatch.setattr(remediation, '_api', lambda *_: pytest.fail('incomplete plan must not be sent'))
+    plan = tmp_path / 'plan.md'
+    plan.write_text('Run native tests')
+    args = parser().parse_args(['remediation', '-k', 'acme', 'plan', '1', '--file', str(plan)])
+    with pytest.raises(SystemExit, match='requirements-file'):
+        remediation.run_remediation(args, tmp_path)
+
+
 def test_worktree_uses_profile_base_and_repository_workspace(monkeypatch, tmp_path):
     engagement = tmp_path / 'engagement'
     repository = tmp_path / 'application'

@@ -170,9 +170,23 @@ def _settings(project: dict, engagement: Path | None = None, key: str | None = N
 
 def _notice(project: dict) -> str:
     if _settings(project).get("disableAllHooks"):
-        return ("Non-managed hooks are disabled for this remediation session; managed policy hooks remain active. "
-                "Formatting, analysis, and tests run during verification and before publishing.")
+        return ("This profile disables personal, repository, and ordinary plugin Claude hooks for this session. "
+                "Organization-managed hooks remain enabled if configured. Git hooks are unaffected. "
+                "Run required checks against case source during verification and before publishing.")
     return "Repository and personal hooks retain their configured policy for this session."
+
+
+def _start_prompt(project: dict, repository: Path, engagement: Path, key: str, notice: str) -> str:
+    profile = project.get("_profile_path") or engagement / "PROJECT.md"
+    return (f"Start a Vigil defensive remediation session for engagement {key}.\n\n"
+            f"Repository: {repository}\nProject profile: {profile}\n\n"
+            "Read the project profile and applicable repository instructions. Wait for the owner's "
+            "ticket IDs, URLs, or report before beginning investigation. Use /vigil-remediate to route "
+            "supplied references and load the appropriate role.\n\n"
+            "For one case, retain this conversation as its developer. For several cases, coordinate "
+            "separate developer conversations through Vigil.\n\n"
+            f"{notice}\n\n"
+            "Present the diagnosis and proposed fix plan for owner approval before editing.")
 
 
 def _environment(engagement: Path, key: str, install_root: Path | None = None) -> dict[str, str]:
@@ -338,7 +352,7 @@ def run_session_command(args: argparse.Namespace, install_root: Path, engagement
     key = args.engagement_key
     environment = _environment(engagement, key, install_root)
     notice = _notice(project)
-    if command != "join" and not (command == "start" and getattr(args, "session_id", None)):
+    if command == "session":
         print(notice, flush=True)
     if command == "start":
         if getattr(args, "session_id", None):
@@ -360,14 +374,17 @@ def run_session_command(args: argparse.Namespace, install_root: Path, engagement
         session_id = str(uuid.uuid4())
         command_line = _launch_arguments(install_root, engagement, project, session_id, key)
         profile_path = project.get("_profile_path") or engagement / "PROJECT.md"
-        opening = (f"{notice}\nRepository: {repository}. Selected profile: {profile_path}. "
-                   f"Remediation engagement: {key}. Use /vigil-remediate with ticket IDs or URLs to begin. "
-                   "Keep this conversation as the developer for one bug or coordinator for several. "
-                   "Read repository instructions and relevant profile-selected skills when the task begins.")
+        print(f"Starting Claude remediation session\nRepository: {repository}\nProfile: {profile_path}", flush=True)
+        print(notice, flush=True)
+        checks = project.get("remediation", {}).get("check_commands", [])
+        print("Profile checks: " + (", ".join(check["name"] for check in checks)
+              if checks else "none configured; agree required checks before editing"), flush=True)
+        opening = _start_prompt(project, repository, engagement, key, notice)
         entry_binding = {"engagement_key": key, "session_cwd": str(repository),
                          "session_id": session_id, "job_id": None, "settings": _settings(project, engagement, key, install_root)}
         path = engagement / "remediation" / "sessions" / f"{session_id}.json"
         entry_row = _launch_background(command_line, opening, entry_binding, path, repository, environment)
+        print("Attaching automatically…", flush=True)
         return subprocess.run(["claude", "attach", entry_row["id"]], cwd=repository, env=environment).returncode
     if case_reader is None:
         raise SystemExit("Case session commands require the authoritative case reader")

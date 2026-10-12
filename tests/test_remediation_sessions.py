@@ -149,7 +149,7 @@ def test_start_hosts_and_attaches_same_native_conversation_with_repository_confi
     assert Path(added_directories[0]).parent == prepared.engagement / "remediation/client-context"
     assert added_directories[1] == str(prepared.engagement / "remediation")
     assert str(prepared.repository / "PROJECT.md") in argv[-1]
-    assert "Non-managed hooks are disabled" in capsys.readouterr().out
+    assert "This profile disables" in capsys.readouterr().out
     overlay = Path(added_directories[0]) / ".claude/commands"
     assert [path.name for path in overlay.iterdir()] == ["vigil-remediate.md"]
     assert not (prepared.repository / ".claude").exists()
@@ -349,7 +349,7 @@ def test_join_announces_recorded_hook_policy_when_profile_changed(prepared, caps
     capsys.readouterr()
     prepared.project["remediation"]["hook_policy"] = "inherit"
     run_case(prepared, command="join")
-    assert "Non-managed hooks are disabled" in capsys.readouterr().out
+    assert "This profile disables" in capsys.readouterr().out
 
 
 def test_failed_launch_retains_binding_and_does_not_retry_implicitly(prepared, monkeypatch) -> None:

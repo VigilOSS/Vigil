@@ -33,4 +33,5 @@ Native conversation UUID: ${CLAUDE_SESSION_ID}
 4. Validate the report against current code and present the proposed fix and
    verification plan before editing. State the effective hook policy and
    instruction conflicts that affect the work. Continue under the owner-approved
-   plan and the selected profile's testing and publishing guidance.
+   plan, record its case-specific evidence requirements, and follow the selected
+   profile's testing and publishing guidance.

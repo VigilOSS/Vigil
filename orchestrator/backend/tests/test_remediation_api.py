@@ -34,7 +34,13 @@ def _case(client, isolate_settings, **overrides):
     payload.update(overrides)
     response = client.post(f"{BASE}/cases", json=payload)
     assert response.status_code == 201, response.text
-    return response.json()
+    # These lifecycle regressions exercise already-recorded prose plans and their
+    # evidence history. New-plan contracts are covered by test_remediation_policy.
+    identifier = response.json()["id"]
+    with db.get_connection() as connection:
+        connection.execute("UPDATE remediation_cases SET verification_plan=? WHERE id=?",
+                           ("Recorded verification plan", identifier))
+    return client.get(f"{BASE}/cases/{identifier}").json()
 
 
 def _approve(client, case_id: int):

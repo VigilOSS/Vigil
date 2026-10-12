@@ -98,6 +98,14 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
+it("keeps initial plan setup with the case developer before enabling text-only updates", async () => {
+  vi.mocked(getRemediationCase).mockResolvedValue({ ...reviewedCase, verification_plan: "" });
+  render(<RemediationPage engagementKey="acme" onBack={() => {}} />);
+  await openSection("Review");
+  fireEvent.change(screen.getByLabelText("Human verification plan"), { target: { value: "Proposed test steps" } });
+  expect((screen.getByRole("button", { name: "Save plan" }) as HTMLButtonElement).disabled).toBe(true);
+});
+
 async function findSibling() {
   vi.mocked(getAssessmentFinding).mockResolvedValue({ id: 22, slug: "SEC-002", title: "Same root cause", severity: "medium", verification_status: "unreviewed", root_cause_key: "authorization" } as Awaited<ReturnType<typeof getAssessmentFinding>>);
   fireEvent.click(await screen.findByRole("button", { name: "Link finding" }));

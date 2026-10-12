@@ -340,7 +340,7 @@ function RemediationWorkspace({ engagementKey, onBack, initialCaseId }: Props) {
   }
 
   async function savePlan() {
-    if (!selected || busy) return;
+    if (!selected || busy || !selected.verification_plan?.trim() || !plan.trim()) return;
     caseReads.current += 1;
     setBusy(true);
     setNotice(null);
@@ -618,8 +618,9 @@ function RemediationWorkspace({ engagementKey, onBack, initialCaseId }: Props) {
                 <div className="remediation-section-heading"><h3>Human verification plan</h3><span>Only rehearsed steps</span></div>
                 <fieldset className="remediation-case-controls" disabled={selected.status === "closed"}>
                 <label htmlFor="remediation-plan">Human verification plan</label>
+                {!selected.verification_plan?.trim() && <p className="remediation-help">Ask the case developer to record the initial plan and required evidence before saving changes here.</p>}
                 <textarea id="remediation-plan" value={plan} onChange={(event) => editPlan(event.target.value)} rows={9} />
-                <div className="remediation-plan-actions"><span>{planDirty ? "Unsaved changes invalidate the reviewed plan." : "Plan saved"}</span><button type="button" onClick={savePlan} disabled={!planDirty || busy}>Save plan</button></div>
+                <div className="remediation-plan-actions"><span>{planDirty ? "Unsaved changes invalidate the reviewed plan." : selected.verification_plan?.trim() ? "Plan saved" : "Initial plan not recorded"}</span><button type="button" onClick={savePlan} disabled={!planDirty || busy || !selected.verification_plan?.trim() || !plan.trim()}>Save plan</button></div>
                 </fieldset>
               </section>
 
