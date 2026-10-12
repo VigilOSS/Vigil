@@ -5,6 +5,21 @@ versioning follows [Semantic Versioning][semver].
 
 Durable design decisions live in [`docs/adr/`](docs/adr/).
 
+## [1.2.3] - 2026-10-12
+
+### Changed
+
+- Structural indexing reports its phases and sparse activity on stderr at completed-file
+  boundaries, including elapsed time and separate processed, indexed, and error counts.
+- CLI help describes complete-inventory indexing, supported file-search filters,
+  collection reads, work-buffer input, and finding patch requirements.
+- Cleanup warnings describe an unconfirmed command exit as unverified cleanup.
+
+### Fixed
+
+- Long code-dispatch table values retain clear column boundaries.
+- Truncated handoffs accurately identify omitted artifact and runtime records.
+
 ## [1.2.2] - 2026-10-12
 
 ### Changed
