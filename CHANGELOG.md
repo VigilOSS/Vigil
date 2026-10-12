@@ -5,6 +5,22 @@ versioning follows [Semantic Versioning][semver].
 
 Durable design decisions live in [`docs/adr/`](docs/adr/).
 
+## [1.2.4] - 2026-10-12
+
+### Fixed
+
+- Remediation startup binds Claude's native conversation identity and attaches automatically,
+  including when the background host assigns a different session ID.
+
+### Changed
+
+- Remediation startup shows the selected repository, profile, hook policy, and configured checks.
+- First verification plans require explicit evidence requirements appropriate to the case.
+- Remediation developers account for required checks before editing; coordinators keep owner
+  approvals separate for each case.
+- The remediation UI enables plan updates after the developer records the initial plan and
+  evidence requirements.
+
 ## [1.2.3] - 2026-10-12
 
 ### Changed
