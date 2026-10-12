@@ -7,10 +7,9 @@ else, so the backend left the pre-exec placeholders in place and a scan that
 finished cleanly before its wrapper died reported ``stdout_bytes 0`` with the
 whole measurement sitting on disk.
 
-And a ``--destructive`` row finalized this way is not a bookkeeping problem: the
-run never reached its trapped ``EXIT`` restore, so a live tenant may still be
-holding whatever it granted or deleted. The reaper used to finalize it exactly
-like a lost ``curl``.
+A ``--destructive`` row finalized this way leaves its trapped ``EXIT`` restore
+unverified: cleanup may have been interrupted, or its audit finalization may have
+failed after cleanup completed. Target state needs a read-back in either case.
 """
 from __future__ import annotations
 

@@ -293,14 +293,8 @@ def _render_handoff_blob(
         out.extend(coverage_lines)
         out.extend(next_steps_lines)
         out.extend(open_questions_lines)
-        artifacts_section_lines = _artifacts_section(artifacts_kept)
-        out.extend(artifacts_section_lines)
-        if artifacts_dropped > 0:
-            out.append(f"  - ... and {artifacts_dropped} more")
-        runtime_section_lines = _runtime_issues_section(runtime_kept)
-        out.extend(runtime_section_lines)
-        if runtime_dropped > 0:
-            out.append(f"  - ... and {runtime_dropped} more")
+        out.extend(_artifacts_section(artifacts_kept, omitted_count=artifacts_dropped))
+        out.extend(_runtime_issues_section(runtime_kept, omitted_count=runtime_dropped))
         out.append(recommended_line)
         out.append(credentials_line)
         return out
@@ -473,10 +467,13 @@ def _open_questions_section(rows: list) -> list[str]:
     return lines
 
 
-def _runtime_issues_section(rows: list) -> list[str]:
-    if not rows:
+def _runtime_issues_section(rows: list, *, omitted_count: int = 0) -> list[str]:
+    if not rows and not omitted_count:
         return []
     lines = ["- **Runtime issues:**"]
+    if not rows:
+        lines.append(f"  - ({omitted_count} recorded runtime issue(s) omitted)")
+        return lines
     for row in rows:
         if isinstance(row, dict):
             kind = str(row.get("kind") or "<kind>")
@@ -488,6 +485,8 @@ def _runtime_issues_section(rows: list) -> list[str]:
             lines.append(f"  - {kind}{tail}")
         else:
             lines.append(f"  - {row}")
+    if omitted_count:
+        lines.append(f"  - ... and {omitted_count} more runtime issue(s) omitted")
     return lines
 
 
@@ -526,14 +525,21 @@ def _findings_section(finding_rows: list[dict], *, include_evidence: bool) -> li
     return lines
 
 
-def _artifacts_section(artifact_states: list[tuple[str, str]]) -> list[str]:
-    """Working-artifact bullets with on-disk present/missing state."""
+def _artifacts_section(
+    artifact_states: list[tuple[str, str]], *, omitted_count: int = 0
+) -> list[str]:
+    """Working-artifact bullets with on-disk state and explicit omissions."""
     lines = ["- **Working artifacts:**"]
     if not artifact_states:
-        lines.append("  - (none recorded)")
+        lines.append(
+            f"  - ({omitted_count} recorded artifact(s) omitted)"
+            if omitted_count else "  - (none recorded)"
+        )
         return lines
     for path, state in artifact_states:
         lines.append(f"  - `{path}` (state: {state})")
+    if omitted_count:
+        lines.append(f"  - ... and {omitted_count} more artifact(s) omitted")
     return lines
 
 

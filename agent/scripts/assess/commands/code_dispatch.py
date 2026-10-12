@@ -621,18 +621,18 @@ def _list(cfg, filters: dict[str, str], output: str) -> None:
         print("No current-generation queue rows matched these filters.")
         return
     print(
-        f"{'ID':>8}  {'STATUS':<13}{'MODE':<17}{'PRI':>4}  {'CLASS':<10}"
-        f"{'AGE':>8}{'RCPT':>6}  {'THEME':<21}{'AGENT':<17}FILE"
+        f"{'ID':>8}  {'STATUS':<13}  {'MODE':<17}  {'PRI':>4}  {'CLASS':<10}  "
+        f"{'AGE':>8}  {'RCPT':>6}  {'THEME':<21}  {'AGENT':<17}  FILE"
     )
     for item in items:
         print(
-            f"{item.get('id', '?')!s:>8}  {item.get('status', ''):<13}"
-            f"{item.get('queue_mode', ''):<17}{item.get('priority', 0)!s:>4}  "
-            f"{item.get('classification', ''):<10}"
-            f"{_format_lease_age(item.get('heartbeat_age_seconds')):>8}"
+            f"{item.get('id', '?')!s:>8}  {item.get('status', ''):<13}  "
+            f"{item.get('queue_mode', ''):<17}  {item.get('priority', 0)!s:>4}  "
+            f"{item.get('classification', ''):<10}  "
+            f"{_format_lease_age(item.get('heartbeat_age_seconds')):>8}  "
             f"{item.get('current_result_count', 0)!s:>6}  "
-            f"{item.get('batch_theme', ''):<21}"
-            f"{item.get('agent_name', ''):<17}{item.get('file_path', '')}"
+            f"{item.get('batch_theme', ''):<21}  "
+            f"{item.get('agent_name', ''):<17}  {item.get('file_path', '')}"
         )
     unclaimable = [
         item for item in items if str(item.get("repo_role") or "analysis") != "analysis"

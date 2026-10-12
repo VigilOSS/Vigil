@@ -8,6 +8,7 @@ verb must therefore be consumable as an ids file without scraping the table.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -232,3 +233,30 @@ def test_a_complete_page_warns_about_nothing(fake_client, tmp_path, capsys):
     captured = capsys.readouterr()
     assert json.loads(captured.out) == [41, 42]
     assert captured.err == ""
+
+
+def test_list_table_separates_long_values_without_truncating_them(
+    fake_client, tmp_path, capsys
+):
+    item = {
+        **_PAGE["items"][0],
+        "batch_theme": "acme-compiled-bundle-review-with-a-long-theme",
+        "agent_name": "acme-local-source-review-specialist",
+        "file_path": "acme/client/compiled/application-bundle.js",
+        "heartbeat_age_seconds": 3,
+        "current_result_count": 2,
+    }
+    fake_client.payload = {
+        "total": 1, "offset": 0, "has_more": False, "item_ids": [41], "items": [item]
+    }
+
+    code_dispatch._list(_config(tmp_path), {}, "table")
+
+    row = next(line for line in capsys.readouterr().out.splitlines() if line.strip().startswith("41"))
+    assert re.split(r"\s{2,}", row.strip()) == [
+        "41", "processing", "initial", "100", "critical", "3s", "2",
+        item["batch_theme"], item["agent_name"], item["file_path"],
+    ]
+
+    code_dispatch._list(_config(tmp_path), {}, "json")
+    assert json.loads(capsys.readouterr().out) == fake_client.payload

@@ -423,11 +423,10 @@ def _finalize_lost(
 def _warn_mutating_run_terminated_abnormally(row: dict, *, run_id: int, status: str) -> str:
     """Loudly flag a --destructive run finalized without a proven clean exit.
 
-    A destructive dispatch is authorized on the promise that its trapped ``EXIT``
-    restore puts the target back. When the wrapper dies outside its own control
-    flow that trap never fires, so the row is not merely lost — a live tenant may
-    still be holding whatever the run granted, renamed, or deleted. The reaper
-    used to finalize such a row exactly like a lost ``curl``.
+    The audit row cannot establish whether a destructive command ran its trapped
+    ``EXIT`` restore. The wrapper may have died before cleanup, or cleanup may
+    have completed before a finalize PATCH failed. Both leave cleanup unverified
+    until the operator reads target state back.
     """
     argv = row.get("argv")
     command = " ".join(str(token) for token in argv) if isinstance(argv, list) else str(
@@ -437,7 +436,7 @@ def _warn_mutating_run_terminated_abnormally(row: dict, *, run_id: int, status: 
         f"mutating_run_terminated_abnormally id={run_id} new_status={status} "
         f"agent={row.get('agent_name') or 'unknown'} "
         f"phase={row.get('phase') or 'unknown'}: this run was dispatched "
-        "--destructive and did NOT exit through its own cleanup, so its trapped "
+        "--destructive and its exit outcome could not be confirmed; its trapped "
         "EXIT restore is UNVERIFIED. Read the target state back before "
         f"continuing. command: {command}"
     )
