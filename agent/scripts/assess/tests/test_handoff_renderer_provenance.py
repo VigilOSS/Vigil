@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from types import SimpleNamespace
 
 import pytest
@@ -247,3 +248,53 @@ def test_render_handoff_provenance_line_tolerates_a_legacy_row(
 
     output = capsys.readouterr().out
     assert "**Handoff row:** (status unrecorded) v(unrecorded), last written (unknown)" in output
+
+
+def test_render_handoff_attributes_all_omitted_records_to_separate_sections(
+    tmp_path, monkeypatch, capsys
+):
+    _run_renderer(
+        monkeypatch, tmp_path, dispatch_slugs=[], handoff_slugs=[],
+        handoff_extra={
+            "working_artifacts": [f"scans/acme/artifact-{index}.json" for index in range(11)],
+            "runtime_issues": [
+                {"kind": "acme-runtime-control", "detail": f"control {index}"}
+                for index in range(3)
+            ],
+        },
+        max_lines=21,
+    )
+
+    lines = capsys.readouterr().out.splitlines()
+    artifact_notices = [
+        index for index, line in enumerate(lines)
+        if re.search(r"\b11\b", line) and "artifact" in line.lower() and "omit" in line.lower()
+    ]
+    runtime_notices = [
+        index for index, line in enumerate(lines)
+        if re.search(r"\b3\b", line) and "runtime" in line.lower() and "omit" in line.lower()
+    ]
+    assert len(artifact_notices) == 1
+    assert len(runtime_notices) == 1
+    assert any(line.startswith("- **") for line in lines[artifact_notices[0] + 1:runtime_notices[0]])
+    assert len(lines) <= 21
+
+
+@pytest.mark.parametrize("max_lines", [1, 12, 21, 23, 40])
+def test_render_handoff_keeps_cap_and_recorded_values_when_space_allows(
+    tmp_path, monkeypatch, capsys, max_lines
+):
+    paths = [f"scans/acme/artifact-{index}.json" for index in range(11)]
+    issues = [{"kind": "acme-runtime-control", "detail": f"control {index}"} for index in range(3)]
+    _run_renderer(
+        monkeypatch, tmp_path, dispatch_slugs=[], handoff_slugs=[],
+        handoff_extra={"working_artifacts": paths, "runtime_issues": issues},
+        max_lines=max_lines,
+    )
+
+    output = capsys.readouterr().out
+    assert len(output.splitlines()) <= max_lines
+    if max_lines >= 40:
+        assert all(path in output for path in paths)
+        assert all(issue["detail"] in output for issue in issues)
+        assert "Completed the assigned surface pass." in output

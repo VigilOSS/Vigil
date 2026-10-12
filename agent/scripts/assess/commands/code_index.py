@@ -12,6 +12,7 @@ import sys
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
+from time import monotonic
 from typing import Any
 
 from assess.commands.code_ingest import SKIP_DIRS, _is_regular_file, _should_skip_file
@@ -125,7 +126,10 @@ def _register_build(subparsers) -> None:
     parser.add_argument(
         "--file-list",
         default=None,
-        help="Optional JSON subset of snapshot files to index",
+        help=(
+            "Optional complete JSON inventory to order/assert snapshot files; "
+            "every admitted snapshot file is required for the generation"
+        ),
     )
     parser.add_argument(
         "--max-tree-sitter-bytes",
@@ -975,6 +979,14 @@ def _validate_analysis_artifact(
 
 
 def run(args) -> None:
+    """Build atomically, reporting activity only at synchronous file boundaries.
+
+    Activity goes to stderr about every 30 seconds when a file finishes. A
+    single long-running file can exceed that interval without a new notice;
+    indexed counts describe staged artifacts, not publication or coverage.
+    """
+    started_at = monotonic()
+    print("code-index: validation: checking sealed source snapshot", file=sys.stderr, flush=True)
     source_path = Path(args.repo_path).resolve()
     if not source_path.is_dir():
         print(f"Sealed snapshot source not found: {source_path}", file=sys.stderr)
@@ -985,6 +997,7 @@ def run(args) -> None:
         print(f"Cannot index source: {exc}", file=sys.stderr)
         sys.exit(1)
 
+    print("code-index: binding: checking backend repository and file inventory", file=sys.stderr, flush=True)
     cfg = load_config(getattr(args, "engagement_dir", None))
     try:
         with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
@@ -1087,8 +1100,14 @@ def run(args) -> None:
     analysis_status_counts = {"complete": 0, "degraded": 0, "unsupported": 0}
     errors: list[str] = []
     try:
+        print(
+            f"code-index: indexing: processing {len(selected)} file(s) into staged artifacts",
+            file=sys.stderr,
+            flush=True,
+        )
+        last_activity_at = monotonic()
         with RootedSourceTree(source_path) as source_tree:
-            for entry in selected:
+            for processed, entry in enumerate(selected, 1):
                 rel_path = str(entry["file_path"])
                 try:
                     language = str(entry["language"])
@@ -1170,10 +1189,25 @@ def run(args) -> None:
                     totals["total_exports"] += int(indexed["total_exports"])
                 except ValueError as exc:
                     errors.append(f"{rel_path}: {exc}")
+                now = monotonic()
+                if now - last_activity_at >= 30:
+                    print(
+                        f"code-index: indexing activity: processed={processed}/{len(selected)} "
+                        f"indexed={len(files_manifest)} errors={len(errors)} "
+                        f"elapsed={int(now - started_at)}s (staged artifacts)",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                    last_activity_at = now
             source_tree.verify_root_identity()
         if errors:
             raise ValueError("invalid structural artifacts:\n" + "\n".join(errors))
 
+        print(
+            "code-index: publication: rechecking backend binding before publishing staged artifacts",
+            file=sys.stderr,
+            flush=True,
+        )
         with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
             current_repo = _resolve_backend_repo(client, repo_id, source_path)
             current_files = fetch_backend_file_inventory(client, repo_id)

@@ -316,3 +316,68 @@ def test_selected_v7_sync_coexists_with_unselected_v6_aggregate_pointer(
     assert "repo 8 manifest is not structural-index/v7" in capsys.readouterr().err
     assert len(posts) == 1
     assert {item: item.read_bytes() for item in historical_bytes} == historical_bytes
+
+
+def test_build_reports_phases_and_sparse_monotonic_file_activity(
+    index_project, monkeypatch, capsys
+) -> None:
+    args, _repo, _client = index_project
+    clock = [100.0]
+    durations = iter([29.0, 2.0])
+    monkeypatch.setattr(code_index, "monotonic", lambda: clock[0], raising=False)
+
+    def timed_index(_path, _language, source, **_kwargs):
+        clock[0] += next(durations)
+        return _artifact(source)
+
+    monkeypatch.setattr(code_index, "index_file", timed_index)
+    code_index.run(args)
+
+    captured = capsys.readouterr()
+    notices = [line for line in captured.err.splitlines() if line.startswith("code-index:")]
+    phases = [word for word in ("validation", "binding", "indexing", "publication")
+              if any(word in line for line in notices)]
+    assert phases == ["validation", "binding", "indexing", "publication"]
+    assert [next(index for index, line in enumerate(notices) if word in line)
+            for word in phases] == sorted(
+        next(index for index, line in enumerate(notices) if word in line) for word in phases
+    )
+    activity = [line for line in notices if "activity" in line]
+    assert len(activity) == 1
+    for value in ("processed=2/2", "indexed=2", "errors=0", "elapsed=31s"):
+        assert value in activity[0]
+    assert captured.out == ""
+    output = Path(args.output_dir)
+    aggregate = json.loads((output / "structural-index-manifest.json").read_text())
+    manifest = json.loads((output / aggregate["repos"]["7"]["manifest_path"]).read_text())
+    assert manifest["indexed_files"] == 2
+    assert set(manifest["files"]) == {"a.py", "b.py"}
+
+
+def test_build_activity_counts_processed_errors_without_claiming_indexed_artifacts(
+    index_project, monkeypatch, capsys
+) -> None:
+    args, _repo, _client = index_project
+    clock = [100.0]
+    monkeypatch.setattr(code_index, "monotonic", lambda: clock[0], raising=False)
+
+    def invalid_index(_path, _language, source, **_kwargs):
+        clock[0] += 31.0
+        artifact = _artifact(source)
+        artifact["functions"][0]["qualified_name"] = " f "
+        return artifact
+
+    monkeypatch.setattr(code_index, "index_file", invalid_index)
+    with pytest.raises(SystemExit) as exc:
+        code_index.run(args)
+
+    assert exc.value.code == 1
+    captured = capsys.readouterr()
+    activity = [line for line in captured.err.splitlines() if "code-index:" in line and "activity" in line]
+    assert len(activity) == 2
+    for line, count in zip(activity, (1, 2), strict=True):
+        assert f"processed={count}/2" in line
+        assert "indexed=0" in line
+        assert f"errors={count}" in line
+    assert "invalid structural artifacts" in captured.err
+    assert captured.out == ""

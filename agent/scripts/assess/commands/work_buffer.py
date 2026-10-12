@@ -62,6 +62,18 @@ _ACTION_HELP: dict[str, str] = {
         "Usage: vigil assess work-buffer reset-stale <minutes>\n\n"
         "Return stale processing rows to pending.\n"
     ),
+    "retry-errors": (
+        "Usage: vigil assess work-buffer retry-errors [max_retries]\n\n"
+        "Retry errored work items below the retry limit (default: 2).\n"
+    ),
+    "requeue": (
+        "Usage: vigil assess work-buffer requeue < work-items.jsonl\n\n"
+        "Read JSONL work-item objects from stdin and re-admit them through "
+        "classification into the backend work buffer.\n"
+        "Each row needs a usable url and either queue_key, request_variant_id, "
+        "service_id, or coverage_item_id. Positional item IDs are not selectors "
+        "for this action; use error <ids> and retry-errors for errored items.\n"
+    ),
     "mark-manual": (
         "Usage: vigil assess work-buffer mark-manual <id> [<id> ...]\n\n"
         "Stamp classifier_version='manual' on hand-tuned rows so "

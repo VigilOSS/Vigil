@@ -42,7 +42,13 @@ def register(subparsers) -> None:
     p.add_argument(
         "--payload-file",
         dest="payload_file",
-        help="Path to a single-finding JSON patch document",
+        help=(
+            "Path to a JSON patch for one finding. Must contain expected_row_version "
+            "as a positive integer; the optional rationale key is reason_text. "
+            "Cannot be combined with request-content flags, including --source-name "
+            "or --reason. A successful update returns the next row_version; refresh "
+            "the file before reusing it. See `vigil assess contract finding update`."
+        ),
     )
     p.add_argument("--title")
     p.add_argument("--severity")
