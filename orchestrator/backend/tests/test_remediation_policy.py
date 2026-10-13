@@ -232,6 +232,84 @@ def test_registered_external_workspace_pins_profile_base_and_requires_profile_ch
     assert current["review_digest"] != registered.json()["review_digest"]
 
 
+def _commit(path, name, text):
+    (path / name).write_text(text)
+    subprocess.run(["git", "-C", str(path), "add", name], check=True)
+    subprocess.run(["git", "-C", str(path), "-c", "user.name=Acme Test", "-c", "user.email=test@example.com",
+                    "commit", "-qm", name], check=True)
+    return subprocess.check_output(["git", "-C", str(path), "rev-parse", "HEAD"], text=True).strip()
+
+
+def _rebased_case(client, isolate_settings, vcs):
+    root, item = case(client, isolate_settings)
+    repo = root.parent / "acme-repo"
+    subprocess.run(["git", "init", "-q", "--initial-branch=develop", str(repo)], check=True)
+    first = _commit(repo, "README.md", "Acme app\n")
+    base = _commit(repo, "CHANGES.md", "Initial\n")
+    (repo / "PROJECT.md").write_text('+++\nrepository = "."\nbase_branch = "develop"\nworkspace_directory = "worktrees"\n+++\n')
+    (root / "PROJECT.md").symlink_to(repo / "PROJECT.md")
+    if vcs == "jj":
+        subprocess.run(["jj", "git", "init", "--colocate", str(repo)], check=True, capture_output=True)
+    path = repo / "worktrees" / "fix" / "SEC-123"
+    remediation._vcs.create_workspace(repo, path, "fix/SEC-123", "develop")
+    (path / "fix.py").write_text("fixed\n")
+    if vcs == "jj":
+        subprocess.run(["jj", "-R", str(path), "describe", "-m", "Fix"], check=True, capture_output=True)
+    else:
+        _commit(path, "fix.py", "fixed\n")
+    endpoint = f"{BASE}/cases/{item['id']}"
+    registered = client.patch(endpoint, json={"worktree_path": str(path), "worktree_branch": "fix/SEC-123",
+                                              "worktree_revision": remediation._vcs.revision(path)})
+    assert registered.status_code == 200, registered.text
+    assert registered.json()["base_revision"] == base
+    return repo, path, endpoint, first, base
+
+
+def _rebase_onto_develop(repo, path, vcs):
+    if vcs == "jj":
+        subprocess.run(["jj", "-R", str(repo), "git", "import"], check=True, capture_output=True)
+        subprocess.run(["jj", "-R", str(path), "rebase", "-b", "@", "-d", "develop"], check=True, capture_output=True)
+    else:
+        subprocess.run(["git", "-C", str(path), "-c", "user.name=Acme Test", "-c", "user.email=test@example.com",
+                        "rebase", "-q", "develop"], check=True)
+
+
+@pytest.mark.parametrize("vcs", ["git", "jj"])
+def test_revision_sync_advances_the_base_when_the_case_is_rebased_onto_newer_develop(client, isolate_settings, vcs):
+    repo, path, endpoint, _first, base = _rebased_case(client, isolate_settings, vcs)
+    merged = _commit(repo, "OTHER.md", "Merged by another team\n")
+    _rebase_onto_develop(repo, path, vcs)
+
+    synced = client.patch(endpoint, json={"worktree_revision": remediation._vcs.revision(path)})
+
+    assert synced.status_code == 200, synced.text
+    assert synced.json()["base_revision"] == merged != base
+    diff = client.get(f"{endpoint}/diff").json()
+    assert diff["base_revision"] == merged
+    assert "fix.py" in diff["text"] and "OTHER.md" not in diff["text"]
+    assert client.patch(endpoint, json={"base_revision": base}).status_code == 409
+
+
+@pytest.mark.parametrize("vcs", ["git", "jj"])
+def test_revision_sync_keeps_the_base_when_develop_moves_backwards(client, isolate_settings, vcs):
+    repo, path, endpoint, first, base = _rebased_case(client, isolate_settings, vcs)
+    if vcs == "jj":
+        subprocess.run(["jj", "-R", str(repo), "bookmark", "set", "develop", "-r", first, "--allow-backwards"],
+                       check=True, capture_output=True)
+    else:
+        subprocess.run(["git", "-C", str(repo), "reset", "-q", "--hard", first], check=True)
+    (path / "fix.py").write_text("fixed again\n")
+    if vcs == "jj":
+        subprocess.run(["jj", "-R", str(path), "status"], check=True, capture_output=True)
+    else:
+        _commit(path, "fix.py", "fixed again\n")
+
+    synced = client.patch(endpoint, json={"worktree_revision": remediation._vcs.revision(path)})
+
+    assert synced.status_code == 200, synced.text
+    assert synced.json()["base_revision"] == base
+
+
 def test_generic_source_schema_migration_preserves_approval_and_finding_history(client, isolate_settings):
     _, item = case(client, isolate_settings)
     with db.get_connection() as connection:

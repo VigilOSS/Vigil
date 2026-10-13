@@ -925,6 +925,8 @@ def patch_case(key: str, case_id: int, changes: dict[str, Any]) -> dict[str, Any
         if old["worktree_branch"] and "worktree_revision" in changes:
             if not _case_worktree_identity(old, Path(owner.engagement_root)):
                 raise HTTPException(409, "Case worktree is no longer registered with its repository")
+        if "worktree_revision" in changes and old["base_revision"] and "base_revision" not in changes:
+            changes.update(_advanced_base(old, changes.get("worktree_path") or old["worktree_path"]))
         if finding_ids is not None:
             connection.execute("DELETE FROM remediation_case_findings WHERE case_id=?", (case_id,))
             connection.executemany("INSERT INTO remediation_case_findings(case_id,finding_id) VALUES(?,?)", [(case_id, finding_id) for finding_id in finding_ids])
@@ -959,6 +961,19 @@ def patch_release_plan(key: str, case_id: int, data: dict[str, str]) -> dict[str
     if "coralogix_monitoring" in data and "monitoring" not in data:
         data = {**data, "monitoring": data["coralogix_monitoring"]}
     return patch_case(key, case_id, {"release_plan_json": _json(data)})
+
+
+def _advanced_base(old, path_value: str | None) -> dict[str, str]:
+    """Move the review base forward when the case was rebased onto a newer base branch."""
+    if not path_value:
+        return {}
+    path = Path(path_value)
+    try:
+        current = _vcs.review_base(path, old["base_branch"] or "main")
+        moved = _vcs.ancestor(path, old["base_revision"], current)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return {}
+    return {"base_revision": current} if moved else {}
 
 
 def _evidence_current(engagement_root: Path, case_id: int, evidence: list[dict[str, Any]]) -> bool:

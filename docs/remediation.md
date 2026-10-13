@@ -269,7 +269,9 @@ rem checks <case-id> --actor <owner> --name tests
 
 Checks use the case's saved review policy. Each runs in its workspace-relative `directory`, with
 `VIGIL_CASE_WORKTREE`, `VIGIL_REPOSITORY`, and `VIGIL_CASE_REVISION` available to the command.
-`VIGIL_CASE_BASE_REVISION` supplies the captured base for checks scoped to committed case changes.
+`VIGIL_CASE_BASE_REVISION` supplies the case's merge base with its base branch for checks scoped
+to committed case changes. `sync-revision` moves it forward when the case is rebased onto a newer
+base branch; it never moves backwards and cannot be set directly.
 Vigil records output, exit status, source identity, and execution directory. A check that edits source
 is not a pass at the old revision: inspect, commit/sync, and rerun. All configured checks are required
 for review and rerun before publishing; named execution is useful during development.

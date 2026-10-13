@@ -74,7 +74,7 @@ def register_remediation_parser(sub: argparse._SubParsersAction) -> None:
 
     sync_revision = commands.add_parser(
         "sync-revision", help="Record the immutable case revision after committing the fix",
-        description="Record the revision before green-test evidence, browser verification, or review. Requires a registered case workspace/bookmark or Git worktree/branch. Git must be clean; JJ snapshots edits and rejects conflicts. A content change makes approval stale.",
+        description="Record the revision before green-test evidence, browser verification, or review. Requires a registered case workspace/bookmark or Git worktree/branch. Git must be clean; JJ snapshots edits and rejects conflicts. A rebase onto a newer base branch moves the review base forward. A content or base change makes approval stale.",
     )
     sync_revision.add_argument("case_id")
 
