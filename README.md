@@ -136,11 +136,13 @@ single file: `plugins/out_es/es.c`.
 | Coverage | 9 of 9 scoped files analysed |
 | Findings | 3, all reproduced at runtime against a live Elasticsearch 8.15.0: one critical, two medium |
 
-https://github.com/user-attachments/assets/19cdd31a-eb6f-43cc-8f1d-2675eeebac91
+https://github.com/user-attachments/assets/bf99a0bb-df71-4966-a390-708cf23d9e62
 
-> **Heavily trimmed down from a three-hour session.** Ten moments from the operator thread, one
-> hunter agent's own transcript, and the finished disclosure. Across the full run, the operator
-> handed 17 tasks to five specialist agents, which made 945 tool calls over 7.2 hours of agent time.
+Video not playing? [Watch it here](https://vigiloss.github.io/Vigil/vigil-fluent-bit-audit.mp4).
+
+> **Heavily trimmed down from a three-hour session.** Eleven moments, from the brief the operator
+> was given to the finished disclosure. Across the full run, the operator handed 17 tasks to five
+> specialist agents, which made 945 tool calls over 7.2 hours of agent time.
 
 The engagement is named `historical-replay` because the source was pinned to a revision from
 before the upstream fix. One finding is redacted because it is still unfixed upstream.
