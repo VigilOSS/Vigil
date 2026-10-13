@@ -47,7 +47,12 @@ There is no commit-message convention. Write a message that says what changed an
 
 ## Development and verification
 
-Use the setup and complete verification matrix in `AGENTS.md`.
+Install the CLI from your checkout with `uv tool install --editable .`; the checkout then supplies
+the prompts, backend, and UI assets. `vigil up` starts the local stack. For UI work, run
+`npm ci && npm run dev` in `orchestrator/frontend/`; the Vite dev server proxies API calls to the
+backend at `http://127.0.0.1:18000`.
+
+The complete verification matrix is in `AGENTS.md`.
 
 New Python behavior and bug fixes start with a focused failing regression: write a test that fails
 against the current tree for the exact reason you are about to fix, watch it fail, then make the

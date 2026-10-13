@@ -117,7 +117,8 @@ Before your dispatch returns, use the sequence selected by Operational Mode Gate
    canonical current parent actually exists; otherwise omit it.
 2. `vigil assess agent handoff --from-json <path>` with `non-covering discovery` in the summary,
    historical shapes searched, findings recorded, dedup decisions, search gaps, and next steps.
-   Keep `variant_receipt_ids` empty because this pass does not prove assigned-file coverage.
+   Record no `code-record variant-check` receipts because this pass does not prove assigned-file
+   coverage.
 3. `vigil assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 →
    `agent_id` mismatch).
 

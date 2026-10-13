@@ -151,8 +151,8 @@ Emit it as a markdown table or as a JSON array of those objects. Keep `expected`
 Each miss is one of: **re-dispatched** (the operator fires the `suggested_redispatch`),
 **fixed in place** (a re-grade / a recorded `false_positive` / a corrected `details`
 story), or **deferred with a stated reason** — record the deferral so it is audited,
-not invisible: `vigil assess agent decision --kind coverage_deferral --payload-json
-'{"host": "...", "deferred_objectives": ["..."], "reason": "..."}' --surfaced-to-user`.
+not invisible: a deferred host objective as `coverage_deferral`, a depth gap as `depth_deferral`
+(payload shapes: Recon/Collect Stage-Completion Audit above and `vigil assess contract agent decision`).
 A miss that is silently dropped is the failure mode this skill exists to prevent.
 
 ## Cross-references

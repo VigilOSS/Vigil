@@ -1,6 +1,7 @@
 # Engagements
 
-Detail behind the README [Running an engagement](../README.md#running-an-engagement):
+Detail behind the README [Quick start](../README.md#quick-start) and
+[How an engagement runs](../README.md#how-an-engagement-runs):
 creation flags, tracks and modes, the start preflight, and how phases advance. Client setup
 and flag forwarding: [`agent-clients.md`](agent-clients.md). Start and resume prompts:
 [`session-commands.md`](session-commands.md).
@@ -89,8 +90,9 @@ key instead.
 ## Phases
 
 The web, code, and blue phase rosters are pinned in
-[`agent/scripts/assess/lib/phases.py`](../agent/scripts/assess/lib/phases.py). The README
-[tracks table](../README.md#engagement-tracks-and-phases) lists web and code; blue phases are in
+[`agent/scripts/assess/lib/phases.py`](../agent/scripts/assess/lib/phases.py). Each enabled
+track's current phase is stored at `scope.json.tracks.<track>.phase`. The README
+[phase table](../README.md#how-an-engagement-runs) lists web and code; blue phases are in
 [`blue-engagements.md`](blue-engagements.md).
 
 `complete` is a terminal state, not a working phase: no readiness gate, no audit tag, no

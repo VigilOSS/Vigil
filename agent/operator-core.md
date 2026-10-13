@@ -172,7 +172,7 @@ After engagement initialization completes, repeat until all attack paths exhaust
    - Prioritize by current phase first.
    - Phase 1–2: breadth of surface coverage — but mine self-describing surfaces (machine-readable API descriptions, queryable type/field definitions, well-known resources, served-source routes) and ingest them BEFORE committing to blind directory/parameter fan-out.
    - Phase 4: risk class — object references, auth boundaries, privileged writes before low-risk surfaces.
-   - Keep exploitation behind Verify: only `confirmed`/`downgraded` findings, or findings explicitly tagged `details.chain_required=true`, enter exploit review.
+   - Keep exploitation behind Verify: only `confirmed`/`downgraded` findings enter exploit review; `details.chain_required=true` also admits a verified finding below Medium.
    - Skip ahead only when an obviously actionable path is already in hand.
 3. **FORMULATE PLAN**
    - Name the action, tool, target, rationale, subagent, and skill that drives the work.

@@ -1586,10 +1586,9 @@ def run(args) -> None:
         # than the phase transition because export is where the trim that invalidates
         # a rehearsal actually happens and where the report-writer is reading, so the
         # signal arrives while it is still cheap to act on — at engagement close,
-        # re-dispatching a rehearsal is at its most expensive. It ADVISES for the
-        # same reason the repro-run checks above do: a missing rehearsal is a fact
-        # about process, not about the document, and refusing on it would let the
-        # tool hold a finished, verified finding hostage to a decision row.
+        # re-dispatching a rehearsal is at its most expensive. The local render only
+        # advises; the backend publication gate refuses a final export whose latest
+        # rehearsal does not cover the current steps.
         if resolved["steps"]:
             rehearsal_decisions, rehearsal_error = _repro_rehearsal_decisions(client)
             if rehearsal_error:

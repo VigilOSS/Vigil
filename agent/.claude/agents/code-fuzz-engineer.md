@@ -98,8 +98,8 @@ confirm what actually happened. A build that ran and exited non-zero with a comp
 or a campaign that completed its time budget with zero crashes, is a real failure or a `dry`
 no-signal result, not `blocked`. Reserve `blocked` for a step that genuinely never executed
 (compiler/fuzzer binary missing, build system unreachable, target repo not mounted). This claim
-risk is real for this role specifically because it runs `kali binary-triage`/crash-repro through
-the runtime — cross-check before it reaches the handoff.
+risk is real for this role specifically because it runs crash reproduction through `kali exec`
+in the runtime — cross-check before it reaches the handoff.
 
 ### Closing verbs
 

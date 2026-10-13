@@ -1,7 +1,21 @@
 # Operations
 
-Runtime sizing, kernel limits, and orchestrator data management for a running
-Vigil install.
+The runtime container, its sizing and kernel limits, and orchestrator data management for a
+running Vigil install.
+
+## Runtime container
+
+`vigil up` (or `vigil runtime start`) starts one long-lived Kali container named `vigil`.
+Target-facing commands run through `vigil assess kali ...` via `docker exec`.
+
+The container mounts shared runtime data at `.runtime-data/`, bind-mounts the engagement root at
+`/engagements`, and receives the root `.env` when present. Fresh workspaces keep artifacts under
+`engagements/<key>/`; adopted workspaces keep their existing paths. For non-interactive
+maintenance, use `vigil runtime shell-exec "<cmd>"` so quoting and exit codes stay under the CLI.
+
+`agent/docker/runtime-full/Dockerfile` is the only supported runtime for target-facing execution.
+`agent/docker/runtime-lightweight/Dockerfile` is for faster Dockerfile iteration only
+(`vigil runtime build lightweight --dev`).
 
 ## Resource sizing
 

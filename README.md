@@ -5,21 +5,26 @@
   <img alt="Vigil" src="docs/assets/logo/vigil-lockup-light.svg" width="280">
 </picture>
 
-**An AI harness for long-running pentests, bug bounties, and code audits, with independently verified findings.**
+**An AI harness for long-running code audits, web pentests, and bug bounty hunting.**
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![CI](https://github.com/VigilOSS/Vigil/actions/workflows/ci.yml/badge.svg)](https://github.com/VigilOSS/Vigil/actions/workflows/ci.yml)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
-[![Version](https://img.shields.io/badge/version-1.2.4-green.svg)](https://github.com/VigilOSS/Vigil)
+[![Version](https://img.shields.io/badge/version-1.2.4-green.svg)](https://github.com/VigilOSS/Vigil/releases/tag/v1.2.4)
 
 </div>
 
-Vigil runs long offensive security engagements: web app pentesting and bug bounty hunting,
-white-box code audits, or both against one target. A lean operator keeps the engagement on track
-while specialist agents recon, hunt, and exploit inside a full Kali runtime. A finding counts only
-when a second agent confirms it against captured evidence, and attack chains show its real
-impact. Every command, request, probe, and finding lands in a durable database, so the work
-survives context limits and restarts and can be audited afterward.
+Vigil runs authorized, long-form offensive security engagements: white-box code audits, web
+application pentests, bug bounty hunting, or code and web analysis against the same target.
+A lightweight operator coordinates specialist agents and a Kali runtime. Tool executions,
+probes, findings, evidence, and coverage are recorded in the backend so the investigation can
+survive context compaction, restarts, and multiple sessions.
+
+Vigil was built by an application security engineer and refined over eight months and hundreds
+of hours of hands-on use. Much of that work went into the operator instructions, specialist
+prompts, skills, and the small decisions that shape an investigation: which assumptions to
+challenge, what counts as a real negative, when to dig deeper, and what evidence is needed
+before making a claim.
 
 > **Authorized use only.** Vigil autonomously drives offensive tooling against live systems.
 > Use it only with explicit authorization and a reviewed scope. It is provided without warranty
@@ -27,54 +32,173 @@ survives context limits and restarts and can be audited afterward.
 > infrastructure, and target effects. See [SECURITY.md](SECURITY.md) for private vulnerability
 > reporting and the operator-data boundary.
 
-## What Vigil provides
+## How Vigil hunts
 
-- **Long-running engagements.** State lives in the backend, so an engagement survives
-  compaction, restarts, and new sessions.
-- **Independently verified findings.** Only a dispatch other than the author's can confirm,
-  downgrade, or mark a finding false positive, and it must cite a proof receipt of captured
-  evidence.
-- **Impact.** Attack chains link findings into end-to-end exploitation; by default, exploit work
-  waits for your approval.
-- **An audit trail.** Target-facing commands run through `vigil assess kali`, which records each
-  command's argv, agent, phase, technique, intent, probe kind, exit status, and output. Coverage
-  ledgers show what was tested and what was not.
-- **Attack tooling.** A long-lived Kali container with ProjectDiscovery recon, fuzzers, an
-  audited Playwright browser, MITM capture with multiple identities for cross-account testing,
-  and out-of-band callbacks correlated to the probe that caused them.
-- **White-box code audits.** A sealed, content-addressed source snapshot with a tree-sitter
-  structural index and a coverage ledger.
-- **Submission-ready output.** Findings export as hash-verified Bugcrowd, HackerOne, or direct
-  disclosure write-ups.
-- **Clients.** Claude Code and Codex have full support: headless specialist dispatch, `vigil-*`
-  session commands, and compaction and session hooks. goose, opencode, and Kimi lack session
-  commands and compaction hooks, and opencode and Kimi run specialists inline. Pi supports
-  remediation engagements only.
+### Prompts built around security-research failure modes
 
-### How Vigil hunts
+The operator, specialist roles, and skills encode specific decisions about how investigations fail:
+jumping to a familiar bug class, stopping after an ambiguous response, repeatedly running a probe
+that teaches nothing, trusting an incomplete tool result, or writing up impact that was never
+demonstrated.
 
-- **No pre-named bugs.** Over-prompting caps what a model finds. Dispatches carry the surface,
-  scope, and rules of engagement, never the bug to look for or a checklist. Web specialists choose
-  what to probe within that surface; code hunters get a file batch and the vulnerability classes
-  to score.
-- **One lens per hunt.** Each hunting dispatch sets how wide to go, how to work through its
-  inputs, and at most one mindset lens: developer, injection, access control, business logic,
-  chain impact, or skeptical verifier.
-- **Independent verification.** A finding is confirmed only by a different agent working from
-  captured evidence. Code engagements add an anchor-free re-read of the highest-risk files and a
-  variant sweep across every file; web testing walks every sibling route, method, and content type
-  that shares the vulnerable code path.
-- **Kill-first triage.** Web leads must pass eight ordered questions, including whether a real
-  request reproduces it and whether the impact is proven. Code findings must earn PASS with the
-  same evidence a KILL would need.
-- **A skill library, not pasted prompts.** 90+ skills and 200+ references are found through
-  `vigil assess list-skills` and `vigil assess list-references`. Web specialists load them when
-  they see the matching signal; the code operator names them in each dispatch.
+The operator plans and tracks the work. Specialists do the analysis and choose techniques. They
+load detailed skills and references as the corresponding signal appears, rather than stuffing
+every playbook into every agent's context. Long-running sessions periodically re-anchor on their
+methodology to counter drift toward shallow, checklist-style testing.
+
+### Investigate the assumptions behind the implementation
+
+Alongside "which vulnerability class applies?", the first question is "what did the developer
+assume was safe?" Vigil's developer lens looks for copied endpoints missing a guard, old API
+versions that retained weaker controls, reliance on framework defaults, trusted client-side
+validation, and differences in naming or error responses that suggest different implementations.
+These are leads for the specialist to evaluate.
+
+Vigil gives specialists a surface, an objective, scope constraints, and relevant context. It never
+names the bug to find, because a pre-named bug caps the hunt at the operator's guess. A broad pass
+generates hypotheses from the actual code or observed behavior; subsequent passes use focused
+lenses for access control, injection, business logic, and chain impact. A clean result under one
+lens doesn't preclude a fresh investigation under another.
+
+For code audits, hunters evaluate the applicable vulnerability classes before checking the
+architect's suggested attack hypotheses. Higher-risk files get an additional, less-anchored
+reread. Structured coverage provides a minimum standard without telling the agent what it
+*must* discover.
+
+### Don't mistake an inconclusive test for a negative result
+
+A transport failure, WAF challenge, empty tool output, or validation error can say more about
+the test than the target. Vigil distinguishes these cases from evidence that a security control
+actually held. Before recording a negative, agents prove a positive on the same route, identity,
+and gateway in the same window, so the test is known to have reached the intended behavior.
+
+Negative findings retain the context in which they were established. A route denied to one
+identity may need retesting with another; a surface examined under one lens is not automatically
+closed under all the others. Prior conclusions guide the next pass but do not substitute for
+rechecking the evidence when conditions change.
+
+### Go deep where a quick pass would miss an application
+
+One URL may represent a substantial authenticated application. Vigil tracks distinct application
+units instead of assuming that touching a host means testing every feature behind it. Its
+operator deliberately concentrates deeper work on promising surfaces, varies investigative
+lenses, and returns to breadth when those leads have been resolved.
+
+When successive attempts produce the same response class without new information, the next step is
+a different hypothesis or technique. Surfaces closed after shallow testing are revisited before an
+engagement is declared ready. A conclusion such as "these subdomains are all the same application"
+must be supported by the hosts it would otherwise remove from consideration.
+
+### Keep evidence, findings, and investigative history connected
+
+Vigil records tool executions, probes, coverage, findings, agent decisions, and handoffs in a
+durable backend. The operator can retrieve a compact view of the current engagement instead of
+asking each new agent to reconstruct it from a long conversation. Existing findings can inform
+variant hunts, root-cause grouping, and attack-chain analysis without becoming a fixed list of
+bugs the next specialist is allowed to find.
+
+A finding has to stand on its evidence. Verification is performed by a different dispatch using
+attributable proof. Reproduction steps point back to recorded runs, and a fresh agent follows them
+with no author context before the report is drafted. The report writer cannot invent a missing
+reproduction sequence from the hunt's summary. Medium-or-higher submissions receive a blind review
+of the exact external report and attachments; edits that change that reviewed packet require a new
+review.
+
+Report-writing rules favor demonstrated impact, short reproducible steps, and facts stated once.
+Internal instrumentation, speculation, and repetitive AI-generated narration stay out of the
+submission.
+
+### What coverage means
+
+Coverage records investigation work. It does not measure how many vulnerabilities were found,
+and Vigil cannot guarantee that every bug in a codebase or application was discovered.
+
+- **Code:** A sealed source snapshot and structural index define what was admitted for analysis.
+  The ledger tracks file/function review, applicable vulnerability-class effort, recorded outcomes,
+  and unresolved structural or context gaps. Reference-only files are available for tracing but
+  are not counted as reviewed unless admitted to the analysis queue.
+- **Web:** Host, application-unit, input, identity, and probe records distinguish observed testing
+  from untested or inconclusive work. A completed dispatch is not proof that a whole host or
+  application was exhausted. Decisive or high-confidence app units can carry class-specific
+  depth requirements at report time; gaps require more testing or an explicit, recorded deferral.
+- **Readiness:** Phase gates evaluate the recorded work and known blockers. Passing them establishes
+  the required accounting and dispositions.
+
+## Real results
+
+One engagement, run end to end on 2026-10-12 against [Fluent Bit](https://github.com/fluent/fluent-bit)
+(CNCF), scoped to a single file: `plugins/out_es/es.c`.
+
+| | |
+|---|---|
+| Operator time | **2 h 59 m** — one session, one operator, start to finished advisory |
+| Scope | 9 files / 2,572 LOC under analysis, plus a 495-file core reference tree indexed alongside as readable context that cannot be claimed as coverage |
+| Coverage | 9 of 9 files analysed — 100% at every severity tier, nothing left parked as structural debt |
+| Hypotheses | 12 generated, 9 in scope adjudicated: 2 promoted to the primary finding, 2 to secondary findings, 2 killed with counter-evidence, 3 retained as hardening |
+| Findings | 3 recorded, all three reproduced at runtime against a live Elasticsearch 8.15.0 — one critical, two medium |
+| Work | 5 specialist agents over 17 dispatches and 945 tool calls — 7.2 h of agent time inside the 2 h 59 m session |
+
+The critical finding was that `out_es` interpolates record-derived bytes into the Elasticsearch
+`_bulk` action line without escaping, so a log producer can terminate the plugin's own line and
+append bulk operations of its choosing, executed under the collector's credential. The run proved
+it end to end: against a cluster with security enabled and a collector role restricted to
+`fluent-bit*`, one log record deleted another producer's document, and Fluent Bit recorded no
+error. `out_opensearch` carries the same code.
+
+Upstream fixed that defect in 4.2.6. It has never had a CVE, a GHSA, or a published advisory.
+
+Vigil found it against source pinned to a revision four hours older than upstream's own fix, with
+CVE, advisory and changelog lookups withheld by the engagement rules until after the finding was
+written up — so the discovery is independent, and the fix that exists today is the answer key.
+
+### Did the findings hold up?
+
+The critical was authored by one agent and then attacked by a separate verifier dispatch told to
+kill it. It could not: five kill attempts failed, two of them disproven by the runtime capture
+rather than by argument. It did cut the severity from 9.1 to 7.1 on scope reasoning — and an
+authenticated re-test then rebuilt it to 9.1 on measured availability loss, so the first and last
+number match while sharing none of the same argument. A third agent, handed only the draft
+advisory with no engagement context, found six real errors in it, including a line number cited
+wrongly three times and a suggested patch that would have hung the process. All six were corrected
+before anything was sent.
+
+### Can you check it?
+
+Every command the run executed against the lab went through an audited surface that records the
+command, its purpose, its target, its exit status and its output — 28 of them in this engagement.
+Each claim in the final advisory resolves to one of those records, to one of the four runtime
+transcripts, or to one of the two verifier scripts that re-derive the arithmetic and exit non-zero
+if a prediction misses. Nothing in the write-up rests on an agent's description of work it says it
+did.
+
+## What ships
+
+- **Test identities.** Log in through the MITM proxy and each account becomes a named identity.
+  Kali tools replay a request as an identity with `--identity` for cross-account testing such as
+  IDOR and BOLA.
+- **Callbacks tied to probes.** Blind payloads use nonce-tagged URLs and `vigil oob poll`
+  correlates observed callbacks with their originating probes and source information.
+- **A browser for what curl misses.** Client-rendered routes and challenge pages can be examined
+  in an audited headless Chromium alongside plain HTTP observations.
+- **Resumable recon.** Subdomain discovery, liveness checks, crawling, JS mining, and archived
+  URLs form a checkpointed, scope-filtered reconnaissance pipeline.
+- **A file-level ledger for code.** Source is sealed in a content-addressed snapshot with a
+  tree-sitter index and attributable review records.
+- **Signal-triggered methodology.** Specialist roles use a library of skills and references when
+  the relevant behavior appears; see [`agent/`](agent/).
+- **Program-ready exports.** Bugcrowd, HackerOne, and direct-disclosure drafts are rendered from
+  recorded findings and published as versioned, hash-verified packages. Vigil does not submit
+  them to a third-party platform on your behalf.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/findings-dark.png">
   <img alt="Vigil orchestrator UI: an engagement's findings grouped by severity, workflow, and verification" src="docs/assets/findings-light.png">
 </picture>
+
+> [!NOTE]
+> The orchestrator UI has had far less attention than the agents and backend. It shows
+> engagement state, findings, and coverage, but it is rough in places. If you'd like to take it
+> on, see [CONTRIBUTING.md](CONTRIBUTING.md) or open an issue.
 
 ## Quick start
 
@@ -112,7 +236,10 @@ hosts in scope.json. Run this engagement using the operator web workflow.
 
 The orchestrator UI is at `http://127.0.0.1:18000`. On macOS or Windows Docker Desktop,
 DNS-heavy recon runs on the host; `vigil quickstart --install-host-tools` installs those tools.
-Upgrades and workspace layout: [`docs/installation.md`](docs/installation.md).
+Always start through `vigil engagement start`, which runs the preflight and exports the
+engagement environment. Later sessions start the same way and then run `vigil-resume`. Upgrades
+and workspace layout: [`docs/installation.md`](docs/installation.md); modes and preflight:
+[`docs/engagements.md`](docs/engagements.md).
 
 ## Models and access
 
@@ -137,20 +264,29 @@ As of October 2026, red-team access to the newest models is for organizations on
   ([access guidance](https://learn.chatgpt.com/docs/cyber-safety),
   [Daybreak overview](https://help.openai.com/en/articles/20001258-openai-daybreak-trusted-access-for-cyber-overview)).
 
+goose, opencode, and Kimi run with reduced support; see
+[`docs/agent-clients.md`](docs/agent-clients.md).
+
 Planned: broader support for **GLM 5.3** and other models with more predictable access, through
 lower orchestration overhead, model-specific prompts, and deeper **OpenCode** integration.
 
 ## Effort and usage
 
-The operator keeps a small context and delegates: 95%+ of tokens are spent by specialist
-sub-agents, which keeps one operator session on track for much longer. Expect to hit usage
-limits quickly.
+**Vigil is designed for depth, not low-token scanning.** It spends model effort on repeated
+investigation, cross-file reasoning, different hunting lenses, evidence collection, re-testing,
+variant searches, and reports that can be reproduced. That can consume substantial tokens,
+especially on large repositories or authenticated web applications. It does not mean every target
+will take the same amount of time or tokens.
 
-| Engagement | Reasoning effort | Plan |
-|---|---|---|
-| Code | Medium | $100/month; expect limits before you finish a repository |
-| Code, hardened codebase | High | $200/month |
-| Web | High or above | $200/month |
+The operator keeps a relatively small working context and delegates most analysis to
+specialists. Durable backend state and on-demand skill loading reduce wasted context, but they
+are not substitutes for the actual investigation work. Usage caps and pricing depend on the
+model/provider and change over time; plan for interruptions on large engagements.
+
+| Engagement | Suggested starting reasoning effort |
+|---|---|
+| Code audit | Medium; increase for hardened or complex code |
+| Web pentest / bug bounty | High or above, where your model access permits |
 
 > [!TIP]
 > **Bug bounties:** look for source maps. Download the `.map` files, recover the source with
@@ -158,34 +294,23 @@ limits quickly.
 > `vigil engagement add-track <key> web` and `vigil engagement add-host <key> <host>` so web
 > testing builds on its findings ([tracks](docs/engagements.md#tracks-and-modes)).
 
-## Running an engagement
+## How an engagement runs
 
-- `vigil engagement start` selects one session mode, runs a preflight, prints the workspace,
-  engagement, client, mode, and phase to stderr, exports the engagement environment, and execs
-  the client. Flags it does not own are forwarded to the client.
-- Always start through `vigil engagement start`; the generated `start_<client>.sh` and a bare
-  client run skip the preflight and environment.
-- A web + code engagement needs `--mode web` or `--mode code`; a single track is selected
-  automatically. Change modes by starting a new client process. `vigil engagement mode <key>`
-  shows enabled tracks, phases, prompt paths, and start commands.
-- Later sessions start the same way, then run `vigil-resume` to restore the operator role and
-  rebuild live state from the backend.
+| Track | Phases |
+|---|---|
+| **web** | `recon → collect → consume-test → verify → exploit → report` |
+| **code** | `ingest → classify-map → hunt → verify-variant → fuzz` |
 
-Detail: [`docs/engagements.md`](docs/engagements.md),
-[`docs/session-commands.md`](docs/session-commands.md),
-[`docs/agent-clients.md`](docs/agent-clients.md).
+Every transition runs `vigil assess transition-phase`, which refuses while the phase still owes
+work. `--force` records an audited override; a code audit can never be forced to `complete`.
+Code findings go through the same per-finding submission flow as web.
 
-## Engagement tracks and phases
-
-| Track | Phases | Persisted as |
-|---|---|---|
-| **web** (red team) | `recon → collect → consume-test → verify → exploit → report` | `scope.json.tracks.web.phase` |
-| **code** (white-box) | `ingest → classify-map → hunt → verify-variant → fuzz` | `scope.json.tracks.code.phase` |
-| **remediation** (work in progress) | `intake → baseline → fixing → review → approved → pr_draft → development → verified → closed` | `remediation_cases.status` per case |
-
-Web and code tracks end in `complete`, and `vigil assess transition-phase` gates every
-transition; `--force` records a durable override, and some integrity blockers cannot be forced.
-Roster, readiness previews, and specialist roles: [`docs/engagements.md`](docs/engagements.md#phases).
+Phase completion depends on readiness checks and recorded decisions, not a fixed engagement
+duration; individual commands and dispatches still have timeouts. Web testing may require
+multiple identities, class-specific probes, browser-assisted observations, and deliberate
+rate-limiting across concurrent specialists. Code work expands as hunters follow call chains
+and add related files for analysis. Verified findings can trigger sibling/variant checks and
+attack-chain review. Exploit work waits for approval by default.
 
 **Remediation** (work in progress) takes a finding or ticket to a reviewed fix. Each case gets
 its own Git worktree or JJ workspace, records proof that the fix works, and needs your approval
@@ -196,20 +321,12 @@ readers, checks, and publishing. Start with `vigil remediation -k <key> start`, 
 Blue incident response also runs on the same backend; see
 [`docs/blue-engagements.md`](docs/blue-engagements.md).
 
-## Runtime model
+## Runtime
 
-`vigil up` (or `vigil runtime start`) starts one long-lived Kali container named `vigil`.
-Target-facing commands run through `vigil assess kali ...` via `docker exec`; long scans run
-through `vigil assess kali job start ...` under an in-container `dtach` supervisor, so they
-survive the operator session.
-
-The container mounts shared runtime data at `.runtime-data/`, bind-mounts the engagement root at
-`/engagements`, and receives the root `.env` when present. Fresh workspaces keep artifacts under
-`engagements/<key>/`; adopted workspaces keep their existing paths. For non-interactive
-maintenance, use `vigil runtime shell-exec "<cmd>"` so quoting and exit codes stay under the CLI.
-
-`agent/docker/runtime-full/Dockerfile` is the only supported runtime for target-facing
-execution.
+`vigil up` starts one long-lived Kali container named `vigil`. Target-facing commands run through
+`vigil assess kali ...`; long scans run as `vigil assess kali job start ...` so they survive the
+operator session. Mounts, maintenance commands, sizing, and backups:
+[`docs/operations.md`](docs/operations.md).
 
 <details>
 <summary>Bundled tools</summary>
@@ -228,10 +345,6 @@ execution.
 
 </details>
 
-`agent/docker/runtime-lightweight/Dockerfile` is for faster Dockerfile iteration only
-(`vigil runtime build lightweight --dev`). Sizing, kernel limits, and backups:
-[`docs/operations.md`](docs/operations.md).
-
 ## Optional capabilities
 
 | Capability | Default | Start command | Purpose |
@@ -240,58 +353,23 @@ execution.
 | OOB (frp + interactsh) | off | `vigil oob start` | Out-of-band callback detection over shared frp/interactsh. |
 | Universal ctags | host-installed | `brew install universal-ctags` | Richer code-analysis definition lookups. |
 
-**Authenticated capture.** After `vigil mitmproxy start`, route a browser through
-`http://127.0.0.1:8080`, log in to any scoped host, and confirm with `vigil auth status <key>`.
-A second login adds a second identity for cross-account (IDOR/BOLA) testing. Detail:
-[`docs/authentication.md`](docs/authentication.md).
+Route a browser through `http://127.0.0.1:8080` and log in to capture credentials; a second
+login adds a second identity ([`docs/authentication.md`](docs/authentication.md)). Callbacks need
+your own relay, configured before `vigil install`
+([`docs/oob-routing.md`](docs/oob-routing.md)).
 
-**Callbacks, listeners, and tunnels** are started by the operator, never by agents. Vigil ships
-no fallback relay; configure your own before `vigil install`, which reserves this install's
-relay slot:
+## Commands you run
 
-```bash
-vigil config set oob.frp_host oob-relay.example.com   # also: oob.frp_port, oob.domain, oob.frp_token
-vigil install                                        # reserves this install's relay slot
-vigil oob start && vigil oob status --json
-vigil oob client start example-agent --engagement <engagement-key> --agent vulnerability-analyst
-vigil oob test
-```
+The agents drive `vigil assess`. These are the commands you use yourself:
 
-Relay slots, refusal cases, and edge routing: [`docs/oob-routing.md`](docs/oob-routing.md).
-Payload-side tradecraft: [`frp-tunneling.md`](agent/references/offensive-tactics/frp-tunneling.md),
-[`shell-handling.md`](agent/references/offensive-tactics/shell-handling.md).
+| Command | Use |
+|---|---|
+| `vigil up`, `vigil status`, `vigil doctor` | Start the local stack and check it |
+| `vigil engagement create`, `vigil engagement start <key>` | Create an engagement and start a session |
+| `vigil mitmproxy start`, `vigil auth status <key>` | Capture logins as test identities |
+| `vigil oob start` | Start out-of-band callbacks |
 
-## Command reference
-
-<details>
-<summary>All commands</summary>
-
-| Command | Purpose |
-|---------|---------|
-| `vigil quickstart` | Probe host prerequisites and recon tools, print the setup checklist. Installs host tools only with `--install-host-tools`. |
-| `vigil install [path]` | Initialize or adopt a private workspace in place, preserving engagements, DB, `.env`, and client files. |
-| `vigil up` | Initialize or adopt the workspace, build stale images, start the local stack from matched application assets. |
-| `vigil doctor` | Check local readiness and prerequisites. Exits non-zero on a `FAIL` row; `--json` for a machine-readable report. |
-| `vigil status` | Report live service state. |
-| `vigil logs <target> [--lines N]` | Tail logs for `orchestrator`, `runtime`, `mitmproxy`, `oob`, or `all`. |
-| `vigil runtime build \| start \| stop \| restart \| status \| shell \| shell-exec \| resources` | Manage the shared Kali runtime container. |
-| `vigil orchestrator start \| stop \| restart \| status \| open \| build` | Manage the orchestrator backend and UI. |
-| `vigil engagement create \| list \| mode \| start \| open \| path \| current \| cd-init \| archive \| export \| export-pdf` | Create, inspect, and drive engagements. Scope edits (`add-host`, `add-oos`, `set-header`, `add-track`, `set-rate-limit`, …) live here too — `vigil engagement --help`. |
-| `vigil use <key>` | Set the persisted active engagement for global services. |
-| `vigil assess ...` | The assessment surface; see [`docs/assessment-cli.md`](docs/assessment-cli.md). |
-| `vigil remediation ...` | **Work in progress.** Remediation engagements: Jira/bounty import, `from-finding` intake, shared-fix links, worktrees, evidence, review, and PR handoff — see [`docs/remediation.md`](docs/remediation.md). |
-| `vigil auth status \| show \| edit \| clear \| export \| quarantine \| import \| alias \| env-check \| set-active \| keepalive` | Manage engagement credentials in the backend store. |
-| `vigil mitmproxy start \| stop \| status \| cert \| build \| reload \| routes` | Manage the shared MITM proxy. |
-| `vigil oob start \| stop \| restart \| status \| routing \| test \| clean \| mint \| poll \| client` | Manage shared OOB and render relay-slot edge-routing inputs. |
-| `vigil config path \| list \| get \| set \| unset \| edit` | Read and write persistent CLI config. |
-| `vigil backup create \| list \| show \| restore` | Manual orchestrator DB backup operations. |
-| `vigil email <mailbox>` | Read a local Mail.app test mailbox for verification codes during authenticated testing. |
-| `vigil blue ...` | Blue incident response; see [`docs/blue-engagements.md`](docs/blue-engagements.md). |
-
-</details>
-
-Every command documents its full flag set under `--help`; runtime tool verbs live under
-`vigil assess kali --help`.
+Every command lists its flags under `--help`.
 
 ## Security
 
@@ -306,6 +384,30 @@ Every command documents its full flag set under `--help`; runtime tool verbs liv
   explicit recording.
 
 Report vulnerabilities privately; see [SECURITY.md](SECURITY.md).
+
+## Design decisions
+
+The decisions behind the method are recorded in [`docs/adr/`](docs/adr/). The ones that shape
+hunting most:
+
+- [Coverage steers; it blocks only at report](docs/adr/0001-coverage-as-harness-not-gate.md),
+  where untouched high-value applications need a test or a recorded reason. Gates read structured
+  records, never an agent's own summary.
+- [Depth is checked per vulnerability class](docs/adr/0012-coverage-grain-selective-load-bearing-depth.md)
+  on decisive applications, so one probe can't mark a whole family covered.
+- [A crashed scan and a clean scan look different](docs/adr/0015-honest-instruments-distinguish-no-measurement-from-clean.md).
+  Missing output, truncated input, and transport failures are recorded as "no measurement".
+- [Negatives are retryable](docs/adr/0016-target-knowledge-is-derived-and-negatives-are-retryable.md).
+  A past "nothing here" guides the next check but can't suppress it.
+- [A verifier can only confirm with its own evidence](docs/adr/0028-producer-provenance-binds-proof-to-work.md).
+  Every proof is bound to the dispatch that produced it.
+- [One lens per dispatch, rotated](docs/adr/0034-one-lens-per-dispatch-rotated-across-surfaces.md).
+  A specialist gets one lens at a time, and a surface that came back clean under it is still open
+  under the next. Only the hard rules of engagement constrain a dispatch.
+- [Unproven findings stay on the books](docs/adr/0035-unproven-findings-are-parked-or-blocked-never-dropped.md).
+  A finding is parked when it lacks runtime proof, graded at impact-if-true when only the
+  program's rules block the last step, and held as blocked when it needs access nobody has
+  provisioned. None is silently dropped or downgraded.
 
 ## Documentation
 
@@ -340,5 +442,5 @@ Report vulnerabilities privately; see [SECURITY.md](SECURITY.md).
 
 To extend Vigil (a skill, `vigil assess` verb, deterministic oracle, or eval case), follow the
 [maintainer recipes](docs/maintainer-guide.md) and the
-[test and verification matrix](AGENTS.md#tests--verification). Design decisions live in
-[`docs/adr/`](docs/adr/). To check a running install, use `vigil doctor` and `vigil status`.
+[test and verification matrix](AGENTS.md#tests--verification). To check a running install, use
+`vigil doctor` and `vigil status`.

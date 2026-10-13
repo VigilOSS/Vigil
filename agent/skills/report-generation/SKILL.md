@@ -221,11 +221,8 @@ never rendered.
 5. **Blind triage — mandatory for every Medium-or-above finding.** Run
    `agent/skills/blind-triage/SKILL.md` Pass 2 (the zero-context blind reviewer) against the QA'd
    submission. Only a verdict starting `Accept` clears the finding for submission; anything else
-   routes back to fix the finding (step 3) or kill and re-run. Record the verdict:
-   ```bash
-   vigil assess agent decision --kind blind_triage_verdict --payload-json \
-     '{"finding_slug":"<slug>","verdict":"<Accept@P1..P5|Need-More-Info|Not-Applicable|Out-of-Scope|Duplicate>","claimed_severity":"<sev>","weak_points":"..."}'
-   ```
+   routes back to fix the finding (step 3) or kill and re-run. Build the packet and record the
+   verdict with its `packet_id` exactly as that skill specifies.
 6. **Publish.** Read `vigil assess contract export submission`, then re-run `export submission
    <slug> --platform <same platform> --overwrite` without `--draft` once its executable final gate
    is satisfiable. This reproduces the authored content from the finding and exits non-zero before

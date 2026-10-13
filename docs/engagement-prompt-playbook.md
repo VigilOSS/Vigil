@@ -43,16 +43,16 @@ The whole playbook reduces to this table. Everything after it is detail.
 
 | The model is… | You say… | Reinforces |
 |---|---|---|
-| **Doing the probing itself** (running curl/nmap, parsing output) | "You're the operator — dispatch a specialist for this; don't run target tools yourself." | operator-core *"You are the orchestrator brain"*; hunting §18 |
+| **Doing the probing itself** (running curl/nmap, parsing output) | "You're the operator — dispatch a specialist for this; don't run target tools yourself." | operator-core Core Loop step 7 and Dispatch Discipline |
 | **Stopping shallow** / "no findings" too fast | "Slow isn't dry. Exhaust the surface before rotating — confidence, not time, is the bar." | hunting §5, §15, §16 |
 | **Forgetting the core loop / phases** after many batches | "Re-read operator-core.md, confirm the phase, then continue." | operator-core Resume Gate |
 | **Overclaiming severity / impact** | "What can an attacker do *right now*? Score the incremental impact, not the theoretical ceiling." | hunting §2, §3 |
 | **Tunnel-visioned on the first win** | "Don't stop at the first bug — hunt its siblings and the cluster around it before moving on." | hunting §9, §10 |
 | **Wasting shallow dispatches** (20–30s agents) | "Give each specialist enough scope to run deep; don't burn a dispatch on a 30-second task." | operator-core Iteration-mode (dispatch_mode) Declaration |
-| **Calling theory a finding** | "No theory. If you can't show the attacker outcome with a real request/response, park it `chain_required`, don't report it." | hunting §2; shared-constraints §7 |
+| **Calling theory a finding** | "No theory. If you can't show the attacker outcome with a real request/response, park it `chain_required`, don't report it." | hunting §2, §13 |
 | **Thrashing** when another agent changed state | "Another agent is working — review what changed and decide; don't reflexively revert." | (net-new — §4) |
-| **About to ship a self-graded finding** | "Dispatch a fresh, low-context specialist to review this as a skeptical triager." | operator-core Phase 4; adversarial-mindset |
-| **Padding the report** with slop/theory | "Cut filler and speculation. Write the exact action and exact method, nothing else." | reporting §11/§15; shared-constraints §7 |
+| **About to ship a self-graded finding** | "Dispatch a fresh, low-context specialist to review this as a skeptical triager." | Phase 5 verify; Phase 8 blind triage |
+| **Padding the report** with slop/theory | "Cut filler and speculation. Write the exact action and exact method, nothing else." | reporting §11/§15 |
 
 ---
 
@@ -188,8 +188,8 @@ inherit its confirmation bias.
 > submission text, and decide if we should push back — and what to say."
 
 It catches the model's most common failure: **overclaiming**. In practice the model inflates severity to look
-productive, and this pass is what walks it back to a defensible, triager-proof claim. (Reinforces operator-core
-Phase 4 + the FP/severity gate, but the *low-context* twist is the part worth doing deliberately.)
+productive, and this pass is what walks it back to a defensible, triager-proof claim. (Reinforces Phase 5
+verify + the FP/severity gate, but the *low-context* twist is the part worth doing deliberately.)
 
 ### B. Anchor on the highest-impact archetype, then hunt its variants everywhere
 Don't just enumerate bugs — name the worst realistic archetype for this target (a Log4j-style unauth log-ingestion
@@ -247,13 +247,13 @@ the honest split.
 ### Worth repeating (the model genuinely drifts from these)
 | Habitual prompt | Already enforced by | Why still worth saying |
 |---|---|---|
-| "You're the operator, delegate / don't do it yourself" | operator-core *orchestrator brain*; hunting §18 | The model slides back into running tools itself on long runs. |
-| "Leave no stone unturned / depth over speed / slow isn't dry" | hunting §5, §12, §16 | The strongest counter to shallow "no findings." |
-| "What can an attacker do right now / no theory" | hunting §2; shared-constraints §7 | Counters overclaiming and theory-as-finding. |
+| "You're the operator, delegate / don't do it yourself" | operator-core Core Loop step 7 and Dispatch Discipline | The model slides back into running tools itself on long runs. |
+| "Leave no stone unturned / depth over speed / slow isn't dry" | hunting §5, §15, §16 | The strongest counter to shallow "no findings." |
+| "What can an attacker do right now / no theory" | hunting §2, §13 | Counters overclaiming and theory-as-finding. |
 | "Is this expected / already-admin / defense-in-depth" | hunting §3 | The model forgets precondition-equivalence under pressure to find Highs. |
 | "Check siblings / chains" | hunting §9, §10; operator-core variant + chain passes | Tunnel vision after the first win. |
 | "Re-read operator-core / confirm the phase" | operator-core Resume Gate | The single best drift reset. |
-| "Severity must match real impact, not CVSS band" | hunting §20; shared-constraints §4 | The model inflates; this forces honesty. |
+| "Severity must match real impact, not CVSS band" | hunting §3; FP & severity gate C5 | The model inflates; this forces honesty. |
 
 ### Drop or downgrade (noise / not best practice)
 - **Re-pasting the full program policy every message.** Put stable scope/policy facts in `scope.json`
@@ -265,7 +265,7 @@ the honest split.
 - **Heavy per-dispatch guardrails.** The model's own guidance (and yours) is that over-constraining chokes a
   subagent — hand it the hypothesis and the gap, not a checklist.
 - **Stream-of-consciousness multi-topic prompts.** One dispatch, one objective reads better and dedups cleaner
-  (shared-constraints §16; hunting §18).
+  (operator-core Dispatch Discipline).
 
 ---
 
