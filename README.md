@@ -136,6 +136,15 @@ single file: `plugins/out_es/es.c`.
 | Coverage | 9 of 9 scoped files analysed |
 | Findings | 3, all reproduced at runtime against a live Elasticsearch 8.15.0: one critical, two medium |
 
+https://github.com/user-attachments/assets/19cdd31a-eb6f-43cc-8f1d-2675eeebac91
+
+> **Heavily trimmed down from a three-hour session.** Ten moments from the operator thread, one
+> hunter agent's own transcript, and the finished disclosure. Across the full run, the operator
+> handed 17 tasks to five specialist agents, which made 945 tool calls over 7.2 hours of agent time.
+
+The engagement is named `historical-replay` because the source was pinned to a revision from
+before the upstream fix. One finding is redacted because it is still unfixed upstream.
+
 `out_es` pastes a record-derived index name into Bulk API syntax. A log producer who controls
 that field can add an extra action line of its own choosing, posted under Fluent Bit's own
 Elasticsearch credential. Against a cluster with security enabled and a collector role
@@ -146,6 +155,14 @@ Upstream fixed this in 4.2.6. It carries no CVE, no GHSA, no published advisory.
 independently: source was pinned to a revision from before that fix, repository lookups and
 cloning were off limits, and CVE, advisory, and changelog checks were withheld until the
 write-up was done.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/fluent-bit-findings-dark.png">
+  <img alt="The engagement's three recorded findings. Two are shown in full; the third is withheld pending vendor disclosure because it is still unfixed upstream." src="docs/assets/fluent-bit-findings-light.png">
+</picture>
+
+The third finding is withheld here: it is still unfixed upstream, so it stays with the
+maintainers until a fix ships or the disclosure window closes.
 
 ### Verification
 
@@ -158,11 +175,9 @@ errors in it — a line number cited wrong three times, a patch that would have 
 
 ### Provenance
 
-Every command the run executed against the lab passed through an audited surface that logs the
-command, its purpose, target, exit status, and output. Each claim in the advisory resolves to
-one of those records, to a runtime transcript, or to a verifier script that re-derives the
-arithmetic and exits non-zero on a mismatch. Nothing here rests on an agent's own account of
-what it did.
+Every command the run executed against the lab went through an audited surface that logs the
+command, its purpose, target, exit status, and output. Each claim in the advisory traces to one of
+those records, a runtime transcript, or a verifier script.
 
 ## What ships
 
