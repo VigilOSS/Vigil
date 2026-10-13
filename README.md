@@ -126,50 +126,43 @@ and Vigil cannot guarantee that every bug in a codebase or application was disco
 
 ## Real results
 
-One engagement, run end to end on 2026-10-12 against [Fluent Bit](https://github.com/fluent/fluent-bit)
-(CNCF), scoped to a single file: `plugins/out_es/es.c`.
+One engagement against [Fluent Bit](https://github.com/fluent/fluent-bit) (CNCF), scoped to a
+single file: `plugins/out_es/es.c`.
 
 | | |
 |---|---|
-| Operator time | **2 h 59 m** — one session, one operator, start to finished advisory |
-| Scope | 9 files / 2,572 LOC under analysis, plus a 495-file core reference tree indexed alongside as readable context that cannot be claimed as coverage |
-| Coverage | 9 of 9 files analysed — 100% at every severity tier, nothing left parked as structural debt |
-| Hypotheses | 12 generated, 9 in scope adjudicated: 2 promoted to the primary finding, 2 to secondary findings, 2 killed with counter-evidence, 3 retained as hardening |
-| Findings | 3 recorded, all three reproduced at runtime against a live Elasticsearch 8.15.0 — one critical, two medium |
-| Work | 5 specialist agents over 17 dispatches and 945 tool calls — 7.2 h of agent time inside the 2 h 59 m session |
+| Operator time | **2 h 59 m**, one session, start to finished advisory |
+| Scope | 9 files / 2,572 LOC, plus a 495-file core tree indexed for context, not analysis |
+| Coverage | 9 of 9 scoped files analysed |
+| Findings | 3, all reproduced at runtime against a live Elasticsearch 8.15.0: one critical, two medium |
 
-The critical finding was that `out_es` interpolates record-derived bytes into the Elasticsearch
-`_bulk` action line without escaping, so a log producer can terminate the plugin's own line and
-append bulk operations of its choosing, executed under the collector's credential. The run proved
-it end to end: against a cluster with security enabled and a collector role restricted to
-`fluent-bit*`, one log record deleted another producer's document, and Fluent Bit recorded no
-error. `out_opensearch` carries the same code.
+`out_es` pastes a record-derived index name into Bulk API syntax. A log producer who controls
+that field can add an extra action line of its own choosing, posted under Fluent Bit's own
+Elasticsearch credential. Against a cluster with security enabled and a collector role
+restricted to `fluent-bit*`, one such record deleted another producer's document, and Fluent
+Bit recorded no error. `out_opensearch` carries the same code.
 
-Upstream fixed that defect in 4.2.6. It has never had a CVE, a GHSA, or a published advisory.
+Upstream fixed this in 4.2.6. It carries no CVE, no GHSA, no published advisory. Vigil found it
+independently: source was pinned to a revision from before that fix, repository lookups and
+cloning were off limits, and CVE, advisory, and changelog checks were withheld until the
+write-up was done.
 
-Vigil found it against source pinned to a revision four hours older than upstream's own fix, with
-CVE, advisory and changelog lookups withheld by the engagement rules until after the finding was
-written up — so the discovery is independent, and the fix that exists today is the answer key.
+### Verification
 
-### Did the findings hold up?
+A separate verifier dispatch tried to kill the critical and couldn't: five attempts failed, two
+of them disproven by runtime capture rather than argument. Severity moved from 9.1 to 7.1 on
+scope reasoning, then back to 9.1 once an authenticated re-test measured the actual availability
+loss. A third agent, given only the draft advisory and no engagement context, found six real
+errors in it — a line number cited wrong three times, a patch that would have hung the process
+— and all six were fixed before anything shipped.
 
-The critical was authored by one agent and then attacked by a separate verifier dispatch told to
-kill it. It could not: five kill attempts failed, two of them disproven by the runtime capture
-rather than by argument. It did cut the severity from 9.1 to 7.1 on scope reasoning — and an
-authenticated re-test then rebuilt it to 9.1 on measured availability loss, so the first and last
-number match while sharing none of the same argument. A third agent, handed only the draft
-advisory with no engagement context, found six real errors in it, including a line number cited
-wrongly three times and a suggested patch that would have hung the process. All six were corrected
-before anything was sent.
+### Provenance
 
-### Can you check it?
-
-Every command the run executed against the lab went through an audited surface that records the
-command, its purpose, its target, its exit status and its output — 28 of them in this engagement.
-Each claim in the final advisory resolves to one of those records, to one of the four runtime
-transcripts, or to one of the two verifier scripts that re-derive the arithmetic and exit non-zero
-if a prediction misses. Nothing in the write-up rests on an agent's description of work it says it
-did.
+Every command the run executed against the lab passed through an audited surface that logs the
+command, its purpose, target, exit status, and output. Each claim in the advisory resolves to
+one of those records, to a runtime transcript, or to a verifier script that re-derives the
+arithmetic and exits non-zero on a mismatch. Nothing here rests on an agent's own account of
+what it did.
 
 ## What ships
 
