@@ -184,7 +184,9 @@ vigil remediation -k <engagement-key> join <case-id>
 
 `session` launches a worker only when no binding exists. For one case, the agent binds its existing
 UUID with `session --bind --session-id <uuid>`. `join` attaches to the recorded conversation; missing
-or mismatched identities require recovery rather than replacement. The repository-context command, native binding, worker launch, and joining currently support
+or mismatched identities require recovery rather than replacement. When the recorded conversation has
+stopped, `session --bind --session-id <uuid> --replace-stopped` binds the new one and keeps the old
+UUID as `replaced_session_id`; a running conversation is never replaced. The repository-context command, native binding, worker launch, and joining currently support
 Claude only.
 
 ### Hook policy

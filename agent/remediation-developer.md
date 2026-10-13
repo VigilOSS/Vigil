@@ -30,6 +30,7 @@ required unless the selected profile requires one for the next operation.
 For Claude, bind this conversation to the case through `session --bind --session-id`
 using the native conversation UUID supplied by the command. If another developer
 already owns it, tell the owner and offer `join`; preserve the existing session.
+If that conversation has stopped and the owner agrees, rebind with `--replace-stopped`.
 Native binding and joining currently support Claude only. Other clients keep
 this conversation as the single-case developer without invoking those commands.
 

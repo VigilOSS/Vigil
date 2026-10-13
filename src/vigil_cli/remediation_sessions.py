@@ -30,6 +30,8 @@ def register_session_parsers(commands: argparse._SubParsersAction) -> None:
     session.add_argument("case_id")
     session.add_argument("--bind", action="store_true", help="Bind the existing conversation without launching another")
     session.add_argument("--session-id", help="Native conversation UUID required with --bind")
+    session.add_argument("--replace-stopped", action="store_true",
+                         help="With --bind, take over a case whose recorded conversation has stopped")
     join = commands.add_parser("join", help="Attach to the exact recorded case developer conversation")
     join.add_argument("case_id")
 
@@ -428,7 +430,16 @@ def run_session_command(args: argparse.Namespace, install_root: Path, engagement
                         "settings": launch.get("settings") if launch else {},
                         "workspace_branch": case["worktree_branch"]}
             if binding and binding["session_id"] != session_id:
-                raise SystemExit("Case already belongs to another developer conversation; use join")
+                previous = _launched_session(binding, rows)
+                stopped = previous is None or previous.get("state") == "stopped"
+                if not getattr(args, "replace_stopped", False):
+                    if stopped:
+                        raise SystemExit("Case belongs to a developer conversation that has stopped; "
+                                         "rerun with --replace-stopped to bind this one instead")
+                    raise SystemExit("Case already belongs to another developer conversation; use join")
+                if not stopped:
+                    raise SystemExit("The recorded developer conversation is still running; use join")
+                proposed["replaced_session_id"] = binding["session_id"]
             row = _matching_session(proposed, rows)
             if row is None:
                 raise SystemExit("The supplied conversation is not in Claude's native repository session inventory")

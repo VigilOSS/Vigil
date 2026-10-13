@@ -290,6 +290,37 @@ def test_single_case_binds_existing_conversation_without_new_launch(prepared) ->
     assert prepared.calls[-1][0] == ["claude", "attach", "existing"]
 
 
+def _bind_after_previous(prepared, state):
+    prepared.project["remediation"]["hook_policy"] = "inherit"
+    previous_id = "0d3f4a7e-5b8c-4c1d-9e2f-3a4b5c6d7e8f"
+    session_id = "638131c5-4bcd-4a2f-898b-ecb1a5489638"
+    prepared.rows.append({"id": "previous", "sessionId": previous_id, "cwd": str(prepared.repository), "state": state})
+    run_case(prepared, bind=True, session_id=previous_id)
+    prepared.rows.append({"id": "current", "sessionId": session_id, "cwd": str(prepared.repository), "state": "working"})
+    return previous_id, session_id
+
+
+def test_bind_offers_replacement_only_when_previous_conversation_stopped(prepared) -> None:
+    previous_id, session_id = _bind_after_previous(prepared, "stopped")
+    binding_path = prepared.engagement / "remediation/cases/1/session.json"
+    with pytest.raises(SystemExit, match="--replace-stopped"):
+        run_case(prepared, bind=True, session_id=session_id)
+    assert json.loads(binding_path.read_text())["session_id"] == previous_id
+    run_case(prepared, bind=True, session_id=session_id, replace_stopped=True)
+    binding = json.loads(binding_path.read_text())
+    assert (binding["session_id"], binding["job_id"], binding["replaced_session_id"]) == (session_id, "current", previous_id)
+
+
+def test_replace_stopped_refuses_a_running_conversation(prepared) -> None:
+    previous_id, session_id = _bind_after_previous(prepared, "working")
+    binding_path = prepared.engagement / "remediation/cases/1/session.json"
+    with pytest.raises(SystemExit, match="use join"):
+        run_case(prepared, bind=True, session_id=session_id)
+    with pytest.raises(SystemExit, match="still running"):
+        run_case(prepared, bind=True, session_id=session_id, replace_stopped=True)
+    assert json.loads(binding_path.read_text())["session_id"] == previous_id
+
+
 def test_hook_disabled_profile_cannot_bind_an_uncontrolled_session(prepared) -> None:
     session_id = "638131c5-4bcd-4a2f-898b-ecb1a5489638"
     prepared.rows.append({"id": "existing", "sessionId": session_id, "cwd": str(prepared.repository)})
