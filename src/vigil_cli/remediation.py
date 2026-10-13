@@ -92,7 +92,7 @@ def register_remediation_parser(sub: argparse._SubParsersAction) -> None:
     evidence.add_argument("--kind", required=True)
     evidence.add_argument("--method", required=True)
     evidence.add_argument("--environment", choices=("local", "development", "test", "production"), required=True)
-    evidence.add_argument("--command")
+    evidence.add_argument("--command", dest="evidence_command")
     evidence.add_argument("--observed", required=True)
     evidence.add_argument("--proved", required=True)
     evidence.add_argument("--artifact", type=Path)
@@ -1128,7 +1128,7 @@ def run_remediation(args: argparse.Namespace, install_root: Path) -> None:
         if args.kind in {"red-test", "green-test"}:
             expected_outcome = "failed_as_expected" if args.kind == "red-test" else "passed"
             if (args.outcome != expected_outcome
-                    or not (args.command or "").strip() or args.artifact is None
+                    or not (args.evidence_command or "").strip() or args.artifact is None
                     or not (args.revision or "").strip()):
                 raise SystemExit(
                     f"{args.kind} requires nonempty command, saved output artifact, --revision, "
@@ -1142,7 +1142,7 @@ def run_remediation(args: argparse.Namespace, install_root: Path) -> None:
                 raise SystemExit("evidence artifact must be a file inside this case's remediation directory")
             artifact = str(file.relative_to(eng_dir.resolve()))
         result = _api(install_root, eng_dir, key, "POST", endpoint + "/evidence", {
-            "kind": args.kind, "method": args.method, "command": args.command or "",
+            "kind": args.kind, "method": args.method, "command": args.evidence_command or "",
             "environment": args.environment,
             "observed": args.observed, "proved": args.proved,
             "artifact_path": artifact, "revision": args.revision, "outcome": args.outcome,

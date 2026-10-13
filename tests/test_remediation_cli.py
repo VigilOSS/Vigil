@@ -883,7 +883,7 @@ def test_red_test_evidence_requires_laravel_output_and_outcome(monkeypatch: pyte
     eng = tmp_path / "eng"
     eng.mkdir()
     monkeypatch.setattr(remediation, "_project", lambda *_: (eng, {}))
-    args = argparse.Namespace(engagement_key="project", remediation_command="evidence", case_id="1", kind="red-test", method="Laravel", command="php artisan test", observed="failed", proved="boundary exercised", artifact=None, revision="sha", outcome="failed_as_expected", environment="local")
+    args = argparse.Namespace(engagement_key="project", remediation_command="evidence", case_id="1", kind="red-test", method="Laravel", evidence_command="php artisan test", observed="failed", proved="boundary exercised", artifact=None, revision="sha", outcome="failed_as_expected", environment="local")
     with pytest.raises(SystemExit, match="saved output artifact"):
         remediation.run_remediation(args, tmp_path)
 
@@ -897,7 +897,7 @@ def test_ordinary_evidence_sends_explicit_environment(monkeypatch: pytest.Monkey
     sent = []
     monkeypatch.setattr(remediation, "_api", lambda *_args: sent.append(_args[-1]) or {"id": 1})
     args = argparse.Namespace(engagement_key="project", remediation_command="evidence", case_id="1",
-                              kind="baseline", method="HTTP", command="curl example.test",
+                              kind="baseline", method="HTTP", evidence_command="curl example.test",
                               observed="403", proved="boundary holds", artifact=None, revision="abc",
                               outcome=None, environment="development")
     remediation.run_remediation(args, tmp_path)
@@ -916,7 +916,7 @@ def test_typed_test_evidence_requires_revision(monkeypatch: pytest.MonkeyPatch, 
     monkeypatch.setattr(remediation, "_project", lambda *_: (eng, {}))
     monkeypatch.setattr(remediation, "_api", lambda *_args: pytest.fail("revisionless test evidence must not be recorded"))
 
-    args = argparse.Namespace(engagement_key="project", remediation_command="evidence", case_id="1", kind=kind, method="Laravel", command="php artisan test", observed="failed", proved="boundary exercised", artifact=artifact, revision=revision, outcome=outcome, environment="local")
+    args = argparse.Namespace(engagement_key="project", remediation_command="evidence", case_id="1", kind=kind, method="Laravel", evidence_command="php artisan test", observed="failed", proved="boundary exercised", artifact=artifact, revision=revision, outcome=outcome, environment="local")
     with pytest.raises(SystemExit, match="--revision"):
         remediation.run_remediation(args, tmp_path)
 
@@ -942,3 +942,14 @@ def test_prepare_pr_retains_and_indexes_reviewed_body(monkeypatch: pytest.Monkey
     remediation.run_remediation(args, tmp_path)
     assert output.is_file()
     assert (eng / payloads[0]["artifact_path"]).read_text(encoding="utf-8") == output.read_text(encoding="utf-8")
+
+
+def test_evidence_command_option_does_not_replace_the_cli_command(monkeypatch, tmp_path) -> None:
+    from vigil_cli import main as cli
+
+    received = []
+    monkeypatch.setattr(cli, "resolve_install_root", lambda *_args, **_kwargs: tmp_path)
+    monkeypatch.setattr(cli.remediation_module, "run_remediation", lambda args, _root: received.append(args))
+    cli.main(["remediation", "-k", "acme", "evidence", "1", "--kind", "api-test", "--method", "pytest",
+              "--environment", "local", "--command", "pytest tests", "--observed", "o", "--proved", "p"])
+    assert [(args.command, args.evidence_command) for args in received] == [("remediation", "pytest tests")]
