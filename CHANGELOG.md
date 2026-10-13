@@ -5,6 +5,27 @@ versioning follows [Semantic Versioning][semver].
 
 Durable design decisions live in [`docs/adr/`](docs/adr/).
 
+## [1.2.5] - 2026-10-13
+
+### Changed
+
+- The README describes how Vigil hunts, what coverage means, the Fluent Bit results, and the
+  design decisions behind the method. Runtime-container detail lives in `docs/operations.md`.
+- ADRs 0031–0035 record reproduction, negative results, the verify and exploit gates, one lens per
+  dispatch, and how unproven findings are held.
+- `CONTRIBUTING.md` gives setup steps, including running the UI dev server.
+
+### Fixed
+
+- Code submission closeout follows the Phase 8 flow, including the repro rehearsal and the
+  blind-triage packet that final export requires.
+- Blind-triage verdicts in the report-generation skill carry their packet id.
+- Phase QC records depth gaps as `depth_deferral`.
+- The operator prompt states that only verified findings enter exploit review.
+- The code fuzz engineer routes crash reproduction through `kali exec`, and the variant hunter's
+  discovery mode records no variant-check receipts.
+- Steering-playbook references point at existing sections.
+
 ## [1.2.4] - 2026-10-12
 
 ### Fixed

@@ -10,7 +10,7 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![CI](https://github.com/VigilOSS/Vigil/actions/workflows/ci.yml/badge.svg)](https://github.com/VigilOSS/Vigil/actions/workflows/ci.yml)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
-[![Version](https://img.shields.io/badge/version-1.2.4-green.svg)](https://github.com/VigilOSS/Vigil/releases/tag/v1.2.4)
+[![Version](https://img.shields.io/badge/version-1.2.5-green.svg)](https://github.com/VigilOSS/Vigil/releases/tag/v1.2.5)
 
 </div>
 
@@ -204,7 +204,7 @@ did.
 
 ```bash
 # 1. Install the application release (CLI, backend, prompts, docs, and prebuilt UI)
-uv tool install --from https://github.com/VigilOSS/Vigil/releases/download/v1.2.4/vigil-1.2.4-py3-none-any.whl vigil
+uv tool install --from https://github.com/VigilOSS/Vigil/releases/download/v1.2.5/vigil-1.2.5-py3-none-any.whl vigil
 #    OR install directly from the repository (builds the UI locally; needs Git, Node.js, and npm)
 uv tool install git+https://github.com/VigilOSS/Vigil vigil
 

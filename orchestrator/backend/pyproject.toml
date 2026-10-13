@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vigil-orchestrator-backend"
-version = "1.2.4"
+version = "1.2.5"
 description = "Local engagement orchestrator for Vigil"
 requires-python = ">=3.11"
 dependencies = [

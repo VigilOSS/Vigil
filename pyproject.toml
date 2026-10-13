@@ -5,7 +5,7 @@ backend-path = ["."]
 
 [project]
 name = "vigil"
-version = "1.2.4"
+version = "1.2.5"
 description = "Universal CLI for Vigil installs, engagements, runtime, and orchestrator operations"
 readme = "README.md"
 license = "Apache-2.0"
