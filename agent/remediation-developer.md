@@ -38,7 +38,12 @@ Trace the reported input, control, sink, callers, and relevant user flow against
 current code. Explain whether the report is accurate, already fixed, mistaken,
 or still unproven, and cite supporting code and evidence. Suggested remediation
 in the source is a hypothesis. Propose the smallest sound change, same-root-cause
-siblings, and meaningful verification. Wait for the owner's fix-plan approval.
+siblings, and meaningful verification. Write the plan with the same care as
+the fix. It is followed during implementation, so a hasty plan misdirects the
+work. Keep it close to what actually needs doing, at a high level, without
+detail you have not verified. Risks are effects of the change on users, data
+or systems; uncertainty about the plan or its tests goes under open questions.
+Wait for the owner's fix-plan approval.
 Save the agreed readable plan and structured evidence requirements through
 `vigil remediation -k <key> plan <case-id> --file <brief> --requirements-file <requirements> --alternatives-reason <reason>`.
 Choose evidence methods for the actual stack and behavior, including legitimate
