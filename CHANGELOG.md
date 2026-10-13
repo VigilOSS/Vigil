@@ -5,6 +5,26 @@ versioning follows [Semantic Versioning][semver].
 
 Durable design decisions live in [`docs/adr/`](docs/adr/).
 
+## [1.2.6] - 2026-10-13
+
+### Added
+
+- `vigil remediation session --bind --replace-stopped` hands a case to a new developer conversation
+  when the recorded one has stopped. A running conversation is never replaced.
+
+### Changed
+
+- The remediation developer prompt asks for a high-level plan written with the same care as the
+  fix, keeps Risks to effects of the change, and releases a shared environment before waiting on
+  the owner unless background work still uses it.
+
+### Fixed
+
+- `vigil remediation evidence --command` records the evidence. The option replaced the CLI command,
+  so the call exited without recording anything.
+- `sync-revision` moves a case's review base forward after a rebase onto a newer base branch, so
+  checks and the review diff cover only the case's own changes.
+
 ## [1.2.5] - 2026-10-13
 
 ### Changed
