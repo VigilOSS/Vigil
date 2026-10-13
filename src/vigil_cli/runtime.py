@@ -530,13 +530,13 @@ def _start_runtime_locked(
         headline = (
             "Docker is not responding (the daemon/VM appears wedged)"
             if health.timed_out
-            else "Docker does not appear to be running"
+            else "Docker is unavailable"
         )
         detail = f"\n  {health.detail}" if health.detail else ""
         raise SystemExit(
             f"{headline} — cannot start the runtime.{detail}\n"
-            "  Start or restart Docker (on macOS: launch Docker Desktop, or quit and reopen it "
-            "if it is hung), then retry. Confirm with `docker info`.\n"
+            "  Start or unpause Docker, then retry this command. On macOS, open Docker Desktop; "
+            "restart it if it is unresponsive. Confirm with `docker info`.\n"
             "  Set VIGIL_DOCKER_TIMEOUT (seconds) if a slow-but-healthy daemon needs longer to respond."
         )
 

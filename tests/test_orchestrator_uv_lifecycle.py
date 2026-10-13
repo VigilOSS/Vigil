@@ -143,5 +143,6 @@ def test_health_and_readiness_share_one_startup_budget(isolated_launch, monkeypa
     orchestrator.start_orchestrator(orchestrator.OrchestratorOptions(workspace))
     assert budgets == [600.0, 510.0]
     output = capsys.readouterr().out
-    assert "600" in output
+    assert "Vigil is ready: http://127.0.0.1:18000" in output
+    assert "Backend" in output and "ready" in output
     assert "logs" in output or "orchestrator.log" in output

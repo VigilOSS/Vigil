@@ -2,11 +2,9 @@
 
 * auth keepalive: `<anchor>=deleted` teardown detection is case-insensitive.
 * engagement export: the internal OPERATOR DETAILS section is stripped from PDFs.
-* quickstart: printed next-commands are shell-quoted so they copy-paste safely.
 """
 from __future__ import annotations
 
-import shlex
 import sys
 from pathlib import Path
 
@@ -16,7 +14,6 @@ sys.path.insert(0, str(repo_root / "src"))
 
 from vigil_cli.auth import _parse_probe_blob  # noqa: E402
 from vigil_cli.engagements import _strip_operator_details  # noqa: E402
-from vigil_cli.quickstart import _next_commands  # noqa: E402
 
 
 # --------------------------------------------------------------------------- #
@@ -65,27 +62,3 @@ def test_strip_operator_details_removes_reference_section():
 def test_strip_operator_details_noop_without_section():
     md = "# Incident report\n\nAll findings resolved.\n"
     assert _strip_operator_details(md) == md
-
-
-# --------------------------------------------------------------------------- #
-# quickstart.py — shell-quote generated next-commands
-# --------------------------------------------------------------------------- #
-def test_next_commands_shell_quote_target_and_install_root():
-    cmds = _next_commands(
-        Path("/opt/vigil root"),
-        "https://target.test/?a=1&b=2",
-        "a.test, b.test",
-    )
-    create = next(c for c in cmds if c.startswith("vigil engagement create"))
-    # The `&` and whitespace survive a round-trip through the shell as ONE token
-    # each, instead of splitting/backgrounding the command.
-    assert shlex.split(create) == [
-        "vigil",
-        "engagement",
-        "create",
-        "https://target.test/?a=1&b=2",
-        "--hosts",
-        "a.test, b.test",
-    ]
-    install = next(c for c in cmds if c.startswith("vigil install"))
-    assert shlex.split(install) == ["vigil", "install", "/opt/vigil root"]

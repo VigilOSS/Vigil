@@ -104,7 +104,7 @@ from .orchestrator import (
 )
 from .paths import agent_root, default_runtime_container, engagements_root, resolve_install_root, resolve_source_root, resolve_logs_dir, resolve_runtime_state_dir, resolve_orchestrator_data_dir
 from .preflight import _preflight_engagement_start
-from .quickstart import QuickstartOptions, run_quickstart
+from .host_tools import print_host_tool_setup, setup_host_tools
 from .runtime import RuntimeOptions, vigil_runtime_resources, build_runtime, runtime_status, start_runtime, stop_runtime, warn_if_local_hosts_need_restart
 from .status import collect_doctor_checks, collect_status, print_doctor, print_status
 from .up import UpOptions, run_up
@@ -163,6 +163,16 @@ def _print_post_install(
         state for state in states if state.state == "unknown" and not state.remedy
     ]
     cli_lags = any(state.key == "cli" for state in actionable)
+    docker_keys = {'runtime-image', 'proxy-image', 'runtime-container', 'proxy-container'}
+    docker_unreachable = [state for state in unreachable if state.key in docker_keys]
+    if docker_unreachable:
+        unreachable = [state for state in unreachable if state.key not in docker_keys]
+        reasons = list(dict.fromkeys(state.detail for state in docker_unreachable if state.detail))
+        unreachable.append(restart_manifest.ConsumerState(
+            'docker-tools', 'Docker tools could not be checked', 'unknown', '',
+            '; '.join(reasons) + '. Start or unpause Docker before runtime testing, fuzzing and browser capture.',
+        ))
+
 
     print(file=stream)
     if result.is_upgrade:
@@ -196,6 +206,10 @@ def _print_post_install(
         else:
             print("Upgrade complete. These need attention:", file=stream)
             for state in actionable:
+                if state.key == 'client-sessions':
+                    print(term.row('info', state.detail, stream=stream), file=stream)
+                    print(term.wrap(state.remedy, stream=stream), file=stream)
+                    continue
                 detail = f"{state.remedy}  ({state.detail})" if state.detail else state.remedy
                 print(
                     term.row(
@@ -215,13 +229,14 @@ def _print_post_install(
                     file=stream,
                 )
     else:
-        print("Install complete. Next steps:", file=stream)
-        print(f"  1. Configure tokens and API keys in {root / '.env'}", file=stream)
-        print("  2. Optional OOB: set oob.frp_host, oob.domain, and oob.frp_token", file=stream)
-        print("     (set oob.domain and re-run this command to allocate a relay slot)", file=stream)
-        print("  3. vigil up                      # build/start runtime, orchestrator, and OOB", file=stream)
-        print("  4. vigil engagement create <target>  # create your first engagement", file=stream)
-        print("  5. vigil assess kali --help      # discover target-facing CLI verbs", file=stream)
+        print("Install complete. Start an engagement:", file=stream)
+        print("  Code: vigil engagement create --type code --name acme --source-dir ./acme", file=stream)
+        print("  Web:  vigil engagement create https://app.example.com --hosts app.example.com", file=stream)
+        print("  Then: vigil engagement start <engagement-key> --client claude", file=stream)
+        print(file=stream)
+        print("Sign in to your selected agent client before starting. The backend starts as needed.", file=stream)
+        print("Source review runs on the host. Start Docker before runtime testing or fuzzing.", file=stream)
+        print("Check workspace health: vigil doctor", file=stream)
 
     if cli_lags or not result.is_upgrade:
         print(file=stream)
@@ -333,46 +348,10 @@ def main(argv: list[str] | None = None) -> None:
             "inside legacy physical roster directories without deleting extra files"
         ),
     )
-    quickstart_p = sub.add_parser(
-        "quickstart",
-        help="Check prerequisites and print setup for the selected work and client",
-        description=(
-            "Check prerequisites for the selected engagement type and native client, "
-            "then print an ordered setup checklist. Host-tool installation is "
-            "explicit through --install-host-tools; --dry-run never installs tools."
-        ),
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    quickstart_p.add_argument(
-        "--non-interactive",
-        action="store_true",
-        help="Never prompt; use flags/defaults only (implied when stdin is not a TTY)",
-    )
-    quickstart_p.add_argument(
-        "--yes",
-        dest="assume_yes",
-        action="store_true",
-        help="Assume yes to prompts (e.g. run the host-tool installs without confirmation)",
-    )
-    quickstart_p.add_argument(
-        "--install-host-tools",
-        action="store_true",
-        help="Actually run the host-tool install commands (default: plan/print only)",
-    )
-    quickstart_p.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Plan everything, execute nothing (overrides --install-host-tools)",
-    )
-    quickstart_p.add_argument("--type", dest="engagement_type", choices=("web", "code"), default="web")
-    quickstart_p.add_argument("--client", choices=("claude", "codex", "opencode", "goose", "kimi"), default="claude")
-    quickstart_p.add_argument("--source-dir", type=Path, help="Original source directory for a code audit")
-    quickstart_p.add_argument("--target", help="First engagement target URL/host for the checklist")
-    quickstart_p.add_argument("--hosts", help="In-scope hosts (comma-separated) for the checklist")
-    quickstart_p.add_argument("--json", action="store_true", help="Emit the readiness report as JSON")
-
-    doctor_p = sub.add_parser("doctor")
+    doctor_p = sub.add_parser("doctor", help="Check workspace health and tool availability")
     doctor_p.add_argument("--json", action="store_true")
+    doctor_p.add_argument("--install-host-tools", action="store_true", help="Install missing host recon tools")
+    doctor_p.add_argument("--dry-run", action="store_true", help="Print the host recon install plan without running installers")
     status_p = sub.add_parser("status")
     status_p.add_argument("--json", action="store_true")
     status_p.add_argument(
@@ -1304,13 +1283,10 @@ def main(argv: list[str] | None = None) -> None:
         else:
             _print_post_install(result)
     elif args.command == "doctor":
+        host_tools = setup_host_tools(install=args.install_host_tools, dry_run=args.dry_run) if args.install_host_tools or args.dry_run else None
         checks = collect_doctor_checks(install_root, runner=docker_run_command)
-        # FAIL gates, and so does a MISSING row the collector marked required.
-        # `MISSING` alone cannot decide it: an unset `oob.frp_token` and an
-        # absent Docker CLI carry the same status, and only one of them is a
-        # legitimate steady state. Treating every MISSING as advisory made
-        # `vigil doctor` exit 0 and report `"ok": true` on a host with no Docker
-        # at all — the same dishonesty as the earlier exit-0-on-FAIL.
+        # Required workspace/backend failures gate health; unavailable optional
+        # capabilities (Docker, host recon, OOB) report their own requirements.
         failed = [
             check
             for check in checks
@@ -1320,7 +1296,8 @@ def main(argv: list[str] | None = None) -> None:
             print(
                 json.dumps(
                     {
-                        "ok": not failed,
+                        "ok": not failed and (host_tools is None or bool(host_tools["ok"])),
+                        **({"host_tools": host_tools} if host_tools is not None else {}),
                         "checks": [
                             {
                                 "name": c.name,
@@ -1336,7 +1313,9 @@ def main(argv: list[str] | None = None) -> None:
             )
         else:
             print_doctor(checks)
-        if failed:
+            if host_tools is not None:
+                print_host_tool_setup(host_tools)
+        if failed or (host_tools is not None and not host_tools["ok"]):
             if not args.json:
                 print(
                     "[vigil] not ready: "
@@ -1360,24 +1339,6 @@ def main(argv: list[str] | None = None) -> None:
             )
         ):
             raise SystemExit(1)
-    elif args.command == "quickstart":
-        exit_code = run_quickstart(
-            QuickstartOptions(
-                install_root=install_root,
-                non_interactive=args.non_interactive,
-                assume_yes=args.assume_yes,
-                install_host_tools=args.install_host_tools,
-                dry_run=args.dry_run,
-                json_output=args.json,
-                target=args.target,
-                hosts=args.hosts,
-                engagement_type=args.engagement_type,
-                client=args.client,
-                source_dir=args.source_dir,
-            )
-        )
-        if exit_code:
-            raise SystemExit(exit_code)
     elif args.command == "up":
         if args.yes_restart_runtime and args.no_restart_runtime:
             raise SystemExit("Specify only one of --yes-restart-runtime or --no-restart-runtime.")

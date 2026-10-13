@@ -188,11 +188,12 @@ def test_doctor_uses_release_assets_and_private_workspace_state(tmp_path, monkey
     assert "npm" not in rows
 
 
-def test_quickstart_does_not_require_git_or_node_for_release_consumers():
-    from vigil_cli.quickstart import prerequisite_status
-
-    rows = prerequisite_status(which=lambda _: None)
-    assert {row.binary for row in rows} == {"uv", "docker", "go"}
+def test_release_health_checks_work_without_git_or_node(tmp_path, monkeypatch):
+    from vigil_cli import status
+    monkeypatch.setattr(status, '_binary_check', lambda name: status.Check(name, 'MISSING'))
+    rows = {row.name: row for row in status.collect_doctor_checks(tmp_path)}
+    assert rows['application'].status == 'OK'
+    assert rows['uv'].required is True
 
 
 def test_automatic_initialization_is_current_without_legacy_install_stamp(tmp_path, monkeypatch):

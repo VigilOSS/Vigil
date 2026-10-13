@@ -254,7 +254,9 @@ Every code analysis dispatch must include:
   code specialists with `vigil assess agent start --code-repo-id <id>` (the flag is optional only
   when exactly one active repository exists) and copy the backend-derived block printed immediately
   after Runtime Identity; do not rebuild its generation, digest, snapshot, index, or ctags paths
-  from memory.
+  from memory. For proof work, `proof-work claim` renders and persists the same source block
+  inside its returned `prompt_packet`; pass that packet to the specialist without a separate
+  `agent start` call.
 - A **Structural Coverage Debt** block when any scoped file artifact is degraded, unsupported, or
   truncated, using the exact top-of-dispatch shape below — inline per file, or above 25 files the
   ledger form defined there
@@ -463,14 +465,19 @@ The current operator owns this work. Use `vigil assess contract proof-work` to i
 claim, and reconcile durable proof work; the backend owns payloads, currentness, approval, and
 ownership. Launch only when a successful claim returns `launch_required: true`; a replay
 requires inspecting the existing owner/run, not another native spawn. Launch the fresh specialist
-from the current native client with its claimed task,
-existing proof/run references, and explicit `proof_route: code` or `proof_route: web`. Copy the
-returned `authorized_phase` into Runtime Identity rather than using this lead's campaign phase:
+from the current native client using the returned `prompt_packet.rendered_prompt`, which carries
+the claimed identity, source context, and explicit route. Supply the canonical dispatch context
+and traffic budget when claiming; include existing proof/run references there. The backend-selected
+`authorized_phase` in that packet follows the proof route rather than this lead's campaign phase:
 `code-verify` for local proof, `exploit` for web proof. The route
 selects exactly one constraint bundle; Code Source Identity in a web task is evidence rather than
 a switch to code methodology. Challenge the candidate claim instead of defending it. Preparation
 or dispatch never confirms a finding or advances a phase. Record the actual proof receipt and
 verification disposition through their existing contracts.
+
+Do not execute claimed specialist work in the operator context. Dispatch the returned prompt
+through the native client's specialist mechanism and bind its client handle when the client
+exposes one; a durable dispatch row alone cannot establish that a separate model context ran.
 
 Keep blocked proof visible with the exact missing prerequisite and useful next test while other
 investigation continues. Inspect/reconcile existing ownership and live jobs before redispatching

@@ -5,19 +5,21 @@ Install detail behind the README [Quick start](../README.md#quick-start).
 ## Install
 
 Install the versioned wheel from the
-[GitHub release](https://github.com/VigilOSS/Vigil/releases/tag/v1.2.6), check the host, and
-initialize your workspace:
+[GitHub release](https://github.com/VigilOSS/Vigil/releases/tag/v1.2.6), then initialize your
+workspace:
 
 ```bash
 uv tool install --from https://github.com/VigilOSS/Vigil/releases/download/v1.2.6/vigil-1.2.6-py3-none-any.whl vigil
-vigil quickstart --type code --client codex
 vigil install
 ```
 
 The release includes the CLI, backend, prompts, schemas, Docker definitions, documentation,
 legal files, and prebuilt frontend and report. It needs neither Git nor Node. The selected engagement starts the managed backend as needed, with its UI at
-`http://127.0.0.1:18000`. Static code review needs no Docker. Audited target execution starts
-Kali on first use, so Docker must be running then. Capture is optional: use
+`http://127.0.0.1:18000`. Source intake, indexing, and source investigation run on the host without Docker.
+Compiling or running target code, runtime reproduction, and fuzzing need Docker. The first
+audited command that needs Kali asks Vigil to prepare its image and start the container;
+start Docker first. If the release includes a matching image pin, Vigil pulls it; otherwise it builds locally.
+The initial pull or build can take time and prints progress. Capture is optional: use
 `vigil mitmproxy start`, or `vigil up` to start the full stack explicitly.
 
 Backend startup allows up to 600 seconds for health and readiness together. Upgrades can
@@ -37,9 +39,13 @@ The same setting applies when engagement startup recovers the managed backend.
 - **For development:** run `uv tool install --editable .` in a source checkout; the checkout
   supplies the application assets.
 
-`vigil quickstart` changes nothing unless you pass `--install-host-tools`; `--json` prints a
-machine-readable readiness report. Select `--type web` for the web prerequisites; choose your
-native client with `--client`. Code onboarding also accepts `--source-dir ./acme`.
+Start your first engagement with the three commands in the README:
+`vigil install`, `vigil engagement create`, and `vigil engagement start`.
+Sign in to your selected native client first; API keys are only needed for a provider path
+that uses them. `vigil doctor` checks workspace health and reports missing tools.
+To preview optional host recon installation, run `vigil doctor --dry-run`; to install the
+missing tools, run `vigil doctor --install-host-tools`. `--json` emits a machine-readable
+report, and combining `--dry-run` with `--install-host-tools` never runs installers.
 
 ## Runtime delivery
 
@@ -62,10 +68,13 @@ of silently replacing the release image with a different build.
    explicit maintenance flags repair them.
 3. Restart what `vigil status` or `vigil doctor` reports as stale.
 
-Running services and client sessions keep their original release until restarted, and new
-sessions use the current one. Starting a session refreshes that engagement's generated
-entrypoints, so end any official client process on that engagement from the previous release
-first. Freshness compares content digests, never timestamps; see
+Running services and client sessions keep their loaded release until restarted. You can
+finish work in an open client while updating Vigil. To use updated prompts and helpers,
+save a handoff, exit that client, then start the engagement again. Starting it refreshes
+its generated client files; those files stay protected while another release uses them.
+Pausing a client during a backend restart avoids requests during downtime, but does not
+replace its inherited helper paths or instructions already in the conversation.
+Freshness compares content digests, never timestamps; see
 [`install-integrity.md`](install-integrity.md).
 
 The frontend and report ship prebuilt. `vigil orchestrator build` reports their installed state;
@@ -108,7 +117,7 @@ and wedges the VM.
 
 On native Linux or a remote Docker host everything runs in-container and the host tools are
 optional. On Docker Desktop, `vigil assess recon` and `--runtime host` require them: a missing
-binary fails the preflight instead of silently degrading. `vigil quickstart --install-host-tools`
+binary fails the preflight instead of silently degrading. `vigil doctor --install-host-tools`
 installs them, `vigil doctor` reports what is missing in its `host-recon-tools` row, and
 `$(go env GOPATH)/bin` must be on your `PATH`.
 
@@ -127,8 +136,8 @@ go install github.com/projectdiscovery/alterx/cmd/alterx@v0.1.0
 ## ripgrep for code engagements
 
 Install ripgrep (`rg`) before a code engagement. It is the code track's main search tool after
-the ctags index and ships only in the runtime image, which code analysis does not use. Claude
-and opencode bundle their own search, but Codex and goose specialists have only a shell: without
+the ctags index. The runtime image has its own copy, but host-side source investigation
+needs a host copy. Claude and opencode bundle their own search, but Codex and goose specialists have only a shell: without
 `rg`, their searches exit 127 and read as "no results". `vigil doctor` reports it and
 `vigil engagement start` warns; neither blocks.
 

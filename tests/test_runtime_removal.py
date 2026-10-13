@@ -14,6 +14,14 @@ def test_stop_runtime_reports_failed_removal():
         runtime.stop_runtime('vigil', runner=runner)
 
 
+def test_runtime_start_preserves_paused_daemon_detail_and_explains_retry(tmp_path, monkeypatch):
+    monkeypatch.setattr(runtime.docker, 'daemon_status', lambda **kw: docker.DaemonStatus(False, False, 'Docker Desktop is paused'))
+    with pytest.raises(SystemExit) as error:
+        runtime.start_runtime(runtime.RuntimeOptions(install_root=tmp_path))
+    assert 'Docker Desktop is paused' in str(error.value)
+    assert 'unpause Docker' in str(error.value)
+
+
 def test_runtime_recreation_stops_before_start_when_removal_fails(tmp_path, monkeypatch):
     from vigil_cli import runtime_images
 

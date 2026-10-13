@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from platform import system as platform_system
 import shutil
 import sqlite3
 import subprocess
@@ -550,15 +551,16 @@ _RIPGREP_DEGRADATION = (
 def collect_doctor_checks(install_root: Path, *, runner: docker.Runner = docker.run_command) -> list[Check]:
     checks: list[Check] = []
     binary_status: dict[str, str] = {}
-    for command in ("uv", "docker", "codex", "claude", "fzf", "rg"):
+    for command in ("uv", "docker", "go", "codex", "claude", "fzf", "rg"):
         check = _binary_check(command)
-        # Docker alone is required: every runtime, orchestrator, and proxy path
-        # goes through it. The client binaries are not — Vigil supports five and
-        # an operator needs one — and `uv`/`npm` are build-time tools an install
-        # can already have run. `rg` is advisory for the same reason `fzf` is:
-        # useful, not universally installed, and not needed by a web engagement.
-        if command in {"uv", "docker"} and check.status != "OK":
+        # uv runs the managed backend. Docker is a capability prerequisite for
+        # target execution, not for starting source investigation on the host.
+        if command == "uv" and check.status != "OK":
             check = replace(check, required=True)
+        elif command == "docker" and check.status != "OK":
+            check = replace(check, status="WARN" if check.status == "FAIL" else check.status, detail="needed for target execution, runtime reproduction, fuzzing and capture; source investigation can start without it")
+        elif command == "go" and check.status != "OK":
+            check = replace(check, status="WARN" if check.status == "FAIL" else check.status, detail="needed only for host recon tool installation; install Go before `vigil doctor --install-host-tools`")
         elif command == "rg" and check.status != "OK":
             check = replace(check, detail=_RIPGREP_DEGRADATION)
         checks.append(check)
@@ -608,7 +610,7 @@ def collect_doctor_checks(install_root: Path, *, runner: docker.Runner = docker.
     checks.append(Check("backend-data", "OK" if data_dir.is_dir() else "MISSING"))
     checks.append(_database_check(data_dir / "orchestrator.sqlite3"))
     if binary_status.get("docker") == "OK":
-        checks.append(Check("docker-daemon", "OK" if docker.daemon_available(runner=runner) else "FAIL"))
+        checks.append(Check("docker-daemon", "OK" if docker.daemon_available(runner=runner) else "WARN", "needed for runtime testing and capture; start or unpause Docker before that work"))
         checks.append(Check("runtime-image", "OK" if docker.image_exists("vigil:latest", runner=runner) else "MISSING"))
         checks.append(Check("mitmproxy-image", "OK" if docker.image_exists("vigil-proxy:latest", runner=runner) else "MISSING"))
         # Drift only exists for a running container; a stopped/absent proxy is
@@ -732,18 +734,20 @@ def _host_recon_tools_check() -> Check:
     needs on macOS Docker Desktop (DNS-heavy + bulk-liveness; I-001). WARN-only —
     they are unneeded on native Linux / remote Docker, and the recon job's
     enforce-preflight is the hard gate at run time."""
-    from .runtime import host_recon_tool_status, missing_essential_host_tools
+    from .runtime import host_recon_tool_status
 
     statuses = host_recon_tool_status()
-    missing_essential = missing_essential_host_tools()
+    missing_essential = [tool.binary for tool, present in statuses if tool.essential and not present]
+    present = [tool.binary for tool, found in statuses if found]
     if missing_essential:
+        optional = platform_system() not in {"Darwin", "Windows"}
         return Check(
-            "host-recon-tools", "WARN",
+            "host-recon-tools", "OPTIONAL" if optional else "WARN",
             "missing " + ", ".join(missing_essential)
-            + " — see docs/installation.md 'Host recon tools on Docker Desktop' for install commands "
-            "(needed for --runtime host on Docker Desktop)",
+            + ("; host recon tools are optional on native Linux / remote Docker"
+               if optional else "; needed for host recon on Docker Desktop")
+            + "; install with `vigil doctor --install-host-tools`",
         )
-    present = [t.binary for t, present in statuses if present]
     return Check("host-recon-tools", "OK", "present: " + ", ".join(present))
 
 
@@ -751,7 +755,8 @@ def _binary_check(command: str) -> Check:
     if shutil.which(command) is None:
         return Check(command, "MISSING")
     try:
-        result = subprocess.run([command, "--version"], text=True, capture_output=True, check=False)
+        version_argv = [command, "version"] if command == "go" else [command, "--version"]
+        result = subprocess.run(version_argv, text=True, capture_output=True, check=False)
     except FileNotFoundError:
         return Check(command, "MISSING")
     return Check(command, "OK" if result.returncode == 0 else "FAIL")

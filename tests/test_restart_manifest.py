@@ -596,8 +596,8 @@ def test_post_install_does_not_call_an_unchecked_consumer_current() -> None:
 
     assert "nothing to restart" not in text.lower()
     assert "Docker daemon is not responding" in text
-    for label in ("Kali runtime image", "mitmproxy image", "Kali runtime container"):
-        assert label in text, f"{label} was checked-but-unreachable and must be named"
+    assert 'runtime testing, fuzzing and browser capture' in text
+    assert 'Docker tools could not be checked' in text
     # The one consumer we DID clear must not be reported as uncertain.
     assert "orchestrator backend" not in text
 
@@ -1567,3 +1567,16 @@ def test_the_pinned_reinstall_remedy_is_a_command_the_cli_actually_accepts(
     main_module.main()
 
     assert seen == [named], "the remedy must reinstall from the checkout it names"
+
+
+def test_post_install_groups_unavailable_docker_capabilities():
+    states = [
+        _undetermined('runtime-image', 'Kali runtime image'),
+        _undetermined('runtime-container', 'Kali runtime container'),
+        _undetermined('proxy-image', 'mitmproxy image'),
+        _undetermined('proxy-container', 'mitmproxy container'),
+    ]
+    text = _post_install_output(states, tty=False)
+    assert text.count('Docker daemon is not responding') == 1
+    assert 'runtime testing, fuzzing and browser capture' in text
+    assert 'Start or unpause Docker' in text

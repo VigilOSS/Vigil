@@ -289,9 +289,8 @@ def test_blocked_finding_absent_from_both_report_modes(client, isolate_settings)
 
 
 def test_resume_brief_finding_summary_projects_block_reason(client, isolate_settings):
-    # A blocked-for-provisioning finding is verified (leaves the unreviewed
-    # queue) but held out of the report, so it renders in the brief as a bare
-    # active/verified line. build_resume_brief must project block_reason so the
+    # A blocked-for-provisioning finding leaves the unreviewed queue but still
+    # awaits the missing prerequisite. Its active summary must carry the reason so the
     # CLI can render "BLOCKED: ..." without the operator opening the finding.
     _seed(client, isolate_settings)
     _create_finding(client, "VA-030")
@@ -305,9 +304,10 @@ def test_resume_brief_finding_summary_projects_block_reason(client, isolate_sett
     ).status_code == 200
 
     brief = client.get(f"{BASE}/resume-brief").json()
-    verified = {row["slug"]: row for row in brief["findings"]["verified"]}
-    assert "VA-030" in verified
-    assert verified["VA-030"]["block_reason"] == "no finance-admin account provisioned"
+    active = {row["slug"]: row for row in brief["findings"]["active"]}
+    assert active["VA-030"]["verification_status"] == "blocked"
+    assert active["VA-030"]["block_reason"] == "no finance-admin account provisioned"
+    assert "VA-030" not in {row["slug"] for row in brief["findings"]["verified"]}
 
 
 def test_resume_brief_finding_summary_block_reason_empty_for_normal_finding(client, isolate_settings):

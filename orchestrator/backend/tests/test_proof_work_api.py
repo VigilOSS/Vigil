@@ -43,7 +43,21 @@ def claim(client, work, agent='PROOF-1'):
     return client.post(f'{BASE}/proof-work/{work["id"]}/claim', json={
         'agent_id': agent, 'agent_role': 'exploit-developer',
         'task': 'Challenge the hypothesis using the prepared route',
+        'prompt_packet': {
+            'schema': 'dispatch-prompt/v1',
+            'context': {'authorized_phase': work['authorized_phase']},
+            'rendered_prompt': f'Proof assignment for {work["id"]}',
+        },
     })
+
+
+def test_prepare_rejects_an_objective_larger_than_dispatch_task(client, isolate_settings):
+    seed(client, isolate_settings)
+    response = client.post(f'{BASE}/proof-work', json={
+        'finding_slug': 'VA-050', 'route': 'code', 'objective': 'x' * 4097,
+        'target_hosts': [],
+    })
+    assert response.status_code == 422
 
 
 def bind_source_candidate():

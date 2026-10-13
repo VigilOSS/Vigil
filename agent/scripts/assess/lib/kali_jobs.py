@@ -424,8 +424,11 @@ def start_job(
                 current_agent=str(audit_meta.get("agent_name") or "operator"),
             )
 
-        if not _container_running(container_name):
-            _check_container_running(container_name)
+        # The common gate starts a stopped managed runtime and also validates
+        # that an already-running global container belongs to this install.
+        # A liveness-only shortcut can reuse another install's /engagements
+        # mount and launch a detached job into the wrong workspace.
+        _check_container_running(container_name)
         _check_dtach_in_container(container_name)
         _ensure_dtach_dir(container_name, dtach_socket_dir)
 

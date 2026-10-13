@@ -35,6 +35,11 @@ from assess.lib import kali_jobs
 from assess.lib.client import AssessError
 
 
+@pytest.fixture(autouse=True)
+def _managed_runtime_ready(monkeypatch):
+    monkeypatch.setattr(kali_jobs, "_check_container_running", lambda *_: None)
+
+
 # --------------------------------------------------------------------------- #
 # Helpers
 # --------------------------------------------------------------------------- #
@@ -162,6 +167,35 @@ def test_start_job_wrapper_and_started_at(monkeypatch, tmp_path):
     running_patches = [p for _, p in fake.patches if p.get("status") == "running"]
     assert running_patches, "expected a running PATCH"
     assert running_patches[-1].get("started_at"), "running PATCH must stamp started_at"
+
+
+def test_start_job_validates_an_already_running_managed_runtime(monkeypatch, tmp_path):
+    fake = FakeClient(post_value={"id": 7})
+    validated = []
+    monkeypatch.setattr(kali_jobs, "_container_running", lambda *a, **k: True)
+    monkeypatch.setattr(
+        kali_jobs,
+        "_check_container_running",
+        lambda container_name: validated.append(container_name),
+    )
+    monkeypatch.setattr(kali_jobs, "_check_dtach_in_container", lambda *a, **k: None)
+    monkeypatch.setattr(kali_jobs, "_ensure_dtach_dir", lambda *a, **k: None)
+    monkeypatch.setattr(kali_jobs, "AssessmentClient", lambda *a, **k: fake)
+    monkeypatch.setattr(
+        kali_jobs.subprocess,
+        "run",
+        lambda *a, **k: SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+
+    kali_jobs.start_job(
+        ["echo", "hi"],
+        audit_meta={"technique": "RECON"},
+        engagement_dir=tmp_path,
+        container_name="vigil",
+        config=_cfg(tmp_path),
+    )
+
+    assert validated == ["vigil"]
 
 
 def test_start_job_emits_nonblocking_recency_advisory_before_dtach(

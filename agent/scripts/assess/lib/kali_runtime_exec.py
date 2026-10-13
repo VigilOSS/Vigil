@@ -16,6 +16,24 @@ from contextlib import redirect_stdout
 from .client import AssessError, default_runtime_container
 
 
+_validated_managed_runtimes: set[tuple[str, str]] = set()
+
+
+def _container_identity(container_name: str) -> str:
+    """Return the current container instance ID, or an empty string if unknown."""
+    try:
+        result = subprocess.run(
+            ["docker", "inspect", "-f", "{{.Id}}", container_name],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return ""
+    return (result.stdout or "").strip() if result.returncode == 0 else ""
+
+
 def _container_pid_file(run_uuid: str) -> str:
     """Path inside the container where the wrapper shell records the user
     command's PID. Sharing the engagement-wide ``run_uuid`` here means the
@@ -243,23 +261,51 @@ def _check_container_running(container_name: str) -> None:
             timeout=5,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-        raise AssessError(f"docker not reachable: {exc}") from exc
+        raise AssessError(
+            f"Docker is unavailable: {exc}\n"
+            "Start or unpause Docker, then retry this command. Vigil prepares the testing environment automatically."
+        ) from exc
     if result.returncode != 0:
-        raise AssessError(f"docker ps failed: {result.stderr.strip() or result.stdout.strip()}")
-    if container_name not in (result.stdout or "").splitlines():
-        if container_name != default_runtime_container():
+        raise AssessError(
+            f"Docker is unavailable: {result.stderr.strip() or result.stdout.strip()}\n"
+            "Start or unpause Docker, then retry this command. Vigil prepares the testing environment automatically."
+        )
+    running = container_name in (result.stdout or "").splitlines()
+    if container_name != default_runtime_container():
+        if not running:
             raise AssessError(f"external runtime container '{container_name}' is not running; start it explicitly")
-        try:
-            from vigil_cli.paths import resolve_install_root
-            from vigil_cli.runtime import RuntimeOptions, start_runtime
-        except ImportError as exc:
-            raise AssessError("Managed runtime startup needs the matched Vigil CLI; run `vigil runtime start`.") from exc
+        return
+
+    try:
+        from vigil_cli.paths import resolve_install_root
+        from vigil_cli.runtime import RuntimeOptions, start_runtime
+    except ImportError as exc:
+        raise AssessError("Managed runtime startup needs the matched Vigil CLI; run `vigil runtime start`.") from exc
+
+    install_root = resolve_install_root()
+    install_identity = str(install_root.expanduser().resolve())
+    container_identity = _container_identity(container_name) if running else ""
+    validation_key = (container_identity, install_identity)
+    if not running or not container_identity or validation_key not in _validated_managed_runtimes:
         try:
             # Reuse the canonical startup path and its process lock. Existing
             # jobs own their detached supervisors, independent of this client.
+            # Even an already-running managed container goes through this path:
+            # its global name can belong to another Vigil install, whose
+            # /engagements bind mount cannot execute this engagement.
+            if not running:
+                print('Preparing the testing environment...', file=sys.stderr, flush=True)
             with redirect_stdout(sys.stderr):
-                start_runtime(RuntimeOptions(install_root=resolve_install_root(), container_name=container_name), allow_existing=True)
+                start_runtime(
+                    RuntimeOptions(install_root=install_root, container_name=container_name),
+                    allow_existing=True,
+                )
         except (OSError, SystemExit) as exc:
             raise AssessError(f"Could not start managed runtime '{container_name}': {exc}") from exc
         if not _container_running(container_name):
             raise AssessError(f"managed runtime '{container_name}' did not become ready")
+        container_identity = _container_identity(container_name)
+        if container_identity:
+            _validated_managed_runtimes.add((container_identity, install_identity))
+        if not running:
+            print('Testing environment ready.', file=sys.stderr, flush=True)

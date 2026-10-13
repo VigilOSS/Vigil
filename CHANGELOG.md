@@ -762,8 +762,8 @@ described here.
   anywhere in the UI — so the activity log an engagement's audit trail depends on, and the
   session-end receipt, were silently absent. Generated Codex launchers now vouch for the hooks Vigil
   itself wrote.
-- **`vigil quickstart` no longer reports `[ok] docker`** on a host with the client binary and no
-  running daemon; it shares `vigil doctor`'s daemon probe.
+- **`vigil doctor` checks the Docker daemon**, rather than treating the client binary alone
+  as a usable runtime.
 - **A relay slot is allocated whenever OOB is configured**, not only by the install that first
   creates the root. Configuring `oob.domain` after installing and re-running `vigil install` now
   reserves a dedicated slot instead of pinning the globally shared legacy route.

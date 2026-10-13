@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import json
 import re
+import sys
+from functools import partial
 from pathlib import Path
 
 from . import docker, image_freshness
@@ -45,7 +47,7 @@ def ensure_runtime_image(
     *,
     image: str = 'vigil:latest',
     runner: docker.Runner = docker.run_command,
-    build_runner: docker.Runner = docker.run_command_streaming,
+    build_runner: docker.Runner = partial(docker.run_command_streaming, stderr_output=True),
 ) -> None:
     """Pull an exact matching release or build the editable runtime locally."""
     with service_start_lock(f"runtime-image:{image}"):
@@ -61,9 +63,11 @@ def ensure_runtime_image(
         if runtime_image_build_state(install_root, image=image, runner=runner) == 'current':
             return
         if pin is None or pin['inputs_digest'] != current_digest:
+            print('Building the testing runtime image; initial setup may take several minutes.', file=sys.stderr, flush=True)
             build_runtime(install_root, runner=build_runner, daemon_runner=runner)
             return
         reference = pin['reference']
+        print('Pulling the testing runtime image; initial setup may take several minutes.', file=sys.stderr, flush=True)
         pulled = build_runner(['docker', 'pull', reference])
         if pulled.returncode:
             raise SystemExit(

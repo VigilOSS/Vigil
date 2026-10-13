@@ -50,9 +50,8 @@ def _finding_summary(row: Any) -> dict[str, Any]:
         "evidence_ref": row["evidence_ref"] or "",
         "chain_required": bool(details.get("chain_required")),
         "chain_rationale": str(details.get("chain_rationale") or "")[:500],
-        # Blocked-for-provisioning marker: a disposition='blocked' finding is held
-        # OUT of the report and otherwise renders in the brief as a bare
-        # active/verified line, so surface WHY it stalled via the required
+        # A blocked-for-provisioning finding is held out of the report. Surface
+        # WHY it stalled on the active summary via the required
         # block_reason. Empty for non-blocked findings; bounded so the brief stays
         # compact. Rendered by resume_brief._finding_line via the shared
         # finding_render.blocked_reason_summary helper. The compact projection

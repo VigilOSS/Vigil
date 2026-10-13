@@ -828,16 +828,18 @@ def client_sessions_state(install_root: Path) -> ConsumerState:
     if not older:
         return ConsumerState("client-sessions", "client sessions", "current", "", f"{len(sessions)} live session(s) use the current application")
     detail = "; ".join(
-        f"{Path(session['engagement']).name}: release={session['application']['version']} pid={session['pid']}"
+        f"{session.get('client') or 'client'} is still open for {Path(session['engagement']).name} "
+        f"(current prompts and helpers retained; release={session['application']['version']} pid={session['pid']})"
         for session in older
     )
     commands = [shlex.join([
         "vigil", "engagement", "start", Path(session["engagement"]).name,
-        "--client", str(session.get("client") or "claude"),
+        "--client", str(session.get("client") or "unknown"),
         "--mode", str(session.get("mode") or "web"), "--root", str(install_root),
     ]) for session in older]
     return ConsumerState("client-sessions", "client sessions", "stale",
-                         "End the listed sessions, then " + "; ".join(commands), detail)
+                         "These sessions can continue. When ready to use the updated prompts and helpers, "
+                         "save a handoff, exit the listed clients, then start again: " + "; ".join(commands), detail)
 
 
 def consumer_states(
@@ -867,7 +869,8 @@ def consumer_states(
     # One probe up front rather than eleven bounded queries that each wait out
     # the daemon timeout, and — the reason it is here rather than an
     # optimisation — the only thing that separates "no image" from "no answer".
-    docker_ok = docker.daemon_available(runner=runner)
+    docker_health = docker.daemon_status(runner=runner)
+    docker_ok = docker_health.responsive
     # Resolved ONCE, then handed to every consumer that compares against a
     # checkout or names one in a command. Each such consumer used to rediscover
     # its own, so one summary could judge the CLI against the installed source
@@ -877,7 +880,7 @@ def consumer_states(
         source_root if source_root is not None else _resolve_source_root_offline(install_root)
     )
     cli = cli_state(source_root=resolved_source)
-    return [
+    states = [
         cli,
         _backend_state(install_root),
         _frontend_state(application_root),
@@ -893,3 +896,11 @@ def consumer_states(
         client_sessions_state(install_root),
         _agent_tree_state(install_root, source_root=resolved_source),
     ]
+    if not docker_ok and docker_health.detail:
+        states = [
+            ConsumerState(state.key, state.label, state.state, state.remedy, "Docker daemon: " + docker_health.detail)
+            if state.key in {'runtime-image', 'proxy-image', 'runtime-container', 'proxy-container'}
+            and state.state == 'unknown' else state
+            for state in states
+        ]
+    return states

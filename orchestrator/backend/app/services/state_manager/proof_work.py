@@ -214,6 +214,8 @@ def claim_proof_work(engagement_id: int, work_id: int, *, dispatch: dict) -> dic
         allowed_roles = {'exploit-developer', 'code-vuln-verifier' if work['route'] == 'code' else 'vulnerability-analyst'}
         if dispatch['agent_role'] not in allowed_roles:
             _fail('Proof work requires an appropriate verifier specialist role', 400)
+        if not dispatch.get('prompt_packet'):
+            _fail('Proof work requires the canonical rendered dispatch prompt packet', 400)
         if work['approval_required']:
             _fail('Live proof approval required for this exact work or existing selected scope')
         author = json.loads(_finding(connection, engagement_id, work['finding_slug'])['provenance_json']).get('agent_id')
@@ -239,7 +241,11 @@ def claim_proof_work(engagement_id: int, work_id: int, *, dispatch: dict) -> dic
         connection.execute('UPDATE assessment_proof_work SET owner_dispatch_id=?,status=\'claimed\', '
                            'updated_at=CURRENT_TIMESTAMP WHERE id=?', (created['id'], work_id))
         _event(connection, work_id, 'claimed', {'dispatch_id': created['id'], 'agent_id': dispatch['agent_id']})
-        return {**_serialize(connection, engagement_id, _row(connection, engagement_id, work_id)), 'launch_required': True}
+        return {
+            **_serialize(connection, engagement_id, _row(connection, engagement_id, work_id)),
+            'launch_required': True,
+            'prompt_packet': created['prompt_packet'],
+        }
 
 
 def update_proof_work(engagement_id: int, work_id: int, *, agent_id: str,

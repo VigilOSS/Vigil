@@ -106,7 +106,6 @@ Static investigation needs `uv`, your agent client, and host-side ripgrep (`rg`)
 start source review before building Kali or setting up browser capture.
 
 ```bash
-vigil quickstart --type code --client codex
 vigil install
 vigil engagement create --type code --name acme --source-dir ./acme --no-prompt
 vigil engagement start <engagement-key> --mode code --client codex
@@ -118,16 +117,17 @@ creating one sealed audit copy directly from it. The original stays untouched; l
 work and Git history is optional. You can also create without `--source-dir` and put files
 in the printed `source/` folder. Refreshing a snapshot requires another confirmation.
 
-Starting the engagement brings up the managed backend when needed. Static review does not
-need Docker. The first audited build, runtime test, or fuzz job starts Kali if it is stopped;
-start Docker before that work. See [code analysis](docs/code-analysis.md).
+Starting the engagement brings up Vigil's backend on the host when needed. Source intake,
+indexing, and source investigation run without Docker. Start Docker before compiling or
+running target code, reproducing a bug, or fuzzing. Vigil prepares and starts Kali when an
+audited command first needs it. If the release includes a matching image pin, Vigil pulls it; otherwise it builds
+locally, which can take time on first use. See [code analysis](docs/code-analysis.md).
 
 ### Test a live application
 
-Start Docker, check the selected client and host requirements, then create the engagement:
+Start Docker, then create the engagement:
 
 ```bash
-vigil quickstart --type web --client codex
 vigil install
 vigil engagement create https://app.example.com --hosts app.example.com
 vigil engagement start <engagement-key> --mode web --client codex
@@ -138,7 +138,7 @@ Replace the example with your authorized target. Review `scope.json` and tell th
 the allowed work, exclusions, accounts, and program rules. Exploit work waits for approval
 by default. Already admitted hosts carry across sessions. New roots still need admission.
 On Docker Desktop, broad DNS and liveness recon also needs host tools;
-`vigil quickstart --type web --install-host-tools` installs them. See [installation](docs/installation.md).
+`vigil doctor --install-host-tools` installs missing tools. See [installation](docs/installation.md).
 
 Kali starts when an audited command needs it. A release with a pinned runtime pulls the
 matching image; a source checkout builds locally. `vigil up` explicitly starts the full

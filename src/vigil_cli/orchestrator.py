@@ -13,7 +13,7 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import restart_manifest
+from . import restart_manifest, term
 from .application import application_root_for_workspace
 from .paths import engagements_root, resolve_logs_dir, resolve_orchestrator_data_dir, resolve_runtime_state_dir
 from .workspace import workspace_path
@@ -94,17 +94,16 @@ def _start_orchestrator_locked(options: OrchestratorOptions) -> None:
     runtime_dir.joinpath("pids").mkdir(parents=True, exist_ok=True)
     log_file.parent.mkdir(parents=True, exist_ok=True)
 
+    print(term.paint("Starting Vigil", "bold", stream=sys.stdout), flush=True)
     if _frontend_build_needed(application_root, force=options.build):
-        print("frontend\tbuilding")
+        print(term.row("info", "Web interface", "building", stream=sys.stdout), flush=True)
         _build_frontend(application_root)
-    else:
-        print("frontend\tcurrent")
+    print(term.row("ok", "Web interface", "ready", stream=sys.stdout), flush=True)
 
     if _report_build_needed(application_root, force=options.build):
-        print("report\tbuilding")
+        print(term.row("info", "Report renderer", "building", stream=sys.stdout), flush=True)
         _build_report(application_root)
-    else:
-        print("report\tcurrent")
+    print(term.row("ok", "Report renderer", "ready", stream=sys.stdout), flush=True)
 
     if _pid_running(pid_file):
         pid = pid_file.read_text(encoding="utf-8").strip()
@@ -154,13 +153,7 @@ def _start_orchestrator_locked(options: OrchestratorOptions) -> None:
     if options.foreground:
         os.chdir(application_root)
         os.execvpe("uv", argv, env)
-    print(f"orchestrator\tstarting\thost={options.host}\tport={options.port}")
-    print(
-        f"orchestrator\tstartup budget={startup_timeout:g}s; database backups and migrations can take minutes. "
-        f"Progress: vigil logs orchestrator ({log_file}). "
-        f"Set {START_TIMEOUT_ENV} to adjust the deadline.",
-        flush=True,
-    )
+    print(term.row("info", "Backend", "starting", stream=sys.stdout), flush=True)
     with log_file.open("ab") as log, open(os.devnull, "rb") as stdin:
         process = subprocess.Popen(
             argv,
@@ -190,10 +183,9 @@ def _start_orchestrator_locked(options: OrchestratorOptions) -> None:
             f"within the {startup_timeout:g}s startup budget (see {log_file}). "
             f"Inspect the log before retrying with a larger {START_TIMEOUT_ENV}."
         )
-    print(
-        f"orchestrator\trunning\thealthy=True\tpid={process.pid}\t"
-        f"url=http://{options.host}:{options.port}"
-    )
+    print(term.row("ok", "Backend", "ready", stream=sys.stdout))
+    print(f"\nVigil is ready: http://{options.host}:{options.port}")
+    print("Logs: vigil logs orchestrator")
 
 
 def _backend_environment(workspace: Path, application_root: Path) -> Path:
@@ -208,7 +200,7 @@ def _backend_environment(workspace: Path, application_root: Path) -> Path:
 def _sync_backend_environment(application_root: Path, *, env: dict[str, str], log_file: Path) -> None:
     """Provision only locked dependencies outside the immutable application."""
     environment = env["UV_PROJECT_ENVIRONMENT"]
-    print(f"backend\tsynchronizing dependencies\tenvironment={environment}", flush=True)
+    print(term.row("info", "Backend dependencies", "checking", stream=sys.stdout), flush=True)
     argv = ["uv", "sync", "--frozen", "--no-install-project", "--directory", "orchestrator/backend"]
     try:
         with log_file.open("ab") as log:
@@ -595,8 +587,7 @@ def _wait_for_http_200(
             return False
         if now >= next_notice:
             print(
-                f"orchestrator\twaiting for {url}; {remaining:.0f}s remain. "
-                "Database backup or migration may still be running; inspect `vigil logs orchestrator`.",
+                term.row("info", "Backend", f"waiting for readiness; {remaining:.0f}s remain. Logs: vigil logs orchestrator", stream=sys.stdout),
                 flush=True,
             )
             next_notice = now + 15.0

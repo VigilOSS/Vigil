@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from vigil_cli import engagements, preflight, quickstart
+from vigil_cli import engagements, preflight
 
 
 @pytest.fixture(autouse=True)
@@ -14,18 +14,6 @@ def _isolate_service_locks(tmp_path, monkeypatch):
     from vigil_cli import service_locks
 
     monkeypatch.setattr(service_locks, '_application_cache', lambda: tmp_path / 'service-cache')
-
-
-def test_code_quickstart_checks_selected_client_without_recon_or_docker(tmp_path, monkeypatch, capsys):
-    checked = []
-    monkeypatch.setattr(quickstart.docker, "daemon_available", lambda: pytest.fail("static setup must not query Docker"))
-    options = quickstart.QuickstartOptions(install_root=tmp_path, json_output=True, engagement_type="code", client="codex", source_dir=tmp_path / "acme")
-    quickstart.run_quickstart(options, which=lambda name: checked.append(name) or "/bin/acme", stdin_isatty=lambda: False)
-    result = json.loads(capsys.readouterr().out)
-    assert [row["binary"] for row in result["prerequisites"]] == ["uv", "codex", "rg"]
-    assert result["host_tools"] == []
-    assert any("--type code" in command and "--source-dir" in command for command in result["next_commands"])
-    assert result["next_commands"][-1].endswith("--mode code --client codex")
 
 
 def test_registered_source_is_selected_without_creating_a_staging_copy(tmp_path, monkeypatch):
@@ -309,19 +297,16 @@ def test_no_build_capture_start_uses_available_image_without_building(tmp_path, 
     assert builds == []
 
 
-def test_native_linux_web_quickstart_does_not_require_host_recon_toolchain(tmp_path, capsys, monkeypatch):
-    from vigil_cli import quickstart
-    from vigil_cli.quickstart import QuickstartOptions, run_quickstart
-    monkeypatch.setattr(quickstart.docker, 'daemon_available', lambda: True)
-    run_quickstart(
-        QuickstartOptions(install_root=tmp_path, engagement_type='web', client='codex', json_output=True),
-        which=lambda name: '/usr/bin/fixture' if name in {'uv', 'docker', 'codex'} else None,
-        system=lambda: 'Linux',
-    )
-    report = json.loads(capsys.readouterr().out)
-    missing = {row['binary'] for row in report['prerequisites'] if not row['present']}
-    assert 'go' not in missing
-    assert report['host_tools'] == []
+def test_native_linux_missing_host_recon_tools_are_reported_as_optional(monkeypatch):
+    from vigil_cli import runtime, status
+
+    monkeypatch.setattr(runtime.shutil, 'which', lambda name: None)
+    monkeypatch.setattr(status, 'platform_system', lambda: 'Linux', raising=False)
+    row = status._host_recon_tools_check()
+    assert row.status == 'OPTIONAL'
+    assert 'missing' in row.detail
+    assert 'subfinder' in row.detail
+    assert 'native Linux' in row.detail
 
 
 def test_stack_runtime_image_preparation_and_start_are_one_serialized_operation(tmp_path, monkeypatch):

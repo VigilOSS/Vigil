@@ -1,4 +1,6 @@
 import json
+import os
+import sys
 
 import pytest
 
@@ -112,3 +114,42 @@ def test_release_image_uses_application_inputs_and_keeps_private_workspace_untou
     runtime_images.ensure_runtime_image(workspace, runner=runner, build_runner=build)
     assert ['docker', 'pull', ref] in calls
     assert (workspace / '.env').read_text() == 'PRIVATE_VALUE=fixture\n'
+
+
+def test_default_image_preparation_streams_child_output_to_stderr(release, tmp_path, monkeypatch, capfd):
+    root, ref, digest, _ = release
+    executable = tmp_path / 'bin' / 'docker'
+    executable.parent.mkdir()
+    executable.write_text(f'#!{sys.executable}\nprint("Acme image preparation")\n')
+    executable.chmod(0o755)
+    monkeypatch.setenv('PATH', str(executable.parent) + os.pathsep + os.environ['PATH'])
+
+    def metadata(argv, **kwargs):
+        return DockerResult(0, digest, '') if argv[-1] == ref else DockerResult(1, '', 'missing')
+
+    runtime_images.ensure_runtime_image(root, runner=metadata)
+    output = capfd.readouterr()
+    assert output.out == ''
+    assert 'Acme image preparation' in output.err
+
+
+@pytest.mark.parametrize('published', [True, False], ids=['pull', 'build'])
+def test_image_preparation_explains_work_before_long_operation(release, monkeypatch, capsys, published):
+    root, ref, digest, pin = release
+    if not published:
+        pin.write_text('{"schema_version":1}')
+    announced = []
+
+    def operation(*args, **kwargs):
+        announced.append(capsys.readouterr().err)
+        return DockerResult(0, '', '')
+
+    monkeypatch.setattr(runtime, 'build_runtime', operation)
+    runtime_images.ensure_runtime_image(
+        root,
+        runner=lambda argv, **kwargs: DockerResult(0, digest, '') if argv[-1] == ref else DockerResult(1, '', 'missing'),
+        build_runner=operation,
+    )
+    assert announced
+    assert ('Pulling' if published else 'Building') in announced[0]
+    assert 'minutes' in announced[0]

@@ -120,9 +120,10 @@ def guard_client_session_upgrade(
             continue
         raise SystemExit(
             f"engagement {engagement.name} has an active client session from release "
-            f"{original['version']} (PID {session['pid']}). End that session before starting "
-            "the new release or refreshing this engagement's shared client files. "
-            "The existing process and its application assets remain available."
+            f"{original['version']} ({session.get('client') or 'client'}, PID {session['pid']}). "
+            "It can continue using its current prompts and helpers. When ready to adopt the update, "
+            "save a handoff, exit that client, and start the engagement again. Pausing does not "
+            "replace its inherited helper paths or instructions already in the conversation."
         )
 
 

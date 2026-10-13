@@ -32,7 +32,7 @@ durable work, evidence and claims. Human review remains essential.
 6. Require attributed independent recorded reviewers for new or changed
    blind-triage acceptances. Preserve unchanged accepted historical packets and
    audit records. Recorded identities do not prove reasoning independence.
-7. Simplify quickstart for the selected engagement type and client. Recover only
+7. Use install, engagement create, and engagement start as the onboarding path; doctor owns optional host-tool setup. Recover only
    the default managed backend. Start required services on demand; capture and
    OOB are optional capabilities. Keep explicit full-stack startup. Serialize
    shared startup and never interrupt another engagement's active services/jobs.
@@ -67,7 +67,7 @@ bug yield from ledger correctness or offline tests.
 
 The implementation covers the contract above. The main executable owners are:
 
-- `src/vigil_cli/quickstart.py`, `preflight.py`, `service_locks.py`, and `runtime.py`:
+- `src/vigil_cli/host_tools.py`, `preflight.py`, `service_locks.py`, and `runtime.py`:
   selected prerequisites, managed backend recovery, serialized shared startup and
   first-use runtime execution. Native Linux onboarding leaves host recon optional.
 - `src/vigil_cli/engagements.py`: original-directory registration, source inventory,
@@ -100,8 +100,8 @@ bug yield or prove independent reasoning.
 
 | Check | Result |
 |---|---|
-| Backend pytest | 4,834 passed |
-| Root CLI pytest | 1,367 passed, 3 skipped |
+| Backend pytest | 4,848 passed |
+| Root CLI pytest | 1,387 passed, 1 skipped, 2 deselected |
 | Assessment-helper pytest | 4,834 passed |
 | Deterministic evals | 60 passed |
 | Frontend tests | 326 component tests, 22 library tests, 1 SSR test passed |
@@ -114,17 +114,49 @@ bug yield or prove independent reasoning.
 | Packaged sdist → wheel → isolated CLI | Passed in root suite |
 | README local links/assets and launch-post quotes | 64 links/assets and quotes verified |
 
-The three root skips are two private identity-policy audits whose private policy
-was unavailable, and a Git-only immutable-refspec case for which a JJ operation
-snapshot does not apply. Live integration tests remain opt-in. Dependency
+The root skip is a Git-only immutable-refspec case for which a JJ operation
+snapshot does not apply. The private identity-policy audits passed in the default
+workspace. Live integration tests remain opt-in. Dependency
 warnings and intentionally degraded parser fixtures produced backend warnings;
 the frontend build reports its bundle-size warning.
 
-Docker Desktop was manually paused and was left that way. Real container startup,
-registry pulls, both image architectures, and native paid-client launches have
-not been exercised. The image workflow and matched application artifacts have
-not been published. Existing engagement upgrades were tested with retained
-fixture state, rather than by modifying operator engagements.
+### Independent QC and live workflows
+
+Two independent reviews and live workflow checks found and corrected:
+
+- Concurrent initializers inserting the same proof migration record. The first
+  recorded backup remains canonical and both initializers can finish.
+- Stopped runtime startup accepting an outdated cached image. Managed image
+  freshness is resolved before creation; running runtimes remain undisturbed.
+- Shared image preparation racing container startup or a manual build. Builds,
+  release tagging and startup now use shared image ownership.
+- A fixed 30-second backend deadline interrupting a large migration backup.
+  Health and readiness share a configurable 600-second budget, with progress
+  notices and immediate failure when the backend exits.
+- Proof handoffs disappearing from the candidate's resume view. Canonical
+  candidate ownership now selects memory independently of execution method;
+  durable claim events preserve earlier workers after release and reassignment.
+- Pending or blocked findings appearing in the verified resume bucket. Only
+  confirmed and downgraded findings belong there; blockers remain visible on
+  active summaries.
+
+A real native Claude Code session ingested a confirmed original directory,
+inspected its sealed inventory and resume state, and exited successfully. Live
+backend/CLI checks exercised idempotent preparation, atomic claims, launch replay,
+competing-owner rejection, retained blockers, linked runs, restart durability,
+release refusal during active execution, safe release, source-refresh invalidation,
+and use of sealed source when the original was unavailable. Handoffs retained seven
+next-step rationales and non-finding observations. An admitted, explicitly approved
+web proof for a source candidate remained in the code investigation without
+enabling a web campaign. These were workflow checks, not a bug-yield benchmark or
+a completed runtime reproduction.
+
+An existing local workspace completed its backed-up database upgrade and the
+normal backend was restarted and checked ready. The disposable backend was
+stopped. Docker Desktop remained manually paused: real container execution,
+registry pulls and both image architectures remain untested. The image workflow
+and matched application artifacts have not been published. Browser interaction
+was unavailable; frontend component/SSR tests, API checks and builds passed.
 
 The README and focused guides now describe the implemented paths. Launch titles
 and body were saved to the requested home-directory Markdown file. Specialist

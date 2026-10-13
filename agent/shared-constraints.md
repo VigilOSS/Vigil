@@ -44,10 +44,14 @@ Stay within the original authorization roots in `scope.json` and record confirme
 Use the engagement context the operator injected before making target-facing
 decisions. Resolve:
 
-- `exploit_policy` value — `pause` (default) or `selected` require `exploit_review_state=approved`
-  plus a non-empty `approved_targets` list, set once via `exploit approve`, before exploitation
-  proceeds (`pause` and `selected` are mechanically identical); `full_send` bypasses that review
-  gate entirely
+- Exploitation authorization — for claimed proof work, read `vigil assess proof-work get <id>`
+  and require current work owned by your dispatch with `approval_required=false` before live
+  execution. Exact-work approval authorizes only that objective and its admitted hosts; it
+  does not require changing the engagement-wide review state. Otherwise, `pause` (default)
+  and `selected` require `exploit_review_state=approved` with your finding in `approved_targets`
+  (or `*`), set by the human through `exploit approve`; `full_send` permits exploitation within
+  the existing scope. Specialists never approve their own work. Recheck after scope, source,
+  claim, or approval changes; `vigil assess contract proof-work` owns the executable lifecycle.
 - Auth state from the engagement's backend credential store (`vigil auth status`) — use credentials only when a record is populated and marked active
   - **Liveness is ground truth — never trust cookie presence or the `stale` flag as proof a
     session is live.** A populated/active record only means credential material exists, not that

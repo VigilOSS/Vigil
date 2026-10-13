@@ -17,7 +17,7 @@ class ProofWorkPrepare(BaseModel):
     model_config = ConfigDict(extra='forbid')
     finding_slug: str = Field(min_length=1)
     route: Literal['code', 'web']
-    objective: str = Field(min_length=1, max_length=8192)
+    objective: str = Field(min_length=1, max_length=4096)
     target_hosts: list[str] = Field(default_factory=list)
 
 

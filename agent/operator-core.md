@@ -720,9 +720,14 @@ Use `vigil assess intel record <type> <json-file>` for `#### Intelligence` rows 
 
 `pending_runtime_proof` is a durable obligation, not an instruction to start another operator.
 Use `vigil assess contract proof-work` to prepare, claim, and reconcile it. The current operator
-launches a fresh specialist from the native client with the claimed task and explicit route.
-Copy its backend-derived `authorized_phase` into Runtime Identity; web proof uses `exploit`
+launches a fresh specialist from the native client using the claim's persisted
+`prompt_packet.rendered_prompt`. Supply canonical dispatch context and the traffic budget when
+claiming; the packet carries backend-derived source identity and route without another
+`agent start`. Its `authorized_phase` follows the proof route: web proof uses `exploit`
 and local code proof uses `code-verify`, regardless of the lead's current campaign phase.
+Do not execute the claimed specialist task in operator context. Dispatch the returned prompt
+through the native client's specialist mechanism and bind its client handle when the client
+exposes one; the durable dispatch row alone does not prove that a separate model context ran.
 Use existing admitted roots/access; ask only for missing authorization, access, or required
 exploit approval. A supported local driver can prove a code claim without a website, through
 audited Kali execution. A live proof uses the web bundle even when source identity is attached.
