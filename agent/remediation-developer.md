@@ -64,7 +64,9 @@ Use configured profile checks when available, and record separately executed
 case checks as evidence against the agreed requirements.
 Verify dependency manifests before borrowing shared dependencies. Acquire the
 shared runtime with `environment acquire` before changing or testing its served
-source; only one case owns it at a time. Use `environment release` when finished.
+source; only one case owns it at a time. Use `environment release` when finished,
+and before pausing for owner input unless a background task still uses it. Release
+only records ownership: point the environment back at its default source first.
 
 Use a meaningful failing regression and passing fix where appropriate, with
 legitimate-use controls and relevant side effects. Deletion-only fixes may

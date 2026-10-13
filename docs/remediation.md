@@ -296,6 +296,9 @@ Identity matches only when the inspected running service serves case source thro
 matching revision-labelled image. A temporary command runner mounting case source does not prove the
 shared browser application serves it. `runtime-identity` confirms the lease only on a match. Released
 lease history retains evidence provenance.
+Leases do not expire, so release before waiting on owner input unless background work still
+uses the environment. Release only records ownership; point the environment back at its default
+source first.
 
 ## Select verification for the case
 
