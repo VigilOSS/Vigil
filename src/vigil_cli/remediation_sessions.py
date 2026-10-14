@@ -21,10 +21,11 @@ _TICKET = re.compile(r"[A-Za-z][A-Za-z0-9_]*-\d+")
 
 
 def register_session_parsers(commands: argparse._SubParsersAction) -> None:
-    start = commands.add_parser("start", help="Open repository Claude context for /vigil-remediate")
-    start.add_argument("--client", choices=("claude",), default="claude")
+    start = commands.add_parser("start", help="Open repository context for /vigil-remediate")
+    start.add_argument("--client", choices=("claude", "opencode", "zcode"), default="claude")
     start.add_argument("--session-id", help="Recover and attach an existing Vigil launch without starting another")
     route = commands.add_parser("route", help="Resolve input references and choose remediation role context")
+    route.add_argument("--client", choices=("claude", "opencode", "zcode"), default="claude")
     route.add_argument("references", nargs="+")
     session = commands.add_parser("session", help="Start a full case developer session or bind this conversation")
     session.add_argument("case_id")
@@ -64,8 +65,12 @@ def normalize_references(references: list[str]) -> list[dict]:
     return list(grouped.values())
 
 
-def route_context(install_root: Path, engagement: Path, project: dict, references: list[str]) -> dict:
+def route_context(install_root: Path, engagement: Path, project: dict, references: list[str], *, client: str = "claude") -> dict:
     requested = normalize_references(references)
+    if client not in ("claude", "opencode", "zcode"):
+        raise ValueError(f"Unsupported remediation client: {client}")
+    if client != "claude" and len(requested) > 1:
+        raise ValueError(f"{client} currently supports one case per native conversation; route one case at a time or use Claude for coordination")
     role = "developer" if len(requested) == 1 else "coordinator"
     pending = engagement / "remediation" / "pending"
     digest = hashlib.sha256(json.dumps(requested, sort_keys=True).encode()).hexdigest()
@@ -79,6 +84,12 @@ def route_context(install_root: Path, engagement: Path, project: dict, reference
         "repository": project["repository"],
         "source_reader": project.get("remediation", {}).get("source_reader", ""),
         "pending_input": str(path),
+        "client": client,
+        "session_capabilities": {
+            client: {"native_binding": client == "claude", "exact_join": client == "claude",
+                     "background_launch": client == "claude"}
+            for client in ("claude", "opencode", "zcode")
+        },
     }
     _write_json(path, context)
     return context
@@ -178,8 +189,13 @@ def _notice(project: dict) -> str:
     return "Repository and personal hooks retain their configured policy for this session."
 
 
-def _start_prompt(project: dict, repository: Path, engagement: Path, key: str) -> str:
+def _start_prompt(project: dict, repository: Path, engagement: Path, key: str, *, native_binding: bool = True) -> str:
     profile = project.get("_profile_path") or engagement / "PROJECT.md"
+    conversation_guidance = (
+        "For one case, retain this conversation as its developer. For several cases, coordinate "
+        "separate developer conversations through Vigil.\n\n" if native_binding else
+        "Retain and resume each case's conversation through the native client.\n\n"
+    )
     return (f"Start a Vigil defensive remediation session for engagement {key}.\n\n"
             f"Repository: {repository}\nProject profile: {profile}\n\n"
             "Read the selected project profile and applicable repository instructions. Tell the owner "
@@ -187,9 +203,8 @@ def _start_prompt(project: dict, repository: Path, engagement: Path, key: str) -
             "Wait for the owner's "
             "ticket IDs, URLs, or report before beginning investigation. Use /vigil-remediate to route "
             "supplied references and load the appropriate role.\n\n"
-            "For one case, retain this conversation as its developer. For several cases, coordinate "
-            "separate developer conversations through Vigil.\n\n"
-            "Present the diagnosis and proposed fix plan for owner approval before editing.")
+            + conversation_guidance
+            + "Present the diagnosis and proposed fix plan for owner approval before editing.")
 
 
 def _environment(engagement: Path, key: str, install_root: Path | None = None) -> dict[str, str]:
@@ -344,10 +359,16 @@ def run_session_command(args: argparse.Namespace, install_root: Path, engagement
     command = args.remediation_command
     if command == "route":
         try:
-            print(json.dumps(route_context(install_root, engagement, project, args.references), indent=2))
+            print(json.dumps(route_context(install_root, engagement, project, args.references,
+                                          client=getattr(args, "client", "claude")), indent=2))
         except ValueError as exc:
             raise SystemExit(str(exc)) from exc
         return 0
+    client = getattr(args, "client", "claude")
+    if command == "start" and client != "claude":
+        from .remediation_clients import start_repository_client
+
+        return start_repository_client(args, install_root, engagement, project)
     _claude_capabilities()
     repository = Path(project["repository"]).resolve()
     if not repository.is_dir():

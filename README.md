@@ -277,6 +277,11 @@ As of October 2026, red-team access to the newest models is for organizations on
 goose, opencode, and Kimi run with reduced support; see
 [`docs/agent-clients.md`](docs/agent-clients.md).
 
+For defensive remediation, OpenCode TUI and ZCode desktop can open repository
+context with native commands and inherited approvals. ZCode requires plugin
+activation in the desktop app; native conversation attachment remains Claude-only.
+See [remediation client setup](docs/remediation.md#opencode-and-zcode-repository-context).
+
 Planned: broader support for **GLM 5.3** and other models with more predictable access, through
 lower orchestration overhead, model-specific prompts, and deeper **OpenCode** integration.
 

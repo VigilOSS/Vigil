@@ -134,7 +134,7 @@ When you are about to copy one of these into a second file, stop and import.
 ## Sync rules worth remembering
 
 - `agent/operator-core.md` and `agent/operator-core-blue.md` render to the committed wrappers, and `agent/agents/*.md` render to the per-client agent trees, through `agent/scripts/render-operator-prompts.sh`. Run it with `repo`; `check` fails on drift.
-- `agent/commands/` is the canonical source for the operator commands — one `.md` per command. The renderer's explicit `COMMAND_NAMES` roster (not a glob) drives two generated wrapper trees: `agent/.claude/commands/<name>.md` and `agent/.codex/skills/<name>/SKILL.md`. See: ADR 0017.
+- `agent/commands/` owns operator commands. Renderer `COMMAND_NAMES` and explicit client metadata drive `agent/.claude/commands`, `agent/.codex/skills`, and native OpenCode/ZCode remediation commands. See: ADR 0017.
 - `src/vigil_cli/client_rosters.py` links those wrapper trees into an engagement as **per-entry symlinks** (`<engagement>/.claude/commands/`, `<engagement>/.codex/skills/`), so an engagement never carries a stale copy and an operator-authored command of the same name wins.
 - `orchestrator/backend/app/api/assessment.py` and `orchestrator/backend/app/api/code_analysis.py` feed the generated `agent/schemas/*.json` through `orchestrator/backend/scripts/generate_agent_schemas.py`. Check drift with that script's `--check` mode.
 - `agent/scripts/assess/lib/contracts.py` renders the engagement-binding invariant onto every executable command contract, so prompts do not restate it.
@@ -226,9 +226,8 @@ A prompt change is **not** prompt-only when the prompt defines an artifact the b
 - `src/vigil_cli/paths.py:resolve_orchestrator_base_url` — backend URL precedence and dotenv normalization; `vigil config resolve orchestrator_base_url` exposes it to generated client launchers at session start.
 - `src/vigil_cli/preflight.py` — `_preflight_engagement_start`, `_resolve_provider_key`, `_warn_if_install_stale`. It lives outside `main.py` so `blue.py` can import it without a cycle; `main.py` re-exports what it uses.
 - `src/vigil_cli/remediation.py` — case intake/context rendering, configured workspace/checks, reviewed PR publication, and consented development workflow commands; `remediation_browser.py` owns local browser execution. Backend APIs own case state.
-- `src/vigil_cli/remediation_sessions.py` — Claude repository-context launch, role routing, and native conversation binding/attachment; `agent/commands/vigil-remediate.md` selects the remediation role and profile references.
-  Launch receipts correlate the unique native job name with the host-assigned UUID; `start --session-id` recovers a receipt without dispatching another conversation.
-  Command frontmatter `clients` limits generated client discovery.
+- `src/vigil_cli/remediation_sessions.py` owns role routing and Claude native binding/attachment; launch receipts correlate job names with host UUIDs, and `start --session-id` recovers without redispatch.
+- `src/vigil_cli/remediation_clients.py` owns OpenCode repository launch and ZCode's context-bound plugin preparation/workspace opening, without native conversation receipts. `agent/.zcode/hooks/` restores defensive case context.
 - `agent/scripts/assess/lib/remediation_project.py` and `remediation_vcs.py` — shared PROJECT.md parsing and Git/JJ identity, workspace, diff, and push contracts; CLI import bridges are `project_config.py` and `remediation_vcs.py`.
 - `src/vigil_cli/runtime.py` + `up.py` — one shared long-lived Kali container, reached host-side by `docker exec`. There is no in-container API server or MCP bridge.
   `up.py:run_up` owns startup JSON results and service states.

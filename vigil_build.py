@@ -24,7 +24,7 @@ _ROOT_FILES = (
 )
 _AGENT_DIRS = (
     "agents", "commands", "docker", "phases", "references", "rules", "schemas",
-    "scripts", "skills", ".claude", ".codex", ".goose", ".opencode",
+    "scripts", "skills", ".claude", ".codex", ".goose", ".opencode", ".zcode",
 )
 _EXCLUDED = {
     ".private", ".git", ".jj", ".venv", "__pycache__", "node_modules", "dist",

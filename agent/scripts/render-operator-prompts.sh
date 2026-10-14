@@ -115,10 +115,11 @@ set_output_paths() {
   # slash commands from .claude/commands/<name>.md; Codex reads project skills
   # from .codex/skills/<name>/SKILL.md (verified empirically against Codex
   # 0.154.0 with `codex debug prompt-input`; a bare `skills/` is NOT discovered).
-  # opencode/goose/kimi get no commands — those clients have no equivalent
-  # project-command surface, and their operators run the verbs directly.
+  # OpenCode and ZCode receive only commands explicitly declaring those clients.
   CLAUDE_COMMANDS_DIR="$OUTPUT_DIR/.claude/commands"
   CODEX_SKILLS_DIR="$OUTPUT_DIR/.codex/skills"
+  OPENCODE_COMMANDS_DIR="$OUTPUT_DIR/.opencode/commands"
+  ZCODE_COMMANDS_DIR="$OUTPUT_DIR/.zcode/commands"
 }
 set_output_paths
 
@@ -211,11 +212,15 @@ command_field() {
   ' "$src"
 }
 
-# Omitted clients means both supported command surfaces.
+# Omitted clients preserves Claude/Codex discovery. New clients require opt-in.
 command_supports_client() {
   local clients
   clients=$(command_field "$1" clients)
-  [[ -z "$clients" || " ${clients//,/ } " == *" $2 "* ]]
+  if [[ -z "$clients" ]]; then
+    [[ "$2" == claude || "$2" == codex ]]
+  else
+    [[ " ${clients//,/ } " == *" $2 "* ]]
+  fi
 }
 
 # Canonical body for one client: frontmatter stripped, capability blocks for
@@ -236,7 +241,7 @@ command_body() {
         fail("malformed capability block marker")
       }
       split($0, part, " ")
-      if (part[3] != "claude" && part[3] != "codex") {
+      if (part[3] != "claude" && part[3] != "codex" && part[3] != "opencode" && part[3] != "zcode") {
         fail("unknown capability client \047" part[3] "\047")
       }
       if (in_block) {
@@ -328,12 +333,70 @@ EOF
   perl -0pi -e 's/\n+\z/\n/' "$out"
 }
 
+render_native_remediation_command() {
+  local name="$1" client="$2" directory="$3"
+  local src="$COMMANDS_SRC_DIR/$name.md"
+  [[ -f "$src" ]] || return 0
+  command_supports_client "$src" "$client" || return 0
+  local description out
+  description=$(command_field "$src" description)
+  out="$directory/$name.md"
+  mkdir -p "$(dirname "$out")"
+  {
+    cat <<EOF
+---
+description: $description
+---
+
+<!-- GENERATED FILE — DO NOT EDIT. -->
+<!-- Source: agent/commands/$name.md -->
+<!-- Regenerate with: cd agent && ./scripts/render-operator-prompts.sh repo -->
+EOF
+    render_stamp md
+    printf '\n'
+    command_body "$src" "$client"
+  } > "$out"
+  perl -0pi -e 's/\n+\z/\n/' "$out"
+}
+
+render_zcode_manifest() {
+  [[ -f "$ZCODE_COMMANDS_DIR/vigil-remediate.md" ]] || return 0
+  local root="$OUTPUT_DIR/.zcode"
+  mkdir -p "$root/.zcode-plugin"
+  cat > "$root/.zcode-plugin/plugin.json" <<'EOF'
+{
+  "name": "vigil-remediation",
+  "version": "1.0.0",
+  "description": "Vigil repository remediation commands"
+}
+EOF
+  cat > "$root/marketplace.json" <<'EOF'
+{
+  "name": "vigil-remediation",
+  "description": "Local Vigil remediation integration",
+  "plugins": [
+    {
+      "name": "vigil-remediation",
+      "source": "./",
+      "description": "Vigil repository remediation commands",
+      "version": "1.0.0"
+    }
+  ]
+}
+EOF
+}
+
 render_all_commands() {
   local name
   for name in "${COMMAND_NAMES[@]}"; do
     render_claude_command "$name"
     render_codex_skill "$name"
+    if [[ "$name" == vigil-remediate ]]; then
+      render_native_remediation_command "$name" opencode "$OPENCODE_COMMANDS_DIR"
+      render_native_remediation_command "$name" zcode "$ZCODE_COMMANDS_DIR"
+    fi
   done
+  render_zcode_manifest
 }
 
 # -----------------------------------------------------------------------------
@@ -1148,7 +1211,8 @@ check_render_one() {
     local claude_command_rel=".claude/commands/$command_name.md"
     local codex_skill_rel=".codex/skills/$command_name/SKILL.md"
     local rel
-    for rel in "$claude_command_rel" "$codex_skill_rel"; do
+    for rel in "$claude_command_rel" "$codex_skill_rel" \
+      ".opencode/commands/$command_name.md" ".zcode/commands/$command_name.md"; do
       if [[ ! -f "$tmp_dir/$rel" ]]; then
         continue
       fi
@@ -1164,12 +1228,35 @@ check_render_one() {
     done
   done
 
+  local manifest_rel
+  for manifest_rel in .zcode/.zcode-plugin/plugin.json .zcode/marketplace.json; do
+    [[ -f "$tmp_dir/$manifest_rel" ]] || continue
+    if prompt_files_differ "$source_output_dir/$manifest_rel" "$tmp_dir/$manifest_rel"; then
+      printf 'DRIFT (%s): %s differs from source render\n' "$check_type" "$manifest_rel" >&2
+      print_prompt_diff "$source_output_dir/$manifest_rel" "$tmp_dir/$manifest_rel"
+      drift=1
+    fi
+  done
+
   # Orphans. agent/.claude and agent/.codex are mirror-synced into the install
   # root by `vigil install` (install.py::_sync_client_entrypoints_fds), so a
   # rendered command left behind after its canonical source was renamed or
   # deleted would keep shipping to every engagement with nothing regenerating
   # it. A canonical source that is not in COMMAND_NAMES is caught the same way.
   local rendered orphan_name
+  local native_commands_rel
+  for native_commands_rel in .opencode/commands .zcode/commands; do
+    [[ -d "$source_output_dir/$native_commands_rel" ]] || continue
+    for rendered in "$source_output_dir/$native_commands_rel"/*.md; do
+      [[ -e "$rendered" ]] || continue
+      orphan_name=$(basename "$rendered" .md)
+      if [[ ! -f "$tmp_dir/$native_commands_rel/$orphan_name.md" ]]; then
+        printf 'DRIFT (%s): %s/%s.md is not rendered by any canonical source\n' \
+          "$check_type" "$native_commands_rel" "$orphan_name" >&2
+        drift=1
+      fi
+    done
+  done
   if [[ -d "$source_output_dir/.claude/commands" ]]; then
     for rendered in "$source_output_dir"/.claude/commands/*.md; do
       [[ -e "$rendered" ]] || continue

@@ -186,8 +186,78 @@ vigil remediation -k <engagement-key> join <case-id>
 UUID with `session --bind --session-id <uuid>`. `join` attaches to the recorded conversation; missing
 or mismatched identities require recovery rather than replacement. When the recorded conversation has
 stopped, `session --bind --session-id <uuid> --replace-stopped` binds the new one and keeps the old
-UUID as `replaced_session_id`; a running conversation is never replaced. The repository-context command, native binding, worker launch, and joining currently support
-Claude only.
+UUID as `replaced_session_id`; a running conversation is never replaced. Native
+binding, hosted worker launch, and exact joining currently support Claude only.
+
+### OpenCode and ZCode repository context
+
+For a single case, OpenCode and ZCode can open repository context and use the
+same defensive remediation role, case handoff, verification requirements, and
+approval gates:
+
+```bash
+vigil remediation -k <key> start --client opencode
+vigil remediation -k <key> start --client zcode
+```
+
+OpenCode uses its native TUI and receives the release's `/vigil-remediate`
+command through session configuration. Stable 1.x, at least 1.18.10, and the
+native `--prompt` option are required. Choose Z.AI Coding Plan with `/connect`
+and your entitled model with `/models`. Vigil preserves native authentication,
+selected models, permissions, project configuration, and existing plugins.
+An existing inline command named `vigil-remediate` is a reported collision.
+
+ZCode workspace opening currently targets macOS and candidate releases 3.14.3
+through 3.x. This version gate is based on the released interface, not a native
+GUI certification. Install the desktop application
+in `/Applications` or your user Applications directory, and have `node` available
+for the plugin hook. Startup prints the prepared local marketplace, plugin name,
+and opening instructions. In ZCode, add that marketplace under Settings → Plugins,
+install and enable its plugin, open the printed repository, and create a new task.
+Review the plugin hooks before enabling them. Choose Z.AI GLM Coding Plan and the
+model in ZCode. Keep only the matching remediation context plugin enabled for
+this repository, and follow the new plugin instructions when the profile or
+application release changes. Merely writing project hook configuration does not
+enable ZCode hooks. See [ZCode plugin setup](https://zcode.z.ai/en/docs/plugin)
+and [hook configuration](https://zcode.z.ai/en/docs/hooks).
+
+The prepared plugin contains `/vigil-remediate` and a repository-bound
+`SessionStart` context hook. Startup, resume, clear, and post-compaction events
+point back to the selected profile and authoritative case records. The hook
+requires a matching repository and active remediation engagement. It neither
+steers ZCode's pre-compaction summary nor produces a session-end receipt.
+
+These entrypoints retain native approvals and support `hook_policy = "inherit"`.
+They reject `hook_policy = "disabled"` because a corresponding session-scoped
+override has not been verified. Choose Claude when that policy is required;
+changing the profile to inherit is an explicit owner decision.
+
+Vigil-native `session`, binding, `join`, and `start --session-id` recovery remain
+Claude-only. For OpenCode or ZCode, work on one case per native conversation and
+resume it in that client. The command routes with an explicit client identity;
+several distinct cases require separate native conversations rather than silently
+launching Claude workers. A successful desktop open command does not establish
+that a conversation started or that hooks were enabled.
+
+Before relying on the integration, verify these native behaviors on your machine:
+
+- Select the intended provider/model and invoke `/vigil-remediate` with an Acme
+  fixture report. Confirm the correct profile, repository, and case workspace.
+- Confirm approvals and native project plugins remain active, and fix-plan
+  approval precedes edits. Record the structured verification requirements.
+- For ZCode, confirm the enabled plugin's hook is visible, its `node` subprocess
+  runs, and both manual and automatic compaction restore the selected case's
+  authoritative state without injecting another engagement's context.
+- Resume through the native client and verify case revision, evidence, approvals,
+  and handoff continuity. After a Vigil upgrade, prepare and enable the new
+  matching context plugin. ZCode conversations have no Vigil release-ownership
+  receipt; do not assume retained helper paths survive release cleanup, or treat
+  this as a Vigil exact-join test.
+
+Automated tests exercise generation, packaging, launch arguments, policy errors,
+context isolation, and the hook subprocess protocol. Native authentication,
+desktop window reuse, provider execution, plugin activation, and vendor-driven
+compaction require this end-to-end verification.
 
 ### Hook policy
 
