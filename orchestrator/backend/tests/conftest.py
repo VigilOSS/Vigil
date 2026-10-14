@@ -277,6 +277,15 @@ def _isolate_vigil_config(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_runtime_data_dir(monkeypatch):
+    """Keep runtime state under each test's own install root. OOB relay records
+    follow the runtime data directory, so an exported ``VIGIL_RUNTIME_DATA_DIR``
+    would aim allocations at the operator's real ``/data`` mount."""
+    monkeypatch.delenv("VIGIL_RUNTIME_DATA_DIR", raising=False)
+    monkeypatch.delenv("KALI_MCP_DATA_DIR", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _isolate_assess_import_cache():
     """CLI tests reload assess modules; backend imports must survive their teardown."""
     saved = {

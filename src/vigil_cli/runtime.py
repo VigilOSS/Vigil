@@ -81,7 +81,9 @@ def _resolve_runtime_data_dir(install_root: Path) -> Path:
     process environment, then the same keys from the install-root ``.env`` — the file
     ``vigil runtime start`` hands to ``docker --env-file``, so a value set there is
     honoured host-side too rather than silently only inside the container — else
-    ``<install>/.runtime-data``. A relative value resolves against ``install_root``.
+    the workspace's ``runtime_state`` (``state/runtime`` on a fresh workspace,
+    ``.runtime-data`` on an adopted one). A relative value resolves against
+    ``install_root``.
     Deliberately distinct from the orchestrator DB dir's ``VIGIL_DATA_DIR``
     (``paths.resolve_orchestrator_data_dir``): separate directories with separate
     defaults, so one env var must not relocate both. ``start_runtime`` and

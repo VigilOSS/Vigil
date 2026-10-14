@@ -60,7 +60,7 @@ def test_windows_file_lock_backend_locks_a_real_byte(
 
 
 def test_fresh_slot_allocation_is_sanitized_stable_and_persisted(tmp_path: Path) -> None:
-    from vigil_cli.oob_relay import allocate_relay_route
+    from vigil_cli.oob_relay import RELAY_METADATA_FILENAME, allocate_relay_route, oob_state_dir
 
     install_root = tmp_path / "Customer Alpha"
     registry = tmp_path / "allocations.json"
@@ -85,7 +85,7 @@ def test_fresh_slot_allocation_is_sanitized_stable_and_persisted(tmp_path: Path)
     assert first.oob_domain == "customer-alpha-be3e46b6d1911ed7.oob.example.test"
     assert first.dns_remote_port != 53
     assert first.reverse_remote_port == first.dns_remote_port + 1
-    assert first.metadata_path == install_root / ".runtime-data/oob/relay-routing.json"
+    assert first.metadata_path == oob_state_dir(install_root) / RELAY_METADATA_FILENAME
     assert json.loads(first.metadata_path.read_text())["slot_prefix"] == first.slot_prefix
 
 
@@ -241,14 +241,16 @@ def test_failed_metadata_publish_rolls_back_registry_allocation(tmp_path: Path) 
 
     payload = json.loads(registry.read_text())
     assert payload["allocations"] == {}
-    assert not (tmp_path / "broken/.runtime-data/oob/relay-routing.json").exists()
+    assert not (
+        relay_module.oob_state_dir(tmp_path / "broken") / relay_module.RELAY_METADATA_FILENAME
+    ).exists()
 
 
 def test_relay_metadata_rejects_corrupt_or_silently_changed_routing(tmp_path: Path) -> None:
-    from vigil_cli.oob_relay import RELAY_METADATA_RELATIVE_PATH, load_relay_route
+    from vigil_cli.oob_relay import RELAY_METADATA_FILENAME, load_relay_route, oob_state_dir
 
     install_root = tmp_path / "install"
-    path = install_root / RELAY_METADATA_RELATIVE_PATH
+    path = oob_state_dir(install_root) / RELAY_METADATA_FILENAME
     path.parent.mkdir(parents=True)
     path.write_text(
         json.dumps(
@@ -1137,21 +1139,21 @@ def test_existing_route_repairs_missing_registry_entry_before_new_allocation(
 
 
 def test_copied_live_install_metadata_is_rejected_by_registry(tmp_path: Path) -> None:
-    from vigil_cli.oob_relay import RELAY_METADATA_RELATIVE_PATH, allocate_relay_route
+    from vigil_cli.oob_relay import RELAY_METADATA_FILENAME, allocate_relay_route, oob_state_dir
 
     registry = tmp_path / "allocations.json"
     original_root = tmp_path / "original"
     clone_root = tmp_path / "clone"
-    allocate_relay_route(
+    original = allocate_relay_route(
         original_root,
         slot_name="original",
         registry_path=registry,
         identity_factory=lambda: "shared-id",
         slot_candidates=lambda _: [4],
     )
-    clone_path = clone_root / RELAY_METADATA_RELATIVE_PATH
+    clone_path = oob_state_dir(clone_root) / RELAY_METADATA_FILENAME
     clone_path.parent.mkdir(parents=True)
-    shutil.copy2(original_root / RELAY_METADATA_RELATIVE_PATH, clone_path)
+    shutil.copy2(original.metadata_path, clone_path)
 
     with pytest.raises(SystemExit, match="another install root"):
         allocate_relay_route(
@@ -1228,13 +1230,16 @@ def test_upgrade_pins_ambient_domain_that_was_effective_before_metadata(
     assert route.oob_domain == "legacy.custom.test"
 
 
-def test_metadata_parent_symlink_cannot_escape_install_root(tmp_path: Path) -> None:
+def test_install_root_record_dir_symlink_cannot_escape_install_root(
+    tmp_path: Path
+) -> None:
+    """The `.runtime-data/oob` fallback stays anchored to the install root."""
     from vigil_cli.oob_relay import allocate_relay_route
 
     install_root = tmp_path / "install"
+    _register_fresh_workspace(install_root)
     outside = tmp_path / "outside"
     outside.mkdir()
-    install_root.mkdir()
     (install_root / ".runtime-data").symlink_to(outside, target_is_directory=True)
 
     with pytest.raises(SystemExit, match="escapes install root"):
@@ -1246,11 +1251,15 @@ def test_metadata_parent_symlink_cannot_escape_install_root(tmp_path: Path) -> N
     assert not (outside / "oob/relay-routing.json").exists()
 
 
-def test_metadata_file_symlink_is_rejected(tmp_path: Path) -> None:
+@pytest.mark.parametrize("location", ["runtime-state", "install-root"])
+def test_metadata_file_symlink_is_rejected(
+    tmp_path: Path, location: str
+) -> None:
     from vigil_cli.oob_relay import (
-        RELAY_METADATA_RELATIVE_PATH,
+        RELAY_METADATA_FILENAME,
         allocate_relay_route,
         load_relay_route,
+        oob_state_dir,
     )
 
     source_root = tmp_path / "source"
@@ -1262,7 +1271,13 @@ def test_metadata_file_symlink_is_rejected(tmp_path: Path) -> None:
         slot_candidates=lambda _: [1],
     )
     install_root = tmp_path / "install"
-    linked = install_root / RELAY_METADATA_RELATIVE_PATH
+    _register_fresh_workspace(install_root)
+    state_dir = (
+        oob_state_dir(install_root)
+        if location == "runtime-state"
+        else install_root / ".runtime-data" / "oob"
+    )
+    linked = state_dir / RELAY_METADATA_FILENAME
     linked.parent.mkdir(parents=True)
     linked.symlink_to(source.metadata_path)
 
@@ -1604,20 +1619,16 @@ def _allocated_route(tmp_path: Path, install_root: Path):
 def test_load_relay_route_reads_pre_rename_metadata_without_rewriting_it(
     tmp_path: Path,
 ) -> None:
-    from vigil_cli.oob_relay import (
-        LEGACY_RELAY_METADATA_RELATIVE_PATH,
-        RELAY_METADATA_RELATIVE_PATH,
-        load_relay_route,
-    )
+    from vigil_cli.oob_relay import LEGACY_RELAY_METADATA_FILENAME, load_relay_route
 
     install_root = tmp_path / "install"
     route = _allocated_route(tmp_path, install_root)
-    legacy_path = install_root / LEGACY_RELAY_METADATA_RELATIVE_PATH
+    legacy_path = route.metadata_path.with_name(LEGACY_RELAY_METADATA_FILENAME)
     legacy_path.write_text(
         json.dumps(_pre_rename_record(route.serializable()), indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
-    (install_root / RELAY_METADATA_RELATIVE_PATH).unlink()
+    route.metadata_path.unlink()
     before = legacy_path.read_bytes()
 
     loaded = load_relay_route(install_root)
@@ -1630,25 +1641,21 @@ def test_load_relay_route_reads_pre_rename_metadata_without_rewriting_it(
     assert loaded.metadata_path == legacy_path
     # A read must not migrate the operator's file behind their back.
     assert legacy_path.read_bytes() == before
-    assert not (install_root / RELAY_METADATA_RELATIVE_PATH).exists()
+    assert not route.metadata_path.exists()
 
 
 def test_pre_rename_metadata_keeps_its_route_through_allocation(tmp_path: Path) -> None:
     """A pre-rename install must never be handed a second, different slot."""
-    from vigil_cli.oob_relay import (
-        LEGACY_RELAY_METADATA_RELATIVE_PATH,
-        RELAY_METADATA_RELATIVE_PATH,
-        allocate_relay_route,
-    )
+    from vigil_cli.oob_relay import LEGACY_RELAY_METADATA_FILENAME, allocate_relay_route
 
     install_root = tmp_path / "install"
     registry = tmp_path / "allocations.json"
     route = _allocated_route(tmp_path, install_root)
-    (install_root / LEGACY_RELAY_METADATA_RELATIVE_PATH).write_text(
+    route.metadata_path.with_name(LEGACY_RELAY_METADATA_FILENAME).write_text(
         json.dumps(_pre_rename_record(route.serializable()), indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
-    (install_root / RELAY_METADATA_RELATIVE_PATH).unlink()
+    route.metadata_path.unlink()
 
     reallocated = allocate_relay_route(
         install_root,
@@ -2059,8 +2066,6 @@ def test_configuring_oob_after_the_first_install_allocates_a_dedicated_slot(
 
     monkeypatch.setenv("VIGIL_CONFIG", str(tmp_path / "config.json"))
     monkeypatch.delenv("VIGIL_OOB_DOMAIN", raising=False)
-    monkeypatch.delenv("VIGIL_RUNTIME_DATA_DIR", raising=False)
-    monkeypatch.delenv("KALI_MCP_DATA_DIR", raising=False)
     source = tmp_path / "source"
     (source / "agent" / "engagements").mkdir(parents=True)
     (source / "orchestrator").mkdir(exist_ok=True)
@@ -2117,8 +2122,6 @@ def test_install_preserves_the_legacy_route_of_a_root_that_already_ran_oob(
 
     monkeypatch.setenv("VIGIL_CONFIG", str(tmp_path / "config.json"))
     monkeypatch.delenv("VIGIL_OOB_DOMAIN", raising=False)
-    monkeypatch.delenv("VIGIL_RUNTIME_DATA_DIR", raising=False)
-    monkeypatch.delenv("KALI_MCP_DATA_DIR", raising=False)
     source = tmp_path / "source"
     (source / "agent" / "engagements").mkdir(parents=True)
     (source / "orchestrator").mkdir(exist_ok=True)
@@ -2160,8 +2163,8 @@ def test_relocated_runtime_data_dir_still_proves_a_live_legacy_oob_install(
     """OOB state follows the container's `/data` mount, which is relocatable.
 
     With `VIGIL_RUNTIME_DATA_DIR` set, `frpc.toml` and the per-client files land
-    outside `<install>/.runtime-data`. Looking only there would read a live
-    legacy install as never-configured and move its ports.
+    outside the install root. Looking only there would read a live legacy
+    install as never-configured and move its ports.
     """
     from vigil_cli.install import InstallOptions, install_from_source
     from vigil_cli.oob_relay import load_relay_route
@@ -2170,7 +2173,6 @@ def test_relocated_runtime_data_dir_still_proves_a_live_legacy_oob_install(
     monkeypatch.setenv("VIGIL_OOB_DOMAIN", "oob.example.com")
     data_dir = tmp_path / "elsewhere"
     monkeypatch.setenv("VIGIL_RUNTIME_DATA_DIR", str(data_dir))
-    monkeypatch.delenv("KALI_MCP_DATA_DIR", raising=False)
     source = tmp_path / "source"
     (source / "agent" / "engagements").mkdir(parents=True)
     (source / "orchestrator").mkdir(exist_ok=True)
@@ -2197,12 +2199,10 @@ def test_deferred_configuration_leaves_an_allocated_slot_untouched(
 ) -> None:
     """Once a slot exists, further installs reconcile it and change nothing."""
     from vigil_cli.install import InstallOptions, install_from_source
-    from vigil_cli.oob_relay import load_relay_route
+    from vigil_cli.oob_relay import load_relay_route, oob_state_dir
 
     monkeypatch.setenv("VIGIL_CONFIG", str(tmp_path / "config.json"))
     monkeypatch.setenv("VIGIL_OOB_DOMAIN", "oob.example.com")
-    monkeypatch.delenv("VIGIL_RUNTIME_DATA_DIR", raising=False)
-    monkeypatch.delenv("KALI_MCP_DATA_DIR", raising=False)
     source = tmp_path / "source"
     (source / "agent" / "engagements").mkdir(parents=True)
     (source / "orchestrator").mkdir(exist_ok=True)
@@ -2219,7 +2219,7 @@ def test_deferred_configuration_leaves_an_allocated_slot_untouched(
 
     # A later `vigil oob start` leaves state behind; that must not now be read
     # as legacy evidence and re-pin a route this install already owns.
-    (install_root / ".runtime-data" / "oob" / "frpc.log").write_text(
+    (oob_state_dir(install_root) / "frpc.log").write_text(
         "start proxy success\n", encoding="utf-8"
     )
     install_from_source(
@@ -2246,11 +2246,7 @@ def test_deferred_configuration_keeps_a_pre_rename_record_and_slot_key(
     still name the slot when nothing has been allocated yet.
     """
     from vigil_cli.install import InstallOptions, install_from_source
-    from vigil_cli.oob_relay import (
-        LEGACY_RELAY_METADATA_RELATIVE_PATH,
-        RELAY_METADATA_RELATIVE_PATH,
-        load_relay_route,
-    )
+    from vigil_cli.oob_relay import LEGACY_RELAY_METADATA_FILENAME, load_relay_route
 
     config_path = tmp_path / "config.json"
     config_path.write_text(
@@ -2259,8 +2255,6 @@ def test_deferred_configuration_keeps_a_pre_rename_record_and_slot_key(
     )
     monkeypatch.setenv("VIGIL_CONFIG", str(config_path))
     monkeypatch.delenv("VIGIL_OOB_DOMAIN", raising=False)
-    monkeypatch.delenv("VIGIL_RUNTIME_DATA_DIR", raising=False)
-    monkeypatch.delenv("KALI_MCP_DATA_DIR", raising=False)
     source = tmp_path / "source"
     (source / "agent" / "engagements").mkdir(parents=True)
     (source / "orchestrator").mkdir(exist_ok=True)
@@ -2269,12 +2263,13 @@ def test_deferred_configuration_keeps_a_pre_rename_record_and_slot_key(
     # A root whose only routing record is the pre-rename file.
     pre_rename_root = tmp_path / "pre-rename"
     existing = _allocated_route(tmp_path, pre_rename_root)
-    (pre_rename_root / LEGACY_RELAY_METADATA_RELATIVE_PATH).write_text(
+    pre_rename_path = existing.metadata_path.with_name(LEGACY_RELAY_METADATA_FILENAME)
+    pre_rename_path.write_text(
         json.dumps(_pre_rename_record(existing.serializable()), indent=2, sort_keys=True)
         + "\n",
         encoding="utf-8",
     )
-    (pre_rename_root / RELAY_METADATA_RELATIVE_PATH).unlink()
+    existing.metadata_path.unlink()
 
     install_from_source(
         InstallOptions(
@@ -2288,8 +2283,8 @@ def test_deferred_configuration_keeps_a_pre_rename_record_and_slot_key(
     assert kept is not None
     assert kept.slot_prefix == existing.slot_prefix
     assert kept.oob_domain == existing.oob_domain
-    assert kept.metadata_path == pre_rename_root / LEGACY_RELAY_METADATA_RELATIVE_PATH
-    assert not (pre_rename_root / RELAY_METADATA_RELATIVE_PATH).exists()
+    assert kept.metadata_path == pre_rename_path
+    assert not existing.metadata_path.exists()
 
     # A never-configured root under the same config allocates under the
     # pre-rename slot name.
@@ -2315,9 +2310,9 @@ def _seed_live_oob_state(install_root: Path) -> None:
     A rendered ``frpc.toml`` is the discriminator ``has_pre_routing_oob_state``
     reads; routing records are bookkeeping and deliberately do not count.
     """
-    from vigil_cli.oob_relay import OOB_STATE_RELATIVE_PATH
+    from vigil_cli.oob_relay import oob_state_dir
 
-    state_dir = install_root / OOB_STATE_RELATIVE_PATH
+    state_dir = oob_state_dir(install_root)
     state_dir.mkdir(parents=True, exist_ok=True)
     (state_dir / "frpc.toml").write_text("[common]\n", encoding="utf-8")
 
@@ -2379,3 +2374,336 @@ def test_doctor_metadata_row_names_allocation_or_pinning_but_never_both(
     assert "53/8443" not in fresh_detail
     assert "pin the shared 53/8443 route" in legacy_detail
     assert "allocate" not in legacy_detail
+
+
+# --- the record lives with the runtime container's `/data/oob` ----------------
+# `vigil oob start` writes the container's `/data/oob`, whose host side is the
+# runtime data directory (`runtime._resolve_runtime_data_dir`): the workspace's
+# `state/runtime` on a fresh workspace, `.runtime-data` on an adopted one, or
+# `VIGIL_RUNTIME_DATA_DIR`. The routing record has to sit in the same place.
+
+
+def _register_fresh_workspace(install_root: Path) -> Path:
+    """Register the fresh layout's runtime state, as `vigil install` does."""
+    from vigil_cli.workspace import WORKSPACE_FILENAME
+
+    runtime_state = install_root / "state" / "runtime"
+    runtime_state.mkdir(parents=True)
+    (install_root / WORKSPACE_FILENAME).write_text(
+        json.dumps({"schema_version": 1, "paths": {"runtime_state": str(runtime_state)}}),
+        encoding="utf-8",
+    )
+    return runtime_state
+
+
+def _install_source(tmp_path: Path) -> Path:
+    source = tmp_path / "source"
+    (source / "agent" / "engagements").mkdir(parents=True)
+    (source / "orchestrator").mkdir(exist_ok=True)
+    (source / "README.md").write_text("managed\n", encoding="utf-8")
+    return source
+
+
+@pytest.mark.parametrize("registered", [True, False], ids=["workspace-json", "default"])
+def test_fresh_workspace_keeps_its_relay_record_in_runtime_state(
+    tmp_path: Path, registered: bool
+) -> None:
+    from vigil_cli.oob_relay import initialize_relay_route, load_relay_route
+
+    install_root = tmp_path / "install"
+    install_root.mkdir()
+    if registered:
+        _register_fresh_workspace(install_root)
+
+    route = initialize_relay_route(
+        install_root,
+        base_domain="oob.example.test",
+        registry_path=tmp_path / "allocations.json",
+    )
+
+    assert route.legacy is False
+    assert route.metadata_path == install_root / "state/runtime/oob/relay-routing.json"
+    assert route.metadata_path.is_file()
+    assert load_relay_route(install_root) == route
+    assert not (install_root / ".runtime-data").exists()
+
+
+def test_relay_record_follows_a_runtime_data_dir_outside_the_install_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vigil_cli.oob_relay import allocate_relay_route, load_relay_route
+
+    data_dir = tmp_path / "elsewhere"
+    monkeypatch.setenv("VIGIL_RUNTIME_DATA_DIR", str(data_dir))
+    install_root = tmp_path / "install"
+
+    route = allocate_relay_route(
+        install_root,
+        slot_name="acme",
+        base_domain="oob.example.test",
+        registry_path=tmp_path / "allocations.json",
+    )
+
+    assert route.metadata_path == data_dir / "oob/relay-routing.json"
+    assert route.metadata_path.is_file()
+    assert load_relay_route(install_root) == route
+    assert not (install_root / ".runtime-data").exists()
+
+
+def test_relay_record_dir_symlink_cannot_escape_the_runtime_data_dir(
+    tmp_path: Path
+) -> None:
+    from vigil_cli.oob_relay import allocate_relay_route
+
+    install_root = tmp_path / "install"
+    runtime_state = _register_fresh_workspace(install_root)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (runtime_state / "oob").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(SystemExit, match="escapes the runtime data directory"):
+        allocate_relay_route(
+            install_root,
+            slot_name="slot",
+            registry_path=tmp_path / "allocations.json",
+        )
+    assert list(outside.iterdir()) == []
+
+
+def test_live_oob_state_in_fresh_runtime_state_pins_the_legacy_route_there(
+    tmp_path: Path
+) -> None:
+    from vigil_cli.oob_relay import has_pre_routing_oob_state, initialize_relay_route
+
+    install_root = tmp_path / "install"
+    oob_state = _register_fresh_workspace(install_root) / "oob"
+    oob_state.mkdir()
+    (oob_state / "frpc.toml").write_text("serverAddr = 'relay'\n", encoding="utf-8")
+
+    assert has_pre_routing_oob_state(install_root) is True
+    route = initialize_relay_route(
+        install_root,
+        base_domain="oob.example.test",
+        registry_path=tmp_path / "allocations.json",
+    )
+
+    assert route.legacy is True
+    assert route.metadata_path == oob_state / "relay-routing.json"
+    assert route.metadata_path.is_file()
+    assert not (install_root / ".runtime-data").exists()
+
+
+@pytest.mark.parametrize("filename", ["relay-routing.json", "tenant-routing.json"])
+def test_install_moves_a_record_left_beside_the_install_root_without_reallocating(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    filename: str,
+) -> None:
+    """A slot recorded at `<install>/.runtime-data/oob` keeps its identity.
+
+    Earlier releases wrote the record there whatever the runtime data directory
+    was. Reads fall back to it so no command treats the install as unrouted, and
+    `vigil install` moves it, byte for byte, to where the live OOB state is.
+    """
+    from vigil_cli.install import InstallOptions, install_from_source
+    from vigil_cli.oob_relay import allocate_relay_route, load_relay_route
+
+    monkeypatch.setenv("VIGIL_CONFIG", str(tmp_path / "config.json"))
+    monkeypatch.delenv("VIGIL_OOB_DOMAIN", raising=False)
+    source = _install_source(tmp_path)
+    install_root = tmp_path / "install"
+    options = InstallOptions(
+        source_root=source, install_root=install_root, verify_docker_image=False
+    )
+    install_from_source(options)  # registers the fresh `state/runtime` layout
+
+    registry = tmp_path / "oob-allocations.json"
+    pre_fix_dir = install_root / ".runtime-data" / "oob"
+    monkeypatch.setenv("VIGIL_RUNTIME_DATA_DIR", str(pre_fix_dir.parent))
+    seeded = allocate_relay_route(
+        install_root,
+        slot_name="Acme",
+        base_domain="oob.example.test",
+        registry_path=registry,
+        identity_factory=lambda: "acme-id",
+        slot_candidates=lambda _identity: [11],
+    )
+    monkeypatch.delenv("VIGIL_RUNTIME_DATA_DIR")
+    pre_fix = pre_fix_dir / filename
+    if filename != seeded.metadata_path.name:
+        pre_fix.write_text(
+            json.dumps(_pre_rename_record(seeded.serializable()), indent=2, sort_keys=True)
+            + "\n",
+            encoding="utf-8",
+        )
+        seeded.metadata_path.unlink()
+    record = pre_fix.read_bytes()
+    allocations = json.loads(registry.read_text(encoding="utf-8"))
+
+    loaded = load_relay_route(install_root)
+    assert loaded is not None
+    assert loaded.metadata_path == pre_fix
+    assert loaded.install_id == seeded.install_id
+
+    monkeypatch.setenv("VIGIL_OOB_DOMAIN", "oob.example.test")
+    install_from_source(options)
+
+    moved = load_relay_route(install_root)
+    assert moved is not None
+    assert moved.metadata_path == install_root / "state/runtime/oob" / filename
+    assert moved.metadata_path.read_bytes() == record
+    assert not pre_fix.exists()
+    assert (
+        moved.install_id,
+        moved.allocation_slot,
+        moved.dns_remote_port,
+        moved.reverse_remote_port,
+    ) == (
+        seeded.install_id,
+        seeded.allocation_slot,
+        seeded.dns_remote_port,
+        seeded.reverse_remote_port,
+    )
+    assert json.loads(registry.read_text(encoding="utf-8")) == allocations
+
+
+def _allocate_beside_install_root(
+    monkeypatch: pytest.MonkeyPatch, install_root: Path, registry: Path, identity: str, slot: int
+):
+    """Allocate the way a release that ignored the runtime data directory did."""
+    from vigil_cli.oob_relay import allocate_relay_route
+
+    monkeypatch.setenv("VIGIL_RUNTIME_DATA_DIR", str(install_root / ".runtime-data"))
+    try:
+        return allocate_relay_route(
+            install_root,
+            slot_name=install_root.name,
+            base_domain="oob.example.test",
+            registry_path=registry,
+            identity_factory=lambda: identity,
+            slot_candidates=lambda _identity: [slot],
+        )
+    finally:
+        monkeypatch.delenv("VIGIL_RUNTIME_DATA_DIR")
+
+
+def test_shared_runtime_data_dir_never_hands_one_install_anothers_slot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two installs on one VIGIL_RUNTIME_DATA_DIR must not swap relay slots.
+
+    Once A's record moves into the shared `oob/`, B finds it before its own.
+    Using it would send B's callbacks through A's subdomain and ports.
+    """
+    from vigil_cli.oob_relay import initialize_relay_route, load_relay_route
+
+    registry = tmp_path / "oob-allocations.json"  # beside $VIGIL_CONFIG
+    alpha = _allocate_beside_install_root(monkeypatch, tmp_path / "alpha", registry, "alpha-id", 1)
+    beta = _allocate_beside_install_root(monkeypatch, tmp_path / "beta", registry, "beta-id", 2)
+    shared = tmp_path / "shared"
+    monkeypatch.setenv("VIGIL_RUNTIME_DATA_DIR", str(shared))
+    moved = initialize_relay_route(
+        tmp_path / "alpha", base_domain="oob.example.test", registry_path=registry
+    )
+    assert moved.metadata_path == shared / "oob/relay-routing.json"
+
+    with pytest.raises(SystemExit) as refused:
+        load_relay_route(tmp_path / "beta")
+    message = str(refused.value)
+    assert str(moved.metadata_path) in message
+    assert str(beta.metadata_path) in message
+    assert "VIGIL_RUNTIME_DATA_DIR" in message
+    with pytest.raises(SystemExit, match="VIGIL_RUNTIME_DATA_DIR"):
+        initialize_relay_route(
+            tmp_path / "beta", base_domain="oob.example.test", registry_path=registry
+        )
+    assert load_relay_route(tmp_path / "alpha") == moved
+    assert alpha.install_id == moved.install_id
+
+
+def test_an_install_without_a_record_never_adopts_another_installs_slot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vigil_cli.oob_relay import initialize_relay_route, load_relay_route
+
+    registry = tmp_path / "oob-allocations.json"
+    monkeypatch.setenv("VIGIL_RUNTIME_DATA_DIR", str(tmp_path / "shared"))
+    (tmp_path / "alpha").mkdir()
+    (tmp_path / "beta").mkdir()
+    initialize_relay_route(
+        tmp_path / "alpha", base_domain="oob.example.test", registry_path=registry
+    )
+
+    with pytest.raises(SystemExit, match="another install root"):
+        load_relay_route(tmp_path / "beta")
+    with pytest.raises(SystemExit, match="another install root"):
+        initialize_relay_route(
+            tmp_path / "beta", base_domain="oob.example.test", registry_path=registry
+        )
+
+
+def test_a_moved_install_root_still_reads_its_own_slot(tmp_path: Path) -> None:
+    """A registry row naming a root that no longer exists is a moved install."""
+    from vigil_cli.oob_relay import initialize_relay_route, load_relay_route
+
+    registry = tmp_path / "oob-allocations.json"
+    route = initialize_relay_route(
+        tmp_path / "before", base_domain="oob.example.test", registry_path=registry
+    )
+    (tmp_path / "before").rename(tmp_path / "after")
+
+    loaded = load_relay_route(tmp_path / "after")
+
+    assert loaded is not None
+    assert loaded.install_id == route.install_id
+
+
+def test_a_record_moved_mid_read_is_still_found(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A reader racing `vigil install`'s move must see the record somewhere.
+
+    The move runs right after the reader's first probe finds a location empty,
+    which is the interleaving that would otherwise see neither file.
+    """
+    from vigil_cli.oob_relay import load_relay_route
+
+    install_root = tmp_path / "install"
+    runtime_state = _register_fresh_workspace(install_root)
+    seeded = _allocate_beside_install_root(
+        monkeypatch, install_root, tmp_path / "oob-allocations.json", "acme-id", 3
+    )
+    destination = runtime_state / "oob" / seeded.metadata_path.name
+    destination.parent.mkdir()
+    moved = False
+    real_exists = Path.exists
+    real_read_text = Path.read_text
+
+    def move_once() -> None:
+        nonlocal moved
+        if not moved:
+            moved = True
+            os.replace(seeded.metadata_path, destination)
+
+    def exists(self: Path, *args, **kwargs) -> bool:
+        present = real_exists(self, *args, **kwargs)
+        if not present and self.name.endswith("-routing.json"):
+            move_once()
+        return present
+
+    def read_text(self: Path, *args, **kwargs) -> str:
+        try:
+            return real_read_text(self, *args, **kwargs)
+        except FileNotFoundError:
+            if self.name.endswith("-routing.json"):
+                move_once()
+            raise
+
+    monkeypatch.setattr(Path, "exists", exists)
+    monkeypatch.setattr(Path, "read_text", read_text)
+
+    loaded = load_relay_route(install_root)
+
+    assert moved
+    assert loaded is not None
+    assert loaded.install_id == seeded.install_id

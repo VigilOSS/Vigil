@@ -5,6 +5,20 @@ versioning follows [Semantic Versioning][semver].
 
 Durable design decisions live in [`docs/adr/`](docs/adr/).
 
+## [Unreleased]
+
+### Fixed
+
+- `vigil install` keeps an install's OOB relay slot when the runtime data directory is not
+  `<install>/.runtime-data`. The routing record and the poll channel cache were written there
+  regardless, away from the live OOB state, so an install that moved to `state/runtime` could be
+  allocated a second slot. Both now live in the runtime data directory's `oob/`, and
+  `vigil install` with an OOB domain configured moves a record it finds at the earlier location
+  without changing it. An install whose runtime data directory holds another install's record is
+  refused instead of being handed that install's slot.
+- `agent/.env.example` leaves `VIGIL_RUNTIME_DATA_DIR` unset, so a copied template keeps the
+  workspace's runtime data directory, and says to set it per install in `<install>/.env`.
+
 ## [1.2.6] - 2026-10-13
 
 ### Added

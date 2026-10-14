@@ -1,7 +1,7 @@
 """Shared fixtures for the root ``tests/`` suite (the installable ``vigil`` CLI
 and the bench harness).
 
-Two concerns live here, both about running this suite hermetically from a fresh
+Three concerns live here, all about running this suite hermetically from a fresh
 checkout without the operator's shell environment leaking in:
 
 1. **Importability.** Modules like ``test_active_engagement_pointer`` import
@@ -20,6 +20,10 @@ checkout without the operator's shell environment leaking in:
    NOT touch ``$ENGAGEMENT_DIR`` — the tests that exercise the env tier set (or
    clear) it themselves via monkeypatch, and blanket-unsetting it would defeat
    those cases.
+
+3. **Runtime data isolation.** An exported ``VIGIL_RUNTIME_DATA_DIR`` (or
+   ``KALI_MCP_DATA_DIR``) relocates every install's runtime state, so the
+   autouse fixture clears both; tests that exercise the override set it.
 """
 from __future__ import annotations
 
@@ -42,3 +46,12 @@ def _isolate_vigil_config(tmp_path, monkeypatch):
     resolution. The file is intentionally absent (the loaders treat a missing
     config as empty), so the pointer tier is empty unless a test writes it."""
     monkeypatch.setenv("VIGIL_CONFIG", str(tmp_path / "vigil-config.json"))
+
+
+@pytest.fixture(autouse=True)
+def _isolate_runtime_data_dir(monkeypatch):
+    """Keep runtime state under each test's own install root. OOB relay records
+    follow the runtime data directory, so an exported ``VIGIL_RUNTIME_DATA_DIR``
+    would aim allocations at the operator's real ``/data`` mount."""
+    monkeypatch.delenv("VIGIL_RUNTIME_DATA_DIR", raising=False)
+    monkeypatch.delenv("KALI_MCP_DATA_DIR", raising=False)
