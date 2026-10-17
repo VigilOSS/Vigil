@@ -2635,3 +2635,44 @@ function intelEntityPath(entityType: IntelEntityType): string {
       return "notes";
   }
 }
+
+export type ProofWork = {
+  id: number;
+  finding_slug: string;
+  route: "code" | "web";
+  objective: string;
+  target_hosts: string[];
+  status: "prepared" | "claimed" | "blocked" | "finished" | "stale" | "resolved";
+  current: boolean;
+  owed: boolean;
+  approved: boolean;
+  approval_required: boolean;
+  owner_agent_id: string | null;
+  owner_dispatch_id: number | null;
+  owner_dispatch_status: string | null;
+  blocker: string;
+  run_ids: number[];
+  created_at: string;
+  updated_at: string;
+};
+export type ProofWorkList = {
+  owed: Array<{finding_slug: string; finding_id: number; title: string; canonical_location: string; work_ids: number[]}>;
+  items: ProofWork[];
+};
+export type ProofWorkPreparation = {finding_slug: string; route: "code" | "web"; objective: string; target_hosts: string[]};
+
+export function listProofWork(engagementKey: string) {
+  return request<ProofWorkList>(`/engagements/${encodeURIComponent(engagementKey)}/assessment/proof-work`);
+}
+export function prepareProofWork(engagementKey: string, payload: ProofWorkPreparation) {
+  return request<ProofWork>(`/engagements/${encodeURIComponent(engagementKey)}/assessment/proof-work`, {method: "POST", body: JSON.stringify(payload)});
+}
+export function approveProofWork(engagementKey: string, workId: number, approved: boolean) {
+  return request<ProofWork>(`/engagements/${encodeURIComponent(engagementKey)}/assessment/proof-work/${workId}/approval`, {method: "POST", body: JSON.stringify({approved})});
+}
+export function reconcileProofWork(engagementKey: string, workId: number) {
+  return request<ProofWork>(`/engagements/${encodeURIComponent(engagementKey)}/assessment/proof-work/${workId}/reconcile`, {method: "POST", body: "{}"});
+}
+export function releaseProofWork(engagementKey: string, workId: number, reason: string) {
+  return request<ProofWork>(`/engagements/${encodeURIComponent(engagementKey)}/assessment/proof-work/${workId}/release`, {method: "POST", body: JSON.stringify({reason})});
+}

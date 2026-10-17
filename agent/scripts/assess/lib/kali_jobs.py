@@ -23,6 +23,7 @@ from .execution_recency import emit_foreign_lane_recency
 from .kali_tool_naming import _derive_tool_name
 from .kali_runtime_exec import (
     _cat_container_pid_file,
+    _check_container_running,
     _container_running,
     _engagement_env_args,
     _env_args,
@@ -424,10 +425,7 @@ def start_job(
             )
 
         if not _container_running(container_name):
-            raise AssessError(
-                f"runtime container '{container_name}' is not running. "
-                "Run `vigil runtime start` first."
-            )
+            _check_container_running(container_name)
         _check_dtach_in_container(container_name)
         _ensure_dtach_dir(container_name, dtach_socket_dir)
 

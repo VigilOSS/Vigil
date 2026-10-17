@@ -11,31 +11,22 @@ can be enabled explicitly and advances independently.
 ## Creating the engagement
 
 ```bash
-vigil engagement create
+vigil engagement create --type code --name acme --source-dir ./acme --no-prompt
+vigil engagement start <engagement-key> --mode code --client codex
 ```
 
-Choose **code** and enter an engagement name. Vigil creates the engagement and prints
-the exact `source/` folder where you should place the files to review. Copy your source
-files or project folders there. A Git repository and commit history are not required;
-loose source files are supported too. You can leave the folder empty and add files later.
+`--source-dir` registers the original directory. The operator shows its location and inventory,
+then asks for confirmation before ingest. Ingest creates one sealed audit copy directly from
+that directory and leaves the original untouched. Git history is optional.
 
-When you start Claude or Codex, the client shows that folder and asks you to confirm that
-its contents are the intended source. An empty folder leaves the session waiting for you
-to add files. The client rechecks the folder when you say they are ready and asks for
-confirmation before analysis begins.
+You can also create without `--source-dir` and place loose files or project folders in the
+printed `source/` folder. An empty source waits for files and confirmation. Neither registration
+nor copying files grants consent to ingest or refresh. Starting an existing engagement resumes
+its sealed source and durable work without repeating the same confirmation. If the original is
+unavailable, the sealed source remains usable; refresh waits for the original to return.
 
-To open the client without an automatic opening message, add `--no-autoprompt` to
-`vigil engagement start`. You can enter your own request; the client still needs your
-source confirmation before analysis.
-
-For scripts, creation can also be non-interactive:
-
-```bash
-vigil engagement create --type code --name acme --no-prompt
-```
-
-Creation starts `tracks.code.phase` at `ingest` and prepares an empty source folder.
-The engagement directory name is derived from its name.
+Add `--no-autoprompt` to enter your own opening request. Source confirmation still applies
+before first ingest or refresh. Creation starts `tracks.code.phase` at `ingest`.
 
 ## Toolchain
 
@@ -48,24 +39,23 @@ installs the bundled parser packages automatically. No separate
 vigil assess --help    # first run bootstraps the parser toolchain
 ```
 
-For Phase 4 fuzz campaigns, install the host-side C/C++ tools:
+Static source review runs on the host. Builds, repository binaries, sanitizers,
+and fuzz campaigns run through the audited Kali runtime. With Docker running, the first audited
+command starts Kali when needed. Let the operator check the toolchain for the selected campaign:
 
 ```bash
-brew install llvm afl++
-
-# Prefer Homebrew LLVM for libFuzzer on macOS: Apple clang may not ship
-# libclang_rt.fuzzer_osx.a, which breaks -fsanitize=fuzzer links.
-export PATH="/opt/homebrew/opt/llvm/bin:$PATH"
-
-which clang && clang --version
-afl-fuzz -V
+vigil assess kali exec --technique FUZZ --intent "verify fuzz compiler and engine toolchain" \
+  --probe-kind baseline --phase code-hunt --timeout 60 -- \
+  sh -c 'command -v clang && clang --version'
 ```
 
-Homebrew's AFL++ may provide `afl-clang-fast` or `afl-cc` instead of
-`afl-clang-lto` on macOS; either wrapper is acceptable as long as `afl-fuzz` and
-`afl-tmin` are present. `vigil doctor` covers the core operator prerequisites but
-not the conditional fuzzing toolchain — check those tools directly when planning a
-campaign.
+Check AFL++ and its compiler wrapper through the same audited surface only when
+the selected campaign uses that engine. A libFuzzer-only target does not need
+AFL++. `vigil doctor` covers the core operator prerequisites; the code operator
+and fuzz engineer check campaign-specific tools, source mounts, and build inputs.
+If an input cannot be reached inside the engagement mount, repair that boundary
+before execution. The [fuzz workflow](../agent/phases/code-phase-4-fuzz.md) owns
+the campaign procedure.
 
 ## Starting the operator
 
@@ -83,14 +73,14 @@ engagement. Read AGENTS.md and run the code analysis workflow.
 
 ## The sealed snapshot
 
-After you confirm the staged source, the operator uses the selected folder under `source/` and runs `code-ingest` to
+After you confirm the selected source directory, the operator runs `code-ingest` directly on it to
 publish a content-addressed read-only snapshot, then builds and syncs the
 structural index against the printed repo ID and snapshot path before driving
 classify+map → hunt → verify+variant.
 
 Specialists read the **sealed snapshot**; the mutable origin is retained only as
 provenance. At refresh commit, the backend independently validates the
-engagement-owned v2 manifest, the real source bytes, the staged inventory, and the
+engagement-owned manifest, the real source bytes, the staged inventory, and the
 declared counts before recording the snapshot as `verified`. An API caller cannot
 grant that trust state by supplying the label alone.
 

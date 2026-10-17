@@ -10,8 +10,10 @@ helpers when the PID file is unavailable.
 from __future__ import annotations
 
 import subprocess
+import sys
+from contextlib import redirect_stdout
 
-from .client import AssessError
+from .client import AssessError, default_runtime_container
 
 
 def _container_pid_file(run_uuid: str) -> str:
@@ -245,7 +247,19 @@ def _check_container_running(container_name: str) -> None:
     if result.returncode != 0:
         raise AssessError(f"docker ps failed: {result.stderr.strip() or result.stdout.strip()}")
     if container_name not in (result.stdout or "").splitlines():
-        raise AssessError(
-            f"runtime container '{container_name}' is not running. "
-            "Run `vigil runtime start` first."
-        )
+        if container_name != default_runtime_container():
+            raise AssessError(f"external runtime container '{container_name}' is not running; start it explicitly")
+        try:
+            from vigil_cli.paths import resolve_install_root
+            from vigil_cli.runtime import RuntimeOptions, start_runtime
+        except ImportError as exc:
+            raise AssessError("Managed runtime startup needs the matched Vigil CLI; run `vigil runtime start`.") from exc
+        try:
+            # Reuse the canonical startup path and its process lock. Existing
+            # jobs own their detached supervisors, independent of this client.
+            with redirect_stdout(sys.stderr):
+                start_runtime(RuntimeOptions(install_root=resolve_install_root(), container_name=container_name), allow_existing=True)
+        except (OSError, SystemExit) as exc:
+            raise AssessError(f"Could not start managed runtime '{container_name}': {exc}") from exc
+        if not _container_running(container_name):
+            raise AssessError(f"managed runtime '{container_name}' did not become ready")

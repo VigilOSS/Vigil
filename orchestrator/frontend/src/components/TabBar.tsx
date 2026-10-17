@@ -29,6 +29,7 @@ export const TABS = [
   { key: "runs", label: "Runs" },
   { key: "intel", label: "Intel" },
   { key: "findings", label: "Findings" },
+  { key: "proof", label: "Proof work" },
   { key: "submissions", label: "Submissions" },
   { key: "surfaces", label: "Surfaces" },
   { key: "http", label: "HTTP" },
@@ -45,7 +46,7 @@ export type TabKey = (typeof TABS)[number]["key"];
 
 const TAB_GROUPS = [
   { label: "Workspace", keys: ["overview", "runs", "intel"] },
-  { label: "Assessment", keys: ["findings", "submissions", "surfaces", "http", "coverage", "code"] },
+  { label: "Assessment", keys: ["findings", "proof", "submissions", "surfaces", "http", "coverage", "code"] },
   { label: "Evidence", keys: ["commands", "oast", "activity", "log", "artifacts"] },
 ] as const;
 

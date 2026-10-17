@@ -1,6 +1,6 @@
 ---
 description: "Submission format selector + shared authoring rules (voice, verbatim evidence, PoC authoring) and ONE consolidated pre-submission / report QA checklist; platform-neutral across Bugcrowd, HackerOne, and direct-to-company. Per-platform scaffolds live in templates/{bugcrowd,hackerone,direct}.md"
-skill: report-generation
+skill: report-generation, blind-triage
 category: Disclosure & Reporting Formats
 ---
 

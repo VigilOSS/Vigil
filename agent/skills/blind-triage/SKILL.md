@@ -50,7 +50,7 @@ It is the decisive gate.
 
 **Reviewer setup (all of these are required):**
 
-- **Non-specialist general agent, strongest model.** Not the report-writer, not
+- **Non-specialist general agent, strongest model.** Register its own dispatch identity. Not the report-writer, not
   the vulnerability-analyst who found it — a fresh general agent on the strongest
   available model, so it brings an unbiased, adversarial reviewer's eye.
 - **Zero engagement context on the first pass.** The reviewer receives the
@@ -68,6 +68,12 @@ It is the decisive gate.
   query other engagement state on the first pass.
   If a claim is not proven inside the submission bytes, it is unproven for triage purposes —
   that is the reviewer judging exactly what an external triager can see.
+
+The operator registers this review before native launch with `vigil assess agent start`
+using a fresh ID, `--role general`, `--skills blind-triage`, and `--no-target-traffic`.
+The general agent receives only the prepared packet and the review request below; it does
+not load an investigative specialist role or engagement history. Bind the returned native
+handle to that registered ID separately. The operator records its verdict after it returns.
 
 **The dispatch prompt must, verbatim, give the blind reviewer:**
 
@@ -90,12 +96,22 @@ It is the decisive gate.
 
 **Record the verdict (durable, enforced).** The verdict is not advisory prose —
 persist it so the report/complete transition gate can SEE it. After the reviewer
-returns the table, the operator records one decision row per finding:
+returns the table, the operator records one decision row per finding. Include the actual
+reviewer dispatch and the report-writer dispatch that authored the reviewed packet; both must
+belong to this engagement. The reviewer must differ from the finding author and the writer.
+These recorded identities establish attribution; native context isolation remains the
+operator/reviewer responsibility, not a backend-proven fact:
 
 ```bash
 vigil assess agent decision --kind blind_triage_verdict --payload-json \
-  '{"finding_slug":"<slug>","packet_id":"<64-char packet id>","verdict":"<Accept@P1..P5|Need-More-Info|Not-Applicable-Informational|Out-of-Scope|Duplicate>","claimed_severity":"<sev>","weak_points":"..."}'
+  '{"finding_slug":"<slug>","packet_id":"<64-char packet id>","reviewer_dispatch_agent_id":"<reviewer-id>","writer_dispatch_agent_id":"<writer-id>","verdict":"<Accept@P1..P5|Need-More-Info|Not-Applicable-Informational|Out-of-Scope|Duplicate>","claimed_severity":"<sev>","weak_points":"..."}'
 ```
+
+After recording the returned verdict, the operator preserves the reviewer's actual reasoning,
+weak points, uncertainty, and suggested next tests in the existing handoff fields, then runs
+the existing `agent close` sequence for that registered reviewer. The packet-only reviewer
+makes no tool calls. This is ordinary dispatch closure, not another human acknowledgement
+or a new review gate; do not reduce its final return to the word `Accept`.
 
 This writes a `kind='blind_triage_verdict'` row to the `assessment_dispatch_decisions`
 table. `vigil assess transition-phase report` (and `complete`) reads these rows and

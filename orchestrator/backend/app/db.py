@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-from . import db_code_analysis_schema
+from . import db_code_analysis_schema, db_proof_work_schema
 from .code_snapshot import SOURCE_MANIFEST_VERSION, source_manifest_digest
 from .config import settings
 from .models.engagement import Engagement
@@ -6244,6 +6244,14 @@ def init_db() -> None:
         if run_accounting_v2_migration_reasons
         else None
     )
+    proof_work_backup = None
+    if db_path.exists():
+        with closing(sqlite3.connect(str(db_path))) as inspection:
+            existing_tables = {row[0] for row in inspection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )}
+        if "engagements" in existing_tables and "assessment_proof_work" not in existing_tables:
+            proof_work_backup = _create_adjacent_migration_backup(db_path, label="proof-work")
     with closing(sqlite3.connect(str(db_path))) as connection, connection:
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
@@ -6266,6 +6274,18 @@ def init_db() -> None:
         _create_http_flow_tables(connection)
         _create_jobs_table(connection)
         db_code_analysis_schema.create_tables(connection)
+        db_proof_work_schema.create_tables(connection)
+        if proof_work_backup is not None:
+            _create_migration_history_tables(connection)
+            # Startup workers can each back up the old schema before either
+            # creates it. Keep the first recorded backup and let both start.
+            connection.execute(
+                "INSERT INTO schema_migrations "
+                "(migration_id,from_version,to_version,migrated_rows,warning_count,backup_path,report_json) "
+                "VALUES('proof-work-v1','shared-proof-ledger','durable-proof-work-v1',0,0,?,?) "
+                "ON CONFLICT(migration_id) DO NOTHING",
+                (str(proof_work_backup), json.dumps({"additive": True, "historical_rows_rewritten": 0})),
+            )
         _apply_additive_migrations(connection)
         if verification_backup is not None:
             if connection.in_transaction:

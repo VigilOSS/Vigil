@@ -63,6 +63,7 @@ import { IntelTab } from "../components/IntelTab";
 import { LogTab } from "../components/LogTab";
 import { OastTab } from "../components/OastTab";
 import { OverviewTab } from "../components/OverviewTab";
+import { ProofWorkTab } from "../components/ProofWorkTab";
 import { RunsTab } from "../components/RunsTab";
 import { SurfacesTab } from "../components/SurfacesTab";
 import { SubmissionsTab } from "../components/SubmissionsTab";
@@ -803,6 +804,8 @@ function EngagementWorkspace({
               initialDrawerTab={pendingDrawerTab}
             />
           )}
+
+          {activeTab === "proof" && <ProofWorkTab engagementKey={engagementKey} refreshVersion={assessmentRefreshVersion} />}
 
           {activeTab === "runs" && (
             <RunsTab

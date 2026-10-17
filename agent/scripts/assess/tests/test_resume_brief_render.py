@@ -1717,3 +1717,21 @@ def test_no_persisted_brief_row_lets_a_line_separator_reach_column_zero(
     assert "safe-prefix" in out
     assert marker in out
     assert not any(line.startswith(marker) for line in out.splitlines()), out
+
+
+def test_selected_handoff_exposes_all_recommended_tests_with_reasons_and_uncertainty():
+    steps = [{"action": f"test Acme path {i}", "target": "/jobs", "rationale": f"relationship {i}"} for i in range(5)]
+    output = resume_brief._render_markdown({
+        "engagement": {"key": "acme"},
+        "dispatches": {"selected_handoff": {
+            "agent_id": "worker-1", "summary": "No finding confirmed.",
+            "next_steps": steps,
+            "open_questions": ["A queued export survives role removal; intended behavior?"],
+            "coverage_gaps": [{"area": "worker replay", "reason": "missing worker credential"}],
+            "extras": {"observation": "May combine with job modification; not demonstrated."},
+        }},
+    })
+    assert all(step["rationale"] in output for step in steps)
+    assert "queued export survives role removal" in output
+    assert "missing worker credential" in output
+    assert "May combine with job modification" in output

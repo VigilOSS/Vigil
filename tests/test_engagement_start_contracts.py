@@ -507,6 +507,9 @@ def preflight_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     (engagement_dir / ".orchestrator.env").write_text("DEEPSEEK_API_KEY=test-key\n")
     monkeypatch.setattr(preflight_module.shutil, "which", lambda _name: "/usr/local/bin/client")
     monkeypatch.setattr(preflight_module, "orchestrator_status", lambda _root: "running")
+    monkeypatch.setattr(engagements, "_verify_backend_install_root", lambda *_: True)
+    from vigil_cli import orchestrator
+    monkeypatch.setattr(orchestrator, "start_orchestrator", lambda *_: None)
     monkeypatch.setattr(preflight_module, "runtime_status", lambda: "running")
     monkeypatch.setattr(preflight_module, "_warn_if_install_stale", lambda _root: None)
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
@@ -621,7 +624,7 @@ def test_preflight_does_not_require_a_provider_key_for_vendor_authed_clients(
         )
 
 
-def test_preflight_warns_but_proceeds_when_the_local_stack_is_down(
+def test_preflight_recovers_backend_and_warns_when_execution_is_down(
     preflight_env: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -634,7 +637,7 @@ def test_preflight_warns_but_proceeds_when_the_local_stack_is_down(
     )
 
     stderr = capsys.readouterr().err
-    assert "WARN: orchestrator is not running" in stderr
+    assert "Starting the engagement backend" in stderr
     assert "WARN: Kali runtime container is stopped" in stderr
 
 

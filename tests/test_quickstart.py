@@ -177,7 +177,7 @@ def test_json_output_shape(capsys):
     assert {row["binary"] for row in payload["host_tools"]} == {t.binary for t in HOST_RECON_TOOLS}
     assert any(step["tool"] == "subfinder" for step in payload["install_plan"])
     binaries = {p["binary"] for p in payload["prerequisites"]}
-    assert {"uv", "docker", "go"} == binaries
+    assert {"uv", "docker", "go", "claude"} == binaries
 
 
 def test_prerequisite_status_reports_presence():

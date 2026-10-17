@@ -469,7 +469,7 @@ can use the exact values in its closing sequence:
 
 ```
 ## Runtime Identity
-agent_id: <actual-id-from-register-or-spawn>
+agent_id: <registered-dispatch-agent-id>
 agent_role: <role>
 authorized_phase: <phase>
 tier: <L1|L2|L3|L4>
@@ -478,6 +478,11 @@ platforms: [<platform>, ...]
 tenant_reference_paths:
   - agent/references/tenants/<customer>-<tenant-suffix>.md  # gws → workspace
 ```
+
+Choose and register the backend `agent_id` before native launch. Pass it unchanged in
+Runtime Identity and backend writes. Bind the returned native client session/agent handle
+separately with `vigil assess agent bind-client-handle`; the native handle never replaces the
+backend dispatch identity.
 
 Pass this block verbatim at the top of the dispatch prompt. The specialist
 writes these values into the handoff JSON and runs `vigil assess agent

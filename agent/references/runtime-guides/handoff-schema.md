@@ -19,7 +19,8 @@ prompt by `vigil assess agent render-handoff <agent-id>`.
 - **The operator hands the next dispatch a bounded blob.** `render-handoff` reads the
   handoff row, fetches each finding slug from the backend (404 → "slug missing"),
   checks every working_artifact path on disk (missing → "(state: missing)"), and
-  emits a markdown blob hard-capped at `--max-lines` (default 40). The next agent
+  emits a context excerpt capped at `--max-lines` (default 40). Use `--max-lines 0` for
+  the complete recorded handoff, including specialty extras; a capped excerpt is not the full result. The next agent
   rebuilds its mental model from finding slugs, artifact paths, and the next-step
   list — not from a transcript paste.
 - **The backend dispatch tables are canonical.** Skipping the handoff write means the
@@ -87,6 +88,16 @@ spent on subdomain enum", "tool failed", "scope ambiguous"). `recommended_follow
 is the action that would close the gap ("re-dispatch source-analyzer with
 JS-only objective", "request manual review of vendor-SaaS scope"). The
 operator uses this list to plan the next dispatch.
+
+### Material observations and the final response
+
+Keep useful observations even when they did not become findings. Put the next experiment and
+its rationale in `next_steps`, uncertainty in `open_questions`, and unexpected relationships in
+`extras` or existing intel notes. State what was observed and what remains hypothetical. The
+final native response should explain those connections and the outcome, not just repeat IDs.
+Use free prose when needed; no fixed word quota, separate detailed investigation file, or new
+operator acknowledgement is required. The 2000-character summary is only one field, not a cap
+on the investigation or its return. The operator can combine a weak clue with context you lack.
 
 ### `next_steps`
 

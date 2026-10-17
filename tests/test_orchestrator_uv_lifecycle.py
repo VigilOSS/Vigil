@@ -116,3 +116,32 @@ def test_backend_environment_prepends_matched_cli_and_preserves_inherited_python
     with pytest.raises(ExecIntercepted):
         orchestrator.start_orchestrator(orchestrator.OrchestratorOptions(workspace, foreground=True))
     assert observed[0]["PYTHONPATH"].split(os.pathsep) == [str(application / layout), inherited]
+
+
+def test_health_and_readiness_share_one_startup_budget(isolated_launch, monkeypatch, capsys):
+    from types import SimpleNamespace
+
+    _application, workspace = isolated_launch
+    now = {"value": 0.0}
+    budgets = []
+    monkeypatch.setenv("VIGIL_ORCHESTRATOR_START_TIMEOUT_SECONDS", "600")
+    monkeypatch.setattr(orchestrator.time, "monotonic", lambda: now["value"])
+    monkeypatch.setattr(orchestrator, "_sync_backend_environment", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(orchestrator.subprocess, "Popen", lambda *_args, **_kwargs: SimpleNamespace(pid=1234))
+
+    def health(*_args, **kwargs):
+        budgets.append(kwargs.get("timeout"))
+        now["value"] = 90.0
+        return True
+
+    def readiness(*_args, **kwargs):
+        budgets.append(kwargs.get("timeout"))
+        return True
+
+    monkeypatch.setattr(orchestrator, "_wait_for_health", health)
+    monkeypatch.setattr(orchestrator, "_wait_for_readiness", readiness)
+    orchestrator.start_orchestrator(orchestrator.OrchestratorOptions(workspace))
+    assert budgets == [600.0, 510.0]
+    output = capsys.readouterr().out
+    assert "600" in output
+    assert "logs" in output or "orchestrator.log" in output

@@ -172,6 +172,7 @@ def start_proxy(
     verify_port: bool = True,
     verify_running: bool = True,
     force_rebuild: bool = False,
+    build_if_needed: bool = True,
 ) -> None:
     if options.mode != "docker":
         raise SystemExit("Only Docker mitmproxy mode is managed by the CLI. Use host mitmproxy directly for --host workflows.")
@@ -190,9 +191,13 @@ def start_proxy(
     # runner for the build passes `build_runner`; `runner` stays raw on the
     # build call so `build_image` can still pick the streaming default itself.
     exec_runner = runner or docker.run_command
-    if force_rebuild or image_freshness.image_outdated(
+    if not build_if_needed and force_rebuild:
+        raise SystemExit("Capture image rebuild requires build_if_needed")
+    if not build_if_needed and not docker.image_exists(options.image, runner=exec_runner):
+        raise SystemExit(f"Capture image {options.image} is missing; run `vigil mitmproxy build` before --no-build startup.")
+    if build_if_needed and (force_rebuild or image_freshness.image_outdated(
         options.image, mitmproxy_image_inputs(application_root), root=application_root, runner=exec_runner
-    ):
+    )):
         build_image(
             install_root,
             options.image,

@@ -298,3 +298,26 @@ def test_render_handoff_keeps_cap_and_recorded_values_when_space_allows(
         assert all(path in output for path in paths)
         assert all(issue["detail"] in output for issue in issues)
         assert "Completed the assigned surface pass." in output
+
+
+def test_full_handoff_retains_material_clues_and_next_step_reasoning(tmp_path, monkeypatch, capsys):
+    steps = [{"action": f"check Acme path {i}", "rationale": f"possible cross-role relationship {i}"} for i in range(25)]
+    _run_renderer(
+        monkeypatch, tmp_path, dispatch_slugs=[], handoff_slugs=[], max_lines=0,
+        handoff_extra={
+            "next_steps": steps,
+            "open_questions": ["Queued export survives a role change; intentional or a replay path?"],
+            "extras": {"observation": "No claim yet: authorization is checked before queued execution."},
+        },
+    )
+    output = capsys.readouterr().out
+    assert all(step["rationale"] in output for step in steps)
+    assert "Queued export survives a role change" in output
+    assert "authorization is checked before queued execution" in output
+
+
+def test_handoff_rejects_negative_excerpt_limit(tmp_path, monkeypatch, capsys):
+    with pytest.raises(SystemExit) as stopped:
+        _run_renderer(monkeypatch, tmp_path, dispatch_slugs=[], handoff_slugs=[], max_lines=-1)
+    assert stopped.value.code == 1
+    assert "non-negative" in capsys.readouterr().err

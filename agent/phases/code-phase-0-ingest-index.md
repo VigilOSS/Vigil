@@ -13,7 +13,8 @@ Phased mindset flow (code), the Agent Roster, and the Dispatch Context Template 
 Operator-mechanical. No agent dispatch.
 
 Complete `agent/operator-core-code.md`'s Source confirmation step first. Use the confirmed
-`source/` folder itself for loose files, or a confirmed project subdirectory for one project.
+original directory returned by `vigil engagement mode --json`, or a project subdirectory
+within the manual source folder. Ingest directly; the sealed snapshot is the audit copy.
 
 ```bash
 # 1. Use the source folder or project subdirectory confirmed by the human.

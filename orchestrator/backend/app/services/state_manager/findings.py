@@ -85,6 +85,16 @@ from .finding_snapshots import (
 
 _CODE_SNAPSHOT_WRITE_MODES = CODE_SNAPSHOT_WRITE_MODES
 
+
+def finding_mode_sql(mode: str | None, *, location_sql: str = 'canonical_location') -> str:
+    """The canonical candidate mode used by finding and proof-memory reads."""
+    if mode == 'code':
+        return f" AND {location_sql} LIKE 'file:%'"
+    if mode == 'web':
+        return f" AND COALESCE({location_sql}, '') NOT LIKE 'file:%'"
+    return ''
+
+
 _VERIFICATION_MATERIAL_DETAIL_KEYS = frozenset(
     {
         "cwe_id",

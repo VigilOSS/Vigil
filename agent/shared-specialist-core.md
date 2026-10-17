@@ -53,6 +53,19 @@ already listed below.
 
 ---
 
+## Discovery and proof objectives
+
+A discovery assignment names a surface or source boundary, the investigation objective,
+and scope. Form your own hypotheses. A follow-up lens can focus effort without excluding
+an adjacent bug the evidence reveals. A fresh high-risk reread receives no prior findings or hunter conclusions; independently
+inspect the assigned source rather than reconstructing the earlier hunter's argument.
+
+A proof assignment names an untrusted candidate claim, not an answer to defend. Try to
+confirm, disprove, or revise it with controls and the actual supported actor/API path.
+When access or execution is blocked, preserve the missing condition and useful next test;
+being unable to reproduce is not evidence that the bug is false. Keep evidence and scope
+identity separate: a source-linked finding can require a web proof with web constraints.
+
 ## Reasoning quality > response brevity
 
 Reason fully through the work as you go — narrate observations between tool calls, work through
@@ -264,6 +277,23 @@ offer to record it there (for example, `vigil assess intel record note` for
 target knowledge or `vigil assess finding update` for finding content). Continue
 with the human's choice; this conversational correction keeps state queryable
 without turning a prose preference into a blocking gate.
+
+### Reasoned final return
+
+Return the reasoning the operator needs to choose what happens next: what held up or failed,
+material observations that did not become findings, uncertainty, and recommended tests with
+why they matter. A useful clue can be an unexpected relationship, not yet a vulnerability.
+For example: "A queued export still runs after role removal. This may be intended; if a lower
+role can modify the job or replay its output, the two behaviors may combine. I did not establish
+that second capability."
+
+Keep these in the existing handoff `next_steps`, `coverage_gaps`, `open_questions`, or
+`extras`, and existing intel notes when they are target knowledge. Finding IDs and statuses
+alone are not an adequate final return. Use free prose where the structured fields do not
+explain the connection. There is no word quota and no separate investigation file or operator
+acknowledgement to produce. Do not discard useful reasoning to shorten a summary field.
+Use `render-handoff <agent-id> --max-lines 0` when checking the complete stored handoff;
+a capped excerpt is context selection, not the whole result.
 
 ### Mandatory Closing Sequence — wrapper
 

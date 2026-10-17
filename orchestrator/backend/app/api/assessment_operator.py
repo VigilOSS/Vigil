@@ -387,12 +387,14 @@ class DepthDeferralPayload(BaseModel):
 
 
 class BlindTriageVerdictPayload(BaseModel):
-    """Fields the report gate consumes from a blind-triage decision."""
+    """Fields the report gate consumes from an attributed blind review."""
 
     model_config = ConfigDict(extra="allow")
 
     finding_slug: str = Field(min_length=1)
     packet_id: str = Field(pattern=r"^[0-9a-f]{64}$")
+    reviewer_dispatch_agent_id: str = Field(min_length=1)
+    writer_dispatch_agent_id: str = Field(min_length=1)
     verdict: Literal[
         "Accept@P1",
         "Accept@P2",

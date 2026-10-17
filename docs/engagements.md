@@ -1,7 +1,7 @@
 # Engagements
 
 Detail behind the README [Quick start](../README.md#quick-start) and
-[How an engagement runs](../README.md#how-an-engagement-runs):
+[Workflows and controls](../README.md#workflows-and-controls):
 creation flags, tracks and modes, the start preflight, and how phases advance. Client setup
 and flag forwarding: [`agent-clients.md`](agent-clients.md). Start and resume prompts:
 [`session-commands.md`](session-commands.md).
@@ -13,13 +13,14 @@ vigil engagement create                                  # follow the interactiv
 vigil engagement list --json                              # find the key
 ```
 
-`create` starts the exploit policy at `pause` — explicit human approval before any exploit work
-— and leaves authentication unset. When `--type` is omitted it is inferred from the inputs
+`create` starts the exploit policy at `pause` — explicit human approval before live exploit
+work — and leaves authentication unset. Local sandbox proof uses the code route. When `--type` is omitted it is inferred from the inputs
 (URL/host → `web`, APK or `--package-name` → `android`) and
 echoed on stderr so it can be overridden; ambiguous inputs prompt on a terminal and fail fast
 under `--no-prompt`. Repository selection requires explicit `--type remediation`.
-Code creation asks for a name and prepares a `source/` folder;
-place the files to review there. The code client asks you to confirm those files at startup.
+Code creation accepts `--source-dir ./acme` to register an original directory, or prepares a
+manual `source/` folder when omitted. The operator asks for source confirmation before first
+ingest or refresh, then creates one sealed audit copy directly from the selected directory.
 Ordinary source folders and loose files work without Git. See [`code-analysis.md`](code-analysis.md).
 
 Scope hosts can be given as `--hosts a,b`, repeated `--host` flags, a
@@ -57,9 +58,12 @@ the current directory, active pointer, or `--select` resolves the engagement.
 
 A preflight runs first. It **hard-fails** when the client binary is not on `PATH`, or when Goose or
 OpenCode has no `DEEPSEEK_API_KEY` in the environment, the engagement's `.orchestrator.env`, or the
-workspace's env files. It **warns and continues** when the orchestrator is not running, the
-Kali runtime container is not running, or an application consumer needs restarting. `--skip-preflight` bypasses
-all five.
+workspace's env files. It recovers the default managed local backend when needed and refuses
+launch if the configured backend is unavailable or belongs to another workspace. It never
+substitutes localhost for a configured remote endpoint. Static code startup does not query
+Docker. The first audited execution starts the managed Kali runtime if stopped; it never
+recreates a running service. Application freshness remains a warning. `--skip-preflight`
+bypasses these checks.
 
 For a client session without Vigil's automatic opening message, pass `--no-autoprompt`:
 
@@ -68,7 +72,7 @@ vigil engagement start <engagement-key> --client codex --no-autoprompt
 ```
 
 Explicit client messages are still forwarded. In code mode, source confirmation remains
-required before analysis when you ask the client to begin work.
+required before first ingest or refresh. Existing sealed work resumes without repeating consent.
 Claude's `-r`/`--resume` and Codex's `resume` requests start without an automatic opening message.
 
 Startup refreshes generated client files only for the selected engagement. After an
@@ -87,12 +91,45 @@ For a human shell that jumps into a selected engagement directory, install the `
 with `vigil engagement cd-init zsh >> ~/.zshrc`; non-interactive agents should pass an explicit
 key instead.
 
+## Proof work and continuation
+
+Reopen the same engagement to retrieve its recorded investigation. In an existing native
+conversation, `vigil-resume` retrieves current backend state; native chat history is separate.
+Read existing work ownership before launching a specialist. Shared services and detached jobs
+continue when a client exits. Nothing here restarts native clients unattended.
+
+The current operator prepares proof for `pending_runtime_proof` candidates and claims the
+work before launching a fresh specialist. The explicit code route covers local library/API
+reproduction in audited Kali; the web route covers admitted live targets under the applicable
+exploit approval. Neither requires a second operator or both operator cores.
+
+The UI's **Proof work** view shows owed candidates, targets, owners, blockers, approval and
+linked proof runs. It can prepare work, record exact-work approval, reconcile state, and release
+ended ownership only after backend liveness checks. Preparing or finishing a task never
+confirms the finding. Run evidence and the existing finding-verification requirements still apply.
+
+Manual inspection and recovery are available without launching a session:
+
+```bash
+vigil engagement prove <key>
+vigil engagement prove <key> --finding VA-001 --mode code --objective "Challenge the supported API claim"
+vigil engagement prove <key> --work 9 --reconcile
+vigil engagement prove <key> --work 9 --release --reason "Ended worker and terminal jobs inspected"
+```
+
+For a selected live proof, `--work 9 --approve` records approval for that prepared objective,
+source, finding and admitted targets; `--revoke` removes that work's explicit approval. A
+broader existing policy can still authorize it. New roots require explicit admission. Changed
+source, claim or scope requires current preparation before further execution. Owner updates
+can still preserve the result of work that already ran; they do not authorize new testing.
+Agents use `vigil assess contract proof-work` for the executable payload/lifecycle contract.
+
 ## Phases
 
 The web, code, and blue phase rosters are pinned in
 [`agent/scripts/assess/lib/phases.py`](../agent/scripts/assess/lib/phases.py). Each enabled
 track's current phase is stored at `scope.json.tracks.<track>.phase`. The README
-[phase table](../README.md#how-an-engagement-runs) lists web and code; blue phases are in
+[phase table](../README.md#workflows-and-controls) lists web and code; blue phases are in
 [`blue-engagements.md`](blue-engagements.md).
 
 `complete` is a terminal state, not a working phase: no readiness gate, no audit tag, no

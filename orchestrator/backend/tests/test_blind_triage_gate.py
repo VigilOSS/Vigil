@@ -361,12 +361,21 @@ def _seed_engagement(client, isolate_settings) -> None:
 
 def test_blind_triage_verdict_round_trips_to_dispatch_decisions(client, isolate_settings):
     _seed_engagement(client, isolate_settings)
+    from tests.test_report_export import _finding
+
+    for agent_id, role in [("SOURCE-VA-007", "vulnerability-analyst"), ("WRITE-VA-007", "report-writer"), ("REVIEW-VA-007", "general")]:
+        dispatch = client.post(f"{_RT_BASE}/dispatches", json={"agent_id": agent_id, "agent_role": role, "task": "review Acme submission"})
+        assert dispatch.status_code == 201, dispatch.text
+    finding = client.post(f"{_RT_BASE}/findings", json=_finding("VA-007", "Missing authorization"))
+    assert finding.status_code in {200, 201}, finding.text
 
     payload = {
-        "finding_slug": "idor-7",
+        "finding_slug": "VA-007",
         "verdict": "Accept@P3",
         "packet_id": "a" * 64,
         "claimed_severity": "medium",
+        "reviewer_dispatch_agent_id": "REVIEW-VA-007",
+        "writer_dispatch_agent_id": "WRITE-VA-007",
         "weak_points": "single-object read, no cross-tenant proof requested",
     }
     create = client.post(
@@ -376,7 +385,7 @@ def test_blind_triage_verdict_round_trips_to_dispatch_decisions(client, isolate_
     assert create.status_code == 201, create.text
     created = create.json()
     assert created["kind"] == "blind_triage_verdict"
-    assert created["payload"]["finding_slug"] == "idor-7"
+    assert created["payload"]["finding_slug"] == "VA-007"
     assert created["payload"]["verdict"] == "Accept@P3"
 
     # Readable filtered by kind — the exact read the gate issues.

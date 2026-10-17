@@ -335,14 +335,11 @@ def main(argv: list[str] | None = None) -> None:
     )
     quickstart_p = sub.add_parser(
         "quickstart",
-        help="Onboarding wizard: probe host prerequisites/recon tools and print the setup checklist",
+        help="Check prerequisites and print setup for the selected work and client",
         description=(
-            "macOS-first onboarding wizard. Reports the bootstrap prerequisites "
-            "(uv/docker/go), detects missing host-side recon tools, and "
-            "prints the ordered next-command checklist for the resolved install "
-            "root. It only mutates the host when --install-host-tools is passed "
-            "(and never under --dry-run); without it the host-tool installs are "
-            "planned/printed, not run."
+            "Check prerequisites for the selected engagement type and native client, "
+            "then print an ordered setup checklist. Host-tool installation is "
+            "explicit through --install-host-tools; --dry-run never installs tools."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -367,6 +364,9 @@ def main(argv: list[str] | None = None) -> None:
         action="store_true",
         help="Plan everything, execute nothing (overrides --install-host-tools)",
     )
+    quickstart_p.add_argument("--type", dest="engagement_type", choices=("web", "code"), default="web")
+    quickstart_p.add_argument("--client", choices=("claude", "codex", "opencode", "goose", "kimi"), default="claude")
+    quickstart_p.add_argument("--source-dir", type=Path, help="Original source directory for a code audit")
     quickstart_p.add_argument("--target", help="First engagement target URL/host for the checklist")
     quickstart_p.add_argument("--hosts", help="In-scope hosts (comma-separated) for the checklist")
     quickstart_p.add_argument("--json", action="store_true", help="Emit the readiness report as JSON")
@@ -463,6 +463,7 @@ def main(argv: list[str] | None = None) -> None:
         default=None,
         help="Creation type; inferred when omitted. Web/code enables the first durable track; start --mode selects one client process",
     )
+    create_p.add_argument("--source-dir", type=Path, help="Register original source for code analysis; confirmation precedes one sealed audit copy")
     create_p.add_argument("--name", help="Engagement name (required for code/remediation)")
     create_p.add_argument("--project-config", help="Shared repository PROJECT.md with +++ TOML frontmatter (legacy JSON is imported once)")
     create_p.add_argument("--target", help="Primary target URL or host (web)")
@@ -644,6 +645,21 @@ def main(argv: list[str] | None = None) -> None:
     # rather than a positional, because a positional would reorder an option away
     # from its value. See _engagement_start_client_args.
     start_p.set_defaults(client_args=[])
+    prove_p = engagement_sub.add_parser("prove", help="Inspect, prepare, approve, or recover proof work without launching another operator")
+    prove_p.add_argument("key", nargs="?")
+    prove_p.add_argument("--select", action="store_true")
+    prove_p.add_argument("--finding", help="Candidate slug awaiting runtime proof")
+    prove_p.add_argument("--mode", choices=("code", "web"), help="Explicit local code or live application proof route")
+    prove_p.add_argument("--objective", help="Test that can confirm, disprove, or narrow the hypothesis")
+    prove_p.add_argument("--host", action="append", default=[], help="Already admitted target host; repeatable")
+    prove_p.add_argument("--work", type=int, help="Inspect or act on an existing proof work ID")
+    proof_action = prove_p.add_mutually_exclusive_group()
+    proof_action.add_argument("--approve", action="store_true", help="Approve only this prepared live proof")
+    proof_action.add_argument("--revoke", action="store_true", help="Revoke this work's explicit approval")
+    proof_action.add_argument("--reconcile", action="store_true", help="Reconcile canonical finding and worker state")
+    proof_action.add_argument("--release", action="store_true", help="Release ended proof ownership after checking live execution")
+    prove_p.add_argument("--reason", help="Recorded explanation for releasing proof ownership")
+    prove_p.add_argument("--json", action="store_true", help="Emit the complete durable result")
     open_p = engagement_sub.add_parser("open")
     open_p.add_argument("key", nargs="?")
     open_p.add_argument("--select", action="store_true")
@@ -1355,6 +1371,9 @@ def main(argv: list[str] | None = None) -> None:
                 json_output=args.json,
                 target=args.target,
                 hosts=args.hosts,
+                engagement_type=args.engagement_type,
+                client=args.client,
+                source_dir=args.source_dir,
             )
         )
         if exit_code:
@@ -1829,13 +1848,15 @@ def _engagement(args: argparse.Namespace, install_root: Path) -> None:
             )
         path = _resolve_current_or_selected_engagement(install_root, key=args.key, select=args.select)
         if not args.skip_preflight:
-            _preflight_engagement_start(install_root, path, args.client)
+            _preflight_engagement_start(install_root, path, args.client, mode=args.mode)
         if args.client == "opencode":
             start_engagement(install_root, path, args.client, args.client_args, args.mode, thinking=args.thinking, no_autoprompt=args.no_autoprompt)
         elif args.mode is None:
             start_engagement(install_root, path, args.client, args.client_args, no_autoprompt=args.no_autoprompt)
         else:
             start_engagement(install_root, path, args.client, args.client_args, args.mode, no_autoprompt=args.no_autoprompt)
+    elif command == "prove":
+        _engagement_prove(args, install_root)
     elif command == "open":
         path = _resolve_current_or_selected_engagement(install_root, key=args.key, select=args.select)
         webbrowser.open(path.as_uri())
@@ -1868,6 +1889,53 @@ def _engagement(args: argparse.Namespace, install_root: Path) -> None:
         path = _resolve_current_or_selected_engagement(install_root, key=args.key, select=args.select)
         pdf_output = Path(args.output).expanduser() if args.output else None
         print(export_pdf(path, pdf_output))
+
+
+def _engagement_prove(args: argparse.Namespace, install_root: Path) -> None:
+    action = args.approve or args.revoke or args.reconcile or args.release
+    preparation = args.finding or args.mode or args.objective or args.host
+    if args.release and not (args.reason and args.reason.strip()):
+        raise SystemExit("--release requires a meaningful --reason")
+    if args.reason and not args.release:
+        raise SystemExit("--reason is used with --release")
+    if args.work is not None and args.work <= 0:
+        raise SystemExit("--work must be a positive proof work ID")
+    if action and args.work is None:
+        raise SystemExit("approval, reconciliation and retry require --work")
+    if args.work is not None and preparation:
+        raise SystemExit("choose either --work or a new finding proof preparation")
+    if preparation and not (args.finding and args.mode and args.objective and args.objective.strip()):
+        raise SystemExit("preparation requires --finding, --mode, and --objective")
+    if args.mode == "code" and args.host:
+        raise SystemExit("local code proof does not accept live --host targets")
+    path = _resolve_current_or_selected_engagement(install_root, key=args.key, select=args.select)
+    with _build_assessment_client(install_root, path.name) as client:
+        if args.work is not None:
+            endpoint = f"proof-work/{args.work}"
+            if args.approve or args.revoke:
+                result = client.post(f"{endpoint}/approval", {"approved": args.approve})
+            elif args.reconcile or args.release:
+                result = client.post(f"{endpoint}/{'release' if args.release else 'reconcile'}", {"reason": args.reason.strip()} if args.release else {})
+            else:
+                result = client.get(endpoint)
+        elif preparation:
+            result = client.post("proof-work", {"finding_slug": args.finding, "route": args.mode,
+                                 "objective": args.objective.strip(), "target_hosts": args.host})
+        else:
+            result = client.get("proof-work")
+    if action or preparation:
+        from .paths import add_assess_import_path
+        add_assess_import_path(install_root)
+        from assess.lib.client import AssessError, require_write_result  # type: ignore[import-not-found]
+        try:
+            if not isinstance(result, dict):
+                raise AssessError("Proof response was malformed; the write may have committed. Inspect durable state before retrying.")
+            expected = ({"id": args.work} if args.work is not None else
+                        {"finding_slug": args.finding, "route": args.mode})
+            require_write_result(result, operation="engagement prove", expected=expected, positive_ids=("id",))
+        except AssessError as exc:
+            raise SystemExit(str(exc)) from exc
+    print(json.dumps(result, indent=2, ensure_ascii=False))
 
 
 def _engagement_create(args: argparse.Namespace, install_root: Path) -> None:
@@ -2009,6 +2077,7 @@ def _engagement_create(args: argparse.Namespace, install_root: Path) -> None:
     options = CreateEngagementOptions(
         install_root=install_root,
         engagement_type=engagement_type,
+        source_dir=args.source_dir,
         target=target,
         name=name,
         hosts=hosts,

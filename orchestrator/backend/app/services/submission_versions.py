@@ -601,9 +601,15 @@ def _blind_triage_issue(
         prompt_root, "agent/skills/blind-triage/SKILL.md",
         max_bytes=WORKSPACE_MARKDOWN_MAX_BYTES, label="blind triage verdict rubric",
     )
+    # New decisions require attribution at creation. Stored pre-attribution
+    # Accepts retain their original rubric when the exact external package and
+    # program brief still match; an upgrade must not fabricate audit history.
     if (
         (inputs.get("program_brief") or {}).get("sha256") != _sha256(brief)
-        or (inputs.get("verdict_rubric") or {}).get("sha256") != _sha256(rubric)
+        or (
+            payload.get("reviewer_dispatch_agent_id")
+            and (inputs.get("verdict_rubric") or {}).get("sha256") != _sha256(rubric)
+        )
     ):
         return "blind triage verdict covers an older program brief or rubric"
     return None

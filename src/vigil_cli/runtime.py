@@ -29,6 +29,7 @@ from .paths import (
     resolve_runtime_state_dir,
 )
 from .scope_entries import classify_scope_entry
+from .service_locks import service_start_lock
 
 
 HEAVY_TIER_HOST_GB_THRESHOLD = 32
@@ -329,22 +330,23 @@ def build_runtime(
 ) -> None:
     if variant == "lightweight" and not dev:
         raise SystemExit("The lightweight runtime is development-only. Re-run with --dev to build it.")
-    docker.require_daemon("build the runtime image", runner=daemon_runner)
-    install_root = application_root_for_workspace(install_root)
-    dockerfile = install_root / "agent" / "docker" / ("runtime-lightweight" if variant == "lightweight" else "runtime-full") / "Dockerfile"
     image = "vigil-lightweight:latest" if variant == "lightweight" else "vigil:latest"
-    with _runtime_build_context(install_root, variant=variant) as build_context:
-        staged_dockerfile = build_context / dockerfile.relative_to(install_root)
-        argv = ["docker", "build", "-t", image, "-f", str(staged_dockerfile)]
-        if variant == "full":
-            argv += [
-                "--label",
-                image_freshness.inputs_label_arg(
-                    runtime_image_inputs(install_root), root=install_root
-                ),
-            ]
-        argv.append(str(build_context))
-        docker.require_success(runner(argv), argv)
+    with service_start_lock(f"runtime-image:{image}"):
+        docker.require_daemon("build the runtime image", runner=daemon_runner)
+        install_root = application_root_for_workspace(install_root)
+        dockerfile = install_root / "agent" / "docker" / ("runtime-lightweight" if variant == "lightweight" else "runtime-full") / "Dockerfile"
+        with _runtime_build_context(install_root, variant=variant) as build_context:
+            staged_dockerfile = build_context / dockerfile.relative_to(install_root)
+            argv = ["docker", "build", "-t", image, "-f", str(staged_dockerfile)]
+            if variant == "full":
+                argv += [
+                    "--label",
+                    image_freshness.inputs_label_arg(
+                        runtime_image_inputs(install_root), root=install_root
+                    ),
+                ]
+            argv.append(str(build_context))
+            docker.require_success(runner(argv), argv)
 
 
 def _egress_run_args(egress: RuntimeEgress) -> list[str]:
@@ -495,6 +497,21 @@ def start_runtime(
     runner: docker.Runner = docker.run_command,
     validate_tools: bool = True,
     allow_existing: bool = False,
+    prepare_image: bool = True,
+) -> None:
+    with (service_start_lock(f"runtime:{options.container_name}"),
+          service_start_lock(f"runtime-image:{options.image}")):
+        _start_runtime_locked(options, runner=runner, validate_tools=validate_tools,
+                              allow_existing=allow_existing, prepare_image=prepare_image)
+
+
+def _start_runtime_locked(
+    options: RuntimeOptions,
+    *,
+    runner: docker.Runner,
+    validate_tools: bool,
+    allow_existing: bool,
+    prepare_image: bool,
 ) -> None:
     install_root = options.install_root.expanduser().resolve()
     data_dir = _resolve_runtime_data_dir(install_root)
@@ -523,16 +540,30 @@ def start_runtime(
             "  Set VIGIL_DOCKER_TIMEOUT (seconds) if a slow-but-healthy daemon needs longer to respond."
         )
 
-    if not docker.image_exists(options.image, runner=runner):
-        raise SystemExit(
-            f"Missing runtime image: {options.image}. Run `vigil runtime build` first.\n"
-            "The runtime is only needed for target-facing Kali tools. Backend state reads/writes "
-            "use the orchestrator service; run `vigil orchestrator status` or "
-            "`vigil orchestrator start` if that is what you need."
-        )
+    runtime_is_running = docker.container_running(options.container_name, runner=runner)
+    if allow_existing and not options.recreate and not runtime_is_running and docker.container_exists(options.container_name, runner=runner):
+        existing_image = runner(["docker", "inspect", "-f", "{{.Config.Image}}", options.container_name])
+        if existing_image.returncode or not existing_image.stdout.strip():
+            raise SystemExit("Cannot establish the stopped runtime image; inspect it before starting explicitly.")
+        if existing_image.stdout.strip() != options.image:
+            raise SystemExit(
+                f"Stopped runtime uses custom image {existing_image.stdout.strip()}; on-demand startup left it untouched. "
+                "Start that image explicitly with `vigil runtime start --image <image>` before retrying."
+            )
+    if (not runtime_is_running or options.recreate) and prepare_image:
+        from .runtime_images import ensure_runtime_image
 
-    if docker.container_running(options.container_name, runner=runner) and not options.recreate:
-        _validate_image_current(options, runner=runner)
+        # A previous release may leave the default tag present but stale. Resolve
+        # its content identity before creating a container, not just its presence.
+        ensure_runtime_image(install_root, image=options.image, runner=runner)
+
+    if runtime_is_running and not options.recreate:
+        try:
+            _validate_image_current(options, runner=runner)
+        except SystemExit:
+            if not allow_existing:
+                raise
+            print("runtime\trunning; image update pending. Existing jobs continue; restart explicitly when they finish.", file=sys.stderr)
         _validate_mounts(options.container_name, data_dir, engagements_dir, runner=runner)
         if validate_tools:
             _validate_tools(options.container_name, runner=runner)

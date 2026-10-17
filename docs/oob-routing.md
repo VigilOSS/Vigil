@@ -2,7 +2,7 @@
 
 Deep reference for per-install relay-slot routing, the edge configuration Vigil renders,
 and the frpc conflict scan. The README summary is in
-[Optional capabilities](../README.md#optional-capabilities).
+[Tools and working environment](../README.md#tools-and-working-environment).
 
 ## Configuration
 

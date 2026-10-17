@@ -44,6 +44,7 @@ def _approve_packet(client, isolate_settings, slug: str, attachments: list[dict]
                 "finding_slug": slug,
                 "verdict": "Accept@P3",
                 "packet_id": packet["packet_id"],
+                **_triage_dispatches(client, slug),
             },
         },
     )
@@ -251,6 +252,7 @@ def test_final_export_rejects_accept_for_older_submission_bytes(
                 "finding_slug": "VA-001",
                 "verdict": "Accept@P3",
                 "packet_id": "a" * 64,
+                **_triage_dispatches(client, "VA-001"),
             },
         },
     )
@@ -540,6 +542,7 @@ def test_finalization_rechecks_latest_blind_verdict(
                 "payload": {
                     "finding_slug": "VA-001", "verdict": "Need-More-Info",
                     "packet_id": "0" * 64,
+                    **_triage_dispatches(client, "VA-001"),
                 },
             },
         )
@@ -1761,3 +1764,84 @@ def test_export_rejects_stale_or_unverified_workspace(client, isolate_settings) 
     versions = client.get(f"{BASE}/submissions/VA-001")
     assert versions.status_code == 200, versions.text
     assert versions.json()["versions"] == []
+
+
+def _triage_dispatches(client, slug: str) -> dict[str, str]:
+    identities = {
+        "reviewer_dispatch_agent_id": f"TRIAGE-{slug}",
+        "writer_dispatch_agent_id": f"WRITE-{slug}",
+    }
+    for field, agent_id in identities.items():
+        response = client.post(f"{BASE}/dispatches", json={
+            "agent_id": agent_id,
+            "agent_role": "report-writer" if field.startswith("writer") else "general",
+            "task": f"review submission for {slug}" if field.startswith("reviewer") else f"write submission for {slug}",
+        })
+        assert response.status_code in {201, 409}, response.text
+    return identities
+
+
+@pytest.mark.parametrize("invalid_reviewer", [None, "unknown", "WRITE-VA-001", "SOURCE-VA-001"])
+def test_new_blind_verdict_requires_recorded_independent_reviewer(
+    client, isolate_settings, invalid_reviewer
+) -> None:
+    _seed_reportable_finding(client, isolate_settings)
+    identities = _triage_dispatches(client, "VA-001")
+    payload = {"finding_slug": "VA-001", "verdict": "Accept@P3", "packet_id": "a" * 64,
+               **identities}
+    if invalid_reviewer is None:
+        payload.pop("reviewer_dispatch_agent_id")
+    else:
+        payload["reviewer_dispatch_agent_id"] = invalid_reviewer
+    response = client.post(f"{BASE}/dispatch-decisions", json={
+        "kind": "blind_triage_verdict", "payload": payload,
+    })
+    assert response.status_code == 422, response.text
+
+
+def test_new_blind_verdict_records_distinct_writer_and_reviewer(client, isolate_settings) -> None:
+    _seed_reportable_finding(client, isolate_settings)
+    identities = _triage_dispatches(client, "VA-001")
+    response = client.post(f"{BASE}/dispatch-decisions", json={
+        "kind": "blind_triage_verdict", "payload": {
+            "finding_slug": "VA-001", "verdict": "Accept@P3", "packet_id": "a" * 64,
+            **identities,
+        },
+    })
+    assert response.status_code == 201, response.text
+    assert all(response.json()["payload"][key] == value for key, value in identities.items())
+
+
+def test_unchanged_historical_packet_keeps_acceptance_after_rubric_update(
+    client, isolate_settings, monkeypatch
+) -> None:
+    from app.services import submission_versions
+
+    finding = _seed_reportable_finding(client, isolate_settings)
+    submission_path, context_path = _write_workspace(client, isolate_settings, finding)
+    # This row represents a pre-upgrade decision. Preserve its actual history;
+    # do not invent reviewer identities during migration.
+    with get_connection() as connection:
+        row = connection.execute("SELECT id, payload_json FROM assessment_dispatch_decisions WHERE kind = 'blind_triage_verdict' ORDER BY id DESC LIMIT 1").fetchone()
+        historical = json.loads(row["payload_json"])
+        historical.pop("reviewer_dispatch_agent_id")
+        historical.pop("writer_dispatch_agent_id")
+        connection.execute("UPDATE assessment_dispatch_decisions SET payload_json = ? WHERE id = ?", (json.dumps(historical), row["id"]))
+    original_read = submission_versions._read_stable_file
+
+    def updated_rubric(root, relative, **kwargs):
+        path, contents = original_read(root, relative, **kwargs)
+        if relative == "agent/skills/blind-triage/SKILL.md":
+            contents += b"\nUpdated reviewer attribution guidance.\n"
+        return path, contents
+
+    monkeypatch.setattr(submission_versions, "_read_stable_file", updated_rubric)
+    response = _export(client, "VA-001", submission_path, context_path)
+    assert response.status_code == 201, response.text
+    # Changed bytes still need a new review, even for historical packets.
+    changed_path, changed_context = _write_workspace(
+        client, isolate_settings, finding, markdown=b"# Changed impact claim\n", reviewed=False,
+    )
+    rejected = _export(client, "VA-001", changed_path, changed_context)
+    assert rejected.status_code == 409, rejected.text
+    assert "blind triage" in rejected.json()["detail"].lower()

@@ -6,17 +6,31 @@ Install detail behind the README [Quick start](../README.md#quick-start).
 
 Install the versioned wheel from the
 [GitHub release](https://github.com/VigilOSS/Vigil/releases/tag/v1.2.6), check the host, and
-bring the stack up:
+initialize your workspace:
 
 ```bash
 uv tool install --from https://github.com/VigilOSS/Vigil/releases/download/v1.2.6/vigil-1.2.6-py3-none-any.whl vigil
-vigil quickstart
-vigil up
+vigil quickstart --type code --client codex
+vigil install
 ```
 
 The release includes the CLI, backend, prompts, schemas, Docker definitions, documentation,
-legal files, and prebuilt frontend and report. It needs neither Git nor Node. Docker must be
-running for `vigil up`, and the orchestrator UI is then at `http://127.0.0.1:18000`.
+legal files, and prebuilt frontend and report. It needs neither Git nor Node. The selected engagement starts the managed backend as needed, with its UI at
+`http://127.0.0.1:18000`. Static code review needs no Docker. Audited target execution starts
+Kali on first use, so Docker must be running then. Capture is optional: use
+`vigil mitmproxy start`, or `vigil up` to start the full stack explicitly.
+
+Backend startup allows up to 600 seconds for health and readiness together. Upgrades can
+back up and migrate a large engagement database before the HTTP server starts. The CLI
+reports its remaining wait every 15 seconds; inspect `vigil logs orchestrator` for errors.
+An exited backend fails immediately. For a larger database or slower disk, set a finite,
+positive deadline in seconds before starting:
+
+```bash
+VIGIL_ORCHESTRATOR_START_TIMEOUT_SECONDS=1200 vigil orchestrator start
+```
+
+The same setting applies when engagement startup recovers the managed backend.
 
 - **From the repository:** `uv tool install git+https://github.com/VigilOSS/Vigil vigil` builds
   the frontend and report locally, so it needs Git, Node.js, and npm on `PATH`.
@@ -24,7 +38,22 @@ running for `vigil up`, and the orchestrator UI is then at `http://127.0.0.1:180
   supplies the application assets.
 
 `vigil quickstart` changes nothing unless you pass `--install-host-tools`; `--json` prints a
-machine-readable readiness report.
+machine-readable readiness report. Select `--type web` for the web prerequisites; choose your
+native client with `--client`. Code onboarding also accepts `--source-dir ./acme`.
+
+## Runtime delivery
+
+Matched release artifacts can carry an exact multi-platform runtime image reference. Startup
+checks the release's build-input digest, pulls the image by SHA256, validates its label, then
+updates the local image tag. It does not restart an already running container. The image index
+covers Linux AMD64 and ARM64. Source checkouts and changed runtime inputs build locally;
+`vigil runtime build` is the explicit local-build path.
+
+The runtime-release workflow builds both platforms, publishes the image, embeds its immutable
+pin into the matched application wheel/sdist, and attaches those files to a draft GitHub release.
+The checked-out source has no fabricated release digest; availability starts when that workflow
+has successfully built and published a matched release. A failed pull reports recovery instead
+of silently replacing the release image with a different build.
 
 ## Upgrade
 

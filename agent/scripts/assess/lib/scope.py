@@ -1687,8 +1687,9 @@ def enforce_execution_policy(
             print(
                 "WARNING: CODE engagement command appears to contact declared "
                 f"target '{host}'. CODE workflow is for source analysis; use "
-                "research-only network access or explicitly add the web track "
-                "before live target work. This is advisory; execution is continuing.",
+                "research-only network access, an explicitly approved web proof-work "
+                "route, or an explicitly enabled web track for live target work. "
+                "This is advisory; execution is continuing.",
                 file=sys.stderr,
             )
             break

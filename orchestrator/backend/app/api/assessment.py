@@ -4409,3 +4409,7 @@ from .assessment_operator import (  # noqa: E402 - helpers above must initialize
 )
 
 router.include_router(operator_router)
+
+from .assessment_proof_work import router as proof_work_router  # noqa: E402
+
+router.include_router(proof_work_router)

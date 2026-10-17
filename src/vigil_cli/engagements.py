@@ -190,6 +190,7 @@ class CreateEngagementOptions:
     engagement_type: str = "web"
     target: str | None = None
     name: str | None = None
+    source_dir: Path | None = None
     hosts: list[str] = field(default_factory=list)
     repos: list[str] = field(default_factory=list)
     artifacts: list[str] = field(default_factory=list)
@@ -308,6 +309,12 @@ def plan_engagement(options: CreateEngagementOptions, *, now: datetime | None = 
     remediation_project_snapshot = dict(options.remediation_config)
     if options.engagement_type not in ENGAGEMENT_TYPES:
         raise SystemExit("--type must be one of: web, code, android, blue, remediation")
+    source_dir = options.source_dir.expanduser().resolve() if options.source_dir is not None else None
+    if source_dir is not None:
+        if options.engagement_type != "code":
+            raise SystemExit("--source-dir requires --type code")
+        if not source_dir.is_dir():
+            raise SystemExit(f"source directory not found: {source_dir}")
     if options.engagement_type == "code" and options.repos:
         raise SystemExit("place code engagement source files in its source/ folder after creation")
     if options.engagement_type not in {"code", "remediation"} and options.repos:
@@ -528,6 +535,8 @@ def plan_engagement(options: CreateEngagementOptions, *, now: datetime | None = 
         )
 
     report_name = name
+    if source_dir is not None:
+        manifest["source_dir"] = str(source_dir)
     report_target = target_normalized
     if options.engagement_type == "blue":
         report_name = str(manifest.get("customer") or options.customer or "")
@@ -573,6 +582,9 @@ def create_engagement(
         if engagement_root is not None
         else engagements_root(install_root)
     )
+    registered_source = plan.manifest.get("source_dir")
+    if registered_source and root.resolve().is_relative_to(Path(str(registered_source))):
+        raise SystemExit("registered source cannot contain engagement storage; choose a separate working root")
     root.mkdir(parents=True, exist_ok=True)
 
     eng_dir = root / f"{plan.date_label}-{plan.time_label}-{plan.label}"
@@ -707,7 +719,10 @@ def _emit_engagement_identity(key: str, engagement_type: str) -> None:
 def _emit_code_source_footer(engagement_dir: Path) -> None:
     source = engagement_source_state(engagement_dir)
     print(f"[vigil] source: {source['path']} ({source['state']})", file=sys.stderr)
-    print("[vigil] Place the source files to review in that folder. A Git repository is not required.", file=sys.stderr)
+    if _read_json(engagement_dir / "engagement.json").get("source_dir"):
+        print("[vigil] Source location registered. Confirmation creates a sealed audit copy directly from this directory; the original stays untouched.", file=sys.stderr)
+    else:
+        print("[vigil] Place the source files to review in that folder. A Git repository is not required.", file=sys.stderr)
     print("[vigil] The code client will ask you to confirm the source before reading it for analysis.", file=sys.stderr)
 
 
@@ -1162,14 +1177,18 @@ def engagement_mode_state(install_root: Path, engagement_dir: Path, *, client: s
 
 
 def engagement_source_state(engagement_dir: Path) -> dict[str, Any]:
-    """Describe staged files without reading code or claiming user confirmation."""
-    source = engagement_dir / "source"
+    """Describe registered or staged source without granting analysis consent."""
+    registered = _read_json(engagement_dir / "engagement.json").get("source_dir")
+    source = Path(str(registered)) if registered else engagement_dir / "source"
     state: dict[str, Any] = {"path": str(source), "state": "waiting", "file_count": 0, "entries": []}
     metadata = {".git", ".jj", ".DS_Store"}
     try:
         try:
             directory_stat = source.stat()
         except FileNotFoundError:
+            if registered:
+                state["state"] = "unavailable"
+                state["detail"] = "registered source directory is missing; existing sealed snapshots remain usable"
             return state
         if not stat.S_ISDIR(directory_stat.st_mode):
             raise ValueError("source path is not a directory")
@@ -1695,8 +1714,12 @@ def start_engagement(install_root: Path, engagement_dir: Path, client: str, extr
         flags, message = split_operator_message(extra_args)
         setup = (
             "Follow the source confirmation step in the canonical code operator prompt. "
-            "Show me the source folder and ask me to confirm its contents before analysis. "
-            "If it is empty, ask me to place the source files there and wait."
+            f"The selected source directory is {json.dumps(source['path'])}. "
+            "Show me this directory and ask me to confirm it before first ingest or refresh. "
+            "Use code-ingest directly on this original directory to create one sealed audit copy; do not stage another copy. "
+            "If no source is present, ask me to provide it and wait. "
+            "If backend state already contains confirmed sealed source, resume that investigation with vigil-resume; "
+            "do not repeat source confirmation or dispatch duplicate workers merely because this client is new."
         )
         extra_args = [*flags, setup + (f"\n\nAdditional context:\n{message}" if message else "")]
     os.chdir(engagement_dir)

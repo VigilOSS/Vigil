@@ -759,7 +759,7 @@ def _blind_triage_blockers(client: AssessmentClient) -> list[dict[str, str]]:
                 + " — run blind-triage Pass 2 (agent/skills/blind-triage/SKILL.md) "
                 "and record the Accept verdict with `vigil assess agent decision "
                 "--kind blind_triage_verdict --payload-json "
-                "'{\"finding_slug\":\"<slug>\",\"packet_id\":\"<packet id>\",\"verdict\":\"Accept@P3\"}'` "
+                "'{\"finding_slug\":\"<slug>\",\"packet_id\":\"<packet id>\",\"reviewer_dispatch_agent_id\":\"<reviewer-id>\",\"writer_dispatch_agent_id\":\"<writer-id>\",\"verdict\":\"Accept@P3\"}'` "
                 "before publish (skipping the blind pass is how false-positive / "
                 "over-severity submissions ship). Pass --force --reason \"...\" to "
                 "override with an audited decision."

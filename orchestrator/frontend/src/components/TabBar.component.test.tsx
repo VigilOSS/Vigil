@@ -30,7 +30,7 @@ describe("TabBar", () => {
     expect(screen.getByRole("tablist").getAttribute("aria-orientation")).toBe("vertical");
     expect(screen.getByText("Assessment")).toBeTruthy();
     expect(screen.getByText("Evidence")).toBeTruthy();
-    expect(screen.getAllByRole("tab")).toHaveLength(14);
+    expect(screen.getAllByRole("tab")).toHaveLength(15);
     fireEvent.keyDown(screen.getByRole("tab", { name: "Intel" }), { key: "ArrowDown" });
     expect(onChange).toHaveBeenCalledWith("findings");
     expect(document.activeElement).toBe(screen.getByRole("tab", { name: "Findings" }));

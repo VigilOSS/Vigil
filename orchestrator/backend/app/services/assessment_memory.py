@@ -13,6 +13,8 @@ from . import artifact_index, code_analysis, intel, operator_checkpoints, state_
 from .events import _engagement_or_404
 from .engagement_tracks import track_phases
 from .search import canonical_finding_alias
+from .state_manager.dispatches import dispatch_mode_sql
+from .state_manager.findings import finding_mode_sql
 
 
 def _read_scope(root: Path) -> dict[str, Any]:
@@ -81,7 +83,7 @@ def _limited_findings(
                source_name, evidence_ref,
                details_json, updated_at
         FROM assessment_findings
-        WHERE engagement_id = ? AND {where_sql}{extra_where}{_finding_mode_sql(mode)}
+        WHERE engagement_id = ? AND {where_sql}{extra_where}{finding_mode_sql(mode)}
         ORDER BY updated_at DESC, id DESC
         LIMIT 12
         """,
@@ -214,7 +216,7 @@ _IN_PROGRESS_STATUS = "in-progress"
 _DISPATCH_LIST_RENDER_CAP = 10
 
 
-def _dispatch_lifecycle_rows(connection, engagement_id: int) -> list[Any]:
+def _dispatch_lifecycle_rows(connection, engagement_id: int, *, mode: str | None = None) -> list[Any]:
     """Every dispatch of one engagement, worst-first, lifecycle columns only.
 
     Exhaustive on purpose. No row cap is honest here: "stale" is a per-role age
@@ -234,11 +236,11 @@ def _dispatch_lifecycle_rows(connection, engagement_id: int) -> list[Any]:
     none of this needs.
     """
     return connection.execute(
-        """
-        SELECT agent_id, agent_role, dispatched_at, completed_at, status
-        FROM assessment_dispatches
-        WHERE engagement_id = ?
-        ORDER BY dispatched_at ASC, id ASC
+        f"""
+        SELECT d.agent_id, d.agent_role, d.dispatched_at, d.completed_at, d.status
+        FROM assessment_dispatches d
+        WHERE d.engagement_id = ?{dispatch_mode_sql(mode)}
+        ORDER BY d.dispatched_at ASC, d.id ASC
         """,
         (engagement_id,),
     ).fetchall()
@@ -289,13 +291,6 @@ def _reconciled_agent_ids(connection, engagement_id: int) -> set[str]:
     return agent_ids
 
 
-def _dispatch_in_mode(role: str | None, mode: str | None) -> bool:
-    if mode not in {"web", "code"}:
-        return True
-    is_code = str(role or "").startswith("code-")
-    return is_code if mode == "code" else not is_code
-
-
 def _recent_dispatch_picture(
     engagement_id: int,
     *,
@@ -307,21 +302,16 @@ def _recent_dispatch_picture(
     # between two separate reads could otherwise erase a gap from the list while
     # leaving it in the count.
     with get_connection() as connection:
-        lifecycle_rows = [
-            row for row in _dispatch_lifecycle_rows(connection, engagement_id)
-            if _dispatch_in_mode(row["agent_role"], mode)
-        ]
+        lifecycle_rows = _dispatch_lifecycle_rows(connection, engagement_id, mode=mode)
         handoff_status_by_agent = _handoff_status_by_agent(connection, engagement_id)
         reconciled_agent_ids = _reconciled_agent_ids(connection, engagement_id)
         dispatch_total = len(lifecycle_rows)
-        if mode in {"web", "code"}:
-            role_filter = "LIKE 'code-%'" if mode == "code" else "NOT LIKE 'code-%'"
-            handoff_total = int(connection.execute(
-                f"SELECT COUNT(*) FROM assessment_dispatch_handoffs WHERE engagement_id = ? AND agent_role {role_filter}",
-                (engagement_id,),
-            ).fetchone()[0])
-        else:
-            handoff_total = _row_count(connection, "assessment_dispatch_handoffs", engagement_id)
+        handoff_total = int(connection.execute(
+            "SELECT COUNT(*) FROM assessment_dispatch_handoffs h LEFT JOIN assessment_dispatches d "
+            "ON d.engagement_id=h.engagement_id AND d.agent_id=h.agent_id "
+            f"WHERE h.engagement_id = ?{dispatch_mode_sql(mode, role_sql='h.agent_role')}",
+            (engagement_id,),
+        ).fetchone()[0])
 
     now = dt.datetime.now(dt.timezone.utc)
     stale: list[dict[str, Any]] = []
@@ -393,14 +383,12 @@ def _recent_dispatch_picture(
     return {
         "recent_dispatches": state_manager.list_dispatches(
             engagement_id, limit=_DISPATCH_LIST_RENDER_CAP,
-            role_prefix="code-" if mode == "code" else "",
-            exclude_role_prefix="code-" if mode == "web" else "",
+            mode=mode,
         ),
         "recent_dispatches_count": dispatch_total,
         "latest_handoffs": state_manager.list_handoffs(
             engagement_id, sort="checkpoint", limit=_DISPATCH_LIST_RENDER_CAP,
-            role_prefix="code-" if mode == "code" else "",
-            exclude_role_prefix="code-" if mode == "web" else "",
+            mode=mode,
         ),
         "latest_handoffs_count": handoff_total,
         "stale_in_progress_dispatches": stale[:_DISPATCH_LIST_RENDER_CAP],
@@ -426,20 +414,12 @@ def _parse_iso(value: Any) -> dt.datetime | None:
         return None
 
 
-def _finding_mode_sql(mode: str | None) -> str:
-    if mode == "code":
-        return " AND canonical_location LIKE 'file:%'"
-    if mode == "web":
-        return " AND COALESCE(canonical_location, '') NOT LIKE 'file:%'"
-    return ""
-
-
 def _counts(connection, engagement_id: int, *, mode: str | None = None) -> dict[str, dict[str, int]]:
     rows = connection.execute(
         f"""
         SELECT status, verification_status, severity, source_name
         FROM assessment_findings
-        WHERE engagement_id = ?{_finding_mode_sql(mode)}
+        WHERE engagement_id = ?{finding_mode_sql(mode)}
         """,
         (engagement_id,),
     ).fetchall()
@@ -939,7 +919,7 @@ def _cross_track_pointer(connection, engagement_id: int, *, mode: str, phases: d
     other = "code" if mode == "web" else "web"
     if other not in phases:
         return {}
-    where = _finding_mode_sql(other)
+    where = finding_mode_sql(other)
     count = int(connection.execute(
         f"SELECT COUNT(*) FROM assessment_findings WHERE engagement_id = ?{where}",
         (engagement_id,),
@@ -1106,7 +1086,7 @@ def build_resume_brief(
             "verified": _limited_findings(
                 connection,
                 engagement_id,
-                "verification_status NOT IN ('unreviewed', 'disputed')",
+                "verification_status IN ('confirmed', 'downgraded')",
                 since=since, mode=mode,
             ),
             "killed": _limited_findings(connection, engagement_id, "status = 'false_positive'", since=since, mode=mode),

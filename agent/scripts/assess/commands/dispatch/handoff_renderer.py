@@ -9,18 +9,20 @@ transcripts because it's fast and the dispatch prompt arrives bloated.
 render-handoff replaces that discretion with a deterministic emitter that
 pulls from durable state (the orchestrator's assessment_dispatches +
 assessment_dispatch_handoffs tables) and emits a markdown blob the operator
-pastes verbatim into the next dispatch prompt. The output is hard-capped at
---max-lines (default 40); the findings list collapses to "... and N more"
+pastes verbatim into the next dispatch prompt. The context excerpt is capped at
+--max-lines (default 40; 0 renders the complete recorded handoff); the findings list collapses to "... and N more"
 before any fixed sections drop.
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
 
 from assess.lib.client import AssessmentClient, AssessError
 from assess.lib.config import load_config
 from assess.lib.finding_render import UNTRUSTED_DATA_NOTICE
+from assess.lib.render_containment import contain_separators
 
 
 def _render_handoff(args, extra: list[str]) -> None:
@@ -50,7 +52,10 @@ def _render_handoff(args, extra: list[str]) -> None:
         )
         sys.exit(1)
 
-    max_lines = max(1, int(getattr(args, "max_lines", 40) or 40))
+    max_lines = int(getattr(args, "max_lines", 40))
+    if max_lines < 0:
+        print("render-handoff: --max-lines must be non-negative (0 renders all)", file=sys.stderr)
+        sys.exit(1)
     include_evidence = bool(getattr(args, "include_evidence", False))
 
     cfg = load_config(getattr(args, "engagement_dir", None))
@@ -111,6 +116,7 @@ def _render_handoff(args, extra: list[str]) -> None:
         if not isinstance(open_questions, list):
             open_questions = []
         recommended_next_agent = str(handoff.get("recommended_next_agent") or "")
+        extras_payload = handoff.get("extras") or {}
         summary = str(handoff.get("summary") or "")
         confidence = str(handoff.get("confidence") or "")
 
@@ -203,6 +209,7 @@ def _render_handoff(args, extra: list[str]) -> None:
         credential_rows=credential_rows,
         include_evidence=include_evidence,
         max_lines=max_lines,
+        extras=extras_payload,
     )
     print(blob)
 
@@ -233,15 +240,18 @@ def _render_handoff_blob(
     credential_rows: list[dict],
     include_evidence: bool,
     max_lines: int,
+    extras: object = None,
 ) -> str:
     """Build the markdown handoff blob with the documented section order.
 
     Section order: header / summary / confidence / findings / coverage gaps /
-    next steps / open questions / working artifacts / runtime issues /
+    next steps / open questions / specialist observations / working artifacts / runtime issues /
     recommended next agent. Trim policy on overflow: findings list collapses
     first ("... and N more"), then runtime_issues, then working_artifacts. If
     multiline load-bearing prose alone still exceeds the caller's hard cap, the
     final blob is visibly truncated rather than silently violating --max-lines.
+    A zero cap returns every recorded field for inspection; context selection
+    happens when the operator builds the next dispatch, not during storage.
     """
     head = [
         f"#### Handoff from {role} dispatch {agent_id}",
@@ -270,6 +280,8 @@ def _render_handoff_blob(
     coverage_lines = _coverage_gaps_section(coverage_gaps)
     next_steps_lines = _next_steps_section(next_steps)
     open_questions_lines = _open_questions_section(open_questions)
+    if extras:
+        open_questions_lines.extend(["- **Specialist observations:**", f"  {json.dumps(extras, ensure_ascii=False, sort_keys=True)}"])
     recommended_line = _recommended_next_agent_section(recommended_next_agent)
     credentials_line = _credentials_section(credential_rows)
 
@@ -300,7 +312,7 @@ def _render_handoff_blob(
         return out
 
     composed = _compose(finding_lines, 0, artifact_states, runtime_issues, 0, 0)
-    if len(composed) <= max_lines:
+    if max_lines == 0 or len(composed) <= max_lines:
         return _join_with_hard_cap(composed, max_lines)
 
     # First-pass trim: findings.
@@ -344,13 +356,13 @@ def _render_handoff_blob(
 
 def _join_with_hard_cap(lines: list[str], max_lines: int) -> str:
     """Join renderer lines without letting embedded newlines defeat the cap."""
-    physical_lines = "\n".join(lines).splitlines()
-    if len(physical_lines) <= max_lines:
+    physical_lines = "\n".join(contain_separators(line) for line in lines).splitlines()
+    if max_lines == 0 or len(physical_lines) <= max_lines:
         return "\n".join(physical_lines)
     omitted = len(physical_lines) - max(0, max_lines - 1)
     marker = (
         f"... handoff truncated: {omitted} line(s) omitted; rerun "
-        "render-handoff with a larger --max-lines to inspect them"
+        "render-handoff with --max-lines 0 for the complete recorded handoff"
     )
     if max_lines == 1:
         return marker

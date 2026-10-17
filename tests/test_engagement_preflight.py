@@ -30,6 +30,7 @@ from vigil_cli import blue as blue_module  # noqa: E402
 from vigil_cli import engagements as engagements_module  # noqa: E402
 from vigil_cli import main as main_module  # noqa: E402
 from vigil_cli import preflight as preflight_module  # noqa: E402
+from vigil_cli import orchestrator as orchestrator_module  # noqa: E402
 from vigil_cli.engagements import CreatedEngagement  # noqa: E402
 from vigil_cli.main import main  # noqa: E402
 
@@ -73,6 +74,8 @@ def blue_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, objec
     )
     monkeypatch.setattr(preflight_module.shutil, "which", lambda _name: "/usr/bin/client")
     monkeypatch.setattr(preflight_module, "orchestrator_status", lambda _root: "running")
+    monkeypatch.setattr(engagements_module, "_verify_backend_install_root", lambda *_: True)
+    monkeypatch.setattr(orchestrator_module, "start_orchestrator", lambda *_: None)
     monkeypatch.setattr(preflight_module, "runtime_status", lambda: "running")
     monkeypatch.setattr(preflight_module, "_warn_if_install_stale", lambda _root: None)
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
@@ -119,6 +122,8 @@ def red_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, object
     )
     monkeypatch.setattr(preflight_module.shutil, "which", lambda _name: "/usr/bin/client")
     monkeypatch.setattr(preflight_module, "orchestrator_status", lambda _root: "running")
+    monkeypatch.setattr(engagements_module, "_verify_backend_install_root", lambda *_: True)
+    monkeypatch.setattr(orchestrator_module, "start_orchestrator", lambda *_: None)
     monkeypatch.setattr(preflight_module, "runtime_status", lambda: "running")
     monkeypatch.setattr(preflight_module, "_warn_if_install_stale", lambda _root: None)
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
@@ -298,7 +303,7 @@ def test_the_refusal_names_an_escape_hatch_both_commands_accept(
 # ── soft warnings warn on both paths and block neither ───────────────────────
 
 
-def test_blue_start_warns_but_proceeds_when_the_local_stack_is_down(
+def test_blue_start_recovers_backend_and_warns_when_execution_is_down(
     blue_env: dict[str, object],
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -314,7 +319,7 @@ def test_blue_start_warns_but_proceeds_when_the_local_stack_is_down(
     _blue_engage(blue_env["install_root"], "--start", "goose")  # type: ignore[arg-type]
 
     captured = capsys.readouterr()
-    assert "WARN: orchestrator is not running" in captured.err
+    assert "Starting the engagement backend" in captured.err
     assert "WARN: Kali runtime container is stopped" in captured.err
     assert "WARN: install root is stale" in captured.err
     assert blue_env["started"] == "goose"
@@ -322,7 +327,7 @@ def test_blue_start_warns_but_proceeds_when_the_local_stack_is_down(
     assert captured.out == f"{blue_env['dir']}\n"
 
 
-def test_red_start_warns_but_proceeds_when_the_local_stack_is_down(
+def test_red_start_recovers_backend_and_warns_when_execution_is_down(
     red_env: dict[str, object],
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -338,7 +343,7 @@ def test_red_start_warns_but_proceeds_when_the_local_stack_is_down(
     _red_start(red_env["install_root"], "goose")  # type: ignore[arg-type]
 
     stderr = capsys.readouterr().err
-    assert "WARN: orchestrator is not running" in stderr
+    assert "Starting the engagement backend" in stderr
     assert "WARN: Kali runtime container is stopped" in stderr
     assert "WARN: install root is stale" in stderr
     assert red_env["started"] == "goose"

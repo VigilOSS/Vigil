@@ -1894,7 +1894,7 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
                 "<agent-id> (the prior dispatch's agent_id from `vigil assess agent list`)",
             ),
             helper_defaults=(
-                ("--max-lines", "40 (hard cap; findings list collapses with '... and N more')"),
+                ("--max-lines", "40 (context excerpt; 0 returns the complete recorded handoff)"),
                 ("--include-evidence", "off (one short evidence excerpt per finding when set)"),
                 ("--engagement-dir", "explicit flag, then engagement CWD, then launcher session"),
                 ("scope", "handoff payload's summary / coverage_gaps / next_steps / "
@@ -1915,8 +1915,8 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
                     "paste render-handoff output instead of copy-pasting from the prior agent's transcript",
                 ),
                 (
-                    "raising --max-lines past ~80",
-                    "the cap keeps the prompt bounded — if the blob is too small, narrow the registry's finding_slugs list rather than widening the cap",
+                    "treating a capped excerpt as the entire specialist result",
+                    "use --max-lines 0 to inspect complete next steps, uncertainty, and observations; select only relevant context for a new dispatch",
                 ),
             ),
             examples=(
@@ -2289,6 +2289,7 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
                 "Set --surfaced-to-user for operator-facing decisions (vendor-SaaS, egress reputation, blocked dispatch) so the human-visible audit log matches what the operator was shown.",
                 "--payload-json WINS OUTRIGHT: when it is supplied the shorthand flags are ignored entirely, so a top-level --choice alongside --payload-json is silently dropped and any gate that reads `payload.choice` never fires. Put `choice` INSIDE the JSON object, never as a sibling flag.",
                 "For claim_equivalence, read finding GET's verification_audit.claim_transition_id and current_claim_sha256. A separate verifier dispatch compares the changed finding with the verified claim and records verdict=equivalent or changed with those exact values. Equivalent clears claim_review_pending; changed requires a new canonical edit and terminal verification. Report readiness and final export block while review is pending.",
+                "For blind_triage_verdict, include finding_slug, packet_id, verdict, reviewer_dispatch_agent_id and writer_dispatch_agent_id. Both identities must be recorded dispatches in the engagement; the writer has report-writer role. The reviewer differs from the writer and finding provenance author. This enforces attribution, not native context independence. New or changed external content requires a new attributed packet review.",
                 "For repro_rehearsal, verdict is followed, failed, or equivalent; proof_mode is live, source, or fuzz. The verifier_dispatch_agent_id must name an independent dispatch with the matching role: vulnerability-analyst, code-vuln-verifier, or code-fuzz-engineer. A followed live/fuzz check needs observed_outcome, all authored repro_runs IDs in runs_checked, and a completed reviewer command run. A followed source check names the independently observed outcome. A failed check needs failed_step. An equivalent step edit needs prior_decision_id of a followed check, a fresh verifier dispatch, and reason. The backend stamps a digest of current steps and ordered run IDs; final publication requires the latest successful digest to match.",
                 # --- human_reach_decision: the side-effect preflight -------------
                 "`--kind human_reach_decision` IS THE SIDE-EFFECT PREFLIGHT GATE. Run the preflight before sending any request that could create persistent state or reach a human — signup, request-access, support/report/ticket, password-reset, contact-form, or any endpoint whose name or path suggests a write that notifies someone. The posture is CAPPED LIVE-FIRE, not zero-fire: static characterization is unlimited, and genuine ambiguity earns a small, hard, audited budget gated by this recorded decision.",

@@ -1,12 +1,9 @@
-"""`vigil quickstart` — a macOS-first onboarding wizard.
+"""`vigil quickstart` — task-specific host readiness and setup commands.
 
-Gets a new operator from a bare checkout to a running engagement: it probes the
-host prerequisites (uv/docker/go), reports which host-side recon tools
-are missing, and either PLANS or (behind an explicit flag) RUNS their install
-commands. It never touches the working root, backend, or Docker on its own — the
-only side effect it can take is running the host-tool install commands, and only
-when `--install-host-tools` is passed. Everything else is printed as an ordered
-next-command checklist keyed to the resolved install root (`~/vigil`).
+Code review needs the selected client, uv, and source search. Web recon also
+checks Docker and host recon tools. The wizard only runs tool installers with
+`--install-host-tools`; engagement and service setup stay explicit in its
+ordered next-command checklist.
 
 The install/plan logic is factored into pure functions (`prerequisite_status`,
 `host_tool_plan`) so it can be asserted on without side effects.
@@ -83,6 +80,9 @@ class QuickstartOptions:
     json_output: bool = False
     target: str | None = None
     hosts: str | None = None
+    engagement_type: str = "web"
+    client: str = "claude"
+    source_dir: Path | None = None
 
 
 def _default_runner(argv: Sequence[str]) -> "subprocess.CompletedProcess[str]":
@@ -93,6 +93,9 @@ def prerequisite_status(
     *,
     which: WhichFn = shutil.which,
     daemon_available: Callable[[], bool] | None = None,
+    engagement_type: str = "web",
+    client: str | None = None,
+    host_recon: bool = True,
 ) -> list[ToolStatus]:
     """Readiness of each bootstrap prerequisite, in declaration order.
 
@@ -103,7 +106,16 @@ def prerequisite_status(
     """
     probe = daemon_available if daemon_available is not None else docker.daemon_available
     rows: list[ToolStatus] = []
-    for prerequisite in PREREQUISITES:
+    prerequisites = list(PREREQUISITES)
+    if engagement_type == "code":
+        prerequisites = [PREREQUISITES[0]]
+    elif not host_recon:
+        prerequisites = [row for row in prerequisites if row.binary != "go"]
+    if client:
+        prerequisites.append(Prerequisite(client, f"install the {client} CLI", "selected operator client"))
+    if engagement_type == "code":
+        prerequisites.append(Prerequisite("rg", "brew install ripgrep", "source search for code specialists"))
+    for prerequisite in prerequisites:
         present = which(prerequisite.binary) is not None
         detail = ""
         if present and prerequisite.binary == "docker" and not probe():
@@ -172,8 +184,15 @@ def run_quickstart(
     gated behind `options.install_host_tools` and never taken under `--dry-run`.
     """
     interactive = not options.non_interactive and stdin_isatty()
-    prereqs = prerequisite_status(which=which)
-    tool_rows = host_tool_statuses(which=which, system=system)
+    if options.engagement_type not in {"web", "code"}:
+        raise SystemExit("quickstart --type must be web or code")
+    if options.source_dir is not None and options.engagement_type != "code":
+        raise SystemExit("--source-dir requires --type code")
+    host_recon = options.engagement_type == "web" and (
+        system() in {"Darwin", "Windows"} or options.install_host_tools
+    )
+    prereqs = prerequisite_status(which=which, engagement_type=options.engagement_type, client=options.client, host_recon=host_recon)
+    tool_rows = host_tool_statuses(which=which, system=system) if host_recon else []
     plan = [
         InstallStep(tool.binary, command)
         for tool, present, command in tool_rows
@@ -195,7 +214,7 @@ def run_quickstart(
             ran_installs = True
             executed = _execute_plan(plan, runner)
 
-    next_commands = _next_commands(options.install_root, target, hosts)
+    next_commands = _next_commands(options.install_root, target, hosts, engagement_type=options.engagement_type, client=options.client, source_dir=options.source_dir)
 
     if options.json_output:
         _emit_json(options, prereqs, tool_rows, plan, manual, executed, ran_installs, next_commands)
@@ -227,12 +246,16 @@ def _execute_plan(plan: list[InstallStep], runner: Runner) -> list[tuple[Install
     return results
 
 
-def _next_commands(install_root: Path, target: str | None, hosts: str | None) -> list[str]:
+def _next_commands(install_root: Path, target: str | None, hosts: str | None, *, engagement_type: str = "web", client: str = "claude", source_dir: Path | None = None) -> list[str]:
     # Shell-quote every interpolated value so the printed command is safe to
     # copy-paste: a target with `&` in its query string, or whitespace in the
     # host list / install path, would otherwise split or background the command
     # and `vigil engagement create` would receive a truncated argument.
-    if target:
+    if engagement_type == "code":
+        create = "vigil engagement create --type code --name acme"
+        if source_dir is not None:
+            create += f" --source-dir {shlex.quote(str(source_dir.expanduser()))}"
+    elif target:
         create = f"vigil engagement create {shlex.quote(target)}"
         if hosts:
             create += f" --hosts {shlex.quote(hosts)}"
@@ -240,9 +263,9 @@ def _next_commands(install_root: Path, target: str | None, hosts: str | None) ->
         create = "vigil engagement create https://target.example --hosts target.example"
     return [
         f"vigil install {shlex.quote(str(install_root))}",
-        "vigil up",
+        "vigil orchestrator start",
         create,
-        "vigil engagement start <key> --client claude",
+        f"vigil engagement start <key> --mode {engagement_type} --client {shlex.quote(client)}",
     ]
 
 
@@ -265,13 +288,13 @@ def _emit_text(
         suffix = "" if p.present else f"  {p.detail or p.macos_hint}"
         print(f"  [{state}] {p.binary:<8} {p.note}{suffix}")
     print()
-    print("host recon tools:")
+    print("host recon tools:" if options.engagement_type == "web" else "Kali execution is started when needed; source review runs without Docker.")
     for tool, present, command in tool_rows:
         state = "ok " if present else "MISS"
         detail = "" if present else f"  {command or tool.note}"
         print(f"  [{state}] {tool.binary}{detail}")
     print()
-    if not plan and not manual:
+    if not plan and not manual and options.engagement_type == "web":
         print("all host recon tools present.")
     else:
         if plan:
@@ -311,6 +334,8 @@ def _emit_json(
 ) -> None:
     payload = {
         "install_root": str(options.install_root),
+        "engagement_type": options.engagement_type,
+        "client": options.client,
         "install_host_tools": options.install_host_tools,
         "dry_run": options.dry_run,
         "installs_executed": ran_installs,

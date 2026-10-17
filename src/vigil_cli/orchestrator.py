@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import hashlib
+import math
 import shutil
 import signal
 import socket
@@ -16,6 +17,7 @@ from . import restart_manifest
 from .application import application_root_for_workspace
 from .paths import engagements_root, resolve_logs_dir, resolve_orchestrator_data_dir, resolve_runtime_state_dir
 from .workspace import workspace_path
+from .service_locks import service_start_lock
 
 
 # E1: opt-in multi-worker uvicorn. Default stays 1 (single-process) so existing
@@ -24,7 +26,8 @@ from .workspace import workspace_path
 # "resolve from the VIGIL_ORCHESTRATOR_WORKERS env" so callers that don't pass an
 # explicit value still pick up the knob.
 WORKERS_ENV = "VIGIL_ORCHESTRATOR_WORKERS"
-ORCHESTRATOR_START_TIMEOUT_SECONDS = 30.0
+ORCHESTRATOR_START_TIMEOUT_SECONDS = 600.0
+START_TIMEOUT_ENV = "VIGIL_ORCHESTRATOR_START_TIMEOUT_SECONDS"
 BACKEND_DEPENDENCY_SYNC_TIMEOUT_SECONDS = 120.0
 
 
@@ -63,7 +66,26 @@ def _resolve_worker_count(options: OrchestratorOptions) -> int:
     return value
 
 
+def _startup_timeout_seconds() -> float:
+    raw = os.environ.get(START_TIMEOUT_ENV, "").strip()
+    if not raw:
+        return ORCHESTRATOR_START_TIMEOUT_SECONDS
+    try:
+        seconds = float(raw)
+    except ValueError:
+        seconds = math.nan
+    if not math.isfinite(seconds) or seconds <= 0:
+        raise SystemExit(f"{START_TIMEOUT_ENV} must be a finite positive number of seconds; got {raw!r}.")
+    return seconds
+
+
 def start_orchestrator(options: OrchestratorOptions) -> None:
+    with service_start_lock(f"orchestrator:{options.host}:{options.port}"):
+        _start_orchestrator_locked(options)
+
+
+def _start_orchestrator_locked(options: OrchestratorOptions) -> None:
+    startup_timeout = _startup_timeout_seconds()
     install_root = options.install_root.expanduser().resolve()
     application_root = application_root_for_workspace(install_root)
     runtime_dir = resolve_runtime_state_dir(install_root)
@@ -133,6 +155,12 @@ def start_orchestrator(options: OrchestratorOptions) -> None:
         os.chdir(application_root)
         os.execvpe("uv", argv, env)
     print(f"orchestrator\tstarting\thost={options.host}\tport={options.port}")
+    print(
+        f"orchestrator\tstartup budget={startup_timeout:g}s; database backups and migrations can take minutes. "
+        f"Progress: vigil logs orchestrator ({log_file}). "
+        f"Set {START_TIMEOUT_ENV} to adjust the deadline.",
+        flush=True,
+    )
     with log_file.open("ab") as log, open(os.devnull, "rb") as stdin:
         process = subprocess.Popen(
             argv,
@@ -144,19 +172,23 @@ def start_orchestrator(options: OrchestratorOptions) -> None:
             start_new_session=True,
         )
     pid_file.write_text(f"{process.pid}\n", encoding="utf-8")
-    if not _wait_for_health(options.host, options.port, process=process):
+    startup_deadline = time.monotonic() + startup_timeout
+    if not _wait_for_health(options.host, options.port, process=process, timeout=startup_timeout):
         _terminate_process(process)
         pid_file.unlink(missing_ok=True)
         raise SystemExit(
             f"Orchestrator did not become healthy on http://{options.host}:{options.port}/healthz "
-            f"(see {log_file} for uvicorn errors)"
+            f"within the {startup_timeout:g}s startup budget (see {log_file}). "
+            f"For a large database migration, inspect the log before retrying with a larger {START_TIMEOUT_ENV}."
         )
-    if not _wait_for_readiness(options.host, options.port, process=process):
+    remaining = max(0.0, startup_deadline - time.monotonic())
+    if not _wait_for_readiness(options.host, options.port, process=process, timeout=remaining):
         _terminate_process(process)
         pid_file.unlink(missing_ok=True)
         raise SystemExit(
             f"Orchestrator did not become ready on http://{options.host}:{options.port}/readyz "
-            f"(see {log_file} for uvicorn errors)"
+            f"within the {startup_timeout:g}s startup budget (see {log_file}). "
+            f"Inspect the log before retrying with a larger {START_TIMEOUT_ENV}."
         )
     print(
         f"orchestrator\trunning\thealthy=True\tpid={process.pid}\t"
@@ -524,17 +556,19 @@ def _check_port_available(host: str, port: int) -> None:
     )
 
 
-def _wait_for_health(host: str, port: int, *, process: subprocess.Popen[bytes] | None = None) -> bool:
+def _wait_for_health(host: str, port: int, *, process: subprocess.Popen[bytes] | None = None,
+                     timeout: float | None = None) -> bool:
     url = f"http://{host}:{port}/healthz"
     return _wait_for_http_200(
-        url, process=process, timeout=ORCHESTRATOR_START_TIMEOUT_SECONDS
+        url, process=process, timeout=_startup_timeout_seconds() if timeout is None else timeout
     )
 
 
-def _wait_for_readiness(host: str, port: int, *, process: subprocess.Popen[bytes] | None = None) -> bool:
+def _wait_for_readiness(host: str, port: int, *, process: subprocess.Popen[bytes] | None = None,
+                        timeout: float | None = None) -> bool:
     url = f"http://{host}:{port}/readyz"
     return _wait_for_http_200(
-        url, process=process, timeout=ORCHESTRATOR_START_TIMEOUT_SECONDS
+        url, process=process, timeout=_startup_timeout_seconds() if timeout is None else timeout
     )
 
 
@@ -545,6 +579,7 @@ def _wait_for_http_200(
     timeout: float,
 ) -> bool:
     deadline = time.monotonic() + timeout
+    next_notice = deadline - timeout + 15.0
     while True:
         if process is not None and process.poll() is not None:
             return False
@@ -554,7 +589,15 @@ def _wait_for_http_200(
                     return True
         except OSError:
             pass
-        remaining = deadline - time.monotonic()
+        now = time.monotonic()
+        remaining = deadline - now
         if remaining <= 0:
             return False
+        if now >= next_notice:
+            print(
+                f"orchestrator\twaiting for {url}; {remaining:.0f}s remain. "
+                "Database backup or migration may still be running; inspect `vigil logs orchestrator`.",
+                flush=True,
+            )
+            next_notice = now + 15.0
         time.sleep(min(0.2, remaining))

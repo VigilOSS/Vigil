@@ -216,3 +216,17 @@
 @media (prefers-reduced-motion: reduce) {
   .workspace-rail .tab-button, .engagement-ledger-table tbody tr { transition: none; }
 }
+
+.proof-workspace { padding: 28px; }
+.proof-preparation { display: grid; gap: 14px; max-width: 720px; margin: 20px 0 32px; }
+.proof-preparation label { display: grid; gap: 6px; }
+.proof-preparation textarea { min-height: 92px; }
+.proof-work-item { border-top: 1px solid var(--divider); padding: 20px 0; }
+.proof-work-item dl { display: grid; grid-template-columns: 90px 1fr; gap: 8px 16px; }
+.proof-work-item dd { margin: 0; overflow-wrap: anywhere; white-space: pre-wrap; }
+.proof-objective { white-space: pre-wrap; overflow-wrap: anywhere; }
+.proof-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 12px; }
+.proof-run-link { margin-right: 14px; }
+
+.proof-recovery { display: grid; gap: 10px; max-width: 720px; margin-top: 16px; }
+.proof-recovery label { display: grid; gap: 6px; }

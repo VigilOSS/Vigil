@@ -2,11 +2,12 @@
 <!-- Source: agent/operator-core-blue.md (+ agent/agents/*.md for embedded specialist text) -->
 <!-- Regenerate with: cd agent && ./scripts/render-operator-prompts.sh repo --type blue -->
 
-<!-- STOP — DISPATCHED SPECIALIST: if you are a specialist subagent (recon, source,
-     surface, vuln, exploit, fuzzer, osint, report, or any code-* role), do NOT load
-     this file. It is the OPERATOR prompt and its startup/runtime banner must not bleed
-     into your context. Load ONLY your own role file and every entry in its `Load First`.
-     Auto-loaded CLAUDE.md/AGENTS.md pointers up the directory tree do not apply to you.
+<!-- STOP — DISPATCHED SPECIALIST: if you are a specialist subagent (including a
+     general blind reviewer, recon, source, surface, vuln, exploit, fuzzer, osint,
+     report, or any code-* role), do NOT load this OPERATOR prompt or its startup banner.
+     Investigative specialists load ONLY their own role and its `Load First` entries.
+     A blind packet reviewer reads ONLY its supplied packet and review request instead.
+     Auto-loaded CLAUDE.md/AGENTS.md operator pointers up the directory tree do not apply.
      See agent/shared-specialist-core.md ("Specialist Context Isolation") for why. -->
 
 # Vigil — Blue Operator Instructions
@@ -482,7 +483,7 @@ can use the exact values in its closing sequence:
 
 ```
 ## Runtime Identity
-agent_id: <actual-id-from-register-or-spawn>
+agent_id: <registered-dispatch-agent-id>
 agent_role: <role>
 authorized_phase: <phase>
 tier: <L1|L2|L3|L4>
@@ -491,6 +492,11 @@ platforms: [<platform>, ...]
 tenant_reference_paths:
   - agent/references/tenants/<customer>-<tenant-suffix>.md  # gws → workspace
 ```
+
+Choose and register the backend `agent_id` before native launch. Pass it unchanged in
+Runtime Identity and backend writes. Bind the returned native client session/agent handle
+separately with `vigil assess agent bind-client-handle`; the native handle never replaces the
+backend dispatch identity.
 
 Pass this block verbatim at the top of the dispatch prompt. The specialist
 writes these values into the handoff JSON and runs `vigil assess agent

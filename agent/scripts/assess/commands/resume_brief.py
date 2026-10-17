@@ -430,12 +430,18 @@ def _render_markdown(brief: dict) -> str:
             )
         if selected_handoff.get("finding_slugs"):
             lines.append(contain_separators(f"- finding_slugs: {', '.join(selected_handoff.get('finding_slugs') or [])}"))
-        for step in (selected_handoff.get("next_steps") or [])[:3]:
+        for step in (selected_handoff.get("next_steps") or []):
             if isinstance(step, dict):
                 lines.append(contain_separators(
                     f"- next: {step.get('action') or '-'} → {step.get('target') or '-'} "
-                    f"({step.get('recommended_agent') or '-'})"
+                    f"({step.get('recommended_agent') or '-'}) — {step.get('rationale') or 'reason not recorded'}"
                 ))
+        for field in ("coverage_gaps", "open_questions", "runtime_issues", "extras"):
+            if selected_handoff.get(field):
+                append_contained_value(
+                    lines, f"- {field}:",
+                    json.dumps(selected_handoff[field], ensure_ascii=False, sort_keys=True),
+                )
     lines.extend(["", "## Command Runs"])
     for row in brief.get("command_runs") or []:
         output_truth = _command_output_truth(row)
@@ -630,6 +636,16 @@ def _render_latest_handoffs(lines: list, rows: list, total) -> None:
             "::",
             str(row.get("summary") or ""),
         )
+        details = ", ".join(
+            f"{field}={len(row.get(field) or [])}"
+            for field in ("next_steps", "coverage_gaps", "open_questions", "runtime_issues")
+            if row.get(field)
+        )
+        if details or row.get("extras"):
+            lines.append(contain_separators(
+                f"    {details or 'specialist observations recorded'}; full handoff: "
+                f"vigil assess agent render-handoff {row.get('agent_id')} --max-lines 0"
+            ))
     _render_dispatch_more(lines, len(rows), total, "handoffs")
 
 

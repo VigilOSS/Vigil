@@ -67,6 +67,15 @@ audit trail stops claiming a dead run is still going:
 vigil assess kali sweep-orphans --scope all
 ```
 
+For outstanding runtime proof, inspect `vigil assess proof-work list` and the relevant
+`proof-work get <id>` before dispatching. The list also exposes owed but unprepared findings.
+Use the explicit `proof-work reconcile <id>` write when ownership or source/scope currentness
+needs reconciliation; the read brief never changes it. A chat exit or old checkpoint is not
+proof that a supervised command stopped. Preserve a live owner/run, recover a genuinely stopped
+assignment through the contract, and keep blocked work visible while other investigation continues.
+Read the complete handoff with `agent render-handoff <agent-id> --max-lines 0` when its excerpt
+omits a material clue or recommended next test; do not treat a short summary as the whole result.
+
 Close the loop at the other end: before a phase transition, before a long
 dispatch wave, and at session end, record your own checkpoint so the next
 session resumes from a row instead of a guess.

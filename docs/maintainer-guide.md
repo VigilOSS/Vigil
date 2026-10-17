@@ -386,3 +386,18 @@ one line, which is mutating the operator's capture.
 - **The `**/data/` ignore trap.** Required resolver lists, fixtures, or golden files under `data/`
   need targeted `.gitignore` negations for every ignored path level. Track them with
   `jj file track <path>` and confirm with `jj file list <path>`; a local untracked file is absent in CI.
+
+## Matched runtime image releases
+
+`.github/workflows/runtime-release.yml` runs from the version tag, builds Linux AMD64/ARM64
+with the canonical staged runtime input set, publishes a multi-platform index with provenance
+and SBOMs, and writes its SHA256 reference plus build-input digest into
+`agent/docker/runtime-full/release-image.json`. It then builds the matched application wheel
+and sdist and attaches them to a draft release. Only draft assets can be replaced on retry.
+Review the draft before publication; source commits keep the unpinned manifest unless a real
+matched image exists. Never invent or reuse a digest for different baked inputs.
+
+The pin itself is application metadata, not a baked image input. `runtime_images.py` checks
+the pin and image label before tagging locally. Existing runtime containers are reused, so a
+release upgrade does not interrupt another engagement. A deliberate `vigil runtime build`
+uses the same declared input set for local builds.

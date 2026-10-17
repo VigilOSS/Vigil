@@ -2,11 +2,12 @@
 <!-- Source: agent/operator-core.md (+ agent/agents/*.md for embedded specialist text) -->
 <!-- Regenerate with: cd agent && ./scripts/render-operator-prompts.sh repo -->
 
-<!-- STOP — DISPATCHED SPECIALIST: if you are a specialist subagent (recon, source,
-     surface, vuln, exploit, fuzzer, osint, report, or any code-* role), do NOT load
-     this file. It is the OPERATOR prompt and its startup/runtime banner must not bleed
-     into your context. Load ONLY your own role file and every entry in its `Load First`.
-     Auto-loaded CLAUDE.md/AGENTS.md pointers up the directory tree do not apply to you.
+<!-- STOP — DISPATCHED SPECIALIST: if you are a specialist subagent (including a
+     general blind reviewer, recon, source, surface, vuln, exploit, fuzzer, osint,
+     report, or any code-* role), do NOT load this OPERATOR prompt or its startup banner.
+     Investigative specialists load ONLY their own role and its `Load First` entries.
+     A blind packet reviewer reads ONLY its supplied packet and review request instead.
+     Auto-loaded CLAUDE.md/AGENTS.md operator pointers up the directory tree do not apply.
      See agent/shared-specialist-core.md ("Specialist Context Isolation") for why. -->
 
 # Vigil — Operator Instructions
@@ -379,12 +380,19 @@ Every dispatch prompt must include a Runtime Identity block so the specialist ca
 
 ```
 ## Runtime Identity
-agent_id: <actual-id-from-register-or-spawn>
+agent_id: <registered-dispatch-agent-id>
 agent_role: <role>
 authorized_phase: <phase>
 ```
 
-The `agent_id` is operator-chosen — a unique string per dispatch (e.g. `recon-a3f9`). Use the same value in the `vigil assess agent start` audit record and in the runtime spawn's Runtime Identity block so they reconcile. (Codex returns its own id from `spawn_agent`; use that.)
+Choose one unique backend `agent_id` before launching the specialist (for example,
+`recon-a3f9`). Register it with `vigil assess agent start`, or obtain its successful
+`proof-work claim` when proof work owns the launch. Use that same registered ID in the
+specialist's Runtime Identity and every backend write. After native launch, bind the returned
+client session/agent handle separately with `vigil assess agent bind-client-handle`; it is not
+the backend dispatch ID. Read that command's contract for the actual client namespace and
+handle fields. A proof claim retry is inspection, not permission to spawn another worker. Launch only when
+the successful claim returns `launch_required: true`; otherwise inspect its existing owner/run.
 
 Pass this block verbatim at the top of the dispatch prompt. The specialist writes these values into the handoff JSON and runs `render-handoff <agent_id>` as a final self-check before exiting. A 404 from render-handoff means the `agent_id` in the handoff does not match the registered dispatch.
 
@@ -410,6 +418,7 @@ Required fields per dispatch:
 | Field | Values |
 |---|---|
 | `role` | `recon-specialist` / `source-analyzer` / `surface-collector` / `vulnerability-analyst` / `exploit-developer` / `fuzzer` / `osint-analyst` / `report-writer` / `code-architect` / `code-vuln-hunter` / `code-variant-hunter` / `code-vuln-verifier` / `code-fuzz-engineer` |
+| `assessment_mode` / `proof_route` | Explicit `code` or `web` method for a mixed-role specialist. Proof work supplies its backend-selected route; source attachments do not select it. |
 | `dispatch_mode` | `hypothesis-driven` / `item-iterating` / `deep-manual` / `variant-rotation` / `swarm` (see "Iteration-mode (dispatch_mode) Declaration" below) |
 | `skills` | The skill context the specialist loaded, recorded on the dispatch row so it is a truthful audit rather than a guess. Format, discovery, the operator exemption, and what omitting it does: `vigil assess contract agent start`. |
 | `rate_limit_budget` | The exact operator-authored traffic budget, or an explicit no-target-traffic declaration — `vigil assess contract agent start` owns the two flags and their exclusivity. |
@@ -745,11 +754,24 @@ Use `vigil assess finding record <agent-name> <finding-json-file> --agent-id <yo
 
 Use `vigil assess intel record <type> <json-file>` for `#### Intelligence` rows (intel types and dedup keys in §13). report-writer uses `vigil assess finding report --mode <final|draft> --json`, which returns grouped root-cause findings with sequential `001~N` report IDs.
 
+## Runtime proof work
+
+`pending_runtime_proof` is a durable obligation, not an instruction to start another operator.
+Use `vigil assess contract proof-work` to prepare, claim, and reconcile it. The current operator
+launches a fresh specialist from the native client with the claimed task and explicit route.
+Copy its backend-derived `authorized_phase` into Runtime Identity; web proof uses `exploit`
+and local code proof uses `code-verify`, regardless of the lead's current campaign phase.
+Use existing admitted roots/access; ask only for missing authorization, access, or required
+exploit approval. A supported local driver can prove a code claim without a website, through
+audited Kali execution. A live proof uses the web bundle even when source identity is attached.
+Keep blocked work visible, continue other useful work, and inspect existing owners/runs on resume
+before dispatching again. Preparation never confirms a finding or advances the engagement.
+
 ## Source Code Analysis Mode
 
 When source code is available (cloned repo, exposed `.git`, decompiled source, backup download):
-- Enable the code track explicitly with `vigil engagement add-track <engagement-key> code` when authorized. Start a fresh `--mode code` client for the code workflow (Phases 0–4: Ingest+Index → Classify+Map → Hunt → Verify+Variant → Fuzz (conditional)).
-- The code session reads `agent/operator-core-code.md`; this web session continues its own phase. Findings land in the same `assessment_findings` table.
+- Enable the code track explicitly with `vigil engagement add-track <engagement-key> code` when authorized. Dispatch fresh code specialists from this operator with explicit `assessment_mode: code` and their Code Source Identity. A separate `--mode code` operator session is optional. The code workflow is Phases 0–4: Ingest+Index → Classify+Map → Hunt → Verify+Variant → Fuzz (conditional).
+- Keep one operator core in the lead context and one constraint bundle in each specialist. Code and web phases remain separate; findings land in the same `assessment_findings` table.
 - Code findings use `canonical_location = "file:<path>:<line>"` and link to web findings via attack chains
 - See the Code Analysis Agents roster in `agent/operator-core-code.md` for available specialists
 

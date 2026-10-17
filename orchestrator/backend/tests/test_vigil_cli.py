@@ -2971,6 +2971,15 @@ def test_assess_passthrough_is_silent_when_install_is_current(
     assert capsys.readouterr().err == ""
 
 
+@pytest.fixture
+def _prepared_runtime_image(monkeypatch):
+    """Container lifecycle tests supply their image separately from release delivery."""
+    from vigil_cli import runtime_images
+
+    monkeypatch.setattr(runtime_images, "ensure_runtime_image", lambda *a, **kw: None)
+
+
+@pytest.mark.usefixtures("_prepared_runtime_image")
 def test_runtime_start_uses_expected_docker_mounts(tmp_path: Path) -> None:
     from vigil_cli.docker import DockerResult
     from vigil_cli.runtime import RuntimeOptions, start_runtime
@@ -3004,30 +3013,33 @@ def test_runtime_start_uses_expected_docker_mounts(tmp_path: Path) -> None:
     assert "ORCHESTRATOR_BASE_URL=http://host.docker.internal:18000" in run_command
 
 
-def test_runtime_start_missing_image_points_to_orchestrator_for_backend_state(tmp_path: Path) -> None:
+def test_runtime_start_missing_image_uses_matched_release_resolver(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from vigil_cli import runtime_images
     from vigil_cli.docker import DockerResult
     from vigil_cli.runtime import RuntimeOptions, start_runtime
 
     install_root = tmp_path / "install"
+    prepared = []
+
+    def prepare(root, **kwargs):
+        prepared.append((root, kwargs))
+        raise SystemExit("Acme image preparation")
+
+    monkeypatch.setattr(runtime_images, "ensure_runtime_image", prepare)
 
     def runner(argv: list[str], **_: object) -> DockerResult:
-        if argv[:3] == ["docker", "image", "inspect"]:
+        if argv[:3] == ["docker", "image", "inspect"] or argv[:4] == ["docker", "inspect", "--type", "image"]:
             return DockerResult(1, "", "missing")
-        if argv[:4] == ["docker", "inspect", "--type", "image"]:
-            return DockerResult(1, "", "missing")
-        if argv[:3] == ["docker", "images", "-q"]:
-            return DockerResult(0, "", "")
         return DockerResult(0, "", "")
 
-    with pytest.raises(SystemExit) as exc_info:
+    with pytest.raises(SystemExit, match="Acme image preparation"):
         start_runtime(RuntimeOptions(install_root=install_root), runner=runner, validate_tools=False)
-
-    message = str(exc_info.value)
-    assert "Missing runtime image" in message
-    assert "vigil runtime build" in message
-    assert "vigil orchestrator status" in message
+    assert prepared[0][0] == install_root
+    assert prepared[0][1]["image"] == "vigil:latest"
+    assert prepared[0][1]["runner"] is runner
 
 
+@pytest.mark.usefixtures("_prepared_runtime_image")
 def test_runtime_start_grants_sys_ptrace_capability(tmp_path: Path) -> None:
     """B2: runtime diagnostic tooling needs CAP_SYS_PTRACE; the docker-run argv
     must request it explicitly so ptrace operations do not fail with EPERM."""
@@ -3061,6 +3073,7 @@ def test_runtime_start_grants_sys_ptrace_capability(tmp_path: Path) -> None:
     assert "--cap-add=NET_ADMIN" in run_command
 
 
+@pytest.mark.usefixtures("_prepared_runtime_image")
 def test_runtime_start_retries_without_host_gateway_when_docker_rejects_flag(tmp_path: Path) -> None:
     from vigil_cli.docker import DockerResult
     from vigil_cli.runtime import RuntimeOptions, start_runtime
@@ -3539,6 +3552,7 @@ def test_orchestrator_start_builds_frontend_then_errors_when_backend_already_run
 def test_orchestrator_health_wait_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
     from vigil_cli import orchestrator as orchestrator_module
 
+    monkeypatch.setenv("VIGIL_ORCHESTRATOR_START_TIMEOUT_SECONDS", "30")
     attempts: list[str] = []
 
     def fail_urlopen(url: str, timeout: int):
@@ -3932,6 +3946,7 @@ def test_main_assess_passthrough_execs_assess_script(tmp_path: Path, monkeypatch
     assert captured["env"]["VIGIL_OOB_DOMAIN"] == "configured.oob.test"
 
 
+@pytest.mark.usefixtures("_prepared_runtime_image")
 def test_runtime_start_applies_resource_limits(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from vigil_cli.docker import DockerResult
     from vigil_cli.runtime import RuntimeOptions, start_runtime
@@ -6390,6 +6405,7 @@ def test_up_skips_oob_when_existing_sessions_are_active(tmp_path: Path, monkeypa
     monkeypatch.setattr(up_module, "_runtime_image_drift", lambda *args, **kwargs: False)
     monkeypatch.setattr(up_module, "proxy_image_drift", lambda *args, **kwargs: False)
     monkeypatch.setattr(up_module.docker, "container_running", lambda name, runner=None: True)
+    monkeypatch.setattr(up_module.docker, "container_mounts", lambda *a, **k: {"/engagements": str(up_module.engagements_root(tmp_path))})
     monkeypatch.setattr(up_module, "start_runtime", lambda *args, **kwargs: calls.append("runtime"))
     monkeypatch.setattr(up_module, "start_proxy", lambda *args, **kwargs: calls.append("mitmproxy"))
     monkeypatch.setattr(
@@ -6424,6 +6440,7 @@ def test_up_skips_oob_when_only_client_sessions_exist_but_endpoint_is_unconfigur
     monkeypatch.setattr(up_module, "_runtime_image_drift", lambda *args, **kwargs: False)
     monkeypatch.setattr(up_module, "proxy_image_drift", lambda *args, **kwargs: False)
     monkeypatch.setattr(up_module.docker, "container_running", lambda name, runner=None: True)
+    monkeypatch.setattr(up_module.docker, "container_mounts", lambda *a, **k: {"/engagements": str(up_module.engagements_root(tmp_path))})
     monkeypatch.setattr(up_module, "start_runtime", lambda *args, **kwargs: calls.append("runtime"))
     monkeypatch.setattr(up_module, "start_orchestrator", lambda *args, **kwargs: calls.append("orchestrator"))
     monkeypatch.setattr(
@@ -6505,13 +6522,14 @@ def test_up_passes_injected_runner_to_image_builds(tmp_path: Path, monkeypatch: 
     monkeypatch.setattr(up_module, "_start_mitmproxy_if_needed", lambda *args, **kwargs: None)
     monkeypatch.setattr(up_module, "_start_oob_if_needed", lambda *args, **kwargs: None)
 
-    def fake_build_runtime(_install_root, *, runner=None, **_kwargs):
-        seen["runtime_runner"] = runner
+    def fake_ensure_runtime_image(_install_root, *, runner=None, build_runner=None):
+        seen["runtime_runner"] = build_runner
+        seen["runtime_metadata_runner"] = runner
 
     def fake_build_mitmproxy(_install_root, *, runner=None):
         seen["mitmproxy_runner"] = runner
 
-    monkeypatch.setattr(up_module, "build_runtime", fake_build_runtime)
+    monkeypatch.setattr(up_module, "ensure_runtime_image", fake_ensure_runtime_image)
     monkeypatch.setattr(up_module, "_build_mitmproxy_image", fake_build_mitmproxy)
 
     def fake_build_runner(*_args, **_kwargs):
@@ -6526,6 +6544,7 @@ def test_up_passes_injected_runner_to_image_builds(tmp_path: Path, monkeypatch: 
     # Builds take `build_runner`, never the caller's bounded metadata `runner`:
     # the 20s bound that makes a wedged daemon fail fast would kill a cold image
     # build outright.
+    assert seen["runtime_metadata_runner"] is fake_runner
     assert seen["runtime_runner"] is fake_build_runner
     assert seen["mitmproxy_runner"] is fake_build_runner
 
@@ -6903,6 +6922,7 @@ def test_up_warns_when_proxy_container_predates_image(
     monkeypatch.setattr(up_module, "_runtime_image_drift", lambda *a, **k: False)
     monkeypatch.setattr(up_module, "proxy_image_drift", lambda **k: True)
     monkeypatch.setattr(up_module.docker, "container_running", lambda name, runner=None: True)
+    monkeypatch.setattr(up_module.docker, "container_mounts", lambda *a, **k: {"/engagements": str(up_module.engagements_root(tmp_path))})
     monkeypatch.setattr(up_module, "start_runtime", lambda *a, **k: calls.append("runtime"))
     monkeypatch.setattr(up_module, "start_proxy", lambda *a, **k: calls.append("mitmproxy"))
     monkeypatch.setattr(up_module, "start_orchestrator", lambda *a, **k: calls.append("orchestrator"))
@@ -16982,6 +17002,7 @@ def _preflight_install_root(tmp_path: Path) -> Path:
     return install_root
 
 
+@pytest.mark.usefixtures("_prepared_runtime_image")
 def test_runtime_start_refuses_when_tier_exceeds_vm(tmp_path, monkeypatch):
     import json as _json
 
@@ -17000,6 +17021,7 @@ def test_runtime_start_refuses_when_tier_exceeds_vm(tmp_path, monkeypatch):
     assert not any(c[:3] == ["docker", "run", "-d"] for c in commands)
 
 
+@pytest.mark.usefixtures("_prepared_runtime_image")
 def test_runtime_start_preflights_before_removing_existing_container(tmp_path, monkeypatch):
     import json as _json
 
@@ -17033,6 +17055,7 @@ def test_runtime_start_preflights_before_removing_existing_container(tmp_path, m
     assert not any(c[:3] == ["docker", "run", "-d"] for c in commands)
 
 
+@pytest.mark.usefixtures("_prepared_runtime_image")
 def test_runtime_start_allow_oversubscribe_bypasses_refusal(tmp_path, monkeypatch):
     import json as _json
 
@@ -17051,6 +17074,7 @@ def test_runtime_start_allow_oversubscribe_bypasses_refusal(tmp_path, monkeypatc
     assert any(c[:3] == ["docker", "run", "-d"] for c in commands)
 
 
+@pytest.mark.usefixtures("_prepared_runtime_image")
 def test_runtime_start_warns_at_high_limit_with_cotenants_but_proceeds(tmp_path, monkeypatch, capsys):
     import json as _json
 
@@ -17071,6 +17095,7 @@ def test_runtime_start_warns_at_high_limit_with_cotenants_but_proceeds(tmp_path,
     assert "acme-db" in capsys.readouterr().err
 
 
+@pytest.mark.usefixtures("_prepared_runtime_image")
 def test_runtime_start_proceeds_when_docker_info_unparseable(tmp_path, monkeypatch):
     from vigil_cli.runtime import RuntimeOptions, start_runtime
 
@@ -17598,7 +17623,7 @@ def test_up_routes_both_image_builds_to_the_unbounded_streaming_runner(
     monkeypatch.setattr(up_module, "start_orchestrator", lambda *_a, **_k: None)
     monkeypatch.setattr(up_module.docker, "container_running", lambda *_a, **_k: False)
     monkeypatch.setattr(
-        up_module, "build_runtime", lambda _root, **kw: seen.__setitem__("runtime", kw.get("runner"))
+        up_module, "ensure_runtime_image", lambda _root, **kw: seen.update(runtime=kw.get("build_runner"), runtime_metadata=kw.get("runner"))
     )
     monkeypatch.setattr(
         up_module,
@@ -17608,28 +17633,15 @@ def test_up_routes_both_image_builds_to_the_unbounded_streaming_runner(
 
     up_module.run_up(up_module.UpOptions(install_root=install), runner=metadata_runner)
 
+    assert seen["runtime_metadata"] is metadata_runner
     assert seen["runtime"] is docker_module.run_command_streaming
     assert seen["mitmproxy"] is docker_module.run_command_streaming
 
 
-def test_up_no_build_still_keeps_the_bounded_runner_out_of_the_proxy_build(
+def test_up_no_build_preserves_runner_roles_and_disables_proxy_build(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`--no-build` must not reopen the 20s build bound through a side door.
-
-    `run_up` skips its own proxy build under `--no-build`, but still calls
-    `_start_mitmproxy_if_needed`. `start_proxy` runs an independent freshness
-    check and builds the image itself, so on a host with a missing or stale
-    `vigil-proxy` image this is the only path to that build: it must carry the
-    unbounded build runner, or a cold build goes back under the 20s ceiling.
-
-    Both runners travel, in their own roles. Collapsing them — handing
-    `start_proxy` the streaming runner as its only runner — swapped one defect
-    for another: that runner returns empty stdout by design, so the image label
-    read back blank and rebuilt a current image every time, and the post-start
-    `docker ps` check saw nothing and declared the proxy it had just started
-    already dead.
-    """
+    """Capture gets its bounded metadata runner and an explicit no-build policy."""
     from vigil_cli import up as up_module
 
     seen: dict[str, object] = {}
@@ -17654,6 +17666,7 @@ def test_up_no_build_still_keeps_the_bounded_runner_out_of_the_proxy_build(
             {
                 "proxy_runner": kwargs.get("runner"),
                 "proxy_build_runner": kwargs.get("build_runner"),
+                "proxy_build_if_needed": kwargs.get("build_if_needed"),
             }
         ),
     )
@@ -17664,6 +17677,7 @@ def test_up_no_build_still_keeps_the_bounded_runner_out_of_the_proxy_build(
         build_runner=build_runner,
     )
 
+    assert seen["proxy_build_if_needed"] is False
     assert seen["proxy_build_runner"] is build_runner
     # The metadata role is not the build role: every non-build docker call in
     # `start_proxy` reads the command's stdout.

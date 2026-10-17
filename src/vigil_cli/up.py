@@ -28,7 +28,9 @@ from .oob import (
 )
 from .orchestrator import OrchestratorOptions, start_orchestrator
 from .paths import default_runtime_container, engagements_root
-from .runtime import RuntimeCapacityError, RuntimeOptions, build_runtime, runtime_image_inputs, start_runtime
+from .runtime import RuntimeCapacityError, RuntimeOptions, runtime_image_inputs, start_runtime
+from .runtime_images import ensure_runtime_image
+from .service_locks import service_start_lock
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,23 +110,25 @@ def _start_stack(
     build_runner: docker.Runner,
     state: dict[str, object],
 ) -> None:
-    runtime_was_running = docker.container_running(default_runtime_container(), runner=runner)
-
-    runtime_built = False
-    if options.no_build:
-        _progress("Runtime image", "build skipped")
-    elif image_outdated(
-        "vigil:latest", _runtime_image_inputs(application_root), root=application_root, runner=runner
-    ):
-        _progress("Runtime image", "building…")
-        build_runtime(install_root, runner=build_runner, daemon_runner=runner)
-        runtime_built = True
-    else:
-        _progress("Runtime image", "current")
-
     services: dict[str, str] = {}
     state["services"] = services
-    services["runtime"] = _start_or_restart_runtime(install_root, runtime_was_running, runtime_built, options, runner=runner)
+    with (service_start_lock(f"runtime:{default_runtime_container()}"),
+          service_start_lock("runtime-image:vigil:latest")):
+        runtime_was_running = docker.container_running(default_runtime_container(), runner=runner)
+
+        runtime_built = False
+        if options.no_build:
+            _progress("Runtime image", "build skipped")
+        elif image_outdated(
+            "vigil:latest", _runtime_image_inputs(application_root), root=application_root, runner=runner
+        ):
+            _progress("Runtime image", "preparing…")
+            ensure_runtime_image(install_root, runner=runner, build_runner=build_runner)
+            runtime_built = True
+        else:
+            _progress("Runtime image", "current")
+
+        services["runtime"] = _start_or_restart_runtime(install_root, runtime_was_running, runtime_built, options, runner=runner)
 
     if options.no_build:
         _progress("Proxy image", "build skipped")
@@ -156,8 +160,10 @@ def _start_or_restart_runtime(
 ) -> str:
     runtime_options = RuntimeOptions(install_root=install_root, allow_oversubscribe=options.allow_oversubscribe)
     if not runtime_was_running:
+        if options.no_build and not docker.image_exists(runtime_options.image, runner=runner):
+            raise SystemExit(f"Runtime image {runtime_options.image} is missing; run `vigil runtime build` or retry `vigil up` without --no-build.")
         _progress("Runtime", "starting…")
-        start_runtime(runtime_options, runner=runner)
+        start_runtime(runtime_options, runner=runner, allow_existing=True, prepare_image=False)
         _progress("Runtime", "running")
         return "running"
 
@@ -165,7 +171,7 @@ def _start_or_restart_runtime(
     if runtime_built or drifted:
         if _confirm_runtime_restart(options):
             _progress("Runtime", "restarting…")
-            start_runtime(RuntimeOptions(install_root=install_root, recreate=True, allow_oversubscribe=options.allow_oversubscribe), runner=runner)
+            start_runtime(RuntimeOptions(install_root=install_root, recreate=True, allow_oversubscribe=options.allow_oversubscribe), runner=runner, prepare_image=False)
             _progress("Runtime", "running")
             return "running"
         _progress("Runtime", "running; image update pending")
@@ -208,12 +214,18 @@ def _start_mitmproxy_if_needed(
     runner: docker.Runner,
     build_runner: docker.Runner,
 ) -> str:
-    """Start the proxy, building its image first if `start_proxy` finds it stale.
+    with service_start_lock("mitmproxy:vigil-proxy"):
+        return _start_mitmproxy_locked(install_root, options, runner=runner, build_runner=build_runner)
 
-    `build_runner` is not optional here: `start_proxy` runs its own freshness
-    check and builds, so under `--no-build` — where run_up skipped its own proxy
-    build — this is the only path to that build. Handing it the bounded metadata
-    runner would put a cold build back under the 20s ceiling.
+
+def _start_mitmproxy_locked(
+    install_root: Path,
+    options: UpOptions,
+    *,
+    runner: docker.Runner,
+    build_runner: docker.Runner,
+) -> str:
+    """Start capture once, preserving an existing shared capture process.
 
     Both runners go in, and they are not interchangeable. `start_proxy` reads
     the image label, `docker ps` and a log tail through its `runner`, so passing
@@ -222,6 +234,13 @@ def _start_mitmproxy_if_needed(
     proxy it had just started already dead.
     """
     if docker.container_running("vigil-proxy", runner=runner):
+        mounted = docker.container_mounts("vigil-proxy", runner=runner).get("/engagements")
+        expected = engagements_root(install_root).resolve()
+        if not mounted or Path(mounted).resolve() != expected:
+            raise SystemExit(
+                f"Shared capture uses a different engagements directory ({mounted or 'unknown'}); "
+                f"this working root needs {expected}. Existing capture was left running."
+            )
         if proxy_image_drift(runner=runner):
             _progress("Proxy", "running; image update pending")
             print("Run `vigil mitmproxy start` to recreate the container on the current image.")
@@ -236,8 +255,8 @@ def _start_mitmproxy_if_needed(
         MitmproxyOptions(install_root=install_root, engagements_root=engagement_directory),
         runner=runner,
         build_runner=build_runner,
+        build_if_needed=not options.no_build,
     )
-    del options  # accepted for signature parity; the proxy no longer pins to an engagement
     _progress("Proxy", "running")
     return "running"
 

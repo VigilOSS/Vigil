@@ -206,7 +206,7 @@ def register(subparsers) -> None:
         "render-handoff", help="Render a bounded prior handoff.", allow_abbrev=False
     )
     render.add_argument("extra", nargs="+", metavar="agent-id")
-    render.add_argument("--max-lines", type=int, default=40)
+    render.add_argument("--max-lines", type=int, default=40, help="Context excerpt line cap; 0 renders the complete recorded handoff.")
     render.add_argument("--include-evidence", action="store_true")
 
     continue_parser = actions.add_parser(

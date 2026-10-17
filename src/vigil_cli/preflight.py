@@ -20,10 +20,11 @@ import shutil
 import sys
 from pathlib import Path
 
-from .engagements import CLIENT_PROVIDER_KEY
+from .engagements import CLIENT_PROVIDER_KEY, _read_json
 from .orchestrator import orchestrator_status
 from .runtime import runtime_status
 from .status import install_staleness
+from .paths import DEFAULT_ORCHESTRATOR_BASE_URL, resolve_orchestrator_base_url
 
 def _resolve_provider_key(install_root: Path, engagement_dir: Path, key: str) -> str | None:
     """Resolve one provider key exactly as the generated launcher does.
@@ -79,15 +80,13 @@ def _dotenv_value(raw: str) -> str:
 
 
 def _preflight_engagement_start(
-    install_root: Path, engagement_dir: Path, client: str
+    install_root: Path, engagement_dir: Path, client: str, *, mode: str | None = None
 ) -> None:
-    """Refuse a session that cannot work; warn about one that can recover.
+    """Validate the client and durable backend before launching a session.
 
-    Both halves matter. Without the hard checks the operator gets a bash
-    `command not found` (exit 127) or a first-API-call auth error minutes in, with no
-    Vigil-level explanation. Without the soft ones they start a real session against a
-    stopped orchestrator or runtime and only learn on their first `vigil assess` call.
-    Nothing here blocks a session that a mid-session `vigil up` would repair.
+    A stopped managed backend starts here. An explicit endpoint is checked
+    without starting a different service. Static code review never queries
+    Docker; audited execution starts its managed runtime on first use.
 
     Every line goes to stderr: `vigil blue engage --start` prints the bare
     engagement path on stdout for `eng=$(…)` capture.
@@ -108,24 +107,43 @@ def _preflight_engagement_start(
             "Pass --skip-preflight to launch anyway."
         )
 
-    if orchestrator_status(install_root) != "running":
-        print(
-            "[vigil] WARN: orchestrator is not running; `vigil assess` calls will fail "
-            "until you run `vigil up`.",
-            file=sys.stderr,
-        )
-    try:
-        runtime_state = runtime_status()
-    except Exception:  # noqa: BLE001 — a diagnostic must never block the launch
-        runtime_state = "unknown"
-    if runtime_state != "running":
-        print(
-            f"[vigil] WARN: Kali runtime container is {runtime_state}; "
-            "`vigil assess kali` calls will fail until you run `vigil up`.",
-            file=sys.stderr,
-        )
+    _ensure_engagement_backend(install_root, engagement_dir)
+    scope = _read_json(engagement_dir / "scope.json")
+    tracks = scope.get("tracks")
+    static_code = mode == "code" or (mode is None and (
+        scope.get("engagement_type") == "code" or (isinstance(tracks, dict) and set(tracks) == {"code"})
+    ))
+    if not static_code:
+        try:
+            runtime_state = runtime_status()
+        except Exception:  # noqa: BLE001 — a diagnostic must never block the launch
+            runtime_state = "unknown"
+        if runtime_state != "running":
+            print(
+                f"[vigil] WARN: Kali runtime container is {runtime_state}; "
+                "audited execution starts the managed runtime on demand.",
+                file=sys.stderr,
+            )
     _warn_if_ripgrep_missing()
     _warn_if_install_stale(install_root)
+
+
+def _ensure_engagement_backend(install_root: Path, engagement_dir: Path) -> None:
+    """Recover managed local state without retargeting an explicit endpoint."""
+    from contextlib import redirect_stdout
+
+    from . import engagements, orchestrator
+
+    base_url = resolve_orchestrator_base_url(install_root, engagement_dir)
+    if base_url.rstrip("/") == DEFAULT_ORCHESTRATOR_BASE_URL and orchestrator_status(install_root) != "running":
+        print("[vigil] Starting the engagement backend...", file=sys.stderr)
+        with redirect_stdout(sys.stderr):
+            orchestrator.start_orchestrator(orchestrator.OrchestratorOptions(install_root=install_root, allow_existing=True))
+    if not engagements._verify_backend_install_root(install_root, engagement_dir):
+        raise SystemExit(
+            f"engagement backend is not ready at {base_url}; check that configured endpoint "
+            "before starting. Pass --skip-preflight to launch anyway."
+        )
 
 
 def _warn_if_ripgrep_missing() -> None:

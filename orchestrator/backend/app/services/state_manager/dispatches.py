@@ -14,7 +14,7 @@ from ._common import (
     TERMINAL_DISPATCH_STATUSES as _TERMINAL_DISPATCH_STATUSES,
     _require_canonical_finding_slugs,
 )
-from .findings import _ensure_finding_slugs_exist
+from .findings import _ensure_finding_slugs_exist, finding_mode_sql
 from ..variant_scopes import (
     MAX_VARIANT_PARENT_FINDINGS,
     VARIANT_DISPATCH_ROLE,
@@ -466,12 +466,35 @@ def get_dispatch(engagement_id: int, agent_id: str) -> dict[str, Any]:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="dispatch not found")
     return _serialize_dispatch(row)
 
+def dispatch_mode_sql(mode: str | None, *, role_sql: str = 'd.agent_role') -> str:
+    """Scope dispatch reads by durable proof assignment, then ordinary role.
+
+    Proof memory belongs to the candidate's investigation, independently of its
+    execution route. Claimed events retain that association after ownership is
+    released or another worker claims the work. Callers use dispatch alias ``d``
+    and trusted SQL expressions.
+    """
+    if mode not in {'code', 'web'}:
+        return ''
+    assignments = '''SELECT 1 FROM assessment_proof_work pw
+        JOIN assessment_findings pf ON pf.id=pw.finding_id
+        WHERE pw.engagement_id=d.engagement_id AND (
+            pw.owner_dispatch_id=d.id OR EXISTS (
+                SELECT 1 FROM assessment_proof_work_events pe
+                WHERE pe.work_id=pw.id AND pe.action='claimed'
+                  AND json_extract(pe.details_json, '$.dispatch_id')=d.id))'''
+    role_match = "LIKE 'code-%'" if mode == 'code' else "NOT LIKE 'code-%'"
+    return (f" AND (EXISTS ({assignments}{finding_mode_sql(mode, location_sql='pf.canonical_location')}) OR "
+            f"(NOT EXISTS ({assignments}) AND {role_sql} {role_match}))")
+
+
 def list_dispatches(
     engagement_id: int,
     *,
     role: str = "",
     role_prefix: str = "",
     exclude_role_prefix: str = "",
+    mode: str | None = None,
     status_value: str = "",
     since: str = "",
     task_q: str = "",
@@ -504,7 +527,7 @@ def list_dispatches(
     params.append(int(limit))
     params.append(max(int(offset), 0))
     query = (
-        f"{_DISPATCH_SELECT} WHERE {' AND '.join(where)} "
+        f"{_DISPATCH_SELECT} WHERE {' AND '.join(where)}{dispatch_mode_sql(mode)} "
         "ORDER BY d.dispatched_at DESC, d.id DESC LIMIT ? OFFSET ?"
     )
     with _common.get_connection() as connection:
@@ -980,8 +1003,8 @@ def get_handoff(engagement_id: int, agent_id: str) -> dict[str, Any]:
 # written as fixed-width second-precision `...Z` strings, so SQLite's BINARY
 # text ordering over them is the chronological one.
 _HANDOFF_SORTS = {
-    "created": "created_at DESC, id DESC",
-    "checkpoint": "COALESCE(last_checkpoint_at, created_at) DESC, id DESC",
+    "created": "h.created_at DESC, h.id DESC",
+    "checkpoint": "COALESCE(h.last_checkpoint_at, h.created_at) DESC, h.id DESC",
 }
 
 def list_handoffs(
@@ -990,6 +1013,7 @@ def list_handoffs(
     role: str = "",
     role_prefix: str = "",
     exclude_role_prefix: str = "",
+    mode: str | None = None,
     since: str = "",
     sort: str = "created",
     limit: int = 100,
@@ -1005,26 +1029,28 @@ def list_handoffs(
                 f"(expected one of {', '.join(sorted(_HANDOFF_SORTS))})"
             ),
         )
-    where = ["engagement_id = ?"]
+    where = ["h.engagement_id = ?"]
     params: list[Any] = [engagement.id]
     if role:
-        where.append("agent_role = ?")
+        where.append("h.agent_role = ?")
         params.append(role)
     if role_prefix:
-        where.append("agent_role LIKE ?")
+        where.append("h.agent_role LIKE ?")
         params.append(f"{role_prefix}%")
     if exclude_role_prefix:
-        where.append("agent_role NOT LIKE ?")
+        where.append("h.agent_role NOT LIKE ?")
         params.append(f"{exclude_role_prefix}%")
     if since:
         # `since` is a creation-time window regardless of `sort` — it is the
         # documented filter on the public read, so it keeps its own meaning.
-        where.append("created_at >= ?")
+        where.append("h.created_at >= ?")
         params.append(since)
     params.append(int(limit))
     params.append(max(int(offset), 0))
     query = (
-        f"SELECT * FROM assessment_dispatch_handoffs WHERE {' AND '.join(where)} "
+        "SELECT h.* FROM assessment_dispatch_handoffs h LEFT JOIN assessment_dispatches d "
+        "ON d.engagement_id=h.engagement_id AND d.agent_id=h.agent_id "
+        f"WHERE {' AND '.join(where)}{dispatch_mode_sql(mode, role_sql='h.agent_role')} "
         f"ORDER BY {order_by} LIMIT ? OFFSET ?"
     )
     with _common.get_connection() as connection:
@@ -1069,6 +1095,36 @@ def record_decision(
             from .findings import validate_claim_equivalence_decision
 
             validate_claim_equivalence_decision(connection, engagement.id, payload)
+        if kind == "blind_triage_verdict":
+            # Existing verdict rows retain their historical attribution. Every new
+            # review names real dispatches; distinct IDs prove attribution, not
+            # that native clients provided independent context windows.
+            connection.execute("BEGIN IMMEDIATE")
+            if any(
+                not isinstance(payload.get(key), str) or not payload[key].strip()
+                for key in ("finding_slug", "reviewer_dispatch_agent_id", "writer_dispatch_agent_id")
+            ):
+                raise HTTPException(status_code=422, detail="blind triage requires finding, reviewer and writer attribution")
+            reviewer_id = payload["reviewer_dispatch_agent_id"]
+            writer_id = payload["writer_dispatch_agent_id"]
+            finding = connection.execute(
+                "SELECT provenance_json FROM assessment_findings WHERE engagement_id = ? AND slug = ?",
+                (engagement.id, payload["finding_slug"]),
+            ).fetchone()
+            if finding is None:
+                raise HTTPException(status_code=404, detail="blind triage finding not found")
+            provenance = json.loads(finding["provenance_json"] or "{}")
+            if reviewer_id in {writer_id, provenance.get("agent_id")}:
+                raise HTTPException(status_code=422, detail="blind triage reviewer must differ from the finding author and report writer")
+            identities = connection.execute(
+                "SELECT agent_id, agent_role FROM assessment_dispatches WHERE engagement_id = ? AND agent_id IN (?, ?)",
+                (engagement.id, reviewer_id, writer_id),
+            ).fetchall()
+            roles = {row["agent_id"]: row["agent_role"] for row in identities}
+            if roles.get(writer_id) != "report-writer":
+                raise HTTPException(status_code=422, detail="blind triage requires a recorded report-writer dispatch")
+            if reviewer_id not in roles or roles[reviewer_id] == "report-writer":
+                raise HTTPException(status_code=422, detail="blind triage requires a recorded reviewer dispatch distinct from report writing")
         if kind == "repro_rehearsal":
             connection.execute("BEGIN IMMEDIATE")
             from .repro_currentness import reproduction_sha256
