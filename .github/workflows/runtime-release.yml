@@ -14,19 +14,17 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  release:
+  preflight:
     if: github.repository == 'VigilOSS/Vigil'
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    outputs:
+      release_tag: ${{ steps.identity.outputs.release_tag }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: 22
-      - uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
-      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+          fetch-depth: 0
       - name: Validate release identity
+        id: identity
         run: |
           python3 - <<'PY'
           import os, tomllib
@@ -34,13 +32,14 @@ jobs:
           version = tomllib.loads(Path('pyproject.toml').read_text())['project']['version']
           if os.environ['GITHUB_REF_TYPE'] != 'tag' or os.environ['GITHUB_REF_NAME'] != f'v{version}':
               raise SystemExit('Run from the version tag matching pyproject.toml, including manual runs')
-          with open(os.environ['GITHUB_ENV'], 'a') as output:
-              output.write(f'RELEASE_TAG=v{version}\n')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f'release_tag=v{version}\n')
           PY
           python3 tools/check_public_commit_identity.py --revision HEAD
-      - name: Check the immutable release target before publishing an image
+      - name: Check the immutable release target before publishing images
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.identity.outputs.release_tag }}
         run: |
           tag_commit=$(gh api "repos/$GITHUB_REPOSITORY/commits/$RELEASE_TAG" --jq .sha)
           checkout_commit=$(git rev-parse HEAD)
@@ -59,46 +58,68 @@ jobs:
               if release.get('draft') is not True:
                   raise SystemExit('Only a draft release can receive matched artifacts')
           PY_CHECK
+
+  build-platform:
+    needs: preflight
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-24.04
+            suffix: amd64
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            suffix: arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
       - name: Log into the project image registry
         env:
           GH_TOKEN: ${{ github.token }}
         run: printf '%s' "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
-      - name: Build both runtime platforms and pin the matched application
+      - name: Build and publish the native runtime platform
         env:
+          RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
           PYTHONPATH: src
         run: |
-          python3 - <<'PY'
-          import json, os, re, subprocess, tempfile
-          from pathlib import Path
-          from vigil_cli.runtime import _runtime_build_context, runtime_inputs_digest
-          from vigil_cli.runtime_images import PIN_PATH, release_image_pin
-          from vigil_cli.image_freshness import IMAGE_INPUTS_LABEL
-          root = Path.cwd()
-          image = f'ghcr.io/vigiloss/vigil-runtime:{os.environ["RELEASE_TAG"]}'
-          digest = runtime_inputs_digest(root)
-          with tempfile.TemporaryDirectory() as temp, _runtime_build_context(root, variant='full') as context:
-              metadata = Path(temp) / 'metadata.json'
-              subprocess.run(['docker', 'buildx', 'build', '--platform', 'linux/amd64,linux/arm64',
-                  '--push', '--provenance=mode=max', '--sbom=true', '--metadata-file', str(metadata),
-                  '--label', f'{IMAGE_INPUTS_LABEL}={digest}', '--tag', image,
-                  '--file', str(context / 'agent/docker/runtime-full/Dockerfile'), str(context)], check=True)
-              image_digest = json.loads(metadata.read_text())['containerimage.digest']
-              if not re.fullmatch(r'sha256:[0-9a-f]{64}', image_digest):
-                  raise SystemExit('Build did not produce a manifest digest')
-          reference = f'ghcr.io/vigiloss/vigil-runtime@{image_digest}'
-          manifest = json.loads(subprocess.check_output(['docker', 'buildx', 'imagetools', 'inspect', '--raw', reference], text=True))
-          platforms = {f'{m["platform"]["os"]}/{m["platform"]["architecture"]}' for m in manifest['manifests']}
-          if not {'linux/amd64', 'linux/arm64'} <= platforms:
-              raise SystemExit('Published index is missing a supported platform')
-          (root / PIN_PATH).write_text(json.dumps({'schema_version': 1, 'reference': reference,
-              'inputs_digest': digest, 'platforms': ['linux/amd64', 'linux/arm64']}, indent=2) + '\n')
-          release_image_pin(root)
-          PY
+          python3 tools/runtime_release.py build-platform \
+            --release-tag "$RELEASE_TAG" \
+            --platform "${{ matrix.platform }}" \
+            --suffix "${{ matrix.suffix }}" \
+            --revision "$GITHUB_SHA"
+
+  release:
+    needs: [preflight, build-platform]
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+      - name: Log into the project image registry
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: printf '%s' "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+      - name: Publish and validate the multi-platform runtime index
+        env:
+          RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
+          PYTHONPATH: src
+        run: |
+          python3 tools/runtime_release.py publish-index \
+            --release-tag "$RELEASE_TAG" \
+            --revision "$GITHUB_SHA"
       - name: Build matched wheel and source distribution
         run: uv build
       - name: Attach application artifacts to a draft release
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
         run: |
           if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             gh release create "$RELEASE_TAG" --draft --target "$GITHUB_SHA" --title "$RELEASE_TAG" --notes 'Matched application and pinned Linux AMD64/ARM64 runtime. Review before publication.'

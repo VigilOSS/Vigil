@@ -389,9 +389,11 @@ one line, which is mutating the operator's capture.
 
 ## Matched runtime image releases
 
-`.github/workflows/runtime-release.yml` runs from the version tag, builds Linux AMD64/ARM64
-with the canonical staged runtime input set, publishes a multi-platform index with provenance
-and SBOMs, and writes its SHA256 reference plus build-input digest into
+`.github/workflows/runtime-release.yml` runs from the version tag and builds Linux AMD64 and ARM64
+on separate native GitHub runners with the canonical staged runtime input set. After both
+platform images publish with provenance, SBOMs, and repository-linking OCI labels,
+`tools/runtime_release.py` assembles and validates the multi-platform index and writes its SHA256
+reference plus build-input digest into
 `agent/docker/runtime-full/release-image.json`. It then builds the matched application wheel
 and sdist and attaches them to a draft release. Only draft assets can be replaced on retry.
 Review the draft before publication; source commits keep the unpinned manifest unless a real

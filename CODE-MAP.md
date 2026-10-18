@@ -105,6 +105,10 @@ When you are about to copy one of these into a second file, stop and import.
   identity. Generated launchers and preflight consume them.
 - `src/vigil_cli/image_freshness.py` owns the content-digest mechanism every freshness check uses —
   input entries, digests, the image label, exclusions. Content, never mtime.
+- `tools/runtime_release.py` owns native-platform runtime publication, OCI release labels,
+  multi-platform index validation, and the immutable pin written into matched release artifacts.
+  `.github/workflows/runtime-release.yml` supplies tag identity, native runners, registry
+  authentication, and draft-release upload.
 - `src/vigil_cli/restart_manifest.py:consumer_states` owns what an install invalidated, per consumer.
   Presenters consume its rows; do not derive freshness beside it. See: `docs/maintainer-guide.md` freshness section.
 - `src/vigil_cli/install_manifest.py` owns editable application input digests;
