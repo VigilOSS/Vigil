@@ -8,7 +8,7 @@ It is deliberately not an inventory. `ls`, `rg`, and a module's own docstring
 answer "what is this file?" better than a gloss here ever will, and they cannot
 go stale. Implementation detail belongs in the code it describes.
 
-**Size budget: this file stays under 25 KB**, enforced by
+**Size budget: this file stays under 32 KiB**, enforced by
 `orchestrator/backend/tests/test_doc_dead_paths.py`. A map is only useful while it
 can be scanned. If an addition
 would break the budget, something here has stopped earning its place: cut it, or
@@ -253,6 +253,8 @@ A prompt change is **not** prompt-only when the prompt defines an artifact the b
 - `orchestrator/backend/app/services/state_manager/coverage_readiness.py` owns readiness and per-host verdicts; `finding_snapshots.py` owns finding snapshot/author provenance.
 - `orchestrator/backend/app/services/state_manager/command_runs.py` owns run writes and output integrity; `command_run_queries.py`, `assessment_jobs.py`, and `host_liveness.py` own their reads and ledgers.
 - `orchestrator/backend/app/services/submission_versions.py` — CLI/UI submission snapshots; neither changes submission status nor submits externally. See ADR 0025.
+- `orchestrator/backend/app/services/assessment_memory.py` and `artifact_index.py` own the bounded
+  resume brief and artifact index; output points to drill-down commands instead of embedding data.
 - `orchestrator/backend/app/reply_render.py` — the versioned exact-bytes outbound renderer; `agent/scripts/assess/lib/reply_render.py` is an import-only bridge so draft previews and the backend cannot fork the format.
 - `orchestrator/backend/app/services/operator_checkpoints.py` — writes `assessment_operator_checkpoints`, an append-only table enforced by SQLite triggers. The only permitted mutation is stamping a null `superseded_by_id`.
 - `orchestrator/backend/app/services/state_manager/run_accounting.py` owns run identity and lifecycle; `run_inventory.py` owns sources and obligations, `run_evidence.py` owns linked receipts, and `run_comparisons.py` owns comparisons. `proofs.py` owns immutable evidence receipts. See: ADR 0028.

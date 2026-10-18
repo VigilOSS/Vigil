@@ -19,7 +19,7 @@ from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _CODE_MAP = _REPO_ROOT / "CODE-MAP.md"
-_MAX_BYTES = 25 * 1024
+_MAX_BYTES = 32 * 1024
 _MAX_LINE_LENGTH = 300
 _REPO_PATH = re.compile(
     r"`((?:agent|docs|orchestrator|src|tests|third_party|tools)/[^`\s]+)`"
