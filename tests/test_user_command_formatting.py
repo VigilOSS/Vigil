@@ -2,12 +2,20 @@ from __future__ import annotations
 
 import io
 
+import pytest
+
 from vigil_cli import main, mitmproxy, orchestrator, runtime, status, term, up
 
 
 class TTY(io.StringIO):
     def isatty(self) -> bool:
         return True
+
+
+@pytest.fixture(autouse=True)
+def _stable_terminal_color_policy(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep layout assertions independent of the runner's color environment."""
+    monkeypatch.setenv("NO_COLOR", "1")
 
 
 def _minimal_status() -> dict[str, object]:

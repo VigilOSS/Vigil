@@ -262,6 +262,7 @@ def test_doctor_json_is_machine_readable(
 
 
 def test_version_flag_reports_the_installed_cli_version(
+    monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """The two-layer model makes the CLI's own version the first thing to check.
@@ -271,11 +272,13 @@ def test_version_flag_reports_the_installed_cli_version(
     """
     from vigil_cli import main as main_module
 
+    monkeypatch.setattr(main_module.importlib.metadata, "version", lambda name: "9.8.7")
+
     with pytest.raises(SystemExit) as excinfo:
         main_module.main(["--version"])
 
     assert excinfo.value.code == 0
-    assert importlib.metadata.version("vigil") in capsys.readouterr().out
+    assert capsys.readouterr().out == "vigil 9.8.7\n"
 
 
 def test_version_resolution_survives_a_missing_distribution(
