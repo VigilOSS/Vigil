@@ -32,7 +32,7 @@ to reusable engagement lessons. Open it only when those lessons are relevant.
 !`for f in RESUME.md COMPACT.md ISSUES-AND-ENHANCEMENTS.md; do if [ -f "$f" ]; then printf 'present  %-27s %s bytes\n' "$f" "$(wc -c < "$f" | tr -d ' ')"; else printf 'absent   %s\n' "$f"; fi; done`
 
 **4. Re-establish live state from the backend.** The backend is canonical; recollection is not.
-For `remediation`, read `PROJECT.md` and `remediation-project.json`, run
+For `remediation`, read `PROJECT.md`, run
 `vigil remediation -k <key> list`, then `vigil remediation -k <key> show <case-id>`
 for the selected case. Follow the case's evidence and approval state in the
 remediation operator prompt. For other modes, `agent/rules/resume.md` owns the

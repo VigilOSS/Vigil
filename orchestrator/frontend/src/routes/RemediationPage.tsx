@@ -392,7 +392,7 @@ function RemediationWorkspace({ engagementKey, onBack, initialCaseId }: Props) {
   }
 
   async function saveReleasePlan() {
-    if (!selected || busy || !releasePlan.production_canary_decision || !releasePlan.production_canary_rationale?.trim() || !(releasePlan.monitoring ?? releasePlan.coralogix_monitoring)?.trim()) return;
+    if (!selected || busy || !releasePlan.production_canary_decision || !releasePlan.production_canary_rationale?.trim() || !releasePlan.monitoring?.trim()) return;
     if (releasePlan.production_canary_decision === "required" && !releasePlan.safe_procedure?.trim()) return;
     caseReads.current += 1;
     setBusy(true);
@@ -402,7 +402,7 @@ function RemediationWorkspace({ engagementKey, onBack, initialCaseId }: Props) {
         production_canary_decision: releasePlan.production_canary_decision,
         production_canary_rationale: releasePlan.production_canary_rationale,
         safe_procedure: releasePlan.safe_procedure || "",
-        monitoring: releasePlan.monitoring ?? releasePlan.coralogix_monitoring,
+        monitoring: releasePlan.monitoring,
       });
       clearDraft("releasePlan", selected.id, releasePlan);
       setSelected(next);
@@ -583,7 +583,7 @@ function RemediationWorkspace({ engagementKey, onBack, initialCaseId }: Props) {
                 <fieldset className="remediation-case-controls" disabled={selected.status === "closed"}>
                 <div className="remediation-field-grid">
                   <div><label htmlFor="remediation-baseline-outcome">Baseline outcome</label><select id="remediation-baseline-outcome" value={baseline.outcome || ""} onChange={(event) => editBaseline({ ...baseline, outcome: event.target.value as RemediationBaseline["outcome"] })}><option value="">Choose outcome</option><option value="runtime_reproduced">Runtime reproduced</option><option value="code_test_confirmed">Code and failing test confirmed</option><option value="unreproduced">Unreproduced</option></select></div>
-                  <div><label htmlFor="remediation-baseline-method">Baseline method</label><input id="remediation-baseline-method" value={baseline.method || ""} onChange={(event) => editBaseline({ ...baseline, method: event.target.value })} placeholder="HTTP request, Laravel test, browser…" /></div>
+                  <div><label htmlFor="remediation-baseline-method">Baseline method</label><input id="remediation-baseline-method" value={baseline.method || ""} onChange={(event) => editBaseline({ ...baseline, method: event.target.value })} placeholder="HTTP request, unit test, browser…" /></div>
                 </div>
                 <label htmlFor="remediation-baseline-proved">Baseline proved</label><textarea id="remediation-baseline-proved" value={baseline.proved || ""} onChange={(event) => editBaseline({ ...baseline, proved: event.target.value })} rows={3} />
                 {baseline.outcome && baseline.outcome !== "runtime_reproduced" && <div className="remediation-owner-decision">
@@ -634,8 +634,8 @@ function RemediationWorkspace({ engagementKey, onBack, initialCaseId }: Props) {
                 <label htmlFor="remediation-safe-procedure">Safe canary procedure</label>
                 <textarea id="remediation-safe-procedure" value={releasePlan.safe_procedure || ""} onChange={(event) => editReleasePlan({ ...releasePlan, safe_procedure: event.target.value })} rows={3} placeholder="Required when a production canary is needed" />
                 <label htmlFor="remediation-monitoring">Monitoring plan</label>
-                <textarea id="remediation-monitoring" value={releasePlan.monitoring ?? releasePlan.coralogix_monitoring ?? ""} onChange={(event) => editReleasePlan({ ...releasePlan, monitoring: event.target.value })} rows={3} />
-                <div className="remediation-plan-actions"><span>{releasePlanDirty ? "Unsaved release decision" : "Release plan saved"}</span><button type="button" onClick={saveReleasePlan} disabled={!releasePlanDirty || busy || !releasePlan.production_canary_decision || !releasePlan.production_canary_rationale?.trim() || !(releasePlan.monitoring ?? releasePlan.coralogix_monitoring)?.trim() || (releasePlan.production_canary_decision === "required" && !releasePlan.safe_procedure?.trim())}>Save release plan</button></div>
+                <textarea id="remediation-monitoring" value={releasePlan.monitoring ?? ""} onChange={(event) => editReleasePlan({ ...releasePlan, monitoring: event.target.value })} rows={3} />
+                <div className="remediation-plan-actions"><span>{releasePlanDirty ? "Unsaved release decision" : "Release plan saved"}</span><button type="button" onClick={saveReleasePlan} disabled={!releasePlanDirty || busy || !releasePlan.production_canary_decision || !releasePlan.production_canary_rationale?.trim() || !releasePlan.monitoring?.trim() || (releasePlan.production_canary_decision === "required" && !releasePlan.safe_procedure?.trim())}>Save release plan</button></div>
                 </fieldset>
               </section>
 

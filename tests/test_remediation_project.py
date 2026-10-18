@@ -11,7 +11,6 @@ def test_scaffold_has_one_repository_owned_project(tmp_path):
     (eng / 'cases').mkdir(parents=True)
     _write_remediation_project_notes(eng, CreateEngagementOptions(install_root=tmp_path, name='Example', repos=[str(repo)]))
     assert (repo / 'PROJECT.md').is_file()
-    assert not (eng / 'remediation-project.json').exists()
     assert (eng / 'PROJECT.md').resolve() == repo / 'PROJECT.md'
     assert 'repository = "."' in (repo / 'PROJECT.md').read_text()
     assert 'development_url = ""' in (repo / 'PROJECT.md').read_text()
@@ -84,19 +83,6 @@ def test_plan_rejects_project_repository_mismatch_before_writes(tmp_path):
     with pytest.raises(SystemExit, match='selected remediation repository'):
         plan_engagement(CreateEngagementOptions(install_root=tmp_path / 'install', engagement_type='remediation', name='Example', repos=[str(repo)]))
     assert not (tmp_path / 'install').exists()
-
-
-def test_existing_shared_project_rejects_conflicting_legacy_import(tmp_path):
-    import subprocess
-    from vigil_cli.engagements import plan_engagement
-    repo = tmp_path / 'repo'
-    subprocess.run(['git', 'init', str(repo)], check=True, capture_output=True)
-    source = repo / 'PROJECT.md'
-    original = '+++\nrepository = "."\ndevelopment_url = "https://shared.example"\n+++\n# Notes\n'
-    source.write_text(original)
-    with pytest.raises(SystemExit, match='already exists'):
-        plan_engagement(CreateEngagementOptions(install_root=tmp_path / 'install', engagement_type='remediation', name='Example', repos=[str(repo)], remediation_config={'development_url': 'https://legacy.example'}))
-    assert source.read_text() == original
 
 
 def test_plan_snapshot_records_existing_project_configuration(tmp_path):

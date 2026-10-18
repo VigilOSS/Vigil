@@ -32,5 +32,5 @@ def test_browse_evidence_requires_ui_commands_and_accepts_cleanup(tmp_path, monk
         kind = {'red.txt': 'red-test', 'green.txt': 'green-test', 'screen.png': 'screenshot'}.get(file.name, 'browse')
         evidence.append({'kind': kind, 'method': 'Laravel' if kind.endswith('-test') else 'browse', 'outcome': 'failed_as_expected' if kind == 'red-test' else 'passed', 'command': 'run', 'revision': 'sha', 'artifact_path': str(file.relative_to(tmp_path)), 'artifact_sha256': hashlib.sha256(file.read_bytes()).hexdigest()})
     monkeypatch.setattr(remediation, '_commit_ancestor', lambda *args: True)
-    missing = remediation._review_evidence_missing({'id': 1, 'worktree_revision': 'sha', 'worktree_path': str(tmp_path)}, evidence, tmp_path)
+    missing = remediation._review_evidence_missing({'id': 1, 'worktree_revision': 'sha', 'worktree_path': str(tmp_path), 'verification_plan': 'Recorded plan'}, evidence, tmp_path)
     assert bool(missing) is only_cleanup

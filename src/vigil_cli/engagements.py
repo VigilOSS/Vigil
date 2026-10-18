@@ -212,7 +212,6 @@ class CreateEngagementOptions:
     tenant_reference_paths: list[str] = field(default_factory=list)
     alert_source: str | None = None
     severity_hint: str | None = None
-    remediation_config: dict[str, object] = field(default_factory=dict)
     remediation_project_path: Path | None = None
 
 
@@ -306,7 +305,7 @@ def plan_engagement(options: CreateEngagementOptions, *, now: datetime | None = 
     database snapshot is taken, and the orchestrator is not contacted. Raises
     SystemExit on the same invalid inputs `create_engagement` rejects.
     """
-    remediation_project_snapshot = dict(options.remediation_config)
+    remediation_project_snapshot: dict[str, object] = {}
     if options.engagement_type not in ENGAGEMENT_TYPES:
         raise SystemExit("--type must be one of: web, code, android, blue, remediation")
     source_dir = options.source_dir.expanduser().resolve() if options.source_dir is not None else None
@@ -337,16 +336,11 @@ def plan_engagement(options: CreateEngagementOptions, *, now: datetime | None = 
         project = project_module(options.install_root)
         source = (options.remediation_project_path or repo / "PROJECT.md").expanduser().resolve()
         try:
-            project.validate_project(options.remediation_config)
             if source.exists():
                 config = project.load_project(source)
                 remediation_project_snapshot = config
                 if config.get("repository") != str(repo):
                     raise ValueError(f"{source}: repository must identify the selected remediation repository")
-                if options.remediation_project_path is None and options.remediation_config:
-                    for key, value in options.remediation_config.items():
-                        if key != "repository" and config.get(key) != value:
-                            raise ValueError(f"{source} already exists; edit the canonical file explicitly instead of overwriting it with imported configuration")
             elif options.remediation_project_path is not None:
                 raise ValueError(f"{source}: PROJECT.md does not exist")
         except (OSError, ValueError) as exc:
@@ -2354,8 +2348,7 @@ def _write_remediation_project_notes(eng_dir: Path, options: CreateEngagementOpt
     source = options.remediation_project_path or repo / "PROJECT.md"
     source = source.expanduser().resolve()
     if not source.exists():
-        config = dict(options.remediation_config)
-        config["repository"] = os.path.relpath(repo, source.parent)
+        config = {"repository": os.path.relpath(repo, source.parent)}
         source.write_text(project.render_project(config, options.name or repo.name), encoding="utf-8")
     config = project.load_project(source)
     if config.get("repository") != str(repo):
@@ -2370,7 +2363,7 @@ def _write_remediation_project_notes(eng_dir: Path, options: CreateEngagementOpt
         "Expected observations: \n\n"
         "Cleanup: \n\n"
         "Production canary required (yes/no) and reason: \n\n"
-        "Coralogix signals to monitor: \n",
+        "Monitoring signals: \n",
         encoding="utf-8",
     )
 

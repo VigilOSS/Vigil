@@ -127,7 +127,7 @@ def register_remediation_parser(sub: argparse._SubParsersAction) -> None:
     release.add_argument("--production-canary", choices=("required", "not_required", "defer"), required=True)
     release.add_argument("--rationale", required=True)
     release.add_argument("--safe-procedure", default="")
-    release.add_argument("--monitoring", "--coralogix-monitoring", dest="monitoring", required=True)
+    release.add_argument("--monitoring", required=True)
 
     approve = commands.add_parser("approve", help="Approve the current code and plan snapshot")
     approve.add_argument("case_id")
@@ -499,7 +499,7 @@ def _required_reviewed_evidence_lines(case: dict) -> list[str]:
     required = {"red-test", "green-test"}
     kinds = {str(row.get("kind")) for row in evidence}
     if not required.issubset(kinds) or not kinds.intersection({"stagehand", "browse"}):
-        raise SystemExit("reviewed red/green Laravel and browser evidence are required in PR content")
+        raise SystemExit("reviewed red/green test and browser evidence are required in PR content")
     lines = _reviewed_evidence_lines(case)
     return [line for line, row in zip(lines, evidence) if row.get("kind") in required | {"stagehand", "browse"}]
 
@@ -1177,7 +1177,7 @@ def run_remediation(args: argparse.Namespace, install_root: Path) -> None:
             "production_canary_decision": args.production_canary,
             "production_canary_rationale": args.rationale,
             "safe_procedure": args.safe_procedure,
-            "monitoring": getattr(args, "monitoring", getattr(args, "coralogix_monitoring", "")),
+            "monitoring": args.monitoring,
         })
     elif cmd == "approve":
         case = _case(install_root, eng_dir, key, case_id)
@@ -1431,7 +1431,7 @@ def _pr_body(case: dict, config: dict[str, object], root_cause: str, fix_summary
         f"Decision: {release['production_canary_decision']}\n\n"
         f"Reason: {release['production_canary_rationale']}\n\n"
         f"Safe procedure: {release['safe_procedure'] or 'Not applicable'}\n\n"
-        f"Coralogix monitoring: {release['coralogix_monitoring']}\n\n"
+        f"Monitoring: {release['monitoring']}\n\n"
         f"Development workflow: {config.get('deployment_workflow') or '(configure after observing actual workflow inputs)'}\n"
     )
 
@@ -1449,8 +1449,8 @@ def _release_plan(case: dict) -> dict:
         raise SystemExit("case release plan is required before preparing a PR")
     decision = str(release.get("production_canary_decision") or "")
     rationale = str(release.get("production_canary_rationale") or "").strip()
-    monitoring = str(release.get("monitoring") or release.get("coralogix_monitoring") or "").strip()
+    monitoring = str(release.get("monitoring") or "").strip()
     procedure = str(release.get("safe_procedure") or "").strip()
     if decision not in {"required", "not_required"} or not rationale or not monitoring or (decision == "required" and not procedure):
         raise SystemExit("PR release plan needs a final canary decision, rationale, monitoring, and safe procedure when required")
-    return {**release, "monitoring": monitoring, "coralogix_monitoring": monitoring}
+    return {**release, "monitoring": monitoring}

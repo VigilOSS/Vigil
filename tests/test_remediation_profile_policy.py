@@ -68,24 +68,6 @@ def test_loaded_policy_resolves_references_and_repo_local_workspace(project, tmp
     assert project.workspace_path(config, tmp_path / 'case', 'security/SEC-123') == repo / 'worktrees/security/SEC-123'
 
 
-def test_policy_digest_changes_with_instruction_and_template_content(project, tmp_path):
-    (tmp_path / 'AGENTS.md').write_text('Check tenant access.\n')
-    (tmp_path / 'template.md').write_text('## What\n## Test\n')
-    profile = tmp_path / 'PROJECT.md'
-    profile.write_text('+++\nrepository = "."\n[remediation]\ninstruction_files = ["AGENTS.md"]\npr_template = "template.md"\n+++\n')
-    config = project.load_project(profile)
-    before = project.policy_digest(config)
-    assert before == project.policy_digest(dict(reversed(list(config.items()))))
-    (tmp_path / 'AGENTS.md').write_text('Check tenant and role access.\n')
-    assert project.policy_digest(config) != before
-    before = project.policy_digest(config)
-    (tmp_path / 'template.md').write_text('## What\n## Prep\n## Test\n')
-    assert project.policy_digest(config) != before
-    before = project.policy_digest(config)
-    profile.write_text(profile.read_text() + '\nReview caller permissions before publishing.\n')
-    assert project.policy_digest(config) != before
-
-
 def test_legacy_profile_defaults_and_workspace_path_traversal(project, tmp_path):
     profile = tmp_path / 'PROJECT.md'
     profile.write_text('+++\nrepository = "."\n+++\n')

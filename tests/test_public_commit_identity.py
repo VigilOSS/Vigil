@@ -116,8 +116,7 @@ def test_installed_jj_guard_blocks_wrong_identity_pushes(tmp_path: Path, role: s
     jj("describe", "-m", "Synthetic identity guard check")
     jj("bookmark", "create", "probe")
     if role == "author":
-        jj("describe", "--author", "External Contributor <contributor@example.com>",
-           "-m", "Synthetic identity guard check")
+        jj("metaedit", "--author", "External Contributor <contributor@example.com>")
     else:
         jj("--config", 'user.name="External Contributor"',
            "--config", 'user.email="contributor@example.com"',
@@ -130,8 +129,7 @@ def test_installed_jj_guard_blocks_wrong_identity_pushes(tmp_path: Path, role: s
     rejected = jj("git", "push", "--remote", "probe", "--bookmark", "probe", "--dry-run", check=False)
     assert rejected.returncode != 0, "jj must reject a non-maintainer identity before pushing"
     assert "private" in rejected.stderr.lower()
-    jj("describe", "probe", "--ignore-immutable",
-       "--author", f"{checker.APPROVED_NAME} <{checker.APPROVED_EMAIL}>",
-       "-m", "Synthetic identity guard check")
+    jj("metaedit", "probe", "--ignore-immutable", "--force-rewrite",
+       "--author", f"{checker.APPROVED_NAME} <{checker.APPROVED_EMAIL}>")
     approved = jj("git", "push", "--remote", "probe", "--bookmark", "probe", "--dry-run")
     assert approved.returncode == 0

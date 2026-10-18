@@ -61,7 +61,7 @@ to continue manually and keep native attachment pending.
    path and resume through ZCode.
 <!-- vigil:end -->
 4. Validate the report against current code and present the proposed fix and
-   verification plan before editing. State the effective hook policy and
-   instruction conflicts that affect the work. Continue under the owner-approved
+   verification plan before editing. Raise instruction conflicts that need an
+   owner decision. Continue under the owner-approved
    plan, record its case-specific evidence requirements, and follow the selected
    profile's testing and publishing guidance.

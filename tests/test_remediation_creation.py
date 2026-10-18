@@ -38,9 +38,9 @@ def test_missing_type_error_advertises_remediation(monkeypatch, capsys):
         main.main(["engagement", "create", "--no-prompt"])
 
 
-@pytest.mark.parametrize("content", ["not json", None])
+@pytest.mark.parametrize("content", ["no frontmatter", None])
 def test_bad_project_config_has_cli_error(tmp_path, repository, content):
-    path = tmp_path / "project.json"
+    path = tmp_path / "PROJECT.md"
     if content is not None:
         path.write_text(content)
     with pytest.raises(SystemExit, match="--project-config"):

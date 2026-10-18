@@ -183,8 +183,9 @@ def _settings(project: dict, engagement: Path | None = None, key: str | None = N
 
 def _notice(project: dict) -> str:
     if _settings(project).get("disableAllHooks"):
-        return ("This profile disables personal, repository, and ordinary plugin Claude hooks for this session. "
-                "Organization-managed hooks remain enabled if configured. Git hooks are unaffected. "
+        return ("This profile disables personal, repository, and ordinary plugin Claude hooks and any custom "
+                "status line for this session. Organization-managed hooks remain enabled if configured. "
+                "Git hooks are unaffected. "
                 "Run required checks against case source during verification and before publishing.")
     return "Repository and personal hooks retain their configured policy for this session."
 
@@ -198,9 +199,8 @@ def _start_prompt(project: dict, repository: Path, engagement: Path, key: str, *
     )
     return (f"Start a Vigil defensive remediation session for engagement {key}.\n\n"
             f"Repository: {repository}\nProject profile: {profile}\n\n"
-            "Read the selected project profile and applicable repository instructions. Tell the owner "
-            "about hook settings, required checks, or instruction conflicts that affect the work. "
-            "Wait for the owner's "
+            "Read the selected project profile and applicable repository instructions. Raise only "
+            "instruction conflicts that need an owner decision. Wait for the owner's "
             "ticket IDs, URLs, or report before beginning investigation. Use /vigil-remediate to route "
             "supplied references and load the appropriate role.\n\n"
             + conversation_guidance

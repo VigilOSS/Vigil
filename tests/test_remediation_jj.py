@@ -306,7 +306,7 @@ def test_jj_github_pr_creation_and_reconciliation_use_same_explicit_origin(
         "production_canary_decision": "not_required",
         "production_canary_rationale": "Covered by local regression",
         "safe_procedure": "",
-        "coralogix_monitoring": "Watch authorization errors",
+        "monitoring": "Watch authorization errors",
     }
     evidence = [
         {
@@ -346,7 +346,7 @@ def test_jj_github_pr_creation_and_reconciliation_use_same_explicit_origin(
                 sha,
                 "not_required",
                 release["production_canary_rationale"],
-                release["coralogix_monitoring"],
+                release["monitoring"],
                 cause,
                 fix,
                 case["verification_plan"],

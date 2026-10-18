@@ -4,7 +4,7 @@ from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, status
 from fastapi.responses import StreamingResponse
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field, PositiveInt, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PositiveInt, field_validator, model_validator
 
 from ..services import remediation
 
@@ -178,7 +178,7 @@ class ReleasePlanPatch(BaseModel):
     production_canary_decision: Literal["required", "not_required", "defer"]
     production_canary_rationale: str = Field(min_length=1)
     safe_procedure: str = ""
-    monitoring: str = Field(min_length=1, validation_alias=AliasChoices("monitoring", "coralogix_monitoring"))
+    monitoring: str = Field(min_length=1)
 
 
 class TransitionCreate(BaseModel):

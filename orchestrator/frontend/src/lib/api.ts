@@ -876,7 +876,6 @@ export type RemediationReleasePlan = {
   production_canary_rationale: string;
   safe_procedure: string;
   monitoring?: string;
-  coralogix_monitoring?: string;
 };
 
 export type LinkedRemediationFinding = {

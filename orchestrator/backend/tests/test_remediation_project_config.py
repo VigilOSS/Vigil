@@ -1,7 +1,7 @@
 from app.services import remediation
 
 
-def test_project_notes_and_effective_configuration_change_review_digest(tmp_path, monkeypatch):
+def test_effective_configuration_but_not_project_notes_changes_review_digest(tmp_path, monkeypatch):
     monkeypatch.setattr(remediation, '_review_patch', lambda _: ('base', 'head', b'patch', False, 5))
     monkeypatch.setattr(remediation, '_actual_revision', lambda _: 'head')
     monkeypatch.setattr(remediation, '_worktree_digest', lambda _: 'contents')
@@ -15,6 +15,6 @@ def test_project_notes_and_effective_configuration_change_review_digest(tmp_path
     assert changed_workflow != before
     source.write_text(source.read_text() + '\nNew account prerequisites\n')
     changed_notes = remediation._review_digest(row, [], tmp_path, [])
-    assert changed_notes != changed_workflow
+    assert changed_notes == changed_workflow
     monkeypatch.setenv('VIGIL_REMEDIATION_BROWSER_CDP_URL', 'http://127.0.0.1:9555')
     assert remediation._review_digest(row, [], tmp_path, []) != changed_notes

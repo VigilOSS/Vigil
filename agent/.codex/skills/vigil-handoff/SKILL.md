@@ -17,8 +17,8 @@ values disagree, STOP before writing a handoff; a handoff in the wrong workflow'
 state and exit language hides the work that actually governs completion.
 
 **2. Read the complete shared backend hydration.** Ground every claim in backend
-state instead of memory. For `remediation`, read `PROJECT.md` and
-`remediation-project.json`; run `vigil remediation -k <key> list` and
+state instead of memory. For `remediation`, read `PROJECT.md`;
+run `vigil remediation -k <key> list` and
 `vigil remediation -k <key> show <case-id>` for the selected case, then follow
 the remediation prompt's evidence and approval checks. For other modes, run:
 
