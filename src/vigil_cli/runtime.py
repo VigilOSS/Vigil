@@ -13,6 +13,7 @@ from pathlib import Path
 
 from . import docker
 from . import image_freshness
+from . import term
 from .application import application_root_for_workspace
 from .config import (
     RuntimeEgress,
@@ -82,7 +83,9 @@ def _resolve_runtime_data_dir(install_root: Path) -> Path:
     process environment, then the same keys from the install-root ``.env`` — the file
     ``vigil runtime start`` hands to ``docker --env-file``, so a value set there is
     honoured host-side too rather than silently only inside the container — else
-    ``<install>/.runtime-data``. A relative value resolves against ``install_root``.
+    the workspace's ``runtime_state`` (``state/runtime`` on a fresh workspace,
+    ``.runtime-data`` on an adopted one). A relative value resolves against
+    ``install_root``.
     Deliberately distinct from the orchestrator DB dir's ``VIGIL_DATA_DIR``
     (``paths.resolve_orchestrator_data_dir``): separate directories with separate
     defaults, so one env var must not relocate both. ``start_runtime`` and
@@ -729,8 +732,8 @@ def vigil_runtime_resources(container_name: str | None = None, *, runner: docker
         print(json.dumps(state, indent=2))
         return
     configured = state["configured"]  # type: ignore[index]
-    print(f"container\t{state['container']}\trunning={state['running']}")
-    print(
+    records = [f"container\t{state['container']}\trunning={state['running']}"]
+    records.append(
         f"configured\tmemory={configured['memory_gb']}g\tcpus={configured['cpus']}\t"  # type: ignore[index]
         f"pids_limit={configured['pids_limit']}\tshm_size={configured['shm_size']}"  # type: ignore[index]
     )
@@ -738,20 +741,22 @@ def vigil_runtime_resources(container_name: str | None = None, *, runner: docker
     if isinstance(egress, dict) and egress.get("enabled"):
         proxy = egress.get("proxy") or "-"
         network = egress.get("network") or "-"
-        print(
+        records.append(
             f"egress\tenabled=true\tproxy={proxy}\tnetwork={network}\t"
             f"no_proxy={egress.get('no_proxy') or '-'}"
         )
     else:
-        print("egress\tenabled=false\t(shares host/browser egress IP)")
+        records.append("egress\tenabled=false\t(shares host/browser egress IP)")
     live = state.get("live")
     if live is None:
-        print("live\tcontainer not running")
+        records.append("live\tcontainer not running")
+        term.print_records("Runtime resources", records, stream=sys.stdout)
         return
     memory_max = live.get("memory_max", "?") if isinstance(live, dict) else "?"
     cpu_max = live.get("cpu_max", "?") if isinstance(live, dict) else "?"
     pids_max = live.get("pids_max", "?") if isinstance(live, dict) else "?"
-    print(f"live\tmemory.max={memory_max}\tcpu.max={cpu_max}\tpids.max={pids_max}")
+    records.append(f"live\tmemory.max={memory_max}\tcpu.max={cpu_max}\tpids.max={pids_max}")
+    term.print_records("Runtime resources", records, stream=sys.stdout)
 
 
 def _read_live_cgroup_state(container_name: str, *, runner: docker.Runner) -> dict[str, str]:

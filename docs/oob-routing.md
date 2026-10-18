@@ -60,10 +60,22 @@ catches it when they do.
 (Unrelated to a blue engagement's *tenant*, which is the customer organisation
 under investigation. Different concept, deliberately different word.)
 
-A `vigil install` creates `.runtime-data/oob/relay-routing.json` atomically once
-an OOB domain is configured. The record pins the slot prefix, its subdomain, and
-the port block. Records written before the rename are named `tenant-routing.json`
-and spell their keys `tenant_prefix`/`tenant_name`; those are still read.
+A `vigil install` creates `relay-routing.json` atomically once an OOB domain is
+configured, in the `oob/` directory of the runtime data directory — the container's
+`/data` mount: `state/runtime/oob` on a fresh workspace, `.runtime-data/oob` on an
+adopted one, or `oob/` under `VIGIL_RUNTIME_DATA_DIR`. The record pins the slot
+prefix, its subdomain, and the port block. When the runtime data directory changes,
+the next `vigil install` with an OOB domain configured adopts a recognized record
+for the same install and places it beside the rest of the OOB state. The runtime
+data directory's record is authoritative when more than one candidate exists.
+Records that belong to different installs are refused, as is a record the allocation
+registry assigns to another install root that still exists.
+
+`VIGIL_RUNTIME_DATA_DIR` must name a directory of this install's own, and belongs
+in `<install>/.env` rather than a shell profile. The record follows it: installs
+sharing one directory would share one record, and a shell that exports it only
+sometimes looks for the record where it was never written and falls back to the
+shared legacy route.
 
 Allocation is not limited to the install that first creates the root. Configure
 `oob.domain` afterwards and the next `vigil install` allocates the slot — the
@@ -74,8 +86,8 @@ callbacks would stop correlating if those moved, so `vigil install` pins that
 legacy route instead. The evidence is the install's own OOB state — the rendered
 `frpc.toml`, the frpc/watch logs, the per-client files and the runtime route
 marker that `vigil oob start` writes under the container's `/data/oob` (host
-side: `.runtime-data/oob`, or wherever `VIGIL_RUNTIME_DATA_DIR` puts it). A root
-that has never had OOB started carries none of it.
+side: the same `oob/` directory as the routing record). A root that has never had
+OOB started carries none of it.
 
 `vigil oob start`, client metadata, status/doctor, `vigil assess`, and Nuclei
 `--oob-mode vigil` all resolve that record, so changing an ambient

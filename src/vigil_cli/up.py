@@ -13,6 +13,7 @@ from pathlib import Path
 
 from . import config as config_module
 from . import docker
+from . import term
 from .application import resolve_application_root
 from .workspace import initialize_workspace
 from .image_freshness import image_outdated, proxy_image_drift
@@ -46,6 +47,16 @@ class UpOptions:
 
 
 def _progress(component: str, message: str) -> None:
+    if term.is_terminal(sys.stdout):
+        normalized = message.lower()
+        if normalized in {"running", "current", "already running", "active"}:
+            state = "ok"
+        elif "skipped" in normalized or "pending" in normalized:
+            state = "warn"
+        else:
+            state = "info"
+        print(term.row(state, component, message, stream=sys.stdout))
+        return
     print(f"  {component:<14} {message}")
 
 
@@ -74,7 +85,7 @@ def run_up(
             os.environ["VIGIL_APPLICATION_DIR"] = str(application_root)
             resources = config_module.runtime_resources()
             state["configured_resources"] = asdict(resources)
-            print("Starting Vigil")
+            print(term.heading("Starting Vigil", stream=sys.stdout))
             _progress("Runtime limits", f"{resources.memory_gb} GiB RAM · {resources.cpus:g} CPU")
             if options.json_output and build_runner is docker.run_command_streaming:
                 build_runner = partial(docker.run_command_streaming, stderr_output=True)
@@ -98,7 +109,10 @@ def run_up(
     if options.json_output:
         print(json.dumps(state, indent=2))
     else:
-        print("Vigil startup complete.")
+        if term.is_terminal(sys.stdout):
+            print(term.row("ok", "Vigil", "startup complete", stream=sys.stdout))
+        else:
+            print("Vigil startup complete.")
 
 
 def _start_stack(

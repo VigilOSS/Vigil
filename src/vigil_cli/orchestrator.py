@@ -31,6 +31,18 @@ START_TIMEOUT_ENV = "VIGIL_ORCHESTRATOR_START_TIMEOUT_SECONDS"
 BACKEND_DEPENDENCY_SYNC_TIMEOUT_SECONDS = 120.0
 
 
+def _emit(record: str, *, state: str | None = None) -> None:
+    """Render one orchestrator lifecycle record without changing piped output."""
+    if not term.is_terminal(sys.stdout):
+        print(record)
+        return
+    fields = record.split("\t")
+    detail = " · ".join(fields[1:])
+    if state is None:
+        state = "warn" if len(fields) > 1 and fields[1] == "warn" else "info"
+    print(term.row(state, "Orchestrator", detail, stream=sys.stdout))
+
+
 @dataclass(frozen=True, slots=True)
 class OrchestratorOptions:
     install_root: Path
@@ -58,10 +70,10 @@ def _resolve_worker_count(options: OrchestratorOptions) -> int:
     try:
         value = int(raw)
     except ValueError:
-        print(f"orchestrator\twarn\tignoring non-integer {WORKERS_ENV}={raw!r}; using workers=1")
+        _emit(f"orchestrator\twarn\tignoring non-integer {WORKERS_ENV}={raw!r}; using workers=1", state="warn")
         return 1
     if value < 1:
-        print(f"orchestrator\twarn\t{WORKERS_ENV}={raw!r} < 1; using workers=1")
+        _emit(f"orchestrator\twarn\t{WORKERS_ENV}={raw!r} < 1; using workers=1", state="warn")
         return 1
     return value
 
@@ -108,7 +120,7 @@ def _start_orchestrator_locked(options: OrchestratorOptions) -> None:
     if _pid_running(pid_file):
         pid = pid_file.read_text(encoding="utf-8").strip()
         if options.allow_existing:
-            print(f"orchestrator\talready running\tpid={pid}")
+            _emit(f"orchestrator\talready running\tpid={pid}", state="ok")
             return
         raise SystemExit(_already_running_message(pid_file, pid, options.host, options.port))
 
@@ -235,14 +247,15 @@ def _warn_multiworker_caveats(workers: int) -> None:
     until cross-process WebSocket fan-out and single-leader backup scheduling
     are implemented.
     """
-    print(
+    _emit(
         f"orchestrator\twarn\tworkers={workers}: live-UI WebSocket broadcast is per-worker "
         f"(dashboard may miss cross-worker events) and the backup scheduler arms once per "
         f"worker — set VIGIL_BACKUP_DISABLED=1 on all but one to avoid N concurrent backups. "
         f"The API read/write paths are safe under load: reads run in the threadpool and "
         f"async write handlers off-load their SQLite work to it too (anyio.to_thread), so a "
         f"sync write never blocks the event loop, atop SQLite WAL + short-lived per-request "
-        f"connections."
+        f"connections.",
+        state="warn",
     )
 
 
@@ -254,7 +267,7 @@ def stop_orchestrator(install_root: Path, *, host: str = "127.0.0.1", port: int 
     pid_file.unlink(missing_ok=True)
     if pid is None or not _pid_alive(pid):
         return
-    print(f"orchestrator\tstopping\tpid={pid}")
+    _emit(f"orchestrator\tstopping\tpid={pid}", state="info")
     _signal_process_group(pid, signal.SIGTERM)
     if not _wait_for_pid_exit(pid, timeout=2.0):
         # SIGTERM was not enough: the worker is hung or its lifespan shutdown
@@ -270,12 +283,13 @@ def stop_orchestrator(install_root: Path, *, host: str = "127.0.0.1", port: int 
     if not _wait_for_port_release(host, port, timeout=3.0):
         holder = _port_listener_pid(host, port)
         holder_str = f" (PID {holder})" if holder is not None else ""
-        print(
+        _emit(
             f"orchestrator\twarn\t{host}:{port} still held{holder_str} "
-            f"after stop; `vigil orchestrator start` will surface the conflict"
+            f"after stop; `vigil orchestrator start` will surface the conflict",
+            state="warn",
         )
         return
-    print("orchestrator\tstopped")
+    _emit("orchestrator\tstopped", state="ok")
 
 
 def orchestrator_status(install_root: Path) -> str:

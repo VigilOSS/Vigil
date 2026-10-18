@@ -1317,11 +1317,19 @@ def main(argv: list[str] | None = None) -> None:
                 print_host_tool_setup(host_tools)
         if failed or (host_tools is not None and not host_tools["ok"]):
             if not args.json:
-                print(
-                    "[vigil] not ready: "
-                    + ", ".join(f"{c.name} ({c.status})" for c in failed),
-                    file=sys.stderr,
-                )
+                failures = [f"{c.name} ({c.status})" for c in failed]
+                if host_tools is not None:
+                    failures.extend(
+                        f"{row['tool']} (install failed)"
+                        + (f": {row['detail']}" if row.get("detail") else "")
+                        for row in host_tools["executed"]
+                        if not row["ok"]
+                    )
+                detail = ", ".join(failures)
+                if term.is_terminal(sys.stderr):
+                    print(term.row("fail", "Vigil is not ready", detail, stream=sys.stderr), file=sys.stderr)
+                else:
+                    print("[vigil] not ready: " + detail, file=sys.stderr)
             raise SystemExit(1)
     elif args.command == "status":
         status = collect_status(
@@ -1698,6 +1706,51 @@ def _engagement_current(install_root: Path) -> None:
     print(path)
 
 
+def _print_engagement_mode(state: dict[str, Any]) -> None:
+    """Present the selected track while retaining the existing plain contract."""
+    if term.is_terminal(sys.stdout):
+        records = [
+            f"mode\t{state['mode'] or 'unselected'}",
+            f"prompt\t{state['prompt'] or 'unselected'}",
+        ]
+        for name, track in state["tracks"].items():
+            records.extend(
+                [
+                    f"{name}\tphase={track['phase']}",
+                    f"{name} prompt\t{track['prompt']}",
+                    f"{name} start\t{track['start_command']}",
+                ]
+            )
+        source = state.get("source")
+        if isinstance(source, dict):
+            records.extend(
+                [
+                    f"source\t{source['path']}",
+                    f"source state\t{source['state']}",
+                    f"source files\t{source['file_count']}",
+                    f"source entries\t{json.dumps(source['entries'], ensure_ascii=False)}",
+                ]
+            )
+            if source.get("detail"):
+                records.append(f"source detail\t{source['detail']}")
+        term.print_records("Engagement mode", records, stream=sys.stdout)
+        return
+
+    print(f"mode: {state['mode'] or 'unselected'}\nprompt: {state['prompt'] or 'unselected'}")
+    for name, track in state["tracks"].items():
+        print(
+            f"{name}: phase={track['phase']}\n"
+            f"  prompt: {track['prompt']}\n"
+            f"  start: {track['start_command']}"
+        )
+    source = state.get("source")
+    if isinstance(source, dict):
+        print(f"source: {source['path']}\n  state: {source['state']}\n  files: {source['file_count']}")
+        print(f"  entries: {json.dumps(source['entries'], ensure_ascii=False)}")
+        if source.get("detail"):
+            print(f"  detail: {source['detail']}")
+
+
 def _logs(args: argparse.Namespace, install_root: Path) -> None:
     if args.target == "all":
         if args.follow:
@@ -1787,15 +1840,7 @@ def _engagement(args: argparse.Namespace, install_root: Path) -> None:
         if args.json:
             print(json.dumps(state, sort_keys=True))
         else:
-            print(f"mode: {state['mode'] or 'unselected'}\nprompt: {state['prompt'] or 'unselected'}")
-            for name, track in state["tracks"].items():
-                print(f"{name}: phase={track['phase']}\n  prompt: {track['prompt']}\n  start: {track['start_command']}")
-            source = state.get("source")
-            if isinstance(source, dict):
-                print(f"source: {source['path']}\n  state: {source['state']}\n  files: {source['file_count']}")
-                print(f"  entries: {json.dumps(source['entries'], ensure_ascii=False)}")
-                if source.get("detail"):
-                    print(f"  detail: {source['detail']}")
+            _print_engagement_mode(state)
     elif command == "current":
         _engagement_current(install_root)
     elif command == "cd-init":
@@ -1810,6 +1855,17 @@ def _engagement(args: argparse.Namespace, install_root: Path) -> None:
         path = _resolve_current_or_selected_engagement(install_root, key=args.key, select=args.select)
         if not args.skip_preflight:
             _preflight_engagement_start(install_root, path, args.client, mode=args.mode)
+        if term.is_terminal(sys.stderr):
+            selected_mode = args.mode or "configured mode"
+            print(
+                term.row(
+                    "info",
+                    "Starting engagement",
+                    f"{path.name} · {args.client} · {selected_mode}",
+                    stream=sys.stderr,
+                ),
+                file=sys.stderr,
+            )
         if args.client == "opencode":
             start_engagement(install_root, path, args.client, args.client_args, args.mode, thinking=args.thinking, no_autoprompt=args.no_autoprompt)
         elif args.mode is None:
@@ -2251,6 +2307,31 @@ def _print_create_summary(
     out_of_scope: list[str] | None = None,
     rate_limit: float | None = None,
 ) -> None:
+    if term.is_terminal(sys.stderr):
+        records = [f"type\t{engagement_type}"]
+        if target:
+            records.append(f"target\t{target}")
+        if name:
+            records.append(f"name\t{name}")
+        if hosts:
+            records.append(f"hosts\t{', '.join(hosts)}")
+        if repos:
+            records.append(f"repositories\t{', '.join(repos)}")
+        if artifacts:
+            records.append(f"artifacts\t{', '.join(artifacts)}")
+        if android_package:
+            records.append(f"package\t{android_package}")
+        if required_headers:
+            records.append(
+                "headers\t"
+                + ", ".join(f"{key}: {value}" for key, value in required_headers.items())
+            )
+        if out_of_scope:
+            records.append(f"out of scope\t{', '.join(out_of_scope)}")
+        if rate_limit is not None:
+            records.append(f"rate limit\t{rate_limit:g} req/s (global per invocation)")
+        term.print_records("Engagement summary", records, stream=sys.stderr)
+        return
     print("[vigil] engagement summary:", file=sys.stderr)
     print(f"[vigil]   type:      {engagement_type}", file=sys.stderr)
     if target:
@@ -2325,12 +2406,20 @@ def _runtime(args: argparse.Namespace, install_root: Path) -> None:
                 allow_oversubscribe=getattr(args, "allow_oversubscribe", False),
             )
         )
+        if term.is_terminal(sys.stdout):
+            print(term.row("ok", "Runtime", "running", stream=sys.stdout))
     elif args.runtime_command == "stop":
         stop_runtime()
     elif args.runtime_command == "restart":
         start_runtime(RuntimeOptions(install_root=install_root, recreate=True))
     elif args.runtime_command == "status":
-        print(runtime_status())
+        state = runtime_status()
+        if term.is_terminal(sys.stdout):
+            row_state = "ok" if state == "running" else "fail" if state == "docker-unavailable" else "warn"
+            print(term.heading("Runtime status", stream=sys.stdout))
+            print(term.row(row_state, "Runtime", state, stream=sys.stdout))
+        else:
+            print(state)
     elif args.runtime_command == "shell":
         os.execvp("docker", ["docker", "exec", "-it", default_runtime_container(), "bash"])
     elif args.runtime_command == "shell-exec":
@@ -2404,34 +2493,35 @@ def _mitmproxy(args: argparse.Namespace, install_root: Path) -> None:
 
 def _print_mitmproxy_status(payload: dict) -> None:
     state = payload.get("state", "?")
-    print(
+    records = [
         f"mitmproxy\t{state}\tcontainer={payload.get('container', '-')}"
         f"\tport={payload.get('port', '-')}\tport_reachable={payload.get('port_reachable')}"
-    )
+    ]
     pid_or_id = payload.get("container_id") or "-"
-    print(
+    records.append(
         f"image\t{payload.get('image', '-')}\tpresent={payload.get('image_present')}"
         f"\tcontainer_id={pid_or_id}"
     )
-    print(
+    records.append(
         f"cert\tvolume={payload.get('cert_volume', '-')}"
         f"\tpresent={payload.get('cert_volume_present')}"
     )
-    print(
+    records.append(
         f"upstream\t{payload.get('upstream_url', '-')}"
         f"\tengagements_root={payload.get('engagements_root', '-')}"
     )
     routes_loaded = payload.get("routes_loaded") or 0
-    print(
+    records.append(
         f"routes\tloaded={routes_loaded}"
         f"\tgenerated_at={payload.get('routes_generated_at') or '-'}"
     )
     if payload.get("exit_code") is not None and not payload.get("running"):
-        print(
+        records.append(
             f"last_exit\tcode={payload['exit_code']}"
             f"\tstarted_at={payload.get('started_at') or '-'}"
             f"\tfinished_at={payload.get('finished_at') or '-'}"
         )
+    term.print_records("mitmproxy status", records, stream=sys.stdout)
     log_tail = payload.get("log_tail")
     if log_tail:
         print("recent_logs:")

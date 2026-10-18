@@ -8,8 +8,9 @@ running Vigil install.
 `vigil up` (or `vigil runtime start`) starts one long-lived Kali container named `vigil`.
 Target-facing commands run through `vigil assess kali ...` via `docker exec`.
 
-The container mounts shared runtime data at `.runtime-data/`, bind-mounts the engagement root at
-`/engagements`, and receives the root `.env` when present. Fresh workspaces keep artifacts under
+The container mounts the runtime data directory at `/data` (`state/runtime/` on a fresh workspace,
+`.runtime-data/` on an adopted one, or `VIGIL_RUNTIME_DATA_DIR`), bind-mounts the engagement root
+at `/engagements`, and receives the root `.env` when present. Fresh workspaces keep artifacts under
 `engagements/<key>/`; adopted workspaces keep their existing paths. For non-interactive
 maintenance, use `vigil runtime shell-exec "<cmd>"` so quoting and exit codes stay under the CLI.
 

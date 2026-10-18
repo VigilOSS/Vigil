@@ -8,7 +8,7 @@ import re
 import secrets
 import threading
 from collections.abc import Callable, Iterable
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import TextIO, cast
 
@@ -24,23 +24,23 @@ try:
 except ImportError:  # POSIX
     _msvcrt = None  # type: ignore[assignment]
 
-RELAY_METADATA_RELATIVE_PATH = Path(".runtime-data/oob/relay-routing.json")
+RELAY_METADATA_FILENAME = "relay-routing.json"
 # Spelling this record shipped under before the relay-slot rename. Installs that
 # allocated a route then still own it, so every read falls back to this name and
-# leaves the file untouched; only an allocation or reconcile writes the new one.
-LEGACY_RELAY_METADATA_RELATIVE_PATH = Path(".runtime-data/oob/tenant-routing.json")
-# Everything an OOB session writes lives in one directory: the container's
-# ``/data/oob`` (rendered ``frpc.toml``, its log, the interactsh watch log, the
-# runtime route marker, one file per registered client) and, host-side, the
-# routing record plus the poll channel cache kept beside them.
-OOB_STATE_RELATIVE_PATH = RELAY_METADATA_RELATIVE_PATH.parent
+# leaves the spelling alone; only an allocation or reconcile writes the new one.
+LEGACY_RELAY_METADATA_FILENAME = "tenant-routing.json"
+# Where releases before the record followed the runtime data directory kept it,
+# whatever that directory was. Reads fall back here so an install that allocated
+# then is never mistaken for an unrouted one, and `vigil install` moves the
+# record into :func:`oob_state_dir`.
+_INSTALL_ROOT_OOB_STATE_PATH = Path(".runtime-data/oob")
 # Filename stems of the routing records THIS module writes, in both spellings,
 # covering their ``.lock`` and temporary siblings. They are bookkeeping, not
 # evidence of a live channel: an interrupted pin leaves a lock file behind with
 # nothing ever having been routed through it.
 _ROUTING_RECORD_STEMS = (
-    RELAY_METADATA_RELATIVE_PATH.stem,
-    LEGACY_RELAY_METADATA_RELATIVE_PATH.stem,
+    Path(RELAY_METADATA_FILENAME).stem,
+    Path(LEGACY_RELAY_METADATA_FILENAME).stem,
 )
 ROUTING_VERSION = 1
 PORT_BLOCK_START = 20_000
@@ -49,6 +49,9 @@ PORT_SLOT_COUNT = 20_000
 LEGACY_DNS_REMOTE_PORT = 53
 LEGACY_REVERSE_REMOTE_PORT = 8443
 OOB_ALLOCATION_REGISTRY_FILENAME = "oob-allocations.json"
+
+# A cross-device move, or a filesystem without hard links, copies instead.
+_NO_HARD_LINK_ERRNOS = frozenset({errno.EXDEV, errno.EPERM, errno.ENOTSUP, errno.EOPNOTSUPP})
 
 _THREAD_LOCKS: dict[str, threading.Lock] = {}
 _THREAD_LOCKS_GUARD = threading.Lock()
@@ -116,22 +119,73 @@ def _default_slot_candidates(identity: str) -> Iterable[int]:
         yield (start + offset) % PORT_SLOT_COUNT
 
 
+def oob_state_dir(
+    install_root: Path,
+    *,
+    preserve_install_path: bool = False,
+    canonical_install_root: Path | None = None,
+) -> Path:
+    """The one directory everything an OOB session writes lives in.
+
+    That is the container's ``/data/oob`` (rendered ``frpc.toml``, its log, the
+    interactsh watch log, the runtime route marker, one file per registered
+    client) and, host-side, the routing record plus the poll channel cache kept
+    beside them. Its host side is the runtime data directory, relocatable
+    through VIGIL_RUNTIME_DATA_DIR or the install `.env`, so it is derived from
+    runtime's own resolver instead of a second copy of that precedence.
+
+    `vigil install` passes its pinned directory as ``.`` and the path it stands
+    for as ``canonical_install_root``. The workspace registers its runtime state
+    as an absolute path under that root, which is re-anchored at ``.`` so the
+    install never reaches it again through a path that could have been swapped.
+    """
+    # Imported here because `runtime` pulls in the Docker helpers that the rest
+    # of this filesystem-only module never needs.
+    from .runtime import _resolve_runtime_data_dir
+
+    root = install_root.expanduser()
+    if not preserve_install_path:
+        root = root.resolve()
+    data_dir = _resolve_runtime_data_dir(root)
+    if canonical_install_root is not None:
+        canonical = _install_identity_path(
+            canonical_install_root, preserve_install_path=preserve_install_path
+        )
+        if data_dir.is_relative_to(canonical):
+            data_dir = root / data_dir.relative_to(canonical)
+    return data_dir / "oob"
+
+
 def _metadata_path(
     install_root: Path,
     *,
     preserve_install_path: bool = False,
-    relative_path: Path = RELAY_METADATA_RELATIVE_PATH,
+    canonical_install_root: Path | None = None,
 ) -> Path:
+    state_dir = oob_state_dir(
+        install_root,
+        preserve_install_path=preserve_install_path,
+        canonical_install_root=canonical_install_root,
+    )
+    _require_contained(state_dir, state_dir.parent, "the runtime data directory")
+    return state_dir / RELAY_METADATA_FILENAME
+
+
+def _install_root_state_dir(install_root: Path, *, preserve_install_path: bool) -> Path:
     root = install_root.expanduser()
     resolved_root = root.resolve()
     if not preserve_install_path:
         root = resolved_root
-    path = root / relative_path
-    if not path.parent.resolve(strict=False).is_relative_to(resolved_root):
+    state_dir = root / _INSTALL_ROOT_OOB_STATE_PATH
+    _require_contained(state_dir, resolved_root, "install root")
+    return state_dir
+
+
+def _require_contained(state_dir: Path, anchor: Path, anchor_name: str) -> None:
+    if not state_dir.resolve(strict=False).is_relative_to(anchor.resolve(strict=False)):
         raise SystemExit(
-            f"Invalid OOB metadata path {path}: parent escapes install root through a symlink."
+            f"Invalid OOB metadata path {state_dir}: escapes {anchor_name} through a symlink."
         )
-    return path
 
 
 def _thread_lock(path: Path) -> threading.Lock:
@@ -197,10 +251,13 @@ def _unlock_file(handle: TextIO) -> None:
 
 
 def _read_json(path: Path, *, default: dict[str, object] | None = None) -> dict[str, object]:
-    if not path.exists():
-        return dict(default or {})
+    """Parse ``path``; a missing file is ``default``, or FileNotFoundError without one."""
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        if default is None:
+            raise
+        return dict(default)
     except (OSError, json.JSONDecodeError) as exc:
         raise SystemExit(f"Invalid OOB routing metadata at {path}: {exc}") from exc
     if not isinstance(payload, dict):
@@ -324,23 +381,110 @@ def _validate_route(route: OobRelayRoute) -> None:
         )
 
 
-def load_relay_route(
-    install_root: Path, *, preserve_install_path: bool = False
-) -> OobRelayRoute | None:
-    for relative_path in (
-        RELAY_METADATA_RELATIVE_PATH,
-        LEGACY_RELAY_METADATA_RELATIVE_PATH,
-    ):
-        path = _metadata_path(
-            install_root,
-            preserve_install_path=preserve_install_path,
-            relative_path=relative_path,
-        )
+def _first_record(directory: Path) -> OobRelayRoute | None:
+    for name in (RELAY_METADATA_FILENAME, LEGACY_RELAY_METADATA_FILENAME):
+        path = directory / name
         if path.is_symlink():
             raise SystemExit(f"Invalid OOB routing metadata at {path}: symlink files are not allowed.")
-        if path.exists():
+        try:
             return _route_from_payload(path, _read_json(path))
+        except FileNotFoundError:
+            continue
     return None
+
+
+def load_relay_route(
+    install_root: Path,
+    *,
+    preserve_install_path: bool = False,
+    canonical_install_root: Path | None = None,
+    registry_path: Path | None = None,
+) -> OobRelayRoute | None:
+    """This install's routing record: the state directory's, else the install root's.
+
+    The install root's location is read first. `vigil install` links a record
+    into the state directory before unlinking it there, so a reader that finds
+    the install root's copy gone always finds the state directory's next.
+    """
+    state_dir = _metadata_path(
+        install_root,
+        preserve_install_path=preserve_install_path,
+        canonical_install_root=canonical_install_root,
+    ).parent
+    root_state_dir = install_root.expanduser() / _INSTALL_ROOT_OOB_STATE_PATH
+    fallback = None
+    if root_state_dir.resolve(strict=False) != state_dir.resolve(strict=False):
+        fallback = _first_record(
+            _install_root_state_dir(install_root, preserve_install_path=preserve_install_path)
+        )
+    route = _first_record(state_dir) or fallback
+    if route is None:
+        return None
+    if fallback is not None and fallback.install_id != route.install_id:
+        raise SystemExit(
+            f"OOB routing records at {route.metadata_path} and {fallback.metadata_path} belong to "
+            "different installs: the runtime data directory holds another install's relay slot. "
+            "Give each install its own VIGIL_RUNTIME_DATA_DIR, set in that install's `.env`."
+        )
+    if not route.legacy:
+        prior = _read_allocations(_resolved_registry_path(registry_path)).get(route.install_id)
+        if prior is not None:
+            _registered_root(
+                route,
+                prior,
+                _install_identity_path(
+                    canonical_install_root or install_root,
+                    preserve_install_path=preserve_install_path,
+                ),
+                preserve_install_path=preserve_install_path,
+            )
+    return route
+
+
+def _move_record_into_state_dir(
+    route: OobRelayRoute,
+    install_root: Path,
+    *,
+    preserve_install_path: bool,
+    canonical_install_root: Path | None,
+    registry_path: Path | None,
+) -> OobRelayRoute:
+    """Move a record found only beside the install root to :func:`oob_state_dir`.
+
+    The record is the slot's identity, so it moves unchanged: same bytes on one
+    filesystem, the same JSON across two. The registry row it pairs with names
+    the install root, never this path, so the move leaves it as it is. Linking
+    before unlinking keeps the record visible to :func:`load_relay_route`, which
+    takes no lock, at every step.
+    """
+    state_dir = _metadata_path(
+        install_root,
+        preserve_install_path=preserve_install_path,
+        canonical_install_root=canonical_install_root,
+    ).parent
+    if route.metadata_path.parent == state_dir:
+        return route
+    with _FileLock((state_dir / RELAY_METADATA_FILENAME).with_suffix(".lock")):
+        current = load_relay_route(
+            install_root,
+            preserve_install_path=preserve_install_path,
+            canonical_install_root=canonical_install_root,
+            registry_path=registry_path,
+        )
+        if current is None or current.metadata_path.parent == state_dir:
+            return current or route
+        source = current.metadata_path
+        destination = state_dir / source.name
+        try:
+            os.link(source, destination)
+        except OSError as exc:
+            if exc.errno not in _NO_HARD_LINK_ERRNOS:
+                raise
+            _atomic_write_json_real(destination, _read_json(source))
+        source.unlink()
+        _fsync_directory(state_dir)
+        _fsync_directory(source.parent)
+        return replace(current, metadata_path=destination)
 
 
 def legacy_relay_route(
@@ -348,9 +492,12 @@ def legacy_relay_route(
     *,
     base_domain: str,
     preserve_install_path: bool = False,
+    canonical_install_root: Path | None = None,
 ) -> OobRelayRoute:
     path = _metadata_path(
-        install_root, preserve_install_path=preserve_install_path
+        install_root,
+        preserve_install_path=preserve_install_path,
+        canonical_install_root=canonical_install_root,
     )
     domain = normalize_base_domain(base_domain)
     route = OobRelayRoute(
@@ -462,24 +609,13 @@ def _reconcile_existing_route_locked(
 ) -> OobRelayRoute:
     if route.legacy:
         return route
-    registry = _read_json(
-        registry_path,
-        default={"version": ROUTING_VERSION, "allocations": {}},
-    )
-    allocations = _validated_allocations(registry_path, registry)
+    allocations = _read_allocations(registry_path)
     expected = _allocation_row(route, install_root)
     prior = allocations.get(route.install_id)
     if prior is not None:
-        prior_root = _install_identity_path(
-            Path(str(prior["install_root"])),
-            preserve_install_path=preserve_install_path,
-        )
-        if prior_root != install_root:
-            if prior_root.exists():
-                raise SystemExit(
-                    f"OOB install identity {route.install_id!r} is already registered to another install root "
-                    f"({prior_root}); refusing a copied relay route."
-                )
+        if _registered_root(
+            route, prior, install_root, preserve_install_path=preserve_install_path
+        ) != install_root:
             prior = {**prior, "install_root": str(install_root)}
         if any(prior.get(key) != expected[key] for key in expected if key != "install_root"):
             raise SystemExit(
@@ -504,6 +640,38 @@ def _reconcile_existing_route_locked(
         {"version": ROUTING_VERSION, "allocations": allocations},
     )
     return route
+
+
+def _read_allocations(registry_path: Path) -> dict[str, dict[str, object]]:
+    registry = _read_json(
+        registry_path,
+        default={"version": ROUTING_VERSION, "allocations": {}},
+    )
+    return _validated_allocations(registry_path, registry)
+
+
+def _registered_root(
+    route: OobRelayRoute,
+    prior: dict[str, object],
+    install_root: Path,
+    *,
+    preserve_install_path: bool,
+) -> Path:
+    """The root ``prior`` registers ``route`` to, unless another live install owns it.
+
+    A registered root that no longer exists is this install, moved.
+    """
+    prior_root = _install_identity_path(
+        Path(str(prior["install_root"])),
+        preserve_install_path=preserve_install_path,
+    )
+    if prior_root != install_root and prior_root.exists():
+        raise SystemExit(
+            f"OOB install identity {route.install_id!r} at {route.metadata_path} is already registered "
+            f"to another install root ({prior_root}); refusing a copied relay route. Installs that "
+            "share a VIGIL_RUNTIME_DATA_DIR share its oob/ directory; give each install its own."
+        )
+    return prior_root
 
 
 def _install_identity_path(
@@ -536,26 +704,32 @@ def reconcile_relay_route_registry(
         )
 
 
-def _oob_state_directories(install_root: Path) -> tuple[Path, ...]:
-    """Every directory an OOB session could have written this install's state to."""
-    root = install_root.expanduser()
-    directories = [root / OOB_STATE_RELATIVE_PATH]
-    # `vigil oob start` writes frpc and interactsh state into the container's
-    # `/data`, whose host side is relocatable through VIGIL_RUNTIME_DATA_DIR or
-    # the install `.env`. Reuse runtime's own resolver instead of a second copy
-    # of that precedence: missing a relocated install's live OOB state would
-    # move its ports out from under running callbacks. Imported here because
-    # `runtime` pulls in the Docker helpers that the rest of this
-    # filesystem-only module never needs.
-    from .runtime import _resolve_runtime_data_dir
+def _oob_state_directories(
+    install_root: Path, *, canonical_install_root: Path | None
+) -> tuple[Path, ...]:
+    """Every directory an OOB session could have written this install's state to.
 
-    relocated = _resolve_runtime_data_dir(root) / OOB_STATE_RELATIVE_PATH.name
-    if relocated not in directories:
-        directories.append(relocated)
+    Missing either would read a live install as never-configured and move its
+    ports out from under running callbacks: :func:`oob_state_dir` is where
+    `vigil oob start` writes, and an install root's `.runtime-data/oob` holds
+    whatever it wrote while the runtime data directory was `.runtime-data`.
+    """
+    root = install_root.expanduser()
+    directories = [
+        oob_state_dir(
+            root,
+            preserve_install_path=True,
+            canonical_install_root=canonical_install_root,
+        )
+    ]
+    if root / _INSTALL_ROOT_OOB_STATE_PATH not in directories:
+        directories.append(root / _INSTALL_ROOT_OOB_STATE_PATH)
     return tuple(directories)
 
 
-def has_pre_routing_oob_state(install_root: Path) -> bool:
+def has_pre_routing_oob_state(
+    install_root: Path, *, canonical_install_root: Path | None = None
+) -> bool:
     """True when this root was already running OOB before it had a relay route.
 
     The legacy 53/8443 route exists for exactly one population: installs whose
@@ -574,7 +748,9 @@ def has_pre_routing_oob_state(install_root: Path) -> bool:
     An entry in the allocation registry is not evidence either — a registry row
     is only ever written for an allocated slot, so it proves the opposite.
     """
-    for directory in _oob_state_directories(install_root):
+    for directory in _oob_state_directories(
+        install_root, canonical_install_root=canonical_install_root
+    ):
         if not directory.is_dir():
             continue
         try:
@@ -601,20 +777,32 @@ def initialize_relay_route(
     preserve_install_path: bool = False,
 ) -> OobRelayRoute:
     existing = load_relay_route(
-        install_root, preserve_install_path=preserve_install_path
+        install_root,
+        preserve_install_path=preserve_install_path,
+        canonical_install_root=canonical_install_root,
+        registry_path=registry_path,
     )
     registry_install_root = _install_identity_path(
         canonical_install_root or install_root,
         preserve_install_path=preserve_install_path,
     )
     if existing is not None:
+        existing = _move_record_into_state_dir(
+            existing,
+            install_root,
+            preserve_install_path=preserve_install_path,
+            canonical_install_root=canonical_install_root,
+            registry_path=registry_path,
+        )
         return reconcile_relay_route_registry(
             existing,
             registry_install_root,
             registry_path=registry_path,
             preserve_install_path=preserve_install_path,
         )
-    if not has_pre_routing_oob_state(install_root):
+    if not has_pre_routing_oob_state(
+        install_root, canonical_install_root=canonical_install_root
+    ):
         return allocate_relay_route(
             install_root,
             slot_name=slot_name or registry_install_root.name,
@@ -627,11 +815,15 @@ def initialize_relay_route(
         install_root,
         base_domain=base_domain,
         preserve_install_path=preserve_install_path,
+        canonical_install_root=canonical_install_root,
     )
     path = route.metadata_path
     with _FileLock(path.with_suffix(".lock")):
         existing = load_relay_route(
-            install_root, preserve_install_path=preserve_install_path
+            install_root,
+            preserve_install_path=preserve_install_path,
+            canonical_install_root=canonical_install_root,
+            registry_path=registry_path,
         )
         if existing is not None:
             return existing
@@ -662,6 +854,7 @@ def allocate_relay_route(
     metadata_path = _metadata_path(
         filesystem_install_root,
         preserve_install_path=preserve_install_path,
+        canonical_install_root=canonical_install_root,
     )
     registry_path = _resolved_registry_path(registry_path)
     lock_path = registry_path.with_suffix(registry_path.suffix + ".lock")
@@ -669,6 +862,8 @@ def allocate_relay_route(
         existing = load_relay_route(
             filesystem_install_root,
             preserve_install_path=preserve_install_path,
+            canonical_install_root=canonical_install_root,
+            registry_path=registry_path,
         )
         if existing is not None:
             return _reconcile_existing_route_locked(
@@ -678,8 +873,7 @@ def allocate_relay_route(
                 atomic_writer=atomic_writer,
                 preserve_install_path=preserve_install_path,
             )
-        registry = _read_json(registry_path, default={"version": ROUTING_VERSION, "allocations": {}})
-        allocations = _validated_allocations(registry_path, registry)
+        allocations = _read_allocations(registry_path)
         install_id = str(identity_factory()).strip()
         if not install_id:
             raise SystemExit("Invalid OOB install identity: identity factory returned an empty value.")

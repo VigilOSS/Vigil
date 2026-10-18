@@ -77,6 +77,20 @@ def test_opencode_starts_native_tui_with_release_command_and_preserves_configura
     assert not launch.engagement.exists()
 
 
+def test_opencode_accepts_help_written_to_stderr(launch, monkeypatch):
+    def run(argv, **options):
+        launch.calls.append((argv, options))
+        if argv == ["opencode", "--version"]:
+            return subprocess.CompletedProcess(argv, 0, "1.18.10\n", "")
+        if argv == ["opencode", "--help"]:
+            return subprocess.CompletedProcess(argv, 0, "", "Options:\n  --prompt  prompt to use\n")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(launch.sessions.subprocess, "run", run)
+    assert start(launch, "opencode") == 0
+    assert launch.calls[-1][0][:2] == ["opencode", "--prompt"]
+
+
 @pytest.mark.parametrize("client", ["opencode", "zcode"])
 @pytest.mark.parametrize("option,value,message", [
     ("session_id", "existing", "--session-id"),

@@ -5324,9 +5324,9 @@ def _seed_live_oob_state(install_root: Path) -> None:
     whose callbacks are already live on it is warned and started. A rendered
     `frpc.toml` is the discriminator `has_pre_routing_oob_state` reads.
     """
-    from vigil_cli.oob_relay import OOB_STATE_RELATIVE_PATH
+    from vigil_cli.oob_relay import oob_state_dir
 
-    state_dir = install_root / OOB_STATE_RELATIVE_PATH
+    state_dir = oob_state_dir(install_root)
     state_dir.mkdir(parents=True, exist_ok=True)
     (state_dir / "frpc.toml").write_text("[common]\n", encoding="utf-8")
 
@@ -5617,16 +5617,31 @@ def test_channel_verdict_is_not_shared_across_clients(
     assert len(probes) == fresh_probe_count * 2
 
 
+def test_channel_verdict_cache_lives_with_the_runtime_oob_state(
+    tmp_path: Path, _channel_check_stubs: None
+) -> None:
+    """The cache sits beside the relay record in the runtime data directory."""
+    from vigil_cli.oob import verify_oob_channel_cached
+
+    verify_oob_channel_cached(
+        _cached_channel_options(tmp_path),
+        client="agent-a",
+        runner=_channel_probe_runner([]),
+        now=1_000.0,
+    )
+
+    assert (tmp_path / "state/runtime/oob/channel-verification.json").is_file()
+    assert not (tmp_path / ".runtime-data").exists()
+
+
 def test_corrupt_channel_verdict_cache_falls_back_to_proving_the_channel(
     tmp_path: Path, _channel_check_stubs: None
 ) -> None:
     """A hand-edited or half-written cache file must degrade to a real proof."""
-    from vigil_cli.oob import (
-        CHANNEL_VERIFICATION_CACHE_RELATIVE_PATH,
-        verify_oob_channel_cached,
-    )
+    from vigil_cli.oob import CHANNEL_VERIFICATION_CACHE_FILENAME, verify_oob_channel_cached
+    from vigil_cli.oob_relay import oob_state_dir
 
-    cache = tmp_path / CHANNEL_VERIFICATION_CACHE_RELATIVE_PATH
+    cache = oob_state_dir(tmp_path) / CHANNEL_VERIFICATION_CACHE_FILENAME
     cache.parent.mkdir(parents=True, exist_ok=True)
     cache.write_text('{"entries": [1, 2', encoding="utf-8")
 
@@ -5648,9 +5663,12 @@ def test_channel_verdict_cache_write_failure_never_fails_the_check(
 ) -> None:
     """The cache is an optimisation; an unwritable install root must not dead-end a poll."""
     from vigil_cli.oob import verify_oob_channel_cached
+    from vigil_cli.oob_relay import oob_state_dir
 
     # A file where the cache directory must go makes mkdir/write raise.
-    (tmp_path / ".runtime-data").write_text("not a directory", encoding="utf-8")
+    runtime_data = oob_state_dir(tmp_path).parent
+    runtime_data.parent.mkdir(parents=True, exist_ok=True)
+    runtime_data.write_text("not a directory", encoding="utf-8")
 
     result = verify_oob_channel_cached(
         _cached_channel_options(tmp_path),

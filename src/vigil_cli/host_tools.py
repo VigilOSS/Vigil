@@ -79,8 +79,17 @@ def setup_host_tools(
             print(f"[vigil] $ {step.command}", file=sys.stderr)
             try:
                 result = runner(shlex.split(step.command))
-                ok = result.returncode == 0
-                detail = (result.stderr or "").strip() if not ok else ""
+                if result.returncode != 0:
+                    ok = False
+                    detail = (result.stderr or result.stdout or "").strip()
+                elif which(step.tool) is None:
+                    ok = False
+                    detail = (
+                        "installer exited successfully, but the binary is still not found on PATH; "
+                        "open a new shell or add the install directory to PATH, then rerun `vigil doctor`"
+                    )
+                else:
+                    ok, detail = True, ""
             except OSError as exc:
                 ok, detail = False, str(exc)
             executed.append({"tool": step.tool, "ok": ok, "detail": detail})

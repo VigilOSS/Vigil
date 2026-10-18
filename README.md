@@ -10,7 +10,7 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![CI](https://github.com/VigilOSS/Vigil/actions/workflows/ci.yml/badge.svg)](https://github.com/VigilOSS/Vigil/actions/workflows/ci.yml)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
-[![Version](https://img.shields.io/badge/version-1.2.6-green.svg)](https://github.com/VigilOSS/Vigil/releases/tag/v1.2.6)
+[![Version](https://img.shields.io/badge/version-2.0.0-green.svg)](https://github.com/VigilOSS/Vigil/releases/tag/v2.0.0)
 
 </div>
 
@@ -93,12 +93,13 @@ Install [uv](https://docs.astral.sh/uv/getting-started/installation/), then inst
 It includes the CLI, backend, prompts, documentation, and prebuilt UI; Git and Node are not needed.
 
 ```bash
-uv tool install --from https://github.com/VigilOSS/Vigil/releases/download/v1.2.6/vigil-1.2.6-py3-none-any.whl vigil
+uv tool install --from https://github.com/VigilOSS/Vigil/releases/download/v2.0.0/vigil-2.0.0-py3-none-any.whl vigil
 ```
 
-Install and sign in to **Claude Code** or **Codex** before starting an operator. Model access
-affects what testing the provider permits; check [models and access](docs/model-access.md).
-Client setup and alternatives: [agent clients](docs/agent-clients.md).
+Install and sign in to an agent client before starting an operator. Engagement clients:
+**Claude Code, Codex, OpenCode, Goose, Kimi, and Pi**. Setup and support differences:
+[agent clients](docs/agent-clients.md). Model access affects what testing the provider permits;
+check [models and access](docs/model-access.md).
 
 ### Audit source code
 
@@ -109,7 +110,6 @@ start source review before building Kali or setting up browser capture.
 vigil install
 vigil engagement create --type code --name acme --source-dir ./acme --no-prompt
 vigil engagement start <engagement-key> --mode code --client codex
-# Or use --client claude
 ```
 
 Point `--source-dir` at the original project. The operator confirms the source before
@@ -131,7 +131,6 @@ Start Docker, then create the engagement:
 vigil install
 vigil engagement create https://app.example.com --hosts app.example.com
 vigil engagement start <engagement-key> --mode web --client codex
-# Or use --client claude
 ```
 
 Replace the example with your authorized target. Review `scope.json` and tell the operator
@@ -338,9 +337,7 @@ investigation, but does not remove its cost.
 
 Start code audits at medium reasoning effort and increase it for complex or hardened code.
 Web testing generally benefits from high or greater effort where provider access allows it.
-Claude Code and Codex are the primary clients; other clients have reduced support. Current
-model selections, cyber-access restrictions, and planned integrations:
-[models and access](docs/model-access.md).
+Current model selections and cyber-access restrictions: [models and access](docs/model-access.md).
 
 ## Workflows and controls
 
@@ -364,10 +361,8 @@ Other workflows: [blue incident response](docs/blue-engagements.md) and
 records verification, and requires approval before a draft PR. Blue containment separates
 proposal approval, audited execution, and explicit recording.
 
-Remediation can also open OpenCode or ZCode with a repository-bound `vigil-remediate`
-command. ZCode requires a local plugin to be reviewed and enabled in the desktop app.
-These clients retain their native approvals, but Vigil cannot bind, join, or recover their
-conversations. See [remediation client setup](docs/remediation.md#opencode-and-zcode-repository-context).
+Remediation clients: **Claude Code, OpenCode, and ZCode**. See
+[agent clients](docs/agent-clients.md#repository-context-remediation-clients).
 
 The rationale behind hunting, evidence, coverage, and operator trust is in the
 [architecture decisions](docs/adr/). Particularly relevant:

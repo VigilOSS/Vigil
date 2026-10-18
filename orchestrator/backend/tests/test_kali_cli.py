@@ -2322,7 +2322,7 @@ def test_job_start_posts_queued_then_marks_running(monkeypatch, fake_engagement)
 
     fake_client = _JobClient("http://127.0.0.1:18000", fake_engagement.name)
     monkeypatch.setattr(kali_jobs, "AssessmentClient", lambda *a, **k: fake_client)
-    monkeypatch.setattr(kali_jobs, "_container_running", lambda name: True)
+    monkeypatch.setattr(kali_jobs, "_check_container_running", lambda name: None)
     monkeypatch.setattr(kali_jobs, "_check_dtach_in_container", lambda name: None)
     monkeypatch.setattr(kali_jobs, "_ensure_dtach_dir", lambda name, path: None)
 
@@ -2424,7 +2424,7 @@ def test_job_start_persists_paths_and_cleans_up_when_running_patch_fails(
 
     fake_client = _FailRunningPatchClient("http://127.0.0.1:18000", fake_engagement.name)
     monkeypatch.setattr(kali_jobs, "AssessmentClient", lambda *a, **k: fake_client)
-    monkeypatch.setattr(kali_jobs, "_container_running", lambda name: True)
+    monkeypatch.setattr(kali_jobs, "_check_container_running", lambda name: None)
     monkeypatch.setattr(kali_jobs, "_check_dtach_in_container", lambda name: None)
     monkeypatch.setattr(kali_jobs, "_ensure_dtach_dir", lambda name, path: None)
 
@@ -2742,7 +2742,7 @@ def test_job_start_marks_failed_when_running_patch_raises(monkeypatch, fake_enga
 
     fake_client = _FailRunningPatchClient("http://127.0.0.1:18000", fake_engagement.name)
     monkeypatch.setattr(kali_jobs, "AssessmentClient", lambda *a, **k: fake_client)
-    monkeypatch.setattr(kali_jobs, "_container_running", lambda name: True)
+    monkeypatch.setattr(kali_jobs, "_check_container_running", lambda name: None)
     monkeypatch.setattr(kali_jobs, "_check_dtach_in_container", lambda name: None)
     monkeypatch.setattr(kali_jobs, "_ensure_dtach_dir", lambda name, path: None)
     # The spawned-job cleanup helpers shell out; stub them so the only behaviour
@@ -2820,7 +2820,7 @@ def test_job_start_marks_failed_when_dtach_spawn_times_out(monkeypatch, fake_eng
 
     fake_client = _RecordingClient("http://127.0.0.1:18000", fake_engagement.name)
     monkeypatch.setattr(kali_jobs, "AssessmentClient", lambda *a, **k: fake_client)
-    monkeypatch.setattr(kali_jobs, "_container_running", lambda name: True)
+    monkeypatch.setattr(kali_jobs, "_check_container_running", lambda name: None)
     monkeypatch.setattr(kali_jobs, "_check_dtach_in_container", lambda name: None)
     monkeypatch.setattr(kali_jobs, "_ensure_dtach_dir", lambda name, path: None)
     # Cleanup is gated on spawned=True; record any call so the assertion below can

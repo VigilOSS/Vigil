@@ -44,11 +44,21 @@ def test_binary_check_uses_go_version_command(monkeypatch):
 
 @pytest.mark.parametrize(("install", "dry_run", "executes"), [(False, False, False), (True, True, False), (True, False, True)])
 def test_host_installation_requires_explicit_request_and_honors_dry_run(install, dry_run, executes):
+    installed = set()
     calls = []
     def runner(argv):
         calls.append(list(argv))
+        for binary in ("subfinder", "dnsx", "httpx", "puredns", "massdns", "shuffledns", "alterx"):
+            if binary in argv[-1]:
+                installed.add(binary)
         return subprocess.CompletedProcess(argv, 0, "", "")
-    report = setup_host_tools(install=install, dry_run=dry_run, which=lambda _: None, system=lambda: "Darwin", runner=runner)
+    report = setup_host_tools(
+        install=install,
+        dry_run=dry_run,
+        which=lambda binary: f"/usr/local/bin/{binary}" if binary in installed else None,
+        system=lambda: "Darwin",
+        runner=runner,
+    )
     assert bool(calls) == executes
     assert bool(report["executed"]) == executes
     assert report["ok"] is True
@@ -56,6 +66,23 @@ def test_host_installation_requires_explicit_request_and_honors_dry_run(install,
         assert len(calls) == len(report["install_plan"])
         assert ["brew", "install", "massdns"] in calls
     assert {row["binary"] for row in report["tools"]} >= {"subfinder", "massdns"}
+
+
+def test_host_installation_does_not_claim_success_when_binary_is_still_missing():
+    def runner(argv):
+        return subprocess.CompletedProcess(argv, 0, "installed", "")
+
+    report = setup_host_tools(
+        install=True,
+        which=lambda _: None,
+        system=lambda: "Darwin",
+        runner=runner,
+    )
+
+    assert report["ok"] is False
+    assert report["executed"]
+    assert all(row["ok"] is False for row in report["executed"])
+    assert all("not found on PATH" in row["detail"] for row in report["executed"])
 
 
 @pytest.mark.parametrize("failure", ["exit", "missing-installer"])
@@ -89,6 +116,40 @@ def test_doctor_exits_non_zero_when_a_check_fails(monkeypatch: pytest.MonkeyPatc
         main_module.main(["doctor"])
 
     assert excinfo.value.code != 0
+
+
+def test_doctor_names_failed_host_tool_install_in_final_summary(monkeypatch, capsys):
+    from vigil_cli import main as main_module
+    from vigil_cli.status import Check
+
+    monkeypatch.setattr(
+        main_module,
+        "setup_host_tools",
+        lambda **_kwargs: {
+            "dry_run": False,
+            "tools": [],
+            "install_plan": [{"tool": "subfinder", "command": "go install example.com/subfinder"}],
+            "manual": [],
+            "executed": [
+                {
+                    "tool": "subfinder",
+                    "ok": False,
+                    "detail": "installer succeeded but binary is not found on PATH",
+                }
+            ],
+            "ok": False,
+        },
+    )
+    monkeypatch.setattr(
+        main_module,
+        "collect_doctor_checks",
+        lambda *_args, **_kwargs: [Check("workspace", "OK")],
+    )
+
+    with pytest.raises(SystemExit):
+        main_module.main(["doctor", "--install-host-tools"])
+
+    assert "not ready: subfinder (install failed)" in capsys.readouterr().err
 
 
 def test_doctor_exits_zero_for_warn_and_optional_missing(
@@ -245,6 +306,28 @@ def test_broken_docker_is_advisory_for_source_investigation(tmp_path, monkeypatc
     assert rows['docker'].status == 'WARN'
     assert rows['docker'].required is False
     assert 'source investigation' in rows['docker'].detail
+
+
+def test_doctor_treats_docker_assets_as_unknown_when_daemon_is_unavailable(tmp_path, monkeypatch):
+    from vigil_cli import status
+    from vigil_cli.docker import DockerResult
+
+    monkeypatch.setattr(status, "_binary_check", lambda name: status.Check(name, "OK"))
+    calls = []
+
+    def runner(argv, **_kwargs):
+        calls.append(list(argv))
+        assert argv == ["docker", "info"]
+        return DockerResult(1, "", "Cannot connect to the Docker daemon")
+
+    rows = {row.name: row for row in status.collect_doctor_checks(tmp_path, runner=runner)}
+
+    assert calls == [["docker", "info"]]
+    assert rows["docker-daemon"].status == "WARN"
+    assert rows["runtime-image"].status == "SKIPPED"
+    assert rows["mitmproxy-image"].status == "SKIPPED"
+    assert rows["mitmproxy-container-drift"].status == "SKIPPED"
+    assert not any(row.name.startswith("runtime-tool:") for row in rows.values())
 
 
 def test_doctor_explains_optional_go_requirement_for_host_tool_installation(tmp_path, monkeypatch):

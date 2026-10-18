@@ -25,7 +25,7 @@ from pathlib import Path
 import pytest
 
 from vigil_cli import install as install_module
-from vigil_cli.oob_relay import OOB_STATE_RELATIVE_PATH
+from vigil_cli.oob_relay import oob_state_dir
 
 ESC = "\x1b"
 
@@ -66,7 +66,7 @@ def _seed_live_oob_state(install_root: Path) -> None:
     reads: routing records (``relay-routing.json`` and friends) are bookkeeping
     and deliberately do not count.
     """
-    state_dir = install_root / OOB_STATE_RELATIVE_PATH
+    state_dir = oob_state_dir(install_root)
     state_dir.mkdir(parents=True, exist_ok=True)
     (state_dir / "frpc.toml").write_text("[common]\n", encoding="utf-8")
 
@@ -109,7 +109,7 @@ def test_root_already_running_oob_is_told_its_route_is_kept(tmp_path: Path) -> N
 def test_routing_records_alone_do_not_count_as_live_oob(tmp_path: Path) -> None:
     """Mirrors ``has_pre_routing_oob_state``'s own rule: an interrupted pin
     leaves a lock file with nothing ever routed through it."""
-    state_dir = tmp_path / OOB_STATE_RELATIVE_PATH
+    state_dir = oob_state_dir(tmp_path)
     state_dir.mkdir(parents=True)
     (state_dir / "relay-routing.json.lock").write_text("", encoding="utf-8")
     assert LEGACY_ROUTE_MARKER not in _piped(tmp_path)

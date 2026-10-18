@@ -96,69 +96,18 @@ release while detached jobs remain active, and shared startup/image replacement
 races. Discovery remains a model task; these tests do not establish comparative
 bug yield or prove independent reasoning.
 
-### Final verification
+### Release verification
 
-| Check | Result |
-|---|---|
-| Backend pytest | 4,848 passed |
-| Root CLI pytest | 1,387 passed, 1 skipped, 2 deselected |
-| Assessment-helper pytest | 4,834 passed |
-| Deterministic evals | 60 passed |
-| Frontend tests | 326 component tests, 22 library tests, 1 SSR test passed |
-| Report tests | 39 rendering/PoC tests, 5 built-resource checks passed |
-| Frontend and report builds | Passed |
-| Ruff and CLI mypy | Passed |
-| Red and blue generated-wrapper checks | Passed; generated diffs reviewed |
-| Generated schema check | Passed |
-| Release-workflow actionlint | Passed |
-| Packaged sdist → wheel → isolated CLI | Passed in root suite |
-| README local links/assets and launch-post quotes | 64 links/assets and quotes verified |
+Release readiness is established by the blocking matrix in `AGENTS.md`, focused
+regressions for the contracts above, an isolated packaged-CLI smoke test, and
+independent review of the complete change. Exact results belong in the pull
+request and release record so this plan does not become a stale test snapshot.
 
-The root skip is a Git-only immutable-refspec case for which a JJ operation
-snapshot does not apply. The private identity-policy audits passed in the default
-workspace. Live integration tests remain opt-in. Dependency
-warnings and intentionally degraded parser fixtures produced backend warnings;
-the frontend build reports its bundle-size warning.
+Native OpenCode acceptance covers session startup, context delivery, and clean
+exit. ZCode remains a preview until its desktop plugin activation, model selection,
+compaction, and resume behavior can be exercised in the native application.
+Registry publication and anonymous digest pulls for both supported architectures
+must be verified from the release workflow before publishing the release.
 
-### Independent QC and live workflows
-
-Two independent reviews and live workflow checks found and corrected:
-
-- Concurrent initializers inserting the same proof migration record. The first
-  recorded backup remains canonical and both initializers can finish.
-- Stopped runtime startup accepting an outdated cached image. Managed image
-  freshness is resolved before creation; running runtimes remain undisturbed.
-- Shared image preparation racing container startup or a manual build. Builds,
-  release tagging and startup now use shared image ownership.
-- A fixed 30-second backend deadline interrupting a large migration backup.
-  Health and readiness share a configurable 600-second budget, with progress
-  notices and immediate failure when the backend exits.
-- Proof handoffs disappearing from the candidate's resume view. Canonical
-  candidate ownership now selects memory independently of execution method;
-  durable claim events preserve earlier workers after release and reassignment.
-- Pending or blocked findings appearing in the verified resume bucket. Only
-  confirmed and downgraded findings belong there; blockers remain visible on
-  active summaries.
-
-A real native Claude Code session ingested a confirmed original directory,
-inspected its sealed inventory and resume state, and exited successfully. Live
-backend/CLI checks exercised idempotent preparation, atomic claims, launch replay,
-competing-owner rejection, retained blockers, linked runs, restart durability,
-release refusal during active execution, safe release, source-refresh invalidation,
-and use of sealed source when the original was unavailable. Handoffs retained seven
-next-step rationales and non-finding observations. An admitted, explicitly approved
-web proof for a source candidate remained in the code investigation without
-enabling a web campaign. These were workflow checks, not a bug-yield benchmark or
-a completed runtime reproduction.
-
-An existing local workspace completed its backed-up database upgrade and the
-normal backend was restarted and checked ready. The disposable backend was
-stopped. Docker Desktop remained manually paused: real container execution,
-registry pulls and both image architectures remain untested. The image workflow
-and matched application artifacts have not been published. Browser interaction
-was unavailable; frontend component/SSR tests, API checks and builds passed.
-
-The README and focused guides now describe the implemented paths. Launch titles
-and body were saved to the requested home-directory Markdown file. Specialist
-final-output display in the frontend remains the agreed future TODO; the proof-work
-UI is included.
+These checks establish workflow and state-contract behavior. They do not establish
+comparative bug yield or prove that two recorded reviewers reasoned independently.

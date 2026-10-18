@@ -25,11 +25,13 @@ ZCODE_MINIMUM = (3, 14, 3)
 def _opencode_capabilities() -> None:
     try:
         version = subprocess.run(["opencode", "--version"], capture_output=True, text=True, check=True)
-        match = re.fullmatch(r"\s*(\d+)\.(\d+)\.(\d+)\s*", version.stdout)
+        version_text = "\n".join(part for part in (version.stdout, version.stderr) if part)
+        match = re.fullmatch(r"\s*(\d+)\.(\d+)\.(\d+)\s*", version_text)
         if not match or not (OPENCODE_MINIMUM <= tuple(map(int, match.groups())) < (2, 0, 0)):
             raise SystemExit("Remediation requires stable OpenCode 1.18.10 or newer within 1.x")
         help_result = subprocess.run(["opencode", "--help"], capture_output=True, text=True, check=True)
-        if not re.search(r"--prompt(?:\s|$)", help_result.stdout):
+        help_text = "\n".join(part for part in (help_result.stdout, help_result.stderr) if part)
+        if not re.search(r"--prompt(?:\s|$)", help_text):
             raise SystemExit("OpenCode lacks the required native --prompt TUI option; upgrade OpenCode")
     except (OSError, subprocess.CalledProcessError) as exc:
         raise SystemExit("OpenCode CLI is required; install a supported stable 1.x release") from exc

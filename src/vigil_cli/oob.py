@@ -19,6 +19,7 @@ from .oob_relay import (
     has_pre_routing_oob_state,
     legacy_relay_route,
     load_relay_route,
+    oob_state_dir,
 )
 from .paths import default_runtime_container
 
@@ -887,7 +888,7 @@ def verify_oob_channel(
 # Where a channel verdict is remembered between CLI invocations. Every
 # `vigil oob poll` is a fresh process, so an in-process cache would never hit;
 # the file lives beside the relay routing record it is keyed against.
-CHANNEL_VERIFICATION_CACHE_RELATIVE_PATH = Path(".runtime-data/oob/channel-verification.json")
+CHANNEL_VERIFICATION_CACHE_FILENAME = "channel-verification.json"
 # How long a verdict stays usable. A live channel is stable across a poll loop
 # (it breaks on runtime/route events, not between two polls), so trusting it for
 # minutes costs nothing real. A BROKEN channel expires much sooner: the operator
@@ -898,7 +899,7 @@ UNVERIFIED_CHANNEL_TTL_SECONDS = 60.0
 
 
 def _channel_cache_path(options: OobOptions) -> Path:
-    return options.install_root / CHANNEL_VERIFICATION_CACHE_RELATIVE_PATH
+    return oob_state_dir(options.install_root) / CHANNEL_VERIFICATION_CACHE_FILENAME
 
 
 def _channel_cache_key(options: OobOptions, client: str) -> str:

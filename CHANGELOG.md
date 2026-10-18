@@ -5,6 +5,52 @@ versioning follows [Semantic Versioning][semver].
 
 Durable design decisions live in [`docs/adr/`](docs/adr/).
 
+## [2.0.0] - 2026-10-18
+
+### Added
+
+- Proof work is durable per finding. Operators claim bounded proof tasks before dispatch,
+  specialists return findings, negative results, open questions, and recommended next steps, and
+  the UI shows ownership and disposition without turning every lead into a finding.
+- Release tags build a matched Linux AMD64/ARM64 Kali image, application wheel, and source archive.
+  The workflow publishes the image by digest and attaches application artifacts to a draft release.
+- OpenCode can start a native remediation TUI with Vigil's case command. A ZCode preview prepares a
+  repository-bound local plugin and context hook; plugin activation, model selection, compaction,
+  and resume behavior still require native desktop acceptance on the operator's machine.
+
+### Changed
+
+- Engagement setup uses `vigil engagement create` followed by `vigil engagement start`. Code source
+  paths are validated during creation, then confirmed and sealed once before analysis begins.
+- Static code review can start before Docker is available. The Kali runtime starts when an audited
+  command needs it, using a matched release image when present or a local source build otherwise.
+- `vigil doctor` reports client sessions, Docker daemon access, images, containers, host tools, and
+  restart requirements with concrete recovery commands. Orchestrator, runtime, proxy, status, and
+  engagement lifecycle commands use the shared terminal formatter while preserving stable piped
+  records, and service startup uses bounded waits.
+- Code-to-runtime proof stays bounded to the selected claim. A proof task may use a local
+  reproduction or an existing live application route without creating a second campaign.
+- The README now explains Vigil through its hunting, coverage, proof, and continuation behavior,
+  with operational detail moved into the focused documentation.
+
+### Fixed
+
+- Concurrent database initialization keeps schema creation inside the caller's transaction, so
+  first-run and upgrade processes cannot interleave partially initialized tables.
+- Docker daemon outages leave image and container state explicitly unknown instead of producing
+  misleading missing or healthy results, and host-tool setup verifies each installed command is
+  visible before reporting success.
+- Runtime commands validate the selected image, container identity, and engagement mounts before
+  synchronous or detached execution, and recover from a missing runtime without silently using a
+  container from another install.
+- Upgrade reporting names active clients only when their sessions actually block shared-file
+  refresh and explains how to pause work, end the listed session, and resume afterward.
+- OOB routing records and poll-channel state follow the configured runtime data directory.
+  `vigil install` adopts a recognized same-install record without reallocating its slot, and
+  refuses a runtime directory that contains another install's record.
+- `agent/.env.example` leaves `VIGIL_RUNTIME_DATA_DIR` unset, so a copied template keeps the
+  workspace's runtime data directory, and says to set it per install in `<install>/.env`.
+
 ## [1.2.6] - 2026-10-13
 
 ### Added

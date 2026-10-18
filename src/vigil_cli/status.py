@@ -6,6 +6,7 @@ from platform import system as platform_system
 import shutil
 import sqlite3
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -13,7 +14,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import docker
+from . import docker, term
 from .backup import latest_backup, live_database
 from .config import get_config_value
 from .engagements import list_engagements
@@ -385,6 +386,19 @@ def print_status(status: dict[str, object], *, json_output: bool = False) -> Non
     if json_output:
         print(json.dumps(status, indent=2))
         return
+    if term.is_terminal(sys.stdout):
+        from contextlib import redirect_stdout
+        from io import StringIO
+
+        plain = StringIO()
+        with redirect_stdout(plain):
+            _print_status_plain(status)
+        term.print_records("Vigil status", plain.getvalue().splitlines(), stream=sys.stdout)
+        return
+    _print_status_plain(status)
+
+
+def _print_status_plain(status: dict[str, object]) -> None:
     print(f"install\t{status['install_root']}")
     application = status.get("application")
     if isinstance(application, dict):
@@ -610,22 +624,31 @@ def collect_doctor_checks(install_root: Path, *, runner: docker.Runner = docker.
     checks.append(Check("backend-data", "OK" if data_dir.is_dir() else "MISSING"))
     checks.append(_database_check(data_dir / "orchestrator.sqlite3"))
     if binary_status.get("docker") == "OK":
-        checks.append(Check("docker-daemon", "OK" if docker.daemon_available(runner=runner) else "WARN", "needed for runtime testing and capture; start or unpause Docker before that work"))
-        checks.append(Check("runtime-image", "OK" if docker.image_exists("vigil:latest", runner=runner) else "MISSING"))
-        checks.append(Check("mitmproxy-image", "OK" if docker.image_exists("vigil-proxy:latest", runner=runner) else "MISSING"))
-        # Drift only exists for a running container; a stopped/absent proxy is
-        # OK because the next `vigil mitmproxy start` picks up the current image.
-        mitm_drift = docker.container_running("vigil-proxy", runner=runner) and proxy_image_drift(runner=runner)
-        checks.append(
-            Check("mitmproxy-container-drift", "STALE", "container older than image; run `vigil mitmproxy start`")
-            if mitm_drift
-            else Check("mitmproxy-container-drift", "OK")
-        )
-        if runtime_status(runner=runner) == "running":
-            checks.append(Check("runtime-mounts", "OK" if runtime_mounts_ok(install_root, runner=runner) else "FAIL"))
-            for tool in ("dtach", "tmux", "frpc", "interactsh-server", "interactsh-client"):
-                result = runner(["docker", "exec", default_runtime_container(), "sh", "-lc", f"command -v {tool} >/dev/null"])
-                checks.append(Check(f"runtime-tool:{tool}", "OK" if result.returncode == 0 else "MISSING"))
+        daemon_available = docker.daemon_available(runner=runner)
+        daemon_detail = "needed for runtime testing and capture; start or unpause Docker before that work"
+        checks.append(Check("docker-daemon", "OK" if daemon_available else "WARN", daemon_detail))
+        if daemon_available:
+            checks.append(Check("runtime-image", "OK" if docker.image_exists("vigil:latest", runner=runner) else "MISSING"))
+            checks.append(Check("mitmproxy-image", "OK" if docker.image_exists("vigil-proxy:latest", runner=runner) else "MISSING"))
+            # Drift only exists for a running container; a stopped/absent proxy is
+            # OK because the next `vigil mitmproxy start` picks up the current image.
+            mitm_drift = docker.container_running("vigil-proxy", runner=runner) and proxy_image_drift(runner=runner)
+            checks.append(
+                Check("mitmproxy-container-drift", "STALE", "container older than image; run `vigil mitmproxy start`")
+                if mitm_drift
+                else Check("mitmproxy-container-drift", "OK")
+            )
+            if runtime_status(runner=runner) == "running":
+                checks.append(Check("runtime-mounts", "OK" if runtime_mounts_ok(install_root, runner=runner) else "FAIL"))
+                for tool in ("dtach", "tmux", "frpc", "interactsh-server", "interactsh-client"):
+                    result = runner(["docker", "exec", default_runtime_container(), "sh", "-lc", f"command -v {tool} >/dev/null"])
+                    checks.append(Check(f"runtime-tool:{tool}", "OK" if result.returncode == 0 else "MISSING"))
+        else:
+            unknown_detail = "Docker daemon unavailable; image and container state were not inspected"
+            checks.extend(
+                Check(name, "SKIPPED", unknown_detail)
+                for name in ("runtime-image", "mitmproxy-image", "mitmproxy-container-drift")
+            )
     else:
         detail = "docker CLI not found" if binary_status.get("docker") == "MISSING" else "docker --version failed"
         checks.append(Check("docker-daemon", "SKIPPED", detail))
@@ -654,6 +677,26 @@ def collect_doctor_checks(install_root: Path, *, runner: docker.Runner = docker.
 
 
 def print_doctor(checks: list[Check]) -> None:
+    if term.is_terminal(sys.stdout):
+        print(term.heading("Vigil doctor", stream=sys.stdout))
+        for check in checks:
+            if check.status == "OK":
+                state = "ok"
+            elif check.status == "FAIL" or (check.required and check.status != "OK"):
+                state = "fail"
+            elif check.status in {"WARN", "MISSING", "STALE"}:
+                state = "warn"
+            else:
+                state = "info"
+            print(
+                term.row(
+                    state,
+                    check.name,
+                    check.detail,
+                    stream=sys.stdout,
+                )
+            )
+        return
     for check in checks:
         suffix = f"\t{check.detail}" if check.detail else ""
         print(f"{check.status}\t{check.name}{suffix}")

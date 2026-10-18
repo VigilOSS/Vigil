@@ -41,6 +41,7 @@ import os
 import shutil
 import sys
 import textwrap
+from collections.abc import Iterable
 from typing import TextIO
 
 # Narrower than this and wrapping shreds prose into near-vertical text; wider
@@ -121,6 +122,11 @@ def paint(text: str, *styles: str, stream: TextIO = sys.stderr) -> str:
     return f"\x1b[{';'.join(codes)}m{text}{_RESET}"
 
 
+def heading(text: str, *, stream: TextIO = sys.stdout) -> str:
+    """Render a section heading without changing redirected output."""
+    return paint(text, "bold", stream=stream)
+
+
 def wrap(text: str, *, indent: str = "", stream: TextIO = sys.stderr) -> str:
     """Fill `text` to the terminal width, or return the single line off a TTY.
 
@@ -170,6 +176,75 @@ def row(state: str, label: str, detail: str = "", *, stream: TextIO = sys.stderr
     if detail:
         rendered = f"{rendered}  {paint(detail, 'dim', stream=stream)}"
     return rendered
+
+
+def print_records(
+    title: str,
+    records: Iterable[str],
+    *,
+    stream: TextIO = sys.stdout,
+) -> None:
+    """Print stable tab records as a compact human section on a TTY.
+
+    Callers keep ownership of their plain-text contract. This adapter changes
+    only interactive presentation and writes every supplied record unchanged
+    when output is redirected.
+    """
+    materialized = list(records)
+    if not is_terminal(stream):
+        for record in materialized:
+            print(record, file=stream)
+        return
+    print(heading(title, stream=stream), file=stream)
+    for record in materialized:
+        print(record_line(record, stream=stream), file=stream)
+
+
+def record_line(record: str, *, stream: TextIO = sys.stdout) -> str:
+    """Render one tab record for a person, or return it unchanged off a TTY."""
+    if not is_terminal(stream):
+        return record
+    fields = record.split("\t")
+    key = fields[0]
+    if key.lower() in {"warn", "warning"}:
+        state, label = "warn", "Attention"
+        detail = " · ".join(fields[1:])
+    elif key.lower() in {"fail", "error"}:
+        state, label = "fail", "Problem"
+        detail = " · ".join(fields[1:])
+    else:
+        label = {
+            "mitmproxy": "mitmproxy",
+            "oob": "OOB",
+        }.get(key.lower(), key.replace("-", " ").replace("_", " ").capitalize())
+        detail = " · ".join(fields[1:])
+        state = _record_state(fields[1:])
+    return row(state, label, detail, stream=stream)
+
+
+def _record_state(fields: list[str]) -> str:
+    text = " ".join(fields).lower()
+    if any(token in text for token in ("unhealthy", "failed", "error", "unavailable")):
+        return "fail"
+    if any(token in text for token in ("stale", "missing", "stopped", "restart-needed", "false")):
+        return "warn"
+    if any(
+        token in text
+        for token in (
+            "running",
+            "ready",
+            "current",
+            "active",
+            "built",
+            "up to date",
+            "status=ok",
+            "healthy=true",
+            "present=true",
+            "mounts_ok=true",
+        )
+    ):
+        return "ok"
+    return "info"
 
 
 def _style_code(style: str) -> str:

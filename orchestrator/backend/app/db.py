@@ -6096,10 +6096,10 @@ def _migrate_remediation_finding_links(db_path: Path) -> None:
 def _create_remediation_tables(connection: sqlite3.Connection) -> None:
     connection.execute(_REMEDIATION_CASE_TABLE_SQL.format(if_not_exists="IF NOT EXISTS ", table="remediation_cases"))
     _create_remediation_finding_links(connection)
-    connection.executescript("""
-        CREATE INDEX IF NOT EXISTS idx_remediation_cases_queue
-            ON remediation_cases(engagement_id, status, updated_at DESC);
-        CREATE TABLE IF NOT EXISTS remediation_evidence (
+    statements = (
+        """CREATE INDEX IF NOT EXISTS idx_remediation_cases_queue
+            ON remediation_cases(engagement_id, status, updated_at DESC)""",
+        """CREATE TABLE IF NOT EXISTS remediation_evidence (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             case_id INTEGER NOT NULL REFERENCES remediation_cases(id) ON DELETE CASCADE,
             kind TEXT NOT NULL,
@@ -6113,8 +6113,8 @@ def _create_remediation_tables(connection: sqlite3.Connection) -> None:
             artifact_sha256 TEXT,
             revision TEXT,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        );
-        CREATE TABLE IF NOT EXISTS remediation_approvals (
+        )""",
+        """CREATE TABLE IF NOT EXISTS remediation_approvals (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             case_id INTEGER NOT NULL REFERENCES remediation_cases(id) ON DELETE CASCADE,
             reviewer TEXT NOT NULL,
@@ -6124,8 +6124,8 @@ def _create_remediation_tables(connection: sqlite3.Connection) -> None:
             approval_method TEXT NOT NULL DEFAULT 'ui',
             owner_instruction TEXT,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        );
-        CREATE TABLE IF NOT EXISTS remediation_transitions (
+        )""",
+        """CREATE TABLE IF NOT EXISTS remediation_transitions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             case_id INTEGER NOT NULL REFERENCES remediation_cases(id) ON DELETE CASCADE,
             from_status TEXT NOT NULL,
@@ -6133,8 +6133,8 @@ def _create_remediation_tables(connection: sqlite3.Connection) -> None:
             actor TEXT NOT NULL,
             reason TEXT NOT NULL,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        );
-        CREATE TABLE IF NOT EXISTS remediation_deployments (
+        )""",
+        """CREATE TABLE IF NOT EXISTS remediation_deployments (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             case_id INTEGER NOT NULL REFERENCES remediation_cases(id) ON DELETE CASCADE,
             approval_id INTEGER REFERENCES remediation_approvals(id),
@@ -6145,8 +6145,8 @@ def _create_remediation_tables(connection: sqlite3.Connection) -> None:
             observed_revision TEXT NOT NULL,
             actor TEXT NOT NULL,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        );
-        CREATE TABLE IF NOT EXISTS remediation_human_verifications (
+        )""",
+        """CREATE TABLE IF NOT EXISTS remediation_human_verifications (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             case_id INTEGER NOT NULL REFERENCES remediation_cases(id) ON DELETE CASCADE,
             deployment_id INTEGER NOT NULL REFERENCES remediation_deployments(id) ON DELETE CASCADE,
@@ -6155,8 +6155,8 @@ def _create_remediation_tables(connection: sqlite3.Connection) -> None:
             observed_revision TEXT NOT NULL,
             notes TEXT NOT NULL,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        );
-        CREATE TABLE IF NOT EXISTS remediation_environment_leases (
+        )""",
+        """CREATE TABLE IF NOT EXISTS remediation_environment_leases (
             scope TEXT NOT NULL,
             environment TEXT NOT NULL,
             case_id INTEGER NOT NULL REFERENCES remediation_cases(id) ON DELETE CASCADE,
@@ -6166,10 +6166,15 @@ def _create_remediation_tables(connection: sqlite3.Connection) -> None:
             acquired_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             released_at TEXT,
             released_by TEXT
-        );
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_remediation_environment_owner
-            ON remediation_environment_leases(scope, environment) WHERE released_at IS NULL;
-    """)
+        )""",
+        """CREATE UNIQUE INDEX IF NOT EXISTS idx_remediation_environment_owner
+            ON remediation_environment_leases(scope, environment) WHERE released_at IS NULL""",
+    )
+    # sqlite3.Connection.executescript() commits an open transaction before it
+    # runs. Keep every additive statement inside init_db()'s BEGIN IMMEDIATE so
+    # concurrent startup workers cannot interleave later FTS/table creation.
+    for statement in statements:
+        connection.execute(statement)
     for column in ("base_branch", "base_revision", "review_policy_json", "verification_requirements_json"):
         if column not in _table_columns(connection, "remediation_cases"):
             connection.execute(f"ALTER TABLE remediation_cases ADD COLUMN {column} TEXT")
@@ -6254,6 +6259,7 @@ def init_db() -> None:
             proof_work_backup = _create_adjacent_migration_backup(db_path, label="proof-work")
     with closing(sqlite3.connect(str(db_path))) as connection, connection:
         connection.row_factory = sqlite3.Row
+        connection.execute(f"PRAGMA busy_timeout = {_resolve_busy_timeout_ms()}")
         connection.execute("PRAGMA foreign_keys = ON")
         # WAL mode lets readers (including `sqlite3 .backup` snapshots and the
         # 15-minute backend backup task) run concurrently with writers without
@@ -6261,6 +6267,12 @@ def init_db() -> None:
         # causes backups to collide with active writes and return SQLITE_BUSY.
         connection.execute("PRAGMA journal_mode = WAL")
         _require_fts5(connection)
+        # Two startup workers can observe the same pre-migration schema and
+        # create their adjacent backups concurrently. Serialize the schema
+        # transaction after that observation point: concurrent FTS5 virtual
+        # table construction is not safe even when every DDL statement uses
+        # IF NOT EXISTS.
+        connection.execute("BEGIN IMMEDIATE")
         _create_core_tables(connection)
         _create_remediation_tables(connection)
         _create_credentials_table(connection)

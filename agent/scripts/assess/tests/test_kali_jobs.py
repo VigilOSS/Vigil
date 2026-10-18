@@ -137,6 +137,7 @@ def test_start_job_wrapper_and_started_at(monkeypatch, tmp_path):
 
     monkeypatch.setattr(kali_jobs.subprocess, "run", fake_run)
     monkeypatch.setattr(kali_jobs, "_container_running", lambda *a, **k: True)
+    monkeypatch.setattr(kali_jobs, "_check_container_running", lambda *a, **k: None)
     monkeypatch.setattr(kali_jobs, "_check_dtach_in_container", lambda *a, **k: None)
     monkeypatch.setattr(kali_jobs, "_ensure_dtach_dir", lambda *a, **k: None)
     monkeypatch.setattr(kali_jobs, "AssessmentClient", lambda *a, **k: fake)
@@ -204,6 +205,7 @@ def test_start_job_emits_nonblocking_recency_advisory_before_dtach(
     fake = FakeClient(post_value={"id": 17})
     events: list[str] = []
     monkeypatch.setattr(kali_jobs, "_container_running", lambda *a, **k: True)
+    monkeypatch.setattr(kali_jobs, "_check_container_running", lambda *a, **k: None)
     monkeypatch.setattr(kali_jobs, "_check_dtach_in_container", lambda *a, **k: None)
     monkeypatch.setattr(kali_jobs, "_ensure_dtach_dir", lambda *a, **k: None)
     monkeypatch.setattr(kali_jobs, "AssessmentClient", lambda *a, **k: fake)
@@ -253,6 +255,7 @@ def test_start_job_creates_command_audit_before_linked_job_and_spawn(
 
     fake = LifecycleClient()
     monkeypatch.setattr(kali_jobs, "_container_running", lambda *a, **k: True)
+    monkeypatch.setattr(kali_jobs, "_check_container_running", lambda *a, **k: None)
     monkeypatch.setattr(kali_jobs, "_check_dtach_in_container", lambda *a, **k: None)
     monkeypatch.setattr(kali_jobs, "_ensure_dtach_dir", lambda *a, **k: None)
     monkeypatch.setattr(kali_jobs, "AssessmentClient", lambda *a, **k: fake)
@@ -439,6 +442,7 @@ def test_start_job_sizes_deadline_from_requested_timeout(monkeypatch, tmp_path):
 
     monkeypatch.setattr(kali_jobs.subprocess, "run", fake_run)
     monkeypatch.setattr(kali_jobs, "_container_running", lambda *a, **k: True)
+    monkeypatch.setattr(kali_jobs, "_check_container_running", lambda *a, **k: None)
     monkeypatch.setattr(kali_jobs, "_check_dtach_in_container", lambda *a, **k: None)
     monkeypatch.setattr(kali_jobs, "_ensure_dtach_dir", lambda *a, **k: None)
     monkeypatch.setattr(kali_jobs, "AssessmentClient", lambda *a, **k: fake)

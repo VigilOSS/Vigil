@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -10,6 +11,20 @@ from tests.test_engagements_api import write_engagement, _author_provenance
 
 KEY = '2026-03-30-120000-example'
 BASE = f'/engagements/{KEY}/assessment'
+
+
+@pytest.mark.parametrize(
+    'create_schema',
+    (db._create_remediation_tables, db.db_proof_work_schema.create_tables),
+)
+def test_additive_schema_helpers_preserve_the_callers_transaction(create_schema):
+    connection = sqlite3.connect(':memory:')
+    try:
+        connection.execute('BEGIN IMMEDIATE')
+        create_schema(connection)
+        assert connection.in_transaction is True
+    finally:
+        connection.close()
 
 
 def seed(client, isolate_settings):

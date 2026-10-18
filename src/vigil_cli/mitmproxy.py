@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import shutil
 import socket
+import sys
 import tempfile
 import time
 from collections.abc import Iterator
@@ -12,6 +13,7 @@ from pathlib import Path
 
 from . import docker
 from . import image_freshness
+from . import term
 from .application import application_root_for_workspace
 from .paths import container_host_url, resolve_orchestrator_base_url
 
@@ -21,6 +23,10 @@ _PORT_WAIT_DELAY_SECONDS = 0.2
 _CONTAINER_NAME = "vigil-proxy"
 _RELOAD_SENTINEL = ".mitmproxy-reload-requested"
 _ROUTES_CACHE = ".mitmproxy-routes.json"
+
+
+def _emit(record: str) -> None:
+    print(term.record_line(record, stream=sys.stdout))
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,9 +129,9 @@ def build_image(
     if not force and not image_freshness.image_outdated(
         image, inputs, root=install_root, runner=meta_runner
     ):
-        print(f"mitmproxy\timage current (up to date with source)\t{image}")
+        _emit(f"mitmproxy\timage current (up to date with source)\t{image}")
         return
-    print(f"mitmproxy\tbuilding\timage={image}")
+    _emit(f"mitmproxy\tbuilding\timage={image}")
     with _proxy_build_context(install_root) as build_context:
         argv = [
             "docker",
@@ -143,7 +149,7 @@ def build_image(
             str(build_context),
         ]
         docker.require_success(image_build_runner(argv), argv)
-    print(f"mitmproxy\timage built\t{image}")
+    _emit(f"mitmproxy\timage built\t{image}")
 
 
 def mitmproxy_image_inputs(install_root: Path) -> list[Path]:
@@ -207,7 +213,7 @@ def start_proxy(
         )
 
     if docker.container_running(options.container_name, runner=exec_runner):
-        print(f"mitmproxy\tstopping\tcontainer={options.container_name}")
+        _emit(f"mitmproxy\tstopping\tcontainer={options.container_name}")
         exec_runner(["docker", "stop", options.container_name])
     if docker.container_exists(options.container_name, runner=exec_runner):
         exec_runner(["docker", "rm", options.container_name])
@@ -250,7 +256,7 @@ def start_proxy(
         "--set",
         "http2=false",
     ]
-    print(f"mitmproxy\tstarting\tcontainer={options.container_name}\tport={options.port}")
+    _emit(f"mitmproxy\tstarting\tcontainer={options.container_name}\tport={options.port}")
     docker.run_with_host_gateway_fallback(argv, runner=exec_runner)
     if verify_port and not _wait_for_port("127.0.0.1", options.port):
         # Distinguish "port never opened" from "port opened then container
@@ -270,7 +276,7 @@ def start_proxy(
         raise SystemExit(
             f"mitmproxy container started but exited within seconds. Last log lines:\n{tail}"
         )
-    print(
+    _emit(
         f"mitmproxy\trunning\tcontainer={options.container_name}\tport={options.port}\t"
         f"engagements_root={engagements_root}"
     )
@@ -278,11 +284,11 @@ def start_proxy(
 
 def stop_proxy(container_name: str = _CONTAINER_NAME, *, runner: docker.Runner = docker.run_command) -> None:
     if not docker.container_exists(container_name, runner=runner):
-        print(f"mitmproxy\tnot running\t{container_name}")
+        _emit(f"mitmproxy\tnot running\t{container_name}")
         return
-    print(f"mitmproxy\tstopping\tcontainer={container_name}")
+    _emit(f"mitmproxy\tstopping\tcontainer={container_name}")
     runner(["docker", "rm", "-f", container_name])
-    print(f"mitmproxy\tstopped\tcontainer={container_name}")
+    _emit(f"mitmproxy\tstopped\tcontainer={container_name}")
 
 
 def proxy_status_payload(
