@@ -105,8 +105,10 @@ describe("OastTab detail evidence", () => {
     await screen.findByRole("dialog");
     vi.mocked(listOobProbes).mockResolvedValue([]);
     view.rerender(<ToastProvider><OastTab engagementKey="demo" refreshVersion={1} /></ToastProvider>);
-    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
-    expect(document.body.classList.contains("detail-modal-open")).toBe(false);
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog")).toBeNull();
+      expect(document.body.classList.contains("detail-modal-open")).toBe(false);
+    });
   });
 
   it("defaults to the actionable worklist and keeps the full inventory available", async () => {
