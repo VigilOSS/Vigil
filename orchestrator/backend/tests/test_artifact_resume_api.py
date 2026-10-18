@@ -1378,6 +1378,7 @@ def test_resume_brief_stale_threshold_per_role(client, isolate_settings) -> None
         json={
             "agent_id": "exp-old",
             "agent_role": "exploit-developer",
+            "assessment_mode": "web",
             "task": "deep chain",
             "skills": "exploit-playbook-authoring",
             "dispatched_at": old_iso,

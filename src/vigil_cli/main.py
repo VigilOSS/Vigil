@@ -28,6 +28,7 @@ from . import remediation as remediation_module
 from . import term
 from .docker import run_command as docker_run_command
 from .engagements import (
+    BackendInstallRootStatus,
     PROGRAM_HEADER_PRESETS,
     CreateEngagementOptions,
     _verify_backend_install_root,
@@ -1818,7 +1819,8 @@ def _engagement(args: argparse.Namespace, install_root: Path) -> None:
         else:
             mutation_result = set_engagement_rate_limit(install_root, args.key, args.value)
         eng_dir = engagements_root(install_root) / args.key
-        if not _verify_backend_install_root(install_root, eng_dir):
+        backend_state = _verify_backend_install_root(install_root, eng_dir)
+        if backend_state != BackendInstallRootStatus.VERIFIED:
             raise SystemExit(
                 f"scope mutation committed at {eng_dir / 'scope.json'}, but backend "
                 "sync was not confirmed. Start or restart the orchestrator against "

@@ -444,7 +444,9 @@ def test_add_host_on_a_code_engagement_points_at_add_track(tmp_path, capsys):
     add_engagement_hosts(tmp_path, "code1", ["api.example"])
 
     assert json.loads((eng / "scope.json").read_text())["engagement_type"] == "code"
-    assert "vigil engagement add-track code1 web" in capsys.readouterr().err
+    notice = capsys.readouterr().err
+    assert "bounded approved proof" in notice
+    assert "broader web discovery" in notice
 
 
 def test_add_host_is_refused_on_an_engagement_with_no_host_scope(tmp_path):
@@ -662,7 +664,10 @@ def test_cli_exposes_canonical_scope_mutations(
     monkeypatch.setattr(main, helper, fake, raising=False)
     monkeypatch.setattr(main, "resolve_install_root", lambda *_args: tmp_path)
     monkeypatch.setattr(
-        main, "_verify_backend_install_root", lambda *_args: True, raising=False
+        main,
+        "_verify_backend_install_root",
+        lambda *_args: main.BackendInstallRootStatus.VERIFIED,
+        raising=False,
     )
     monkeypatch.setattr(main, "request_proxy_reload", lambda *_args: None)
 
@@ -683,7 +688,11 @@ def test_scope_mutation_reports_retryable_backend_sync_partial(
         lambda *_args: {"engagement_type": "both"},
     )
     monkeypatch.setattr(main, "resolve_install_root", lambda *_args: tmp_path)
-    monkeypatch.setattr(main, "_verify_backend_install_root", lambda *_args: False)
+    monkeypatch.setattr(
+        main,
+        "_verify_backend_install_root",
+        lambda *_args: main.BackendInstallRootStatus.SYNC_PENDING,
+    )
     monkeypatch.setattr(
         main,
         "request_proxy_reload",

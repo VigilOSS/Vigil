@@ -41,7 +41,10 @@ def test_prepare_and_claim_expose_explicit_route_and_atomic_ownership(tmp_path, 
     assert calls == [
         ('proof-work', {'finding_slug': 'VA-050', 'route': 'code',
                         'objective': 'Challenge the supported API replay', 'target_hosts': []}),
-        ('proof-work/3/claim', {'agent_id': 'PROOF-1', 'agent_role': 'exploit-developer'}),
+        ('proof-work/3/claim', {
+            'agent_id': 'PROOF-1', 'agent_role': 'exploit-developer',
+            'assessment_mode': 'code',
+        }),
     ]
 
 

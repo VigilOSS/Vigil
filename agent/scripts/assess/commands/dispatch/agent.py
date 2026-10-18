@@ -16,6 +16,7 @@ from typing import Any
 from assess.lib.client import AssessmentClient, AssessError
 from assess.lib.config import load_config
 from assess.lib.contracts import (
+    MIXED_ASSESSMENT_ROLES,
     default_dispatch_mode_for_role,
     validate_specialist_dispatch_contract,
 )
@@ -95,6 +96,7 @@ def _build_register_payload(args) -> dict:
         "requested_model": getattr(args, "dispatch_model", None),
         "requested_reasoning": getattr(args, "reasoning", None),
         "dispatch_mode": getattr(args, "dispatch_mode_arg", None),
+        "assessment_mode": getattr(args, "assessment_mode", None),
         "skills": getattr(args, "skills", None),
         "tier": getattr(args, "tier", None),
         "vuln_classes": getattr(args, "vuln_classes", None),
@@ -190,6 +192,12 @@ def _build_register_payload(args) -> dict:
             "Pass --dispatch-mode explicitly to override.",
             file=sys.stderr,
         )
+    if payload.get("agent_role") in MIXED_ASSESSMENT_ROLES and not payload.get("assessment_mode"):
+        print(
+            f"agent start: {payload.get('agent_role')} requires --assessment-mode code|web",
+            file=sys.stderr,
+        )
+        sys.exit(1)
     errors, warnings = validate_specialist_dispatch_contract(payload)
     for warning in warnings:
         print(f"WARN agent start: {warning}", file=sys.stderr)

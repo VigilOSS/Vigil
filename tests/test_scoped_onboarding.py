@@ -43,7 +43,7 @@ def test_code_session_preflight_does_not_query_docker(tmp_path, monkeypatch):
     (engagement / "scope.json").write_text(json.dumps({"engagement_type": "offensive", "tracks": {"code": {"phase": "hunt"}}}))
     monkeypatch.setattr(preflight.shutil, "which", lambda _: "/bin/acme")
     monkeypatch.setattr(preflight, "orchestrator_status", lambda _: "running")
-    monkeypatch.setattr(engagements, "_verify_backend_install_root", lambda *_: True)
+    monkeypatch.setattr(engagements, "_verify_backend_install_root", lambda *_: engagements.BackendInstallRootStatus.VERIFIED)
     monkeypatch.setattr(preflight, "runtime_status", lambda: pytest.fail("static session must not query Docker"))
     monkeypatch.setattr(preflight, "_warn_if_install_stale", lambda _: None)
     preflight._preflight_engagement_start(tmp_path, engagement, "codex")
@@ -59,7 +59,7 @@ def test_session_recovers_only_managed_local_backend(tmp_path, monkeypatch):
     monkeypatch.setattr(preflight, "_warn_if_install_stale", lambda _: None)
     started = []
     monkeypatch.setattr(orchestrator, "start_orchestrator", lambda options: started.append(options))
-    monkeypatch.setattr(engagements, "_verify_backend_install_root", lambda *_: True)
+    monkeypatch.setattr(engagements, "_verify_backend_install_root", lambda *_: engagements.BackendInstallRootStatus.VERIFIED)
     monkeypatch.delenv("ORCHESTRATOR_BASE_URL", raising=False)
     monkeypatch.setenv("VIGIL_CONFIG", str(tmp_path / "config.json"))
     preflight._preflight_engagement_start(tmp_path, engagement, "codex")
@@ -79,10 +79,102 @@ def test_failed_managed_backend_recovery_refuses_launch(tmp_path, monkeypatch):
     monkeypatch.setattr(preflight, "orchestrator_status", lambda _: "stopped")
     monkeypatch.setattr(preflight, "_warn_if_install_stale", lambda _: None)
     monkeypatch.setattr(orchestrator, "start_orchestrator", lambda _: None)
-    monkeypatch.setattr(engagements, "_verify_backend_install_root", lambda *_: False)
+    monkeypatch.setattr(engagements, "_verify_backend_install_root", lambda *_: engagements.BackendInstallRootStatus.UNREACHABLE)
     monkeypatch.delenv("ORCHESTRATOR_BASE_URL", raising=False)
     monkeypatch.setenv("VIGIL_CONFIG", str(tmp_path / "config.json"))
     with pytest.raises(SystemExit, match="backend"):
+        preflight._preflight_engagement_start(tmp_path, engagement, "codex")
+
+
+def test_explicit_remote_backend_outage_warns_without_blocking_local_launch(tmp_path, monkeypatch, capsys):
+    engagement = tmp_path / "acme"
+    engagement.mkdir()
+    (engagement / "scope.json").write_text('{"engagement_type":"code"}')
+    monkeypatch.setattr(preflight.shutil, "which", lambda _: "/bin/acme")
+    monkeypatch.setattr(preflight, "_warn_if_install_stale", lambda _: None)
+    monkeypatch.setattr(
+        engagements,
+        "_verify_backend_install_root",
+        lambda *_: engagements.BackendInstallRootStatus.UNREACHABLE,
+    )
+    monkeypatch.setenv("ORCHESTRATOR_BASE_URL", "https://orchestrator.example.com")
+
+    preflight._preflight_engagement_start(tmp_path, engagement, "codex")
+
+    assert "unreachable" in capsys.readouterr().err.lower()
+
+
+def test_transient_backend_sync_failure_warns_without_blocking_launch(tmp_path, monkeypatch, capsys):
+    engagement = tmp_path / "acme"
+    engagement.mkdir()
+    (engagement / "scope.json").write_text('{"engagement_type":"code"}')
+    monkeypatch.setattr(preflight.shutil, "which", lambda _: "/bin/acme")
+    monkeypatch.setattr(preflight, "orchestrator_status", lambda _: "running")
+    monkeypatch.setattr(preflight, "_warn_if_install_stale", lambda _: None)
+    monkeypatch.setattr(
+        engagements,
+        "_verify_backend_install_root",
+        lambda *_: engagements.BackendInstallRootStatus.SYNC_PENDING,
+    )
+
+    preflight._preflight_engagement_start(tmp_path, engagement, "codex")
+
+    assert "sync" in capsys.readouterr().err.lower()
+
+
+@pytest.mark.parametrize(
+    ('status_code', 'body'),
+    [
+        (500, '{}'),
+        (404, '{}'),
+        (200, '{malformed'),
+        (200, '[]'),
+        (200, '{}'),
+        (200, '{"install_root":""}'),
+    ],
+    ids=[
+        'admin-http-error',
+        'legacy-admin-unsupported',
+        'malformed-admin-json',
+        'non-object-admin-json',
+        'missing-install-root',
+        'blank-install-root',
+    ],
+)
+def test_reachable_remote_backend_protocol_error_refuses_launch(
+    tmp_path, monkeypatch, status_code, body
+):
+    import http.client
+
+    engagement = tmp_path / "acme"
+    engagement.mkdir()
+    (engagement / "scope.json").write_text('{"engagement_type":"code"}')
+    monkeypatch.setattr(preflight.shutil, "which", lambda _: "/bin/acme")
+    monkeypatch.setattr(preflight, "_warn_if_install_stale", lambda _: None)
+    monkeypatch.setenv("ORCHESTRATOR_BASE_URL", "http://orchestrator.example.com")
+
+    class Response:
+        status = status_code
+
+        def read(self):
+            return body.encode()
+
+    class Connection:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def request(self, *_args, **_kwargs):
+            pass
+
+        def getresponse(self):
+            return Response()
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(http.client, 'HTTPConnection', Connection)
+
+    with pytest.raises(SystemExit, match='backend is not ready'):
         preflight._preflight_engagement_start(tmp_path, engagement, "codex")
 
 

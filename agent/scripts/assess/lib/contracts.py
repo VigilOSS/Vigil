@@ -33,6 +33,7 @@ from .surfaces import (
 # command modules import, while the data can be maintained independently.
 from .contract_registry import (
     BINDABLE_CLIENTS as BINDABLE_CLIENTS,
+    MIXED_ASSESSMENT_ROLES as MIXED_ASSESSMENT_ROLES,
     CATALOG_PHASES as CATALOG_PHASES,
     COMMAND_GOALS as COMMAND_GOALS,
     CODE_REPO_ROLES as CODE_REPO_ROLES,
@@ -1953,6 +1954,7 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
             preferred_invocations=(
                 "vigil assess agent start-swarm --role <role> --task \"...\" "
                 "--workers <n> --batch-size <n> --items-file <path> "
+                "[--assessment-mode code|web] "
                 "(--rate-budget \"<authored>\" | --no-target-traffic)",
             ),
             author_supplied_fields=(
@@ -1961,6 +1963,7 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
                 "--workers (maximum number of dispatch rows to record)",
                 "--batch-size (contiguous items assigned to each worker)",
                 "--items-file (non-empty line-delimited work list)",
+                "--assessment-mode code|web (required for mixed-role workers)",
                 "exactly one traffic declaration: --rate-budget <authored text> or --no-target-traffic",
                 "optional --skills / --model / --reasoning / --code-repo-id / --finding-slugs / --vuln-classes / --identity / --application-unit-id / --tier shared by every row",
             ),
@@ -1980,7 +1983,7 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
             summary=(
                 "Register a specialist dispatch in the backend audit ledger so the "
                 "row carries role, task, optional application-unit attribution, "
-                "requested model/reasoning, dispatch-mode, and the skills "
+                "requested model/reasoning, dispatch-mode, assessment-mode, and the skills "
                 "the agent loaded."
             ),
             schema_name="backend DispatchCreate (POST /dispatches)",
@@ -1990,6 +1993,7 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
                 "[--code-repo-id <repo-id>] "
                 "--model <name> --reasoning <level> "
                 "--dispatch-mode <mode> --skills \"<skill>[,<skill>...]\" "
+                "[--assessment-mode code|web] "
                 "(--rate-budget \"<authored>\" | --no-target-traffic) "
                 "[--prompt-context-json <context.json> --emit-prompt]",
                 "vigil assess agent start --from-json <payload.json> [--emit-prompt]",
@@ -1999,6 +2003,7 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
                 "--agent-id (unique per dispatch)",
                 "--role (specialist role; operator role is reserved for phase coordination)",
                 "--dispatch-mode (hypothesis-driven|item-iterating|deep-manual|variant-rotation)",
+                "--assessment-mode code|web (required for exploit-developer and source-analyzer; proof-work supplies its authoritative route)",
                 "--skills (comma-separated; optional — omitting it WARNs, never blocks)",
                 "--task (one-line objective)",
                 "--application-unit-id (optional concrete application-unit identity for depth attribution)",

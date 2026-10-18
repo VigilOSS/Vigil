@@ -409,12 +409,17 @@ When the operator launches a specialist, register the dispatch up front:
 ```bash
 vigil assess agent start \
     --agent-id <id> --role <role> \
+    [--assessment-mode code|web] \
     --task "..." \
     --model <name> --reasoning <level> --dispatch-mode <mode> \
     --skills "<skill-name>[,<skill-name>...]" \
     --rate-budget "<exact authored rate/concurrency instruction>" \
     --prompt-context-json dispatch-context.json --emit-prompt
 ```
+
+`--assessment-mode` is required for mixed-role specialists (`exploit-developer` and
+`source-analyzer`). Proof-work launches receive the authoritative mode from their
+backend-selected `proof_route`; ordinary dispatches must supply it explicitly.
 
 `agent start` also lints `--task` for a prescriptive technique cage, runs a default-on duplicate-overlap advisory, and validates the whole `--emit-prompt` prompt-context object before the write. `vigil assess contract agent` and `vigil assess contract agent start` own all three; hand the specialist an open objective plus the measured coverage picture (`vigil assess coverage --host <h> --for-dispatch`) rather than a recipe.
 For a code lane selected in a generated file, set `prompt_context.lane_file` so the emitted prompt carries the checked file/LOC manifest; `agent/references/runtime-guides/dispatch-template.md` owns the field shape.

@@ -76,6 +76,12 @@ def register(subparsers) -> None:
         default=None,
         choices=("hypothesis-driven", "item-iterating", "deep-manual", "variant-rotation", "swarm"),
     )
+    start.add_argument(
+        "--assessment-mode",
+        choices=("code", "web"),
+        default=None,
+        help="Required execution-method bundle for exploit-developer and source-analyzer.",
+    )
     start.add_argument("--skills", default=None)
     start.add_argument(
         "--tier",
@@ -140,6 +146,7 @@ def register(subparsers) -> None:
     swarm.add_argument("--task", required=True)
     swarm.add_argument("--skills", default=None)
     swarm.add_argument("--model", dest="dispatch_model", default=None)
+    swarm.add_argument("--assessment-mode", choices=("code", "web"), default=None)
     swarm.add_argument(
         "--reasoning",
         default=None,
@@ -402,6 +409,7 @@ def _continue(args) -> None:
             "requested_model": prior.get("requested_model"),
             "requested_reasoning": prior.get("requested_reasoning"),
             "dispatch_mode": prior.get("dispatch_mode"),
+            "assessment_mode": prior.get("assessment_mode"),
             "finding_slugs": prior.get("finding_slugs"),
             "skills": prior.get("skills"),
             "tier": prior.get("tier"),
@@ -965,6 +973,7 @@ def _runtime_identity_lines(row: dict) -> list[str]:
         "## Runtime Identity",
         f"agent_id: {row.get('agent_id')}",
         f"agent_role: {row.get('agent_role')}",
+        f"assessment_mode: {row.get('assessment_mode') or 'not applicable'}",
         "authorized_phase: <set-by-operator>",
     ]
 
@@ -1064,6 +1073,7 @@ def _dispatch_prompt(
         "## Runtime Identity",
         f"agent_id: {payload.get('agent_id')}",
         f"agent_role: {payload.get('agent_role')}",
+        f"assessment_mode: {payload.get('assessment_mode') or 'not applicable'}",
         f"authorized_phase: {prompt_context['authorized_phase']}",
     ]
     if source_identity:

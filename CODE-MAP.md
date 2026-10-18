@@ -53,6 +53,7 @@ When you are about to copy one of these into a second file, stop and import.
   surface type security meaning. See: `orchestrator/backend/tests/test_surface_framework_registration.py`.
 - `orchestrator/backend/app/api/assessment_operator.py:_LAUNCHED_CLIENT` owns the clients a dispatch can be
   BOUND to; `_DISPATCH_CLIENT` adds `unknown`, `contract_registry.py:BINDABLE_CLIENTS` mirrors it in the CLI.
+  `_MIXED_ASSESSMENT_ROLES` owns mode-required roles; `contract_registry.py:MIXED_ASSESSMENT_ROLES` mirrors it.
   See: `orchestrator/backend/tests/test_dispatch_client_binding_api.py`.
 - `agent/scripts/assess/lib/render_containment.py:contain_separators` owns how persisted,
   target-influenced text reaches an agent-readable document: lossless, indent-only, so nothing lands
@@ -94,6 +95,8 @@ When you are about to copy one of these into a second file, stop and import.
   roster; `KALI_VERBS` is their union. Registration and `agent/skills/kali-exec/SKILL.md` mirror it.
 - `agent/scripts/assess/lib/kali_output.py:KALI_EXIT_CODES` owns terminal status exit codes;
   `kali_cli.py:emit_result` is the output funnel and renders the help table.
+- `agent/skills/<name>/SKILL.md` owns discovered skill names; directory walking is the roster.
+  `--skills` enforcement is CLI-only and advisory under ADR 0019.
 - `orchestrator/backend/app/api/report_export.py`'s five `_*_FIELDS` rosters own what the
   client-delivered HTML carries; `orchestrator/report/src/types.ts` is the other half, index signature
   dropped so a renderer reaching past them is a type error. See: `docs/maintainer-guide.md` report-template section.
@@ -137,6 +140,7 @@ When you are about to copy one of these into a second file, stop and import.
 
 - `agent/operator-core.md` and `agent/operator-core-blue.md` render to the committed wrappers, and `agent/agents/*.md` render to the per-client agent trees, through `agent/scripts/render-operator-prompts.sh`. Run it with `repo`; `check` fails on drift.
 - `agent/commands/` owns operator commands. Renderer `COMMAND_NAMES` and explicit client metadata drive `agent/.claude/commands`, `agent/.codex/skills`, and native OpenCode/ZCode remediation commands. See: ADR 0017.
+- `agent/scripts/assess/lib/contracts.py` renders engagement binding into every command contract.
 - `src/vigil_cli/client_rosters.py` links those wrapper trees into an engagement as **per-entry symlinks** (`<engagement>/.claude/commands/`, `<engagement>/.codex/skills/`), so an engagement never carries a stale copy and an operator-authored command of the same name wins.
 - `orchestrator/backend/app/api/assessment.py` and `orchestrator/backend/app/api/code_analysis.py` feed the generated `agent/schemas/*.json` through `orchestrator/backend/scripts/generate_agent_schemas.py`. Check drift with that script's `--check` mode.
 - `agent/scripts/assess/lib/treesitter_index.py` owns parsing and dispatch;
@@ -209,12 +213,9 @@ A prompt change is **not** prompt-only when the prompt defines an artifact the b
 - `agent/scripts/assess/commands/export_submission.py` and `export_reply.py` assemble and present;
   neither rewrites authored content or masks credentials. Rendering helpers live in
   `agent/scripts/assess/lib/finding_render.py`.
-- `agent/scripts/assess/commands/operator_checkpoint.py` — `vigil assess operator-checkpoint`, the operator's own durable state. References plus one intent note; every reference is existence-checked in the write transaction.
-- `agent/scripts/assess/commands/resume_brief.py` — a **read**. It observes abandoned command runs, jobs and host children and names the verb that reconciles them; the reconciling write is owned solely by `vigil assess kali sweep-orphans`.
 - `agent/scripts/hooks/` — shared host hooks for activity logging, compaction, post-compaction
   operator rehydration, and session end. Command filtering is deliberately absent (ADR 0019).
   `goose-hook-adapter.sh` adapts Goose tool names.
-- `agent/docker/runtime-full/Dockerfile` — the supported target-facing tool surface. All baked inputs participate in image-digest drift checks.
 
 ### src/vigil_cli/ — the universal CLI
 
@@ -239,9 +240,6 @@ A prompt change is **not** prompt-only when the prompt defines an artifact the b
 - `orchestrator/backend/app/api/assessment.py` — live-state routes for recon, coverage, findings,
   command runs, and bulk ingestion; finding history supports summary and lossless transition reads.
   `assessment_operator.py` owns dispatch/handoff/decision/checkpoint routes; `submissions.py` owns immutable submission/sent-reply APIs.
-- `orchestrator/backend/app/api/intel.py` — per-engagement intel reads and writes. `/resolve` maps
-  untyped finding intel ids through the canonical search index without guessing across entity tables;
-  it reports resolved, missing, unsupported, dangling, and ambiguous ids.
 - `orchestrator/backend/app/api/code_analysis.py` — the only repo/file ingest write, lease-owned queue
   work, generation-bound compare-and-swap, and paginated queue reads. Its `item_ids` page and
   `code-dispatch fetch --ids-file` share ordering and current-generation filtering.
@@ -265,6 +263,10 @@ A prompt change is **not** prompt-only when the prompt defines an artifact the b
 
 ### Frontend and the rest
 
+- `tools/public_identity_policy.py` owns local/CI private policy loading; tracked guards contain no private fingerprints.
+- `orchestrator/frontend/` — operator SPA: `components/TabBar.tsx` owns tabs, `lib/api.ts` REST,
+  `lib/theme.ts` theme state, and `app.css` shared tokens.
+- `orchestrator/frontend/src/routes/RemediationPage.tsx` — remediation workspace entrypoint.
 - `orchestrator/frontend/src/lib/workspaceRoutes.ts` — canonical hash links/history. `App.tsx` routes separate assessment/remediation workspaces.
 - `orchestrator/frontend/src/components/ProofWorkTab.tsx` consumes durable proof work; UI actions never launch agents or verify findings.
 - `orchestrator/report/src/lib/poc.ts` owns copy-and-run `curl` quoting.

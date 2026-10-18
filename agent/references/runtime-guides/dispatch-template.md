@@ -236,6 +236,7 @@ Context: Phase 6. `vulnerability-analyst` confirmed two findings independently
 ## Runtime Identity
 agent_id: ex-chain-d4e1
 agent_role: exploit-developer
+assessment_mode: web
 authorized_phase: 6 (exploit)
 
 ## Dispatch Mindset
@@ -294,7 +295,7 @@ are `exploit-developer.md`'s own doctrine — this template does not restate the
 
 ```bash
 vigil assess agent start \
-    --agent-id ex-chain-d4e1 --role exploit-developer \
+    --agent-id ex-chain-d4e1 --role exploit-developer --assessment-mode web \
     --task "Chain-construction pass: admin SSO auth-bypass -> orders IDOR, full endpoint map self-served" \
     --model claude-opus-5 --reasoning high --dispatch-mode deep-manual \
     --skills "exploit-playbook-authoring" \

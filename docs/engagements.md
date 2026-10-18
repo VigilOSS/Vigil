@@ -59,8 +59,12 @@ the current directory, active pointer, or `--select` resolves the engagement.
 A preflight runs first. It **hard-fails** when the client binary is not on `PATH`, or when Goose or
 OpenCode has no `DEEPSEEK_API_KEY` in the environment, the engagement's `.orchestrator.env`, or the
 workspace's env files. It recovers the default managed local backend when needed and refuses
-launch if the configured backend is unavailable or belongs to another workspace. It never
-substitutes localhost for a configured remote endpoint. Static code startup does not query
+launch when that managed backend remains unavailable or when any reachable backend belongs to
+another workspace. A configured remote backend that is temporarily unreachable produces a
+warning and launches against local engagement files only; backend-dependent commands fail until
+that endpoint returns. A matching backend whose immediate synchronization races also warns and
+continues because the next backend request retries synchronization. Preflight never substitutes
+localhost for a configured remote endpoint. Static code startup does not query
 Docker. The first audited execution starts the managed Kali runtime if stopped; it never
 recreates a running service. Application freshness remains a warning. `--skip-preflight`
 bypasses these checks.

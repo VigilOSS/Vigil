@@ -45,7 +45,7 @@ def test_interactive_code_creation_needs_only_type_name_and_confirmation(workspa
 
     monkeypatch.setattr(main_module.sys, "stdin", TerminalInput("code\nAcme\ny\n"))
     monkeypatch.setattr(main_module, "_uses_prompt_ui", lambda: False)
-    monkeypatch.setattr(engagements, "_verify_backend_install_root", lambda *_: True)
+    monkeypatch.setattr(engagements, "_verify_backend_install_root", lambda *_: engagements.BackendInstallRootStatus.VERIFIED)
     main(["--root", str(workspace), "engagement", "create"])
     output = capsys.readouterr()
     path = Path(output.out.strip())

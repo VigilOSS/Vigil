@@ -204,6 +204,9 @@ FINDING_PATCH_FIELDS: tuple[tuple[str, str, str], ...] = (
 BINDABLE_CLIENTS: tuple[str, ...] = (
     "claude", "codex", "goose", "kimi", "opencode", "pi",
 )
+MIXED_ASSESSMENT_ROLES: frozenset[str] = frozenset(
+    {"exploit-developer", "source-analyzer"}
+)
 
 # Repository obligation role for `code-ingest --role`. MIRRORS the backend
 # `CODE_REPO_ROLES` in orchestrator/backend/app/services/code_analysis.py,

@@ -63,6 +63,8 @@ def test_create_reports_progress_before_slow_steps_on_stderr(
             assert output.out == ""
             assert stage in output.err
             messages.append(output.err)
+            if stage == "orchestrator":
+                return engagements.BackendInstallRootStatus.VERIFIED
         return check
 
     monkeypatch.setattr(engagements, "_write_issues_doc", expect_progress("files"))
@@ -201,7 +203,7 @@ def test_create_keeps_a_fully_written_engagement_when_backend_sync_fails(
     monkeypatch.setattr(engagements, "_install_client_kind", lambda *a, **k: "none")
     monkeypatch.setattr(engagements, "_emit_bootstrap_scope_summary", lambda *a, **k: None)
 
-    def refuse(*_args: object, **_kwargs: object) -> bool:
+    def refuse(*_args: object, **_kwargs: object) -> engagements.BackendInstallRootStatus:
         raise SystemExit("the running orchestrator does not know about it")
 
     monkeypatch.setattr(engagements, "_verify_backend_install_root", refuse)
@@ -507,7 +509,7 @@ def preflight_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     (engagement_dir / ".orchestrator.env").write_text("DEEPSEEK_API_KEY=test-key\n")
     monkeypatch.setattr(preflight_module.shutil, "which", lambda _name: "/usr/local/bin/client")
     monkeypatch.setattr(preflight_module, "orchestrator_status", lambda _root: "running")
-    monkeypatch.setattr(engagements, "_verify_backend_install_root", lambda *_: True)
+    monkeypatch.setattr(engagements, "_verify_backend_install_root", lambda *_: engagements.BackendInstallRootStatus.VERIFIED)
     from vigil_cli import orchestrator
     monkeypatch.setattr(orchestrator, "start_orchestrator", lambda *_: None)
     monkeypatch.setattr(preflight_module, "runtime_status", lambda: "running")

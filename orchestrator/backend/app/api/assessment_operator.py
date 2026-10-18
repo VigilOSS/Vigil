@@ -36,6 +36,7 @@ _HANDOFF_STATUS = Literal["checkpointed", "ready", "blocked", "superseded"]
 # A dispatch can omit client identity, while a client binding cannot.
 _LAUNCHED_CLIENT = Literal["claude", "codex", "goose", "kimi", "opencode", "pi"]
 _DISPATCH_CLIENT = Literal["claude", "codex", "goose", "kimi", "opencode", "pi", "unknown"]
+_MIXED_ASSESSMENT_ROLES = frozenset({"exploit-developer", "source-analyzer"})
 
 
 class DispatchPromptPacket(BaseModel):
@@ -82,6 +83,7 @@ class DispatchCreate(BaseModel):
             + ", ".join(_KNOWN_DISPATCH_MODES)
         ),
     )
+    assessment_mode: Literal["code", "web"] | None = None
     finding_slugs: list[str] | None = None
     skills: str | None = Field(default=None, max_length=4096)
     tier: Literal["L1", "L2", "L3", "L4"] | None = None
@@ -484,6 +486,11 @@ class DecisionUpdate(BaseModel):
 
 @router.post("/dispatches", status_code=status.HTTP_201_CREATED)
 async def create_dispatch(engagement_key: str, request: DispatchCreate) -> dict[str, Any]:
+    if request.agent_role in _MIXED_ASSESSMENT_ROLES and request.assessment_mode is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=f"{request.agent_role} dispatches require assessment_mode=code|web",
+        )
     engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
     record = await anyio.to_thread.run_sync(
         functools.partial(
@@ -514,6 +521,7 @@ async def create_dispatch(engagement_key: str, request: DispatchCreate) -> dict[
             instruction_identity_status=request.instruction_identity_status,
             instructions_stale=request.instructions_stale,
             dispatch_mode=request.dispatch_mode,
+            assessment_mode=request.assessment_mode,
             finding_slugs=request.finding_slugs,
             skills=request.skills,
             tier=request.tier,

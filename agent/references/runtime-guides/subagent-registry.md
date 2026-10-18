@@ -24,6 +24,7 @@ The operator's audit trail. One row per dispatched specialist agent.
 |---|---|---|
 | `agent_id` | string (PK) | Operator-assigned at `vigil assess agent start` time. Must match the spawned specialist's runtime identity (`AGENT_NAME` / wrapper label). |
 | `agent_role` | string | `recon-specialist` / `vulnerability-analyst` / etc. |
+| `assessment_mode` | `code` / `web` (optional by schema) | Required for mixed-role ordinary dispatches (`exploit-developer`, `source-analyzer`); proof-work derives it from its authoritative route. |
 | `task` | string | One-paragraph dispatch objective. |
 | `application_unit_id` | positive integer (optional) | Concrete application unit assigned to a dedicated lane; validated against the current engagement. |
 | `dispatched_at` | ISO datetime | Set on agent start (`POST /dispatches`). |
@@ -71,8 +72,8 @@ vigil assess agent get recon_a3f9
 ```
 
 The request fields (`application_unit_id`, `requested_model`,
-`requested_reasoning`, `dispatch_mode`, `skills`) capture the intended dispatch
-shape. Launcher-effective values remain null for every ordinary client. Static
+`requested_reasoning`, `dispatch_mode`, `assessment_mode`, `skills`) capture the
+intended dispatch shape. Launcher-effective values remain null for every ordinary client. Static
 OpenCode agent frontmatter, `opencode.json`, and Goose recipe settings describe
 available configuration, but do not prove that a specific child invocation ran
 or what arguments it ultimately received. Only a future trusted launcher/session
@@ -87,6 +88,7 @@ The public fields accepted on every `vigil assess agent start` / `POST /dispatch
 | Field | Type | Values |
 |---|---|---|
 | `application_unit_id` | positive integer (optional) | Concrete application unit for depth attribution; must belong to the current engagement. |
+| `assessment_mode` | `code` / `web` (optional by schema) | Required for mixed-role ordinary dispatches; proof-work sets it from `proof_route`. |
 | `dispatch_mode` | string | `hypothesis-driven` / `item-iterating` / `deep-manual` / `variant-rotation` / `swarm` (see "Iteration-mode (dispatch_mode) Declaration" in `agent/operator-core.md`) |
 | `skills` | string | Comma-separated skill names loaded by the specialist; required for non-operator roles. |
 | `requested_model` | string (optional) | Intended model id from the operator |

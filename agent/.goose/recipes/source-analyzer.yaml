@@ -32,7 +32,7 @@ instructions: |2
   - `agent/shared-specialist-core.md` — specialist context isolation, the Contract-First Rule, finding-recording format, closing-sequence wrapper, output hygiene
   - Exactly one mode constraint bundle, selected from the dispatch before reading source:
     - **Code track** — when explicit `assessment_mode: code` or `proof_route: code` selects the work, load `agent/shared-constraints-code.md` instead of the web bundle.
-    - **Web track** — when explicit `assessment_mode: web` or `proof_route: web` selects the work, load `agent/shared-constraints.md`. A source identity in web work is evidence, not a mode selector. Ask the operator if the route is absent or contradictory; load exactly one bundle.
+    - **Web track** — when explicit `assessment_mode: web` or `proof_route: web` selects the work, load `agent/shared-constraints.md`. A source identity in web work is evidence, not a mode selector. Ordinary dispatch validation supplies `assessment_mode`; claimed proof work supplies authoritative `proof_route`. Reject a malformed packet before execution; load exactly one bundle.
   - `agent/rules/hunting.md`
   - `agent/rules/adversarial-mindset.md`
   - `agent/skills/source-analysis/SKILL.md` — this role's one always-applicable methodology skill: every dispatch analyzes client-side source, so it is not a per-signal choice. (For any other skill, run `vigil assess list-skills` to discover it.)

@@ -115,6 +115,7 @@ def _attach_claim_prompt(payload, work, args, cfg, client) -> None:
             raise AssessError('proof-work claim: source identity changed; reconcile and prepare current work')
     payload['task'] = payload.get('task') or work['objective']
     payload['dispatch_mode'] = 'deep-manual'
+    payload['assessment_mode'] = work['route']
     payload['finding_slugs'] = [work['finding_slug']]
     render_args = SimpleNamespace(prompt_context=context, rate_budget=args.rate_budget,
                                   no_target_traffic=args.no_target_traffic)

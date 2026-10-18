@@ -247,6 +247,13 @@ def test_the_bindable_client_roster_is_the_dispatch_roster_minus_unknown() -> No
     assert tuple(BINDABLE_CLIENTS) == get_args(assessment._LAUNCHED_CLIENT)
 
 
+def test_mixed_assessment_role_roster_matches_cli_contract() -> None:
+    from assess.lib.contracts import MIXED_ASSESSMENT_ROLES
+    from app.api import assessment_operator
+
+    assert MIXED_ASSESSMENT_ROLES == assessment_operator._MIXED_ASSESSMENT_ROLES
+
+
 def test_binding_is_not_a_precondition_for_starting_a_dispatch(
     client, isolate_settings
 ) -> None:

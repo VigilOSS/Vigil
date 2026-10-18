@@ -2260,7 +2260,14 @@ def test_pending_runtime_proof_yields_to_confirmed(client, isolate_settings):
     assert confirmed.json()["transition"]["action"] == "verified_confirmed"
 
 
-def test_pending_runtime_proof_blocks_report_readiness_and_exploit_candidates(client, isolate_settings):
+@pytest.mark.parametrize("workflow_status", ["active", "draft"])
+@pytest.mark.parametrize(
+    "canonical_location",
+    ["https://example.com/held", "file:src/acme/parser.py:7"],
+)
+def test_pending_runtime_proof_blocks_report_readiness_and_exploit_candidates(
+    client, isolate_settings, workflow_status, canonical_location
+):
     write_engagement(isolate_settings["engagements_dir"])
 
     created = client.post(
@@ -2269,7 +2276,7 @@ def test_pending_runtime_proof_blocks_report_readiness_and_exploit_candidates(cl
             "slug": "VA-053",
             "title": "Held finding stays out of report and exploit queue",
             "severity": "high",
-            "workflow_status": "active",
+            "workflow_status": workflow_status,
             "verification_status": "unreviewed",
             "defect_family": "auth-bypass",
             "root_cause_key": "held-excluded",
@@ -2299,6 +2306,12 @@ def test_pending_runtime_proof_blocks_report_readiness_and_exploit_candidates(cl
     )
     assert verified.status_code == 200
     assert verified.json()["finding"]["verification_status"] == "pending_runtime_proof"
+    if canonical_location.startswith("file:"):
+        with db_module.get_connection() as connection:
+            connection.execute(
+                "UPDATE assessment_findings SET canonical_location=? WHERE slug='VA-053'",
+                (canonical_location,),
+            )
 
     # Excluded from exploit candidates (disposition not in {confirmed, downgraded}).
     exploit_candidates = client.get(

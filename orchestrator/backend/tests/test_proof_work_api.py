@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
@@ -271,7 +272,7 @@ def test_changed_claim_or_scope_blocks_work_without_erasing_history(client, isol
     work = prepare(client, 'web')
     client.post(f'{BASE}/proof-work/{work["id"]}/approval', json={'approved': True})
     scope = json.loads((path / 'scope.json').read_text())
-    scope['scope_hosts'] = ['other.example']
+    scope['out_of_scope'] = ['example.com']
     (path / 'scope.json').write_text(json.dumps(scope))
     assert claim(client, work).status_code == 409
     read = client.get(f'{BASE}/proof-work/{work["id"]}').json()
@@ -595,6 +596,27 @@ def test_route_derives_explicit_audit_phase_for_specialist(client, isolate_setti
     assert live.get('authorized_phase') == 'exploit'
 
 
+def test_proof_route_is_authoritative_for_mixed_role_assessment_mode(client, isolate_settings):
+    seed(client, isolate_settings)
+    work = prepare(client, 'web')
+    assert client.post(f'{BASE}/proof-work/{work["id"]}/approval', json={'approved': True}).status_code == 200
+    response = client.post(f'{BASE}/proof-work/{work["id"]}/claim', json={
+        'agent_id': 'PROOF-MODE', 'agent_role': 'exploit-developer',
+        'assessment_mode': 'code',
+        'task': 'Challenge the prepared web proof',
+        'prompt_packet': {
+            'schema': 'dispatch-prompt/v1',
+            'context': {'authorized_phase': work['authorized_phase']},
+            'rendered_prompt': 'Prepared web proof assignment',
+        },
+    })
+    assert response.status_code == 200, response.text
+    assert response.json()['prompt_packet']['context']['assessment_mode'] == 'web'
+    assert response.json()['prompt_packet']['rendered_prompt'].startswith('proof_route: web\n')
+    dispatch = client.get(f'{BASE}/dispatches/PROOF-MODE').json()
+    assert dispatch['assessment_mode'] == 'web'
+
+
 def test_list_reports_event_count_with_exact_history_available_by_id(client, isolate_settings):
     seed(client, isolate_settings)
     work = prepare(client)
@@ -680,6 +702,86 @@ def test_repreparation_of_restored_context_rearms_stale_unowned_work_without_reu
     assert restored['status'] == 'prepared'
     assert restored['approved'] is False
     assert any(event['action'] == 'reprepared' for event in restored['events'])
+
+
+def test_repreparing_stale_owned_work_requires_explicit_release(client, isolate_settings):
+    path = seed(client, isolate_settings)
+    work = prepare(client, 'web')
+    assert client.post(f'{BASE}/proof-work/{work["id"]}/approval', json={'approved': True}).status_code == 200
+    assert claim(client, work).status_code == 200
+    original = (path / 'scope.json').read_text()
+    scope = json.loads(original)
+    scope['exploit_policy'] = 'pause'
+    (path / 'scope.json').write_text(json.dumps(scope))
+    assert client.post(f'{BASE}/proof-work/{work["id"]}/reconcile', json={}).json()['status'] == 'stale'
+    (path / 'scope.json').write_text(original)
+
+    response = client.post(f'{BASE}/proof-work', json={
+        'finding_slug': 'VA-050', 'route': 'web',
+        'objective': 'Try to disprove replay under the supported execution path',
+        'target_hosts': ['example.com'],
+    })
+    assert response.status_code == 409, response.text
+    assert 'release' in response.json()['detail'].lower()
+
+
+def test_unrelated_scope_changes_do_not_stale_selected_target_work(client, isolate_settings):
+    path = seed(client, isolate_settings)
+    work = prepare(client, 'web')
+    scope = json.loads((path / 'scope.json').read_text())
+    scope.setdefault('hosts', ['example.com']).append('unrelated.example')
+    scope['out_of_scope'] = ['private.unrelated.example']
+    (path / 'scope.json').write_text(json.dumps(scope))
+
+    assert client.get(f'{BASE}/proof-work/{work["id"]}').json()['current'] is True
+
+
+@pytest.mark.parametrize('route', ['code', 'web'])
+def test_legacy_scope_bound_work_remains_current_and_prepare_is_idempotent(
+    client, isolate_settings, route
+):
+    path = seed(client, isolate_settings)
+    work = prepare(client, route)
+    legacy = dict(work['binding'])
+    legacy.pop('target_admission')
+    legacy['scope_hosts'] = ['example.com'] if route == 'web' else []
+    legacy['out_of_scope'] = []
+    encoded = json.dumps(legacy, sort_keys=True, separators=(',', ':'))
+    digest = hashlib.sha256(encoded.encode()).hexdigest()
+    with db.get_connection() as connection:
+        connection.execute(
+            'UPDATE assessment_proof_work SET binding_json=?,binding_digest=? WHERE id=?',
+            (encoded, digest, work['id']),
+        )
+
+    assert client.get(f'{BASE}/proof-work/{work["id"]}').json()['current'] is True
+    assert prepare(client, route)['id'] == work['id']
+
+    if route == 'web':
+        scope = json.loads((path / 'scope.json').read_text())
+        scope.setdefault('hosts', ['example.com']).append('unrelated.example')
+        scope['out_of_scope'] = ['private.unrelated.example']
+        (path / 'scope.json').write_text(json.dumps(scope))
+        assert client.get(f'{BASE}/proof-work/{work["id"]}').json()['current'] is True
+        scope['out_of_scope'] = ['example.com']
+        (path / 'scope.json').write_text(json.dumps(scope))
+        assert client.get(f'{BASE}/proof-work/{work["id"]}').json()['current'] is False
+
+
+@pytest.mark.parametrize('scope_change', ['remove', 'exclude'])
+def test_selected_target_removal_or_exclusion_stales_web_proof(
+    client, isolate_settings, scope_change
+):
+    path = seed(client, isolate_settings)
+    work = prepare(client, 'web')
+    scope = json.loads((path / 'scope.json').read_text())
+    if scope_change == 'remove':
+        scope.update(hostname='other.example', scope_hosts=['other.example'], scope=['other.example'])
+    else:
+        scope['out_of_scope'] = ['example.com']
+    (path / 'scope.json').write_text(json.dumps(scope))
+
+    assert client.get(f'{BASE}/proof-work/{work["id"]}').json()['current'] is False
 
 
 def test_unrelated_selected_approval_does_not_invalidate_existing_authorized_proof(client, isolate_settings):

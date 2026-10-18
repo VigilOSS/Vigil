@@ -47,8 +47,13 @@ def _binding(connection, engagement_id, finding, route, objective, hosts):
         'finding_claim_sha256': _current_claim_sha256(finding),
         'source_binding': source,
         'source_status': finding_code_snapshot_status(connection, engagement_id, finding),
-        'scope_hosts': sorted(view.scope_hosts) if route == 'web' else [],
-        'out_of_scope': sorted(view.out_of_scope or []) if route == 'web' else [],
+        # Bind web work to the admission result for its selected hosts, not to
+        # the engagement's entire scope document. Adding or excluding an
+        # unrelated host cannot change the authority for this exact proof.
+        'target_admission': {
+            host: admitted_host(host, view.scope_hosts, view.out_of_scope or [])
+            for host in hosts
+        } if route == 'web' else {},
         'approval_posture': {
             'policy': view.exploit_policy, 'review_state': view.exploit_review_state,
             'selected_authorized': ('*' in view.approved_targets
@@ -60,6 +65,20 @@ def _binding(connection, engagement_id, finding, route, objective, hosts):
 
 def _source_current(binding):
     return binding['source_status'] in ('current', 'not_applicable')
+
+
+def _normalized_binding(binding: dict) -> dict:
+    """Project pre-target-scoped bindings onto the current durable contract."""
+    normalized = dict(binding)
+    roots = list(normalized.pop('scope_hosts', []) or [])
+    denied = list(normalized.pop('out_of_scope', []) or [])
+    if 'target_admission' not in normalized:
+        hosts = list(normalized.get('target_hosts') or [])
+        normalized['target_admission'] = (
+            {host: admitted_host(host, roots, denied) for host in hosts}
+            if normalized.get('route') == 'web' else {}
+        )
+    return normalized
 
 
 def _row(connection, engagement_id, work_id):
@@ -86,7 +105,10 @@ def _serialize(connection, engagement_id, row, *, with_history=True):
     data['approved'] = bool(data['approved'])
     data['authorized_phase'] = 'exploit' if data['route'] == 'web' else 'code-verify'
     data['owed'] = finding['verification_status'] == 'pending_runtime_proof'
-    data['current'] = current == binding and _source_current(current)
+    data['current'] = (
+        _normalized_binding(current) == _normalized_binding(binding)
+        and _source_current(current)
+    )
     data['run_ids'] = [r['run_id'] for r in connection.execute(
         'SELECT run_id FROM assessment_proof_work_runs WHERE work_id=? ORDER BY run_id',
         (data['id'],),
@@ -162,22 +184,40 @@ def prepare_proof_work(engagement_id: int, *, finding_slug: str, route: str,
         binding = _binding(connection, engagement_id, finding, route, objective, hosts)
         if not _source_current(binding):
             _fail('Finding source generation is no longer current')
-        if route == 'web' and (not hosts or any(
-            not admitted_host(h, binding['scope_hosts'], binding['out_of_scope']) for h in hosts
-        )):
+        if route == 'web' and (
+            not hosts or not all(binding['target_admission'].values())
+        ):
             _fail('Live proof requires explicitly admitted target hosts outside denied scope', 400)
         digest = hashlib.sha256(_json(binding).encode()).hexdigest()
-        connection.execute(
-            'INSERT OR IGNORE INTO assessment_proof_work '
-            '(engagement_id,finding_id,binding_digest,binding_json,route,objective,target_hosts_json) '
-            'VALUES(?,?,?,?,?,?,?)',
-            (engagement_id, finding['id'], digest, _json(binding), route, objective, _json(hosts)),
-        )
-        work_id = connection.execute(
-            'SELECT id FROM assessment_proof_work WHERE engagement_id=? AND finding_id=? '
-            'AND binding_digest=?', (engagement_id, finding['id'], digest),
-        ).fetchone()['id']
+        hosts_json = _json(hosts)
+        work_id = next((
+            row['id']
+            for row in connection.execute(
+                'SELECT id,binding_json FROM assessment_proof_work '
+                'WHERE engagement_id=? AND finding_id=? AND route=? '
+                'AND objective=? AND target_hosts_json=? ORDER BY id',
+                (engagement_id, finding['id'], route, objective, hosts_json),
+            )
+            if _normalized_binding(json.loads(row['binding_json']))
+            == _normalized_binding(binding)
+        ), None)
+        if work_id is None:
+            connection.execute(
+                'INSERT OR IGNORE INTO assessment_proof_work '
+                '(engagement_id,finding_id,binding_digest,binding_json,route,objective,target_hosts_json) '
+                'VALUES(?,?,?,?,?,?,?)',
+                (engagement_id, finding['id'], digest, _json(binding), route, objective, hosts_json),
+            )
+            work_id = connection.execute(
+                'SELECT id FROM assessment_proof_work WHERE engagement_id=? AND finding_id=? '
+                'AND binding_digest=?', (engagement_id, finding['id'], digest),
+            ).fetchone()['id']
         prepared = _row(connection, engagement_id, work_id)
+        if prepared['owner_dispatch_id'] is not None and prepared['status'] in ('stale', 'resolved'):
+            _fail(
+                'Matching proof work is still owned; reconcile the owner execution and '
+                'release it before preparing this context again'
+            )
         if prepared['owner_dispatch_id'] is None and prepared['status'] in ('stale', 'resolved'):
             connection.execute(
                 "UPDATE assessment_proof_work SET status='prepared',approved=0,blocker='', "
@@ -234,6 +274,17 @@ def claim_proof_work(engagement_id: int, work_id: int, *, dispatch: dict) -> dic
                 _fail('Previous proof worker still owns active runtime work; reconcile it first')
         payload = dict(dispatch)
         payload.pop('status', None)
+        # A prepared proof route is stronger than an ordinary dispatch hint.
+        # Persist the effective mode the specialist actually receives.
+        payload['assessment_mode'] = work['route']
+        packet = dict(payload['prompt_packet'])
+        packet_context = dict(packet.get('context') or {})
+        packet_context['assessment_mode'] = work['route']
+        packet['context'] = packet_context
+        packet['rendered_prompt'] = (
+            f"proof_route: {work['route']}\n" + str(packet['rendered_prompt'])
+        )
+        payload['prompt_packet'] = packet
         payload['finding_slugs'] = [work['finding_slug']]
         payload['dispatch_mode'] = 'deep-manual'
         payload['task'] = (payload.get('task') or work['objective']) + f"\nproof_route: {work['route']}\nproof_work_id: {work_id}\nauthorized_phase: {'exploit' if work['route'] == 'web' else 'code-verify'}"

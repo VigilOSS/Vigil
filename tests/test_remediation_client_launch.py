@@ -128,6 +128,20 @@ def test_missing_opencode_reports_installation_requirement(launch, monkeypatch):
         start(launch, "opencode")
 
 
+@pytest.mark.parametrize("probe", [["opencode", "--version"], ["opencode", "--help"]])
+def test_opencode_probe_timeout_is_actionable_and_bounded(launch, monkeypatch, probe):
+    def timeout(argv, **kwargs):
+        launch.calls.append((argv, kwargs))
+        if argv == probe:
+            raise subprocess.TimeoutExpired(argv, kwargs.get("timeout"))
+        return subprocess.CompletedProcess(argv, 0, "1.18.10", "")
+
+    monkeypatch.setattr(launch.sessions.subprocess, "run", timeout)
+    with pytest.raises(SystemExit, match="timed out"):
+        start(launch, "opencode")
+    assert all(options.get("timeout") is not None for _, options in launch.calls)
+
+
 def test_zcode_prepares_context_plugin_and_opens_repository_without_false_session_receipt(launch, monkeypatch, tmp_path, capsys):
     import sys
     from pathlib import Path
@@ -160,6 +174,28 @@ def test_zcode_missing_app_fails_without_preparing_plugin(launch, monkeypatch, t
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
     with pytest.raises(SystemExit, match="ZCode"):
         start(launch, "zcode")
+    assert not launch.engagement.exists()
+
+
+def test_zcode_node_probe_timeout_is_actionable_and_bounded(launch, monkeypatch, tmp_path):
+    import sys
+    from pathlib import Path
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+    app = tmp_path / "Applications/ZCode.app"
+    info = app / "Contents/Info.plist"
+    info.parent.mkdir(parents=True)
+    info.write_bytes(plistlib.dumps({"CFBundleShortVersionString": "3.15.1"}))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+
+    def timeout(argv, **kwargs):
+        launch.calls.append((argv, kwargs))
+        raise subprocess.TimeoutExpired(argv, kwargs.get("timeout"))
+
+    monkeypatch.setattr(launch.sessions.subprocess, "run", timeout)
+    with pytest.raises(SystemExit, match="timed out"):
+        start(launch, "zcode")
+    assert launch.calls[0][1].get("timeout") is not None
     assert not launch.engagement.exists()
 
 

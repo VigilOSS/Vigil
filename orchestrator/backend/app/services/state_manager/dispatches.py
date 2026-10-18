@@ -158,6 +158,7 @@ def record_dispatch(
     instruction_identity_status: str = "incomplete",
     instructions_stale: bool | None = None,
     dispatch_mode: str | None = None,
+    assessment_mode: str | None = None,
     finding_slugs: list[str] | None = None,
     skills: str | None = None,
     tier: str | None = None,
@@ -268,9 +269,9 @@ def record_dispatch(
                 specialist_instruction_path, specialist_instruction_sha256,
                 instruction_identity_status, instructions_stale,
                 dispatched_at, completed_at, status,
-                dispatch_mode, finding_slugs_json, skills, tier,
+                dispatch_mode, assessment_mode, finding_slugs_json, skills, tier,
                 vuln_classes, identity, continued_from_dispatch_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 engagement.id,
@@ -300,6 +301,7 @@ def record_dispatch(
                 completed_value,
                 status_value,
                 dispatch_mode,
+                assessment_mode,
                 findings_json,
                 skills_value,
                 tier_value,

@@ -245,6 +245,20 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
 
     reportable_statuses = {"active", "blocked", "exploited", "contained", "eradicated", "recovered", "reported"}
     candidate_records = _report_candidate_records(engagement_id)
+    # Runtime proof is durable debt regardless of whether the finding has been
+    # promoted into a reportable workflow state.  The candidate projection
+    # deliberately excludes drafts, so gate it before that projection rather
+    # than allowing a draft URL finding to leave final readiness green.
+    for row in candidate_records:
+        if row.get("verification_status") == "pending_runtime_proof":
+            blockers.append(
+                {
+                    "kind": "finding_verification_status",
+                    "slug": row.get("slug", ""),
+                    "title": row.get("title", ""),
+                    "detail": "verification_status=pending_runtime_proof",
+                }
+            )
     candidates = [
         row
         for row in candidate_records
@@ -469,6 +483,8 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
     }
 
     for row in candidates:
+        if row.get("verification_status") == "pending_runtime_proof":
+            continue
         if row.get("verification_status") not in {"confirmed", "downgraded"}:
             blockers.append(
                 {

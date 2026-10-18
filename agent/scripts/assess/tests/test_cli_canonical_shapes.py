@@ -588,6 +588,23 @@ def test_agent_start_from_json_accepts_and_strips_cli_only_rate_budget(
     assert "prompt_context" not in payload
 
 
+def test_agent_start_requires_and_persists_assessment_mode_for_mixed_roles(capsys) -> None:
+    missing = _agent_parser().parse_args([
+        "agent", "start", "--agent-id", "mixed-1", "--role", "exploit-developer",
+        "--task", "Challenge the finding", "--no-target-traffic",
+    ])
+    with pytest.raises(SystemExit):
+        agent.dispatch._build_register_payload(missing)
+    assert "requires --assessment-mode" in capsys.readouterr().err
+
+    explicit = _agent_parser().parse_args([
+        "agent", "start", "--agent-id", "mixed-2", "--role", "exploit-developer",
+        "--task", "Challenge the finding", "--assessment-mode", "web",
+        "--rate-budget", "maximum 1 request/second",
+    ])
+    assert agent.dispatch._build_register_payload(explicit)["assessment_mode"] == "web"
+
+
 def test_agent_start_from_json_preserves_identity_and_emits_complete_context(
     monkeypatch, capsys, tmp_path
 ) -> None:

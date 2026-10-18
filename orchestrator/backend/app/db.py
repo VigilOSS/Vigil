@@ -4581,6 +4581,7 @@ def _create_dispatch_tables(connection: sqlite3.Connection) -> None:
                 instruction_identity_status TEXT NOT NULL DEFAULT 'incomplete',
                 instructions_stale INTEGER,
                 dispatch_mode TEXT,
+                assessment_mode TEXT,
                 finding_slugs_json TEXT,
                 skills TEXT,
                 tier TEXT,
@@ -4596,6 +4597,8 @@ def _create_dispatch_tables(connection: sqlite3.Connection) -> None:
     dispatch_columns = _table_columns(connection, "assessment_dispatches")
     if dispatch_columns and "skills" not in dispatch_columns:
         connection.execute("ALTER TABLE assessment_dispatches ADD COLUMN skills TEXT")
+    if dispatch_columns and "assessment_mode" not in dispatch_columns:
+        connection.execute("ALTER TABLE assessment_dispatches ADD COLUMN assessment_mode TEXT")
     if dispatch_columns and "requested_model" not in dispatch_columns:
         connection.execute(
             "ALTER TABLE assessment_dispatches ADD COLUMN requested_model TEXT"

@@ -11,6 +11,8 @@ import json
 from contextlib import contextmanager
 from pathlib import Path
 
+import pytest
+
 from app import db as db_module
 
 
@@ -408,6 +410,25 @@ def test_dispatch_without_skills_is_accepted(client, isolate_settings) -> None:
     })
     assert resp.status_code == 201, resp.text
     assert resp.json()["agent_id"] == "ADHOC-1"
+
+
+@pytest.mark.parametrize("role", ["exploit-developer", "source-analyzer"])
+def test_mixed_role_dispatch_requires_explicit_assessment_mode(client, isolate_settings, role) -> None:
+    _seed(client, isolate_settings)
+    missing = client.post(f"{BASE}/dispatches", json={
+        "agent_id": f"MIXED-{role}",
+        "agent_role": role,
+    })
+    assert missing.status_code == 422, missing.text
+
+    created = client.post(f"{BASE}/dispatches", json={
+        "agent_id": f"MIXED-{role}-WEB",
+        "agent_role": role,
+        "assessment_mode": "web",
+    })
+    assert created.status_code == 201, created.text
+    assert created.json()["assessment_mode"] == "web"
+    assert client.get(f"{BASE}/dispatches/MIXED-{role}-WEB").json()["assessment_mode"] == "web"
 
 
 def test_dispatch_unknown_dispatch_mode_stored_as_text(client, isolate_settings) -> None:

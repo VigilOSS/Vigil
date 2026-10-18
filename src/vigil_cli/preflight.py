@@ -139,7 +139,22 @@ def _ensure_engagement_backend(install_root: Path, engagement_dir: Path) -> None
         print("[vigil] Starting the engagement backend...", file=sys.stderr)
         with redirect_stdout(sys.stderr):
             orchestrator.start_orchestrator(orchestrator.OrchestratorOptions(install_root=install_root, allow_existing=True))
-    if not engagements._verify_backend_install_root(install_root, engagement_dir):
+    backend_state = engagements._verify_backend_install_root(install_root, engagement_dir)
+    if backend_state == engagements.BackendInstallRootStatus.SYNC_PENDING:
+        print(
+            f"[vigil] WARN: backend install root matched but engagement sync is pending at {base_url}; "
+            "the next backend request will retry synchronization.",
+            file=sys.stderr,
+        )
+        return
+    if backend_state == engagements.BackendInstallRootStatus.UNREACHABLE and base_url.rstrip("/") != DEFAULT_ORCHESTRATOR_BASE_URL:
+        print(
+            f"[vigil] WARN: configured remote engagement backend is unreachable at {base_url}; "
+            "launching with local engagement state only.",
+            file=sys.stderr,
+        )
+        return
+    if backend_state != engagements.BackendInstallRootStatus.VERIFIED:
         raise SystemExit(
             f"engagement backend is not ready at {base_url}; check that configured endpoint "
             "before starting. Pass --skip-preflight to launch anyway."

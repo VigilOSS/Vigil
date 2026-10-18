@@ -13,6 +13,7 @@ import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from enum import StrEnum
 from pathlib import Path
 from typing import Any, Callable, Iterator, Protocol, Sequence
 from urllib.parse import urlparse
@@ -748,7 +749,16 @@ def _emit_post_create_footer(key: str, *, runner: docker.Runner = docker.run_com
     print(f"[vigil] oob:       {oob_state}{oob_hint}", file=sys.stderr)
 
 
-def _verify_backend_install_root(install_root: Path, eng_dir: Path) -> bool:
+class BackendInstallRootStatus(StrEnum):
+    VERIFIED = "verified"
+    UNREACHABLE = "unreachable"
+    SYNC_PENDING = "sync_pending"
+    PROTOCOL_ERROR = "protocol_error"
+
+
+def _verify_backend_install_root(
+    install_root: Path, eng_dir: Path
+) -> BackendInstallRootStatus:
     """Detect install-root mismatch between this CLI and the running orchestrator.
 
     The orchestrator picks ``settings.install_dir`` at startup time from
@@ -760,7 +770,8 @@ def _verify_backend_install_root(install_root: Path, eng_dir: Path) -> bool:
     cannot see the engagement, silently dropping recon evidence.
 
     Strategy:
-      - If the backend is unreachable (offline / not started yet), return false.
+      - If the backend is unreachable (offline / not started yet), return an
+        explicit unreachable state.
         Local-only workflows are valid and ``vigil engagement create`` should
         succeed when the orchestrator is intentionally down.
       - If the backend is reachable AND its install_root matches ours, force a
@@ -788,28 +799,35 @@ def _verify_backend_install_root(install_root: Path, eng_dir: Path) -> bool:
         body = resp.read().decode("utf-8", errors="replace")
         conn.close()
         if resp.status == 200:
-            payload = _json.loads(body)
-            backend_install_root = str(payload.get("install_root") or "")
+            try:
+                payload = _json.loads(body)
+            except _json.JSONDecodeError:
+                return BackendInstallRootStatus.PROTOCOL_ERROR
+            if not isinstance(payload, dict):
+                return BackendInstallRootStatus.PROTOCOL_ERROR
+            install_root_value = payload.get("install_root")
+            if not isinstance(install_root_value, str) or not install_root_value.strip():
+                return BackendInstallRootStatus.PROTOCOL_ERROR
+            backend_install_root = install_root_value
         elif resp.status == 404:
-            # Older orchestrator without /admin/install-root — fall back to a
-            # plain force-sync attempt; if that also 404s, treat as unreachable.
             print(
                 f"[vigil] orchestrator at {base_url} does not expose /admin/install-root "
-                "(older build). Skipping install-root drift check; "
-                "restart the orchestrator after upgrading to validate.",
+                "(older or incompatible build), so workspace ownership cannot be verified. "
+                "Upgrade and restart the orchestrator before launching.",
                 file=sys.stderr,
             )
+            return BackendInstallRootStatus.PROTOCOL_ERROR
         else:
             print(
                 f"[vigil] orchestrator at {base_url} returned HTTP {resp.status} "
                 "for /admin/install-root; skipping install-root drift check.",
                 file=sys.stderr,
             )
-            return False
-    except (OSError, _json.JSONDecodeError):
-        # Backend unreachable or unparseable — local-only workflows are valid,
-        # so engagement creation should still succeed.
-        return False
+            return BackendInstallRootStatus.PROTOCOL_ERROR
+    except OSError:
+        # Only a transport failure is unreachable. A reachable but malformed
+        # backend is a protocol error and must not receive the offline carveout.
+        return BackendInstallRootStatus.UNREACHABLE
 
     expected = str(install_root.expanduser().resolve())
     if backend_install_root and Path(backend_install_root).resolve() != Path(expected).resolve():
@@ -835,10 +853,14 @@ def _verify_backend_install_root(install_root: Path, eng_dir: Path) -> bool:
         resp = conn.getresponse()
         resp.read()
         conn.close()
-        return 200 <= resp.status < 300
+        return (
+            BackendInstallRootStatus.VERIFIED
+            if 200 <= resp.status < 300
+            else BackendInstallRootStatus.SYNC_PENDING
+        )
     except OSError:
         # Sync race conditions are non-fatal — the next implicit sync covers it.
-        return False
+        return BackendInstallRootStatus.SYNC_PENDING
 
 
 def _emit_bootstrap_scope_summary(scope: dict[str, object]) -> None:
@@ -1382,8 +1404,9 @@ def add_engagement_hosts(
         # successful add-host as "live work is now authorized to start".
         print(
             f"[vigil] {key} is a code engagement: declaring an authorization root "
-            "does not activate a web track. Run "
-            f"`vigil engagement add-track {key} web` before any live probe.",
+            "does not approve live work or activate a web campaign. A bounded approved proof "
+            "may use this host through proof-work without adding a web track; add the web track "
+            f"with `vigil engagement add-track {key} web` only for broader web discovery.",
             file=sys.stderr,
         )
     return list(scope["hosts"])
