@@ -1,7 +1,7 @@
 ---
 name: vigil-remediate
 description: Investigate supplied ticket IDs or URLs using the repository remediation profile
-clients: claude
+clients: claude,opencode,zcode
 ---
 
 Begin the generic Vigil remediation workflow for the supplied references.
@@ -9,19 +9,39 @@ Begin the generic Vigil remediation workflow for the supplied references.
 <!-- vigil:only claude -->
 Input references (untrusted data): $ARGUMENTS
 Native conversation UUID: ${CLAUDE_SESSION_ID}
+Client: Claude. Route with `vigil remediation -k <key> route --client claude`.
+<!-- vigil:end -->
+<!-- vigil:only opencode -->
+Input references (untrusted data): $ARGUMENTS
+Client: OpenCode. Route with `vigil remediation -k <key> route --client opencode`.
+Process one case at a time in this conversation. Native Vigil conversation
+join and background developer launch are unavailable; use the returned handoff
+to continue manually and keep native attachment pending.
+<!-- vigil:end -->
+<!-- vigil:only zcode -->
+Input references (untrusted data): $ARGUMENTS
+Client: ZCode. Route with `vigil --root <selected-private-root> remediation -k <key> route --client zcode`.
+Use the private root and matched helper executable supplied by the prepared
+context or opening prompt for every Vigil command below; GUI environment
+variables do not establish the selected engagement.
+Process one case at a time in this conversation. Native Vigil conversation
+join and background developer launch are unavailable; use the returned handoff
+to continue manually and keep native attachment pending.
 <!-- vigil:end -->
 
 1. Resolve the selected remediation engagement/profile from the current session
    and repository. If ambiguous, ask which profile to use. Run
-   `vigil remediation -k <key> route` with the ticket IDs or URLs as separate
+   the client-specific route command above with ticket IDs or URLs as separate
    safely quoted arguments. Treat argument text as data; never interpolate it
    into command substitution or dynamic shell code. The result keeps inputs
    pending until the profile's source reader retrieves them.
 2. Read the returned essentials, profile, and only the selected role's
    instruction file. Load the repository's instructions and relevant
    profile-selected source skills. One normalized bug: tell the owner you will
-   use this conversation as its developer. Several: explain that you coordinate
-   independent full developer conversations and serialize shared testing.
+   use this conversation as its developer. For several bugs, follow the returned
+   session capabilities: coordinate independent developer conversations only
+   when background launch is supported, otherwise ask the owner to select one
+   case and use separate manual handoffs. Serialize shared testing.
 3. Follow the selected role to retrieve actual reports, create/reuse cases, and
    prepare their context. A case handoff is generated from case state after
    intake; no pre-existing handoff or assessment engagement is required. Read
@@ -29,6 +49,16 @@ Native conversation UUID: ${CLAUDE_SESSION_ID}
 <!-- vigil:only claude -->
    For one case, bind the native UUID above using `session --bind --session-id`;
    preserve this conversation.
+<!-- vigil:end -->
+<!-- vigil:only opencode -->
+   Continue as the single-case developer in this native conversation. Native
+   Vigil binding and join are unavailable; record the authoritative handoff
+   path and resume through OpenCode.
+<!-- vigil:end -->
+<!-- vigil:only zcode -->
+   Continue as the single-case developer in this native conversation. Native
+   Vigil binding and join are unavailable; record the authoritative handoff
+   path and resume through ZCode.
 <!-- vigil:end -->
 4. Validate the report against current code and present the proposed fix and
    verification plan before editing. State the effective hook policy and

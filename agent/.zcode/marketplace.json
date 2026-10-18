@@ -1,0 +1,12 @@
+{
+  "name": "vigil-remediation",
+  "description": "Local Vigil remediation integration",
+  "plugins": [
+    {
+      "name": "vigil-remediation",
+      "source": "./",
+      "description": "Vigil repository remediation commands",
+      "version": "1.0.0"
+    }
+  ]
+}

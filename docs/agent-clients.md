@@ -168,6 +168,25 @@ opencode runs the operator inline — it cannot dispatch custom specialists head
 
 OpenRouter is not a supported launcher path.
 
+## Repository-context remediation clients
+
+`vigil remediation -k <key> start --client opencode` opens OpenCode's native TUI
+with a defensive `/vigil-remediate` command. It retains native authentication,
+models, approvals, and project plugins; choose Z.AI Coding Plan with `/connect`
+and an entitled model with `/models`.
+
+`vigil remediation -k <key> start --client zcode` opens a ZCode desktop workspace
+on macOS and prepares a local defensive command/context plugin. The operator
+installs and enables that plugin in ZCode, then starts a new task. This is a
+workspace-open operation, not a recorded native conversation attachment.
+
+Both entrypoints support one case per conversation and inherited hooks.
+Vigil-native background workers, binding, exact join/recovery, and a verified
+session-wide hook-disable mapping remain Claude-only. ZCode's post-compaction
+hook restores pointers to authoritative remediation state; pre-compaction
+steering and terminal session-end receipts are not claimed. Native end-to-end
+acceptance steps are in [remediation](remediation.md#opencode-and-zcode-repository-context).
+
 ## What the launcher exports
 
 Every client's launcher exports `ENGAGEMENT_DIR`, `VIGIL_SESSION_ENGAGEMENT_DIR`,

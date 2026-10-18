@@ -21,7 +21,14 @@ through Vigil. Retain unresolved references honestly when retrieval fails.
 Distinct reports sharing a root cause require an explicit scope decision;
 title resemblance alone does not merge cases.
 
-Prepare each registered code workspace and render its case handoff. Launch
+Read the selected client's session capabilities returned by `route` before
+coordinating native conversations. Clients without background-launch and exact-join
+support handle one case per native conversation; ask the owner to open another
+conversation for another case. Their case state and handoffs remain durable,
+but a native conversation must not be represented as a Claude worker binding.
+
+When the selected client supports native worker hosting, prepare each registered
+code workspace and render its case handoff. Launch
 workers with `vigil remediation -k <key> session <case-id>`. Each worker is a
 fresh full native developer conversation, not a fork or subagent. Existing
 bindings reuse the same conversation. Give the owner its case and `join`

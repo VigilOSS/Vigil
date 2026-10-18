@@ -364,6 +364,11 @@ Other workflows: [blue incident response](docs/blue-engagements.md) and
 records verification, and requires approval before a draft PR. Blue containment separates
 proposal approval, audited execution, and explicit recording.
 
+Remediation can also open OpenCode or ZCode with a repository-bound `vigil-remediate`
+command. ZCode requires a local plugin to be reviewed and enabled in the desktop app.
+These clients retain their native approvals, but Vigil cannot bind, join, or recover their
+conversations. See [remediation client setup](docs/remediation.md#opencode-and-zcode-repository-context).
+
 The rationale behind hunting, evidence, coverage, and operator trust is in the
 [architecture decisions](docs/adr/). Particularly relevant:
 [measurement failures](docs/adr/0015-honest-instruments-distinguish-no-measurement-from-clean.md),
