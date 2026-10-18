@@ -128,8 +128,6 @@ When you are about to copy one of these into a second file, stop and import.
 - `src/vigil_cli/engagements.py:engagement_source_state` owns registered original-directory or manual-folder source inventory. `engagement.json:source_dir` selects the origin; first ingest/refresh requires conversational confirmation and creates one sealed copy directly from it.
 - `orchestrator/backend/app/services/state_manager/app_units.py:score_application_units` and
   `depth_ledger.py` own the web-only terminal depth gate. See: ADR 0012.
-- `orchestrator/backend/app/services/assessment_memory.py` and `artifact_index.py` own the bounded
-  resume brief and artifact index; output points to drill-down commands instead of embedding data.
 - `orchestrator/backend/app/services/state_manager/findings.py:finding_mode_sql` owns candidate mode classification.
   `dispatches.py:dispatch_mode_sql` applies it to durable proof claims, including prior owners; reads and counts share this predicate before pagination. Execution route does not select memory ownership.
 
