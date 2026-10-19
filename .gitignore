@@ -47,3 +47,6 @@ potentially-updated-issues.md
 
 # Operator-local issue archives and maintainer notes are never distributable.
 /.private/
+
+# Local implementation plans; not part of the distributed docs.
+docs/plans/

@@ -251,6 +251,18 @@ whether entry to `fuzz` is ready. The rest of the Phase 4 document remains entry
 
 ## Dispatch Context Template
 
+Launch each specialist with fresh context using the actual client tool schema. When `fork_turns`
+is exposed, set it to `none`. Begin by directing the child to `agent/agents/<role>.md`, the
+saved packet, and its mandatory Load First files. Installed instruction fingerprints describe
+files on disk, not observed child loading. Preserve credentials and evidence verbatim in the
+contained dispatch; ADR 0018 containment and ADR 0019 operator ownership apply together.
+
+On return, bind an exposed client handle, inspect the durable handoff with
+`vigil assess agent render-handoff <agent-id>`, reconcile execution, and close ready/blocked
+handoffs with `vigil assess agent close <agent-id>` only when actual work is terminal.
+A closed chat alone does not establish that detached commands stopped. A proof owner is
+recovered through reconcile → terminal dispatch closure → release → fresh claim, never continuation.
+
 Every code analysis dispatch must include:
 - **Agent identity** and **repository name**
 - The exact **Code Source Identity** block defined in `agent/shared-constraints-code.md`. Register
@@ -481,6 +493,19 @@ and the finding's `next_test`:
   and finding verification were recorded, since finished work never verifies the finding.
 
 `next_test` is specialist-authored text: its route hint grants no scope or approval.
+
+For live work, the operator obtains human approval once and records the answer with
+`proof-work approve <id> --human-confirmation <text>`, or uses an already applicable
+`full_send` policy. Read current work before launch. The specialist proceeds under that
+recorded authority without asking again; a missing or revoked decision is an operator blocker.
+Selected exploit-candidate approval does not authorize parked proof. An explicit
+`proof-work revoke <id> --reason <text>` overrides `full_send` until exact-work re-approval.
+Revocation blocks further authorized progress but does not stop a running process: reconcile
+and stop existing runs/jobs through their canonical controls, reporting any stop failure.
+
+Inspect `reverification_required` separately from parked proof: a material edit can require a
+fresh verdict while finished work and its receipts remain historical. Read the finding and
+invalidating transition; independently verify or park a new next test as the evidence requires.
 
 Launch only when a successful claim returns `launch_required: true`; a replay requires inspecting the existing owner/run, not another native spawn. Launch the fresh specialist
 from the current native client using the returned `prompt_packet.rendered_prompt`, which carries

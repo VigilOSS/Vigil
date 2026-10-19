@@ -1,6 +1,6 @@
 # ADR 0036 — Targeted proof does not create a web campaign
 
-- Status: Accepted — implemented
+- Status: Accepted — implemented; approval binding amended by [ADR 0038](0038-live-proof-approval-and-verification-history.md)
 - Date: 2026-10-18
 
 ## Context

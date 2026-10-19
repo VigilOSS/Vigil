@@ -400,8 +400,8 @@ def _continue(args) -> None:
             raise SystemExit(2)
         if str(prior.get("status") or "") == "in-progress":
             print(
-                "agent continue: prior dispatch is still in progress; use `agent start --allow-duplicate` "
-                "for intentional parallel work",
+                "agent continue: prior dispatch is still in progress; reconcile its execution and close it explicitly "
+                "before starting replacement work",
                 file=sys.stderr,
             )
             raise SystemExit(2)
@@ -1010,12 +1010,13 @@ def _require_proof_variant_parent_set(payload: dict, engagement_dir: Path) -> No
 
 
 def _runtime_identity_lines(row: dict) -> list[str]:
+    context = (row.get('prompt_packet') or {}).get('context') or {}
     return [
         "## Runtime Identity",
         f"agent_id: {row.get('agent_id')}",
         f"agent_role: {row.get('agent_role')}",
-        f"assessment_mode: {row.get('assessment_mode') or 'not applicable'}",
-        "authorized_phase: <set-by-operator>",
+        f"assessment_mode: {row.get('assessment_mode') or context.get('assessment_mode') or 'not applicable'}",
+        f"authorized_phase: {context.get('authorized_phase') or '<set-by-operator>'}",
     ]
 
 
@@ -1629,7 +1630,7 @@ def _start_swarm(args) -> None:
     This does NOT spawn specialist agents. It writes N backend rows (one per
     worker), encodes each worker's batch range in its ``task`` field, and
     prints the agent_id table so the operator can manually fire the N
-    specialists via @agent-name (Claude Code) or spawn_agent (Codex).
+    specialists via the native registered-role spawn schema in their client.
 
     Rationale: swarm dispatch is intentionally low-reasoning fan-out for
     corpus-scale work (exposed-bucket secret scanning, large URL coverage
@@ -1777,17 +1778,15 @@ def _start_swarm(args) -> None:
         )
         sys.exit(1)
     print(
-        "Next: fire one specialist per row using your runtime's wrapper "
-        "(@<role> in Claude Code, or spawn_agent in Codex), "
+        "Next: launch one fresh specialist per row using the native role-selection schema "
+        "(Agent with the registered subagent_type in Claude Code; the actual spawn schema in Codex), "
         f"{identity_instruction}. The specialist reads its "
         "batch range from its own dispatch row via `vigil assess agent get <agent_id>`."
     )
 
 
 def _native_wrappers(engagement_dir: Path, role: str) -> tuple[bool, bool]:
-    """Which client's generated per-role wrapper the engagement actually has,
-    as ``(claude, codex)``. The wrappers are what make a role spawnable, so this
-    is the only evidence available for naming a concrete spawn command."""
+    """Which clients have an installed role file, not evidence of actual loading."""
     if not role:
         return (False, False)
     return (
@@ -1797,20 +1796,14 @@ def _native_wrappers(engagement_dir: Path, role: str) -> tuple[bool, bool]:
 
 
 def _spawn_command_hint(engagement_dir: Path, role: str) -> str:
-    """The concrete spawn line for ``role``, phrased for the wrapper that exists.
-
-    ``agent start`` records the dispatch; the caller performs the spawn. Saying
-    only "in your client" leaves the reader to guess the mechanism — the same
-    mechanism ``_start_swarm`` already names — so name it here from the wrapper
-    on disk, and fall back to naming both when neither is present rather than
-    withholding the line (the stderr WARN already reports the gap)."""
+    """Describe native role selection and bootstrap from installed role files."""
     claude, codex = _native_wrappers(engagement_dir, role)
     label = role or "<role>"
     if claude and not codex:
-        return f"`@{label}` (Claude Code)"
+        return f"Claude Code's native `Agent` tool with `subagent_type={label}` and the saved dispatch packet"
     if codex and not claude:
-        return f"`spawn_agent {label}` (Codex)"
-    return f"`@{label}` (Claude Code) or `spawn_agent {label}` (Codex)"
+        return f"Codex's actual spawn tool with fresh context (`fork_turns=none` when exposed); begin by reading `agent/agents/{label}.md` and its Load First files"
+    return f"Claude Code's native `Agent` tool with `subagent_type={label}` and the saved dispatch packet, or Codex's actual spawn tool with fresh context (`fork_turns=none` when exposed), directing the child to read `agent/agents/{label}.md` and its Load First files"
 
 
 def _warn_missing_native_wrapper(engagement_dir: Path, role: str) -> None:

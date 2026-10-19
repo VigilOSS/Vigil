@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { approveProofWork, listProofWork, prepareProofWork, reconcileProofWork, releaseProofWork, type ProofNextTest, type ProofWorkList, type ProofWorkQueueState } from "../lib/api";
+import { approveProofWork, getProofWork, listProofWork, prepareProofWork, reconcileProofWork, releaseProofWork, type ProofNextTest, type ProofWorkEvent, type ProofWorkList, type ProofWorkQueueState } from "../lib/api";
 import { engagementHref } from "../lib/workspaceRoutes";
 
 type ProofWorkTabProps = {engagementKey: string; refreshVersion?: number};
@@ -17,6 +17,8 @@ function ProofWorkWorkspace({engagementKey, refreshVersion = 0}: ProofWorkTabPro
   const [objective, setObjective] = useState("");
   const [hosts, setHosts] = useState("");
   const [recoveryReasons, setRecoveryReasons] = useState<Record<number, string>>({});
+  const [revokeReasons, setRevokeReasons] = useState<Record<number, string>>({});
+  const [histories, setHistories] = useState<Record<number, ProofWorkEvent[]>>({});
   const requestVersion = useRef(0);
   const mounted = useRef(true);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
@@ -73,6 +75,13 @@ function ProofWorkWorkspace({engagementKey, refreshVersion = 0}: ProofWorkTabPro
         </form>
       </>}
       <h3>Prepared investigations</h3>
+      {!!data.reverification_required?.length && <>
+        <h3>Verification required again</h3>
+        <ul>{data.reverification_required.map(item => <li key={item.finding_id}>
+          <a href={engagementHref(engagementKey, {tab: "findings", finding: item.finding_slug})}>{item.finding_slug}</a>
+          {" · "}<span>{item.next_action}</span> <span className="muted">Transition {item.invalidating_transition_id}</span>
+        </li>)}</ul>
+      </>}
       {data.items.length === 0 && <p>No proof work prepared. The operator can prepare and dispatch it from the current conversation.</p>}
       {data.items.map(work => <article className="proof-work-item" key={work.id}>
         <h4><a href={engagementHref(engagementKey, {tab: "findings", finding: work.finding_slug})}>{work.finding_slug}</a> · Proof {work.id} <QueueStateLabel state={work.queue_state} /></h4>
@@ -86,9 +95,19 @@ function ProofWorkWorkspace({engagementKey, refreshVersion = 0}: ProofWorkTabPro
         {work.blocker && <p className="finding-proof-gap">{work.blocker}</p>}
         {work.run_ids.length > 0 && <p>Evidence: {work.run_ids.map(id => <a className="proof-run-link" key={id} href={engagementHref(engagementKey, {tab: "runs", run: id})}>Run {id}</a>)}</p>}
         <div className="proof-actions">
-          {work.route === "web" && <button type="button" className="ghost-button" aria-label={`${work.approved ? "Revoke" : "Approve"} live proof ${work.id}`} disabled={busy || !!error || !work.current || !work.owed} onClick={() => void act(() => approveProofWork(engagementKey, work.id, !work.approved))}>{work.approved ? "Revoke work approval" : "Approve this live proof"}</button>}
+          {work.route === "web" && (work.approval_required ?
+            <button type="button" className="ghost-button" aria-label={`Approve live proof ${work.id}`} disabled={busy || !!error || !work.current || !work.owed} onClick={() => void act(() => approveProofWork(engagementKey, work.id, true))}>Approve this live proof</button> :
+            <><label>Revocation reason<textarea aria-label={`Revocation reason for proof ${work.id}`} maxLength={8192} value={revokeReasons[work.id] ?? ""} onChange={event => setRevokeReasons(previous => ({...previous, [work.id]: event.target.value}))} /></label>
+            <button type="button" className="ghost-button" aria-label={`Revoke live proof ${work.id}`} disabled={busy || !!error || !work.current || !work.owed || !revokeReasons[work.id]?.trim()} onClick={() => void act(() => approveProofWork(engagementKey, work.id, false, revokeReasons[work.id]))}>Revoke work approval</button></>)}
           <button type="button" className="ghost-button" aria-label={`Reconcile proof ${work.id}`} disabled={busy} onClick={() => void act(() => reconcileProofWork(engagementKey, work.id))}>Reconcile recorded state</button>
+          <button type="button" className="ghost-button" aria-label={`Show audit history for proof ${work.id}`} disabled={busy} onClick={() => void act(async () => {
+            const detail = await getProofWork(engagementKey, work.id);
+            if (mounted.current) setHistories(previous => ({...previous, [work.id]: detail.events}));
+          })}>Show audit history</button>
         </div>
+        {histories[work.id] && <div aria-label={`Audit history for proof ${work.id}`}>{histories[work.id].map(event => <div key={event.id}>
+          <p>{event.created_at} {event.action}</p><pre style={{whiteSpace: "pre-wrap"}}>{event.details_json}</pre>
+        </div>)}</div>}
         {work.owner_agent_id && ["completed", "failed", "aborted", "blocked"].includes(work.owner_dispatch_status ?? "") && <div className="proof-recovery">
           <p>Release ownership only after the worker has ended. The backend also checks for active runs, commands, and supervised jobs; releasing does not launch another worker.</p>
           <label>Recovery reason<input aria-label={`Recovery reason for proof ${work.id}`} value={recoveryReasons[work.id] ?? ""} onChange={event => setRecoveryReasons(previous => ({...previous, [work.id]: event.target.value}))} /></label>

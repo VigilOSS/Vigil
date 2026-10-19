@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 import hashlib
 import math
 import shutil
@@ -17,6 +18,7 @@ from . import restart_manifest, term
 from .application import application_root_for_workspace
 from .paths import engagements_root, resolve_logs_dir, resolve_orchestrator_data_dir, resolve_runtime_state_dir
 from .workspace import workspace_path
+from .process_identity import _process_identity
 from .service_locks import service_start_lock
 
 
@@ -98,6 +100,7 @@ def start_orchestrator(options: OrchestratorOptions) -> None:
 
 def _start_orchestrator_locked(options: OrchestratorOptions) -> None:
     startup_timeout = _startup_timeout_seconds()
+    endpoint = f"http://{'[' + options.host + ']' if ':' in options.host else options.host}:{options.port}"
     install_root = options.install_root.expanduser().resolve()
     application_root = application_root_for_workspace(install_root)
     runtime_dir = resolve_runtime_state_dir(install_root)
@@ -117,13 +120,16 @@ def _start_orchestrator_locked(options: OrchestratorOptions) -> None:
         _build_report(application_root)
     print(term.row("ok", "Report renderer", "ready", stream=sys.stdout), flush=True)
 
-    if _pid_running(pid_file):
-        pid = pid_file.read_text(encoding="utf-8").strip()
+    process_state = orchestrator_status_payload(install_root, host=options.host, port=options.port)
+    if process_state["state"] == "running":
+        pid = str(process_state["pid"])
         if options.allow_existing:
             _emit(f"orchestrator\talready running\tpid={pid}", state="ok")
             return
         raise SystemExit(_already_running_message(pid_file, pid, options.host, options.port))
 
+    if process_state["state"] in {"unknown", "foreign"}:
+        raise SystemExit(f"Cannot start backend: {process_state['detail']}")
     _check_port_available(options.host, options.port)
 
     env = {
@@ -138,22 +144,8 @@ def _start_orchestrator_locked(options: OrchestratorOptions) -> None:
     cli_directory = application_root / ("cli" if (application_root / "cli/vigil_cli").is_dir() else "src")
     inherited_pythonpath = env.get("PYTHONPATH", "")
     env["PYTHONPATH"] = str(cli_directory) + (os.pathsep + inherited_pythonpath if inherited_pythonpath else "")
-    argv = [
-        "uv",
-        "run",
-        "--frozen",
-        "--no-sync",
-        "--directory",
-        "orchestrator/backend",
-        "python",
-        "-m",
-        "uvicorn",
-        "app.main:app",
-        "--host",
-        options.host,
-        "--port",
-        str(options.port),
-    ]
+    executable = str(_backend_environment(install_root, application_root) / "bin" / "python")
+    argv = [executable, "-m", "uvicorn", "app.main:app", "--host", options.host, "--port", str(options.port)]
     # E1: only append --workers when explicitly raised above the default 1. A bare
     # uvicorn launch is already single-worker, so the default argv is byte-for-byte
     # unchanged — opt-in only.
@@ -163,13 +155,13 @@ def _start_orchestrator_locked(options: OrchestratorOptions) -> None:
         _warn_multiworker_caveats(workers)
     _sync_backend_environment(application_root, env=env, log_file=log_file)
     if options.foreground:
-        os.chdir(application_root)
-        os.execvpe("uv", argv, env)
+        os.chdir(application_root / "orchestrator" / "backend")
+        os.execvpe(executable, argv, env)
     print(term.row("info", "Backend", "starting", stream=sys.stdout), flush=True)
     with log_file.open("ab") as log, open(os.devnull, "rb") as stdin:
         process = subprocess.Popen(
             argv,
-            cwd=application_root,
+            cwd=application_root / "orchestrator" / "backend",
             env=env,
             stdin=stdin,
             stdout=log,
@@ -177,26 +169,45 @@ def _start_orchestrator_locked(options: OrchestratorOptions) -> None:
             start_new_session=True,
         )
     pid_file.write_text(f"{process.pid}\n", encoding="utf-8")
-    startup_deadline = time.monotonic() + startup_timeout
-    if not _wait_for_health(options.host, options.port, process=process, timeout=startup_timeout):
+    try:
+        identity = _process_identity(process.pid)
+        if identity is None:
+            raise SystemExit(f"Backend exited before ownership could be recorded (exit code {process.poll()}; see {log_file}).")
+        receipt = {"pid": process.pid, "process_identity": identity, "workspace": str(install_root),
+                   "host": options.host, "port": options.port, "process_group": process.pid}
+        _write_process_receipt(pid_file.with_suffix(".json"), receipt)
+    except BaseException:
         _terminate_process(process)
         pid_file.unlink(missing_ok=True)
+        raise
+    startup_deadline = time.monotonic() + startup_timeout
+    if not _wait_for_health(options.host, options.port, process=process, timeout=startup_timeout):
+        exit_code = process.poll()
+        _terminate_process(process)
+        pid_file.unlink(missing_ok=True)
+        pid_file.with_suffix(".json").unlink(missing_ok=True)
+        if exit_code is not None:
+            raise SystemExit(f"Orchestrator exited with code {exit_code} during startup (see {log_file}).")
         raise SystemExit(
-            f"Orchestrator did not become healthy on http://{options.host}:{options.port}/healthz "
+            f"Orchestrator did not become healthy on {endpoint}/healthz "
             f"within the {startup_timeout:g}s startup budget (see {log_file}). "
             f"For a large database migration, inspect the log before retrying with a larger {START_TIMEOUT_ENV}."
         )
     remaining = max(0.0, startup_deadline - time.monotonic())
     if not _wait_for_readiness(options.host, options.port, process=process, timeout=remaining):
+        exit_code = process.poll()
         _terminate_process(process)
         pid_file.unlink(missing_ok=True)
+        pid_file.with_suffix(".json").unlink(missing_ok=True)
+        if exit_code is not None:
+            raise SystemExit(f"Orchestrator exited with code {exit_code} during startup (see {log_file}).")
         raise SystemExit(
-            f"Orchestrator did not become ready on http://{options.host}:{options.port}/readyz "
+            f"Orchestrator did not become ready on {endpoint}/readyz "
             f"within the {startup_timeout:g}s startup budget (see {log_file}). "
             f"Inspect the log before retrying with a larger {START_TIMEOUT_ENV}."
         )
     print(term.row("ok", "Backend", "ready", stream=sys.stdout))
-    print(f"\nVigil is ready: http://{options.host}:{options.port}")
+    print(f"\nVigil is ready: {endpoint}")
     print("Logs: vigil logs orchestrator")
 
 
@@ -259,59 +270,149 @@ def _warn_multiworker_caveats(workers: int) -> None:
     )
 
 
+def _write_process_receipt(path: Path, receipt: dict[str, object]) -> None:
+    from .install_fs import atomic_write_bytes, open_pinned_directory
+    pin = open_pinned_directory(path.parent, create=True)
+    assert pin is not None
+    with pin:
+        atomic_write_bytes(pin.fd, path.name, (json.dumps(receipt) + "\n").encode(), mode=0o600, display=path)
+
+
 def stop_orchestrator(install_root: Path, *, host: str = "127.0.0.1", port: int = 18000) -> None:
-    pid_file = resolve_runtime_state_dir(install_root) / "pids" / "orchestrator.pid"
-    if not pid_file.exists():
+    state = orchestrator_status_payload(install_root, host=host, port=port)
+    if state["state"] == "stopped":
         return
-    pid = _read_pid(pid_file)
-    pid_file.unlink(missing_ok=True)
-    if pid is None or not _pid_alive(pid):
-        return
+    if state["state"] != "running" or state.get("ownership") != "owned":
+        raise SystemExit(f"Cannot stop backend: {state.get('detail', 'process ownership is unknown')}. Inspect the owning workspace and endpoint first.")
+    pid = int(str(state["pid"]))
+    if _process_identity(pid) != state.get("process_identity"):
+        raise SystemExit("Backend process identity changed before stop; inspect status again.")
     _emit(f"orchestrator\tstopping\tpid={pid}", state="info")
-    _signal_process_group(pid, signal.SIGTERM)
+    group = state.get("process_group")
+    signal_process = _signal_process_group if group == pid else os.kill
+    signal_process(pid, signal.SIGTERM)
     if not _wait_for_pid_exit(pid, timeout=2.0):
-        # SIGTERM was not enough: the worker is hung or its lifespan shutdown
-        # is taking longer than the next `start` can tolerate. Escalating to
-        # SIGKILL is the only thing that reliably frees port 18000 before the
-        # follow-up start races into EADDRINUSE.
-        _signal_process_group(pid, signal.SIGKILL)
-        _wait_for_pid_exit(pid, timeout=1.0)
-    # Even after the parent PID is gone, the kernel may hold the listening
-    # socket briefly while child sockets close. Wait for the port to release
-    # so `start_orchestrator`'s pre-check (and uvicorn's bind) see a clean
-    # state.
-    if not _wait_for_port_release(host, port, timeout=3.0):
-        holder = _port_listener_pid(host, port)
-        holder_str = f" (PID {holder})" if holder is not None else ""
-        _emit(
-            f"orchestrator\twarn\t{host}:{port} still held{holder_str} "
-            f"after stop; `vigil orchestrator start` will surface the conflict",
-            state="warn",
-        )
+        if _process_identity(pid) == state.get("process_identity"):
+            signal_process(pid, signal.SIGKILL)
+            _wait_for_pid_exit(pid, timeout=1.0)
+    pid_file = Path(str(state["pid_file"]))
+    pid_file.unlink(missing_ok=True)
+    pid_file.with_suffix(".json").unlink(missing_ok=True)
+    if not _wait_for_port_release(str(state["host"]), int(str(state["port"])), timeout=3.0):
+        holder = _port_listener_pid(str(state["host"]), int(str(state["port"])))
+        holder_text = f" (PID {holder})" if holder is not None else ""
+        _emit(f"orchestrator\twarn\t{state['host']}:{state['port']} still held{holder_text} after stop; inspect its ownership", state="warn")
         return
     _emit("orchestrator\tstopped", state="ok")
 
 
 def orchestrator_status(install_root: Path) -> str:
-    pid_file = resolve_runtime_state_dir(install_root) / "pids" / "orchestrator.pid"
-    return "running" if _pid_running(pid_file) else "stopped"
+    return str(orchestrator_status_payload(install_root)["state"])
+
+
+def _listener_application_matches(pid: int, install_root: Path) -> bool:
+    """Require an actual uvicorn process in the selected application, not just a port."""
+    import shlex
+    try:
+        result = subprocess.run(["ps", "-p", str(pid), "-o", "command="], capture_output=True, text=True, timeout=2)
+        argv = shlex.split(result.stdout)
+        if result.returncode != 0 or "uvicorn" not in argv or "app.main:app" not in argv:
+            return False
+        proc_cwd = Path(f"/proc/{pid}/cwd")
+        if Path("/proc").is_dir():
+            cwd = proc_cwd.resolve(strict=True)
+        else:
+            result = subprocess.run(["lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"], capture_output=True, text=True, timeout=2)
+            locations = [line[1:] for line in result.stdout.splitlines() if line.startswith("n")]
+            if result.returncode != 0 or len(locations) != 1:
+                return False
+            cwd = Path(locations[0]).resolve()
+        application = application_root_for_workspace(install_root).resolve()
+        return cwd in {application, application / "orchestrator" / "backend", install_root.resolve(),
+                       install_root.resolve() / "orchestrator" / "backend"}
+    except (OSError, ValueError, subprocess.TimeoutExpired, SystemExit):
+        return False
 
 
 def orchestrator_status_payload(install_root: Path, *, host: str = "127.0.0.1", port: int = 18000) -> dict[str, object]:
-    """Structured status — backs `vigil orchestrator status --json`."""
+    """Shared lifecycle truth: birth-checked receipt or explicitly unknown ownership."""
+    from .engagements import inspect_backend_ownership, BackendInstallRootStatus
     install_root = install_root.expanduser().resolve()
     pid_file = resolve_runtime_state_dir(install_root) / "pids" / "orchestrator.pid"
+    receipt: dict[str, object] = {}
+    try:
+        parsed = json.loads(pid_file.with_suffix(".json").read_text())
+        if isinstance(parsed, dict):
+            receipt = parsed
+    except (OSError, ValueError):
+        pass
     pid = _read_pid(pid_file)
-    alive = pid is not None and _pid_alive(pid)
-    return {
-        "state": "running" if alive else "stopped",
-        "pid": pid if alive else None,
-        "pid_file": str(pid_file),
-        "host": host,
-        "port": port,
-        "url": f"http://{host}:{port}",
-        "port_in_use": _port_in_use(host, port),
-    }
+    identity = None
+    detail = ""
+    owned = False
+    if pid is not None and pid > 0:
+        try:
+            identity = _process_identity(pid)
+        except SystemExit as exc:
+            detail = str(exc)
+        owned = bool(identity and receipt.get("pid") == pid and receipt.get("process_identity") == identity
+                     and receipt.get("workspace") == str(install_root))
+    endpoint = f"http://{'[' + host + ']' if ':' in host else host}:{port}"
+    local_endpoint = True
+    if owned:
+        receipt_port = receipt.get("port", port)
+        receipt_host = receipt.get("host", host)
+        if (not isinstance(receipt_port, int) or isinstance(receipt_port, bool)
+                or not 0 < receipt_port <= 65535 or not isinstance(receipt_host, str) or not receipt_host):
+            owned = False
+            detail = "backend process receipt has an invalid endpoint; ownership requires inspection"
+        else:
+            host, port = receipt_host, receipt_port
+        endpoint = f"http://{'[' + host + ']' if ':' in host else host}:{port}"
+    elif host == "127.0.0.1" and port == 18000:
+        from urllib.parse import urlsplit
+        import ipaddress
+        from .paths import resolve_orchestrator_base_url
+        endpoint = resolve_orchestrator_base_url(install_root)
+        try:
+            parsed = urlsplit(endpoint)
+            host = parsed.hostname or host
+            port = parsed.port or (443 if parsed.scheme == "https" else 80)
+            local_endpoint = host == "localhost" or ipaddress.ip_address(host).is_loopback
+        except ValueError:
+            local_endpoint = False
+    port_in_use = _port_in_use(host, port)
+    state = "running" if owned else "unknown" if (port_in_use or not local_endpoint or detail or (identity and not receipt)) else "stopped"
+    ownership = "owned" if owned else "unknown" if state == "unknown" else "none"
+    owner = None
+    if identity and receipt.get("process_identity") == identity and receipt.get("workspace") != str(install_root):
+        state, ownership = "foreign", "foreign"
+        owner = receipt.get("workspace")
+        detail = f"process receipt belongs to workspace {owner}; copied receipts cannot authorize lifecycle actions"
+    if (port_in_use or not local_endpoint) and not owned:
+        observed = inspect_backend_ownership(install_root, base_url=endpoint)
+        owner = observed.install_root
+        if observed.state == BackendInstallRootStatus.FOREIGN:
+            state, ownership = "foreign", "foreign"
+            detail = f"endpoint {observed.base_url} serves workspace {owner}; this workspace cannot stop it"
+        elif observed.state == BackendInstallRootStatus.VERIFIED and local_endpoint:
+            listener = _port_listener_pid(host, port)
+            try:
+                birth = _process_identity(listener) if listener else None
+                if (listener and birth and _listener_application_matches(listener, install_root)
+                        and _process_identity(listener) == birth):
+                    pid, identity, owned = listener, birth, True
+                    state, ownership = "running", "owned"
+                    receipt = {}  # An orphan listener does not authorize signaling its entire group.
+            except SystemExit as exc:
+                detail = str(exc)
+        if not owned and not detail:
+            detail = f"listener at {host}:{port} has no verifiable process receipt; inspect the listener before recovery"
+    return {"state": state, "ownership": ownership, "owner_workspace": owner, "detail": detail,
+            "pid": pid if owned else None, "process_identity": identity if owned else None,
+            "process_group": receipt.get("process_group") if owned else None,
+            "pid_file": str(pid_file), "host": host, "port": port,
+            "url": endpoint, "port_in_use": port_in_use}
 
 
 def _already_running_message(pid_file: Path, pid: str, host: str, port: int) -> str:
@@ -451,13 +552,6 @@ def _terminate_process_group(process: subprocess.Popen[bytes], sig: signal.Signa
             process.kill()
 
 
-def _pid_running(pid_file: Path) -> bool:
-    try:
-        return _pid_alive(int(pid_file.read_text(encoding="utf-8").strip()))
-    except (OSError, ValueError):
-        return False
-
-
 def _pid_alive(pid: int) -> bool:
     try:
         os.kill(pid, 0)
@@ -497,7 +591,7 @@ def _wait_for_pid_exit(pid: int, *, timeout: float) -> bool:
 
 
 def _port_in_use(host: str, port: int) -> bool:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+    with socket.socket(socket.AF_INET6 if ":" in host else socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.settimeout(0.2)
         try:
             sock.connect((host, port))
@@ -521,9 +615,10 @@ def _wait_for_port_release(host: str, port: int, *, timeout: float) -> bool:
 
 def _port_listener_pid(host: str, port: int) -> int | None:
     """Return the PID holding host:port via lsof, or None if lsof isn't usable."""
+    address = f"[{host}]" if ":" in host else host
     try:
         result = subprocess.run(
-            ["lsof", "-nP", f"-iTCP@{host}:{port}", "-sTCP:LISTEN", "-t"],
+            ["lsof", "-nP", f"-iTCP@{address}:{port}", "-sTCP:LISTEN", "-t"],
             text=True,
             capture_output=True,
             check=False,
@@ -558,13 +653,13 @@ def _check_port_available(host: str, port: int) -> None:
     raise SystemExit(
         f"Cannot start orchestrator: {host}:{port} is already in use{holder_str}.\n"
         f"Inspect with `lsof -nP -iTCP:{port} -sTCP:LISTEN`, stop the holder, then retry.\n"
-        "If this is a stale vigil instance, run `vigil orchestrator stop` first."
+        "Inspect the listener's owning workspace before stopping it."
     )
 
 
 def _wait_for_health(host: str, port: int, *, process: subprocess.Popen[bytes] | None = None,
                      timeout: float | None = None) -> bool:
-    url = f"http://{host}:{port}/healthz"
+    url = f"http://{'[' + host + ']' if ':' in host else host}:{port}/healthz"
     return _wait_for_http_200(
         url, process=process, timeout=_startup_timeout_seconds() if timeout is None else timeout
     )
@@ -572,7 +667,7 @@ def _wait_for_health(host: str, port: int, *, process: subprocess.Popen[bytes] |
 
 def _wait_for_readiness(host: str, port: int, *, process: subprocess.Popen[bytes] | None = None,
                         timeout: float | None = None) -> bool:
-    url = f"http://{host}:{port}/readyz"
+    url = f"http://{'[' + host + ']' if ':' in host else host}:{port}/readyz"
     return _wait_for_http_200(
         url, process=process, timeout=_startup_timeout_seconds() if timeout is None else timeout
     )

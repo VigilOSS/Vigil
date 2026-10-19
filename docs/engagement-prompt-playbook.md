@@ -1,367 +1,155 @@
-# Operator Steering Playbook
+# Steering an engagement
 
-> A library of **human-side prompts** for driving a Vigil engagement — the things you type to keep the
-> model honest, deep, and on-method when it drifts.
->
-> This is not a restatement of `operator-core.md` / `hunting.md` / `shared-constraints.md`. Those tell the
-> *model* how to run an engagement. This tells *you* how to **push** one: how to re-anchor a model that has
-> gone shallow, started overclaiming, forgotten the core loop, or quietly started doing the work itself
-> instead of dispatching. Prompts here are reworded toward best practice — short, specific, and tied to the
-> rule they reinforce — not transcribed verbatim from past sessions.
->
-> **Why a steering library at all?** Long engagements degrade the model in predictable ways. It gets lazy,
-> it forgets the operator role, it inflates severity to look productive, it stops at the first win. The
-> value of a human in the loop is catching each of those the moment it starts and saying the one sentence
-> that corrects it. Those sentences are below.
->
-> **Where the rest lives.** This file is *mid-session* steering. The prompts you paste to start or resume a
-> session, the seven `vigil-*` client commands, and the compaction / session-end hooks are in
-> [`session-commands.md`](session-commands.md).
+These optional prompts deepen an engagement that already has a selected Code or Web operator.
+Normal phase work continues without repeating them. Replace bracketed values with your target;
+keep the engagement's recorded scope, approval, rate limits and source identity in force.
+For client commands and resume hooks, see [session commands](session-commands.md).
 
----
+## Code hunting
 
-## How to use this
+The normal hunt already includes a developer-focused lens. Intake, mapping, conditional variant
+analysis and fuzzing remain part of the [Code workflow](../agent/operator-core-code.md#phase-index).
+First ingest and explicit refresh require human confirmation of the source and trust in its
+build/test code. Ordinary resumption uses the sealed source; it does not require ingesting again.
 
-1. Skim [§1 Failure modes](#1-the-models-failure-modes-and-the-one-line-fix) — it maps each way the model
-   drifts to the nudge that fixes it and the rule that nudge reinforces.
-2. Keep [§2 Re-anchoring nudges](#2-re-anchoring-nudges) within reach — these are the everyday one-liners.
-3. Use [§3 Phase steering](#3-phase-steering) for the longer prompts that move a phase forward.
-4. Read [§4 High-leverage techniques](#4-high-leverage-techniques-the-gold) once — these are the moves that
-   find what the model would otherwise miss.
-5. [§5 Duplicative-but-worth-it vs. drop](#5-what-the-docs-already-say) is the honest audit: which of your
-   habitual prompts are already enforced by the docs (so saying them is reinforcement, not instruction) and
-   which are noise to drop.
-6. [§6 Templates](#6-copy-paste-templates) are fill-in-the-blank starting points.
-7. [§7 Client commands](#7-the-same-prompts-as-client-commands) is where most of §6 already
-   lives as a command you can invoke instead of paste — plus what runs automatically.
+### Investigate related files together
 
----
+Use when small isolated assignments are missing relationships between functions.
 
-## 1. The model's failure modes (and the one-line fix)
+> Group related files into coherent small batches and give each specialist a concrete boundary
+> to investigate, with room to follow relevant callers and callees. Trace attacker-controlled
+> inputs through guards and sinks, and record supported findings, negative evidence and unresolved paths.
 
-The whole playbook reduces to this table. Everything after it is detail.
+Outcome: attributable coverage and evidence for each boundary, with specific follow-up work.
 
-| The model is… | You say… | Reinforces |
-|---|---|---|
-| **Doing the probing itself** (running curl/nmap, parsing output) | "You're the operator — dispatch a specialist for this; don't run target tools yourself." | operator-core Core Loop step 7 and Dispatch Discipline |
-| **Stopping shallow** / "no findings" too fast | "Slow isn't dry. Exhaust the surface before rotating — confidence, not time, is the bar." | hunting §5, §15, §16 |
-| **Forgetting the core loop / phases** after many batches | "Re-read operator-core.md, confirm the phase, then continue." | operator-core Resume Gate |
-| **Overclaiming severity / impact** | "What can an attacker do *right now*? Score the incremental impact, not the theoretical ceiling." | hunting §2, §3 |
-| **Tunnel-visioned on the first win** | "Don't stop at the first bug — hunt its siblings and the cluster around it before moving on." | hunting §9, §10 |
-| **Wasting shallow dispatches** (20–30s agents) | "Give each specialist enough scope to run deep; don't burn a dispatch on a 30-second task." | operator-core Iteration-mode (dispatch_mode) Declaration |
-| **Calling theory a finding** | "No theory. If you can't show the attacker outcome with a real request/response, park it `chain_required`, don't report it." | hunting §2, §13 |
-| **Thrashing** when another agent changed state | "Another agent is working — review what changed and decide; don't reflexively revert." | (net-new — §4) |
-| **About to ship a self-graded finding** | "Dispatch a fresh, low-context specialist to review this as a skeptical triager." | Phase 5 verify; Phase 8 blind triage |
-| **Padding the report** with slop/theory | "Cut filler and speculation. Write the exact action and exact method, nothing else." | reporting §11/§15 |
+### Challenge completed coverage
 
----
+Use when a file or module is marked complete but the evidence looks shallow.
 
-## 2. Re-anchoring nudges
+> Review the recorded coverage for [module] against the sealed source and threat model. Identify
+> the important paths that were actually checked, then dispatch focused follow-up for gaps in
+> input handling, authorization, error paths or cross-module behavior; explain what the new evidence changes.
 
-Short prompts, grouped by what they correct. These are reinforcement of rules the model already has — say
-them when you see drift, not on every turn.
+Outcome: confirmed coverage or named gaps with owners, without silently resetting prior work.
 
-### Stay the brain
-- "You're the operator. Dispatch a specialist for this — don't run the tools yourself."
-- "Delegate in parallel where the phases allow; your job is selection and judgment, not execution."
-- "Don't over-constrain the specialist — give it the hypothesis and the gap, and let it work." *(matches the
-  model's own guidance that too many guardrails choke a subagent)*
+### Take a fresh developer-focused pass
 
-### Go deeper, don't rotate early
-- "Slow isn't dry. Exhaust this surface — routes, privileged features, object references, source intel —
-  before moving on."
-- "Leave no stone unturned. Confidence that nothing was missed is the bar, not elapsed time."
-- "Don't drain the queue quickly — depth per item over breadth across items."
-- "Keep dispatching until the surface is genuinely exhausted; if you hit a stopping point, push past it and
-  tell me what's left, don't stop and ask."
+Use when you want an independent look at assumptions behind a component.
 
-### Prove impact, score honestly
-- "What can an attacker do right now? If the answer is 'nothing yet,' it's not a finding."
-- "Does the precondition already grant equivalent access? If so it's defense-in-depth, not a high."
-- "You're overstating this. Score the incremental impact over what the attacker already has."
-- "Be honest about severity — I'd rather a defensible medium than a high the triager downgrades on sight."
+> Dispatch a fresh specialist over [component] without prior hunter conclusions, preserving the
+> necessary source and threat context. Examine assumptions, guards, alternate and error paths,
+> and guarantees passed between modules; report concrete counterexamples or evidence that the guarantees hold.
 
-### Remember the core
-- "Re-read operator-core.md, confirm the current phase, then continue." *(works as a periodic reset — every
-  few batches on a long run)*
-- "Re-read adversarial-mindset.md before this pass."
+Outcome: an independent assessment. Relevant variants follow the normal conditional workflow;
+you do not need to request a variant pass after every finding.
 
-### Find more off what you have
-- "Don't stop at the first bug — check its siblings (sibling routes, methods, content-types, auth contexts)
-  and the cluster around it."
-- "Try non-trivial, creative paths, not just the obvious one — think about how a developer would have cut a
-  corner here."
-- "Look for chains across the confirmed set before reporting — A→B even where it looks unlikely."
+## Web phases
 
----
+### Recon: establish the reachable surface
 
-## 3. Phase steering
+> Review recon for the admitted hosts and distinguish observed live services from unresolved
+> discovery leads. Fill concrete DNS, service and route-discovery gaps within the rate budget,
+> and show which surfaces are ready for collection and which remain blocked.
 
-Longer prompts that advance a phase. Anonymized; swap the bracketed parts.
+Outcome: a supported surface inventory and explicit uncertainty.
 
-### Kickoff
-```
-Read AGENTS.md → assume Operator role (operator-core.md). Authorized engagement: [program/scope URL].
-Apply the active `agent/rules/*.md`. In-scope: [hosts]. Out-of-scope: [hosts]. Update scope.json.
-Exploitation policy: [pause | selected | full_send]. Rate budget: [N req/s].
-Delegate all target-facing work to specialists, in parallel where phases permit. Depth over speed.
-Start the engagement.
-```
-For an unfamiliar program, prepend a research step: *"Before starting, research the program's VDP/scope
-across sources — don't rely on a single page — and summarize what is actually in scope before updating
-scope.json."*
+### Collect: connect routes to inputs
 
-### Recon & coverage
-```
-Phase 1 is the goal this session — don't advance early. Dispatch recon/OSINT specialists to enumerate every
-subdomain and surface; depth over speed, and throttle DNS/UDP so the runtime stays healthy.
-Then dispatch a review pass: did the commands that should have run actually run? katana? gau? are all hosts
-liveness-checked, results bucketed and triaged? Fill the gaps and report coverage % per host before exiting.
-```
-Recon-QA checklist worth naming explicitly: *katana ran? gau ran? results bucketed? all hosts liveness-checked?
-blackholed hosts dropped? coverage % per host?* (Backstops the operator-core Phase-1 exit gates.)
+> Deepen collection for [application] using discovered pages, scripts and API descriptions.
+> Connect routes, methods, input locations and authentication contexts to recorded surfaces,
+> then identify missing samples that prevent meaningful tests.
 
-### Hunt
-```
-Dispatch specialists in batches across all surfaces. Don't over-constrain them — hand each a hypothesis and
-the specific gap, and let it run deep. Try non-trivial, creative exploitation paths and look for sibling
-routes and clusters off anything that signals. Load adversarial-mindset.md. Record everything to the backend
-as you go so nothing is re-run. Don't stop until the surface is exhausted; if a lead stalls, change the
-approach or research similar techniques — don't abandon a live lead because it's slow.
-```
+Outcome: actionable inputs and request variants, rather than an unexamined URL list.
 
-### Escalate & chain
-```
-For [finding]: state the real-world entrypoint, how it works, and the attacker outcome. Can it go higher?
-Dispatch a specialist to find chains across confirmed findings (siblings share a root cause) and one to push
-severity via the matching exploit path. Stop at the point that proves attacker impact — don't over-exploit,
-especially on production.
-```
+### Consume-test: deepen testing
 
-### Verify (do this before every submission)
-```
-Dispatch a fresh specialist with minimal context to review [finding] as a skeptical triager:
-- What can an attacker do right now — real-world impact, or just a CVSS band fit?
-- Did local testing cheat, or are there guards in the code that kill it? (Trust the code over the docs.)
-- Is any of it "expected" — internal-only, requires existing access, public-by-design?
-- Hunt downgrades and missing evidence; bullet what's off.
-Then tell me whether a downgrade is warranted and whether the program would push back.
-```
+> Review [surface] for applicable vulnerability families and follow the most consequential
+> untested boundaries, including alternate methods, encodings and error handling. Use controls
+> to distinguish target behavior from tool failure, and retain inconclusive results with their blockers.
 
-### Report
-```
-Dispatch report-writer (draft) for [findings] per the report rules: standalone, no internal IDs or tool names,
-no theory, working PoC (inline where possible), a VRT category that actually exists, no filler, written for
-the triager. Then a fresh report-writer in QA mode to fix structure, then normalize across reports.
-Give me the file path and attacker entrypoint for each so I can submit.
-```
+Outcome: evidence-backed coverage and candidates worth independent verification.
 
-### Triage defense (after submitting)
-```
-[Program] [closed/pushed back on] [finding] saying [reason]. Dispatch a fresh, low-context specialist to read
-the finding, our submission text, and their response, and decide whether the pushback is fair.
-If we should push back, give me a concise, professional reply (here, don't edit the submission) that proves
-real-world impact with evidence — only if you genuinely think they'll stop pushing back after it.
-If they're right, say so and tell me whether to resubmit under a different VRT or drop it.
-```
+### Consume-test: provision distinct accounts
 
-### Resume
-```
-Read AGENTS.md → operator-core.md → resume exactly where it left off. Confirm running specialists are alive
-and writing files; re-dispatch any that died. Treat any handoff doc as a lead, not gospel. Keep the backend
-authoritative as you go.
-```
+> Identify the account roles and owned objects needed to test [authorization boundary]. Use
+> genuinely distinct authorized accounts and objects, or tell me exactly what access is missing;
+> compare the allowed control with the cross-account attempt before claiming a failure.
 
----
+Outcome: a valid actor/ownership comparison, or a precise provisioning request.
 
-## 4. High-leverage techniques (the gold)
+### Verify: challenge the candidate
 
-These are the moves that find what the model would otherwise miss. Most are **not** fully spelled out in the
-core docs — they're the operator-craft on top.
+> Dispatch a fresh verifier for [finding] with the evidence and required threat context, without
+> the hunter's conclusions. Reproduce the supported path, test competing explanations and guards,
+> and record confirm, downgrade, disprove or an explicit runtime/access blocker.
 
-### A. The fresh, low-context skeptic
-The single highest-yield move. Before anything ships — and again whenever a finding "feels too clean" — spawn a
-**deliberately context-starved** specialist and tell it to act as a skeptical program/vendor reviewer (or, for
-code, a maintainer). Low context is the point: a reviewer that didn't watch the finding get built doesn't
-inherit its confirmation bias.
-> "Dispatch a fresh specialist with little context/bias to review the finding, the evidence, and the
-> submission text, and decide if we should push back — and what to say."
+Outcome: an independent, durable verdict with the required proof and controls.
 
-It catches the model's most common failure: **overclaiming**. In practice the model inflates severity to look
-productive, and this pass is what walks it back to a defensible, triager-proof claim. (Reinforces Phase 5
-verify + the FP/severity gate, but the *low-context* twist is the part worth doing deliberately.)
+### Exploit: prove bounded impact
 
-### B. Anchor on the highest-impact archetype, then hunt its variants everywhere
-Don't just enumerate bugs — name the worst realistic archetype for this target (a Log4j-style unauth log-ingestion
-RCE, the SSRF that already worked, a blank-credential auth bypass) and hunt for siblings and variants of *that
-pattern* across the whole surface/codebase.
-> "Pick the 10 files/surfaces most likely to hide something like [archetype]; dispatch hunters for variants of
-> that exact pattern, plus the unsuspecting ones."
+> For [finding], propose the smallest test that demonstrates the incremental attacker impact
+> within admitted scope. Use current approval, or ask me once for the missing authorization before
+> launch; stop at the bounded proof and record the result, controls and cleanup.
 
-### C. For code targets: trust the code over the docs
-A recurring, embarrassing failure is submitting against documented behavior that the actual code contradicts.
-> "Ignore what the finding/submission claims and read the code itself. Verify against the source, not the docs —
-> docs are often wrong where the code is right, and that's what makes a submission look amateur."
+Outcome: attributable proof. The specialist checks the operator's recorded decision and does
+not ask for it again. An explicit revoke blocks the work even under `full_send`.
 
-Pair it with a prior-art check: *"Research similar CVEs and prior reports — confirm this is real and not already
-known or fixed in a later commit."*
+### Report: rehearse before submission
 
-### D. Calibrate dispatch depth — don't burn shallow agents
-A swarm of 20–30s dispatches is wasted tokens. Push the model to give each specialist enough scope to run for
-minutes and actually go deep.
-> "Each specialist should have enough scope to run for several minutes and go deep — don't burn a dispatch on a
-> 30-second task. Token spend is fine; shallow dispatches aren't."
+> Prepare a standalone report for [finding] that matches the demonstrated actor, prerequisites
+> and impact. Have an independent reviewer rehearse its reproduction from the supplied instructions,
+> then resolve missing evidence and unsupported claims before giving me the draft to review.
 
-(The dispatch-mode table governs item counts; this governs *depth per dispatch*, which it doesn't.)
+Outcome: a reproducible report with remaining limitations visible. This does not send a submission.
 
-### E. Defeat tunnel vision after the first win
-The model tends to declare victory at the first confirmed bug and forget the surrounding cluster.
-> "Don't stop at the [SSRF] and forget how you found it — there may be variants or other findings clustered
-> here. Keep going."
+## Either track
 
-### F. Concurrency discipline
-On multi-agent runs, state changes you didn't initiate are normal. Tell the model not to thrash.
-> "Another agent is working this — if something changes unexpectedly, review and decide what's best; don't
-> reflexively revert it."
+### Resume from recorded state
 
-### G. Human gates for risk and money
-On production, `.gov`/regulated, or destructive-capable steps, keep an explicit approval gate — and use it to
-force a pause for review, not just safety.
-> "Prove the attacker impact but stop at proof — don't over-exploit. Present numbered options and wait for my
-> approval before the destructive/exploit step."
+> Restore the selected operator mode and read the backend resume state and relevant handoffs.
+> Reconcile existing workers, runs and proof ownership before starting replacements, then continue
+> the next supported action and tell me about blockers that require my input.
 
-### H. Periodic core re-read as an anti-laziness mechanism
-The most reliable cure for mid-engagement drift. Bake it into a long run (a Stop-hook goal, or just say it every
-few batches).
-> "Read operator-core.md every few batches so the phases and method stay loaded, and keep dispatching until all
-> surfaces are worked through."
+Outcome: continuity without duplicate workers. A closed chat or old timestamp does not establish
+that detached execution ended.
 
----
+### Get a read-only status
 
-## 5. What the docs already say
+> Give me a read-only account of current coverage, findings, active workers and proof obligations.
+> Name each material blocker, its evidence and the next action or decision needed; distinguish
+> parked runtime proof from findings needing verification again after a claim changed.
 
-Per the request to separate signal from noise: many habitual session-prompts restate rules the model already
-has. Restating a rule is **reinforcement when the model is drifting from it** and **noise when it isn't.** Here's
-the honest split.
+Outcome: an actionable status. This grants no approval, releases no owner and starts no test.
 
-### Worth repeating (the model genuinely drifts from these)
-| Habitual prompt | Already enforced by | Why still worth saying |
-|---|---|---|
-| "You're the operator, delegate / don't do it yourself" | operator-core Core Loop step 7 and Dispatch Discipline | The model slides back into running tools itself on long runs. |
-| "Leave no stone unturned / depth over speed / slow isn't dry" | hunting §5, §15, §16 | The strongest counter to shallow "no findings." |
-| "What can an attacker do right now / no theory" | hunting §2, §13 | Counters overclaiming and theory-as-finding. |
-| "Is this expected / already-admin / defense-in-depth" | hunting §3 | The model forgets precondition-equivalence under pressure to find Highs. |
-| "Check siblings / chains" | hunting §9, §10; operator-core variant + chain passes | Tunnel vision after the first win. |
-| "Re-read operator-core / confirm the phase" | operator-core Resume Gate | The single best drift reset. |
-| "Severity must match real impact, not CVSS band" | hunting §3; FP & severity gate C5 | The model inflates; this forces honesty. |
+### Coordinate concurrent work
 
-### Drop or downgrade (noise / not best practice)
-- **Re-pasting the full program policy every message.** Put stable scope/policy facts in `scope.json`
-  or one operator activity note; reference that state instead.
-- **Anxious status pings** ("stuck or still working?", "status?") as a *technique*. Fine occasionally; not a
-  method. Prefer a concrete check: "confirm running specialists are alive and writing files."
-- **Micromanaging report formatting mid-stream.** The report rules + QA pass own this; let them run, then
-  review once.
-- **Heavy per-dispatch guardrails.** The model's own guidance (and yours) is that over-constraining chokes a
-  subagent — hand it the hypothesis and the gap, not a checklist.
-- **Stream-of-consciousness multi-topic prompts.** One dispatch, one objective reads better and dedups cleaner
-  (operator-core Dispatch Discipline).
+> Inspect the current ownership and handoffs before assigning [area]. Preserve work another
+> specialist owns, divide independent tasks where useful, and reconcile unexpected state changes
+> before deciding whether a replacement is needed.
 
----
+Outcome: clear ownership and useful parallel work without competing writes or duplicate execution.
 
-## 6. Copy-paste templates
+### Turn a source lead into proof
 
-### Hunt-deeper (anti-laziness)
-```
-Keep dispatching specialists across all surfaces — batches, in parallel, each with enough scope to run deep
-(not 30-second dispatches). Try non-trivial, creative paths and hunt siblings/clusters off anything that
-signals. Slow isn't dry: exhaust each surface before rotating. Record to the backend as you go. Don't stop at
-a stopping point — push past it and tell me what's left. Re-read operator-core.md every few batches.
-```
+> For [finding], determine whether the supported API or binary can reproduce the claim locally,
+> or whether it needs a specific admitted live target. Prepare that explicit route, obtain any
+> missing live approval once, and dispatch a fresh specialist to confirm, disprove, revise or block it.
 
-### Escalate honestly
-```
-For [finding]: real-world entrypoint, mechanism, attacker outcome. Can it go higher via a sibling or chain?
-Score the incremental impact over what the attacker already has — don't inflate. Stop at proof of impact.
-```
+Outcome: proof attached to the same finding, with source identity preserved. A local proof does
+not require a website, and one live test does not require a broader Web campaign.
 
-### Fresh-skeptic verify
-```
-Dispatch a fresh, low-context specialist as a skeptical triager/maintainer on [finding]:
-real-world impact or just a band fit? guards in the code that kill it (trust code over docs)? anything
-"expected" / already-privileged / public-by-design? Hunt downgrades and missing evidence. Bullet what's off,
-then recommend confirm / downgrade / kill.
-```
+### Challenge impact and severity
 
-### Triage reply
-```
-[Program] said [reason]. Fresh low-context specialist: read the finding, our submission, and their reply;
-is the pushback fair? If we should push back, a concise professional reply (here, not in the submission) that
-proves impact with evidence — only if it'll actually end the pushback. If they're right, say so and recommend
-resubmit-under-different-VRT or drop.
-```
+> Have an independent specialist challenge [finding]'s attacker prerequisites, supported entrypoint
+> and incremental impact using the evidence and threat model. Test whether existing privileges or
+> guards change the claim, then recommend the severity the demonstrated outcome supports.
 
----
+Outcome: a defensible claim, including a downgrade or unresolved limitation when warranted.
 
-## 7. The same prompts as client commands
+### Assess triage feedback
 
-Three of the §6 templates, plus four session-lifecycle prompts, ship as **client commands** so
-you do not have to paste them. They live in one canonical source per command under
-`agent/commands/<name>.md` and are rendered per client by
-`agent/scripts/render-operator-prompts.sh`; `render-operator-prompts.sh check` fails on drift,
-including on a missing rendered file. Never edit the rendered copies.
+> Review [finding], our submitted report and this feedback: [response]. Have a fresh specialist
+> assess whether the criticism is fair; if evidence supports a reply, draft a concise response for
+> my review, otherwise explain the correction or additional proof needed.
 
-| Command | What it is |
-|---|---|
-| `vigil-start` | Open a new authorized engagement from the top of the operator workflow |
-| `vigil-resume` | Re-hydrate the operator seat from the backend when a new session opens on an existing engagement, or after a restart or handoff |
-| `vigil-handoff` | Write the next operator a brief grounded in backend state, not recollection |
-| `vigil-compact` | Show the standing compaction contract and audit whether it is being applied |
-| `vigil-hunt-deeper` | §6 Hunt-deeper |
-| `vigil-fresh-skeptic-verify` | §6 Fresh-skeptic verify |
-| `vigil-triage-reply` | §6 Triage reply |
-
-The `vigil-` prefix is mandatory: bare `resume` and `compact` collide with built-ins in both
-clients.
-
-- **Claude Code** — `/vigil-resume`, `/vigil-hunt-deeper`, … Arguments are passed inline
-  (`/vigil-fresh-skeptic-verify idor-on-tenant-export`). Commands with query substitutions
-  run those backend queries before you read them; others provide instructions to run.
-- **Codex** — `$vigil-resume`, `$vigil-hunt-deeper`, … Codex skills perform no argument or
-  command substitution, so the Codex rendering states the commands for the agent to run and
-  reads your intent from the message you send alongside the skill name.
-- **opencode, goose and kimi get no commands.** Those clients have no equivalent
-  project-command surface. Paste the §6 template into the session by hand, or adapt the
-  matching `agent/commands/<name>.md` for that client first. Canonical command bodies
-  can contain Claude/Codex-specific branches and substitution syntax; they are not
-  identical to the rendered client commands.
-
-Commands reach an engagement as pointers, not copies: `<engagement>/.claude/commands/<name>.md`
-and `<engagement>/.codex/skills/<name>/` are per-entry symlinks into the session's application release, so an
-engagement never carries a stale copy. A command you write yourself in an engagement's
-`.claude/commands/` is preserved and wins over the shipped one of the same name.
-
-### Compaction and session end are also automatic
-
-- `agent/scripts/hooks/pre-compact.sh` is registered as a Claude Code `PreCompact` hook with no
-  matcher, so it fires on manual `/compact` **and** on automatic context-window compaction. Its
-  stdout becomes the summarizer's custom instructions, merged with any text you typed after
-  `/compact`. An engagement adds its own rules by dropping a `COMPACT.md` in the engagement
-  directory; it is appended to the standing contract, never a replacement. That stdout behaviour was
-  verified against Claude Code 2.1.261 and is a third-party implementation detail rather than a
-  published contract, so re-verify it when upgrading the client — `/vigil-compact` audits whether the
-  contract is actually being applied. Codex's engagement config renders the same canonical output
-  into `compact_prompt`, then a `SessionStart(compact)` hook injects the automatic resume boundary
-  before the immediate continuation. Codex operators therefore need neither a pre-compaction
-  `$vigil-compact` invocation nor a post-compaction `$vigil-resume` invocation.
-- `agent/scripts/hooks/session-end.sh` is registered as a `SessionEnd` hook on **both** Claude
-  and Codex. It records an ordinary activity receipt that the client ended; it never replaces the
-  operator's separate **save my place** checkpoint. Treat the receipt as best-effort: a crash,
-  `SIGKILL` or host timeout fires no hook at all. The durable checkpoint is the one the operator
-  writes with `vigil assess operator-checkpoint record`.
-
----
-
-*A steering library, not a methodology spec. The methodology lives in `agent/operator-core.md`,
-`agent/rules/hunting.md`, `agent/rules/adversarial-mindset.md`, and `agent/shared-constraints.md`; this is the
-human's side of the keyboard — what to say when the model drifts away from them.*
+Outcome: a fair assessment and optional draft. Sending a reply requires your separate instruction.

@@ -12,6 +12,11 @@ cost, apply the net-new capability ceiling, and preserve genuine uncertainty for
 adjudication. The web
 hunting rules are not required to reach or record a verdict.
 
+Before a terminal verdict, finish reproduction/evidence documentation on the same finding.
+Use `finding update --agent-id <your-dispatch-id>` for attributed edits and consult its contract
+for same-verifier enrichment; claim changes require fresh review and a consumed receipt cannot
+support another verdict. The shared specialist core owns approval and receipt discipline.
+
 ## When to Activate
 
 - Phase 3 of code analysis pipeline. Runs on confirmed findings from Phase 2.

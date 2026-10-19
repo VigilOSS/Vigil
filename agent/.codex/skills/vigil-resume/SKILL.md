@@ -10,8 +10,9 @@ description: Re-hydrate the engagement's generated operator role in a new sessio
 Resume the Vigil engagement in the current directory. The launched session selects one
 operator mode; the engagement's enabled tracks do not select a combined role.
 
-**1. Resolve and restore the session role.** Run `vigil engagement mode`. Confirm its
-`mode:` matches `VIGIL_OPERATOR_MODE`, and read only the canonical file shown as `prompt:`.
+**1. Resolve and restore the session role.** Run `vigil engagement mode` as a standalone
+command. It resolves the selected mode from the session environment; confirm the reported
+`mode:` matches the selected operator seat, and read only the canonical file shown as `prompt:`.
 Read this engagement's `AGENTS.md` router first, then the selected prompt in bounded parts,
 following its Map of This File. If mode resolution fails, the values disagree, or no mode is
 selected, STOP before target-facing work. Start a new client with
@@ -30,12 +31,12 @@ handoff, or remembered instruction.
 their absence. Also report whether the canonical `ISSUES-AND-ENHANCEMENTS.md` exists, as a pointer
 to reusable engagement lessons. Open it only when those lessons are relevant.
 
-Run this and report each file it marks `absent` — a missing optional file is a
-normal result, not a failure:
+Inspect these optional files with the client's read tool. A missing optional file is a normal
+result; it does not bypass required role resolution or backend hydration.
 
-    for f in RESUME.md COMPACT.md ISSUES-AND-ENHANCEMENTS.md; do if [ -f "$f" ]; then printf 'present  %-27s %s bytes\n' "$f" "$(wc -c < "$f" | tr -d ' ')"; else printf 'absent   %s\n' "$f"; fi; done
-
-**4. Re-establish live state from the backend.** The backend is canonical; recollection is not.
+**4. Re-establish live state from the backend.** Run each named command separately so a
+restricted client can match its `vigil` allowlist and preserve failure status. The backend is
+canonical; recollection is not.
 For `remediation`, read `PROJECT.md`, run
 `vigil remediation -k <key> list`, then `vigil remediation -k <key> show <case-id>`
 for the selected case. Follow the case's evidence and approval state in the
@@ -43,7 +44,8 @@ remediation operator prompt. For other modes, `agent/rules/resume.md` owns the
 brief's drill-downs, orphan reconciliation before new target-facing work, and
 bounds that keep resume affordable. Start with the brief:
 
-Run this first and read its complete output:
+After step 1 confirms a non-remediation mode, run this simple command and read its
+complete output. In remediation mode use only the case commands above.
 
     vigil assess resume-brief
 

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import math
+import re
 import os
 import shlex
 import subprocess
@@ -79,13 +81,39 @@ class RuntimeEgress:
         return bool(self.proxy or self.network)
 
 
-def runtime_resources() -> RuntimeResources:
+def runtime_resources(workspace: Path | None = None) -> RuntimeResources:
+    values = _workspace_environment(workspace)
+    shm_size = values.get("VIGIL_RUNTIME_SHM_SIZE", DEFAULT_RUNTIME_SHM_SIZE).strip() or DEFAULT_RUNTIME_SHM_SIZE
+    match = re.fullmatch(r"([0-9]+(?:\.[0-9]+)?)(?:[kmgtp]b?|b)?", shm_size, re.IGNORECASE)
+    if match is None or not math.isfinite(float(match[1])) or float(match[1]) <= 0:
+        raise SystemExit(f"VIGIL_RUNTIME_SHM_SIZE must be a positive byte size such as 1g (got {shm_size!r})")
     return RuntimeResources(
-        memory_gb=_int_env("VIGIL_RUNTIME_MEMORY_GB", DEFAULT_RUNTIME_MEMORY_GB),
-        cpus=_float_env("VIGIL_RUNTIME_CPUS", DEFAULT_RUNTIME_CPUS),
-        pids_limit=_int_env("VIGIL_RUNTIME_PIDS_LIMIT", DEFAULT_RUNTIME_PIDS_LIMIT),
-        shm_size=os.environ.get("VIGIL_RUNTIME_SHM_SIZE", DEFAULT_RUNTIME_SHM_SIZE).strip() or DEFAULT_RUNTIME_SHM_SIZE,
+        memory_gb=_int_env("VIGIL_RUNTIME_MEMORY_GB", DEFAULT_RUNTIME_MEMORY_GB, values),
+        cpus=_float_env("VIGIL_RUNTIME_CPUS", DEFAULT_RUNTIME_CPUS, values),
+        pids_limit=_int_env("VIGIL_RUNTIME_PIDS_LIMIT", DEFAULT_RUNTIME_PIDS_LIMIT, values),
+        shm_size=shm_size,
     )
+
+
+def _workspace_environment(workspace: Path | None) -> dict[str, str]:
+    values: dict[str, str] = {}
+    if workspace is not None:
+        path = workspace / ".env"
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except FileNotFoundError:
+            lines = []
+        except (OSError, UnicodeError) as exc:
+            raise SystemExit(f"Cannot read runtime configuration {path}: {exc}") from exc
+        for line in lines:
+            key, sep, raw = line.strip().removeprefix("export ").partition("=")
+            if sep and key.strip().startswith("VIGIL_RUNTIME_"):
+                try:
+                    parts = shlex.split(raw, comments=True)
+                except ValueError as exc:
+                    raise SystemExit(f"Invalid {key.strip()} in {path}: {exc}") from exc
+                values[key.strip()] = " ".join(parts)
+    return {**values, **os.environ}
 
 
 def runtime_egress() -> RuntimeEgress:
@@ -164,8 +192,8 @@ def _compose_no_proxy(extra: str | None) -> str:
     return ",".join(entries)
 
 
-def _int_env(name: str, default: int) -> int:
-    raw = os.environ.get(name)
+def _int_env(name: str, default: int, values: dict[str, str] | None = None) -> int:
+    raw = (os.environ if values is None else values).get(name)
     if raw is None or not raw.strip():
         return default
     try:
@@ -177,16 +205,16 @@ def _int_env(name: str, default: int) -> int:
     return value
 
 
-def _float_env(name: str, default: float) -> float:
-    raw = os.environ.get(name)
+def _float_env(name: str, default: float, values: dict[str, str] | None = None) -> float:
+    raw = (os.environ if values is None else values).get(name)
     if raw is None or not raw.strip():
         return float(default)
     try:
         value = float(raw.strip())
     except ValueError as exc:
         raise SystemExit(f"{name} must be a number (got {raw!r})") from exc
-    if value <= 0:
-        raise SystemExit(f"{name} must be positive (got {value})")
+    if not math.isfinite(value) or value <= 0:
+        raise SystemExit(f"{name} must be finite and positive (got {value})")
     return value
 
 

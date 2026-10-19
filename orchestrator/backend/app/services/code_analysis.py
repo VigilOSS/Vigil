@@ -6383,6 +6383,11 @@ def get_threat_model(
     engagement = _engagement_or_404(engagement_id)
     with get_connection() as connection:
         row = _get_published_repo_row(connection, engagement.id, repo_id)
+    return _threat_model_state(row)
+
+
+def _threat_model_state(row: dict[str, Any]) -> dict[str, Any]:
+    repo_id = int(row['id'])
     threat_model = _json_decode(row.get("threat_model_json"), {})
     threat_generation = row.get("threat_model_generation")
     active_generation = int(row.get("active_generation", 0) or 0)
@@ -6394,6 +6399,25 @@ def get_threat_model(
         "current": threat_generation is not None and int(threat_generation) == active_generation,
         "threat_model": threat_model,
     }
+
+
+def require_proof_source_prerequisites(connection, engagement_id: int, binding: dict) -> None:
+    """Check only the source context a proof specialist needs, inside its claim transaction."""
+    repo = _get_published_repo_row(connection, engagement_id, binding['repo_id'])
+    if (repo['active_generation'] != binding['repo_generation']
+            or repo['source_manifest_digest'] != binding['source_manifest_digest']):
+        raise HTTPException(status_code=409, detail='Proof source generation changed; prepare current work')
+    if not _threat_model_state(repo)['current']:
+        raise HTTPException(status_code=409, detail='Source-bound proof requires a current generation threat model')
+    if not _structural_index_current(repo):
+        raise HTTPException(status_code=409, detail='Source-bound proof requires a current generation structural index')
+
+
+def _structural_index_current(repo: dict[str, Any]) -> bool:
+    generation = repo.get('structural_index_generation')
+    return (generation is not None and int(generation) == int(repo.get('active_generation', 0) or 0)
+            and repo.get('structural_index_schema') == STRUCTURAL_INDEX_SCHEMA
+            and bool(repo.get('structural_index_manifest_path')))
 
 
 # =========================================================================
@@ -8039,14 +8063,7 @@ def code_readiness(
                         repo_id=repo_id,
                     )
                 )
-            structural_generation = repo.get("structural_index_generation")
-            structural_index_current = not (
-                structural_generation is None
-                or int(structural_generation) != active_generation
-                or str(repo.get("structural_index_schema", "") or "")
-                != STRUCTURAL_INDEX_SCHEMA
-                or not str(repo.get("structural_index_manifest_path", "") or "")
-            )
+            structural_index_current = _structural_index_current(repo)
             if not structural_index_current:
                 blockers.append(
                     _readiness_blocker(

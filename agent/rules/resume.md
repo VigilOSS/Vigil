@@ -70,6 +70,8 @@ vigil assess kali sweep-orphans --scope all
 For outstanding runtime proof, inspect `vigil assess proof-work list` and the relevant
 `proof-work get <id>` before dispatching. The list also exposes owed but unprepared findings;
 each entry's `queue_state` names what it needs next and `next_test` carries the planned test.
+Also inspect `reverification_required`: it names material invalidations of prior runtime proof,
+separate from parked findings. Preserve terminal history and obtain a fresh independent verdict.
 Use the explicit `proof-work reconcile <id>` write when ownership or source/scope currentness
 needs reconciliation; the read brief never changes it. A chat exit or old checkpoint is not
 proof that a supervised command stopped. Preserve a live owner/run, recover a genuinely stopped

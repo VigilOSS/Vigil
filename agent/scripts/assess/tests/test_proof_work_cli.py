@@ -238,6 +238,49 @@ def test_claim_records_the_requested_model_and_reasoning(tmp_path, monkeypatch, 
     assert 'requested_reasoning: high' in rendered
 
 
+def test_claim_records_selected_skills_and_mandatory_route_context(tmp_path, monkeypatch, capsys):
+    sent = _claim_rendering(tmp_path, monkeypatch, capsys, _work(),
+                            '--skills', 'code-finding-verification')
+    assert sent['skills'] == 'code-finding-verification'
+    context = sent['prompt_packet']['context']
+    assert context['assessment_mode'] == 'code'
+    rendered = sent['prompt_packet']['rendered_prompt']
+    assert 'agent/agents/exploit-developer.md' in rendered
+    assert 'agent/shared-specialist-core.md' in rendered
+    assert 'agent/shared-constraints-code.md' in rendered
+
+
+@pytest.mark.parametrize(('action', 'flag', 'value', 'expected'), [
+    ('approve', '--human-confirmation', ' Yes, test api.example.com.\n',
+     {'approved': True, 'actor': 'operator', 'human_confirmation': ' Yes, test api.example.com.\n', 'reason': None}),
+    ('revoke', '--reason', ' Stop this proof.\n',
+     {'approved': False, 'actor': 'operator', 'human_confirmation': None, 'reason': ' Stop this proof.\n'}),
+])
+def test_approval_records_the_human_decision_losslessly(tmp_path, monkeypatch, capsys, action, flag, value, expected):
+    (tmp_path / 'scope.json').write_text('{}\n')
+    monkeypatch.setattr(config, '_verify_backend', lambda _: None)
+    calls = []
+    monkeypatch.setattr(AssessmentClient, 'post', lambda _c, endpoint, payload:
+                        calls.append((endpoint, payload)) or {'id': 3})
+    cli.main(['--engagement-dir', str(tmp_path), 'proof-work', action, '3', flag, value])
+    assert calls == [('proof-work/3/approval', expected)]
+
+
+@pytest.mark.parametrize(('action', 'flag', 'value'), [
+    ('approve', '--human-confirmation', '   '),
+    ('approve', '--human-confirmation', 'x' * 2001),
+    ('revoke', '--reason', ' \n'),
+    ('revoke', '--reason', 'x' * 8193),
+])
+def test_invalid_approval_text_fails_before_a_write(tmp_path, monkeypatch, action, flag, value):
+    (tmp_path / 'scope.json').write_text('{}\n')
+    monkeypatch.setattr(config, '_verify_backend', lambda _: None)
+    monkeypatch.setattr(AssessmentClient, 'post', lambda *_: pytest.fail('invalid decision must not write'))
+    with pytest.raises(SystemExit) as error:
+        cli.main(['--engagement-dir', str(tmp_path), 'proof-work', action, '3', flag, value])
+    assert error.value.code == 1
+
+
 def test_every_command_the_proof_work_contract_names_parses(monkeypatch):
     import argparse
     import re

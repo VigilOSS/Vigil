@@ -239,7 +239,7 @@ def record_dispatch(
                 )
         if continued_from_dispatch_id is not None:
             parent = connection.execute(
-                "SELECT 1 FROM assessment_dispatches WHERE id = ? AND engagement_id = ?",
+                "SELECT status FROM assessment_dispatches WHERE id = ? AND engagement_id = ?",
                 (continued_from_dispatch_id, engagement.id),
             ).fetchone()
             if parent is None:
@@ -247,6 +247,20 @@ def record_dispatch(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="continued_from_dispatch_id must name a dispatch in this engagement",
                 )
+            proof_owner = connection.execute(
+                "SELECT 1 FROM assessment_proof_work w WHERE w.engagement_id=? AND "
+                "(w.owner_dispatch_id=? OR EXISTS (SELECT 1 FROM assessment_proof_work_events e "
+                "WHERE e.work_id=w.id AND ((e.action='claimed' AND json_extract(e.details_json,'$.dispatch_id')=?) "
+                "OR (e.action='released' AND json_extract(e.details_json,'$.previous_dispatch_id')=?)))) LIMIT 1",
+                (engagement.id, continued_from_dispatch_id, continued_from_dispatch_id, continued_from_dispatch_id),
+            ).fetchone()
+            if proof_owner:
+                raise HTTPException(status_code=409, detail=(
+                    'Proof owners cannot continue through ordinary dispatch; reconcile execution, '
+                    'close the ended dispatch, release proof work, then claim fresh work'
+                ))
+            if parent['status'] not in _common.TERMINAL_DISPATCH_STATUSES:
+                raise HTTPException(status_code=409, detail='Predecessor dispatch must be explicitly closed before continuation')
         existing = connection.execute(
             "SELECT id FROM assessment_dispatches WHERE engagement_id = ? AND agent_id = ?",
             (engagement.id, agent_id),

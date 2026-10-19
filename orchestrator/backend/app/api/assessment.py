@@ -1043,6 +1043,7 @@ class FindingPatchRequest(BaseModel):
     # "rotate" banks the accumulated notes on the transition ledger and leaves a
     # pointer behind — the exit for a row already past the append cap.
     notes_mode: Literal["append", "replace", "rotate"] = "append"
+    dispatch_agent_id: str | None = Field(default=None, min_length=1, max_length=128)
     source_name: str | None = Field(default=None, max_length=128)
     details: dict[str, Any] | None = None
     # CR-31: "merge" (default) accretes detail KEYS across checkpoints but
@@ -3979,6 +3980,7 @@ async def patch_finding(
             notes=request.notes,
             notes_mode=request.notes_mode,
             source_name=request.source_name,
+            dispatch_agent_id=request.dispatch_agent_id,
             details=request.details,
             details_mode=request.details_mode,
             provenance=request.provenance,
@@ -3999,7 +4001,7 @@ async def patch_finding(
             engagement.id,
             title="finding-update",
             action=f"finding={finding_slug}",
-            actor_name=request.source_name,
+            actor_name=request.dispatch_agent_id or request.source_name,
             result=request.reason_code or request.reason_text or "",
             metadata={"finding_slug": finding_slug},
         )

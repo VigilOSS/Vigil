@@ -83,7 +83,7 @@ def test_dispatch_instruction_identity_hashes_exact_installed_files(
             "agent/.codex/agents/recon-specialist.toml"
         ),
         "specialist_instruction_sha256": _sha256(specialist_bytes),
-        "instruction_identity_status": "verified",
+        "instruction_identity_status": "installed",
         "instructions_stale": False,
     }
     assert warnings == []
@@ -117,7 +117,7 @@ def test_dispatch_instruction_identity_fingerprints_selected_operator_core(
     )
 
     assert identity["operator_instruction_path"] == f"agent/{operator_file}"
-    assert identity["instruction_identity_status"] == "verified"
+    assert identity["instruction_identity_status"] == "installed"
     assert warnings == []
 
 
@@ -340,7 +340,7 @@ def test_dispatch_instruction_identity_uses_blue_operator_and_reports_staleness(
     )
 
     assert identity["operator_instruction_path"] == "agent/AGENTS-blue.md"
-    assert identity["instruction_identity_status"] == "verified"
+    assert identity["instruction_identity_status"] == "installed"
     assert identity["instructions_stale"] is True
     assert any("installed instructions differ" in warning for warning in warnings)
 

@@ -6,6 +6,11 @@ origin: Vigil
 
 # Finding Verification — adversarial Phase-5 review
 
+Before a terminal verdict, finish reproduction/evidence documentation on the same finding.
+Use `finding update --agent-id <your-dispatch-id>` for attributed edits and consult its contract
+for same-verifier enrichment; claim changes require fresh review and a consumed receipt cannot
+support another verdict. The shared specialist core owns approval and receipt discipline.
+
 ## When to Activate
 
 Load this skill when `vulnerability-analyst` is dispatched in **review mode** (Phase 5,

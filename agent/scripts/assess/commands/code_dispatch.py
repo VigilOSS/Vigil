@@ -991,6 +991,9 @@ def _done(
     if not isinstance(cwe_data, list):
         print("CWE coverage payload must be a JSON array", file=sys.stderr)
         sys.exit(1)
+    if not cwe_data and normalized_disposition != 'skipped':
+        print('CWE coverage must contain at least one entry for analyzed work', file=sys.stderr)
+        sys.exit(1)
     for idx, entry in enumerate(cwe_data):
         if not isinstance(entry, dict):
             print(f"CWE coverage entry {idx} must be a JSON object", file=sys.stderr)

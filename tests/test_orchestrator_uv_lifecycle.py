@@ -50,9 +50,8 @@ def test_backend_launch_uses_real_uv_interface_without_installing_or_mutating_pr
         pass
 
     def launch(_command, argv, env):
-        prefix = argv[:argv.index("python")]
         completed = real_run(
-            [*prefix, "python", "-c", "from vigil_cli import RELEASE_MARKER; print(RELEASE_MARKER)"], cwd=application,
+            [argv[0], "-c", "from vigil_cli import RELEASE_MARKER; print(RELEASE_MARKER)"], cwd=application,
             env=env, capture_output=True, text=True, timeout=30,
         )
         launched.append((completed, env))
@@ -127,6 +126,7 @@ def test_health_and_readiness_share_one_startup_budget(isolated_launch, monkeypa
     monkeypatch.setenv("VIGIL_ORCHESTRATOR_START_TIMEOUT_SECONDS", "600")
     monkeypatch.setattr(orchestrator.time, "monotonic", lambda: now["value"])
     monkeypatch.setattr(orchestrator, "_sync_backend_environment", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(orchestrator, "_process_identity", lambda _: "acme-birth")
     monkeypatch.setattr(orchestrator.subprocess, "Popen", lambda *_args, **_kwargs: SimpleNamespace(pid=1234))
 
     def health(*_args, **kwargs):

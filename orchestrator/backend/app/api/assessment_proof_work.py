@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import Literal
 
 from fastapi import APIRouter
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ..services.engagements import get_engagement_or_404
 from ..services.state_manager import proof_work
@@ -24,6 +24,16 @@ class ProofWorkPrepare(BaseModel):
 class ProofWorkApproval(BaseModel):
     model_config = ConfigDict(extra='forbid')
     approved: bool
+    actor: Literal['operator', 'ui']
+    human_confirmation: str | None = Field(default=None, max_length=2000)
+    reason: str | None = Field(default=None, max_length=8192)
+
+    @model_validator(mode='after')
+    def require_decision_context(self):
+        value = self.human_confirmation if self.approved else self.reason
+        if not value or not value.strip():
+            raise ValueError('Approval requires human_confirmation; revocation requires reason')
+        return self
 
 
 class ProofWorkUpdate(BaseModel):
@@ -58,7 +68,7 @@ def claim(engagement_key: str, work_id: int, request: DispatchCreate):
 @router.post('/proof-work/{work_id}/approval')
 def approve(engagement_key: str, work_id: int, request: ProofWorkApproval):
     return proof_work.approve_proof_work(get_engagement_or_404(engagement_key).id, work_id,
-                                        approved=request.approved)
+                                        **request.model_dump())
 
 
 @router.patch('/proof-work/{work_id}')

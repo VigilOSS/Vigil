@@ -212,7 +212,7 @@ def build_dispatch_instruction_identity(
             str(specialist_relative) if specialist_relative is not None else None
         ),
         "specialist_instruction_sha256": specialist_digest,
-        "instruction_identity_status": "verified" if complete else "incomplete",
+        "instruction_identity_status": "installed" if complete else "incomplete",
         "instructions_stale": instructions_stale,
     }
     return identity, warnings

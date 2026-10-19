@@ -587,7 +587,7 @@ def _start_runtime_locked(
 
     env_file = install_root / ".env"
     base_url = container_host_url(resolve_orchestrator_base_url(install_root))
-    resources = runtime_resources()
+    resources = runtime_resources(install_root)
     # Resolve egress BEFORE any teardown so a malformed VIGIL_RUNTIME_EGRESS_PROXY
     # fails clearly without first `docker rm -f`-ing the running container.
     egress = runtime_egress()
@@ -697,10 +697,10 @@ def runtime_mounts_ok(install_root: Path, container_name: str | None = None, *, 
     return True
 
 
-def runtime_resource_state(container_name: str | None = None, *, runner: docker.Runner = docker.run_command) -> dict[str, object]:
+def runtime_resource_state(container_name: str | None = None, *, workspace: Path | None = None, runner: docker.Runner = docker.run_command) -> dict[str, object]:
     """Return configured runtime resources merged with live cgroup state from the container."""
     container_name = container_name or default_runtime_container()
-    configured = runtime_resources()
+    configured = runtime_resources(workspace)
     egress = runtime_egress()
     state: dict[str, object] = {
         "configured": {
@@ -725,9 +725,9 @@ def runtime_resource_state(container_name: str | None = None, *, runner: docker.
     return state
 
 
-def vigil_runtime_resources(container_name: str | None = None, *, runner: docker.Runner = docker.run_command, json_output: bool = False) -> None:
+def vigil_runtime_resources(container_name: str | None = None, *, workspace: Path | None = None, runner: docker.Runner = docker.run_command, json_output: bool = False) -> None:
     container_name = container_name or default_runtime_container()
-    state = runtime_resource_state(container_name, runner=runner)
+    state = runtime_resource_state(container_name, workspace=workspace, runner=runner)
     if json_output:
         print(json.dumps(state, indent=2))
         return

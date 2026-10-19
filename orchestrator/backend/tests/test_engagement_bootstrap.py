@@ -160,10 +160,10 @@ def test_aith_engagement_create_aborts_on_install_root_mismatch(tmp_path: Path, 
                 )
             )
     message = str(excinfo.value)
-    assert "the running orchestrator does not know about it" in message
+    assert "serves install_root=" in message
     assert other_install_root in message
-    assert "Recover by:" in message
-    assert "orchestrator restart" in message
+    assert "Inspect its owner" in message
+    assert f"vigil --root {other_install_root} orchestrator status" in message
 
 
 def test_aith_engagement_create_force_syncs_on_matching_install_root(tmp_path: Path, monkeypatch) -> None:
@@ -302,7 +302,7 @@ def test_verify_backend_install_root_force_syncs_when_install_root_endpoint_miss
         ("GET", "orchestrator.example.test", 8080, "/prefix/admin/install-root"),
         ("POST", "orchestrator.example.test", 8080, "/prefix/admin/sync-engagements"),
     ]
-    assert "does not expose /admin/install-root" in capsys.readouterr().err
+    assert "ownership cannot be verified" in capsys.readouterr().err
 
 
 def test_aith_engagement_create_skips_drift_check_when_backend_unreachable(tmp_path: Path, monkeypatch) -> None:

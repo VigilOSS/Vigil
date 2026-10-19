@@ -83,8 +83,7 @@ def _default_paths(root: Path) -> dict[str, Path]:
 def workspace_path(root: Path, name: str) -> Path:
     metadata = read_workspace(root)
     if metadata is not None:
-        locations = metadata["paths"]
-        assert isinstance(locations, dict)
+        locations = _workspace_locations(root, metadata)
         value = locations.get(name)
         if not isinstance(value, str) or not value:
             raise SystemExit(f"Missing workspace path {name!r} in {root / WORKSPACE_FILENAME}")
@@ -108,7 +107,7 @@ def validate_workspace(root: Path) -> None:
 
 def _workspace_locations(root: Path, metadata: dict[str, object] | None) -> dict[str, str]:
     if metadata is None:
-        return {name: str(path) for name, path in _default_paths(root).items()}
+        return {name: str(path.relative_to(root)) for name, path in _default_paths(root).items()}
     locations = metadata["paths"]
     assert isinstance(locations, dict)
     for name in _default_paths(root):
@@ -117,7 +116,39 @@ def _workspace_locations(root: Path, metadata: dict[str, object] | None) -> dict
     for name, value in locations.items():
         if not isinstance(name, str) or not isinstance(value, str) or not value:
             raise SystemExit(f"Invalid workspace path: {name}")
-    return dict(locations)
+    result = dict(locations)
+    # Old installers serialized every default absolutely. The cache anchor and
+    # the complete recognized layout establish provenance; never prefix-rewrite
+    # arbitrary operator storage or infer ownership from a path substring.
+    cache = Path(result["cache"]).expanduser()
+    if cache.is_absolute() and cache.name == "cache":
+        previous = cache.parent
+        if previous != root:
+            layouts = {
+                "engagements": {"engagements", "agent/engagements"},
+                "data": {"state", "orchestrator/backend/data"},
+                "runtime_state": {"state/runtime", ".runtime-data"},
+                "tenant_references": {"tenant-references", "agent/references/tenants"},
+                "logs": {"logs", ".runtime-data/logs"},
+                "cache": {"cache"},
+            }
+            converted = {}
+            for name, value in result.items():
+                path = Path(value).expanduser()
+                if name == "data" and path.is_absolute() and not path.is_relative_to(previous):
+                    converted[name] = value  # Explicit external storage stays external.
+                    continue
+                if (not path.is_absolute() or not path.is_relative_to(previous)
+                        or str(path.relative_to(previous)) not in layouts.get(name, set())):
+                    raise SystemExit(f"Ambiguous workspace relocation in {root / WORKSPACE_FILENAME}; "
+                                     "set each intended workspace path explicitly before adoption.")
+                converted[name] = str(path.relative_to(previous))
+            if previous.exists():
+                raise SystemExit(f"Cannot adopt copied workspace: original workspace still exists at {previous}. "
+                                 f"Set the intended paths in {root / WORKSPACE_FILENAME} explicitly, "
+                                 "and stop/restart active services before using the copy.")
+            return converted
+    return result
 
 
 def _validate_workspace_pinned(pin: PinnedDirectory, locations: dict[str, str]) -> None:

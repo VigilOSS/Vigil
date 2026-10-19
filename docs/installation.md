@@ -142,3 +142,21 @@ needs a host copy. Claude and opencode bundle their own search, but Codex and go
 `vigil engagement start` warns; neither blocks.
 
 Runtime sizing, kernel limits, and orchestrator backups: [`operations.md`](operations.md).
+
+## Moving a workspace
+
+Fresh workspace metadata stores default private paths relative to its root. Explicit external
+storage remains absolute. Stop clients and owned services before moving a workspace, then run
+installation/preflight from the intended root to refresh managed pointers and restart services.
+Historical evidence paths and original source origins remain recorded as they ran.
+
+Recognized moved layouts can migrate coherently. If the earlier workspace still exists, or
+metadata mixes roots such that defaults cannot be distinguished from explicit overrides, Vigil
+refuses ambiguous adoption and names the required path decision. A copied process receipt does
+not authorize stopping the original workspace's process. A copy of a running workspace is not
+an independent live installation.
+
+Source manifests retain the original source binding. Moving a workspace does not rewrite
+historical evidence or source manifests. If validation reports an invalid sealed source
+binding after a move, restore access to the original source and explicitly confirm a source
+refresh before continuing source work.

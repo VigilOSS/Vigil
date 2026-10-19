@@ -139,6 +139,7 @@ class Vigil:
             VIGIL_APPLICATION_CACHE=str(workdir / "app-cache"),
             ORCHESTRATOR_BASE_URL=self.base_url,
             VIGIL_RUNTIME_CONTAINER=self.container,
+            VIGIL_RUNTIME_MEMORY_GB="2",
             PYTHONPATH=str(REPO_ROOT / "src"),
             PYTHONDONTWRITEBYTECODE="1",
             UV_OFFLINE="1",
@@ -322,6 +323,18 @@ def test_code_finding_runtime_proof_end_to_end(vigil: Vigil) -> None:
     vigil.assess("code-index", "build", "--repo-id", repo_id.group(1), str(sealed_source))
     sync = vigil.assess("code-index", "sync")
     assert "3 files updated" in sync.stderr
+
+    repos = vigil.assess_json('fetch', 'code/repos')
+    repo = next(row for row in repos if row['id'] == int(repo_id.group(1)))
+    vigil.assess('code-record', 'threat-model', repo_id.group(1),
+        '--repo-generation', str(repo['active_generation']),
+        '--source-manifest-digest', repo['source_manifest_digest'],
+        str(vigil.write('threat-model.json', {
+            'summary': 'Acme library accepts caller-controlled report names; the file store is the trust boundary.',
+            'trusted_inputs': ['The configured report root'],
+            'entry_points': ['acme_reports.read_report(name)'],
+            'trust_boundaries': ['Untrusted report name to filesystem path'],
+        })))
 
     # 2. Finder dispatch records the code finding.
     _start_dispatch(vigil, AUTHOR, "code-vuln-hunter", "Hunt path traversal in read_report")
@@ -583,3 +596,157 @@ def test_code_finding_runtime_proof_end_to_end(vigil: Vigil) -> None:
     dispatch_ids = _dispatch_ids(vigil)
     assert {AUTHOR, VERIFIER, PROVER} <= dispatch_ids
     assert "XDEV-E2E-1" not in dispatch_ids
+
+    # 8. Attributed documentation enrichment retains the verdict and original author.
+    vigil.assess('finding', 'update', slug, '--agent-id', PROVER,
+        '--details-inline', json.dumps({'steps_to_reproduce': 'Call read_report with q3-summary.txt, then ../private/canary.txt.'}))
+    enriched = _finding(vigil, slug)
+    assert enriched['verification_status'] == 'confirmed'
+    assert enriched['provenance']['agent_id'] == AUTHOR
+    assert enriched['verification_audit']['proof_receipt_ids'] == [receipt_id]
+    reused = vigil.assess(*confirm_args, expect_ok=False)
+    assert reused.returncode != 0
+    vigil.assess('finding', 'update', slug, '--severity', 'high')
+    invalidated = _finding(vigil, slug)
+    assert invalidated['verification_status'] == 'unreviewed'
+    renewed = vigil.assess_json('proof-work', 'list')
+    assert renewed['reverification_required'][0]['finding_slug'] == slug
+    assert renewed['items'][0]['status'] == 'finished'
+    assert renewed['items'][0]['queue_state'] == 'stale'
+    for _ in range(2):
+        historical = vigil.assess_json('proof-work', 'reconcile', str(work_id))
+        assert historical['status'] == 'finished'
+    status, continuation = vigil.api('POST', 'dispatches', {
+        'agent_id': 'PROOF-CONTINUED', 'agent_role': 'code-vuln-verifier',
+        'task': 'Try an invalid continuation', 'continued_from_dispatch_id': prover_dispatch_id})
+    assert status == 409, continuation
+    recovered = vigil.assess_json('proof-work', 'release', str(work_id), '--reason', 'Terminal runtime and dispatch inspected')
+    assert recovered['owner_dispatch_id'] is None
+    status, continuation = vigil.api('POST', 'dispatches', {
+        'agent_id': 'PROOF-CONTINUED', 'agent_role': 'code-vuln-verifier',
+        'task': 'Try historical proof continuation', 'continued_from_dispatch_id': prover_dispatch_id})
+    assert status == 409, continuation
+    _web_proof(vigil)
+
+
+def _web_proof(vigil: Vigil) -> None:
+    # Controlled HTTP traffic stays inside the isolated runtime's loopback interface.
+    assert vigil.engagement is not None
+    vigil.run('engagement', 'add-host', vigil.engagement.name, '127.0.0.1')
+    author, verifier = 'WEB-AUTHOR-1', 'WEB-PROOF-1'
+    _start_dispatch(vigil, author, 'vulnerability-analyst', 'Record Acme HTTP fixture hypothesis')
+    candidate = {
+        'title': 'Acme HTTP fixture discloses a canary', 'severity': 'medium',
+        'canonical_location': 'http://127.0.0.1/report',
+        'defect_family': 'information-disclosure', 'root_cause_key': 'acme-http-canary',
+        'summary': 'The controlled report route exposes a fixture canary to its test client.',
+        'details': {'evidence': 'The Acme fixture serves the canary body.', 'impact': 'Test client reads the fixture canary.'},
+    }
+    recorded = vigil.assess('finding', 'record', 'vulnerability-analyst', str(vigil.write('web-finding.json', candidate)),
+                            '--agent-id', author, '--allow-unindexed-evidence')
+    slug = recorded.stdout.strip().splitlines()[-1]
+    plan = {'hypothesis': 'The Acme HTTP report route returns the canary.',
+            'confirm_if': 'GET /report returns ACME-HTTP-CANARY while /denied returns 403.',
+            'falsify_if': 'The report route denies access or omits the canary.',
+            'route_hint': 'live', 'prerequisites': 'Controlled localhost fixture server.'}
+    vigil.assess('finding', 'verify', slug, '--status', 'pending_runtime_proof',
+                 '--reason', 'Challenge the controlled HTTP hypothesis',
+                 '--next-test-file', str(vigil.write('web-next-test.json', plan)))
+    work = vigil.assess_json('proof-work', 'prepare', slug, '--route', 'web',
+        '--host', '127.0.0.1', '--objective', plan['hypothesis'])
+    work_id = str(work['id'])
+    assert work['approval_required'] is True
+    context = PROOF_CONTEXT | {'authorized_phase': 'exploit', 'target': '127.0.0.1 controlled Acme HTTP fixture'}
+    claim_args = ('proof-work', 'claim', work_id, '--agent-id', verifier,
+        '--agent-role', 'exploit-developer', '--skills', 'finding-verification',
+        '--prompt-context-json', '@' + str(vigil.write('web-context.json', context)), '--rate-budget', '2 requests per second')
+    refused = vigil.assess(*claim_args, expect_ok=False)
+    assert refused.returncode != 0
+    assert verifier not in _dispatch_ids(vigil)
+    vigil.assess('proof-work', 'approve', work_id, '--human-confirmation', 'Fixture authorization: test only the isolated Acme localhost server.')
+    claim = vigil.assess_json(*claim_args)
+    owner = claim['owner_dispatch_id']
+    assert claim['launch_required'] is True
+    assert claim['prompt_packet']['context']['assessment_mode'] == 'web'
+    assert 'agent/shared-constraints.md' in claim['prompt_packet']['rendered_prompt']
+
+    # Scope policy changes are operator fixture inputs; backend reads this canonical file.
+    scope_path = vigil.engagement / 'scope.json'
+    scope = json.loads(scope_path.read_text())
+    scope.update(exploit_policy='full_send', approved_targets=['VA-UNRELATED'], exploit_review_state='approved')
+    scope_path.write_text(json.dumps(scope))
+    assert vigil.assess_json('proof-work', 'get', work_id)['current'] is True
+    vigil.assess('proof-work', 'revoke', work_id, '--reason', 'Fixture pause before execution')
+    revoked = vigil.assess_json('proof-work', 'get', work_id)
+    assert revoked['approval_required'] is True and revoked['queue_state'] == 'blocked'
+    blocked = vigil.assess('proof-work', 'update', work_id, '--agent-id', verifier, '--status', 'claimed', expect_ok=False)
+    assert blocked.returncode != 0
+    replay = vigil.assess(*claim_args, expect_ok=False)
+    assert replay.returncode != 0
+    vigil.assess('proof-work', 'reconcile', work_id)
+    vigil.assess('proof-work', 'approve', work_id, '--human-confirmation', 'Fixture authorization resumed for the same bounded test.')
+    scope['exploit_policy'] = 'pause'
+    scope_path.write_text(json.dumps(scope))
+    active = vigil.assess_json('proof-work', 'get', work_id)
+    assert active['current'] and not active['approval_required']
+    assert active['owner_dispatch_id'] == owner
+    run = vigil.assess_json('proof-run', 'start', 'acme-http-' + uuid.uuid4().hex[:8],
+                           '--kind', 'web', '--agent-id', verifier, '--for-finding', slug)
+    script = """import threading, urllib.request, urllib.error
+from http.server import BaseHTTPRequestHandler, HTTPServer
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        allowed = self.path == '/report'
+        self.send_response(200 if allowed else 403)
+        self.end_headers()
+        self.wfile.write(b'ACME-HTTP-CANARY' if allowed else b'denied')
+    def log_message(self, *args): pass
+server = HTTPServer(('127.0.0.1', 0), Handler)
+thread = threading.Thread(target=server.serve_forever, daemon=True)
+thread.start()
+base = 'http://127.0.0.1:' + str(server.server_port)
+try:
+    with urllib.request.urlopen(base + '/report') as response:
+        print('report:', response.status, response.read().decode())
+    try: urllib.request.urlopen(base + '/denied')
+    except urllib.error.HTTPError as error: print('control:', error.code)
+finally:
+    server.shutdown()
+    server.server_close()
+    thread.join()
+"""
+    executed = vigil.assess_json('kali', 'exec', '--technique', 'INFO-DISCLOSURE',
+        '--intent', 'Challenge controlled localhost response with a denied control',
+        '--probe-kind', 'exploit', '--phase', 'exploit', '--timeout', '60',
+        '--agent-name', verifier, '--', 'python3', '-c', script)
+    assert executed['return_code'] == 0
+    assert 'report: 200 ACME-HTTP-CANARY' in executed['stdout_preview']
+    assert 'control: 403' in executed['stdout_preview']
+    receipt = vigil.assess_json('proof-receipt', 'create', '--run-id', str(run['id']), '--kind', 'command',
+        '--command-run-id', str(executed['run_id']), '--expected-result', plan['confirm_if'],
+        '--observed-result', 'Report returned 200 ACME-HTTP-CANARY; denied control returned 403.', '--evidence-health', 'healthy')
+    vigil.assess('proof-work', 'update', work_id, '--agent-id', verifier, '--status', 'claimed', '--run-id', str(run['id']))
+    vigil.assess('finding', 'update', slug, '--agent-id', verifier,
+        '--details-inline', json.dumps({'steps_to_reproduce': 'Start the controlled Acme fixture, GET /report, then GET /denied.'}))
+    check = vigil.write('web-confirm-check.json', {
+        'method': 'Audited HTTP request against isolated fixture',
+        'attempted_falsification': 'Compared the report with a denied control endpoint',
+        'expected_result': plan['confirm_if'], 'observed_result': '200 canary and 403 control',
+        'completed': True, 'proof_receipt_ids': [receipt['id']]})
+    vigil.assess('proof-run', 'finish', str(run['id']), '--status', 'completed')
+    vigil.assess('finding', 'verify', slug, '--status', 'confirmed', '--agent-id', verifier,
+        '--reason', 'Controlled HTTP proof and denied control passed', '--proof-receipt-id', str(receipt['id']),
+        '--confirm-check-file', str(check))
+    finished = vigil.assess_json('proof-work', 'update', work_id, '--agent-id', verifier, '--status', 'finished')
+    assert finished['queue_state'] == 'done'
+    verified = _finding(vigil, slug)
+    assert verified['verification_status'] == 'confirmed'
+    assert verified['provenance']['agent_id'] == author
+    assert verified['proof_receipts'][0]['command_run_id'] == executed['run_id']
+    assert verified['verification_audit']['proof_receipt_ids'] == [receipt['id']]
+    history = vigil.assess_json('proof-work', 'get', work_id)['events']
+    decisions = [json.loads(event['details_json']) for event in history if event['action'] == 'approval']
+    assert [event['approved'] for event in decisions] == [True, False, True]
+    assert decisions[1]['reason'] == 'Fixture pause before execution'
+    for agent_id in (author, verifier):
+        vigil.assess('agent', 'done', agent_id, '--status', 'completed', '--finding-slugs', slug)

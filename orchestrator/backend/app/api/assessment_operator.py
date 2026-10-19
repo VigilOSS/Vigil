@@ -37,6 +37,10 @@ _HANDOFF_STATUS = Literal["checkpointed", "ready", "blocked", "superseded"]
 _LAUNCHED_CLIENT = Literal["claude", "codex", "goose", "kimi", "opencode", "pi"]
 _DISPATCH_CLIENT = Literal["claude", "codex", "goose", "kimi", "opencode", "pi", "unknown"]
 _MIXED_ASSESSMENT_ROLES = frozenset({"exploit-developer", "source-analyzer"})
+_CODE_ASSESSMENT_ROLES = frozenset({
+    'code-architect', 'code-fuzz-engineer', 'code-variant-hunter',
+    'code-vuln-hunter', 'code-vuln-verifier',
+})
 
 
 class DispatchPromptPacket(BaseModel):
@@ -73,7 +77,7 @@ class DispatchCreate(BaseModel):
     specialist_instruction_sha256: str | None = Field(
         default=None, pattern=r"^[a-f0-9]{64}$"
     )
-    instruction_identity_status: Literal["verified", "incomplete"] = "incomplete"
+    instruction_identity_status: Literal["installed", "verified", "incomplete"] = "incomplete"
     instructions_stale: bool | None = None
     dispatch_mode: str | None = Field(
         default=None,
@@ -94,6 +98,10 @@ class DispatchCreate(BaseModel):
 
     @model_validator(mode="after")
     def _validate_instruction_identity(self) -> DispatchCreate:
+        if self.agent_role in _CODE_ASSESSMENT_ROLES:
+            if self.assessment_mode == 'web':
+                raise ValueError('Code-only specialist dispatches require assessment_mode=code')
+            self.assessment_mode = 'code'
         if self.launcher_effective_client == "unknown" and self.client_name != "unknown":
             self.launcher_effective_client = self.client_name
         elif self.client_name == "unknown" and self.launcher_effective_client != "unknown":
@@ -103,7 +111,7 @@ class DispatchCreate(BaseModel):
                 "client_name is a compatibility projection and must equal "
                 "launcher_effective_client"
             )
-        if self.instruction_identity_status == "verified":
+        if self.instruction_identity_status in {"installed", "verified"}:
             complete = all(
                 (
                     self.client_name != "unknown",
@@ -115,12 +123,12 @@ class DispatchCreate(BaseModel):
             )
             if not complete:
                 raise ValueError(
-                    "verified instruction identity requires a known client plus both "
+                    "installed instruction identity requires a known client plus both "
                     "installed instruction paths and SHA-256 fingerprints"
                 )
         elif self.instructions_stale is not None:
             raise ValueError(
-                "instructions_stale is only known for a verified instruction identity"
+                "instructions_stale is only known for a fingerprinted instruction identity"
             )
         return self
 

@@ -220,6 +220,14 @@ class CreateEngagementOptions:
 class CreatedEngagement:
     key: str
     path: Path
+    backend_state: str | None = None
+
+
+class EngagementRegistrationError(SystemExit):
+    """Creation committed; backend registration failed without rolling back data."""
+    def __init__(self, created: CreatedEngagement, message: str):
+        self.created = created
+        super().__init__(message)
 
 
 @dataclass(frozen=True, slots=True)
@@ -580,14 +588,21 @@ def create_engagement(
     registered_source = plan.manifest.get("source_dir")
     if registered_source and root.resolve().is_relative_to(Path(str(registered_source))):
         raise SystemExit("registered source cannot contain engagement storage; choose a separate working root")
+    if contact_backend:
+        ownership = inspect_backend_ownership(install_root)
+        require_backend_ownership(ownership, install_root)
+        if ownership.state == BackendInstallRootStatus.PROTOCOL_ERROR:
+            raise SystemExit(f"Backend ownership check failed before creation: {ownership.detail}")
     root.mkdir(parents=True, exist_ok=True)
-
-    eng_dir = root / f"{plan.date_label}-{plan.time_label}-{plan.label}"
-    counter = 2
-    while eng_dir.exists():
-        eng_dir = root / f"{plan.date_label}-{plan.time_label}-{plan.label}-{counter}"
-        counter += 1
-    eng_dir.mkdir(parents=True)
+    label = f"{plan.date_label}-{plan.time_label}-{plan.label}"
+    counter = 1
+    while True:
+        eng_dir = root / (label if counter == 1 else f"{label}-{counter}")
+        try:
+            eng_dir.mkdir()
+            break
+        except FileExistsError:
+            counter += 1
     key = eng_dir.name
     # Everything below writes into the new directory. A writer that fails part
     # way through must not leave a scoped-but-unlaunchable engagement behind:
@@ -684,9 +699,19 @@ def create_engagement(
         shutil.rmtree(eng_dir, ignore_errors=True)
         raise
     _emit_bootstrap_scope_summary(scope)
+    backend_state = None
     if contact_backend:
         print("[vigil] Checking orchestrator and registering engagement...", file=sys.stderr, flush=True)
-        _verify_backend_install_root(install_root, eng_dir)
+        try:
+            backend_state = _verify_backend_install_root(install_root, eng_dir)
+        except SystemExit as exc:
+            raise EngagementRegistrationError(CreatedEngagement(key, eng_dir, "foreign"),
+                f"Engagement {key} was created at {eng_dir}, but registration failed: {exc}") from exc
+        if backend_state == BackendInstallRootStatus.PROTOCOL_ERROR:
+            raise EngagementRegistrationError(CreatedEngagement(key, eng_dir, str(backend_state)),
+                f"Engagement {key} was created at {eng_dir}, but backend registration returned {backend_state}; inspect the configured endpoint and retry synchronization.")
+        if backend_state != BackendInstallRootStatus.VERIFIED:
+            print(f"[vigil] WARN: engagement is durable at {eng_dir}; backend state is {backend_state}. Start/check the configured backend to synchronize it.", file=sys.stderr)
     # Blue and remediation skip the red-infra footer (mitmproxy/oob are irrelevant
     # to them); blue.py adds its alert hints after creation. Every type gets the
     # same key and start-command lines from _emit_engagement_identity.
@@ -697,7 +722,7 @@ def create_engagement(
         _emit_post_create_footer(key)
     print("[vigil] Engagement created.", file=sys.stderr)
     _emit_engagement_identity(key, options.engagement_type)
-    return CreatedEngagement(key=key, path=eng_dir)
+    return CreatedEngagement(key=key, path=eng_dir, backend_state=str(backend_state) if backend_state is not None else None)
 
 
 def _emit_engagement_identity(key: str, engagement_type: str) -> None:
@@ -764,6 +789,8 @@ def _emit_post_create_footer(key: str, *, runner: docker.Runner = docker.run_com
 
 class BackendInstallRootStatus(StrEnum):
     VERIFIED = "verified"
+    FOREIGN = "foreign"
+    OWNERSHIP_UNVERIFIED = "ownership_unverified"
     UNREACHABLE = "unreachable"
     SYNC_PENDING = "sync_pending"
     # The sync request dropped after an older build that cannot report its
@@ -772,129 +799,96 @@ class BackendInstallRootStatus(StrEnum):
     PROTOCOL_ERROR = "protocol_error"
 
 
-def _verify_backend_install_root(
-    install_root: Path, eng_dir: Path
-) -> BackendInstallRootStatus:
-    """Detect install-root mismatch between this CLI and the running orchestrator.
+@dataclass(frozen=True)
+class BackendOwnership:
+    state: BackendInstallRootStatus
+    base_url: str
+    install_root: str | None = None
+    detail: str = ""
 
-    The orchestrator picks ``settings.install_dir`` at startup time from
-    ``$VIGIL_INSTALL_DIR`` and cannot retarget at runtime. When
-    the operator runs ``vigil --root /custom/path engagement create ...`` against
-    a backend that was started with a *different* install root, the new
-    engagement directory is invisible to ``sync_engagements()`` — every
-    subsequent ``vigil assess`` call will write audit data to a backend that
-    cannot see the engagement, silently dropping recon evidence.
 
-    Strategy:
-      - If the backend is unreachable (offline / not started yet), return an
-        explicit unreachable state.
-        Local-only workflows are valid and ``vigil engagement create`` should
-        succeed when the orchestrator is intentionally down.
-      - If the backend is reachable AND its install_root matches ours, force a
-        re-sync so the new engagement is registered immediately.
-      - If the backend is reachable AND its install_root differs, abort with
-        the recovery message — the operator must restart the orchestrator
-        against the matching install root before the engagement is usable.
-      - An older backend without /admin/install-root (404) still receives the
-        force-sync; only the drift comparison is skipped, with a warning.
-      - A TLS failure or a non-2xx answer from a reachable backend is a protocol
-        error. Only a transport failure of the sync request itself is a
-        retryable pending sync, reported as ownership-unverified when the
-        backend could not report its install root.
-    """
+def _backend_request(base_url: str, method: str, path: str) -> tuple[int | None, bytes, str, bool]:
+    """One bounded HTTP exchange; distinguish protocol failures from transport loss."""
     import http.client
-    import json as _json
     import ssl
-    from urllib.parse import urlparse
+    from urllib.parse import urlsplit
 
-    base_url = resolve_orchestrator_base_url(install_root, eng_dir)
-    parsed = urlparse(base_url)
-    host = parsed.hostname or "127.0.0.1"
-    port = parsed.port or (443 if parsed.scheme == "https" else 80)
-    prefix = (parsed.path or "").rstrip("/")
-    connection_cls = http.client.HTTPSConnection if parsed.scheme == "https" else http.client.HTTPConnection
-
-    backend_install_root: str | None = None
+    conn = None
     try:
-        conn = connection_cls(host, port, timeout=2)
-        conn.request("GET", f"{prefix}/admin/install-root")
-        resp = conn.getresponse()
-        body = resp.read().decode("utf-8", errors="replace")
-        conn.close()
-        if resp.status == 200:
-            try:
-                payload = _json.loads(body)
-            except _json.JSONDecodeError:
-                return BackendInstallRootStatus.PROTOCOL_ERROR
-            if not isinstance(payload, dict):
-                return BackendInstallRootStatus.PROTOCOL_ERROR
-            install_root_value = payload.get("install_root")
-            if not isinstance(install_root_value, str) or not install_root_value.strip():
-                return BackendInstallRootStatus.PROTOCOL_ERROR
-            backend_install_root = install_root_value
-        elif resp.status == 404:
-            print(
-                f"[vigil] orchestrator at {base_url} does not expose /admin/install-root "
-                "(older build), so workspace ownership cannot be verified; skipping the "
-                "install-root drift check. Upgrade and restart the orchestrator to validate it.",
-                file=sys.stderr,
-            )
-        else:
-            print(
-                f"[vigil] orchestrator at {base_url} returned HTTP {resp.status} "
-                "for /admin/install-root; skipping install-root drift check.",
-                file=sys.stderr,
-            )
-            return BackendInstallRootStatus.PROTOCOL_ERROR
-    except (ssl.SSLError, http.client.HTTPException):
-        # A TLS failure or a non-HTTP answer is not an outage: something answered
-        # and could not be trusted, so it must not receive the offline carveout.
-        return BackendInstallRootStatus.PROTOCOL_ERROR
-    except OSError:
-        # Only a transport failure is unreachable. A reachable but malformed
-        # backend is a protocol error and must not receive the offline carveout.
-        return BackendInstallRootStatus.UNREACHABLE
+        parsed = urlsplit(base_url)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            raise ValueError("expected an HTTP or HTTPS endpoint")
+        request_path = parsed.path.rstrip("/") + path
+        connection = http.client.HTTPSConnection if parsed.scheme == "https" else http.client.HTTPConnection
+        conn = connection(parsed.hostname, parsed.port or (443 if parsed.scheme == "https" else 80), timeout=2)
+        conn.request(method, request_path)
+        response = conn.getresponse()
+        return response.status, response.read(), "", False
+    except (ssl.SSLError, ValueError) as exc:
+        detail, protocol = str(exc), True
+    except OSError as exc:
+        detail, protocol = str(exc), False
+        if base_url.startswith("http:"):
+            detail += "; if this port expects TLS, configure an https:// endpoint"
+    except http.client.HTTPException as exc:
+        detail, protocol = str(exc), True
+    finally:
+        if conn is not None:
+            conn.close()
+    detail = f"{method} {base_url.rstrip('/')}{path}: {detail}"
+    print(f"[vigil] {detail}", file=sys.stderr)
+    return None, b"", detail, protocol
 
-    expected = str(install_root.expanduser().resolve())
-    if backend_install_root and Path(backend_install_root).resolve() != Path(expected).resolve():
+
+def inspect_backend_ownership(install_root: Path, eng_dir: Path | None = None, *, base_url: str | None = None) -> BackendOwnership:
+    """Inspect ownership without syncing or materializing engagement state."""
+    base_url = base_url or resolve_orchestrator_base_url(install_root, eng_dir)
+    status, body, detail, protocol = _backend_request(base_url, "GET", "/admin/install-root")
+    if status is None:
+        return BackendOwnership(BackendInstallRootStatus.PROTOCOL_ERROR if protocol else BackendInstallRootStatus.UNREACHABLE, base_url, detail=detail)
+    if status == 404:
+        detail = f"{base_url}/admin/install-root returned HTTP 404; workspace ownership cannot be verified. Upgrade and restart the backend."
+        print(f"[vigil] {detail}", file=sys.stderr)
+        return BackendOwnership(BackendInstallRootStatus.OWNERSHIP_UNVERIFIED, base_url, detail=detail)
+    try:
+        payload = json.loads(body)
+        served = payload.get("install_root") if isinstance(payload, dict) else None
+        if status != 200 or not isinstance(served, str) or not served.strip():
+            raise ValueError("expected a nonblank install_root in an HTTP 200 JSON response")
+    except (ValueError, UnicodeError) as exc:
+        detail = f"GET {base_url}/admin/install-root HTTP {status}: {exc}"
+        print(f"[vigil] {detail}", file=sys.stderr)
+        return BackendOwnership(BackendInstallRootStatus.PROTOCOL_ERROR, base_url, detail=detail)
+    state = BackendInstallRootStatus.VERIFIED if Path(served).resolve() == install_root.resolve() else BackendInstallRootStatus.FOREIGN
+    return BackendOwnership(state, base_url, served)
+
+
+def require_backend_ownership(ownership: BackendOwnership, install_root: Path) -> None:
+    if ownership.state == BackendInstallRootStatus.FOREIGN:
+        import shlex
+        inspect = shlex.join(["vigil", "--root", str(ownership.install_root), "orchestrator", "status"])
         raise SystemExit(
-            "\n".join(
-                [
-                    f"Engagement state at {eng_dir} exists, but the running orchestrator does not know about it.",
-                    f"  The orchestrator was started against install_root={backend_install_root}",
-                    f"  This engagement is at install_root={expected}",
-                    "",
-                    "Recover by:",
-                    f"  vigil --root {expected} orchestrator restart",
-                    f"  vigil --root {expected} assess fetch summary --engagement-dir {eng_dir}",
-                ]
-            )
+            f"Backend at {ownership.base_url} serves install_root={ownership.install_root}, "
+            f"but this workspace is {install_root.resolve()}. Inspect its owner with `{inspect}`. "
+            "Stop it from its owning workspace or configure a different endpoint; this workspace cannot stop that process."
         )
 
-    # Install roots match — force a re-sync so the new engagement is visible
-    # to the backend immediately, without waiting for the next implicit trigger.
-    try:
-        conn = connection_cls(host, port, timeout=2)
-        conn.request("POST", f"{prefix}/admin/sync-engagements")
-        resp = conn.getresponse()
-        resp.read()
-        conn.close()
-        if 200 <= resp.status < 300:
-            return BackendInstallRootStatus.VERIFIED
-        print(
-            f"[vigil] orchestrator at {base_url} returned HTTP {resp.status} "
-            "for /admin/sync-engagements; the engagement is not registered.",
-            file=sys.stderr,
-        )
-        return BackendInstallRootStatus.PROTOCOL_ERROR
-    except (ssl.SSLError, http.client.HTTPException):
-        return BackendInstallRootStatus.PROTOCOL_ERROR
-    except OSError:
-        # A transport drop after the install-root request answered is the one
-        # retryable case — the next implicit sync covers it.
-        if backend_install_root is None:
-            return BackendInstallRootStatus.SYNC_PENDING_OWNERSHIP_UNVERIFIED
-        return BackendInstallRootStatus.SYNC_PENDING
+
+def _verify_backend_install_root(install_root: Path, eng_dir: Path, ownership: BackendOwnership | None = None) -> BackendInstallRootStatus:
+    ownership = ownership or inspect_backend_ownership(install_root, eng_dir)
+    require_backend_ownership(ownership, install_root)
+    if ownership.state not in {BackendInstallRootStatus.VERIFIED, BackendInstallRootStatus.OWNERSHIP_UNVERIFIED}:
+        return ownership.state
+    status, _body, _detail, protocol = _backend_request(ownership.base_url, "POST", "/admin/sync-engagements")
+    if status is None:
+        if protocol:
+            return BackendInstallRootStatus.PROTOCOL_ERROR
+        return (BackendInstallRootStatus.SYNC_PENDING if ownership.install_root is not None
+                else BackendInstallRootStatus.SYNC_PENDING_OWNERSHIP_UNVERIFIED)
+    if 200 <= status < 300:
+        return BackendInstallRootStatus.VERIFIED
+    print(f"[vigil] POST {ownership.base_url}/admin/sync-engagements returned HTTP {status}; engagement sync failed.", file=sys.stderr)
+    return BackendInstallRootStatus.PROTOCOL_ERROR
 
 
 def _emit_bootstrap_scope_summary(scope: dict[str, object]) -> None:
@@ -1227,6 +1221,35 @@ def engagement_mode_state(install_root: Path, engagement_dir: Path, *, client: s
 
 
 def engagement_source_state(engagement_dir: Path) -> dict[str, Any]:
+    """Separate original-source availability from validated retained audit copies."""
+    state = _original_source_state(engagement_dir)
+    snapshots = engagement_dir / "tools" / "analysis-state" / "code-snapshots"
+    if not snapshots.exists():
+        return state
+    from .paths import add_assess_import_path
+    add_assess_import_path(engagement_dir)
+    from assess.lib.code_snapshot import validate_snapshot  # type: ignore[import-not-found]
+    valid = []
+    errors = []
+    for manifest in sorted(snapshots.glob("*/*/manifest.json")):
+        try:
+            snapshot = validate_snapshot(manifest.parent)
+            valid.append({"path": str(manifest.parent / "source"), "repo_key": snapshot["repo_key"],
+                          "snapshot_digest": snapshot["snapshot_digest"], "file_count": len(snapshot["files"])})
+        except (OSError, ValueError) as exc:
+            errors.append(str(exc))
+    if errors:
+        state["sealed_source_errors"] = errors
+    if valid:
+        state["original_source_available"] = state["state"] == "present"
+        state["sealed_sources"] = valid
+        if not state["original_source_available"]:
+            state["state"] = "sealed"
+            state["detail"] = "Validated sealed source is available for resume; refresh requires the original source and trust confirmation."
+    return state
+
+
+def _original_source_state(engagement_dir: Path) -> dict[str, Any]:
     """Describe registered or staged source without granting analysis consent."""
     registered = _read_json(engagement_dir / "engagement.json").get("source_dir")
     source = Path(str(registered)) if registered else engagement_dir / "source"

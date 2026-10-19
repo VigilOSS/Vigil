@@ -816,12 +816,13 @@ def _render_contradiction_reviews(lines: list[str], section: dict) -> None:
 def _render_proof_work(lines: list[str], section: dict) -> None:
     owed = int(section.get("owed_findings") or 0)
     counts = section.get("queue_state_counts") or {}
-    if not owed and not counts:
+    renewed = int(section.get('reverification_required') or 0)
+    if not owed and not counts and not renewed:
         return
     compact = ", ".join(f"{state}={count}" for state, count in counts.items()) or "-"
     lines.extend(["", "## Proof Work"])
     lines.append(contain_separators(
-        f"- owed findings: {owed}; queue: {compact}; read=`{section.get('read_command')}`"
+        f"- owed findings: {owed}; verification required again: {renewed}; queue: {compact}; read=`{section.get('read_command')}`"
     ))
 
 

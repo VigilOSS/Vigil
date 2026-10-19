@@ -1228,3 +1228,20 @@ def test_agent_contracts_show_assessment_mode_for_mixed_roles() -> None:
     root = contracts.render_contract("agent")
     assert "--assessment-mode" in root
     assert "--assessment-mode" in contracts.render_contract("agent continue")
+
+
+@pytest.mark.parametrize('role', sorted(agent._CODE_SOURCE_IDENTITY_ROLES))
+def test_code_dispatch_registration_resolves_mode_before_rendering(role):
+    from assess.commands.dispatch.agent import _build_register_payload
+    args = _agent_parser().parse_args(['agent', 'start', '--agent-id', 'CODE-1',
+        '--role', role, '--task', 'Review Acme source', '--no-target-traffic'])
+    payload = _build_register_payload(args)
+    assert payload['assessment_mode'] == 'code'
+
+
+def test_runtime_identity_uses_persisted_prompt_authorization():
+    row = {'agent_id': 'PROOF-1', 'agent_role': 'exploit-developer', 'assessment_mode': 'web',
+           'prompt_packet': {'context': {'assessment_mode': 'web', 'authorized_phase': 'exploit'}}}
+    lines = agent._runtime_identity_lines(row)
+    assert 'assessment_mode: web' in lines
+    assert 'authorized_phase: exploit' in lines

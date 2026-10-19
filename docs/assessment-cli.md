@@ -117,6 +117,20 @@ printed loudly, with the exact `mark-scratch` fix in its detail line.
 
 ## Run accounting and proof
 
+`vigil assess proof-work list` separates parked runtime obligations from
+`reverification_required` after a prior runtime verdict is invalidated. Prepare an explicit
+route, record missing human approval once, then claim before native launch. The claim packet
+carries the selected skills, route, authorized phase and mandatory role loads. Only
+`launch_required: true` launches a worker; retrying a claim inspects existing ownership.
+Use `proof-work approve <id> --human-confirmation <text>` or
+`proof-work revoke <id> --reason <text>` for audited operator decisions. Revoke overrides
+`full_send`; recovery never infers that an old worker is dead.
+
+`finding update --agent-id <dispatch-id>` attributes the editor separately from the original
+author. Write reproduction details before verification. The same canonical verifier can make
+narrow, evidence-preserving reproduction enrichments; a claim change needs fresh review and
+receipts remain single-use. Consult `vigil assess contract finding update` for exact fields.
+
 ```bash
 vigil assess proof-run start|begin|finish|list|get
 vigil assess run-audit sources|source-read|obligation|candidate|tool-signal|discovery-pass|code-receipt|compare

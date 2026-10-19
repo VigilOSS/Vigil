@@ -38,6 +38,15 @@ from vigil_cli import restart_manifest  # noqa: E402
 def application_pin(monkeypatch: pytest.MonkeyPatch) -> None:
     """Restore per-test explicit application fixtures to the caller's environment."""
     monkeypatch.setenv("VIGIL_APPLICATION_DIR", str(repo_root))
+    # Never contact a real operator service from these host unit tests.
+    import socket
+    original_connect = socket.socket.connect
+    def connect(sock, address):
+        if isinstance(address, tuple) and len(address) >= 2 and address[1] == 18000:
+            raise ConnectionRefusedError("isolated test backend is offline")
+        return original_connect(sock, address)
+    monkeypatch.setattr(socket.socket, "connect", connect)
+
 
 
 def _copy_agent_fixture(agent_root: Path, install_root: Path) -> Path:
@@ -1235,8 +1244,8 @@ def test_install_adopts_local_state_without_replacing_legacy_application(tmp_pat
     assert (install_root / "agent" / "old-managed.txt").read_text() == "remove me\n"
     assert legacy_installer.read_text() == "old installer\n"
     metadata = json.loads((install_root / "workspace.json").read_text())
-    assert metadata["paths"]["engagements"] == str(marker.parent.parent)
-    assert metadata["paths"]["data"] == str(database.parent)
+    assert metadata["paths"]["engagements"] == "agent/engagements"
+    assert metadata["paths"]["data"] == "orchestrator/backend/data"
     assert metadata["application"]["root"] == str(source_root)
 
 
@@ -3477,6 +3486,7 @@ def test_orchestrator_foreground_execs_from_install_root(tmp_path: Path, monkeyp
     frontend_dist.mkdir(parents=True)
     (frontend_dist / "index.html").write_text("ok", encoding="utf-8")
     (install_root / "agent").mkdir()
+    (install_root / "orchestrator/backend").mkdir()
     monkeypatch.setenv("VIGIL_APPLICATION_DIR", str(install_root))
     # Freshness is a content stamp, not an mtime: an unstamped `dist/` cannot be
     # proven current and would trigger a real `npm ci` inside the test.
@@ -3502,11 +3512,11 @@ def test_orchestrator_foreground_execs_from_install_root(tmp_path: Path, monkeyp
             orchestrator_module.OrchestratorOptions(install_root=install_root, foreground=True)
         )
 
-    assert captured["file"] == "uv"
-    assert captured["cwd"] == install_root.resolve()
+    assert captured["file"] == str(Path(captured["env"]["UV_PROJECT_ENVIRONMENT"]) / "bin/python")
+    assert captured["cwd"] == install_root.resolve() / "orchestrator/backend"
     argv = captured["argv"]
     assert isinstance(argv, list)
-    assert argv[:6] == ["uv", "run", "--frozen", "--no-sync", "--directory", "orchestrator/backend"]
+    assert argv[1:4] == ["-m", "uvicorn", "app.main:app"]
     env = captured["env"]
     assert isinstance(env, dict)
     assert env["VIGIL_INSTALL_DIR"] == str(install_root.resolve())
@@ -3527,6 +3537,8 @@ def test_orchestrator_start_builds_frontend_then_errors_when_backend_already_run
     pid_file = install_root / ".runtime-data" / "pids" / "orchestrator.pid"
     pid_file.parent.mkdir(parents=True)
     pid_file.write_text("123\n", encoding="utf-8")
+    pid_file.with_suffix(".json").write_text(json.dumps({"pid": 123, "process_identity": "acme-birth", "workspace": str(install_root), "process_group": 123}))
+    monkeypatch.setattr(orchestrator_module, "_process_identity", lambda _: "acme-birth")
     calls: list[list[str]] = []
 
     def fake_run(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
@@ -3534,7 +3546,6 @@ def test_orchestrator_start_builds_frontend_then_errors_when_backend_already_run
         return subprocess.CompletedProcess(argv, 0, "", "")
 
     monkeypatch.setattr(orchestrator_module.subprocess, "run", fake_run)
-    monkeypatch.setattr(orchestrator_module, "_pid_running", lambda path: True)
 
     with pytest.raises(SystemExit) as excinfo:
         orchestrator_module.start_orchestrator(orchestrator_module.OrchestratorOptions(install_root=install_root))
@@ -3650,6 +3661,7 @@ def test_orchestrator_start_terminates_child_when_health_times_out(tmp_path: Pat
         signals_sent.append((pid, sig))
 
     monkeypatch.setattr(orchestrator_module.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(orchestrator_module, "_process_identity", lambda _: "acme-birth")
     monkeypatch.setattr(orchestrator_module.os, "killpg", fake_killpg)
     monkeypatch.setattr(orchestrator_module, "_check_port_available", lambda *_, **__: None)
     monkeypatch.setattr(orchestrator_module, "_wait_for_health", lambda *_, **__: False)
@@ -3698,6 +3710,7 @@ def test_orchestrator_start_terminates_child_when_readiness_times_out(tmp_path: 
         signals_sent.append((pid, sig))
 
     monkeypatch.setattr(orchestrator_module.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(orchestrator_module, "_process_identity", lambda _: "acme-birth")
     monkeypatch.setattr(orchestrator_module.os, "killpg", fake_killpg)
     monkeypatch.setattr(orchestrator_module, "_check_port_available", lambda *_, **__: None)
     monkeypatch.setattr(orchestrator_module, "_wait_for_health", lambda *_, **__: True)
@@ -3741,9 +3754,9 @@ def test_orchestrator_start_refuses_when_port_already_in_use(
         orchestrator_module.start_orchestrator(orchestrator_module.OrchestratorOptions(install_root=install_root))
 
     message = str(excinfo.value)
-    assert "127.0.0.1:18000 is already in use" in message
-    assert "PID 99999" in message
-    assert "vigil orchestrator stop" in message
+    assert "listener at 127.0.0.1:18000" in message
+    assert "verifiable process receipt" in message
+    assert "inspect" in message.lower()
     assert popen_called is False
 
 
@@ -3756,6 +3769,8 @@ def test_stop_orchestrator_escalates_to_sigkill_when_sigterm_ignored(
     pid_file = install_root / ".runtime-data" / "pids" / "orchestrator.pid"
     pid_file.parent.mkdir(parents=True)
     pid_file.write_text("4242\n", encoding="utf-8")
+    pid_file.with_suffix(".json").write_text(json.dumps({"pid": 4242, "process_identity": "acme-birth", "workspace": str(install_root), "process_group": 4242}))
+    monkeypatch.setattr(orchestrator_module, "_process_identity", lambda _: "acme-birth")
 
     # Simulate a process that ignores SIGTERM but dies on SIGKILL.
     alive_flag = {"alive": True}
@@ -3795,6 +3810,8 @@ def test_stop_orchestrator_warns_when_port_stays_held(
     pid_file = install_root / ".runtime-data" / "pids" / "orchestrator.pid"
     pid_file.parent.mkdir(parents=True)
     pid_file.write_text("5050\n", encoding="utf-8")
+    pid_file.with_suffix(".json").write_text(json.dumps({"pid": 5050, "process_identity": "acme-birth", "workspace": str(install_root), "process_group": 5050}))
+    monkeypatch.setattr(orchestrator_module, "_process_identity", lambda _: "acme-birth")
 
     # Process dies immediately on SIGTERM, but the port stays held by an
     # unrelated process. Stop must not block forever; it should warn and
@@ -3850,6 +3867,8 @@ def test_orchestrator_status_payload_reports_running_with_live_pid(
     pid_file = install_root / ".runtime-data" / "pids" / "orchestrator.pid"
     pid_file.parent.mkdir(parents=True)
     pid_file.write_text("8235\n", encoding="utf-8")
+    pid_file.with_suffix(".json").write_text(json.dumps({"pid": 8235, "process_identity": "acme-birth", "workspace": str(install_root), "process_group": 8235}))
+    monkeypatch.setattr(orchestrator_module, "_process_identity", lambda _: "acme-birth")
 
     monkeypatch.setattr(orchestrator_module, "_pid_alive", lambda _: True)
     monkeypatch.setattr(orchestrator_module, "_port_in_use", lambda *_, **__: True)

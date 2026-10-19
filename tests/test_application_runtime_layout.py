@@ -64,13 +64,11 @@ def test_orchestrator_launch_reads_application_and_pins_private_state(tmp_path: 
     assert env["VIGIL_DATA_DIR"] == str(workspace / "state")
     assert Path(env["UV_PROJECT_ENVIRONMENT"]).is_relative_to(workspace / "cache")
     assert env["PYTHONDONTWRITEBYTECODE"] == "1"
-    assert observed["chdir"] == application
+    assert observed["chdir"] == application / "orchestrator/backend"
     assert observed["sync_root"] == application
     assert observed["sync_env"] == env
     argv = observed["argv"]
-    assert "--frozen" in argv
-    assert "--no-sync" in argv
-    assert "--no-install-project" not in argv
+    assert argv[:4] == [str(Path(env["UV_PROJECT_ENVIRONMENT"]) / "bin/python"), "-m", "uvicorn", "app.main:app"]
 
 
 def test_proxy_context_pins_scope_parser_from_explicit_application(tmp_path: Path) -> None:

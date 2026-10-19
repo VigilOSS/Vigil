@@ -2667,6 +2667,7 @@ export type ProofWork = {
   updated_at: string;
 };
 export type ProofWorkList = {
+  reverification_required: Array<{finding_slug: string; finding_id: number; invalidating_transition_id: number; next_action: string; work_ids: number[]}>;
   owed: Array<{finding_slug: string; finding_id: number; title: string; canonical_location: string; work_ids: number[]; queue_state: ProofWorkQueueState; next_test: ProofNextTest | null}>;
   items: ProofWork[];
 };
@@ -2678,8 +2679,12 @@ export function listProofWork(engagementKey: string) {
 export function prepareProofWork(engagementKey: string, payload: ProofWorkPreparation) {
   return request<ProofWork>(`/engagements/${encodeURIComponent(engagementKey)}/assessment/proof-work`, {method: "POST", body: JSON.stringify(payload)});
 }
-export function approveProofWork(engagementKey: string, workId: number, approved: boolean) {
-  return request<ProofWork>(`/engagements/${encodeURIComponent(engagementKey)}/assessment/proof-work/${workId}/approval`, {method: "POST", body: JSON.stringify({approved})});
+export type ProofWorkEvent = {id: number; action: string; created_at: string; details_json: string};
+export function getProofWork(engagementKey: string, workId: number) {
+  return request<ProofWork & {events: ProofWorkEvent[]}>(`/engagements/${encodeURIComponent(engagementKey)}/assessment/proof-work/${workId}`);
+}
+export function approveProofWork(engagementKey: string, workId: number, approved: boolean, reason?: string) {
+  return request<ProofWork>(`/engagements/${encodeURIComponent(engagementKey)}/assessment/proof-work/${workId}/approval`, {method: "POST", body: JSON.stringify({approved, actor: "ui", human_confirmation: approved ? "Approved in the Vigil UI" : null, reason: approved ? null : reason})});
 }
 export function reconcileProofWork(engagementKey: string, workId: number) {
   return request<ProofWork>(`/engagements/${encodeURIComponent(engagementKey)}/assessment/proof-work/${workId}/reconcile`, {method: "POST", body: "{}"});

@@ -50,7 +50,7 @@ def test_instruction_identity_reads_release_provenance_and_exact_release_prompts
     identity, warnings = instruction_identity.build_dispatch_instruction_identity(
         agent_root=agent, engagement_dir=engagement, agent_role="recon-specialist", client_name="claude",
     )
-    assert identity["instruction_identity_status"] == "verified"
+    assert identity["instruction_identity_status"] == "installed"
     assert identity["source_revision"] == "bundle:" + "a" * 64
     assert identity["instructions_stale"] is False
     assert not warnings

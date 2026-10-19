@@ -65,20 +65,14 @@ def _binding(connection, engagement_id, finding, route, objective, hosts, view):
             host: admitted_host(host, view.scope_hosts, view.out_of_scope or [])
             for host in hosts
         } if route == 'web' else {},
-        'approval_posture': {
-            'policy': view.exploit_policy, 'review_state': view.exploit_review_state,
-            'selected_authorized': ('*' in view.approved_targets
-                                    or finding['slug'] in view.approved_targets),
-        } if route == 'web' else None,
         'route': route, 'objective': objective, 'target_hosts': hosts,
     }
 
 
 # Derived readiness, never stored. Precedence is top to bottom: the first rule
-# that matches names the state. Work is ``done`` once it finished or resolved, or
-# once a verification decision or merge answered its finding's obligation, even
-# while stale. Stale context outranks any stored lifecycle, including a finding
-# whose verification a material edit invalidated before anyone decided it.
+# that matches names the state. Runtime-backed verification invalidation surfaces
+# stale while preserving terminal lifecycle history. Otherwise finished/resolved
+# work is done, and unresolved work follows context, owner, and live authority.
 QUEUE_STATES = ('unprepared', 'ready', 'needs_approval', 'in_progress', 'blocked', 'stale', 'done')
 # How an owed finding summarizes its current-park work: the most live item, and
 # a claimable item ahead of one awaiting approval because claiming is the next action.
@@ -88,12 +82,16 @@ _LIVE_WORK_STATUSES = ('prepared', 'claimed', 'blocked')
 
 def queue_state(work: dict) -> str:
     """Classify one serialized proof-work item for the operator queue."""
+    if work.get('reverification_required'):
+        return 'stale'
     if work['status'] in ('finished', 'resolved') or (
         not work['owed'] and not work['verification_invalidated']
     ):
         return 'done'
     if work['status'] == 'stale' or not work['current'] or not work['owed']:
         return 'stale'
+    if work['approval_required'] and work['owner_dispatch_id'] is not None:
+        return 'blocked'
     if work['status'] == 'blocked':
         return 'blocked'
     if work['status'] == 'claimed':
@@ -129,6 +127,23 @@ def _verification_invalidated(finding) -> bool:
     return finding['status'] != 'merged' and finding['verification_status'] == 'unreviewed'
 
 
+def _reverification_transition(connection, engagement_id, finding):
+    if not _verification_invalidated(finding):
+        return None
+    row = connection.execute(
+        "SELECT t.id FROM assessment_finding_transitions t WHERE t.engagement_id=? AND t.finding_id=? "
+        "AND t.to_verification_status='unreviewed' AND t.from_verification_status<>'unreviewed' "
+        "AND EXISTS (SELECT 1 FROM assessment_finding_proof_receipts l "
+        "JOIN assessment_proof_receipts p ON p.id=l.proof_receipt_id AND p.engagement_id=l.engagement_id "
+        "WHERE l.engagement_id=t.engagement_id AND l.finding_id=t.finding_id "
+        "AND l.transition_id<t.id "
+        "AND p.evidence_kind IN ('command','http_exchange','browser_action','oob_event')) "
+        "ORDER BY t.id DESC LIMIT 1",
+        (engagement_id, finding['id']),
+    ).fetchone()
+    return row['id'] if row else None
+
+
 def _competing_owner(connection, engagement_id, finding_id, route, work_id):
     """The other work whose owner still holds this finding and route, and why.
 
@@ -144,8 +159,9 @@ def _competing_owner(connection, engagement_id, finding_id, route, work_id):
     ):
         if other['status'] not in ('finished', 'resolved') or other['dispatch_status'] not in _common.TERMINAL_DISPATCH_STATUSES:
             return other['id'], 'Another proof worker already owns this finding and route; reconcile and release it first'
-        if _owned_execution_active(connection, engagement_id, other['owner_dispatch_id']):
-            return other['id'], 'Previous proof worker still owns active runtime work; reconcile it first'
+        active = _owned_execution_active(connection, engagement_id, other['owner_dispatch_id'], other['id'])
+        if active:
+            return other['id'], 'Previous proof worker has owned or ambiguous active execution; reconcile first: ' + ', '.join(active)
     return None, ''
 
 
@@ -171,6 +187,7 @@ def _stored_binding(connection, engagement_id, row) -> dict:
 def _normalized_binding(binding: dict) -> dict:
     """Project pre-target-scoped bindings onto the current durable contract."""
     normalized = dict(binding)
+    normalized.pop('approval_posture', None)
     roots = list(normalized.pop('scope_hosts', []) or [])
     denied = list(normalized.pop('out_of_scope', []) or [])
     if 'target_admission' not in normalized:
@@ -210,6 +227,7 @@ def _serialize(connection, engagement_id, row, *, with_history=True, view=None):
     data['authorized_phase'] = 'exploit' if data['route'] == 'web' else 'code-verify'
     data['owed'] = owes_runtime_proof(finding)
     data['verification_invalidated'] = _verification_invalidated(finding)
+    data['reverification_required'] = _reverification_transition(connection, engagement_id, finding) is not None
     # The finding's runtime proof plan: untrusted context for the worker, never authority.
     # The plan this work was prepared for; after a re-park, history keeps its own.
     data['next_test'] = next_tests_by_transition(
@@ -232,7 +250,14 @@ def _serialize(connection, engagement_id, row, *, with_history=True, view=None):
     data['events'] = [dict(r) for r in connection.execute(
         'SELECT * FROM assessment_proof_work_events WHERE work_id=? ORDER BY id', (data['id'],),
     )] if with_history else []
+    data['approval_decision'] = _approval_decision(connection, data['id'])
     data['approval_required'] = data['route'] == 'web' and not _approved(view, data)
+    if (data['status'] in _LIVE_WORK_STATUSES and data['approval_required']
+            and data['owner_dispatch_id'] is not None) and (
+        not data['blocker'] or data['blocker_cause'] == 'approval'
+    ):
+        data['blocker'] = 'Live proof approval required for this exact work; operator must approve or stop active execution'
+        data['blocker_cause'] = 'approval'
     data['queue_state'] = queue_state(data)
     return data
 
@@ -244,10 +269,25 @@ def _event(connection, work_id, action, details):
     )
 
 
+def _approval_decision(connection, work_id):
+    row = connection.execute(
+        "SELECT action,details_json FROM assessment_proof_work_events WHERE work_id=? "
+        "AND action IN ('approval','reprepared') ORDER BY id DESC LIMIT 1", (work_id,),
+    ).fetchone()
+    if row is None or row['action'] == 'reprepared':
+        return None
+    return 'approved' if json.loads(row['details_json'])['approved'] else 'revoked'
+
+
 def _approved(view, work):
-    return bool(work['approved'] or view.exploit_policy == 'full_send' or (
-        view.exploit_review_state == 'approved' and (
-            '*' in view.approved_targets or work['finding_slug'] in view.approved_targets)))
+    if work['approval_decision'] == 'revoked':
+        return False
+    return work['approval_decision'] == 'approved' or view.exploit_policy == 'full_send'
+
+
+def _require_authorized(work):
+    if work['approval_required']:
+        _fail('Live proof approval required for this exact work; operator must approve or stop active execution')
 
 
 def _require_current(work):
@@ -300,7 +340,20 @@ def list_proof_work(engagement_id: int) -> dict:
         # current-park work.
         counts = Counter(w['queue_state'] for w in items)
         counts.update(entry['queue_state'] for entry in owed if entry['queue_state'] == 'unprepared')
-        return {'owed': owed, 'items': items,
+        reverification = []
+        for finding in connection.execute(
+            "SELECT * FROM assessment_findings WHERE engagement_id=? AND verification_status='unreviewed' AND status<>'merged'",
+            (engagement_id,),
+        ):
+            transition_id = _reverification_transition(connection, engagement_id, finding)
+            if transition_id is not None:
+                reverification.append({
+                    'finding_id': finding['id'], 'finding_slug': finding['slug'], 'title': finding['title'],
+                    'invalidating_transition_id': transition_id,
+                    'work_ids': [work['id'] for work in items if work['finding_id'] == finding['id']],
+                    'next_action': 'Re-verify the finding; park a new runtime proof plan if execution is still needed.',
+                })
+        return {'owed': owed, 'items': items, 'reverification_required': reverification,
                 'queue_state_counts': {state: counts[state] for state in QUEUE_STATES if counts[state]}}
 
 
@@ -323,10 +376,13 @@ def prepare_proof_work(engagement_id: int, *, finding_slug: str, route: str,
                            _view(engagement_id))
         if not _source_current(binding):
             _fail('Finding source generation is no longer current')
-        if route == 'web' and (
-            not hosts or not all(binding['target_admission'].values())
-        ):
-            _fail('Live proof requires explicitly admitted target hosts outside denied scope', 400)
+        if route == 'web':
+            if not hosts:
+                _fail('Live proof requires target_hosts (--host); supply at least one admitted host', 400)
+            rejected = [host for host, admitted in binding['target_admission'].items() if not admitted]
+            if rejected:
+                _fail('Live proof target_hosts (--host) failed scope admission for ' + ', '.join(rejected)
+                      + '; hosts must match admitted scope and not denied scope', 400)
         digest = hashlib.sha256(_json(binding).encode()).hexdigest()
         hosts_json = _json(hosts)
         # Legacy bindings can normalize equal; reuse the newest live row before
@@ -365,21 +421,31 @@ def prepare_proof_work(engagement_id: int, *, finding_slug: str, route: str,
             )
         if prepared['owner_dispatch_id'] is None and prepared['status'] in ('stale', 'resolved'):
             connection.execute(
-                "UPDATE assessment_proof_work SET status='prepared',approved=0,blocker='', "
+                "UPDATE assessment_proof_work SET status='prepared',approved=0,blocker='',blocker_cause=NULL, "
                 "updated_at=CURRENT_TIMESTAMP WHERE id=?", (work_id,),
             )
             _event(connection, work_id, 'reprepared', {'previous_status': prepared['status']})
         return _serialize(connection, engagement_id, _row(connection, engagement_id, work_id))
 
 
-def approve_proof_work(engagement_id: int, work_id: int, *, approved: bool) -> dict:
+def approve_proof_work(engagement_id: int, work_id: int, *, approved: bool,
+                       actor: str, human_confirmation: str | None = None,
+                       reason: str | None = None) -> dict:
     with _common.get_connection() as connection:
         connection.execute('BEGIN IMMEDIATE')
         work = _serialize(connection, engagement_id, _row(connection, engagement_id, work_id))
         _require_current(work)
         connection.execute('UPDATE assessment_proof_work SET approved=?,updated_at=CURRENT_TIMESTAMP '
                            'WHERE id=?', (int(approved), work_id))
-        _event(connection, work_id, 'approval', {'approved': approved})
+        _event(connection, work_id, 'approval', {
+            'approved': approved, 'actor': actor,
+            'human_confirmation': human_confirmation, 'reason': reason,
+        })
+        if approved and work['status'] in _LIVE_WORK_STATUSES and work['blocker_cause'] == 'approval':
+            connection.execute(
+                "UPDATE assessment_proof_work SET status=?,blocker='',blocker_cause=NULL WHERE id=?",
+                ('claimed' if work['owner_dispatch_id'] is not None else 'prepared', work_id),
+            )
         return _serialize(connection, engagement_id, _row(connection, engagement_id, work_id))
 
 
@@ -388,6 +454,7 @@ def claim_proof_work(engagement_id: int, work_id: int, *, dispatch: dict) -> dic
         connection.execute('BEGIN IMMEDIATE')
         work = _serialize(connection, engagement_id, _row(connection, engagement_id, work_id))
         _require_current(work)
+        _require_authorized(work)
         if work['owner_dispatch_id'] is not None:
             if work['owner_agent_id'] == dispatch['agent_id']:
                 return {**work, 'launch_required': False}
@@ -401,8 +468,9 @@ def claim_proof_work(engagement_id: int, work_id: int, *, dispatch: dict) -> dic
             _fail('Proof work requires an appropriate verifier specialist role', 400)
         if not dispatch.get('prompt_packet'):
             _fail('Proof work requires the canonical rendered dispatch prompt packet', 400)
-        if work['approval_required']:
-            _fail('Live proof approval required for this exact work or existing selected scope')
+        if work['route'] == 'code' and work['binding'].get('source_binding') is not None:
+            from ..code_analysis import require_proof_source_prerequisites
+            require_proof_source_prerequisites(connection, engagement_id, work['binding']['source_binding'])
         author = json.loads(_finding(connection, engagement_id, work['finding_slug'])['provenance_json']).get('agent_id')
         if author == dispatch['agent_id']:
             _fail('Finding author cannot own its independent proof work', 400)
@@ -442,6 +510,7 @@ def update_proof_work(engagement_id: int, work_id: int, *, agent_id: str,
     with _common.get_connection() as connection:
         connection.execute('BEGIN IMMEDIATE')
         work = _serialize(connection, engagement_id, _row(connection, engagement_id, work_id))
+        _require_authorized(work)
         if status == 'claimed' and work['verification_invalidated']:
             status, blocker = 'stale', blocker or _INVALIDATED_BLOCKER
         elif status == 'claimed' and (not work['current'] or not work['owed']):
@@ -462,8 +531,8 @@ def update_proof_work(engagement_id: int, work_id: int, *, agent_id: str,
                 _fail('Proof run route does not match prepared work', 400)
             connection.execute('INSERT OR IGNORE INTO assessment_proof_work_runs(work_id,run_id) VALUES(?,?)',
                                (work_id, run_id))
-        connection.execute('UPDATE assessment_proof_work SET status=?,blocker=?,updated_at=CURRENT_TIMESTAMP '
-                           'WHERE id=?', (status, blocker, work_id))
+        connection.execute('UPDATE assessment_proof_work SET status=?,blocker=?,blocker_cause=?,updated_at=CURRENT_TIMESTAMP '
+                           'WHERE id=?', (status, blocker, 'operator' if blocker else None, work_id))
         _event(connection, work_id, status, {'agent_id': agent_id, 'blocker': blocker, 'run_id': run_id})
         return _serialize(connection, engagement_id, _row(connection, engagement_id, work_id))
 
@@ -472,20 +541,27 @@ def reconcile_proof_work(engagement_id: int, work_id: int) -> dict:
     with _common.get_connection() as connection:
         connection.execute('BEGIN IMMEDIATE')
         work = _serialize(connection, engagement_id, _row(connection, engagement_id, work_id))
+        if work['status'] in ('finished', 'resolved'):
+            return work
         new_status = None
         blocker = work['blocker']
+        cause = work['blocker_cause']
         if work['verification_invalidated'] and work['status'] not in ('finished', 'resolved'):
             new_status, blocker = 'stale', _INVALIDATED_BLOCKER
         elif not work['owed']:
             new_status = 'resolved'
         elif not work['current']:
             new_status, blocker = 'stale', 'Finding, runtime proof plan, source generation, or admitted scope changed'
-        elif work['status'] == 'claimed' and _owner_ended(work):
-            new_status, blocker = 'blocked', 'Owner dispatch ended or is missing; inspect durable proof runs before retrying'
-        if new_status and new_status != work['status']:
-            connection.execute('UPDATE assessment_proof_work SET status=?,blocker=?,updated_at=CURRENT_TIMESTAMP '
-                               'WHERE id=?', (new_status, blocker, work_id))
-            _event(connection, work_id, 'reconciled', {'status': new_status, 'blocker': blocker})
+        elif work['owner_dispatch_id'] is not None and _owner_ended(work):
+            new_status, blocker, cause = 'blocked', 'Owner dispatch ended or is missing; inspect durable proof runs before retrying', 'owner'
+        elif work['approval_required'] and work['owner_dispatch_id'] is not None:
+            new_status = 'blocked'
+            if not work['blocker'] or work['blocker_cause'] == 'approval':
+                blocker, cause = 'Live proof approval required for this exact work', 'approval'
+        if new_status and (new_status != work['status'] or blocker != work['blocker'] or cause != work['blocker_cause']):
+            connection.execute('UPDATE assessment_proof_work SET status=?,blocker=?,blocker_cause=?,updated_at=CURRENT_TIMESTAMP '
+                               'WHERE id=?', (new_status, blocker, cause, work_id))
+            _event(connection, work_id, 'reconciled', {'status': new_status, 'blocker': blocker, 'blocker_cause': cause})
         return _serialize(connection, engagement_id, _row(connection, engagement_id, work_id))
 
 
@@ -507,8 +583,9 @@ def release_proof_work(engagement_id: int, work_id: int, *, reason: str) -> dict
             _fail('Owner dispatch record is missing, so ownership cannot be verified; this work cannot be released')
         if work['owner_dispatch_status'] not in _common.TERMINAL_DISPATCH_STATUSES:
             _fail('Owner dispatch is still active; inspect its native session before recovery')
-        if _owned_execution_active(connection, engagement_id, work['owner_dispatch_id']):
-            _fail('Owned runtime work remains active; reconcile proof runs, command runs, and supervised jobs first')
+        active = _owned_execution_active(connection, engagement_id, work['owner_dispatch_id'], work_id)
+        if active:
+            _fail('Owned or ambiguous runtime work remains active; reconcile first: ' + ', '.join(active))
         _event(connection, work_id, 'released', {
             'reason': reason, 'previous_dispatch_id': work['owner_dispatch_id'],
             'previous_agent_id': work['owner_agent_id'],
@@ -523,22 +600,54 @@ def release_proof_work(engagement_id: int, work_id: int, *, reason: str) -> dict
         return _serialize(connection, engagement_id, _row(connection, engagement_id, work_id))
 
 
-def _owned_execution_active(connection, engagement_id, dispatch_id):
-    owner = connection.execute('SELECT agent_id FROM assessment_dispatches WHERE id=? AND engagement_id=?',
-                               (dispatch_id, engagement_id)).fetchone()
-    if owner is None:
-        return True  # Missing ownership cannot authorize another worker.
-    active_run = connection.execute(
-        "SELECT id FROM assessment_runs WHERE engagement_id=? AND producer_dispatch_id=? "
-        "AND status IN ('queued','running') LIMIT 1", (engagement_id, dispatch_id),
+def _owned_execution_active(connection, engagement_id, dispatch_id, work_id):
+    owners = list(connection.execute(
+        "WITH RECURSIVE owners(id,agent_id,status) AS ("
+        "SELECT id,agent_id,status FROM assessment_dispatches WHERE engagement_id=? AND id=? "
+        "UNION SELECT d.id,d.agent_id,d.status FROM assessment_dispatches d JOIN owners p "
+        "ON d.continued_from_dispatch_id=p.id WHERE d.engagement_id=?) SELECT * FROM owners",
+        (engagement_id, dispatch_id, engagement_id),
+    ))
+    if not owners:
+        return ['missing dispatch identity']
+    active = [f"dispatch {row['id']}" for row in owners
+              if row['status'] not in _common.TERMINAL_DISPATCH_STATUSES]
+    ids = {row['id'] for row in owners}
+    agents = {row['agent_id'] for row in owners}
+    claim = connection.execute(
+        "SELECT created_at FROM assessment_proof_work_events WHERE work_id=? AND action='claimed' "
+        "AND json_extract(details_json,'$.dispatch_id')=? ORDER BY id DESC LIMIT 1",
+        (work_id, dispatch_id),
     ).fetchone()
-    active_command = connection.execute(
-        "SELECT id FROM assessment_command_runs WHERE engagement_id=? AND agent_name=? "
-        "AND status IN ('queued','running') LIMIT 1", (engagement_id, owner['agent_id']),
-    ).fetchone()
-    active_job = connection.execute(
-        "SELECT j.id FROM assessment_jobs j JOIN assessment_command_runs c ON c.id=j.parent_command_run_id "
-        "WHERE j.engagement_id=? AND c.agent_name=? "
-        "AND j.status IN ('queued','running','stop_failed') LIMIT 1", (engagement_id, owner['agent_id']),
-    ).fetchone()
-    return bool(active_run or active_command or active_job)
+    # Missing historical claim time cannot prove an unattributed execution predates it.
+    since = claim['created_at'] if claim else '0001-01-01'
+    registered = {row['agent_id'] for row in connection.execute(
+        'SELECT agent_id FROM assessment_dispatches WHERE engagement_id=?', (engagement_id,),
+    )}
+    for row in connection.execute(
+        "SELECT id,producer_dispatch_id FROM assessment_runs WHERE engagement_id=? "
+        "AND status IN ('queued','running')", (engagement_id,),
+    ):
+        if row['producer_dispatch_id'] in ids:
+            active.append(f"proof run {row['id']}")
+    for row in connection.execute(
+        "SELECT id,agent_name,datetime(started_at)>=datetime(?) AS since_claim "
+        "FROM assessment_command_runs WHERE engagement_id=? AND status IN ('queued','running')",
+        (since, engagement_id),
+    ):
+        if row['agent_name'] in agents:
+            active.append(f"command run {row['id']}")
+        elif row['since_claim'] != 0 and (row['agent_name'] == 'operator' or row['agent_name'] not in registered):
+            active.append(f"ambiguous command run {row['id']} (operator/unattributed since claim)")
+    for row in connection.execute(
+        "SELECT j.id,c.agent_name,datetime(COALESCE(j.started_at,j.created_at))>=datetime(?) AS since_claim "
+        "FROM assessment_jobs j LEFT JOIN assessment_command_runs c "
+        "ON c.id=j.parent_command_run_id AND c.engagement_id=j.engagement_id "
+        "WHERE j.engagement_id=? AND j.status IN ('queued','running','stop_failed')",
+        (since, engagement_id),
+    ):
+        if row['agent_name'] in agents:
+            active.append(f"supervised job {row['id']}")
+        elif row['since_claim'] != 0 and (row['agent_name'] == 'operator' or row['agent_name'] not in registered):
+            active.append(f"ambiguous supervised job {row['id']} (operator/unattributed since claim)")
+    return active

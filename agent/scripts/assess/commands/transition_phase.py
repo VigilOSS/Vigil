@@ -710,6 +710,7 @@ def _blind_triage_blockers(client: AssessmentClient) -> list[dict[str, str]]:
         if f.get("severity") in ("medium", "high", "critical")
         and str(f.get("workflow_status") or "").strip().lower()
         in _SUBMITTABLE_WORKFLOW_STATUSES
+        and f.get("verification_status") in ("confirmed", "downgraded")
     ]
     if not medium_or_above:
         return blockers

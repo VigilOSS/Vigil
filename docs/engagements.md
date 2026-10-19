@@ -134,12 +134,27 @@ vigil engagement prove <key> --work 9 --reconcile
 vigil engagement prove <key> --work 9 --release --reason "Ended worker and terminal jobs inspected"
 ```
 
-For a selected live proof, `--work 9 --approve` records approval for that prepared objective,
-source, finding and admitted targets; `--revoke` removes that work's explicit approval. A
-broader existing policy can still authorize it. New roots require explicit admission. Changed
-source, claim or scope requires current preparation before further execution. Owner updates
-can still preserve the result of work that already ran; they do not authorize new testing.
-Agents use `vigil assess contract proof-work` for the executable payload/lifecycle contract.
+Live approval is recorded in the UI or through the assess CLI:
+
+```bash
+vigil assess proof-work approve 9 --human-confirmation "Yes, run the bounded Acme test."
+vigil assess proof-work revoke 9 --reason "Stop this test while access is reviewed."
+```
+
+The operator asks once and records the answer; the specialist checks the current work and
+proceeds under that decision. `full_send` permits live proof without an additional per-work
+grant, but an explicit revoke blocks that work until it is re-approved. Selected exploit
+candidates do not authorize parked proof. New roots require explicit admission. Changes to
+source, claim or admitted scope require current preparation; approval changes alone retain
+ownership and context. Revocation does not terminate an already running command: use the
+canonical run/job controls and inspect the result. Evidence remains in its original ledger.
+The audit history records actor, confirmation or revocation reason verbatim. These fields
+record the operator's assertion; they do not authenticate a separate human principal.
+
+Finished work retains its lifecycle history after a material finding edit. The proof view's
+separate verification-required list names the invalidating transition and next action.
+Use `vigil assess contract proof-work` and `vigil assess contract finding update` for the
+executable lifecycle and narrow same-verifier reproduction-enrichment contracts.
 
 ## Phases
 

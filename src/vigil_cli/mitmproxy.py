@@ -313,6 +313,15 @@ def proxy_status_payload(
     """
     install_root = install_root.expanduser().resolve()
     engagements_root = engagements_root.expanduser().resolve()
+    if not docker.daemon_available(runner=runner):
+        return {"state": "unknown", "detail": "Docker daemon unavailable; container and image state were not inspected",
+                "container": container_name, "container_id": None, "exists": None, "running": None,
+                "exit_code": None, "started_at": None, "finished_at": None, "image": image,
+                "image_present": None, "port": port, "port_reachable": None,
+                "cert_volume": volume_name, "cert_volume_present": None,
+                "engagements_root": str(engagements_root),
+                "upstream_url": container_host_url(resolve_orchestrator_base_url(install_root)),
+                "routes_loaded": None, "routes_generated_at": None, "log_tail": None}
     container = _docker_inspect_summary(container_name, runner=runner)
     running = container.get("running") is True
     status_port = _container_host_port(container) or port

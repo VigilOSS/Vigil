@@ -83,7 +83,7 @@ def run_up(
             application_root = resolve_application_root(options.source_root, preserve_path=True)
             initialize_workspace(install_root, application_root=application_root)
             os.environ["VIGIL_APPLICATION_DIR"] = str(application_root)
-            resources = config_module.runtime_resources()
+            resources = config_module.runtime_resources(install_root)
             state["configured_resources"] = asdict(resources)
             print(term.heading("Starting Vigil", stream=sys.stdout))
             _progress("Runtime limits", f"{resources.memory_gb} GiB RAM · {resources.cpus:g} CPU")

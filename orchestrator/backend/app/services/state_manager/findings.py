@@ -571,6 +571,8 @@ def _finding_content_snapshot(row: dict[str, Any] | Any) -> dict[str, str]:
         "summary": str(get("summary", "") or ""),
         "canonical_location": str(get("canonical_location", "") or ""),
         "details_json": str(get("details_json", "{}") or "{}"),
+        "evidence_ref": str(get("evidence_ref", "") or ""),
+        "evidence_type": str(get("evidence_type", "") or ""),
         "notes": str(get("notes", "") or ""),
         # A rebind moves ONLY this. Without it in the snapshot, the one write
         # whose purpose is to change the source binding emitted no ledger row.
@@ -678,6 +680,51 @@ def _proof_dependency_removed(
         key in before and key not in after
         for key in ("evidence", "impact", "proof", "exploitability")
     )
+
+
+def _same_verifier_enrichment(connection, engagement_id, before, after, dispatch_agent_id):
+    """Permit attributed documentation additions without consuming another receipt.
+
+    Prior evidence references and reproduction run IDs must survive. An existing
+    claim-review event remains on its explicit equivalence-review path.
+    """
+    if not dispatch_agent_id or _row_verification_status(before) not in {'confirmed', 'downgraded'}:
+        return False
+    if _claim_review_status(connection, engagement_id, before)['claim_transition_id'] is not None:
+        return False
+    for key in ('title', 'severity', 'status', 'defect_family', 'root_cause_key',
+                'auth_context', 'canonical_location', 'summary', 'provenance_json'):
+        if before[key] != after[key]:
+            return False
+    old_ref, new_ref = str(before['evidence_ref'] or ''), str(after['evidence_ref'] or '')
+    if old_ref and new_ref != old_ref:
+        return False
+    old_details, new_details = _json_object(before['details_json']), _json_object(after['details_json'])
+    changed = {key for key in old_details.keys() | new_details.keys()
+               if old_details.get(key) != new_details.get(key) or (key in old_details) != (key in new_details)}
+    if not changed <= {'steps_to_reproduce', 'repro_runs'}:
+        return False
+    if any(key not in new_details or not new_details[key] for key in changed):
+        return False
+    if 'repro_runs' in changed and not (
+        {str(value).strip() for value in old_details.get('repro_runs', [])}
+        <= {str(value).strip() for value in new_details.get('repro_runs', [])}
+    ):
+        return False
+    if not changed and old_ref == new_ref and before['evidence_type'] == after['evidence_type']:
+        return False
+    rows = connection.execute(
+        "SELECT DISTINCT d.agent_id FROM assessment_finding_proof_receipts l "
+        "JOIN assessment_proof_receipts p ON p.id=l.proof_receipt_id AND p.engagement_id=l.engagement_id "
+        "JOIN assessment_runs r ON r.id=p.run_id AND r.producer_dispatch_id=p.producer_dispatch_id "
+        "AND r.engagement_id=p.engagement_id "
+        "JOIN assessment_dispatches d ON d.id=p.producer_dispatch_id AND d.engagement_id=p.engagement_id "
+        "WHERE l.engagement_id=? AND l.finding_id=? AND l.transition_id=("
+        "SELECT MAX(id) FROM assessment_finding_transitions WHERE engagement_id=? AND finding_id=? "
+        "AND action IN ('verified_confirmed','verified_downgraded'))",
+        (engagement_id, before['id'], engagement_id, before['id']),
+    ).fetchall()
+    return len(rows) == 1 and rows[0]['agent_id'] == dispatch_agent_id
 
 
 def _validate_authored_repro_runs(
@@ -848,7 +895,7 @@ def validate_claim_equivalence_decision(
             detail="claim_equivalence verifier dispatch does not exist",
         )
     if verifier["agent_role"] not in {
-        "vulnerability-analyst", "code-vuln-verifier", "incident-verifier",
+        "vulnerability-analyst", "code-vuln-verifier", "incident-verifier", "exploit-developer",
     }:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -1081,7 +1128,7 @@ def _record_finding_transition(
         notes_history_status = "initial"
     metadata_payload = dict(metadata or {})
     if before_content is not None and after_content is not None:
-        for field in ("title", "summary"):
+        for field in ("title", "summary", "evidence_ref", "evidence_type"):
             if before_content[field] != after_content[field]:
                 metadata_payload[f"{field}_before"] = before_content[field]
                 metadata_payload[f"{field}_after"] = after_content[field]
@@ -1458,6 +1505,7 @@ def create_finding(
     transition_artifact_ref: str = "",
     transition_metadata: dict[str, Any] | None = None,
     transition_actor: str = "",
+    dispatch_agent_id: str | None = None,
     expected_row_version: int | None = None,
     notes_mode: str = "append",
     details_mode: str = "merge",
@@ -1489,6 +1537,15 @@ def create_finding(
     promoted_run_candidate: dict[str, Any] | None = None
     with _common.get_connection() as connection:
         connection.execute("BEGIN IMMEDIATE")
+        if dispatch_agent_id is not None:
+            editor = connection.execute(
+                'SELECT id FROM assessment_dispatches WHERE engagement_id=? AND agent_id=?',
+                (engagement.id, dispatch_agent_id),
+            ).fetchone()
+            if editor is None:
+                raise HTTPException(status_code=400, detail='dispatch_agent_id must name a dispatch in this engagement')
+            transition_actor = dispatch_agent_id
+            transition_metadata = {**(transition_metadata or {}), 'dispatch_agent_id': dispatch_agent_id}
         incoming_binding = _code_snapshot_binding(provenance, strict=True)
         # Normalise BEFORE anything reads the location — the dedup match, the
         # category guards, and the re-mint guard all key on it, so normalising
@@ -2096,6 +2153,22 @@ def create_finding(
                         "cvss_score_before": cvss_reduction[0],
                         "cvss_score_after": cvss_reduction[1],
                     })
+        if (existing is not None and code_snapshot_write_mode == 'patch'
+                and transition_reason_code != 'claim_retracted'
+                and _same_verifier_enrichment(connection, engagement.id, existing, finding, dispatch_agent_id)):
+            # Evaluate the stored, fully resolved payload under the same write transaction.
+            # Restore only this edit's conservative invalidation; never create a new verdict.
+            finding['verification_status'] = existing['verification_status']
+            connection.execute('UPDATE assessment_findings SET verification_status=? WHERE id=?',
+                               (finding['verification_status'], finding['id']))
+            transition_action = 'details_patched'
+            transition_reason_code = 'verifier_enrichment'
+            transition_metadata = {
+                **(transition_metadata or {}), 'enrichment': True,
+                'material_change': False, 'claim_review_pending': False,
+                'prior_claim_sha256': _current_claim_sha256(existing),
+                'claim_sha256': _current_claim_sha256(finding),
+            }
         after_state = _finding_state_snapshot(finding)
         after_content = _finding_content_snapshot(finding)
         terminal_verification_asserted = (
@@ -2380,6 +2453,7 @@ def patch_finding(
     summary: str | None = None,
     evidence_ref: str | None = None,
     notes: str | None = None,
+    dispatch_agent_id: str | None = None,
     source_name: str | None = None,
     details: dict[str, Any] | None = None,
     provenance: dict[str, Any] | None = None,
@@ -2584,6 +2658,7 @@ def patch_finding(
         transition_artifact_ref=transition_artifact_ref,
         transition_metadata=transition_metadata,
         transition_actor=source_name,
+        dispatch_agent_id=dispatch_agent_id,
         expected_row_version=(
             current_row_version if expected_row_version is None else expected_row_version
         ),
@@ -2599,7 +2674,9 @@ def patch_finding(
         verification_normal_severity_band=verification_normal_severity_band,
         verification_next_test=verification_next_test,
     )
-    result["finding"]["verification_invalidated"] = verification_invalidated
+    result["finding"]["verification_invalidated"] = (
+        verification_invalidated and result["finding"]["verification_status"] == "unreviewed"
+    )
     return result
 
 # Documented (not hard-enforced) vocabulary for what a blocked finding is

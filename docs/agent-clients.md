@@ -7,7 +7,7 @@ expose the `vigil-*` session commands.
 
 | Client | Model / runtime | Headless dispatch | Session commands |
 |--------|-----------------|-------------------|------------------|
-| `claude` | Claude Code (Anthropic) | Yes (`@agent`) | Yes (`/vigil-*`) |
+| `claude` | Claude Code (Anthropic) | Yes (`Agent` with registered `subagent_type`) | Yes (`/vigil-*`) |
 | `codex` | Codex CLI (OpenAI) | Yes (registered roster) | Yes (`$vigil-*`) |
 | `kimi` | Kimi Code (Moonshot K3, the CLI default) | No — runs inline | No |
 | `pi` | Pi with your configured provider/model (remediation only) | No | No Vigil commands |
@@ -58,15 +58,27 @@ check for a provider key.
   `autoMemoryEnabled`. Codex ships memories off by default; Vigil pins it so an
   operator whose global `~/.codex/config.toml` enables the feature does not get
   a second cross-session store inside an engagement. The same block pins
-  `multi_agent_v2 = false` for the same reason and a sharper hazard: Codex's
-  default spawn path (`multi_agent`) starts a specialist from the dispatch
-  message alone when `fork_context` is omitted, but v2 replaces that field with
-  `fork_turns`, which defaults to `all` — the operator's entire transcript.
-  Vigil passes neither field, so the flag alone decides what a specialist
-  inherits, and a global config enabling v2 would silently hand every dispatch
-  the operator's history. That is exactly the anchoring
-  `agent/phases/code-phase-2-hunt.md` forbids between the Phase 2A pass and the
-  2C dispatch that has to re-derive it independently.
+  `multi_agent_v2 = false`. Independently of this preference, the operator explicitly
+  selects fresh child context in the available spawn schema (`fork_turns: none` when
+  exposed). Native role selection is used when available; otherwise the child's first
+  instruction names its canonical `agent/agents/<role>.md`, saved packet and Load First
+  files. Installed `.codex/agents/*.toml` files do not prove that a particular child loaded them.
+
+Hook trust and project trust are separate prerequisites; a successful launch does not
+establish that activity hooks fired. Check actual activity/session receipts for the client
+version in use. Headless hook delivery on Codex 0.163.0 remains unverified; an absent
+hook receipt is not evidence that no work ran. See the [Codex hook contract](https://learn.chatgpt.com/docs/hooks).
+
+Claude Code selects a registered specialist through its native `Agent` tool with that
+role as `subagent_type`, supplying the saved dispatch packet. The selected wrapper
+provides the specialist instructions; see [custom subagents](https://code.claude.com/docs/en/sub-agents).
+
+Dispatch fingerprints use `instruction_identity_status=installed` when the expected installed
+instruction files were hashed. They identify disk contents, not observed child execution or
+model identity. Unobserved launch properties remain unknown. The same distinction applies to
+all supported clients. Bind an exposed native client handle and inspect the handoff and actual
+runtime state before closing a dispatch or releasing its proof ownership.
+
 - **kimi** — execs `kimi`, with `--auto` under `--skip-permissions`. Runs the
   operator inline from the same prompt; it has no generated specialist roster or
   activity hooks. Its model is

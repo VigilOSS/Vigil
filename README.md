@@ -172,6 +172,9 @@ For manual inspection or recovery, use `vigil engagement prove <engagement-key>`
 **Proof work** in the UI. The operator normally drives these steps; you do not need to assemble
 handoff JSON or open a second operator just to prove a code finding.
 
+For example prompts to deepen code or web testing, check coverage, or challenge a
+finding, see the [engagement prompt playbook](docs/engagement-prompt-playbook.md).
+
 ## How Vigil hunts
 
 ### Start broad, then change the question
@@ -385,7 +388,6 @@ The rationale behind hunting, evidence, coverage, and operator trust is in the
 | [Session commands](docs/session-commands.md) | Start, resume, compaction, and session-end hooks |
 | [Assessment CLI](docs/assessment-cli.md) | Agent commands, evidence, exports, and dispatch closure |
 | [Operations](docs/operations.md) / [OOB routing](docs/oob-routing.md) | Runtime sizing, backups, and callback infrastructure |
-| [Steering an engagement](docs/engagement-prompt-playbook.md) | Recovering a shallow investigation or challenging an unsupported claim |
 
 The CLI lives in `src/vigil_cli/`, the methodology and assessment helpers in `agent/`, and the
 backend, UI, and report renderer in `orchestrator/`. [CODE-MAP.md](CODE-MAP.md) identifies

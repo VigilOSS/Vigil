@@ -30,6 +30,7 @@ def register(subparsers) -> None:
             action.add_argument('--agent-id', required=True)
             action.add_argument('--agent-role', required=True)
             action.add_argument('--task')
+            action.add_argument('--skills', help='Comma-separated selected skill names, as for agent start.')
             action.add_argument('--model', dest='dispatch_model', default=None,
                                 help='Requested model for the claimed dispatch, as for agent start.')
             action.add_argument('--reasoning', default=None, choices=REASONING_CHOICES,
@@ -46,6 +47,10 @@ def register(subparsers) -> None:
             action.add_argument('--blocker', default='')
             action.add_argument('--run-id', type=int)
         if name == 'release':
+            action.add_argument('--reason', required=True)
+        if name == 'approve':
+            action.add_argument('--human-confirmation', required=True)
+        if name == 'revoke':
             action.add_argument('--reason', required=True)
         action.set_defaults(func=run)
 
@@ -71,6 +76,8 @@ def run(args) -> None:
         payload.update(agent_id=args.agent_id, agent_role=args.agent_role)
         if args.task:
             payload['task'] = args.task
+        if args.skills:
+            payload['skills'] = args.skills
         if args.dispatch_model:
             payload['requested_model'] = args.dispatch_model
         if args.reasoning:
@@ -81,7 +88,13 @@ def run(args) -> None:
         endpoint += '/claim'
     elif action in ('approve', 'revoke'):
         endpoint += '/approval'
-        payload = {'approved': action == 'approve'}
+        value = args.human_confirmation if action == 'approve' else args.reason
+        limit = 2000 if action == 'approve' else 8192
+        if not value.strip() or len(value) > limit:
+            raise AssessError(f'proof-work {action}: decision text must be nonblank and at most {limit} characters')
+        payload = {'approved': action == 'approve', 'actor': 'operator',
+                   'human_confirmation': value if action == 'approve' else None,
+                   'reason': value if action == 'revoke' else None}
     elif action in ('reconcile', 'release'):
         endpoint += f'/{action}'
         if action == 'release':
@@ -129,6 +142,15 @@ def _attach_claim_prompt(payload, work, args, cfg, client) -> None:
     payload['dispatch_mode'] = 'deep-manual'
     payload['assessment_mode'] = work['route']
     payload['finding_slugs'] = [work['finding_slug']]
+    context['assessment_mode'] = work['route']
+    from assess.lib.contracts import validate_specialist_dispatch_contract
+    errors, warnings = validate_specialist_dispatch_contract(payload)
+    if errors:
+        raise AssessError('proof-work claim: ' + '; '.join(errors))
+    for warning in warnings:
+        print(f'WARN proof-work claim: {warning}', file=sys.stderr)
+    if isinstance(payload.get('skills'), list):
+        payload['skills'] = ','.join(payload['skills'])
     render_args = SimpleNamespace(prompt_context=context, rate_budget=args.rate_budget,
                                   no_target_traffic=args.no_target_traffic)
     # The backend claim prefixes the authoritative proof_route line to this packet.
@@ -138,13 +160,38 @@ def _attach_claim_prompt(payload, work, args, cfg, client) -> None:
                   + _next_test_lines(work.get('next_test')) +
                   f"proof command attribution: pass `--agent-name {payload['agent_id']}` on every audited run used by a proof receipt; use this dispatch agent_id, not the role name.\n"
                   'Read `vigil assess proof-work get ' + str(work['id']) +
-                  '` before execution; use only its current authorized route and targets.')
+                  '` before execution; use only its current authorized route and targets. '
+                  'The operator records human approval once; proceed when current approval permits. '
+                  'If approval is missing or revoked, stop and report the blocker to the operator. '
+                  'Do not approve your own work or request duplicate approval.\n\n'
+                  + _mandatory_load_lines(Path(cfg.agent_root), payload['agent_role'], work['route']))
     rendered = assignment + '\n\n' + _dispatch_prompt(
         payload, engagement_dir=Path(cfg.engagement_dir), agent_root=Path(cfg.agent_root),
         source_identity=source_identity, args=render_args, client=client,
     )
     payload['prompt_packet'] = {'schema': 'dispatch-prompt/v1', 'context': context,
                                 'rendered_prompt': rendered}
+
+
+def _mandatory_load_lines(agent_root: Path, role: str, route: str) -> str:
+    """Derive the role's mandatory references from the canonical prompt roster."""
+    from assess.lib.prompt_census import census_role
+
+    role_path = agent_root / 'agents' / f'{role}.md'
+    if role_path.parent != agent_root / 'agents' or not role_path.is_file():
+        raise AssessError(f'proof-work claim: unknown role {role!r}')
+    census = census_role(agent_root, role_path, None)
+    refs = list(census['mandatory_references'])
+    for group in census['mandatory_alternative_groups']:
+        matches = [option for option in group['options']
+                   if option['label'].lower().startswith(route + ' ')]
+        if len(matches) != 1:
+            raise AssessError('proof-work claim: cannot resolve mandatory role bundle for route')
+        refs.extend(matches[0]['references'])
+    if any(not ref['present'] for ref in refs):
+        raise AssessError('proof-work claim: mandatory role instructions are missing')
+    paths = [f'agent/agents/{role}.md', *(ref['path'] for ref in refs)]
+    return '## Load First\nRead before work:\n' + '\n'.join(f'- {path}' for path in dict.fromkeys(paths))
 
 
 def _next_test_lines(plan) -> str:

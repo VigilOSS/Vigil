@@ -23,7 +23,9 @@ maintenance, use `vigil runtime shell-exec "<cmd>"` so quoting and exit codes st
 The Kali runtime container is started with `--memory`, `--memory-swap` pinned
 equal to `--memory` (so the container cannot swap), `--memory-swappiness=0`,
 `--pids-limit`, and `--shm-size`. Memory, CPU, process, and shared-memory limits are configurable through
-environment variables read before startup. These are limits, not reserved resources;
+the process environment, then the selected workspace `.env`, then the defaults below.
+The working directory does not select a different `.env`, and configuration reads do not
+mutate the process environment. These are limits, not reserved resources;
 the backend and proxy have separate resource use:
 
 | Variable | Default | Effect |
@@ -139,3 +141,15 @@ Engagement deletion is explicit: `DELETE /engagements/<key>?confirm=<key>`, or t
 frontend delete button with a typed-key confirmation. Renaming or removing an
 engagement directory under the registered engagements path leaves the DB row intact — there
 is no cascade delete.
+
+## Backend ownership and recovery
+
+Managed backend status and stop use a durable receipt containing process birth identity,
+workspace and endpoint. A reused PID or an unrelated listener is not authority to stop it.
+Preflight checks endpoint ownership before creating or starting engagement work and refuses
+known-stale managed backends with a restart instruction. Explicit remote endpoints retain
+remote ownership and upgrade guidance. Unknown ownership remains visible and blocks restore
+until the backend's stopped state is established.
+
+An unavailable Docker daemon reports runtime/proxy state as unknown or uninspected. Start
+Docker and inspect again to distinguish an absent container from one that could not be queried.

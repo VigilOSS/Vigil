@@ -459,6 +459,8 @@ def _backend_offline_state(install_root: Path, probe: BackendProbe) -> ConsumerS
 
     host, port = _orchestrator_host_port(install_root)
     payload = orchestrator.orchestrator_status_payload(install_root, host=host, port=port)
+    if payload.get("state") in {"unknown", "foreign"}:
+        return _backend_unknown(str(payload.get("detail") or "backend process ownership is unknown"))
     pid = payload.get("pid")
     process_running = payload.get("state") == "running"
     port_held = bool(payload.get("port_in_use"))

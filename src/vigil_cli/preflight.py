@@ -24,7 +24,7 @@ from .engagements import CLIENT_PROVIDER_KEY, _read_json
 from .orchestrator import orchestrator_status
 from .runtime import runtime_status
 from .status import install_staleness
-from .paths import DEFAULT_ORCHESTRATOR_BASE_URL, resolve_orchestrator_base_url
+from .paths import resolve_orchestrator_base_url
 
 def _resolve_provider_key(install_root: Path, engagement_dir: Path, key: str) -> str | None:
     """Resolve one provider key exactly as the generated launcher does.
@@ -107,6 +107,10 @@ def _preflight_engagement_start(
             "Pass --skip-preflight to launch anyway."
         )
 
+    from .engagements import resolve_engagement_mode
+    mode = resolve_engagement_mode(engagement_dir, mode, client=client, install_root=install_root)
+    if client == "pi" and mode != "remediation":
+        raise SystemExit("Pi supports remediation engagements only; select codex or claude for this engagement.")
     _ensure_engagement_backend(install_root, engagement_dir)
     scope = _read_json(engagement_dir / "scope.json")
     tracks = scope.get("tracks")
@@ -128,45 +132,81 @@ def _preflight_engagement_start(
     _warn_if_install_stale(install_root)
 
 
+def managed_backend_host(base_url: str) -> str | None:
+    """Only literal HTTP loopback endpoints at the managed port convey start authority."""
+    import ipaddress
+    from urllib.parse import urlsplit
+    try:
+        parsed = urlsplit(base_url)
+        if (parsed.scheme != "http" or parsed.port != 18000 or parsed.path not in {"", "/"}
+                or parsed.query or parsed.fragment or parsed.username or parsed.password):
+            return None
+        host = parsed.hostname or ""
+        if host == "localhost":
+            return "127.0.0.1"
+        return host if ipaddress.ip_address(host).is_loopback else None
+    except ValueError:
+        return None
+
+
+def _ensure_backend_freshness(install_root: Path, base_url: str) -> None:
+    import json
+    import shlex
+    from .engagements import _backend_request
+    from .restart_manifest import backend_state_from_readiness
+
+    status, body, _detail, _protocol = _backend_request(base_url, "GET", "/readyz")
+    try:
+        readiness = json.loads(body) if status is not None else {}
+        if not isinstance(readiness, dict):
+            readiness = {}
+    except (ValueError, UnicodeError):
+        readiness = {}
+    readiness.update(reachable=status is not None, http_status=status)
+    consumer = backend_state_from_readiness(install_root, readiness)
+    runtime = readiness.get("backend_runtime")
+    stale = consumer.state == "stale" or (isinstance(runtime, dict) and runtime.get("restart_required") is True)
+    if stale:
+        remedy = ("run `" + shlex.join(["vigil", "--root", str(install_root), "orchestrator", "restart"]) + "`"
+                  if managed_backend_host(base_url) is not None
+                  else f"restart or upgrade the configured backend at {base_url} on its owning host")
+        raise SystemExit(f"Engagement backend requires restart: {consumer.detail}; {remedy}. Pass --skip-preflight to launch anyway.")
+    if consumer.state == "unknown":
+        print(f"[vigil] WARN: backend freshness at {base_url} is unknown: {consumer.detail}; upgrade/restart that backend to verify its release.", file=sys.stderr)
+
+
 def _ensure_engagement_backend(install_root: Path, engagement_dir: Path) -> None:
     """Recover managed local state without retargeting an explicit endpoint."""
     from contextlib import redirect_stdout
-
     from . import engagements, orchestrator
 
     base_url = resolve_orchestrator_base_url(install_root, engagement_dir)
-    if base_url.rstrip("/") == DEFAULT_ORCHESTRATOR_BASE_URL and orchestrator_status(install_root) != "running":
+    managed_host = managed_backend_host(base_url)
+    ownership = engagements.inspect_backend_ownership(install_root, engagement_dir)
+    verified_ownership: engagements.BackendOwnership | None = ownership
+    engagements.require_backend_ownership(ownership, install_root)
+    if ownership.state == engagements.BackendInstallRootStatus.PROTOCOL_ERROR:
+        raise SystemExit(f"engagement backend is not ready at {base_url}: protocol error: {ownership.detail}. Pass --skip-preflight to launch anyway.")
+    if (managed_host is not None and ownership.state == engagements.BackendInstallRootStatus.UNREACHABLE
+            and orchestrator_status(install_root) != "running"):
         print("[vigil] Starting the engagement backend...", file=sys.stderr)
         with redirect_stdout(sys.stderr):
-            orchestrator.start_orchestrator(orchestrator.OrchestratorOptions(install_root=install_root, allow_existing=True))
-    backend_state = engagements._verify_backend_install_root(install_root, engagement_dir)
-    if backend_state in (
-        engagements.BackendInstallRootStatus.SYNC_PENDING,
-        engagements.BackendInstallRootStatus.SYNC_PENDING_OWNERSHIP_UNVERIFIED,
-    ):
-        verified = (
-            "backend install root matched"
-            if backend_state == engagements.BackendInstallRootStatus.SYNC_PENDING
-            else "backend workspace ownership is unverified (older orchestrator build)"
-        )
-        print(
-            f"[vigil] WARN: {verified} and engagement sync is pending at {base_url}; "
-            "the next backend request will retry synchronization.",
-            file=sys.stderr,
-        )
+            orchestrator.start_orchestrator(orchestrator.OrchestratorOptions(install_root=install_root, host=managed_host, allow_existing=True))
+        verified_ownership = None
+    backend_state = engagements._verify_backend_install_root(install_root, engagement_dir, verified_ownership)
+    if backend_state in {engagements.BackendInstallRootStatus.SYNC_PENDING,
+                         engagements.BackendInstallRootStatus.SYNC_PENDING_OWNERSHIP_UNVERIFIED}:
+        verified = ("backend install root matched" if backend_state == engagements.BackendInstallRootStatus.SYNC_PENDING
+                    else "backend workspace ownership is unverified (older orchestrator build)")
+        print(f"[vigil] WARN: {verified} and engagement sync is pending at {base_url}; the next backend request will retry synchronization.", file=sys.stderr)
+        _ensure_backend_freshness(install_root, base_url)
         return
-    if backend_state == engagements.BackendInstallRootStatus.UNREACHABLE and base_url.rstrip("/") != DEFAULT_ORCHESTRATOR_BASE_URL:
-        print(
-            f"[vigil] WARN: configured remote engagement backend is unreachable at {base_url}; "
-            "launching with local engagement state only.",
-            file=sys.stderr,
-        )
+    if backend_state == engagements.BackendInstallRootStatus.UNREACHABLE and managed_host is None:
+        print(f"[vigil] WARN: configured remote engagement backend is unreachable at {base_url}; launching with local engagement state only.", file=sys.stderr)
         return
     if backend_state != engagements.BackendInstallRootStatus.VERIFIED:
-        raise SystemExit(
-            f"engagement backend is not ready at {base_url}; check that configured endpoint "
-            "before starting. Pass --skip-preflight to launch anyway."
-        )
+        raise SystemExit(f"engagement backend is not ready at {base_url}; check that configured endpoint before starting. Pass --skip-preflight to launch anyway.")
+    _ensure_backend_freshness(install_root, base_url)
 
 
 def _warn_if_ripgrep_missing() -> None:

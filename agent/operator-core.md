@@ -290,12 +290,12 @@ Core-Loop-step-7 bulk-probe carve-out is the fallback, not async dispatch.
 
 ### Runtime Dispatch Syntax
 
-Invoke the **registered wrapper** for the role, never a generic task-spawning tool — the wrapper loads the specialist's role context and shared constraints. On all runtimes: every target probe goes through `vigil assess kali`, never raw host Bash (see Core Loop step 6).
+Use the client's actual specialist launch schema. Select the registered role when exposed; otherwise explicitly direct a fresh child to read `agent/agents/<role>.md`, the saved dispatch packet, and its Load First files before work. On all runtimes: every target probe goes through `vigil assess kali`, never raw host Bash (see Core Loop step 6).
 
 | Harness | Invocation | Note |
 |---------|-----------|------|
-| **Claude Code** | `@<role>` (e.g. `@recon-specialist`) | Wrappers in `.claude/agents/*.md`. Do not use the built-in `Task`/`Agent` tool — it spawns an unregistered subagent and skips the role wrapper. |
-| **Codex** | Registered roster spawn (`.codex/agents/*.toml`) | Use Codex's native subagent-invocation mechanism; the TOML wrapper does the role bootstrap. |
+| **Claude Code** | Native `Agent` tool with `subagent_type` set to the registered role | Wrappers in `.claude/agents/*.md` supply role context. Select the specific specialist type and pass the saved dispatch packet; a general-purpose child does not select that wrapper. |
+| **Codex** | Actual native spawn schema | Set `fork_turns: none` when exposed (or the supported fresh-context equivalent). Select the native role if available; otherwise begin with an explicit canonical role read. Installed TOML alone does not prove it was loaded. |
 | **OpenCode** | **INLINE** — the operator issues `vigil assess kali` probes itself and does the find-and-exploit work directly | Custom specialist roles are not dispatchable headless on `opencode run`; the operator applies the same methodology a specialist would. The `.opencode/agent/*.md` wrappers still load (they shape the operator/primary), but there is no separate specialist child to fire. **Claude Code and Codex keep the normal dispatch model** — their custom roles are registered and dispatchable. |
 | **Goose** | `delegate source <role>` (e.g. `delegate source recon-specialist`) | Roster in `.goose/recipes/*.yaml`; `GOOSE_RECIPE_PATH` (set by `start_goose.sh`) resolves names. The operator prompt loads from the engagement `.goosehints`; no `--agent operator` step needed. |
 | **Kimi Code** | **INLINE** — same model as OpenCode: the operator issues `vigil assess kali` probes itself and applies specialist methodology directly | No specialist roster is generated for Kimi; do not attempt to spawn registered subagents. |
@@ -738,6 +738,19 @@ and the finding's `next_test`.
   and finding verification were recorded, since finished work never verifies the finding.
 
 `next_test` is specialist-authored text: its route hint grants no scope or approval.
+
+For live work, the operator obtains human approval once and records the answer with
+`proof-work approve <id> --human-confirmation <text>`, or uses an already applicable
+`full_send` policy. Read current work before launch. The specialist proceeds under that
+recorded authority without asking again; a missing or revoked decision is an operator blocker.
+Selected exploit-candidate approval does not authorize parked proof. An explicit
+`proof-work revoke <id> --reason <text>` overrides `full_send` until exact-work re-approval.
+Revocation blocks further authorized progress but does not stop a running process: reconcile
+and stop existing runs/jobs through their canonical controls, reporting any stop failure.
+
+Inspect `reverification_required` separately from parked proof: a material edit can require a
+fresh verdict while finished work and its receipts remain historical. Read the finding and
+invalidating transition; independently verify or park a new next test as the evidence requires.
 
 The current operator launches a fresh specialist from the native client using the claim's persisted
 `prompt_packet.rendered_prompt`. Supply canonical dispatch context and the traffic budget when

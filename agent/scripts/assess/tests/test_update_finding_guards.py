@@ -226,3 +226,13 @@ def test_directory_evidence_ref_is_accepted_not_warned(tmp_path, monkeypatch, ca
 
     assert "warning" not in capsys.readouterr().err
     assert len(fake.patches) == 1
+
+
+def test_update_carries_editor_without_changing_author(tmp_path, monkeypatch):
+    fake = _FakeClient()
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(["update", "VA-001", "--agent-id", "VERIFY-1",
+                   "--details-inline", '{"steps_to_reproduce": "Replay the supported Acme API"}'], str(tmp_path))
+    update_finding.run(args)
+    assert fake.patches[0][1]["dispatch_agent_id"] == "VERIFY-1"
+    assert "provenance" not in fake.patches[0][1]

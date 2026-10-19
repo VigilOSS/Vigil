@@ -26,6 +26,16 @@ Durable design decisions live in [`docs/adr/`](docs/adr/).
 
 ### Changed
 
+- Live proof uses audited approval decisions with exact-work revocation taking precedence over
+  `full_send`. Specialists use the operator's recorded approval without a second conversation.
+- Proof history remains intact when a changed claim needs verification again. Attributed,
+  evidence-preserving reproduction enrichment by the same verifier retains its verdict.
+- Dispatch packets include route-specific mandatory instructions and selected skills; installed
+  instruction fingerprints are distinguished from observed client execution.
+- Workspace relocation, backend process ownership, endpoint diagnostics and runtime sizing
+  use explicit identity and configuration, with actionable recovery when ownership is uncertain.
+- The engagement playbook provides optional Code, Web and cross-track steering prompts.
+
 - Engagement setup uses `vigil engagement create` followed by `vigil engagement start`. Code source
   paths are validated during creation, then confirmed and sealed once before analysis begins.
   That confirmation includes trusting the repository's build and test code to run in the Vigil

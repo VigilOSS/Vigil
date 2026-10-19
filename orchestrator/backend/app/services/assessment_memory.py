@@ -1001,6 +1001,7 @@ def _proof_work_section(engagement_id: int) -> dict[str, Any]:
     listing = proof_work.list_proof_work(engagement_id)
     return {
         "owed_findings": len(listing["owed"]),
+        "reverification_required": len(listing["reverification_required"]),
         "queue_state_counts": listing["queue_state_counts"],
         "read_command": "vigil assess proof-work list",
     }

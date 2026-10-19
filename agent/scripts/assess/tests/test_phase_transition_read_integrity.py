@@ -119,6 +119,7 @@ def test_blind_triage_precondition_fails_closed_on_bad_decision_response(
                     "slug": "VA-1",
                     "severity": "high",
                     "workflow_status": "active",
+                    "verification_status": "confirmed",
                 }
             ],
             "dispatch-decisions?kind=blind_triage_verdict&limit=1000": decision_response,

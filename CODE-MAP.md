@@ -103,7 +103,7 @@ When you are about to copy one of these into a second file, stop and import.
 - `agent/scripts/assess/lib/contract_registry.py` owns executable CLI metadata; `contracts.py`
   resolves and renders it for `contract.py` and `list_commands.py`.
 - `src/vigil_cli/host_tools.py` owns optional host recon install planning for `vigil doctor`; selected-client launch checks stay in `preflight.py`.
-- `agent/scripts/assess/commands/proof_work.py` renders proof-claim packets through `commands/agent.py` before atomic dispatch ownership, validating the finding-bound source tuple.
+- `agent/scripts/assess/commands/proof_work.py` renders proof-claim packets through `commands/agent.py` before atomic ownership, validating source identity and deriving mandatory loads through `lib/prompt_census.py`.
 - `src/vigil_cli/engagements.py:CLIENT_PROVIDER_KEYS` and `CLIENT_MESSAGE_FLAGS` own client launch
   identity. Generated launchers and preflight consume them.
 - `src/vigil_cli/image_freshness.py` owns the content-digest mechanism every freshness check uses —
@@ -135,6 +135,9 @@ When you are about to copy one of these into a second file, stop and import.
   `dispatches.py:dispatch_mode_sql` applies it to durable proof claims, including prior owners; reads and counts share this predicate before pagination. Execution route does not select memory ownership.
 
 ---
+
+- `orchestrator/backend/app/api/assessment_operator.py:_CODE_ASSESSMENT_ROLES` defaults code-only dispatches to code;
+  `agent/scripts/assess/commands/agent.py:_CODE_SOURCE_IDENTITY_ROLES` mirrors this set for source packets and CLI mode resolution.
 
 ## Sync rules worth remembering
 
@@ -225,6 +228,8 @@ A prompt change is **not** prompt-only when the prompt defines an artifact the b
 - `src/vigil_cli/application.py` — explicit/imported release resolution, bundle validation and persistent content-addressed assets/helper CLI. Never discover source from workspace or CWD.
 - `src/vigil_cli/workspace.py` — canonical private paths and in-place legacy adoption; `paths.py:workspace_root_for_engagement` resolves private ownership independently of application assets.
 - `vigil_build.py` — tracked publisher inputs, matched CLI/backend/agent/docs/legal bundle and locked prebuilt UI provenance; its sdist builds wheels without Git or Node.
+- `src/vigil_cli/process_identity.py` owns birth-identity checks shared by client sessions and backend process receipts;
+  `orchestrator.py` uses those receipts for status/stop, preflight and restore ownership decisions.
 - `src/vigil_cli/client_sessions.py` — live PID/birth-identity release bindings and shared-file bootstrap lock; old releases retain assets and must end before rebinding the same engagement.
 - `src/vigil_cli/paths.py:resolve_orchestrator_base_url` — backend URL precedence and dotenv normalization; `vigil config resolve orchestrator_base_url` exposes it to generated client launchers at session start.
 - `src/vigil_cli/preflight.py` owns launch checks shared with blue; managed-local backend recovery never replaces a configured remote endpoint. Static code startup does not query Docker.
@@ -249,7 +254,7 @@ A prompt change is **not** prompt-only when the prompt defines an artifact the b
 - `orchestrator/backend/app/api/code_analysis.py` — the only repo/file ingest write, lease-owned queue
   work, generation-bound compare-and-swap, and paginated queue reads. Its `item_ids` page and
   `code-dispatch fetch --ids-file` share ordering and current-generation filtering.
-- `orchestrator/backend/app/services/state_manager/proof_work.py` owns current proof preparation, atomic dispatch claims, approval, derived `queue_state`, and explicit release after execution ends.
+- `orchestrator/backend/app/services/state_manager/proof_work.py` owns current proof preparation, atomic dispatch claims, live approval independent of bindings, derived `queue_state`/`reverification_required`, and explicit release after execution ends.
   `api/assessment_proof_work.py` and `agent/scripts/assess/commands/proof_work.py` expose it; finding status and its `next_test` still own proof owed.
   `orchestrator/backend/app/services/scope_admission.py` bridges to the canonical agent scope matcher.
 - `orchestrator/backend/app/services/state_manager/finding_next_tests.py` owns runtime proof plans, written with the parking transition,

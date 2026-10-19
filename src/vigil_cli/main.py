@@ -625,7 +625,7 @@ def main(argv: list[str] | None = None) -> None:
     # rather than a positional, because a positional would reorder an option away
     # from its value. See _engagement_start_client_args.
     start_p.set_defaults(client_args=[])
-    prove_p = engagement_sub.add_parser("prove", help="Inspect, prepare, approve, or recover proof work without launching another operator")
+    prove_p = engagement_sub.add_parser("prove", help="Inspect, prepare, or recover proof work without launching another operator")
     prove_p.add_argument("key", nargs="?")
     prove_p.add_argument("--select", action="store_true")
     prove_p.add_argument("--finding", help="Candidate slug awaiting runtime proof")
@@ -634,8 +634,6 @@ def main(argv: list[str] | None = None) -> None:
     prove_p.add_argument("--host", action="append", default=[], help="Already admitted target host; repeatable")
     prove_p.add_argument("--work", type=int, help="Inspect or act on an existing proof work ID")
     proof_action = prove_p.add_mutually_exclusive_group()
-    proof_action.add_argument("--approve", action="store_true", help="Approve only this prepared live proof")
-    proof_action.add_argument("--revoke", action="store_true", help="Revoke this work's explicit approval")
     proof_action.add_argument("--reconcile", action="store_true", help="Reconcile canonical finding and worker state")
     proof_action.add_argument("--release", action="store_true", help="Release ended proof ownership after checking live execution")
     prove_p.add_argument("--reason", help="Recorded explanation for releasing proof ownership")
@@ -1911,7 +1909,7 @@ def _engagement(args: argparse.Namespace, install_root: Path) -> None:
 
 
 def _engagement_prove(args: argparse.Namespace, install_root: Path) -> None:
-    action = args.approve or args.revoke or args.reconcile or args.release
+    action = args.reconcile or args.release
     preparation = args.finding or args.mode or args.objective or args.host
     if args.release and not (args.reason and args.reason.strip()):
         raise SystemExit("--release requires a meaningful --reason")
@@ -1920,7 +1918,7 @@ def _engagement_prove(args: argparse.Namespace, install_root: Path) -> None:
     if args.work is not None and args.work <= 0:
         raise SystemExit("--work must be a positive proof work ID")
     if action and args.work is None:
-        raise SystemExit("approval, reconciliation and retry require --work")
+        raise SystemExit("reconciliation and retry require --work")
     if args.work is not None and preparation:
         raise SystemExit("choose either --work or a new finding proof preparation")
     if preparation and not (args.finding and args.mode and args.objective and args.objective.strip()):
@@ -1928,32 +1926,30 @@ def _engagement_prove(args: argparse.Namespace, install_root: Path) -> None:
     if args.mode == "code" and args.host:
         raise SystemExit("local code proof does not accept live --host targets")
     path = _resolve_current_or_selected_engagement(install_root, key=args.key, select=args.select)
-    with _build_assessment_client(install_root, path.name) as client:
-        if args.work is not None:
-            endpoint = f"proof-work/{args.work}"
-            if args.approve or args.revoke:
-                result = client.post(f"{endpoint}/approval", {"approved": args.approve})
-            elif args.reconcile or args.release:
-                result = client.post(f"{endpoint}/{'release' if args.release else 'reconcile'}", {"reason": args.reason.strip()} if args.release else {})
+    from .paths import add_assess_import_path
+    add_assess_import_path(install_root)
+    from assess.lib.client import AssessError, require_write_result  # type: ignore[import-not-found]
+    try:
+        with _build_assessment_client(install_root, path.name) as client:
+            if args.work is not None:
+                endpoint = f"proof-work/{args.work}"
+                if args.reconcile or args.release:
+                    result = client.post(f"{endpoint}/{'release' if args.release else 'reconcile'}", {"reason": args.reason.strip()} if args.release else {})
+                else:
+                    result = client.get(endpoint)
+            elif preparation:
+                result = client.post("proof-work", {"finding_slug": args.finding, "route": args.mode,
+                                     "objective": args.objective.strip(), "target_hosts": args.host})
             else:
-                result = client.get(endpoint)
-        elif preparation:
-            result = client.post("proof-work", {"finding_slug": args.finding, "route": args.mode,
-                                 "objective": args.objective.strip(), "target_hosts": args.host})
-        else:
-            result = client.get("proof-work")
-    if action or preparation:
-        from .paths import add_assess_import_path
-        add_assess_import_path(install_root)
-        from assess.lib.client import AssessError, require_write_result  # type: ignore[import-not-found]
-        try:
-            if not isinstance(result, dict):
-                raise AssessError("Proof response was malformed; the write may have committed. Inspect durable state before retrying.")
+                result = client.get("proof-work")
+        if not isinstance(result, dict):
+            raise AssessError("Proof response was malformed; inspect durable state before retrying" + ("; the write may have committed." if action or preparation else "."))
+        if action or preparation:
             expected = ({"id": args.work} if args.work is not None else
                         {"finding_slug": args.finding, "route": args.mode})
             require_write_result(result, operation="engagement prove", expected=expected, positive_ids=("id",))
-        except AssessError as exc:
-            raise SystemExit(str(exc)) from exc
+    except AssessError as exc:
+        raise SystemExit(str(exc)) from exc
     print(json.dumps(result, indent=2, ensure_ascii=False))
 
 
@@ -2134,12 +2130,22 @@ def _engagement_create(args: argparse.Namespace, install_root: Path) -> None:
             )
         return
 
-    created = create_engagement(options)
+    from .engagements import EngagementRegistrationError
+    try:
+        created = create_engagement(options)
+    except EngagementRegistrationError as exc:
+        if args.json:
+            print(json.dumps({"status": "error", "created": True, "key": exc.created.key,
+                              "path": str(exc.created.path), "backend_state": exc.created.backend_state,
+                              "detail": str(exc)}, indent=2, ensure_ascii=False))
+            raise SystemExit(1) from exc
+        raise
     if args.json:
         scope = json.loads((created.path / "scope.json").read_text(encoding="utf-8"))
         payload = {
             "key": created.key,
             "path": str(created.path),
+            "backend_state": created.backend_state,
             "engagement_type": str(scope.get("engagement_type") or ""),
             "scope": scope,
         }
@@ -2380,7 +2386,10 @@ def _orchestrator(args: argparse.Namespace, install_root: Path) -> None:
         if args.json:
             print(json.dumps(orchestrator_status_payload(install_root), indent=2))
         else:
-            print(orchestrator_status(install_root))
+            payload = orchestrator_status_payload(install_root)
+            print(payload["state"])
+            if payload.get("detail"):
+                print(payload["detail"])
     elif args.orchestrator_command == "open":
         webbrowser.open("http://127.0.0.1:18000")
     elif args.orchestrator_command == "build":
@@ -2417,7 +2426,7 @@ def _runtime(args: argparse.Namespace, install_root: Path) -> None:
     elif args.runtime_command == "shell-exec":
         _runtime_shell_exec(args.shell_command)
     elif args.runtime_command == "resources":
-        vigil_runtime_resources(json_output=args.json)
+        vigil_runtime_resources(workspace=install_root, json_output=args.json)
 
 
 def _runtime_shell_exec(command_parts: list[str]) -> None:
@@ -2883,8 +2892,8 @@ def _backup(args: argparse.Namespace, install_root: Path) -> None:
                 raise SystemExit("No backups found")
             print(json.dumps(asdict(latest) | {"path": str(latest.path)}, indent=2))
     elif args.backup_command == "restore":
-        if orchestrator_status(install_root) == "running" and not args.force:
-            raise SystemExit("Stop the orchestrator before restoring a backup, or pass --force.")
+        if orchestrator_status(install_root) != "stopped" and not args.force:
+            raise SystemExit("Backend is running or ownership is unknown. Verify it is stopped before restoring a backup, or pass --force.")
         backup = backup_module.resolve_backup(install_root, args.backup)
         print(backup_module.restore_backup(install_root, backup))
 

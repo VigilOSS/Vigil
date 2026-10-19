@@ -85,6 +85,12 @@ def bind_source_candidate():
             'INSERT INTO code_repos(engagement_id,repo_key,name,repo_path,active_generation,source_manifest_digest,source_snapshot_quality) '
             'VALUES(?,?,?,?,?,?,?)', (engagement_id, 'acme', 'Acme', 'source/acme', 1, 'a'*64, 'verified'),
         ).lastrowid
+        from app.services.code_analysis_support import STRUCTURAL_INDEX_SCHEMA
+        connection.execute(
+            "UPDATE code_repos SET threat_model_generation=1,structural_index_generation=1,"
+            "structural_index_schema=?,structural_index_manifest_path='source/acme/index.json' WHERE id=?",
+            (STRUCTURAL_INDEX_SCHEMA, repo_id),
+        )
         row = connection.execute("SELECT provenance_json FROM assessment_findings WHERE engagement_id=? AND slug='VA-050'", (engagement_id,)).fetchone()
         provenance = json.loads(row['provenance_json'])
         provenance['code_snapshot'] = {'repo_id': repo_id, 'repo_generation': 1, 'source_manifest_digest': 'a'*64}
@@ -112,7 +118,7 @@ def test_resume_uses_proof_candidate_mode_and_retains_released_handoffs(client, 
     baseline = {mode: picture(mode) for mode in ['code', 'web', None]}
     work = prepare(client, route)
     if route == 'web':
-        assert client.post(f'{BASE}/proof-work/{work["id"]}/approval', json={'approved': True}).status_code == 200
+        assert client.post(f'{BASE}/proof-work/{work["id"]}/approval', json={'approved': True, 'actor': 'operator', 'human_confirmation': 'Approve bounded Acme proof'}).status_code == 200
     response = claim(client, work, 'ACME-PROOF')
     assert response.status_code == 200, response.text
     assigned = picture(candidate_mode)
@@ -198,7 +204,7 @@ def test_code_only_resume_keeps_live_proof_return_without_starting_a_web_campaig
     scope.update(engagement_type='offensive', tracks={'code': {'phase': 'verify'}})
     (path / 'scope.json').write_text(json.dumps(scope))
     work = prepare(client, 'web')
-    assert client.post(f'{BASE}/proof-work/{work["id"]}/approval', json={'approved': True}).status_code == 200
+    assert client.post(f'{BASE}/proof-work/{work["id"]}/approval', json={'approved': True, 'actor': 'operator', 'human_confirmation': 'Approve bounded Acme proof'}).status_code == 200
     response = claim(client, work, 'ACME-LIVE-PROOF')
     assert response.status_code == 200, response.text
     assert response.json()['authorized_phase'] == 'exploit'
@@ -263,7 +269,7 @@ def test_web_requires_admitted_hosts_and_bound_approval(client, isolate_settings
     denied = claim(client, work)
     assert denied.status_code == 409, denied.text
     assert client.get(f'{BASE}/dispatches/PROOF-1').status_code == 404
-    approved = client.post(f'{BASE}/proof-work/{work["id"]}/approval', json={'approved': True})
+    approved = client.post(f'{BASE}/proof-work/{work["id"]}/approval', json={'approved': True, 'actor': 'operator', 'human_confirmation': 'Approve bounded Acme proof'})
     assert approved.status_code == 200, approved.text
     assert claim(client, work).status_code == 200
     assert client.get(f'{BASE}/exploit-candidates').json() == []
@@ -272,7 +278,7 @@ def test_web_requires_admitted_hosts_and_bound_approval(client, isolate_settings
 def test_changed_claim_or_scope_blocks_work_without_erasing_history(client, isolate_settings):
     path = seed(client, isolate_settings)
     work = prepare(client, 'web')
-    client.post(f'{BASE}/proof-work/{work["id"]}/approval', json={'approved': True})
+    client.post(f'{BASE}/proof-work/{work["id"]}/approval', json={'approved': True, 'actor': 'operator', 'human_confirmation': 'Approve bounded Acme proof'})
     scope = json.loads((path / 'scope.json').read_text())
     scope['out_of_scope'] = ['example.com']
     (path / 'scope.json').write_text(json.dumps(scope))
@@ -336,15 +342,15 @@ def test_scope_wildcards_and_cidr_reuse_admitted_roots_but_deny_wins(client, iso
     assert denied.status_code == 400, denied.text
 
 
-def test_policy_change_invalidates_exact_work_approval(client, isolate_settings):
+def test_policy_change_preserves_exact_work_approval(client, isolate_settings):
     path = seed(client, isolate_settings)
     work = prepare(client, 'web')
-    assert client.post(f'{BASE}/proof-work/{work["id"]}/approval', json={'approved': True}).status_code == 200
+    assert client.post(f'{BASE}/proof-work/{work["id"]}/approval', json={'approved': True, 'actor': 'operator', 'human_confirmation': 'Approve bounded Acme proof'}).status_code == 200
     scope = json.loads((path / 'scope.json').read_text())
     scope['exploit_policy'] = 'pause'
     (path / 'scope.json').write_text(json.dumps(scope))
-    assert claim(client, work).status_code == 409
-    assert client.get(f'{BASE}/proof-work/{work["id"]}').json()['current'] is False
+    assert claim(client, work).status_code == 200
+    assert client.get(f'{BASE}/proof-work/{work["id"]}').json()['current'] is True
 
 
 def test_release_requires_terminal_dispatch_and_terminal_owned_execution(client, isolate_settings):
@@ -555,7 +561,7 @@ def test_targeted_live_proof_can_run_without_full_web_campaign(client, isolate_s
     (path / 'scope.json').write_text(json.dumps(scope))
     work = prepare(client, 'web')
     assert claim(client, work).status_code == 409
-    assert client.post(f'{BASE}/proof-work/{work["id"]}/approval', json={'approved': True}).status_code == 200
+    assert client.post(f'{BASE}/proof-work/{work["id"]}/approval', json={'approved': True, 'actor': 'operator', 'human_confirmation': 'Approve bounded Acme proof'}).status_code == 200
     assert claim(client, work).status_code == 200
     assert json.loads((path / 'scope.json').read_text())['tracks'] == {'code': {'phase': 'code-review'}}
 
@@ -573,19 +579,21 @@ def test_blocked_proof_work_requires_nonblank_reason(client, isolate_settings):
 def test_stale_owner_can_be_released_without_authorizing_old_context(client, isolate_settings):
     path = seed(client, isolate_settings)
     work = prepare(client, 'web')
-    client.post(f'{BASE}/proof-work/{work["id"]}/approval', json={'approved': True})
+    client.post(f'{BASE}/proof-work/{work["id"]}/approval', json={'approved': True, 'actor': 'operator', 'human_confirmation': 'Approve bounded Acme proof'})
     assert claim(client, work).status_code == 200
     assert client.patch(f'{BASE}/dispatches/PROOF-1', json={'status': 'aborted'}).status_code == 200
     scope = json.loads((path / 'scope.json').read_text())
-    scope['exploit_policy'] = 'pause'
+    scope['out_of_scope'] = ['example.com']
     (path / 'scope.json').write_text(json.dumps(scope))
     response = client.post(f'{BASE}/proof-work/{work["id"]}/release', json={
-        'reason': 'Owner ended; all runtime work inspected after policy change',
+        'reason': 'Owner ended; all runtime work inspected after target admission changed',
     })
     assert response.status_code == 200, response.text
     assert response.json()['status'] == 'stale'
     assert response.json()['owner_dispatch_id'] is None
-    fresh = prepare(client, 'web')
+    scope['out_of_scope'] = []
+    (path / 'scope.json').write_text(json.dumps(scope))
+    fresh = prepare(client, 'web', objective='Challenge the updated bounded Acme path')
     assert fresh['id'] != work['id']
     assert claim(client, fresh, 'PROOF-2').status_code == 409
 
@@ -601,7 +609,7 @@ def test_route_derives_explicit_audit_phase_for_specialist(client, isolate_setti
 def test_proof_route_is_authoritative_for_mixed_role_assessment_mode(client, isolate_settings):
     seed(client, isolate_settings)
     work = prepare(client, 'web')
-    assert client.post(f'{BASE}/proof-work/{work["id"]}/approval', json={'approved': True}).status_code == 200
+    assert client.post(f'{BASE}/proof-work/{work["id"]}/approval', json={'approved': True, 'actor': 'operator', 'human_confirmation': 'Approve bounded Acme proof'}).status_code == 200
     response = client.post(f'{BASE}/proof-work/{work["id"]}/claim', json={
         'agent_id': 'PROOF-MODE', 'agent_role': 'exploit-developer',
         'assessment_mode': 'code',
@@ -693,10 +701,10 @@ def test_freeform_notes_do_not_change_canonical_claim_identity(client, isolate_s
 def test_repreparation_of_restored_context_rearms_stale_unowned_work_without_reusing_approval(client, isolate_settings):
     path = seed(client, isolate_settings)
     work = prepare(client, 'web')
-    client.post(f'{BASE}/proof-work/{work["id"]}/approval', json={'approved': True})
+    client.post(f'{BASE}/proof-work/{work["id"]}/approval', json={'approved': True, 'actor': 'operator', 'human_confirmation': 'Approve bounded Acme proof'})
     original = (path / 'scope.json').read_text()
     scope = json.loads(original)
-    scope['exploit_policy'] = 'pause'
+    scope['out_of_scope'] = ['example.com']
     (path / 'scope.json').write_text(json.dumps(scope))
     assert client.post(f'{BASE}/proof-work/{work["id"]}/reconcile', json={}).json()['status'] == 'stale'
     (path / 'scope.json').write_text(original)
@@ -709,11 +717,11 @@ def test_repreparation_of_restored_context_rearms_stale_unowned_work_without_reu
 def test_repreparing_stale_owned_work_requires_explicit_release(client, isolate_settings):
     path = seed(client, isolate_settings)
     work = prepare(client, 'web')
-    assert client.post(f'{BASE}/proof-work/{work["id"]}/approval', json={'approved': True}).status_code == 200
+    assert client.post(f'{BASE}/proof-work/{work["id"]}/approval', json={'approved': True, 'actor': 'operator', 'human_confirmation': 'Approve bounded Acme proof'}).status_code == 200
     assert claim(client, work).status_code == 200
     original = (path / 'scope.json').read_text()
     scope = json.loads(original)
-    scope['exploit_policy'] = 'pause'
+    scope['out_of_scope'] = ['example.com']
     (path / 'scope.json').write_text(json.dumps(scope))
     assert client.post(f'{BASE}/proof-work/{work["id"]}/reconcile', json={}).json()['status'] == 'stale'
     (path / 'scope.json').write_text(original)
@@ -792,14 +800,15 @@ def test_unrelated_selected_approval_does_not_invalidate_existing_authorized_pro
     scope['approved_targets'] = ['VA-050']
     (path / 'scope.json').write_text(json.dumps(scope))
     work = prepare(client, 'web')
-    assert work['approval_required'] is False
+    assert work['approval_required'] is True
+    assert client.post(f'{BASE}/proof-work/{work["id"]}/approval', json={'approved': True, 'actor': 'operator', 'human_confirmation': 'Approve Acme proof'}).status_code == 200
     scope['approved_targets'].append('VA-051')
     (path / 'scope.json').write_text(json.dumps(scope))
     assert client.get(f'{BASE}/proof-work/{work["id"]}').json()['current'] is True
     assert claim(client, work).status_code == 200
     scope['approved_targets'] = ['VA-051']
     (path / 'scope.json').write_text(json.dumps(scope))
-    assert client.get(f'{BASE}/proof-work/{work["id"]}').json()['current'] is False
+    assert client.get(f'{BASE}/proof-work/{work["id"]}').json()['current'] is True
 
 
 _QUEUE_MATRIX = [
@@ -822,7 +831,7 @@ _QUEUE_MATRIX = [
     ('claimed', True, True, False, 'completed', 'blocked'),
     # in_progress: owned claim whose dispatch is still running.
     ('claimed', True, True, False, 'in-progress', 'in_progress'),
-    ('claimed', True, True, True, 'in-progress', 'in_progress'),
+    ('claimed', True, True, True, 'in-progress', 'blocked'),
     # prepared, current, owed: approval decides.
     ('prepared', True, True, True, None, 'needs_approval'),
     ('prepared', True, True, False, None, 'ready'),
@@ -949,7 +958,7 @@ def test_resume_brief_counts_all_owed_proof_work_whatever_the_session_mode(clien
         return response.json()['proof_work']
 
     expected = {
-        'owed_findings': 1, 'queue_state_counts': {'unprepared': 1},
+        'owed_findings': 1, 'reverification_required': 0, 'queue_state_counts': {'unprepared': 1},
         'read_command': 'vigil assess proof-work list',
     }
     # The current operator owns every proof obligation, so a session of either

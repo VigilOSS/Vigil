@@ -55,3 +55,19 @@ def _isolate_runtime_data_dir(monkeypatch):
     would aim allocations at the operator's real ``/data`` mount."""
     monkeypatch.delenv("VIGIL_RUNTIME_DATA_DIR", raising=False)
     monkeypatch.delenv("KALI_MCP_DATA_DIR", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_default_backend_listener(monkeypatch):
+    """A unit test must never contact the operator's managed service on port 18000.
+
+    Protocol tests provide fake connections; real server tests allocate an isolated
+    ephemeral port. Unmocked default-endpoint probes therefore see an offline host.
+    """
+    import socket
+    connect = socket.socket.connect
+    def isolated_connect(sock, address):
+        if isinstance(address, tuple) and len(address) >= 2 and address[1] == 18000:
+            raise ConnectionRefusedError('isolated test backend is offline')
+        return connect(sock, address)
+    monkeypatch.setattr(socket.socket, 'connect', isolated_connect)

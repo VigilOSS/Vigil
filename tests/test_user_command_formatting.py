@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import io
 
 import pytest
@@ -209,6 +211,9 @@ def test_orchestrator_stop_uses_human_lifecycle_rows_on_a_terminal(tmp_path, mon
     pid_file.parent.mkdir(parents=True)
     pid_file.write_text("4242\n")
     monkeypatch.setattr(orchestrator, "resolve_runtime_state_dir", lambda _root: runtime_dir)
+    pid_file.with_suffix(".json").write_text(json.dumps({"pid": 4242, "process_identity": "acme-birth",
+        "workspace": str(tmp_path), "process_group": 4242}))
+    monkeypatch.setattr(orchestrator, "_process_identity", lambda _: "acme-birth")
     monkeypatch.setattr(orchestrator, "_pid_alive", lambda _pid: True)
     monkeypatch.setattr(orchestrator, "_signal_process_group", lambda *_args: None)
     monkeypatch.setattr(orchestrator, "_wait_for_pid_exit", lambda *_args, **_kwargs: True)

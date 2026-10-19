@@ -38,8 +38,8 @@ def test_manual_proof_prepares_selected_candidate_route_and_objective(tmp_path, 
     assert calls == [('post', 'proof-work', {'finding_slug': 'VA-001', 'route': 'code', 'objective': 'Challenge supported parser input', 'target_hosts': []})]
 
 
-def test_manual_proof_approval_binds_only_selected_work(tmp_path, monkeypatch):
-    assert invoke(tmp_path, monkeypatch, ['--work', '9', '--approve']) == [('post', 'proof-work/9/approval', {'approved': True})]
+def test_manual_proof_inspects_selected_work(tmp_path, monkeypatch):
+    assert invoke(tmp_path, monkeypatch, ['--work', '9']) == [('get', 'proof-work/9')]
 
 
 def test_manual_proof_release_records_human_recovery_reason(tmp_path, monkeypatch):
@@ -56,4 +56,4 @@ def test_manual_proof_reports_uncertain_success_without_durable_work_identity(tm
     monkeypatch.setattr(cli, '_resolve_current_or_selected_engagement', lambda *a, **k: tmp_path / 'acme')
     monkeypatch.setattr(cli, '_build_assessment_client', connect)
     with pytest.raises(SystemExit, match='may have committed'):
-        cli.main(['--root', str(tmp_path), 'engagement', 'prove', 'acme', '--work', '9', '--approve'])
+        cli.main(['--root', str(tmp_path), 'engagement', 'prove', 'acme', '--work', '9', '--reconcile'])

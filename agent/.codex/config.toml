@@ -1,15 +1,12 @@
 # Project-local Codex config for Vigil.
 # These mirror agent/.claude/settings.json.
 #
-# HOOK TRUST. Codex 0.154.0 does not run a project-local hook until its exact
-# command has been trusted: the TUI opens on "Hooks need review" and records an
-# approval as `hooks.state."<config path>:<event>:<i>:<j>".trusted_hash` in the
-# operator's own ~/.codex/config.toml. Declining — or pressing esc — starts a
-# normal session in which NOTHING runs these hooks and no UI element says so, so
-# the generated `start_codex.sh` passes `--dangerously-bypass-hook-trust`
-# (src/vigil_cli/engagements.py). Editing a command below changes its hash, which
-# is why the launcher flag, not a persisted approval, is what keeps the activity
-# and session-end receipts recording across engagements.
+# HOOK TRUST. Project-layer trust and exact-hook trust are separate client
+# conditions. The generated launcher passes --dangerously-bypass-hook-trust for
+# Vigil's installed hook definitions, so a changed command does not depend on a
+# persisted per-command approval. This does not attest hook delivery: verify
+# actual activity/session receipts in the supported client. Installed instruction
+# fingerprints describe files on disk, not hooks or role loading observed at run time.
 
 # Compact once the active history reaches roughly half of a one-million-token
 # context. Codex accepts an absolute token threshold, not a percentage.
@@ -27,15 +24,10 @@ compact_prompt = "__VIGIL_RENDER_COMPACT_PROMPT__"
 [features]
 memories = false
 
-# Keep specialist dispatch a clean room. Codex's default spawn path
-# (`multi_agent`) starts a child from the dispatch message alone; `multi_agent_v2`
-# swaps that `fork_context` field for `fork_turns`, which DEFAULTS TO `all` — the
-# operator's entire history. Vigil passes neither field, so the flag alone decides
-# what a specialist inherits, and under v2 the Phase 2C/2D hunters that
-# agent/phases/code-phase-2-hunt.md deliberately keeps blind would read the Phase 2A
-# findings they exist to re-derive independently. Codex ships this off by default;
-# pinning it here also overrides an operator whose global ~/.codex/config.toml
-# turns it on.
+# Keep specialist dispatch a clean room. The operator must explicitly choose
+# fresh context in the actual spawn schema (fork_turns = "none" when exposed),
+# then direct the child to its canonical role and Load First files. This default
+# is a configuration preference, not proof of any child's inherited context.
 multi_agent_v2 = false
 
 [hooks]

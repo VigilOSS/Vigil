@@ -2390,7 +2390,7 @@ def _register_fresh_workspace(install_root: Path) -> Path:
     runtime_state = install_root / "state" / "runtime"
     runtime_state.mkdir(parents=True)
     (install_root / WORKSPACE_FILENAME).write_text(
-        json.dumps({"schema_version": 1, "paths": {"runtime_state": str(runtime_state)}}),
+        json.dumps({"schema_version": 1, "paths": {"runtime_state": str(runtime_state), "engagements": "engagements", "data": "state", "logs": "logs", "cache": "cache", "tenant_references": "tenant-references"}}),
         encoding="utf-8",
     )
     return runtime_state

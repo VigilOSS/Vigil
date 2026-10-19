@@ -174,3 +174,31 @@ def test_verify_contract_documents_the_plan_flag_and_every_field():
     for hint in contracts.NEXT_TEST_ROUTE_HINTS:
         assert hint in text
     assert "--next-test-file" in contracts.render_contract("finding record")
+
+
+def test_record_rejects_overlong_park_before_first_write(engagement, backend):
+    with pytest.raises(SystemExit):
+        _record(engagement, "--pending-runtime-proof", "x" * 4097,
+                "--next-test-file", _plan_file(engagement, PLAN))
+    assert backend.posts == []
+
+
+def test_failed_park_retry_preserves_literal_argv(engagement, backend, monkeypatch, capsys):
+    import shlex
+    from assess.lib.client import AssessError
+    reason = "Acme's $TOKEN $(touch nope) `touch nope`\nsecond line"
+    plan = engagement / "next test's $value.json"
+    plan.write_text(json.dumps(PLAN))
+    original = backend.post
+    def fail_park(_client, endpoint, payload):
+        if endpoint.endswith('/verify'):
+            raise AssessError('HTTP 409: state changed')
+        return original(endpoint, payload)
+    monkeypatch.setattr(AssessmentClient, 'post', fail_park)
+    with pytest.raises(SystemExit):
+        _record(engagement, '--pending-runtime-proof', reason, '--next-test-file', str(plan))
+    error = capsys.readouterr().err
+    retry = error.split('Retry only the park: `', 1)[1].rsplit('`.', 1)[0]
+    assert shlex.split(retry) == ['vigil', 'assess', 'finding', 'verify', 'VA-001',
+        '--status', 'pending_runtime_proof', '--reason', reason, '--next-test-file', str(plan)]
+    assert [endpoint for endpoint, _ in backend.posts] == ['findings']

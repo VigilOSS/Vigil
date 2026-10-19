@@ -20,6 +20,7 @@ def create_tables(connection: sqlite3.Connection) -> None:
             approved INTEGER NOT NULL DEFAULT 0,
             owner_dispatch_id INTEGER REFERENCES assessment_dispatches(id),
             blocker TEXT NOT NULL DEFAULT '',
+            blocker_cause TEXT,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(engagement_id, finding_id, binding_digest)
@@ -44,3 +45,6 @@ def create_tables(connection: sqlite3.Connection) -> None:
     # statement without crossing that serialization boundary.
     for statement in statements:
         connection.execute(statement)
+    columns = {row[1] for row in connection.execute('PRAGMA table_info(assessment_proof_work)')}
+    if 'blocker_cause' not in columns:
+        connection.execute('ALTER TABLE assessment_proof_work ADD COLUMN blocker_cause TEXT')

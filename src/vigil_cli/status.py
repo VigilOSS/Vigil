@@ -318,8 +318,9 @@ def collect_status(
     legacy_both_missing_code_phase = [
         eng_dir.name for eng_dir in _both_engagements_missing_code_phase(install_root)
     ]
-    runtime_state = runtime_status(runner=runner)
-    mitm_running = docker.container_running("vigil-proxy", runner=runner)
+    docker_ok = docker.daemon_available(runner=runner)
+    runtime_state = runtime_status(runner=runner) if docker_ok else "unknown"
+    mitm_running = docker.container_running("vigil-proxy", runner=runner) if docker_ok else None
     # Drift is only meaningful for a running container; skip the two docker
     # inspects otherwise to keep `vigil status` cheap.
     mitm_image_drift = mitm_running and proxy_image_drift(runner=runner)
@@ -346,26 +347,28 @@ def collect_status(
         },
         "runtime": {
             "state": runtime_state,
-            "image_exists": docker.image_exists("vigil:latest", runner=runner),
+            "image_exists": docker.image_exists("vigil:latest", runner=runner) if docker_ok else None,
             "mounts_ok": runtime_mounts_ok(install_root, runner=runner) if runtime_state == "running" else None,
-            "resources": runtime_resource_state(runner=runner),
+            "resources": runtime_resource_state(workspace=install_root, runner=runner) if docker_ok else None,
         },
         "mitmproxy": {
-            "state": "running" if mitm_running else "stopped",
-            "image_exists": docker.image_exists("vigil-proxy:latest", runner=runner),
-            "image_drift": bool(mitm_image_drift),
-            "ca_volume": docker.volume_exists("mitmproxy-ca", runner=runner),
+            "state": "running" if mitm_running else "stopped" if docker_ok else "unknown",
+            "image_exists": docker.image_exists("vigil-proxy:latest", runner=runner) if docker_ok else None,
+            "image_drift": bool(mitm_image_drift) if docker_ok else None,
+            "ca_volume": docker.volume_exists("mitmproxy-ca", runner=runner) if docker_ok else None,
         },
         # deep=False keeps `vigil status` cheap (no per-client log reads / DNS probe);
         # `vigil oob status` runs the full health check.
-        "oob": oob_status(
+        "oob": (oob_status(
             oob_domain=resolved_oob.oob_domain,
             slot_prefix=resolved_oob.slot_prefix,
             dns_remote_port=resolved_oob.dns_remote_port,
             reverse_remote_port=resolved_oob.reverse_remote_port,
             runner=runner,
             deep=False,
-        ) | {"frp_token_configured": oob_token_configured},
+        ) if docker_ok else {"state": "unknown", "health": "unknown", "server": None, "frpc": None,
+                            "clients": [], "running": [], "issues": ["Docker daemon unavailable; OOB state was not inspected"]})
+        | {"frp_token_configured": oob_token_configured},
         "backup": {
             "latest": str(backup.path) if backup else None,
             "modified_at": backup.modified_at if backup else None,
@@ -431,6 +434,8 @@ def _print_status_plain(status: dict[str, object]) -> None:
             f"warn\tbackend restart required: {backend_state.get('detail')}; "
             f"run `{backend_state.get('remedy')}`"
         )
+    elif isinstance(backend_state, dict) and backend_state.get("state") == "unknown":
+        print(f"warn\tbackend ownership/freshness unknown: {backend_state.get('detail')}")
     elif isinstance(readiness, dict):
         backend_runtime = readiness.get("backend_runtime")
         if isinstance(backend_runtime, dict) and backend_runtime.get("restart_required"):

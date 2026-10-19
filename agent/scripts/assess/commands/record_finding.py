@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import shlex
 from pathlib import Path
 
 from assess.lib.client import (
@@ -510,10 +511,14 @@ def _require_authoring_dispatch(
                 raise
             dispatch = None
     if not isinstance(dispatch, dict) or dispatch.get("agent_id") != author:
+        recovery = (
+            "Register the author with `vigil assess agent start --agent-id <id> --role <role> ...` before recording."
+            if existing is None else
+            "Run `vigil assess finding bind-author` once to repair this invalid historical binding."
+        )
         print(
             f"finding record: REFUSED — provenance.agent_id {author!r} does not resolve "
-            "to a dispatch in this engagement. Run `vigil assess finding bind-author` "
-            "once to repair this invalid historical binding.",
+            f"to a dispatch in this engagement. {recovery}",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -667,6 +672,9 @@ def run(args) -> None:
         sys.exit(1)
 
     park_reason = (getattr(args, "pending_runtime_proof_reason", "") or "").strip()
+    if len(park_reason) > 4096:
+        print('finding record: --pending-runtime-proof reason must be at most 4096 characters', file=sys.stderr)
+        sys.exit(1)
     next_test_file = (getattr(args, "next_test_file", "") or "").strip()
     next_test = None
     if bool(park_reason) != bool(next_test_file):
@@ -812,12 +820,13 @@ def run(args) -> None:
                 engagement_key=cfg.engagement_key,
             )
         except AssessError as exc:
+            retry = shlex.join(['vigil', 'assess', 'finding', 'verify', finding_slug,
+                                '--status', 'pending_runtime_proof', '--reason', park_reason,
+                                '--next-test-file', next_test_file])
             print(
                 f"finding record: {finding_slug} WAS recorded, but parking it at "
                 f"pending_runtime_proof failed: {exc}\n"
-                f"  - Retry only the park: `vigil assess finding verify {finding_slug} "
-                f'--status pending_runtime_proof --reason "{park_reason}" '
-                f'--next-test-file {next_test_file}`.',
+                f"  - Retry only the park: `{retry}`.",
                 file=sys.stderr,
             )
             sys.exit(1)

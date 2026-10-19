@@ -23,7 +23,7 @@ def test_auth_engagement_resolves_its_registered_private_workspace(tmp_path, mon
     engagement = engagements / "acme"
     engagement.mkdir(parents=True)
     (workspace / "workspace.json").write_text(json.dumps({
-        "schema_version": 1, "paths": {"engagements": str(engagements)},
+        "schema_version": 1, "paths": {"engagements": str(engagements), "data": "state", "runtime_state": "state/runtime", "logs": "logs", "cache": "cache", "tenant_references": "tenant-references"},
     }))
     monkeypatch.setenv("VIGIL_CONFIG", str(tmp_path / "missing-config.json"))
     assert auth._install_root(engagement) == workspace

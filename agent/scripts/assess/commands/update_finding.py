@@ -90,6 +90,7 @@ def register(subparsers) -> None:
     )
     p.add_argument("--notes")
     p.add_argument("--source-name")
+    p.add_argument("--agent-id", dest="dispatch_agent_id", help="Registered editing dispatch; preserves the original finding author.")
     p.add_argument("--reason-code")
     p.add_argument("--reason", dest="reason_text")
     p.add_argument("--artifact-ref")
@@ -171,6 +172,7 @@ _CONTENT_FLAGS = (
     ("evidence_ref", "--evidence-ref"),
     ("notes", "--notes"),
     ("source_name", "--source-name"),
+    ("dispatch_agent_id", "--agent-id"),
     ("reason_code", "--reason-code"),
     ("reason_text", "--reason"),
     ("artifact_ref", "--artifact-ref"),
@@ -191,6 +193,7 @@ _PATCH_CONTROL_FIELDS = frozenset(
         "reason_code",
         "reason_text",
         "artifact_ref",
+        "dispatch_agent_id",
     }
 )
 
@@ -387,6 +390,7 @@ def run(args) -> None:
                 else None
             ),
             "source_name": args.source_name,
+            "dispatch_agent_id": getattr(args, "dispatch_agent_id", None),
             "details": details,
             "details_mode": "replace" if getattr(args, "details_replace", False) else None,
             "provenance": provenance,

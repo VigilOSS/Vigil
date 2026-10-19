@@ -1,9 +1,9 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { listProofWork, prepareProofWork, approveProofWork, reconcileProofWork, releaseProofWork } from '../lib/api';
+import { getProofWork, listProofWork, prepareProofWork, approveProofWork, reconcileProofWork, releaseProofWork } from '../lib/api';
 import { ProofWorkTab } from './ProofWorkTab';
-vi.mock('../lib/api', () => ({ listProofWork: vi.fn(), prepareProofWork: vi.fn(), approveProofWork: vi.fn(), reconcileProofWork: vi.fn(), releaseProofWork: vi.fn() }));
+vi.mock('../lib/api', () => ({ getProofWork: vi.fn(), listProofWork: vi.fn(), prepareProofWork: vi.fn(), approveProofWork: vi.fn(), reconcileProofWork: vi.fn(), releaseProofWork: vi.fn() }));
 const work = { id: 9, finding_slug: 'VA-001', route: 'web', objective: 'Challenge export access', target_hosts: ['app.example.com'], status: 'prepared', current: true, owed: true, approved: false, approval_required: true, owner_agent_id: null, owner_dispatch_id: null, blocker: 'Live proof approval required', run_ids: [], queue_state: 'needs_approval', next_test: null, created_at: '', updated_at: '', stale_reasons: [] };
 const owed = { finding_slug: 'VA-001', title: 'Acme export hypothesis', work_ids: [9], queue_state: 'needs_approval', next_test: null };
 const nextTest = { hypothesis: 'A viewer can export another tenant report', confirm_if: 'The export returns the other tenant rows', falsify_if: 'The export returns 403 for the other tenant while the own-tenant control succeeds', route_hint: 'live', prerequisites: 'Two viewer accounts on app.example.com' };
@@ -103,4 +103,31 @@ it('renders the next test as plain text and marks findings without one', async (
   expect(screen.getByText('Two viewer accounts on app.example.com')).toBeTruthy();
   expect(screen.getAllByText('Prerequisites')).toHaveLength(1);
   expect(screen.getAllByText('No next test recorded.')).toHaveLength(1);
+});
+
+
+it('revokes full-send authority with a lossless reason', async () => {
+  vi.mocked(listProofWork).mockResolvedValue({owed: [owed], items: [{...work, approval_required: false}]} as never);
+  render(<ProofWorkTab engagementKey="acme" />);
+  const button = await screen.findByRole('button', {name: 'Revoke live proof 9'});
+  expect((button as HTMLButtonElement).disabled).toBe(true);
+  fireEvent.change(screen.getByLabelText('Revocation reason for proof 9'), {target: {value: ' Stop this proof.\n'}});
+  fireEvent.click(button);
+  await waitFor(() => expect(approveProofWork).toHaveBeenCalledWith('acme', 9, false, ' Stop this proof.\n'));
+});
+
+it('loads approval history on request and renders raw text safely', async () => {
+  const confirmation = '<img src=x onerror=alert(1)> approved\n  Acme';
+  vi.mocked(getProofWork).mockResolvedValue({...work, events: [{id: 1, action: 'approval', created_at: '', details_json: JSON.stringify({actor: 'operator', human_confirmation: confirmation})}]} as never);
+  const view = render(<ProofWorkTab engagementKey="acme" />);
+  fireEvent.click(await screen.findByRole('button', {name: 'Show audit history for proof 9'}));
+  await waitFor(() => expect(getProofWork).toHaveBeenCalledWith('acme', 9));
+  expect(await screen.findByText((_, element) => element?.tagName === 'PRE' && !!element.textContent?.includes(confirmation.replace('\n', '\\n')))).toBeTruthy();
+  expect(view.container.querySelector('img')).toBeNull();
+});
+
+it('shows renewed verification separately from parked work', async () => {
+  vi.mocked(listProofWork).mockResolvedValue({owed: [], items: [], reverification_required: [{finding_id: 1, finding_slug: 'VA-001', invalidating_transition_id: 7, next_action: 'Independently re-verify the changed claim', work_ids: [9]}]} as never);
+  render(<ProofWorkTab engagementKey="acme" />);
+  expect(await screen.findByText('Independently re-verify the changed claim')).toBeTruthy();
 });

@@ -12,6 +12,12 @@ import pytest
 @pytest.fixture
 def launch(tmp_path, monkeypatch):
     from vigil_cli import remediation_sessions as sessions
+    from pathlib import Path
+
+    # System applications are not fixtures; exercise only each test's temporary app.
+    actual_is_file = Path.is_file
+    monkeypatch.setattr(Path, 'is_file', lambda path: False if str(path) ==
+        '/Applications/ZCode.app/Contents/Info.plist' else actual_is_file(path))
 
     root = tmp_path / "release"
     (root / "orchestrator").mkdir(parents=True)

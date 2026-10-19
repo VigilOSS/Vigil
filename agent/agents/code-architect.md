@@ -212,7 +212,7 @@ REQUIRED. Before writing this section, check the pass holds together across four
 directory/file type is assigned to a module or marked `skip` with a reason, and no large file
 (>500 LOC) is `skip`ped without review; every entry-point and trust-boundary category (network,
 CLI, file, env, API, IPC) was actually looked for, not just the obvious ones; every `critical`/
-`high` file has a slot-type annotation, an explicit reasoning string, and a precise role label
+`high` file has a slot-type annotation, a precise role label, and rationale in the narrative architecture/handoff artifact
 (protocol parsers, serialization handlers, and auth code classified `critical`); and the threat
 model names concrete protocols/data formats/trust relationships (including the trusted-inputs
 set) rather than generic descriptions, with historical CVE patterns distilled into bug-shapes.

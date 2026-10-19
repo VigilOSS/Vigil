@@ -198,6 +198,12 @@ def _build_register_payload(args) -> dict:
             file=sys.stderr,
         )
         sys.exit(1)
+    from assess.commands.agent import _CODE_SOURCE_IDENTITY_ROLES
+    if payload.get("agent_role") in _CODE_SOURCE_IDENTITY_ROLES:
+        if payload.get("assessment_mode") not in (None, 'code'):
+            print('agent start: code-only roles require assessment_mode=code', file=sys.stderr)
+            sys.exit(1)
+        payload['assessment_mode'] = 'code'
     errors, warnings = validate_specialist_dispatch_contract(payload)
     for warning in warnings:
         print(f"WARN agent start: {warning}", file=sys.stderr)

@@ -509,11 +509,13 @@ def preflight_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     (engagement_dir / ".orchestrator.env").write_text("DEEPSEEK_API_KEY=test-key\n")
     monkeypatch.setattr(preflight_module.shutil, "which", lambda _name: "/usr/local/bin/client")
     monkeypatch.setattr(preflight_module, "orchestrator_status", lambda _root: "running")
+    monkeypatch.setattr(engagements, "inspect_backend_ownership", lambda root, *a: engagements.BackendOwnership(engagements.BackendInstallRootStatus.VERIFIED, "http://127.0.0.1:18000", str(root)))
     monkeypatch.setattr(engagements, "_verify_backend_install_root", lambda *_: engagements.BackendInstallRootStatus.VERIFIED)
     from vigil_cli import orchestrator
     monkeypatch.setattr(orchestrator, "start_orchestrator", lambda *_: None)
     monkeypatch.setattr(preflight_module, "runtime_status", lambda: "running")
     monkeypatch.setattr(preflight_module, "_warn_if_install_stale", lambda _root: None)
+    monkeypatch.setattr(preflight_module, "_ensure_backend_freshness", lambda *a: None)
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
@@ -632,6 +634,7 @@ def test_preflight_recovers_backend_and_warns_when_execution_is_down(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.setattr(preflight_module, "orchestrator_status", lambda _root: "stopped")
+    monkeypatch.setattr(engagements, "inspect_backend_ownership", lambda *a: engagements.BackendOwnership(engagements.BackendInstallRootStatus.UNREACHABLE, "http://127.0.0.1:18000"))
     monkeypatch.setattr(preflight_module, "runtime_status", lambda: "stopped")
 
     main_module._preflight_engagement_start(

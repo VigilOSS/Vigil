@@ -98,7 +98,7 @@ def test_adoption_registers_existing_state_without_copying_or_rewriting_data(tmp
     assert all(path.read_bytes() == payload for path, payload in before.items())
     assert paths.engagements_root(tmp_path) == engagement.parent
     assert paths.resolve_orchestrator_data_dir(tmp_path) == data
-    assert metadata["paths"]["logs"] == str(tmp_path / ".runtime-data" / "logs")
+    assert metadata["paths"]["logs"] == ".runtime-data/logs"
     assert not (tmp_path / "engagements").exists()
     assert not (tmp_path / "agent" / "AGENTS.md").exists()
     assert initialize_workspace(tmp_path, REPO_ROOT) == metadata

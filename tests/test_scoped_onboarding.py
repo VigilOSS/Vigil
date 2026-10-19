@@ -47,6 +47,7 @@ def test_code_session_preflight_does_not_query_docker(tmp_path, monkeypatch):
     monkeypatch.setattr(engagements, "_verify_backend_install_root", lambda *_: engagements.BackendInstallRootStatus.VERIFIED)
     monkeypatch.setattr(preflight, "runtime_status", lambda: pytest.fail("static session must not query Docker"))
     monkeypatch.setattr(preflight, "_warn_if_install_stale", lambda _: None)
+    monkeypatch.setattr(preflight, "_ensure_backend_freshness", lambda *a: None)
     preflight._preflight_engagement_start(tmp_path, engagement, "codex")
 
 
@@ -58,6 +59,7 @@ def test_session_recovers_only_managed_local_backend(tmp_path, monkeypatch):
     monkeypatch.setattr(preflight.shutil, "which", lambda _: "/bin/acme")
     monkeypatch.setattr(preflight, "orchestrator_status", lambda _: "stopped")
     monkeypatch.setattr(preflight, "_warn_if_install_stale", lambda _: None)
+    monkeypatch.setattr(preflight, "_ensure_backend_freshness", lambda *a: None)
     started = []
     monkeypatch.setattr(orchestrator, "start_orchestrator", lambda options: started.append(options))
     monkeypatch.setattr(engagements, "_verify_backend_install_root", lambda *_: engagements.BackendInstallRootStatus.VERIFIED)
@@ -79,6 +81,7 @@ def test_failed_managed_backend_recovery_refuses_launch(tmp_path, monkeypatch):
     monkeypatch.setattr(preflight.shutil, "which", lambda _: "/bin/acme")
     monkeypatch.setattr(preflight, "orchestrator_status", lambda _: "stopped")
     monkeypatch.setattr(preflight, "_warn_if_install_stale", lambda _: None)
+    monkeypatch.setattr(preflight, "_ensure_backend_freshness", lambda *a: None)
     monkeypatch.setattr(orchestrator, "start_orchestrator", lambda _: None)
     monkeypatch.setattr(engagements, "_verify_backend_install_root", lambda *_: engagements.BackendInstallRootStatus.UNREACHABLE)
     monkeypatch.delenv("ORCHESTRATOR_BASE_URL", raising=False)
@@ -93,6 +96,7 @@ def test_explicit_remote_backend_outage_warns_without_blocking_local_launch(tmp_
     (engagement / "scope.json").write_text('{"engagement_type":"code"}')
     monkeypatch.setattr(preflight.shutil, "which", lambda _: "/bin/acme")
     monkeypatch.setattr(preflight, "_warn_if_install_stale", lambda _: None)
+    monkeypatch.setattr(preflight, "_ensure_backend_freshness", lambda *a: None)
     monkeypatch.setattr(
         engagements,
         "_verify_backend_install_root",
@@ -112,6 +116,7 @@ def test_transient_backend_sync_failure_warns_without_blocking_launch(tmp_path, 
     monkeypatch.setattr(preflight.shutil, "which", lambda _: "/bin/acme")
     monkeypatch.setattr(preflight, "orchestrator_status", lambda _: "running")
     monkeypatch.setattr(preflight, "_warn_if_install_stale", lambda _: None)
+    monkeypatch.setattr(preflight, "_ensure_backend_freshness", lambda *a: None)
     monkeypatch.setattr(
         engagements,
         "_verify_backend_install_root",
@@ -152,6 +157,7 @@ def test_reachable_remote_backend_protocol_error_refuses_launch(
     (engagement / "scope.json").write_text('{"engagement_type":"code"}')
     monkeypatch.setattr(preflight.shutil, "which", lambda _: "/bin/acme")
     monkeypatch.setattr(preflight, "_warn_if_install_stale", lambda _: None)
+    monkeypatch.setattr(preflight, "_ensure_backend_freshness", lambda *a: None)
     monkeypatch.setenv("ORCHESTRATOR_BASE_URL", "http://orchestrator.example.com")
 
     class Response:
@@ -194,7 +200,7 @@ def test_concurrent_backend_starts_share_one_process(tmp_path, monkeypatch):
     monkeypatch.setattr(orchestrator, "application_root_for_workspace", lambda _: tmp_path)
     monkeypatch.setattr(orchestrator, "_frontend_build_needed", lambda *a, **k: False)
     monkeypatch.setattr(orchestrator, "_report_build_needed", lambda *a, **k: False)
-    monkeypatch.setattr(orchestrator, "_pid_running", lambda path: path.exists())
+    monkeypatch.setattr(orchestrator, "_process_identity", lambda _: "acme-birth")
     monkeypatch.setattr(orchestrator, "_sync_backend_environment", lambda *a, **k: None)
     monkeypatch.setattr(orchestrator, "_wait_for_health", lambda *a, **k: True)
     monkeypatch.setattr(orchestrator, "_wait_for_readiness", lambda *a, **k: True)
