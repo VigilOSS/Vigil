@@ -264,6 +264,9 @@ class EngagementRow:
     status: str
     current_phase: str
     created_at: str
+    last_activity_at: str = ""
+    activity_incomplete: bool = False
+    engagement_type: str = ""
 
 
 def normalize_target(raw: str) -> str:
@@ -1490,7 +1493,11 @@ def set_engagement_rate_limit(
 
 
 def list_engagements(install_root: Path) -> list[EngagementRow]:
+    from dataclasses import replace
+    from .engagement_recency import engagement_recencies
+
     rows: list[EngagementRow] = []
+    scopes: dict[Path, dict[str, object]] = {}
     for eng_dir in sorted(engagements_root(install_root).glob("*")):
         if not eng_dir.is_dir() or not (eng_dir / "scope.json").is_file():
             continue
@@ -1506,6 +1513,7 @@ def list_engagements(install_root: Path) -> list[EngagementRow]:
                 phase = "repair-required"
         else:
             phase = str(scope.get("current_phase") or "unknown")
+        scopes[eng_dir.resolve()] = {**scope, "created_at": manifest.get("created_at") or scope.get("created_at")}
         rows.append(
             EngagementRow(
                 key=eng_dir.name,
@@ -1514,8 +1522,17 @@ def list_engagements(install_root: Path) -> list[EngagementRow]:
                 status=str(scope.get("status") or "unknown"),
                 current_phase=phase,
                 created_at=str(manifest.get("created_at") or ""),
+                engagement_type=kind or "web",
             )
         )
+    activity = engagement_recencies(install_root, scopes)
+    projected = []
+    for row in rows:
+        recency = activity[row.path]
+        timestamp = recency.latest_at
+        projected.append(replace(row, last_activity_at=timestamp.isoformat() if timestamp else "",
+                                 activity_incomplete=recency.incomplete))
+    rows = projected
     return sorted(rows, key=lambda row: (row.created_at or "", row.key))
 
 
@@ -1687,18 +1704,11 @@ def _select_engagement(rows: list[EngagementRow]) -> EngagementRow:
             "Interactive --select is unavailable in a non-interactive process; "
             "pass the optional engagement key explicitly"
         )
-    if shutil.which("fzf"):
-        lines = [f"{row.key}\t{row.status}\t{row.current_phase}\t{row.target}\t{row.path}" for row in rows]
-        result = subprocess.run(["fzf", "--with-nth", "1,2,3,4"], input="\n".join(lines), text=True, capture_output=True, check=False)
-        if result.returncode == 0 and result.stdout.strip():
-            selected = result.stdout.split("\t", 1)[0]
-            return next(row for row in rows if row.key == selected)
-    for idx, row in enumerate(rows, start=1):
-        print(f"{idx}. {row.key} [{row.status}/{row.current_phase}] {row.target}", file=sys.stderr)
-    choice = input("> ").strip()
-    if not choice.isdigit() or not (1 <= int(choice) <= len(rows)):
-        raise SystemExit("Invalid selection")
-    return rows[int(choice) - 1]
+    from .prompts import prompt_choice
+
+    labels = [f"{row.key} [{row.status}/{row.current_phase}] {row.target}" for row in rows]
+    selected = prompt_choice("Select engagement", labels[0], labels)
+    return rows[labels.index(selected)]
 
 
 def print_shell_cd_init(shell: str = "zsh") -> str:
@@ -1803,6 +1813,8 @@ def start_engagement(install_root: Path, engagement_dir: Path, client: str, extr
         )
         extra_args = [*flags, setup + (f"\n\nAdditional context:\n{message}" if message else "")]
     os.chdir(engagement_dir)
+    from .client_sessions import record_client_launch
+    record_client_launch(install_root, engagement_dir, client, selected_mode)
     os.execv(str(launcher), [str(launcher), *client_launch_argv(client, extra_args)])
 
 

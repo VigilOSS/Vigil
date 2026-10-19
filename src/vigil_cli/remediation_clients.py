@@ -250,6 +250,12 @@ def start_repository_client(args: argparse.Namespace, install_root: Path, engage
           + "\nRepository and personal hooks retain their configured policy. Native approvals and selected model remain in effect.",
           flush=True)
     try:
-        return subprocess.run(argv, cwd=repository, env=environment).returncode
+        from .client_sessions import record_client_launch
+        if client != "zcode":
+            record_client_launch(install_root, engagement, client, "remediation")
+        result = subprocess.run(argv, cwd=repository, env=environment)
+        if client == "zcode" and result.returncode == 0:
+            record_client_launch(install_root, engagement, client, "remediation", event="workspace_opened")
+        return result.returncode
     except OSError as exc:
         raise SystemExit(f"Cannot launch {client}: {exc}") from exc

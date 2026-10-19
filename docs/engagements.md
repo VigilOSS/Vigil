@@ -39,8 +39,9 @@ Offensive engagements persist enabled tracks and their independent phases in
 `vigil engagement add-track <key> web|code` to enable the second explicitly.
 
 A session mode selects one enabled track's operator prompt for one client process. A single
-enabled track is selected automatically; with two tracks, `start` requires `--mode web` or
-`--mode code`. Change mode by starting a new client process. Selecting a session mode does
+enabled track is selected automatically; with two tracks, an interactive `start` asks for
+one mode unless `--mode web` or `--mode code` is supplied. Noninteractive starts require
+the explicit mode. Change mode by starting a new client process. Selecting a session mode does
 not enable a track, reset its phase, or change scope.
 
 `vigil engagement mode <key>` inspects enabled tracks, their phases, prompt paths, and complete
@@ -50,15 +51,21 @@ and prompt are reported too; an inherited mode from another engagement is ignore
 
 ## Starting a session
 
-`start` requires `--client`. Before launching, it prints the workspace, engagement, client,
-selected mode, and track phase to stderr. It changes into the engagement directory, exports the engagement
-environment ([what the launcher exports](agent-clients.md#what-the-launcher-exports)), then execs
-the client. Flags it does not own are forwarded to the client
-([forwarding rules](agent-clients.md#forwarding-flags-to-the-client)). The key may be omitted when
-the current directory, active pointer, or `--select` resolves the engagement.
+`start` requires `--client`. With no explicit key, interactive starts always show the
+shared picker, even inside an engagement or with a persisted selection. Choose an
+existing engagement or **Create new engagement**. Rows show status, tracks and recent
+activity; ordering uses meaningful recorded work and official client launch/open history,
+falling back to creation. Missing history is labeled. Noninteractive starts require a key.
+
+Legacy CLI clients start from the engagement root with their engagement environment
+([what the launcher exports](agent-clients.md#what-the-launcher-exports)). OpenCode and
+ZCode web/code sessions use their generated bound client workspace; ZCode opens that
+folder as a project rather than becoming an owned CLI conversation. Flags Vigil does
+not own follow the client's [forwarding rules](agent-clients.md#forwarding-flags-to-the-client).
+Other commands keep their existing current-directory and active-pointer resolution.
 
 A preflight runs first. It **hard-fails** when the client binary is not on `PATH`, or when Goose or
-OpenCode has no `DEEPSEEK_API_KEY` in the environment, the engagement's `.orchestrator.env`, or the
+OpenCode's Blue integration has no `DEEPSEEK_API_KEY` in the environment, the engagement's `.orchestrator.env`, or the
 workspace's env files. It recovers the default managed local backend when needed and refuses
 launch when that managed backend remains unavailable or when any reachable backend belongs to
 another workspace. A configured remote backend that cannot be reached at the transport level

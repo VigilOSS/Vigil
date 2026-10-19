@@ -14,8 +14,10 @@ import shlex
 import shutil
 import stat
 import subprocess
+import sys
 import uuid
 
+from . import term
 from .application import _read_file, application_provenance, session_cli_directory
 from .install_fs import open_pinned_directory
 from .paths import agent_root, resolve_orchestrator_base_url
@@ -149,22 +151,38 @@ def prepare_workspace(install_root: Path, engagement: Path, client: str, mode: s
     workspace_files = {"bin/vigil": helper.encode(), CONTEXT_FILE: _json(binding)}
     prompt = agent / ("operator-core-code.md" if mode == "code" else "AGENTS.md")
     from .engagements import _SPECIALIST_STOP_SIGN
+    helper_command = shlex.quote(str(binding["vigil_cli"]))
+    setup = (
+        "## First-task setup\n\n"
+        "You are the Vigil operator for this project. Help a newcomer finish setup before starting the selected workflow.\n"
+        "This exact folder is the ZCode project; the canonical engagement and audited source remain separate.\n"
+        f"1. Run `{helper_command} engagement client-check --client zcode --mode {mode} --json`. Explain failed prerequisites and distinguish installed assets, historical hook observations, and unverified native behavior.\n"
+        f"2. If the plugin has not been installed/enabled, ask the user to open Plugin Marketplace → Add → Add plugin marketplace and add `{workspace.resolve() / 'plugin/marketplace.json'}`. Under Personal, review, install and enable the matching Vigil plugin. Native approval belongs to the user.\n"
+        "3. Ask the user to select their entitled Z.AI Coding Plan model in ZCode, without sharing credentials. A selected model is not proof of successful authentication.\n"
+        "4. After plugin enablement, ask the user to create a NEW task in this same project and use the printed opening prompt or the matching Vigil resume command. An existing task may have captured an earlier hook configuration.\n"
+        "5. Verify startup hook delivery and backend hydration separately. If unverified, explain what remains to test; neither opening a project nor finding files proves hooks or compaction work.\n"
+        f"For detailed setup and recovery, read `{agent.parent / 'docs/zcode-setup.md'}` explicitly; ZCode does not expand instruction-file imports.\n\n"
+    ) if client == "zcode" else ""
     router = (
         _SPECIALIST_STOP_SIGN + "\n"
         f"# Vigil {mode} session\n\n"
+        "## Session identity and commands\n\n"
         f"This workspace binds only engagement {json.dumps(engagement.name)} in `{mode}` mode.\n"
         f"Canonical engagement: `{engagement.resolve()}`.\n"
         f"Use `{binding['vigil_cli']}` instead of bare `vigil` in every command.\n"
-        f"Run `{binding['vigil_cli']} engagement mode` and read only `{prompt}`.\n"
-        f"Read `{engagement.resolve() / 'ENGAGEMENT.md'}` when present and the complete selected prompt.\n"
         f"Client context: `{workspace.resolve() / CONTEXT_FILE}`. Read it for literal artifact paths.\n"
-        "Environment-variable path notation in shared guidance denotes these literal paths, not ambient GUI variables.\n"
+        f"The binding's `mode` is `{mode}`. Interpret VIGIL_OPERATOR_MODE in shared guidance as that bound value, not an assumed GUI environment variable.\n"
+        "Environment-variable path notation in shared guidance denotes these literal paths, not ambient GUI variables.\n\n"
+        + setup
+        + "## Operator workflow and recovery\n\n"
+        f"Run `{helper_command} engagement mode` and verify its mode is `{mode}` before reading only `{prompt}` in full.\n"
+        f"Read `{engagement.resolve() / 'ENGAGEMENT.md'}` when present. Scope, approvals and backend records remain canonical; the native conversation is not shared durable state.\n"
+        f"Before dependent work run `{helper_command} engagement client-check {shlex.quote(engagement.name)} --client {client} --mode {mode} --json`.\n"
+        "If setup is incomplete, explain the failed check and the next setup action before dependent work. Instructions do not replace native approvals or executable authorization checks.\n"
+        "After any context boundary use the selected workflow's resume hydration before acting; report unavailable backend state rather than inferring it from a summary.\n\n"
+        "## Specialist boundaries\n\n"
         "Every specialist assignment must include this context file path, the absolute Vigil helper, canonical engagement/artifact paths, and the normal Runtime Identity.\n"
         "A specialist reads its role and mandatory constraints, never the operator core.\n"
-        f"Before dependent work run `{binding['vigil_cli']} engagement client-check {shlex.quote(engagement.name)} --client {client} --mode {mode} --json`.\n"
-        "If plugin/hooks are missing, report the setup steps before proceeding; installed files alone are not proof of hook execution.\n"
-        f"Setup guide: `{agent.parent / 'docs/zcode-setup.md'}`.\n"
-        "After any context boundary run the selected workflow's resume hydration before acting.\n"
     )
     workspace_files["AGENTS.md"] = router.encode()
     # OpenCode may inherit this bounded router: its canonical stop-sign excludes
@@ -284,23 +302,57 @@ def start_client(install_root: Path, engagement: Path, client: str, mode: str,
         set_active_engagement(install_root, engagement)
     except (SystemExit, OSError):
         pass  # Same best-effort terminal selection as the other official starts.
-    opening = "Read this workspace AGENTS.md, verify the selected mode, and perform its startup/resume procedure. "
+    opening = "Read this workspace AGENTS.md, verify the selected mode, and perform its startup/resume procedure."
+    if client == "zcode":
+        helper = shlex.quote(str(binding["vigil_cli"]))
+        opening = (
+            f"This is a ZCode {mode} assessment. The project folder must be:\n{json.dumps(str(workspace))}\n\n"
+            "Run pwd before doing any work. If it is not that folder, stop and ask me to open the correct project in ZCode. "
+            "Do not launch another coding client or run engagement start from this task.\n\n"
+            f"Read {json.dumps(str(workspace / 'AGENTS.md'))} in full.\n"
+            f"Use {helper} for every Vigil command, not bare vigil.\n"
+            f"Verify the bound mode with: {helper} engagement mode\n"
+            "Then follow the selected workflow's startup/resume procedure."
+        )
     if mode == "code":
         from .engagements import SOURCE_TRUST_CONFIRMATION, engagement_source_state
         source = engagement_source_state(engagement)
-        opening += (f"Selected original source: {json.dumps(source['path'])}. Before first ingest or refresh ask "
-            f"{json.dumps(SOURCE_TRUST_CONFIRMATION)} and wait. If sealed source already exists, resume it without duplicate ingestion. ")
-    opening += " ".join(extra_args) if client == "zcode" else ""
-    print(f"workspace: {workspace}\nengagement: {engagement.name}\nclient: {client}\nmode: {mode}", flush=True)
+        opening += (f"\n\nOriginal source: {json.dumps(source['path'])}\n"
+            f"Before the first ingest or a refresh, ask:\n{json.dumps(SOURCE_TRUST_CONFIRMATION)}\n"
+            "Wait for my confirmation. If sealed source already exists, resume it without duplicate ingestion.")
+    if client == "zcode" and extra_args:
+        opening += "\n\nOperator focus: " + " ".join(extra_args)
+    if client != "zcode" or not term.is_terminal(sys.stdout):
+        print(f"workspace: {workspace}\nengagement: {engagement.name}\nclient: {client}\nmode: {mode}", flush=True)
     if client == "zcode":
-        print(f"In ZCode add local marketplace {workspace / 'plugin/marketplace.json'}, install and enable its "
-            "Vigil assessment plugin, review hooks, then create a NEW task in the printed workspace. "
-            "Select your Z.AI Coding Plan and entitled model in the app. "
-            "Workspace opening does not establish native conversation readiness or SessionEnd support.\n"
-            + (f"Opening prompt: {opening}\n" if not no_autoprompt else ""), flush=True)
+        if term.is_terminal(sys.stdout):
+            print(term.heading("Continue in ZCode", stream=sys.stdout))
+            print(term.row("info", "Engagement", engagement.name, stream=sys.stdout))
+            print(term.row("info", "Workflow", f"{mode.capitalize()} assessment", stream=sys.stdout))
+        print("\n" + term.heading("Project folder", stream=sys.stdout))
+        print(term.wrap("In Projects, choose Add project (+) > Open folder. In the macOS folder chooser, "
+                        "press Cmd+Shift+G, paste this path, press Return, then Open:", stream=sys.stdout))
+        print(f"  {workspace}")
+        print(term.wrap("Vigil already created this folder. Use it as the project, not the engagement root or source folder.", stream=sys.stdout))
+        print("\n" + term.heading("Plugin setup (first time for this project)", stream=sys.stdout))
+        print(term.wrap("1. Open Plugin Marketplace > Add > Add plugin marketplace. In the field "
+                        "'GitHub repo, git URL, file, or directory', paste this marketplace file:", stream=sys.stdout))
+        print(f"  {workspace / 'plugin/marketplace.json'}")
+        plugin_name = json.loads((workspace / "plugin/.zcode-plugin/plugin.json").read_text())["name"]
+        print(term.wrap("2. Under Personal, find this plugin. Review its hooks, then install and enable it:", stream=sys.stdout))
+        print(f"  {plugin_name}")
+        print(term.wrap("3. Select Z.AI Coding Plan and your model in ZCode.", stream=sys.stdout))
+        print("\n" + term.wrap("Opening a folder does not verify plugin hooks. Finish setup before asking the agent to work.", stream=sys.stdout))
+        if no_autoprompt:
+            print("\nStart a new task in this project and follow AGENTS.md.\n", flush=True)
+        else:
+            print("\n" + term.heading("Paste into a new task", stream=sys.stdout) + "\n")
+            print(opening + "\n", flush=True)
         result = subprocess.run(["open", "-a", str(application), str(workspace)], check=False)
         if result.returncode:
             raise SystemExit(f"ZCode workspace opening failed ({result.returncode}); open {workspace} manually")
+        from .client_sessions import record_client_launch
+        record_client_launch(install_root, engagement, client, mode, event="workspace_opened")
         return
     environment = dict(os.environ)
     environment.update({"VIGIL_CLIENT_CONTEXT": str(workspace / CONTEXT_FILE),
@@ -317,4 +369,6 @@ def start_client(install_root: Path, engagement: Path, client: str, mode: str,
             prompt += ("\n\nOperator focus: " if prompt else "") + focus
         argv.extend(["--prompt", prompt])
     os.chdir(workspace)
+    from .client_sessions import record_client_launch
+    record_client_launch(install_root, engagement, client, mode)
     os.execve(executable, argv, environment)

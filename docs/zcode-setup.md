@@ -4,6 +4,44 @@ ZCode is the Z.AI desktop coding client. Vigil does not replace its login,
 provider selection, model selection, or native approvals. Install and sign in
 using the [official setup guide](https://zcode.z.ai/en/docs/install).
 
+## Create or resume your first engagement
+
+After installing Vigil, use its terminal picker:
+
+```bash
+vigil install
+vigil engagement start --client zcode
+```
+
+Choose an existing engagement or **Create new engagement**. The shared creation
+questions ask for the workflow and its required inputs; for ZCode select web or
+code. Existing rows show their status, tracks and recent activity. The ordering
+uses recorded work and official client launches/openings, with creation as a
+fallback; it does not infer work from file modification times. An incomplete
+history is labeled rather than presented as complete.
+
+You can also create explicitly, using an authorized source directory:
+
+```bash
+vigil engagement create --type code --name acme --source-dir ./acme --no-prompt
+vigil engagement start <printed-engagement-key> --mode code --client zcode
+```
+
+For web, use `vigil engagement create https://app.example.com --hosts app.example.com`
+and then start the printed key with `--mode web --client zcode`. Use only targets
+you are authorized to test. Creation preserves the source-trust and approval
+boundaries of the selected workflow.
+
+An explicit key skips engagement selection. If both web and code are enabled
+and `--mode` is omitted, the terminal asks which one operator mode to launch.
+Noninteractive calls must provide the key and any ambiguous mode explicitly.
+Starting a client without a key always asks rather than silently using a current
+directory or persisted selection. Other Vigil commands retain their own binding
+rules.
+
+Vigil then opens the exact generated project described below. Opening ZCode
+alone, or using an unrelated project, does not install Vigil onboarding.
+
 ## Check the installed client
 
 Run this independently of an engagement:
@@ -55,17 +93,29 @@ vigil engagement start <engagement-key> --mode code --client zcode
 # For an admitted web track, select --mode web instead.
 ```
 
-The launcher prints `workspace:` and prepares a release/context-bound folder at
+The launcher shows **Project folder** (or `workspace:` in redirected output) and prepares a release/context-bound folder at
 `<engagement>/client-context/<binding-digest>/zcode`. Open that exact printed path
 as the ZCode project. Its `AGENTS.md` router supplies absolute paths to the matched
 helper, selected operator prompt, and canonical engagement state. Its `plugin/`
 directory contains the local marketplace. Keep the generated binding intact;
 another engagement, mode, or application release can have a different path.
+`<binding-digest>` is a generated fingerprint, not a value to invent or enter.
+The same `client-context` mechanism is used by OpenCode web/code starts. Claude
+and Codex retain their existing engagement-root layouts. The context folder is
+not another checkout: scope, evidence and backend records remain canonical.
 The `plugin/` entry points to a private immutable plugin shared by matching
 release/tool bindings; keep that managed link intact too. The context file is
 `.vigil-client-context.json`, and the absolute bound helper is `bin/vigil` within
 the printed workspace. Workspace preparation requires `uv`, Bash, jq, and Node
 on the launching terminal's PATH so their executable paths can be bound explicitly.
+
+In the **Projects** sidebar, click **Add project (+) → Open folder**. In the macOS
+folder chooser, press **Cmd+Shift+G**, paste the complete printed **Project folder**
+path, press Return, and click **Open**. Vigil has already created that folder;
+you are opening an existing folder as a project, not creating an empty directory.
+The path ends in `/client-context/<binding-digest>/zcode`. The canonical engagement
+folder, its `source` folder, and the `plugin` folder are not the project to select.
+If the project is already listed, select its matching workspace before creating a task.
 
 An already running ZCode app does not reliably inherit the launcher's shell
 environment. Use the explicit helper and literal paths in the generated router
@@ -76,7 +126,9 @@ For an entrypoint that supplies a local marketplace:
 
 1. Open its printed workspace in ZCode. Plugin management requires an open workspace.
 2. Open **Plugin Marketplace** in the sidebar, then **Add → Add plugin
-   marketplace** and enter the printed local marketplace file or directory.
+   marketplace**. In **GitHub repo, git URL, file, or directory**, paste the printed
+   marketplace file path ending in `/zcode/plugin/marketplace.json`. This is a
+   separate field from the project-folder chooser above.
    This path was checked in ZCode 3.15.3. Builds using the settings layout expose
    the equivalent **Settings → Plugins → Create → Add marketplace** action.
 3. Find the matching Vigil plugin under **Personal**, inspect its components and
@@ -92,6 +144,22 @@ hooks. The workspace router also names this setup guide and requires the agent
 to report missing plugin/hook setup before dependent work. If the plugin is not
 enabled, its hooks cannot diagnose their own absence; use the printed prompt and
 the read-only client check to bootstrap setup.
+
+The opening prompt also names the absolute instruction file and bound Vigil helper.
+It checks the task's working folder before proceeding. If the task reports an
+unselected mode or tries to launch another coding client, stop it and verify the
+selected project folder; starting another client does not repair the ZCode binding.
+
+The generated root `AGENTS.md` puts session identity and absolute commands first,
+then the plugin/model/new-task checklist, workflow entry and recovery, and
+specialist boundaries. Its writing follows the practical, verifiable guidance in
+[OpenAI's agent practices](https://learn.chatgpt.com/guides/best-practices),
+[Anthropic's instruction-file guidance](https://code.claude.com/docs/en/memory),
+and [ZCode's project-instruction rules](https://zcode.z.ai/en/docs/agents).
+It explicitly directs the agent to read the selected canonical prompt rather
+than embedding a second workflow or relying on automatic Markdown imports.
+Instructions guide behavior; native approvals and executable contracts enforce
+their respective boundaries.
 
 The [ZCode plugin guide](https://zcode.z.ai/en/docs/plugin) documents local
 marketplaces and native components. Enabling a hook-bearing plugin grants local

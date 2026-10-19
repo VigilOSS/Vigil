@@ -78,6 +78,9 @@ def test_opencode_starts_native_tui_with_release_command_and_preserves_configura
     assert config["permission"] == "ask"
     assert config["command"]["vigil-remediate"]["template"] == "Read the profile. $ARGUMENTS\n"
     assert options["env"]["VIGIL_CLIENT_NAME"] == "opencode"
+    from vigil_cli.client_sessions import historical_client_starts
+    starts, _ = historical_client_starts(launch.root)
+    assert [(row["client"], row["mode"], row["event"]) for row in starts] == [("opencode", "remediation", "launch_requested")]
     assert str(launch.project["_profile_path"]) in argv[2]
     assert list(launch.repository.iterdir()) == []
     assert not launch.engagement.exists()
@@ -161,6 +164,9 @@ def test_zcode_prepares_context_plugin_and_opens_repository_without_false_sessio
     assert start(launch, "zcode") == 0
     argv, options = launch.calls[-1]
     assert argv == ["open", "-a", str(app), str(launch.repository)]
+    from vigil_cli.client_sessions import historical_client_starts
+    starts, _ = historical_client_starts(launch.root)
+    assert [(row["client"], row["event"]) for row in starts] == [("zcode", "workspace_opened")]
     assert options["cwd"] == launch.repository
     context_paths = list(launch.engagement.glob("remediation/client-context/*/zcode/vigil-context.json"))
     assert len(context_paths) == 1

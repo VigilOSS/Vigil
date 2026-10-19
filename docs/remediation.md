@@ -12,32 +12,40 @@ share one case when one fix covers them.
 
 ## First ticket, end to end
 
-1. Configure the profile below and confirm the referenced skills, MCP authentication,
-   shared test environment, PR template, and deployment workflow.
-2. Create the engagement once:
+1. Install and sign in to your chosen client. Review the repository profile below
+   and confirm the referenced skills, MCP authentication, shared test environment,
+   PR template, and deployment workflow before using them.
+2. Start the interactive onboarding:
 
    ```bash
-   vigil engagement create --type remediation --name Acme \
-     --repo /absolute/path/to/acme-app --project-config /absolute/path/to/PROJECT.md --no-prompt
-   vigil engagement list --json
+   vigil remediation start
    ```
 
-3. Use its key to open repository context:
+   Choose a recent remediation engagement or **Create new remediation engagement**.
+   Creation reuses Vigil's engagement questions for the name and repository and
+   preserves or scaffolds its `PROJECT.md`. Keep one engagement per repository.
+   The picker shows only remediation engagements; other workflows remain separate.
+3. Select the client. Claude supports exact conversation joining and multi-case
+   coordination; OpenCode and ZCode use one case per native conversation. The
+   selected client opens repository context, not a case's editable source copy.
+   To skip selection for a known engagement and client:
 
    ```bash
-   vigil remediation -k <key> start
+   vigil remediation -k <key> start --client claude
    ```
 
-   `start` launches Claude and attaches automatically. It displays the repository,
-   profile, and configured check names; no Continue confirmation is needed.
+   Claude starts and attaches automatically. Startup displays the repository,
+   profile, and configured check names. ZCode still requires native plugin setup
+   and a new task as described below; opening the app does not prove readiness.
 
-4. Give Claude the ticket IDs or URLs and ask it to use the remediation workflow,
+4. Give your agent the ticket IDs or URLs and ask it to use the remediation workflow,
    or explicitly invoke `/vigil-remediate SEC-123`. The agent
    retrieves the report, creates the case/workspace/handoff, and proposes its fix
    and verification plan. Check the diagnosis and scope, then approve the plan.
 5. The agent implements the fix, runs checks against the case's copy of the code, records proof,
-   and presents the diff and human Prep/Test steps. For the first pilot, test
+   and presents the diff and human Prep/Test steps. With Claude, test
    `join <case-id>` from another terminal and confirm it opens this conversation.
+   With OpenCode or ZCode, verify resuming the case in the native client instead.
 6. Ask to publish when ready. Vigil checks the reviewed revision and opens a draft.
    Choose deployment and optional suites separately. Follow the developer's
    Prep/Test, confirm the served revision, and record development verification.
@@ -130,7 +138,7 @@ Top-level machine overrides use `VIGIL_REMEDIATION_<FIELD>`; Stagehand overrides
 ## Start and supply tickets
 
 ```bash
-vigil remediation -k <engagement-key> start
+vigil remediation -k <engagement-key> start --client claude
 ```
 
 Vigil opens a full Claude conversation in the repository root and attaches you to it, so Claude
@@ -142,6 +150,18 @@ instructions. Then use the command in Claude:
 /vigil-remediate SEC-123
 /vigil-remediate SEC-123 https://jira.example.com/browse/SEC-124
 ```
+
+Without `-k`, an interactive `start` always offers the remediation picker, ordered
+by recorded activity and official client launches. It does not silently select an
+ambient engagement or the only available one. An explicit `-k` skips engagement
+selection. Omitting `--client` asks on a terminal; noninteractive calls keep Claude
+as the default but require an explicit engagement key. Other remediation commands
+retain their existing engagement-binding rules. `--session-id` recovery remains
+Claude-only and does not ask for a different client.
+
+Use `vigil remediation --help` for the workflow overview and
+`vigil remediation start --help` for launch and recovery options. Help does not
+create an engagement, contact a backend, or launch a client.
 
 ### Where the session runs
 

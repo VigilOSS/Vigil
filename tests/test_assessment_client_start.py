@@ -2,6 +2,8 @@
 from contextlib import nullcontext
 import json
 from pathlib import Path
+import re
+import shlex
 from types import SimpleNamespace
 
 import pytest
@@ -63,6 +65,9 @@ def test_zcode_start_prepares_two_mode_bound_workspaces_and_no_pid_receipt(conte
     workspaces = [Path(call[0][0][-1]) for call in calls]
     assert len(set(workspaces)) == 2
     assert receipts == []
+    history, _ = client_sessions.historical_client_starts(root)
+    assert [(row["client"], row["mode"], row["event"]) for row in sorted(history, key=lambda row: row["started_at"])] == [
+        ("zcode", "code", "workspace_opened"), ("zcode", "web", "workspace_opened")]
     for workspace, mode in zip(workspaces, ("code", "web")):
         binding = json.loads((workspace / ".vigil-client-context.json").read_text())
         assert binding["mode"] == mode
@@ -76,6 +81,79 @@ def test_zcode_refuses_unsupported_mode_before_preparing_context(context):
     (engagement / "scope.json").write_text('{"engagement_type":"blue","status":"in_progress"}')
     with pytest.raises(SystemExit, match="web|code"):
         engagements.start_engagement(root, engagement, "zcode", [], "blue")
+
+
+@pytest.mark.parametrize("terminal", [True, False])
+def test_zcode_launch_separates_setup_paths_and_copyable_prompt(context, monkeypatch, capsys, terminal):
+    from vigil_cli import remediation_clients, term
+
+    root, engagement, _ = context
+    monkeypatch.setenv("NO_COLOR", "1")
+    monkeypatch.setattr(term, "is_terminal", lambda _stream: terminal)
+    monkeypatch.setattr(remediation_clients, "_zcode_application", lambda: (Path("/Applications/ZCode.app"), "3.15.3"))
+    opened = []
+    monkeypatch.setattr(engagements.subprocess, "run", lambda argv, **_kwargs:
+                        opened.append(argv) or SimpleNamespace(returncode=0))
+    engagements.start_engagement(root, engagement, "zcode", ["Investigate Acme"], "code")
+    output = capsys.readouterr().out
+    workspace = Path(opened[0][-1])
+    assert "Plugin setup" in output
+    assert str(workspace) in [line.strip() for line in output.splitlines()]
+    assert str(workspace / "plugin/marketplace.json") in [line.strip() for line in output.splitlines()]
+    plugin = json.loads((workspace / "plugin/.zcode-plugin/plugin.json").read_text())
+    assert plugin["name"] in output
+    prompt = output.split("Paste into a new task\n\n", 1)[1].strip()
+    assert engagements.SOURCE_TRUST_CONFIRMATION in prompt
+    assert json.dumps(str(engagement / "source")) in prompt
+    assert "Investigate Acme" in prompt
+    assert "\n\n" in prompt
+    if terminal:
+        assert "Continue in ZCode" in output
+    else:
+        assert f"workspace: {workspace}\nengagement: acme\nclient: zcode\nmode: code\n" in output
+
+
+def test_zcode_no_autoprompt_still_explains_how_to_begin(context, monkeypatch, capsys):
+    from vigil_cli import remediation_clients
+
+    root, engagement, _ = context
+    monkeypatch.setattr(remediation_clients, "_zcode_application", lambda: (Path("/Applications/ZCode.app"), "3.15.3"))
+    monkeypatch.setattr(engagements.subprocess, "run", lambda *_args, **_kwargs: SimpleNamespace(returncode=0))
+    engagements.start_engagement(root, engagement, "zcode", [], "web", no_autoprompt=True)
+    assert "Start a new task in this project and follow AGENTS.md." in capsys.readouterr().out
+
+
+def test_zcode_opening_prompt_names_its_bound_instructions_and_helper(context, monkeypatch, capsys):
+    from vigil_cli import remediation_clients
+
+    root, engagement, _ = context
+    monkeypatch.setattr(remediation_clients, "_zcode_application", lambda: (Path("/Applications/ZCode.app"), "3.15.3"))
+    opened = []
+    monkeypatch.setattr(engagements.subprocess, "run", lambda argv, **_kwargs:
+                        opened.append(argv) or SimpleNamespace(returncode=0))
+    engagements.start_engagement(root, engagement, "zcode", [], "code")
+    workspace = Path(opened[0][-1])
+    binding = json.loads((workspace / ".vigil-client-context.json").read_text())
+    output = capsys.readouterr().out
+    assert json.dumps(str(workspace / "AGENTS.md")) in output
+    assert shlex.join([binding["vigil_cli"], "engagement", "mode"]) in output
+
+
+@pytest.mark.parametrize("client", ["zcode", "opencode"])
+@pytest.mark.parametrize("mode", ["web", "code"])
+def test_generated_router_shell_commands_preserve_helper_path_with_spaces(context, client, mode):
+    from vigil_cli.assessment_clients import prepare_workspace
+
+    root, engagement, _ = context
+    spaced = root.with_name("Acme private workspace")
+    root.rename(spaced)
+    workspace, binding = prepare_workspace(spaced, spaced / "engagements" / engagement.name, client, mode)
+    snippets = re.findall(r"`([^`\n]+)`", (workspace / "AGENTS.md").read_text())
+    commands = [shlex.split(snippet) for snippet in snippets if " engagement " in snippet]
+    assert commands
+    for arguments in commands:
+        assert arguments[0] == binding["vigil_cli"]
+        assert arguments[1] == "engagement"
 
 
 @pytest.mark.parametrize("arguments", [["investigate Acme"], ["--prompt", "investigate Acme"],
@@ -102,3 +180,5 @@ def test_opencode_start_merges_opening_and_user_focus_once(context, monkeypatch,
     configuration = json.loads((workspace / ".opencode/opencode.json").read_text())
     assert configuration["instructions"] == [str(workspace / "AGENTS.md")]
     assert receipts[0][2:] == ("opencode", "web")
+    history, _ = client_sessions.historical_client_starts(root)
+    assert [(row["client"], row["event"]) for row in history] == [("opencode", "launch_requested")]

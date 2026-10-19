@@ -145,10 +145,18 @@ def _manifest_check(workspace: Path, binding_bytes: bytes | None = None, *,
     return Check(check_name, "OK", f"Verified {len(manifest)} recorded file digests in {workspace}.")
 
 
+def _observation_fields(client: str) -> tuple[tuple[str, str], ...]:
+    if client == "opencode":
+        return (("request-hook", "request_observed"), ("preservation-hook", "compacting_observed"),
+                ("summary-recovery", "context_injected"))
+    return (("startup-hook", "startup_observed"), ("compact-hook", "compact_observed"),
+            ("context-injection", "context_injected"))
+
+
 def _observed_context_checks(client: str, engagement: Path, mode: str | None,
                              install_root: Path | None, context_file: Path | None = None) -> tuple[list[Check], dict[str, list[str]]]:
     checks: list[Check] = []
-    observed: dict[str, list[str]] = {name: [] for name in ("startup-hook", "compact-hook", "context-injection")}
+    observed: dict[str, list[str]] = {name: [] for name, _ in _observation_fields(client)}
     if mode is not None and mode not in {"web", "code"}:
         return [Check("client-context", "FAIL", "Select web or code mode.", True)], observed
     if install_root is None:
@@ -257,10 +265,8 @@ def _observed_context_checks(client: str, engagement: Path, mode: str | None,
                     if expected_application is not None:
                         detail = (f"Historical receipt for {binding['mode']} workspace {workspace}; session {session}. "
                                   "This does not establish current native desktop/engine capability or conversation readiness.")
-                        for check_name, field in (("startup-hook", "startup_observed"),
-                                                  ("compact-hook", "compact_observed"),
-                                                  ("context-injection", "context_injected")):
-                            if row.get(field) is True:
+                        for check_name, field in _observation_fields(client):
+                            if row.get(field) is True and (check_name != "summary-recovery" or row.get("last_summary_id")):
                                 observed[check_name].append(detail)
                 workspace_pin.require_attached()
         for candidate_pin in context_pins:
@@ -324,9 +330,8 @@ def collect_client_checks(client: str, *, engagement: Path | None = None,
         Check("authentication-model", "UNVERIFIED",
               "Use the client's provider/model settings to select Z.AI Coding Plan and an entitled model. "
               "Credentials and provider connectivity were not inspected."),
-        Check("startup-hook", "UNVERIFIED", "Installed files do not prove startup dispatch or context injection."),
-        Check("compact-hook", "UNVERIFIED", "Automatic recovery requires native verification on the exact client/engine build."),
-        Check("context-injection", "UNVERIFIED", "No exact-context native injection receipt was inspected."),
+        *(Check(name, "UNVERIFIED", "No exact-context native observation was inspected; installed files do not prove execution.")
+          for name, _ in _observation_fields(client)),
         Check("native-build-validation", "UNVERIFIED",
               "Historical event receipts do not verify the current native desktop/engine build's lifecycle behavior."),
         Check("backend-hydration", "UNVERIFIED", "No backend was contacted; hook injection alone does not prove hydration."),

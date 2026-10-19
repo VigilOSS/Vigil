@@ -122,6 +122,25 @@ await adapter['tool.execute.after']({tool:process.argv[2],sessionID:'session-1',
     assert payload["cwd"] == context["engagement_dir"]
 
 
+def test_opencode_exit_normalization_preserves_native_payload(tmp_path: Path) -> None:
+    binding, _ = _binding(tmp_path, client="opencode")
+    script = """
+import {readFileSync} from 'node:fs';
+const module=await import('data:text/javascript;base64,'+readFileSync(process.argv[1]).toString('base64'));
+const adapter=await module.VigilAssessmentHooks({client:{}});
+await adapter['tool.execute.after']({tool:'bash',sessionID:'acme-session',callID:'acme-call',args:{command:'printf Acme'}},
+ {title:'Acme',output:'Acme failure',metadata:{exit:7,description:'Acme task'},native_extra:{count:2}});
+"""
+    subprocess.run(["node", "--input-type=module", "-e", script, str(OPENCODE)],
+                   env={**os.environ, "VIGIL_CLIENT_CONTEXT": str(binding)},
+                   capture_output=True, text=True, timeout=10, check=True)
+    payload = json.loads((tmp_path / "capture.json").read_text())
+    assert payload["tool_response"]["exit_code"] == 7
+    assert payload["tool_response"]["metadata"] == {"exit": 7, "description": "Acme task"}
+    assert payload["tool_response"]["native_extra"] == {"count": 2}
+    assert payload["native_tool_name"] == "bash"
+
+
 def test_zcode_health_receipt_identifies_exact_binding(tmp_path: Path) -> None:
     binding, context = _binding(tmp_path, client="zcode")
     result = _zcode_run(_zcode_plugin(tmp_path), {

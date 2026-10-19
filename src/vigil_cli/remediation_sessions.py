@@ -21,9 +21,28 @@ _TICKET = re.compile(r"[A-Za-z][A-Za-z0-9_]*-\d+")
 
 
 def register_session_parsers(commands: argparse._SubParsersAction) -> None:
-    start = commands.add_parser("start", help="Open repository context for /vigil-remediate")
-    start.add_argument("--client", choices=("claude", "opencode", "zcode"), default="claude")
-    start.add_argument("--session-id", help="Recover and attach an existing Vigil launch without starting another")
+    start = commands.add_parser(
+        "start", help="Choose or create a remediation project and open its coding client",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=(
+            "Start here: vigil remediation start\n\n"
+            "Choose or create a repository project, then select a coding client.\n"
+            "Vigil uses its PROJECT.md; give /vigil-remediate a ticket or report\n"
+            "inside the client. Review the proposed fix and checks before work begins."
+        ),
+        epilog=(
+            "Examples:\n"
+            "  vigil remediation start\n"
+            "  vigil remediation -k KEY start --client claude\n"
+            "  vigil remediation -k KEY start --session-id UUID\n\n"
+            "Automation: pass -k KEY before start; the default client is Claude.\n"
+            "Recovery by UUID is Claude-only. ZCode needs its plugin and a new task.\n"
+            "Setup and client limits: docs/remediation.md"
+        ),
+    )
+    start.add_argument("--client", choices=("claude", "opencode", "zcode"),
+                       help="Coding client; asks on a terminal, otherwise defaults to claude")
+    start.add_argument("--session-id", help="Recover an existing Claude launch without redispatch; skips client selection")
     route = commands.add_parser("route", help="Resolve input references and choose remediation role context")
     route.add_argument("--client", choices=("claude", "opencode", "zcode"), default="claude")
     route.add_argument("references", nargs="+")
@@ -286,6 +305,9 @@ def _launch_background(command_line: list[str], opening: str, binding: dict,
     # Record identity before dispatch: an inventory failure must not create a
     # second worker on the next attempt.
     _write_json(path, binding)
+    from .client_sessions import record_client_launch
+    record_client_launch(Path(environment["VIGIL_INSTALL_DIR"]),
+                         Path(environment["VIGIL_SESSION_ENGAGEMENT_DIR"]), "claude", "remediation")
     result = subprocess.run([*command_line, "--bg", "--name", f"vigil-{binding['session_id']}", opening],
                             cwd=repository, env=environment, capture_output=True, text=True)
     if result.returncode:
@@ -356,6 +378,8 @@ def _read_binding(path: Path, case_id: str, key: str, workspace: Path, repositor
 
 def run_session_command(args: argparse.Namespace, install_root: Path, engagement: Path,
                         project: dict, *, case_reader=None) -> int:
+    from .client_sessions import record_client_launch
+
     command = args.remediation_command
     if command == "route":
         try:
@@ -394,6 +418,7 @@ def run_session_command(args: argparse.Namespace, install_root: Path, engagement
                 _record_launched_session(entry_binding, entry_row, path)
                 recorded_policy = "disabled" if entry_binding.get("settings", {}).get("disableAllHooks") else "inherit"
                 print(_notice({"remediation": {"hook_policy": recorded_policy}}), flush=True)
+            record_client_launch(install_root, engagement, "claude", "remediation")
             return subprocess.run(["claude", "attach", entry_row["id"]], cwd=repository, env=environment).returncode
         session_id = str(uuid.uuid4())
         command_line = _launch_arguments(install_root, engagement, project, session_id, key)
@@ -496,4 +521,5 @@ def run_session_command(args: argparse.Namespace, install_root: Path, engagement
             _launch_background(command_line, opening, binding, path, repository, environment)
             print(json.dumps(binding, indent=2))
             return 0
+    record_client_launch(install_root, engagement, "claude", "remediation")
     return subprocess.run(command_line, cwd=repository, env=environment).returncode

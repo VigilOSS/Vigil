@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from collections.abc import Callable
 import fcntl
 import hashlib
 import importlib.util
@@ -12,24 +13,48 @@ import posixpath
 import re
 import shutil
 import subprocess
+import sys
 import uuid
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlsplit
 from urllib.request import Request, urlopen
 
-from .engagements import resolve_engagement_path
+from .engagements import CreatedEngagement, list_engagements, resolve_engagement_path
 from .paths import engagements_root, resolve_orchestrator_base_url
 from .remediation_vcs import adapter as _vcs
 from .remediation_browser import execute as _execute_browse
 from .project_config import project_module
+from .prompts import prompt_choice
 from .remediation_sessions import register_session_parsers, run_session_command
 
 
-def register_remediation_parser(sub: argparse._SubParsersAction) -> None:
-    parser = sub.add_parser("remediation", help="Manage remediation cases in one project engagement")
-    parser.add_argument("--engagement-key", "-k")
-    commands = parser.add_subparsers(dest="remediation_command", required=True)
+def register_remediation_parser(
+    sub: argparse._SubParsersAction, *,
+    create_parser: argparse.ArgumentParser | None = None,
+    create_engagement: Callable[[argparse.Namespace, Path], CreatedEngagement | None] | None = None,
+) -> None:
+    parser = sub.add_parser(
+        "remediation", help="Fix security tickets or reports, verify changes, and prepare reviewed draft PRs",
+        usage="%(prog)s [-k KEY] COMMAND ...",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=(
+            "Fix security tickets or reports in your repository; no prior assessment needed.\n"
+            "Start here: vigil remediation start\n"
+            "Your agent follows PROJECT.md. Give /vigil-remediate a ticket or report."
+        ),
+        epilog=(
+            "Examples:\n"
+            "  vigil remediation start\n"
+            "  vigil remediation -k KEY start --client claude\n\n"
+            "The agent handles case commands; use COMMAND --help for details.\n"
+            "Walkthrough: docs/remediation.md"
+        ),
+    )
+    parser.add_argument("--engagement-key", "-k", help="Remediation project engagement key; start asks when omitted on a terminal")
+    parser.set_defaults(remediation_help=parser.print_help, remediation_create_parser=create_parser,
+                        remediation_create=create_engagement)
+    commands = parser.add_subparsers(dest="remediation_command", title="Commands", metavar="COMMAND")
     register_session_parsers(commands)
 
     intake = commands.add_parser(
@@ -750,6 +775,38 @@ def _engagement_key(args: argparse.Namespace, install_root: Path) -> str:
     raise SystemExit("select a remediation engagement with -k; create one first if none exists")
 
 
+def _start_engagement_key(args: argparse.Namespace, install_root: Path) -> str:
+    """Start always makes the project choice explicit; other verbs retain their resolver."""
+    if args.engagement_key:
+        return args.engagement_key
+    if not sys.stdin.isatty():
+        raise SystemExit("Noninteractive remediation start requires an explicit --engagement-key; use vigil remediation -k KEY start")
+    rows = [row for row in list_engagements(install_root) if row.engagement_type == "remediation"]
+    rows.sort(key=lambda row: row.key)
+    rows.sort(key=lambda row: row.last_activity_at, reverse=True)
+    choices = [
+        f"{row.key} · {row.status} · {row.target} · recent {row.last_activity_at or 'unknown'}"
+        + ("; some activity unavailable" if row.activity_incomplete else "")
+        for row in rows
+    ]
+    recovering = bool(getattr(args, "session_id", None))
+    if not recovering:
+        choices.append("Create new remediation engagement")
+    if not choices:
+        raise SystemExit("No remediation engagements are available for recovery; pass -k with the original engagement key")
+    selected = prompt_choice("Select remediation engagement", choices[0], choices)
+    if not recovering and selected == choices[-1]:
+        parser = getattr(args, "remediation_create_parser", None)
+        create = getattr(args, "remediation_create", None)
+        if parser is None or create is None:
+            raise SystemExit("Create the project with vigil engagement create --type remediation, then start with -k KEY")
+        created = create(parser.parse_args(["--type", "remediation"]), install_root)
+        if created is None:
+            raise SystemExit("remediation creation did not return a workspace")
+        return created.key
+    return rows[choices.index(selected)].key
+
+
 def _render_case_handoff(engagement: Path, case: dict, config: dict) -> Path:
     config = _case_config(case, config)
     identifier = str(case["id"])
@@ -985,10 +1042,16 @@ def _record_publication(install_root: Path, engagement: Path, key: str, case: di
 
 
 def run_remediation(args: argparse.Namespace, install_root: Path) -> None:
-    key = _engagement_key(args, install_root)
+    cmd = args.remediation_command
+    if cmd is None:
+        args.remediation_help()
+        return
+    key = _start_engagement_key(args, install_root) if cmd == "start" else _engagement_key(args, install_root)
     args.engagement_key = key
     eng_dir, config = _project(install_root, key)
-    cmd = args.remediation_command
+    if cmd == "start" and not getattr(args, "client", None):
+        args.client = (prompt_choice("Select remediation client", "claude", ["claude", "opencode", "zcode"])
+                       if sys.stdin.isatty() and not getattr(args, "session_id", None) else "claude")
     if cmd in {"start", "route", "session", "join"}:
         if cmd in {"session", "join"}:
             config = _case_config(_case(install_root, eng_dir, key, args.case_id), config)

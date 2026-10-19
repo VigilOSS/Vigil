@@ -141,6 +141,10 @@ def test_start_hosts_and_attaches_same_native_conversation_with_repository_confi
     assert opts["env"].get("CLAUDECODE") is None
     assert opts["env"]["ENGAGEMENT_DIR"] == str(prepared.engagement)
     assert prepared.calls[-1][0] == ["claude", "attach", "job1"]
+    from vigil_cli.client_sessions import historical_client_starts
+    history, _ = historical_client_starts(prepared.installation)
+    assert [(row["client"], row["mode"], row["event"]) for row in history] == [
+        ("claude", "remediation", "launch_requested")]
     assert "--bare" not in argv
     assert "--strict-mcp-config" not in argv
     assert "--dangerously-skip-permissions" not in argv

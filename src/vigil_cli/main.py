@@ -13,7 +13,6 @@ import tarfile
 import time
 import webbrowser
 from collections.abc import Sequence
-from contextlib import redirect_stdout
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, NoReturn, TextIO
@@ -26,11 +25,19 @@ from . import email as email_module
 from . import restart_manifest
 from . import remediation as remediation_module
 from . import term
+from .prompts import (
+    prompt_choice as _prompt_choice,
+    read_line as _read_line,
+    terminal_question as _terminal_question,
+    uses_prompt_ui as _uses_prompt_ui,
+)
 from .docker import run_command as docker_run_command
 from .engagements import (
     BackendInstallRootStatus,
     PROGRAM_HEADER_PRESETS,
     CreateEngagementOptions,
+    CreatedEngagement,
+    _engagement_modes,
     _verify_backend_install_root,
     add_engagement_hosts,
     add_engagement_track,
@@ -49,6 +56,7 @@ from .engagements import (
     repair_engagement_tracks,
     resolve_current_engagement,
     resolve_engagement_path,
+    resolve_engagement_mode,
     resolve_out_of_scope,
     resolve_rate_limit,
     resolve_required_headers,
@@ -603,13 +611,16 @@ def main(argv: list[str] | None = None) -> None:
     cd_p.add_argument("shell", choices=["zsh", "bash"], default="zsh", nargs="?")
     start_p = engagement_sub.add_parser(
         "start", description="Start one client process in one enabled track. A single track "
-        "selects automatically; two tracks require --mode. Switch modes by starting a new process.",
+        "selects automatically; choose a mode interactively for two tracks or pass --mode. "
+        "Without an engagement key, a terminal shows the recent-engagement picker. "
+        "Noninteractive starts require a key and an explicit mode when ambiguous. "
+        "Switch modes by starting a new process.",
     )
     start_p.add_argument("key", nargs="?")
     start_p.add_argument("--select", action="store_true")
     start_p.add_argument("--client", choices=["codex", "claude", "opencode", "zcode", "goose", "kimi", "pi"], required=True)
     start_p.add_argument("--mode", choices=["web", "code", "blue", "remediation", "android"],
-                         help="Session prompt for this client process; required with two enabled tracks")
+                         help="Session prompt for this client process; asks on a terminal when ambiguous, otherwise required")
     start_p.add_argument("--thinking", choices=["off", "high", "max"], default=None,
                          help="Deprecated. DeepSeek thinking level for --client opencode: off=disabled, "
                               "high=on, max=maximum (default: client default — thinking on). "
@@ -630,7 +641,7 @@ def main(argv: list[str] | None = None) -> None:
     # (`--model opus`, `-- "operator message"`). It is collected by parse_known_args
     # rather than a positional, because a positional would reorder an option away
     # from its value. See _engagement_start_client_args.
-    start_p.set_defaults(client_args=[])
+    start_p.set_defaults(client_args=[], create_parser=create_p)
     prove_p = engagement_sub.add_parser("prove", help="Inspect, prepare, or recover proof work without launching another operator")
     prove_p.add_argument("key", nargs="?")
     prove_p.add_argument("--select", action="store_true")
@@ -680,7 +691,7 @@ def main(argv: list[str] | None = None) -> None:
     export_pdf_p.add_argument("--output", help="Output PDF path (default: <engagement>/report.pdf)")
 
     blue_module.register_blue_parser(sub)
-    remediation_module.register_remediation_parser(sub)
+    remediation_module.register_remediation_parser(sub, create_parser=create_p, create_engagement=_engagement_create)
 
     orch_p = sub.add_parser("orchestrator")
     orch_sub = orch_p.add_subparsers(dest="orchestrator_command", required=True)
@@ -1789,6 +1800,74 @@ def _docker_logs(container_name: str, lines: str, follow: bool) -> None:
     subprocess.run(argv, check=False)
 
 
+def _start_client_limit(client: str, modes: set[str]) -> str:
+    if client == "zcode" and not modes.intersection({"web", "code"}):
+        return "zcode supports web/code assessment modes only"
+    if client == "pi" and modes != {"remediation"}:
+        return "pi supports remediation engagements only"
+    return ""
+
+
+def _start_modes(path: Path) -> dict[str, dict[str, str]]:
+    try:
+        scope = json.loads((path / "scope.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise SystemExit(f"cannot read {path / 'scope.json'}: {exc}") from exc
+    if not isinstance(scope, dict):
+        raise SystemExit(f"{path / 'scope.json'} must contain a JSON object")
+    return _engagement_modes(scope)
+
+
+def _select_start_mode(path: Path, requested: str | None, *, client: str, install_root: Path) -> str:
+    # Session environment, current-directory resolution and persisted pointers
+    # cannot choose a mode for a new official start.
+    modes = _start_modes(path)
+    if requested:
+        selected = resolve_engagement_mode(path, requested, client=client, install_root=install_root)
+    elif len(modes) > 1 and sys.stdin.isatty():
+        selected = _prompt_choice("Select operator mode", next(iter(modes)), list(modes))
+    else:
+        selected = resolve_engagement_mode(path, client=client, install_root=install_root)
+    if reason := _start_client_limit(client, {selected}):
+        raise SystemExit(reason)
+    return selected
+
+
+def _resolve_start_engagement(args: argparse.Namespace, install_root: Path) -> Path:
+    if args.key:
+        return resolve_engagement_path(install_root, args.key)
+    if not sys.stdin.isatty():
+        raise SystemExit("Noninteractive engagement start requires an explicit engagement key; pass --mode for dual-track engagements")
+    rows = list_engagements(install_root)
+    # Row timestamps are normalized UTC by the shared read-only recency owner.
+    rows.sort(key=lambda row: row.key)
+    rows.sort(key=lambda row: row.last_activity_at, reverse=True)
+    choices: list[str] = []
+    for row in rows:
+        try:
+            modes = set(_start_modes(row.path))
+            reason = _start_client_limit(args.client, {args.mode} if args.mode else modes)
+            if args.mode and args.mode not in modes:
+                reason = f"mode {args.mode} is not enabled"
+        except (OSError, ValueError, SystemExit) as exc:
+            reason = f"scope repair required: {exc}"
+        recent = row.last_activity_at or "unknown"
+        partial = "; some activity unavailable" if row.activity_incomplete else ""
+        limit = f" [unsupported: {reason}]" if reason else ""
+        choices.append(f"{row.key} · {row.status} · {row.engagement_type} · {row.current_phase} · {row.target} · recent {recent}{partial}{limit}")
+    choices.append("Create new engagement")
+    selected = _prompt_choice("Select engagement", choices[0], choices)
+    if selected == choices[-1]:
+        # The original parser supplies the complete canonical wizard defaults;
+        # creation returns its committed result, never parsed CLI output.
+        created = _engagement_create(args.create_parser.parse_args([]), install_root)
+        if created is None:
+            raise SystemExit("engagement creation did not return a workspace")
+        return created.path
+    row = rows[choices.index(selected)]
+    return row.path
+
+
 def _engagement(args: argparse.Namespace, install_root: Path) -> None:
     command = args.engagement_command
     if command == "list":
@@ -1879,7 +1958,8 @@ def _engagement(args: argparse.Namespace, install_root: Path) -> None:
                 "(opencode.json, or the client's /model picker).",
                 file=sys.stderr,
             )
-        path = _resolve_current_or_selected_engagement(install_root, key=args.key, select=args.select)
+        path = _resolve_start_engagement(args, install_root)
+        args.mode = _select_start_mode(path, args.mode, client=args.client, install_root=install_root)
         if not args.skip_preflight:
             _preflight_engagement_start(install_root, path, args.client, mode=args.mode)
         if term.is_terminal(sys.stderr):
@@ -1980,7 +2060,7 @@ def _engagement_prove(args: argparse.Namespace, install_root: Path) -> None:
     print(json.dumps(result, indent=2, ensure_ascii=False))
 
 
-def _engagement_create(args: argparse.Namespace, install_root: Path) -> None:
+def _engagement_create(args: argparse.Namespace, install_root: Path) -> CreatedEngagement | None:
     interactive = not args.no_prompt and sys.stdin.isatty()
     positional = args.target_or_name
     target = args.target
@@ -2155,7 +2235,7 @@ def _engagement_create(args: argparse.Namespace, install_root: Path) -> None:
                 out_of_scope=out_of_scope,
                 rate_limit=rate_limit,
             )
-        return
+        return None
 
     from .engagements import EngagementRegistrationError
     try:
@@ -2179,6 +2259,7 @@ def _engagement_create(args: argparse.Namespace, install_root: Path) -> None:
         print(json.dumps(payload, indent=2, sort_keys=True))
     else:
         print(created.path)
+    return created
 
 
 def _collect_hosts(args: argparse.Namespace) -> list[str]:
@@ -2225,34 +2306,6 @@ def _infer_engagement_type(
     if web_evidence:
         return "web"
     return None
-
-
-def _read_line() -> str:
-    try:
-        return input()
-    except EOFError as exc:
-        raise SystemExit("stdin closed during interactive prompt; pass the missing flags or --no-prompt") from exc
-
-
-def _uses_prompt_ui() -> bool:
-    return term.is_terminal(sys.stdin) and term.is_terminal(sys.stderr)
-
-
-def _terminal_question(kind: str, label: str, **kwargs: Any) -> Any:
-    import questionary
-
-    if not term.supports_style(sys.stderr):
-        kwargs["color_depth"] = "DEPTH_1_BIT"
-    try:
-        # Questionary chooses its output when the prompt is built. Keep both
-        # construction and rendering off the command's machine-readable stdout.
-        with redirect_stdout(sys.stderr):
-            answer = getattr(questionary, kind)(label, **kwargs).unsafe_ask()
-    except (KeyboardInterrupt, EOFError) as exc:
-        raise SystemExit("interactive prompt cancelled") from exc
-    if answer is None:
-        raise SystemExit("interactive prompt cancelled")
-    return answer
 
 
 def _ask_repository(*, attempts: int = 3, install_root: Path | None = None) -> str:
@@ -3322,26 +3375,6 @@ def _resolve_current_or_selected_engagement(install_root: Path, *, key: str | No
     if current := current_engagement_path():
         return current
     raise SystemExit("Specify an engagement key or --select, or run from inside an engagement")
-
-
-def _prompt_choice(label: str, default: str, choices: list[str], *, attempts: int = 3) -> str:
-    if _uses_prompt_ui():
-        return str(_terminal_question("select", label, choices=choices, default=default))
-    for _ in range(attempts):
-        print(label, file=sys.stderr)
-        for idx, choice in enumerate(choices, start=1):
-            suffix = " [default]" if choice == default else ""
-            print(f"  {idx}. {choice}{suffix}", file=sys.stderr)
-        print("> ", end="", file=sys.stderr, flush=True)
-        raw = _read_line().strip()
-        if not raw:
-            return default
-        if raw.isdigit() and 1 <= int(raw) <= len(choices):
-            return choices[int(raw) - 1]
-        if raw in choices:
-            return raw
-        print(f"Invalid {label.lower()}: {raw}", file=sys.stderr)
-    raise SystemExit(f"Invalid {label.lower()}: no valid selection after {attempts} attempts")
 
 
 if __name__ == "__main__":

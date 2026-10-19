@@ -5,6 +5,12 @@ Clients read the selected workflow's operator prompt; they differ in the model b
 them, in whether they can dispatch specialists headlessly, and in whether they
 expose the `vigil-*` session commands.
 
+For every client, `vigil engagement start --client <client>` opens the shared
+recent-engagement picker with a **Create new engagement** action. An explicit
+engagement key skips that picker. If the selected engagement has two enabled
+tracks, an interactive start asks for one mode unless `--mode` is supplied;
+noninteractive starts require an explicit key and any ambiguous mode.
+
 | Client | Model / runtime | Headless dispatch | Session commands |
 |--------|-----------------|-------------------|------------------|
 | `claude` | Claude Code (Anthropic) | Yes (`Agent` with registered `subagent_type`) | Yes (`/vigil-*`) |
@@ -191,7 +197,7 @@ is not the tested Vigil surface; this integration targets stable 1.x CLI/TUI.
 vigil engagement start <key> --mode code --client zcode
 ```
 
-Use `--mode web` for an admitted web track. Open the exact generated `workspace:`
+Use `--mode web` for an admitted web track. Open the exact generated **Project folder**
 path printed by Vigil, not the canonical engagement storage folder. Add the
 workspace's printed local marketplace, install and enable its matched plugin,
 then start a new ZCode task and use the printed opening instructions. A reused

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -241,8 +242,8 @@ def started(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, object
     monkeypatch.setattr(
         main_module,
         "start_engagement",
-        lambda root, path, client, client_args, *, no_autoprompt=False: calls.update(
-            client=client, client_args=list(client_args)
+        lambda root, path, client, client_args, mode=None, *, no_autoprompt=False: calls.update(
+            client=client, client_args=list(client_args), mode=mode,
         ),
     )
     return calls
@@ -378,6 +379,8 @@ def test_start_without_key_does_not_consume_a_client_flag_value_as_the_key(
     started: dict[str, object], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.chdir(started["dir"])
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(isatty=lambda: True))
+    monkeypatch.setattr("builtins.input", lambda: "1")
 
     main(
         [
@@ -400,6 +403,8 @@ def test_start_without_key_forwards_everything_after_double_dash(
     started: dict[str, object], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.chdir(started["dir"])
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(isatty=lambda: True))
+    monkeypatch.setattr("builtins.input", lambda: "1")
 
     main(
         [
@@ -665,7 +670,7 @@ def test_start_skips_the_preflight_on_request(
     monkeypatch.setattr(
         main_module,
         "start_engagement",
-        lambda root, path, client, client_args, *, no_autoprompt=False: started.update(client=client),
+        lambda root, path, client, client_args, mode=None, *, no_autoprompt=False: started.update(client=client, mode=mode),
     )
 
     main(
@@ -681,7 +686,7 @@ def test_start_skips_the_preflight_on_request(
         ]
     )
 
-    assert started == {"client": "goose"}
+    assert started == {"client": "goose", "mode": "web"}
 
 
 def test_start_runs_the_preflight_before_touching_the_launcher(
@@ -715,6 +720,7 @@ def test_start_runs_the_preflight_before_touching_the_launcher(
 
 
 def test_start_pi_forwards_provider_model_and_thinking(started: dict[str, object]) -> None:
+    (started["dir"] / "scope.json").write_text('{"engagement_type":"remediation","status":"active"}\n')
     main([
         "--root", str(started["install_root"]), "engagement", "start",
         "2026-01-01-0000-target", "--client", "pi", "--",

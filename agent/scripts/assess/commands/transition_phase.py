@@ -8,6 +8,7 @@ remain hard on every edge.
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import json
 import os
 import re
@@ -236,6 +237,7 @@ def run(args) -> None:
             print(f"  - [{b['kind']}] {b['detail']}", file=sys.stderr)
 
     def update(latest_scope):
+        prior_phase = track_phases(latest_scope).get(track)
         if isinstance(latest_scope.get("tracks"), dict):
             latest_scope["tracks"][track]["phase"] = target_phase
             latest_scope["status"] = (
@@ -256,6 +258,9 @@ def run(args) -> None:
             latest_scope["status"] = (
                 "completed" if target_phase == "complete" else "in_progress"
             )
+
+        if prior_phase != target_phase:
+            latest_scope["phase_changed_at"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
     mutate_scope(engagement_dir, update)
 

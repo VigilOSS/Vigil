@@ -168,6 +168,9 @@ def test_start_refreshes_only_selected_generated_entrypoints_for_current_release
     engagements.start_engagement(workspace, engagement, "codex", [])
 
     assert launched
+    from vigil_cli.client_sessions import historical_client_starts
+    starts, _ = historical_client_starts(workspace)
+    assert any(row.get("event") == "launch_requested" and row["client"] == "codex" for row in starts)
     assert str(application / "agent/operator-core-code.md") in (engagement / "AGENTS.md").read_text()
     assert f"VIGIL_INSTALL_DIR={workspace}" in (engagement / "start_codex.sh").read_text()
     assert f"VIGIL_APPLICATION_DIR={application}" in (engagement / "start_codex.sh").read_text()

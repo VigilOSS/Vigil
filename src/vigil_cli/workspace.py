@@ -123,7 +123,9 @@ def _workspace_locations(root: Path, metadata: dict[str, object] | None) -> dict
     cache = Path(result["cache"]).expanduser()
     if cache.is_absolute() and cache.name == "cache":
         previous = cache.parent
-        if previous != root:
+        # Install helpers may address the same pinned workspace as ``.``.
+        # Normalize identity lexically, retaining no-follow filesystem access.
+        if previous != Path(os.path.abspath(root.expanduser())):
             layouts = {
                 "engagements": {"engagements", "agent/engagements"},
                 "data": {"state", "orchestrator/backend/data"},

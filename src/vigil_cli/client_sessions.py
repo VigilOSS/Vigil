@@ -9,7 +9,9 @@ import json
 import os
 from pathlib import Path
 import stat
+import sys
 from typing import Any, Iterator
+import uuid
 
 from .application import application_provenance, application_root_for_workspace
 from .install_fs import atomic_write_bytes, open_pinned_directory
@@ -21,6 +23,73 @@ from .process_identity import _process_identity
 
 def _registry_directory(workspace: Path) -> Path:
     return resolve_runtime_state_dir(workspace) / "client-sessions"
+
+
+def historical_client_starts(workspace: Path) -> tuple[tuple[dict[str, Any], ...], bool]:
+    """Read historical starts independently of process liveness; never repair records.
+
+    This tolerant display projection must not replace the fail-closed active-session
+    reader used by release upgrade guards.
+    """
+    rows: list[dict[str, Any]] = []
+    incomplete = False
+    for directory, launch in ((_registry_directory(workspace), False),
+                              (resolve_runtime_state_dir(workspace) / "client-launches", True)):
+        try:
+            pin = open_pinned_directory(directory, missing_ok=True)
+            if pin is None:
+                continue
+            with pin:
+                for name in sorted(os.listdir(pin.fd)):
+                    if not name.endswith(".json"):
+                        continue
+                    try:
+                        descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=pin.fd)
+                        with os.fdopen(descriptor, "rb") as document:
+                            details = os.fstat(document.fileno())
+                            if not stat.S_ISREG(details.st_mode) or details.st_size > 1024 * 1024:
+                                raise ValueError("invalid historical record")
+                            row = json.loads(document.read(1024 * 1024 + 1))
+                        if not isinstance(row, dict) or row.get("schema_version") != 1:
+                            raise ValueError("invalid historical record")
+                        if not all(isinstance(row.get(key), str) for key in ("engagement", "client", "mode", "started_at")):
+                            raise ValueError("invalid historical identity")
+                        if launch:
+                            if row.get("event") not in {"launch_requested", "workspace_opened"}:
+                                raise ValueError("invalid launch event")
+                        elif (not isinstance(row.get("pid"), int) or isinstance(row.get("pid"), bool)
+                              or not isinstance(row.get("process_identity"), str)
+                              or not isinstance(row.get("application"), dict)
+                              or not all(isinstance(row["application"].get(key), str)
+                                         for key in ("root", "version", "content_sha256"))):
+                            raise ValueError("invalid historical session")
+                        rows.append(row)
+                    except (OSError, ValueError, RecursionError):
+                        incomplete = True
+                pin.require_attached()
+        except (OSError, SystemExit):
+            incomplete = True
+    return tuple(rows), incomplete
+
+
+def record_client_launch(workspace: Path, engagement: Path, client: str, mode: str,
+                         *, event: str = "launch_requested") -> None:
+    """Best-effort historical intent/open marker, not process or native readiness proof."""
+    if event not in {"launch_requested", "workspace_opened"}:
+        raise ValueError(f"Unsupported official client launch event: {event}")
+    try:
+        directory = resolve_runtime_state_dir(workspace) / "client-launches"
+        row = {"schema_version": 1, "event": event, "engagement": str(engagement.resolve()),
+               "client": client, "mode": mode, "started_at": datetime.now(timezone.utc).isoformat()}
+        name = f"{uuid.uuid4().hex}.json"
+        pin = open_pinned_directory(directory, create=True)
+        assert pin is not None
+        with pin:
+            atomic_write_bytes(pin.fd, name, (json.dumps(row, sort_keys=True) + "\n").encode(),
+                               mode=0o600, display=directory / name)
+            pin.require_attached()
+    except (OSError, SystemExit) as exc:
+        print(f"Warning: could not record official client {event}: {exc}", file=sys.stderr)
 
 
 def active_client_sessions(workspace: Path) -> tuple[dict[str, Any], ...]:

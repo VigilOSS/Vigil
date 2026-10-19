@@ -101,18 +101,45 @@ export const VigilAssessmentHooks = async ({client}) => {
   }
   const toolName = tool => ({bash: "Bash", read: "Read", write: "Write", edit: "Edit",
     task: "Agent", webfetch: "WebFetch", websearch: "WebSearch", skill: "Skill"}[tool] || tool)
+  const nativeToolName = async tool => {
+    if (toolName(tool) !== tool) return toolName(tool)
+    // The public SDK exposes connected MCP servers and the built-in/custom
+    // registry separately. Do not classify arbitrary underscore names as MCP.
+    let timer
+    try {
+      const [servers, local] = await Promise.race([
+        Promise.all([client.mcp.status(), client.tool.ids()]),
+        new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("Native tool catalog timeout")), 1000) }),
+      ])
+      if (servers.error || local.error || !servers.data || !Array.isArray(local.data))
+        throw new Error("Native tool catalog unavailable")
+      if (!local.data.includes(tool) && Object.entries(servers.data).some(([server, status]) =>
+        status.status === "connected" && tool.startsWith(server.replace(/[^a-zA-Z0-9_-]/g, "_") + "_")))
+        return "mcp__" + tool
+    } catch (error) {
+      console.error(`[vigil] Native MCP identity could not be verified: ${error.message}`)
+    } finally { clearTimeout(timer) }
+    return tool
+  }
   const log = async (input, output, failed = false) => {
     try {
       const context = readContext()
       let actor = "unknown"
       try { actor = (await request(input.sessionID)).current.agent || "unknown" } catch {}
+      const name = await nativeToolName(input.tool)
+      const response = failed ? {...output, stderr: String(output.error || "Native tool failed"), exit_code: 1}
+        : {...output, ...output.metadata,
+          ...(input.tool === "bash" && output.metadata?.exit !== undefined ? {exit_code: output.metadata.exit} : {})}
+      // The shared logger retains its existing bounded projection. Keep all
+      // original native data available to that projection, including mixed MCP
+      // content and structured-only results; never stringify undefined output.
+      if (name.startsWith("mcp__")) response.output = JSON.stringify(response)
       hook(context, "post-tool-log.sh", {hook_event_name: "PostToolUse", client_name: "opencode",
         session_id: input.sessionID, tool_use_id: input.callID, agent_type: actor,
-        tool_name: toolName(input.tool), tool_input: ["write", "edit"].includes(input.tool)
+        tool_name: name, native_tool_name: input.tool, tool_input: ["write", "edit"].includes(input.tool)
           ? {...(input.args || {}), file_path: input.args?.file_path ?? input.args?.filePath}
           : input.args || {},
-        tool_response: failed ? {stderr: String(output.error || "Native tool failed"), exit_code: 1}
-          : {output: output.output, ...output.metadata}})
+        tool_response: response})
     } catch (error) { console.error(`[vigil] Native activity was not recorded: ${error.message}`) }
   }
   return {

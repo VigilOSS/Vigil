@@ -795,7 +795,7 @@ def _interactive_scope(monkeypatch, capsys, answers, extra_argv=()):
 
     monkeypatch.setattr(main.sys.stdin, "isatty", lambda: True)
     it = iter(answers)
-    monkeypatch.setattr(main, "_read_line", lambda: next(it))
+    monkeypatch.setattr("builtins.input", lambda: next(it))
     argv = ["engagement", "create", "https://target.example", "--hosts", "*.target.example",
             "--dry-run", "--json", *extra_argv]
     try:
@@ -857,7 +857,7 @@ def _drive_create(monkeypatch, answers, confirm, tmp_path, extra_argv=()):
 
     monkeypatch.setattr(main.sys.stdin, "isatty", lambda: True)
     it = iter(answers)
-    monkeypatch.setattr(main, "_read_line", lambda: next(it))
+    monkeypatch.setattr("builtins.input", lambda: next(it))
     monkeypatch.setattr(main, "_confirm", lambda prompt: confirm)
     captured: dict = {}
 

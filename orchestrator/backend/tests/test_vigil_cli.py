@@ -4274,7 +4274,7 @@ def test_engagement_create_infers_localhost_url_as_web(tmp_path: Path, monkeypat
     assert manifest["target"] == "http://localhost:8080"
 
 
-def test_engagement_select_uses_fzf_when_requested(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_engagement_select_uses_shared_terminal_picker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys) -> None:
     from vigil_cli import engagements
 
     root = tmp_path / "install" / "agent" / "engagements"
@@ -4288,18 +4288,11 @@ def test_engagement_select_uses_fzf_when_requested(tmp_path: Path, monkeypatch: 
         (path / "scope.json").write_text('{"status":"in_progress","current_phase":"recon"}', encoding="utf-8")
         (path / "engagement.json").write_text(json.dumps({"key": path.name, "target": path.name, "created_at": created_at}), encoding="utf-8")
 
-    def fake_which(command: str) -> str | None:
-        return "/usr/bin/fzf" if command == "fzf" else None
-
-    def fake_run(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-        assert argv == ["fzf", "--with-nth", "1,2,3,4"]
-        return subprocess.CompletedProcess(argv, 0, f"{newer.name}\tin_progress\trecon\t{newer.name}\t{newer.resolve()}\n", "")
-
-    monkeypatch.setattr(engagements.shutil, "which", fake_which)
-    monkeypatch.setattr(engagements.subprocess, "run", fake_run)
     monkeypatch.setattr(engagements.sys, "stdin", _TTYStdin())
+    monkeypatch.setattr("builtins.input", lambda: "2")
 
     assert engagements.resolve_engagement_path(tmp_path / "install", select=True) == newer.resolve()
+    assert "Select engagement" in capsys.readouterr().err
 
 
 def test_runtime_start_rejects_running_container_with_wrong_mount(tmp_path: Path) -> None:
@@ -5131,15 +5124,8 @@ def test_auth_select_selector_overrides_current_engagement(tmp_path: Path, monke
             "active_identity": auth_module.DEFAULT_IDENTITY,
         }
 
-    def fake_which(command: str) -> str | None:
-        return "/usr/bin/fzf" if command == "fzf" else None
-
-    def fake_run(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-        return subprocess.CompletedProcess(argv, 0, f"{newer.name}\tin_progress\trecon\t{newer.name}\t{newer.resolve()}\n", "")
-
-    monkeypatch.setattr(engagements.shutil, "which", fake_which)
-    monkeypatch.setattr(engagements.subprocess, "run", fake_run)
     monkeypatch.setattr(engagements.sys, "stdin", _TTYStdin())
+    monkeypatch.setattr("builtins.input", lambda: "2")
     monkeypatch.chdir(older)
 
     main_module.main(["--root", str(install_root), "auth", "clear", "--select"])

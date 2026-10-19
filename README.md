@@ -103,6 +103,19 @@ check [models and access](docs/model-access.md).
 For ZCode desktop, follow [ZCode setup](docs/zcode-setup.md): open the exact generated
 workspace printed by Vigil, enable its local plugin, and begin a fresh task.
 
+Start without an engagement ID to choose an existing engagement by recent work
+or client opening, or choose **Create new engagement** using the same creation
+questions. This picker works for every client; an explicit ID skips it:
+
+```bash
+vigil engagement start --client zcode
+```
+
+For ZCode, creation comes before opening the project: Vigil opens the generated
+**Project folder**, whose root `AGENTS.md` walks through setup. Enable the printed
+local plugin and start a new task in that project. Do not open the audited source
+directory or the Vigil source checkout as the engagement's ZCode project.
+
 ### Audit source code
 
 Static investigation needs `uv`, your agent client, and host-side ripgrep (`rg`). You can
@@ -369,6 +382,9 @@ proposal approval, audited execution, and explicit recording.
 
 Remediation clients: **Claude Code, OpenCode, and ZCode**. See
 [agent clients](docs/agent-clients.md#repository-context-remediation-clients).
+Run `vigil remediation start` to choose a recent remediation engagement or create
+one for your repository, then select a client. `vigil remediation --help` explains
+the ticket-to-fix workflow and the commands you need first.
 For desktop installation, Coding Plan selection, local plugin enablement, and
 workspace selection, see [ZCode setup](docs/zcode-setup.md).
 

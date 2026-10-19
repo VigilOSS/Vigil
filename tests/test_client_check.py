@@ -165,6 +165,36 @@ def test_observed_context_reports_proof_levels_without_writing(observed_context)
     assert {path: path.read_bytes() for path in workspace.rglob("*") if path.is_file() and not path.is_symlink()} == before
 
 
+@pytest.mark.parametrize("summary_id", ["summary-acme", None])
+def test_opencode_observations_keep_native_lifecycle_distinct(observed_context, summary_id):
+    root, engagement, workspace, health, receipt = observed_context
+    binding_path = workspace / ".vigil-client-context.json"
+    binding = json.loads(binding_path.read_text())
+    binding["client"] = "opencode"
+    binding_path.write_text(json.dumps(binding))
+    encoded = binding_path.read_bytes()
+    (workspace / ".vigil-managed-files.json").write_text(json.dumps({
+        ".vigil-client-context.json": hashlib.sha256(encoded).hexdigest()}))
+    # Context paths use the client basename as an integrity invariant.
+    native = workspace.with_name("opencode")
+    workspace.rename(native)
+    binding.update(workspace=str(native), vigil_cli=str(native / "bin/vigil"))
+    encoded = json.dumps(binding).encode()
+    (native / ".vigil-client-context.json").write_bytes(encoded)
+    (native / ".vigil-managed-files.json").write_text(json.dumps({
+        ".vigil-client-context.json": hashlib.sha256(encoded).hexdigest()}))
+    health.update(client="opencode", binding_sha256=hashlib.sha256(encoded).hexdigest(),
+                  request_observed=True, compacting_observed=True, last_summary_id=summary_id)
+    (native / receipt.name).write_text(json.dumps(health))
+    checks = client_checks.collect_client_checks("opencode", engagement=engagement, mode="code", install_root=root)
+    indexed = {check.name: check for check in checks}
+    for name in ("request-hook", "preservation-hook"):
+        assert indexed[name].status == "OBSERVED"
+    assert indexed["summary-recovery"].status == ("OBSERVED" if summary_id else "UNVERIFIED")
+    assert indexed["native-build-validation"].status == "UNVERIFIED"
+    assert indexed["backend-hydration"].status == "UNVERIFIED"
+
+
 def test_receipt_does_not_prove_different_selected_mode(observed_context):
     root, engagement, _, _, _ = observed_context
     try:

@@ -122,6 +122,16 @@ When you are about to copy one of these into a second file, stop and import.
 - `src/vigil_cli/client_checks.py` owns read-only client prerequisites and inspection of existing
   bound workspaces, asset manifests, and exact-context hook receipts. Historical `OBSERVED` events
   do not establish current native-build acceptance or completed backend hydration.
+- `src/vigil_cli/prompts.py` owns shared terminal questions used by creation and engagement/mode selection;
+  `main.py` resolves interactive start selections before preflight without changing ambient resolution for other commands.
+- `src/vigil_cli/engagement_recency.py` owns the declared meaningful-work timestamp projection and UTC comparison;
+  it reads existing database snapshots without initialization and excludes backend sync/housekeeping clocks.
+- `src/vigil_cli/client_sessions.py` owns historical launch reads and separate official-open markers;
+  picker recency never turns those markers into PID ownership or proof of native conversation readiness.
+- `agent/scripts/assess/commands/transition_phase.py` stamps scope-level `phase_changed_at` inside the existing
+  atomic mutation only when a phase changes; same-phase calls do not create activity.
+- `agent/scripts/assess/commands/approve_exploit.py` stamps `exploit_review_changed_at` only when the
+  existing atomic approval mutation changes review state or its selected targets.
 - `agent/scripts/assess/lib/scope.py:ingest_scope_filter` must run on every new file-to-buffer ingest
   path. Arjun and proxy ingestion reuse already-filtered URLs.
 - `orchestrator/backend/app/services/state_manager/work_buffer.py:_scope_excluded_hosts` owns
@@ -243,6 +253,8 @@ A prompt change is **not** prompt-only when the prompt defines an artifact the b
 - `src/vigil_cli/paths.py:resolve_orchestrator_base_url` — backend URL precedence and dotenv normalization; `vigil config resolve orchestrator_base_url` exposes it to generated client launchers at session start.
 - `src/vigil_cli/preflight.py` owns launch checks shared with blue; managed-local backend recovery never replaces a configured remote endpoint. Static code startup does not query Docker.
 - `src/vigil_cli/remediation.py` — case intake/context rendering, configured workspace/checks, reviewed PR publication, and consented development workflow commands; `remediation_browser.py` owns local browser execution. Backend APIs own case state.
+  Interactive `start` selects only remediation engagements using shared terminal prompts and recent activity;
+  its create action calls the canonical engagement wizard registered by `main.py`. Other verbs retain their binding rules.
 - `src/vigil_cli/remediation_sessions.py` owns role routing and Claude native binding/attachment; launch receipts correlate job names with host UUIDs, and `start --session-id` recovers without redispatch.
 - `src/vigil_cli/remediation_clients.py` owns OpenCode repository launch and ZCode's context-bound plugin preparation/workspace opening, without native conversation receipts. `agent/.zcode/hooks/` restores defensive case context.
 - `agent/scripts/assess/lib/remediation_project.py` and `remediation_vcs.py` — shared PROJECT.md parsing and Git/JJ identity, workspace, diff, and push contracts; CLI import bridges are `project_config.py` and `remediation_vcs.py`.
