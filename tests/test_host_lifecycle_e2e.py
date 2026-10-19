@@ -84,7 +84,9 @@ HTTPServer((host, port), Handler).serve_forever()
             main.main(['--root', str(workspace), 'backup', 'restore', str(saved)])
         with sqlite3.connect(database) as connection:
             assert connection.execute('SELECT value FROM acme').fetchone()[0] == 'changed'
-        orchestrator.stop_orchestrator(workspace, host=host, port=port)
+        # A normal CLI stop must recover the configured custom loopback port,
+        # including a receiptless orphan.
+        orchestrator.stop_orchestrator(workspace)
         children[0].wait(timeout=5)
         assert orchestrator.orchestrator_status_payload(workspace, host=host, port=port)['state'] == 'stopped'
         main.main(['--root', str(workspace), 'backup', 'restore', str(saved)])

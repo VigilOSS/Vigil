@@ -274,3 +274,75 @@ def test_owned_receipt_with_invalid_endpoint_is_unknown_instead_of_traceback(tmp
     monkeypatch.setattr(orchestrator, '_process_identity', lambda *a: 'acme-birth')
     monkeypatch.setattr(orchestrator, '_port_in_use', lambda *a: False)
     assert orchestrator.orchestrator_status(tmp_path) == 'unknown'
+
+
+@pytest.mark.parametrize('endpoint', ['http://192.0.2.10:18000', 'http://host.docker.internal:18000'])
+def test_unreachable_remote_configuration_does_not_block_local_lifecycle(tmp_path, monkeypatch, endpoint):
+    from vigil_cli import orchestrator, paths
+    monkeypatch.setattr(paths, 'resolve_orchestrator_base_url', lambda *a: endpoint)
+    monkeypatch.setattr(orchestrator, '_port_in_use', lambda *a: False)
+    monkeypatch.setattr(engagements, 'inspect_backend_ownership', lambda *a, **kw: engagements.BackendOwnership(engagements.BackendInstallRootStatus.UNREACHABLE, endpoint))
+    orchestrator.stop_orchestrator(tmp_path)
+
+
+def test_legacy_pid_reused_by_unrelated_process_does_not_block_local_start(tmp_path, monkeypatch):
+    from vigil_cli import orchestrator
+    directory = tmp_path / 'state/runtime/pids'
+    directory.mkdir(parents=True)
+    (directory / 'orchestrator.pid').write_text('4242\n')
+    monkeypatch.setattr(orchestrator, '_process_identity', lambda _: 'unrelated-birth')
+    monkeypatch.setattr(orchestrator, '_port_in_use', lambda *a: False)
+    monkeypatch.setattr(orchestrator, '_listener_application_matches', lambda *a: False)
+    assert orchestrator.orchestrator_status_payload(tmp_path)['state'] == 'stopped'
+    orchestrator.stop_orchestrator(tmp_path)
+
+
+def test_legacy_backend_starting_without_listener_has_actionable_status(tmp_path, monkeypatch):
+    from vigil_cli import orchestrator
+    directory = tmp_path / 'state/runtime/pids'
+    directory.mkdir(parents=True)
+    (directory / 'orchestrator.pid').write_text('4242\n')
+    monkeypatch.setattr(orchestrator, '_process_identity', lambda _: 'backend-birth')
+    monkeypatch.setattr(orchestrator, '_port_in_use', lambda *a: False)
+    monkeypatch.setattr(orchestrator, '_listener_application_matches', lambda *a: True)
+    state = orchestrator.orchestrator_status_payload(tmp_path)
+    assert state['state'] == 'unknown'
+    assert '4242' in state['detail']
+    assert 'wait' in state['detail']
+
+
+def test_unreachable_remote_configuration_preserves_restore_uncertainty(tmp_path, monkeypatch):
+    from vigil_cli import orchestrator, paths
+    endpoint = 'http://backend.example:18000'
+    monkeypatch.setattr(paths, 'resolve_orchestrator_base_url', lambda *a: endpoint)
+    monkeypatch.setattr(orchestrator, '_port_in_use', lambda *a: False)
+    monkeypatch.setattr(engagements, 'inspect_backend_ownership', lambda *a, **kw: engagements.BackendOwnership(engagements.BackendInstallRootStatus.UNREACHABLE, endpoint))
+    state = orchestrator.orchestrator_status_payload(tmp_path)
+    assert state['state'] == 'unknown'
+    assert endpoint in state['detail']
+    assert 'owning host' in state['detail']
+    assert 'shared database' in state['detail']
+    with pytest.raises(SystemExit, match='ownership is unknown.*owning host'):
+        main.main(['--root', str(tmp_path), 'backup', 'restore', 'acme.sqlite'])
+
+
+@pytest.mark.parametrize('endpoint', ['http://192.0.2.10:18000', 'http://host.docker.internal:18000'])
+def test_explicit_start_uses_local_endpoint_despite_remote_client_url(tmp_path, monkeypatch, endpoint):
+    from types import SimpleNamespace
+    from vigil_cli import orchestrator, paths
+    monkeypatch.setattr(paths, 'resolve_orchestrator_base_url', lambda *a: endpoint)
+    monkeypatch.setattr(orchestrator, 'application_root_for_workspace', lambda *a: tmp_path)
+    monkeypatch.setattr(orchestrator, '_frontend_build_needed', lambda *a, **k: False)
+    monkeypatch.setattr(orchestrator, '_report_build_needed', lambda *a, **k: False)
+    monkeypatch.setattr(orchestrator, '_sync_backend_environment', lambda *a, **k: None)
+    monkeypatch.setattr(orchestrator, '_port_in_use', lambda *a: False)
+    monkeypatch.setattr(orchestrator, '_process_identity', lambda *a: 'acme-birth')
+    launched = []
+    def spawn(argv, **kwargs):
+        launched.append(argv)
+        return SimpleNamespace(pid=4242, poll=lambda: 8)
+    monkeypatch.setattr(orchestrator.subprocess, 'Popen', spawn)
+    monkeypatch.setattr(orchestrator, '_wait_for_health', lambda *a, **k: False)
+    with pytest.raises(SystemExit, match='exited with code 8'):
+        orchestrator.start_orchestrator(orchestrator.OrchestratorOptions(tmp_path))
+    assert launched[0][-4:] == ['--host', '127.0.0.1', '--port', '18000']

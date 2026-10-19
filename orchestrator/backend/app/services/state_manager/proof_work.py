@@ -151,17 +151,32 @@ def _competing_owner(connection, engagement_id, finding_id, route, work_id):
     authorize another worker.
     """
     for other in connection.execute(
-        'SELECT w.id,w.owner_dispatch_id,d.status AS dispatch_status,w.status FROM assessment_proof_work w '
-        'LEFT JOIN assessment_dispatches d ON d.id=w.owner_dispatch_id '
+        'SELECT w.id,w.owner_dispatch_id,d.status AS dispatch_status,w.status,1 AS current_owner '
+        'FROM assessment_proof_work w LEFT JOIN assessment_dispatches d ON d.id=w.owner_dispatch_id '
         'WHERE w.engagement_id=? AND w.finding_id=? AND w.route=? AND w.id<>? '
-        'AND w.owner_dispatch_id IS NOT NULL ORDER BY w.id',
-        (engagement_id, finding_id, route, work_id),
+        'AND w.owner_dispatch_id IS NOT NULL '
+        'UNION SELECT w.id,d.id AS owner_dispatch_id,d.status AS dispatch_status,w.status,0 AS current_owner '
+        'FROM assessment_proof_work w JOIN assessment_proof_work_events e ON e.work_id=w.id '
+        "LEFT JOIN assessment_dispatches d ON d.id=json_extract(e.details_json,'$.dispatch_id') "
+        "WHERE w.engagement_id=? AND w.finding_id=? AND w.route=? AND e.action='claimed' "
+        "AND json_extract(e.details_json,'$.dispatch_id') IS NOT NULL "
+        "AND (w.owner_dispatch_id IS NULL OR w.owner_dispatch_id<>json_extract(e.details_json,'$.dispatch_id')) "
+        'ORDER BY 1,2',
+        (engagement_id, finding_id, route, work_id, engagement_id, finding_id, route),
     ):
-        if other['status'] not in ('finished', 'resolved') or other['dispatch_status'] not in _common.TERMINAL_DISPATCH_STATUSES:
-            return other['id'], 'Another proof worker already owns this finding and route; reconcile and release it first'
+        if other['current_owner'] and (
+            other['status'] not in ('finished', 'resolved')
+            or other['dispatch_status'] not in _common.TERMINAL_DISPATCH_STATUSES
+        ):
+            return other['id'], (
+                'Another proof worker already owns this finding and route; inspect its native session and '
+                'wait for or stop execution, run `vigil assess kali sweep-orphans` for orphaned execution, '
+                f"then `vigil assess proof-work reconcile {other['id']}` and "
+                f"`vigil assess proof-work release {other['id']} --reason '<observed recovery state>'`"
+            )
         active = _owned_execution_active(connection, engagement_id, other['owner_dispatch_id'], other['id'])
         if active:
-            return other['id'], 'Previous proof worker has owned or ambiguous active execution; reconcile first: ' + ', '.join(active)
+            return other['id'], 'Previous proof worker has active execution: ' + '; '.join(active)
     return None, ''
 
 
@@ -250,7 +265,7 @@ def _serialize(connection, engagement_id, row, *, with_history=True, view=None):
     data['events'] = [dict(r) for r in connection.execute(
         'SELECT * FROM assessment_proof_work_events WHERE work_id=? ORDER BY id', (data['id'],),
     )] if with_history else []
-    data['approval_decision'] = _approval_decision(connection, data['id'])
+    data.update(_approval_state(connection, data))
     data['approval_required'] = data['route'] == 'web' and not _approved(view, data)
     if (data['status'] in _LIVE_WORK_STATUSES and data['approval_required']
             and data['owner_dispatch_id'] is not None) and (
@@ -269,20 +284,58 @@ def _event(connection, work_id, action, details):
     )
 
 
-def _approval_decision(connection, work_id):
-    row = connection.execute(
-        "SELECT action,details_json FROM assessment_proof_work_events WHERE work_id=? "
-        "AND action IN ('approval','reprepared') ORDER BY id DESC LIMIT 1", (work_id,),
+def _approval_state(connection, work):
+    """Approval belongs to this preparation; a stop also follows successor work.
+
+    Event ordering, not wall time or the mutable approved column, determines
+    authority. Historical rows need no rewrite: predecessor rows and existing
+    reprepared events establish their renewal requirement on read.
+    """
+    work_id = work['id']
+    previous = connection.execute(
+        'SELECT id FROM assessment_proof_work WHERE engagement_id=? AND finding_id=? '
+        'AND route=? AND id<? ORDER BY id DESC LIMIT 1',
+        (work['engagement_id'], work['finding_id'], work['route'], work_id),
     ).fetchone()
-    if row is None or row['action'] == 'reprepared':
-        return None
-    return 'approved' if json.loads(row['details_json'])['approved'] else 'revoked'
+    epoch = connection.execute(
+        "SELECT id FROM assessment_proof_work_events WHERE work_id=? "
+        "AND action IN ('prepared','reprepared') ORDER BY id DESC LIMIT 1", (work_id,),
+    ).fetchone()
+    decision = connection.execute(
+        "SELECT id,details_json FROM assessment_proof_work_events WHERE work_id=? "
+        "AND action='approval' ORDER BY id DESC LIMIT 1", (work_id,),
+    ).fetchone()
+    approved = bool(decision and json.loads(decision['details_json'])['approved'])
+    # UNION visits each work once, including a restored A -> B -> A context.
+    # Earlier rows cover historical preparations without explicit lineage events.
+    stop = connection.execute(
+        "WITH RECURSIVE lineage(id) AS (SELECT ? UNION "
+        "SELECT p.id FROM lineage l JOIN assessment_proof_work w ON w.id=l.id "
+        "JOIN assessment_proof_work p ON p.engagement_id=w.engagement_id "
+        "AND p.finding_id=w.finding_id AND p.route=w.route AND p.id<w.id UNION "
+        "SELECT p.id FROM lineage l JOIN assessment_proof_work w ON w.id=l.id "
+        "JOIN assessment_proof_work_events h ON h.work_id=w.id "
+        "JOIN assessment_proof_work p ON p.id=json_extract(h.details_json,'$.previous_work_id') "
+        "AND p.engagement_id=w.engagement_id AND p.finding_id=w.finding_id AND p.route=w.route "
+        "WHERE h.action IN ('prepared','reprepared')) "
+        "SELECT e.id,e.work_id FROM assessment_proof_work_events e JOIN lineage l ON l.id=e.work_id "
+        "WHERE e.action='approval' AND json_extract(e.details_json,'$.approved')=0 "
+        "AND e.id>? ORDER BY e.id DESC LIMIT 1",
+        (work_id, decision['id'] if approved else 0),
+    ).fetchone()
+    current_approval = approved and (epoch is None or decision['id'] > epoch['id']) and stop is None
+    return {
+        'approval_decision': 'revoked' if stop else 'approved' if current_approval else None,
+        'approval_renewal_required': work['route'] == 'web' and bool(previous or epoch) and not current_approval,
+        'approval_revocation_work_id': stop['work_id'] if stop else None,
+    }
 
 
 def _approved(view, work):
     if work['approval_decision'] == 'revoked':
         return False
-    return work['approval_decision'] == 'approved' or view.exploit_policy == 'full_send'
+    return (work['approval_decision'] == 'approved'
+            or (not work['approval_renewal_required'] and view.exploit_policy == 'full_send'))
 
 
 def _require_authorized(work):
@@ -294,7 +347,8 @@ def _require_current(work):
     if work['verification_invalidated']:
         _fail(_INVALIDATED_BLOCKER)
     if not work['current']:
-        _fail('Proof work context changed; reconcile and prepare against the current plan, evidence, and scope')
+        _fail(f"Proof work context changed; run `vigil assess proof-work reconcile {work['id']}` "
+              'and prepare against the current plan, evidence, and scope')
     if not work['owed']:
         _fail('Finding no longer owes runtime proof; inspect its canonical verification state')
 
@@ -402,6 +456,10 @@ def prepare_proof_work(engagement_id: int, *, finding_slug: str, route: str,
                 matches, key=lambda row: row['status'] not in _LIVE_WORK_STATUSES)
         ), None)
         if work_id is None:
+            previous = connection.execute(
+                'SELECT * FROM assessment_proof_work WHERE engagement_id=? AND finding_id=? AND route=? '
+                'ORDER BY id DESC LIMIT 1', (engagement_id, finding['id'], route),
+            ).fetchone()
             connection.execute(
                 'INSERT OR IGNORE INTO assessment_proof_work '
                 '(engagement_id,finding_id,binding_digest,binding_json,route,objective,target_hosts_json) '
@@ -412,19 +470,35 @@ def prepare_proof_work(engagement_id: int, *, finding_slug: str, route: str,
                 'SELECT id FROM assessment_proof_work WHERE engagement_id=? AND finding_id=? '
                 'AND binding_digest=?', (engagement_id, finding['id'], digest),
             ).fetchone()['id']
+            if previous is not None:
+                _event(connection, work_id, 'prepared', {
+                    'previous_work_id': previous['id'],
+                    'previous_approval_decision': _approval_state(connection, previous)['approval_decision'],
+                    'approval_renewal_required': route == 'web',
+                })
         prepared = _row(connection, engagement_id, work_id)
         if prepared['owner_dispatch_id'] is not None and prepared['status'] != 'claimed':
             _fail(
                 f"Matching proof work is still owned with status={prepared['status']}; "
-                f"reconcile the owner execution and run `vigil assess proof-work release "
-                f"{work_id}` before preparing this context again"
+                'inspect `vigil assess command-run list`, wait for or stop live execution, '
+                'and run `vigil assess kali sweep-orphans` for orphaned execution; '
+                f"then run `vigil assess proof-work release {work_id} --reason '<observed recovery state>'` "
+                'before preparing this context again'
             )
         if prepared['owner_dispatch_id'] is None and prepared['status'] in ('stale', 'resolved'):
+            previous = connection.execute(
+                'SELECT * FROM assessment_proof_work WHERE engagement_id=? AND finding_id=? AND route=? '
+                'ORDER BY id DESC LIMIT 1', (engagement_id, finding['id'], route),
+            ).fetchone()
             connection.execute(
                 "UPDATE assessment_proof_work SET status='prepared',approved=0,blocker='',blocker_cause=NULL, "
                 "updated_at=CURRENT_TIMESTAMP WHERE id=?", (work_id,),
             )
-            _event(connection, work_id, 'reprepared', {'previous_status': prepared['status']})
+            _event(connection, work_id, 'reprepared', {
+                'previous_status': prepared['status'], 'previous_work_id': previous['id'],
+                'previous_approval_decision': _approval_state(connection, previous)['approval_decision'],
+                'approval_renewal_required': route == 'web',
+            })
         return _serialize(connection, engagement_id, _row(connection, engagement_id, work_id))
 
 
@@ -434,7 +508,8 @@ def approve_proof_work(engagement_id: int, work_id: int, *, approved: bool,
     with _common.get_connection() as connection:
         connection.execute('BEGIN IMMEDIATE')
         work = _serialize(connection, engagement_id, _row(connection, engagement_id, work_id))
-        _require_current(work)
+        if approved:
+            _require_current(work)
         connection.execute('UPDATE assessment_proof_work SET approved=?,updated_at=CURRENT_TIMESTAMP '
                            'WHERE id=?', (int(approved), work_id))
         _event(connection, work_id, 'approval', {
@@ -458,7 +533,8 @@ def claim_proof_work(engagement_id: int, work_id: int, *, dispatch: dict) -> dic
         if work['owner_dispatch_id'] is not None:
             if work['owner_agent_id'] == dispatch['agent_id']:
                 return {**work, 'launch_required': False}
-            _fail('Proof work is already owned; reconcile its dispatch and runtime runs')
+            _fail(f"Proof work is already owned; inspect its native session and `vigil assess command-run list`, "
+                  f"then run `vigil assess proof-work reconcile {work_id}`")
         if work['status'] != 'prepared':
             _fail('Proof work is not available for a new claim')
         if dispatch.get('status', 'in-progress') != 'in-progress':
@@ -585,7 +661,7 @@ def release_proof_work(engagement_id: int, work_id: int, *, reason: str) -> dict
             _fail('Owner dispatch is still active; inspect its native session before recovery')
         active = _owned_execution_active(connection, engagement_id, work['owner_dispatch_id'], work_id)
         if active:
-            _fail('Owned or ambiguous runtime work remains active; reconcile first: ' + ', '.join(active))
+            _fail('Owned or ambiguous runtime work remains active: ' + '; '.join(active))
         _event(connection, work_id, 'released', {
             'reason': reason, 'previous_dispatch_id': work['owner_dispatch_id'],
             'previous_agent_id': work['owner_agent_id'],
@@ -615,12 +691,23 @@ def _owned_execution_active(connection, engagement_id, dispatch_id, work_id):
     ids = {row['id'] for row in owners}
     agents = {row['agent_id'] for row in owners}
     claim = connection.execute(
-        "SELECT created_at FROM assessment_proof_work_events WHERE work_id=? AND action='claimed' "
+        "SELECT id,created_at FROM assessment_proof_work_events WHERE work_id=? AND action='claimed' "
         "AND json_extract(details_json,'$.dispatch_id')=? ORDER BY id DESC LIMIT 1",
         (work_id, dispatch_id),
     ).fetchone()
     # Missing historical claim time cannot prove an unattributed execution predates it.
     since = claim['created_at'] if claim else '0001-01-01'
+    ended = connection.execute(
+        "SELECT created_at FROM assessment_proof_work_events WHERE work_id=? AND id>? AND ("
+        "action IN ('finished','resolved','released') OR "
+        "(action='reconciled' AND json_extract(details_json,'$.status')='resolved')) ORDER BY id LIMIT 1",
+        (work_id, claim['id'] if claim else 0),
+    ).fetchone()
+    # Only unattributed execution needs a time window. Direct owner/descendant
+    # attribution continues to block even after a claimed finish or release.
+    # Events use second precision; include that whole terminal second so a
+    # fractional command/job timestamp cannot appear falsely later than finish.
+    until = ended['created_at'] if ended else '9999-12-31 23:59:59'
     registered = {row['agent_id'] for row in connection.execute(
         'SELECT agent_id FROM assessment_dispatches WHERE engagement_id=?', (engagement_id,),
     )}
@@ -629,25 +716,26 @@ def _owned_execution_active(connection, engagement_id, dispatch_id, work_id):
         "AND status IN ('queued','running')", (engagement_id,),
     ):
         if row['producer_dispatch_id'] in ids:
-            active.append(f"proof run {row['id']}")
+            active.append(f"proof run {row['id']}; inspect `vigil assess proof-run get {row['id']}` and wait for its producer to finish")
     for row in connection.execute(
-        "SELECT id,agent_name,datetime(started_at)>=datetime(?) AS since_claim "
+        "SELECT id,agent_name,datetime(started_at) BETWEEN datetime(?) AND datetime(?) AS during_claim "
         "FROM assessment_command_runs WHERE engagement_id=? AND status IN ('queued','running')",
-        (since, engagement_id),
+        (since, until, engagement_id),
     ):
         if row['agent_name'] in agents:
-            active.append(f"command run {row['id']}")
-        elif row['since_claim'] != 0 and (row['agent_name'] == 'operator' or row['agent_name'] not in registered):
-            active.append(f"ambiguous command run {row['id']} (operator/unattributed since claim)")
+            active.append(f"command run {row['id']}; inspect `vigil assess command-run get {row['id']}` and wait for or stop its execution")
+        elif row['during_claim'] != 0 and (row['agent_name'] == 'operator' or row['agent_name'] not in registered):
+            active.append(f"ambiguous command run {row['id']} (operator/unattributed during claim); inspect `vigil assess command-run get {row['id']}` and wait for or stop its execution")
     for row in connection.execute(
-        "SELECT j.id,c.agent_name,datetime(COALESCE(j.started_at,j.created_at))>=datetime(?) AS since_claim "
+        "SELECT j.id,c.agent_name,datetime(COALESCE(j.started_at,j.created_at)) "
+        "BETWEEN datetime(?) AND datetime(?) AS during_claim "
         "FROM assessment_jobs j LEFT JOIN assessment_command_runs c "
         "ON c.id=j.parent_command_run_id AND c.engagement_id=j.engagement_id "
         "WHERE j.engagement_id=? AND j.status IN ('queued','running','stop_failed')",
-        (since, engagement_id),
+        (since, until, engagement_id),
     ):
         if row['agent_name'] in agents:
-            active.append(f"supervised job {row['id']}")
-        elif row['since_claim'] != 0 and (row['agent_name'] == 'operator' or row['agent_name'] not in registered):
-            active.append(f"ambiguous supervised job {row['id']} (operator/unattributed since claim)")
+            active.append(f"supervised job {row['id']}; wait for completion or run `vigil assess kali job stop {row['id']}`")
+        elif row['during_claim'] != 0 and (row['agent_name'] == 'operator' or row['agent_name'] not in registered):
+            active.append(f"ambiguous supervised job {row['id']} (operator/unattributed during claim); wait for completion or run `vigil assess kali job stop {row['id']}`")
     return active

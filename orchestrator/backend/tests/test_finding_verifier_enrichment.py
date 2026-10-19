@@ -122,9 +122,10 @@ def test_enrichment_evaluates_resolved_details_modes_and_retains_receipts(client
         'dispatch_agent_id': 'VERIFY-1', 'details': initial,
     }).status_code == 200
     finding = client.get(f'{BASE}/findings/VA-905').json()
-    additions = {'steps_to_reproduce': ['Observe the Acme account boundary']}
+    steps = ['Request the Acme object', 'Observe the Acme account boundary']
+    additions = {'steps_to_reproduce': steps[1:] if mode == 'append' else steps}
     if mode == 'replace':
-        additions = dict(finding['details'], steps_to_reproduce=['Request and observe the Acme object'])
+        additions = dict(finding['details'], steps_to_reproduce=steps)
     body = {'dispatch_agent_id': 'VERIFY-1', 'details': additions, 'details_mode': mode}
     if mode == 'replace':
         body['expected_row_version'] = finding['row_version']
@@ -217,3 +218,56 @@ def test_standalone_evidence_enrichment_records_lossless_audit(client, confirmed
     assert metadata[field + '_before'] == (before.get(field) or '')
     assert metadata[field + '_after'] == value
     assert len(metadata['prior_claim_sha256']) == len(metadata['claim_sha256']) == 64
+
+
+@pytest.mark.parametrize('steps', [
+    ['Request another object'],
+    ['Observe the Acme response', 'Request the Acme object'],
+    ['Request the Acme object'],
+])
+def test_same_verifier_replacing_reordering_or_deleting_steps_requires_review(client, confirmed, steps):
+    original = ['Request the Acme object', 'Observe the Acme response']
+    assert client.patch(f'{BASE}/findings/VA-905', json={
+        'dispatch_agent_id': 'VERIFY-1', 'details': {'steps_to_reproduce': original},
+    }).status_code == 200
+    response = client.patch(f'{BASE}/findings/VA-905', json={
+        'dispatch_agent_id': 'VERIFY-1', 'details': {'steps_to_reproduce': steps},
+    })
+    assert response.status_code == 200, response.text
+    finding = client.get(f'{BASE}/findings/VA-905').json()
+    assert finding['verification_audit']['claim_review_pending'] is True
+    transition = response.json()['transition']
+    assert transition is not None
+    detail = client.get(f'{BASE}/findings/VA-905/transitions/{transition["id"]}').json()
+    assert json.loads(detail['metadata_json']).get('enrichment') is not True
+
+
+def test_same_verifier_reordering_reproduction_runs_requires_review(client, confirmed):
+    command, _ = confirmed
+    added = client.post(f'{BASE}/command-runs', json={
+        'command': 'python control.py', 'argv': ['python', 'control.py'], 'tool_name': 'python',
+        'agent_name': 'VERIFY-1', 'phase': 'verify', 'return_code': 0, 'success': True,
+        'started_at': '2026-09-09T12:00:02Z', 'completed_at': '2026-09-09T12:00:03Z',
+        'duration_ms': 1000, 'stdout': 'Acme control', 'stderr': '', 'run_uuid': 'acme-control',
+    })
+    assert added.status_code == 201, added.text
+    original = [command['id'], added.json()['id']]
+    assert client.patch(f'{BASE}/findings/VA-905', json={
+        'dispatch_agent_id': 'VERIFY-1', 'details': {'repro_runs': original},
+    }).status_code == 200
+    response = client.patch(f'{BASE}/findings/VA-905', json={
+        'dispatch_agent_id': 'VERIFY-1', 'details': {'repro_runs': list(reversed(original))},
+    })
+    assert response.status_code == 200, response.text
+    assert client.get(f'{BASE}/findings/VA-905').json()['verification_audit']['claim_review_pending'] is True
+
+
+def test_same_verifier_replacing_evidence_type_requires_review(client, confirmed):
+    assert client.patch(f'{BASE}/findings/VA-905', json={
+        'dispatch_agent_id': 'VERIFY-1', 'evidence_type': 'network-confirmed',
+    }).status_code == 200
+    response = client.patch(f'{BASE}/findings/VA-905', json={
+        'dispatch_agent_id': 'VERIFY-1', 'evidence_type': 'code-inferred',
+    })
+    assert response.status_code == 200, response.text
+    assert client.get(f'{BASE}/findings/VA-905').json()['verification_status'] == 'unreviewed'

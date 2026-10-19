@@ -59,9 +59,12 @@ vigil assess agent start \
 # Then launch the specialist with the client-native agent tool and pass it
 # the Runtime Identity block printed by `agent start`.
 
-# Render the returned handoff and close its ready/blocked dispatch.
+# After observed native return and checking owned execution ended, close its final handoff.
 vigil assess agent render-handoff recon_a3f9
 vigil assess agent close recon_a3f9
+
+# If native return left no final handoff, preserve its checkpoint and record failed recovery.
+vigil assess agent close recon_a3f9 --status failed --reason "Worker returned; owned commands ended"
 
 # List dispatches (DEDUP input — replaces the old JSON-file scan).
 vigil assess agent list --filter-role recon-specialist --since 2026-01-15T00:00:00Z

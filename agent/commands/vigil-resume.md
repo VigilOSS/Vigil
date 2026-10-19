@@ -1,6 +1,7 @@
 ---
 name: vigil-resume
 description: Re-hydrate the engagement's generated operator role in a new session on an existing engagement, or after a restart or handoff
+clients: claude codex opencode zcode
 ---
 
 Resume the Vigil engagement in the current directory. The launched session selects one
@@ -10,7 +11,7 @@ operator mode; the engagement's enabled tracks do not select a combined role.
 command. It resolves the selected mode from the session environment; confirm the reported
 `mode:` matches the selected operator seat, and read only the canonical file shown as `prompt:`.
 Read this engagement's `AGENTS.md` router first, then the selected prompt in bounded parts,
-following its Map of This File. If mode resolution fails, the values disagree, or no mode is
+following its Map of This File. If mode resolution fails, the reported mode differs from the selected operator seat, or no mode is
 selected, STOP before target-facing work. Start a new client with
 `vigil engagement start <key> --mode <mode> --client <client>`; do not infer a role from
 `scope.json`, another track's findings, a handoff, or this session's summary. Operator
@@ -20,7 +21,7 @@ before acting on remembered or persisted state.
 <!-- vigil:only claude -->
 Use `/vigil-start` if this engagement has no work in it yet.
 <!-- vigil:end -->
-<!-- vigil:only codex -->
+<!-- vigil:only codex,opencode,zcode -->
 Use `$vigil-start` if this engagement has no work in it yet.
 <!-- vigil:end -->
 
@@ -59,7 +60,7 @@ claim, separate backend-supported facts from specialist assertions before carryi
 <!-- vigil:only claude -->
 Operator focus for this resume (may be empty): $ARGUMENTS
 <!-- vigil:end -->
-<!-- vigil:only codex -->
+<!-- vigil:only codex,opencode,zcode -->
 If the operator named a focus in the message, apply it within the active mode and recorded ROE.
 <!-- vigil:end -->
 

@@ -336,6 +336,36 @@ def test_code_finding_runtime_proof_end_to_end(vigil: Vigil) -> None:
             'trust_boundaries': ['Untrusted report name to filesystem path'],
         })))
 
+    # An observed context-limit return preserves checkpoint evidence and can continue.
+    recovery_context = vigil.write('recovery-context.json', PROOF_CONTEXT)
+    for checkpoint in (False, True):
+        agent_id = 'RECOVERY-' + ('CHECKPOINT' if checkpoint else 'EMPTY')
+        _start_dispatch(vigil, agent_id, 'code-vuln-hunter', 'Inspect the Acme library boundary',
+                        '--prompt-context-json', '@' + str(recovery_context), '--emit-prompt')
+        if checkpoint:
+            status, body = vigil.api('POST', 'dispatch-handoffs', {
+                'agent_id': agent_id, 'agent_role': 'code-vuln-hunter',
+                'summary': 'Acme entry point inspected; caller review unfinished.',
+                'handoff_status': 'checkpointed',
+                'coverage_gaps': [{'path': 'acme_reports.py', 'reason': 'caller review unfinished'}],
+            })
+            assert status == 201, body
+        refused = vigil.assess('agent', 'continue', agent_id, '--agent-id', agent_id + '-NEXT',
+                               '--task', 'Continue the unfinished caller review', expect_ok=False)
+        assert refused.returncode != 0
+        closed = vigil.assess_json('agent', 'close', agent_id, '--status', 'failed',
+            '--reason', 'Fixture native worker returned; owned execution ended.')
+        assert closed['dispatch']['status'] == 'failed'
+        status, handoff = vigil.api('GET', 'dispatch-handoffs/' + agent_id)
+        assert status == 200 and handoff['handoff_status'] == 'blocked'
+        if checkpoint:
+            assert handoff['coverage_gaps'][0]['reason'] == 'caller review unfinished'
+        vigil.assess('agent', 'continue', agent_id, '--agent-id', agent_id + '-NEXT',
+                     '--task', 'Continue the unfinished caller review')
+        status, continued = vigil.api('GET', 'dispatches/' + agent_id + '-NEXT')
+        assert status == 200 and continued['continued_from_dispatch_id'] == closed['dispatch']['id']
+        vigil.assess('agent', 'done', agent_id + '-NEXT', '--status', 'completed')
+
     # 2. Finder dispatch records the code finding.
     _start_dispatch(vigil, AUTHOR, "code-vuln-hunter", "Hunt path traversal in read_report")
     record = vigil.assess(
@@ -750,3 +780,31 @@ finally:
     assert decisions[1]['reason'] == 'Fixture pause before execution'
     for agent_id in (author, verifier):
         vigil.assess('agent', 'done', agent_id, '--status', 'completed', '--finding-slugs', slug)
+
+    # A changed proof context cannot erase a human stop through full_send.
+    vigil.assess('finding', 'verify', slug, '--status', 'pending_runtime_proof',
+        '--reason', 'Challenge the revised Acme fixture hypothesis',
+        '--next-test-file', str(vigil.write('web-next-test-revised.json', plan | {
+            'hypothesis': 'Repeat the controlled canary comparison with revised context.'})))
+    scope['exploit_policy'] = 'full_send'
+    scope_path.write_text(json.dumps(scope))
+    vigil.assess('proof-work', 'revoke', work_id, '--reason', 'Stop Acme live proof after context changed.')
+    vigil.assess('proof-work', 'release', work_id, '--reason', 'Fixture producer and all owned execution ended.')
+    renewed = vigil.assess_json('proof-work', 'prepare', slug, '--route', 'web',
+        '--host', '127.0.0.1', '--objective', 'Challenge the revised Acme fixture hypothesis')
+    assert renewed['approval_required'] and renewed['approval_renewal_required']
+    assert renewed['approval_revocation_work_id'] == int(work_id)
+    assert renewed['approval_decision'] == 'revoked'
+    vigil.assess('proof-work', 'approve', str(renewed['id']),
+        '--human-confirmation', 'Fixture authorization: only the revised isolated Acme localhost test.')
+    approved = vigil.assess_json('proof-work', 'get', str(renewed['id']))
+    assert not approved['approval_required'] and approved['approval_decision'] == 'approved'
+    replacement = vigil.assess_json('proof-work', 'claim', str(renewed['id']),
+        '--agent-id', 'WEB-PROOF-2', '--agent-role', 'exploit-developer',
+        '--skills', 'finding-verification',
+        '--prompt-context-json', '@' + str(vigil.write('web-context-renewed.json', context)),
+        '--rate-budget', '2 requests per second')
+    assert replacement['launch_required'] is True
+    vigil.assess('agent', 'close', 'WEB-PROOF-2', '--status', 'failed',
+        '--reason', 'Fixture dispatch returned before execution; no owned runtime work.')
+    vigil.assess('proof-work', 'release', str(renewed['id']), '--reason', 'Fixture ended without execution.')

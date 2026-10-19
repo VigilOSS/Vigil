@@ -24,6 +24,7 @@ copy of the standing contract; Codex loads it directly as its history compaction
 The continuation hook uses the session's `VIGIL_OPERATOR_MODE` and `vigil engagement mode`
 to restore only the selected operator prompt.
 
+
 Report to the operator, in three lines:
 
 1. whether the contract resolved and printed non-empty output — empty output means the

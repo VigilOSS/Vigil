@@ -116,6 +116,12 @@ When you are about to copy one of these into a second file, stop and import.
   Presenters consume its rows; do not derive freshness beside it. See: `docs/maintainer-guide.md` freshness section.
 - `src/vigil_cli/install_manifest.py` owns editable application input digests;
   `src/vigil_cli/install_fs.py` owns pinned/no-follow workspace and cache operations.
+- `src/vigil_cli/assessment_clients.py` owns immutable native-client workspace bindings,
+  context-bound helpers, managed pointers, plugin release identities, and managed-file digest manifests.
+  GUI workspace opening never establishes native conversation ownership.
+- `src/vigil_cli/client_checks.py` owns read-only client prerequisites and inspection of existing
+  bound workspaces, asset manifests, and exact-context hook receipts. Historical `OBSERVED` events
+  do not establish current native-build acceptance or completed backend hydration.
 - `agent/scripts/assess/lib/scope.py:ingest_scope_filter` must run on every new file-to-buffer ingest
   path. Arjun and proxy ingestion reuse already-filtered URLs.
 - `orchestrator/backend/app/services/state_manager/work_buffer.py:_scope_excluded_hosts` owns
@@ -142,7 +148,10 @@ When you are about to copy one of these into a second file, stop and import.
 ## Sync rules worth remembering
 
 - `agent/operator-core.md` and `agent/operator-core-blue.md` render to the committed wrappers, and `agent/agents/*.md` render to the per-client agent trees, through `agent/scripts/render-operator-prompts.sh`. Run it with `repo`; `check` fails on drift.
-- `agent/commands/` owns operator commands. Renderer `COMMAND_NAMES` and explicit client metadata drive `agent/.claude/commands`, `agent/.codex/skills`, and native OpenCode/ZCode remediation commands. See: ADR 0017.
+- `agent/commands/` owns operator commands. Renderer `COMMAND_NAMES` and explicit client metadata drive `agent/.claude/commands`, `agent/.codex/skills`, and native OpenCode/ZCode command trees. See: ADR 0017.
+- `agent/scripts/render-operator-prompts.sh` renders native assessment command/role assets under
+  `agent/.opencode/assessment` and `agent/.zcode/assessment`; `src/vigil_cli/assessment_clients.py`
+  stages their immutable workspace/plugin consumers separately from other workflow assets.
 - `agent/scripts/assess/lib/contracts.py` renders engagement binding into every command contract.
 - `src/vigil_cli/client_rosters.py` links those wrapper trees into an engagement as **per-entry symlinks** (`<engagement>/.claude/commands/`, `<engagement>/.codex/skills/`), so an engagement never carries a stale copy and an operator-authored command of the same name wins.
 - `orchestrator/backend/app/api/assessment.py` and `orchestrator/backend/app/api/code_analysis.py` feed the generated `agent/schemas/*.json` through `orchestrator/backend/scripts/generate_agent_schemas.py`. Check drift with that script's `--check` mode.

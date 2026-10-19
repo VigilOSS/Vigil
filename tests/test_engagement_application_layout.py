@@ -199,6 +199,7 @@ def test_start_refuses_cross_release_refresh_while_original_session_is_alive(lay
 
 def test_opencode_rejected_upgrade_start_preserves_active_session_config(layout, monkeypatch):
     from vigil_cli import main as main_module
+    from vigil_cli import assessment_clients, client_sessions
 
     application, workspace = layout
     engagement = workspace / "engagements/acme"
@@ -208,13 +209,21 @@ def test_opencode_rejected_upgrade_start_preserves_active_session_config(layout,
     engagements._write_launchers(application / "agent", engagement, "codex", skip_permissions=False, workspace_root=workspace)
     monkeypatch.setattr(engagements.os, "chdir", lambda *_: None)
     monkeypatch.setattr(engagements.os, "execv", lambda *_: None)
-    engagements.start_engagement(workspace, engagement, "opencode", [])
+    (engagement / "opencode.json").write_text('{"model":"operator-selected-model","compaction":{"auto":true}}\n')
+    client_sessions.record_client_session(workspace, engagement, "opencode", "code")
     original = (engagement / "opencode.json").read_bytes()
     next_application = application.parent / "application-next"
     (next_application / "orchestrator").mkdir(parents=True)
     (next_application / "agent").mkdir()
     (next_application / "agent/operator-core-code.md").write_text("next release\n")
     monkeypatch.setenv("VIGIL_APPLICATION_DIR", str(next_application))
+    monkeypatch.setattr(assessment_clients.shutil, "which", lambda *_: "/usr/bin/client")
+    native_run = assessment_clients.subprocess.run
+    monkeypatch.setattr(assessment_clients.subprocess, "run",
+        lambda argv, **kwargs: subprocess.CompletedProcess(argv, 0, "1.19.3\n", "")
+        if argv[0] == "/usr/bin/client" else native_run(argv, **kwargs))
+    monkeypatch.setattr(assessment_clients, "prepare_workspace",
+        lambda *a, **kw: pytest.fail("Cross-release retention must be checked before preparing workspace files"))
 
     with pytest.raises(SystemExit, match="active.*release|end.*session"):
         main_module.main(["--root", str(workspace), "engagement", "start", "acme", "--client", "opencode", "--thinking", "max", "--skip-preflight"])

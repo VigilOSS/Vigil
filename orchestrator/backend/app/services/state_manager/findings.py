@@ -685,7 +685,7 @@ def _proof_dependency_removed(
 def _same_verifier_enrichment(connection, engagement_id, before, after, dispatch_agent_id):
     """Permit attributed documentation additions without consuming another receipt.
 
-    Prior evidence references and reproduction run IDs must survive. An existing
+    Prior evidence references, reproduction steps, and run IDs must survive in order. An existing
     claim-review event remains on its explicit equivalence-review path.
     """
     if not dispatch_agent_id or _row_verification_status(before) not in {'confirmed', 'downgraded'}:
@@ -699,6 +699,8 @@ def _same_verifier_enrichment(connection, engagement_id, before, after, dispatch
     old_ref, new_ref = str(before['evidence_ref'] or ''), str(after['evidence_ref'] or '')
     if old_ref and new_ref != old_ref:
         return False
+    if before['evidence_type'] and before['evidence_type'] != after['evidence_type']:
+        return False
     old_details, new_details = _json_object(before['details_json']), _json_object(after['details_json'])
     changed = {key for key in old_details.keys() | new_details.keys()
                if old_details.get(key) != new_details.get(key) or (key in old_details) != (key in new_details)}
@@ -706,11 +708,14 @@ def _same_verifier_enrichment(connection, engagement_id, before, after, dispatch
         return False
     if any(key not in new_details or not new_details[key] for key in changed):
         return False
-    if 'repro_runs' in changed and not (
-        {str(value).strip() for value in old_details.get('repro_runs', [])}
-        <= {str(value).strip() for value in new_details.get('repro_runs', [])}
-    ):
-        return False
+    for key in ('steps_to_reproduce', 'repro_runs'):
+        if key not in changed:
+            continue
+        previous, current = old_details.get(key, []), new_details[key]
+        if not isinstance(previous, list) or not isinstance(current, list):
+            return False
+        if current[:len(previous)] != previous:
+            return False
     if not changed and old_ref == new_ref and before['evidence_type'] == after['evidence_type']:
         return False
     rows = connection.execute(
@@ -2116,7 +2121,7 @@ def create_finding(
                     "severity", "defect_family", "root_cause_key", "auth_context",
                     "canonical_location", "evidence_ref",
                 )
-            ) or _verification_material_details_changed(
+            ) or (bool(existing["evidence_type"]) and existing["evidence_type"] != finding["evidence_type"]) or _verification_material_details_changed(
                 str(existing["details_json"]), details, details_mode,
                 ignore_cvss=cvss_reduction is not None,
             ) or _proof_dependency_removed(
@@ -2569,6 +2574,8 @@ def patch_finding(
                 canonical_location is not None
                 and canonical_location != str(existing["canonical_location"]),
                 evidence_ref is not None and evidence_ref != str(existing["evidence_ref"]),
+                evidence_type is not None and bool(existing["evidence_type"])
+                and evidence_type != existing["evidence_type"],
                 transition_reason_code == "claim_retracted",
                 _proof_dependency_removed(
                     str(existing["details_json"]), details, details_mode

@@ -9,11 +9,13 @@ on their text.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
 import subprocess
 import tomllib
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -958,3 +960,135 @@ def test_post_tool_log_releases_failed_dedup_claim_for_retry(tmp_path: Path) -> 
     assert len(_captured(capture)) == 2
     seen = engagement_dir / ".hook_seen_tool_uses"
     assert not seen.exists() or "tu-1" not in seen.read_text(encoding="utf-8").splitlines()
+
+
+def _native_log_payload(engagement_dir: Path, **identity: str) -> dict:
+    return {
+        **_BASH_PAYLOAD,
+        "cwd": str(engagement_dir),
+        "client_name": "opencode",
+        "session_id": "session-1",
+        **identity,
+    }
+
+
+@pytest.mark.parametrize("changed", ["tool_use_id", "session_id", "client_name"])
+def test_post_tool_log_distinguishes_native_calls(tmp_path: Path, changed: str) -> None:
+    engagement_dir = _engagement(tmp_path)
+    capture = tmp_path / "capture.jsonl"
+    _fake_vigil(tmp_path / "bin", capture)
+    env = _session_end_env(tmp_path / "bin")
+    payload = _native_log_payload(engagement_dir)
+
+    first = _run_hook(POST_TOOL_LOG, payload, cwd=engagement_dir, env=env)
+    second = _run_hook(
+        POST_TOOL_LOG, {**payload, changed: "distinct"}, cwd=engagement_dir, env=env
+    )
+
+    assert first.returncode == second.returncode == 0
+    assert len(_captured(capture)) == 2
+
+
+def test_post_tool_log_claims_one_concurrent_native_delivery(tmp_path: Path) -> None:
+    engagement_dir = _engagement(tmp_path)
+    capture = tmp_path / "capture.jsonl"
+    _fake_vigil(tmp_path / "bin", capture)
+    env = _session_end_env(tmp_path / "bin")
+    payload = {
+        **_native_log_payload(engagement_dir),
+        "tool_name": "Agent",
+        "tool_input": {"subagent_type": "reviewer", "description": "Review changes"},
+    }
+
+    def deliver(_: int) -> subprocess.CompletedProcess[str]:
+        return _run_hook(POST_TOOL_LOG, payload, cwd=engagement_dir, env=env)
+
+    with ThreadPoolExecutor(max_workers=12) as pool:
+        results = list(pool.map(deliver, range(24)))
+
+    assert all(result.returncode == 0 for result in results)
+    assert len(_captured(capture)) == 1
+
+
+def test_post_tool_log_claim_is_atomic_during_delayed_seen_reads(tmp_path: Path) -> None:
+    """Two already-completed empty reads must not both acquire one delivery."""
+    engagement_dir = _engagement(tmp_path)
+    (engagement_dir / ".hook_seen_tool_uses").write_text("", encoding="utf-8")
+    capture = tmp_path / "capture.jsonl"
+    bin_dir = tmp_path / "bin"
+    _fake_vigil(bin_dir, capture)
+    real_grep = shutil.which("grep")
+    assert real_grep
+    barrier = tmp_path / "read-barrier"
+    barrier.mkdir()
+    delayed_grep = bin_dir / "grep"
+    delayed_grep.write_text(
+        "#!/usr/bin/env python3\n"
+        "import os, pathlib, subprocess, sys, time\n"
+        f"result = subprocess.run([{real_grep!r}, *sys.argv[1:]], check=False)\n"
+        "if len(sys.argv) > 1 and sys.argv[1] == '-Fxq':\n"
+        f"    barrier = pathlib.Path({str(barrier)!r})\n"
+        "    (barrier / str(os.getpid())).touch()\n"
+        "    deadline = time.monotonic() + 3\n"
+        "    while len(list(barrier.iterdir())) < 2 and time.monotonic() < deadline:\n"
+        "        pass\n"
+        "sys.exit(result.returncode)\n",
+        encoding="utf-8",
+    )
+    delayed_grep.chmod(0o755)
+    payload = {
+        **_native_log_payload(engagement_dir),
+        "tool_name": "Agent",
+        "tool_input": {"subagent_type": "reviewer", "description": "Review changes"},
+    }
+
+    def deliver(_: int) -> subprocess.CompletedProcess[str]:
+        return _run_hook(
+            POST_TOOL_LOG, payload, cwd=engagement_dir, env=_session_end_env(bin_dir)
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(deliver, range(2)))
+
+    assert all(result.returncode == 0 for result in results)
+    assert len(_captured(capture)) == 1
+
+
+def test_post_tool_log_does_not_follow_native_claim_symlink(tmp_path: Path) -> None:
+    engagement_dir = _engagement(tmp_path)
+    capture = tmp_path / "capture.jsonl"
+    _fake_vigil(tmp_path / "bin", capture)
+    identity = json.dumps(["opencode", "session-1", "tu-1"], separators=(",", ":"))
+    digest = hashlib.sha256(identity.encode()).hexdigest()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    sentinel = outside / "sentinel"
+    sentinel.write_text("preserve", encoding="utf-8")
+    claim = engagement_dir / f".hook_tool_use_{digest}"
+    claim.symlink_to(outside, target_is_directory=True)
+
+    result = _run_hook(
+        POST_TOOL_LOG,
+        _native_log_payload(engagement_dir),
+        cwd=engagement_dir,
+        env=_session_end_env(tmp_path / "bin"),
+    )
+
+    assert result.returncode == 0
+    assert _captured(capture) == []
+    assert sentinel.read_text(encoding="utf-8") == "preserve"
+    assert claim.is_symlink()
+
+
+def test_post_tool_log_without_native_identity_retains_short_window_dedup(tmp_path: Path) -> None:
+    engagement_dir = _engagement(tmp_path)
+    capture = tmp_path / "capture.jsonl"
+    _fake_vigil(tmp_path / "bin", capture)
+    payload = {key: value for key, value in _BASH_PAYLOAD.items() if key != "tool_use_id"}
+    env = _session_end_env(tmp_path / "bin")
+
+    first = _run_hook(POST_TOOL_LOG, payload, cwd=engagement_dir, env=env)
+    second = _run_hook(POST_TOOL_LOG, payload, cwd=engagement_dir, env=env)
+
+    assert first.returncode == second.returncode == 0
+    assert len(_captured(capture)) == 1

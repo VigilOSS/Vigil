@@ -34,8 +34,8 @@ _REASONING = Literal["low", "medium", "high", "xhigh", "max"]
 _CONFIDENCE = Literal["low", "medium", "high"]
 _HANDOFF_STATUS = Literal["checkpointed", "ready", "blocked", "superseded"]
 # A dispatch can omit client identity, while a client binding cannot.
-_LAUNCHED_CLIENT = Literal["claude", "codex", "goose", "kimi", "opencode", "pi"]
-_DISPATCH_CLIENT = Literal["claude", "codex", "goose", "kimi", "opencode", "pi", "unknown"]
+_LAUNCHED_CLIENT = Literal["claude", "codex", "goose", "kimi", "opencode", "zcode", "pi"]
+_DISPATCH_CLIENT = Literal["claude", "codex", "goose", "kimi", "opencode", "zcode", "pi", "unknown"]
 _MIXED_ASSESSMENT_ROLES = frozenset({"exploit-developer", "source-analyzer"})
 _CODE_ASSESSMENT_ROLES = frozenset({
     'code-architect', 'code-fuzz-engineer', 'code-variant-hunter',
@@ -196,6 +196,8 @@ class HandoffCreate(BaseModel):
 
 class HandoffUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+    expected_handoff_version: int | None = Field(default=None, ge=1)
 
     summary: str | None = Field(default=None, min_length=1, max_length=2000)
     phase: str | None = Field(default=None, max_length=64)
@@ -778,6 +780,7 @@ async def patch_handoff(
             handoff_status=request.handoff_status,
             closed_dispatch_status=request.closed_dispatch_status,
             extras=request.extras,
+            expected_handoff_version=request.expected_handoff_version,
         )
     )
     await anyio.to_thread.run_sync(

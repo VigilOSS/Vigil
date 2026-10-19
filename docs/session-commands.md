@@ -140,21 +140,27 @@ Eight commands are available across the supported workflows. Each has one canoni
 |---|---|---|
 | `claude` | Project slash commands, `.claude/commands/<name>.md` | `/vigil-resume` |
 | `codex` | Project skills, `.codex/skills/<name>/SKILL.md` | `$vigil-resume` |
-| `opencode`, `goose`, `kimi`, `pi` | None | Paste the body of `agent/commands/<name>.md` |
+| `opencode`, `zcode` | Native assessment command files or enabled ZCode plugin commands | `/vigil-resume` in a prepared web/code session; `/vigil-remediate` in repository-context remediation |
+| `goose`, `kimi`, `pi` | None | Paste the body of `agent/commands/<name>.md` |
 
 Select the operator mode at `vigil engagement start`; command text never changes it. For
 Codex, `$vigil-start <focus>` supplies optional focus within the launched session's mode.
 Use `vigil remediation start` for the focused remediation command instead of selecting an
 assessment mode. Its repository-context overlay does not expose the hunting commands.
 
-Vigil installs no project commands for opencode, goose, kimi, or pi. The content
-is identical — only the invocation differs — so their operators paste the command
-body or run the verbs it names directly.
+OpenCode and ZCode expose the seven assessment commands from a separate generated
+web/code asset tree. Start, resume, handoff, and compact support both tracks. The
+three web-specific commands explain their limitation in code mode rather than
+changing workflows. Repository-context remediation exposes only `vigil-remediate`.
+Follow [ZCode setup](zcode-setup.md) to open the generated workspace, enable the
+native plugin, and start a fresh task. Command discovery is not runtime proof of
+specialist execution or hooks.
+Goose, Kimi, and Pi have no installed project commands; run the applicable verbs or
+use the canonical command guidance within the active workflow.
 
-Where a command's wording has to differ between Claude and Codex (Codex does no
-`$ARGUMENTS` or backtick-bash substitution), the single source carries
-`<!-- vigil:only claude -->` / `<!-- vigil:only codex -->` blocks and the renderer
-filters them.
+Client-specific command instructions live in capability blocks in the canonical
+source; the renderer selects the appropriate body. Native OpenCode/ZCode command
+arguments use `$ARGUMENTS`; they do not execute Claude's inline shell substitutions.
 
 ---
 

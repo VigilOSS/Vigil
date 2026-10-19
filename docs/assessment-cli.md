@@ -119,16 +119,20 @@ printed loudly, with the exact `mark-scratch` fix in its detail line.
 
 `vigil assess proof-work list` separates parked runtime obligations from
 `reverification_required` after a prior runtime verdict is invalidated. Prepare an explicit
-route, record missing human approval once, then claim before native launch. The claim packet
+route, record missing human approval per work item and preparation, then claim before native launch.
+One human answer may name several work IDs; record it against each. Re-preparation requires
+a fresh answer, including under `full_send`. A specialist uses the recorded approval without
+asking the human again. The claim packet
 carries the selected skills, route, authorized phase and mandatory role loads. Only
 `launch_required: true` launches a worker; retrying a claim inspects existing ownership.
 Use `proof-work approve <id> --human-confirmation <text>` or
 `proof-work revoke <id> --reason <text>` for audited operator decisions. Revoke overrides
-`full_send`; recovery never infers that an old worker is dead.
+`full_send` and remains effective across re-preparation for the same finding and route until
+a later exact-work approval. Stale work can still be revoked. Recovery never infers that an old worker is dead.
 
 `finding update --agent-id <dispatch-id>` attributes the editor separately from the original
 author. Write reproduction details before verification. The same canonical verifier can make
-narrow, evidence-preserving reproduction enrichments; a claim change needs fresh review and
+additive, evidence-preserving reproduction enrichments (existing steps and runs remain intact); a claim change needs fresh review and
 receipts remain single-use. Consult `vigil assess contract finding update` for exact fields.
 
 ```bash
@@ -191,7 +195,20 @@ vigil assess agent reconcile-stale [--dry-run] [--max-age-hours N]
 ```
 
 `close` closes an in-progress dispatch whose handoff is `ready` or `blocked`, and
-records a `dispatch_closed_from_handoff` decision row.
+records a `dispatch_closed_from_handoff` decision row. First observe the native return and
+confirm owned execution is terminal: run `vigil assess kali sweep-orphans`, inspect
+`vigil assess command-run list` and proof runs/jobs, and wait for or stop active execution.
+For proof work, also run `vigil assess proof-work reconcile <id>`.
+
+If the returned worker left no final handoff, use:
+
+```bash
+vigil assess agent close <agent-id> --status failed --reason "<observed return and execution state>"
+```
+
+This records a blocked operator recovery handoff without losing checkpoint evidence, closes
+the dispatch as failed, and allows ordinary `agent continue`. Proof ownership instead requires
+release and a fresh claim after execution has ended. A timestamp alone is never evidence of return.
 
 `reconcile-stale` lists in-progress dispatches older than the threshold and closes
 the ones whose handoff is `ready`/`blocked`. It always prints every candidate with

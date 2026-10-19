@@ -98,7 +98,6 @@ from .oob_relay import legacy_relay_route, render_edge_routing
 from .orchestrator import (
     OrchestratorOptions,
     build_frontend,
-    orchestrator_status,
     orchestrator_status_payload,
     start_orchestrator,
     stop_orchestrator,
@@ -587,8 +586,15 @@ def main(argv: list[str] | None = None) -> None:
     mode_p = engagement_sub.add_parser("mode", help="Inspect enabled tracks, phases, prompts, and session selection")
     mode_p.add_argument("key", nargs="?")
     mode_p.add_argument("--json", action="store_true")
-    mode_p.add_argument("--client", choices=["codex", "claude", "opencode", "goose", "kimi", "pi"],
+    mode_p.add_argument("--client", choices=["codex", "claude", "opencode", "zcode", "goose", "kimi", "pi"],
                         default="claude", help="Client for displayed start commands (default: claude)")
+    client_check_p = engagement_sub.add_parser(
+        "client-check", help="Inspect client prerequisites without launching or changing services",
+    )
+    client_check_p.add_argument("key", nargs="?")
+    client_check_p.add_argument("--client", choices=("opencode", "zcode"), required=True)
+    client_check_p.add_argument("--mode", choices=("web", "code"))
+    client_check_p.add_argument("--json", action="store_true")
     engagement_sub.add_parser(
         "current",
         help="Print the resolved active engagement and which tier won (flag/cwd/pointer/env).",
@@ -601,7 +607,7 @@ def main(argv: list[str] | None = None) -> None:
     )
     start_p.add_argument("key", nargs="?")
     start_p.add_argument("--select", action="store_true")
-    start_p.add_argument("--client", choices=["codex", "claude", "opencode", "goose", "kimi", "pi"], required=True)
+    start_p.add_argument("--client", choices=["codex", "claude", "opencode", "zcode", "goose", "kimi", "pi"], required=True)
     start_p.add_argument("--mode", choices=["web", "code", "blue", "remediation", "android"],
                          help="Session prompt for this client process; required with two enabled tracks")
     start_p.add_argument("--thinking", choices=["off", "high", "max"], default=None,
@@ -1841,6 +1847,27 @@ def _engagement(args: argparse.Namespace, install_root: Path) -> None:
             print(json.dumps(state, sort_keys=True))
         else:
             _print_engagement_mode(state)
+    elif command == "client-check":
+        from .client_checks import collect_client_checks
+
+        # An omitted key needs no active engagement, services, or private data.
+        # Explicit keys use the existing read-only resolver and never select it.
+        checked_engagement = resolve_engagement_path(install_root, args.key) if args.key else None
+        context_file = None
+        if not args.key and os.environ.get("VIGIL_CLIENT_CONTEXT") and os.environ.get("VIGIL_SESSION_ENGAGEMENT_DIR"):
+            checked_engagement = Path(os.environ["VIGIL_SESSION_ENGAGEMENT_DIR"])
+            context_file = Path(os.environ["VIGIL_CLIENT_CONTEXT"])
+        checks = collect_client_checks(args.client, engagement=checked_engagement, mode=args.mode, install_root=install_root,
+                                       context_file=context_file)
+        report = {"client": args.client, "engagement": str(checked_engagement) if checked_engagement else None,
+                  "mode": args.mode, "checks": [asdict(check) for check in checks]}
+        if args.json:
+            print(json.dumps(report, indent=2, sort_keys=True))
+        else:
+            for check in checks:
+                print(f"{check.name}\t{check.status}\t{check.detail}")
+        if any(check.status == "FAIL" or (check.required and check.status != "OK") for check in checks):
+            raise SystemExit(1)
     elif command == "current":
         _engagement_current(install_root)
     elif command == "cd-init":
@@ -2892,8 +2919,10 @@ def _backup(args: argparse.Namespace, install_root: Path) -> None:
                 raise SystemExit("No backups found")
             print(json.dumps(asdict(latest) | {"path": str(latest.path)}, indent=2))
     elif args.backup_command == "restore":
-        if orchestrator_status(install_root) != "stopped" and not args.force:
-            raise SystemExit("Backend is running or ownership is unknown. Verify it is stopped before restoring a backup, or pass --force.")
+        backend = orchestrator_status_payload(install_root)
+        if backend["state"] != "stopped" and not args.force:
+            detail = str(backend.get("detail") or "Verify it is stopped before restoring a backup")
+            raise SystemExit(f"Backend is running or ownership is unknown. {detail}. Pass --force only after verifying database safety.")
         backup = backup_module.resolve_backup(install_root, args.backup)
         print(backup_module.restore_backup(install_root, backup))
 

@@ -31,6 +31,7 @@ WORKERS_ENV = "VIGIL_ORCHESTRATOR_WORKERS"
 ORCHESTRATOR_START_TIMEOUT_SECONDS = 600.0
 START_TIMEOUT_ENV = "VIGIL_ORCHESTRATOR_START_TIMEOUT_SECONDS"
 BACKEND_DEPENDENCY_SYNC_TIMEOUT_SECONDS = 120.0
+_PROC_ROOT = Path("/proc")
 
 
 def _emit(record: str, *, state: str | None = None) -> None:
@@ -120,7 +121,7 @@ def _start_orchestrator_locked(options: OrchestratorOptions) -> None:
         _build_report(application_root)
     print(term.row("ok", "Report renderer", "ready", stream=sys.stdout), flush=True)
 
-    process_state = orchestrator_status_payload(install_root, host=options.host, port=options.port)
+    process_state = orchestrator_status_payload(install_root, host=options.host, port=options.port, local_only=True)
     if process_state["state"] == "running":
         pid = str(process_state["pid"])
         if options.allow_existing:
@@ -279,7 +280,7 @@ def _write_process_receipt(path: Path, receipt: dict[str, object]) -> None:
 
 
 def stop_orchestrator(install_root: Path, *, host: str = "127.0.0.1", port: int = 18000) -> None:
-    state = orchestrator_status_payload(install_root, host=host, port=port)
+    state = orchestrator_status_payload(install_root, host=host, port=port, local_only=True)
     if state["state"] == "stopped":
         return
     if state["state"] != "running" or state.get("ownership") != "owned":
@@ -334,8 +335,13 @@ def _listener_application_matches(pid: int, install_root: Path) -> bool:
         return False
 
 
-def orchestrator_status_payload(install_root: Path, *, host: str = "127.0.0.1", port: int = 18000) -> dict[str, object]:
-    """Shared lifecycle truth: birth-checked receipt or explicitly unknown ownership."""
+def orchestrator_status_payload(install_root: Path, *, host: str = "127.0.0.1", port: int = 18000,
+                                local_only: bool = False) -> dict[str, object]:
+    """Inspect ownership; explicit local lifecycle never targets a configured remote URL.
+
+    Default status includes remote uncertainty so restore cannot mistake an
+    unreachable shared-database backend for a stopped process.
+    """
     from .engagements import inspect_backend_ownership, BackendInstallRootStatus
     install_root = install_root.expanduser().resolve()
     pid_file = resolve_runtime_state_dir(install_root) / "pids" / "orchestrator.pid"
@@ -373,16 +379,24 @@ def orchestrator_status_payload(install_root: Path, *, host: str = "127.0.0.1", 
         from urllib.parse import urlsplit
         import ipaddress
         from .paths import resolve_orchestrator_base_url
-        endpoint = resolve_orchestrator_base_url(install_root)
+        configured_endpoint = resolve_orchestrator_base_url(install_root)
+        configured_host, configured_port = host, port
         try:
-            parsed = urlsplit(endpoint)
-            host = parsed.hostname or host
-            port = parsed.port or (443 if parsed.scheme == "https" else 80)
-            local_endpoint = host == "localhost" or ipaddress.ip_address(host).is_loopback
+            parsed = urlsplit(configured_endpoint)
+            configured_host = parsed.hostname or host
+            configured_port = parsed.port or (443 if parsed.scheme == "https" else 80)
+            configured_local = configured_host == "localhost" or ipaddress.ip_address(configured_host).is_loopback
         except ValueError:
-            local_endpoint = False
+            configured_local = False
+        if configured_local or not local_only:
+            endpoint, host = configured_endpoint, configured_host
+            port, local_endpoint = configured_port, configured_local
     port_in_use = _port_in_use(host, port)
-    state = "running" if owned else "unknown" if (port_in_use or not local_endpoint or detail or (identity and not receipt)) else "stopped"
+    if identity and not receipt and not port_in_use and pid is not None:
+        if _listener_application_matches(pid, install_root):
+            detail = (f"legacy backend PID {pid} has no process receipt and is not listening; "
+                      "wait for startup or inspect and stop that process manually before retrying")
+    state = "running" if owned else "unknown" if (port_in_use or not local_endpoint or detail) else "stopped"
     ownership = "owned" if owned else "unknown" if state == "unknown" else "none"
     owner = None
     if identity and receipt.get("process_identity") == identity and receipt.get("workspace") != str(install_root):
@@ -407,7 +421,14 @@ def orchestrator_status_payload(install_root: Path, *, host: str = "127.0.0.1", 
             except SystemExit as exc:
                 detail = str(exc)
         if not owned and not detail:
-            detail = f"listener at {host}:{port} has no verifiable process receipt; inspect the listener before recovery"
+            if not local_endpoint:
+                detail = (f"configured remote endpoint {endpoint} has {observed.state.value} ownership; "
+                          "inspect and stop it on its owning host before restoring a shared database. "
+                          "Local orchestrator start/stop manage the local listener only")
+            else:
+                detail = (f"listener at {host}:{port} has no verifiable process receipt; "
+                          f"inspect its PID with `lsof -nP -iTCP:{port} -sTCP:LISTEN` or "
+                          f"`ss -ltnp 'sport = :{port}'`, verify its workspace, then stop it manually if necessary")
     return {"state": state, "ownership": ownership, "owner_workspace": owner, "detail": detail,
             "pid": pid if owned else None, "process_identity": identity if owned else None,
             "process_group": receipt.get("process_group") if owned else None,
@@ -614,27 +635,87 @@ def _wait_for_port_release(host: str, port: int, *, timeout: float) -> bool:
 
 
 def _port_listener_pid(host: str, port: int) -> int | None:
-    """Return the PID holding host:port via lsof, or None if lsof isn't usable."""
+    """Identify one listener owner through lsof or Linux socket-inode ownership."""
     address = f"[{host}]" if ":" in host else host
     try:
         result = subprocess.run(
             ["lsof", "-nP", f"-iTCP@{address}:{port}", "-sTCP:LISTEN", "-t"],
-            text=True,
-            capture_output=True,
-            check=False,
-            timeout=2,
+            text=True, capture_output=True, check=False, timeout=2,
         )
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+    except (OSError, subprocess.TimeoutExpired):
+        return _proc_listener_pid(host, port)
+    owners = {int(line.strip()) for line in result.stdout.splitlines()
+              if line.strip().isdigit() and int(line.strip()) > 0}
+    if owners:
+        return next(iter(owners)) if len(owners) == 1 else None
+    return _proc_listener_pid(host, port)
+
+
+def _proc_listener_pid(host: str, port: int) -> int | None:
+    """Resolve LISTEN sockets to a unique visible PID in this network namespace.
+
+    This only supplies a candidate: the caller still verifies backend endpoint
+    ownership, application identity and process birth before signaling it.
+    """
+    import ipaddress
+    try:
+        targets = ({ipaddress.ip_address("127.0.0.1"), ipaddress.ip_address("::1")}
+                   if host == "localhost" else {ipaddress.ip_address(host)})
+    except ValueError:
         return None
-    for line in result.stdout.splitlines():
-        candidate = line.strip()
-        if not candidate:
+    inodes = set()
+    for table in ("tcp", "tcp6"):
+        try:
+            rows = (_PROC_ROOT / "net" / table).read_text().splitlines()
+        except OSError:
+            continue
+        for row in rows:
+            fields = row.split()
+            if len(fields) < 10 or fields[3] != "0A":
+                continue
+            try:
+                encoded, encoded_port = fields[1].split(":")
+                if int(encoded_port, 16) != port:
+                    continue
+                raw = b"".join(int(encoded[index:index + 8], 16).to_bytes(4, sys.byteorder)
+                               for index in range(0, len(encoded), 8))
+                bound = ipaddress.ip_address(raw)
+                # A tcp6 wildcard may accept IPv4 (IPV6_V6ONLY is not in
+                # this table). Keep it as a candidate; multiple owners refuse
+                # recovery, and the caller must verify the responding backend.
+                mapped = bound.ipv4_mapped if isinstance(bound, ipaddress.IPv6Address) else None
+                wildcard = bound.is_unspecified and (
+                    bound.version == 6 or any(target.version == bound.version for target in targets)
+                )
+                if bound in targets or mapped in targets or wildcard:
+                    inodes.add(fields[9])
+            except (ValueError, OverflowError):
+                continue
+    if not inodes:
+        return None
+    owners = set()
+    try:
+        processes = list(_PROC_ROOT.iterdir())
+    except OSError:
+        return None
+    for process in processes:
+        if not process.name.isdigit():
             continue
         try:
-            return int(candidate)
-        except ValueError:
+            descriptors = list((process / "fd").iterdir())
+        except OSError:
             continue
-    return None
+        for descriptor in descriptors:
+            try:
+                target = os.readlink(descriptor)
+            except OSError:
+                continue
+            if target.startswith("socket:[") and target[8:-1] in inodes:
+                owners.add(int(process.name))
+                break
+        if len(owners) > 1:
+            return None
+    return next(iter(owners)) if owners else None
 
 
 def _check_port_available(host: str, port: int) -> None:

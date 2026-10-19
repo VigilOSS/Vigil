@@ -241,15 +241,20 @@ command_body() {
         fail("malformed capability block marker")
       }
       split($0, part, " ")
-      if (part[3] != "claude" && part[3] != "codex" && part[3] != "opencode" && part[3] != "zcode") {
-        fail("unknown capability client \047" part[3] "\047")
+      count = split(part[3], clients, ",")
+      matched = 0
+      for (i = 1; i <= count; i++) {
+        if (clients[i] != "claude" && clients[i] != "codex" && clients[i] != "opencode" && clients[i] != "zcode") {
+          fail("unknown capability client \047" clients[i] "\047")
+        }
+        if (clients[i] == want) matched = 1
       }
       if (in_block) {
         fail("nested capability block")
       }
       in_block = 1
       block_start = NR
-      skip = (part[3] == want) ? 0 : 1
+      skip = matched ? 0 : 1
       next
     }
     /^<!-- vigil:end -->$/ {
@@ -397,6 +402,65 @@ render_all_commands() {
     fi
   done
   render_zcode_manifest
+}
+
+# Assessment clients use an independent native tree: repository-context
+# remediation and the shared Blue roster keep their existing configuration.
+render_assessment_clients() {
+  [[ "$TYPE" == red ]] || return 0
+  local client name root out description
+  for client in opencode zcode; do
+    root="$OUTPUT_DIR/.$client/assessment"
+    mkdir -p "$root/commands" "$root/agents"
+    for name in "${COMMAND_NAMES[@]}"; do
+      [[ "$name" != vigil-remediate ]] || continue
+      command_supports_client "$COMMANDS_SRC_DIR/$name.md" "$client" || continue
+      description=$(command_field "$COMMANDS_SRC_DIR/$name.md" description)
+      out="$root/commands/$name.md"
+      {
+        printf -- '---\ndescription: %s\n---\n\n' "$description"
+        printf '<!-- GENERATED FILE — DO NOT EDIT. -->\n<!-- Source: agent/commands/%s.md -->\n\n' "$name"
+        render_stamp md
+        printf '\nUse the context-bound Vigil helper named in this workspace AGENTS.md for every Vigil invocation. Confirm the selected mode before acting.\n\nArguments from this invocation: $ARGUMENTS\n\n'
+        case "$name" in
+          vigil-hunt-deeper|vigil-fresh-skeptic-verify|vigil-triage-reply)
+            printf 'This command implements the web workflow. In code mode, explain that limitation and use the selected code operator workflow instead; do not change modes or load a web operator core.\n\n' ;;
+        esac
+        command_body "$COMMANDS_SRC_DIR/$name.md" "$client" | sed 's/\$vigil-/\/vigil-/g'
+      } > "$out"
+    done
+    for name in "${AGENT_NAMES[@]}"; do
+      out="$root/agents/$name.md"
+      if [[ "$name" == operator ]]; then
+        [[ "$client" == opencode ]] || continue
+        description="Coordinate the session-selected Vigil operator workflow"
+      else
+        description=$(agent_description "$name")
+      fi
+      {
+        printf -- '---\nname: %s\ndescription: %s\n' "$name" "$description"
+        if [[ "$client" == zcode ]]; then
+          printf 'injectAgentsMd: false\n'
+        elif [[ "$name" == operator ]]; then
+          printf 'mode: primary\n'
+        else
+          printf 'mode: subagent\n'
+        fi
+        printf -- '---\n\n<!-- GENERATED FILE — DO NOT EDIT. -->\n'
+        render_stamp md
+        printf '\nUse the explicit context-bound helper and literal engagement/artifact paths supplied in Runtime Identity. Environment-variable path notation in shared instructions denotes those literal paths; do not assume a desktop shell inherits launcher variables.\n\n'
+        if [[ "$name" == operator ]]; then
+          printf 'Read this workspace AGENTS.md and follow only its selected canonical operator prompt.\n'
+        else
+          agent_prompt_body "$name"
+        fi
+      } > "$out"
+    done
+  done
+  root="$OUTPUT_DIR/.zcode/assessment"
+  mkdir -p "$root/.zcode-plugin"
+  printf '{"name":"vigil-assessment","version":"1.0.0","description":"Vigil web/code client integration"}\n' > "$root/.zcode-plugin/plugin.json"
+  printf '{"name":"vigil-assessment","plugins":[{"name":"vigil-assessment","source":"./","version":"1.0.0"}]}\n' > "$root/marketplace.json"
 }
 
 # -----------------------------------------------------------------------------
@@ -1042,6 +1106,7 @@ render_all_wrappers() {
   # Commands are roster-independent (identical for red and blue), so this is
   # idempotent when both types are rendered in one run.
   render_all_commands
+  render_assessment_clients
 }
 
 # Return 0 if all blue specialist sources exist on disk, 1 otherwise. Used by
@@ -1238,6 +1303,17 @@ check_render_one() {
       drift=1
     fi
   done
+
+  if [[ "$check_type" == red ]]; then
+    local native_rel
+    while IFS= read -r native_rel; do
+      native_rel="${native_rel#"$tmp_dir/"}"
+      if [[ ! -f "$source_output_dir/$native_rel" ]] || prompt_files_differ "$source_output_dir/$native_rel" "$tmp_dir/$native_rel"; then
+        printf 'DRIFT (%s): %s differs from source render\n' "$check_type" "$native_rel" >&2
+        drift=1
+      fi
+    done < <(find "$tmp_dir/.opencode/assessment" "$tmp_dir/.zcode/assessment" -type f | sort)
+  fi
 
   # Orphans. agent/.claude and agent/.codex are mirror-synced into the install
   # root by `vigil install` (install.py::_sync_client_entrypoints_fds), so a

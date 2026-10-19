@@ -131,3 +131,14 @@ it('shows renewed verification separately from parked work', async () => {
   render(<ProofWorkTab engagementKey="acme" />);
   expect(await screen.findByText('Independently re-verify the changed claim')).toBeTruthy();
 });
+
+it('lets the operator revoke stale live work while approval remains unavailable', async () => {
+  vi.mocked(listProofWork).mockResolvedValue({owed: [], items: [{...work, current: false, owed: false, approval_required: true}]} as never);
+  render(<ProofWorkTab engagementKey="acme" />);
+  const button = await screen.findByRole('button', {name: 'Revoke live proof 9'});
+  fireEvent.change(screen.getByLabelText('Revocation reason for proof 9'), {target: {value: 'Stop the Acme proof across its changed context'}});
+  expect((button as HTMLButtonElement).disabled).toBe(false);
+  expect((screen.getByRole('button', {name: 'Approve live proof 9'}) as HTMLButtonElement).disabled).toBe(true);
+  fireEvent.click(button);
+  await waitFor(() => expect(approveProofWork).toHaveBeenCalledWith('acme', 9, false, 'Stop the Acme proof across its changed context'));
+});

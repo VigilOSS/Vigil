@@ -583,15 +583,16 @@ def test_preflight_accepts_deepseek_key_for_opencode_from_the_install_env_file(
     main_module._preflight_engagement_start(install_root, preflight_env, "opencode")
 
 
-def test_preflight_rejects_openrouter_only_configuration_for_opencode(
-    preflight_env: Path,
+def test_preflight_preserves_opencode_native_authentication_with_unrelated_provider_settings(
+    preflight_env: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     install_root = preflight_env.parents[2]
     (preflight_env / ".orchestrator.env").write_text("")
     (install_root / ".env").write_text("OPENROUTER_API_KEY=test-openrouter\n")
+    monkeypatch.setattr(preflight_module, "_resolve_provider_key",
+                        lambda *args: pytest.fail("OpenCode authentication remains native-client owned"))
 
-    with pytest.raises(SystemExit, match="opencode needs DEEPSEEK_API_KEY"):
-        main_module._preflight_engagement_start(install_root, preflight_env, "opencode")
+    main_module._preflight_engagement_start(install_root, preflight_env, "opencode")
 
 
 def test_preflight_rejects_ambient_openai_key_for_goose_from_the_install_env_file(

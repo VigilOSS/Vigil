@@ -161,7 +161,7 @@ def _attach_claim_prompt(payload, work, args, cfg, client) -> None:
                   f"proof command attribution: pass `--agent-name {payload['agent_id']}` on every audited run used by a proof receipt; use this dispatch agent_id, not the role name.\n"
                   'Read `vigil assess proof-work get ' + str(work['id']) +
                   '` before execution; use only its current authorized route and targets. '
-                  'The operator records human approval once; proceed when current approval permits. '
+                  'The operator records human approval per work item and preparation; proceed when current approval permits. '
                   'If approval is missing or revoked, stop and report the blocker to the operator. '
                   'Do not approve your own work or request duplicate approval.\n\n'
                   + _mandatory_load_lines(Path(cfg.agent_root), payload['agent_role'], work['route']))
@@ -190,8 +190,11 @@ def _mandatory_load_lines(agent_root: Path, role: str, route: str) -> str:
         refs.extend(matches[0]['references'])
     if any(not ref['present'] for ref in refs):
         raise AssessError('proof-work claim: mandatory role instructions are missing')
-    paths = [f'agent/agents/{role}.md', *(ref['path'] for ref in refs)]
-    return '## Load First\nRead before work:\n' + '\n'.join(f'- {path}' for path in dict.fromkeys(paths))
+    paths = [ref['path'] for ref in refs]
+    return (f'## Load First\nIf the native client has not already loaded the registered {role} role, '
+            f'read agent/agents/{role}.md before work. Do not reread it when the native role is loaded.\n'
+            'Read the mandatory references before work:\n'
+            + '\n'.join(f'- {path}' for path in dict.fromkeys(paths)))
 
 
 def _next_test_lines(plan) -> str:

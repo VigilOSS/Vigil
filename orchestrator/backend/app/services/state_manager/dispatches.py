@@ -256,11 +256,16 @@ def record_dispatch(
             ).fetchone()
             if proof_owner:
                 raise HTTPException(status_code=409, detail=(
-                    'Proof owners cannot continue through ordinary dispatch; reconcile execution, '
-                    'close the ended dispatch, release proof work, then claim fresh work'
+                    'Proof owners cannot continue through ordinary dispatch; run vigil assess kali sweep-orphans, '
+                    'inspect vigil assess command-run list and proof runs/jobs, wait or stop active work, '
+                    'then proof-work reconcile, close the ended dispatch, proof-work release, and claim fresh work'
                 ))
             if parent['status'] not in _common.TERMINAL_DISPATCH_STATUSES:
-                raise HTTPException(status_code=409, detail='Predecessor dispatch must be explicitly closed before continuation')
+                raise HTTPException(status_code=409, detail=('Predecessor dispatch must be explicitly closed before continuation. After observing '
+                        'native return and confirming execution ended, use vigil assess agent close <agent-id>; '
+                        'for no final handoff use agent close <agent-id> --status failed '
+                        '--reason <observed-return-and-execution-state>. Inspect kali sweep-orphans and '
+                        'command-run list; wait or stop active execution first.'))
         existing = connection.execute(
             "SELECT id FROM assessment_dispatches WHERE engagement_id = ? AND agent_id = ?",
             (engagement.id, agent_id),
@@ -907,6 +912,7 @@ def update_handoff(
     handoff_status: str | None = None,
     closed_dispatch_status: str | None = None,
     extras: dict[str, Any] | None = None,
+    expected_handoff_version: int | None = None,
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     closed_dispatch_status = _require_terminal_dispatch_status(closed_dispatch_status)
@@ -928,6 +934,8 @@ def update_handoff(
         ).fetchone()
         if existing is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="handoff not found")
+        if expected_handoff_version is not None and (existing["handoff_version"] or 1) != expected_handoff_version:
+            raise HTTPException(status_code=409, detail="Handoff changed; read its current version before recovery")
         sets: list[str] = []
         values: list[Any] = []
         if summary is not None:
@@ -982,10 +990,16 @@ def update_handoff(
         sets.append("last_checkpoint_at = ?")
         values.append(_common._utcnow_iso_dispatch())
         values.extend([engagement.id, agent_id])
-        connection.execute(
-            f"UPDATE assessment_dispatch_handoffs SET {', '.join(sets)} WHERE engagement_id = ? AND agent_id = ?",
+        version_clause = ""
+        if expected_handoff_version is not None:
+            version_clause = " AND COALESCE(handoff_version, 1) = ?"
+            values.append(expected_handoff_version)
+        updated = connection.execute(
+            f"UPDATE assessment_dispatch_handoffs SET {', '.join(sets)} WHERE engagement_id = ? AND agent_id = ?{version_clause}",
             tuple(values),
         )
+        if updated.rowcount != 1:
+            raise HTTPException(status_code=409, detail="Handoff changed; read its current version before recovery")
         row = connection.execute(
             "SELECT * FROM assessment_dispatch_handoffs WHERE engagement_id = ? AND agent_id = ?",
             (engagement.id, agent_id),

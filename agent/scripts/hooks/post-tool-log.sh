@@ -13,6 +13,9 @@
 #   tool_response    — stdout/stderr object (Claude Bash) or stable response
 #                      string/object (Codex Bash/apply_patch/MCP)
 #   agent_type       — which subagent is running (only present in subagent context)
+#   client_name      — native client namespace (optional)
+#   session_id       — native conversation namespace (optional)
+#   tool_use_id      — native call identity (optional)
 #   hook_event_name  — PostToolUse
 
 # No set -e: jq/grep returning empty is expected, not an error.
@@ -43,19 +46,33 @@ STATUS=$(jq -r '.status // "unknown"' "$ENG_DIR/scope.json" 2>/dev/null || echo 
 [ "$STATUS" != "in_progress" ] && exit 0
 
 # --- Deduplication ---
-# Use a stamp file to track last logged command (within this engagement).
-# Skip if the same command was logged within the last 3 seconds. This prevents
-# loud hooks from flooding the activity_entries table when a command triggers
-# multiple PostToolUse events.
+# Native calls are claimed atomically by client/session/call identity. mkdir
+# neither follows a claim symlink nor overwrites an existing claim. Flat hashed
+# names avoid following an extra caller-controlled directory and keep raw IDs
+# (including slashes/newlines) out of paths. Successful claims persist; definite
+# write failures release only this process's empty directory for later retry.
+# Calls without native identity retain the short command/time fallback.
 DEDUP_FILE="$ENG_DIR/.last_hook_log"
 TOOL_USE_ID=$(echo "$INPUT" | jq -r '.tool_use_id // empty' 2>/dev/null || true)
+NATIVE_CLAIM=""
 
 if [ -n "$TOOL_USE_ID" ]; then
-  SEEN_FILE="$ENG_DIR/.hook_seen_tool_uses"
-  if [ -f "$SEEN_FILE" ] && grep -Fxq "$TOOL_USE_ID" "$SEEN_FILE" 2>/dev/null; then
-    exit 0
+  IDENTITY=$(echo "$INPUT" | jq -c \
+    --arg client "${VIGIL_CLIENT_NAME:-legacy}" \
+    '[.client_name // $client, .session_id // "legacy", .tool_use_id]' \
+    2>/dev/null || true)
+  DIGEST=""
+  if command -v shasum >/dev/null 2>&1; then
+    DIGEST=$(printf '%s' "$IDENTITY" | shasum -a 256 2>/dev/null | cut -d ' ' -f1)
+  elif command -v sha256sum >/dev/null 2>&1; then
+    DIGEST=$(printf '%s' "$IDENTITY" | sha256sum 2>/dev/null | cut -d ' ' -f1)
   fi
-  printf '%s\n' "$TOOL_USE_ID" >> "$SEEN_FILE" 2>/dev/null || true
+  # Without a valid digest, do not pretend duplicate suppression succeeded.
+  # Logging remains best-effort and does not fall back to command-text identity.
+  if [[ "$DIGEST" =~ ^[a-f0-9]{64}$ ]]; then
+    NATIVE_CLAIM="$ENG_DIR/.hook_tool_use_$DIGEST"
+    mkdir -m 700 "$NATIVE_CLAIM" 2>/dev/null || exit 0
+  fi
 fi
 
 tool_response_text() {
@@ -138,14 +155,8 @@ post_activity_entry() {
 }
 
 release_dedup_claim() {
-  if [ -n "$TOOL_USE_ID" ] && [ -f "${SEEN_FILE:-}" ]; then
-    local seen_tmp="${SEEN_FILE}.tmp.$$"
-    grep -Fxv "$TOOL_USE_ID" "$SEEN_FILE" > "$seen_tmp" 2>/dev/null || true
-    if [ -s "$seen_tmp" ]; then
-      mv "$seen_tmp" "$SEEN_FILE" 2>/dev/null || true
-    else
-      rm -f "$seen_tmp" "$SEEN_FILE" 2>/dev/null || true
-    fi
+  if [ -n "$NATIVE_CLAIM" ]; then
+    rmdir "$NATIVE_CLAIM" 2>/dev/null || true
   fi
   if [ -n "${CMD_KEY:-}" ] && [ -f "$DEDUP_FILE" ]; then
     local claimed_key
@@ -173,17 +184,20 @@ case "$TOOL_NAME" in
         ;;
     esac
 
-    # Dedup check: compare first 200 chars + timestamp within 3s window
-    CMD_KEY=$(echo "$COMMAND" | head -c 200)
-    if [ -f "$DEDUP_FILE" ]; then
-      LAST_KEY=$(head -1 "$DEDUP_FILE" 2>/dev/null || true)
-      LAST_TS=$(tail -1 "$DEDUP_FILE" 2>/dev/null || echo "0")
-      NOW_TS=$(date +%s)
-      if [ "$CMD_KEY" = "$LAST_KEY" ] && [ -n "$LAST_TS" ] && [ $((NOW_TS - LAST_TS)) -lt 3 ]; then
-        exit 0
+    # A different native ID is a different call, even with identical command
+    # text. Only callers without identity use the historical short window.
+    if [ -z "$TOOL_USE_ID" ]; then
+      CMD_KEY=$(echo "$COMMAND" | head -c 200)
+      if [ -f "$DEDUP_FILE" ]; then
+        LAST_KEY=$(head -1 "$DEDUP_FILE" 2>/dev/null || true)
+        LAST_TS=$(tail -1 "$DEDUP_FILE" 2>/dev/null || echo "0")
+        NOW_TS=$(date +%s)
+        if [ "$CMD_KEY" = "$LAST_KEY" ] && [ -n "$LAST_TS" ] && [ $((NOW_TS - LAST_TS)) -lt 3 ]; then
+          exit 0
+        fi
       fi
+      printf '%s\n%s\n' "$CMD_KEY" "$(date +%s)" > "$DEDUP_FILE"
     fi
-    printf '%s\n%s\n' "$CMD_KEY" "$(date +%s)" > "$DEDUP_FILE"
 
     # Extract output summary (first 300 chars). Claude sends a response object;
     # Codex sends a stable response string for Bash/unified exec.

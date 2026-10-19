@@ -1,6 +1,7 @@
 ---
 name: vigil-start
 description: Open an authorized engagement — adopt its generated operator role and run that workflow from the top
+clients: claude codex opencode zcode
 ---
 
 Open the authorized Vigil engagement in the current directory. The launched session's
@@ -8,8 +9,8 @@ Open the authorized Vigil engagement in the current directory. The launched sess
 optional focus only; it cannot switch modes or enable another track.
 
 **1. Route safely.** Run `vigil engagement mode`. Confirm its `mode:` matches
-`VIGIL_OPERATOR_MODE`; read this engagement's `AGENTS.md` and only the canonical prompt
-shown as `prompt:`. If resolution fails or the values disagree, STOP before target-facing
+the selected operator seat; read this engagement's `AGENTS.md` and only the canonical prompt
+shown as `prompt:`. If resolution fails or the reported mode differs from the selected operator seat, STOP before target-facing
 work and start a new client with an explicit `--mode`. Do not infer the session's mode
 from enabled tracks. `scope.json` and `ENGAGEMENT.md` remain the scope and ROE authorities.
 
@@ -19,16 +20,12 @@ then run `vigil remediation -k <key> list` and inspect any
 selected case with `vigil remediation -k <key> show <case-id>`. If case work is
 already under way, use `vigil-resume`. For other modes, use the bounded assessment brief:
 
-<!-- vigil:only claude -->
-Use `/vigil-resume` if this engagement is already under way.
-
-!`if [ "${VIGIL_OPERATOR_MODE:-}" != remediation ]; then vigil assess resume-brief 2>&1; fi`
-<!-- vigil:end -->
-<!-- vigil:only codex -->
-Use `$vigil-resume` if this engagement is already under way. Run and read:
+Run this as a standalone command after confirming a non-remediation mode:
 
     vigil assess resume-brief
-<!-- vigil:end -->
+
+If hydration fails, report the failure and stop. Use `vigil-resume` if this engagement is
+already under way.
 
 If the brief shows findings, dispatched agents, or progress beyond the selected workflow's opening
 phase, report that the engagement is in progress and switch to `vigil-resume`. Otherwise continue.
@@ -40,7 +37,7 @@ from its opening phase.
 <!-- vigil:only claude -->
 Additional context from the operator (may be empty): $ARGUMENTS
 <!-- vigil:end -->
-<!-- vigil:only codex -->
+<!-- vigil:only codex,opencode,zcode -->
 Treat additional text in the invocation as focus only. Apply it when consistent with
 `ENGAGEMENT.md`, `scope.json`, and the loaded operator contract; report conflicts.
 <!-- vigil:end -->

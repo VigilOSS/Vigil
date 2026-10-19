@@ -2656,6 +2656,8 @@ export type ProofWork = {
   owed: boolean;
   approved: boolean;
   approval_required: boolean;
+  approval_renewal_required: boolean;
+  approval_revocation_work_id: number | null;
   owner_agent_id: string | null;
   owner_dispatch_id: number | null;
   owner_dispatch_status: string | null;

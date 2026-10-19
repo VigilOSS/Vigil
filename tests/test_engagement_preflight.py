@@ -49,6 +49,7 @@ def blue_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, objec
     (tenant_dir / "acme-workspace.md").write_text("# acme\n")
     engagement_dir = install_root / "agent" / "engagements" / "2026-01-01-0000-acme"
     engagement_dir.mkdir(parents=True)
+    (engagement_dir / "scope.json").write_text('{"engagement_type":"blue","status":"in_progress"}\n')
     (engagement_dir / ".orchestrator.env").write_text("DEEPSEEK_API_KEY=test-key\n")
 
     created = CreatedEngagement(key=engagement_dir.name, path=engagement_dir)
@@ -119,7 +120,7 @@ def red_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, object
     monkeypatch.setattr(
         main_module,
         "start_engagement",
-        lambda root, path, client, client_args, *, no_autoprompt=False: calls.update(started=client),
+        lambda root, path, client, client_args, mode=None, *, thinking=None, no_autoprompt=False: calls.update(started=client),
     )
     monkeypatch.setattr(preflight_module.shutil, "which", lambda _name: "/usr/bin/client")
     monkeypatch.setattr(preflight_module, "orchestrator_status", lambda _root: "running")
@@ -254,17 +255,16 @@ def test_blue_opencode_start_refuses_without_the_deepseek_key(
     assert blue_env["started"] is None
 
 
-def test_red_opencode_start_refuses_without_the_deepseek_key(
+def test_red_opencode_start_uses_the_clients_native_authentication(
     red_env: dict[str, object]
 ) -> None:
     install_root = red_env["install_root"]
     engagement_dir = install_root / "agent" / "engagements" / "2026-01-01-0000-target"  # type: ignore[operator]
     (engagement_dir / ".orchestrator.env").write_text("")
 
-    with pytest.raises(SystemExit, match="opencode needs DEEPSEEK_API_KEY"):
-        _red_start(install_root, "opencode")  # type: ignore[arg-type]
+    _red_start(install_root, "opencode")  # type: ignore[arg-type]
 
-    assert red_env["started"] is None
+    assert red_env["started"] == "opencode"
 
 
 def test_preflight_refuses_cleanly_when_a_provider_env_file_is_not_utf8(

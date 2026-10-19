@@ -24,6 +24,7 @@ Run the hook now and show the operator exactly what will be injected:
 
 !`bash -c 'if [ -n "${VIGIL_AGENT_ROOT:-}" ]; then s="$VIGIL_AGENT_ROOT/scripts/hooks/pre-compact.sh"; elif [ -f agent/scripts/hooks/pre-compact.sh ]; then s=agent/scripts/hooks/pre-compact.sh; else s=../../scripts/hooks/pre-compact.sh; fi; echo "hook: $s"; echo; echo "{\"trigger\":\"manual\"}" | bash "$s"'`
 
+
 Report to the operator, in three lines:
 
 1. whether the contract resolved and printed non-empty output — empty output means the

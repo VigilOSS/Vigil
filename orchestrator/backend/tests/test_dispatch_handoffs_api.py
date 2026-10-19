@@ -427,3 +427,23 @@ def test_handoff_list_rejects_an_unknown_sort(client, isolate_settings) -> None:
         state_manager.list_handoffs(engagement_id, sort="last_checkpoint_at")
     assert exc_info.value.status_code == 400
     assert "invalid handoff sort" in str(exc_info.value.detail)
+
+
+def test_handoff_conditional_update_preserves_a_newer_final_return(client, isolate_settings):
+    _seed(client, isolate_settings)
+    _register_dispatch(client, agent_id='HF-001', agent_role='vulnerability-analyst')
+    created = client.post(f'{BASE}/dispatch-handoffs', json=_full_payload(handoff_status='checkpointed')).json()
+    finished = client.patch(f'{BASE}/dispatch-handoffs/HF-001', json={
+        'summary': 'Acme final evidence', 'handoff_status': 'ready',
+        'expected_handoff_version': created['handoff_version'],
+    })
+    assert finished.status_code == 200, finished.text
+    recovery = client.patch(f'{BASE}/dispatch-handoffs/HF-001', json={
+        'handoff_status': 'blocked', 'closed_dispatch_status': 'failed',
+        'expected_handoff_version': created['handoff_version'],
+    })
+    assert recovery.status_code == 409, recovery.text
+    stored = client.get(f'{BASE}/dispatch-handoffs/HF-001').json()
+    assert stored['handoff_status'] == 'ready'
+    assert stored['summary'] == 'Acme final evidence'
+    assert stored['handoff_version'] == finished.json()['handoff_version']

@@ -11,9 +11,9 @@ Produce a handoff for the next operator session, whether it uses another client 
 restart. The reader has the engagement directory and backend, not this session's context.
 
 **1. Adopt the session's operator role.** Run `vigil engagement mode` and confirm its
-`mode:` matches `VIGIL_OPERATOR_MODE`. Read this engagement's `AGENTS.md`, then only
+`mode:` matches the selected operator seat. Read this engagement's `AGENTS.md`, then only
 the canonical prompt shown as `prompt:` in bounded parts. If resolution fails or the
-values disagree, STOP before writing a handoff; a handoff in the wrong workflow's
+reported mode differs from the selected operator seat, STOP before writing a handoff; a handoff in the wrong workflow's
 state and exit language hides the work that actually governs completion.
 
 **2. Read the complete shared backend hydration.** Ground every claim in backend
@@ -22,12 +22,15 @@ run `vigil remediation -k <key> list` and
 `vigil remediation -k <key> show <case-id>` for the selected case, then follow
 the remediation prompt's evidence and approval checks. For other modes, run:
 
-Run all of these and read their complete output:
+Run each command separately and read its complete output, so the client can match its
+`vigil` allowlist and preserve failure status:
 
     vigil assess resume-brief
     vigil assess agent list --status in-progress
     vigil assess finding list
     vigil assess operator-checkpoint show
+
+If hydration fails, report the failure and stop before writing the handoff.
 
 **3. Read the readiness surface for the loaded mode.** These route to CLI surfaces no operator
 prompt owns; run only the applicable one.

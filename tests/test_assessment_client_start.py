@@ -1,0 +1,104 @@
+"""Native client starts prepare a bounded workspace without a false GUI receipt."""
+from contextlib import nullcontext
+import json
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+from vigil_cli import engagements
+from vigil_cli import main as cli
+from vigil_cli import client_sessions
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+@pytest.fixture
+def context(tmp_path, monkeypatch):
+    monkeypatch.setenv("VIGIL_APPLICATION_DIR", str(ROOT))
+    monkeypatch.setenv("VIGIL_APPLICATION_CACHE", str(tmp_path / "cache"))
+    root = tmp_path / "private"
+    engagement = root / "engagements/acme"
+    engagement.mkdir(parents=True)
+    (engagement / "scope.json").write_text(json.dumps({"status": "in_progress",
+        "engagement_type": "offensive", "tracks": {"web": {"phase": "recon"},
+        "code": {"phase": "ingest"}}}))
+    monkeypatch.setattr(client_sessions, "client_session_bootstrap", lambda *_: nullcontext())
+    receipts = []
+    monkeypatch.setattr(client_sessions, "record_client_session", lambda *args: receipts.append(args))
+    monkeypatch.setattr(engagements, "repair_engagement_client_entrypoints",
+        lambda *args, **kwargs: SimpleNamespace(reconciled=()))
+    monkeypatch.setattr(engagements, "set_active_engagement", lambda *_: None)
+    return root, engagement, receipts
+
+
+def test_zcode_start_cli_accepts_the_native_client_without_backend_work(context, monkeypatch):
+    root, engagement, _ = context
+    monkeypatch.setattr(cli, "_resolve_current_or_selected_engagement", lambda *a, **kw: engagement)
+    calls = []
+    monkeypatch.setattr(cli, "start_engagement", lambda *a, **kw: calls.append((a, kw)))
+    outcome = 0
+    try:
+        cli.main(["--root", str(root), "engagement", "start", "acme", "--client", "zcode",
+                  "--mode", "code", "--skip-preflight"])
+    except SystemExit as exc:
+        outcome = exc.code
+    assert outcome == 0
+    assert calls[0][0][2] == "zcode"
+
+
+def test_zcode_start_prepares_two_mode_bound_workspaces_and_no_pid_receipt(context, monkeypatch):
+    root, engagement, receipts = context
+    from vigil_cli import remediation_clients
+    monkeypatch.setattr(remediation_clients, "_zcode_application", lambda: (Path("/Applications/ZCode.app"), "3.15.3"))
+    calls = []
+    monkeypatch.setattr(engagements.subprocess, "run", lambda *a, **kw: calls.append((a, kw)) or SimpleNamespace(returncode=0))
+    outcome = None
+    try:
+        engagements.start_engagement(root, engagement, "zcode", [], "code")
+        engagements.start_engagement(root, engagement, "zcode", [], "web")
+    except SystemExit as exc:
+        outcome = str(exc)
+    assert outcome is None, outcome
+    workspaces = [Path(call[0][0][-1]) for call in calls]
+    assert len(set(workspaces)) == 2
+    assert receipts == []
+    for workspace, mode in zip(workspaces, ("code", "web")):
+        binding = json.loads((workspace / ".vigil-client-context.json").read_text())
+        assert binding["mode"] == mode
+        assert binding["engagement_dir"] == str(engagement)
+        assert Path(binding["vigil_cli"]).is_file()
+        assert (workspace / "AGENTS.md").read_text().startswith(engagements._SPECIALIST_STOP_SIGN)
+
+
+def test_zcode_refuses_unsupported_mode_before_preparing_context(context):
+    root, engagement, _ = context
+    (engagement / "scope.json").write_text('{"engagement_type":"blue","status":"in_progress"}')
+    with pytest.raises(SystemExit, match="web|code"):
+        engagements.start_engagement(root, engagement, "zcode", [], "blue")
+
+
+@pytest.mark.parametrize("arguments", [["investigate Acme"], ["--prompt", "investigate Acme"],
+                                       ["--prompt=investigate Acme"]])
+def test_opencode_start_merges_opening_and_user_focus_once(context, monkeypatch, arguments):
+    from vigil_cli import assessment_clients as clients
+    root, engagement, receipts = context
+    original = clients.shutil.which
+    monkeypatch.setattr(clients.shutil, "which", lambda name: "/native/opencode" if name == "opencode" else original(name))
+    monkeypatch.setattr(clients.subprocess, "run", lambda *a, **kw: SimpleNamespace(returncode=0, stdout="1.18.10", stderr=""))
+    calls = []
+    monkeypatch.chdir(ROOT)
+    monkeypatch.setattr(clients.os, "execve", lambda path, argv, env: calls.append((path, argv, env)))
+    engagements.start_engagement(root, engagement, "opencode", arguments, "web")
+    _, argv, environment = calls[0]
+    prompts = [argv[index + 1] for index, argument in enumerate(argv) if argument == "--prompt"]
+    prompts.extend(argument.split("=", 1)[1] for argument in argv if argument.startswith("--prompt="))
+    assert len(prompts) == 1
+    assert "investigate Acme" in prompts[0]
+    assert environment["VIGIL_OPERATOR_MODE"] == "web"
+    workspace = Path(environment["VIGIL_CLIENT_CONTEXT"]).parent
+    assert environment["OPENCODE_DISABLE_PROJECT_CONFIG"] == "1"
+    assert environment["OPENCODE_CONFIG_DIR"] == str(workspace / ".opencode")
+    configuration = json.loads((workspace / ".opencode/opencode.json").read_text())
+    assert configuration["instructions"] == [str(workspace / "AGENTS.md")]
+    assert receipts[0][2:] == ("opencode", "web")

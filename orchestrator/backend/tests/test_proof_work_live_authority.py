@@ -275,3 +275,199 @@ def test_scope_admission_failure_names_requested_host_and_flag(client, isolate_s
     assert response.status_code == 400, response.text
     assert 'outside.example' in response.json()['detail']
     assert '--host' in response.json()['detail']
+
+
+@pytest.mark.parametrize('execution', ['command', 'job'])
+@pytest.mark.parametrize(('agent', 'when', 'allowed'), [
+    ('operator', '2026-01-04 00:00:00', True),
+    ('unregistered', '2026-01-04 00:00:00', True),
+    ('operator', '2026-01-02 12:00:00', False),
+    ('operator', '2026-01-03 00:00:00.500', False),
+    ('PROOF-1', '2026-01-04 00:00:00', False),
+])
+def test_finished_proof_bounds_ambiguous_execution_but_retains_owned_work(
+    client, isolate_settings, execution, agent, when, allowed,
+):
+    from app import db
+    seed(client, isolate_settings)
+    work = prepare(client)
+    assert claim(client, work).status_code == 200
+    assert client.patch(f'{BASE}/proof-work/{work["id"]}', json={
+        'agent_id': 'PROOF-1', 'status': 'finished',
+    }).status_code == 200
+    assert client.patch(f'{BASE}/dispatches/PROOF-1', json={'status': 'completed'}).status_code == 200
+    with db.get_connection() as connection:
+        connection.execute(
+            "UPDATE assessment_proof_work_events SET created_at=CASE WHEN action='claimed' "
+            "THEN '2026-01-02 00:00:00' ELSE '2026-01-03 00:00:00' END WHERE work_id=?", (work['id'],),
+        )
+        command_id = connection.execute(
+            "INSERT INTO assessment_command_runs(engagement_id,agent_name,command,started_at,status,run_uuid,tool_name,phase,completed_at,command_hash) "
+            "VALUES(?,?,'sleep 60',?,?,'acme-window-command','sleep','verify','','acme-hash')",
+            (work['engagement_id'], agent, when, 'running' if execution == 'command' else 'completed'),
+        ).lastrowid
+        if execution == 'job':
+            connection.execute(
+                "INSERT INTO assessment_jobs(engagement_id,parent_command_run_id,status,started_at) VALUES(?,?,'stop_failed',?)",
+                (work['engagement_id'], command_id, when),
+            )
+    next_work = prepare(client, objective='Challenge a second bounded Acme case')
+    response = claim(client, next_work, 'PROOF-2')
+    assert response.status_code == (200 if allowed else 409), response.text
+    response = client.post(f'{BASE}/proof-work/{work["id"]}/release', json={'reason': 'Previous proof ended'})
+    assert response.status_code == (200 if allowed else 409), response.text
+
+
+@pytest.mark.parametrize('changed_context', [False, True])
+@pytest.mark.parametrize('previously_approved', [False, True])
+def test_reprepared_web_work_requires_new_exact_approval_even_under_full_send(
+    client, isolate_settings, changed_context, previously_approved,
+):
+    path = seed(client, isolate_settings)
+    policy(path, 'full_send')
+    original = prepare(client, 'web')
+    assert original['approval_required'] is False
+    assert approval(client, original, previously_approved).status_code == 200
+    policy(path, 'full_send', out_of_scope=['example.com'])
+    assert client.post(f'{BASE}/proof-work/{original["id"]}/reconcile').json()['status'] == 'stale'
+    policy(path, 'full_send', out_of_scope=[])
+    work = prepare(client, 'web', **({'objective': 'Challenge the updated Acme boundary'} if changed_context else {}))
+    assert (work['id'] != original['id']) is changed_context
+    assert work['approval_required'] is True
+    assert work['approval_renewal_required'] is True
+    assert work['approval_decision'] == (None if previously_approved else 'revoked')
+    assert claim(client, work).status_code == 409
+    latest_event = json.loads(work['events'][-1]['details_json'])
+    assert latest_event['previous_work_id'] == original['id']
+    assert approval(client, work).status_code == 200
+    assert claim(client, work).status_code == 200
+    current = client.get(f'{BASE}/proof-work/{work["id"]}').json()
+    assert current['approval_renewal_required'] is False
+    assert current['approval_required'] is False
+
+
+def test_stale_work_can_be_revoked_without_losing_run_records_or_blocking_termination(client, isolate_settings):
+    path = seed(client, isolate_settings)
+    policy(path, 'full_send')
+    work = prepare(client, 'web')
+    assert claim(client, work).status_code == 200
+    run = client.post(f'{BASE}/assessment-runs', json={
+        'run_uuid': 'acme-stale-proof', 'run_kind': 'web', 'run_purpose': 'proof',
+        'producer_dispatch_agent_id': 'PROOF-1',
+    }).json()
+    policy(path, 'full_send', out_of_scope=['example.com'])
+    assert client.post(f'{BASE}/proof-work/{work["id"]}/reconcile').json()['status'] == 'stale'
+    revoked = approval(client, work, False)
+    assert revoked.status_code == 200, revoked.text
+    assert revoked.json()['approval_decision'] == 'revoked'
+    assert approval(client, work).status_code == 409
+    assert client.patch(f'{BASE}/proof-work/{work["id"]}', json={
+        'agent_id': 'PROOF-1', 'status': 'claimed', 'run_id': run['id'],
+    }).status_code == 409
+    assert client.patch(f'{BASE}/assessment-runs/{run["id"]}', json={'status': 'interrupted'}).status_code == 200
+    assert client.patch(f'{BASE}/dispatches/PROOF-1', json={'status': 'completed'}).status_code == 200
+    assert client.post(f'{BASE}/proof-work/{work["id"]}/release', json={'reason': 'Execution stopped'}).status_code == 200
+    assert client.get(f'{BASE}/assessment-runs/{run["id"]}').json()['status'] == 'interrupted'
+
+
+def test_later_stale_predecessor_revoke_stops_successor_until_new_exact_approval(client, isolate_settings):
+    from tests.test_proof_work_api import repark
+    path = seed(client, isolate_settings)
+    policy(path, 'full_send')
+    original = prepare(client, 'web')
+    repark(client)
+    successor = prepare(client, 'web')
+    assert successor['id'] != original['id']
+    assert approval(client, successor).status_code == 200
+    revoked = approval(client, original, False)
+    assert revoked.status_code == 200, revoked.text
+    current = client.get(f'{BASE}/proof-work/{successor["id"]}').json()
+    assert current['approval_required'] is True
+    assert current['approval_decision'] == 'revoked'
+    assert claim(client, successor).status_code == 409
+    assert approval(client, successor).status_code == 200
+    assert claim(client, successor).status_code == 200
+    code = prepare(client, 'code')
+    assert code['approval_required'] is False
+
+
+@pytest.mark.parametrize('same_work', [False, True])
+@pytest.mark.parametrize('agent', ['operator', 'PROOF-1'])
+def test_released_claim_only_blocks_new_claim_for_later_attributable_execution(client, isolate_settings, same_work, agent):
+    from app import db
+    seed(client, isolate_settings)
+    work = prepare(client)
+    assert claim(client, work).status_code == 200
+    assert client.patch(f'{BASE}/dispatches/PROOF-1', json={'status': 'completed'}).status_code == 200
+    released = client.post(f'{BASE}/proof-work/{work["id"]}/release', json={'reason': 'No execution remains'})
+    assert released.status_code == 200, released.text
+    with db.get_connection() as connection:
+        connection.execute(
+            "UPDATE assessment_proof_work_events SET created_at=CASE WHEN action='claimed' "
+            "THEN '2026-01-02 00:00:00' ELSE '2026-01-03 00:00:00' END WHERE work_id=?", (work['id'],),
+        )
+        connection.execute(
+            "INSERT INTO assessment_command_runs(engagement_id,agent_name,command,started_at,status,run_uuid,tool_name,phase,completed_at,command_hash) "
+            "VALUES(?,?,'sleep 60','2026-01-04 00:00:00','running','acme-post-release-command','sleep','verify','','acme-hash')",
+            (work['engagement_id'], agent),
+        )
+    next_work = work if same_work else prepare(client, objective='Challenge another Acme boundary')
+    response = claim(client, next_work, 'PROOF-2')
+    assert response.status_code == (200 if agent == 'operator' else 409), response.text
+
+
+def test_reusing_older_work_preserves_later_context_stop_lineage(client, isolate_settings):
+    path = seed(client, isolate_settings)
+    policy(path, 'full_send')
+    original = prepare(client, 'web')
+    policy(path, 'full_send', out_of_scope=['example.com'])
+    assert client.post(f'{BASE}/proof-work/{original["id"]}/reconcile').json()['status'] == 'stale'
+    policy(path, 'full_send', out_of_scope=[])
+    intermediate = prepare(client, 'web', objective='Challenge another Acme case')
+    restored = prepare(client, 'web')
+    assert restored['id'] == original['id'] < intermediate['id']
+    assert approval(client, restored).status_code == 200
+    assert approval(client, intermediate, False).status_code == 200
+    assert claim(client, restored).status_code == 409
+    current = client.get(f'{BASE}/proof-work/{restored["id"]}').json()
+    assert current['approval_revocation_work_id'] == intermediate['id']
+    assert approval(client, restored).status_code == 200
+    assert claim(client, restored).status_code == 200
+
+
+def test_claimed_progress_event_does_not_invent_an_owner_after_release(client, isolate_settings):
+    seed(client, isolate_settings)
+    work = prepare(client)
+    assert claim(client, work).status_code == 200
+    run = client.post(f'{BASE}/assessment-runs', json={
+        'run_uuid': 'acme-claimed-progress', 'run_kind': 'code', 'run_purpose': 'proof',
+        'producer_dispatch_agent_id': 'PROOF-1',
+    })
+    assert run.status_code == 201, run.text
+    assert client.patch(f'{BASE}/proof-work/{work["id"]}', json={
+        'agent_id': 'PROOF-1', 'status': 'claimed', 'run_id': run.json()['id'],
+    }).status_code == 200
+    assert client.patch(f'{BASE}/assessment-runs/{run.json()["id"]}', json={'status': 'interrupted'}).status_code == 200
+    assert client.patch(f'{BASE}/dispatches/PROOF-1', json={'status': 'completed'}).status_code == 200
+    released = client.post(f'{BASE}/proof-work/{work["id"]}/release', json={'reason': 'Recorded run ended'})
+    assert released.status_code == 200, released.text
+    fresh = prepare(client, objective='Challenge next Acme case')
+    response = claim(client, fresh, 'PROOF-2')
+    assert response.status_code == 200, response.text
+
+
+def test_released_claim_with_missing_recorded_owner_still_blocks_retry(client, isolate_settings):
+    from app import db
+    seed(client, isolate_settings)
+    work = prepare(client)
+    owned = claim(client, work).json()
+    assert client.patch(f'{BASE}/dispatches/PROOF-1', json={'status': 'completed'}).status_code == 200
+    assert client.post(f'{BASE}/proof-work/{work["id"]}/release', json={'reason': 'No execution remains'}).status_code == 200
+    with db.get_connection() as connection:
+        connection.execute('PRAGMA foreign_keys=OFF')
+        connection.execute('DELETE FROM assessment_dispatches WHERE id=?', (owned['owner_dispatch_id'],))
+    fresh = prepare(client, objective='Challenge next Acme case')
+    assert fresh['queue_state'] == 'blocked'
+    response = claim(client, fresh, 'PROOF-2')
+    assert response.status_code == 409, response.text
+    assert 'missing dispatch identity' in response.json()['detail']

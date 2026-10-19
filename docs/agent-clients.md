@@ -1,7 +1,7 @@
 # Agent clients
 
-`--client` on `vigil engagement start` selects which agent CLI drives the engagement. All six read the
-same operator prompt and run the same methodology; they differ in the model behind
+`--client` on `vigil engagement start` selects the engagement's agent client.
+Clients read the selected workflow's operator prompt; they differ in the model behind
 them, in whether they can dispatch specialists headlessly, and in whether they
 expose the `vigil-*` session commands.
 
@@ -12,7 +12,8 @@ expose the `vigil-*` session commands.
 | `kimi` | Kimi Code (Moonshot K3, the CLI default) | No — runs inline | No |
 | `pi` | Pi with your configured provider/model (remediation only) | No | No Vigil commands |
 | `goose` | goose on direct DeepSeek | Yes — headless (`delegate`) | No |
-| `opencode` | opencode on direct DeepSeek | No — runs inline | No |
+| `opencode` | Native selected provider/model for web/code | Native assessment roles; verify actual dispatch | Yes (`/vigil-*`) for web/code |
+| `zcode` | ZCode desktop with native selected provider/model (macOS web/code) | Native plugin roles; verify actual dispatch | Yes (`/vigil-*`) through enabled plugin |
 
 Claude and Codex compact automatically
 ([compaction hooks](session-commands.md#compaction-claude-and-codex)) and run with their
@@ -114,7 +115,7 @@ when the engagement's primary launcher configuration can be recognized.
 
 ## Open-model clients
 
-`goose` and `opencode` run direct DeepSeek and require `DEEPSEEK_API_KEY` in
+`goose` and OpenCode's Blue integration run direct DeepSeek and require `DEEPSEEK_API_KEY` in
 Vigil's environment. Set it once in the install root; the launcher exports it to
 the client:
 
@@ -124,8 +125,9 @@ echo 'DEEPSEEK_API_KEY=sk-...' >> ~/vigil/.env
 
 The key is resolved from the process environment, then the engagement's
 `.orchestrator.env`, then the install root's `.orchestrator.env`, then the install
-root's `.env` — first hit wins. The start preflight hard-fails for either open-model
-client if none of them has `DEEPSEEK_API_KEY`. The launcher derives Goose's required
+root's `.env` — first hit wins. The start preflight requires this key for Goose
+and the OpenCode modes using that integration, not native web/code model selection.
+The launcher derives Goose's required
 `OPENAI_API_KEY` from that DeepSeek credential so an unrelated ambient OpenAI key
 cannot be sent to Vigil's DeepSeek endpoint. The Goose provider and upstream are
 likewise pinned to the OpenAI-compatible adapter and `https://api.deepseek.com`, so
@@ -173,12 +175,33 @@ vigil engagement start <key> --client opencode
 The launcher execs opencode's **default TUI** as `--agent operator`, not the
 one-shot `opencode run`. The operator message is passed with `--prompt`.
 
-Set the DeepSeek reasoning level in the engagement's `opencode.json`
-(`provider.deepseek.models.deepseek-v4-pro.options`: `thinking` and `reasoningEffort`).
-opencode runs the operator inline — it cannot dispatch custom specialists headlessly
-(opencode#29616).
+For web/code, select the provider and model natively; Vigil does not require a
+DeepSeek key or force assessment specialist models. To use Z.AI Coding Plan,
+connect the corresponding provider through `/connect` and choose an entitled
+model through `/models`. See [OpenCode providers](https://opencode.ai/docs/providers/#zai).
+Generated assessment roles inherit the selected model. Installed role files do
+not prove that a particular specialist was dispatched successfully.
 
-OpenRouter is not a supported launcher path.
+Blue's existing provider/model routing is unchanged. OpenCode native GUI/desktop
+is not the tested Vigil surface; this integration targets stable 1.x CLI/TUI.
+
+### ZCode desktop
+
+```bash
+vigil engagement start <key> --mode code --client zcode
+```
+
+Use `--mode web` for an admitted web track. Open the exact generated `workspace:`
+path printed by Vigil, not the canonical engagement storage folder. Add the
+workspace's printed local marketplace, install and enable its matched plugin,
+then start a new ZCode task and use the printed opening instructions. A reused
+desktop app is not a newly owned CLI session and may not inherit terminal variables.
+The generated router provides explicit matched helper and engagement paths.
+
+Native authentication, the selected Coding Plan model, and approvals remain
+under ZCode's control. Specialists form a flat roster and opt out of automatic
+operator `AGENTS.md` injection. ZCode support here is web/code only; Blue is not
+enabled by this integration. Full setup and verification: [ZCode setup](zcode-setup.md).
 
 ## Repository-context remediation clients
 
@@ -199,9 +222,24 @@ hook restores pointers to authoritative remediation state; pre-compaction
 steering and terminal session-end receipts are not claimed. Native end-to-end
 acceptance steps are in [remediation](remediation.md#opencode-and-zcode-repository-context).
 
+The dedicated [ZCode setup guide](zcode-setup.md) explains native Coding Plan
+selection, workspace selection, local marketplace installation, plugin enablement,
+fresh tasks, and verification. Read-only prerequisite checks are available without
+opening a client or starting services:
+
+```bash
+vigil engagement client-check --client zcode
+vigil engagement client-check --client opencode --json
+```
+
+These checks do not inspect credentials or test model access. Startup hooks,
+compact hooks, and backend hydration remain separately reported as unverified
+by this prerequisite command; verify their actual delivery separately in a
+native session. It does not consume a runtime health receipt or certify readiness.
+
 ## What the launcher exports
 
-Every client's launcher exports `ENGAGEMENT_DIR`, `VIGIL_SESSION_ENGAGEMENT_DIR`,
+CLI launchers export `ENGAGEMENT_DIR`, `VIGIL_SESSION_ENGAGEMENT_DIR`,
 `ENGAGEMENT_KEY`, `VIGIL_AGENT_ROOT`, `VIGIL_INSTALL_DIR`, `VIGIL_APPLICATION_DIR`,
 `VIGIL_CLIENT_NAME`,
 and — only when not already set — `ORCHESTRATOR_BASE_URL`, resolved from the
@@ -212,15 +250,20 @@ its `.env`. `vigil engagement start` also exports `VIGIL_OPERATOR_MODE` for the 
 The launcher pins its helper CLI to the same release so package upgrades do not
 silently change an active session's contracts.
 
-The specialist roster links (`.codex/agents`, `.claude/agents`, both opencode
-roster spellings, `.goose/recipes`) and the command surfaces (`.claude/commands`,
-`.codex/skills`) are created at **engagement-create** time, not by the launcher.
+Claude/Codex/Goose and the Blue OpenCode roster links are created at
+**engagement-create** time. OpenCode/ZCode web/code starts instead stage their
+assessment assets in a separate immutable client workspace. ZCode's absolute
+`bin/vigil` helper exports the bound context for its own process; it does not
+change the environment of the already running desktop app or arbitrary shell
+commands. Operators and specialists use the literal paths in that context.
 
 ## Forwarding flags to the client
 
 `vigil engagement start` is the one verb parsed leniently: any flag it does not own
 is forwarded to the client verbatim and echoed on stderr as
 `[vigil] forwarding to the client: <args>`.
+ZCode desktop is the exception: forwarded CLI flags are rejected, because its
+model and approvals must be selected natively. Plain opening-prompt text is supported.
 
 A `--`-prefixed token that closely resembles a real Vigil flag is refused with a
 suggestion rather than forwarded:

@@ -1292,9 +1292,19 @@ def test_start_engagement_dispatches_to_exact_client_launcher(
         "execv",
         lambda path, argv: calls.setdefault("execv", (path, argv)),
     )
+    monkeypatch.setattr(engagements.os, "execve", lambda *args: pytest.fail("native launch escaped the selected adapter stub"))
+    if client == "opencode":
+        from vigil_cli import assessment_clients
+
+        monkeypatch.setattr(assessment_clients, "start_client",
+            lambda *args, **kwargs: calls.setdefault("native", (args, kwargs)))
 
     engagements.start_engagement(install_root, engagement_dir, client, ["--model", "test"])
 
+    if client == "opencode":
+        assert calls == {"native": ((install_root, engagement_dir, "opencode", "web", ["--model", "test"]),
+                                    {"no_autoprompt": False})}
+        return
     assert calls == {
         "cwd": engagement_dir,
         "execv": (str(launcher), [str(launcher), "--model", "test"]),

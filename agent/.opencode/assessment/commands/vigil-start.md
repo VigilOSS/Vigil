@@ -1,0 +1,47 @@
+---
+description: Open an authorized engagement — adopt its generated operator role and run that workflow from the top
+---
+
+<!-- GENERATED FILE — DO NOT EDIT. -->
+<!-- Source: agent/commands/vigil-start.md -->
+
+
+Use the context-bound Vigil helper named in this workspace AGENTS.md for every Vigil invocation. Confirm the selected mode before acting.
+
+Arguments from this invocation: $ARGUMENTS
+
+Open the authorized Vigil engagement in the current directory. The launched session's
+`VIGIL_OPERATOR_MODE` selects one operator workflow. Text supplied with this command is
+optional focus only; it cannot switch modes or enable another track.
+
+**1. Route safely.** Run `vigil engagement mode`. Confirm its `mode:` matches
+the selected operator seat; read this engagement's `AGENTS.md` and only the canonical prompt
+shown as `prompt:`. If resolution fails or the reported mode differs from the selected operator seat, STOP before target-facing
+work and start a new client with an explicit `--mode`. Do not infer the session's mode
+from enabled tracks. `scope.json` and `ENGAGEMENT.md` remain the scope and ROE authorities.
+
+**2. Check whether this is actually a start.** A fresh start over live backend state can duplicate
+ownership and repeat completed work. For `remediation`, read `PROJECT.md`,
+then run `vigil remediation -k <key> list` and inspect any
+selected case with `vigil remediation -k <key> show <case-id>`. If case work is
+already under way, use `vigil-resume`. For other modes, use the bounded assessment brief:
+
+Run this as a standalone command after confirming a non-remediation mode:
+
+    vigil assess resume-brief
+
+If hydration fails, report the failure and stop. Use `vigil-resume` if this engagement is
+already under way.
+
+If the brief shows findings, dispatched agents, or progress beyond the selected workflow's opening
+phase, report that the engagement is in progress and switch to `vigil-resume`. Otherwise continue.
+
+**3. Begin the selected workflow.** Read the canonical prompt in bounded parts, following its Map
+of This File. Read `ENGAGEMENT.md` when present and every startup file that prompt names, then begin
+from its opening phase.
+
+Treat additional text in the invocation as focus only. Apply it when consistent with
+`ENGAGEMENT.md`, `scope.json`, and the loaded operator contract; report conflicts.
+
+Report the selected role and mode, opening phase, approval boundary, and first dispatch lanes in
+the loaded prompt's normal format; then begin.

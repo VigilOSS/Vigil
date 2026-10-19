@@ -91,13 +91,20 @@ def _preflight_engagement_start(
     Every line goes to stderr: `vigil blue engage --start` prints the bare
     engagement path on stdout for `eng=$(…)` capture.
     """
-    if shutil.which(client) is None:
+    from .engagements import resolve_engagement_mode
+    mode = resolve_engagement_mode(engagement_dir, mode, client=client, install_root=install_root)
+    if client == "zcode":
+        if mode not in {"web", "code"}:
+            raise SystemExit("ZCode assessment start supports web/code only")
+        from .remediation_clients import _zcode_application
+        _zcode_application()
+    elif shutil.which(client) is None:
         raise SystemExit(
             f"{client} CLI not found on PATH; install it, or start a different client "
             f"with `vigil engagement start {engagement_dir.name} --client <name>`. "
             "Pass --skip-preflight to launch anyway."
         )
-    provider_key = CLIENT_PROVIDER_KEY.get(client)
+    provider_key = None if client == "opencode" and mode in {"web", "code"} else CLIENT_PROVIDER_KEY.get(client)
     if provider_key and not _resolve_provider_key(
         install_root, engagement_dir, provider_key
     ):
@@ -107,8 +114,6 @@ def _preflight_engagement_start(
             "Pass --skip-preflight to launch anyway."
         )
 
-    from .engagements import resolve_engagement_mode
-    mode = resolve_engagement_mode(engagement_dir, mode, client=client, install_root=install_root)
     if client == "pi" and mode != "remediation":
         raise SystemExit("Pi supports remediation engagements only; select codex or claude for this engagement.")
     _ensure_engagement_backend(install_root, engagement_dir)

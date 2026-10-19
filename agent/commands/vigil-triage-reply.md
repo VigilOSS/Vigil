@@ -1,12 +1,13 @@
 ---
 name: vigil-triage-reply
 description: Assess a program's pushback on a submission and decide whether to rebut, resubmit, or drop
+clients: claude codex opencode zcode
 ---
 
 <!-- vigil:only claude -->
 Program pushback to assess (finding, and what they said): $ARGUMENTS
 <!-- vigil:end -->
-<!-- vigil:only codex -->
+<!-- vigil:only codex,opencode,zcode -->
 Assess the program pushback the operator described in their message.
 <!-- vigil:end -->
 

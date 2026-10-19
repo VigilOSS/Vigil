@@ -14,7 +14,7 @@ operator mode; the engagement's enabled tracks do not select a combined role.
 command. It resolves the selected mode from the session environment; confirm the reported
 `mode:` matches the selected operator seat, and read only the canonical file shown as `prompt:`.
 Read this engagement's `AGENTS.md` router first, then the selected prompt in bounded parts,
-following its Map of This File. If mode resolution fails, the values disagree, or no mode is
+following its Map of This File. If mode resolution fails, the reported mode differs from the selected operator seat, or no mode is
 selected, STOP before target-facing work. Start a new client with
 `vigil engagement start <key> --mode <mode> --client <client>`; do not infer a role from
 `scope.json`, another track's findings, a handoff, or this session's summary. Operator

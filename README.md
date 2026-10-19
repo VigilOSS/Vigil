@@ -97,9 +97,11 @@ uv tool install --from https://github.com/VigilOSS/Vigil/releases/download/v2.0.
 ```
 
 Install and sign in to an agent client before starting an operator. Engagement clients:
-**Claude Code, Codex, OpenCode, Goose, Kimi, and Pi**. Setup and support differences:
+**Claude Code, Codex, OpenCode, ZCode, Goose, Kimi, and Pi**. Setup and support differences:
 [agent clients](docs/agent-clients.md). Model access affects what testing the provider permits;
 check [models and access](docs/model-access.md).
+For ZCode desktop, follow [ZCode setup](docs/zcode-setup.md): open the exact generated
+workspace printed by Vigil, enable its local plugin, and begin a fresh task.
 
 ### Audit source code
 
@@ -367,6 +369,8 @@ proposal approval, audited execution, and explicit recording.
 
 Remediation clients: **Claude Code, OpenCode, and ZCode**. See
 [agent clients](docs/agent-clients.md#repository-context-remediation-clients).
+For desktop installation, Coding Plan selection, local plugin enablement, and
+workspace selection, see [ZCode setup](docs/zcode-setup.md).
 
 The rationale behind hunting, evidence, coverage, and operator trust is in the
 [architecture decisions](docs/adr/). Particularly relevant:

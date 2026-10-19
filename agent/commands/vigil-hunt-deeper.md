@@ -1,6 +1,7 @@
 ---
 name: vigil-hunt-deeper
 description: Push past a shallow stopping point — wider batches, deeper dispatches, siblings off anything that signals
+clients: claude codex opencode zcode
 ---
 
 You have stopped short. Restart the hunt at depth.
@@ -12,7 +13,7 @@ Current lane state:
 
 !`vigil assess agent list --status in-progress 2>&1`
 <!-- vigil:end -->
-<!-- vigil:only codex -->
+<!-- vigil:only codex,opencode,zcode -->
 If the operator named specific surfaces or constraints for this push in their message, start
 there — but still cover the rest. Check current lane state first:
 

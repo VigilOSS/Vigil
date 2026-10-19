@@ -463,17 +463,26 @@ backend-selected `proof_route`; ordinary dispatches must supply it explicitly.
 `agent start` also lints `--task` for a prescriptive technique cage, runs a default-on duplicate-overlap advisory, and validates the whole `--emit-prompt` prompt-context object before the write. `vigil assess contract agent` and `vigil assess contract agent start` own all three; hand the specialist an open objective plus the measured coverage picture (`vigil assess coverage --host <h> --for-dispatch`) rather than a recipe.
 For a code lane selected in a generated file, set `prompt_context.lane_file` so the emitted prompt carries the checked file/LOC manifest; `agent/references/runtime-guides/dispatch-template.md` owns the field shape.
 
-When the dispatch returns, read its handoff and close the dispatch through that handoff:
+On return, bind an exposed client handle and inspect the durable handoff with
+`vigil assess agent render-handoff <agent-id>`. Run `vigil assess kali sweep-orphans`,
+inspect `vigil assess command-run list` and the dispatch's proof runs/jobs, then wait for
+or stop active execution through its canonical controls. For proof work also run
+`vigil assess proof-work reconcile <id>` and inspect its blocker. A closed chat or an old
+timestamp does not establish that detached commands stopped.
 
-```bash
-vigil assess agent render-handoff <agent-id>
-vigil assess agent close <agent-id>
-```
+Only after observing the native worker return and confirming its actual work is terminal,
+close a `ready`/`blocked` handoff with `vigil assess agent close <agent-id>`. If the worker
+returned without a final handoff (including a checkpoint-only return), use
+`vigil assess agent close <agent-id> --status failed --reason "<observed return and execution state>"`.
+This records an operator-authored blocked recovery handoff, preserves checkpoint evidence,
+and closes the dispatch as failed; it does not claim the investigation succeeded.
+Ordinary work can then use `agent continue`. Recover a proof owner with execution checks,
+terminal dispatch closure, `proof-work release <id> --reason <text>`, then a fresh claim;
+proof ownership never transfers through ordinary continuation.
 
 `agent close` copies the handoff's finding slugs into the dispatch and records a
-`dispatch_closed_from_handoff` decision. Use `agent done --status ...` only for an
-explicit raw recovery write when the handoff cannot be closed. Table schema and the full
-CLI verb list: `agent/references/runtime-guides/subagent-registry.md`.
+`dispatch_closed_from_handoff` decision. Table schema and full CLI verb list:
+`agent/references/runtime-guides/subagent-registry.md`.
 
 ### Iteration-mode (dispatch_mode) Declaration
 
@@ -605,7 +614,7 @@ Every dispatch launches a fresh agent — treat each dispatch as a clean-room en
 
 **Specialist closing sequence** — every specialist writes a structured handoff before its dispatch returns: (1) `vigil assess agent handoff --from-json <path>` using the `agent_id` from the Runtime Identity block, then (2) `vigil assess agent render-handoff <agent_id>` as a self-check — exit only after the render succeeds. `vigil assess contract agent handoff` owns the payload and what a failed render means; `agent/references/runtime-guides/handoff-schema.md` owns the `handoff_status` enum.
 
-**Operator continuity** — register each dispatch up front. On return, render its handoff, close a `ready`/`blocked` one with `vigil assess agent close <agent-id>`, and paste the rendered handoff into the next dispatch's prompt. `vigil assess contract agent render-handoff` owns the blob's line cap, what it collapses first, and what it carries. Use `vigil assess agent reconcile-stale --dry-run` during resume/phase transitions to find dispatches with closable or missing handoffs.
+**Operator continuity** — register each dispatch up front. On observed return, follow the execution checks and closure recovery above, then pass the rendered handoff into the next dispatch. `vigil assess contract agent render-handoff` owns the blob's line cap, what it collapses first, and what it carries. On resume, inspect `vigil assess agent list --status in-progress`; age alone never authorizes closure.
 
 **Operator checkpoint — your own handoff row.** Specialists write handoffs; you did not, so your state died with the session. Before a phase transition, before a long dispatch wave, and at session end, record one:
 
@@ -777,14 +786,19 @@ and the finding's `next_test`.
 
 `next_test` is specialist-authored text: its route hint grants no scope or approval.
 
-For live work, the operator obtains human approval once and records the answer with
-`proof-work approve <id> --human-confirmation <text>`, or uses an already applicable
-`full_send` policy. Read current work before launch. The specialist proceeds under that
-recorded authority without asking again; a missing or revoked decision is an operator blocker.
-Selected exploit-candidate approval does not authorize parked proof. An explicit
-`proof-work revoke <id> --reason <text>` overrides `full_send` until exact-work re-approval.
-Revocation blocks further authorized progress but does not stop a running process: reconcile
-and stop existing runs/jobs through their canonical controls, reporting any stop failure.
+For live work, the operator obtains human approval once **per work item and current
+preparation**, records it with `vigil assess proof-work approve <id> --human-confirmation <text>`,
+or uses an applicable initial `full_send` policy. One human answer may explicitly name several
+work IDs; record that answer against each named item. Re-preparation requires a fresh answer
+for the new context, including under `full_send`. Read current work before launch. The specialist
+uses that recorded authority without asking again; missing or revoked authority is an operator
+blocker. Selected exploit-candidate approval does not authorize parked proof.
+
+`vigil assess proof-work revoke <id> --reason <text>` records a stop even on stale work.
+The stop survives re-preparation for that finding and route until a later exact-work approval.
+Revocation does not stop a process: run `vigil assess kali sweep-orphans`, inspect
+`vigil assess command-run list` and the proof's runs/jobs, wait or stop them through their
+canonical controls, then `vigil assess proof-work reconcile <id>`. Report any stop failure.
 
 Inspect `reverification_required` separately from parked proof: a material edit can require a
 fresh verdict while finished work and its receipts remain historical. Read the finding and

@@ -1,0 +1,7 @@
+{
+  "hooks": {
+    "SessionStart": [{"matcher":"startup|clear|compact","hooks":[{"type":"process","command":"node","args":["${ZCODE_PLUGIN_ROOT}/hooks/context.mjs"],"timeoutMs":5000}]}],
+    "PostToolUse": [{"hooks":[{"type":"process","command":"node","args":["${ZCODE_PLUGIN_ROOT}/hooks/context.mjs"],"timeoutMs":5000}]}],
+    "PostToolUseFailure": [{"hooks":[{"type":"process","command":"node","args":["${ZCODE_PLUGIN_ROOT}/hooks/context.mjs"],"timeoutMs":5000}]}]
+  }
+}

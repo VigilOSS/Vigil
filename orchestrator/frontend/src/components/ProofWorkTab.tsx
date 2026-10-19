@@ -87,7 +87,7 @@ function ProofWorkWorkspace({engagementKey, refreshVersion = 0}: ProofWorkTabPro
         <h4><a href={engagementHref(engagementKey, {tab: "findings", finding: work.finding_slug})}>{work.finding_slug}</a> · Proof {work.id} <QueueStateLabel state={work.queue_state} /></h4>
         <p className="proof-objective">{work.objective}</p>
         <dl><dt>Route</dt><dd>{work.route === "code" ? "Local code reproduction in Kali" : "Live application test"}</dd><dt>Status</dt><dd>{work.status}</dd><dt>Owner</dt><dd>{work.owner_agent_id || "Unclaimed"}{work.owner_dispatch_status ? ` (${work.owner_dispatch_status})` : ""}</dd>
-          <dt>Approval</dt><dd>{!work.current ? "Context changed; approval cannot authorize execution" : work.route === "code" ? "Local sandbox work" : work.approval_required ? "Live proof approval required" : "Approved for this work"}</dd>
+          <dt>Approval</dt><dd>{!work.current ? "Context changed; approval cannot authorize execution" : work.route === "code" ? "Local sandbox work" : work.approval_required ? (work.approval_renewal_required ? "Fresh approval required for this preparation" : "Live proof approval required") : "Approved for this work"}</dd>
           {work.target_hosts.length > 0 && <><dt>Targets</dt><dd>{work.target_hosts.join(", ")}</dd></>}
         </dl>
         <NextTestPlan nextTest={work.next_test} />
@@ -95,10 +95,11 @@ function ProofWorkWorkspace({engagementKey, refreshVersion = 0}: ProofWorkTabPro
         {work.blocker && <p className="finding-proof-gap">{work.blocker}</p>}
         {work.run_ids.length > 0 && <p>Evidence: {work.run_ids.map(id => <a className="proof-run-link" key={id} href={engagementHref(engagementKey, {tab: "runs", run: id})}>Run {id}</a>)}</p>}
         <div className="proof-actions">
-          {work.route === "web" && (work.approval_required ?
-            <button type="button" className="ghost-button" aria-label={`Approve live proof ${work.id}`} disabled={busy || !!error || !work.current || !work.owed} onClick={() => void act(() => approveProofWork(engagementKey, work.id, true))}>Approve this live proof</button> :
-            <><label>Revocation reason<textarea aria-label={`Revocation reason for proof ${work.id}`} maxLength={8192} value={revokeReasons[work.id] ?? ""} onChange={event => setRevokeReasons(previous => ({...previous, [work.id]: event.target.value}))} /></label>
-            <button type="button" className="ghost-button" aria-label={`Revoke live proof ${work.id}`} disabled={busy || !!error || !work.current || !work.owed || !revokeReasons[work.id]?.trim()} onClick={() => void act(() => approveProofWork(engagementKey, work.id, false, revokeReasons[work.id]))}>Revoke work approval</button></>)}
+          {work.route === "web" && <>
+            {work.approval_required &&
+            <button type="button" className="ghost-button" aria-label={`Approve live proof ${work.id}`} disabled={busy || !!error || !work.current || !work.owed} onClick={() => void act(() => approveProofWork(engagementKey, work.id, true))}>Approve this live proof</button>}
+            <label>Revocation reason<textarea aria-label={`Revocation reason for proof ${work.id}`} maxLength={8192} value={revokeReasons[work.id] ?? ""} onChange={event => setRevokeReasons(previous => ({...previous, [work.id]: event.target.value}))} /></label>
+            <button type="button" className="ghost-button" aria-label={`Revoke live proof ${work.id}`} disabled={busy || !!error || !revokeReasons[work.id]?.trim()} onClick={() => void act(() => approveProofWork(engagementKey, work.id, false, revokeReasons[work.id]))}>Revoke work approval</button></>}
           <button type="button" className="ghost-button" aria-label={`Reconcile proof ${work.id}`} disabled={busy} onClick={() => void act(() => reconcileProofWork(engagementKey, work.id))}>Reconcile recorded state</button>
           <button type="button" className="ghost-button" aria-label={`Show audit history for proof ${work.id}`} disabled={busy} onClick={() => void act(async () => {
             const detail = await getProofWork(engagementKey, work.id);

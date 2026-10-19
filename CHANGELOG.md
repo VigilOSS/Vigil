@@ -5,7 +5,7 @@ versioning follows [Semantic Versioning][semver].
 
 Durable design decisions live in [`docs/adr/`](docs/adr/).
 
-## [2.0.0] - 2026-10-18
+## [2.0.0] - 2026-10-19
 
 ### Added
 
@@ -20,6 +20,9 @@ Durable design decisions live in [`docs/adr/`](docs/adr/).
   prompt carries the current next test.
 - Release tags build a matched Linux AMD64/ARM64 Kali image, application wheel, and source archive.
   The workflow publishes the image by digest and attaches application artifacts to a draft release.
+- OpenCode and ZCode assessment launches prepare mode-specific workspaces, native commands,
+  specialist instructions and hook adapters. Native model execution, specialist activity and
+  compaction acceptance remain preview limitations for follow-up verification.
 - OpenCode can start a native remediation TUI with Vigil's case command. A ZCode preview prepares a
   repository-bound local plugin and context hook; plugin activation, model selection, compaction,
   and resume behavior still require native desktop acceptance on the operator's machine.
@@ -53,6 +56,18 @@ Durable design decisions live in [`docs/adr/`](docs/adr/).
 
 ### Fixed
 
+- Operators can close an observed failed worker return without losing its checkpoint, then
+  continue ordinary work. Version checks protect newer handoffs and retries complete interrupted
+  closure audit writes.
+- Finished proof work bounds ambiguous execution checks to its active interval. Later unrelated
+  operator commands do not hold new proof work indefinitely; actual owner execution still blocks it.
+- Live-proof stops remain effective across changed preparations, stale work can be revoked, and
+  re-preparation requires fresh exact-work approval. Reproduction enrichment preserves prior evidence.
+- Local backend start and stop use the managed endpoint independently of a remote client URL.
+  Reused PID files get accurate diagnostics, and Linux listener recovery supports IPv4/IPv6 without
+  requiring `lsof` while retaining ownership and process identity checks.
+- Start and handoff commands run standalone Vigil calls compatible with restrictive client
+  allowlists. Dispatch guidance avoids duplicate role loading and names explicit recovery commands.
 - Concurrent database initialization keeps schema creation inside the caller's transaction, so
   first-run and upgrade processes cannot interleave partially initialized tables.
 - Docker daemon outages leave image and container state explicitly unknown instead of producing

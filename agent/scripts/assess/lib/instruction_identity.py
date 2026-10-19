@@ -16,6 +16,7 @@ _CLIENT_SPECIALIST_PATHS = {
     "codex": Path("agent/.codex/agents/{role}.toml"),
     "goose": Path("agent/.goose/recipes/{role}.yaml"),
     "opencode": Path("agent/.opencode/agent/{role}.md"),
+    "zcode": Path("agent/.zcode/assessment/agents/{role}.md"),
 }
 _KNOWN_CLIENTS = frozenset({*_CLIENT_SPECIALIST_PATHS, "kimi", "pi"})
 
@@ -128,6 +129,8 @@ def build_dispatch_instruction_identity(
     specialist_relative: Path | None = None
     specialist_digest: str | None = None
     template = _CLIENT_SPECIALIST_PATHS.get(launcher_client)
+    if launcher_client == "opencode" and os.environ.get("VIGIL_CLIENT_CONTEXT"):
+        template = Path("agent/.opencode/assessment/agents/{role}.md")
     if template is None:
         if launcher_client == "unknown":
             warnings.append(

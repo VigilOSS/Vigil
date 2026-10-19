@@ -2196,21 +2196,23 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
     if verb == "close":
         return CommandContract(
             name="agent close",
-            summary="Consume the latest ready/blocked handoff and close the matching dispatch row.",
+            summary="Close a final handoff, or record failed-return recovery without losing checkpoint evidence.",
             schema_name="GET dispatch-handoffs/{agent_id} + PATCH dispatches/{agent_id} + decision-record",
             preferred_invocations=(
                 "vigil assess agent close <agent-id>",
                 "vigil assess agent close <agent-id> --reason \"ready handoff reviewed\"",
                 "vigil assess agent close AG-1 AG-2 AG-3",
+                'vigil assess agent close <agent-id> --status failed --reason "<observed return and execution state>"',
             ),
             author_supplied_fields=(
                 "<agent-id> (one or more; batch closes each ready/blocked handoff)",
                 "--reason",
             ),
             notes=(
-                "Use after a specialist checkpoint marks handoff_status=ready or blocked. Checkpointed handoffs stay open.",
+                "Use only after observing the native worker return and checking owned execution ended. Run kali sweep-orphans, inspect command-run list and proof runs/jobs, and wait or stop active execution; proof-work reconcile reports durable proof blockers. Age or chat closure alone does not prove execution ended.",
+                "Normal close consumes ready/blocked handoffs. For absent or checkpointed handoffs, --status failed requires a nonblank --reason of at most 8192 characters; it records an operator-authored blocked handoff, preserves checkpoint evidence, and closes an in-progress dispatch as failed. Ordinary work may then continue; proof work requires release and a fresh claim.",
                 "Batch: list several agent-ids to close each in a resilient loop; a non-closable/checkpointed dispatch is reported and skipped, not fatal.",
-                "Records a dispatch_closed_from_handoff decision row so automated/stale closure stays auditable.",
+                "Records a dispatch_closed_from_handoff decision row so automated/stale closure stays auditable. Failed-return checkpoint updates compare the observed handoff version and refuse a concurrent newer return. Retrying the same failed recovery can complete a missing audit write without changing its completion timestamp.",
             ),
         )
     if verb == "reconcile-stale":

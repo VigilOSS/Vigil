@@ -1,12 +1,13 @@
 ---
 name: vigil-fresh-skeptic-verify
 description: Dispatch a fresh low-context specialist to attack a finding as a hostile triager would
+clients: claude codex opencode zcode
 ---
 
 <!-- vigil:only claude -->
 Finding to verify: $ARGUMENTS
 <!-- vigil:end -->
-<!-- vigil:only codex -->
+<!-- vigil:only codex,opencode,zcode -->
 Verify the finding the operator named in their message.
 <!-- vigil:end -->
 

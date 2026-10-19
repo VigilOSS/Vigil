@@ -125,7 +125,7 @@ vigil assess agent start-swarm \
     --task "download each file in this batch from <bucket>, scan for hardcoded credentials, API keys, internal hostnames, exploitable patterns; record findings as code-vuln-hunter prefix"
 ```
 
-The helper does NOT spawn specialists — it writes N dispatch rows and prints the agent_id table. Operator dispatches the N workers manually via `@code-vuln-hunter` (Claude Code) or `spawn_agent` (Codex). Each worker reads its slice from `vigil assess agent get <agent_id>`. Detail: `agent/operator-core.md` Swarm Dispatch.
+The helper does NOT spawn specialists — it writes N dispatch rows and prints the agent_id table. Operator dispatches the N workers manually using the actual native client tool schema and registered `code-vuln-hunter` role. Each worker reads its slice from `vigil assess agent get <agent_id>`. Detail: `agent/operator-core.md` Swarm Dispatch.
 
 ### Step 5 — Offline secret scan over the downloaded sample
 

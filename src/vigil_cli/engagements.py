@@ -1715,6 +1715,11 @@ def start_engagement(install_root: Path, engagement_dir: Path, client: str, extr
             "or create a remediation engagement for Pi."
         )
     selected_mode = resolve_engagement_mode(engagement_dir, mode, client=client, install_root=install_root)
+    if client == "zcode" or (client == "opencode" and selected_mode in {"web", "code"}):
+        from .assessment_clients import start_client
+
+        start_client(install_root, engagement_dir, client, selected_mode, extra_args, no_autoprompt=no_autoprompt)
+        return
     prompt = engagement_mode_prompt(install_root, selected_mode)
     if not prompt.is_file():
         raise SystemExit(f"operator prompt not found at {prompt}; run `vigil install {install_root}`")

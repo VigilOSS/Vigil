@@ -197,7 +197,7 @@ def register(subparsers) -> None:
 
     for action_name, help_text in (
         ("get", "Fetch dispatch rows by agent id."),
-        ("close", "Close dispatches from ready or blocked handoffs."),
+        ("close", "Close final handoffs, or record an observed failed return."),
     ):
         action_parser = actions.add_parser(
             action_name, help=help_text, allow_abbrev=False
@@ -205,7 +205,9 @@ def register(subparsers) -> None:
         action_parser.add_argument("extra", nargs="+", metavar="agent-id")
         if action_name == "close":
             action_parser.add_argument("--completed-at", default=None)
-            action_parser.add_argument("--reason", default="agent close")
+            action_parser.add_argument("--reason", default=None)
+            action_parser.add_argument("--status", dest="close_status", choices=("failed",), default=None,
+                                       help="Record an observed failed return without a final handoff; requires --reason.")
 
     handoff = actions.add_parser(
         "handoff", help="Create or update a handoff from JSON.", allow_abbrev=False
@@ -400,8 +402,11 @@ def _continue(args) -> None:
             raise SystemExit(2)
         if str(prior.get("status") or "") == "in-progress":
             print(
-                "agent continue: prior dispatch is still in progress; reconcile its execution and close it explicitly "
-                "before starting replacement work",
+                "agent continue: prior dispatch is still in progress. Inspect `vigil assess kali sweep-orphans` "
+                "and `vigil assess command-run list`; wait for or stop active execution. After an observed native "
+                f"return, close its final handoff with `vigil assess agent close {prior_agent_id}`. "
+                f"If no final handoff exists, use `vigil assess agent close {prior_agent_id} "
+                "--status failed --reason '<observed return and execution state>'`, then retry continuation.",
                 file=sys.stderr,
             )
             raise SystemExit(2)
@@ -551,6 +556,10 @@ def _utcnow_iso() -> str:
 
 
 def _close(args) -> None:
+    if getattr(args, "close_status", None) == "failed":
+        reason = getattr(args, "reason", None) or ""
+        if not reason.strip() or len(reason) > 8192:
+            raise SystemExit("agent close --status failed requires --reason with 1–8192 characters describing the observed return and ended execution")
     # Batch: `agent close a b c` closes each ready/blocked handoff. A single id keeps
     # the detailed non-closable guidance below; multiple ids run a resilient loop
     # where a non-closable/checkpointed dispatch is reported and skipped, not fatal.
@@ -570,7 +579,8 @@ def _close(args) -> None:
     try:
         for agent_id in ids:
             try:
-                result = _close_via_client(client, agent_id, reason=reason)
+                result = _close_via_client(client, agent_id, reason=reason,
+                                           failed_return=getattr(args, "close_status", None) == "failed")
             except _ReconcileSkipped as exc:
                 failed += 1
                 print(f"agent close: {agent_id} skipped: {exc}", file=sys.stderr)
@@ -588,66 +598,51 @@ def _close(args) -> None:
         sys.exit(1)
 
 
+def _failed_return_handoff(client, agent_id: str, dispatch_row: dict, handoff: dict | None, reason: str) -> dict:
+    """Record operator recovery without inventing a specialist's final result."""
+    if handoff and str(handoff.get("handoff_status") or "checkpointed") != "checkpointed":
+        recovery = (handoff.get("extras") or {}).get("operator_recovery") or {}
+        if (handoff.get("handoff_status") == "blocked" and handoff.get("closed_dispatch_status") == "failed"
+                and isinstance(recovery, dict) and recovery.get("kind") == "returned_without_final_handoff"):
+            return handoff  # Retry after a successful recovery write and interrupted close.
+        raise _ReconcileSkipped("a final handoff exists; close it normally to retain the specialist's disposition")
+    recovery = {"kind": "returned_without_final_handoff", "actor": "operator", "reason": reason,
+                "prior_handoff_version": handoff.get("handoff_version") if handoff else None}
+    patch = {
+        "handoff_status": "blocked", "closed_dispatch_status": "failed",
+        "extras": {**((handoff or {}).get("extras") or {}), "operator_recovery": recovery},
+        "runtime_issues": [*((handoff or {}).get("runtime_issues") or []),
+                           {"kind": "returned_without_final_handoff", "detail": reason, "actor": "operator"}],
+    }
+    if handoff:
+        patch["expected_handoff_version"] = handoff["handoff_version"]
+        return client.update_handoff(agent_id, patch)
+    return client.record_handoff({
+        "agent_id": agent_id, "agent_role": dispatch_row["agent_role"],
+        "summary": "Operator recovery: native worker returned without a final handoff; unfinished work remains.",
+        **patch,
+    })
+
+
 def _close_one(args, agent_id: str) -> None:
     client, _ = dispatch._client_for(args)  # noqa: SLF001
     try:
-        handoff = client.get_handoff(agent_id)
-        if not handoff:
-            print(f"agent close: no handoff found for agent_id={agent_id}", file=sys.stderr)
-            sys.exit(2)
-        dispatch_row = client.get_dispatch(agent_id)
-        if not dispatch_row:
-            print(f"agent close: no dispatch found for agent_id={agent_id}", file=sys.stderr)
-            sys.exit(2)
-        handoff_status = str(handoff.get("handoff_status") or "checkpointed")
-        if handoff_status == "ready":
-            target_status = str(handoff.get("closed_dispatch_status") or "completed")
-        elif handoff_status == "blocked":
-            target_status = str(handoff.get("closed_dispatch_status") or "blocked")
-        else:
-            print(
-                f"agent close: handoff_status={handoff_status!r} is not closable. Options:\n"
-                f"  1. Re-dispatch the specialist to write a final handoff with "
-                f"--handoff-status ready (or blocked) — preferred.\n"
-                f"  2. Force-complete without an audit row: "
-                f"`vigil assess agent done {agent_id} --status completed` "
-                f"(or --status failed / blocked / aborted).\n"
-                f"  3. Operator override: write the closing handoff manually with "
-                f"`vigil assess agent handoff --from-json <path>` — a JSON object "
-                f"carrying agent_id={agent_id}, agent_role, summary, and "
-                f"handoff_status \"blocked\" — then re-run `agent close`.",
-                file=sys.stderr,
+        try:
+            result = _close_via_client(
+                client, agent_id, reason=getattr(args, "reason", None) or "agent close",
+                failed_return=getattr(args, "close_status", None) == "failed",
+                completed_at=getattr(args, "completed_at", None),
             )
-            sys.exit(2)
-        if target_status not in {"completed", "blocked", "failed", "aborted"}:
-            print(f"agent close: closed status {target_status!r} is not valid", file=sys.stderr)
-            sys.exit(2)
-        patch = {
-            "status": target_status,
-            "completed_at": getattr(args, "completed_at", None) or _utcnow_iso(),
-        }
-        if (
-            handoff.get("finding_slugs")
-            and dispatch_row.get("agent_role") not in _IMMUTABLE_DISPATCH_FINDING_SCOPE_ROLES
-        ):
-            patch["finding_slugs"] = handoff.get("finding_slugs")
-        updated = client.update_dispatch(agent_id, patch)
-        decision = client.record_decision(
-            {
-                "kind": "dispatch_closed_from_handoff",
-                "payload": {
-                    "agent_id": agent_id,
-                    "handoff_status": handoff_status,
-                    "closed_dispatch_status": target_status,
-                    "handoff_version": handoff.get("handoff_version"),
-                    "reason": getattr(args, "reason", "") or "agent close",
-                },
-                "surfaced_to_user": False,
-            }
-        )
+        except _ReconcileSkipped as exc:
+            print(f"agent close: {exc}", file=sys.stderr)
+            if getattr(args, "close_status", None) != "failed":
+                print("After observing native return and confirming execution ended, "
+                      f"use `vigil assess agent close {agent_id} --status failed "
+                      "--reason '<observed return and execution state>'` for missing/checkpointed handoffs.", file=sys.stderr)
+            raise SystemExit(2) from exc
     finally:
         client.close()
-    print(json.dumps({"dispatch": updated, "decision": decision}, ensure_ascii=False))
+    print(json.dumps(result, ensure_ascii=False))
 
 
 def _parse_iso(value: str) -> datetime | None:
@@ -810,16 +805,27 @@ class _ReconcileSkipped(Exception):
     """Raised when a reconcile candidate cannot be closed cleanly."""
 
 
-def _close_via_client(client, agent_id: str, *, reason: str) -> dict:
+def _close_via_client(client, agent_id: str, *, reason: str, failed_return: bool = False, completed_at: str | None = None) -> dict:
     """Close one dispatch using an already-open client. Returns {'dispatch', 'decision'}."""
     if not agent_id:
         raise _ReconcileSkipped("missing agent_id")
     handoff = client.get_handoff(agent_id)
-    if not handoff:
-        raise _ReconcileSkipped("no handoff for agent_id")
     dispatch_row = client.get_dispatch(agent_id)
     if not dispatch_row:
         raise _ReconcileSkipped("no dispatch for agent_id")
+    if failed_return:
+        if dispatch_row.get("status") != "in-progress":
+            recovery = ((handoff or {}).get("extras") or {}).get("operator_recovery")
+            if not (dispatch_row.get("status") == "failed" and handoff
+                    and handoff.get("handoff_status") == "blocked"
+                    and handoff.get("closed_dispatch_status") == "failed"
+                    and isinstance(recovery, dict)
+                    and recovery.get("kind") == "returned_without_final_handoff"
+                    and recovery.get("reason") == reason):
+                raise _ReconcileSkipped("dispatch is already closed; inspect its recorded outcome")
+        handoff = _failed_return_handoff(client, agent_id, dispatch_row, handoff, reason)
+    if not handoff:
+        raise _ReconcileSkipped("no handoff for agent_id")
     handoff_status = str(handoff.get("handoff_status") or "checkpointed")
     if handoff_status == "ready":
         target_status = str(handoff.get("closed_dispatch_status") or "completed")
@@ -829,7 +835,10 @@ def _close_via_client(client, agent_id: str, *, reason: str) -> dict:
         raise _ReconcileSkipped(f"handoff_status={handoff_status} is not closable")
     if target_status not in {"completed", "blocked", "failed", "aborted"}:
         raise _ReconcileSkipped(f"invalid closed status {target_status}")
-    patch: dict = {"status": target_status, "completed_at": _utcnow_iso()}
+    patch: dict = {"status": target_status, "completed_at": (
+        dispatch_row.get("completed_at") if failed_return and dispatch_row.get("status") == "failed"
+        else completed_at
+    ) or _utcnow_iso()}
     if (
         handoff.get("finding_slugs")
         and dispatch_row.get("agent_role") not in _IMMUTABLE_DISPATCH_FINDING_SCOPE_ROLES
