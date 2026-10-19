@@ -1354,6 +1354,13 @@ def test_verify_finding_narrative_relative_path_resolves_under_engagement_dir(
             return False
 
     monkeypatch.setattr(module, "AssessmentClient", FakeClient)
+    plan_file = tmp_path / "next-test.json"
+    plan_file.write_text(json.dumps({
+        "hypothesis": "The search parameter reaches the query unescaped.",
+        "confirm_if": "A quote in q changes the result set.",
+        "falsify_if": "q is bound as a parameter.",
+        "route_hint": "live",
+    }), encoding="utf-8")
 
     args = SimpleNamespace(
         engagement_dir=tmp_path,
@@ -1374,6 +1381,7 @@ def test_verify_finding_narrative_relative_path_resolves_under_engagement_dir(
         proof_receipt_ids=None,
         counter_check_file=None,
         severity_variance_file=None,
+        next_test_file=str(plan_file),
     )
 
     module.run(args)

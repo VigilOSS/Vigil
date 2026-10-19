@@ -1205,6 +1205,31 @@ class FindingSeverityVarianceRequest(BaseModel):
     proof_receipt_id: int = Field(ge=1)
 
 
+class FindingNextTestRequest(BaseModel):
+    """The runtime proof plan a ``pending_runtime_proof`` verdict must carry.
+
+    Model-authored text about a target: stored losslessly and never read as
+    authorization. ``route_hint='live'`` admits no host and approves nothing;
+    proof-work scope admission and exploit approval are unchanged by it.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    hypothesis: str = Field(min_length=1, max_length=4096)
+    confirm_if: str = Field(min_length=1, max_length=4096)
+    falsify_if: str = Field(min_length=1, max_length=4096)
+    route_hint: Literal["local", "live", "unknown"]
+    prerequisites: str = Field(default="", max_length=4096)
+
+    @field_validator("hypothesis", "confirm_if", "falsify_if")
+    @classmethod
+    def _require_text(cls, value: str) -> str:
+        # Validate the stripped text but store the authored bytes unchanged.
+        if not value.strip():
+            raise ValueError("must not be blank")
+        return value
+
+
 class FindingVerifyRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1229,6 +1254,9 @@ class FindingVerifyRequest(BaseModel):
     counter_check: FindingCounterCheckRequest | None = None
     confirm_check: FindingConfirmCheckRequest | None = None
     severity_variance: FindingSeverityVarianceRequest | None = None
+    # Required for, and only accepted with, verification_status=pending_runtime_proof;
+    # the service owns that pairing so every caller meets the same 400.
+    next_test: FindingNextTestRequest | None = None
 
 
 class AssessmentRunSourceGenerationRequest(BaseModel):
@@ -2222,6 +2250,7 @@ def get_findings(
     slug: str | None = None,
     search: str | None = None,
     holding: bool = False,
+    runtime_proof_owed: bool = False,
     limit: int | None = Query(default=None, ge=1, le=MAX_ASSESSMENT_LIST_LIMIT),
     offset: int = Query(default=0, ge=0),
 ) -> list[dict[str, Any]]:
@@ -2236,6 +2265,7 @@ def get_findings(
         slug=slug,
         search=search,
         holding=holding,
+        runtime_proof_owed=runtime_proof_owed,
         limit=limit,
         offset=offset,
     )
@@ -4242,6 +4272,11 @@ async def verify_finding(
             severity_variance=(
                 request.severity_variance.model_dump()
                 if request.severity_variance is not None
+                else None
+            ),
+            next_test=(
+                request.next_test.model_dump()
+                if request.next_test is not None
                 else None
             ),
         )

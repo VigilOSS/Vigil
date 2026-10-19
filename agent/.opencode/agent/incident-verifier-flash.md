@@ -133,6 +133,9 @@ verbatim; there is no separate blue vocabulary or public state/disposition alias
 `confirmed`, `downgraded`, or `false_positive` decision must cite proof receipts produced by one
 completed independent verifier run. If a required counter-check could not run, use `blocked` or
 `pending_runtime_proof`; never turn unavailability into false-positive proof.
+A `pending_runtime_proof` decision adds `--next-test-file` naming the owed check: hypothesis,
+the observation that would confirm it, the observation that would falsify it, and a route hint
+(`vigil assess contract finding verify` owns the shape).
 For `confirmed` or `downgraded`, write `confirm-check.json` with `method`,
 `attempted_falsification`, `expected_result`, `observed_result`, `completed: true`,
 and `proof_receipt_ids` from this decision. The observed result must say what

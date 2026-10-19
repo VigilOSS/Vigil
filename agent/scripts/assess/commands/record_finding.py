@@ -20,6 +20,7 @@ from assess.lib.contracts import common_mistake_hints, render_contract
 from assess.lib.exploit_targets import is_source_bound
 from assess.lib.findings import finding_lock_path, next_finding_id
 from assess.lib.locking import file_lock
+from assess.lib.next_test import load_next_test_file
 from assess.lib.schema_validation import collect_validation_errors, load_schema
 from assess.lib.evidence_ref import evidence_ref_exists, is_single_path_shaped
 
@@ -110,7 +111,16 @@ def register(subparsers) -> None:
              "always opens at 'unreviewed', so a code finding that is real but has no runtime "
              "trigger yet otherwise costs a second `finding verify` call. The park carries the "
              "same author identity and code-snapshot binding as the record, and the ledger "
-             "records the same transition it would have; only the round trip is removed.",
+             "records the same transition it would have; only the round trip is removed. "
+             "Requires --next-test-file.",
+    )
+    p.add_argument(
+        "--next-test-file",
+        default="",
+        help="Runtime proof plan JSON for the --pending-runtime-proof park: the same "
+             "next_test object `finding verify --status pending_runtime_proof --next-test-file` "
+             "takes. Required with --pending-runtime-proof and refused without it; both are "
+             "checked before anything is recorded.",
     )
     p.add_argument(
         "--quiet",
@@ -590,6 +600,7 @@ def _park_pending_runtime_proof(
     finding_slug: str,
     reason: str,
     *,
+    next_test: dict | None,
     provenance: dict,
     agent_name: str,
     base_url: str,
@@ -608,6 +619,7 @@ def _park_pending_runtime_proof(
         "reason_text": reason,
         "source_name": agent_name,
         "provenance": provenance,
+        "next_test": next_test,
     }
     with AssessmentClient(base_url, engagement_key) as client:
         response = client.post(f"findings/{finding_slug}/verify", payload)
@@ -653,6 +665,26 @@ def run(args) -> None:
     if not isinstance(payload, dict):
         print("finding payload must be a JSON object", file=sys.stderr)
         sys.exit(1)
+
+    park_reason = (getattr(args, "pending_runtime_proof_reason", "") or "").strip()
+    next_test_file = (getattr(args, "next_test_file", "") or "").strip()
+    next_test = None
+    if bool(park_reason) != bool(next_test_file):
+        # Checked before the record: a park that cannot be sent must not leave
+        # a recorded-but-unparked finding behind.
+        print(
+            "finding record: --pending-runtime-proof and --next-test-file go together; "
+            "the park is a pending_runtime_proof verification and carries its runtime "
+            "proof plan (see `vigil assess contract finding verify`).",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if next_test_file:
+        try:
+            next_test = load_next_test_file(next_test_file)
+        except ValueError as exc:
+            print(f"finding record: --next-test-file: {exc}", file=sys.stderr)
+            sys.exit(1)
 
     agent_name = args.agent_name
     update_slug = (getattr(args, "update_slug", "") or "").strip()
@@ -768,12 +800,12 @@ def run(args) -> None:
     # park: a park that fails must not read as a record that never happened.
     print(finding_slug)
 
-    park_reason = (getattr(args, "pending_runtime_proof_reason", "") or "").strip()
     if park_reason:
         try:
             _park_pending_runtime_proof(
                 finding_slug,
                 park_reason,
+                next_test=next_test,
                 provenance=payload["provenance"],
                 agent_name=agent_name,
                 base_url=cfg.base_url,
@@ -784,7 +816,8 @@ def run(args) -> None:
                 f"finding record: {finding_slug} WAS recorded, but parking it at "
                 f"pending_runtime_proof failed: {exc}\n"
                 f"  - Retry only the park: `vigil assess finding verify {finding_slug} "
-                f'--status pending_runtime_proof --reason "{park_reason}"`.',
+                f'--status pending_runtime_proof --reason "{park_reason}" '
+                f'--next-test-file {next_test_file}`.',
                 file=sys.stderr,
             )
             sys.exit(1)

@@ -799,6 +799,12 @@ describe("finding investigation workspace", () => {
     expect(screen.getByText("No proof receipts support the current verification state.")).toBeTruthy();
   });
 
+  it("does not claim runtime proof is outstanding for a merged finding", async () => {
+    workspace({ verification_status: "pending_runtime_proof", workflow_status: "merged", canonical_location: "file:src/account.ts:42", proof_receipts: [] });
+    await screen.findByRole("heading", { name: "Shared claim" });
+    expect(screen.queryByText("Runtime proof outstanding")).toBeNull();
+  });
+
   it("restores the engagement queue search after following evidence and returning", async () => {
     const first = workspace();
     fireEvent.change(screen.getByPlaceholderText(/Search any field/), { target: { value: "authorization" } });

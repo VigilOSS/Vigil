@@ -1735,3 +1735,27 @@ def test_selected_handoff_exposes_all_recommended_tests_with_reasons_and_uncerta
     assert "queued export survives role removal" in output
     assert "missing worker credential" in output
     assert "May combine with job modification" in output
+
+
+def test_resume_brief_summarizes_proof_work_queue_counts():
+    out = resume_brief._render_markdown({
+        "engagement": {"key": "eng"},
+        "proof_work": {
+            "owed_findings": 2,
+            "queue_state_counts": {"unprepared": 1, "needs_approval": 1},
+            "read_command": "vigil assess proof-work list",
+        },
+    })
+    section = out.split("## Proof Work", 1)[1].split("\n## ", 1)[0]
+    assert "owed findings: 2" in section
+    assert "needs_approval=1" in section and "unprepared=1" in section
+    assert "`vigil assess proof-work list`" in section
+
+
+def test_resume_brief_omits_proof_work_when_nothing_is_owed_or_queued():
+    out = resume_brief._render_markdown({
+        "engagement": {"key": "eng"},
+        "proof_work": {"owed_findings": 0, "queue_state_counts": {},
+                       "read_command": "vigil assess proof-work list"},
+    })
+    assert "## Proof Work" not in out

@@ -176,3 +176,19 @@ def test_resume_starts_preserve_client_arguments_without_automatic_message(works
     ])
     assert len(launched) == 1
     assert launched[0][1:] == forwarded
+
+
+_SOURCE_TRUST_CONFIRMATION = (
+    "Confirm these are the intended source files and that you trust this repository's "
+    "build and test code to run inside the Vigil runtime."
+)
+
+
+def test_source_confirmation_asks_for_repository_trust_at_creation_and_start(workspace, monkeypatch, capsys):
+    path = _code_engagement(workspace)
+    assert _SOURCE_TRUST_CONFIRMATION in capsys.readouterr().err
+    monkeypatch.chdir(workspace)
+    launched = []
+    monkeypatch.setattr(engagements.os, "execv", lambda executable, argv: launched.append(argv))
+    engagements.start_engagement(workspace, path, "claude", [])
+    assert _SOURCE_TRUST_CONFIRMATION in launched[0][-1]

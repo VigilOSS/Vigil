@@ -1158,3 +1158,73 @@ def test_details_writing_contracts_publish_the_allowed_details_keys() -> None:
     update = contracts.render_contract("finding update")
     assert "Allowed details keys" not in update
     assert "vigil assess contract finding record" in update
+
+
+def _mixed_role_continuation(prior_mode, recorded):
+    class _MixedRoleClient(_DispatchClient):
+        def get_dispatch(self, agent_id: str) -> dict:
+            return {"id": 51, "agent_id": agent_id, "agent_role": "exploit-developer",
+                    "status": "completed", "assessment_mode": prior_mode}
+
+        def get(self, endpoint: str) -> dict:
+            if endpoint.endswith("/prompt-packet"):
+                return {"schema": "dispatch-prompt/v1", "context": {},
+                        "rendered_prompt": "original proof prompt"}
+            return {}
+
+        def record_dispatch(self, payload: dict) -> dict:
+            recorded.append(payload)
+            return {"id": 52, **payload}
+
+    return _MixedRoleClient()
+
+
+def test_agent_continue_parses_an_assessment_mode() -> None:
+    args = _agent_parser().parse_args(
+        ["agent", "continue", "proof-previous", "--task", "Finish", "--assessment-mode", "web"]
+    )
+    assert args.assessment_mode == "web"
+
+
+@pytest.mark.parametrize(
+    ("prior_mode", "flag", "expected"),
+    [("code", None, "code"), (None, "web", "web"), ("web", "web", "web")],
+    ids=["inherits-prior", "flag-fills-pre-migration-null", "matching-flag"],
+)
+def test_agent_continue_carries_the_mixed_role_assessment_mode(monkeypatch, capsys, prior_mode, flag, expected):
+    recorded: list[dict] = []
+    client = _mixed_role_continuation(prior_mode, recorded)
+    monkeypatch.setattr(agent.dispatch, "_client_for", lambda _args: (client, SimpleNamespace()))
+    agent._continue(SimpleNamespace(extra=["proof-previous"], task="Finish", agent_id="proof-next",
+                                    assessment_mode=flag))
+    printed = capsys.readouterr().out
+    assert recorded[0]["assessment_mode"] == expected
+    # The specialist receives the mode it was recorded with, in the packet
+    # context and in the identity it is told to work under.
+    packet = recorded[0]["prompt_packet"]
+    assert packet["context"]["assessment_mode"] == expected
+    replacement_identity = packet["rendered_prompt"].split("## Active Replacement Identity\n", 1)[1]
+    assert f"assessment_mode: {expected}\n" in replacement_identity.split("## ", 1)[0]
+    assert packet["rendered_prompt"] in printed
+
+
+@pytest.mark.parametrize(("prior_mode", "flag"), [(None, None), ("code", "web")],
+                         ids=["pre-migration-null-without-flag", "conflicting-flag"])
+def test_agent_continue_refuses_an_unknown_or_conflicting_mode_before_writing(
+    monkeypatch, capsys, prior_mode, flag
+):
+    recorded: list[dict] = []
+    client = _mixed_role_continuation(prior_mode, recorded)
+    monkeypatch.setattr(agent.dispatch, "_client_for", lambda _args: (client, SimpleNamespace()))
+    with pytest.raises(SystemExit) as exc:
+        agent._continue(SimpleNamespace(extra=["proof-previous"], task="Finish", agent_id="proof-next",
+                                        assessment_mode=flag))
+    assert exc.value.code != 0
+    assert "--assessment-mode" in capsys.readouterr().err
+    assert recorded == []
+
+
+def test_agent_contracts_show_assessment_mode_for_mixed_roles() -> None:
+    root = contracts.render_contract("agent")
+    assert "--assessment-mode" in root
+    assert "--assessment-mode" in contracts.render_contract("agent continue")

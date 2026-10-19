@@ -195,6 +195,25 @@ FINDING_PATCH_FIELDS: tuple[tuple[str, str, str], ...] = (
     ("workflow_status", "string", "Report-inclusion lifecycle state (the `--status` flag). Use 'draft' to reopen a finding for re-triage. Verification-status changes belong to `finding verify`."),
 )
 
+# Route hints a runtime proof plan may name. MIRRORS the backend
+# `FindingNextTestRequest.route_hint` Literal in
+# orchestrator/backend/app/api/assessment.py, pinned in sync by
+# test_finding_next_test_contract_mirror. A hint is the plan author's guess at
+# where the proof can run; it admits no host and approves nothing.
+NEXT_TEST_ROUTE_HINTS: tuple[str, ...] = ("local", "live", "unknown")
+
+# The runtime proof plan `finding verify --status pending_runtime_proof` must
+# carry (`--next-test-file`). MIRRORS `FindingNextTestRequest`, which forbids
+# extra keys; pinned by test_finding_next_test_contract_mirror. Every field but
+# prerequisites is a required non-blank string.
+NEXT_TEST_FIELDS: tuple[tuple[str, str, str], ...] = (
+    ("hypothesis", "string, required, <= 4096 chars", "The claim the runtime test will challenge."),
+    ("confirm_if", "string, required, <= 4096 chars", "The observation that would confirm the claim."),
+    ("falsify_if", "string, required, <= 4096 chars", "The observation that would disprove the claim."),
+    ("route_hint", "string, required; one of: " + ", ".join(NEXT_TEST_ROUTE_HINTS), "Where the proof is expected to run: local reproduction, a live admitted target, or not yet known. Grants nothing; proof-work prepare still decides the route, hosts, and approval."),
+    ("prerequisites", "string, optional, <= 4096 chars", "What the test needs first (accounts, fixtures, builds); may be empty."),
+)
+
 # Clients a dispatch can be bound to by `agent bind-client-handle`. MIRRORS the
 # backend `_LAUNCHED_CLIENT` Literal in orchestrator/backend/app/api/assessment.py,
 # duplicated for the same packaging reason as SUBMISSION_STATUSES above and
@@ -519,7 +538,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "vigil assess finding record <agent-name> <finding-json-file> --agent-id <your-dispatch-agent-id>",
             "vigil assess finding record <agent-name> <finding-json-file> --update <existing-slug>",
             "vigil assess finding record <agent-name> <finding-json-file> --agent-id <your-dispatch-agent-id> --evidence-type theoretical",
-            "vigil assess finding record <agent-name> <finding-json-file> --agent-id <your-dispatch-agent-id> --pending-runtime-proof \"Static dataflow only; no runtime trigger yet.\"",
+            "vigil assess finding record <agent-name> <finding-json-file> --agent-id <your-dispatch-agent-id> --pending-runtime-proof \"Static dataflow only; no runtime trigger yet.\" --next-test-file next-test.json",
             "vigil assess finding record <agent-name> <finding-json-file> --agent-id <your-dispatch-agent-id> --quiet",
         ),
         author_supplied_fields=(
@@ -559,7 +578,7 @@ _CONTRACTS: dict[str, CommandContract] = {
         notes=(
             "Omit top-level lifecycle fields unless you are intentionally overriding a helper default. The CLI fills workflow_status and verification_status plus producer provenance.",
             "provenance.code_snapshot is DERIVED for a file: canonical_location: the CLI reads the engagement's active repository and binds repo_id + repo_generation + source_manifest_digest from it, so there is nothing to transcribe out of Code Source Identity. An authored binding is sent exactly as written, stale included, and the currency gate is unchanged either way — a binding that is not the current verified snapshot is still refused. The derivation needs exactly one active repository; with several, set provenance.code_snapshot yourself rather than let the CLI guess which source you reviewed.",
-            "--pending-runtime-proof \"<why proof is still owed>\" records the finding AND moves it to verification_status=pending_runtime_proof in one invocation. A new finding always opens at unreviewed, so a real code finding with no runtime trigger yet used to cost a second `finding verify` call; this is that same verify transition, through the same route, ledger and evidence gates, carrying the record's own author identity and code-snapshot binding. The canonical slug stays on stdout, and a park that fails says so without pretending the record failed.",
+            "--pending-runtime-proof \"<why proof is still owed>\" requires --next-test-file <plan.json>, the same runtime proof plan `vigil assess contract finding verify` documents, and is refused without it (as is --next-test-file without the park) before anything is recorded. It records the finding AND moves it to verification_status=pending_runtime_proof in one invocation. A new finding always opens at unreviewed, so a real code finding with no runtime trigger yet used to cost a second `finding verify` call; this is that same verify transition, through the same route, ledger and evidence gates, carrying the record's own author identity and code-snapshot binding. The canonical slug stays on stdout, and a park that fails says so without pretending the record failed.",
             "--agent-id <dispatch agent_id> stores provenance.agent_id, the finding's durable AUTHOR identity. It is the agent_id from your Runtime Identity block — a dispatch id such as HUNT-RUN-1 — not the role name that the positional <agent-name> carries, and it is never inferred from that role. A new finding is refused unless this id resolves to a real dispatch in the engagement. An ordinary --update may omit it: the backend preserves and validates the immutable original author rather than rebinding it. A historical row whose author is missing or no longer resolves in this engagement is also refused on the record route; repair that row once with finding bind-author, then re-record it normally.",
             "A confirmed run candidate is promoted in the same backend transaction by including run_candidate. Its target, exact source path, code-snapshot generation, and proof receipts must match the finding; a cross-file or cross-target link is rejected.",
             "--evidence-type {network-confirmed|code-inferred|theoretical|informational} labels the CONFIRMATION MODE, the same vocabulary `finding update --evidence-type` patches. It has no default on purpose: an unlabelled record stores NULL rather than asserting a mode nobody claimed, and no gate reads the column — `finding list --holding` finds the holding area by verification_status (pending_runtime_proof / blocked) as well as by this label, so a park is never invisible for want of it. Pair `theoretical` with details.chain_required + details.chain_rationale. The flag and a JSON `evidence_type` key are two spellings of one field; a disagreement is refused.",
@@ -583,7 +602,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             ("evidence", "use details.evidence"),
             ("impact", "use details.impact"),
             ("hand-copying provenance.code_snapshot out of Code Source Identity", "omit it: the CLI derives the binding from the active repository, and a transcription slip reads as a stale binding rather than as the typo it was"),
-            ("recording a code finding and then calling finding verify just to park it", "pass --pending-runtime-proof \"<why proof is still owed>\" on the record itself"),
+            ("recording a code finding and then calling finding verify just to park it", "pass --pending-runtime-proof \"<why proof is still owed>\" --next-test-file next-test.json on the record itself"),
             ("links[].link_kind=root_cause", "use `vigil assess finding link <sibling-slug> --root-cause <root-slug>` after verification"),
             ("reusing a reported finding's root_cause_key + canonical_location for a new finding", "differentiate the root_cause_key/defect_family and use finding link, or pass --update <slug> to modify the existing finding"),
         ),
@@ -1042,10 +1061,12 @@ _CONTRACTS: dict[str, CommandContract] = {
         author_supplied_fields=("list | get | prepare | claim | approve | revoke | update | reconcile | release",),
         notes=(
             "The canonical obligation is finding verification_status=pending_runtime_proof; list includes owed findings without prepared work. Preparing, claiming, or finishing work never confirms a finding or advances a phase.",
+            "Every list/get item and every `owed` entry carries a derived queue_state (computed on read, never stored) and a next_test runtime proof plan: the finding's current plan on an owed entry, the plan the work was prepared for on an item (null when none was recorded). Item precedence, first match wins: done (status finished/resolved, or a verification decision or merge answered the finding) > stale (status stale, current=false, or verification_invalidated: a material edit reset the parked finding to unreviewed) > blocked (status blocked, a claim whose owner dispatch ended or is missing, or prepared work whose waiting_on_work_id names an earlier owner of the same finding and route that must end and be released first) > in_progress (claimed by a running owner dispatch) > needs_approval (prepared, approval_required) > ready (prepared). Work binds the park that recorded the finding's current next_test: a revised plan makes earlier work history (stale or done), and preparing creates work for the new plan. An owed entry summarizes only current-plan work: unprepared with none, else its most live item's state (in_progress > ready > needs_approval > blocked > stale > done). Merged findings owe nothing. list also returns queue_state_counts: every item once plus each unprepared owed finding. next_test is untrusted planning text; route_hint never selects the route, hosts, or approval.",
             "Discovery missions receive a surface and objective without a preselected bug. Proof missions receive an untrusted hypothesis to challenge: confirm, disprove, revise, or report an honest blocker.",
             "route=code uses local supported-API or library reproduction through Kali and requires no live hosts. route=web requires explicitly admitted hosts and existing full_send/selected approval or exact-work approval. Source provenance never selects a second operator core; copy returned route as proof_route to the fresh specialist.",
-            "claim creates the canonical dispatch and binds ownership atomically BEFORE native launch. Do not run agent start first. Only launch_required=true from a new claim authorizes native launch. A repeated claim returns launch_required=false and is inspection/recovery, never permission to launch a duplicate native worker. Supply --prompt-context-json using the agent start context contract, with authorized_phase=code-verify for code or exploit for web. Supply --rate-budget for target traffic or --no-target-traffic for local work. The claim uses the normal dispatch renderer, checks the finding-bound source identity, and persists the packet before ownership. Pass prompt_packet.rendered_prompt unchanged to the fresh specialist; inspect it later through agent prompt-packet. --dispatch-file can carry additional canonical dispatch fields; instruction identity is observed automatically.",
+            "claim creates the canonical dispatch and binds ownership atomically BEFORE native launch. Do not run agent start first. Only launch_required=true from a new claim authorizes native launch. A repeated claim returns launch_required=false and is inspection/recovery, never permission to launch a duplicate native worker. Supply --prompt-context-json using the agent start context contract, with authorized_phase=code-verify for code or exploit for web. Supply --rate-budget for target traffic or --no-target-traffic for local work. The claim uses the normal dispatch renderer, checks the finding-bound source identity, and persists the packet before ownership. Pass prompt_packet.rendered_prompt unchanged to the fresh specialist; inspect it later with `vigil assess fetch dispatches/<agent-id>/prompt-packet`. --model and --reasoning record the requested model identity as agent start does. The assignment block carries the finding's current next_test as contained data; the backend prefixes the authoritative proof_route line. --dispatch-file can carry additional canonical dispatch fields; instruction identity is observed automatically.",
             "Only the human operator approves/revokes live proof; specialists never self-approve. Approval is bound to exact finding/source/scope/objective context and does not add ordinary exploit candidates. Changed scope or source blocks the work.",
+            "prepare reuses the newest live matching row (prepared, claimed, blocked) before an ended one. Preparing context whose matching work is still owned and not claimed (blocked, finished, stale, resolved) is refused: reconcile the owner, then `proof-work release <id>`.",
             "update links owned proof runs and records blockers or work completion. Evidence receipts and finding verify remain mandatory. Reconcile is an explicit mutation; get/list never change state. Client exit and elapsed time do not reclaim runtime work. release requires a terminal owning dispatch and no active owned runs, command runs, or supervised jobs.",
         ),
     ),
@@ -1080,7 +1101,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "Proof runs start running. Scan runs start queued: use begin before accounting writes, then finish for the explicit terminal outcome; a terminal run cannot be rewritten to a different status.",
             "Before starting a scan, compute each target's exact v1 source-inventory count and digest with run-audit sources commitment and include those values in the source-generations file. Completion reconciles the committed inventory against durable rows.",
             "Only receipts from a completed run can support terminal finding verification. Failed, interrupted, and canceled runs remain durable audit history.",
-            "--for-finding <slug> (repeatable) checks that the verifier dispatch differs from the stored author dispatch before target traffic and persists a typed proof_run association after creating the run. This establishes dispatch separation, not distinct human identity. A terminal finding decision requires at least one healthy receipt from an associated completed run. Exploratory runs created before a finding exists can be associated later with `finding link <slug> --link-kind proof_run --target-kind assessment_run --target-id <run-id>`. A failed association reports the created run id for recovery.",
+            "--for-finding <slug> (repeatable) checks that the verifier dispatch differs from the stored author dispatch before target traffic and persists a typed proof_run association after creating the run. This establishes dispatch separation, not distinct human identity. A terminal finding decision requires at least one healthy receipt from an associated completed run. Exploratory runs created before a finding exists can be associated later with `finding link <slug> --link-kind proof_run --target-kind assessment_run --target-id <run-id>`. A failed association reports the created run id for recovery. get/finish report findings associated with this run itself as associated_finding_slugs; finding_slugs lists only findings whose verification already cites the run lineage's receipts. A resumed run needs its own --for-finding or link before its receipts can support that finding.",
             "List reads one bounded page by default and reports an exact or lower-bound total plus a continuation command; --paginate is the explicit all-page opt-in.",
         ),
         common_mistakes=(
@@ -1189,6 +1210,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "Command receipts must reference an actual terminal command-run row from the same engagement; free-text command claims are not execution proof.",
             "--evidence-health healthy is a REQUEST, not a stored value: the backend measures the cited command output or artifact snapshot and stores what it found, so the response can legitimately come back missing or stale. The CLI prints that as a WARN, because only a healthy receipt can carry a terminal `finding verify`; re-capture the evidence rather than re-sending the flag. A caller-DECLARED degradation is stored verbatim and must come back unchanged.",
             "Only receipts from a completed verifier run under a dispatch distinct from the author's can support a terminal finding decision. This checks dispatch separation, not distinct human identity. The underlying command agent_name, source-read dispatch, or artifact --agent-id / producing command must match that verifier dispatch; reusing author-produced evidence fails the dispatch-separation check. Receipt history remains durable when evidence later becomes missing, stale, or tombstoned.",
+            "--finding lists the receipts that finding's verification cites and those from runs associated with it; each row's finding_association is verification (cited) or proof_run (associated run, not yet cited).",
             "List reads one bounded page by default and reports an exact or lower-bound total plus a continuation command; --paginate is the explicit all-page opt-in.",
         ),
         common_mistakes=(
@@ -1295,6 +1317,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             'vigil assess finding verify <slug> --status confirmed --reason "..." --agent-id <your-dispatch-agent-id> --proof-receipt-id <id> --confirm-check-file confirm-check.json',
             'vigil assess finding verify <slug> --status downgraded --reason "..." --agent-id <your-dispatch-agent-id> --new-severity low --proof-receipt-id <id> --confirm-check-file confirm-check.json',
             'vigil assess finding verify <slug> --status false_positive --reason "..." --agent-id <your-dispatch-agent-id> --counter-check-file counter-check.json',
+            'vigil assess finding verify <slug> --status pending_runtime_proof --reason "Source evidence accepted; runtime proof owed" --agent-id <your-dispatch-agent-id> --next-test-file next-test.json',
             'vigil assess finding verify <slug> --status confirmed --reason "Re-reviewed current sealed source" --agent-id <your-dispatch-agent-id> --source-name code-vuln-verifier --proof-receipt-id <id> --confirm-check-file confirm-check.json',
             "vigil assess finding verify <slug> --payload-file verify.json",
             'vigil assess finding verify VA-001 VA-002 VA-003 --status confirmed --reason "batch: all reproduced" --agent-id <your-dispatch-agent-id> --proof-receipt-id <id> --confirm-check-file confirm-check.json',
@@ -1306,6 +1329,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "proof_receipt_ids for terminal decisions",
             "counter_check for false_positive",
             "confirm_check for confirmed/downgraded",
+            "next_test for pending_runtime_proof (via --next-test-file)",
             "severity_variance when chosen severity differs from the CVSS band",
         ),
         notes=(
@@ -1313,6 +1337,9 @@ _CONTRACTS: dict[str, CommandContract] = {
             "Confirmed and downgraded decisions require --proof-receipt-id from a completed verifier run under a dispatch distinct from the author's and --confirm-check-file with method, attempted_falsification, expected_result, observed_result, completed=true, and proof_receipt_ids drawn from the decision receipts, including one from an active finding-linked proof_run. The completed check is stored on the verification transition. This checks dispatch separation, not distinct human identity. False_positive requires --counter-check-file with method, expected_result, observed_result, falsified_claim, completed=true, and proof_receipt_ids.",
             "If chosen severity differs from its CVSS band, also pass --severity-variance-file with a JSON object {normal_band, chosen_severity, actor, reason, proof_receipt_id}. The proof_receipt_id must also be passed with --proof-receipt-id. The backend rejects a terminal decision lacking this attributed variance event.",
             "If a counter-check could not run, record blocked or pending_runtime_proof; free-text kill_reason/kill_check are not decision evidence.",
+            "pending_runtime_proof REQUIRES --next-test-file: a JSON object (API field next_test, unknown keys refused) with "
+            + "; ".join(f"{name} ({domain}) — {meaning}" for name, domain, meaning in NEXT_TEST_FIELDS)
+            + ". Every other status REFUSES a next_test. The plan is stored on the verification transition, returned as `next_test` by `finding get`/`finding list`/`proof-work list|get` while the finding stays pending_runtime_proof (null for a finding parked without one), and kept per event in `finding history`. Re-verifying pending_runtime_proof with a revised plan records a new event. It is your hypothesis, stored verbatim: route_hint=live admits no host and approves nothing.",
             "False_positive also requires details.kill_reason (rationale) and details.kill_check (integer 1-5 naming the verification check). These annotations accompany the structured counter_check; they do not replace its evidence.",
             "Use explicit flags for ordinary transitions. --payload-file is for a final, complete verification-transition document: it is sent verbatim (no derived binding, no --agent-id), it is mutually exclusive with request-content flags, and --narrative may accompany it.",
             "--agent-id <your dispatch agent_id> is what makes a code verification attest to anything. The backend resolves it into the finding's stored code_snapshot_attestation; without it that attestation names no dispatch and the finding reads code_snapshot_attestation_status=unattested — a binding indistinguishable from one copied off another finding. It does NOT rebind the finding's immutable author, which stays the recording dispatch.",
@@ -1353,6 +1380,17 @@ _CONTRACTS: dict[str, CommandContract] = {
                 "proof_receipt_ids": [19],
                 "source_name": "code-vuln-verifier",
                 "provenance": {"agent_id": "VERIFY-1"},
+            },
+            {
+                "verification_status": "pending_runtime_proof",
+                "reason_text": "Source dataflow accepted; the runtime trigger is still owed.",
+                "next_test": {
+                    "hypothesis": "GET /api/orders/{id} returns another tenant's order.",
+                    "confirm_if": "Tenant B's session receives tenant A's order body.",
+                    "falsify_if": "Tenant B receives 403/404 or only its own orders.",
+                    "route_hint": "live",
+                    "prerequisites": "Two tenant accounts on the admitted target.",
+                },
             },
         ),
     ),
@@ -2680,7 +2718,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "the backend, never an empty list.",
             "--limit / --offset page the bounded result set. Each listing reports an exact or lower-bound total and an actionable continuation on stderr; the removed unbounded --all spelling returns a replacement hint.",
             "--json emits compact index rows with a `_point_read` command instead of embedding potentially large details/notes/provenance. Use `vigil assess finding get <slug>` for the complete stored row.",
-            "--holding is broader than the runtime-proof-owed set: it is `evidence_type=theoretical` OR verification_status in (pending_runtime_proof, blocked), so it also sweeps permanently blocked rows and theoretical evidence at any status. The findings actually owed runtime proof are `--verification-status pending_runtime_proof`; `vigil assess exploit review` renders that same set under `Runtime proof owed`.",
+            "--holding is broader than the runtime-proof-owed set: it is `evidence_type=theoretical` OR verification_status in (pending_runtime_proof, blocked), so it also sweeps permanently blocked rows and theoretical evidence at any status. The findings actually owed runtime proof are the pending_runtime_proof findings that are not merged; `vigil assess proof-work list` and `vigil assess exploit review` (under `Runtime proof owed`) render that set. A merged finding keeps its verification status as history.",
         ),
     ),
     "finding get": CommandContract(
@@ -3174,7 +3212,7 @@ _CONTRACTS: dict[str, CommandContract] = {
         ),
         notes=(
             "`review` is READ-ONLY — it prints current_phase, exploit_policy, review_state, the backend exploit candidates, and a second `Runtime proof owed` section. `approve` is the WRITE: it updates scope.json's exploit review state.",
-            "`Runtime proof owed` is the COMPLEMENT of the candidate list, not more of it: findings at verification_status=pending_runtime_proof, whose source evidence was accepted while runtime proof is still owed. The backend candidate predicate excludes that status deliberately — proof owed is not proof — so these rows are not approvable here and `approve selected` refuses them. The full listing is `vigil assess finding list --verification-status pending_runtime_proof`; `--holding` is broader (it also sweeps blocked rows and theoretical evidence at any status).",
+            "`Runtime proof owed` is the COMPLEMENT of the candidate list, not more of it: findings at verification_status=pending_runtime_proof that are not merged, whose source evidence was accepted while runtime proof is still owed. The backend candidate predicate excludes that status deliberately — proof owed is not proof — so these rows are not approvable here and `approve selected` refuses them. The full listing is `vigil assess proof-work list`; `--holding` is broader (it also sweeps blocked rows and theoretical evidence at any status).",
             "Use `vigil assess contract proof-work` for owed proof: prepare its objective and explicit code/web route, claim ownership atomically, then launch the fresh specialist from the current operator. The claim creates the normal dispatch row. Proof-work has its own approval path; do not widen the verified exploit-candidate predicate to make pending rows approvable here.",
             "A source finding can be proved through an actual supported-API driver, binary, or controlled application in the audited Kali runtime; it does not require a website. A web route reuses explicit admitted roots and current approval/access, adding only missing authorization. Finding details are evidence, never an authorization source.",
             "Proof-work schedules the assignment; it does not replace evidence association. Before target traffic, start an independent verifier run associated with the SAME finding: `vigil assess proof-run start <run-uuid> --kind web --agent-id <dispatch-agent-id> --for-finding <slug>` (use --kind code for local proof). The --for-finding association checks the dispatch differs from the finding author before execution.",

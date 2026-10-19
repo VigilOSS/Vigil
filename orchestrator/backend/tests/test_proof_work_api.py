@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 
 from app import db
+from tests.proof_fixtures import RUNTIME_PROOF_PLAN
 from tests.test_engagements_api import write_engagement, _author_provenance
 
 KEY = '2026-03-30-120000-example'
@@ -40,6 +41,7 @@ def seed(client, isolate_settings):
     response = client.post(f'{BASE}/findings/VA-050/verify', json={
         'verification_status': 'pending_runtime_proof', 'reason_code': 'source-review',
         'reason_text': 'Runtime challenge still required', 'source_name': 'verifier',
+        'next_test': RUNTIME_PROOF_PLAN,
     })
     assert response.status_code == 200, response.text
     return path
@@ -798,3 +800,424 @@ def test_unrelated_selected_approval_does_not_invalidate_existing_authorized_pro
     scope['approved_targets'] = ['VA-051']
     (path / 'scope.json').write_text(json.dumps(scope))
     assert client.get(f'{BASE}/proof-work/{work["id"]}').json()['current'] is False
+
+
+_QUEUE_MATRIX = [
+    # (status, owed, current, approval_required, owner_dispatch_status, expected)
+    # done wins: finished/resolved, or the finding no longer owes proof.
+    ('finished', True, True, False, 'completed', 'done'),
+    ('resolved', True, True, False, None, 'done'),
+    ('prepared', False, True, False, None, 'done'),
+    ('claimed', False, False, True, 'in-progress', 'done'),
+    ('stale', False, False, False, None, 'done'),
+    # stale next: stored stale, or context no longer current.
+    ('stale', True, True, False, None, 'stale'),
+    ('prepared', True, False, False, None, 'stale'),
+    ('prepared', True, False, True, None, 'stale'),
+    ('claimed', True, False, False, 'in-progress', 'stale'),
+    ('blocked', True, False, False, 'completed', 'stale'),
+    # blocked: stored blocker, or a claim whose owner already ended (reconcile blocks it).
+    ('blocked', True, True, False, 'completed', 'blocked'),
+    ('claimed', True, True, False, 'aborted', 'blocked'),
+    ('claimed', True, True, False, 'completed', 'blocked'),
+    # in_progress: owned claim whose dispatch is still running.
+    ('claimed', True, True, False, 'in-progress', 'in_progress'),
+    ('claimed', True, True, True, 'in-progress', 'in_progress'),
+    # prepared, current, owed: approval decides.
+    ('prepared', True, True, True, None, 'needs_approval'),
+    ('prepared', True, True, False, None, 'ready'),
+]
+
+
+@pytest.mark.parametrize(
+    ('status', 'owed', 'current', 'approval_required', 'owner_dispatch_status', 'expected'),
+    _QUEUE_MATRIX,
+)
+def test_queue_state_precedence_matrix(status, owed, current, approval_required,
+                                       owner_dispatch_status, expected):
+    from app.services.state_manager import proof_work
+
+    work = {
+        'status': status, 'owed': owed, 'current': current,
+        'approval_required': approval_required, 'verification_invalidated': False,
+        'waiting_on_work_id': None,
+        'owner_dispatch_id': 7 if owner_dispatch_status else None,
+        'owner_dispatch_status': owner_dispatch_status,
+    }
+    assert proof_work.queue_state(work) == expected
+
+
+@pytest.mark.parametrize(('status', 'expected'), [
+    ('prepared', 'stale'), ('claimed', 'stale'), ('blocked', 'stale'), ('stale', 'stale'),
+    ('finished', 'done'), ('resolved', 'done'),
+])
+def test_invalidated_verification_stales_open_work_and_keeps_ended_work_done(status, expected):
+    from app.services.state_manager import proof_work
+
+    assert proof_work.queue_state({
+        'status': status, 'owed': False, 'current': False, 'approval_required': False,
+        'verification_invalidated': True, 'waiting_on_work_id': None, 'owner_dispatch_id': 7,
+        'owner_dispatch_status': 'in-progress',
+    }) == expected
+
+
+def test_queue_state_is_derived_on_every_list_and_get_entry(client, isolate_settings):
+    seed(client, isolate_settings)
+    listed = client.get(f'{BASE}/proof-work').json()
+    assert [row['queue_state'] for row in listed['owed']] == ['unprepared']
+    assert listed['queue_state_counts'] == {'unprepared': 1}
+
+    local = prepare(client)
+    live = prepare(client, 'web')
+    assert local['queue_state'] == 'ready'
+    assert live['queue_state'] == 'needs_approval'
+    listed = client.get(f'{BASE}/proof-work').json()
+    assert {row['id']: row['queue_state'] for row in listed['items']} == {
+        local['id']: 'ready', live['id']: 'needs_approval',
+    }
+    assert listed['owed'][0]['work_ids'] == [local['id'], live['id']]
+    # A claimable item is the next action, ahead of one still awaiting approval.
+    assert listed['owed'][0]['queue_state'] == 'ready'
+    assert listed['queue_state_counts'] == {'ready': 1, 'needs_approval': 1}
+
+    assert claim(client, local).status_code == 200
+    assert client.get(f'{BASE}/proof-work/{local["id"]}').json()['queue_state'] == 'in_progress'
+    listed = client.get(f'{BASE}/proof-work').json()
+    assert listed['owed'][0]['queue_state'] == 'in_progress'
+    # Reading derives the state; it never writes lifecycle.
+    with db.get_connection() as connection:
+        stored = connection.execute('SELECT status FROM assessment_proof_work WHERE id=?',
+                                    (local['id'],)).fetchone()['status']
+    assert stored == 'claimed'
+
+
+@pytest.mark.parametrize('ended_status', ['blocked', 'finished'])
+def test_repreparing_ended_owned_work_requires_explicit_release(client, isolate_settings, ended_status):
+    seed(client, isolate_settings)
+    work = prepare(client)
+    assert claim(client, work).status_code == 200
+    update = client.patch(f'{BASE}/proof-work/{work["id"]}', json={
+        'agent_id': 'PROOF-1', 'status': ended_status,
+        'blocker': 'Need Acme tenant credentials' if ended_status == 'blocked' else '',
+    })
+    assert update.status_code == 200, update.text
+    response = client.post(f'{BASE}/proof-work', json={
+        'finding_slug': 'VA-050', 'route': 'code',
+        'objective': 'Try to disprove replay under the supported execution path',
+        'target_hosts': [],
+    })
+    assert response.status_code == 409, response.text
+    detail = response.json()['detail'].lower()
+    assert 'release' in detail and ended_status in detail
+
+
+def test_prepare_prefers_the_newest_live_row_among_equivalent_legacy_bindings(client, isolate_settings):
+    seed(client, isolate_settings)
+    work = prepare(client, 'web')
+    legacy = dict(work['binding'])
+    legacy.pop('target_admission')
+    legacy['out_of_scope'] = []
+    with db.get_connection() as connection:
+        for roots in (['example.com', 'old.example'], ['example.com']):
+            variant = dict(legacy, scope_hosts=roots)
+            encoded = json.dumps(variant, sort_keys=True, separators=(',', ':'))
+            connection.execute(
+                'UPDATE assessment_proof_work SET binding_json=?,binding_digest=? WHERE id=?',
+                (encoded, hashlib.sha256(encoded.encode()).hexdigest(), work['id']),
+            ) if roots == ['example.com', 'old.example'] else connection.execute(
+                'INSERT INTO assessment_proof_work '
+                '(engagement_id,finding_id,binding_digest,binding_json,route,objective,target_hosts_json) '
+                'SELECT engagement_id,finding_id,?,?,route,objective,target_hosts_json '
+                'FROM assessment_proof_work WHERE id=?',
+                (hashlib.sha256(encoded.encode()).hexdigest(), encoded, work['id']),
+            )
+        connection.execute("UPDATE assessment_proof_work SET status='finished' WHERE id=?", (work['id'],))
+        newest = connection.execute('SELECT MAX(id) FROM assessment_proof_work').fetchone()[0]
+    assert newest != work['id']
+    assert prepare(client, 'web')['id'] == newest
+
+
+def test_resume_brief_counts_all_owed_proof_work_whatever_the_session_mode(client, isolate_settings):
+    path = seed(client, isolate_settings)
+    scope = json.loads((path / 'scope.json').read_text())
+    scope.update(engagement_type='offensive', tracks={'code': {'phase': 'hunt'}, 'web': {'phase': 'verify'}})
+    (path / 'scope.json').write_text(json.dumps(scope))
+
+    def section(mode=None):
+        response = client.get(f'{BASE}/resume-brief', params={'mode': mode} if mode else {})
+        assert response.status_code == 200, response.text
+        return response.json()['proof_work']
+
+    expected = {
+        'owed_findings': 1, 'queue_state_counts': {'unprepared': 1},
+        'read_command': 'vigil assess proof-work list',
+    }
+    # The current operator owns every proof obligation, so a session of either
+    # mode sees the same owed set and readiness.
+    assert [section(mode) for mode in (None, 'web', 'code')] == [expected] * 3
+    prepare(client)
+    prepare(client, 'web')
+    for mode in (None, 'web', 'code'):
+        assert section(mode)['queue_state_counts'] == {'ready': 1, 'needs_approval': 1}
+
+REVISED_PLAN = {
+    **RUNTIME_PROOF_PLAN,
+    'hypothesis': 'The Acme handler still accepts a captured token after logout.',
+}
+
+
+def repark(client, plan=REVISED_PLAN):
+    """Park the finding again with a revised plan: a new pending_runtime_proof event."""
+    response = client.post(f'{BASE}/findings/VA-050/verify', json={
+        'verification_status': 'pending_runtime_proof', 'reason_code': 'source-review',
+        'reason_text': 'Runtime challenge revised after the earlier pass',
+        'source_name': 'verifier', 'next_test': plan,
+    })
+    assert response.status_code == 200, response.text
+
+
+def prepare_response(client, route='code'):
+    return client.post(f'{BASE}/proof-work', json={
+        'finding_slug': 'VA-050', 'route': route,
+        'objective': 'Try to disprove replay under the supported execution path',
+        'target_hosts': ['example.com'] if route == 'web' else [],
+    })
+
+
+def owed_listing(client):
+    listed = client.get(f'{BASE}/proof-work').json()
+    [entry] = listed['owed']
+    return entry, listed
+
+
+def test_repark_after_finished_work_owes_a_fresh_preparation(client, isolate_settings):
+    seed(client, isolate_settings)
+    work = prepare(client)
+    assert claim(client, work).status_code == 200
+    finished = client.patch(f'{BASE}/proof-work/{work["id"]}', json={
+        'agent_id': 'PROOF-1', 'status': 'finished',
+    })
+    assert finished.status_code == 200, finished.text
+    repark(client)
+
+    entry, listed = owed_listing(client)
+    assert entry['queue_state'] == 'unprepared'
+    assert entry['work_ids'] == []
+    assert entry['next_test']['hypothesis'] == REVISED_PLAN['hypothesis']
+    assert listed['queue_state_counts'] == {'unprepared': 1, 'done': 1}
+    historical = client.get(f'{BASE}/proof-work/{work["id"]}').json()
+    assert (historical['status'], historical['queue_state'], historical['current']) == (
+        'finished', 'done', False)
+    # History keeps the plan it was prepared for, not the revised one.
+    assert historical['next_test'] == RUNTIME_PROOF_PLAN
+
+    fresh = prepare_response(client)
+    assert fresh.status_code == 201, fresh.text
+    assert fresh.json()['id'] != work['id']
+    assert fresh.json()['next_test'] == REVISED_PLAN
+    # Its earlier owner is still running, so claiming waits on it.
+    assert (fresh.json()['queue_state'], fresh.json()['waiting_on_work_id']) == ('blocked', work['id'])
+    assert claim(client, fresh.json(), 'PROOF-2').status_code == 409
+    assert client.patch(f'{BASE}/dispatches/PROOF-1', json={'status': 'completed'}).status_code == 200
+    entry, _ = owed_listing(client)
+    assert (entry['queue_state'], entry['work_ids']) == ('ready', [fresh.json()['id']])
+    assert claim(client, fresh.json(), 'PROOF-2').status_code == 200
+
+
+def test_repark_after_resolved_work_prepares_new_work_and_keeps_the_resolved_row(client, isolate_settings):
+    seed(client, isolate_settings)
+    work = prepare(client)
+    left = client.post(f'{BASE}/findings/VA-050/verify', json={
+        'verification_status': 'disputed', 'reason_text': 'Claim contested.',
+    })
+    assert left.status_code == 200, left.text
+    reconciled = client.post(f'{BASE}/proof-work/{work["id"]}/reconcile', json={})
+    assert reconciled.json()['status'] == 'resolved'
+    repark(client)
+
+    entry, listed = owed_listing(client)
+    assert (entry['queue_state'], entry['work_ids']) == ('unprepared', [])
+    assert listed['queue_state_counts'] == {'unprepared': 1, 'done': 1}
+    fresh = prepare(client)
+    assert fresh['id'] != work['id']
+    assert (fresh['queue_state'], fresh['waiting_on_work_id']) == ('ready', None)
+    assert client.get(f'{BASE}/proof-work/{work["id"]}').json()['status'] == 'resolved'
+
+
+def test_repark_while_claimed_stales_the_claim_and_preserves_its_evidence(client, isolate_settings):
+    seed(client, isolate_settings)
+    work = prepare(client)
+    assert claim(client, work).status_code == 200
+    run = client.post(f'{BASE}/assessment-runs', json={
+        'run_uuid': 'proof-before-repark', 'run_kind': 'code', 'producer_dispatch_agent_id': 'PROOF-1',
+    }).json()
+    repark(client)
+
+    old = client.get(f'{BASE}/proof-work/{work["id"]}').json()
+    assert (old['status'], old['queue_state'], old['current']) == ('claimed', 'stale', False)
+    entry, listed = owed_listing(client)
+    assert (entry['queue_state'], entry['work_ids']) == ('unprepared', [])
+    assert listed['queue_state_counts'] == {'unprepared': 1, 'stale': 1}
+
+    fresh = prepare_response(client)
+    assert fresh.status_code == 201, fresh.text
+    assert fresh.json()['id'] != work['id']
+    # One worker per finding and route: the new work waits for the earlier owner.
+    assert (fresh.json()['queue_state'], fresh.json()['waiting_on_work_id']) == ('blocked', work['id'])
+    entry, _ = owed_listing(client)
+    assert entry['queue_state'] == 'blocked'
+    assert claim(client, fresh.json(), 'PROOF-2').status_code == 409
+
+    # The earlier owner keeps attributing what it already ran.
+    recorded = client.patch(f'{BASE}/proof-work/{work["id"]}', json={
+        'agent_id': 'PROOF-1', 'status': 'claimed', 'run_id': run['id'],
+    })
+    assert recorded.status_code == 200, recorded.text
+    assert (recorded.json()['status'], recorded.json()['run_ids']) == ('stale', [run['id']])
+    assert client.patch(f'{BASE}/assessment-runs/{run["id"]}', json={'status': 'interrupted'}).status_code == 200
+    assert client.patch(f'{BASE}/dispatches/PROOF-1', json={'status': 'completed'}).status_code == 200
+    released = client.post(f'{BASE}/proof-work/{work["id"]}/release', json={
+        'reason': 'Earlier plan owner ended; its run is reconciled',
+    })
+    assert released.status_code == 200, released.text
+    assert released.json()['status'] == 'stale'
+    assert client.get(f'{BASE}/proof-work/{fresh.json()["id"]}').json()['queue_state'] == 'ready'
+    assert claim(client, fresh.json(), 'PROOF-2').status_code == 200
+
+
+def test_claim_whose_owner_dispatch_row_is_missing_reads_blocked(client, isolate_settings):
+    from app.services.state_manager import proof_work
+
+    assert proof_work.queue_state({
+        'status': 'claimed', 'owed': True, 'current': True, 'approval_required': False,
+        'verification_invalidated': False, 'waiting_on_work_id': None,
+        'owner_dispatch_id': 7, 'owner_dispatch_status': None,
+    }) == 'blocked'
+
+    seed(client, isolate_settings)
+    work = prepare(client)
+    owner = claim(client, work).json()['owner_dispatch_id']
+    with db.get_connection() as connection:
+        connection.execute('PRAGMA foreign_keys=OFF')
+        connection.execute('DELETE FROM assessment_dispatches WHERE id=?', (owner,))
+    assert client.get(f'{BASE}/proof-work/{work["id"]}').json()['queue_state'] == 'blocked'
+    reconciled = client.post(f'{BASE}/proof-work/{work["id"]}/reconcile', json={})
+    assert reconciled.status_code == 200, reconciled.text
+    assert reconciled.json()['status'] == 'blocked'
+    # Missing ownership authorizes neither a release nor another worker.
+    released = client.post(f'{BASE}/proof-work/{work["id"]}/release', json={'reason': 'Owner row lost'})
+    assert released.status_code == 409, released.text
+    assert 'missing' in released.json()['detail']
+    other = prepare(client, objective='Challenge replay with a second supported driver')
+    assert other['queue_state'] == 'blocked'
+    assert claim(client, other, 'PROOF-2').status_code == 409
+
+
+def merge_parked_finding(client):
+    target = client.post(f'{BASE}/findings', json={
+        'slug': 'VA-051', 'title': 'Acme replay canonical record', 'severity': 'high',
+        'canonical_location': 'https://example.com/login',
+        'summary': 'Canonical replay record',
+        'provenance': _author_provenance(client, 'VA-051'),
+    })
+    assert target.status_code == 201, target.text
+    merged = client.post(f'{BASE}/findings/merge', json={
+        'source_slug': 'VA-050', 'target_slug': 'VA-051',
+        'reason': 'Same replay root cause', 'source_name': 'operator',
+    })
+    assert merged.status_code == 200, merged.text
+    merged_finding = client.get(f'{BASE}/findings/VA-050').json()
+    assert merged_finding['verification_status'] == 'pending_runtime_proof'
+    # A merged finding owes no proof, so it has no current plan.
+    assert merged_finding['next_test'] is None
+
+
+def test_merged_findings_owe_no_proof_work(client, isolate_settings):
+    seed(client, isolate_settings)
+    work = prepare(client)
+    merge_parked_finding(client)
+
+    listed = client.get(f'{BASE}/proof-work').json()
+    assert listed['owed'] == []
+    assert listed['queue_state_counts'] == {'done': 1}
+    historical = client.get(f'{BASE}/proof-work/{work["id"]}').json()
+    assert (historical['owed'], historical['queue_state']) == (False, 'done')
+    brief = client.get(f'{BASE}/resume-brief').json()['proof_work']
+    assert brief['owed_findings'] == 0
+    owed_rows = client.get(f'{BASE}/findings', params={'runtime_proof_owed': True}).json()
+    assert [row['slug'] for row in owed_rows] == []
+
+    refused = prepare_response(client)
+    assert refused.status_code == 400, refused.text
+    assert 'merged' in refused.json()['detail']
+    assert claim(client, work).status_code == 409
+
+
+def test_runtime_proof_owed_filter_lists_parked_live_findings(client, isolate_settings):
+    seed(client, isolate_settings)
+    owed_rows = client.get(f'{BASE}/findings', params={'runtime_proof_owed': True}).json()
+    assert [row['slug'] for row in owed_rows] == ['VA-050']
+
+
+def test_work_bound_before_parks_were_named_belongs_to_the_plan_it_was_prepared_under(client, isolate_settings):
+    seed(client, isolate_settings)
+    work = prepare(client)
+    legacy = dict(work['binding'])
+    legacy.pop('parking_transition_id')
+    encoded = json.dumps(legacy, sort_keys=True, separators=(',', ':'))
+    with db.get_connection() as connection:
+        connection.execute("UPDATE assessment_finding_next_tests SET created_at='2026-01-01 00:00:00'")
+        connection.execute(
+            "UPDATE assessment_proof_work SET binding_json=?,binding_digest=?,"
+            "created_at='2026-01-01 00:00:01' WHERE id=?",
+            (encoded, hashlib.sha256(encoded.encode()).hexdigest(), work['id']),
+        )
+    assert client.get(f'{BASE}/proof-work/{work["id"]}').json()['current'] is True
+    assert prepare(client)['id'] == work['id']
+
+    repark(client)
+    assert client.get(f'{BASE}/proof-work/{work["id"]}').json()['current'] is False
+    entry, _ = owed_listing(client)
+    assert (entry['queue_state'], entry['work_ids']) == ('unprepared', [])
+    assert prepare(client)['id'] != work['id']
+
+
+def test_material_edit_that_invalidates_a_parked_finding_stales_its_open_work(client, isolate_settings):
+    seed(client, isolate_settings)
+    work = prepare(client)
+    assert claim(client, work).status_code == 200
+    patched = client.patch(f'{BASE}/findings/VA-050', json={'severity': 'medium'})
+    assert patched.status_code == 200, patched.text
+    assert patched.json()['finding']['verification_status'] == 'unreviewed'
+
+    read = client.get(f'{BASE}/proof-work/{work["id"]}').json()
+    assert (read['status'], read['owed'], read['queue_state']) == ('claimed', False, 'stale')
+    assert client.get(f'{BASE}/proof-work').json()['queue_state_counts'] == {'stale': 1}
+    reconciled = client.post(f'{BASE}/proof-work/{work["id"]}/reconcile', json={}).json()
+    assert (reconciled['status'], reconciled['queue_state']) == ('stale', 'stale')
+    assert 'invalidated' in reconciled['blocker']
+    # The owner still records what it ran; nothing reads the work as done.
+    recorded = client.patch(f'{BASE}/proof-work/{work["id"]}', json={
+        'agent_id': 'PROOF-1', 'status': 'claimed',
+    })
+    assert recorded.status_code == 200, recorded.text
+    assert (recorded.json()['status'], recorded.json()['queue_state']) == ('stale', 'stale')
+    assert 'invalidated' in recorded.json()['blocker']
+    assert client.patch(f'{BASE}/dispatches/PROOF-1', json={'status': 'completed'}).status_code == 200
+    released = client.post(f'{BASE}/proof-work/{work["id"]}/release', json={
+        'reason': 'Owner ended after the finding was edited',
+    }).json()
+    assert (released['status'], released['owner_dispatch_id']) == ('stale', None)
+    assert 'invalidated' in released['blocker']
+
+
+def test_an_explicit_verification_decision_still_reads_open_work_done(client, isolate_settings):
+    seed(client, isolate_settings)
+    work = prepare(client)
+    assert claim(client, work).status_code == 200
+    decided = client.post(f'{BASE}/findings/VA-050/verify', json={
+        'verification_status': 'disputed', 'reason_text': 'Claim contested.',
+    })
+    assert decided.status_code == 200, decided.text
+    assert client.get(f'{BASE}/proof-work/{work["id"]}').json()['queue_state'] == 'done'
+    assert client.post(f'{BASE}/proof-work/{work["id"]}/reconcile', json={}).json()['status'] == 'resolved'

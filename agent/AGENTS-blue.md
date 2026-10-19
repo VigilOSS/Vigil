@@ -254,7 +254,7 @@ overrides with a stated reason.
 - **Definition of Done:**
   - [ ] Every finding with `verification_status=unreviewed` has a five-check decision recorded (see "Five-Check Verification" below).
   - [ ] Shared status vocabulary used: `unreviewed`, `disputed`, `pending_runtime_proof`, `blocked`, `confirmed`, `downgraded`, `false_positive`.
-  - [ ] Decision reached via `vigil assess finding verify <slug> --status <...>`. Terminal decisions cite healthy proof receipts from one completed independent verifier run; `false_positive` additionally records a completed structured counter-check. Unavailable checks become `blocked` or `pending_runtime_proof`.
+  - [ ] Decision reached via `vigil assess finding verify <slug> --status <...>`. Terminal decisions cite healthy proof receipts from one completed independent verifier run; `false_positive` additionally records a completed structured counter-check. Unavailable checks become `blocked` or `pending_runtime_proof`; the latter carries the verifier's `--next-test-file` plan.
   - [ ] False-positive artifacts marked scratch via `vigil assess artifact mark-scratch <id>` (never deleted) so they stay auditable without polluting resume-brief or report.
   - [ ] Verifier handoff includes the Devil's-advocate enumeration (Check 5) with the same evidence bar as the positive case.
   - [ ] Cross-platform correlation gaps named explicitly when the engagement carries multiple platforms (e.g., `gws + okta`): which platform clock is authoritative, which identity field bridges the two log sources.

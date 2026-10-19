@@ -30,6 +30,7 @@ Each iteration:
 
     vulnerability-analyst: api, api-spec, form, upload, graphql, websocket
     source-analyzer: page, javascript, stylesheet, data
+      (register source-analyzer with `agent start --assessment-mode web`)
 
     vigil assess work-buffer fetch <type> 10 <agent_name>
 

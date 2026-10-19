@@ -39,7 +39,7 @@ then demonstrate the attacker outcome it enables.
 
 When you capture credentials, tokens, or keys — **use them**. Extract the token, replay it, show what it unlocks. If replay fails, say why (expiry, IP binding, CSRF token required) and mark the finding CHAIN REQUIRED with the specific gap.
 
-A strong-but-unproven finding is parked, not dropped: hold it with `evidence_type=theoretical` + `chain_required=true` at `verification_status=pending_runtime_proof` (`vigil assess contract finding record`), and review the holding area with `vigil assess finding list --holding`. It stays out of the report until a runtime pass proves it.
+A strong-but-unproven finding is parked, not dropped: hold it with `evidence_type=theoretical` + `chain_required=true` at `verification_status=pending_runtime_proof` (`vigil assess contract finding record`), with a next test naming what would confirm and what would falsify it (`--next-test-file`; `vigil assess contract finding verify`), and review the holding area with `vigil assess finding list --holding`. It stays out of the report until a runtime pass proves it.
 
 **Recording a finding is not grading it.** A finding at `verification_status=unreviewed` is an **open question**, not a graded N/A — the lifecycle default means "not yet judged," not "judged harmless." Do not assert "no P2 here" / "this surface is clean" while any unauth or medium-plus finding is still `unreviewed`: an unreviewed finding is exactly what a clean-bill-of-health claim is supposed to have already resolved. Drive it to a verifier decision before you grade the surface.
 

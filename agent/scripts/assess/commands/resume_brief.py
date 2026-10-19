@@ -341,6 +341,7 @@ def _render_markdown(brief: dict) -> str:
     _render_attempts(lines, brief.get("attempts") or {})
     _render_credential_needs(lines, brief.get("credential_needs") or {})
     _render_contradiction_reviews(lines, brief.get("contradiction_reviews") or {})
+    _render_proof_work(lines, brief.get("proof_work") or {})
     _render_per_input_coverage(lines, brief.get("per_input_coverage") or {})
     _render_code_analysis(lines, brief.get("code_analysis") or {})
     _render_decisions(
@@ -810,6 +811,18 @@ def _render_contradiction_reviews(lines: list[str], section: dict) -> None:
         ))
     if count > len(items):
         lines.append(f"- … showing {len(items)} of {count}")
+
+
+def _render_proof_work(lines: list[str], section: dict) -> None:
+    owed = int(section.get("owed_findings") or 0)
+    counts = section.get("queue_state_counts") or {}
+    if not owed and not counts:
+        return
+    compact = ", ".join(f"{state}={count}" for state, count in counts.items()) or "-"
+    lines.extend(["", "## Proof Work"])
+    lines.append(contain_separators(
+        f"- owed findings: {owed}; queue: {compact}; read=`{section.get('read_command')}`"
+    ))
 
 
 def _render_attempts(lines: list, attempts: dict) -> None:

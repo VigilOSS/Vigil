@@ -1133,6 +1133,28 @@ def _serialize_run(
             (engagement_id, *lineage_ids),
         ).fetchall()
     ]
+    # ``finding_slugs`` are findings whose verification CITES this run's receipts.
+    # A ``--for-finding`` start (or a later ``finding link``) records intent to
+    # verify before any citation exists; it is reported apart so an associated
+    # run never reads as unlinked and a citation is never implied. It is per run,
+    # not per lineage, because the verification gate requires the run's own link.
+    record["associated_finding_slugs"] = [
+        str(finding["slug"])
+        for finding in connection.execute(
+            """
+            SELECT DISTINCT findings.slug
+            FROM assessment_findings AS findings
+            JOIN assessment_finding_links AS links ON links.finding_id = findings.id
+            WHERE findings.engagement_id = ?
+              AND links.engagement_id = findings.engagement_id
+              AND links.link_kind = 'proof_run' AND links.target_kind = 'assessment_run'
+              AND links.retired_at IS NULL
+              AND links.target_id = ?
+            ORDER BY findings.slug
+            """,
+            (engagement_id, run_id),
+        ).fetchall()
+    ]
     warnings: list[str] = []
     if str(record.get("actual_model") or "unknown") == "unknown":
         warnings.append("provider-observed model identity is unknown")

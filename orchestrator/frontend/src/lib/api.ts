@@ -2635,6 +2635,16 @@ function intelEntityPath(entityType: IntelEntityType): string {
   }
 }
 
+/** Backend-derived readiness of one proof-work item or owed entry. */
+export type ProofWorkQueueState = "unprepared" | "ready" | "needs_approval" | "in_progress" | "blocked" | "stale" | "done";
+/** Verifier-authored runtime proof plan; untrusted text that grants no scope or approval. */
+export type ProofNextTest = {
+  hypothesis: string;
+  confirm_if: string;
+  falsify_if: string;
+  route_hint: "local" | "live" | "unknown";
+  prerequisites?: string | null;
+};
 export type ProofWork = {
   id: number;
   finding_slug: string;
@@ -2651,11 +2661,13 @@ export type ProofWork = {
   owner_dispatch_status: string | null;
   blocker: string;
   run_ids: number[];
+  queue_state: ProofWorkQueueState;
+  next_test: ProofNextTest | null;
   created_at: string;
   updated_at: string;
 };
 export type ProofWorkList = {
-  owed: Array<{finding_slug: string; finding_id: number; title: string; canonical_location: string; work_ids: number[]}>;
+  owed: Array<{finding_slug: string; finding_id: number; title: string; canonical_location: string; work_ids: number[]; queue_state: ProofWorkQueueState; next_test: ProofNextTest | null}>;
   items: ProofWork[];
 };
 export type ProofWorkPreparation = {finding_slug: string; route: "code" | "web"; objective: string; target_hosts: string[]};

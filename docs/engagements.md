@@ -19,8 +19,9 @@ work — and leaves authentication unset. Local sandbox proof uses the code rout
 echoed on stderr so it can be overridden; ambiguous inputs prompt on a terminal and fail fast
 under `--no-prompt`. Repository selection requires explicit `--type remediation`.
 Code creation accepts `--source-dir ./acme` to register an original directory, or prepares a
-manual `source/` folder when omitted. The operator asks for source confirmation before first
-ingest or refresh, then creates one sealed audit copy directly from the selected directory.
+manual `source/` folder when omitted. The operator asks you to confirm the source, and that you
+trust its build and test code to run inside the Vigil runtime, before first ingest or refresh. It
+then creates one sealed audit copy directly from the selected directory.
 Ordinary source folders and loose files work without Git. See [`code-analysis.md`](code-analysis.md).
 
 Scope hosts can be given as `--hosts a,b`, repeated `--host` flags, a
@@ -60,10 +61,14 @@ A preflight runs first. It **hard-fails** when the client binary is not on `PATH
 OpenCode has no `DEEPSEEK_API_KEY` in the environment, the engagement's `.orchestrator.env`, or the
 workspace's env files. It recovers the default managed local backend when needed and refuses
 launch when that managed backend remains unavailable or when any reachable backend belongs to
-another workspace. A configured remote backend that is temporarily unreachable produces a
-warning and launches against local engagement files only; backend-dependent commands fail until
-that endpoint returns. A matching backend whose immediate synchronization races also warns and
-continues because the next backend request retries synchronization. Preflight never substitutes
+another workspace. A configured remote backend that cannot be reached at the transport level
+produces a warning and launches against local engagement files only; backend-dependent commands
+fail until that endpoint returns. A reachable backend that answers engagement synchronization
+with a non-2xx response, or fails with a TLS or certificate error, refuses launch as a protocol
+error. An older backend that cannot report its install root still receives the synchronization,
+with a warning that workspace ownership is unverified. When the synchronization request itself
+drops at the transport level after the backend answered, preflight warns and launches, and the
+next backend request retries synchronization. Preflight never substitutes
 localhost for a configured remote endpoint. Static code startup does not query
 Docker. The first audited execution starts the managed Kali runtime if stopped; it never
 recreates a running service. Application freshness remains a warning. `--skip-preflight`
@@ -103,14 +108,22 @@ Read existing work ownership before launching a specialist. Shared services and 
 continue when a client exits. Nothing here restarts native clients unattended.
 
 The current operator prepares proof for `pending_runtime_proof` candidates and claims the
-work before launching a fresh specialist. The explicit code route covers local library/API
-reproduction in audited Kali; the web route covers admitted live targets under the applicable
-exploit approval. Neither requires a second operator or both operator cores.
+work before launching a fresh specialist. A candidate carries the next test its verifier
+recorded: hypothesis, confirming and falsifying observations, and a local or live route hint.
+The explicit code route covers local library/API reproduction in audited Kali; the web route
+covers admitted live targets under the applicable exploit approval. Neither requires a second
+operator or both operator cores.
 
-The UI's **Proof work** view shows owed candidates, targets, owners, blockers, approval and
-linked proof runs. It can prepare work, record exact-work approval, reconcile state, and release
-ended ownership only after backend liveness checks. Preparing or finishing a task never
-confirms the finding. Run evidence and the existing finding-verification requirements still apply.
+The UI's **Proof work** view shows owed candidates, their next tests, targets, owners, blockers,
+approval and linked proof runs. Each entry shows a readiness state derived by the backend:
+unprepared, ready, needs approval, in progress, blocked, stale, or done. It can prepare work,
+record exact-work approval, reconcile state, and release ended ownership only after backend
+liveness checks. Preparing or finishing a task never confirms the finding. Run evidence and the existing finding-verification requirements still apply.
+A revised next test makes earlier work for that finding history: it keeps its runs and evidence,
+reads stale or done, and the finding reads unprepared until work is prepared for the new plan.
+New work reads blocked while an earlier owner of the same finding and route has not ended and
+been released, because one worker owns a finding and route at a time.
+A merged finding owes no proof work.
 
 Manual inspection and recovery are available without launching a session:
 

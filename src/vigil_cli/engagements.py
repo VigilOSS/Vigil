@@ -711,6 +711,15 @@ def _emit_engagement_identity(key: str, engagement_type: str) -> None:
     print(f"[vigil] start: {start}", file=sys.stderr, flush=True)
 
 
+# The one sentence a human answers before first ingest or refresh. The code
+# operator prompt asks it verbatim: confirming source also consents to running
+# that repository's build and test code inside the runtime.
+SOURCE_TRUST_CONFIRMATION = (
+    "Confirm these are the intended source files and that you trust this repository's "
+    "build and test code to run inside the Vigil runtime."
+)
+
+
 def _emit_code_source_footer(engagement_dir: Path) -> None:
     source = engagement_source_state(engagement_dir)
     print(f"[vigil] source: {source['path']} ({source['state']})", file=sys.stderr)
@@ -718,7 +727,11 @@ def _emit_code_source_footer(engagement_dir: Path) -> None:
         print("[vigil] Source location registered. Confirmation creates a sealed audit copy directly from this directory; the original stays untouched.", file=sys.stderr)
     else:
         print("[vigil] Place the source files to review in that folder. A Git repository is not required.", file=sys.stderr)
-    print("[vigil] The code client will ask you to confirm the source before reading it for analysis.", file=sys.stderr)
+    print(
+        "[vigil] Before reading the source for analysis, the code client will ask: "
+        + SOURCE_TRUST_CONFIRMATION,
+        file=sys.stderr,
+    )
 
 
 def _emit_post_create_footer(key: str, *, runner: docker.Runner = docker.run_command) -> None:
@@ -753,6 +766,9 @@ class BackendInstallRootStatus(StrEnum):
     VERIFIED = "verified"
     UNREACHABLE = "unreachable"
     SYNC_PENDING = "sync_pending"
+    # The sync request dropped after an older build that cannot report its
+    # install root answered, so workspace ownership was never checked.
+    SYNC_PENDING_OWNERSHIP_UNVERIFIED = "sync_pending_ownership_unverified"
     PROTOCOL_ERROR = "protocol_error"
 
 
@@ -779,9 +795,16 @@ def _verify_backend_install_root(
       - If the backend is reachable AND its install_root differs, abort with
         the recovery message — the operator must restart the orchestrator
         against the matching install root before the engagement is usable.
+      - An older backend without /admin/install-root (404) still receives the
+        force-sync; only the drift comparison is skipped, with a warning.
+      - A TLS failure or a non-2xx answer from a reachable backend is a protocol
+        error. Only a transport failure of the sync request itself is a
+        retryable pending sync, reported as ownership-unverified when the
+        backend could not report its install root.
     """
     import http.client
     import json as _json
+    import ssl
     from urllib.parse import urlparse
 
     base_url = resolve_orchestrator_base_url(install_root, eng_dir)
@@ -812,11 +835,10 @@ def _verify_backend_install_root(
         elif resp.status == 404:
             print(
                 f"[vigil] orchestrator at {base_url} does not expose /admin/install-root "
-                "(older or incompatible build), so workspace ownership cannot be verified. "
-                "Upgrade and restart the orchestrator before launching.",
+                "(older build), so workspace ownership cannot be verified; skipping the "
+                "install-root drift check. Upgrade and restart the orchestrator to validate it.",
                 file=sys.stderr,
             )
-            return BackendInstallRootStatus.PROTOCOL_ERROR
         else:
             print(
                 f"[vigil] orchestrator at {base_url} returned HTTP {resp.status} "
@@ -824,6 +846,10 @@ def _verify_backend_install_root(
                 file=sys.stderr,
             )
             return BackendInstallRootStatus.PROTOCOL_ERROR
+    except (ssl.SSLError, http.client.HTTPException):
+        # A TLS failure or a non-HTTP answer is not an outage: something answered
+        # and could not be trusted, so it must not receive the offline carveout.
+        return BackendInstallRootStatus.PROTOCOL_ERROR
     except OSError:
         # Only a transport failure is unreachable. A reachable but malformed
         # backend is a protocol error and must not receive the offline carveout.
@@ -853,13 +879,21 @@ def _verify_backend_install_root(
         resp = conn.getresponse()
         resp.read()
         conn.close()
-        return (
-            BackendInstallRootStatus.VERIFIED
-            if 200 <= resp.status < 300
-            else BackendInstallRootStatus.SYNC_PENDING
+        if 200 <= resp.status < 300:
+            return BackendInstallRootStatus.VERIFIED
+        print(
+            f"[vigil] orchestrator at {base_url} returned HTTP {resp.status} "
+            "for /admin/sync-engagements; the engagement is not registered.",
+            file=sys.stderr,
         )
+        return BackendInstallRootStatus.PROTOCOL_ERROR
+    except (ssl.SSLError, http.client.HTTPException):
+        return BackendInstallRootStatus.PROTOCOL_ERROR
     except OSError:
-        # Sync race conditions are non-fatal — the next implicit sync covers it.
+        # A transport drop after the install-root request answered is the one
+        # retryable case — the next implicit sync covers it.
+        if backend_install_root is None:
+            return BackendInstallRootStatus.SYNC_PENDING_OWNERSHIP_UNVERIFIED
         return BackendInstallRootStatus.SYNC_PENDING
 
 
@@ -1732,7 +1766,8 @@ def start_engagement(install_root: Path, engagement_dir: Path, client: str, extr
         setup = (
             "Follow the source confirmation step in the canonical code operator prompt. "
             f"The selected source directory is {json.dumps(source['path'])}. "
-            "Show me this directory and ask me to confirm it before first ingest or refresh. "
+            "Show me this directory and, before first ingest or refresh, ask me exactly: "
+            f"{json.dumps(SOURCE_TRUST_CONFIRMATION)} Wait for my answer. "
             "Use code-ingest directly on this original directory to create one sealed audit copy; do not stage another copy. "
             "If no source is present, ask me to provide it and wait. "
             "If backend state already contains confirmed sealed source, resume that investigation with vigil-resume; "

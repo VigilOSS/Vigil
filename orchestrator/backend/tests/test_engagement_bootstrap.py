@@ -735,3 +735,47 @@ def test_aith_launchers_respect_explicit_agent_name_override(
         env=env_with_override,
     )
     assert "AGENT_NAME=vulnerability-analyst" in launch.stdout
+
+
+@pytest.mark.parametrize("failing_method", ["GET", "POST"])
+def test_verify_backend_install_root_reports_non_http_responder_as_protocol_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failing_method: str
+) -> None:
+    """Something answered but did not speak HTTP: that is a protocol error that
+    refuses launch, not a crash and not the unreachable carveout."""
+    import http.client
+
+    from vigil_cli import engagements as engagement_module
+
+    install_root = tmp_path / "install"
+    install_root.mkdir()
+    eng_dir = install_root / "agent" / "engagements" / "eng-1"
+    eng_dir.mkdir(parents=True)
+
+    class _Response:
+        status = 200
+
+        def read(self) -> bytes:
+            return json.dumps({"install_root": str(install_root.resolve())}).encode("utf-8")
+
+    class _HttpConnection:
+        def __init__(self, host: str, port: int, timeout: int):
+            self.method = ""
+
+        def request(self, method: str, path: str) -> None:
+            self.method = method
+
+        def getresponse(self) -> _Response:
+            if self.method == failing_method:
+                raise http.client.BadStatusLine("SSH-2.0-OpenSSH_9.6")
+            return _Response()
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setenv("ORCHESTRATOR_BASE_URL", "http://orchestrator.example.test:8080/")
+    monkeypatch.setattr(http.client, "HTTPConnection", _HttpConnection)
+
+    status = engagement_module._verify_backend_install_root(install_root, eng_dir)
+
+    assert status == engagement_module.BackendInstallRootStatus.PROTOCOL_ERROR

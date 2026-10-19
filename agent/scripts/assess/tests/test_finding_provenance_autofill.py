@@ -27,8 +27,18 @@ _DIGEST = "ab" * 32
 _NEXT_DIGEST = "cd" * 32
 
 
+_PLAN = {
+    "hypothesis": "The parser copies an attacker-controlled length.",
+    "confirm_if": "An oversized length crashes the harness.",
+    "falsify_if": "The length is clamped before the copy.",
+    "route_hint": "local",
+    "prerequisites": "",
+}
+
+
 def _engagement(tmp_path):
     (tmp_path / "scope.json").write_text("{}\n", encoding="utf-8")
+    (tmp_path / "next-test.json").write_text(json.dumps(_PLAN), encoding="utf-8")
     return tmp_path
 
 
@@ -139,6 +149,8 @@ def test_record_can_park_a_code_finding_at_pending_runtime_proof(
             "CH-1",
             "--pending-runtime-proof",
             "Static dataflow only; no runtime trigger yet.",
+            "--next-test-file",
+            str(engagement / "next-test.json"),
             "--allow-unindexed-evidence",
         ]
     )
@@ -148,6 +160,7 @@ def test_record_can_park_a_code_finding_at_pending_runtime_proof(
     park = backend.payload_for("findings/CH-001/verify")
     assert park["verification_status"] == "pending_runtime_proof"
     assert park["reason_text"] == "Static dataflow only; no runtime trigger yet."
+    assert park["next_test"] == _PLAN
     # The park is a write against a file: finding, so it carries the same
     # derived binding and the same author identity the record did.
     assert park["provenance"]["agent_id"] == "CH-1"
@@ -359,6 +372,8 @@ def test_verify_stamps_the_verifier_dispatch_as_the_attesting_identity(
             "CH-001",
             "--status",
             "pending_runtime_proof",
+            "--next-test-file",
+            str(engagement / "next-test.json"),
             "--reason",
             "Re-read the current sealed source; runtime trigger still owed.",
             "--agent-id",
@@ -398,6 +413,8 @@ def test_verify_lets_an_explicit_provenance_inline_win(
             "CH-001",
             "--status",
             "pending_runtime_proof",
+            "--next-test-file",
+            str(engagement / "next-test.json"),
             "--reason",
             "Rebinding by hand.",
             "--agent-id",
@@ -442,6 +459,8 @@ def test_verify_leaves_a_url_finding_unbound(tmp_path, monkeypatch, capsys) -> N
             "VA-001",
             "--status",
             "pending_runtime_proof",
+            "--next-test-file",
+            str(engagement / "next-test.json"),
             "--reason",
             "Runtime proof still owed.",
             "--agent-id",

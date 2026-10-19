@@ -192,6 +192,8 @@ vigil assess agent start --role <role> --tier <L1|L2|L3|L4> \
 ```
 
 Use `--no-target-traffic` instead of `--rate-budget` for a genuinely offline lane.
+The mixed-role specialists (`exploit-developer`, `source-analyzer`) require
+`--assessment-mode code|web`.
 For a blue engagement the emitter reads `customer`, `platforms`, and
 `tenant_reference_paths` from `scope.json`, validates every tenant reference, and
 prints the complete prompt. The prompt-context JSON shape is documented in

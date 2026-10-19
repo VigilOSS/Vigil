@@ -64,6 +64,13 @@ from .proofs import (
     verification_audit_for_finding,
 )
 
+from .finding_next_tests import (
+    PENDING_RUNTIME_PROOF,
+    current_next_test,
+    next_tests_by_transition,
+    record_next_test,
+    runtime_proof_owed_sql,
+)
 from .finding_snapshots import (
     CODE_SNAPSHOT_ATTESTATION_PROVENANCE_KEY,
     CODE_SNAPSHOT_PROVENANCE_KEY,
@@ -1460,6 +1467,7 @@ def create_finding(
     verification_confirm_check: dict[str, Any] | None = None,
     verification_severity_variance: dict[str, Any] | None = None,
     verification_normal_severity_band: str | None = None,
+    verification_next_test: dict[str, Any] | None = None,
     run_candidate: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
@@ -2106,6 +2114,28 @@ def create_finding(
                     "independent proof_receipt_ids"
                 ),
             )
+        parked_for_runtime_proof = (
+            after_state["verification_status"] == PENDING_RUNTIME_PROOF
+        )
+        if verification_next_test is not None and not parked_for_runtime_proof:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="next_test applies only to verification_status='pending_runtime_proof'",
+            )
+        if (
+            parked_for_runtime_proof
+            and verification_next_test is None
+            and (
+                before_state is None
+                or before_state["verification_status"] != PENDING_RUNTIME_PROOF
+            )
+        ):
+            # Every entry into the holding status carries its plan, which is what
+            # lets the newest plan stand for the current park on every read.
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=_NEXT_TEST_REQUIRED_DETAIL,
+            )
         transition = None
         lifecycle_changed = _finding_state_changed(before_state, after_state)
         # A pure details / notes / location rewrite moves no lifecycle axis, so
@@ -2117,7 +2147,13 @@ def create_finding(
             and after_content is not None
             and before_content != after_content
         )
-        if lifecycle_changed or content_changed or verification_evidence_requested:
+        if (
+            lifecycle_changed
+            or content_changed
+            or verification_evidence_requested
+            # A revised plan for a finding already parked is its own event.
+            or verification_next_test is not None
+        ):
             action = transition_action or (
                 _infer_transition_action(before_state, after_state)
                 if lifecycle_changed
@@ -2143,6 +2179,22 @@ def create_finding(
                 before_content=before_content,
                 after_content=after_content,
             )
+        if verification_next_test is not None:
+            assert transition is not None
+            record_next_test(
+                connection,
+                engagement_id=engagement.id,
+                finding_id=int(finding["id"]),
+                transition_id=int(transition["id"]),
+                next_test=verification_next_test,
+            )
+        next_test = current_next_test(
+            connection,
+            engagement.id,
+            int(finding["id"]),
+            after_state["verification_status"],
+            workflow_status=after_state["workflow_status"],
+        )
         verification_evidence = {
             "proof_receipts": [],
             "counter_check": None,
@@ -2236,6 +2288,7 @@ def create_finding(
         record
     )
     record["proof_receipts"] = verification_evidence["proof_receipts"]
+    record["next_test"] = next_test
     if code_snapshot_status_before is not None:
         record["code_snapshot_status_before"] = code_snapshot_status_before
     return {
@@ -2349,6 +2402,7 @@ def patch_finding(
     verification_confirm_check: dict[str, Any] | None = None,
     verification_severity_variance: dict[str, Any] | None = None,
     verification_normal_severity_band: str | None = None,
+    verification_next_test: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if canonical_location is not None:
         canonical_location = str(canonical_location).strip()
@@ -2543,6 +2597,7 @@ def patch_finding(
         verification_confirm_check=verification_confirm_check,
         verification_severity_variance=verification_severity_variance,
         verification_normal_severity_band=verification_normal_severity_band,
+        verification_next_test=verification_next_test,
     )
     result["finding"]["verification_invalidated"] = verification_invalidated
     return result
@@ -2721,6 +2776,14 @@ def _validate_blocked_verification_details(
     )
 
 
+_NEXT_TEST_REQUIRED_DETAIL = (
+    "pending_runtime_proof verification requires a structured next_test "
+    "{hypothesis, confirm_if, falsify_if, route_hint, prerequisites}: the runtime "
+    "test still owed, the observation that confirms the claim, and the observation "
+    "that disproves it"
+)
+
+
 def verify_finding(
     engagement_id: int,
     *,
@@ -2739,6 +2802,7 @@ def verify_finding(
     counter_check: dict[str, Any] | None = None,
     confirm_check: dict[str, Any] | None = None,
     severity_variance: dict[str, Any] | None = None,
+    next_test: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     normalized_verification_status = _normalize_verification_status(verification_status)
@@ -2758,6 +2822,19 @@ def verify_finding(
                 f"new_severity applies only to verification_status='downgraded' (got "
                 f"'{verification_status}'); change the band with "
                 f"`vigil assess finding update {slug} --severity {new_severity}`"
+            ),
+        )
+    if normalized_verification_status == PENDING_RUNTIME_PROOF and next_test is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=_NEXT_TEST_REQUIRED_DETAIL,
+        )
+    if normalized_verification_status != PENDING_RUNTIME_PROOF and next_test is not None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"next_test applies only to verification_status='pending_runtime_proof' "
+                f"(got '{verification_status}')"
             ),
         )
 
@@ -2915,6 +2992,7 @@ def verify_finding(
         verification_confirm_check=confirm_check,
         verification_severity_variance=severity_variance,
         verification_normal_severity_band=normal_severity_band,
+        verification_next_test=next_test,
     )
     if artifact_ref:
         _common._register_artifact_reference(
@@ -3735,6 +3813,7 @@ def list_findings(
     slug: str | None = None,
     search: str | None = None,
     holding: bool = False,
+    runtime_proof_owed: bool = False,
     limit: int | None = None,
     offset: int = 0,
 ) -> list[dict[str, Any]]:
@@ -3789,6 +3868,8 @@ def list_findings(
             "LOWER(findings.verification_status) IN ('pending_runtime_proof', 'blocked')"
             ")"
         )
+    if runtime_proof_owed:
+        where.append(runtime_proof_owed_sql("findings"))
     limit_sql = ""
     if limit is not None:
         limit_sql = " LIMIT ? OFFSET ?"
@@ -3985,6 +4066,7 @@ def _serialize_finding_transition(
     row: sqlite3.Row,
     *,
     verification_audit: dict[str, Any],
+    next_test: dict[str, Any] | None,
 ) -> dict[str, Any]:
     record = dict(row)
     metadata = _json_object(record.get("metadata_json"))
@@ -4003,6 +4085,8 @@ def _serialize_finding_transition(
         )
     record[_NOTES_HISTORY_STATUS_KEY] = notes_history_status
     record["verification_audit"] = verification_audit
+    # The plan this event carried; null on every event that parked nothing.
+    record["next_test"] = next_test
     return record
 
 
@@ -4033,16 +4117,21 @@ def list_finding_transitions(
             sql += " LIMIT ? OFFSET ?"
             params.extend((int(limit), int(offset)))
         rows = connection.execute(sql, tuple(params)).fetchall()
+        transition_ids = [int(row["id"]) for row in rows]
         audit_by_transition = verification_audit_by_transition(
             connection,
             engagement.id,
             int(finding["id"]),
-            [int(row["id"]) for row in rows],
+            transition_ids,
+        )
+        plans_by_transition = next_tests_by_transition(
+            connection, engagement.id, int(finding["id"]), transition_ids
         )
     return [
         _serialize_finding_transition(
             row,
             verification_audit=audit_by_transition[int(row["id"])],
+            next_test=plans_by_transition.get(int(row["id"])),
         )
         for row in rows
     ]
@@ -4116,4 +4205,7 @@ def get_finding_transition(
             int(finding["id"]),
             [int(row["id"])],
         )[int(row["id"])]
-    return _serialize_finding_transition(row, verification_audit=audit)
+        plan = next_tests_by_transition(
+            connection, engagement.id, int(finding["id"]), [int(row["id"])]
+        ).get(int(row["id"]))
+    return _serialize_finding_transition(row, verification_audit=audit, next_test=plan)

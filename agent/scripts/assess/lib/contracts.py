@@ -34,6 +34,8 @@ from .surfaces import (
 from .contract_registry import (
     BINDABLE_CLIENTS as BINDABLE_CLIENTS,
     MIXED_ASSESSMENT_ROLES as MIXED_ASSESSMENT_ROLES,
+    NEXT_TEST_FIELDS as NEXT_TEST_FIELDS,
+    NEXT_TEST_ROUTE_HINTS as NEXT_TEST_ROUTE_HINTS,
     CATALOG_PHASES as CATALOG_PHASES,
     COMMAND_GOALS as COMMAND_GOALS,
     CODE_REPO_ROLES as CODE_REPO_ROLES,
@@ -1731,6 +1733,7 @@ def _dispatch_root_contract() -> CommandContract:
         schema_name="(per-action argparse; backend-backed via assessment_dispatches / _dispatch_handoffs / _dispatch_decisions)",
         preferred_invocations=(
             "vigil assess agent start --role <role> --task \"...\" --dispatch-mode <mode> --skills <skills> (--rate-budget <authored> | --no-target-traffic) [--prompt-context-json <context.json> --emit-prompt]",
+            "vigil assess agent start --role exploit-developer --assessment-mode code|web --task \"...\" --dispatch-mode deep-manual --skills <skills> (--rate-budget <authored> | --no-target-traffic) (--assessment-mode is required for exploit-developer and source-analyzer)",
             "vigil assess agent bind-client-handle <agent-id> --client <client> --session-namespace <scope> --handle <session-id>",
             "vigil assess agent handoff --from-json <handoff.json>",
             "vigil assess agent close <agent-id>",
@@ -1738,7 +1741,7 @@ def _dispatch_root_contract() -> CommandContract:
             "vigil assess agent reconcile-stale --dry-run",
             "vigil assess agent list [--filter-role <role>] [--status <status>]",
             "vigil assess agent render-handoff <agent-id>",
-            "vigil assess agent continue <prior-agent-id> --task \"...\"",
+            "vigil assess agent continue <prior-agent-id> --task \"...\" [--assessment-mode code|web]",
         ),
         author_supplied_fields=(
             "<action> (e.g. start, done, handoff, render-handoff, decision, ...)",
@@ -1936,10 +1939,17 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
             schema_name="reads prior dispatch + prompt packet; writes one linked DispatchCreate row",
             preferred_invocations=(
                 "vigil assess agent continue <prior-agent-id> --task \"Finish the unresolved authorization pass\"",
+                "vigil assess agent continue <prior-agent-id> --task \"Finish the live proof\" --assessment-mode web",
             ),
-            author_supplied_fields=("<prior-agent-id>", "--task", "--agent-id (optional replacement identity)"),
+            author_supplied_fields=(
+                "<prior-agent-id>",
+                "--task",
+                "--agent-id (optional replacement identity)",
+                "--assessment-mode code|web (mixed roles only, when the prior dispatch recorded none)",
+            ),
             notes=(
                 "The predecessor stays immutable history. Continue refuses a fresh in-progress predecessor so it cannot silently duplicate a live specialist; use agent start --allow-duplicate for intentional parallel work.",
+                "The replacement inherits the prior assessment_mode. An exploit-developer or source-analyzer predecessor recorded before assessment_mode existed has none, so pass --assessment-mode code|web; a value contradicting a recorded mode is refused, because the saved packet was rendered for that mode.",
                 "A saved packet exists only when the original agent start used --emit-prompt. The replacement prompt preserves the original packet verbatim and directs the specialist to hydrate current state through resume-brief before target-facing work.",
             ),
         )

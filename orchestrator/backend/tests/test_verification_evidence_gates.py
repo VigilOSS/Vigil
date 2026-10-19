@@ -4,7 +4,11 @@ import json
 
 from app import db as db_module
 
-from tests.proof_fixtures import completed_confirm_check, post_artifact_backed_source_observation
+from tests.proof_fixtures import (
+    RUNTIME_PROOF_PLAN,
+    completed_confirm_check,
+    post_artifact_backed_source_observation,
+)
 from tests.test_engagements_api import write_engagement
 
 
@@ -511,6 +515,7 @@ def test_missing_raw_evidence_blocks_only_a_dependent_terminal_decision(
         f"{BASE}/findings/VA-020/verify",
         json={
             "verification_status": "pending_runtime_proof",
+            "next_test": RUNTIME_PROOF_PLAN,
             "reason_text": "fresh proof is required",
         },
     )

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import ssl
 from pathlib import Path
 
 import pytest
@@ -542,3 +543,99 @@ def test_image_mutation_waits_for_other_container_startup(tmp_path, monkeypatch,
             assert not reached.wait(0.2), 'shared tag changed during another container startup'
         with pytest.raises(RuntimeError, match='Acme image operation entered'):
             work.result()
+
+
+def _scripted_backend(monkeypatch, *, get, post):
+    """Patch HTTPConnection so GET/POST each return a status or raise an error."""
+    import http.client
+
+    requests = []
+
+    class Response:
+        def __init__(self, status):
+            self.status = status
+
+        def read(self):
+            return json.dumps({"install_root": str(_ROOT_HOLDER[0])}).encode()
+
+    class Connection:
+        def __init__(self, *_args, **_kwargs):
+            self.method = ""
+
+        def request(self, method, path):
+            self.method = method
+            requests.append((method, path))
+
+        def getresponse(self):
+            outcome = get if self.method == "GET" else post
+            if isinstance(outcome, BaseException):
+                raise outcome
+            return Response(outcome)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(http.client, "HTTPConnection", Connection)
+    monkeypatch.setenv("ORCHESTRATOR_BASE_URL", "http://orchestrator.example.com")
+    return requests
+
+
+_ROOT_HOLDER: list = [None]
+
+
+@pytest.mark.parametrize(
+    ("get", "post", "expected"),
+    [
+        (200, 200, "verified"),
+        # An older backend without /admin/install-root still receives the sync;
+        # only the drift comparison is skipped.
+        (404, 200, "verified"),
+        (404, 404, "protocol_error"),
+        (200, 500, "protocol_error"),
+        (200, 404, "protocol_error"),
+        (200, ConnectionResetError("reset"), "sync_pending"),
+        (404, ConnectionResetError("reset"), "sync_pending_ownership_unverified"),
+        (ConnectionRefusedError("refused"), 200, "unreachable"),
+        (ssl.SSLError("certificate verify failed"), 200, "protocol_error"),
+        (200, ssl.SSLError("handshake failure"), "protocol_error"),
+    ],
+    ids=[
+        "verified", "legacy-install-root-synced", "legacy-sync-missing",
+        "sync-server-error", "sync-not-found", "sync-transport-drop",
+        "legacy-sync-transport-drop",
+        "unreachable", "tls-on-install-root", "tls-on-sync",
+    ],
+)
+def test_backend_install_root_status_maps_each_outcome(tmp_path, monkeypatch, capsys, get, post, expected):
+    install_root = tmp_path / "install"
+    install_root.mkdir()
+    _ROOT_HOLDER[0] = install_root.resolve()
+    requests = _scripted_backend(monkeypatch, get=get, post=post)
+    status = engagements._verify_backend_install_root(install_root, install_root / "eng")
+    assert status == engagements.BackendInstallRootStatus(expected)
+    if get == 404:
+        assert [method for method, _ in requests] == ["GET", "POST"]
+        assert "ownership cannot be verified" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("get", "expected", "absent"),
+    [
+        (200, "install root matched", "ownership is unverified"),
+        (404, "ownership is unverified", "install root matched"),
+    ],
+    ids=["confirmed-root", "legacy-root"],
+)
+def test_dropped_sync_warning_states_what_was_verified(tmp_path, monkeypatch, capsys, get, expected, absent):
+    install_root = tmp_path / "install"
+    engagement = install_root / "eng"
+    engagement.mkdir(parents=True)
+    _ROOT_HOLDER[0] = install_root.resolve()
+    _scripted_backend(monkeypatch, get=get, post=ConnectionResetError("reset"))
+
+    preflight._ensure_engagement_backend(install_root, engagement)
+
+    err = capsys.readouterr().err
+    warning = next(line for line in err.splitlines() if line.startswith("[vigil] WARN:"))
+    assert expected in warning
+    assert absent not in warning

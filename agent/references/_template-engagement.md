@@ -227,7 +227,8 @@ holding-area mechanism):
    classes, set `evidence_type=informational`; for a strong-but-unproven finding or chain primitive,
    set `evidence_type=theoretical` and `details.chain_required=true` (with `details.chain_rationale`).
 2. Move it into the holding area so it stays OUT of the report until proven, rather than leaving it
-   report-ready: `vigil assess finding verify <slug> --status pending_runtime_proof --reason "parked: <why not yet submittable>"`.
+   report-ready: `vigil assess finding verify <slug> --status pending_runtime_proof --reason "parked: <why not yet submittable>" --next-test-file <next-test.json>`.
+   The next test names what would make it submittable or disprove it (`vigil assess contract finding verify`).
    The park reason lives in that verification reason / `details.chain_rationale`, not a non-existent `parked_reason`.
 3. Review the holding area with `vigil assess finding list --holding` and re-evaluate after each
    engagement phase — a chain may promote it to submittable.

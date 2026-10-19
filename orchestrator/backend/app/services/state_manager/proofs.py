@@ -698,33 +698,50 @@ def list_proof_receipts(
     limit: int = 100,
     offset: int = 0,
 ) -> list[dict[str, Any]]:
+    """Receipts, newest first; ``finding_slug`` narrows to that finding's receipts.
+
+    A finding's receipts are those its verification cites and those produced by a
+    run associated with it (``proof-run start --for-finding`` or ``finding link
+    --link-kind proof_run``). Each filtered row names which one it is in
+    ``finding_association``: ``verification`` (cited) or ``proof_run`` (associated
+    run, not cited), so an associated receipt never reads as decision evidence.
+    """
     engagement = _engagement_or_404(engagement_id)
     with _common.get_connection() as connection:
-        params: list[Any] = [engagement.id]
-        join = ""
+        params: list[Any] = []
+        association = ""
         where = "receipts.engagement_id = ?"
         if finding_slug:
-            join = (
-                "JOIN assessment_finding_proof_receipts AS links "
-                "ON links.proof_receipt_id = receipts.id "
-                "JOIN assessment_findings AS findings ON findings.id = links.finding_id"
+            cited = (
+                "EXISTS (SELECT 1 FROM assessment_finding_proof_receipts AS cited "
+                "WHERE cited.proof_receipt_id = receipts.id AND cited.finding_id = findings.id)"
             )
-            where += " AND findings.slug = ?"
+            association = (
+                f", CASE WHEN {cited} THEN 'verification' ELSE 'proof_run' END "
+                "AS finding_association"
+            )
+            where = (
+                "receipts.engagement_id = ? AND findings.engagement_id = receipts.engagement_id "
+                f"AND findings.slug = ? AND ({cited} OR EXISTS ("
+                "SELECT 1 FROM assessment_finding_links AS links "
+                "WHERE links.finding_id = findings.id AND links.link_kind = 'proof_run' "
+                "AND links.target_kind = 'assessment_run' AND links.retired_at IS NULL "
+                "AND links.target_id = receipts.run_id))"
+            )
             params.append(str(finding_slug))
-        params.extend((limit, offset))
         rows = connection.execute(
             f"""
             SELECT receipts.*, artifacts.present AS artifact_present,
                    artifacts.integrity_status AS artifact_integrity_status,
-                   artifacts.sha256 AS artifact_current_sha256
+                   artifacts.sha256 AS artifact_current_sha256{association}
             FROM assessment_proof_receipts AS receipts
-            {join}
+            {"CROSS JOIN assessment_findings AS findings" if finding_slug else ""}
             LEFT JOIN assessment_artifacts AS artifacts ON artifacts.id = receipts.artifact_id
             WHERE {where}
             ORDER BY receipts.created_at DESC, receipts.id DESC
             LIMIT ? OFFSET ?
             """,
-            tuple(params),
+            (engagement.id, *params, limit, offset),
         ).fetchall()
         return _serialize_receipts(connection, engagement.id, rows)
 

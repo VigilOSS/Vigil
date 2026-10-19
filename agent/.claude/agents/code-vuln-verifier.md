@@ -126,7 +126,7 @@ the rare net-new spot-check bug. The closing sequence below owns ordering.
 
 Before your dispatch returns, run in this order:
 
-1. `vigil assess finding verify <slug> --status <verdict> --reason "<rationale>" --agent-id <your-agent_id>` for each decision (`--agent-id` is what the stored code-snapshot attestation resolves to; without it the binding attests to no dispatch); confirmed/downgraded decisions add `--proof-receipt-id` and `--confirm-check-file` (the completed falsification check), while false-positive decisions add `--counter-check-file`. Read `vigil assess contract finding verify` for the exact shape.
+1. `vigil assess finding verify <slug> --status <verdict> --reason "<rationale>" --agent-id <your-agent_id>` for each decision (`--agent-id` is what the stored code-snapshot attestation resolves to; without it the binding attests to no dispatch); confirmed/downgraded decisions add `--proof-receipt-id` and `--confirm-check-file` (the completed falsification check), false-positive decisions add `--counter-check-file`, and `pending_runtime_proof` decisions add `--next-test-file` (the owed test's hypothesis, confirming and falsifying observations, and route hint; see the `code-finding-verification` skill). Read `vigil assess contract finding verify` for the exact shape.
 2. For each retained finding still in workflow status `draft`, run `vigil assess finding update <slug> --status active --reason "Verification retained this finding"`; otherwise merge or kill it before returning
 3. `vigil assess record-chain code-vuln-verifier <chain-json>` for any composed chains
 4. `vigil assess finding record code-vuln-verifier <new-finding-json> --agent-id <your-agent_id>` for net-new spot-check bugs (rare)

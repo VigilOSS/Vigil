@@ -227,6 +227,15 @@
 .proof-objective { white-space: pre-wrap; overflow-wrap: anywhere; }
 .proof-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 12px; }
 .proof-run-link { margin-right: 14px; }
+.proof-owed-item { margin-bottom: 10px; }
+.proof-queue-state { display: inline-block; margin-left: 8px; padding: 2px 8px; vertical-align: middle; background: color-mix(in srgb, var(--accent) 10%, transparent); color: var(--accent); }
+.proof-queue-unprepared, .proof-queue-stale { background: color-mix(in srgb, var(--pending) 16%, transparent); color: var(--pending); }
+.proof-queue-needs_approval, .proof-queue-in_progress { background: color-mix(in srgb, var(--warn) 16%, transparent); color: var(--warn); }
+.proof-queue-ready, .proof-queue-done { background: color-mix(in srgb, var(--ok) 16%, transparent); color: var(--ok); }
+.proof-queue-blocked { background: color-mix(in srgb, var(--danger) 14%, transparent); color: var(--danger); }
+.proof-next-test { margin-top: 12px; }
+.proof-next-test h5 { margin: 0 0 6px; }
+.proof-next-test dl { grid-template-columns: 110px 1fr; }
 
 .proof-recovery { display: grid; gap: 10px; max-width: 720px; margin-top: 16px; }
 .proof-recovery label { display: grid; gap: 6px; }

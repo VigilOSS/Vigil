@@ -16,6 +16,7 @@ import json
 from pathlib import Path
 
 from app import db as db_module
+from tests.proof_fixtures import RUNTIME_PROOF_PLAN
 
 ENGAGEMENT_KEY = "2026-08-20-finding-shape"
 AUTHOR_AGENT_ID = "FINDING-SHAPE-AUTHOR"
@@ -112,6 +113,7 @@ def test_every_finding_bearing_response_returns_parsed_details_and_provenance(
         f"{_base()}/findings/VA-001/verify",
         json={
             "verification_status": "pending_runtime_proof",
+            "next_test": RUNTIME_PROOF_PLAN,
             "reason_text": "Reproduced against the live service.",
             "source_name": "vulnerability-analyst",
         },

@@ -1486,6 +1486,7 @@ _ENGAGEMENT_SCOPED_TABLES = {
     "assessment_surfaces",
     "assessment_findings",
     "assessment_finding_transitions",
+    "assessment_finding_next_tests",
     "assessment_finding_links",
     "assessment_attack_chains",
     "assessment_attack_chain_links",
@@ -5008,6 +5009,37 @@ def _create_dispatch_tables(connection: sqlite3.Connection) -> None:
     )
 
 
+def _create_finding_next_test_table(connection: sqlite3.Connection) -> None:
+    """Runtime proof plans, one per ``pending_runtime_proof`` verification event.
+
+    Additive: an existing database gains an empty table and every finding parked
+    before it existed reads ``next_test`` as null rather than a fabricated plan.
+    Plain ``execute`` keeps ``init_db``'s single BEGIN IMMEDIATE intact.
+    """
+
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS assessment_finding_next_tests (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            engagement_id INTEGER NOT NULL REFERENCES engagements(id) ON DELETE CASCADE,
+            finding_id INTEGER NOT NULL REFERENCES assessment_findings(id) ON DELETE CASCADE,
+            transition_id INTEGER NOT NULL UNIQUE
+                REFERENCES assessment_finding_transitions(id) ON DELETE RESTRICT,
+            hypothesis TEXT NOT NULL,
+            confirm_if TEXT NOT NULL,
+            falsify_if TEXT NOT NULL,
+            route_hint TEXT NOT NULL CHECK(route_hint IN ('local', 'live', 'unknown')),
+            prerequisites TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_assessment_finding_next_tests_finding "
+        "ON assessment_finding_next_tests(engagement_id, finding_id, id DESC)"
+    )
+
+
 def _create_verification_evidence_tables(connection: sqlite3.Connection) -> None:
     """Shared run/proof identities used by code, web, and blue workflows."""
 
@@ -6282,6 +6314,7 @@ def init_db() -> None:
         _create_assessment_entity_tables(connection)
         _create_assessment_work_items_table(connection)
         _create_assessment_finding_tables(connection)
+        _create_finding_next_test_table(connection)
         _create_command_runs_table_and_fts(connection)
         _create_artifacts_table_and_fts(connection)
         _create_submission_version_tables(connection)

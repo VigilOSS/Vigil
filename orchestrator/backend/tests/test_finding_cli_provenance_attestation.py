@@ -22,6 +22,7 @@ from types import SimpleNamespace
 
 import pytest
 from app import db as db_module
+from tests.proof_fixtures import RUNTIME_PROOF_PLAN
 
 _ENGAGEMENT_KEY = "2026-09-18-cli-attestation"
 _DIGEST = "5c" * 32
@@ -178,6 +179,12 @@ def _args(module, argv: list[str], engagement_dir: Path):
     return args
 
 
+def _plan_file(engagement: Path) -> str:
+    path = engagement / "next-test.json"
+    path.write_text(json.dumps(RUNTIME_PROOF_PLAN), encoding="utf-8")
+    return str(path)
+
+
 def _stored(client, slug: str) -> dict:
     response = client.get(
         f"/engagements/{_ENGAGEMENT_KEY}/assessment/findings/{slug}"
@@ -214,6 +221,8 @@ def test_recording_and_parking_a_code_finding_stores_an_attested_binding(
                 "--allow-unindexed-evidence",
                 "--pending-runtime-proof",
                 "Static dataflow only; no runtime trigger yet.",
+                "--next-test-file",
+                _plan_file(code_engagement),
             ],
             code_engagement,
         )
@@ -223,6 +232,7 @@ def test_recording_and_parking_a_code_finding_stores_an_attested_binding(
     stored = _stored(client, "CH-001")
     # One invocation produced both the record and the park.
     assert stored["verification_status"] == "pending_runtime_proof"
+    assert stored["next_test"] == RUNTIME_PROOF_PLAN
     # The binding was derived, never transcribed, and it is CURRENT.
     assert stored["provenance"]["code_snapshot"] == {
         "repo_id": 1,
@@ -295,6 +305,8 @@ def test_verifying_a_code_finding_re_attests_under_the_verifier_dispatch(
                 "Re-read the current sealed source; runtime trigger still owed.",
                 "--agent-id",
                 "VF-1",
+                "--next-test-file",
+                _plan_file(code_engagement),
             ],
             code_engagement,
         )

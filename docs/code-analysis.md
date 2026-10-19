@@ -16,8 +16,11 @@ vigil engagement start <engagement-key> --mode code --client codex
 ```
 
 `--source-dir` registers the original directory. The operator shows its location and inventory,
-then asks for confirmation before ingest. Ingest creates one sealed audit copy directly from
-that directory and leaves the original untouched. Git history is optional.
+then asks for confirmation before ingest. The same question asks you to confirm that you trust the
+repository's build and test code to run inside the Vigil runtime: local proof compiles and runs
+that code in the shared runtime container, which also holds engagement data and recon credentials.
+Ingest creates one sealed audit copy directly from that directory and leaves the original
+untouched. Git history is optional.
 
 You can also create without `--source-dir` and place loose files or project folders in the
 printed `source/` folder. An empty source waits for files and confirmation. Neither registration
@@ -114,6 +117,14 @@ which records a durable override decision. A weak quality score should trigger
 more focused review; `--require-transition-ready` remains the read-only authority
 for the target phase's actual blocker set.
 
+## Runtime proof owed
+
+When a verifier accepts the source evidence but cannot run the decisive test, it records
+`pending_runtime_proof` with a next test: the hypothesis, the observation that would confirm it,
+the observation that would falsify it, and whether the test looks local or live. The operator
+prepares proof work from that plan. The route hint is a suggestion and grants no scope or
+approval. See [proof work](engagements.md#proof-work-and-continuation).
+
 ## ctags
 
 `code-ingest` generates an advisory, generation-bound ctags index under the
@@ -129,5 +140,7 @@ files. Without trusted ctags, agents fall back to grep-only cross-references.
 
 Code analysis can also run alongside web testing when source is discovered during
 an engagement — an exposed `.git`, source maps, a backup download. The operator
-enables the code track with `vigil engagement add-track <key> code`, then starts a
-separate `--mode code` session. The web session continues under `--mode web`.
+enables the code track with `vigil engagement add-track <key> code`, asks you to
+confirm the source and that you trust its build and test code to run inside the Vigil
+runtime, and dispatches code specialists from the current session. A separate
+`--mode code` session is optional; each session loads one operator workflow.

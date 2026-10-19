@@ -12,6 +12,12 @@ Durable design decisions live in [`docs/adr/`](docs/adr/).
 - Proof work is durable per finding. Operators claim bounded proof tasks before dispatch,
   specialists return findings, negative results, open questions, and recommended next steps, and
   the UI shows ownership and disposition without turning every lead into a finding.
+- A `pending_runtime_proof` decision carries a required next test: the hypothesis, what would
+  confirm or falsify it, and a local or live route hint. Proof-work entries show a backend-derived
+  readiness state so the operator knows what to prepare, approve, claim, or reconcile next.
+  A revised next test starts fresh proof work, a merged finding owes none, and a material edit
+  that resets a parked finding's verification marks its open work stale. The claimed specialist's
+  prompt carries the current next test.
 - Release tags build a matched Linux AMD64/ARM64 Kali image, application wheel, and source archive.
   The workflow publishes the image by digest and attaches application artifacts to a draft release.
 - OpenCode can start a native remediation TUI with Vigil's case command. A ZCode preview prepares a
@@ -22,6 +28,8 @@ Durable design decisions live in [`docs/adr/`](docs/adr/).
 
 - Engagement setup uses `vigil engagement create` followed by `vigil engagement start`. Code source
   paths are validated during creation, then confirmed and sealed once before analysis begins.
+  That confirmation includes trusting the repository's build and test code to run in the Vigil
+  runtime.
 - Static code review can start before Docker is available. The Kali runtime starts when an audited
   command needs it, using a matched release image when present or a local source build otherwise.
 - `vigil doctor` reports client sessions, Docker daemon access, images, containers, host tools, and

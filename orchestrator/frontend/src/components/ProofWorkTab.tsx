@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { approveProofWork, listProofWork, prepareProofWork, reconcileProofWork, releaseProofWork, type ProofWorkList } from "../lib/api";
+import { approveProofWork, listProofWork, prepareProofWork, reconcileProofWork, releaseProofWork, type ProofNextTest, type ProofWorkList, type ProofWorkQueueState } from "../lib/api";
 import { engagementHref } from "../lib/workspaceRoutes";
 
 type ProofWorkTabProps = {engagementKey: string; refreshVersion?: number};
@@ -53,13 +53,14 @@ function ProofWorkWorkspace({engagementKey, refreshVersion = 0}: ProofWorkTabPro
 
   return <section className="panel proof-workspace">
     <div className="section-heading"><h2>Proof work</h2><button type="button" className="ghost-button" onClick={() => void refresh()} disabled={busy}>Refresh proof work</button></div>
-    <p>Challenge source-backed candidates with a supported local reproduction or a live test. Preparing or finishing work does not confirm a finding.</p>
+    <p>Challenge source-backed candidates with a supported local reproduction or a live test. Preparing or finishing work does not confirm a finding. A next test is the verifier's suggested plan; its route hint grants no scope or approval.</p>
     {error && <p role="alert">{error}</p>}
     {!data && !error && <p role="status">Loading proof work…</p>}
     {data && <>
       <h3>Runtime proof owed</h3>
       {data.owed.length === 0 ? <p>No findings currently await runtime proof.</p> : <>
-        <ul>{data.owed.map(item => <li key={item.finding_slug}><a href={engagementHref(engagementKey, {tab: "findings", finding: item.finding_slug})}>{item.title}</a> <span className="muted">{item.finding_slug} · {item.work_ids.length} prepared</span></li>)}</ul>
+        <ul>{data.owed.map(item => <li key={item.finding_slug} className="proof-owed-item"><a href={engagementHref(engagementKey, {tab: "findings", finding: item.finding_slug})}>{item.title}</a> <span className="muted">{item.finding_slug} · {item.work_ids.length} prepared</span> <QueueStateLabel state={item.queue_state} />
+          {item.work_ids.length === 0 && <NextTestPlan nextTest={item.next_test} />}</li>)}</ul>
         <form className="proof-preparation" onSubmit={event => {
           event.preventDefault();
           void act(() => prepareProofWork(engagementKey, {finding_slug: slug, route, objective: objective.trim(), target_hosts: route === "web" ? hosts.split(/[\s,]+/).filter(Boolean) : []}));
@@ -74,12 +75,13 @@ function ProofWorkWorkspace({engagementKey, refreshVersion = 0}: ProofWorkTabPro
       <h3>Prepared investigations</h3>
       {data.items.length === 0 && <p>No proof work prepared. The operator can prepare and dispatch it from the current conversation.</p>}
       {data.items.map(work => <article className="proof-work-item" key={work.id}>
-        <h4><a href={engagementHref(engagementKey, {tab: "findings", finding: work.finding_slug})}>{work.finding_slug}</a> · Proof {work.id}</h4>
+        <h4><a href={engagementHref(engagementKey, {tab: "findings", finding: work.finding_slug})}>{work.finding_slug}</a> · Proof {work.id} <QueueStateLabel state={work.queue_state} /></h4>
         <p className="proof-objective">{work.objective}</p>
         <dl><dt>Route</dt><dd>{work.route === "code" ? "Local code reproduction in Kali" : "Live application test"}</dd><dt>Status</dt><dd>{work.status}</dd><dt>Owner</dt><dd>{work.owner_agent_id || "Unclaimed"}{work.owner_dispatch_status ? ` (${work.owner_dispatch_status})` : ""}</dd>
           <dt>Approval</dt><dd>{!work.current ? "Context changed; approval cannot authorize execution" : work.route === "code" ? "Local sandbox work" : work.approval_required ? "Live proof approval required" : "Approved for this work"}</dd>
           {work.target_hosts.length > 0 && <><dt>Targets</dt><dd>{work.target_hosts.join(", ")}</dd></>}
         </dl>
+        <NextTestPlan nextTest={work.next_test} />
         {!work.current && <p role="status">Stale context — prepare against current evidence</p>}
         {work.blocker && <p className="finding-proof-gap">{work.blocker}</p>}
         {work.run_ids.length > 0 && <p>Evidence: {work.run_ids.map(id => <a className="proof-run-link" key={id} href={engagementHref(engagementKey, {tab: "runs", run: id})}>Run {id}</a>)}</p>}
@@ -95,4 +97,40 @@ function ProofWorkWorkspace({engagementKey, refreshVersion = 0}: ProofWorkTabPro
       </article>)}
     </>}
   </section>;
+}
+
+const QUEUE_STATE_LABELS: Record<ProofWorkQueueState, string> = {
+  unprepared: "Unprepared",
+  ready: "Ready to claim",
+  needs_approval: "Needs approval",
+  in_progress: "In progress",
+  blocked: "Blocked",
+  stale: "Stale",
+  done: "Done",
+};
+
+const ROUTE_HINT_LABELS: Record<ProofNextTest["route_hint"], string> = {
+  local: "Local reproduction",
+  live: "Live target",
+  unknown: "Unknown",
+};
+
+function QueueStateLabel({state}: {state: ProofWorkQueueState | undefined}) {
+  if (!state) return null;
+  return <span className={`status-pill proof-queue-state proof-queue-${state}`}>{QUEUE_STATE_LABELS[state] ?? state}</span>;
+}
+
+// Verifier-authored text renders as plain React text nodes only (ADR 0018).
+function NextTestPlan({nextTest}: {nextTest: ProofNextTest | null | undefined}) {
+  if (!nextTest) return <p className="muted proof-next-test-missing">No next test recorded.</p>;
+  return <div className="proof-next-test">
+    <h5>Next test</h5>
+    <dl>
+      <dt>Hypothesis</dt><dd>{nextTest.hypothesis}</dd>
+      <dt>Confirms if</dt><dd>{nextTest.confirm_if}</dd>
+      <dt>Falsifies if</dt><dd>{nextTest.falsify_if}</dd>
+      <dt>Route hint</dt><dd>{ROUTE_HINT_LABELS[nextTest.route_hint] ?? nextTest.route_hint}</dd>
+      {nextTest.prerequisites && <><dt>Prerequisites</dt><dd>{nextTest.prerequisites}</dd></>}
+    </dl>
+  </div>;
 }

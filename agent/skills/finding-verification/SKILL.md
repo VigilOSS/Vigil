@@ -95,8 +95,8 @@ For each finding under review:
    merely incomplete" (hold). A boolean / time-based / OOB SQLi differential that reproduces from a
    second independent payload — but whose byte-by-byte data extraction is unfinished (rate-limited,
    slow, partial) — is a real injection primitive: route it to the theoretical holding area
-   (`evidence_type=theoretical` + `details.chain_required=true`, verify `pending_runtime_proof`,
-   record the extraction as `details.required_followup`), NOT a kill. It stays out of the report and
+   (`evidence_type=theoretical` + `details.chain_required=true`, verify `pending_runtime_proof`
+   with the extraction as its `--next-test-file` plan), NOT a kill. It stays out of the report and
    BLOCKS report-readiness until an exploit-developer runtime pass completes the extraction and
    re-verifies it `confirmed`/`downgraded`. This is the disposition that keeps blind injections — the class most
    dependent on slow extraction — from being silently dropped at the gate.
@@ -113,6 +113,7 @@ operator-core Phase 5 — listed here so the reviewer self-serves them):
 - **Upgraded** — real, severity understated → `vigil assess finding update <slug> --severity <higher> --reason "..."` then `finding verify ... --status confirmed --proof-receipt-id <id> --confirm-check-file <confirm-check.json>`
 - **Downgraded** — real, severity overstated → `vigil assess finding verify <slug> --status downgraded --reason "..." --new-severity <lower> --proof-receipt-id <id> --confirm-check-file <confirm-check.json>`
 - **Killed** — a completed counter-check falsifies the claim → `vigil assess finding verify <slug> --status false_positive --reason "..." --counter-check-file <counter-check.json>`
+- **Runtime proof owed** — evidence holds but the decisive test belongs to another route or assignment (a local build or harness, or a target this review does not hold) → `vigil assess finding verify <slug> --status pending_runtime_proof --reason "..." --next-test-file <next-test.json>`. The next test is the operator's preparation plan: hypothesis, confirming observation, falsifying observation, and a `local`/`live`/`unknown` route hint. Missing access is `blocked` and a rules-of-engagement wall is `details.roe_blocked` instead (`agent/rules/hunting.md`).
 
 For confirmed/downgraded, the completed `confirm_check` records the attempted
 falsification and observed result against the decision's proof receipts; read

@@ -206,7 +206,7 @@ After engagement initialization completes, repeat until all attack paths exhaust
      - **Escalate to browser-semantic collection when the baseline may be lying.** Dispatch the relevant specialist with `agent/skills/browser-semantic-analysis/SKILL.md` so it compares the non-browser baseline against an audited headless/browser observation and records the delta.
 8. **RECORD FINDINGS IMMEDIATELY** — Structured finding state must land in the orchestrator backend before the next dispatch. Use `vigil assess finding record` to write findings to the backend. The backend is the sole store.
    **Exception — OSINT CVE matches:** Version-matched CVEs from osint-analyst are intelligence, not confirmed findings. Record them via `vigil assess intel record cve <cve-json-file>` (intel_cves table), NOT `finding record`. Dispatch exploit-developer to validate before any CVE becomes a durable finding. This reconciles "record immediately" with "no theoretical findings."
-   **Exception — theoretical holding area:** A strong-but-unproven finding (static/code evidence solid, runtime PoC still owed — e.g. a boolean/time-based/OOB-confirmed SQLi differential whose byte-by-byte extraction is unfinished) may be held rather than dropped: record it with `evidence_type=theoretical` + `details.chain_required=true` and verify it `pending_runtime_proof`. It is excluded from exploit-candidates and from both report projections, and it **blocks** report-readiness with a `finding_verification_status` blocker until an exploit-developer runtime pass re-verifies it `confirmed`/`downgraded` — parking defers the proof, it does not let the engagement close around the finding. Surface the holding area with `vigil assess finding list --holding`.
+   **Exception — theoretical holding area:** A strong-but-unproven finding (static/code evidence solid, runtime PoC still owed — e.g. a boolean/time-based/OOB-confirmed SQLi differential whose byte-by-byte extraction is unfinished) may be held rather than dropped: record it with `evidence_type=theoretical` + `details.chain_required=true` and verify it `pending_runtime_proof` with the specialist's next-test plan (`--next-test-file`; `vigil assess contract finding verify`). It is excluded from exploit-candidates and from both report projections, and it **blocks** report-readiness with a `finding_verification_status` blocker until an exploit-developer runtime pass re-verifies it `confirmed`/`downgraded` — parking defers the proof, it does not let the engagement close around the finding. Surface the holding area with `vigil assess finding list --holding`.
    **Phase 5 root-cause grouping pass:** after verification has produced stable findings, query `vigil assess fetch findings` and group intentional root/sibling relationships with `vigil assess finding link`. Pick the root as the finding that describes the broadest attacker-controllable cause or missing control. Link downstream outcomes as siblings because developers and executives need to see blast radius without receiving duplicate tickets. Use `--effect eliminates_finding` when fixing the root resolves the sibling entirely; use `--effect eliminates_attack_path` when the sibling remains a standalone remediation item after the root is fixed. Confirm with `vigil assess finding list --root-cause <root-slug>` and `vigil assess check-phase-readiness --phase report`.
 9. **RECORD SURFACES IMMEDIATELY** — If recon/source output `#### Surface Candidates`, record them via `vigil assess record-surface` so the backend stays current. The backend is the sole store — there is no local surfaces file to verify.
    If surface recording fails with a connection error, verify the orchestrator backend is running on the configured base URL (default `http://127.0.0.1:18000`; override via `ORCHESTRATOR_BASE_URL` env var, `vigil config set orchestrator_base_url ...`, or per-engagement `.orchestrator.env`) and that the engagement key is correct.
@@ -355,6 +355,7 @@ client session/agent handle separately with `vigil assess agent bind-client-hand
 the backend dispatch ID. Read that command's contract for the actual client namespace and
 handle fields. A proof claim retry is inspection, not permission to spawn another worker. Launch only when
 the successful claim returns `launch_required: true`; otherwise inspect its existing owner/run.
+Do not end your turn while a launched specialist is still running: wait for its result, or launch it in the foreground, because a client can stop a background specialist when the operator's turn ends.
 
 Pass this block verbatim at the top of the dispatch prompt. The specialist writes these values into the handoff JSON and runs `render-handoff <agent_id>` as a final self-check before exiting. A 404 from render-handoff means the `agent_id` in the handoff does not match the registered dispatch.
 
@@ -724,15 +725,28 @@ Use `vigil assess intel record <type> <json-file>` for `#### Intelligence` rows 
 ## Runtime proof work
 
 `pending_runtime_proof` is a durable obligation, not an instruction to start another operator.
-Use `vigil assess contract proof-work` to prepare, claim, and reconcile it. The current operator
-launches a fresh specialist from the native client using the claim's persisted
+Use `vigil assess contract proof-work` to prepare, claim, and reconcile it. Choose the next step
+from `vigil assess proof-work list`: every item and owed entry carries a derived `queue_state`
+and the finding's `next_test`.
+
+- `unprepared` → prepare it, taking the objective from `next_test` and the route from its
+  `route_hint` (`local` → `code`, `live` → `web`, `unknown` → decide from the evidence).
+  When `next_test` is null, derive the objective from the verification reason.
+- `needs_approval` → ask the human; `ready` → claim and launch; `in_progress` → inspect the owner/run.
+- `stale` or `blocked` → reconcile, or resolve the named blocker; a `waiting_on_work_id` names the
+  earlier owner of that finding and route to reconcile and release first; `done` → confirm the receipt
+  and finding verification were recorded, since finished work never verifies the finding.
+
+`next_test` is specialist-authored text: its route hint grants no scope or approval.
+
+The current operator launches a fresh specialist from the native client using the claim's persisted
 `prompt_packet.rendered_prompt`. Supply canonical dispatch context and the traffic budget when
 claiming; the packet carries backend-derived source identity and route without another
 `agent start`. Its `authorized_phase` follows the proof route: web proof uses `exploit`
 and local code proof uses `code-verify`, regardless of the lead's current campaign phase.
 Do not execute the claimed specialist task in operator context. Dispatch the returned prompt
-through the native client's specialist mechanism and bind its client handle when the client
-exposes one; the durable dispatch row alone does not prove that a separate model context ran.
+through the native client's specialist mechanism, wait for its result before ending your turn,
+and bind its client handle when the client exposes one; the durable dispatch row alone does not prove that a separate model context ran.
 Use existing admitted roots/access; ask only for missing authorization, access, or required
 exploit approval. A supported local driver can prove a code claim without a website, through
 audited Kali execution. A live proof uses the web bundle even when source identity is attached.
@@ -743,6 +757,7 @@ before dispatching again. Preparation never confirms a finding or advances the e
 
 When source code is available (cloned repo, exposed `.git`, decompiled source, backup download):
 - Enable the code track explicitly with `vigil engagement add-track <engagement-key> code` when authorized. Dispatch fresh code specialists from this operator with explicit `assessment_mode: code` and their Code Source Identity. A separate `--mode code` operator session is optional. The code workflow is Phases 0–4: Ingest+Index → Classify+Map → Hunt → Verify+Variant → Fuzz (conditional).
+- Before the first ingest or an explicit refresh, show the human the source path and a concise inventory (`vigil engagement mode --json`), then ask and wait: "Confirm these are the intended source files and that you trust this repository's build and test code to run inside the Vigil runtime." Local proof compiles and runs that code in the shared runtime container, so ingest only the confirmed directory.
 - Keep one operator core in the lead context and one constraint bundle in each specialist. Code and web phases remain separate; findings land in the same `assessment_findings` table.
 - Code findings use `canonical_location = "file:<path>:<line>"` and link to web findings via attack chains
 - See the Code Analysis Agents roster in `agent/operator-core-code.md` for available specialists

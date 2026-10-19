@@ -482,12 +482,20 @@ Register it on the verify call so it links to the finding:
 ```bash
 vigil assess finding verify <slug> --status pending_runtime_proof \
   --reason "static evidence accepted; runtime PoC outstanding" \
+  --next-test-file next-test.json \
   --narrative notes/<slug>-debate.md
 ```
 
 `--narrative` registers the file as a `kind=verification-narrative` artifact with
 `related_finding_slug=<slug>`; retrieve later with
 `vigil assess artifact search --finding <slug> --kind verification-narrative`.
+
+`pending_runtime_proof` requires `--next-test-file`: the runtime proof still owed, written as the
+plan the operator prepares from. It states the hypothesis, the observation that would confirm it,
+the observation that would falsify it, and a `local`/`live`/`unknown` route hint (a supported-API
+driver or local build is `local`). Make the falsifier as concrete as the confirmer, because a proof
+pass that can only succeed cannot disprove the claim. Read `vigil assess contract finding verify`
+for the exact fields; the route hint is a suggestion and grants no scope or approval.
 
 ### Structured Counter-Check Format (for audit trail)
 

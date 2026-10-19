@@ -2206,7 +2206,7 @@ function OverviewPane({ engagementKey, d, receipts, receiptsLoading, proseMode, 
         </div>
       )}
       {d.impact && <section className="section"><div className="section-head-row"><h3 className="section-title">Impact</h3><CopyChip text={d.impact} toast={toast} label="Copy impact" /></div><Prose text={d.impact} mode={proseMode} /></section>}
-      {d.verification_status === "pending_runtime_proof" && (
+      {d.verification_status === "pending_runtime_proof" && d.workflow_status !== "merged" && (
         <p className="finding-proof-gap" role="status">Runtime proof outstanding</p>
       )}
       <div className="finding-evidence-contributions">

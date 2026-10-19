@@ -81,3 +81,13 @@ def post_artifact_backed_source_observation(
         and artifact_id > 0
     ), artifact.text
     return client.post(endpoint, json={**json, "artifact_id": artifact_id})
+
+
+# The structured runtime proof plan every ``pending_runtime_proof`` verdict carries.
+RUNTIME_PROOF_PLAN: dict[str, str] = {
+    "hypothesis": "The Acme handler accepts the tampered request at runtime.",
+    "confirm_if": "The tampered request returns another account's data.",
+    "falsify_if": "The tampered request is rejected or returns only the caller's data.",
+    "route_hint": "unknown",
+    "prerequisites": "",
+}

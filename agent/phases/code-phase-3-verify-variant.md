@@ -187,6 +187,8 @@ If the verifier's clean-file spot-check discovers a missed vulnerability:
 ```bash
 # Record verification results (updates existing findings)
 vigil assess finding verify <slug> --status <verdict> --reason "<rationale>"
+# Runtime proof owed: the verifier's next-test plan travels with the disposition
+vigil assess finding verify <slug> --status pending_runtime_proof --reason "<rationale>" --next-test-file <next-test.json>
 # Rebind a stale/unbound finding only after independently reviewing the current sealed bytes.
 # Substitute the current Code Source Identity values in this exact provenance shape.
 vigil assess finding verify <slug> --status confirmed --reason "Re-reviewed current sealed source" \

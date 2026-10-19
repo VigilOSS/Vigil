@@ -12,7 +12,11 @@ import pytest
 from app import db as db_module
 from app.services import engagements as engagement_service
 from app.services import events as events_service
-from tests.proof_fixtures import completed_confirm_check, post_artifact_backed_source_observation
+from tests.proof_fixtures import (
+    RUNTIME_PROOF_PLAN,
+    completed_confirm_check,
+    post_artifact_backed_source_observation,
+)
 
 
 def legacy_finding_slug(suffix: str = "VA-001") -> str:
@@ -2115,6 +2119,7 @@ def test_findings_verify_pending_runtime_proof_roundtrips_and_holds(client, isol
         "/engagements/2026-03-30-120000-example/assessment/findings/VA-050/verify",
         json={
             "verification_status": "pending_runtime_proof",
+            "next_test": RUNTIME_PROOF_PLAN,
             "reason_code": "static-accepted",
             "reason_text": "Static/code evidence accepted; runtime PoC still outstanding.",
             "notes": "Held pending exploit-developer runtime proof.",
@@ -2182,6 +2187,7 @@ def test_pending_runtime_proof_is_sticky_against_bare_none_rerecord(client, isol
         "/engagements/2026-03-30-120000-example/assessment/findings/VA-051/verify",
         json={
             "verification_status": "pending_runtime_proof",
+            "next_test": RUNTIME_PROOF_PLAN,
             "reason_code": "static-accepted",
             "reason_text": "Static evidence accepted; runtime proof outstanding.",
             "source_name": "vulnerability-analyst",
@@ -2237,6 +2243,7 @@ def test_pending_runtime_proof_yields_to_confirmed(client, isolate_settings):
         "/engagements/2026-03-30-120000-example/assessment/findings/VA-052/verify",
         json={
             "verification_status": "pending_runtime_proof",
+            "next_test": RUNTIME_PROOF_PLAN,
             "reason_code": "static-accepted",
             "reason_text": "Static evidence accepted; runtime proof outstanding.",
             "source_name": "vulnerability-analyst",
@@ -2299,6 +2306,7 @@ def test_pending_runtime_proof_blocks_report_readiness_and_exploit_candidates(
         "/engagements/2026-03-30-120000-example/assessment/findings/VA-053/verify",
         json={
             "verification_status": "pending_runtime_proof",
+            "next_test": RUNTIME_PROOF_PLAN,
             "reason_code": "static-accepted",
             "reason_text": "Static evidence accepted; runtime proof outstanding.",
             "source_name": "vulnerability-analyst",
@@ -4110,6 +4118,7 @@ def test_pending_runtime_proof_absent_from_draft_report_findings(client, isolate
         "/engagements/2026-03-30-120000-example/assessment/findings/VA-071/verify",
         json={
             "verification_status": "pending_runtime_proof",
+            "next_test": RUNTIME_PROOF_PLAN,
             "reason_code": "static-accepted",
             "reason_text": "Static evidence accepted; runtime proof outstanding.",
             "source_name": "vulnerability-analyst",
@@ -4174,6 +4183,7 @@ def test_markdown_tree_draft_projection_excludes_pending_runtime_proof(client, i
         "/engagements/2026-03-30-120000-example/assessment/findings/VA-072/verify",
         json={
             "verification_status": "pending_runtime_proof",
+            "next_test": RUNTIME_PROOF_PLAN,
             "reason_code": "static-accepted",
             "reason_text": "Static evidence accepted; runtime proof outstanding.",
             "source_name": "vulnerability-analyst",

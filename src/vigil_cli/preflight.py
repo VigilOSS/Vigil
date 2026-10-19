@@ -140,9 +140,17 @@ def _ensure_engagement_backend(install_root: Path, engagement_dir: Path) -> None
         with redirect_stdout(sys.stderr):
             orchestrator.start_orchestrator(orchestrator.OrchestratorOptions(install_root=install_root, allow_existing=True))
     backend_state = engagements._verify_backend_install_root(install_root, engagement_dir)
-    if backend_state == engagements.BackendInstallRootStatus.SYNC_PENDING:
+    if backend_state in (
+        engagements.BackendInstallRootStatus.SYNC_PENDING,
+        engagements.BackendInstallRootStatus.SYNC_PENDING_OWNERSHIP_UNVERIFIED,
+    ):
+        verified = (
+            "backend install root matched"
+            if backend_state == engagements.BackendInstallRootStatus.SYNC_PENDING
+            else "backend workspace ownership is unverified (older orchestrator build)"
+        )
         print(
-            f"[vigil] WARN: backend install root matched but engagement sync is pending at {base_url}; "
+            f"[vigil] WARN: {verified} and engagement sync is pending at {base_url}; "
             "the next backend request will retry synchronization.",
             file=sys.stderr,
         )

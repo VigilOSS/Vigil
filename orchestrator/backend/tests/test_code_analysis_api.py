@@ -21,7 +21,11 @@ from app.api.code_analysis import QueueItemsBulkCreateRequest
 from app.services import code_analysis, code_fuzz_completion
 from fastapi import HTTPException
 from pydantic import ValidationError
-from tests.proof_fixtures import completed_confirm_check, post_artifact_backed_source_observation
+from tests.proof_fixtures import (
+    RUNTIME_PROOF_PLAN,
+    completed_confirm_check,
+    post_artifact_backed_source_observation,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SCRIPTS_ROOT = REPO_ROOT / "agent" / "scripts"
@@ -781,6 +785,8 @@ def _verify_code_finding(
         payload["artifact_ref"] = artifact_ref
     if details is not None:
         payload["details"] = details
+    if disposition == "pending_runtime_proof":
+        payload["next_test"] = RUNTIME_PROOF_PLAN
 
     if disposition in {"confirmed", "downgraded", "false_positive"}:
         verifier_id = f"VERIFY-{slug}-{disposition}"

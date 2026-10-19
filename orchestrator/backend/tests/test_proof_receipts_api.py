@@ -1456,3 +1456,67 @@ def test_a_measured_empty_stderr_file_still_proves_the_command_output(
     grown = client.get(f"{BASE}/proof-receipts/{receipt.json()['id']}")
     assert grown.status_code == 200, grown.text
     assert grown.json()["evidence_health"] == "stale"
+
+
+def test_a_for_finding_association_shows_on_runs_and_receipts_apart_from_verification_citations(
+    client, isolate_settings
+) -> None:
+    _seed(client, isolate_settings)
+    finding = client.post(
+        f"{BASE}/findings",
+        json={
+            "slug": "VA-903",
+            "title": "Associated before any verification",
+            "severity": "medium",
+            "workflow_status": "active",
+            "verification_status": "unreviewed",
+            "source_name": "vulnerability-analyst",
+            "provenance": {"agent_id": "HUNT-1"},
+        },
+    )
+    assert finding.status_code == 201, finding.text
+    run = _run(client)
+    _link_run(client, run, "VA-903")
+    receipt = _source_observation(client, run, "independent review reproduced the finding")
+
+    read = client.get(f"{BASE}/assessment-runs/{run['id']}").json()
+    assert (read["finding_slugs"], read["associated_finding_slugs"]) == ([], ["VA-903"])
+    listing = client.get(f"{BASE}/proof-receipts", params={"finding_slug": "VA-903"}).json()
+    assert [(row["id"], row["finding_association"]) for row in listing] == [
+        (receipt["id"], "proof_run")
+    ]
+
+    _complete_run(client, run)
+    verified = client.post(
+        f"{BASE}/findings/VA-903/verify",
+        json={
+            "verification_status": "confirmed",
+            "reason_text": "independent review",
+            "proof_receipt_ids": [receipt["id"]],
+            "confirm_check": completed_confirm_check(receipt["id"]),
+        },
+    )
+    assert verified.status_code == 200, verified.text
+    read = client.get(f"{BASE}/assessment-runs/{run['id']}").json()
+    assert (read["finding_slugs"], read["associated_finding_slugs"]) == (["VA-903"], ["VA-903"])
+    listing = client.get(f"{BASE}/proof-receipts", params={"finding_slug": "VA-903"}).json()
+    assert [(row["id"], row["finding_association"]) for row in listing] == [
+        (receipt["id"], "verification")
+    ]
+
+    # Association is per run, as the verification gate reads it: a resumed run
+    # verifies the finding only once it is associated itself.
+    resumed = client.post(
+        f"{BASE}/assessment-runs",
+        json={
+            "run_uuid": "run-verify-1-resumed-association",
+            "run_kind": "code",
+            "producer_dispatch_agent_id": "VERIFY-1",
+            "resumed_from_run_id": run["id"],
+        },
+    )
+    assert resumed.status_code == 201, resumed.text
+    assert resumed.json()["associated_finding_slugs"] == []
+    _link_run(client, resumed.json(), "VA-903")
+    read = client.get(f"{BASE}/assessment-runs/{resumed.json()['id']}").json()
+    assert read["associated_finding_slugs"] == ["VA-903"]

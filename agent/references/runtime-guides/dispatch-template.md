@@ -62,6 +62,7 @@ Register the contract alongside the prompt (`operator-core.md` § Specialist Dis
 ```bash
 vigil assess agent start \
     --agent-id <agent_id> --role <role> \
+    [--assessment-mode code|web] \
     --task "<one-paragraph outcome objective>" \
     --model <name> --reasoning <level> --dispatch-mode <mode> \
     --skills "<skill-name>[,<skill-name>...]" \
@@ -70,7 +71,8 @@ vigil assess agent start \
 ```
 
 Use `--no-target-traffic` instead of `--rate-budget` only for a genuinely
-offline lane. Exactly one is required. `--emit-prompt` prints the complete,
+offline lane. Exactly one is required. `--assessment-mode` is required for the
+mixed-role specialists (`exploit-developer`, `source-analyzer`). `--emit-prompt` prints the complete,
 filled dispatch prompt (including validated blue tenant refs when applicable),
 so callers do not reconstruct the contract by hand.
 

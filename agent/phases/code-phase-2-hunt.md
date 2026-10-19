@@ -436,7 +436,8 @@ Reason across the seam; do not re-audit individual files."
 
 **Step 3 — Reduce (transitive / multi-hop chains).** Seam agents find 2-module chains; 3+-module
 chains (A→B→C) form by joining seam outputs that share a module. Collect all candidate chains and
-dispatch a consolidation pass (`code-vuln-hunter` or `exploit-developer`) to hunt the joins. If the
+dispatch a consolidation pass (`code-vuln-hunter`, or `exploit-developer` registered with
+`--assessment-mode code`) to hunt the joins. If the
 candidate set is large, partition the reduce by subsystem — one reduce agent per subsystem touching
 many seams — a tree, not a single reduce. Carry the same current Code Source Identity, matching
 structural index, and complete current threat-model envelope into every reduce dispatch.

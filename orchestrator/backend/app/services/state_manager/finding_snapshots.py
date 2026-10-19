@@ -15,6 +15,7 @@ from fastapi import HTTPException, status
 from . import _common
 from ._common import _json_object, _serialize_finding_record
 from .finding_details import validate_stored_reply_sequence_identity
+from .finding_next_tests import current_next_test
 from .proofs import proof_receipts_for_finding
 
 CODE_SNAPSHOT_PROVENANCE_KEY = "code_snapshot"
@@ -369,6 +370,10 @@ def _serialize_finding_with_code_snapshot_status(
     )
     record["proof_receipts"] = proof_receipts_for_finding(
         connection, engagement_id, int(record["id"])
+    )
+    record["next_test"] = current_next_test(
+        connection, engagement_id, int(record["id"]), str(record["verification_status"]),
+        workflow_status=str(record["workflow_status"]),
     )
     return record
 

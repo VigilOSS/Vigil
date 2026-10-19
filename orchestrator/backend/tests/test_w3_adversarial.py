@@ -2,6 +2,8 @@
 import json
 from pathlib import Path
 
+from tests.proof_fixtures import RUNTIME_PROOF_PLAN
+
 BASE_TMPL = "/engagements/{key}/assessment"
 AUTHOR_AGENT_ID = "W3-ADVERSARIAL-AUTHOR"
 
@@ -288,7 +290,11 @@ def test_pending_runtime_proof_clears_unreviewed_but_not_reportable(client, isol
     # Grade with pending_runtime_proof
     verify = client.post(
         f"{base}/findings/VA-500/verify",
-        json={"verification_status": "pending_runtime_proof", "reason_text": "code looks bad, need runtime proof"},
+        json={
+            "verification_status": "pending_runtime_proof",
+            "reason_text": "code looks bad, need runtime proof",
+            "next_test": RUNTIME_PROOF_PLAN,
+        },
     )
     assert verify.status_code == 200, verify.text
 

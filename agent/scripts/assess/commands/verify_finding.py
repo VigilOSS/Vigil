@@ -17,6 +17,7 @@ from assess.lib.config import load_config
 from assess.lib.contracts import VERIFICATION_TRANSITION_STATUSES, render_contract_epilog
 from assess.lib.exploit_targets import is_source_bound
 from assess.lib.json_inputs import parse_json_argument, parse_optional_inline_json
+from assess.lib.next_test import load_next_test_file, next_test_problems
 from assess.lib.schema_validation import collect_patch_validation_errors, load_schema
 
 
@@ -101,6 +102,14 @@ def register(subparsers) -> None:
         help="JSON file containing the completed falsification check for confirmed/downgraded",
     )
     p.add_argument(
+        "--next-test-file",
+        help=(
+            "JSON file with the runtime proof plan {hypothesis, confirm_if, falsify_if, "
+            "route_hint, prerequisites}. Required with --status pending_runtime_proof and "
+            "rejected with any other status; see `vigil assess contract finding verify`."
+        ),
+    )
+    p.add_argument(
         "--severity-variance-file",
         help="JSON file with {normal_band, chosen_severity, actor, reason, proof_receipt_id} when chosen severity differs from its CVSS band; receipt id must also be passed with --proof-receipt-id",
     )
@@ -125,6 +134,7 @@ _CONTENT_FLAGS = (
     ("counter_check_file", "--counter-check-file"),
     ("confirm_check_file", "--confirm-check-file"),
     ("severity_variance_file", "--severity-variance-file"),
+    ("next_test_file", "--next-test-file"),
 )
 
 
@@ -192,6 +202,31 @@ def _request_for_slug(client, payload: dict, slug: str, *, derive_binding: bool)
         operation="finding verify",
     )
     return request
+
+
+def _require_next_test_pairing(payload: dict) -> None:
+    """A runtime-proof park carries its plan; no other verdict may carry one."""
+    parked = payload.get("verification_status") == "pending_runtime_proof"
+    plan = payload.get("next_test")
+    if parked and plan is None:
+        print(
+            "finding verify: pending_runtime_proof requires --next-test-file <plan.json> "
+            "(a next_test object {hypothesis, confirm_if, falsify_if, route_hint, "
+            "prerequisites}); run `vigil assess contract finding verify` for the shape",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if not parked and plan is not None:
+        print(
+            "finding verify: --next-test-file / next_test applies only to "
+            f"--status pending_runtime_proof (got '{payload.get('verification_status')}')",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    problems = next_test_problems(plan) if plan is not None else []
+    if problems:
+        print(f"finding verify: {'; '.join(problems)}", file=sys.stderr)
+        sys.exit(1)
 
 
 def _provided_content_flags(args) -> list[str]:
@@ -332,6 +367,13 @@ def run(args) -> None:
                 print(f"{description} must be a JSON object", file=sys.stderr)
                 sys.exit(1)
             structured_decisions[field_name] = structured
+        next_test_file = getattr(args, "next_test_file", None)
+        if next_test_file:
+            try:
+                structured_decisions["next_test"] = load_next_test_file(next_test_file)
+            except ValueError as exc:
+                print(f"finding verify: --next-test-file: {exc}", file=sys.stderr)
+                sys.exit(1)
         payload = {
             "verification_status": args.verification_status,
             "reason_code": args.reason_code,
@@ -366,6 +408,7 @@ def run(args) -> None:
                 file=sys.stderr,
             )
             sys.exit(1)
+    _require_next_test_pairing(payload)
     if payload.get("verification_status") == "false_positive":
         counter_check = payload.get("counter_check")
         if not isinstance(counter_check, dict):

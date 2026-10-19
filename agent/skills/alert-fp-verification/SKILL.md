@@ -467,7 +467,7 @@ Verbatim from `agent/rules/triage.md:53-70`:
 | `false_positive` | Benign explanation cited at finding's rigor bar | At least one check KILL with same-bar counter-evidence; no contradicting evidence in other checks; completed structured counter-check and healthy proof receipts |
 | `downgraded` | Adversarial primitive confirmed but narrower impact than rule's claim | At least one check DOWNGRADE; remaining checks PASS or DOWNGRADE; severity reduced; `details.severity_rationale` updated |
 | `disputed` | Evidence ambiguous; routes to multi-perspective voting OR external escalation (vendor, on-call, legal) | At least one check ESCALATE that voting did not resolve; FOR / AGAINST summary in handoff |
-| `pending_runtime_proof` | Material runtime uncertainty remains | Name the exact proof required; do not claim a terminal decision |
+| `pending_runtime_proof` | Material runtime uncertainty remains | Name the exact proof required in `--next-test-file` (confirming and falsifying observations; `vigil assess contract finding verify`); do not claim a terminal decision |
 | `blocked` | Required check could not run | Record the missing precondition in `details.block_reason` |
 
 Forbidden vocabulary: `partially_verified`, `pending`, `unknown`,

@@ -14,6 +14,7 @@ from .events import _engagement_or_404
 from .engagement_tracks import track_phases
 from .search import canonical_finding_alias
 from .state_manager.dispatches import dispatch_mode_sql
+from .state_manager import proof_work
 from .state_manager.findings import finding_mode_sql
 
 
@@ -989,6 +990,22 @@ def _credential_needs_section(connection, engagement_id: int) -> dict[str, Any]:
     return {"count": int(count), "items": items[:10]}
 
 
+def _proof_work_section(engagement_id: int) -> dict[str, Any]:
+    """Owed runtime proof and its derived queue readiness, as counts only.
+
+    An absolute snapshot like ``finding_counts``: ``--since`` does not apply, and
+    neither does the session mode, because the current operator owns every proof
+    obligation whichever operator workflow it loaded. The rows, plans and work
+    ids stay behind the read command.
+    """
+    listing = proof_work.list_proof_work(engagement_id)
+    return {
+        "owed_findings": len(listing["owed"]),
+        "queue_state_counts": listing["queue_state_counts"],
+        "read_command": "vigil assess proof-work list",
+    }
+
+
 def _contradiction_reviews_section(connection, engagement_id: int) -> dict[str, Any]:
     predicate = (
         "links.engagement_id = ? AND links.link_kind = 'contradicts' "
@@ -1200,6 +1217,7 @@ def build_resume_brief(
         "read_first_notes": _resume_note_pointers(engagement_id, since=since),
     }
     dispatch_picture = _recent_dispatch_picture(engagement_id, max_age_hours=max_age_hours, mode=mode)
+    proof_work_section = _proof_work_section(engagement_id)
     current_code_phase = phases.get("code", "")
     code_analysis_section = (
         _code_analysis_section(engagement_id, "code" in phases, current_code_phase)
@@ -1245,6 +1263,7 @@ def build_resume_brief(
         "attempts": attempts_section,
         "credential_needs": credential_needs,
         "contradiction_reviews": contradiction_reviews,
+        "proof_work": proof_work_section,
         "per_input_coverage": per_input_coverage_section,
         "target_finding": target_finding,
         "findings": findings,

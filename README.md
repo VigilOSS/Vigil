@@ -112,8 +112,9 @@ vigil engagement create --type code --name acme --source-dir ./acme --no-prompt
 vigil engagement start <engagement-key> --mode code --client codex
 ```
 
-Point `--source-dir` at the original project. The operator confirms the source before
-creating one sealed audit copy directly from it. The original stays untouched; loose files
+Point `--source-dir` at the original project. The operator asks you to confirm the source,
+and that you trust its build and test code to run inside the Vigil runtime, before creating
+one sealed audit copy directly from it. The original stays untouched; loose files
 work and Git history is optional. You can also create without `--source-dir` and put files
 in the printed `source/` folder. Refreshing a snapshot requires another confirmation.
 

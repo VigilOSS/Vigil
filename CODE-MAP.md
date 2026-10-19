@@ -213,9 +213,12 @@ A prompt change is **not** prompt-only when the prompt defines an artifact the b
 - `agent/scripts/assess/commands/export_submission.py` and `export_reply.py` assemble and present;
   neither rewrites authored content or masks credentials. Rendering helpers live in
   `agent/scripts/assess/lib/finding_render.py`.
+- `agent/scripts/assess/commands/operator_checkpoint.py` — `vigil assess operator-checkpoint`, the operator's own durable state. References plus one intent note; every reference is existence-checked in the write transaction.
+- `agent/scripts/assess/commands/resume_brief.py` — a **read**. It observes abandoned command runs, jobs and host children and names the verb that reconciles them; the reconciling write is owned solely by `vigil assess kali sweep-orphans`.
 - `agent/scripts/hooks/` — shared host hooks for activity logging, compaction, post-compaction
   operator rehydration, and session end. Command filtering is deliberately absent (ADR 0019).
   `goose-hook-adapter.sh` adapts Goose tool names.
+- `agent/docker/runtime-full/Dockerfile` — the supported target-facing tool surface. All baked inputs participate in image-digest drift checks.
 
 ### src/vigil_cli/ — the universal CLI
 
@@ -240,12 +243,19 @@ A prompt change is **not** prompt-only when the prompt defines an artifact the b
 - `orchestrator/backend/app/api/assessment.py` — live-state routes for recon, coverage, findings,
   command runs, and bulk ingestion; finding history supports summary and lossless transition reads.
   `assessment_operator.py` owns dispatch/handoff/decision/checkpoint routes; `submissions.py` owns immutable submission/sent-reply APIs.
+- `orchestrator/backend/app/api/intel.py` — per-engagement intel reads and writes. `/resolve` maps
+  untyped finding intel ids through the canonical search index without guessing across entity tables;
+  it reports resolved, missing, unsupported, dangling, and ambiguous ids.
 - `orchestrator/backend/app/api/code_analysis.py` — the only repo/file ingest write, lease-owned queue
   work, generation-bound compare-and-swap, and paginated queue reads. Its `item_ids` page and
   `code-dispatch fetch --ids-file` share ordering and current-generation filtering.
-- `orchestrator/backend/app/services/state_manager/proof_work.py` owns current proof preparation, atomic dispatch claims, approval and explicit release after execution ends.
-  `api/assessment_proof_work.py` and `agent/scripts/assess/commands/proof_work.py` expose it; finding status still owns proof owed.
+- `orchestrator/backend/app/services/state_manager/proof_work.py` owns current proof preparation, atomic dispatch claims, approval, derived `queue_state`, and explicit release after execution ends.
+  `api/assessment_proof_work.py` and `agent/scripts/assess/commands/proof_work.py` expose it; finding status and its `next_test` still own proof owed.
   `orchestrator/backend/app/services/scope_admission.py` bridges to the canonical agent scope matcher.
+- `orchestrator/backend/app/services/state_manager/finding_next_tests.py` owns runtime proof plans, written with the parking transition,
+  and `owes_runtime_proof`/`runtime_proof_owed_sql` (parked, not merged). Proof work binds the current park.
+  `contract_registry.py:NEXT_TEST_FIELDS`/`NEXT_TEST_ROUTE_HINTS`, `agent/scripts/assess/lib/next_test.py` bounds and `finding_next_tests.py:NEXT_TEST_FIELDS`
+  mirror `api/assessment.py:FindingNextTestRequest`. See: `orchestrator/backend/tests/test_finding_next_test_contract_mirror.py`.
 - `orchestrator/backend/app/services/state_manager/` — the live-state service package, re-exported
   through `__init__.py` so public `state_manager.<fn>` paths remain stable.
 - `orchestrator/backend/app/services/state_manager/coverage_readiness.py` owns readiness and per-host verdicts; `finding_snapshots.py` owns finding snapshot/author provenance.

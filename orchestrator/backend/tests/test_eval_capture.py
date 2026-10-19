@@ -23,6 +23,7 @@ from types import SimpleNamespace
 
 import pytest
 from app import db as db_module
+from tests.proof_fixtures import RUNTIME_PROOF_PLAN
 
 # Put agent/scripts on sys.path so assess.* imports resolve (mirrors
 # tests/eval/conftest.py and test_aith_cli.py).
@@ -274,6 +275,7 @@ def test_pending_runtime_proof_status_captures_and_validates(
         f"{BASE}/findings/{slug}/verify",
         json={
             "verification_status": "pending_runtime_proof",
+            "next_test": RUNTIME_PROOF_PLAN,
             "reason_text": "Static taint path confirmed; runtime proof outstanding.",
             "source_name": "verifier",
             "provenance": {"code_snapshot": code_snapshot},
