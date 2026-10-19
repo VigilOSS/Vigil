@@ -315,7 +315,7 @@ def _listener_application_matches(pid: int, install_root: Path) -> bool:
     """Require an actual uvicorn process in the selected application, not just a port."""
     import shlex
     try:
-        result = subprocess.run(["ps", "-p", str(pid), "-o", "command="], capture_output=True, text=True, timeout=2)
+        result = subprocess.run(["ps", "-p", str(pid), "-ww", "-o", "command="], capture_output=True, text=True, timeout=2)
         argv = shlex.split(result.stdout)
         if result.returncode != 0 or "uvicorn" not in argv or "app.main:app" not in argv:
             return False

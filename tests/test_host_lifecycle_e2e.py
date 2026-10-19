@@ -38,6 +38,8 @@ HTTPServer((host, port), Handler).serve_forever()
     monkeypatch.setenv('VIGIL_APPLICATION_DIR', str(application))
     monkeypatch.setenv('UV_PYTHON', sys.executable)
     monkeypatch.setenv('UV_OFFLINE', '1')
+    # A narrow shell must not truncate the process identity used for orphan recovery.
+    monkeypatch.setenv('COLUMNS', '80')
     monkeypatch.setenv('VIGIL_ORCHESTRATOR_START_TIMEOUT_SECONDS', '10')
     monkeypatch.setattr(service_locks, '_application_cache', lambda: tmp_path / 'locks')
     monkeypatch.setattr(orchestrator, '_frontend_build_needed', lambda *a, **k: False)
@@ -77,7 +79,7 @@ HTTPServer((host, port), Handler).serve_forever()
             receipt_path.unlink()
             receipt_path.with_suffix('.pid').unlink()
         state = orchestrator.orchestrator_status_payload(workspace, host=host, port=port)
-        assert state['state'] == 'running'
+        assert state['state'] == 'running', state
         assert state['ownership'] == 'owned'
         assert state['pid'] == children[0].pid
         with pytest.raises(SystemExit, match='running or ownership is unknown'):
