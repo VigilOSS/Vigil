@@ -57,7 +57,7 @@ def scratch_source(repo: Path, base: str, head: str, paths: list[str]):
             scratch_revision = vcs.revision(scratch)
             tree = vcs.tree_id(scratch, scratch_revision)
         else:
-            _run(['git', '-C', str(scratch), 'restore', '--source', base, '--staged', '--worktree', '--', *paths])
+            _run(['git', '--literal-pathspecs', '-C', str(scratch), 'restore', '--source', base, '--staged', '--worktree', '--', *paths])
             tree = _run(['git', '-C', str(scratch), 'write-tree'])
         yield scratch, {'base_revision': base, 'head_revision': head, 'reverted_paths': paths, 'scratch_tree': tree}
     finally:

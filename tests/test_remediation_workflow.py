@@ -45,7 +45,7 @@ def test_worktree_uses_profile_base_and_repository_workspace(monkeypatch, tmp_pa
     monkeypatch.setattr(remediation, '_api', lambda *_args: {})
     args = parser().parse_args(['remediation', '-k', 'acme', 'worktree', '1', '--branch', 'fix/SEC-1'])
     remediation.run_remediation(args, tmp_path)
-    assert calls[0] == (repository, repository / 'worktrees/fix/SEC-1', 'fix/SEC-1', 'develop')
+    assert calls[0] == (repository, repository / 'worktrees/case-1', 'fix/SEC-1', 'develop')
 
 
 def test_sync_accepts_registered_repository_local_workspace(monkeypatch, tmp_path):
@@ -104,6 +104,7 @@ def test_short_pr_body_does_not_require_case_ledger(monkeypatch):
             'release_plan': {'production_canary_decision': 'not_required',
                              'production_canary_rationale': 'No production fixture is required.',
                              'safe_procedure': '', 'monitoring': 'Watch authorization errors.'},
+            'verification_matches': [{'requirement_index': 0, 'evidence_ids': [1]}],
             'approvals': [{'review_digest': 'd' * 64, 'evidence_cutoff_id': 1}],
             'approval_current': True, 'worktree_revision': 'a' * 40,
             'evidence': [{'id': 1, 'kind': 'green-test', 'method': 'pytest', 'outcome': 'passed',

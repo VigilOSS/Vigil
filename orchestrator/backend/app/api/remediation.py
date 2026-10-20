@@ -15,10 +15,54 @@ router = APIRouter(prefix="/engagements/{engagement_key}/remediation", tags=["re
 class CaseCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
     source_type: str = Field(min_length=1, pattern=r"^[a-z][a-z0-9_-]*$")
-    source_key: str = Field(min_length=1)
+    source_key: str | None = Field(default=None, min_length=1)
+    external_provider: str | None = Field(default=None, min_length=1)
+    external_key: str | None = Field(default=None, min_length=1)
     title: str = Field(min_length=1)
     snapshot: dict[str, Any]
     finding_ids: list[PositiveInt] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def source_and_identity(self):
+        if self.source_key is None and self.source_type not in {"manual", "report"}:
+            raise ValueError("Source key is required for this provider")
+        _paired_external(self.external_provider, self.external_key)
+        return self
+
+
+def _paired_external(provider: str | None, key: str | None) -> None:
+    if (provider is None) != (key is None) or any(
+        value is not None and not value.strip() for value in (provider, key)
+    ):
+        raise ValueError("External provider and key must both be nonempty or both null")
+
+
+class CaseIdentity(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    expected_external_provider: str | None
+    expected_external_key: str | None
+    external_provider: str | None
+    external_key: str | None
+
+    @model_validator(mode="after")
+    def paired_identity(self):
+        _paired_external(self.expected_external_provider, self.expected_external_key)
+        _paired_external(self.external_provider, self.external_key)
+        return self
+
+
+class BranchFinalization(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    old_branch: str = Field(min_length=1)
+    new_branch: str = Field(min_length=1)
+    revision: str = Field(min_length=1)
+
+
+class PublicationIntent(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    review_digest: str = Field(min_length=1)
+    revision: str = Field(min_length=1)
+    branch: str = Field(min_length=1)
 
 
 class CasePatch(BaseModel):
@@ -231,6 +275,21 @@ def list_cases(engagement_key: str):
 @router.post("/cases", status_code=status.HTTP_201_CREATED)
 def create_case(engagement_key: str, body: CaseCreate):
     return remediation.create_case(engagement_key, body.model_dump())
+
+
+@router.post("/cases/{case_id}/identity")
+def update_identity(engagement_key: str, case_id: int, body: CaseIdentity):
+    return remediation.update_identity(engagement_key, case_id, body.model_dump())
+
+
+@router.post("/cases/{case_id}/finalize-branch")
+def finalize_branch(engagement_key: str, case_id: int, body: BranchFinalization):
+    return remediation.finalize_branch(engagement_key, case_id, body.model_dump())
+
+
+@router.post("/cases/{case_id}/publication-intent")
+def publication_intent(engagement_key: str, case_id: int, body: PublicationIntent):
+    return remediation.publication_intent(engagement_key, case_id, body.model_dump())
 
 
 @router.post("/cases/{case_id}/resolve-source")

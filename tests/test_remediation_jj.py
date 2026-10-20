@@ -323,6 +323,8 @@ def test_jj_github_pr_creation_and_reconciliation_use_same_explicit_origin(
         "status": "approved",
         "approval_current": True,
         "approvals": [{"review_digest": digest, "evidence_cutoff_id": 3}],
+        "verification_matches": [{"requirement_index": index, "evidence_ids": [row["id"]]}
+                                 for index, row in enumerate(evidence)],
         "evidence": evidence, "verification_requirements": {"requirements": [{"kind": row["kind"]} for row in evidence]},
         "worktree_path": str(workspace),
         "worktree_branch": "codex/gh-case",

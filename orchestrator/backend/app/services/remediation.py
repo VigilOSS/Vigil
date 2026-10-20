@@ -5,6 +5,7 @@ import difflib
 import json
 import os
 import secrets
+import sqlite3
 import select
 import stat
 import subprocess
@@ -439,6 +440,11 @@ def _review_digest(row, evidence: list[dict[str, Any]], engagement_root: Path, f
         ],
         "current_artifact_sha256": artifact_state,
     }
+    if _field(row, "external_provider") is not None or _field(row, "identity_version", 0):
+        material["external_identity"] = {
+            "provider": _field(row, "external_provider"), "key": _field(row, "external_key"),
+            "version": _field(row, "identity_version", 0),
+        }
     for field in ("base_branch", "base_revision", "review_policy_json", "verification_requirements_json"):
         if _field(row, field) is not None:
             material[field] = row[field]
@@ -461,6 +467,8 @@ def _review_evidence_missing(row, evidence: list[dict[str, Any]], engagement_roo
         missing = _explicit_evidence_missing(row, evidence, engagement_root, json.loads(plan))
     else:
         missing = ["verification plan with evidence requirements"]
+    if _external_reference_missing(row):
+        missing.append("external reference required by project policy")
     return missing + _profile_checks_missing(row, evidence, engagement_root)
 
 
@@ -775,6 +783,8 @@ def list_cases(key: str) -> list[dict[str, Any]]:
                 "engagement_id": row["engagement_id"],
                 "source_type": row["source_type"],
                 "source_key": row["source_key"],
+                "external_provider": row["external_provider"],
+                "external_key": row["external_key"],
                 "title": row["title"],
                 "status": row["status"],
                 "linked_findings": _linked_findings(connection, row["id"]),
@@ -829,23 +839,177 @@ def create_case(key: str, data: dict[str, Any]) -> dict[str, Any]:
     with db.get_connection() as connection:
         connection.execute("BEGIN IMMEDIATE")
         finding_ids = _validate_finding_ids(connection, data.get("finding_ids", []))
-        exists = connection.execute(
-            "SELECT id FROM remediation_cases WHERE engagement_id=? AND source_type=? AND source_key=?",
-            (owner.id, data["source_type"], data["source_key"]),
-        ).fetchone()
-        if exists:
-            raise HTTPException(409, {"message": "Source already has a remediation case", "existing_case_id": exists["id"]})
-        cursor = connection.execute(
-            "INSERT INTO remediation_cases(engagement_id,source_type,source_key,title,snapshot_json) VALUES(?,?,?,?,?)",
-            (owner.id, data["source_type"], data["source_key"], data["title"],
-             _json(data["snapshot"])),
-        )
+        source_key = data.get("source_key")
+        if source_key is None and data["source_type"] not in {"manual", "report"}:
+            raise HTTPException(400, "Source key is required for this provider")
+        if source_key is not None and not source_key.strip():
+            raise HTTPException(400, "Source key must be nonempty")
+        if source_key is not None:
+            exists = connection.execute(
+                "SELECT id FROM remediation_cases WHERE engagement_id=? AND source_type=? AND source_key=?",
+                (owner.id, data["source_type"], source_key),
+            ).fetchone()
+            if exists:
+                raise HTTPException(409, {"message": "Source already has a remediation case", "existing_case_id": exists["id"]})
+        _validate_external_identity(data.get("external_provider"), data.get("external_key"))
+        case_id = None
+        if source_key is None:
+            # Allocate under the same write transaction as insertion. Existing
+            # caller-supplied source keys may overlap the generated namespace.
+            sequence = connection.execute("SELECT seq FROM sqlite_sequence WHERE name='remediation_cases'").fetchone()
+            maximum = connection.execute("SELECT COALESCE(MAX(id),0) FROM remediation_cases").fetchone()[0]
+            case_id = max(sequence["seq"] if sequence else 0, maximum) + 1
+            while connection.execute(
+                "SELECT 1 FROM remediation_cases WHERE engagement_id=? AND source_type=? AND source_key=?",
+                (owner.id, data["source_type"], f"case-{case_id}"),
+            ).fetchone():
+                case_id += 1
+            source_key = f"case-{case_id}"
+        try:
+            cursor = connection.execute(
+                "INSERT INTO remediation_cases(id,engagement_id,source_type,source_key,title,snapshot_json,external_provider,external_key) VALUES(?,?,?,?,?,?,?,?)",
+                (case_id, owner.id, data["source_type"], source_key, data["title"],
+                 _json(data["snapshot"]), data.get("external_provider"), data.get("external_key")),
+            )
+        except sqlite3.IntegrityError:
+            raise HTTPException(409, "Source or external identity already has a remediation case") from None
         connection.executemany("INSERT INTO remediation_case_findings(case_id,finding_id) VALUES(?,?)", [(cursor.lastrowid, finding_id) for finding_id in finding_ids])
         return _details(connection, _row(connection, owner.id, cursor.lastrowid), Path(owner.engagement_root))
 
 
+def _validate_external_identity(provider, key) -> None:
+    if (provider is None) != (key is None) or any(
+        value is not None and (not isinstance(value, str) or not value.strip()) for value in (provider, key)
+    ):
+        raise HTTPException(400, "External provider and key must both be nonempty or both null")
+
+
+def _external_reference_missing(row) -> bool:
+    policy = json.loads(_field(row, "review_policy_json") or "{}")
+    return bool(policy.get("remediation", {}).get("development_ticket_required") and not (
+        (_field(row, "external_provider") and _field(row, "external_key"))
+        or (row["source_type"] not in {"report", "manual", "reference", "finding"} and row["source_key"])
+    ))
+
+
+def _publication_recorded(connection, case_id: int, engagement_root: Path) -> bool:
+    directory = engagement_root / "remediation" / "cases" / str(case_id)
+    markers = (any((directory / "pr").glob("publication-*.json"))
+               or any((directory / "pr").glob("update-intent-*.json"))
+               or any((directory / "deployments").glob("*.json")))
+    return bool(markers or connection.execute(
+        "SELECT 1 FROM remediation_evidence WHERE case_id=? AND kind IN ('pr_publication','pr_update','deployment_request') LIMIT 1", (case_id,),
+    ).fetchone() or connection.execute(
+        "SELECT 1 FROM remediation_deployments WHERE case_id=? LIMIT 1", (case_id,),
+    ).fetchone())
+
+
+def update_identity(key: str, case_id: int, data: dict[str, Any]) -> dict[str, Any]:
+    owner = engagement(key)
+    _validate_external_identity(data["external_provider"], data["external_key"])
+    desired = (data["external_provider"], data["external_key"])
+    expected = (data["expected_external_provider"], data["expected_external_key"])
+    with db.get_connection() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        row = _row(connection, owner.id, case_id)
+        current = (row["external_provider"], row["external_key"])
+        if current == desired:
+            return _details(connection, row, Path(owner.engagement_root))
+        if row["status"] in {"closed", "pr_draft", "development", "verified"} or _publication_recorded(connection, case_id, Path(owner.engagement_root)):
+            raise HTTPException(409, "Published or closed case identity cannot be changed")
+        if current != expected:
+            raise HTTPException(409, "Case external identity changed; refresh before retrying")
+        try:
+            connection.execute(
+                "UPDATE remediation_cases SET external_provider=?,external_key=?,identity_version=identity_version+1,updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                (*desired, case_id),
+            )
+        except sqlite3.IntegrityError:
+            raise HTTPException(409, "External identity already has a remediation case") from None
+        connection.execute(
+            "INSERT INTO remediation_transitions(case_id,from_status,to_status,actor,reason) VALUES(?,?,?,?,?)",
+            (case_id, row["status"], row["status"], "Vigil", "External reference updated"),
+        )
+        return _details(connection, _row(connection, owner.id, case_id), Path(owner.engagement_root))
+
+
+def finalize_branch(key: str, case_id: int, data: dict[str, Any]) -> dict[str, Any]:
+    owner = engagement(key)
+    with db.get_connection() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        row = _row(connection, owner.id, case_id)
+        if row["status"] in {"closed", "pr_draft", "development", "verified"} or _publication_recorded(connection, case_id, Path(owner.engagement_root)):
+            raise HTTPException(409, "Published or closed case branch cannot be changed")
+        if not row["worktree_branch"] or row["worktree_branch"] not in {data["old_branch"], data["new_branch"]}:
+            raise HTTPException(409, "Registered branch changed; refresh before retrying")
+        if not row["worktree_path"] or data["revision"] != row["worktree_revision"]:
+            raise HTTPException(409, "Branch finalization requires the registered revision")
+        root = Path(owner.engagement_root)
+        path = Path(row["worktree_path"])
+        try:
+            project = _case_project(row, root)
+            _vcs.verify_finalized_branch(path, data["old_branch"], data["new_branch"], data["revision"])
+            _vcs.ensure_unpublished_branches(path, [data["old_branch"], data["new_branch"]])
+            repo = Path(project["repository"])
+            valid = (repo.is_absolute() and _registered_worktree(repo, path)
+                     and _vcs.branch_matches(path, data["new_branch"])
+                     and _actual_revision(str(path)) == data["revision"]
+                     and _worktree_clean(str(path)) and row["base_revision"]
+                     and _vcs.review_base(path, row["base_branch"] or "main", row["base_revision"]) == row["base_revision"])
+        except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+            valid = False
+        if not valid:
+            raise HTTPException(409, "Finalized branch must match the clean registered workspace, revision, and review base")
+        if row["worktree_branch"] != data["new_branch"]:
+            connection.execute("UPDATE remediation_cases SET worktree_branch=?,identity_version=identity_version+1,updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                               (data["new_branch"], case_id))
+            connection.execute(
+                "INSERT INTO remediation_transitions(case_id,from_status,to_status,actor,reason) VALUES(?,?,?,?,?)",
+                (case_id, row["status"], row["status"], "Vigil", f"Branch finalized: {row['worktree_branch']} -> {data['new_branch']}"),
+            )
+        return _details(connection, _row(connection, owner.id, case_id), root)
+
+
+def publication_intent(key: str, case_id: int, data: dict[str, str]) -> dict[str, Any]:
+    """Serialize publication preparation with external identity and branch edits."""
+    owner = engagement(key)
+    root = Path(owner.engagement_root)
+    with db.get_connection() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        row = _row(connection, owner.id, case_id)
+        package = _details(connection, row, root)
+        if (row["status"] not in {"approved", "pr_draft"}
+                or not package["approval_current"] or not package["approvals"]
+                or package["approvals"][-1]["review_digest"] != data["review_digest"]
+                or row["worktree_revision"] != data["revision"]
+                or row["worktree_branch"] != data["branch"]
+                or _actual_revision(row["worktree_path"]) != data["revision"]
+                or not row["worktree_path"] or not _worktree_clean(row["worktree_path"])
+                or not _case_worktree_identity(row, root)):
+            raise HTTPException(409, "Publication requires the current approved case revision and branch")
+        directory = root / "remediation" / "cases" / str(case_id) / "pr"
+        directory.mkdir(parents=True, exist_ok=True)
+        temporary = directory / f".publication-intent-{secrets.token_hex(8)}.tmp"
+        try:
+            with temporary.open("x", encoding="utf-8") as target:
+                target.write(_json(data) + "\n")
+                target.flush()
+                os.fsync(target.fileno())
+            temporary.replace(directory / "publication-intent.json")
+            descriptor = os.open(directory, os.O_RDONLY)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        finally:
+            temporary.unlink(missing_ok=True)
+        return package
+
+
 def resolve_source(key: str, case_id: int, data: dict[str, Any]) -> dict[str, Any]:
     owner = engagement(key)
+    if not data.get("source_key"):
+        raise HTTPException(400, "Resolved source requires a provider key")
     if data["source_type"] == "reference":
         raise HTTPException(400, "Resolved source must identify the actual report provider")
     with db.get_connection() as connection:
@@ -1290,6 +1454,8 @@ def approve(
             raise HTTPException(409, "Case needs review status, worktree identity, and verification plan")
         if not _case_worktree_identity(row, Path(owner.engagement_root)):
             raise HTTPException(409, "Case worktree identity differs from registered repository and branch")
+        if _external_reference_missing(row):
+            raise HTTPException(409, "Project policy requires an external reference before approval")
         baseline = json.loads(row["baseline_json"])
         if baseline.get("outcome") not in {"runtime_reproduced", "code_test_confirmed", "unreproduced"}:
             raise HTTPException(409, "Baseline outcome has not been recorded")

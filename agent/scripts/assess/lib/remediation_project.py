@@ -68,6 +68,8 @@ def validate_project(config: dict[str, object]) -> None:
         if check['name'] in names:
             raise ValueError('PROJECT.md: remediation.check_commands name must be unique')
         names.add(check['name'])
+        if check.get('stage', 'verification') not in ('verification', 'publication'):
+            raise ValueError('PROJECT.md: remediation.check_commands.stage must be verification or publication')
         directory = check.get('directory', '.')
         if not isinstance(directory, str) or Path(directory).is_absolute() or '..' in Path(directory).parts:
             raise ValueError('PROJECT.md: remediation.check_commands.directory must stay within the case workspace')
@@ -136,13 +138,13 @@ def workspace_path(config: dict[str, object], case_directory: Path, branch: str)
     destination = config.get('workspace_directory', '')
     if not destination:
         return case_directory / 'worktree'
-    name = Path(branch)
-    if not branch or name.is_absolute() or any(part in {'.', '..'} for part in branch.split('/')):
-        raise ValueError('Case branch must identify a repository-local workspace')
+    identifier = case_directory.name
+    if not identifier.isascii() or not identifier.isdecimal() or int(identifier) < 1:
+        raise ValueError('Case workspace requires a positive numeric case ID')
     parent = Path(destination).resolve()
-    path = (parent / name).resolve()
-    if not path.is_relative_to(parent):
-        raise ValueError('Case branch must identify a repository-local workspace')
+    path = parent / f'case-{identifier}'
+    if path.resolve().parent != parent:
+        raise ValueError('Case workspace must stay within its configured directory')
     return path
 
 

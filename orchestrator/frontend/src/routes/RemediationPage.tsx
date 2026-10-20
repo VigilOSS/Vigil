@@ -54,6 +54,8 @@ function caseSummary(value: RemediationCase): RemediationCaseSummary {
     id: value.id,
     source_type: value.source_type,
     source_key: value.source_key,
+    external_provider: value.external_provider,
+    external_key: value.external_key,
     title: value.title,
     status: value.status,
     linked_findings: value.linked_findings,
@@ -63,6 +65,12 @@ function caseSummary(value: RemediationCase): RemediationCaseSummary {
     baseline_outcome: value.baseline.outcome ?? "pending",
     approval_recorded: value.approvals.length > 0,
   };
+}
+
+function caseReference(value: RemediationCaseSummary): string {
+  if (value.external_key) return value.external_key;
+  if ((value.source_type === "manual" || value.source_type === "report") && value.source_key === `case-${value.id}`) return "Direct report";
+  return value.source_type === "finding" ? `Finding #${value.source_key}` : value.source_key;
 }
 
 function initialCasePage(value: RemediationCase): RemediationCase {
@@ -608,7 +616,7 @@ function RemediationWorkspace({ engagementKey, onBack, initialCaseId }: Props) {
     const draft = drafts[field];
     return draft != null && (draft.review_digest !== (selected.review_digest ?? null) || draft.worktree_revision !== selected.worktree_revision || JSON.stringify(draft.base_value) !== JSON.stringify(savedDraftValues(selected)[field]));
   });
-  const visibleCases = cases.map((item) => item.id === selected?.id ? selected : item).filter((item) => `${item.title} ${item.source_key} ${item.source_type} ${item.status} ${item.linked_findings.map((finding) => `${finding.slug} ${finding.title}`).join(" ")}`.toLowerCase().includes(query.toLowerCase()));
+  const visibleCases = cases.map((item) => item.id === selected?.id ? selected : item).filter((item) => `${item.title} ${item.source_key} ${item.source_type} ${item.external_provider ?? ""} ${item.external_key ?? ""} ${item.status} ${item.linked_findings.map((finding) => `${finding.slug} ${finding.title}`).join(" ")}`.toLowerCase().includes(query.toLowerCase()));
 
   return (
     <div className="remediation-page">
@@ -631,7 +639,7 @@ function RemediationWorkspace({ engagementKey, onBack, initialCaseId }: Props) {
               {visibleCases.map((item) => (
                 <li key={item.id}>
                   <button type="button" className={selectedId === item.id ? "is-selected" : ""} onClick={() => chooseCase(item.id)} disabled={busy} aria-current={selectedId === item.id ? "page" : undefined}>
-                    <span className="remediation-case-key"><span>{item.source_type === "finding" ? `Finding #${item.source_key}` : item.source_key}</span><span>#{item.id}</span></span>
+                    <span className="remediation-case-key"><span>{caseReference(item)}</span><span>#{item.id}</span></span>
                     <strong>{item.title}</strong>
                     <span className="remediation-case-status"><span className="remediation-status-dot" />{item.status.replace(/_/g, " ")} · {item.linked_findings.length} finding{item.linked_findings.length === 1 ? "" : "s"}</span>
                     {item.linked_findings.map((finding) => <span key={finding.id} className="remediation-case-finding"><span>{finding.title}</span><span>{finding.slug} · {finding.severity} · {finding.verification_status.replace(/_/g, " ")}</span>{finding.root_cause_key && <span>Root cause: {finding.root_cause_key}</span>}</span>)}
@@ -648,7 +656,7 @@ function RemediationWorkspace({ engagementKey, onBack, initialCaseId }: Props) {
           {!selected ? (caseError ? <><p role="alert">{caseError}</p><button type="button" onClick={() => setCaseAttempt((attempt) => attempt + 1)}>Retry loading case</button></> : selectedId == null ? <p>Select a case to begin.</p> : <p>Loading case…</p>) : (
             <fieldset className="remediation-case-controls" disabled={busy}>
               <div className="remediation-title-row">
-                <div><p className="remediation-eyebrow">Case #{selected.id} · {selected.source_type === "finding" ? `Vigil finding #${selected.source_key} intake` : `${selected.source_type} · ${selected.source_key}`}</p><h2>{selected.title}</h2></div>
+                <div><p className="remediation-eyebrow">Case #{selected.id} · {selected.external_provider ?? selected.source_type} · {caseReference(selected)}</p><h2>{selected.title}</h2></div>
                 <div className="remediation-title-actions"><span className="remediation-state">{selected.status.replace(/_/g, " ")}</span><button type="button" onClick={refreshCase} disabled={busy}>Refresh case</button></div>
               </div>
               {selected.status === "closed" && <p className="remediation-help">This case is closed. Its plans and evidence are read-only.</p>}

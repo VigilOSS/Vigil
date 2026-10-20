@@ -1,7 +1,7 @@
 // Native Chrome DevTools client: no browser automation package or external traffic.
 import assert from "node:assert/strict";
 
-const [endpoint, url, mode] = process.argv.slice(2);
+const [endpoint, url, mode, evidenceCount] = process.argv.slice(2);
 const socket = new WebSocket(endpoint);
 await new Promise((resolve, reject) => {
   socket.addEventListener("open", resolve, { once: true });
@@ -46,6 +46,9 @@ try {
   await call("Page.enable");
   await call("Page.navigate", { url });
   await until("document.body.innerText.includes('Acme account boundary')");
+  if (mode === "approve-finalized") {
+    await until("document.body.innerText.includes('ACME-1')");
+  }
   if (mode === "drift") {
     await until("document.body.innerText.includes('Backend restart required')");
   } else if (mode === "fresh") {
@@ -65,7 +68,8 @@ try {
       const evidenceButton = await evaluate("[...document.querySelectorAll('button')].find(b => /^Evidence/.test(b.textContent.trim())).textContent.trim()");
       await click(evidenceButton);
       await click("Load more evidence");
-      await until("document.querySelectorAll('figure[id^=remediation-evidence-]').length === 25");
+      assert(Number.isSafeInteger(Number(evidenceCount)) && Number(evidenceCount) > 20);
+      await until(`document.querySelectorAll('figure[id^=remediation-evidence-]').length === ${Number(evidenceCount)}`);
       await click("Preview note-0.txt");
       await until("document.body.innerText.includes('<script>window.acmeInjected = true</script>')");
       assert.equal(await evaluate("Boolean(window.acmeInjected)"), false);
@@ -77,7 +81,8 @@ try {
         input.dispatchEvent(new Event('input', { bubbles: true }));
       })()`);
       await click("Approve reviewed snapshot");
-      await until("document.body.innerText.includes('Latest approval: Acme owner')");
+      await until("[...document.querySelectorAll('.remediation-section-heading')].some(h => h.querySelector('h3')?.textContent === 'Review approval' && h.querySelector('span')?.textContent === 'Current')");
+      assert(await evaluate("document.body.innerText.includes('Latest approval: Acme owner')"));
     }
   }
   console.log(`Acme remediation browser E2E passed: ${mode}`);

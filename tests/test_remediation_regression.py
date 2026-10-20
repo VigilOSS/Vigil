@@ -65,6 +65,30 @@ def test_scratch_red_supports_literal_fix_filenames(vcs_repo, name):
         assert proof['reverted_paths'] == [name]
 
 
+@pytest.mark.parametrize('selected, sibling', [
+    ('src/[id]/route.py', 'src/i/route.py'),
+    ('src/route*.py', 'src/routes.py'),
+    (':(glob)route.py', 'route.py'),
+])
+def test_scratch_red_restores_literal_fix_without_matching_sibling(vcs_repo, selected, sibling):
+    from assess.lib.remediation_regression import scratch_source
+
+    vcs, _, workspace, _ = vcs_repo
+    for name in (selected, sibling):
+        path = workspace / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('baseline\n')
+    base = commit(vcs, workspace, 'Baseline routes')
+    for name in (selected, sibling):
+        (workspace / name).write_text('fixed\n')
+    head = commit(vcs, workspace, 'Fix routes')
+
+    with scratch_source(workspace, base, head, [selected]) as (scratch, proof):
+        assert (scratch / selected).read_text() == 'baseline\n'
+        assert (scratch / sibling).read_text() == 'fixed\n'
+        assert proof['reverted_paths'] == [selected]
+
+
 @pytest.mark.parametrize('expected_failure', ['AssertionError', 'wrong failure'])
 def test_paired_runner_records_proof_and_requires_expected_failure(vcs_repo, tmp_path, monkeypatch, expected_failure):
     from vigil_cli import remediation as cli

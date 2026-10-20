@@ -235,6 +235,7 @@ def publication(monkeypatch, tmp_path):
             'approvals': [{'review_digest': digest, 'evidence_cutoff_id': 2}], 'worktree_path': str(workspace),
             'worktree_branch': 'fix/SEC-123', 'worktree_revision': revision, 'base_branch': 'develop',
             'verification_requirements': {'requirements': [{'kind': 'profile-check'}]},
+            'verification_matches': [{'requirement_index': 0, 'evidence_ids': [1], 'missing': None}],
             'release_plan': {'production_canary_decision': 'not_required',
                              'production_canary_rationale': 'Local verification suffices',
                              'monitoring': 'Monitor rejection counts'},

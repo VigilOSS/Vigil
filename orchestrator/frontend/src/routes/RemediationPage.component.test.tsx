@@ -109,6 +109,15 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
+it("finds a direct report by its attached external key", async () => {
+  const item = { ...reviewedCase, source_type: "manual", source_key: "case-7",
+    external_provider: "tracker", external_key: "ACME-103" };
+  vi.mocked(listRemediationCases).mockResolvedValue([item]);
+  vi.mocked(getRemediationCase).mockResolvedValue(item);
+  render(<RemediationPage engagementKey="acme" onBack={() => {}} />);
+  expect(await screen.findByText("ACME-103")).toBeTruthy();
+});
+
 it("previews evidence on demand as literal text and displays integrity failures", async () => {
   vi.mocked(readRemediationEvidenceText).mockResolvedValue({ text: "<script>target text</script>\nPassed", truncated: true });
   render(<RemediationPage engagementKey="acme" onBack={() => {}} />);

@@ -26,6 +26,9 @@ unavailable. Import the actual snapshot through Vigil, resolve duplicate case
 identity, prepare its registered workspace, and render its handoff. A direct
 report or finding-linked case uses that same case context; no ticket system is
 required unless the selected profile requires one for the next operation.
+For pasted reports and suspected bugs, follow the essentials' direct-report intake
+and stable identity flow; do not invent an external issue to acquire a workspace
+or shared-environment lease.
 
 For Claude, bind this conversation to the case through `session --bind --session-id`
 using the native conversation UUID supplied by the command. If another developer
@@ -96,8 +99,11 @@ legitimate-use control with a rationale, or a happy-path browser requirement.
 ## Review and continue
 
 Present the diff, verification, remaining limits, and human preparation/testing
-steps. Follow the essentials' approval and publishing rules. Run relevant checks
-again after requested PR changes and reconcile the existing branch and draft;
+steps. Follow the essentials' approval and publishing rules. Run checks at the
+publication stage after finalizing any external identity and branch.
+Rewriting commit messages changes revision identity; renew proof and approval
+under the existing revision rules before publishing.
+Run relevant checks again after requested PR changes and reconcile the existing branch and draft;
 retain earlier evidence as history rather than proof of changed behavior.
 Deployment and additional suites require their separate owner decision. Keep
 the handoff current from case state so another session can inspect the result.

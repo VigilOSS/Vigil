@@ -833,6 +833,8 @@ export type RemediationCase = {
   id: number;
   source_type: string;
   source_key: string;
+  external_provider?: string | null;
+  external_key?: string | null;
   title: string;
   status: string;
   snapshot: Record<string, unknown>;
@@ -897,7 +899,7 @@ export type LinkedRemediationFinding = {
   root_cause_key: string | null;
 };
 
-export type RemediationCaseSummary = Pick<RemediationCase, "id" | "source_type" | "source_key" | "title" | "status" | "linked_findings"> & {
+export type RemediationCaseSummary = Pick<RemediationCase, "id" | "source_type" | "source_key" | "external_provider" | "external_key" | "title" | "status" | "linked_findings"> & {
   duplicate_hints: number[];
   duplicate_hint_details?: Array<{ case_id: number; reasons: string[] }>;
   worktree_revision?: string | null;

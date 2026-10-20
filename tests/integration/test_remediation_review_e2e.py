@@ -16,6 +16,7 @@ import socket
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 
 import pytest
@@ -117,8 +118,12 @@ def test_regression_review_rewrite_and_backend_drift(tmp_path, vcs):
             time.sleep(0.1)
         pytest.fail("isolated backend did not become ready")
 
+    browser_runs = 0
+
     def browser(case_id, mode):
-        profile = tmp_path / f"chrome-{mode}"
+        nonlocal browser_runs
+        browser_runs += 1
+        profile = tmp_path / f"chrome-{mode}-{browser_runs}"
         process = subprocess.Popen([chrome, "--headless", "--no-sandbox", "--disable-gpu", "--disable-background-networking",
                                     "--remote-debugging-port=0", f"--user-data-dir={profile}", "about:blank"],
                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -135,7 +140,8 @@ def test_regression_review_rewrite_and_backend_drift(tmp_path, vcs):
             target = json.load(response)
         try:
             run("node", str(Path(__file__).with_name("remediation_browser.mjs")), target["webSocketDebuggerUrl"],
-                f"{base_url}/#/remediation/{engagement.name}?case={case_id}", mode)
+                f"{base_url}/#/remediation/{engagement.name}?case={case_id}", mode,
+                str(api("GET", f"/engagements/{engagement.name}/remediation/cases/{case_id}")["evidence_total"]))
         finally:
             process.terminate()
             process.wait(timeout=10)
@@ -212,15 +218,19 @@ def test_regression_review_rewrite_and_backend_drift(tmp_path, vcs):
             "--snapshot-file", str(earlier))
         snapshot = tmp_path / "report.json"
         snapshot.write_text(json.dumps({"original_report": "Acme cross-account write", "suggested_remediation": "Check the owner"}))
-        identifier = str(cli("import", "--source", "manual", "--source-key", "ACME-1", "--title", "Acme account boundary",
+        identifier = str(cli("import", "--source", "manual", "--title", "Acme account boundary",
                              "--snapshot-file", str(snapshot))["id"])
-        case = cli("worktree", identifier, "--branch", "fix/ACME-1")
+        case = cli("worktree", identifier)
         source = Path(case["worktree_path"])
+        assert source == repository / "worktrees" / f"case-{identifier}"
+        original_snapshot = case["snapshot"]
         listed = cli("list", "--json")
         assert int(identifier) > 1  # Case identity differs from the picker's row number.
         assert listed[0]["case_id"] == int(identifier)
         assert shlex.split(listed[0]["join_command"])[-2:] == ["join", identifier]
         terminal_join(identifier, source)
+        binding_path = engagement / "remediation/cases" / identifier / "session.json"
+        original_binding = binding_path.read_bytes()
         (source / "accounts.py").write_text("def allowed(actor, owner):\n    return actor == owner\n")
         (source / "test_accounts.py").write_text(
             'from accounts import allowed\nassert not allowed("guest", "owner"), "cross-account write"\n'
@@ -252,16 +262,73 @@ def test_regression_review_rewrite_and_backend_drift(tmp_path, vcs):
             artifact.write_text("<script>window.acmeInjected = true</script>\nAcme literal evidence\n")
             api("POST", endpoint + "/evidence", {"kind": "intake-note", "method": "manual", "environment": "not_applicable",
                 "observed": "Acme source context", "proved": "Intake only", "artifact_path": str(artifact.relative_to(engagement))})
+        current_revision = cli("show", identifier)["worktree_revision"]
+        for index, (revision, outcome, method, observation) in enumerate([
+            (case["base_revision"], "passed", "python", "Earlier source permits cross-account access"),
+            (current_revision, "failed", "python", "Earlier current-source attempt failed"),
+            (current_revision, "passed", "unselected", "Unselected verification method passed"),
+        ]):
+            artifact = engagement / "remediation/cases" / identifier / f"earlier-check-{index}.txt"
+            artifact.write_text(observation + "\n")
+            api("POST", endpoint + "/evidence", {"kind": "green-test", "method": method, "environment": "local",
+                "observed": observation, "proved": "Earlier verification history", "outcome": outcome,
+                "command": command, "revision": revision, "executed_revision": revision,
+                "executed_directory": str(source), "execution": "executed", "artifact_path": str(artifact.relative_to(engagement))})
         cli("test", identifier, "--method", "python", "--command", command, "--expected-failure", "cross-account write")
-        cli("checks", identifier, "--actor", "Acme developer")
+        cli("checks", identifier, "--actor", "Acme developer", "--stage", "publication")
         cli("release-plan", identifier, "--production-canary", "not_required", "--rationale", "Isolated Acme fixture",
             "--monitoring", "Account authorization failures")
         cli("transition", identifier, "review", "--actor", "Acme developer", "--reason", "Verification complete")
         ready = cli("show", identifier)
-        assert ready["review_evidence_ready"] and ready["evidence_total"] == 25
+        assert ready["review_evidence_ready"] and ready["evidence_total"] == 28
         assert all(match["evidence_ids"][0] > 20 for match in ready["verification_matches"])
         browser(identifier, "approve")
-        assert cli("show", identifier)["approval_current"]
+        approved = cli("show", identifier)
+        assert approved["approval_current"]
+        lease = cli("environment", "acquire", identifier, "--name", "acme-local", "--actor", "Acme developer")
+        identified = cli("identity", identifier, "--provider", "tracker", "--key", "ACME-1")
+        assert not identified["approval_current"]
+        assert identified["snapshot"] == original_snapshot
+        finalized = cli("finalize-branch", identifier, "--branch", "fix/ACME-1")
+        assert finalized["worktree_path"] == str(source)
+        assert finalized["worktree_revision"] == approved["worktree_revision"]
+        assert finalized["worktree_branch"] == "fix/ACME-1"
+        assert finalized["review_evidence_ready"] and not finalized["approval_current"]
+        assert binding_path.read_bytes() == original_binding
+        assert any(item["token"] == lease["token"] and not item["released_at"]
+                   for item in finalized["environment_leases"])
+        assert cli("finalize-branch", identifier, "--branch", "fix/ACME-1")["worktree_revision"] == approved["worktree_revision"]
+        assert cli("list", "--json")[0]["external_key"] == "ACME-1"
+        cli("environment", "release", identifier, "--name", "acme-local", "--actor", "Acme developer", "--token", lease["token"])
+        cli("transition", identifier, "review", "--actor", "Acme developer", "--reason", "Review finalized external identity")
+        browser(identifier, "approve-finalized")
+        final_review = cli("show", identifier)
+        assert final_review["approval_current"]
+        body_file = tmp_path / "prepared-pr.md"
+        root_cause = "The account permission check accepted every actor without comparing the owner."
+        fix_summary = "Compare actor and owner before allowing the account operation."
+        cli("prepare-pr", identifier, "--output", str(body_file), "--root-cause", root_cause,
+            "--fix-summary", fix_summary)
+        prepared_body = body_file.read_text()
+        assert root_cause in prepared_body and fix_summary in prepared_body
+        assert "ACME-1" in prepared_body
+        assert [line for line in prepared_body.splitlines() if line.startswith("- ")] == [
+            "- python [environment: local] (failed as expected): exit 1; source changed: False",
+            "- python [environment: local] (passed): exit 0; source changed: False",
+        ]
+        intended = api("POST", endpoint + "/publication-intent", {
+            "review_digest": final_review["approvals"][-1]["review_digest"],
+            "revision": final_review["worktree_revision"], "branch": final_review["worktree_branch"],
+        })
+        assert intended["approval_current"]
+        marker = engagement / "remediation/cases" / identifier / "pr/publication-intent.json"
+        assert json.loads(marker.read_text())["branch"] == "fix/ACME-1"
+        with pytest.raises(urllib.error.HTTPError) as refused:
+            api("POST", endpoint + "/finalize-branch", {
+                "old_branch": "fix/ACME-1", "new_branch": "fix/another-reference",
+                "revision": final_review["worktree_revision"],
+            })
+        assert refused.value.code == 409
 
         if vcs == "jj":
             run("jj", "describe", "-m", "Enforce account ownership", cwd=source)

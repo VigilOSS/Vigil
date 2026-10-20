@@ -146,8 +146,9 @@ supply authentication, or bypass workspace trust. Personal and nested repository
 apply. Surface conflicting requirements with their sources before dependent work.
 
 `repository`, instruction files, PR guidance, and template references resolve relative to `PROJECT.md`.
-`workspace_directory` resolves inside the repository; a branch such as `fix/SEC-123` produces
-`<repository>/worktrees/fix/SEC-123`. Without it, the workspace stays under the case directory.
+`workspace_directory` resolves inside the repository. New workspaces use a stable
+`<repository>/<workspace_directory>/case-<id>` directory, independent of branch names.
+Without it, the workspace stays under the case directory.
 `base_branch` defaults to `main`, but each case records its selected branch and base commit for review
 and PR creation. Existing cases retain their registered workspace and review policy; later profile
 changes cannot silently retarget them.
@@ -352,9 +353,48 @@ rem show <case-id>
 
 `import` stores a JSON object supplied by the existing source reader; it does not fetch tickets.
 Preserve retrieval provenance, original report, analysis, and attachment references. Direct reports
-can use `--source report`. Attachments are copied and indexed as untrusted source evidence. Partial
+can use `--source report` or `--source manual` without `--source-key`; Vigil derives the source
+reference from the permanent numeric case ID. Attachments are copied and indexed as untrusted source evidence. Partial
 registration prints the case ID: retry with `--resume-case-id <id>` and the same files. No
 organization-side export utility or handoff skill is required.
+
+A pasted example or suspected bug needs no external issue. Import it, prepare its workspace, and
+investigate before deciding whether it is real. Creating a case does not confirm the report.
+
+```bash
+rem import --source manual --title 'Possible account boundary bug' --snapshot-file report.json
+rem worktree <case-id>
+# After investigation, attach the primary external reference when one exists:
+rem identity <case-id> --provider tracker --key ACME-123
+rem finalize-branch <case-id> --branch fix/ACME-123-account-boundary
+rem join tracker:ACME-123
+```
+
+The original report and finding links stay intact. Current lists, pickers, and handoffs use the
+attached external reference; evidence and session ownership keep using the permanent case ID.
+Numeric join arguments always mean case IDs; use `provider:key` for numeric external keys or
+references shared by several providers. Bare unique external keys also work. References are exact
+and scoped to the selected engagement. External formats and publication branch conventions belong
+to your profile. Default PR titles and generated bodies use the primary external key when set.
+Template-authored titles and bodies retain your wording. Vigil does not add an internal case-number
+or workspace-path footer.
+
+Finalize branch identity before publishing approval. Finalization renames the local Git branch or
+JJ bookmark without moving the directory or rewriting commits, and can be retried after an
+interrupted backend update. It refuses published branches, remote-name collisions, dirty source,
+or changed revisions. The same-revision rename preserves evidence and environment leases, but
+changes the review package and requires renewed approval and PR preparation. If the case is
+already approved, transition it back to review before requesting approval again. Rewriting commit
+messages yourself changes revision IDs; synchronize the revision and renew applicable runtime
+proof. Changing the primary reference also invalidates approval. Published identities stay fixed.
+
+When `development_ticket_required = true`, publishing approval requires a primary external
+reference. Existing provider-backed intake identities also satisfy this requirement; direct reports,
+unresolved references, and finding-linked cases need an explicit reference. Vigil does not fetch or
+create that external issue or verify its existence from its label alone. Before the first push,
+the backend validates the current approval and retains a publication intent in the case directory.
+Identity changes and branch finalization then stay blocked, including after an interrupted push;
+retry `create-pr` to reconcile publication on the same branch.
 
 For a Vigil finding, reuse the linked-case path:
 
@@ -399,6 +439,7 @@ Commit the relevant changes, record the commit, then run checks:
 rem sync-revision <case-id>
 rem checks <case-id> --actor <owner>
 rem checks <case-id> --actor <owner> --name tests
+rem checks <case-id> --actor <owner> --stage publication
 ```
 
 Checks use the profile settings the case started with. Each runs from its `directory` inside the
@@ -407,8 +448,16 @@ workspace with `VIGIL_CASE_WORKTREE`, `VIGIL_REPOSITORY`, `VIGIL_CASE_REVISION`,
 `sync-revision` moves it forward when the case is rebased onto a newer base, never backwards, and it
 cannot be set directly. Vigil saves each check's output, exit code, commit, and directory. A check
 that changes files, such as a formatter, does not count as a pass: commit the change, sync, and
-rerun. All profile checks must pass for review and again before publishing; `--name` runs a single
-check during development.
+rerun. Checks default to the verification stage. A check with `stage = "publication"` is skipped
+during ordinary verification; run `checks --stage publication` after finalizing the branch and
+external reference. That stage includes all configured checks. All profile checks must pass before
+approval, and `create-pr` reruns them before publishing. `--name` selects checks within the requested
+stage; it cannot waive the approval or publication requirements. Omitted stages mean verification.
+
+For example, a private naming check can use `{ name = "ticket", stage = "publication", command =
+"python tools/check_ticket.py" }` alongside ordinary lint and test commands. Its external-key format
+remains repository policy. Cases retain their captured check settings; changing a live profile does
+not silently change an existing case's requirements.
 
 There is one shared local environment, not one per workspace. A check can run in a throwaway
 container that mounts the case workspace and borrows dependencies installed in the main checkout.

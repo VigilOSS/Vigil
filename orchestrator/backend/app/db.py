@@ -6043,6 +6043,9 @@ _REMEDIATION_CASE_TABLE_SQL = """
             engagement_id INTEGER NOT NULL REFERENCES engagements(id) ON DELETE CASCADE,
             source_type TEXT NOT NULL,
             source_key TEXT NOT NULL,
+            external_provider TEXT,
+            external_key TEXT,
+            identity_version INTEGER NOT NULL DEFAULT 0,
             title TEXT NOT NULL,
             snapshot_json TEXT NOT NULL,
             status TEXT NOT NULL DEFAULT 'intake',
@@ -6210,9 +6213,14 @@ def _create_remediation_tables(connection: sqlite3.Connection) -> None:
     # concurrent startup workers cannot interleave later FTS/table creation.
     for statement in statements:
         connection.execute(statement)
-    for column in ("base_branch", "base_revision", "review_policy_json", "verification_requirements_json"):
+    for column in ("base_branch", "base_revision", "review_policy_json", "verification_requirements_json", "external_provider", "external_key"):
         if column not in _table_columns(connection, "remediation_cases"):
             connection.execute(f"ALTER TABLE remediation_cases ADD COLUMN {column} TEXT")
+    if "identity_version" not in _table_columns(connection, "remediation_cases"):
+        connection.execute("ALTER TABLE remediation_cases ADD COLUMN identity_version INTEGER NOT NULL DEFAULT 0")
+    connection.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_remediation_external_identity "
+                       "ON remediation_cases(engagement_id,external_provider,external_key) "
+                       "WHERE external_provider IS NOT NULL AND external_key IS NOT NULL")
     for column in ("execution", "executed_revision", "executed_directory", "shared_environment", "environment_token", "runtime_revision", "tree_id", "scratch_proof_json"):
         if column not in _table_columns(connection, "remediation_evidence"):
             connection.execute(f"ALTER TABLE remediation_evidence ADD COLUMN {column} TEXT")

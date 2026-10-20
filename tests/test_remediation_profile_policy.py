@@ -65,7 +65,7 @@ def test_loaded_policy_resolves_references_and_repo_local_workspace(project, tmp
     assert config['remediation']['instruction_files'] == [str(repo / 'AGENTS.md')]
     assert config['remediation']['pr_template'] == str(repo / '.github/pull_request_template.md')
     assert config['remediation']['pr_guidance'] == [str(profile_dir / 'runbook.md')]
-    assert project.workspace_path(config, tmp_path / 'case', 'security/SEC-123') == repo / 'worktrees/security/SEC-123'
+    assert project.workspace_path(config, tmp_path / '42', 'security/SEC-123') == repo / 'worktrees/case-42'
 
 
 def test_legacy_profile_defaults_and_workspace_path_traversal(project, tmp_path):
@@ -78,5 +78,5 @@ def test_legacy_profile_defaults_and_workspace_path_traversal(project, tmp_path)
     assert project.effective_policy(config)['borrowed_dependency_manifests'] == []
     assert project.workspace_path(config, tmp_path / 'case', 'security/fix') == tmp_path / 'case/worktree'
     config['workspace_directory'] = str(tmp_path / 'worktrees')
-    with pytest.raises(ValueError, match='branch'):
-        project.workspace_path(config, tmp_path / 'case', '../outside')
+    with pytest.raises(ValueError, match='numeric case ID'):
+        project.workspace_path(config, tmp_path / '../outside', 'security/fix')
