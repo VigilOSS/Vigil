@@ -206,7 +206,8 @@ def test_terminal_list_separates_identity_title_and_metadata(navigation, monkeyp
     assert "#27" in title
     assert any("Review" in line and "jira:ACME-42" in line for line in lines)
     assert any("Updated" in line and "2026-02-01" in line for line in lines)
-    assert any(shlex.join(["vigil", "--root", str(navigation.root), "remediation", "-k", "acme-old", "join", "27"]) in line for line in lines)
+    assert any("numeric ID" in line for line in lines)
+    assert any("list --json" in line for line in lines)
 
 
 def test_fuzzy_picker_uses_human_labels_and_preserves_literal_identity(navigation, monkeypatch):
@@ -264,3 +265,129 @@ def test_fuzzy_picker_rejects_multiple_or_modified_selections(navigation, monkey
     with pytest.raises(SystemExit, match="selection"):
         remediation.run_remediation(arguments(*argv), navigation.root)
     assert navigation.calls == []
+
+
+@pytest.mark.parametrize("width", [24, 40, 80])
+def test_terminal_case_list_fits_width_and_keeps_literal_full_titles(navigation, monkeypatch, capsys, width):
+    from vigil_cli import term
+    monkeypatch.setattr(term, "is_terminal", lambda stream: True)
+    monkeypatch.setenv("COLUMNS", str(width))
+    monkeypatch.setenv("NO_COLOR", "1")
+    title = "[red]" + "Acme" * 35 + "\x1b[2J"
+    cases = [{**CASES[0], "title": title}]
+    remediation._print_case_list(navigation.root, "acme-" * 15, cases, as_json=False)
+    output = capsys.readouterr().out
+    assert all(len(line) <= width for line in output.splitlines())
+    assert "[red]" in output and "\\u001b" in "".join(output.split())
+    assert "ID" in output and "#12" in output
+
+
+def test_case_picker_preview_uses_literal_details_and_cleans_up(navigation, monkeypatch):
+    from pathlib import Path
+    monkeypatch.setattr(remediation.shutil, "which", lambda _: "/usr/bin/fzf")
+    monkeypatch.setenv("COLUMNS", "60")
+    paths = []
+    def choose(argv, **kwargs):
+        import shlex
+        assert "down" in argv[argv.index("--preview-window") + 1]
+        command = shlex.split(argv[argv.index("--preview") + 1])
+        preview_dir = Path(command[-2])
+        paths.append(preview_dir)
+        assert "$(touch /tmp/acme)" in (preview_dir / "12").read_text()
+        assert "\\u001b" in (preview_dir / "12").read_text()
+        return SimpleNamespace(returncode=0, stdout=kwargs["input"].splitlines()[0] + "\n")
+    monkeypatch.setattr(remediation.subprocess, "run", choose)
+    case = {**CASES[0], "title": "[red]$(touch /tmp/acme)\x1b[2J"}
+    assert remediation._select_case([case]) is case
+    assert not paths[0].exists()
+
+
+@pytest.mark.parametrize("width", [24, 40, 80])
+def test_numbered_project_picker_wraps_full_untrusted_values(navigation, monkeypatch, capsys, width):
+    from vigil_cli import engagements
+    from rich.cells import cell_len
+    monkeypatch.setenv("COLUMNS", str(width))
+    monkeypatch.setenv("NO_COLOR", "1")
+    value = "[blue]" + "界Acme" * 20 + "\x1b[2J"
+    row = replace(engagements.list_engagements(navigation.root)[0], key=value, target=value)
+    assert engagements._select_engagement([row]) is row
+    output = capsys.readouterr().err
+    assert all(cell_len(line) <= width for line in output.splitlines())
+    assert term_literal(value) in "".join(output.split())
+
+
+def term_literal(value):
+    from vigil_cli import term
+    return "".join(term.single_line(value).split())
+
+
+def test_fuzzy_preview_reader_renders_data_without_shell_evaluation(navigation, monkeypatch):
+    import subprocess
+    from vigil_cli import term
+    run = subprocess.run
+    payload = "[red]$(printf forged) `printf forged`\nAcme\x1b[2J"
+    def choose(argv, **kwargs):
+        preview = argv[argv.index("--preview") + 1].replace("{1}", "12")
+        result = run(preview, shell=True, text=True, capture_output=True, check=True)
+        assert result.stdout == term.single_line(payload)
+        return SimpleNamespace(returncode=0, stdout=kwargs["input"] + "\n")
+    monkeypatch.setattr(subprocess, "run", choose)
+    assert term.fuzzy_pick(["12\tAcme"], {"12": term.single_line(payload)}, prompt="Case > ", action="join",
+                           cancelled="cancelled", invalid="invalid") == 0
+
+
+def test_case_picker_keeps_source_ticket_searchable(navigation, monkeypatch):
+    monkeypatch.setattr(remediation.shutil, "which", lambda _: "/usr/bin/fzf")
+    def choose(argv, **kwargs):
+        line = next(line for line in kwargs["input"].splitlines() if line.startswith("27\t"))
+        label = line.split("\t", 1)[1]
+        assert "jira:ACME-42" in label
+        return SimpleNamespace(returncode=0, stdout=line + "\n")
+    monkeypatch.setattr(remediation.subprocess, "run", choose)
+    assert remediation._select_case(CASES)["id"] == 27
+
+
+def test_project_picker_keeps_target_and_phase_searchable(navigation, monkeypatch):
+    from vigil_cli import engagements
+    row = replace(engagements.list_engagements(navigation.root)[0], target="api.example.com", current_phase="verification")
+    monkeypatch.setattr(engagements.shutil, "which", lambda _: "/usr/bin/fzf")
+    def choose(argv, **kwargs):
+        label = kwargs["input"].split("\t", 1)[1]
+        assert "api.example.com" in label and "verification" in label
+        return SimpleNamespace(returncode=0, stdout=kwargs["input"] + "\n")
+    monkeypatch.setattr(engagements.subprocess, "run", choose)
+    assert engagements._select_engagement([row]) is row
+
+
+@pytest.mark.parametrize(("key", "label"), [("2026-10-20-123045-Acme", "Acme"), ("2026-10-Acme", "2026-10-Acme"), ("Acme", "Acme")])
+def test_project_picker_leads_with_friendly_name_and_retains_full_identity(navigation, monkeypatch, key, label):
+    from vigil_cli import engagements
+    row = replace(engagements.list_engagements(navigation.root)[0], key=key)
+    monkeypatch.setattr(engagements.shutil, "which", lambda _: "/usr/bin/fzf")
+    def pick(lines, details, **kwargs):
+        display = lines[0].split("\t", 1)[1]
+        assert display.startswith(label + "  ")
+        assert key in display
+        assert str(row.path) in details["0"]
+        return 0
+    monkeypatch.setattr(engagements.term, "fuzzy_pick", pick)
+    assert engagements._select_engagement([row]) is row
+
+
+def test_remediation_project_selection_fits_narrow_terminal(navigation, monkeypatch, capsys):
+    from rich.cells import cell_len
+    monkeypatch.setenv("COLUMNS", "24")
+    monkeypatch.setenv("NO_COLOR", "1")
+    assert remediation._select_project(remediation._remediation_projects(navigation.root)) == "acme-old"
+    assert all(cell_len(line) <= 24 for line in capsys.readouterr().err.splitlines())
+
+
+@pytest.mark.parametrize("choose_project", [False, True])
+def test_dumb_terminal_uses_numbered_selection(navigation, monkeypatch, capsys, choose_project):
+    monkeypatch.setenv("TERM", "dumb")
+    monkeypatch.setattr(remediation.shutil, "which", lambda _: "/usr/bin/fzf")
+    monkeypatch.setattr(remediation.subprocess, "run", lambda *a, **kw: pytest.fail("cursor UI is unavailable on this terminal"))
+    argv = ("join",) if choose_project else ("-k", "acme-old", "join")
+    remediation.run_remediation(arguments(*argv), navigation.root)
+    assert navigation.calls == [("join", "acme-old", "27")]
+    assert "#27" in capsys.readouterr().err

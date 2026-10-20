@@ -150,7 +150,7 @@ class Vigil:
     def _python(self, code: str) -> list[str]:
         return [
             "uv", "run", "--no-project", "--python", ">=3.11",
-            "--with", "questionary>=2.1.1,<3", "--quiet", "python", "-c", code,
+            "--with", "questionary>=2.1.1,<3", "--with", "rich>=14,<15", "--quiet", "python", "-c", code,
         ]
 
     def run(self, *args: str, cwd: Path | None = None, timeout: float = 300,

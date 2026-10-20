@@ -110,7 +110,7 @@ def _launcher(root: Path, cli: Path | None = None) -> bytes:
         f"export VIGIL_APPLICATION_DIR={shlex.quote(str(root))}\n"
         f"export PYTHONPATH={shlex.quote(str(cli or root / 'cli'))}\n"
         "export PYTHONDONTWRITEBYTECODE=1\n"
-        'exec uv run --no-project --python ">=3.11" --with "questionary>=2.1.1,<3" '
+        'exec uv run --no-project --python ">=3.11" --with "questionary>=2.1.1,<3" --with "rich>=14,<15" '
         '--quiet python -c "from vigil_cli.main import main; main()" "$@"\n'
     ).encode()
 

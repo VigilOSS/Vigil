@@ -12,7 +12,7 @@ license = "Apache-2.0"
 license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md", "third_party/licenses/*"]
 authors = [{name = "Vigil OSS Maintainers", email = "vigil.oss@proton.me"}]
 requires-python = ">=3.11"
-dependencies = ["questionary>=2.1.1,<3"]
+dependencies = ["questionary>=2.1.1,<3", "rich>=14,<15"]
 classifiers = [
     "Development Status :: 5 - Production/Stable",
     "Environment :: Console",

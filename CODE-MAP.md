@@ -234,6 +234,7 @@ A prompt change is **not** prompt-only when the prompt defines an artifact the b
 
 ### src/vigil_cli/ — the universal CLI
 
+- `src/vigil_cli/term.py` owns terminal-only Rich rendering and shared exact-candidate fuzzy selection with literal, temporary-file previews; callers retain plain/JSON output contracts.
 - `src/vigil_cli/application.py` — explicit/imported release resolution, bundle validation and persistent content-addressed assets/helper CLI. Never discover source from workspace or CWD.
 - `src/vigil_cli/workspace.py` — canonical private paths and in-place legacy adoption; `paths.py:workspace_root_for_engagement` resolves private ownership independently of application assets.
 - `vigil_build.py` — tracked publisher inputs, matched CLI/backend/agent/docs/legal bundle and locked prebuilt UI provenance; its sdist builds wheels without Git or Node.

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import inspect
 import io
+import os
 import sys
 
 import pytest
@@ -68,6 +69,28 @@ def test_single_line_preserves_data_as_visible_literal_text(text: str) -> None:
     assert json.loads('"' + rendered + '"') == text
     assert len(rendered.splitlines()) == 1
     assert all(ord(char) >= 32 and not 0x7f <= ord(char) <= 0x9f for char in rendered)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="requires a POSIX terminal")
+@pytest.mark.parametrize("no_color", [False, True])
+def test_rich_console_measures_its_output_terminal(monkeypatch, no_color):
+    import fcntl
+    import pty
+    import struct
+    import termios
+    monkeypatch.delenv("COLUMNS", raising=False)
+    if no_color:
+        monkeypatch.setenv("NO_COLOR", "1")
+    master, slave = pty.openpty()
+    try:
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 40, 0, 0))
+        with os.fdopen(os.dup(slave), "w") as terminal:
+            assert term.console(terminal).width == 40
+            monkeypatch.setenv("COLUMNS", "24")
+            assert term.console(terminal).width == 24
+    finally:
+        os.close(master)
+        os.close(slave)
 
 
 def test_supports_style_false_for_a_pipe() -> None:

@@ -317,30 +317,22 @@ def _case_summary_line(case: dict) -> str:
 def _select_case(cases: list[dict]) -> dict:
     if not cases:
         raise SystemExit("No remediation cases in this project; use start to open a conversation and supply a report")
-    print(term.heading("Choose a remediation case", stream=sys.stderr), file=sys.stderr)
-    print("Open cases first · most recently updated first", file=sys.stderr)
-    if shutil.which("fzf"):
-        lines = [f"{case['id']}\t#{case['id']}  {term.single_line(case.get('title'))}  ·  {_case_metadata(case)}" for case in cases]
-        result = subprocess.run(
-            ["fzf", "--delimiter", "\t", "--with-nth", "2", "--prompt", "Case > ",
-             "--height", "60%", "--layout", "reverse", "--border", "rounded",
-             "--header", "Type to filter | Enter: join | Esc: cancel"],
-            input="\n".join(lines), text=True, capture_output=True, check=False,
-            env={name: value for name, value in os.environ.items() if name not in {"FZF_DEFAULT_OPTS", "FZF_DEFAULT_OPTS_FILE"}},
-        )
-        if result.returncode != 0 or not result.stdout.strip():
-            raise SystemExit("Remediation case selection cancelled")
-        selected_line = result.stdout.rstrip("\n")
-        if selected_line not in lines:
-            raise SystemExit("Invalid remediation case selection")
-        identifier = selected_line.split("\t", 1)[0]
-        selected = next((case for case in cases if str(case["id"]) == identifier), None)
-        if selected is None:
-            raise SystemExit("Invalid remediation case selection")
-        return selected
-    for index, case in enumerate(cases, start=1):
-        print(f"  {index}. #{case['id']}  {term.single_line(case.get('title'))}", file=sys.stderr)
-        print(f"     {_case_metadata(case)}", file=sys.stderr)
+    if term.is_terminal(sys.stdin) and shutil.which("fzf"):
+        lines = [f"{case['id']}\t#{case['id']}  {_case_status(case)}  {term.single_line(case.get('title'))}  ·  "
+                 f"{term.single_line(case.get('source_type'))}:{term.single_line(case.get('source_key'))}" for case in cases]
+        details = {str(case["id"]): (
+            f"Case #{case['id']}\n\n{term.single_line(case.get('title'))}\n\n"
+            f"Status: {_case_status(case)}\n"
+            f"Source: {term.single_line(case.get('source_type'))}:{term.single_line(case.get('source_key'))}\n"
+            f"Updated: {term.single_line(case.get('updated_at') or case.get('created_at'))}\n"
+        ) for case in cases}
+        index = term.fuzzy_pick(lines, details, prompt="Case > ", action="join",
+                                cancelled="Remediation case selection cancelled", invalid="Invalid remediation case selection")
+        return cases[index]
+    output = term.console(sys.stderr)
+    output.print("Choose a remediation case", style="bold")
+    output.print("Open first · newest first", style="dim")
+    _case_table(output, cases, numbered=True)
     print("Row number> ", end="", file=sys.stderr, flush=True)
     try:
         choice = input().strip()
@@ -358,8 +350,31 @@ def _case_command(install_root: Path, key: str, command: str, case_id: int | Non
     return shlex.join(argv)
 
 
+def _case_status(case: dict) -> str:
+    return term.single_line(case.get("status")).replace("_", " ").capitalize()
+
+
+def _case_table(output, cases: list[dict], *, numbered: bool = False) -> None:
+    from rich.table import Table
+    from rich.text import Text
+
+    table = Table(box=None, padding=(0, 1), expand=True, show_edge=False)
+    if numbered:
+        table.add_column("Row", no_wrap=True, style="dim")
+    table.add_column("ID", no_wrap=True, style="cyan")
+    table.add_column("Case", ratio=1, overflow="fold")
+    for index, case in enumerate(cases, 1):
+        detail = Text(term.single_line(case.get("title")))
+        detail.append("\n" + _case_metadata(case), style="dim")
+        fields = [Text(f"#{case['id']}"), detail]
+        if numbered:
+            fields.insert(0, Text(str(index)))
+        table.add_row(*fields, end_section=True)
+    output.print(table)
+
+
 def _case_metadata(case: dict) -> str:
-    status = term.single_line(case.get("status")).replace("_", " ").capitalize()
+    status = _case_status(case)
     source = term.single_line(f"{case.get('source_type', '')}:{case.get('source_key', '')}")
     updated = term.single_line(case.get("updated_at") or case.get("created_at"))
     return f"{status} · {source} · Updated {updated}"
@@ -372,20 +387,19 @@ def _print_case_list(install_root: Path, key: str, cases: list[dict], *, as_json
         print(json.dumps(records, indent=2, sort_keys=True))
         return
     if term.is_terminal(sys.stdout):
-        print(term.heading(f"Remediation · {term.single_line(key)}", stream=sys.stdout))
-        print("\nStart a new conversation:")
-        print(f"  {_case_command(install_root, key, 'start')}")
-        print("Join an existing case (choose interactively or add its ID):")
-        print(f"  {_case_command(install_root, key, 'join')}")
-        if not cases:
-            print("\nNo remediation cases yet. Use start to supply a report.")
+        output = term.console(sys.stdout)
+        output.print(f"Remediation · {term.single_line(key)}", style="bold")
+        output.print("Open first · newest first", style="dim")
+        output.print()
+        if cases:
+            _case_table(output, cases)
         else:
-            print("\nOpen cases first · most recently updated first")
-        for case in cases:
-            label = term.wrap(f"  #{case['id']}  {term.single_line(case.get('title'))}", indent="       ", stream=sys.stdout)
-            print("\n" + term.heading(label, stream=sys.stdout))
-            print(term.wrap("       " + _case_metadata(case), indent="       ", stream=sys.stdout))
-            print(f"       Join: {_case_command(install_root, key, 'join', case['id'])}")
+            output.print("No remediation cases yet. Use start to supply a report.")
+        output.print()
+        output.print("start  New repository conversation", style="bold")
+        output.print("join   Choose a case, or supply its numeric ID", style="bold")
+        output.print("Use the same --root and -k options as this list command.", style="dim")
+        output.print("Exact join commands: list --json", style="dim")
         return
     print(f"Remediation project: {json.dumps(key, ensure_ascii=False)}")
     print(f"start: {_case_command(install_root, key, 'start')}  (new repository conversation)")
@@ -862,7 +876,6 @@ def _select_project(projects: list[EngagementRow]) -> str:
 
     if not projects:
         raise SystemExit("No remediation projects found; create one with vigil engagement create --type remediation")
-    print("Choose a remediation project:", file=sys.stderr)
     return _select_engagement(projects).key
 
 

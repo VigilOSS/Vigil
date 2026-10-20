@@ -1679,6 +1679,15 @@ def _write_active_mirror(install_root: Path, key: str) -> None:
         pass
 
 
+def _project_picker_label(row: EngagementRow) -> str:
+    name = re.sub(r"^\d{4}-\d{2}-\d{2}-\d{6}-(?=.)", "", row.key, count=1)
+    fields = [term.single_line(name), term.single_line(row.status),
+              term.single_line(row.current_phase), term.single_line(row.target)]
+    if name != row.key:
+        fields.append(term.single_line(row.key))
+    return "  ·  ".join(fields)
+
+
 def _select_engagement(rows: list[EngagementRow]) -> EngagementRow:
     if not rows:
         raise SystemExit("No engagements found")
@@ -1687,28 +1696,25 @@ def _select_engagement(rows: list[EngagementRow]) -> EngagementRow:
             "Interactive --select is unavailable in a non-interactive process; "
             "pass the optional engagement key explicitly"
         )
-    if shutil.which("fzf"):
-        lines = [f"{index}\t{term.single_line(row.key)}  ·  {term.single_line(row.status)} / {term.single_line(row.current_phase)}  ·  {term.single_line(row.target)}"
-                 for index, row in enumerate(rows)]
-        result = subprocess.run(
-            ["fzf", "--delimiter", "\t", "--with-nth", "2", "--prompt", "Project > ",
-             "--height", "60%", "--layout", "reverse", "--border", "rounded",
-             "--header", "Type to filter | Enter: select | Esc: cancel"],
-            input="\n".join(lines), text=True, capture_output=True, check=False,
-            env={name: value for name, value in os.environ.items() if name not in {"FZF_DEFAULT_OPTS", "FZF_DEFAULT_OPTS_FILE"}},
-        )
-        if result.returncode != 0 or not result.stdout.strip():
-            raise SystemExit("Project selection cancelled")
-        selected_line = result.stdout.rstrip("\n")
-        if selected_line not in lines:
-            raise SystemExit("Invalid project selection")
-        selected = selected_line.split("\t", 1)[0]
-        if not selected.isdigit() or not 0 <= int(selected) < len(rows):
-            raise SystemExit("Invalid project selection")
-        return rows[int(selected)]
-    for idx, row in enumerate(rows, start=1):
-        print(f"  {idx}. {term.single_line(row.key)}", file=sys.stderr)
-        print(f"     {term.single_line(row.status)} / {term.single_line(row.current_phase)} · {term.single_line(row.target)}", file=sys.stderr)
+    if term.is_terminal(sys.stdin) and shutil.which("fzf"):
+        lines = [f"{index}\t{_project_picker_label(row)}" for index, row in enumerate(rows)]
+        details = {str(index): f"Project\n\n{term.single_line(row.key)}\n\nWorkspace: {term.single_line(row.path)}\nStatus: {term.single_line(row.status)}\nPhase: {term.single_line(row.current_phase)}\nTarget: {term.single_line(row.target)}\n"
+                   for index, row in enumerate(rows)}
+        index = term.fuzzy_pick(lines, details, prompt="Project > ", action="select",
+                                cancelled="Project selection cancelled", invalid="Invalid project selection")
+        return rows[index]
+    from rich.table import Table
+    from rich.text import Text
+    output = term.console(sys.stderr)
+    output.print("Choose a project", style="bold")
+    table = Table(box=None, padding=(0, 1), expand=True, show_edge=False)
+    table.add_column("Row", no_wrap=True, style="dim")
+    table.add_column("Project", ratio=1, overflow="fold")
+    for index, row in enumerate(rows, 1):
+        detail = Text(term.single_line(row.key))
+        detail.append(f"\n{term.single_line(row.status)} / {term.single_line(row.current_phase)} · {term.single_line(row.target)}", style="dim")
+        table.add_row(str(index), detail, end_section=True)
+    output.print(table)
     print("Row number> ", end="", file=sys.stderr, flush=True)
     try:
         choice = input().strip()
