@@ -128,6 +128,8 @@ def prepare_workspace(install_root: Path, engagement: Path, client: str, mode: s
         "application": provenance, "release_id": release_hash, "tools": tools,
         "native_version": native_version,
         "backend_url": resolve_orchestrator_base_url(install_root, engagement)}
+    from .client_projects import project_directory
+    binding["project"] = str(project_directory(engagement.resolve(), client, mode))
     digest = hashlib.sha256(_json(binding)).hexdigest()
     workspace = engagement / "client-context" / digest[:24] / client
     binding["workspace"] = str(workspace.resolve())
@@ -155,11 +157,11 @@ def prepare_workspace(install_root: Path, engagement: Path, client: str, mode: s
     setup = (
         "## First-task setup\n\n"
         "You are the Vigil operator for this project. Help a newcomer finish setup before starting the selected workflow.\n"
-        "This exact folder is the ZCode project; the canonical engagement and audited source remain separate.\n"
+        f"The stable ZCode project is `{binding['project']}`; this folder retains this task's immutable context. The canonical engagement and audited source remain separate.\n"
         f"1. Run `{helper_command} engagement client-check --client zcode --mode {mode} --json`. Explain failed prerequisites and distinguish installed assets, historical hook observations, and unverified native behavior.\n"
-        f"2. If the plugin has not been installed/enabled, ask the user to open Plugin Marketplace → Add → Add plugin marketplace and add `{workspace.resolve() / 'plugin/marketplace.json'}`. Under Personal, review, install and enable the matching Vigil plugin. Native approval belongs to the user.\n"
+        f"2. If the plugin has not been installed/enabled, ask the user to open Plugin Marketplace → Add → Add plugin marketplace and add `{str(binding['project'])}/plugin/marketplace.json`. Under Personal, review, install and enable Vigil Project v1. Native approval belongs to the user.\n"
         "3. Ask the user to select their entitled Z.AI Coding Plan model in ZCode, without sharing credentials. A selected model is not proof of successful authentication.\n"
-        "4. After plugin enablement, ask the user to create a NEW task in this same project and use the printed opening prompt or the matching Vigil resume command. An existing task may have captured an earlier hook configuration.\n"
+        "4. After plugin enablement, ask the user to create a NEW task in the stable project and use the printed opening prompt or the matching Vigil resume command. An existing task may have captured an earlier hook configuration; existing bound tasks keep their retained context.\n"
         "5. Verify startup hook delivery and backend hydration separately. If unverified, explain what remains to test; neither opening a project nor finding files proves hooks or compaction work.\n"
         f"For detailed setup and recovery, read `{agent.parent / 'docs/zcode-setup.md'}` explicitly; ZCode does not expand instruction-file imports.\n\n"
     ) if client == "zcode" else ""
@@ -170,7 +172,7 @@ def prepare_workspace(install_root: Path, engagement: Path, client: str, mode: s
         f"This workspace binds only engagement {json.dumps(engagement.name)} in `{mode}` mode.\n"
         f"Canonical engagement: `{engagement.resolve()}`.\n"
         f"Session commands use `{binding['vigil_cli']}`; it supplies the project identity explicitly.\n"
-        "The installed `vigil` also discovers this identity for mode inspection, client checks and assessment commands run from this Project folder or its subfolders.\n"
+        "The installed `vigil` can inspect this retained context directly. In the stable project, mode/client checks inspect NEW-task setup only; task workflow commands use this absolute helper.\n"
         f"Client context: `{workspace.resolve() / CONTEXT_FILE}`. Read it for literal artifact paths.\n"
         f"The binding's `mode` is `{mode}`. Interpret VIGIL_OPERATOR_MODE in shared guidance as that bound value, not an assumed GUI environment variable.\n"
         "Environment-variable path notation in shared guidance denotes these literal paths, not ambient GUI variables.\n\n"
@@ -197,9 +199,16 @@ def prepare_workspace(install_root: Path, engagement: Path, client: str, mode: s
         for name, data in assets.items():
             workspace_files[f".opencode/{name}"] = data
         plugin = agent / ".opencode/plugin/assessment-hooks.js"
-        workspace_files[".opencode/plugins/vigil-assessment.js"] = plugin.read_bytes()
+        workspace_files[".opencode/vigil-assessment-runtime.mjs"] = plugin.read_bytes()
+        workspace_files[".opencode/plugins/vigil-assessment.js"] = (agent / ".opencode/plugin/project-dispatch.js").read_bytes()
+        workspace_files[".opencode/vigil-project.mjs"] = (agent / "scripts/native-client/project-binding.mjs").read_bytes()
+        # Native discovery is stable while canonical command/role bodies remain
+        # selected by the task's immutable Runtime Identity.
+        from .client_projects import forwarding_assets
+        for name, data in forwarding_assets(agent, client).items():
+            workspace_files[f".opencode/{name}"] = data
         workspace_files[".opencode/opencode.json"] = _json({"$schema": "https://opencode.ai/config.json",
-            "compaction": {"auto": True}, "instructions": [str(workspace.resolve() / "AGENTS.md")]})
+            "compaction": {"auto": True}, "instructions": [str(binding["project"]) + "/AGENTS.md"]})
     else:
         plugin_root = install_root / "client-plugins" / release_hash[:24] / "zcode"
         plugin_files = {}
@@ -298,8 +307,12 @@ def start_client(install_root: Path, engagement: Path, client: str, mode: str,
         except (OSError, subprocess.TimeoutExpired):
             pass  # Diagnostic state remains unverified; no native version invented.
     from .client_sessions import client_session_bootstrap, record_client_session
-    with client_session_bootstrap(install_root, engagement):
-        workspace, binding = prepare_workspace(install_root, engagement, client, mode, native_version=native_version)
+    # Native preparation writes only immutable task assets and its own stable
+    # selector; it does not refresh the shared engagement-root client files.
+    with client_session_bootstrap(install_root, engagement, shared_files=False):
+        snapshot, binding = prepare_workspace(install_root, engagement, client, mode, native_version=native_version)
+        from .client_projects import prepare_project
+        workspace = prepare_project(snapshot, binding)
         if client == "opencode":
             record_client_session(install_root, engagement, client, mode)
     from .engagements import set_active_engagement
@@ -311,8 +324,9 @@ def start_client(install_root: Path, engagement: Path, client: str, mode: str,
     if client == "zcode":
         opening = (
             "Read ./AGENTS.md in this ZCode project. Before work, verify "
-            f"./.vigil-client-context.json matches engagement {json.dumps(engagement.name)}, client zcode, mode {mode}.\n"
-            "Run ./bin/vigil engagement mode and ./bin/vigil engagement client-check --json. "
+            f"./.vigil-client-project.json matches engagement {json.dumps(engagement.name)}, client zcode, mode {mode}.\n"
+            "Use the immutable context and absolute helper supplied by this task's native hook. "
+            "If that context is missing, run ./bin/vigil engagement client-check --json for setup only. "
             "If identity or setup needs attention, explain the recovery action and wait for me. "
             "Otherwise follow the bound workflow's startup/resume procedure."
         )
@@ -357,8 +371,8 @@ def start_client(install_root: Path, engagement: Path, client: str, mode: str,
         record_client_launch(install_root, engagement, client, mode, event="workspace_opened")
         return
     environment = dict(os.environ)
-    environment.update({"VIGIL_CLIENT_CONTEXT": str(workspace / CONTEXT_FILE),
-        "OPENCODE_DISABLE_PROJECT_CONFIG": "1", "OPENCODE_CONFIG_DIR": str(workspace / ".opencode"),
+    environment.update({"VIGIL_CLIENT_CONTEXT": str(snapshot / CONTEXT_FILE),
+        "OPENCODE_DISABLE_PROJECT_CONFIG": "1", "OPENCODE_CONFIG_DIR": str(snapshot / ".opencode"),
         "VIGIL_AGENT_ROOT": binding["agent_root"], "ENGAGEMENT_DIR": binding["engagement_dir"],
         "VIGIL_SESSION_ENGAGEMENT_DIR": binding["engagement_dir"], "VIGIL_OPERATOR_MODE": mode,
         "VIGIL_INSTALL_DIR": binding["install_root"], "VIGIL_CLIENT_NAME": client,

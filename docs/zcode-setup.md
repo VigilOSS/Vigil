@@ -63,12 +63,14 @@ pointers, workspace and plugin file digests, and plugin release identity. This
 does not repair files or establish that the plugin is enabled in ZCode. Without
 an explicit application pin, release matching remains `UNVERIFIED`.
 
-When invoked through the generated bound helper without an engagement key, the
-check uses that helper's explicit context and engagement binding. The installed
-`vigil` discovers the same binding in a generated Project folder or its subfolders.
-In either case, `vigil engagement client-check --json` uses the bound client when
-`--client` is omitted. Outside a bound project, supply `--client zcode` explicitly;
-the global active-engagement pointer does not select a client context.
+The absolute helper injected into a native task checks that task's exact retained
+context. From the stable Project folder, `./bin/vigil engagement client-check
+--json` checks the selection for NEW tasks only. The installed `vigil` also
+discovers this setup identity for mode inspection and client checks, but a folder
+alone cannot identify an existing conversation. Workflow commands use the native
+task's absolute context-bound helper. Outside a bound project, supply
+`--client zcode` explicitly; the global active-engagement pointer does not select
+a client context.
 
 `OBSERVED` means an exact-context historical receipt records startup, compaction,
 or context injection; it does not certify the currently installed desktop/engine
@@ -96,43 +98,46 @@ vigil engagement start <engagement-key> --mode code --client zcode
 # For an admitted web track, select --mode web instead.
 ```
 
-The launcher shows **Project folder** (or `workspace:` in redirected output) and prepares a release/context-bound folder at
-`<engagement>/client-context/<binding-digest>/zcode`. Open that exact printed path
-as the ZCode project. Its `AGENTS.md` router supplies absolute paths to the matched
-helper, selected operator prompt, and canonical engagement state. Its `plugin/`
-directory contains the local marketplace. Keep the generated binding intact;
-another engagement, mode, or application release can have a different path.
-`<binding-digest>` is a generated fingerprint, not a value to invent or enter.
+The launcher shows **Project folder** (or `workspace:` in redirected output):
+`<engagement>/clients/zcode/code` (or `web`). Open this folder once as the ZCode
+project and reuse it. Starting the same engagement/client/mode keeps this address
+even when Vigil or ZCode is updated. Its root `AGENTS.md` explains setup and routes
+each task into the immutable context delivered by the native hook. Its `plugin/`
+entry contains the local dispatcher marketplace.
 The compact setup instructions call the printed folder `<PATH>`. Replace that
 shorthand with the full folder path before pasting into ZCode; for the marketplace
 file, append `/plugin/marketplace.json`. The task prompt uses project-relative
 files and commands rather than placeholders.
-The same `client-context` mechanism is used by OpenCode web/code starts. Claude
-and Codex retain their existing engagement-root layouts. The context folder is
-not another checkout: scope, evidence and backend records remain canonical.
-The `plugin/` entry points to a private immutable plugin shared by matching
-release/tool bindings; keep that managed link intact too. The context file is
-`.vigil-client-context.json`, and the absolute bound helper is `bin/vigil` within
-the printed workspace. Workspace preparation requires `uv`, Bash, jq, and Node
-on the launching terminal's PATH so their executable paths can be bound explicitly.
+OpenCode uses the same stable per-engagement/client/mode entry. Claude and Codex
+retain their existing engagement-root layouts. These project entries are not
+checkouts: scope, evidence and backend records remain canonical.
+Keep all managed files and the `plugin/` link intact. Preparation requires `uv`,
+Bash, jq and Node on the launching terminal's PATH. The project bootstrap and
+dispatcher retain a known Node launcher path so a desktop shell need not inherit
+your terminal's PATH; relocating that executable requires explicit repair.
 
 In the **Projects** sidebar, click **Add project (+) → Open folder**. In the macOS
 folder chooser, press **Cmd+Shift+G**, paste the complete printed **Project folder**
 path, press Return, and click **Open**. Vigil has already created that folder;
 you are opening an existing folder as a project, not creating an empty directory.
-The path ends in `/client-context/<binding-digest>/zcode`. The canonical engagement
+The path ends in `/clients/zcode/code` or `/clients/zcode/web`. The canonical engagement
 folder, its `source` folder, and the `plugin` folder are not the project to select.
 If the project is already listed, select its matching workspace before creating a task.
 
-An already running ZCode app does not reliably inherit the launcher's shell
-environment. The generated `bin/vigil` helper supplies `VIGIL_CLIENT_NAME=zcode`,
-the selected workflow, engagement, and exact context-file path explicitly.
-The installed `vigil` also discovers that identity for mode inspection, client checks,
-and assessment commands run from the Project folder or its subfolders. It validates
-the binding and managed-file digests before supplying session identity; it keeps
-application code and backend selection independent of project metadata.
-Use the helper and literal paths in the generated router for explicit session commands.
-Opening this workspace is not evidence that a fresh task has started.
+An already running ZCode app does not reliably inherit the launcher's environment.
+The native dispatcher binds a new task to the project's current selection and
+injects its absolute context path and helper. The helper supplies the client,
+mode, engagement, matching application, executable paths and backend explicitly.
+Existing tasks keep their recorded binding after another start or compaction.
+Vigil retains the versioned contexts under `client-context`; they are internal
+task snapshots, not additional projects to add. No automatic cleanup infers that
+an old native task has ended.
+
+`./bin/vigil` in the stable project is setup-only, accepting `engagement mode` and
+`engagement client-check`. An ordinary shell has no native conversation ID, so it
+cannot safely choose an old task's helper from the current folder. Use the
+absolute helper in that task's injected context for workflow commands. Opening
+this workspace is not evidence that a fresh task has started.
 
 For an entrypoint that supplies a local marketplace:
 
@@ -143,10 +148,10 @@ For an entrypoint that supplies a local marketplace:
    separate field from the project-folder chooser above.
    This path was checked in ZCode 3.15.3. Builds using the settings layout expose
    the equivalent **Settings → Plugins → Create → Add marketplace** action.
-3. Find the matching Vigil plugin under **Personal**, inspect its components and
+3. Find **vigil-project-v1** under **Personal**, inspect its components and
    hook scripts, install it, and confirm that it is enabled.
-4. Disable any other Vigil context plugin bound to a different engagement or
-   mode in that workspace, so competing hooks cannot inject another context.
+4. Keep this dispatcher enabled. It resolves each task separately; preparing a
+   new retained application context does not require adding another marketplace.
 5. Start a **new task** after enabling the plugin, then paste the complete
    opening prompt printed by Vigil. A task that predates plugin enablement is not
    a hook-delivery test.
@@ -157,16 +162,16 @@ to report missing plugin/hook setup before dependent work. If the plugin is not
 enabled, its hooks cannot diagnose their own absence; use the printed prompt and
 the read-only client check to bootstrap setup.
 
-The opening prompt names the project-relative instruction file, context binding,
-and Vigil helper. It checks the engagement, client, and workflow before proceeding. A successful mode check
+The opening prompt names the project-relative instruction file and project
+identity. Native context supplies the task-specific binding and helper. It checks
+the engagement, client, and workflow before proceeding. A successful mode check
 identifies the Code or Web workflow and its operator prompt. If project identity
 needs attention, the agent explains the check's recovery action and waits for you
 to confirm setup is ready. Project selection and client startup are terminal
 onboarding steps; source inventory and durable resume are separate workflow steps.
 
-The generated root `AGENTS.md` puts session identity and absolute commands first,
-then the plugin/model/new-task checklist, workflow entry and recovery, and
-specialist boundaries. Its writing follows the practical, verifiable guidance in
+The root `AGENTS.md` describes the stable project and setup, then delegates to
+the task's retained workflow router. Its writing follows the practical, verifiable guidance in
 [OpenAI's agent practices](https://learn.chatgpt.com/guides/best-practices),
 [Anthropic's instruction-file guidance](https://code.claude.com/docs/en/memory),
 and [ZCode's project-instruction rules](https://zcode.z.ai/en/docs/agents).
@@ -210,6 +215,24 @@ a terminal `SessionEnd` event, or exact attachment to a native conversation.
 `Stop` ends a model turn, not necessarily a task. Vigil does not treat a transient
 macOS `open` process as ownership of a live conversation. See the
 [native hook reference](https://zcode.z.ai/en/docs/hooks).
+
+Vigil leaves ZCode's native compaction settings unchanged. Its hook restores
+workflow instructions after a `compact` event; it does not choose the native
+compaction threshold or certify completed hydration. Test an actual compaction
+separately before relying on automatic recovery.
+
+Existing tasks stay pinned while their verified binding receipts remain intact.
+Missing receipts on `compact`/`clear`, or malformed receipts, produce a recovery
+diagnostic rather than selecting a new context. If ALL receipt copies are lost,
+an unknown `startup` event cannot distinguish an old conversation from a new
+task; create a new task rather than continuing old history in that condition.
+A specialist requires its parent's explicit Runtime Identity. When the native
+event identifies a specialist but provides no retained binding, the dispatcher
+reports the missing parent correlation instead of choosing another context.
+An event without an actor identity cannot establish native parent ownership.
+Dispatcher protocol assets are immutable; an asset collision or relocated Node
+launcher requires maintainer-assisted inspection and repair before new starts,
+rather than a live rewrite or automatic deletion of retained task assets.
 
 Blue and remediation behavior are unchanged. Existing repository-context
 remediation setup is documented separately in

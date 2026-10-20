@@ -182,7 +182,7 @@ def record_client_session(workspace: Path, engagement: Path, client: str, mode: 
 
 
 @contextmanager
-def client_session_bootstrap(workspace: Path, engagement: Path) -> Iterator[None]:
+def client_session_bootstrap(workspace: Path, engagement: Path, *, shared_files: bool = True) -> Iterator[None]:
     """Serialize release checks, shared-file refresh, and the official start receipt."""
     directory = _registry_directory(workspace)
     pin = open_pinned_directory(directory, create=True)
@@ -195,7 +195,8 @@ def client_session_bootstrap(workspace: Path, engagement: Path) -> Iterator[None
                 raise SystemExit(f"Invalid client bootstrap lock: {directory / 'bootstrap.lock'}")
             fcntl.flock(descriptor, fcntl.LOCK_EX)
             pin.require_attached()
-            guard_client_session_upgrade(workspace, engagement)
+            if shared_files:
+                guard_client_session_upgrade(workspace, engagement)
             yield
             pin.require_attached()
         finally:

@@ -1,5 +1,6 @@
 """Project identity survives GUI shells without selecting application code from CWD."""
 import json
+import hashlib
 import os
 from pathlib import Path
 import subprocess
@@ -260,3 +261,141 @@ def test_project_discovery_rejects_unverified_assets(project, damage):
         manifest.write_text(json.dumps(recorded))
     with pytest.raises(SystemExit, match="project context"):
         cli.main(["engagement", "mode", "--json"])
+
+
+@pytest.fixture
+def stable_project(project, monkeypatch):
+    install, engagement, snapshot, binding = project
+    entry = engagement / "clients" / binding["client"] / binding["mode"]
+    entry.mkdir(parents=True)
+    descriptor = {key: binding[key] for key in (
+        "client", "mode", "install_root", "engagement_dir", "engagement_key")}
+    descriptor.update(schema_version=1, protocol=1, project=str(entry), engagements_root=str(engagement.parent))
+    files = {".vigil-client-project.json": json.dumps(descriptor).encode(),
+             "AGENTS.md": b"Acme project router", "bin/vigil": b"Acme bootstrap",
+             "bootstrap.mjs": b"Acme bootstrap", "vigil-project.mjs": b"Acme validator"}
+    for name, data in files.items():
+        target = entry / name
+        target.parent.mkdir(exist_ok=True)
+        target.write_bytes(data)
+    (entry / ".vigil-managed-files.json").write_text(json.dumps({
+        name: hashlib.sha256(data).hexdigest() for name, data in files.items()}))
+    if binding["client"] == "zcode":
+        plugin = install / "client-plugins/dispatcher-v1/zcode"
+        assets = {".zcode-plugin/plugin.json": b'{"name":"vigil-project-v1","version":"1.0.0"}',
+                  "marketplace.json": b"{}", "hooks/hooks.json": b"{}",
+                  "hooks/dispatch.mjs": b"Acme dispatcher", "hooks/project-binding.mjs": b"Acme binding validator",
+                  "hooks/launch.sh": b"Acme launcher", "vigil-owner.json": json.dumps({
+                      "schema_version": 1, "install_root": str(install),
+                      "engagements_root": str(engagement.parent)}).encode()}
+        for name, data in assets.items():
+            path = plugin / name
+            path.parent.mkdir(exist_ok=True, parents=True)
+            path.write_bytes(data)
+        (plugin / ".vigil-managed-files.json").write_text(json.dumps({
+            name: hashlib.sha256(data).hexdigest() for name, data in assets.items()}))
+        (entry / "plugin").symlink_to(plugin)
+    binding["project"] = str(entry)
+    context = snapshot / ".vigil-client-context.json"
+    context.write_text(json.dumps(binding))
+    manifest = snapshot / ".vigil-managed-files.json"
+    recorded = json.loads(manifest.read_text())
+    recorded[context.name] = hashlib.sha256(context.read_bytes()).hexdigest()
+    manifest.write_text(json.dumps(recorded))
+    (entry / ".vigil-current-context.json").write_text(json.dumps({
+        "schema_version": 1, "binding_path": str(context),
+        "binding_sha256": hashlib.sha256(context.read_bytes()).hexdigest()}))
+    monkeypatch.chdir(entry)
+    return install, engagement, entry, snapshot, binding
+
+
+def test_stable_project_mode_inspection_uses_current_context(stable_project, capsys):
+    _, _, _, _, binding = stable_project
+    cli.main(["engagement", "mode", "--json"])
+    captured = capsys.readouterr()
+    state = json.loads(captured.out)
+    assert state["mode"] == binding["mode"]
+    assert state["client"] == binding["client"]
+    assert "new-task" in captured.err.lower()
+
+
+def test_stable_project_assessment_requires_task_binding(stable_project, monkeypatch):
+    monkeypatch.setattr(cli.os, "execvpe", lambda *a, **k: pytest.fail("Unbound project must not execute assessment"))
+    with pytest.raises(SystemExit, match="task.*binding|bound.*helper"):
+        cli.main(["assess", "contract", "finding"])
+
+
+def test_stable_project_accepts_pinned_task_when_current_selector_is_unavailable(stable_project, monkeypatch):
+    _, _, entry, snapshot, binding = stable_project
+    (entry / ".vigil-current-context.json").write_text("unavailable current selection")
+    context = snapshot / ".vigil-client-context.json"
+    monkeypatch.setenv("VIGIL_CLIENT_CONTEXT", str(context))
+    captured = {}
+    monkeypatch.setattr(cli.os, "execvpe", lambda executable, argv, env: captured.update(env=env))
+    cli.main(["assess", "contract", "finding"])
+    assert captured["env"]["VIGIL_CLIENT_CONTEXT"] == str(context)
+    assert captured["env"]["VIGIL_CLIENT_NAME"] == binding["client"]
+
+
+@pytest.mark.parametrize("damage", ["selector-link", "selector-digest", "project-router", "foreign-binding"])
+def test_stable_project_rejects_invalid_selection(stable_project, damage):
+    _, engagement, entry, snapshot, _ = stable_project
+    selection = entry / ".vigil-current-context.json"
+    if damage == "selector-link":
+        saved = entry / "saved.json"
+        selection.rename(saved)
+        selection.symlink_to(saved)
+    elif damage == "selector-digest":
+        row = json.loads(selection.read_text())
+        row["binding_sha256"] = "0" * 64
+        selection.write_text(json.dumps(row))
+    elif damage == "project-router":
+        (entry / "AGENTS.md").write_text("unmanaged replacement")
+    else:
+        row = json.loads(selection.read_text())
+        row["binding_path"] = str(engagement / "other" / snapshot.name / ".vigil-client-context.json")
+        selection.write_text(json.dumps(row))
+    with pytest.raises(SystemExit, match="project context"):
+        cli.main(["engagement", "mode", "--json"])
+
+
+@pytest.mark.parametrize("damaged", [False, True])
+def test_pinned_client_diagnostics_verify_stable_project_entry(stable_project, damaged):
+    from vigil_cli.client_checks import collect_client_checks
+
+    install, engagement, entry, snapshot, binding = stable_project
+    if damaged:
+        (entry / "AGENTS.md").write_text("unmanaged router")
+    checks = collect_client_checks(binding["client"], engagement=engagement, mode="code",
+                                   install_root=install, context_file=snapshot / ".vigil-client-context.json")
+    indexed = {check.name: check for check in checks}
+    if damaged:
+        assert indexed["client-context"].status == "FAIL"
+    else:
+        assert indexed["project-entry"].status == "OK"
+
+
+@pytest.mark.parametrize("project", ["zcode"], indirect=True)
+@pytest.mark.parametrize("damage", ["script", "launcher-inventory", "dispatcher-owner"])
+def test_pinned_client_diagnostics_verify_zcode_dispatcher(stable_project, damage):
+    from vigil_cli.client_checks import collect_client_checks
+
+    install, engagement, entry, snapshot, _ = stable_project
+    if damage == "script":
+        (entry / "plugin/hooks/dispatch.mjs").write_text("unmanaged replacement")
+    elif damage == "launcher-inventory":
+        manifest = entry / "plugin/.vigil-managed-files.json"
+        assets = json.loads(manifest.read_text())
+        assets.pop("hooks/launch.sh")
+        manifest.write_text(json.dumps(assets))
+    else:
+        owner = entry / "plugin/vigil-owner.json"
+        owner.write_text(json.dumps({"schema_version": 1, "install_root": str(install),
+                                    "engagements_root": str(engagement.parent / "other")}))
+        manifest = entry / "plugin/.vigil-managed-files.json"
+        assets = json.loads(manifest.read_text())
+        assets[owner.name] = hashlib.sha256(owner.read_bytes()).hexdigest()
+        manifest.write_text(json.dumps(assets))
+    checks = collect_client_checks("zcode", engagement=engagement, mode="code",
+                                   install_root=install, context_file=snapshot / ".vigil-client-context.json")
+    assert next(check for check in checks if check.name == "client-context").status == "FAIL"

@@ -6,7 +6,7 @@ description: Assess a program's pushback on a submission and decide whether to r
 <!-- Source: agent/commands/vigil-triage-reply.md -->
 
 
-Use the context-bound Vigil helper named in this workspace AGENTS.md for every Vigil invocation. Confirm the selected mode before acting.
+Use the absolute context-bound Vigil helper supplied by this native task context or Runtime Identity for every Vigil invocation. Read that immutable context router; the stable project helper inspects NEW-task setup only. Confirm the selected mode before acting.
 
 Arguments from this invocation: $ARGUMENTS
 

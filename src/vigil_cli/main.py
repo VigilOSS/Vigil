@@ -336,7 +336,7 @@ def main(argv: list[str] | None = None) -> None:
             option = _global_value_option(token)
             if option is not None and option[0] == "--root":
                 root = token.split("=", 1)[1] if option[1] else raw[offset + 1]
-        with project_identity(install_root=root):
+        with project_identity(install_root=root, inspection_only=raw[index] != "assess"):
             _main(raw, project_mode=os.environ.get("VIGIL_OPERATOR_MODE"))
     else:
         _main(raw)

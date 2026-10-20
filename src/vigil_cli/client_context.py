@@ -6,9 +6,10 @@ from collections.abc import Iterator
 import os
 from pathlib import Path
 import re
+import sys
 
 from .assessment_clients import CONTEXT_FILE
-from .client_checks import _manifest_check, _object, _read_regular, validate_context_binding
+from .client_checks import _manifest_check, _object, _read_regular, read_project_context, validate_context_binding
 from .paths import engagements_root
 
 
@@ -17,11 +18,14 @@ def _project_context() -> Path | None:
         context = directory / CONTEXT_FILE
         if context.exists() or context.is_symlink():
             return context
+        project = directory / ".vigil-client-project.json"
+        if project.exists() or project.is_symlink():
+            return project
     return None
 
 
 @contextmanager
-def project_identity(*, install_root: str | None = None) -> Iterator[None]:
+def project_identity(*, install_root: str | None = None, inspection_only: bool = False) -> Iterator[None]:
     """Supply verified GUI project identity for scoped CLI operations.
 
     Read only canonical install-owned projects. Never run their helper or select
@@ -35,6 +39,15 @@ def project_identity(*, install_root: str | None = None) -> Iterator[None]:
         yield
         return
     try:
+        stable = discovered is not None and discovered.name == ".vigil-client-project.json"
+        if stable:
+            assert discovered is not None
+            context, _ = read_project_context(discovered.parent, context_file=Path(explicit) if explicit else None)
+            if not explicit and not inspection_only:
+                raise ValueError("A native task binding is required; use the absolute bound helper supplied by the task hook")
+            if not explicit:
+                print("Inspecting the project's new-task selection; this does not identify an existing native conversation.",
+                      file=sys.stderr)
         if not context.is_absolute() or context.name != CONTEXT_FILE:
             raise ValueError("Expected an absolute project context path")
         workspace = context.parent
@@ -42,7 +55,7 @@ def project_identity(*, install_root: str | None = None) -> Iterator[None]:
                 or not re.fullmatch(r"[0-9a-f]{24}", workspace.parent.name)
                 or workspace.parent.parent.name != "client-context"):
             raise ValueError("Expected a generated client project folder")
-        if discovered is not None and context != discovered:
+        if discovered is not None and not stable and context != discovered:
             raise ValueError("Inherited context and current project identify different sessions")
         engagement = workspace.parent.parent.parent
         raw = _read_regular(context)

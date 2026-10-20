@@ -200,7 +200,7 @@ def test_start_refuses_cross_release_refresh_while_original_session_is_alive(lay
     assert original == ((engagement / "start_codex.sh").read_bytes(), (engagement / "AGENTS.md").read_bytes())
 
 
-def test_opencode_rejected_upgrade_start_preserves_active_session_config(layout, monkeypatch):
+def test_opencode_upgrade_prepares_new_context_without_rebinding_active_session_config(layout, monkeypatch):
     from vigil_cli import main as main_module
     from vigil_cli import assessment_clients, client_sessions
 
@@ -225,10 +225,17 @@ def test_opencode_rejected_upgrade_start_preserves_active_session_config(layout,
     monkeypatch.setattr(assessment_clients.subprocess, "run",
         lambda argv, **kwargs: subprocess.CompletedProcess(argv, 0, "1.19.3\n", "")
         if argv[0] == "/usr/bin/client" else native_run(argv, **kwargs))
-    monkeypatch.setattr(assessment_clients, "prepare_workspace",
-        lambda *a, **kw: pytest.fail("Cross-release retention must be checked before preparing workspace files"))
+    class PreparationReached(Exception):
+        pass
 
-    with pytest.raises(SystemExit, match="active.*release|end.*session"):
+    def prepare_context(install, directory, client, mode, **kwargs):
+        assert (install, directory, client, mode) == (workspace, engagement, "opencode", "code")
+        assert kwargs["native_version"] == "1.19.3"
+        raise PreparationReached("New immutable native context preparation reached")
+
+    monkeypatch.setattr(assessment_clients, "prepare_workspace", prepare_context)
+
+    with pytest.raises(PreparationReached, match="New immutable native context"):
         main_module.main(["--root", str(workspace), "engagement", "start", "acme", "--client", "opencode", "--thinking", "max", "--skip-preflight"])
 
     assert (engagement / "opencode.json").read_bytes() == original

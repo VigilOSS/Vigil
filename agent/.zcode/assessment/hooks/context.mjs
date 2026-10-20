@@ -41,15 +41,15 @@ const restore = async () => {
   const release = JSON.parse(readFileSync(join(plugin, "vigil-release.json"), "utf8")).release_id
   const registry = process.env.ZCODE_PLUGIN_DATA
   const receiptName = "session-" + hash(session) + ".json"
-  let bindingPath
-  if (typeof input.cwd === "string") {
-    const candidate = join(input.cwd, ".vigil-client-context.json")
-    if (existsSync(candidate) && !lstatSync(candidate).isSymbolicLink()) bindingPath = candidate
-  }
+  let bindingPath = process.env.VIGIL_NATIVE_DISPATCH_CONTEXT
   if (!bindingPath && registry && existsSync(join(registry, receiptName))) {
     if (lstatSync(join(registry, receiptName)).isSymbolicLink()) throw new Error("Unsafe native binding receipt")
     const row = JSON.parse(readFileSync(join(registry, receiptName), "utf8"))
     if (row.session_id === session && row.release_id === release) bindingPath = row.binding_path
+  }
+  if (!bindingPath && typeof input.cwd === "string") {
+    const candidate = join(input.cwd, ".vigil-client-context.json")
+    if (existsSync(candidate) && !lstatSync(candidate).isSymbolicLink()) bindingPath = candidate
   }
   // Globally enabled plugins must stay silent in unrelated workspaces.
   if (!bindingPath) return
@@ -109,6 +109,7 @@ const restore = async () => {
     `Restore the session-selected ${context.mode} Vigil operator. Engagement: ${JSON.stringify(context.engagement_dir)}.`,
     `Use ${JSON.stringify(context.vigil_cli)} instead of bare vigil for every command.`,
     `Read client context ${JSON.stringify(bindingPath)} for literal artifact paths; do not rely on GUI environment variables.`,
+    `Read ${JSON.stringify(join(context.workspace, "AGENTS.md"))} for this task's immutable workflow router. Resolve every agent/... path against ${JSON.stringify(context.agent_root)}.`,
     `Run the bound helper's engagement mode command and read only its selected canonical prompt.`,
     `Read the engagement's ENGAGEMENT.md when present and apply agent/rules/resume.md before dependent work.`,
     "Every specialist assignment includes this client-context path, absolute helper, literal artifact paths, and its normal Runtime Identity. Specialists load their role/constraints, not the operator core.",

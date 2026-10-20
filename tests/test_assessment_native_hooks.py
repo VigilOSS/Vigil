@@ -3,10 +3,47 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import shutil
 
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_opencode_retained_runtime_supplies_its_own_shell_hook_environment(tmp_path):
+    engagement = tmp_path / "acme"
+    engagement.mkdir()
+    (engagement / "scope.json").write_text('{"status":"in_progress","tracks":{"code":{}}}')
+    application = tmp_path / "application-b"
+    hooks = application / "agent/scripts/hooks"
+    hooks.mkdir(parents=True)
+    (hooks / "pre-compact.sh").write_text(
+        '#!/bin/sh\nprintf "%s\\n" "$VIGIL_CLIENT_CONTEXT" "$VIGIL_APPLICATION_DIR" "$PATH"\n')
+    binding = tmp_path / "context-b.json"
+    tools = tmp_path / "tools-b"
+    binding.write_text(json.dumps({"schema_version": 1, "client": "opencode", "mode": "code",
+        "workspace": str(tmp_path), "engagement_dir": str(engagement), "agent_root": str(application / "agent"),
+        "vigil_cli": "/bin/false", "install_root": str(tmp_path), "release_id": "test",
+        "tools": {"bash": shutil.which("bash"), "jq": str(tools / "jq")}}))
+    script = """
+import fs from 'node:fs';
+const module=await import('data:text/javascript;base64,'+fs.readFileSync(process.argv[1]).toString('base64'));
+const plugin=await module.VigilAssessmentHooks({client:{},bindingPath:process.argv[2]});
+const out={context:[]}; await plugin['experimental.session.compacting']({sessionID:'session-b'},out);
+process.stdout.write(JSON.stringify(out));
+"""
+    result = subprocess.run([shutil.which("node"), "--input-type=module", "-e", script,
+        str(ROOT / "agent/.opencode/plugin/assessment-hooks.js"), str(binding)],
+        env={**os.environ, "VIGIL_CLIENT_CONTEXT": str(tmp_path / "context-a.json"),
+             "VIGIL_APPLICATION_DIR": str(tmp_path / "application-a"),
+             "PATH": "/launch/tools-a:/usr/bin:/bin"},
+        capture_output=True, text=True, timeout=10, check=True)
+    context, app, path = json.loads(result.stdout)["context"][0].splitlines()
+    assert context == str(binding)
+    assert app == str(application)
+    directories = path.split(os.pathsep)
+    assert directories[0] == str(tmp_path / "bin")
+    assert directories.index(str(tools)) < directories.index("/launch/tools-a")
 
 
 def test_opencode_compaction_hook_extends_native_summary_context(tmp_path):

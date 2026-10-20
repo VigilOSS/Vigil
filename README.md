@@ -100,8 +100,8 @@ Install and sign in to an agent client before starting an operator. Engagement c
 **Claude Code, Codex, OpenCode, ZCode, Goose, Kimi, and Pi**. Setup and support differences:
 [agent clients](docs/agent-clients.md). Model access affects what testing the provider permits;
 check [models and access](docs/model-access.md).
-For ZCode desktop, follow [ZCode setup](docs/zcode-setup.md): open the exact generated
-workspace printed by Vigil, enable its local plugin, and begin a fresh task.
+For ZCode desktop, follow [ZCode setup](docs/zcode-setup.md): add the printed stable
+Project folder once, enable its local plugin, and begin a fresh task.
 
 Start without an engagement ID to choose an existing engagement by recent work
 or client opening, or choose **Create new engagement** using the same creation
@@ -115,9 +115,11 @@ For ZCode, creation comes before opening the project: Vigil opens the generated
 **Project folder**, whose root `AGENTS.md` walks through setup. Enable the printed
 local plugin and start a new task in that project. Do not open the audited source
 directory or the Vigil source checkout as the engagement's ZCode project.
-The installed `vigil` recognizes the generated project's engagement, workflow and
-client during mode checks, client diagnostics and assessment commands. Setup checks
-explain any identity conflict before workflow work begins.
+Reuse that project for subsequent starts of the same engagement and mode. Each
+task receives its own retained context and absolute Vigil helper; updates select
+the context for new tasks without silently changing existing ones. Project-local
+mode/client checks inspect new-task setup; workflow commands use the task's bound
+helper. Vigil leaves ZCode's native compaction settings unchanged.
 
 ### Audit source code
 

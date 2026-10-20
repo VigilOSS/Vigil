@@ -13,6 +13,7 @@ from vigil_cli import main as cli
 from vigil_cli import client_sessions
 
 ROOT = Path(__file__).resolve().parents[1]
+ORIGINAL_BOOTSTRAP = client_sessions.client_session_bootstrap
 
 
 @pytest.fixture
@@ -25,7 +26,7 @@ def context(tmp_path, monkeypatch):
     (engagement / "scope.json").write_text(json.dumps({"status": "in_progress",
         "engagement_type": "offensive", "tracks": {"web": {"phase": "recon"},
         "code": {"phase": "ingest"}}}))
-    monkeypatch.setattr(client_sessions, "client_session_bootstrap", lambda *_: nullcontext())
+    monkeypatch.setattr(client_sessions, "client_session_bootstrap", lambda *_, **_kw: nullcontext())
     receipts = []
     monkeypatch.setattr(client_sessions, "record_client_session", lambda *args: receipts.append(args))
     monkeypatch.setattr(engagements, "repair_engagement_client_entrypoints",
@@ -69,11 +70,46 @@ def test_zcode_start_prepares_two_mode_bound_workspaces_and_no_pid_receipt(conte
     assert [(row["client"], row["mode"], row["event"]) for row in sorted(history, key=lambda row: row["started_at"])] == [
         ("zcode", "code", "workspace_opened"), ("zcode", "web", "workspace_opened")]
     for workspace, mode in zip(workspaces, ("code", "web")):
-        binding = json.loads((workspace / ".vigil-client-context.json").read_text())
+        selected = json.loads((workspace / ".vigil-current-context.json").read_text())
+        binding = json.loads(Path(selected["binding_path"]).read_text())
         assert binding["mode"] == mode
         assert binding["engagement_dir"] == str(engagement)
         assert Path(binding["vigil_cli"]).is_file()
         assert (workspace / "AGENTS.md").read_text().startswith(engagements._SPECIALIST_STOP_SIGN)
+
+
+def test_zcode_project_address_is_stable_when_native_build_changes(context, monkeypatch):
+    from vigil_cli import remediation_clients
+    root, engagement, _ = context
+    versions = iter(("3.15.3", "3.16.0"))
+    monkeypatch.setattr(remediation_clients, "_zcode_application",
+                        lambda: (Path("/Applications/ZCode.app"), next(versions)))
+    opened = []
+    monkeypatch.setattr(engagements.subprocess, "run", lambda argv, **_:
+                        opened.append(Path(argv[-1])) or SimpleNamespace(returncode=0))
+    engagements.start_engagement(root, engagement, "zcode", [], "code")
+    engagements.start_engagement(root, engagement, "zcode", [], "code")
+    assert opened == [engagement / "clients/zcode/code"] * 2
+    assert len(list((engagement / "client-context").glob("*/zcode"))) == 2
+
+
+def test_native_project_start_does_not_rebind_shared_client_files(context, monkeypatch):
+    from vigil_cli import remediation_clients
+    root, engagement, _ = context
+    monkeypatch.setattr(client_sessions, "client_session_bootstrap", ORIGINAL_BOOTSTRAP)
+    def shared_guard(*_):
+        raise SystemExit("Shared files are in use by another release")
+    monkeypatch.setattr(client_sessions, "guard_client_session_upgrade", shared_guard)
+    monkeypatch.setattr(remediation_clients, "_zcode_application", lambda:
+                        (Path("/Applications/ZCode.app"), "3.15.3"))
+    monkeypatch.setattr(engagements.subprocess, "run", lambda *_args, **_kwargs: SimpleNamespace(returncode=0))
+    outcome = None
+    try:
+        engagements.start_engagement(root, engagement, "zcode", [], "code")
+    except SystemExit as exc:
+        outcome = str(exc)
+    assert outcome is None
+    assert (engagement / "clients/zcode/code/AGENTS.md").is_file()
 
 
 def test_zcode_refuses_unsupported_mode_before_preparing_context(context):
@@ -137,8 +173,8 @@ def test_zcode_opening_prompt_resolves_its_project_instructions_and_helper(conte
     output = capsys.readouterr().out
     prompt = output.split("Paste into a new task\n\n", 1)[1].strip()
     assert "./AGENTS.md" in prompt
-    assert "./bin/vigil engagement mode" in prompt
-    assert "./.vigil-client-context.json" in prompt
+    assert "./bin/vigil engagement client-check" in prompt
+    assert "./.vigil-client-project.json" in prompt
     assert "acme" in prompt and "code" in prompt and "ZCode" in prompt
     assert (workspace / "AGENTS.md").is_file()
     assert (workspace / "bin/vigil").is_file()
@@ -200,7 +236,9 @@ def test_opencode_start_merges_opening_and_user_focus_once(context, monkeypatch,
     assert environment["OPENCODE_DISABLE_PROJECT_CONFIG"] == "1"
     assert environment["OPENCODE_CONFIG_DIR"] == str(workspace / ".opencode")
     configuration = json.loads((workspace / ".opencode/opencode.json").read_text())
-    assert configuration["instructions"] == [str(workspace / "AGENTS.md")]
+    binding = json.loads((workspace / ".vigil-client-context.json").read_text())
+    assert configuration["instructions"] == [str(Path(binding["project"]) / "AGENTS.md")]
+    assert Path.cwd() == Path(binding["project"])
     assert receipts[0][2:] == ("opencode", "web")
     history, _ = client_sessions.historical_client_starts(root)
     assert [(row["client"], row["event"]) for row in history] == [("opencode", "launch_requested")]

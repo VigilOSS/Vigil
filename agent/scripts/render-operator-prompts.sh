@@ -421,7 +421,7 @@ render_assessment_clients() {
         printf -- '---\ndescription: %s\n---\n\n' "$description"
         printf '<!-- GENERATED FILE — DO NOT EDIT. -->\n<!-- Source: agent/commands/%s.md -->\n\n' "$name"
         render_stamp md
-        printf '\nUse the context-bound Vigil helper named in this workspace AGENTS.md for every Vigil invocation. Confirm the selected mode before acting.\n\nArguments from this invocation: $ARGUMENTS\n\n'
+        printf '\nUse the absolute context-bound Vigil helper supplied by this native task context or Runtime Identity for every Vigil invocation. Read that immutable context router; the stable project helper inspects NEW-task setup only. Confirm the selected mode before acting.\n\nArguments from this invocation: $ARGUMENTS\n\n'
         case "$name" in
           vigil-hunt-deeper|vigil-fresh-skeptic-verify|vigil-triage-reply)
             printf 'This command implements the web workflow. In code mode, explain that limitation and use the selected code operator workflow instead; do not change modes or load a web operator core.\n\n' ;;

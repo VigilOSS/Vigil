@@ -32,4 +32,6 @@ def test_prepared_assessment_hook_is_discoverable_by_native_opencode(tmp_path, m
         for path in (workspace / ".opencode" / directory).glob(f"*.{suffix}")
     ]
     assert len(discovered) == 1
-    assert discovered[0].read_bytes() == (ROOT / "agent/.opencode/plugin/assessment-hooks.js").read_bytes()
+    assert discovered[0].read_bytes() == (ROOT / "agent/.opencode/plugin/project-dispatch.js").read_bytes()
+    runtime = workspace / ".opencode/vigil-assessment-runtime.mjs"
+    assert runtime.read_bytes() == (ROOT / "agent/.opencode/plugin/assessment-hooks.js").read_bytes()

@@ -140,6 +140,64 @@ def validate_context_binding(binding: dict, workspace: Path, engagement: Path,
             or not re.fullmatch(r"[0-9a-f]{64}", application["content_sha256"])
             or not isinstance(application.get("version"), str)):
         raise ValueError("Invalid client application binding")
+    if "project" in binding and binding["project"] != str(engagement / "clients" / client / binding["mode"]):
+        raise ValueError("Client context does not belong to its stable project")
+
+
+def read_project_context(project: Path, *, context_file: Path | None = None) -> tuple[Path, dict]:
+    """Verify a stable entry and its selected or explicitly pinned task context.
+
+    This reads identities only: it never executes a project helper or chooses
+    application code. Explicit task bindings do not consult the new-task selector.
+    """
+    if (not project.is_absolute() or project.name not in {"web", "code"}
+            or project.parent.name not in {"opencode", "zcode"} or project.parent.parent.name != "clients"):
+        raise ValueError("Expected a canonical native client project")
+    engagement = project.parents[2]
+    client, mode = project.parent.name, project.name
+    descriptor = _object(_read_regular(project / ".vigil-client-project.json"))
+    owner = descriptor.get("install_root")
+    if not isinstance(owner, str) or not Path(owner).is_absolute():
+        raise ValueError("Expected an absolute project owner")
+    root = Path(owner)
+    from .paths import engagements_root
+    if engagements_root(root).resolve() != engagement.parent:
+        raise ValueError("Project engagement is outside its private workspace")
+    expected = {"schema_version": 1, "protocol": 1, "client": client, "mode": mode,
+                "project": str(project), "install_root": str(root), "engagement_dir": str(engagement),
+                "engagement_key": engagement.name, "engagements_root": str(engagement.parent)}
+    if descriptor != expected:
+        raise ValueError("Stable project identity mismatch")
+    check = _manifest_check(project, required_files=(".vigil-client-project.json", "AGENTS.md", "bin/vigil",
+                                                    "bootstrap.mjs", "vigil-project.mjs"))
+    if check.status != "OK":
+        raise ValueError(check.detail)
+    selection = None
+    if context_file is None:
+        selection = _object(_read_regular(project / ".vigil-current-context.json"))
+        if (set(selection) != {"schema_version", "binding_path", "binding_sha256"}
+                or selection.get("schema_version") != 1 or not isinstance(selection.get("binding_path"), str)
+                or not isinstance(selection.get("binding_sha256"), str)
+                or not re.fullmatch(r"[0-9a-f]{64}", selection["binding_sha256"])):
+            raise ValueError("Invalid new-task context selector")
+        context_file = Path(selection["binding_path"])
+    if (not context_file.is_absolute() or context_file.name != ".vigil-client-context.json"
+            or context_file.parent.name != client
+            or context_file.parent.parent.parent != engagement / "client-context"
+            or not re.fullmatch(r"[0-9a-f]{24}", context_file.parent.parent.name)):
+        raise ValueError("Task context is outside its stable project engagement")
+    raw = _read_regular(context_file)
+    binding = _object(raw)
+    validate_context_binding(binding, context_file.parent, engagement, root, client)
+    if binding.get("project") != str(project) or binding["mode"] != mode:
+        raise ValueError("Task context and stable project identity disagree")
+    if selection is not None and hashlib.sha256(raw).hexdigest() != selection["binding_sha256"]:
+        raise ValueError("New-task context digest mismatch")
+    check = _manifest_check(context_file.parent, raw,
+                            required_files=(".vigil-client-context.json", "bin/vigil", "AGENTS.md"))
+    if check.status != "OK":
+        raise ValueError(check.detail)
+    return context_file, binding
 
 
 def _manifest_check(workspace: Path, binding_bytes: bytes | None = None, *,
@@ -234,6 +292,24 @@ def _observed_context_checks(client: str, engagement: Path, mode: str | None,
             if expected_application is not None and application != expected_application:
                 checks.append(Check(f"retained-context:{name}", "STALE", "Retained workspace belongs to another pinned release."))
                 continue
+            if "project" in binding:
+                project = Path(binding["project"])
+                read_project_context(project, context_file=workspace / ".vigil-client-context.json")
+                checks.append(Check("project-entry", "OK", f"Verified stable project {project}; inspecting this pinned context, not selecting another task."))
+                if client == "zcode":
+                    dispatcher = install_root / "client-plugins/dispatcher-v1/zcode"
+                    _known_pointer(project / "plugin", dispatcher, directory=True)
+                    check = _manifest_check(dispatcher, check_name="dispatcher-assets", required_files=(
+                        ".zcode-plugin/plugin.json", "marketplace.json", "hooks/hooks.json",
+                        "hooks/dispatch.mjs", "hooks/project-binding.mjs", "hooks/launch.sh", "vigil-owner.json"))
+                    if check.status != "OK":
+                        raise ValueError(check.detail)
+                    from .paths import engagements_root
+                    owner = _object(_read_regular(dispatcher / "vigil-owner.json"))
+                    if owner != {"schema_version": 1, "install_root": str(install_root),
+                                 "engagements_root": str(engagements_root(install_root).resolve())}:
+                        raise ValueError("Native dispatcher owner does not match the private workspace")
+                    checks.append(check)
             matched += 1
             checks.append(_manifest_check(workspace, raw))
             tools = binding.get("tools")

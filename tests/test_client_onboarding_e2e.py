@@ -166,7 +166,14 @@ def test_real_cli_opencode_selection_executes_bound_native_workspace(launch_envi
     assert binding["mode"] == mode
     assert binding["native_version"] == "1.18.10"
     assert binding["backend_url"] == "http://127.0.0.1:9"
-    assert Path(native["cwd"]) == context.parent
+    project = selected / "clients/opencode" / mode
+    assert Path(native["cwd"]) == project
+    assert binding["project"] == str(project)
+    descriptor = json.loads((project / ".vigil-client-project.json").read_text())
+    assert (descriptor["engagement_dir"], descriptor["client"], descriptor["mode"]) == (
+        str(selected), "opencode", mode)
+    selection_row = json.loads((project / ".vigil-current-context.json").read_text())
+    assert selection_row["binding_path"] == str(context)
     assert context.parent.parent.parent == selected / "client-context"
     assert native["argv"][:2] == ["--agent", "operator"]
     assert "--prompt" in native["argv"]
@@ -174,7 +181,9 @@ def test_real_cli_opencode_selection_executes_bound_native_workspace(launch_envi
     assert (context.parent / "AGENTS.md").is_file()
     assert (context.parent / ".opencode/plugins/vigil-assessment.js").is_file()
     config = json.loads((context.parent / ".opencode/opencode.json").read_text())
-    assert config["instructions"] == [str(context.parent / "AGENTS.md")]
+    assert config["instructions"] == [str(project / "AGENTS.md")]
+    assert (project / "AGENTS.md").is_file()
+    assert (context.parent / ".opencode/vigil-assessment-runtime.mjs").is_file()
     markers = [json.loads(path.read_text()) for path in
                (workspace / "state/runtime/client-launches").glob("*.json")]
     assert [(row["event"], row["client"], row["mode"], row["engagement"]) for row in markers] == [
@@ -214,12 +223,22 @@ def test_real_zcode_selection_materializes_workspace_and_records_only_open_inten
     opened = json.loads(capture.read_text())
     context = Path(opened["argv"][-1])
     assert opened["argv"][:2] == ["-a", str(application)]
-    binding = json.loads((context / ".vigil-client-context.json").read_text())
+    assert context == selected / "clients/zcode/code"
+    descriptor = json.loads((context / ".vigil-client-project.json").read_text())
+    assert (descriptor["engagement_dir"], descriptor["client"], descriptor["mode"]) == (
+        str(selected), "zcode", "code")
+    selection = json.loads((context / ".vigil-current-context.json").read_text())
+    snapshot = Path(selection["binding_path"]).parent
+    assert snapshot.parent.parent == selected / "client-context"
+    binding = json.loads(Path(selection["binding_path"]).read_text())
     assert binding["engagement_dir"] == str(selected)
     assert binding["mode"] == "code"
     assert os.access(binding["vigil_cli"], os.X_OK)
     assert (context / "AGENTS.md").is_file()
     assert (context / "plugin/marketplace.json").is_file()
+    assert (snapshot / "AGENTS.md").is_file()
+    assert binding["workspace"] == str(snapshot)
+    assert binding["project"] == str(context)
     markers = [json.loads(path.read_text()) for path in
                (workspace / "state/runtime/client-launches").glob("*.json")]
     assert [(row["event"], row["client"], row["mode"]) for row in markers] == [

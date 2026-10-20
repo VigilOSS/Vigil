@@ -1,12 +1,11 @@
 // Native web/code adapter. The legacy standard plugin remains Blue-owned.
 import {execFileSync} from "node:child_process"
 import {readFileSync, realpathSync, writeFileSync, renameSync, existsSync, lstatSync, openSync, closeSync, unlinkSync} from "node:fs"
-import {join} from "node:path"
+import {join, dirname} from "node:path"
 import {createHash, randomUUID} from "node:crypto"
 
-export const VigilAssessmentHooks = async ({client}) => {
+export const VigilAssessmentHooks = async ({client, bindingPath = process.env.VIGIL_CLIENT_CONTEXT}) => {
   const states = new Map()
-  const bindingPath = process.env.VIGIL_CLIENT_CONTEXT
   const readContext = () => {
     if (!bindingPath) throw new Error("No native Vigil context binding")
     const binding = readFileSync(bindingPath)
@@ -23,8 +22,11 @@ export const VigilAssessmentHooks = async ({client}) => {
   const env = context => ({...process.env, ENGAGEMENT_DIR: context.engagement_dir,
     VIGIL_SESSION_ENGAGEMENT_DIR: context.engagement_dir, VIGIL_AGENT_ROOT: context.agent_root,
     VIGIL_INSTALL_DIR: context.install_root, VIGIL_OPERATOR_MODE: context.mode,
+    VIGIL_CLIENT_CONTEXT: bindingPath, VIGIL_APPLICATION_DIR: dirname(context.agent_root),
+    VIGIL_REQUESTED_CLIENT: "opencode", ENGAGEMENT_KEY: context.engagement_key || context.engagement_dir.split("/").at(-1),
     VIGIL_CLIENT_NAME: "opencode", ORCHESTRATOR_BASE_URL: context.backend_url || process.env.ORCHESTRATOR_BASE_URL,
-    PATH: [join(context.workspace, "bin"), process.env.PATH || "/usr/bin:/bin"].join(":")})
+    PATH: [join(context.workspace, "bin"), ...Object.values(context.tools || {}).map(value => dirname(value)),
+      process.env.PATH || "/usr/bin:/bin"].join(":")})
   const hook = (context, name, payload) => execFileSync(context.tools?.bash || "bash",
     [join(context.agent_root, "scripts/hooks", name)], {input: JSON.stringify({...payload, cwd: context.engagement_dir}),
       env: env(context), encoding: "utf8", timeout: 5000, maxBuffer: 1024 * 1024, stdio: ["pipe", "pipe", "pipe"]})
@@ -74,6 +76,7 @@ export const VigilAssessmentHooks = async ({client}) => {
     `Vigil mode: ${context.mode}. Canonical engagement: ${JSON.stringify(context.engagement_dir)}.`,
     `Use the absolute bound helper ${JSON.stringify(context.vigil_cli)} for every Vigil command.`,
     `Client context: ${JSON.stringify(bindingPath)}. Treat environment-variable artifact paths as literal paths from this binding.`,
+    `Read ${JSON.stringify(join(context.workspace, "AGENTS.md"))} for this task's immutable workflow router. Resolve every agent/... path against ${JSON.stringify(context.agent_root)}.`,
   ].join("\n")
   const request = async sessionID => {
     const response = await client.session.messages({path: {id: sessionID}})

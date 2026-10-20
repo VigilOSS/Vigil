@@ -119,6 +119,9 @@ When you are about to copy one of these into a second file, stop and import.
 - `src/vigil_cli/assessment_clients.py` owns immutable native-client workspace bindings,
   context-bound helpers, managed pointers, plugin release identities, and managed-file digest manifests.
   GUI workspace opening never establishes native conversation ownership.
+- `src/vigil_cli/client_projects.py` owns stable per-engagement/client/mode project entries,
+  atomic new-task selections, and immutable protocol-v1 dispatcher staging. `agent/scripts/native-client/project-binding.mjs`
+  attests native task bindings and create-once session receipts; project selection never migrates an existing task.
 - `src/vigil_cli/client_checks.py` owns read-only client prerequisites and inspection of existing
   bound workspaces, asset manifests, and exact-context hook receipts. Historical `OBSERVED` events
   do not establish current native-build acceptance or completed backend hydration.
