@@ -120,6 +120,19 @@ def test_project_bootstrap_restricts_unbound_workflow_commands(prepared):
     assert "NEW-task setup only" in result.stderr
 
 
+def test_zcode_repeat_start_accepts_native_read_only_marketplace_mode(prepared):
+    project, _, _ = prepared("zcode")
+    marketplace = project / "plugin/marketplace.json"
+    original = marketplace.read_bytes()
+    marketplace.chmod(0o644)
+    inode = marketplace.stat().st_ino
+    same_project, _, _ = prepared("zcode")
+    assert same_project == project
+    assert marketplace.read_bytes() == original
+    assert marketplace.stat().st_mode & 0o7777 == 0o644
+    assert marketplace.stat().st_ino == inode
+
+
 @pytest.mark.parametrize("client", ["zcode", "opencode"])
 def test_native_receipt_without_binding_digest_is_not_adopted(prepared, client):
     project, snapshot, binding = prepared(client)

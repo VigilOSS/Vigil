@@ -210,6 +210,11 @@ must establish delivery on the installed desktop and engine version. An
 compact dispatch on an older engine. If recovery is unverified or fails, restore
 context explicitly rather than treating a summary as current backend state.
 
+Native acceptance on ZCode Desktop 3.15.3 confirmed startup injection and bound
+helper access to backend state. A real `/compact` completed, but produced no new
+Vigil compact receipt or fresh compact context in the task. Do not interpret
+successful native compression as verified automatic Vigil recovery on this build.
+
 The documented hook surface does not establish `PreCompact` summary steering,
 a terminal `SessionEnd` event, or exact attachment to a native conversation.
 `Stop` ends a model turn, not necessarily a task. Vigil does not treat a transient
@@ -217,9 +222,21 @@ macOS `open` process as ownership of a live conversation. See the
 [native hook reference](https://zcode.z.ai/en/docs/hooks).
 
 Vigil leaves ZCode's native compaction settings unchanged. Its hook restores
-workflow instructions after a `compact` event; it does not choose the native
-compaction threshold or certify completed hydration. Test an actual compaction
-separately before relying on automatic recovery.
+workflow instructions only if a `compact` event actually reaches it; it does not
+choose the native compaction threshold or certify completed hydration. Native
+manual or automatic compression alone does not establish Vigil recovery.
+
+After compaction, pause ongoing work and invoke `/vigil-resume` in the same task
+when fresh recovery has not been verified. This reloads the selected workflow
+instructions, engagement constraints, and current backend state using the task's
+original immutable context and absolute helper. If the binding or hydration cannot
+be verified, wait for repair before dependent work; the project's new-task
+selection cannot identify or replace an existing task's context.
+
+Explicit resume does not guarantee that an unattended mid-turn continuation waited
+for hydration, or establish that earlier work used fresh state. Startup observations
+and compacted summaries cannot supply that guarantee. Verify actual compact-event
+delivery separately before relying on automatic recovery.
 
 Existing tasks stay pinned while their verified binding receipts remain intact.
 Missing receipts on `compact`/`clear`, or malformed receipts, produce a recovery

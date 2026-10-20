@@ -57,8 +57,13 @@ Run `vigil engagement client-check --client zcode --json` through the context-bo
 helper. ZCode has no established PreCompact/custom summarizer interface. Its documented
 SessionStart(compact) hook is a recovery opportunity, not proof of native dispatch.
 Report whether this exact desktop/engine build has actually delivered a compact event;
-startup dispatch alone is insufficient. If recovery is unverified or absent, run
-/vigil-resume explicitly after native /compact before continuing work. Print the
+startup dispatch alone is insufficient. Native manual or automatic compaction does
+not establish Vigil recovery. If recovery is unverified or absent, explain that the
+human can invoke /vigil-resume explicitly to restore the selected instructions and
+backend state before continuing work. When a context boundary is recognized, apply
+agent/rules/resume.md through the original bound helper before dependent work.
+Recovery before an unattended mid-turn continuation is not guaranteed, and a later
+resume cannot establish that earlier work waited for hydration. Print the
 standing contract from the matched agent root's scripts/hooks/pre-compact.sh using
 the explicit engagement and mode. Do not claim a custom auto-compaction token threshold.
 <!-- vigil:end -->

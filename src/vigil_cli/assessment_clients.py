@@ -29,10 +29,17 @@ def _json(value: object) -> bytes:
     return (json.dumps(value, sort_keys=True, indent=2) + "\n").encode()
 
 
-def _write_managed(path: Path, data: bytes, *, executable: bool = False) -> None:
+def _write_managed(path: Path, data: bytes, *, executable: bool = False,
+                   native_marketplace: bool = False) -> None:
+    if native_marketplace and (executable or path.name != "marketplace.json"):
+        raise ValueError("Native marketplace reuse requires nonexecutable marketplace.json")
     pin = open_pinned_directory(path.parent, create=True)
     assert pin is not None
     mode = 0o755 if executable else 0o600
+    # ZCode's marketplace registration may make this public metadata readable.
+    # Reuse only exact content at these two modes; keep private assets strict and
+    # preserve the native file rather than chmod/replacing it during a start.
+    existing_modes = (0o600, 0o644) if native_marketplace else (mode,)
     with pin:
         def compare_existing() -> bool:
             try:
@@ -43,7 +50,7 @@ def _write_managed(path: Path, data: bytes, *, executable: bool = False) -> None
                 raise SystemExit(f"Client workspace collision: {path}") from exc
             try:
                 metadata = os.fstat(descriptor)
-                if not stat.S_ISREG(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) != mode:
+                if not stat.S_ISREG(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) not in existing_modes:
                     raise SystemExit(f"Client workspace mode/collision: {path}")
                 with os.fdopen(descriptor, "rb") as handle:
                     descriptor = -1

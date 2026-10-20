@@ -105,7 +105,7 @@ def _prepare_dispatch_plugin(project: Path, binding: dict) -> None:
     }
     files.update(forwarding_assets(agent, "zcode"))
     for name, data in files.items():
-        _write_managed(root / name, data)
+        _write_managed(root / name, data, native_marketplace=name == "marketplace.json")
     _write_managed(root / ".vigil-managed-files.json", _json({
         name: hashlib.sha256(data).hexdigest() for name, data in files.items()}))
     pin = open_pinned_directory(project)

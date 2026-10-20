@@ -211,6 +211,24 @@ configured approximation of 51% of a one-million-token context. `/vigil-compact`
 neither compaction integration nor a command surface — paste the bodies of
 `agent/commands/vigil-compact.md` and `agent/commands/vigil-resume.md`.
 
+### ZCode compaction and explicit recovery
+
+Native manual or automatic compaction and Vigil recovery are separate capabilities.
+Successful compression, an enabled plugin, or a startup receipt does not prove that
+fresh recovery context reached the continuation. Vigil leaves ZCode's native
+compaction settings unchanged.
+
+After compaction, pause ongoing work and invoke `/vigil-resume` explicitly when
+fresh recovery has not been verified. The command restores the selected workflow
+instructions, engagement constraints, and current backend state through that task's
+original bound helper. It keeps the task's binding rather than selecting the
+project's context for new tasks. If hydration fails, dependent work waits for repair.
+
+This explicit recovery does not guarantee that an unattended mid-turn continuation
+waited for hydration, or establish that work already performed used fresh state.
+See [ZCode capability boundaries](zcode-setup.md#capability-boundaries) for native
+acceptance evidence and limitations.
+
 ### SessionEnd (Claude and Codex)
 
 The operator checkpoint is the durable **save my place** note: it points to the

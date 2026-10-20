@@ -119,7 +119,10 @@ Reuse that project for subsequent starts of the same engagement and mode. Each
 task receives its own retained context and absolute Vigil helper; updates select
 the context for new tasks without silently changing existing ones. Project-local
 mode/client checks inspect new-task setup; workflow commands use the task's bound
-helper. Vigil leaves ZCode's native compaction settings unchanged.
+helper. Vigil leaves ZCode's native compaction settings unchanged. Native compression
+does not guarantee Vigil recovery: use `/vigil-resume` explicitly after compaction
+when fresh recovery has not been verified. Recovery before an unattended continuation
+is not guaranteed; see [ZCode capability boundaries](docs/zcode-setup.md#capability-boundaries).
 
 ### Audit source code
 

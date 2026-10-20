@@ -7,6 +7,16 @@ clients: claude codex opencode zcode
 Resume the Vigil engagement in the current directory. The launched session selects one
 operator mode; the engagement's enabled tracks do not select a combined role.
 
+<!-- vigil:only zcode -->
+Use this command explicitly after native manual or automatic compaction when fresh
+Vigil recovery has not been verified. It restores instructions and backend state
+through this task's original context-bound helper; it does not change the task's
+binding or ZCode's compaction settings. Native compression alone does not establish
+Vigil recovery, and a later resume cannot guarantee that an unattended continuation
+waited for hydration. If required context or hydration is unavailable, report the
+failure and wait before dependent work.
+
+<!-- vigil:end -->
 **1. Resolve and restore the session role.** Run `vigil engagement mode` as a standalone
 command. It resolves the selected mode from the session environment; confirm the reported
 `mode:` matches the selected operator seat, and read only the canonical file shown as `prompt:`.

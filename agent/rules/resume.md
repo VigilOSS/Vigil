@@ -13,13 +13,26 @@ true:
 - You are unsure whether the engagement is fresh
 - The session was compacted, truncated, or restarted
 
-**Compaction is a context boundary, so it triggers this hydration automatically.**
+**Compaction is a context boundary, so hydration is required before continuing.**
+Automatic delivery of recovery instructions depends on the client.
 Claude's `PreCompact` hook steers its summarizer. Codex receives the same contract
 through `compact_prompt`, then its `SessionStart(compact)` hook re-hydrates the
 immediate continuation. Follow the injected recovery instructions; do not invoke
-`vigil-resume` manually after compaction. Still record `vigil assess
-operator-checkpoint` before a long dispatch wave: the checkpoint is durable
-backend state, while either client's summary remains only a bridge to it.
+`vigil-resume` manually when that recovery is delivered.
+
+**ZCode:** native manual or automatic compaction does not establish Vigil recovery.
+When a context boundary is recognized, restore the selected instructions and apply
+this hydration procedure through the task's original context-bound helper before
+dependent work. The human can invoke `/vigil-resume` explicitly to request that
+restoration. A startup receipt, compacted summary, or successful native compression
+is not evidence of fresh recovery context or completed backend hydration. Without
+a verified compact callback, recovery before an unattended continuation is not
+guaranteed; explain that limitation rather than promising automatic recovery or
+inferring that compaction was detected.
+
+Still record `vigil assess operator-checkpoint` before a long dispatch wave:
+the checkpoint is durable backend state, while the client's summary remains only
+a bridge to it.
 
 Run the core resume hydration before target-facing commands, specialist dispatch, phase
 transitions, finding writes, or report work:
