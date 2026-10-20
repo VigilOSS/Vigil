@@ -10,6 +10,28 @@ enough; no earlier Vigil assessment is required.
 Create one remediation engagement per repository and keep using it. Several assessment findings can
 share one case when one fix covers them.
 
+## Start or rejoin work
+
+- `vigil remediation start` opens a new conversation in the project repository. With no project
+  selected, the terminal offers a project picker when several remediation projects are available.
+- `vigil remediation join` offers a remediation project picker, then a case picker. It attaches
+  to the selected case's recorded Claude conversation.
+- `vigil remediation -k <project-key> join` goes directly to that project's case picker.
+- `vigil remediation -k <project-key> join <case_id>` attaches directly, without prompting.
+
+Find the numeric `case_id` and an exact join command with:
+
+```bash
+vigil remediation -k <project-key> list
+vigil remediation -k <project-key> list --json
+```
+
+The case ID identifies the Vigil remediation case; the source key identifies its ticket or report.
+Lists and case pickers put open cases first, ordered by most recent update, followed by closed cases.
+`list --json` retains every case summary field and adds explicit `case_id`, `engagement_key`, and
+`join_command` fields for agents and scripts. ID-less `join` requires a terminal; scripts supply
+the project key and case ID. Joining requires a recorded Claude conversation; use `start` for new work.
+
 ## First ticket, end to end
 
 1. Configure the profile below and confirm the referenced skills, MCP authentication,

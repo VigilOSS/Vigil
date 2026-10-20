@@ -21,8 +21,8 @@ from urllib.parse import quote, urlsplit
 from urllib.request import Request, urlopen
 
 from . import restart_manifest
-from .engagements import resolve_engagement_path
-from .paths import engagements_root, resolve_orchestrator_base_url
+from .engagements import EngagementRow, list_engagements, resolve_engagement_path
+from .paths import resolve_orchestrator_base_url
 from .remediation_vcs import adapter as _vcs
 from .remediation_browser import execute as _execute_browse
 from .project_config import project_module
@@ -30,8 +30,13 @@ from .remediation_sessions import register_session_parsers, run_session_command
 
 
 def register_remediation_parser(sub: argparse._SubParsersAction) -> None:
-    parser = sub.add_parser("remediation", help="Manage remediation cases in one project engagement")
-    parser.add_argument("--engagement-key", "-k")
+    parser = sub.add_parser(
+        "remediation", help="Start remediation work or rejoin an existing case",
+        description="Start a new repository conversation with start, or resume a recorded case with join. "
+                    "Use list to find numeric case_id values and exact join commands. "
+                    "Without a case_id, join lets you choose a remediation project and case interactively.",
+    )
+    parser.add_argument("--engagement-key", "-k", help="Remediation project key; skips the interactive project picker")
     commands = parser.add_subparsers(dest="remediation_command", required=True)
     register_session_parsers(commands)
 
@@ -52,8 +57,8 @@ def register_remediation_parser(sub: argparse._SubParsersAction) -> None:
     from_finding.add_argument("--finding", required=True, help="Finding slug in the source engagement")
     from_finding.add_argument("--title")
 
-    list_cases = commands.add_parser("list", help="List cases")
-    list_cases.add_argument("--json", action="store_true")
+    list_cases = commands.add_parser("list", help="List case_id values and exact join commands, open cases first")
+    list_cases.add_argument("--json", action="store_true", help="Full case records with case_id and join_command for agents and scripts")
     show = commands.add_parser("show", help="Show case and review state")
     show.add_argument("case_id")
     handoff_case = commands.add_parser("handoff", help="Render the current case context for its developer")
@@ -288,6 +293,77 @@ def _case(install_root: Path, eng_dir: Path, key: str, case_id: str) -> dict:
     if not isinstance(result, dict):
         raise SystemExit("remediation API returned an invalid case")
     return result
+
+
+def _case_summaries(install_root: Path, eng_dir: Path, key: str) -> list[dict]:
+    result = _api(install_root, eng_dir, key, "GET", "/cases")
+    if not isinstance(result, list) or any(
+        not isinstance(case, dict) or type(case.get("id")) is not int or case["id"] <= 0 for case in result
+    ):
+        raise SystemExit("remediation API returned invalid case identities")
+    if len({case["id"] for case in result}) != len(result):
+        raise SystemExit("remediation API returned duplicate case identities")
+    recent = sorted(result, key=lambda case: (case.get("updated_at") or case.get("created_at") or "", case["id"]), reverse=True)
+    return sorted(recent, key=lambda case: case.get("status") == "closed")
+
+
+def _case_summary_line(case: dict) -> str:
+    source = f"{case.get('source_type', '')}:{case.get('source_key', '')}"
+    return (f"case_id={case['id']} status={json.dumps(case.get('status'))} "
+            f"source={json.dumps(source, ensure_ascii=False)} title={json.dumps(case.get('title'), ensure_ascii=False)} "
+            f"updated_at={json.dumps(case.get('updated_at'))}")
+
+
+def _select_case(cases: list[dict]) -> dict:
+    if not cases:
+        raise SystemExit("No remediation cases in this project; use start to open a conversation and supply a report")
+    print("Choose a remediation case (open cases first, most recently updated first):", file=sys.stderr)
+    if shutil.which("fzf"):
+        lines = [f"{case['id']}\t{_case_summary_line(case)}" for case in cases]
+        result = subprocess.run(
+            ["fzf", "--delimiter", "\t", "--with-nth", "2", "--prompt", "Remediation case> "],
+            input="\n".join(lines), text=True, capture_output=True, check=False,
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            raise SystemExit("Remediation case selection cancelled")
+        identifier = result.stdout.split("\t", 1)[0].strip()
+        selected = next((case for case in cases if str(case["id"]) == identifier), None)
+        if selected is None:
+            raise SystemExit("Invalid remediation case selection")
+        return selected
+    for index, case in enumerate(cases, start=1):
+        print(f"{index}. {_case_summary_line(case)}", file=sys.stderr)
+    print("Row number> ", end="", file=sys.stderr, flush=True)
+    try:
+        choice = input().strip()
+    except (EOFError, KeyboardInterrupt) as exc:
+        raise SystemExit("Remediation case selection cancelled") from exc
+    if not choice.isdigit() or not 1 <= int(choice) <= len(cases):
+        raise SystemExit("Invalid remediation case selection")
+    return cases[int(choice) - 1]
+
+
+def _case_command(install_root: Path, key: str, command: str, case_id: int | None = None) -> str:
+    argv = ["vigil", "--root", str(install_root), "remediation", "-k", key, command]
+    if case_id is not None:
+        argv.append(str(case_id))
+    return shlex.join(argv)
+
+
+def _print_case_list(install_root: Path, key: str, cases: list[dict], *, as_json: bool) -> None:
+    if as_json:
+        records = [{**case, "case_id": case["id"], "engagement_key": key,
+                    "join_command": _case_command(install_root, key, "join", case["id"])} for case in cases]
+        print(json.dumps(records, indent=2, sort_keys=True))
+        return
+    print(f"Remediation project: {json.dumps(key, ensure_ascii=False)}")
+    print(f"start: {_case_command(install_root, key, 'start')}  (new repository conversation)")
+    print(f"join: {_case_command(install_root, key, 'join')} <case_id>  (recorded case conversation)")
+    if not cases:
+        print("No remediation cases in this project. Use start to supply a report.")
+    for case in cases:
+        print(f"\n{_case_summary_line(case)}")
+        print(f"  join: {_case_command(install_root, key, 'join', case['id'])}")
 
 
 def _revision(path: Path) -> str:
@@ -739,20 +815,36 @@ def _register_intake_files(
         })
 
 
+def _remediation_projects(install_root: Path) -> list[EngagementRow]:
+    candidates = []
+    for row in list_engagements(install_root):
+        try:
+            if json.loads((row.path / "scope.json").read_text(encoding="utf-8")).get("engagement_type") == "remediation":
+                candidates.append(row)
+        except (OSError, ValueError):
+            continue
+    return candidates
+
+
+def _select_project(projects: list[EngagementRow]) -> str:
+    from .engagements import _select_engagement
+
+    if not projects:
+        raise SystemExit("No remediation projects found; create one with vigil engagement create --type remediation")
+    print("Choose a remediation project:", file=sys.stderr)
+    return _select_engagement(projects).key
+
+
 def _engagement_key(args: argparse.Namespace, install_root: Path) -> str:
     if args.engagement_key:
         return args.engagement_key
     if os.environ.get("ENGAGEMENT_KEY"):
         return os.environ["ENGAGEMENT_KEY"]
-    candidates = []
-    for scope_file in engagements_root(install_root).glob("*/scope.json"):
-        try:
-            if json.loads(scope_file.read_text(encoding="utf-8")).get("engagement_type") == "remediation":
-                candidates.append(scope_file.parent.name)
-        except (OSError, ValueError):
-            continue
+    candidates = _remediation_projects(install_root)
     if len(candidates) == 1:
-        return candidates[0]
+        return candidates[0].key
+    if args.remediation_command == "start" and sys.stdin.isatty():
+        return _select_project(candidates)
     raise SystemExit("select a remediation engagement with -k; create one first if none exists")
 
 
@@ -994,7 +1086,14 @@ def _record_publication(install_root: Path, engagement: Path, key: str, case: di
 
 
 def run_remediation(args: argparse.Namespace, install_root: Path) -> None:
-    key = _engagement_key(args, install_root)
+    cmd = args.remediation_command
+    choose_case = cmd == "join" and not getattr(args, "case_id", None)
+    if choose_case:
+        if not sys.stdin.isatty():
+            raise SystemExit("Interactive join needs a terminal; supply -k <project> join <case_id>, or use list --json to find case_id")
+        key = args.engagement_key or _select_project(_remediation_projects(install_root))
+    else:
+        key = _engagement_key(args, install_root)
     args.engagement_key = key
     eng_dir, config = _project(install_root, key)
     backend = restart_manifest.backend_state(install_root, engagement_dir=eng_dir)
@@ -1009,7 +1108,8 @@ def run_remediation(args: argparse.Namespace, install_root: Path) -> None:
             f"Warning: backend restart required: {backend.detail}; {remedy}",
             file=sys.stderr,
         )
-    cmd = args.remediation_command
+    if choose_case:
+        args.case_id = str(_select_case(_case_summaries(install_root, eng_dir, key))["id"])
     if cmd in {"start", "route", "session", "join"}:
         if cmd in {"session", "join"}:
             config = _case_config(_case(install_root, eng_dir, key, args.case_id), config)
@@ -1069,7 +1169,8 @@ def run_remediation(args: argparse.Namespace, install_root: Path) -> None:
                 f"Retry import with --resume-case-id {result['id']} and the same files."
             ) from exc
     elif cmd == "list":
-        result = _api(install_root, eng_dir, key, "GET", "/cases")
+        _print_case_list(install_root, key, _case_summaries(install_root, eng_dir, key), as_json=getattr(args, "json", False))
+        return
     elif cmd == "show":
         result = _case(install_root, eng_dir, key, case_id)
     elif cmd == "handoff":

@@ -14,7 +14,7 @@ def test_remediation_reports_backend_drift_without_polluting_json(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], state: str,
 ) -> None:
     monkeypatch.setattr(remediation, "_project", lambda *_: (tmp_path, {}))
-    monkeypatch.setattr(remediation, "_api", lambda *_: {"cases": []})
+    monkeypatch.setattr(remediation, "_api", lambda *_: [])
     monkeypatch.setattr(restart_manifest, "backend_state", lambda *a, **kw: restart_manifest.ConsumerState(
         key="backend", label="orchestrator backend", state=state,
         remedy="vigil orchestrator restart" if state == "stale" else "",
@@ -23,7 +23,7 @@ def test_remediation_reports_backend_drift_without_polluting_json(
     args = argparse.Namespace(engagement_key="acme", remediation_command="list", json=True)
     remediation.run_remediation(args, tmp_path)
     captured = capsys.readouterr()
-    assert json.loads(captured.out) == {"cases": []}
+    assert json.loads(captured.out) == []
     if state == "stale":
         assert "backend restart required" in captured.err
         assert "app/services/remediation.py" in captured.err
@@ -35,7 +35,7 @@ def test_remediation_reports_backend_drift_without_polluting_json(
 @pytest.mark.parametrize("endpoint", ["http://127.0.0.1:18000", "https://backend.example.com"])
 def test_restart_warning_targets_backend_owner(tmp_path, monkeypatch, capsys, endpoint):
     monkeypatch.setattr(remediation, "_project", lambda *_: (tmp_path, {}))
-    monkeypatch.setattr(remediation, "_api", lambda *_: {"cases": []})
+    monkeypatch.setattr(remediation, "_api", lambda *_: [])
     monkeypatch.setattr(remediation, "resolve_orchestrator_base_url", lambda *_: endpoint)
     monkeypatch.setattr(restart_manifest, "backend_state", lambda *a, **kw: restart_manifest.ConsumerState(
         key="backend", label="orchestrator backend", state="stale",
@@ -43,7 +43,7 @@ def test_restart_warning_targets_backend_owner(tmp_path, monkeypatch, capsys, en
     ))
     remediation.run_remediation(argparse.Namespace(engagement_key="acme", remediation_command="list", json=True), tmp_path)
     captured = capsys.readouterr()
-    assert json.loads(captured.out) == {"cases": []}
+    assert json.loads(captured.out) == []
     if endpoint.startswith("https"):
         assert endpoint in captured.err and "owning host" in captured.err
     else:

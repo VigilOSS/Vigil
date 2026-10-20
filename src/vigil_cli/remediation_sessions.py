@@ -21,9 +21,11 @@ _TICKET = re.compile(r"[A-Za-z][A-Za-z0-9_]*-\d+")
 
 
 def register_session_parsers(commands: argparse._SubParsersAction) -> None:
-    start = commands.add_parser("start", help="Open repository context for /vigil-remediate")
+    start = commands.add_parser("start", help="Start a new remediation conversation in the project repository")
     start.add_argument("--client", choices=("claude", "opencode", "zcode"), default="claude")
     start.add_argument("--session-id", help="Recover and attach an existing Vigil launch without starting another")
+    join = commands.add_parser("join", help="Rejoin a recorded case conversation; omit case_id to choose interactively")
+    join.add_argument("case_id", nargs="?", help="Numeric case_id from remediation list; omitted: pick a project and case")
     route = commands.add_parser("route", help="Resolve input references and choose remediation role context")
     route.add_argument("--client", choices=("claude", "opencode", "zcode"), default="claude")
     route.add_argument("references", nargs="+")
@@ -33,8 +35,6 @@ def register_session_parsers(commands: argparse._SubParsersAction) -> None:
     session.add_argument("--session-id", help="Native conversation UUID required with --bind")
     session.add_argument("--replace-stopped", action="store_true",
                          help="With --bind, take over a case whose recorded conversation has stopped")
-    join = commands.add_parser("join", help="Attach to the exact recorded case developer conversation")
-    join.add_argument("case_id")
 
 
 def normalize_references(references: list[str]) -> list[dict]:

@@ -8,6 +8,8 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import pty
+import select
 import shlex
 import shutil
 import socket
@@ -55,6 +57,7 @@ def test_regression_review_rewrite_and_backend_drift(tmp_path, vcs):
         VIGIL_INSTALL_DIR=str(workspace), VIGIL_APPLICATION_DIR=str(application),
         VIGIL_DATA_DIR=str(workspace / "state"), VIGIL_ENGAGEMENTS_DIR=str(workspace / "engagements"),
         VIGIL_CONFIG=str(tmp_path / "config.json"), VIGIL_BACKUP_DISABLED="1",
+        VIGIL_APPLICATION_CACHE=str(tmp_path / "application-cache"),
         PYTHONDONTWRITEBYTECODE="1", ORCHESTRATOR_BASE_URL=base_url,
         PYTHONPATH=os.pathsep.join(str(application / relative) for relative in
                                   ("src", "agent/scripts", "orchestrator/backend")),
@@ -137,14 +140,83 @@ def test_regression_review_rewrite_and_backend_drift(tmp_path, vcs):
             process.terminate()
             process.wait(timeout=10)
 
+    def terminal_join(case_id, source):
+        # Exercise both real terminal pickers and the complete binding/attachment
+        # path, with a local native-client fixture instead of a model session.
+        binary_dir = tmp_path / "native-client-bin"
+        binary_dir.mkdir()
+        for executable in ("git", "jj", "python3"):
+            target = sys.executable if executable == "python3" else shutil.which(executable)
+            if target:
+                (binary_dir / executable).symlink_to(target)
+        native_id = "11111111-1111-4111-8111-111111111111"
+        job_id = "acme-remediation-job"
+        binding = {"case_id": case_id, "engagement_key": engagement.name, "workspace": str(source),
+                   "session_cwd": str(repository), "session_id": native_id, "job_id": job_id, "settings": {}}
+        (engagement / "remediation/cases" / case_id / "session.json").write_text(json.dumps(binding))
+        inventory = [{"id": job_id, "sessionId": native_id, "cwd": str(repository),
+                      "kind": "background", "state": "blocked"}]
+        receipt = tmp_path / "attached.json"
+        native = binary_dir / "claude"
+        native.write_text(
+            '#!/usr/bin/env python3\nimport json, sys\nfrom pathlib import Path\n'
+            'args = sys.argv[1:]\n'
+            'if args == ["--version"]: print("2.1.296 (Claude Code)")\n'
+            'elif args == ["--help"]: print("--bg\\n  agents [options]\\n  attach <id>")\n'
+            f'elif args == ["agents", "--json", "--all"]: print({json.dumps(inventory)!r})\n'
+            f'elif args == ["attach", {job_id!r}]: Path({str(receipt)!r}).write_text(json.dumps(args))\n'
+            'else: raise SystemExit("Unexpected native client command: " + repr(args))\n'
+        )
+        native.chmod(0o700)
+        master, slave = pty.openpty()
+        process = subprocess.Popen(
+            [sys.executable, "-c", "from vigil_cli.main import main; main()", "--root", str(workspace), "remediation", "join"],
+            cwd=repository, env={**environment, "PATH": str(binary_dir)}, stdin=slave, stdout=slave, stderr=slave,
+        )
+        processes.append(process)
+        os.close(slave)
+        output = bytearray()
+        try:
+            os.write(master, b"1\n1\n")
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline:
+                readable, _, _ = select.select([master], [], [], 0.1)
+                if readable:
+                    try:
+                        chunk = os.read(master, 65536)
+                    except OSError:
+                        break
+                    if not chunk:
+                        break
+                    output.extend(chunk)
+                elif process.poll() is not None:
+                    break
+            assert process.wait(timeout=5) == 0, output.decode(errors="replace")
+        finally:
+            os.close(master)
+            if process.poll() is None:
+                process.terminate()
+                process.wait(timeout=10)
+        assert json.loads(receipt.read_text()) == ["attach", job_id]
+        assert f"case_id={case_id}" in output.decode()
+
     try:
         backend = start_backend()
+        earlier = tmp_path / "earlier-report.json"
+        earlier.write_text(json.dumps({"original_report": "Acme independent earlier report"}))
+        cli("import", "--source", "manual", "--source-key", "ACME-0", "--title", "Acme earlier case",
+            "--snapshot-file", str(earlier))
         snapshot = tmp_path / "report.json"
         snapshot.write_text(json.dumps({"original_report": "Acme cross-account write", "suggested_remediation": "Check the owner"}))
         identifier = str(cli("import", "--source", "manual", "--source-key", "ACME-1", "--title", "Acme account boundary",
                              "--snapshot-file", str(snapshot))["id"])
         case = cli("worktree", identifier, "--branch", "fix/ACME-1")
         source = Path(case["worktree_path"])
+        listed = cli("list", "--json")
+        assert int(identifier) > 1  # Case identity differs from the picker's row number.
+        assert listed[0]["case_id"] == int(identifier)
+        assert shlex.split(listed[0]["join_command"])[-2:] == ["join", identifier]
+        terminal_join(identifier, source)
         (source / "accounts.py").write_text("def allowed(actor, owner):\n    return actor == owner\n")
         (source / "test_accounts.py").write_text(
             'from accounts import allowed\nassert not allowed("guest", "owner"), "cross-account write"\n'
@@ -204,7 +276,7 @@ def test_regression_review_rewrite_and_backend_drift(tmp_path, vcs):
         changed_module.write_text(changed_module.read_text() + "\n# Acme E2E input change.\n")
         assert api("GET", "/readyz")["backend_runtime"]["restart_required"]
         warning = subprocess.run([sys.executable, "-c", "from vigil_cli.main import main; main()", "--root", str(workspace),
-                                  "remediation", "-k", engagement.name, "list"], env=environment,
+                                  "remediation", "-k", engagement.name, "list", "--json"], env=environment,
                                  capture_output=True, text=True, timeout=30)
         assert warning.returncode == 0 and json.loads(warning.stdout)
         assert "backend restart required" in warning.stderr and base_url in warning.stderr
