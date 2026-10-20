@@ -26,7 +26,7 @@ from .paths import resolve_orchestrator_base_url
 from .remediation_vcs import adapter as _vcs
 from .remediation_browser import execute as _execute_browse
 from .project_config import project_module
-from .remediation_sessions import register_session_parsers, run_session_command
+from .remediation_sessions import register_session_parsers, run_session_command, select_conversation_action
 
 
 def register_remediation_parser(sub: argparse._SubParsersAction) -> None:
@@ -34,7 +34,8 @@ def register_remediation_parser(sub: argparse._SubParsersAction) -> None:
         "remediation", help="Start remediation work or rejoin an existing case",
         description="Start a new repository conversation with start, or resume a recorded case with join. "
                     "Use list to find numeric case_id values and exact join commands. "
-                    "Without a case_id, join lets you choose a remediation project and case interactively.",
+                    "Without a case_id, join lets you choose a project, case, and resume or fresh conversation. "
+                    "Use join <case_id> --fresh to start fresh within an existing case.",
     )
     parser.add_argument("--engagement-key", "-k", help="Remediation project key; skips the interactive project picker")
     commands = parser.add_subparsers(dest="remediation_command", required=True)
@@ -1271,6 +1272,8 @@ def _run_remediation(args: argparse.Namespace, install_root: Path) -> None:
         )
     if choose_case:
         args.case_id = str(_select_case(_case_summaries(install_root, eng_dir, key))["id"])
+        if not args.fresh:
+            args.fresh = select_conversation_action()
     elif cmd == "join" and getattr(args, "case_id", None):
         args.case_id = _resolve_case_id(install_root, eng_dir, key, args.case_id)
     if cmd in {"start", "route", "session", "join"}:

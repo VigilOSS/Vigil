@@ -36,7 +36,7 @@ def test_regression_review_rewrite_and_backend_drift(tmp_path, vcs):
         pytest.skip("requires jj for the JJ workspace scenario")
 
     application = tmp_path / "vigil-application"
-    for relative in ("src/vigil_cli", "agent/scripts/assess", "agent/schemas",
+    for relative in ("src/vigil_cli", "agent/scripts/assess", "agent/schemas", "agent/.claude/commands",
                      "orchestrator/backend/app", "orchestrator/frontend/dist"):
         shutil.copytree(REPO / relative, application / relative,
                         ignore=shutil.ignore_patterns("__pycache__", ".pytest_cache"))
@@ -130,11 +130,15 @@ def test_regression_review_rewrite_and_backend_drift(tmp_path, vcs):
         processes.append(process)
         deadline = time.monotonic() + 15
         receipt = profile / "DevToolsActivePort"
-        while not receipt.exists() and time.monotonic() < deadline:
+        endpoint_lines = []
+        while time.monotonic() < deadline:
             assert process.poll() is None
+            endpoint_lines = receipt.read_text().splitlines() if receipt.exists() else []
+            if len(endpoint_lines) >= 2 and endpoint_lines[0].isdigit():
+                break
             time.sleep(0.1)
-        assert receipt.exists(), "Chrome did not publish its isolated debugging endpoint"
-        debug_url = "http://127.0.0.1:" + receipt.read_text().splitlines()[0]
+        assert len(endpoint_lines) >= 2, "Chrome did not publish its isolated debugging endpoint"
+        debug_url = "http://127.0.0.1:" + endpoint_lines[0]
         request = urllib.request.Request(debug_url + "/json/new?about:blank", method="PUT")
         with urllib.request.urlopen(request, timeout=10) as response:
             target = json.load(response)
@@ -163,52 +167,94 @@ def test_regression_review_rewrite_and_backend_drift(tmp_path, vcs):
         inventory = [{"id": job_id, "sessionId": native_id, "cwd": str(repository),
                       "kind": "background", "state": "blocked"}]
         receipt = tmp_path / "attached.json"
+        inventory_file = tmp_path / "native-inventory.json"
+        inventory_file.write_text(json.dumps(inventory))
+        launch_receipt = tmp_path / "native-launch.json"
         native = binary_dir / "claude"
         native.write_text(
             '#!/usr/bin/env python3\nimport json, sys, time\nfrom pathlib import Path\n'
+            f'inventory = Path({str(inventory_file)!r})\n'
+            f'receipt = Path({str(receipt)!r})\n'
             'args = sys.argv[1:]\n'
             'if args == ["--version"]: print("2.1.296 (Claude Code)")\n'
             'elif args == ["--help"]: time.sleep(0.15); print("--bg\\n  agents [options]\\n  attach <id>")\n'
-            f'elif args == ["agents", "--json", "--all"]: time.sleep(0.2); print({json.dumps(inventory)!r})\n'
-            f'elif args == ["attach", {job_id!r}]: Path({str(receipt)!r}).write_text(json.dumps(args)); print("ATTACH_READY", flush=True); time.sleep(0.2)\n'
+            'elif args == ["agents", "--json", "--all"]: time.sleep(0.2); print(inventory.read_text())\n'
+            'elif args[0] == "stop":\n'
+            '    rows = json.loads(inventory.read_text())\n'
+            '    row = next(row for row in rows if row["id"] == args[1])\n'
+            '    row["state"] = "stopped"\n'
+            '    inventory.write_text(json.dumps(rows))\n'
+            'elif "--bg" in args:\n'
+            '    rows = json.loads(inventory.read_text())\n'
+            '    identity = args[args.index("--session-id") + 1]\n'
+            '    rows.append({"id": "acme-fresh-job", "sessionId": identity, '
+            f'"cwd": {str(repository)!r}, "name": args[args.index("--name") + 1], '
+            '"kind": "background", "state": "blocked"})\n'
+            '    inventory.write_text(json.dumps(rows))\n'
+            f'    Path({str(launch_receipt)!r}).write_text(json.dumps(args))\n'
+            'elif args[0] == "attach":\n'
+            '    receipt.write_text(json.dumps(args))\n'
+            '    print("ATTACH_READY", flush=True); time.sleep(0.2)\n'
             'else: raise SystemExit("Unexpected native client command: " + repr(args))\n'
         )
         native.chmod(0o700)
-        master, slave = pty.openpty()
-        process = subprocess.Popen(
-            [sys.executable, "-c", "from vigil_cli.main import main; main()", "--root", str(workspace), "remediation", "join"],
-            cwd=repository, env={**environment, "PATH": str(binary_dir), "TERM": "xterm-256color", "COLUMNS": "80", "NO_COLOR": "1"},
-            stdin=slave, stdout=slave, stderr=slave,
-        )
-        processes.append(process)
-        os.close(slave)
-        output = bytearray()
-        try:
-            os.write(master, b"1\n1\n")
-            deadline = time.monotonic() + 30
-            while time.monotonic() < deadline:
-                readable, _, _ = select.select([master], [], [], 0.1)
-                if readable:
-                    try:
-                        chunk = os.read(master, 65536)
-                    except OSError:
+
+        def attach(arguments, answers):
+            master, slave = pty.openpty()
+            process = subprocess.Popen(
+                [sys.executable, "-c", "from vigil_cli.main import main; main()", "--root", str(workspace),
+                 "remediation", *arguments],
+                cwd=repository, env={**environment, "PATH": str(binary_dir), "TERM": "xterm-256color",
+                                     "COLUMNS": "80", "NO_COLOR": "1"},
+                stdin=slave, stdout=slave, stderr=slave,
+            )
+            processes.append(process)
+            os.close(slave)
+            output = bytearray()
+            try:
+                if answers:
+                    os.write(master, answers)
+                deadline = time.monotonic() + 30
+                while time.monotonic() < deadline:
+                    readable, _, _ = select.select([master], [], [], 0.1)
+                    if readable:
+                        try:
+                            chunk = os.read(master, 65536)
+                        except OSError:
+                            break
+                        if not chunk:
+                            break
+                        output.extend(chunk)
+                    elif process.poll() is not None:
                         break
-                    if not chunk:
-                        break
-                    output.extend(chunk)
-                elif process.poll() is not None:
-                    break
-            assert process.wait(timeout=5) == 0, output.decode(errors="replace")
-        finally:
-            os.close(master)
-            if process.poll() is None:
-                process.terminate()
-                process.wait(timeout=10)
+                assert process.wait(timeout=5) == 0, output.decode(errors="replace")
+            finally:
+                os.close(master)
+                if process.poll() is None:
+                    process.terminate()
+                    process.wait(timeout=10)
+            assert b"Checking Claude" in output and b"Finding the recorded conversation" in output
+            assert output.index(b"Opening Claude") < output.index(b"ATTACH_READY")
+            assert output.split(b"ATTACH_READY", 1)[1].strip() == b""
+            return output
+
+        output = attach(["join"], b"1\n1\n1\n")
         assert json.loads(receipt.read_text()) == ["attach", job_id]
         assert f"#{case_id}" in output.decode()
-        assert b"Checking Claude" in output and b"Finding the recorded conversation" in output
-        assert output.index(b"Opening Claude") < output.index(b"ATTACH_READY")
-        assert output.split(b"ATTACH_READY", 1)[1].strip() == b""
+        before = api("GET", f"/engagements/{engagement.name}/remediation/cases/{case_id}")
+        attach(["join"], b"1\n1\n2\ny\n")
+        assert json.loads(receipt.read_text()) == ["attach", "acme-fresh-job"]
+        updated = json.loads((engagement / "remediation/cases" / case_id / "session.json").read_text())
+        assert updated["session_id"] != native_id
+        assert updated["replaced_session_id"] == native_id
+        launch = json.loads(launch_receipt.read_text())
+        assert str(engagement / "remediation/cases" / case_id / "handoff.md") in launch[-1]
+        assert str(source) in launch[-1]
+        after = api("GET", f"/engagements/{engagement.name}/remediation/cases/{case_id}")
+        assert before == after
+        attach(["-k", engagement.name, "join", case_id], b"")
+        assert json.loads(receipt.read_text()) == ["attach", "acme-fresh-job"]
+        assert len(json.loads(inventory_file.read_text())) == 2
 
     try:
         backend = start_backend()

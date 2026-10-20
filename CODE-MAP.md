@@ -248,6 +248,7 @@ A prompt change is **not** prompt-only when the prompt defines an artifact the b
   External-reference joins resolve once to numeric case identity; identity/finalization/publication share a case lock. `finalize-branch` retains retry intent across local VCS and backend registration.
 - `src/vigil_cli/remediation_regression.py` — paired red/green commands and output receipts; `agent/scripts/assess/lib/remediation_regression.py` owns disposable Git/JJ source; `orchestrator/backend/app/services/remediation_regression.py` validates scratch provenance.
 - `src/vigil_cli/remediation_sessions.py` owns role routing and Claude native binding/attachment; launch receipts correlate job names with host UUIDs, and `start --session-id` recovers without redispatch.
+  `join --fresh` replaces the case conversation under its session lock, preserving binding history and requiring consent before stopping a running worker.
 - `src/vigil_cli/remediation_clients.py` owns OpenCode repository launch and ZCode's context-bound plugin preparation/workspace opening, without native conversation receipts. `agent/.zcode/hooks/` restores defensive case context.
 - `agent/scripts/assess/lib/remediation_project.py` and `remediation_vcs.py` — shared PROJECT.md parsing and Git/JJ identity, workspace, diff, and push contracts; CLI import bridges are `project_config.py` and `remediation_vcs.py`.
   `remediation_vcs.py:tree_id` owns complete code-tree identity; backend evidence records it at intake.

@@ -46,6 +46,7 @@ def navigation(tmp_path, monkeypatch):
     monkeypatch.setattr(remediation, "_case", lambda *a: {"id": a[-1]})
     monkeypatch.setattr(restart_manifest, "backend_state", lambda *a, **kw: restart_manifest.ConsumerState(
         "backend", "backend", "current", "", ""))
+    monkeypatch.setattr(remediation, "select_conversation_action", lambda: False)
     monkeypatch.setattr(remediation, "run_session_command", lambda args, *a, **kw: calls.append(
         (args.remediation_command, args.engagement_key, getattr(args, "case_id", None))) or 0)
     monkeypatch.setattr(remediation.sys.stdin, "isatty", lambda: True)
@@ -409,3 +410,20 @@ def test_join_uses_one_authoritative_case_snapshot(navigation, monkeypatch):
     remediation.run_remediation(arguments("-k", "acme-old", "join", "27"), navigation.root)
     assert reads == ["27"]
     assert rendered == [case]
+
+
+@pytest.mark.parametrize("fresh", [False, True])
+def test_case_picker_passes_conversation_action(navigation, monkeypatch, fresh):
+    monkeypatch.setattr(remediation, "select_conversation_action", lambda: fresh)
+    selections = []
+    monkeypatch.setattr(remediation, "run_session_command", lambda args, *a, **kw: selections.append(args.fresh) or 0)
+    remediation.run_remediation(arguments("-k", "acme-old", "join"), navigation.root)
+    assert selections == [fresh]
+
+
+def test_fresh_flag_skips_only_conversation_action_picker(navigation, monkeypatch):
+    monkeypatch.setattr(remediation, "select_conversation_action", lambda: pytest.fail("fresh already selected"))
+    selections = []
+    monkeypatch.setattr(remediation, "run_session_command", lambda args, *a, **kw: selections.append((args.case_id, args.fresh)) or 0)
+    remediation.run_remediation(arguments("-k", "acme-old", "join", "--fresh"), navigation.root)
+    assert selections == [("27", True)]

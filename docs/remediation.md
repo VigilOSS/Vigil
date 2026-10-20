@@ -14,10 +14,12 @@ share one case when one fix covers them.
 
 - `vigil remediation start` opens a new conversation in the project repository. With no project
   selected, the terminal offers a project picker when several remediation projects are available.
-- `vigil remediation join` offers a remediation project picker, then a case picker. It attaches
-  to the selected case's recorded Claude conversation.
+- `vigil remediation join` offers project and case pickers, then a choice to resume the recorded
+  Claude conversation or start a fresh conversation for that case.
 - `vigil remediation -k <project-key> join` goes directly to that project's case picker.
-- `vigil remediation -k <project-key> join <case_id>` attaches directly, without prompting.
+- `vigil remediation -k <project-key> join <case_id>` resumes directly, without prompting.
+- Add `--fresh` to start a fresh conversation for the selected case. If its recorded conversation
+  is running, Vigil asks before stopping it; stopping requires an interactive terminal.
 
 Find the numeric `case_id` and an exact join command with:
 
@@ -34,7 +36,9 @@ preview beside the list, or below it in a narrow window. Without `fzf`, a number
 same selection. Use the same `--root` and `-k` options when changing from `list` to `start` or `join`.
 `list --json` retains every case summary field and adds explicit `case_id`, `engagement_key`, and
 `join_command` fields for agents and scripts. ID-less `join` requires a terminal; scripts supply
-the project key and case ID. Joining requires a recorded Claude conversation; use `start` for new work.
+the project key and case ID. A fresh conversation reads the current case handoff and keeps the same
+workspace, evidence, approvals, and environment leases. Future joins open the new conversation;
+the previous transcript remains in Claude's history. Use `start` for new project work.
 During join preparation, a terminal spinner shows case loading, workspace checks, and conversation
 lookup, then ends before Claude takes over the terminal. Claude queries and case-session lock waits
 time out after 30 seconds with retry guidance. The attachment itself continues for the conversation's
@@ -220,8 +224,9 @@ own. A profile can require a linked development ticket before publishing; Vigil 
 Launching and attaching need Claude Code 2.1.257 or newer. `start` runs the conversation in the
 background and attaches you to it, so you can always rejoin the same conversation. Ctrl-D detaches
 without stopping it; reopening it from the agents view reattaches the same conversation with its
-original settings. To pick up changed profile settings, stop it with `claude stop <id>` and run
-`start` again. If startup exits before attaching, look in `claude agents --json --all` and the
+original settings. For an existing case, use `join <case_id> --fresh` to start with current launch settings and
+the case's captured policy. For an unbound project conversation, stop it with `claude stop <id>`
+and run `start` again. If startup exits before attaching, look in `claude agents --json --all` and the
 engagement's `remediation/sessions/` receipts, then recover the recorded launch by its receipt UUID;
 this never starts another conversation:
 
@@ -233,16 +238,15 @@ Claude Code's own background worktree isolation is turned off for these sessions
 already has its own workspace. For an existing case:
 
 ```bash
-vigil remediation -k <engagement-key> session <case-id>
 vigil remediation -k <engagement-key> join <case-id>
+vigil remediation -k <engagement-key> join <case-id> --fresh
 ```
 
-`session` launches a worker only when no binding exists. For one case, the agent binds its existing
-UUID with `session --bind --session-id <uuid>`. `join` attaches to the recorded conversation; missing
-or mismatched identities require recovery rather than replacement. When the recorded conversation has
-stopped, `session --bind --session-id <uuid> --replace-stopped` binds the new one and keeps the old
-UUID as `replaced_session_id`; a running conversation is never replaced. Native
-binding, hosted worker launch, and exact joining currently support Claude only.
+`join --fresh` refreshes the handoff and launches a new developer conversation. If launch or attachment
+is interrupted, use ordinary `join <case-id>` to recover the recorded launch before trying fresh again.
+Agents use `session` to launch an unbound worker or `session --bind --session-id <uuid>` to bind their
+existing conversation; `--replace-stopped` permits an explicitly agreed replacement. See
+`vigil remediation session --help` for binding options. Native binding and joining support Claude only.
 
 ### OpenCode and ZCode repository context
 

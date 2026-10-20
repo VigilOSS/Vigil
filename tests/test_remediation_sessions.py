@@ -104,7 +104,9 @@ def prepared(tmp_path, monkeypatch):
             return subprocess.CompletedProcess(argv, 0, json.dumps(rows), "")
         if "--bg" in argv:
             session_id = argv[argv.index("--session-id") + 1]
-            rows.append({"id": "job1", "sessionId": session_id, "cwd": str(repository), "kind": "background", "state": "blocked"})
+            rows.append({"id": f"job{sum('--bg' in call[0] for call in calls)}", "sessionId": session_id, "cwd": str(repository), "kind": "background", "state": "blocked"})
+        if argv[:2] == ["claude", "stop"]:
+            next(row for row in rows if row["id"] == argv[2])["state"] = "stopped"
         return subprocess.CompletedProcess(argv, 0, "", "")
 
     monkeypatch.setattr(sessions.subprocess, "run", native_run)
@@ -549,3 +551,182 @@ def test_source_arguments_never_become_shell_code(tmp_path, monkeypatch) -> None
     args = argparse.Namespace(remediation_command="route", references=[reference])
     sessions.run_session_command(args, tmp_path, tmp_path / "engagement", {"repository": "/acme"})
     assert sessions.normalize_references([reference])[0]["references"] == [reference]
+
+
+def test_fresh_join_preserves_case_and_archives_stopped_conversation(prepared):
+    run_case(prepared)
+    prepared.rows[0]["state"] = "stopped"
+    path = prepared.engagement / "remediation/cases/1/session.json"
+    previous = json.loads(path.read_text())
+    case_before = dict(prepared.case)
+    run_case(prepared, command="join", fresh=True)
+    binding = json.loads(path.read_text())
+    assert binding["session_id"] != previous["session_id"]
+    assert binding["replaced_session_id"] == previous["session_id"]
+    archived = path.parent / "session-history" / f"{previous['session_id']}.json"
+    assert json.loads(archived.read_text()) == previous
+    assert prepared.case == case_before
+    assert binding["workspace"] == str(prepared.workspace)
+    launch = [argv for argv, _ in prepared.calls if "--bg" in argv][-1]
+    assert str(path.parent / "handoff.md") in launch[-1]
+    assert prepared.calls[-1][0] == ["claude", "attach", "job2"]
+    run_case(prepared, command="join")
+    assert prepared.calls[-1][0] == ["claude", "attach", "job2"]
+
+
+def test_fresh_join_can_start_first_conversation(prepared):
+    run_case(prepared, command="join", fresh=True)
+    assert sum("--bg" in argv for argv, _ in prepared.calls) == 1
+    assert prepared.calls[-1][0] == ["claude", "attach", "job1"]
+
+
+@pytest.mark.parametrize("answer", ["n", "", "yes"])
+def test_fresh_join_running_requires_confirmation_and_verified_stop(prepared, monkeypatch, answer):
+    run_case(prepared)
+    monkeypatch.setattr(prepared.module.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda *_: answer)
+    path = prepared.engagement / "remediation/cases/1/session.json"
+    previous = path.read_bytes()
+    if answer != "yes":
+        with pytest.raises(SystemExit, match="cancelled"):
+            run_case(prepared, command="join", fresh=True)
+        assert path.read_bytes() == previous
+        assert sum("--bg" in argv for argv, _ in prepared.calls) == 1
+        assert not any(argv[:2] == ["claude", "stop"] for argv, _ in prepared.calls)
+    else:
+        run_case(prepared, command="join", fresh=True)
+        assert ["claude", "stop", "job1"] in [argv for argv, _ in prepared.calls]
+        assert prepared.rows[0]["state"] == "stopped"
+        assert prepared.calls[-1][0] == ["claude", "attach", "job2"]
+
+
+def test_fresh_running_join_fails_closed_without_terminal(prepared, monkeypatch):
+    run_case(prepared)
+    monkeypatch.setattr(prepared.module.sys.stdin, "isatty", lambda: False)
+    with pytest.raises(SystemExit, match="terminal"):
+        run_case(prepared, command="join", fresh=True)
+    assert sum("--bg" in argv for argv, _ in prepared.calls) == 1
+
+
+def test_fresh_retry_does_not_dispatch_duplicate_after_failed_launch(prepared, monkeypatch):
+    native = prepared.module.subprocess.run
+    def failed(argv, **kwargs):
+        if "--bg" in argv:
+            return subprocess.CompletedProcess(argv, 1, "", "failed")
+        return native(argv, **kwargs)
+    monkeypatch.setattr(prepared.module.subprocess, "run", failed)
+    with pytest.raises(SystemExit, match="binding retained"):
+        run_case(prepared, command="join", fresh=True)
+    with pytest.raises(SystemExit, match="pending"):
+        run_case(prepared, command="join", fresh=True)
+
+
+def test_fresh_join_refuses_branch_drift(prepared):
+    run_case(prepared)
+    prepared.rows[0]["state"] = "stopped"
+    prepared.case["worktree_branch"] = "unexpected"
+    with pytest.raises(SystemExit, match="branch"):
+        run_case(prepared, command="join", fresh=True)
+    assert sum("--bg" in argv for argv, _ in prepared.calls) == 1
+
+
+def test_fresh_join_rejects_historical_unresolved_launch(prepared):
+    path = prepared.engagement / "remediation/cases/1/session.json"
+    prepared.module._write_json(path, {
+        "case_id": "1", "engagement_key": "acme", "workspace": str(prepared.workspace),
+        "session_cwd": str(prepared.repository), "session_id": "638131c5-4bcd-4a2f-898b-ecb1a5489638",
+        "job_id": None, "settings": {},
+    })
+    with pytest.raises(SystemExit, match="pending"):
+        run_case(prepared, command="join", fresh=True)
+    assert not any("--bg" in argv for argv, _ in prepared.calls)
+
+
+def test_fresh_join_recovers_interrupted_dispatch_by_join_without_duplicate(prepared, monkeypatch):
+    native = prepared.module.subprocess.run
+    failed = False
+    def interrupted(argv, **kwargs):
+        nonlocal failed
+        if argv == ["claude", "agents", "--json", "--all"] and prepared.rows and not failed:
+            failed = True
+            raise subprocess.TimeoutExpired(argv, 30)
+        return native(argv, **kwargs)
+    monkeypatch.setattr(prepared.module.subprocess, "run", interrupted)
+    with pytest.raises(SystemExit, match="Timed out"):
+        run_case(prepared, command="join", fresh=True)
+    with pytest.raises(SystemExit, match="pending"):
+        run_case(prepared, command="join", fresh=True)
+    assert run_case(prepared, command="join") == 0
+    assert sum("--bg" in argv for argv, _ in prepared.calls) == 1
+    path = prepared.engagement / "remediation/cases/1/session.json"
+    assert not json.loads(path.read_text()).get("launch_pending")
+    assert prepared.calls[-1][0] == ["claude", "attach", "job1"]
+
+
+@pytest.mark.parametrize("failure", ["stop-error", "still-running", "identity-drift", "interactive"])
+def test_fresh_join_stops_safely_when_native_host_changes_or_fails(prepared, monkeypatch, failure):
+    run_case(prepared)
+    path = prepared.engagement / "remediation/cases/1/session.json"
+    original = path.read_bytes()
+    monkeypatch.setattr(prepared.module.sys.stdin, "isatty", lambda: True)
+    def confirm(*_):
+        if failure == "identity-drift":
+            prepared.rows[0]["sessionId"] = "638131c5-4bcd-4a2f-898b-ecb1a5489638"
+        if failure == "interactive":
+            prepared.rows[0].pop("id")
+        return "yes"
+    monkeypatch.setattr("builtins.input", confirm)
+    monkeypatch.setattr(prepared.module.time, "sleep", lambda _: None)
+    native = prepared.module.subprocess.run
+    def stop_fails(argv, **kwargs):
+        if argv[:2] == ["claude", "stop"]:
+            if failure == "stop-error":
+                raise subprocess.CalledProcessError(1, argv)
+            if failure == "still-running":
+                return subprocess.CompletedProcess(argv, 0, "", "")
+        return native(argv, **kwargs)
+    monkeypatch.setattr(prepared.module.subprocess, "run", stop_fails)
+    with pytest.raises(SystemExit):
+        run_case(prepared, command="join", fresh=True)
+    assert path.read_bytes() == original
+    assert sum("--bg" in argv for argv, _ in prepared.calls) == 1
+
+
+@pytest.mark.parametrize("choice, fresh", [("1", False), ("2", True)])
+def test_conversation_action_picker_without_fzf(prepared, monkeypatch, choice, fresh):
+    monkeypatch.setattr(prepared.module.shutil, "which", lambda _: None)
+    monkeypatch.setattr("builtins.input", lambda *_: choice)
+    assert prepared.module.select_conversation_action() is fresh
+
+
+@pytest.mark.parametrize("choice", ["", "0", "3", "fresh"])
+def test_conversation_action_picker_rejects_invalid_selection(prepared, monkeypatch, choice):
+    monkeypatch.setattr(prepared.module.shutil, "which", lambda _: None)
+    monkeypatch.setattr("builtins.input", lambda *_: choice)
+    with pytest.raises(SystemExit, match="selection"):
+        prepared.module.select_conversation_action()
+
+
+def test_conversation_action_fzf_picker_passes_exact_options(prepared, monkeypatch):
+    monkeypatch.setattr(prepared.module.shutil, "which", lambda _: "/usr/bin/fzf")
+    monkeypatch.setattr(prepared.module.sys.stdin, "isatty", lambda: True)
+    def choose(lines, details, **kwargs):
+        assert lines == ["1\tResume existing conversation", "2\tStart a fresh conversation"]
+        assert set(details) == {"1", "2"}
+        return 1
+    monkeypatch.setattr(prepared.module.term, "fuzzy_pick", choose)
+    assert prepared.module.select_conversation_action() is True
+
+
+@pytest.mark.parametrize("missing", ["handoff", "command"])
+def test_fresh_preflight_preserves_running_conversation_when_context_is_missing(prepared, missing):
+    run_case(prepared)
+    if missing == "handoff":
+        (prepared.engagement / "remediation/cases/1/handoff.md").unlink()
+    else:
+        (prepared.installation / "agent/.claude/commands/vigil-remediate.md").unlink()
+    with pytest.raises(SystemExit):
+        run_case(prepared, command="join", fresh=True)
+    assert prepared.rows[0]["state"] == "blocked"
+    assert not any(argv[:2] == ["claude", "stop"] for argv, _ in prepared.calls)
+    assert sum("--bg" in argv for argv, _ in prepared.calls) == 1
