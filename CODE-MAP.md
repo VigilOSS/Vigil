@@ -113,7 +113,7 @@ When you are about to copy one of these into a second file, stop and import.
   `.github/workflows/runtime-release.yml` supplies tag identity, native runners, registry
   authentication, and draft-release upload.
 - `src/vigil_cli/restart_manifest.py:consumer_states` owns what an install invalidated, per consumer.
-  Presenters consume its rows; do not derive freshness beside it. See: `docs/maintainer-guide.md` freshness section.
+  `backend_state` provides the backend-only verdict for remediation commands. Presenters consume its rows; do not derive freshness beside it. See: `docs/maintainer-guide.md` freshness section.
 - `src/vigil_cli/install_manifest.py` owns editable application input digests;
   `src/vigil_cli/install_fs.py` owns pinned/no-follow workspace and cache operations.
 - `src/vigil_cli/assessment_clients.py` owns immutable native-client workspace bindings,
@@ -243,9 +243,12 @@ A prompt change is **not** prompt-only when the prompt defines an artifact the b
 - `src/vigil_cli/paths.py:resolve_orchestrator_base_url` — backend URL precedence and dotenv normalization; `vigil config resolve orchestrator_base_url` exposes it to generated client launchers at session start.
 - `src/vigil_cli/preflight.py` owns launch checks shared with blue; managed-local backend recovery never replaces a configured remote endpoint. Static code startup does not query Docker.
 - `src/vigil_cli/remediation.py` — case intake/context rendering, configured workspace/checks, reviewed PR publication, and consented development workflow commands; `remediation_browser.py` owns local browser execution. Backend APIs own case state.
+- `src/vigil_cli/remediation_regression.py` — paired red/green commands and output receipts; `agent/scripts/assess/lib/remediation_regression.py` owns disposable Git/JJ source; `orchestrator/backend/app/services/remediation_regression.py` validates scratch provenance.
 - `src/vigil_cli/remediation_sessions.py` owns role routing and Claude native binding/attachment; launch receipts correlate job names with host UUIDs, and `start --session-id` recovers without redispatch.
 - `src/vigil_cli/remediation_clients.py` owns OpenCode repository launch and ZCode's context-bound plugin preparation/workspace opening, without native conversation receipts. `agent/.zcode/hooks/` restores defensive case context.
 - `agent/scripts/assess/lib/remediation_project.py` and `remediation_vcs.py` — shared PROJECT.md parsing and Git/JJ identity, workspace, diff, and push contracts; CLI import bridges are `project_config.py` and `remediation_vcs.py`.
+  `remediation_vcs.py:tree_id` owns complete code-tree identity; backend evidence records it at intake.
+  Local verification can carry across identical trees; approvals and served-runtime proof retain revision identity.
 - `src/vigil_cli/runtime.py` + `up.py` — one shared long-lived Kali container, reached host-side by `docker exec`. There is no in-container API server or MCP bridge.
   `up.py:run_up` owns startup JSON/service states; `service_locks.py` serializes shared starts. `agent/scripts/assess/lib/kali_runtime_exec.py` owns first-use managed execution startup.
 - `src/vigil_cli/runtime_images.py` owns immutable release pins and label validation; `.github/workflows/runtime-release.yml` embeds the published multi-platform pin in matched artifacts.
@@ -284,6 +287,7 @@ A prompt change is **not** prompt-only when the prompt defines an artifact the b
 - `orchestrator/backend/app/api/remediation.py` and `services/remediation.py` — case/source
   resolution, canonical finding links, captured review policy/base, typed verification, shared
   environment ownership/runtime identity, and approval/deployment gates; separate from assessment Findings.
+  `_details` owns evidence matches and PR/check projections; paged evidence/history reads preserve full review gates.
 
 ### Frontend and the rest
 

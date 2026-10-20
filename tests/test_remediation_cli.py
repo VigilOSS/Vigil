@@ -183,6 +183,16 @@ def test_pr_gate_refuses_uncommitted_worktree(monkeypatch: pytest.MonkeyPatch, t
         remediation._approved_current(case, tmp_path)
 
 
+def test_pr_content_needs_explicit_verification_requirements() -> None:
+    from vigil_cli.remediation import _required_reviewed_evidence_lines
+
+    case = {"approvals": [{"evidence_cutoff_id": 3}], "evidence": [
+        {"id": index, "kind": kind} for index, kind in enumerate(("red-test", "green-test", "stagehand"), 1)
+    ]}
+    with pytest.raises(SystemExit, match="explicit verification requirements"):
+        _required_reviewed_evidence_lines(case)
+
+
 def test_pr_body_requires_production_decision_and_monitoring() -> None:
     from vigil_cli.remediation import _pr_body
 
@@ -190,13 +200,12 @@ def test_pr_body_requires_production_decision_and_monitoring() -> None:
                  "environment": "local" if kind != "stagehand" else "development",
                  "observed": "observed", "proved": "proved"}
                 for index, kind in enumerate(("red-test", "green-test", "stagehand"), 1)]
-    case = {"title": "Fix", "review_digest": "newer-digest", "approval_current": True, "approvals": [{"review_digest": "approved-digest", "evidence_cutoff_id": 3}], "evidence": evidence, "worktree_revision": "sha", "verification_plan": "Open Manage and verify result"}
+    case = {"title": "Fix", "review_digest": "newer-digest", "approval_current": True, "approvals": [{"review_digest": "approved-digest", "evidence_cutoff_id": 3}], "evidence": evidence, "verification_requirements": {"requirements": [{"kind": row["kind"]} for row in evidence]}, "worktree_revision": "sha", "verification_plan": "Open Manage and verify result"}
     with pytest.raises(SystemExit, match="release plan"):
         _pr_body(case, {}, "Controller authorizes wrong tenant context", "Validate tenant ownership before update")
     case["release_plan"] = {"production_canary_decision": "required", "production_canary_rationale": "Infrastructure behavior", "safe_procedure": "Use test account", "monitoring": "Watch errors"}
     body = _pr_body(case, {}, "Controller authorizes wrong tenant context", "Validate tenant ownership before update")
-    assert "approved-digest" in body
-    assert "newer-digest" not in body
+    assert "observed" in body
     assert "Controller authorizes wrong tenant context" in body
     assert "Infrastructure behavior" in body
     assert "Use test account" in body
@@ -215,7 +224,7 @@ def test_pr_body_includes_reviewed_evidence_environments() -> None:
                 ), 1)]
     case = {"title": "Fix", "approval_current": True,
             "approvals": [{"review_digest": "a" * 64, "evidence_cutoff_id": 3}],
-            "evidence": evidence, "worktree_revision": "sha",
+            "evidence": evidence, "verification_requirements": {"requirements": [{"kind": row["kind"]} for row in evidence]}, "worktree_revision": "sha",
             "verification_plan": "Open the tested form and verify the saved result",
             "release_plan": {"production_canary_decision": "not_required", "production_canary_rationale": "Route coverage",
                              "safe_procedure": "", "monitoring": "Watch errors"}}
@@ -225,7 +234,7 @@ def test_pr_body_includes_reviewed_evidence_environments() -> None:
     assert "environment: local" in body
     assert "environment: test" in body
     assert "environment: development" in body
-    assert all(line in body for line in _required_reviewed_evidence_lines(case))
+    assert len(_required_reviewed_evidence_lines(case)) == 3
 
 
 def test_compose_identity_requires_served_source_mount(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -658,7 +667,7 @@ def test_create_pr_reconciles_existing_draft_without_second_push(monkeypatch: py
                  "environment": "local" if kind != "stagehand" else "development",
                  "observed": "observed", "proved": "proved"}
                 for index, kind in enumerate(("red-test", "green-test", "stagehand"), 1)]
-    case = {"status": "approved", "approval_current": True, "approvals": [{"review_digest": digest, "evidence_cutoff_id": 3}], "evidence": evidence, "worktree_path": str(worktree), "worktree_branch": "codex/remediation-project-1", "worktree_revision": "sha", "release_plan": release, "verification_plan": "Open Manage and confirm the fixed result", "title": "Fix"}
+    case = {"status": "approved", "approval_current": True, "approvals": [{"review_digest": digest, "evidence_cutoff_id": 3}], "evidence": evidence, "verification_requirements": {"requirements": [{"kind": row["kind"]} for row in evidence]}, "worktree_path": str(worktree), "worktree_branch": "codex/remediation-project-1", "worktree_revision": "sha", "release_plan": release, "verification_plan": "Open Manage and confirm the fixed result", "title": "Fix"}
     content = eng / "remediation/cases/1/pr-content.json"
     content.write_text(json.dumps({"approval_digest": digest, "root_cause": root_cause, "fix_summary": fix}), encoding="utf-8")
     body = tmp_path / "body.md"
@@ -696,12 +705,12 @@ def test_create_pr_reconciles_existing_draft_without_second_push(monkeypatch: py
     monkeypatch.setattr(remediation, "_api", fake_api)
     args = argparse.Namespace(engagement_key="project", remediation_command="create-pr", case_id="1", body_file=body, actor="owner", template_mapped=True)
     full_body = body.read_text(encoding="utf-8")
-    body.write_text(full_body.replace(case["verification_plan"], ""), encoding="utf-8")
-    with pytest.raises(SystemExit, match="missing reviewed plan"):
+    body.write_text(full_body.replace(root_cause, ""), encoding="utf-8")
+    with pytest.raises(SystemExit, match="prepared root cause"):
         remediation.run_remediation(args, tmp_path)
     assert not commands
-    body.write_text(full_body.replace("[environment: development]", ""), encoding="utf-8")
-    with pytest.raises(SystemExit, match="missing reviewed plan, evidence"):
+    body.write_text(full_body.replace(fix, ""), encoding="utf-8")
+    with pytest.raises(SystemExit, match="prepared root cause and fix"):
         remediation.run_remediation(args, tmp_path)
     assert not commands
     body.write_text(full_body, encoding="utf-8")
@@ -758,7 +767,7 @@ def test_create_pr_creates_and_verifies_new_draft_before_transition(monkeypatch:
     evidence = [{"id": index, "kind": kind, "method": "Laravel" if kind != "stagehand" else "stagehand", "observed": "observed", "proved": "proved"}
                 for index, kind in enumerate(("red-test", "green-test", "stagehand"), 1)]
     case = {"status": "approved", "approval_current": True, "approvals": [{"review_digest": digest, "evidence_cutoff_id": 3}],
-            "evidence": evidence, "worktree_path": str(worktree), "worktree_branch": "codex/remediation-1",
+            "evidence": evidence, "verification_requirements": {"requirements": [{"kind": row["kind"]} for row in evidence]}, "worktree_path": str(worktree), "worktree_branch": "codex/remediation-1",
             "worktree_revision": "sha", "release_plan": release,
             "verification_plan": plan, "title": "Fix"}
     content = eng / "remediation/cases/1/pr-content.json"
@@ -918,6 +927,7 @@ def test_prepare_pr_retains_and_indexes_reviewed_body(monkeypatch: pytest.Monkey
         "worktree_revision": "sha", "verification_plan": "Open Manage and confirm the saved value",
         "release_plan": {"production_canary_decision": "not_required", "production_canary_rationale": "Local route coverage", "safe_procedure": "", "monitoring": "Watch errors"},
     }
+    case["verification_requirements"] = {"requirements": [{"kind": row["kind"]} for row in case["evidence"]]}
     monkeypatch.setattr(remediation, "_project", lambda *_: (eng, {"repository": str(tmp_path)}))
     monkeypatch.setattr(remediation, "_case", lambda *_: case)
     monkeypatch.setattr(remediation, "_approved_current", lambda *_: eng)

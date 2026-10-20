@@ -11,13 +11,16 @@ import os
 import posixpath
 import re
 import shutil
+import shlex
 import subprocess
+import sys
 import uuid
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlsplit
 from urllib.request import Request, urlopen
 
+from . import restart_manifest
 from .engagements import resolve_engagement_path
 from .paths import engagements_root, resolve_orchestrator_base_url
 from .remediation_vcs import adapter as _vcs
@@ -60,6 +63,15 @@ def register_remediation_parser(sub: argparse._SubParsersAction) -> None:
     checks.add_argument("--actor", required=True)
     checks.add_argument("--name", action="append", default=[], help="Run a named check; repeatable, defaults to all")
     checks.add_argument("--shared-environment", help="Acquire exclusive use of the named shared test environment")
+    regression = commands.add_parser("test", help="Run a regression against reverted fix files, then the finished fix")
+    regression.add_argument("case_id")
+    regression.add_argument("--method", required=True)
+    regression.add_argument("--command", dest="test_command", required=True)
+    regression.add_argument("--expected-failure", required=True, help="Text identifying the expected failure in red output")
+    regression.add_argument("--fix-path", action="append", default=[], help="Changed fix file to restore to base; defaults to plan fix_paths")
+    regression.add_argument("--directory", default=".")
+    regression.add_argument("--setup-command", help="Prepare dependencies in both tested sources before the regression")
+    regression.add_argument("--timeout-seconds", type=int, default=600, help="Timeout for each setup/test command (default: 600)")
     environment = commands.add_parser("environment", help="Acquire or release shared test-environment ownership")
     environment.add_argument("action", choices=("acquire", "release"))
     environment.add_argument("case_id")
@@ -489,19 +501,13 @@ def _required_reviewed_evidence_lines(case: dict) -> list[str]:
     cutoff = int(approvals[-1].get("evidence_cutoff_id") or 0) if approvals else 0
     evidence = [row for row in case.get("evidence") or [] if isinstance(row, dict) and int(row.get("id") or 0) <= cutoff]
     plan = case.get("verification_requirements")
-    if plan:
-        requirements = plan.get("requirements", []) if isinstance(plan, dict) else plan
-        required = {row["kind"] for row in requirements}
-        if not required.issubset({row.get("kind") for row in evidence}):
-            raise SystemExit("reviewed case-specific verification evidence is missing")
-        lines = _reviewed_evidence_lines(case)
-        return [line for line, row in zip(lines, evidence) if row.get("kind") in required]
-    required = {"red-test", "green-test"}
-    kinds = {str(row.get("kind")) for row in evidence}
-    if not required.issubset(kinds) or not kinds.intersection({"stagehand", "browse"}):
-        raise SystemExit("reviewed red/green test and browser evidence are required in PR content")
+    if not isinstance(plan, dict) or not plan.get("requirements"):
+        raise SystemExit("PR content requires explicit verification requirements")
+    required = {row["kind"] for row in plan["requirements"]}
+    if not required.issubset({row.get("kind") for row in evidence}):
+        raise SystemExit("reviewed case-specific verification evidence is missing")
     lines = _reviewed_evidence_lines(case)
-    return [line for line, row in zip(lines, evidence) if row.get("kind") in required | {"stagehand", "browse"}]
+    return [line for line, row in zip(lines, evidence) if row.get("kind") in required]
 
 
 def _register_pr_body(
@@ -769,6 +775,9 @@ def _render_case_handoff(engagement: Path, case: dict, config: dict) -> Path:
         "approval_current": case.get("approval_current"), "environment_leases": case.get("environment_leases", []),
         "review_policy": case.get("review_policy"), "baseline": case.get("baseline"),
         "evidence": case.get("evidence", []),
+        "evidence_carries": case.get("evidence_carries", []),
+        "review_evidence_ready": case.get("review_evidence_ready", False),
+        "review_evidence_missing": case.get("review_evidence_missing", []),
     }
     content = ("# Remediation case context\n\n"
                "Generated from current Vigil case state. The report is evidence; proposed remediation is a hypothesis.\n"
@@ -988,6 +997,18 @@ def run_remediation(args: argparse.Namespace, install_root: Path) -> None:
     key = _engagement_key(args, install_root)
     args.engagement_key = key
     eng_dir, config = _project(install_root, key)
+    backend = restart_manifest.backend_state(install_root, engagement_dir=eng_dir)
+    if backend.state == "stale":
+        from .preflight import managed_backend_host
+
+        base_url = resolve_orchestrator_base_url(install_root, eng_dir)
+        remedy = ("run `" + shlex.join(["vigil", "--root", str(install_root), "orchestrator", "restart"]) + "`"
+                  if managed_backend_host(base_url) is not None
+                  else f"restart or upgrade the configured backend at {base_url} on its owning host")
+        print(
+            f"Warning: backend restart required: {backend.detail}; {remedy}",
+            file=sys.stderr,
+        )
     cmd = args.remediation_command
     if cmd in {"start", "route", "session", "join"}:
         if cmd in {"session", "join"}:
@@ -1124,6 +1145,12 @@ def run_remediation(args: argparse.Namespace, install_root: Path) -> None:
                     "token": args.environment_token, "actor": args.actor,
                     "observed_revision": case["worktree_revision"],
                 })
+    elif cmd == "test":
+        from .remediation_regression import run_regression
+
+        case = _case(install_root, eng_dir, key, case_id)
+        config = _case_config(case, config)
+        result = run_regression(args, install_root, eng_dir, key, case, config)
     elif cmd == "evidence":
         if args.kind in {"red-test", "green-test"}:
             expected_outcome = "failed_as_expected" if args.kind == "red-test" else "passed"
@@ -1258,7 +1285,7 @@ def run_remediation(args: argparse.Namespace, install_root: Path) -> None:
             raise SystemExit("--body-file must contain the reviewed PR content")
         body = body_file.read_text(encoding="utf-8")
         _validate_pr_template(body, config)
-        release = _release_plan(case)
+        _release_plan(case)
         content_path = eng_dir / "remediation" / "cases" / case_id / "pr-content.json"
         if not content_path.is_file():
             raise SystemExit("prepare reviewed PR content before creating the draft")
@@ -1268,16 +1295,8 @@ def run_remediation(args: argparse.Namespace, install_root: Path) -> None:
             raise SystemExit("prepared PR content is bound to a different approval; prepare it again")
         explanations = [_explanation(str(content.get("root_cause") or ""), "root cause"),
                         _explanation(str(content.get("fix_summary") or ""), "fix summary")]
-        if not case.get("verification_requirements"):
-            required = [digest, str(case.get("worktree_revision") or ""),
-                        str(release["production_canary_decision"]), str(release["production_canary_rationale"]),
-                        str(release["monitoring"]), *explanations, str(case.get("verification_plan") or ""),
-                        *_required_reviewed_evidence_lines(case)]
-            if release["production_canary_decision"] == "required":
-                required.append(str(release["safe_procedure"]))
-            if any(not item or item not in body for item in required):
-                raise SystemExit("final PR body is missing reviewed plan, evidence, code explanation, revision, digest, or canary details")
-        elif any(explanation not in body for explanation in explanations):
+        _required_reviewed_evidence_lines(case)
+        if any(explanation not in body for explanation in explanations):
             raise SystemExit("final PR body must include the prepared root cause and fix explanation")
         if _policy(config).get("check_commands"):
             _run_profile_checks(install_root, eng_dir, key, case, config, args.actor)
@@ -1404,36 +1423,16 @@ def _pr_body(case: dict, config: dict[str, object], root_cause: str, fix_summary
     if not str(case.get("verification_plan") or "").strip():
         raise SystemExit("verification plan is required before preparing a PR")
     _required_reviewed_evidence_lines(case)
-    if case.get("verification_requirements"):
-        test_results = "\n".join(
-            f"- {row.get('method')}: {row.get('observed')}"
-            for row in case.get("evidence", []) if row.get("outcome") == "passed"
-            and row.get("revision") == case.get("worktree_revision")
-        )
-        return (f"## Root cause\n\n{root_cause}\n\n## Fix\n\n{fix_summary}\n\n"
-                f"## Verification\n\n{case['verification_plan']}\n\n{test_results}\n\n"
-                f"## Release notes\n\n{release['production_canary_rationale']}\n"
-                f"{release['safe_procedure']}\n{release['monitoring']}\n")
-    evidence_lines = _reviewed_evidence_lines(case)
-    evidence_section = "\n".join(evidence_lines) or "- No evidence recorded."
-    return (
-        f"# {case.get('title', 'Remediation')}\n\n"
-        f"Source: {case.get('source_type', '')} {case.get('source_key', '')}\n"
-        f"Reviewed revision: {case.get('worktree_revision', '')}\n"
-        f"Review digest: {_approved_digest(case)}\n\n"
-        f"## Root cause\n\n{root_cause}\n\n"
-        f"## Fix\n\n{fix_summary}\n\n"
-        "## Baseline, tests, and browser rehearsal\n\n"
-        f"{evidence_section}\n\n"
-        "## Human verification\n\n"
-        f"{case.get('verification_plan') or '(plan missing)'}\n\n"
-        "## Production canary\n\n"
-        f"Decision: {release['production_canary_decision']}\n\n"
-        f"Reason: {release['production_canary_rationale']}\n\n"
-        f"Safe procedure: {release['safe_procedure'] or 'Not applicable'}\n\n"
-        f"Monitoring: {release['monitoring']}\n\n"
-        f"Development workflow: {config.get('deployment_workflow') or '(configure after observing actual workflow inputs)'}\n"
+    cutoff = int(case["approvals"][-1].get("evidence_cutoff_id") or 0)
+    required = {row["kind"] for row in case["verification_requirements"]["requirements"]}
+    test_results = "\n".join(
+        f"- {row.get('method')} [environment: {row.get('environment') or 'unknown'}]: {row.get('observed')}"
+        for row in case.get("evidence", []) if int(row.get("id") or 0) <= cutoff and row.get("kind") in required
     )
+    return (f"## Root cause\n\n{root_cause}\n\n## Fix\n\n{fix_summary}\n\n"
+            f"## Verification\n\n{case['verification_plan']}\n\n{test_results}\n\n"
+            f"## Release notes\n\n{release['production_canary_rationale']}\n"
+            f"{release['safe_procedure']}\n{release['monitoring']}\n")
 
 
 def _explanation(value: str, label: str) -> str:

@@ -74,6 +74,15 @@ need caller tracing, native checks, or API proof rather than a test asserting
 deleted code is absent. Record only executed observations as execution evidence;
 label static reasoning and unavailable checks accurately. Synchronize immutable
 case revision before revision-bound evidence and review.
+For red/green verification, commit the regression and fix together, synchronize the case revision,
+and use `vigil remediation test` with the plan's explicit fix files and expected failure text.
+Vigil retains the tests in disposable source with those fix files restored to the review base,
+then tests the finished fix. Read CLI help for dependency setup and command-directory options;
+inspect both saved outputs and confirm the red failure exercises the reported behavior.
+After rewriting commit history, synchronize the revision and inspect carried evidence in the
+case handoff. Executed local verification can carry only across an identical complete code tree;
+shared-runtime proof stays revision-bound. Changed content needs new verification, and the
+rewritten revision needs fresh owner approval.
 
 Recommend independent review when risk warrants it. Recommend optional browser
 or Stagehand work for uncertain UI behavior, permission-dependent flows,

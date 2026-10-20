@@ -928,14 +928,16 @@ def _database_write_error_status(exc: sqlite3.Error) -> str:
     return "storage_error"
 
 
-def _orchestrator_readyz_snapshot(install_root: Path) -> tuple[bool, dict[str, object]]:
+def _orchestrator_readyz_snapshot(install_root: Path, *, engagement_dir: Path | None = None) -> tuple[bool, dict[str, object]]:
     """Fetch ``/readyz`` and return ``(healthy, readiness)``.
 
     ``healthy`` is True when the endpoint returns HTTP 200 (orchestrator ready for work).
     ``readiness`` surfaces connection reachability, HTTP status, and parsed JSON fields
     when the response body is JSON (mirrors the backend ``/readyz`` payload shape).
     """
-    url = f"{resolve_orchestrator_base_url(install_root)}/readyz"
+    base_url = (resolve_orchestrator_base_url(install_root, engagement_dir) if engagement_dir is not None
+                else resolve_orchestrator_base_url(install_root))
+    url = f"{base_url}/readyz"
     readiness: dict[str, object] = {
         "reachable": False,
         # Why there was no answer, when there was none. Collapsing every OSError

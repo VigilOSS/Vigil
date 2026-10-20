@@ -10,6 +10,8 @@ import stat
 import subprocess
 import sys
 import time
+from contextvars import ContextVar
+from functools import wraps
 from pathlib import Path
 from typing import Any, BinaryIO
 
@@ -38,6 +40,36 @@ TRANSITIONS = {
     "paused": {"baseline", "fixing", "review"},
     "closed": set(),
 }
+
+
+_REVIEW_READ_CACHE: ContextVar[dict | None] = ContextVar("remediation_review_read", default=None)
+
+
+def _review_read(function):
+    """Share expensive observations only within one review read, never between requests."""
+    @wraps(function)
+    def read(*args, **kwargs):
+        if _REVIEW_READ_CACHE.get() is not None:
+            return function(*args, **kwargs)
+        token = _REVIEW_READ_CACHE.set({})
+        try:
+            return function(*args, **kwargs)
+        finally:
+            _REVIEW_READ_CACHE.reset(token)
+    return read
+
+
+def _once_per_review(function):
+    @wraps(function)
+    def read(*args, **kwargs):
+        cache = _REVIEW_READ_CACHE.get()
+        if cache is None:
+            return function(*args, **kwargs)
+        key = (function.__name__, args, tuple(sorted(kwargs.items())))
+        if key not in cache:
+            cache[key] = function(*args, **kwargs)
+        return cache[key]
+    return read
 
 
 def engagement(key: str):
@@ -69,6 +101,7 @@ def _sha256_stream(source: BinaryIO) -> str:
     return digest.hexdigest()
 
 
+@_once_per_review
 def _sha256_file(path: Path) -> str:
     with path.open("rb") as source:
         return _sha256_stream(source)
@@ -150,6 +183,7 @@ def artifact_file(key: str, case_id: int, evidence_id: int) -> tuple[Path, Binar
     return path, source
 
 
+@_once_per_review
 def _worktree_digest(path_value: str | None) -> str:
     if not path_value:
         return ""
@@ -197,6 +231,7 @@ def _worktree_digest(path_value: str | None) -> str:
     return digest.hexdigest()
 
 
+@_once_per_review
 def _actual_revision(path_value: str | None) -> str:
     if not path_value:
         return ""
@@ -233,15 +268,6 @@ def _case_worktree_identity(row, engagement_root: Path) -> bool:
             return False
         return _vcs.branch_matches(Path(row["worktree_path"]), row["worktree_branch"])
     except (OSError, ValueError, KeyError, TypeError):
-        return False
-
-
-def _commit_ancestor(path_value: str | None, ancestor: str, descendant: str) -> bool:
-    if not path_value or not ancestor or not descendant:
-        return False
-    try:
-        return _vcs.ancestor(Path(path_value), ancestor, descendant)
-    except (OSError, ValueError, subprocess.SubprocessError):
         return False
 
 
@@ -339,6 +365,7 @@ def _review_patch(path_value: str | None, base_branch: str = "main", base_revisi
     return base, head, whole[:_REVIEW_DIFF_LIMIT], truncated, bytes_total if truncated else len(whole)
 
 
+@_review_read
 def review_diff(key: str, case_id: int) -> dict[str, Any]:
     owner = engagement(key)
     with db.get_connection() as connection:
@@ -365,7 +392,12 @@ def review_diff(key: str, case_id: int) -> dict[str, Any]:
 def _row_review_patch(row):
     branch = _field(row, "base_branch")
     revision = _field(row, "base_revision")
-    return _review_patch(row["worktree_path"], branch or "main", revision) if branch or revision else _review_patch(row["worktree_path"])
+    return _cached_review_patch(row["worktree_path"], branch, revision)
+
+
+@_once_per_review
+def _cached_review_patch(path_value, branch, revision):
+    return _review_patch(path_value, branch or "main", revision) if branch or revision else _review_patch(path_value)
 
 
 def _review_digest(row, evidence: list[dict[str, Any]], engagement_root: Path, finding_ids: list[int]) -> str:
@@ -401,7 +433,7 @@ def _review_digest(row, evidence: list[dict[str, Any]], engagement_root: Path, f
         "release_plan": json.loads(row["release_plan_json"]),
         "evidence": [
             {key: value for key, value in item.items() if key not in {
-                "environment", "execution", "executed_revision", "executed_directory", "shared_environment", "environment_token", "runtime_revision"
+                "environment", "execution", "executed_revision", "executed_directory", "shared_environment", "environment_token", "runtime_revision", "tree_id", "scratch_proof_json"
             } or value is not None}
             for item in evidence
         ],
@@ -427,14 +459,17 @@ def _review_evidence_missing(row, evidence: list[dict[str, Any]], engagement_roo
     plan = _field(row, "verification_requirements_json")
     if plan is not None:
         missing = _explicit_evidence_missing(row, evidence, engagement_root, json.loads(plan))
-    elif not (row["verification_plan"] or "").strip():
-        missing = ["verification plan with evidence requirements"]
     else:
-        missing = _prose_plan_evidence_missing(row, evidence, engagement_root)
+        missing = ["verification plan with evidence requirements"]
     return missing + _profile_checks_missing(row, evidence, engagement_root)
 
 
 def _explicit_evidence_missing(row, evidence, engagement_root, plan):
+    return [f"{match['requirement']['kind']} ({match['requirement']['execution']}, current revision)"
+            for match in _explicit_evidence_matches(row, evidence, engagement_root, plan) if not match['evidence_ids']]
+
+
+def _explicit_evidence_matches(row, evidence, engagement_root, plan):
     def satisfies(item, requirement):
         if (item["kind"] != requirement["kind"]
                 or item["method"].casefold() not in {value.casefold() for value in requirement["methods"]}
@@ -442,10 +477,14 @@ def _explicit_evidence_missing(row, evidence, engagement_root, plan):
                 or item.get("execution") != requirement["execution"]
                 or not item.get("artifact_path") or not item.get("revision")):
             return False
-        if requirement["revision"] == "current" and item["revision"] != row["worktree_revision"]:
+        if requirement.get("revision") != "current" or not _evidence_matches_revision(
+            row, item, runtime_required=requirement.get("runtime_identity_required", False),
+        ):
             return False
-        if requirement["revision"] == "ancestor" and not _commit_ancestor(row["worktree_path"], item["revision"], row["worktree_revision"]):
-            return False
+        if item['kind'] == 'red-test':
+            from .remediation_regression import proof_satisfies
+            if not proof_satisfies(row, item, requirement):
+                return False
         if requirement["execution"] == "executed" and (
             not item["command"].strip() or item.get("executed_revision") != item["revision"]
         ):
@@ -467,61 +506,58 @@ def _explicit_evidence_missing(row, evidence, engagement_root, plan):
                 return False
         return bool(_artifact(engagement_root, row["id"], item["artifact_path"]).stat().st_size)
 
-    missing = []
-    for requirement in plan["requirements"]:
-        if not any(satisfies(item, requirement) for item in evidence):
-            missing.append(f"{requirement['kind']} ({requirement['execution']}, {requirement['revision']} revision)")
-    return missing
+    return [{'requirement': requirement, 'evidence_ids': [item['id'] for item in evidence if satisfies(item, requirement)]}
+            for requirement in plan['requirements']]
 
 
 def _profile_checks_missing(row, evidence, engagement_root):
-    missing = []
+    return [item["missing"] for item in _profile_check_matches(row, evidence, engagement_root) if item["missing"]]
+
+
+def _profile_check_matches(row, evidence, engagement_root):
+    matches = []
     policy = json.loads(_field(row, "review_policy_json") or "{}")
     shared_environment = policy.get("remediation", {}).get("shared_environment", "")
     for check in policy.get("remediation", {}).get("check_commands", []):
-        if not any(
+        ids = [item["id"] for item in evidence if (
             item["kind"] == "profile-check" and item["method"] == check["name"]
             and item["command"] == check["command"] and item.get("execution") == "executed"
-            and item.get("revision") == row["worktree_revision"]
-            and item.get("executed_revision") == row["worktree_revision"]
+            and _evidence_matches_revision(row, item)
+            and item.get("executed_revision") == item.get("revision")
             and item.get("executed_directory") == str((Path(row["worktree_path"] or ".") / check.get("directory", ".")).resolve())
             and (not shared_environment or (item.get("shared_environment") == shared_environment and item.get("environment_token")))
             and item["outcome"] == "passed" and item.get("artifact_path")
             and _evidence_current(engagement_root, row["id"], [item])
             and _artifact(engagement_root, row["id"], item["artifact_path"]).stat().st_size
-            for item in evidence
-        ):
-            missing.append(f"profile check: {check['name']}")
-    return missing
+        )]
+        matches.append({"name": check["name"], "command": check["command"], "evidence_ids": ids,
+                        "missing": None if ids else f"profile check: {check['name']}"})
+    return matches
 
 
-def _prose_plan_evidence_missing(row, evidence: list[dict[str, Any]], engagement_root: Path) -> list[str]:
-    case_id = row["id"]
-
-    def valid_test(kind: str, outcome: str) -> bool:
-        for item in evidence:
-            if (item["kind"] != kind or item["outcome"] != outcome or not item["command"].strip()
-                    or not item["revision"] or not item["artifact_path"]
-                    or item.get("execution") not in {None, "executed"}):
+def _published_pr(row, evidence, engagement_root):
+    for item in reversed(evidence):
+        if item["kind"] != "pr_publication" or not item.get("artifact_path"):
+            continue
+        if not _evidence_current(engagement_root, row["id"], [item]):
+            continue
+        try:
+            path = _artifact(engagement_root, row["id"], item["artifact_path"])
+            with path.open("rb") as source:
+                raw = source.read(64 * 1024 + 1)
+            if len(raw) > 64 * 1024:
                 continue
-            if kind == "green-test" and item["revision"] != row["worktree_revision"]:
+            publication = json.loads(raw)
+            fields = ("url", "revision", "branch", "base_branch", "review_digest", "body_sha256")
+            if not isinstance(publication, dict) or any(not isinstance(publication.get(field), str) for field in fields):
                 continue
-            if kind == "red-test" and not _commit_ancestor(
-                row["worktree_path"], item["revision"], row["worktree_revision"]
-            ):
+            if publication["revision"] != item["revision"]:
                 continue
-            if _evidence_current(engagement_root, case_id, [item]):
-                path = _artifact(engagement_root, case_id, item["artifact_path"])
-                if path.stat().st_size:
-                    return True
-        return False
-
-    missing = []
-    if not valid_test("red-test", "failed_as_expected"):
-        missing.append("red test with expected failure and saved output")
-    if not valid_test("green-test", "passed"):
-        missing.append("green test with passing output at current revision")
-    return missing + _browser_evidence_missing(row, evidence, engagement_root)
+            return {**{field: publication[field] for field in fields}, "evidence_id": item["id"],
+                    "current": publication["revision"] == row["worktree_revision"]}
+        except (HTTPException, OSError, ValueError, TypeError):
+            continue
+    return None
 
 
 def _browser_evidence_missing(row, evidence, engagement_root, *, purpose="happy-path", require_screenshot=True, result_path=None):
@@ -622,7 +658,8 @@ def _valid_screenshot(path: Path) -> bool:
     return path.suffix.lower() in {".jpg", ".jpeg"} and head.startswith(b"\xff\xd8") and tail.endswith(b"\xff\xd9")
 
 
-def _details(connection, row, engagement_root: Path):
+@_review_read
+def _details(connection, row, engagement_root: Path, *, history_limit: int | None = None):
     case_id = row["id"]
     evidence = [dict(item) for item in connection.execute(
         "SELECT * FROM remediation_evidence WHERE case_id=? ORDER BY id", (case_id,)
@@ -631,7 +668,7 @@ def _details(connection, row, engagement_root: Path):
         "SELECT * FROM remediation_approvals WHERE case_id=? ORDER BY id", (case_id,)
     )]
     transitions = [dict(item) for item in connection.execute(
-        "SELECT * FROM remediation_transitions WHERE case_id=? ORDER BY id", (case_id,)
+        "SELECT * FROM remediation_transitions WHERE case_id=? ORDER BY id LIMIT ?", (case_id, history_limit if history_limit is not None else -1)
     )]
     deployment = connection.execute(
         "SELECT * FROM remediation_deployments WHERE case_id=? ORDER BY id DESC LIMIT 1", (case_id,)
@@ -664,6 +701,7 @@ def _details(connection, row, engagement_root: Path):
     result["duplicate_hints"] = [hint["case_id"] for hint in hint_details]
     result["duplicate_hint_details"] = hint_details
     result["evidence"] = evidence
+    result["evidence_carries"] = _evidence_carries(row, evidence, engagement_root)
     result["approvals"] = approvals
     result["transitions"] = transitions
     result["deployment"] = dict(deployment) if deployment else None
@@ -674,6 +712,19 @@ def _details(connection, row, engagement_root: Path):
     result["review_digest"] = digest
     result["review_evidence_missing"] = _review_evidence_missing(row, evidence, engagement_root)
     result["review_evidence_ready"] = not result["review_evidence_missing"]
+    result["evidence_total"] = len(evidence)
+    result["history_total"] = (
+        connection.execute("SELECT COUNT(*) FROM remediation_transitions WHERE case_id=?", (case_id,)).fetchone()[0]
+        if history_limit is not None else len(transitions)
+    )
+    matches = _explicit_evidence_matches(row, evidence, engagement_root, result["verification_requirements"]) if result["verification_requirements"] else []
+    result["verification_matches"] = [
+        {"requirement_index": index, "evidence_ids": match["evidence_ids"],
+         "missing": None if match["evidence_ids"] else f"{match['requirement']['kind']} ({match['requirement']['execution']}, current revision)"}
+        for index, match in enumerate(matches)
+    ]
+    result["checks"] = _profile_check_matches(row, evidence, engagement_root)
+    result["pull_request"] = _published_pr(row, evidence, engagement_root)
     approved_evidence_missing = (
         result["review_evidence_missing"] if len(approved_evidence) == len(evidence)
         else _review_evidence_missing(row, approved_evidence, engagement_root)
@@ -683,6 +734,11 @@ def _details(connection, row, engagement_root: Path):
         and not approved_evidence_missing
         and _case_worktree_identity(row, engagement_root)
     )
+    if result["pull_request"]:
+        result["pull_request"]["current"] = bool(
+            result["pull_request"]["current"] and result["approval_current"]
+            and result["pull_request"]["review_digest"] == approvals[-1]["review_digest"]
+        )
     return result
 
 
@@ -738,10 +794,34 @@ def list_cases(key: str) -> list[dict[str, Any]]:
         return summaries
 
 
-def get_case(key: str, case_id: int) -> dict[str, Any]:
+def get_case(key: str, case_id: int, *, evidence_limit: int | None = None, history_limit: int | None = None) -> dict[str, Any]:
     owner = engagement(key)
     with db.get_connection() as connection:
-        return _details(connection, _row(connection, owner.id, case_id), Path(owner.engagement_root))
+        result = _details(connection, _row(connection, owner.id, case_id), Path(owner.engagement_root), history_limit=history_limit)
+    if evidence_limit is not None:
+        result["evidence"] = result["evidence"][:evidence_limit]
+    return result
+
+
+def evidence_record(key: str, case_id: int, evidence_id: int) -> dict[str, Any]:
+    owner = engagement(key)
+    with db.get_connection() as connection:
+        _row(connection, owner.id, case_id)
+        item = connection.execute("SELECT * FROM remediation_evidence WHERE case_id=? AND id=?", (case_id, evidence_id)).fetchone()
+    if item is None:
+        raise HTTPException(404, "Evidence record not found")
+    return dict(item)
+
+
+def case_records(key: str, case_id: int, kind: str, *, limit: int, offset: int) -> dict[str, Any]:
+    tables = {"evidence": "remediation_evidence", "history": "remediation_transitions"}
+    table = tables[kind]
+    owner = engagement(key)
+    with db.get_connection() as connection:
+        _row(connection, owner.id, case_id)
+        total = connection.execute(f"SELECT COUNT(*) FROM {table} WHERE case_id=?", (case_id,)).fetchone()[0]
+        items = connection.execute(f"SELECT * FROM {table} WHERE case_id=? ORDER BY id LIMIT ? OFFSET ?", (case_id, limit, offset)).fetchall()
+    return {"items": [dict(item) for item in items], "total": total, "limit": limit, "offset": offset}
 
 
 def create_case(key: str, data: dict[str, Any]) -> dict[str, Any]:
@@ -857,7 +937,7 @@ def patch_case(key: str, case_id: int, changes: dict[str, Any]) -> dict[str, Any
         if old["status"] == "closed":
             raise HTTPException(409, "Closed remediation cases cannot be changed")
         changes = dict(changes)
-        if ("verification_plan" in changes and not (old["verification_plan"] or "").strip()
+        if ("verification_plan" in changes and not old["verification_requirements_json"]
                 and not changes.get("verification_requirements_json")):
             raise HTTPException(400, "The first verification plan requires explicit evidence requirements and a reason")
         finding_ids = _validate_finding_ids(connection, changes.pop("finding_ids")) if "finding_ids" in changes else None
@@ -933,6 +1013,17 @@ def patch_case(key: str, case_id: int, changes: dict[str, Any]) -> dict[str, Any
                 f"UPDATE remediation_cases SET {columns} WHERE id=?",
                 (*changes.values(), case_id),
             )
+        if changes.get("worktree_revision") and changes["worktree_revision"] != old["worktree_revision"]:
+            current = _row(connection, owner.id, case_id)
+            evidence = [dict(item) for item in connection.execute(
+                "SELECT * FROM remediation_evidence WHERE case_id=? ORDER BY id", (case_id,),
+            )]
+            for carry in _evidence_carries(current, evidence, Path(owner.engagement_root)):
+                connection.execute(
+                    "INSERT INTO remediation_transitions(case_id,from_status,to_status,actor,reason) VALUES(?,?,?,?,?)",
+                    (case_id, old["status"], old["status"], "Vigil",
+                     f"Evidence #{carry['evidence_id']}: evidence carried from {carry['from_revision']} to {carry['to_revision']}, same tree {carry['tree_id']}"),
+                )
         return _details(connection, _row(connection, owner.id, case_id), Path(owner.engagement_root))
 
 
@@ -969,6 +1060,45 @@ def _advanced_base(old, path_value: str | None) -> dict[str, str]:
     except (OSError, ValueError, subprocess.SubprocessError):
         return {}
     return {"base_revision": current} if moved else {}
+
+
+@_once_per_review
+def _tree_id(path: Path, revision: str) -> str:
+    return _vcs.tree_id(path, revision)
+
+
+def _evidence_tree_id(row, item) -> str:
+    return item.get("tree_id") or _tree_id(Path(row["worktree_path"]), item["revision"])
+
+
+def _evidence_matches_revision(row, item, *, runtime_required: bool = False) -> bool:
+    if item.get("revision") == row["worktree_revision"]:
+        return bool(item.get("revision"))
+    if (runtime_required or item.get("runtime_revision")
+            or item.get("environment") != "local"
+            or item.get("execution") != "executed"
+            or item.get("executed_revision") != item.get("revision")
+            or item.get("shared_environment")
+            or item.get("method", "").casefold() in {"stagehand", "browse"}
+            or not item.get("revision") or not row["worktree_path"] or not row["worktree_revision"]):
+        return False
+    try:
+        return _evidence_tree_id(row, item) == _tree_id(Path(row["worktree_path"]), row["worktree_revision"])
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return False
+
+
+def _evidence_carries(row, evidence, engagement_root: Path) -> list[dict[str, Any]]:
+    plan = json.loads(_field(row, "verification_requirements_json") or "null")
+    matches = _explicit_evidence_matches(row, evidence, engagement_root, plan) if plan else []
+    matches.extend(_profile_check_matches(row, evidence, engagement_root))
+    matched_ids = {identifier for match in matches for identifier in match["evidence_ids"]}
+    return [
+        {"evidence_id": item["id"], "from_revision": item["revision"],
+         "to_revision": row["worktree_revision"], "tree_id": _evidence_tree_id(row, item)}
+        for item in evidence
+        if item.get("revision") != row["worktree_revision"] and item["id"] in matched_ids
+    ]
 
 
 def _evidence_current(engagement_root: Path, case_id: int, evidence: list[dict[str, Any]]) -> bool:
@@ -1095,6 +1225,12 @@ def add_evidence(key: str, case_id: int, data: dict[str, Any]) -> dict[str, Any]
         revision = data.get("revision")
         if revision is not None:
             revision = _evidence_revision(row["worktree_path"], revision)
+        tree = None
+        if revision is not None:
+            try:
+                tree = _vcs.tree_id(Path(row["worktree_path"]), revision)
+            except (OSError, ValueError, subprocess.SubprocessError):
+                raise HTTPException(400, "Evidence revision must identify a conflict-free code tree") from None
         execution = data.get("execution", "executed")
         executed_revision = data.get("executed_revision")
         if executed_revision is not None:
@@ -1117,11 +1253,28 @@ def add_evidence(key: str, case_id: int, data: dict[str, Any]) -> dict[str, Any]
         artifact_sha = None
         if data.get("artifact_path"):
             artifact_sha = _sha256_file(_artifact(Path(owner.engagement_root), case_id, data["artifact_path"]))
+        from .remediation_regression import validate_proof
+        proof = validate_proof(row, {**data, "executed_revision": executed_revision}, revision)
+        if proof and data.get('outcome') == 'failed_as_expected':
+            try:
+                receipt_path = _artifact(Path(owner.engagement_root), case_id, data['artifact_path'])
+                if receipt_path.stat().st_size > 32 * 1024 * 1024:
+                    raise ValueError('Red receipt exceeds the structured output limit')
+                receipt = json.loads(receipt_path.read_text())
+                valid_output = (receipt['exit_code'] == proof['exit_code'] and receipt['revision'] == revision
+                                and receipt['command'] == data['command']
+                                and receipt.get('source_changed') is False
+                                and isinstance(receipt['stdout'], str) and isinstance(receipt['stderr'], str)
+                                and proof['expected_failure'] in receipt['stdout'] + receipt['stderr'])
+            except (ValueError, KeyError, TypeError):
+                valid_output = False
+            if not valid_output:
+                raise HTTPException(400, 'Saved red command output does not contain the expected regression failure')
         cursor = connection.execute(
-            "INSERT INTO remediation_evidence(case_id,kind,method,environment,command,observed,proved,outcome,artifact_path,artifact_sha256,revision,execution,executed_revision,executed_directory,shared_environment,environment_token,runtime_revision) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO remediation_evidence(case_id,kind,method,environment,command,observed,proved,outcome,artifact_path,artifact_sha256,revision,execution,executed_revision,executed_directory,shared_environment,environment_token,runtime_revision,tree_id,scratch_proof_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (case_id, data["kind"], data["method"], data["environment"], data.get("command", ""), data["observed"],
              data["proved"], data.get("outcome"), data.get("artifact_path"), artifact_sha, revision,
-             execution, executed_revision, executed_directory, data.get("shared_environment"), data.get("environment_token"), runtime_revision),
+             execution, executed_revision, executed_directory, data.get("shared_environment"), data.get("environment_token"), runtime_revision, tree, _json(proof) if proof else None),
         )
         return dict(connection.execute("SELECT * FROM remediation_evidence WHERE id=?", (cursor.lastrowid,)).fetchone())
 

@@ -43,6 +43,9 @@ The first recorded plan needs both a readable brief and nonempty structured
 evidence requirements through `plan --requirements-file`, with the reason for
 the selected methods. Consult CLI help and the remediation documentation for
 the executable contract. A conversational plan alone does not configure gates.
+For selected red/green proof, name the fix files in the plan and use `vigil remediation test`.
+It retains committed regressions in disposable source with those fixes restored to the review
+base, then tests the finished fix. Review the expected failure, restored files, and both outputs.
 
 One explicit initial publishing approval authorizes the reviewed patch's push
 and draft PR. Requested updates to an existing PR authorize their corresponding

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from typing import Any, Literal
+from pathlib import PurePosixPath
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, PositiveInt, field_validator, model_validator
 
@@ -43,13 +44,24 @@ class VerificationRequirement(BaseModel):
     kind: str = Field(min_length=1)
     methods: list[str] = Field(min_length=1)
     outcome: str = Field(default="passed", min_length=1)
-    revision: Literal["current", "ancestor"] = "current"
+    revision: Literal["current"] = "current"
     execution: Literal["executed", "reasoned"] = "executed"
     rationale: str = ""
     shared_environment: str | None = Field(default=None, min_length=1)
     runtime_identity_required: bool = False
     browser_purpose: Literal["happy-path", "bad-path", "other"] | None = None
     legitimate_use_control: bool = False
+    fix_paths: list[str] = Field(default_factory=list)
+
+    @field_validator("fix_paths")
+    @classmethod
+    def repository_fix_files(cls, value: list[str]) -> list[str]:
+        if len(value) != len(set(value)) or any(
+            not path or path == "." or PurePosixPath(path).is_absolute()
+            or ".." in PurePosixPath(path).parts or str(PurePosixPath(path)) != path for path in value
+        ):
+            raise ValueError("fix_paths must name distinct repository-relative files")
+        return sorted(value)
 
     @field_validator("methods")
     @classmethod
@@ -60,6 +72,13 @@ class VerificationRequirement(BaseModel):
 
     @model_validator(mode="after")
     def validate_browser_control(self):
+        if self.kind == "red-test" and (
+            self.execution != "executed" or self.outcome != "failed_as_expected" or not self.fix_paths
+            or self.shared_environment or self.runtime_identity_required
+        ):
+            raise ValueError("Red tests require local executed expected failure and explicit fix_paths")
+        if self.kind != "red-test" and self.fix_paths:
+            raise ValueError("Only red-test requirements name fix_paths")
         methods = {method.casefold() for method in self.methods}
         browser = methods & {"stagehand", "browse"}
         if self.browser_purpose is not None and (not browser or methods - {"stagehand", "browse"}):
@@ -156,6 +175,7 @@ class EvidenceCreate(BaseModel):
     executed_directory: str | None = None
     shared_environment: str | None = None
     environment_token: str | None = None
+    scratch_proof: dict[str, Any] | None = None
 
 
 class ApprovalCreate(BaseModel):
@@ -234,8 +254,27 @@ def confirm_environment(engagement_key: str, body: EnvironmentConfirm):
 
 
 @router.get("/cases/{case_id}")
-def get_case(engagement_key: str, case_id: int):
-    return remediation.get_case(engagement_key, case_id)
+def get_case(engagement_key: str, case_id: int,
+             evidence_limit: int | None = Query(default=None, ge=1, le=100),
+             history_limit: int | None = Query(default=None, ge=1, le=100)):
+    return remediation.get_case(engagement_key, case_id, evidence_limit=evidence_limit, history_limit=history_limit)
+
+
+@router.get("/cases/{case_id}/evidence")
+def list_evidence(engagement_key: str, case_id: int,
+                  limit: int = Query(default=20, ge=1, le=100), offset: int = Query(default=0, ge=0)):
+    return remediation.case_records(engagement_key, case_id, "evidence", limit=limit, offset=offset)
+
+
+@router.get("/cases/{case_id}/history")
+def list_history(engagement_key: str, case_id: int,
+                 limit: int = Query(default=20, ge=1, le=100), offset: int = Query(default=0, ge=0)):
+    return remediation.case_records(engagement_key, case_id, "history", limit=limit, offset=offset)
+
+
+@router.get("/cases/{case_id}/evidence/{evidence_id}")
+def get_evidence(engagement_key: str, case_id: int, evidence_id: int):
+    return remediation.evidence_record(engagement_key, case_id, evidence_id)
 
 
 @router.get("/cases/{case_id}/diff")

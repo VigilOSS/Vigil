@@ -352,6 +352,17 @@ scratch changes for you, and refuses a different repository found at a case's re
 on a case-insensitive filesystem, tracked paths that differ only in letter case show up as renames in
 every snapshot and land in the case commit; remove them before review.
 
+Executed local verification evidence also records the complete tested code tree. When a squash or commit
+rewrite preserves that exact tree, the evidence continues to satisfy current-code requirements;
+the case history and handoff record its original and current revisions. Changed files, file modes,
+symlinks, submodule revisions, or content introduced by a rebase require new verification. An unchanged
+patch on a changed base is insufficient. Original evidence receipts remain tied to what actually ran.
+Approval must be renewed after a revision rewrite. Browser, confirmed runtime, and deployment proof
+continue to require their exact served revisions. Shared-environment receipts and reasoned evidence
+need fresh verification after a revision rewrite; code-tree equality alone cannot establish their state.
+Use a named shared environment for checks that depend on a running service or a revision-derived
+build identity, so those checks stay bound to the execution revision.
+
 Commit the relevant changes, record the commit, then run checks:
 
 ```bash
@@ -438,7 +449,7 @@ rem baseline <case-id> --outcome runtime_reproduced --method pytest \
 ```
 
 Each requirement names the evidence kind, the allowed methods, the expected outcome, whether the
-evidence must be from the current commit or may come from an earlier one (`ancestor`), and whether it
+evidence describes the current case source (`current`), and whether it
 must actually run (`executed`) or may be reasoned from code (`reasoned`). Runtime requirements can
 also name a `shared_environment` and set `runtime_identity_required`. Explain your choice of methods
 with `--alternatives-reason`; an empty list cannot waive verification. Before approval, Vigil checks
@@ -450,6 +461,43 @@ keeps the recorded requirements, and a new requirements file replaces them.
 For a code/test-confirmed baseline without safe runtime reproduction, `baseline` needs the explicit
 owner decision: `--owner-decision proceed --owner-actor <owner> --owner-reason <reason>`. Existing case
 plans and evidence remain recorded; changing requirements does not reinterpret prior evidence.
+
+### Regression proof in one commit
+
+Commit the regression tests and fix together, then `sync-revision`. For a red/green plan, name
+the fix files explicitly in the red requirement; keep regression test files out of that list:
+
+```json
+[
+  {"kind":"red-test","methods":["pytest"],"outcome":"failed_as_expected",
+   "revision":"current","execution":"executed","fix_paths":["src/accounts.py"]},
+  {"kind":"green-test","methods":["pytest"],"outcome":"passed",
+   "revision":"current","execution":"executed"}
+]
+```
+
+```bash
+rem test <case-id> --method pytest --command 'python -m pytest tests/test_accounts.py' \
+  --expected-failure 'test_cross_account_write' --setup-command 'python -m pip install -e .'
+```
+
+Vigil creates a disposable checkout of the committed case source, restores the named fix files to
+the recorded review base, and runs the command while retaining the regression tests. Red succeeds
+only when the command fails and its output includes the named expected failure. Vigil then runs
+the same command against the finished fix and requires a passing result. It saves both command
+outputs, working directories, exit codes, and the red source tree and restored file list. Source
+changes during verification invalidate the result. The disposable checkout is removed afterward.
+Both commands receive `VIGIL_REPOSITORY`, `VIGIL_CASE_WORKTREE`, `VIGIL_CASE_REVISION`, and
+`VIGIL_CASE_BASE_REVISION`; `VIGIL_CASE_WORKTREE` identifies the source actually being tested.
+
+Use `--directory` for a repository-relative command directory and `--setup-command` to prepare
+dependencies in both sources. Ignored dependencies are not copied automatically. `--fix-path` is
+repeatable and must match the plan's fix files. Use `rem test` for red proof; a manually recorded
+test output without scratch provenance cannot satisfy a red requirement. Red/green proof remains
+a case-specific choice; native API, analysis, or browser requirements can be selected independently.
+Each command defaults to a 600-second timeout; adjust it with `--timeout-seconds`. Full stdout and
+stderr are retained on disk. Runs above the 16 MiB output receipt limit retain those files and stop
+without claiming verification; select a focused command and rerun.
 
 ### Optional browser proof
 

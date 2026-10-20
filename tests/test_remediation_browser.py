@@ -23,6 +23,7 @@ def test_pr_content_accepts_reviewed_browse_evidence():
         {'id': n, 'kind': kind, 'method': 'browse' if kind == 'browse' else 'Laravel'}
         for n, kind in enumerate(('red-test', 'green-test', 'browse'), 1)
     ]}
+    case['verification_requirements'] = {'requirements': [{'kind': row['kind']} for row in case['evidence']]}
     assert len(remediation._required_reviewed_evidence_lines(case)) == 3
 
 

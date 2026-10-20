@@ -100,7 +100,7 @@ def test_generic_green_evidence_accepts_native_runner(monkeypatch, tmp_path):
 def test_short_pr_body_does_not_require_case_ledger(monkeypatch):
     case = {'title': 'Restrict report ownership', 'source_key': 'SEC-1',
             'verification_plan': 'Open your own report. Another user cannot open it.',
-            'verification_requirements': [{'kind': 'green-test', 'methods': ['pytest']}],
+            'verification_requirements': {'requirements': [{'kind': 'green-test', 'methods': ['pytest']}]},
             'release_plan': {'production_canary_decision': 'not_required',
                              'production_canary_rationale': 'No production fixture is required.',
                              'safe_procedure': '', 'monitoring': 'Watch authorization errors.'},

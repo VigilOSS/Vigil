@@ -823,6 +823,8 @@ export type RemediationEvidence = {
   execution?: "executed" | "reasoned" | "unavailable" | null;
   executed_revision?: string | null;
   executed_directory?: string | null;
+  tree_id?: string | null;
+  scratch_proof_json?: string | null;
   shared_environment?: string | null;
   runtime_revision?: string | null;
 };
@@ -845,13 +847,20 @@ export type RemediationCase = {
   source_resolved?: boolean;
   review_policy?: Record<string, unknown> | null;
   verification_requirements?: {
-    requirements: Array<{ kind: string; methods: string[]; outcome: string; revision: "current" | "ancestor"; execution: "executed" | "reasoned"; rationale: string; shared_environment?: string | null; runtime_identity_required?: boolean; browser_purpose?: "happy-path" | "bad-path" | "other" | null; legitimate_use_control?: boolean }>;
+    requirements: Array<{ kind: string; methods: string[]; outcome: string; revision: "current"; fix_paths?: string[]; execution: "executed" | "reasoned"; rationale: string; shared_environment?: string | null; runtime_identity_required?: boolean; browser_purpose?: "happy-path" | "bad-path" | "other" | null; legitimate_use_control?: boolean }>;
     alternatives_reason: string;
   } | null;
   verification_plan: string;
   baseline: Partial<RemediationBaseline>;
   release_plan: Partial<RemediationReleasePlan>;
   evidence: RemediationEvidence[];
+  evidence_total?: number;
+  history_total?: number;
+  evidence_carries?: Array<{ evidence_id: number; from_revision: string; to_revision: string; tree_id: string }>;
+  verification_matches?: Array<{ requirement_index: number; evidence_ids: number[]; missing: string | null }>;
+  checks?: Array<{ name: string; command: string; evidence_ids: number[]; missing: string | null }>;
+  pull_request?: { url: string; revision: string; branch: string; base_branch: string; review_digest: string; body_sha256: string; evidence_id: number; current: boolean } | null;
+  environment_leases?: Array<{ token: string; environment: string; actor: string; revision: string; observed_revision: string | null; acquired_at: string; released_at: string | null; released_by: string | null }>;
   approvals: Array<Record<string, unknown>>;
   transitions: Array<Record<string, unknown>>;
   human_verifications: Array<{ id: number; deployment_id: number; actor: string; result: "passed" | "failed" | "blocked"; observed_revision: string; notes: string; created_at?: string }>;
@@ -925,7 +934,25 @@ export function listRemediationCases(engagementKey: string) {
 }
 
 export function getRemediationCase(engagementKey: string, caseId: number) {
-  return request<RemediationCase>(`${remediationBase(engagementKey)}/cases/${caseId}`);
+  return request<RemediationCase>(`${remediationBase(engagementKey)}/cases/${caseId}?evidence_limit=20&history_limit=20`);
+}
+
+export type RemediationPageResult<T> = { items: T[]; total: number; limit: number; offset: number };
+
+export function getRemediationEvidencePage(engagementKey: string, caseId: number, offset: number) {
+  return request<RemediationPageResult<RemediationEvidence>>(`${remediationBase(engagementKey)}/cases/${caseId}/evidence?limit=20&offset=${offset}`);
+}
+
+export function getRemediationEvidence(engagementKey: string, caseId: number, evidenceId: number) {
+  return request<RemediationEvidence>(`${remediationBase(engagementKey)}/cases/${caseId}/evidence/${evidenceId}`);
+}
+
+export function getRemediationHistoryPage(engagementKey: string, caseId: number, offset: number) {
+  return request<RemediationPageResult<Record<string, unknown>>>(`${remediationBase(engagementKey)}/cases/${caseId}/history?limit=20&offset=${offset}`);
+}
+
+export function getBackendReadiness() {
+  return request<{ backend_runtime: { restart_required: boolean; changed_inputs: string[] } }>("/readyz");
 }
 
 export function updateRemediationFindings(engagementKey: string, caseId: number, findingIds: number[]) {
@@ -989,6 +1016,34 @@ export function recordRemediationHumanVerification(engagementKey: string, caseId
 
 export function remediationEvidenceFileUrl(engagementKey: string, caseId: number, evidenceId: number): string {
   return resolveAppUrl(`${remediationBase(engagementKey)}/cases/${caseId}/evidence/${evidenceId}/file`);
+}
+
+// Read a bounded prefix on demand; render it as literal text, including HTML artifacts.
+export async function readRemediationEvidenceText(engagementKey: string, caseId: number, evidenceId: number, signal: AbortSignal) {
+  const response = await fetch(remediationEvidenceFileUrl(engagementKey, caseId, evidenceId), { signal });
+  if (!response.ok) {
+    const { message, body } = await readError(response);
+    throw new ApiError(message, response.status, body);
+  }
+  if (!response.body) throw new Error("Evidence response has no readable body");
+  const reader = response.body.getReader();
+  const limit = 128 * 1024;
+  const decoder = new TextDecoder();
+  let bytes = 0;
+  let text = "";
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) return { text: text + decoder.decode(), truncated: false };
+      const remaining = limit - bytes;
+      text += decoder.decode(value.subarray(0, remaining), { stream: true });
+      bytes += value.length;
+      if (bytes > limit) {
+        await reader.cancel();
+        return { text: text + decoder.decode(), truncated: true };
+      }
+    }
+  } finally { reader.releaseLock(); }
 }
 
 // ── Cross-engagement dashboard summary ──────────────────

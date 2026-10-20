@@ -4,6 +4,11 @@ import {
   ApiError,
   approveRemediationCase,
   getRemediationCase,
+  getBackendReadiness,
+  getRemediationEvidencePage,
+  getRemediationEvidence,
+  getRemediationHistoryPage,
+  readRemediationEvidenceText,
   getRemediationDiff,
   listRemediationCases,
   remediationEvidenceFileUrl,
@@ -44,12 +49,75 @@ function intakeSummary(snapshot: Record<string, unknown>): string {
   return typeof record.summary === "string" ? record.summary : "";
 }
 
+function caseSummary(value: RemediationCase): RemediationCaseSummary {
+  return {
+    id: value.id,
+    source_type: value.source_type,
+    source_key: value.source_key,
+    title: value.title,
+    status: value.status,
+    linked_findings: value.linked_findings,
+    duplicate_hints: value.duplicate_hints,
+    duplicate_hint_details: value.duplicate_hint_details,
+    worktree_revision: value.worktree_revision,
+    baseline_outcome: value.baseline.outcome ?? "pending",
+    approval_recorded: value.approvals.length > 0,
+  };
+}
+
+function initialCasePage(value: RemediationCase): RemediationCase {
+  return { ...value, evidence_total: value.evidence_total ?? value.evidence.length, history_total: value.history_total ?? value.transitions.length, evidence: value.evidence.slice(0, 20), transitions: value.transitions.slice(0, 20) };
+}
+
+function safeHttpUrl(value: string): string | undefined {
+  try {
+    const url = new URL(value);
+    return ["https:", "http:"].includes(url.protocol) ? url.href : undefined;
+  } catch { return undefined; }
+}
+
 function evidenceIsImage(evidence: RemediationEvidence): boolean {
   return /\.(png|jpe?g|webp|gif)$/i.test(evidence.artifact_path || "");
 }
 
 function detailLabel(evidence: RemediationEvidence): string {
   return evidence.artifact_path?.split("/").pop() || evidence.kind.replace(/_/g, " ");
+}
+
+function EvidencePreview({ engagementKey, caseId, item }: { engagementKey: string; caseId: number; item: RemediationEvidence }) {
+  const [opened, setOpened] = useState(false);
+  const [preview, setPreview] = useState<{ text: string; truncated: boolean } | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    if (!opened || preview) return;
+    const controller = new AbortController();
+    setError(null);
+    readRemediationEvidenceText(engagementKey, caseId, item.id, controller.signal).then((value) => {
+      if (!controller.signal.aborted) setPreview(value);
+    }).catch((failure: unknown) => {
+      if (!controller.signal.aborted) setError(failure instanceof Error ? failure.message : "Could not preview artifact");
+    });
+    return () => controller.abort();
+  }, [opened, preview, engagementKey, caseId, item.id]);
+  if (!item.artifact_path || evidenceIsImage(item) || !/\.(txt|log|json|jsonl|md|csv|xml|html?|yaml|yml|diff|patch)$/i.test(item.artifact_path)) return null;
+  return <div className="remediation-artifact-preview"><button type="button" aria-expanded={opened} onClick={() => setOpened(!opened)}>{opened ? "Hide" : "Preview"} {detailLabel(item)}</button>{opened && (error ? <p role="alert">{error}</p> : !preview ? <p>Loading artifact…</p> : <>{preview.truncated && <p className="remediation-caution">Preview limited to 128 KiB. Open evidence to inspect the complete artifact.</p>}<pre>{preview.text}</pre></>)}</div>;
+}
+
+function BackendDriftWarning() {
+  const [restartRequired, setRestartRequired] = useState(false);
+  useEffect(() => {
+    let active = true;
+    async function check() {
+      try {
+        const ready = await getBackendReadiness();
+        if (active) setRestartRequired(ready.backend_runtime.restart_required);
+      } catch { /* A transient readiness failure must not clear an observed drift warning. */ }
+    }
+    void check();
+    const timer = window.setInterval(() => { void check(); }, 30000);
+    return () => { active = false; window.clearInterval(timer); };
+  }, []);
+  return restartRequired ? <div className="remediation-message remediation-caution" role="status"><strong>Backend restart required.</strong> Source inputs changed; the running backend still uses earlier code. Restart the backend for this workspace on its owning host, then refresh this case.</div> : null;
 }
 
 function LinkedFindings({ selected, disabled, onSave }: {
@@ -173,7 +241,12 @@ function RemediationWorkspace({ engagementKey, onBack, initialCaseId }: Props) {
   const [discardFailed, setDiscardFailed] = useState(false);
   const workspaceActive = useRef(true);
   const caseReads = useRef(0);
+  const evidenceReads = useRef(0);
   const linkMutationPending = useRef(false);
+  const [pageBusy, setPageBusy] = useState(false);
+  const [pageError, setPageError] = useState<string | null>(null);
+  const [focusedEvidence, setFocusedEvidence] = useState<RemediationEvidence | null>(null);
+  const [rawCaseOpen, setRawCaseOpen] = useState(false);
 
   useEffect(() => {
     workspaceActive.current = true;
@@ -202,13 +275,15 @@ function RemediationWorkspace({ engagementKey, onBack, initialCaseId }: Props) {
       return;
     }
     let active = true;
-    const requestId = ++caseReads.current;
+    const requestId = beginCaseRead();
     setCaseError(null);
+    setFocusedEvidence(null);
+    setPageError(null);
     setDiff(null);
     setDiffError(null);
     getRemediationCase(engagementKey, selectedId).then((next) => {
       if (!active || requestId !== caseReads.current) return;
-      setSelected(next);
+      setSelected(initialCasePage(next));
       let restored: RemediationDrafts = {};
       try {
         restored = readRemediationDrafts(engagementKey, next.id);
@@ -229,13 +304,67 @@ function RemediationWorkspace({ engagementKey, onBack, initialCaseId }: Props) {
     }).catch((failure: unknown) => {
       if (active && requestId === caseReads.current) setCaseError(failure instanceof Error ? failure.message : "Could not load case");
     });
-    getRemediationDiff(engagementKey, selectedId).then((next) => {
-      if (active && requestId === caseReads.current) setDiff(next);
-    }).catch((failure: unknown) => {
-      if (active && requestId === caseReads.current) setDiffError(failure instanceof Error ? failure.message : "Could not load code diff");
-    });
     return () => { active = false; };
   }, [engagementKey, selectedId, caseAttempt]);
+
+  useEffect(() => {
+    if (activePane !== "review" || !selected || busy || diff) return;
+    let active = true;
+    setDiffError(null);
+    getRemediationDiff(engagementKey, selected.id).then((next) => {
+      if (active) setDiff(next);
+    }).catch((failure: unknown) => {
+      if (active) setDiffError(failure instanceof Error ? failure.message : "Could not load code diff");
+    });
+    return () => { active = false; };
+  }, [activePane, selected, busy, diff, engagementKey]);
+
+  function beginCaseRead() {
+    evidenceReads.current += 1;
+    setPageBusy(false);
+    setPageError(null);
+    setFocusedEvidence(null);
+    return ++caseReads.current;
+  }
+
+  async function viewEvidence(id: number) {
+    if (!selected) return;
+    const readId = caseReads.current;
+    const evidenceReadId = ++evidenceReads.current;
+    const current = () => workspaceActive.current && readId === caseReads.current && evidenceReadId === evidenceReads.current;
+    setActivePane("evidence");
+    setFocusedEvidence(null);
+    setPageError(null);
+    if (!selected.evidence.some((item) => item.id === id)) {
+      try {
+        const item = await getRemediationEvidence(engagementKey, selected.id, id);
+        if (!current()) return;
+        setFocusedEvidence(item);
+      } catch (failure) {
+        if (current()) setPageError(failure instanceof Error ? failure.message : "Could not load matching evidence");
+      }
+    }
+    window.setTimeout(() => { if (current()) document.getElementById(`remediation-evidence-${id}`)?.scrollIntoView?.({ block: "center" }); }, 0);
+  }
+
+  async function loadMore(section: "evidence" | "history") {
+    if (!selected || pageBusy) return;
+    const snapshot = selected;
+    const readId = caseReads.current;
+    setPageBusy(true);
+    setPageError(null);
+    try {
+      const page = section === "evidence"
+        ? await getRemediationEvidencePage(engagementKey, snapshot.id, snapshot.evidence.length)
+        : await getRemediationHistoryPage(engagementKey, snapshot.id, snapshot.transitions.length);
+      if (!workspaceActive.current || readId !== caseReads.current) return;
+      setSelected((current) => !current || current.id !== snapshot.id ? current : section === "evidence"
+        ? { ...current, evidence: [...current.evidence, ...page.items as RemediationEvidence[]], evidence_total: page.total }
+        : { ...current, transitions: [...current.transitions, ...page.items], history_total: page.total });
+    } catch (failure) {
+      if (workspaceActive.current && readId === caseReads.current) setPageError(failure instanceof Error ? failure.message : "Could not load more records");
+    } finally { if (workspaceActive.current && readId === caseReads.current) setPageBusy(false); }
+  }
 
   function savedDraftValues(value: RemediationCase): RemediationDraftValues {
     return { plan: value.verification_plan || "", baseline: value.baseline || {}, releasePlan: value.release_plan || {} };
@@ -304,6 +433,7 @@ function RemediationWorkspace({ engagementKey, onBack, initialCaseId }: Props) {
 
   function chooseCase(caseId: number) {
     if (caseId === selectedId || busy || linkMutationPending.current) return;
+    beginCaseRead();
     setSelectedId(caseId);
     setSelected(null);
     setDiff(null);
@@ -316,23 +446,17 @@ function RemediationWorkspace({ engagementKey, onBack, initialCaseId }: Props) {
     if (!selected || busy || linkMutationPending.current) return;
     linkMutationPending.current = true;
     const caseId = selected.id;
-    const requestId = ++caseReads.current;
+    const requestId = beginCaseRead();
     const current = () => workspaceActive.current && requestId === caseReads.current;
     setBusy(true);
     setNotice(null);
     try {
       const next = await updateRemediationFindings(engagementKey, caseId, ids);
       if (!current()) return;
-      setSelected(next);
-      setCases((values) => values.map((item) => item.id === next.id ? next : item));
+      setSelected(initialCasePage(next));
+      setCases((values) => values.map((item) => item.id === next.id ? caseSummary(next) : item));
       setDiff(null);
       setNotice("Linked findings updated. Review approval must match the new case snapshot.");
-      try {
-        const nextDiff = await getRemediationDiff(engagementKey, caseId);
-        if (current()) { setDiff(nextDiff); setDiffError(null); }
-      } catch (failure) {
-        if (current()) setDiffError(failure instanceof Error ? failure.message : "Could not refresh code diff");
-      }
     } finally {
       linkMutationPending.current = false;
       if (current()) setBusy(false);
@@ -341,22 +465,16 @@ function RemediationWorkspace({ engagementKey, onBack, initialCaseId }: Props) {
 
   async function savePlan() {
     if (!selected || busy || !selected.verification_plan?.trim() || !plan.trim()) return;
-    caseReads.current += 1;
+    beginCaseRead();
     setBusy(true);
     setNotice(null);
     setDiff(null);
     try {
       const next = await updateRemediationVerificationPlan(engagementKey, selected.id, plan);
       clearDraft("plan", selected.id, plan);
-      setSelected(next);
+      setSelected(initialCasePage(next));
       setPlan(next.verification_plan || "");
-      setCases((current) => current.map((item) => item.id === next.id ? next : item));
-      try {
-        setDiff(await getRemediationDiff(engagementKey, next.id));
-        setDiffError(null);
-      } catch (failure) {
-        setDiffError(failure instanceof Error ? failure.message : "Could not refresh code diff");
-      }
+      setCases((current) => current.map((item) => item.id === next.id ? caseSummary(next) : item));
       setNotice("Verification plan saved. Review the new snapshot before approval.");
       setError(null);
     } catch (failure) {
@@ -368,22 +486,16 @@ function RemediationWorkspace({ engagementKey, onBack, initialCaseId }: Props) {
 
   async function saveBaseline() {
     if (!selected || busy || !baseline.outcome || !baseline.method?.trim() || !baseline.proved?.trim()) return;
-    caseReads.current += 1;
+    beginCaseRead();
     setBusy(true);
     setDiff(null);
     try {
       const next = await updateRemediationBaseline(engagementKey, selected.id, baseline as RemediationBaseline);
       clearDraft("baseline", selected.id, baseline);
-      setSelected(next);
+      setSelected(initialCasePage(next));
       setBaseline(next.baseline || {});
       setError(null);
       setNotice("Baseline saved. Review the updated snapshot before approval.");
-      try {
-        setDiff(await getRemediationDiff(engagementKey, next.id));
-        setDiffError(null);
-      } catch (failure) {
-        setDiffError(failure instanceof Error ? failure.message : "Could not refresh code diff");
-      }
     } catch (failure) {
       setError(failure instanceof Error ? failure.message : "Could not save baseline");
     } finally {
@@ -394,7 +506,7 @@ function RemediationWorkspace({ engagementKey, onBack, initialCaseId }: Props) {
   async function saveReleasePlan() {
     if (!selected || busy || !releasePlan.production_canary_decision || !releasePlan.production_canary_rationale?.trim() || !releasePlan.monitoring?.trim()) return;
     if (releasePlan.production_canary_decision === "required" && !releasePlan.safe_procedure?.trim()) return;
-    caseReads.current += 1;
+    beginCaseRead();
     setBusy(true);
     setDiff(null);
     try {
@@ -405,16 +517,10 @@ function RemediationWorkspace({ engagementKey, onBack, initialCaseId }: Props) {
         monitoring: releasePlan.monitoring,
       });
       clearDraft("releasePlan", selected.id, releasePlan);
-      setSelected(next);
+      setSelected(initialCasePage(next));
       setReleasePlan(next.release_plan || {});
       setError(null);
       setNotice("Release plan saved. Review the updated snapshot before approval.");
-      try {
-        setDiff(await getRemediationDiff(engagementKey, next.id));
-        setDiffError(null);
-      } catch (failure) {
-        setDiffError(failure instanceof Error ? failure.message : "Could not refresh code diff");
-      }
     } catch (failure) {
       setError(failure instanceof Error ? failure.message : "Could not save release plan");
     } finally {
@@ -424,21 +530,15 @@ function RemediationWorkspace({ engagementKey, onBack, initialCaseId }: Props) {
 
   async function refreshCase() {
     if (!selected || busy) return;
-    caseReads.current += 1;
+    beginCaseRead();
     setBusy(true);
     setDiff(null);
     try {
       const next = await getRemediationCase(engagementKey, selected.id);
-      setSelected(next);
-      setCases((current) => current.map((item) => item.id === next.id ? next : item));
+      setSelected(initialCasePage(next));
+      setCases((current) => current.map((item) => item.id === next.id ? caseSummary(next) : item));
       applyDraftValues(next, drafts);
       setError(null);
-      try {
-        setDiff(await getRemediationDiff(engagementKey, selected.id));
-        setDiffError(null);
-      } catch (failure) {
-        setDiffError(failure instanceof Error ? failure.message : "Could not refresh code diff");
-      }
     } catch (failure) {
       setError(failure instanceof Error ? failure.message : "Could not refresh case");
     } finally {
@@ -448,14 +548,14 @@ function RemediationWorkspace({ engagementKey, onBack, initialCaseId }: Props) {
 
   async function approve() {
     if (!selected || busy || plan !== selected.verification_plan || !reviewer.trim() || !selected.review_evidence_ready || !diff || diff.truncated || diff.review_digest !== selected.review_digest) return;
-    caseReads.current += 1;
+    beginCaseRead();
     setBusy(true);
     setNotice(null);
     try {
       await approveRemediationCase(engagementKey, selected.id, reviewer.trim(), diff.review_digest, "ui");
       const next = await getRemediationCase(engagementKey, selected.id);
-      setSelected(next);
-      setCases((current) => current.map((item) => item.id === next.id ? next : item));
+      setSelected(initialCasePage(next));
+      setCases((current) => current.map((item) => item.id === next.id ? caseSummary(next) : item));
       setNotice("Reviewed snapshot approved. Any later code or plan change requires a new approval.");
       setError(null);
     } catch (failure) {
@@ -464,11 +564,11 @@ function RemediationWorkspace({ engagementKey, onBack, initialCaseId }: Props) {
         setDiff(null);
         try {
           const next = await getRemediationCase(engagementKey, selected.id);
-          setSelected(next);
+          setSelected(initialCasePage(next));
           setPlan(next.verification_plan || "");
           setBaseline(next.baseline || {});
           setReleasePlan(next.release_plan || {});
-          setDiff(await getRemediationDiff(engagementKey, selected.id));
+          setDiffError(null);
         } catch {
           setDiffError("Refresh the case to inspect the latest review snapshot.");
         }
@@ -480,14 +580,14 @@ function RemediationWorkspace({ engagementKey, onBack, initialCaseId }: Props) {
 
   async function recordHumanVerification() {
     if (!selected || !deployedRevision || !revisionMatches || !humanActor.trim() || !humanNotes.trim() || busy) return;
-    caseReads.current += 1;
+    beginCaseRead();
     setBusy(true);
     setNotice(null);
     try {
       await recordRemediationHumanVerification(engagementKey, selected.id, {
         actor: humanActor.trim(), result: humanResult, observed_revision: deployedRevision, notes: humanNotes.trim(),
       });
-      setSelected(await getRemediationCase(engagementKey, selected.id));
+      setSelected(initialCasePage(await getRemediationCase(engagementKey, selected.id)));
       setNotice("Human development verification recorded against the deployed revision.");
       setError(null);
     } catch (failure) {
@@ -521,6 +621,7 @@ function RemediationWorkspace({ engagementKey, onBack, initialCaseId }: Props) {
       </header>
       {error && <div className="remediation-message remediation-error" role="alert">{error}</div>}
       {notice && <div className="remediation-message" role="status">{notice}</div>}
+      <BackendDriftWarning />
       <div className="remediation-layout">
         <aside className="remediation-queue" aria-label="Case queue">
           <div className="remediation-section-heading"><h2>Cases</h2><span>{visibleCases.length} / {cases.length}</span></div>
@@ -564,7 +665,7 @@ function RemediationWorkspace({ engagementKey, onBack, initialCaseId }: Props) {
                 <div><span>Development deployment</span><strong>{deployedRevision || "Not recorded"}</strong></div>
                 <div><span>Revision check</span><strong className={revisionMatches ? "remediation-ok" : "remediation-caution"}>{revisionMatches ? "Matches code revision" : "Unconfirmed"}</strong></div>
               </div>
-              <nav className="remediation-pane-nav" aria-label="Case sections">{[["overview", "Overview"], ["evidence", "Evidence"], ["review", "Review"], ["delivery", "Delivery"], ["history", "History"]].map(([value, label]) => <button type="button" key={value} disabled={busy} aria-current={activePane === value ? "page" : undefined} onClick={() => setActivePane(value)}>{label}{value === "evidence" && <span>{selected.evidence.length}</span>}</button>)}</nav>
+              <nav className="remediation-pane-nav" aria-label="Case sections">{[["overview", "Overview"], ["evidence", "Evidence"], ["review", "Review"], ["delivery", "Delivery"], ["history", "History"]].map(([value, label]) => <button type="button" key={value} disabled={busy} aria-current={activePane === value ? "page" : undefined} onClick={() => setActivePane(value)}>{label}{value === "evidence" && <span>{(selected.evidence_total ?? selected.evidence.length)}</span>}</button>)}</nav>
               {activePane === "overview" && <LinkedFindings key={selected.id} selected={selected} disabled={busy || planDirty || baselineDirty || releasePlanDirty || selected.status === "closed"} onSave={saveFindings} />}
 
               <section className="remediation-section" hidden={activePane !== "overview"}>
@@ -598,22 +699,26 @@ function RemediationWorkspace({ engagementKey, onBack, initialCaseId }: Props) {
                 </fieldset>
               </section>
 
-              <section className="remediation-section" hidden={activePane !== "evidence"}>
-                <div className="remediation-section-heading"><h3>Evidence and test results</h3><span>{selected.evidence.length} records</span></div>
+              {activePane === "evidence" && <section className="remediation-section">
+                <div className="remediation-section-heading"><h3>Evidence and test results</h3><span>{selected.evidence_total ?? selected.evidence.length} records</span></div>
                 {selected.evidence.length === 0 ? <p>No evidence registered.</p> : (
                   <div className="remediation-evidence-grid">
-                    {selected.evidence.map((item) => {
+                    {(focusedEvidence && !selected.evidence.some((item) => item.id === focusedEvidence.id) ? [focusedEvidence, ...selected.evidence] : selected.evidence).map((item) => {
                       const url = remediationEvidenceFileUrl(engagementKey, selected.id, item.id);
                       const label = detailLabel(item);
-                      return <figure key={item.id} className="remediation-evidence">
+                      return <figure key={item.id} id={`remediation-evidence-${item.id}`} className="remediation-evidence">
                         {evidenceIsImage(item) && <a href={url} target="_blank" rel="noreferrer"><img src={url} alt={label} loading="lazy" /></a>}
-                        <figcaption><strong>{label}</strong><span>{item.kind.replace(/_/g, " ")} · {item.method}{item.outcome ? ` · ${item.outcome.replace(/_/g, " ")}` : ""}</span><span>Environment: {item.environment ?? "unknown (historical record)"}</span>{item.execution && <span>{item.execution === "executed" ? "Executed evidence" : item.execution === "reasoned" ? "Reasoned evidence" : "Execution unavailable"}</span>}<span>{item.proved}</span>{item.command && <code>{item.command}</code>}<span>Observed: {item.observed}</span>{item.revision && <span>Revision: {item.revision}</span>}{item.runtime_revision && <span>Confirmed runtime revision: {item.runtime_revision}</span>}{item.artifact_path && <a href={url} target="_blank" rel="noreferrer">Open evidence ↗</a>}</figcaption>
+                        <figcaption><strong>{label}</strong><span>{item.kind.replace(/_/g, " ")} · {item.method}{item.outcome ? ` · ${item.outcome.replace(/_/g, " ")}` : ""}</span><span>Environment: {item.environment ?? "unknown (historical record)"}</span>{item.execution && <span>{item.execution === "executed" ? "Executed evidence" : item.execution === "reasoned" ? "Reasoned evidence" : "Execution unavailable"}</span>}<span>{item.proved}</span>{item.command && <code>{item.command}</code>}<span>Observed: {item.observed}</span>{item.revision && <span>Recorded revision: {item.revision}</span>}{selected.evidence_carries?.filter((carry) => carry.evidence_id === item.id && carry.to_revision === selected.worktree_revision).map((carry) => <span className="remediation-ok" key={`${carry.evidence_id}:${carry.to_revision}`}>Evidence carried from {carry.from_revision} to {carry.to_revision}: same tree.</span>)}{item.runtime_revision && <span>Confirmed runtime revision: {item.runtime_revision}</span>}{item.artifact_path && <a href={url} target="_blank" rel="noreferrer">Open evidence ↗</a>}{item.scratch_proof_json && <details className="remediation-record"><summary>Regression execution proof</summary><CodeBlock text={item.scratch_proof_json} /></details>}<EvidencePreview key={selected.review_digest} engagementKey={engagementKey} caseId={selected.id} item={item} /></figcaption>
                       </figure>;
                     })}
                   </div>
                 )}
-              </section>
+              </section>}
 
+              {activePane === "evidence" && <>
+                {pageError && <p role="alert">{pageError}</p>}
+                {selected.evidence.length < (selected.evidence_total ?? 0) && <button type="button" disabled={pageBusy} onClick={() => loadMore("evidence")}>{pageBusy ? "Loading evidence…" : "Load more evidence"}</button>}
+              </>}
               <section className="remediation-section remediation-review" hidden={activePane !== "review"}>
                 <div className="remediation-section-heading"><h3>Human verification plan</h3><span>Only rehearsed steps</span></div>
                 <fieldset className="remediation-case-controls" disabled={selected.status === "closed"}>
@@ -639,6 +744,19 @@ function RemediationWorkspace({ engagementKey, onBack, initialCaseId }: Props) {
                 </fieldset>
               </section>
 
+              <section className="remediation-section" hidden={activePane !== "delivery"}>
+                <div className="remediation-section-heading"><h3>Pull request</h3><span>{selected.pull_request ? selected.pull_request.current ? "Matches current review" : "Earlier publication" : "Not recorded"}</span></div>
+                {selected.pull_request ? <>
+                  <p>{selected.pull_request.branch} → {selected.pull_request.base_branch} · revision {selected.pull_request.revision}</p>
+                  {safeHttpUrl(selected.pull_request.url) ? <a href={safeHttpUrl(selected.pull_request.url)} target="_blank" rel="noreferrer">Open recorded PR ↗</a> : <p>{selected.pull_request.url}</p>}
+                  {!selected.pull_request.current && <p className="remediation-caution">The recorded publication does not match the current reviewed snapshot.</p>}
+                  <div className="remediation-requirement-result"><button type="button" onClick={() => viewEvidence(selected.pull_request!.evidence_id)}>View publication evidence #{selected.pull_request.evidence_id}</button></div>
+                </> : <p>No verified PR publication receipt recorded.</p>}
+              </section>
+              <section className="remediation-section" hidden={activePane !== "delivery"}>
+                <div className="remediation-section-heading"><h3>Shared environments</h3></div>
+                {selected.environment_leases?.length ? <ul className="remediation-human-history">{selected.environment_leases.map((lease) => <li key={lease.token}><strong>{lease.environment} · {lease.released_at ? "Released" : "Held"}</strong> · {lease.actor}<p>Expected revision: {lease.revision} · observed: {lease.observed_revision || "Unconfirmed"}</p><p>Acquired {lease.acquired_at}{lease.released_at ? ` · released ${lease.released_at} by ${lease.released_by}` : ""}</p></li>)}</ul> : <p>No shared environment leases recorded.</p>}
+              </section>
               {deployment && <section className="remediation-section" hidden={activePane !== "delivery"}><div className="remediation-section-heading"><h3>Development deployment</h3></div><p className="remediation-deployment-link">Workflow: {deployment.workflow} · run {deployment.run_id} · expected {deployment.expected_revision}</p></section>}
 
               <section className="remediation-section remediation-review" hidden={activePane !== "delivery"}>
@@ -659,12 +777,20 @@ function RemediationWorkspace({ engagementKey, onBack, initialCaseId }: Props) {
                 )}
               </section>
 
+              <section className="remediation-section" hidden={activePane !== "review"}>
+                <div className="remediation-section-heading"><h3>Automated checks</h3><span>{selected.checks?.length || 0} configured</span></div>
+                {selected.checks?.length ? <ul className="remediation-check-list">{selected.checks.map((check) => <li key={check.name}><div><strong>{check.name}</strong><code>{check.command}</code></div><div className="remediation-requirement-result"><strong className={check.missing ? "remediation-caution" : "remediation-ok"}>{check.missing || "Passed"}</strong>{check.evidence_ids.map((id) => <button type="button" key={id} onClick={() => viewEvidence(id)}>View check evidence #{id}</button>)}</div></li>)}</ul> : <p>No project check commands configured. Review the case’s verification requirements below.</p>}
+              </section>
               <section className="remediation-section remediation-review" hidden={activePane !== "review"}>
                 <div className="remediation-section-heading"><h3>Review approval</h3><span>{selected.approval_current ? "Current" : "Needs approval"}</span></div>
+                {selected.approvals.length > 0 && <p className="remediation-help">Latest approval: {textValue(selected.approvals.at(-1)?.reviewer)} · revision {textValue(selected.approvals.at(-1)?.approved_revision)} · {textValue(selected.approvals.at(-1)?.created_at)}</p>}
                 {selected.verification_requirements && <div className="remediation-verification-requirements">
-                  <h4>Verification alternatives</h4>
+                  <h4>Verification requirements</h4>
                   <p>{selected.verification_requirements.alternatives_reason}</p>
-                  <ul>{selected.verification_requirements.requirements.map((requirement, index) => <li key={index}>{requirement.kind} · {requirement.methods.join(", ")} · {requirement.execution} · {requirement.revision} revision{requirement.browser_purpose ? ` · ${requirement.browser_purpose}` : ""}{requirement.legitimate_use_control ? " · legitimate-use control" : ""}{requirement.rationale ? ` · ${requirement.rationale}` : ""}</li>)}</ul>
+                  <ul>{selected.verification_requirements.requirements.map((requirement, index) => <li key={index}>{requirement.kind} · {requirement.methods.join(", ")} · {requirement.execution} · {requirement.revision} revision{requirement.fix_paths?.length ? ` · reverted fix paths: ${requirement.fix_paths.join(", ")}` : ""}{requirement.browser_purpose ? ` · ${requirement.browser_purpose}` : ""}{requirement.legitimate_use_control ? " · legitimate-use control" : ""}{requirement.rationale ? ` · ${requirement.rationale}` : ""}{(() => {
+                    const match = selected.verification_matches?.find((item) => item.requirement_index === index);
+                    return match ? <div className="remediation-requirement-result"><strong className={match.missing ? "remediation-caution" : "remediation-ok"}>{match.missing || "Satisfied"}</strong>{match.evidence_ids.map((id) => <button type="button" key={id} onClick={() => viewEvidence(id)}>View evidence #{id}</button>)}</div> : null;
+                  })()}</li>)}</ul>
                 </div>}
                 <p>Review the code diff, baseline, tests, screenshots, and human plan before approving. Approval applies to this exact code and plan snapshot.</p>
                 {selected.review_evidence_ready ? <p className="remediation-ok">The case’s required verification evidence is registered.</p> : <div className="remediation-evidence-gate"><strong>Required evidence is missing</strong><ul>{selected.review_evidence_missing.map((item, index) => <li key={index}>{item}</li>)}</ul></div>}
@@ -683,10 +809,12 @@ function RemediationWorkspace({ engagementKey, onBack, initialCaseId }: Props) {
                 </div>
               </section>
               {activePane === "history" && <section className="remediation-section remediation-history" aria-label="Case history">
-                <div className="remediation-section-heading"><h3>Case history</h3><span>{selected.transitions.length} transitions</span></div>
+                <div className="remediation-section-heading"><h3>Case history</h3><span>{selected.history_total ?? selected.transitions.length} events</span></div>
                 {selected.transitions.length ? <ol>{selected.transitions.map((item, index) => <li key={textValue(item.id) || index}>{textValue(item.from_status)} → {textValue(item.to_status)} · {textValue(item.actor)} · {textValue(item.reason)}</li>)}</ol> : <p>No case transitions recorded.</p>}
+                {pageError && <p role="alert">{pageError}</p>}
+                {selected.transitions.length < (selected.history_total ?? 0) && <button type="button" disabled={pageBusy} onClick={() => loadMore("history")}>{pageBusy ? "Loading history…" : "Load more history"}</button>}
                 {selected.approvals.length > 0 && <><h3>Review approvals</h3><p>{selected.approval_current ? "Latest approval matches this snapshot." : "Earlier approval is stale after a change."}</p><ul>{selected.approvals.map((item, index) => <li key={textValue(item.id) || index}>Approved by {textValue(item.reviewer)} · revision {textValue(item.approved_revision)}</li>)}</ul></>}
-                <details className="remediation-record"><summary>Raw case record</summary><JsonView value={selected} /></details>
+                <details className="remediation-record" onToggle={(event) => setRawCaseOpen(event.currentTarget.open)}><summary>Raw case record</summary>{rawCaseOpen && <JsonView value={selected} />}</details>
                 {Object.keys(drafts).length > 0 && <details className="remediation-record"><summary>Local unsaved drafts</summary><JsonView value={drafts} /></details>}
                 {invalidDraftRecord !== null && <details className="remediation-record"><summary>Unreadable local draft record</summary><CodeBlock text={invalidDraftRecord} /></details>}
               </section>}

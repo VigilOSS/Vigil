@@ -137,6 +137,20 @@ def _jj_store(path: Path) -> Path:
     )
 
 
+def tree_id(path: Path, ref: str) -> str:
+    """Exact complete Git tree identity, including modes, symlinks and submodules."""
+    commit = resolve_revision(path, ref)
+    if is_jj(path):
+        if _log(path, commit, "conflict") == "true":
+            raise ValueError("Conflicted revisions cannot identify tested content")
+        store = _jj_store(path) / "store"
+        target = (store / "git_target").read_text().strip()
+        args = ["git", "--git-dir", str((store / target).resolve())]
+    else:
+        args = ["git", "-C", str(path)]
+    return _run([*args, "rev-parse", "--verify", "--end-of-options", f"{commit}^{{tree}}"])
+
+
 def registered(repo: Path, path: Path) -> bool:
     if path.is_symlink():
         return False

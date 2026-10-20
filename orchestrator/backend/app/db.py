@@ -6213,7 +6213,7 @@ def _create_remediation_tables(connection: sqlite3.Connection) -> None:
     for column in ("base_branch", "base_revision", "review_policy_json", "verification_requirements_json"):
         if column not in _table_columns(connection, "remediation_cases"):
             connection.execute(f"ALTER TABLE remediation_cases ADD COLUMN {column} TEXT")
-    for column in ("execution", "executed_revision", "executed_directory", "shared_environment", "environment_token", "runtime_revision"):
+    for column in ("execution", "executed_revision", "executed_directory", "shared_environment", "environment_token", "runtime_revision", "tree_id", "scratch_proof_json"):
         if column not in _table_columns(connection, "remediation_evidence"):
             connection.execute(f"ALTER TABLE remediation_evidence ADD COLUMN {column} TEXT")
     for column in ("observed_revision", "confirmed_at", "confirmed_by"):
