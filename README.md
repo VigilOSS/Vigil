@@ -115,6 +115,9 @@ For ZCode, creation comes before opening the project: Vigil opens the generated
 **Project folder**, whose root `AGENTS.md` walks through setup. Enable the printed
 local plugin and start a new task in that project. Do not open the audited source
 directory or the Vigil source checkout as the engagement's ZCode project.
+The installed `vigil` recognizes the generated project's engagement, workflow and
+client during mode checks, client diagnostics and assessment commands. Setup checks
+explain any identity conflict before workflow work begins.
 
 ### Audit source code
 

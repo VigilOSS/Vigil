@@ -1196,13 +1196,14 @@ def engagement_mode_prompt(install_root: Path, mode: str) -> Path:
     return _canonical_operator_prompt(application_agent_root(install_root), mode)
 
 
-def engagement_mode_state(install_root: Path, engagement_dir: Path, *, client: str = "claude") -> dict[str, Any]:
+def engagement_mode_state(install_root: Path, engagement_dir: Path, *, client: str | None = None) -> dict[str, Any]:
     """Inspect tracks without choosing a prompt for an ambiguous engagement."""
     tracks = _engagement_modes(_read_json(engagement_dir / "scope.json"))
     requested_mode = None
     binding = os.environ.get("VIGIL_SESSION_ENGAGEMENT_DIR") or os.environ.get("ENGAGEMENT_DIR")
     if binding and Path(binding).expanduser().resolve() == engagement_dir.resolve():
         requested_mode = os.environ.get("VIGIL_OPERATOR_MODE") or None
+        client = client or os.environ.get("VIGIL_CLIENT_NAME") or os.environ.get("VIGIL_REQUESTED_CLIENT") or None
     mode = (
         resolve_engagement_mode(engagement_dir, requested_mode)
         if requested_mode or len(tracks) == 1 else None
@@ -1210,13 +1211,15 @@ def engagement_mode_state(install_root: Path, engagement_dir: Path, *, client: s
     return {
         "mode": mode,
         "prompt": str(engagement_mode_prompt(install_root, mode)) if mode else None,
+        "client": client,
+        "selection_source": "session" if requested_mode else "single-track" if mode else "unselected",
         "enabled_tracks": list(tracks),
         **({"source": engagement_source_state(engagement_dir)} if "code" in tracks else {}),
         "tracks": {
             name: {
                 "phase": track["phase"],
                 "prompt": str(engagement_mode_prompt(install_root, name)),
-                "start_command": _engagement_start_command(engagement_dir, client, name, install_root),
+                "start_command": _engagement_start_command(engagement_dir, client, name, install_root) if client else None,
             }
             for name, track in tracks.items()
         },
@@ -2633,15 +2636,26 @@ def _write_prompt_wrappers(
     selected_kind = next(iter(tracks)) if tracks and not dual_track else engagement_type
     operator_prompt = None if dual_track else _canonical_operator_prompt(agent_root, selected_kind)
     prompt_instruction = (
-        "Run `vigil engagement mode` in this engagement session. Read only the absolute "
-        "prompt path it returns, in bounded parts until the end. If it asks for a mode, "
-        "restart with `vigil engagement start <key> --mode web|code --client <client>`.\n"
+        "Inside a generated client Project folder, follow that project's AGENTS.md and session helper; "
+        "they supply the selected client and workflow. "
+        "Run `vigil engagement mode` to inspect session identity. Read only the absolute prompt path "
+        "it returns, in bounded parts until the end. "
+        "When this engagement folder is opened directly without a session binding, help the user "
+        "choose their workflow and client in a terminal with "
+        "`vigil engagement start <key> --mode web|code --client <client>`. "
+        "Explain the setup action and wait for the user to confirm their project is ready.\n"
         if dual_track else
         f"Load workspace operator instructions from:\n- {operator_prompt}\n\n"
         "Read that file in bounded parts, following its Map of This File, and continue "
         "until you have reached the end of the file. Do not treat a tool's partial-read "
         "notice as completion.\n"
     )
+    if not dual_track and engagement_type in {"offensive", "web", "code", "both"}:
+        prompt_instruction = (
+            "Inside a generated client Project folder, follow that project's AGENTS.md and "
+            "session helper for the selected client and workflow. When this engagement folder "
+            "is opened directly, the instructions below apply.\n\n" + prompt_instruction
+        )
 
     # Specialist context isolation invariant:
     # The per-engagement AGENTS.md/CLAUDE.md written here are operator-only bootstrap pointers.

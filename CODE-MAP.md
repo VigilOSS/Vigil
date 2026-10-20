@@ -122,6 +122,11 @@ When you are about to copy one of these into a second file, stop and import.
 - `src/vigil_cli/client_checks.py` owns read-only client prerequisites and inspection of existing
   bound workspaces, asset manifests, and exact-context hook receipts. Historical `OBSERVED` events
   do not establish current native-build acceptance or completed backend hydration.
+- `src/vigil_cli/client_context.py` discovers validated install-owned native project identity for mode,
+  client-check and assess commands. It supplies session selectors only; application code, executable paths
+  and backend endpoints retain their existing owners. `client_checks.py:validate_context_binding` owns shared binding validation.
+- `src/vigil_cli/argv.py:passthrough_boundary` owns the opaque `--` boundary for universal CLI routing,
+  startup forwarding and assessment root-flag hoisting; each parser retains ownership of its flags and validation.
 - `src/vigil_cli/prompts.py` owns shared terminal questions used by creation and engagement/mode selection;
   `main.py` resolves interactive start selections before preflight without changing ambient resolution for other commands.
 - `src/vigil_cli/engagement_recency.py` owns the declared meaningful-work timestamp projection and UTC comparison;

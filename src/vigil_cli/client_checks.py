@@ -118,6 +118,30 @@ def _object(raw: bytes) -> dict:
     return parsed
 
 
+def validate_context_binding(binding: dict, workspace: Path, engagement: Path,
+                             install_root: Path, client: str) -> None:
+    """Shared identity contract for diagnostic inspection and project discovery."""
+    if not isinstance(binding.get("mode"), str) or binding["mode"] not in {"web", "code"}:
+        raise ValueError("Invalid recorded client mode")
+    if (binding.get("schema_version") != 1 or binding.get("client") != client
+            or binding.get("workspace") != str(workspace)
+            or binding.get("engagement_dir") != str(engagement)
+            or binding.get("engagement_key") != engagement.name
+            or binding.get("install_root") != str(install_root)
+            or binding.get("vigil_cli") != str(workspace / "bin/vigil")
+            or not isinstance(binding.get("release_id"), str)
+            or not re.fullmatch(r"[0-9a-f]{64}", binding["release_id"])):
+        raise ValueError("Client context root/client/workspace binding mismatch")
+    application = binding.get("application")
+    if (not isinstance(application, dict) or not isinstance(application.get("root"), str)
+            or not Path(application["root"]).is_absolute()
+            or binding.get("agent_root") != str(Path(application["root"]) / "agent")
+            or not isinstance(application.get("content_sha256"), str)
+            or not re.fullmatch(r"[0-9a-f]{64}", application["content_sha256"])
+            or not isinstance(application.get("version"), str)):
+        raise ValueError("Invalid client application binding")
+
+
 def _manifest_check(workspace: Path, binding_bytes: bytes | None = None, *,
                     check_name: str = "managed-assets", required_files: tuple[str, ...] = ()) -> Check:
     try:
@@ -201,27 +225,12 @@ def _observed_context_checks(client: str, engagement: Path, mode: str | None,
             except FileNotFoundError:
                 continue
             binding = _object(raw)
-            if binding.get("mode") not in {"web", "code"}:
+            if not isinstance(binding.get("mode"), str) or binding["mode"] not in {"web", "code"}:
                 raise ValueError("Invalid recorded client mode")
             if mode and binding["mode"] != mode:
                 continue
-            if (binding.get("schema_version") != 1 or binding.get("client") != client
-                    or binding.get("workspace") != str(workspace)
-                    or binding.get("engagement_dir") != str(engagement)
-                    or binding.get("engagement_key") != engagement.name
-                    or binding.get("install_root") != str(install_root)
-                    or binding.get("vigil_cli") != str(workspace / "bin/vigil")
-                    or not isinstance(binding.get("release_id"), str)
-                    or not re.fullmatch(r"[0-9a-f]{64}", binding["release_id"])):
-                raise ValueError("Client context root/client/workspace binding mismatch")
+            validate_context_binding(binding, workspace, engagement, install_root, client)
             application = binding.get("application")
-            if (not isinstance(application, dict) or not isinstance(application.get("root"), str)
-                    or not Path(application["root"]).is_absolute()
-                    or binding.get("agent_root") != str(Path(application["root"]) / "agent")
-                    or not isinstance(application.get("content_sha256"), str)
-                    or not re.fullmatch(r"[0-9a-f]{64}", application["content_sha256"])
-                    or not isinstance(application.get("version"), str)):
-                raise ValueError("Invalid client application binding")
             if expected_application is not None and application != expected_application:
                 checks.append(Check(f"retained-context:{name}", "STALE", "Retained workspace belongs to another pinned release."))
                 continue

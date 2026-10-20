@@ -44,10 +44,19 @@ one mode unless `--mode web` or `--mode code` is supplied. Noninteractive starts
 the explicit mode. Change mode by starting a new client process. Selecting a session mode does
 not enable a track, reset its phase, or change scope.
 
-`vigil engagement mode <key>` inspects enabled tracks, their phases, prompt paths, and complete
-start commands without requiring a session selection. `--json` returns a `tracks` object and
-nullable `mode` and `prompt` fields. In a session bound to that engagement, the selected mode
-and prompt are reported too; an inherited mode from another engagement is ignored.
+`vigil engagement mode <key>` inspects enabled tracks, phases, and prompt paths.
+Inside a generated OpenCode or ZCode Project folder (including subfolders), Vigil
+verifies the project binding and supplies the selected engagement, workflow, and client.
+The same discovery supports `vigil assess` and `vigil engagement client-check`.
+This identifies the project; native plugin execution and backend hydration have separate checks.
+
+Outside a bound session, a dual-track engagement reports that this command has no
+session binding. Source files describe available inputs, not the selected workflow.
+Use `--client <client>` to request matching terminal start commands; a bound session
+uses its own client by default. `--json` returns `client`, `selection_source`, a
+`tracks` object and nullable `mode`, `prompt`, and per-track `start_command` fields.
+An inherited mode from another engagement is ignored. Conflicting project and
+environment identities are reported for operator review.
 
 ## Starting a session
 

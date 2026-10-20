@@ -98,8 +98,8 @@ def test_zcode_launch_separates_setup_paths_and_copyable_prompt(context, monkeyp
     output = capsys.readouterr().out
     workspace = Path(opened[0][-1])
     assert "Plugin setup" in output
-    assert str(workspace) in [line.strip() for line in output.splitlines()]
-    assert str(workspace / "plugin/marketplace.json") in [line.strip() for line in output.splitlines()]
+    assert output.count(str(workspace)) == 1
+    assert "<PATH>/plugin/marketplace.json" in output
     plugin = json.loads((workspace / "plugin/.zcode-plugin/plugin.json").read_text())
     assert plugin["name"] in output
     prompt = output.split("Paste into a new task\n\n", 1)[1].strip()
@@ -109,6 +109,7 @@ def test_zcode_launch_separates_setup_paths_and_copyable_prompt(context, monkeyp
     assert "\n\n" in prompt
     if terminal:
         assert "Continue in ZCode" in output
+        assert str(workspace) in [line.strip() for line in output.splitlines()]
     else:
         assert f"workspace: {workspace}\nengagement: acme\nclient: zcode\nmode: code\n" in output
 
@@ -123,7 +124,7 @@ def test_zcode_no_autoprompt_still_explains_how_to_begin(context, monkeypatch, c
     assert "Start a new task in this project and follow AGENTS.md." in capsys.readouterr().out
 
 
-def test_zcode_opening_prompt_names_its_bound_instructions_and_helper(context, monkeypatch, capsys):
+def test_zcode_opening_prompt_resolves_its_project_instructions_and_helper(context, monkeypatch, capsys):
     from vigil_cli import remediation_clients
 
     root, engagement, _ = context
@@ -133,10 +134,31 @@ def test_zcode_opening_prompt_names_its_bound_instructions_and_helper(context, m
                         opened.append(argv) or SimpleNamespace(returncode=0))
     engagements.start_engagement(root, engagement, "zcode", [], "code")
     workspace = Path(opened[0][-1])
-    binding = json.loads((workspace / ".vigil-client-context.json").read_text())
     output = capsys.readouterr().out
-    assert json.dumps(str(workspace / "AGENTS.md")) in output
-    assert shlex.join([binding["vigil_cli"], "engagement", "mode"]) in output
+    prompt = output.split("Paste into a new task\n\n", 1)[1].strip()
+    assert "./AGENTS.md" in prompt
+    assert "./bin/vigil engagement mode" in prompt
+    assert "./.vigil-client-context.json" in prompt
+    assert "acme" in prompt and "code" in prompt and "ZCode" in prompt
+    assert (workspace / "AGENTS.md").is_file()
+    assert (workspace / "bin/vigil").is_file()
+
+
+@pytest.mark.parametrize("width", [60, 80, 100])
+def test_zcode_start_has_compact_formatted_setup(context, monkeypatch, capsys, width):
+    from vigil_cli import remediation_clients, term
+    root, engagement, _ = context
+    monkeypatch.setenv("COLUMNS", str(width))
+    monkeypatch.setenv("NO_COLOR", "1")
+    monkeypatch.setattr(term, "is_terminal", lambda _stream: True)
+    monkeypatch.setattr(remediation_clients, "_zcode_application", lambda: (Path("/Applications/ZCode.app"), "3.15.3"))
+    monkeypatch.setattr(engagements.subprocess, "run", lambda *_args, **_kwargs: SimpleNamespace(returncode=0))
+    engagements.start_engagement(root, engagement, "zcode", [], "code")
+    output = capsys.readouterr().out
+    setup = output.split("Paste into a new task\n\n", 1)[0]
+    assert len(setup.splitlines()) <= 28
+    assert "• Engagement" in setup
+    assert "<PATH>" in setup
 
 
 @pytest.mark.parametrize("client", ["zcode", "opencode"])

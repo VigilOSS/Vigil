@@ -169,13 +169,18 @@ def prepare_workspace(install_root: Path, engagement: Path, client: str, mode: s
         "## Session identity and commands\n\n"
         f"This workspace binds only engagement {json.dumps(engagement.name)} in `{mode}` mode.\n"
         f"Canonical engagement: `{engagement.resolve()}`.\n"
-        f"Use `{binding['vigil_cli']}` instead of bare `vigil` in every command.\n"
+        f"Session commands use `{binding['vigil_cli']}`; it supplies the project identity explicitly.\n"
+        "The installed `vigil` also discovers this identity for mode inspection, client checks and assessment commands run from this Project folder or its subfolders.\n"
         f"Client context: `{workspace.resolve() / CONTEXT_FILE}`. Read it for literal artifact paths.\n"
         f"The binding's `mode` is `{mode}`. Interpret VIGIL_OPERATOR_MODE in shared guidance as that bound value, not an assumed GUI environment variable.\n"
         "Environment-variable path notation in shared guidance denotes these literal paths, not ambient GUI variables.\n\n"
         + setup
         + "## Operator workflow and recovery\n\n"
         f"Run `{helper_command} engagement mode` and verify its mode is `{mode}` before reading only `{prompt}` in full.\n"
+        "The project binding selects the workflow; source inventory describes available inputs. "
+        "A successful mode check supplies the operator prompt, whose resume procedure hydrates durable backend state.\n"
+        "If a check reports missing or conflicting session identity, explain its recovery action to the user and wait for their direction. "
+        "The user performs project selection and client startup from their terminal; continue in this task after they confirm setup is ready.\n"
         f"Read `{engagement.resolve() / 'ENGAGEMENT.md'}` when present. Scope, approvals and backend records remain canonical; the native conversation is not shared durable state.\n"
         f"Before dependent work run `{helper_command} engagement client-check {shlex.quote(engagement.name)} --client {client} --mode {mode} --json`.\n"
         "If setup is incomplete, explain the failed check and the next setup action before dependent work. Instructions do not replace native approvals or executable authorization checks.\n"
@@ -304,15 +309,12 @@ def start_client(install_root: Path, engagement: Path, client: str, mode: str,
         pass  # Same best-effort terminal selection as the other official starts.
     opening = "Read this workspace AGENTS.md, verify the selected mode, and perform its startup/resume procedure."
     if client == "zcode":
-        helper = shlex.quote(str(binding["vigil_cli"]))
         opening = (
-            f"This is a ZCode {mode} assessment. The project folder must be:\n{json.dumps(str(workspace))}\n\n"
-            "Run pwd before doing any work. If it is not that folder, stop and ask me to open the correct project in ZCode. "
-            "Do not launch another coding client or run engagement start from this task.\n\n"
-            f"Read {json.dumps(str(workspace / 'AGENTS.md'))} in full.\n"
-            f"Use {helper} for every Vigil command, not bare vigil.\n"
-            f"Verify the bound mode with: {helper} engagement mode\n"
-            "Then follow the selected workflow's startup/resume procedure."
+            "Read ./AGENTS.md in this ZCode project. Before work, verify "
+            f"./.vigil-client-context.json matches engagement {json.dumps(engagement.name)}, client zcode, mode {mode}.\n"
+            "Run ./bin/vigil engagement mode and ./bin/vigil engagement client-check --json. "
+            "If identity or setup needs attention, explain the recovery action and wait for me. "
+            "Otherwise follow the bound workflow's startup/resume procedure."
         )
     if mode == "code":
         from .engagements import SOURCE_TRUST_CONFIRMATION, engagement_source_state
@@ -326,23 +328,23 @@ def start_client(install_root: Path, engagement: Path, client: str, mode: str,
         print(f"workspace: {workspace}\nengagement: {engagement.name}\nclient: {client}\nmode: {mode}", flush=True)
     if client == "zcode":
         if term.is_terminal(sys.stdout):
-            print(term.heading("Continue in ZCode", stream=sys.stdout))
-            print(term.row("info", "Engagement", engagement.name, stream=sys.stdout))
-            print(term.row("info", "Workflow", f"{mode.capitalize()} assessment", stream=sys.stdout))
-        print("\n" + term.heading("Project folder", stream=sys.stdout))
-        print(term.wrap("In Projects, choose Add project (+) > Open folder. In the macOS folder chooser, "
-                        "press Cmd+Shift+G, paste this path, press Return, then Open:", stream=sys.stdout))
-        print(f"  {workspace}")
-        print(term.wrap("Vigil already created this folder. Use it as the project, not the engagement root or source folder.", stream=sys.stdout))
-        print("\n" + term.heading("Plugin setup (first time for this project)", stream=sys.stdout))
-        print(term.wrap("1. Open Plugin Marketplace > Add > Add plugin marketplace. In the field "
-                        "'GitHub repo, git URL, file, or directory', paste this marketplace file:", stream=sys.stdout))
-        print(f"  {workspace / 'plugin/marketplace.json'}")
+            term.print_records("Continue in ZCode", [f"engagement\t{engagement.name}",
+                f"workflow\t{mode.capitalize()} assessment"], stream=sys.stdout)
+        if term.is_terminal(sys.stdout):
+            print("\n" + term.heading("Project folder (<PATH>)", stream=sys.stdout))
+            print(f"  {workspace}")
+        print(term.wrap("<PATH> means the project folder above; replace it before pasting.", stream=sys.stdout))
+        print(term.wrap("1. Projects > Add project (+) > Open folder. Cmd+Shift+G, paste <PATH>, Return, Open.",
+                        indent="   ", stream=sys.stdout))
+        print("\n" + term.heading("Plugin setup (first time)", stream=sys.stdout))
+        print(term.wrap("2. Plugin Marketplace > Add > Add plugin marketplace.", stream=sys.stdout))
+        print(term.wrap("   Field: GitHub repo, git URL, file, or directory", stream=sys.stdout))
+        print("   <PATH>/plugin/marketplace.json")
         plugin_name = json.loads((workspace / "plugin/.zcode-plugin/plugin.json").read_text())["name"]
-        print(term.wrap("2. Under Personal, find this plugin. Review its hooks, then install and enable it:", stream=sys.stdout))
-        print(f"  {plugin_name}")
-        print(term.wrap("3. Select Z.AI Coding Plan and your model in ZCode.", stream=sys.stdout))
-        print("\n" + term.wrap("Opening a folder does not verify plugin hooks. Finish setup before asking the agent to work.", stream=sys.stdout))
+        print(term.wrap(f"   Personal > {plugin_name}", stream=sys.stdout))
+        print(term.wrap("   Review hooks, then install and enable the plugin.", stream=sys.stdout))
+        print(term.wrap("3. Select Z.AI Coding Plan/model, then create a NEW task.", stream=sys.stdout))
+        print(term.row("warn", "Opening a project does not verify hooks.", stream=sys.stdout))
         if no_autoprompt:
             print("\nStart a new task in this project and follow AGENTS.md.\n", flush=True)
         else:

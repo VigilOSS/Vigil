@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import sys
 
+from vigil_cli.argv import passthrough_boundary
 
 _ROOT_FLAGS_WITH_VALUE = {"--engagement-dir", "--actor-kind"}
 _ROOT_FLAG_PREFIXES = ("--engagement-dir=", "--actor-kind=")
@@ -32,17 +33,12 @@ def _hoist_root_flags(argv: list[str]) -> list[str]:
     """
     hoisted: list[str] = []
     rest: list[str] = []
-    found_double_dash = False
+    boundary = passthrough_boundary(argv)
     seen_engagement_dir = 0
     i = 0
     while i < len(argv):
         token = argv[i]
-        if not found_double_dash and token == "--":
-            found_double_dash = True
-            rest.append(token)
-            i += 1
-            continue
-        if not found_double_dash and token in _ROOT_FLAGS_WITH_VALUE and i + 1 < len(argv):
+        if i < boundary and token in _ROOT_FLAGS_WITH_VALUE and i + 1 < len(argv):
             value = argv[i + 1]
             if token == "--engagement-dir":
                 if not value:
@@ -60,7 +56,7 @@ def _hoist_root_flags(argv: list[str]) -> list[str]:
             hoisted.extend([token, value])
             i += 2
             continue
-        if not found_double_dash and any(token.startswith(prefix) for prefix in _ROOT_FLAG_PREFIXES):
+        if i < boundary and any(token.startswith(prefix) for prefix in _ROOT_FLAG_PREFIXES):
             if token.startswith("--engagement-dir="):
                 value = token.split("=", 1)[1]
                 if not value:

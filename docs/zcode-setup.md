@@ -64,8 +64,11 @@ does not repair files or establish that the plugin is enabled in ZCode. Without
 an explicit application pin, release matching remains `UNVERIFIED`.
 
 When invoked through the generated bound helper without an engagement key, the
-check uses that helper's explicit context and engagement binding. It does not
-guess from the current directory or a global active-engagement pointer.
+check uses that helper's explicit context and engagement binding. The installed
+`vigil` discovers the same binding in a generated Project folder or its subfolders.
+In either case, `vigil engagement client-check --json` uses the bound client when
+`--client` is omitted. Outside a bound project, supply `--client zcode` explicitly;
+the global active-engagement pointer does not select a client context.
 
 `OBSERVED` means an exact-context historical receipt records startup, compaction,
 or context injection; it does not certify the currently installed desktop/engine
@@ -100,6 +103,10 @@ helper, selected operator prompt, and canonical engagement state. Its `plugin/`
 directory contains the local marketplace. Keep the generated binding intact;
 another engagement, mode, or application release can have a different path.
 `<binding-digest>` is a generated fingerprint, not a value to invent or enter.
+The compact setup instructions call the printed folder `<PATH>`. Replace that
+shorthand with the full folder path before pasting into ZCode; for the marketplace
+file, append `/plugin/marketplace.json`. The task prompt uses project-relative
+files and commands rather than placeholders.
 The same `client-context` mechanism is used by OpenCode web/code starts. Claude
 and Codex retain their existing engagement-root layouts. The context folder is
 not another checkout: scope, evidence and backend records remain canonical.
@@ -118,16 +125,21 @@ folder, its `source` folder, and the `plugin` folder are not the project to sele
 If the project is already listed, select its matching workspace before creating a task.
 
 An already running ZCode app does not reliably inherit the launcher's shell
-environment. Use the explicit helper and literal paths in the generated router
-and opening instructions rather than relying on terminal environment variables.
+environment. The generated `bin/vigil` helper supplies `VIGIL_CLIENT_NAME=zcode`,
+the selected workflow, engagement, and exact context-file path explicitly.
+The installed `vigil` also discovers that identity for mode inspection, client checks,
+and assessment commands run from the Project folder or its subfolders. It validates
+the binding and managed-file digests before supplying session identity; it keeps
+application code and backend selection independent of project metadata.
+Use the helper and literal paths in the generated router for explicit session commands.
 Opening this workspace is not evidence that a fresh task has started.
 
 For an entrypoint that supplies a local marketplace:
 
 1. Open its printed workspace in ZCode. Plugin management requires an open workspace.
 2. Open **Plugin Marketplace** in the sidebar, then **Add → Add plugin
-   marketplace**. In **GitHub repo, git URL, file, or directory**, paste the printed
-   marketplace file path ending in `/zcode/plugin/marketplace.json`. This is a
+   marketplace**. In **GitHub repo, git URL, file, or directory**, paste the Project
+   folder path with `/plugin/marketplace.json` appended. This is a
    separate field from the project-folder chooser above.
    This path was checked in ZCode 3.15.3. Builds using the settings layout expose
    the equivalent **Settings → Plugins → Create → Add marketplace** action.
@@ -145,10 +157,12 @@ to report missing plugin/hook setup before dependent work. If the plugin is not
 enabled, its hooks cannot diagnose their own absence; use the printed prompt and
 the read-only client check to bootstrap setup.
 
-The opening prompt also names the absolute instruction file and bound Vigil helper.
-It checks the task's working folder before proceeding. If the task reports an
-unselected mode or tries to launch another coding client, stop it and verify the
-selected project folder; starting another client does not repair the ZCode binding.
+The opening prompt names the project-relative instruction file, context binding,
+and Vigil helper. It checks the engagement, client, and workflow before proceeding. A successful mode check
+identifies the Code or Web workflow and its operator prompt. If project identity
+needs attention, the agent explains the check's recovery action and waits for you
+to confirm setup is ready. Project selection and client startup are terminal
+onboarding steps; source inventory and durable resume are separate workflow steps.
 
 The generated root `AGENTS.md` puts session identity and absolute commands first,
 then the plugin/model/new-task checklist, workflow entry and recovery, and

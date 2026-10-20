@@ -244,7 +244,7 @@ def test_mode_inspects_dual_tracks_without_selecting_a_session(tmp_path, monkeyp
         "web": {"phase": "recon"}, "code": {"phase": "hunt"},
     }})
     monkeypatch.delenv("VIGIL_OPERATOR_MODE", raising=False)
-    main(["--root", str(tmp_path), "engagement", "mode", "example", "--json"])
+    main(["--root", str(tmp_path), "engagement", "mode", "example", "--client", "claude", "--json"])
     state = json.loads(capsys.readouterr().out)
     assert state["mode"] is None
     assert state["prompt"] is None

@@ -25,6 +25,7 @@ from . import email as email_module
 from . import restart_manifest
 from . import remediation as remediation_module
 from . import term
+from .argv import passthrough_boundary
 from .prompts import (
     prompt_choice as _prompt_choice,
     read_line as _read_line,
@@ -314,8 +315,35 @@ def _cli_version() -> str:
 
 
 def main(argv: list[str] | None = None) -> None:
-    raw_argv = list(sys.argv[1:] if argv is None else argv)
-    raw_argv = _hoist_engagement_start_root(raw_argv)
+    raw = _hoist_engagement_start_root(list(sys.argv[1:] if argv is None else argv))
+    index = _top_level_command_index(raw)
+    scoped = index is not None and (
+        raw[index] == "assess" or raw[index:index + 2] in (
+            ["engagement", "mode"], ["engagement", "client-check"],
+        )
+    )
+    # Diagnostics already validate an explicitly supplied context and report
+    # failures as structured checks, including when the context itself is broken.
+    if (index is not None and raw[index:index + 2] == ["engagement", "client-check"]
+            and os.environ.get("VIGIL_CLIENT_CONTEXT")):
+        scoped = False
+    help_args = raw[:passthrough_boundary(raw)]
+    if scoped and not any(flag in help_args for flag in ("--help", "-h")):
+        from .client_context import project_identity
+        root = None
+        assert index is not None
+        for offset, token in enumerate(raw[:index]):
+            option = _global_value_option(token)
+            if option is not None and option[0] == "--root":
+                root = token.split("=", 1)[1] if option[1] else raw[offset + 1]
+        with project_identity(install_root=root):
+            _main(raw, project_mode=os.environ.get("VIGIL_OPERATOR_MODE"))
+    else:
+        _main(raw)
+
+
+def _main(argv: list[str], *, project_mode: str | None = None) -> None:
+    raw_argv = argv
     command_idx = _top_level_command_index(raw_argv)
     if command_idx is not None and raw_argv[command_idx] == "assess":
         _exec_assess_passthrough(raw_argv, command_idx)
@@ -595,12 +623,13 @@ def main(argv: list[str] | None = None) -> None:
     mode_p.add_argument("key", nargs="?")
     mode_p.add_argument("--json", action="store_true")
     mode_p.add_argument("--client", choices=["codex", "claude", "opencode", "zcode", "goose", "kimi", "pi"],
-                        default="claude", help="Client for displayed start commands (default: claude)")
+                        help="Client for recovery commands (default: the bound session's client)")
     client_check_p = engagement_sub.add_parser(
         "client-check", help="Inspect client prerequisites without launching or changing services",
     )
     client_check_p.add_argument("key", nargs="?")
-    client_check_p.add_argument("--client", choices=("opencode", "zcode"), required=True)
+    client_check_p.add_argument("--client", choices=("opencode", "zcode"),
+                                help="Client to inspect (default: the bound project; required elsewhere)")
     client_check_p.add_argument("--mode", choices=("web", "code"))
     client_check_p.add_argument("--json", action="store_true")
     engagement_sub.add_parser(
@@ -1264,6 +1293,13 @@ def main(argv: list[str] | None = None) -> None:
         args.client_args = _engagement_start_client_args(start_p, client_extras)
     else:
         args = parser.parse_args(raw_argv)
+    if args.command == "engagement" and args.engagement_command == "client-check":
+        if args.client is None and os.environ.get("VIGIL_CLIENT_CONTEXT"):
+            args.client = os.environ.get("VIGIL_CLIENT_NAME")
+        if args.client not in {"opencode", "zcode"}:
+            client_check_p.error("choose --client opencode or --client zcode outside a bound native client project")
+        if args.mode is None and args.key is None and os.environ.get("VIGIL_CLIENT_CONTEXT"):
+            args.mode = project_mode
     sync_command = args.command in {"install", "up"}
     install_value = getattr(args, "install_dir", None) or args.root
     install_root = (
@@ -1448,19 +1484,17 @@ def _hoist_engagement_start_root(raw_argv: list[str]) -> list[str]:
     hoisted: list[str] = []
     rest: list[str] = []
     index = 0
-    passthrough = False
+    boundary = passthrough_boundary(raw_argv)
     start_options_at = command_index + 2
     while index < len(raw_argv):
         token = raw_argv[index]
-        if index >= start_options_at and token == "--":
-            passthrough = True
         option, separator, _value = token.partition("=")
         is_root_option = (
             option.startswith("--")
             and len(option) > 2
             and "--root".startswith(option)
         )
-        if index >= start_options_at and not passthrough and is_root_option:
+        if start_options_at <= index < boundary and is_root_option:
             if separator:
                 hoisted.append(f"--root={_value}")
                 index += 1
@@ -1557,13 +1591,10 @@ def _engagement_start_client_args(
     options is refused with the intended spelling, and whatever IS forwarded is echoed
     on stderr so nothing reaches the client unannounced.
     """
-    if "--" in extras:
-        # Tokens after an explicit `--` are the operator's declared passthrough; only
-        # the ones argparse could plausibly have owned are typo-checked.
-        separator = extras.index("--")
-        ambiguous, forwarded = extras[:separator], extras[:separator] + extras[separator + 1 :]
-    else:
-        ambiguous = forwarded = list(extras)
+    # Only parser-owned tokens are typo-checked; the child payload is opaque.
+    separator = passthrough_boundary(extras)
+    ambiguous = extras[:separator]
+    forwarded = [*ambiguous, *extras[separator + 1 :]]
     vigil_options = [
         option
         for action in start_parser._actions
@@ -1615,9 +1646,17 @@ def _exec_assess_passthrough(raw_argv: list[str], idx: int) -> None:
     install_root = resolve_install_root(root_value)
     source_root = resolve_source_root(source_value, install_root=install_root)
     assess = source_root / "agent" / "scripts" / "assess.py"
+    assess_args = raw_argv[idx + 1 :]
+    if (os.environ.get("VIGIL_CLIENT_CONTEXT") and os.environ.get("VIGIL_SESSION_ENGAGEMENT_DIR")
+            and not any(token == "--engagement-dir" or token.startswith("--engagement-dir=")
+                        for token in assess_args[:passthrough_boundary(assess_args)])):
+        # The project exposes a scope pointer for native clients. Select the
+        # canonical engagement explicitly rather than treating its project folder
+        # as a second engagement during the assessment resolver's CWD walk.
+        assess_args = ["--engagement-dir", os.environ["VIGIL_SESSION_ENGAGEMENT_DIR"], *assess_args]
     os.execvpe(
         str(assess),
-        [str(assess), *raw_argv[idx + 1 :]],
+        [str(assess), *assess_args],
         _assess_exec_environment(install_root, application_root=source_root),
     )
 
@@ -1724,17 +1763,27 @@ def _engagement_current(install_root: Path) -> None:
 
 def _print_engagement_mode(state: dict[str, Any]) -> None:
     """Present the selected track while retaining the existing plain contract."""
+    selection_note = (
+        "Engagement found. This command has no session binding; choose a workflow and client. "
+        "Inspect recovery commands with `vigil engagement mode --client <client>` "
+        "(zcode, opencode, claude, codex, goose, kimi, or pi). "
+        "Inside a generated client project, run this check from its Project folder."
+    ) if state["mode"] is None else None
     if term.is_terminal(sys.stdout):
         records = [
             f"mode\t{state['mode'] or 'unselected'}",
             f"prompt\t{state['prompt'] or 'unselected'}",
         ]
+        if state.get("client"):
+            records.append(f"client\t{state['client']}")
+        if selection_note:
+            records.append(f"session\t{selection_note}")
         for name, track in state["tracks"].items():
             records.extend(
                 [
                     f"{name}\tphase={track['phase']}",
                     f"{name} prompt\t{track['prompt']}",
-                    f"{name} start\t{track['start_command']}",
+                    *([f"{name} start\t{track['start_command']}"] if track["start_command"] else []),
                 ]
             )
         source = state.get("source")
@@ -1753,12 +1802,17 @@ def _print_engagement_mode(state: dict[str, Any]) -> None:
         return
 
     print(f"mode: {state['mode'] or 'unselected'}\nprompt: {state['prompt'] or 'unselected'}")
+    if state.get("client"):
+        print(f"client: {state['client']}")
+    if selection_note:
+        print(selection_note)
     for name, track in state["tracks"].items():
         print(
             f"{name}: phase={track['phase']}\n"
-            f"  prompt: {track['prompt']}\n"
-            f"  start: {track['start_command']}"
+            f"  prompt: {track['prompt']}"
         )
+        if track["start_command"]:
+            print(f"  start: {track['start_command']}")
     source = state.get("source")
     if isinstance(source, dict):
         print(f"source: {source['path']}\n  state: {source['state']}\n  files: {source['file_count']}")
@@ -1920,7 +1974,8 @@ def _engagement(args: argparse.Namespace, install_root: Path) -> None:
     elif command == "path":
         print(_resolve_current_or_selected_engagement(install_root, key=args.key, select=args.select))
     elif command == "mode":
-        path = _resolve_current_or_selected_engagement(install_root, key=args.key, select=False)
+        project_key = os.environ.get("ENGAGEMENT_KEY") if os.environ.get("VIGIL_CLIENT_CONTEXT") else None
+        path = _resolve_current_or_selected_engagement(install_root, key=args.key or project_key, select=False)
         state = engagement_mode_state(install_root, path, client=args.client)
         if args.json:
             print(json.dumps(state, sort_keys=True))
@@ -1929,8 +1984,8 @@ def _engagement(args: argparse.Namespace, install_root: Path) -> None:
     elif command == "client-check":
         from .client_checks import collect_client_checks
 
-        # An omitted key needs no active engagement, services, or private data.
-        # Explicit keys use the existing read-only resolver and never select it.
+        # Without a key or project binding this checks only client prerequisites.
+        # Explicit keys use the read-only resolver and never select an engagement.
         checked_engagement = resolve_engagement_path(install_root, args.key) if args.key else None
         context_file = None
         if not args.key and os.environ.get("VIGIL_CLIENT_CONTEXT") and os.environ.get("VIGIL_SESSION_ENGAGEMENT_DIR"):
