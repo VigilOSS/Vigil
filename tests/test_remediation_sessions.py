@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
 import json
 from pathlib import Path
@@ -87,7 +88,7 @@ def prepared(tmp_path, monkeypatch):
     handoff.write_text("case context")
     project = {"repository": str(repository), "remediation": {"hook_policy": "disabled"}}
     project["_profile_path"] = str(repository / "PROJECT.md")
-    monkeypatch.setattr(sessions, "adapter", lambda _: SimpleNamespace(
+    monkeypatch.setattr(sessions, "adapter", lambda _, **kwargs: SimpleNamespace(
         registered=lambda root, path: path == workspace,
         branch_matches=lambda path, branch: branch == "fix/SEC-123"))
     calls = []
@@ -276,6 +277,93 @@ def test_worker_binding_is_idempotent_and_join_attaches_exact_job(prepared) -> N
     run_case(prepared, command="join")
     assert prepared.calls[-1][0] == ["claude", "attach", "job1"]
     assert all("--resume" not in argv and "--fork-session" not in argv for argv, _ in prepared.calls)
+
+
+def test_join_progress_stops_before_native_terminal_handoff(prepared, monkeypatch):
+    from vigil_cli import term
+    run_case(prepared)
+    events = []
+    active = []
+    class Progress:
+        def update(self, message):
+            events.append(message)
+        def stop(self):
+            active.clear()
+    @contextmanager
+    def activity(message, *, enabled=True):
+        if enabled:
+            active.append(True)
+            events.append(message)
+        try:
+            yield Progress()
+        finally:
+            active.clear()
+    monkeypatch.setattr(term, "activity", activity)
+    run = prepared.module.subprocess.run
+    def native(argv, **kwargs):
+        if argv == ["claude", "attach", "job1"]:
+            assert not active
+        else:
+            assert active
+        return run(argv, **kwargs)
+    monkeypatch.setattr(prepared.module.subprocess, "run", native)
+    assert run_case(prepared, command="join") == 0
+    assert any("workspace" in message.lower() for message in events)
+    assert any("conversation" in message.lower() for message in events)
+
+
+@pytest.mark.parametrize("query", ["capabilities", "inventory"])
+def test_native_query_timeout_reports_actionable_error(prepared, monkeypatch, query):
+    def stalled(argv, **kwargs):
+        raise subprocess.TimeoutExpired(argv, kwargs.get("timeout", 0))
+    monkeypatch.setattr(prepared.module.subprocess, "run", stalled)
+    operation = prepared.module._claude_capabilities if query == "capabilities" else prepared.module._inventory
+    with pytest.raises(SystemExit, match="[Tt]imed out"):
+        operation()
+
+
+def test_case_lock_wait_is_bounded(prepared):
+    directory = prepared.engagement / "remediation/cases/1"
+    with prepared.module._session_lock(directory):
+        with pytest.raises(SystemExit, match="[Tt]imed out"):
+            with prepared.module._session_lock(directory, timeout=0.01):
+                pytest.fail("another operation owns the case lock")
+
+
+def test_join_resolves_application_once_for_environment_and_workspace(prepared, monkeypatch):
+    from vigil_cli import application
+    from vigil_cli.remediation_vcs import adapter
+    run_case(prepared)
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1] / "agent/scripts"))
+    from assess.lib import remediation_vcs
+    monkeypatch.setattr(remediation_vcs, "registered", lambda root, path: path == prepared.workspace)
+    monkeypatch.setattr(remediation_vcs, "branch_matches", lambda path, branch: True)
+    monkeypatch.setattr(prepared.module, "adapter", adapter)
+    resolutions = []
+    resolve = application.resolve_application_root
+    def counted(*args, **kwargs):
+        resolutions.append(True)
+        return resolve(*args, **kwargs)
+    monkeypatch.setattr(application, "resolve_application_root", counted)
+    assert run_case(prepared, command="join") == 0
+    assert len(resolutions) == 1
+
+
+def test_failed_inventory_leaves_recorded_binding_unchanged(prepared, monkeypatch):
+    run_case(prepared)
+    path = prepared.engagement / "remediation/cases/1/session.json"
+    original = path.read_bytes()
+    prepared.calls.clear()
+    run = prepared.module.subprocess.run
+    def stalled(argv, **kwargs):
+        if argv == ["claude", "agents", "--json", "--all"]:
+            raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+        return run(argv, **kwargs)
+    monkeypatch.setattr(prepared.module.subprocess, "run", stalled)
+    with pytest.raises(SystemExit, match="Timed out"):
+        run_case(prepared, command="join")
+    assert path.read_bytes() == original
+    assert prepared.calls and all(call[0][1] in {"--version", "--help"} for call in prepared.calls)
 
 
 def test_single_case_binds_existing_conversation_without_new_launch(prepared) -> None:

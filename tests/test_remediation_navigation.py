@@ -391,3 +391,21 @@ def test_dumb_terminal_uses_numbered_selection(navigation, monkeypatch, capsys, 
     remediation.run_remediation(arguments(*argv), navigation.root)
     assert navigation.calls == [("join", "acme-old", "27")]
     assert "#27" in capsys.readouterr().err
+
+
+def test_join_uses_one_authoritative_case_snapshot(navigation, monkeypatch):
+    reads, rendered = [], []
+    case = {"id": 27, "review_policy": {"repository": "/acme/recorded"}}
+    def read(*args):
+        reads.append(args[-1])
+        return case
+    def attach(args, root, engagement, project, *, case_reader):
+        assert project is case["review_policy"]
+        assert case_reader(args.case_id) is case
+        return 0
+    monkeypatch.setattr(remediation, "_case", read)
+    monkeypatch.setattr(remediation, "_render_case_handoff", lambda root, value, config: rendered.append(value))
+    monkeypatch.setattr(remediation, "run_session_command", attach)
+    remediation.run_remediation(arguments("-k", "acme-old", "join", "27"), navigation.root)
+    assert reads == ["27"]
+    assert rendered == [case]

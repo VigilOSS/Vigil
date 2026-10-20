@@ -10,14 +10,17 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import sys
 import time
 import uuid
 from urllib.parse import unquote, urlsplit
 
+from . import term
 from .remediation_vcs import adapter
 from .paths import agent_root as application_agent_root
 
 _TICKET = re.compile(r"[A-Za-z][A-Za-z0-9_]*-\d+")
+_NATIVE_QUERY_TIMEOUT = 30
 
 
 def register_session_parsers(commands: argparse._SubParsersAction) -> None:
@@ -107,14 +110,18 @@ def _write_json(path: Path, value: dict) -> None:
 
 def _claude_capabilities() -> None:
     try:
-        result = subprocess.run(["claude", "--version"], capture_output=True, text=True, check=True)
+        result = subprocess.run(["claude", "--version"], capture_output=True, text=True, check=True, timeout=_NATIVE_QUERY_TIMEOUT)
+    except subprocess.TimeoutExpired as exc:
+        raise SystemExit("Timed out checking Claude's version; check that Claude Code responds before retrying") from exc
     except (OSError, subprocess.CalledProcessError) as exc:
         raise SystemExit("Claude Code is required for remediation sessions") from exc
     match = re.search(r"(\d+)\.(\d+)\.(\d+)", result.stdout)
     if not match or tuple(map(int, match.groups())) < (2, 1, 257):
         raise SystemExit("Remediation command discovery requires Claude Code 2.1.257 or newer")
     try:
-        help_result = subprocess.run(["claude", "--help"], capture_output=True, text=True, check=True)
+        help_result = subprocess.run(["claude", "--help"], capture_output=True, text=True, check=True, timeout=_NATIVE_QUERY_TIMEOUT)
+    except subprocess.TimeoutExpired as exc:
+        raise SystemExit("Timed out checking Claude's capabilities; check that Claude Code responds before retrying") from exc
     except (OSError, subprocess.CalledProcessError) as exc:
         raise SystemExit("Cannot verify Claude's native background session capabilities") from exc
     if not (re.search(r"--bg(?:[\s,]|$)", help_result.stdout)
@@ -125,8 +132,10 @@ def _claude_capabilities() -> None:
 
 def _inventory() -> list[dict]:
     try:
-        result = subprocess.run(["claude", "agents", "--json", "--all"], capture_output=True, text=True, check=True)
+        result = subprocess.run(["claude", "agents", "--json", "--all"], capture_output=True, text=True, check=True, timeout=_NATIVE_QUERY_TIMEOUT)
         rows = json.loads(result.stdout)
+    except subprocess.TimeoutExpired as exc:
+        raise SystemExit("Timed out reading Claude's session inventory; check Claude's native host before retrying") from exc
     except (OSError, subprocess.CalledProcessError, json.JSONDecodeError) as exc:
         raise SystemExit("Cannot read Claude's native session inventory; no replacement session was launched") from exc
     if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
@@ -240,20 +249,33 @@ def _case_directory(engagement: Path, case_id: str) -> Path:
 
 
 @contextmanager
-def _session_lock(directory: Path):
+def _session_lock(directory: Path, *, timeout: float | None = None):
     directory.mkdir(parents=True, exist_ok=True)
     with (directory / ".session.lock").open("a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+        if timeout is None:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+        else:
+            deadline = time.monotonic() + timeout
+            while True:
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise SystemExit("Timed out waiting for this case's session lock; another operation is using it. Retry when it finishes.") from None
+                    time.sleep(min(0.05, remaining))
         yield
 
 
-def _workspace(install_root: Path, project: dict, case: dict, *, allow_branch_drift: bool = False) -> Path:
+def _workspace(install_root: Path, project: dict, case: dict, *, allow_branch_drift: bool = False,
+               application_root: Path | None = None) -> Path:
     supplied = case.get("worktree_path")
     if not supplied:
         raise SystemExit("Prepare and register the case workspace before starting its developer session")
     workspace = Path(supplied).resolve()
     repository = Path(project["repository"]).resolve()
-    vcs = adapter(install_root)
+    vcs = adapter(install_root, application_root=application_root) if application_root is not None else adapter(install_root)
     if workspace == repository or not vcs.registered(repository, workspace):
         raise SystemExit("Case workspace is not registered to the selected repository")
     branch = str(case.get("worktree_branch") or "")
@@ -356,6 +378,12 @@ def _read_binding(path: Path, case_id: str, key: str, workspace: Path, repositor
 
 def run_session_command(args: argparse.Namespace, install_root: Path, engagement: Path,
                         project: dict, *, case_reader=None) -> int:
+    with term.activity("Checking Claude capabilities…", enabled=args.remediation_command == "join") as progress:
+        return _run_session_command(args, install_root, engagement, project, case_reader=case_reader, progress=progress)
+
+
+def _run_session_command(args: argparse.Namespace, install_root: Path, engagement: Path,
+                         project: dict, *, case_reader, progress: term.Activity) -> int:
     command = args.remediation_command
     if command == "route":
         try:
@@ -374,6 +402,7 @@ def run_session_command(args: argparse.Namespace, install_root: Path, engagement
     if not repository.is_dir():
         raise SystemExit("The selected profile requires an existing repository directory")
     key = args.engagement_key
+    progress.update("Preparing session environment…")
     environment = _environment(engagement, key, install_root)
     notice = _notice(project)
     if command == "session":
@@ -411,14 +440,19 @@ def run_session_command(args: argparse.Namespace, install_root: Path, engagement
         return subprocess.run(["claude", "attach", entry_row["id"]], cwd=repository, env=environment).returncode
     if case_reader is None:
         raise SystemExit("Case session commands require the authoritative case reader")
+    progress.update("Refreshing case context…")
     case = case_reader(args.case_id)
     if str(case.get("id")) != str(args.case_id):
         raise SystemExit("Authoritative case identity differs from the requested case")
-    workspace = _workspace(install_root, project, case, allow_branch_drift=command == "join")
+    progress.update("Checking case workspace…")
+    workspace = _workspace(install_root, project, case, allow_branch_drift=command == "join",
+                           application_root=Path(environment["VIGIL_APPLICATION_DIR"]) if command == "join" else None)
     directory = _case_directory(engagement, args.case_id)
     path = directory / "session.json"
-    with _session_lock(directory):
+    progress.update("Waiting for case session lock…")
+    with _session_lock(directory, timeout=30 if command == "join" else None):
         binding = _read_binding(path, args.case_id, key, workspace, repository)
+        progress.update("Finding the recorded conversation…")
         rows = _inventory()
         if command == "join":
             if binding is None:
@@ -496,4 +530,7 @@ def run_session_command(args: argparse.Namespace, install_root: Path, engagement
             _launch_background(command_line, opening, binding, path, repository, environment)
             print(json.dumps(binding, indent=2))
             return 0
+    progress.stop()
+    if command == "join" and term.is_terminal(sys.stderr):
+        print("Opening Claude…", file=sys.stderr, flush=True)
     return subprocess.run(command_line, cwd=repository, env=environment).returncode

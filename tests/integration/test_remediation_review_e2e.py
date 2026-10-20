@@ -159,19 +159,20 @@ def test_regression_review_rewrite_and_backend_drift(tmp_path, vcs):
         receipt = tmp_path / "attached.json"
         native = binary_dir / "claude"
         native.write_text(
-            '#!/usr/bin/env python3\nimport json, sys\nfrom pathlib import Path\n'
+            '#!/usr/bin/env python3\nimport json, sys, time\nfrom pathlib import Path\n'
             'args = sys.argv[1:]\n'
             'if args == ["--version"]: print("2.1.296 (Claude Code)")\n'
-            'elif args == ["--help"]: print("--bg\\n  agents [options]\\n  attach <id>")\n'
-            f'elif args == ["agents", "--json", "--all"]: print({json.dumps(inventory)!r})\n'
-            f'elif args == ["attach", {job_id!r}]: Path({str(receipt)!r}).write_text(json.dumps(args))\n'
+            'elif args == ["--help"]: time.sleep(0.15); print("--bg\\n  agents [options]\\n  attach <id>")\n'
+            f'elif args == ["agents", "--json", "--all"]: time.sleep(0.2); print({json.dumps(inventory)!r})\n'
+            f'elif args == ["attach", {job_id!r}]: Path({str(receipt)!r}).write_text(json.dumps(args)); print("ATTACH_READY", flush=True); time.sleep(0.2)\n'
             'else: raise SystemExit("Unexpected native client command: " + repr(args))\n'
         )
         native.chmod(0o700)
         master, slave = pty.openpty()
         process = subprocess.Popen(
             [sys.executable, "-c", "from vigil_cli.main import main; main()", "--root", str(workspace), "remediation", "join"],
-            cwd=repository, env={**environment, "PATH": str(binary_dir)}, stdin=slave, stdout=slave, stderr=slave,
+            cwd=repository, env={**environment, "PATH": str(binary_dir), "TERM": "xterm-256color", "COLUMNS": "80", "NO_COLOR": "1"},
+            stdin=slave, stdout=slave, stderr=slave,
         )
         processes.append(process)
         os.close(slave)
@@ -199,6 +200,9 @@ def test_regression_review_rewrite_and_backend_drift(tmp_path, vcs):
                 process.wait(timeout=10)
         assert json.loads(receipt.read_text()) == ["attach", job_id]
         assert f"#{case_id}" in output.decode()
+        assert b"Checking Claude" in output and b"Finding the recorded conversation" in output
+        assert output.index(b"Opening Claude") < output.index(b"ATTACH_READY")
+        assert output.split(b"ATTACH_READY", 1)[1].strip() == b""
 
     try:
         backend = start_backend()

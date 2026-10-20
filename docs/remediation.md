@@ -35,6 +35,10 @@ same selection. Use the same `--root` and `-k` options when changing from `list`
 `list --json` retains every case summary field and adds explicit `case_id`, `engagement_key`, and
 `join_command` fields for agents and scripts. ID-less `join` requires a terminal; scripts supply
 the project key and case ID. Joining requires a recorded Claude conversation; use `start` for new work.
+During join preparation, a terminal spinner shows case loading, workspace checks, and conversation
+lookup, then ends before Claude takes over the terminal. Claude queries and case-session lock waits
+time out after 30 seconds with retry guidance. The attachment itself continues for the conversation's
+normal lifetime.
 
 ## First ticket, end to end
 

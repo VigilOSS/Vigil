@@ -1155,10 +1155,14 @@ def run_remediation(args: argparse.Namespace, install_root: Path) -> None:
     if choose_case:
         args.case_id = str(_select_case(_case_summaries(install_root, eng_dir, key))["id"])
     if cmd in {"start", "route", "session", "join"}:
+        selected_case = None
         if cmd in {"session", "join"}:
-            config = _case_config(_case(install_root, eng_dir, key, args.case_id), config)
+            with term.activity(f"Loading case #{args.case_id}…", enabled=cmd == "join"):
+                selected_case = _case(install_root, eng_dir, key, args.case_id)
+                config = _case_config(selected_case, config)
         def read_case(identifier):
-            case = _case(install_root, eng_dir, key, identifier)
+            case = (selected_case if selected_case is not None and str(selected_case.get("id")) == str(identifier)
+                    else _case(install_root, eng_dir, key, identifier))
             _render_case_handoff(eng_dir, case, config)
             return case
         code = run_session_command(args, install_root, eng_dir, config, case_reader=read_case)

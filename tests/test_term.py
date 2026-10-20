@@ -93,6 +93,51 @@ def test_rich_console_measures_its_output_terminal(monkeypatch, no_color):
         os.close(slave)
 
 
+@pytest.mark.parametrize("outcome", ["success", "failure", "interrupt"])
+def test_activity_cleans_up_and_renders_literal_messages(monkeypatch, outcome):
+    from types import SimpleNamespace
+    messages, lifecycle = [], []
+    status = SimpleNamespace(start=lambda: lifecycle.append("start"), stop=lambda: lifecycle.append("stop"),
+                             update=lambda message: messages.append(message))
+    def create(message, **kwargs):
+        messages.append(message)
+        return status
+    monkeypatch.setattr(term, "is_terminal", lambda stream: True)
+    monkeypatch.setattr(term, "console", lambda stream: SimpleNamespace(status=create))
+    error = RuntimeError if outcome == "failure" else KeyboardInterrupt
+    def work():
+        with term.activity("[red]Acme\x1b[2J") as progress:
+            progress.update("Finding conversation…")
+            if outcome != "success":
+                raise error()
+            progress.stop()
+    if outcome == "success":
+        work()
+    else:
+        with pytest.raises(error):
+            work()
+    assert lifecycle == ["start", "stop"]
+    assert messages[0].plain == "[red]Acme\\u001b[2J"
+    assert messages[0].spans == []
+
+
+@pytest.mark.parametrize("tty,enabled", [(False, True), (True, False)])
+def test_activity_keeps_noninteractive_output_clean(monkeypatch, capsys, tty, enabled):
+    monkeypatch.setattr(term, "is_terminal", lambda stream: tty)
+    monkeypatch.setattr(term, "console", lambda stream: pytest.fail("no interactive renderer needed"))
+    with term.activity("Loading case…", enabled=enabled) as progress:
+        progress.update("Finding conversation…")
+    captured = capsys.readouterr()
+    assert captured.out == captured.err == ""
+
+
+def test_no_color_preserves_terminal_activity_capability(monkeypatch):
+    monkeypatch.setenv("NO_COLOR", "1")
+    output = term.console(FakeStream(tty=True))
+    assert output.is_terminal
+    assert output.color_system is None
+
+
 def test_supports_style_false_for_a_pipe() -> None:
     assert term.supports_style(FakeStream(tty=False)) is False
 

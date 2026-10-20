@@ -43,7 +43,11 @@ import shutil
 import sys
 import textwrap
 from collections.abc import Iterable
-from typing import TextIO
+from contextlib import contextmanager
+from typing import TYPE_CHECKING, TextIO
+
+if TYPE_CHECKING:
+    from rich.status import Status
 
 # Narrower than this and wrapping shreds prose into near-vertical text; wider
 # and long lines stop being scannable. Both bounds exist because a terminal is
@@ -289,8 +293,41 @@ def console(stream: TextIO):
     if width <= 0:
         width = shutil.get_terminal_size().columns
     return Console(file=stream, width=max(1, width),
-                   force_terminal=supports_style(stream), color_system="standard" if supports_style(stream) else None,
+                   force_terminal=is_terminal(stream), color_system="standard" if supports_style(stream) else None,
                    markup=False, highlight=False, emoji=False)
+
+
+class Activity:
+    """Preparation feedback that can end before a child owns the terminal."""
+
+    def __init__(self, status: Status | None):
+        self._status = status
+
+    def update(self, message: str) -> None:
+        if self._status is not None:
+            from rich.text import Text
+            self._status.update(Text(single_line(message)))
+
+    def stop(self) -> None:
+        if self._status is not None:
+            self._status.stop()
+            self._status = None
+
+
+@contextmanager
+def activity(message: str, *, enabled: bool = True):
+    """Show a literal Rich spinner on stderr while preparing interactive work."""
+    status = None
+    if enabled and is_terminal(sys.stderr):
+        from rich.text import Text
+        status = console(sys.stderr).status(Text(single_line(message)), spinner="dots")
+    progress = Activity(status)
+    try:
+        if status is not None:
+            status.start()
+        yield progress
+    finally:
+        progress.stop()
 
 
 def fuzzy_pick(lines: list[str], details: dict[str, str], *, prompt: str, action: str, cancelled: str, invalid: str) -> int:
