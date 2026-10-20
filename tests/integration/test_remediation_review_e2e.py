@@ -198,7 +198,7 @@ def test_regression_review_rewrite_and_backend_drift(tmp_path, vcs):
                 process.terminate()
                 process.wait(timeout=10)
         assert json.loads(receipt.read_text()) == ["attach", job_id]
-        assert f"case_id={case_id}" in output.decode()
+        assert f"#{case_id}" in output.decode()
 
     try:
         backend = start_backend()

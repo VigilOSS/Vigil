@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import shlex
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -103,7 +104,7 @@ def test_join_without_id_selects_only_remediation_projects_then_recent_open_case
     remediation.run_remediation(arguments("join"), navigation.root)
     assert navigation.selections == [["acme-old", "acme-new"]]
     assert navigation.calls == [("join", "acme-new", "27")]
-    assert "case_id=27" in capsys.readouterr().err
+    assert "#27" in capsys.readouterr().err
 
 
 def test_join_with_project_skips_project_selection(navigation, monkeypatch):
@@ -178,10 +179,10 @@ def test_fuzzy_picker_returns_case_identity(navigation, monkeypatch):
     monkeypatch.setattr(remediation.shutil, "which", lambda _: "/usr/bin/fzf")
     def choose(argv, **kwargs):
         requests.append(kwargs["input"])
-        return SimpleNamespace(returncode=0, stdout='12\tcase_id=12 status="fixing"\n')
+        return SimpleNamespace(returncode=0, stdout=next(line for line in kwargs["input"].splitlines() if line.startswith("12\t")) + "\n")
     monkeypatch.setattr(remediation.subprocess, "run", choose)
     remediation.run_remediation(arguments("-k", "acme-old", "join"), navigation.root)
-    assert requests[0].splitlines()[0].startswith("27\tcase_id=27")
+    assert requests[0].splitlines()[0].startswith("27\t#27")
     assert navigation.calls == [("join", "acme-old", "12")]
 
 
@@ -193,3 +194,73 @@ def test_list_quotes_untrusted_multiline_titles_without_losing_text(navigation, 
     assert json.dumps(case["title"], ensure_ascii=False) in output
     remediation.run_remediation(arguments("-k", "acme-old", "list", "--json"), navigation.root)
     assert json.loads(capsys.readouterr().out)[0]["title"] == case["title"]
+
+
+def test_terminal_list_separates_identity_title_and_metadata(navigation, monkeypatch, capsys):
+    from vigil_cli import term
+    monkeypatch.setattr(term, "is_terminal", lambda stream: True)
+    monkeypatch.setenv("NO_COLOR", "1")
+    remediation.run_remediation(arguments("-k", "acme-old", "list"), navigation.root)
+    lines = capsys.readouterr().out.splitlines()
+    title = next(line for line in lines if "Latest open case" in line)
+    assert "#27" in title
+    assert any("Review" in line and "jira:ACME-42" in line for line in lines)
+    assert any("Updated" in line and "2026-02-01" in line for line in lines)
+    assert any(shlex.join(["vigil", "--root", str(navigation.root), "remediation", "-k", "acme-old", "join", "27"]) in line for line in lines)
+
+
+def test_fuzzy_picker_uses_human_labels_and_preserves_literal_identity(navigation, monkeypatch):
+    requests = []
+    monkeypatch.setattr(remediation.shutil, "which", lambda _: "/usr/bin/fzf")
+    def choose(argv, **kwargs):
+        requests.append((argv, kwargs["input"]))
+        return SimpleNamespace(returncode=0, stdout=kwargs["input"].splitlines()[0] + "\n")
+    monkeypatch.setattr(remediation.subprocess, "run", choose)
+    remediation.run_remediation(arguments("-k", "acme-old", "join"), navigation.root)
+    label = requests[0][1].splitlines()[0].split("\t", 1)[1]
+    assert label.startswith("#27") and "Latest open case" in label and "Review" in label
+    assert navigation.calls == [("join", "acme-old", "27")]
+
+
+@pytest.mark.parametrize("returncode", [1, 2, 130])
+def test_project_fuzzy_picker_failure_never_prompts_or_attaches(navigation, monkeypatch, returncode):
+    monkeypatch.setattr(remediation.shutil, "which", lambda _: "/usr/bin/fzf")
+    monkeypatch.setattr(remediation.subprocess, "run", lambda *a, **kw: SimpleNamespace(returncode=returncode, stdout=""))
+    monkeypatch.setattr("builtins.input", lambda *_: pytest.fail("failed fuzzy selection must stop"))
+    with pytest.raises(SystemExit, match="selection"):
+        remediation.run_remediation(arguments("join"), navigation.root)
+    assert navigation.calls == []
+
+
+def test_project_picker_keeps_untrusted_labels_separate_from_selection_identity(navigation, monkeypatch):
+    from vigil_cli import engagements
+    rows = engagements.list_engagements(navigation.root)
+    rows[0] = replace(rows[0], target="Acme\n1\tfake project\x1b[2J")
+    requests = []
+    monkeypatch.setattr(engagements.shutil, "which", lambda _: "/usr/bin/fzf")
+    def choose(argv, **kwargs):
+        requests.append(kwargs["input"])
+        return SimpleNamespace(returncode=0, stdout=kwargs["input"].splitlines()[1] + "\n")
+    monkeypatch.setattr(engagements.subprocess, "run", choose)
+    assert engagements._select_engagement(rows) is rows[1]
+    assert len(requests[0].splitlines()) == len(rows)
+    assert all(line.count("\t") == 1 for line in requests[0].splitlines())
+
+
+def test_terminal_json_list_is_still_full_machine_records(navigation, monkeypatch, capsys):
+    from vigil_cli import term
+    monkeypatch.setattr(term, "is_terminal", lambda stream: True)
+    remediation.run_remediation(arguments("-k", "acme-old", "list", "--json"), navigation.root)
+    assert [case["case_id"] for case in json.loads(capsys.readouterr().out)] == [27, 12, 41]
+
+
+@pytest.mark.parametrize("project_picker", [False, True])
+def test_fuzzy_picker_rejects_multiple_or_modified_selections(navigation, monkeypatch, project_picker):
+    monkeypatch.setattr(remediation.shutil, "which", lambda _: "/usr/bin/fzf")
+    def choose(argv, **kwargs):
+        return SimpleNamespace(returncode=0, stdout=kwargs["input"] + "\n")
+    monkeypatch.setattr(remediation.subprocess, "run", choose)
+    argv = ("join",) if project_picker else ("-k", "acme-old", "join")
+    with pytest.raises(SystemExit, match="selection"):
+        remediation.run_remediation(arguments(*argv), navigation.root)
+    assert navigation.calls == []

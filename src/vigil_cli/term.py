@@ -38,6 +38,7 @@ the command on a real terminal.
 from __future__ import annotations
 
 import os
+import json
 import shutil
 import sys
 import textwrap
@@ -125,6 +126,17 @@ def paint(text: str, *styles: str, stream: TextIO = sys.stderr) -> str:
 def heading(text: str, *, stream: TextIO = sys.stdout) -> str:
     """Render a section heading without changing redirected output."""
     return paint(text, "bold", stream=stream)
+
+
+def single_line(value: object) -> str:
+    """Represent data in one terminal row without interpreting control bytes.
+
+    JSON escaping preserves the text while making newlines, tabs, and terminal
+    escapes visible. Unicode line separators and C1 controls also need escaping
+    because terminals may interpret them even though JSON permits them raw.
+    """
+    text = json.dumps(str(value) if value is not None else "", ensure_ascii=False)[1:-1]
+    return "".join(f"\\u{ord(char):04x}" if 0x7f <= ord(char) <= 0x9f or char in "\u2028\u2029" else char for char in text)
 
 
 def wrap(text: str, *, indent: str = "", stream: TextIO = sys.stderr) -> str:

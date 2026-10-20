@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator, Protocol, Sequence
 from urllib.parse import urlparse
 
-from . import docker
+from . import docker, term
 from .client_rosters import (
     ensure_claude_agents_link,
     ensure_claude_commands_link,
@@ -1688,14 +1688,32 @@ def _select_engagement(rows: list[EngagementRow]) -> EngagementRow:
             "pass the optional engagement key explicitly"
         )
     if shutil.which("fzf"):
-        lines = [f"{row.key}\t{row.status}\t{row.current_phase}\t{row.target}\t{row.path}" for row in rows]
-        result = subprocess.run(["fzf", "--with-nth", "1,2,3,4"], input="\n".join(lines), text=True, capture_output=True, check=False)
-        if result.returncode == 0 and result.stdout.strip():
-            selected = result.stdout.split("\t", 1)[0]
-            return next(row for row in rows if row.key == selected)
+        lines = [f"{index}\t{term.single_line(row.key)}  ·  {term.single_line(row.status)} / {term.single_line(row.current_phase)}  ·  {term.single_line(row.target)}"
+                 for index, row in enumerate(rows)]
+        result = subprocess.run(
+            ["fzf", "--delimiter", "\t", "--with-nth", "2", "--prompt", "Project > ",
+             "--height", "60%", "--layout", "reverse", "--border", "rounded",
+             "--header", "Type to filter | Enter: select | Esc: cancel"],
+            input="\n".join(lines), text=True, capture_output=True, check=False,
+            env={name: value for name, value in os.environ.items() if name not in {"FZF_DEFAULT_OPTS", "FZF_DEFAULT_OPTS_FILE"}},
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            raise SystemExit("Project selection cancelled")
+        selected_line = result.stdout.rstrip("\n")
+        if selected_line not in lines:
+            raise SystemExit("Invalid project selection")
+        selected = selected_line.split("\t", 1)[0]
+        if not selected.isdigit() or not 0 <= int(selected) < len(rows):
+            raise SystemExit("Invalid project selection")
+        return rows[int(selected)]
     for idx, row in enumerate(rows, start=1):
-        print(f"{idx}. {row.key} [{row.status}/{row.current_phase}] {row.target}", file=sys.stderr)
-    choice = input("> ").strip()
+        print(f"  {idx}. {term.single_line(row.key)}", file=sys.stderr)
+        print(f"     {term.single_line(row.status)} / {term.single_line(row.current_phase)} · {term.single_line(row.target)}", file=sys.stderr)
+    print("Row number> ", end="", file=sys.stderr, flush=True)
+    try:
+        choice = input().strip()
+    except (EOFError, KeyboardInterrupt) as exc:
+        raise SystemExit("Project selection cancelled") from exc
     if not choice.isdigit() or not (1 <= int(choice) <= len(rows)):
         raise SystemExit("Invalid selection")
     return rows[int(choice) - 1]

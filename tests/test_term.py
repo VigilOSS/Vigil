@@ -61,6 +61,15 @@ def test_supports_style_true_for_a_tty() -> None:
     assert term.supports_style(FakeStream(tty=True)) is True
 
 
+@pytest.mark.parametrize("text", ["Acme report", "Acme\nreport\t27", "Acme\x1b[2Jreport", "Acme\x9breport\u2028next\u2029line", 'Acme "quoted" \\ path'])
+def test_single_line_preserves_data_as_visible_literal_text(text: str) -> None:
+    import json
+    rendered = term.single_line(text)
+    assert json.loads('"' + rendered + '"') == text
+    assert len(rendered.splitlines()) == 1
+    assert all(ord(char) >= 32 and not 0x7f <= ord(char) <= 0x9f for char in rendered)
+
+
 def test_supports_style_false_for_a_pipe() -> None:
     assert term.supports_style(FakeStream(tty=False)) is False
 

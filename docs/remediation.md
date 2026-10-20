@@ -28,6 +28,8 @@ vigil remediation -k <project-key> list --json
 
 The case ID identifies the Vigil remediation case; the source key identifies its ticket or report.
 Lists and case pickers put open cases first, ordered by most recent update, followed by closed cases.
+In a terminal, lists separate the case ID and title from status, source, update time, and the join
+command. Pickers support typing to filter when `fzf` is installed, with a numbered fallback.
 `list --json` retains every case summary field and adds explicit `case_id`, `engagement_key`, and
 `join_command` fields for agents and scripts. ID-less `join` requires a terminal; scripts supply
 the project key and case ID. Joining requires a recorded Claude conversation; use `start` for new work.

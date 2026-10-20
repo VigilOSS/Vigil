@@ -4291,9 +4291,11 @@ def test_engagement_select_uses_fzf_when_requested(tmp_path: Path, monkeypatch: 
     def fake_which(command: str) -> str | None:
         return "/usr/bin/fzf" if command == "fzf" else None
 
-    def fake_run(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-        assert argv == ["fzf", "--with-nth", "1,2,3,4"]
-        return subprocess.CompletedProcess(argv, 0, f"{newer.name}\tin_progress\trecon\t{newer.name}\t{newer.resolve()}\n", "")
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        assert argv[0] == "fzf"
+        offered = str(kwargs["input"]).splitlines()
+        selected = next(row for row in offered if newer.name in row.split("\t", 1)[1])
+        return subprocess.CompletedProcess(argv, 0, selected + "\n", "")
 
     monkeypatch.setattr(engagements.shutil, "which", fake_which)
     monkeypatch.setattr(engagements.subprocess, "run", fake_run)
@@ -5134,8 +5136,10 @@ def test_auth_select_selector_overrides_current_engagement(tmp_path: Path, monke
     def fake_which(command: str) -> str | None:
         return "/usr/bin/fzf" if command == "fzf" else None
 
-    def fake_run(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-        return subprocess.CompletedProcess(argv, 0, f"{newer.name}\tin_progress\trecon\t{newer.name}\t{newer.resolve()}\n", "")
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        offered = str(kwargs["input"]).splitlines()
+        selected = next(row for row in offered if newer.name in row.split("\t", 1)[1])
+        return subprocess.CompletedProcess(argv, 0, selected + "\n", "")
 
     monkeypatch.setattr(engagements.shutil, "which", fake_which)
     monkeypatch.setattr(engagements.subprocess, "run", fake_run)
