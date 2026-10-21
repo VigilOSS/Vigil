@@ -63,6 +63,7 @@ const targetName = (name: string) => screen.findByText(name, { selector: ".works
 const engagement = { id: 1, key: "one", target: "Target one", status: "in_progress", current_phase: "exploit", code_phase: null, track_state: { web: { phase: "exploit", complete: false } }, aggregate_complete: false, engagement_root: "/tmp/one", exploit_policy: "pause", exploit_review_state: "not_requested", approved_targets: [], created_at: "2026-10-01T00:00:00Z", updated_at: "2026-10-01T00:00:00Z", session_count: 0 } satisfies api.Engagement;
 
 beforeEach(() => {
+  LiveSocket.instance = undefined;
   vi.stubGlobal("WebSocket", class { close() {} });
   vi.mocked(api.getEngagement).mockResolvedValue(engagement);
   vi.mocked(api.getAssessmentSummary).mockResolvedValue({ top_findings: [], attack_chains: [] } as unknown as api.AssessmentSummary);
@@ -82,7 +83,7 @@ beforeEach(() => {
   vi.mocked(submissionsApi.listSubmissionDesk).mockResolvedValue({ counts: { actionable: 0 } } as unknown as Awaited<ReturnType<typeof submissionsApi.listSubmissionDesk>>);
   vi.mocked(commandsApi.fetchCommandFacets).mockResolvedValue({ total: 0, scope_totals: { attention: 0, all: 0 }, engagement_totals: { attention: 0, all: 0 } } as unknown as commandsApi.CommandLedgerFacets);
 });
-afterEach(() => { cleanup(); vi.clearAllMocks(); vi.unstubAllGlobals(); });
+afterEach(() => { cleanup(); vi.clearAllMocks(); vi.unstubAllGlobals(); vi.useRealTimers(); });
 
 it("keeps the Intel route authoritative through a native Back and Forward handoff", async () => {
   window.history.replaceState({}, "", "#/engagements/one?tab=intel&intel_type=cve&intel_id=44");
@@ -149,6 +150,7 @@ it("degrades the live feed when a malformed WebSocket frame arrives", async () =
   render(<EngagementPage engagementKey="one" onBack={vi.fn()} />);
   await targetName("Target one");
 
+  await waitFor(() => expect(ControlledSocket.instance?.onmessage).toBeTypeOf("function"));
   act(() => {
     ControlledSocket.instance.onopen?.();
     ControlledSocket.instance.onmessage?.(
@@ -422,6 +424,7 @@ it("reports a dropped live feed separately from a failed data refresh", async ()
   vi.stubGlobal("WebSocket", ControlledSocket);
   render(<EngagementPage engagementKey="one" onBack={vi.fn()} />);
   await screen.findByText("Finding one");
+  await waitFor(() => expect(ControlledSocket.instance?.onerror).toBeTypeOf("function"));
   act(() => { ControlledSocket.instance.onerror?.(); });
   const live = await screen.findByText(/Live updates unavailable/);
   expect(live.textContent).not.toMatch(/Refresh failed/);
@@ -433,7 +436,7 @@ it("reports a dropped live feed separately from a failed data refresh", async ()
 });
 
 class LiveSocket {
-  static instance: LiveSocket;
+  static instance: LiveSocket | undefined;
   onopen: (() => void) | null = null;
   onerror: (() => void) | null = null;
   onclose: (() => void) | null = null;
@@ -445,20 +448,30 @@ class LiveSocket {
   }
 }
 
+async function openLiveSocket() {
+  // Child DOM may be visible before the parent's connection effect runs.
+  // Wait for this test's registered socket, never a previous closed instance.
+  await waitFor(() => expect(LiveSocket.instance?.onmessage).toBeTypeOf("function"));
+  const socket = LiveSocket.instance!;
+  act(() => { socket.onopen?.(); });
+  return socket;
+}
+
 it("re-reads only the data a live change can touch", async () => {
+  vi.useFakeTimers({ toFake: ["Date"] });
   vi.stubGlobal("WebSocket", LiveSocket);
   render(<EngagementPage engagementKey="one" initialTab="findings" onBack={vi.fn()} />);
   await screen.findByText("Finding ledger");
   await waitFor(() => expect(api.listAssessmentFindings).toHaveBeenCalledTimes(1));
-  act(() => { LiveSocket.instance.onopen?.(); });
-  LiveSocket.instance.send({ type: "activity.updated", engagement_key: "one", record_type: "activity_entry", payload: {} });
+  const socket = await openLiveSocket();
+  socket.send({ type: "activity.updated", engagement_key: "one", record_type: "activity_entry", payload: {} });
   await waitFor(() => expect(api.getEngagement).toHaveBeenCalledTimes(2));
   expect(api.listAssessmentFindings).toHaveBeenCalledTimes(1);
   expect(api.listAssessmentAttackChains).toHaveBeenCalledTimes(1);
   expect(api.listProofWork).toHaveBeenCalledTimes(1);
   // Past the 2 s message throttle, a finding change re-reads the ledger and its badges.
-  await new Promise((resolve) => setTimeout(resolve, 2100));
-  LiveSocket.instance.send({ type: "assessment.updated", engagement_key: "one", record_type: "finding_patch", payload: {} });
+  vi.setSystemTime(Date.now() + 2100);
+  socket.send({ type: "assessment.updated", engagement_key: "one", record_type: "finding_patch", payload: {} });
   await waitFor(() => expect(api.listAssessmentFindings).toHaveBeenCalledTimes(2));
   expect(api.listAssessmentAttackChains).toHaveBeenCalledTimes(2);
   expect(api.listOobProbes).toHaveBeenCalledTimes(1);
@@ -512,19 +525,40 @@ it("refreshes when the browser tab comes back into view during the first load", 
 });
 
 it("re-reads Runs for a run change and not for each command run", async () => {
+  vi.useFakeTimers({ toFake: ["Date"] });
   vi.stubGlobal("WebSocket", LiveSocket);
   render(<EngagementPage engagementKey="one" initialTab="runs" onBack={vi.fn()} />);
   expect((await screen.findByText(/Runs refresh/)).textContent).toBe("Runs refresh 0");
-  act(() => { LiveSocket.instance.onopen?.(); });
-  LiveSocket.instance.send({ type: "assessment.updated", engagement_key: "one", record_type: "command_run", payload: {} });
+  const socket = await openLiveSocket();
+  socket.send({ type: "assessment.updated", engagement_key: "one", record_type: "command_run", payload: {} });
   await waitFor(() => expect(api.getEngagement).toHaveBeenCalledTimes(2));
   // Let the pass that read the command change settle; Runs keeps its data.
-  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)); });
+  await act(async () => {});
   expect(screen.getByText(/Runs refresh/).textContent).toBe("Runs refresh 0");
-  await new Promise((resolve) => setTimeout(resolve, 2100));
-  LiveSocket.instance.send({ type: "assessment.updated", engagement_key: "one", record_type: "assessment_run", payload: {} });
+  vi.setSystemTime(Date.now() + 2100);
+  socket.send({ type: "assessment.updated", engagement_key: "one", record_type: "assessment_run", payload: {} });
   await waitFor(() => expect(screen.getByText(/Runs refresh/).textContent).not.toBe("Runs refresh 0"));
 }, 10_000);
+
+it("keeps a run change queued while the preceding command refresh is pending", async () => {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.stubGlobal("WebSocket", LiveSocket);
+  let finishCommandRefresh!: (value: api.Engagement) => void;
+  vi.mocked(api.getEngagement).mockResolvedValueOnce(engagement)
+    .mockReturnValueOnce(new Promise((resolve) => { finishCommandRefresh = resolve; }));
+  render(<EngagementPage engagementKey="one" initialTab="runs" onBack={vi.fn()} />);
+  const socket = await openLiveSocket();
+  socket.send({ type: "assessment.updated", engagement_key: "one", record_type: "command_run", payload: {} });
+  await waitFor(() => expect(api.getEngagement).toHaveBeenCalledTimes(2));
+  vi.setSystemTime(Date.now() + 2100);
+  socket.send({ type: "assessment.updated", engagement_key: "one", record_type: "assessment_run", payload: {} });
+  expect(api.getEngagement).toHaveBeenCalledTimes(2);
+  expect(screen.getByText(/Runs refresh/).textContent).toBe("Runs refresh 0");
+  await act(async () => { finishCommandRefresh(engagement); });
+  await waitFor(() => expect(api.getEngagement).toHaveBeenCalledTimes(3));
+  // Scope versions name the global pass: command pass 1, queued run pass 2.
+  await waitFor(() => expect(screen.getByText(/Runs refresh/).textContent).toBe("Runs refresh 2"));
+});
 
 it("rewrites an unknown or retired tab in the address to the view shown", async () => {
   window.history.replaceState({}, "", "#/engagements/one?tab=bogus");
