@@ -563,14 +563,25 @@ describe("RunsTab record", () => {
   it("runs Load more through the same queue as live refreshes", async () => {
     const sources = Array.from({ length: 60 }, (_, index) => ({ id: index + 1, path: `src/acme-${index + 1}.py` }));
     const read = (offset: number, limit: number) => ({ ...page(sources.slice(offset, offset + limit), sources.length, offset, offset + limit < sources.length), limit });
-    vi.mocked(listAssessmentRunChildren).mockImplementation(async (_key, _runId, section, params) => (
-      section === "sources" ? read(params?.offset ?? 0, params?.limit ?? 50) : page([])
-    ));
+    const first = deferred<AuditPage<AssessmentRunChild>>();
+    const more = deferred<AuditPage<AssessmentRunChild>>();
+    // The record shell can appear before its first child read starts. Route
+    // deferred responses by page instead of letting "next call" capture that
+    // initial read and prevent Load more from ever becoming available.
+    vi.mocked(listAssessmentRunChildren).mockImplementation(async (_key, _runId, section, params) => {
+      if (section !== "sources") return page([]);
+      const offset = params?.offset ?? 0;
+      const limit = params?.limit ?? 50;
+      if (offset === 50) return more.promise;
+      if (offset === 0 && limit === 50) return first.promise;
+      return read(offset, limit);
+    });
     const view = renderTab(<RunsTab engagementKey="acme" initialRunId={40} initialSection="sources" refreshVersion={0} />);
     const record = await screen.findByRole("region", { name: "Run record" });
-    const more = deferred<AuditPage<AssessmentRunChild>>();
-    vi.mocked(listAssessmentRunChildren).mockReturnValueOnce(more.promise);
+    await waitFor(() => expect(listAssessmentRunChildren).toHaveBeenCalledWith("acme", 40, "sources", { limit: 50, offset: 0 }));
+    await act(async () => { first.resolve(read(0, 50)); });
     fireEvent.click(await within(record).findByRole("button", { name: /Load more · 10 remaining/ }));
+    expect(listAssessmentRunChildren).toHaveBeenLastCalledWith("acme", 40, "sources", { limit: 50, offset: 50 });
     const before = vi.mocked(listAssessmentRunChildren).mock.calls.length;
     view.rerender(<RunsTab engagementKey="acme" initialRunId={40} initialSection="sources" refreshVersion={1} />);
     view.rerender(<RunsTab engagementKey="acme" initialRunId={40} initialSection="sources" refreshVersion={2} />);
