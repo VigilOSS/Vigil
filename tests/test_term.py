@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import inspect
 import io
+import os
 import sys
 
 import pytest
@@ -59,6 +60,82 @@ def _styled_environment(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_supports_style_true_for_a_tty() -> None:
     assert term.supports_style(FakeStream(tty=True)) is True
+
+
+@pytest.mark.parametrize("text", ["Acme report", "Acme\nreport\t27", "Acme\x1b[2Jreport", "Acme\x9breport\u2028next\u2029line", 'Acme "quoted" \\ path'])
+def test_single_line_preserves_data_as_visible_literal_text(text: str) -> None:
+    import json
+    rendered = term.single_line(text)
+    assert json.loads('"' + rendered + '"') == text
+    assert len(rendered.splitlines()) == 1
+    assert all(ord(char) >= 32 and not 0x7f <= ord(char) <= 0x9f for char in rendered)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="requires a POSIX terminal")
+@pytest.mark.parametrize("no_color", [False, True])
+def test_rich_console_measures_its_output_terminal(monkeypatch, no_color):
+    import fcntl
+    import pty
+    import struct
+    import termios
+    monkeypatch.delenv("COLUMNS", raising=False)
+    if no_color:
+        monkeypatch.setenv("NO_COLOR", "1")
+    master, slave = pty.openpty()
+    try:
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 40, 0, 0))
+        with os.fdopen(os.dup(slave), "w") as terminal:
+            assert term.console(terminal).width == 40
+            monkeypatch.setenv("COLUMNS", "24")
+            assert term.console(terminal).width == 24
+    finally:
+        os.close(master)
+        os.close(slave)
+
+
+@pytest.mark.parametrize("outcome", ["success", "failure", "interrupt"])
+def test_activity_cleans_up_and_renders_literal_messages(monkeypatch, outcome):
+    from types import SimpleNamespace
+    messages, lifecycle = [], []
+    status = SimpleNamespace(start=lambda: lifecycle.append("start"), stop=lambda: lifecycle.append("stop"),
+                             update=lambda message: messages.append(message))
+    def create(message, **kwargs):
+        messages.append(message)
+        return status
+    monkeypatch.setattr(term, "is_terminal", lambda stream: True)
+    monkeypatch.setattr(term, "console", lambda stream: SimpleNamespace(status=create))
+    error = RuntimeError if outcome == "failure" else KeyboardInterrupt
+    def work():
+        with term.activity("[red]Acme\x1b[2J") as progress:
+            progress.update("Finding conversation…")
+            if outcome != "success":
+                raise error()
+            progress.stop()
+    if outcome == "success":
+        work()
+    else:
+        with pytest.raises(error):
+            work()
+    assert lifecycle == ["start", "stop"]
+    assert messages[0].plain == "[red]Acme\\u001b[2J"
+    assert messages[0].spans == []
+
+
+@pytest.mark.parametrize("tty,enabled", [(False, True), (True, False)])
+def test_activity_keeps_noninteractive_output_clean(monkeypatch, capsys, tty, enabled):
+    monkeypatch.setattr(term, "is_terminal", lambda stream: tty)
+    monkeypatch.setattr(term, "console", lambda stream: pytest.fail("no interactive renderer needed"))
+    with term.activity("Loading case…", enabled=enabled) as progress:
+        progress.update("Finding conversation…")
+    captured = capsys.readouterr()
+    assert captured.out == captured.err == ""
+
+
+def test_no_color_preserves_terminal_activity_capability(monkeypatch):
+    monkeypatch.setenv("NO_COLOR", "1")
+    output = term.console(FakeStream(tty=True))
+    assert output.is_terminal
+    assert output.color_system is None
 
 
 def test_supports_style_false_for_a_pipe() -> None:

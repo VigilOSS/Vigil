@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator, Protocol, Sequence
 from urllib.parse import urlparse
 
-from . import docker
+from . import docker, term
 from .client_rosters import (
     ensure_claude_agents_link,
     ensure_claude_commands_link,
@@ -1699,6 +1699,15 @@ def _write_active_mirror(install_root: Path, key: str) -> None:
         pass
 
 
+def _project_picker_label(row: EngagementRow) -> str:
+    name = re.sub(r"^\d{4}-\d{2}-\d{2}-\d{6}-(?=.)", "", row.key, count=1)
+    fields = [term.single_line(name), term.single_line(row.status),
+              term.single_line(row.current_phase), term.single_line(row.target)]
+    if name != row.key:
+        fields.append(term.single_line(row.key))
+    return "  ·  ".join(fields)
+
+
 def _select_engagement(rows: list[EngagementRow]) -> EngagementRow:
     if not rows:
         raise SystemExit("No engagements found")
@@ -1707,11 +1716,33 @@ def _select_engagement(rows: list[EngagementRow]) -> EngagementRow:
             "Interactive --select is unavailable in a non-interactive process; "
             "pass the optional engagement key explicitly"
         )
-    from .prompts import prompt_choice
-
-    labels = [f"{row.key} [{row.status}/{row.current_phase}] {row.target}" for row in rows]
-    selected = prompt_choice("Select engagement", labels[0], labels)
-    return rows[labels.index(selected)]
+    if term.is_terminal(sys.stdin) and shutil.which("fzf"):
+        lines = [f"{index}\t{_project_picker_label(row)}" for index, row in enumerate(rows)]
+        details = {str(index): f"Project\n\n{term.single_line(row.key)}\n\nWorkspace: {term.single_line(row.path)}\nStatus: {term.single_line(row.status)}\nPhase: {term.single_line(row.current_phase)}\nTarget: {term.single_line(row.target)}\n"
+                   for index, row in enumerate(rows)}
+        index = term.fuzzy_pick(lines, details, prompt="Project > ", action="select",
+                                cancelled="Project selection cancelled", invalid="Invalid project selection")
+        return rows[index]
+    from rich.table import Table
+    from rich.text import Text
+    output = term.console(sys.stderr)
+    output.print("Choose a project", style="bold")
+    table = Table(box=None, padding=(0, 1), expand=True, show_edge=False)
+    table.add_column("Row", no_wrap=True, style="dim")
+    table.add_column("Project", ratio=1, overflow="fold")
+    for index, row in enumerate(rows, 1):
+        detail = Text(term.single_line(row.key))
+        detail.append(f"\n{term.single_line(row.status)} / {term.single_line(row.current_phase)} · {term.single_line(row.target)}", style="dim")
+        table.add_row(str(index), detail, end_section=True)
+    output.print(table)
+    print("Row number> ", end="", file=sys.stderr, flush=True)
+    try:
+        choice = input().strip()
+    except (EOFError, KeyboardInterrupt) as exc:
+        raise SystemExit("Project selection cancelled") from exc
+    if not choice.isdigit() or not (1 <= int(choice) <= len(rows)):
+        raise SystemExit("Invalid selection")
+    return rows[int(choice) - 1]
 
 
 def print_shell_cd_init(shell: str = "zsh") -> str:

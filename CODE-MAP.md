@@ -63,12 +63,6 @@ When you are about to copy one of these into a second file, stop and import.
 - `agent/scripts/assess/lib/code_languages.py:CANONICAL_CODE_LANGUAGES` owns detected languages;
   backend structural languages must be a superset and cover every lightweight extractor.
   See: `orchestrator/backend/tests/test_structural_language_drift.py`.
-- `orchestrator/backend/app/services/code_analysis_support.py:_lease_activity_sql` owns what "a lease last proved life" means
-  (`COALESCE(last_heartbeat_at, consumed_at)`); `reset-stale`, `list --stale-minutes`, adoption
-  liveness and the open-lease report all measure from it.
-- `orchestrator/backend/app/services/code_analysis_support.py:_attempt_owned_result_sql` owns which `(agent, lease)` identities may author a
-  queue attempt's receipts — the current lease PLUS the row's adoption chain. Matching the current
-  lease alone voids everything an adopted attempt inherited.
 - `agent/scripts/assess/lib/dependency_manifests.py:RECOGNIZED_MANIFESTS` owns manifests and readers;
   `classify_buckets.py:_BUCKETS` derives fragments from it. A missing reader is a GAP, not absence.
 - `dependency_picture.py:SHIPMENT_OBSERVATIONS` / `REACHABILITY_OBSERVATIONS` /
@@ -115,7 +109,7 @@ When you are about to copy one of these into a second file, stop and import.
   `.github/workflows/runtime-release.yml` supplies tag identity, native runners, registry
   authentication, and draft-release upload.
 - `src/vigil_cli/restart_manifest.py:consumer_states` owns what an install invalidated, per consumer.
-  Presenters consume its rows; do not derive freshness beside it. See: `docs/maintainer-guide.md` freshness section.
+  `backend_state` provides the backend-only verdict for remediation commands. Presenters consume its rows; do not derive freshness beside it. See: `docs/maintainer-guide.md` freshness section.
 - `src/vigil_cli/install_manifest.py` owns editable application input digests;
   `src/vigil_cli/install_fs.py` owns pinned/no-follow workspace and cache operations.
 - `src/vigil_cli/assessment_clients.py` owns immutable native-client workspace bindings,
@@ -138,14 +132,8 @@ When you are about to copy one of these into a second file, stop and import.
   it reads existing database snapshots without initialization and excludes backend sync/housekeeping clocks.
 - `src/vigil_cli/client_sessions.py` owns historical launch reads and separate official-open markers;
   picker recency never turns those markers into PID ownership or proof of native conversation readiness.
-- `agent/scripts/assess/commands/transition_phase.py` stamps scope-level `phase_changed_at` inside the existing
-  atomic mutation only when a phase changes; same-phase calls do not create activity.
-- `agent/scripts/assess/commands/approve_exploit.py` stamps `exploit_review_changed_at` only when the
-  existing atomic approval mutation changes review state or its selected targets.
 - `agent/scripts/assess/lib/scope.py:ingest_scope_filter` must run on every new file-to-buffer ingest
   path. Arjun and proxy ingestion reuse already-filtered URLs.
-- `orchestrator/backend/app/services/state_manager/work_buffer.py:_scope_excluded_hosts` owns
-  claim-time scope exclusion, applied before ordering and limits.
 - `src/vigil_cli/engagements.py` owns durable offensive track creation, explicit add-track,
   session mode validation, and engagement-local prompt routing. New offensive scopes store
   `tracks.web.phase` and/or `tracks.code.phase`; legacy scalar phase scopes remain readable.
@@ -218,9 +206,6 @@ A prompt change is **not** prompt-only when the prompt defines an artifact the b
   writes `assessment_dispatch_client_bindings`, append-only by SQLite trigger: a correction stamps
   the prior row's `superseded_by_id`, never an overwrite. `_DISPATCH_SELECT` carries the current
   binding — a dispatch read off that projection reports every specialist as unbound.
-- Any path returning a `code_analysis_queue` row to `pending` must clear `adopted_leases_json` AND
-  supersede every current receipt, not only the last owner's, or the next claimant inherits receipts
-  it never earned (`reset_stale_queue_items`, `retry_error_queue_items`, `retry_needs_context_queue_items`).
 - `code_analysis.py:_record_source_generation` — every generation-bound row type must be handled on
   promotion. Queue rows, results and triggers are stamped superseded; `_rebase_lead_bindings` carries
   a lead binding forward only on an identical `file_hash`. A generation-bound table added without a
@@ -241,7 +226,6 @@ A prompt change is **not** prompt-only when the prompt defines an artifact the b
   `orchestrator/backend/app/code_snapshot.py` independently attests them; new v3 snapshots use
   decoded logical lines, while historical v2 snapshots retain their original attestation semantics. See: ADR 0026.
 - `agent/scripts/assess/lib/parser_boundary.py` + `parser_worker.py` — the structural-parser process boundary. Every typed failure becomes an explicit all-byte fallback with declared unavailable dimensions, never a silent skip. See: ADR 0029.
-- `agent/scripts/assess/lib/reachability.py` — `classify_probe()` is the one per-host reachability verdict. A bare `connect=000` is NOT a blanket "blocked"; a verdict requires no TCP connect AND no resolved IP.
 - `agent/scripts/assess/commands/export_submission.py` and `export_reply.py` assemble and present;
   neither rewrites authored content or masks credentials. Rendering helpers live in
   `agent/scripts/assess/lib/finding_render.py`.
@@ -254,6 +238,7 @@ A prompt change is **not** prompt-only when the prompt defines an artifact the b
 
 ### src/vigil_cli/ — the universal CLI
 
+- `src/vigil_cli/term.py` owns terminal-only Rich rendering and shared exact-candidate fuzzy selection with literal, temporary-file previews; callers retain plain/JSON output contracts.
 - `src/vigil_cli/application.py` — explicit/imported release resolution, bundle validation and persistent content-addressed assets/helper CLI. Never discover source from workspace or CWD.
 - `src/vigil_cli/workspace.py` — canonical private paths and in-place legacy adoption; `paths.py:workspace_root_for_engagement` resolves private ownership independently of application assets.
 - `vigil_build.py` — tracked publisher inputs, matched CLI/backend/agent/docs/legal bundle and locked prebuilt UI provenance; its sdist builds wheels without Git or Node.
@@ -263,11 +248,17 @@ A prompt change is **not** prompt-only when the prompt defines an artifact the b
 - `src/vigil_cli/paths.py:resolve_orchestrator_base_url` — backend URL precedence and dotenv normalization; `vigil config resolve orchestrator_base_url` exposes it to generated client launchers at session start.
 - `src/vigil_cli/preflight.py` owns launch checks shared with blue; managed-local backend recovery never replaces a configured remote endpoint. Static code startup does not query Docker.
 - `src/vigil_cli/remediation.py` — case intake/context rendering, configured workspace/checks, reviewed PR publication, and consented development workflow commands; `remediation_browser.py` owns local browser execution. Backend APIs own case state.
-  Interactive `start` selects only remediation engagements using shared terminal prompts and recent activity;
-  its create action calls the canonical engagement wizard registered by `main.py`. Other verbs retain their binding rules.
+  Interactive start selects remediation projects through shared prompts; the canonical engagement wizard creates projects.
+  External-reference joins resolve to numeric case identity; identity/finalization/publication share a case lock.
+  Branch finalization retains retry intent across local VCS and backend registration.
+- `src/vigil_cli/remediation_regression.py` — paired red/green receipts; `agent/scripts/assess/lib/remediation_regression.py` owns disposable sources; `orchestrator/backend/app/services/remediation_regression.py` validates provenance.
 - `src/vigil_cli/remediation_sessions.py` owns role routing and Claude native binding/attachment; launch receipts correlate job names with host UUIDs, and `start --session-id` recovers without redispatch.
+  `join --fresh` replaces the case conversation under its session lock, preserving binding history and requiring consent before stopping a running worker.
 - `src/vigil_cli/remediation_clients.py` owns OpenCode repository launch and ZCode's context-bound plugin preparation/workspace opening, without native conversation receipts. `agent/.zcode/hooks/` restores defensive case context.
 - `agent/scripts/assess/lib/remediation_project.py` and `remediation_vcs.py` — shared PROJECT.md parsing and Git/JJ identity, workspace, diff, and push contracts; CLI import bridges are `project_config.py` and `remediation_vcs.py`.
+  `remediation_vcs.py:tree_id` owns complete code-tree identity; backend evidence records it at intake.
+  New configured workspaces use stable numeric case directories. Check stages select early execution; all captured checks remain approval requirements. Branch finalization validates unpublished same-revision rename and retry state.
+  Local verification can carry across identical trees; approvals and served-runtime proof retain revision identity.
 - `src/vigil_cli/runtime.py` + `up.py` — one shared long-lived Kali container, reached host-side by `docker exec`. There is no in-container API server or MCP bridge.
   `up.py:run_up` owns startup JSON/service states; `service_locks.py` serializes shared starts. `agent/scripts/assess/lib/kali_runtime_exec.py` owns first-use managed execution startup.
 - `src/vigil_cli/runtime_images.py` owns immutable release pins and label validation; `.github/workflows/runtime-release.yml` embeds the published multi-platform pin in matched artifacts.
@@ -310,12 +301,14 @@ A prompt change is **not** prompt-only when the prompt defines an artifact the b
 - `orchestrator/backend/app/services/assessment_memory.py` and `artifact_index.py` own the bounded
   resume brief and artifact index; output points to drill-down commands instead of embedding data.
 - `orchestrator/backend/app/reply_render.py` — the versioned exact-bytes outbound renderer; `agent/scripts/assess/lib/reply_render.py` is an import-only bridge so draft previews and the backend cannot fork the format.
-- `orchestrator/backend/app/services/operator_checkpoints.py` — writes `assessment_operator_checkpoints`, an append-only table enforced by SQLite triggers. The only permitted mutation is stamping a null `superseded_by_id`.
 - `orchestrator/backend/app/services/state_manager/run_accounting.py` owns run identity and lifecycle; `run_inventory.py` owns sources and obligations, `run_evidence.py` owns linked receipts, and `run_comparisons.py` owns comparisons. `proofs.py` owns immutable evidence receipts. See: ADR 0028.
 - `orchestrator/backend/app/services/engagements.py` — filesystem-to-DB sync. Explicit deletes are tombstoned so a later sync cannot resurrect them from leftover files.
 - `orchestrator/backend/app/api/remediation.py` and `services/remediation.py` — case/source
   resolution, canonical finding links, captured review policy/base, typed verification, shared
   environment ownership/runtime identity, and approval/deployment gates; separate from assessment Findings.
+  Optional primary external references are separate from intake provenance; identity versions prevent approval resurrection. Dedicated identity/finalization routes preserve numeric case ownership and normal patch branch immutability.
+  `publication_intent` validates approval and writes a durable intent under the DB writer lock before initial push; later identity and branch changes cannot race that publication.
+  `_details` owns evidence matches and PR/check projections; paged evidence/history reads preserve full review gates.
 
 ### Frontend and the rest
 

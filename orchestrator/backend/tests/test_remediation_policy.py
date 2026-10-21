@@ -112,17 +112,21 @@ def test_blank_verification_plan_is_rejected(client, isolate_settings):
     assert response.status_code == 422, response.text
 
 
-def test_recorded_prose_plan_retains_its_evidence_contract(client, isolate_settings):
+def test_owner_steps_need_explicit_verification_requirements(client, isolate_settings):
     _, item = case(client, isolate_settings)
     with db.get_connection() as connection:
         connection.execute("UPDATE remediation_cases SET verification_plan=? WHERE id=?",
                            ("Recorded owner test steps", item['id']))
     endpoint = f"{BASE}/cases/{item['id']}"
-    before = client.get(endpoint).json()["review_evidence_missing"]
+    assert client.get(endpoint).json()["review_evidence_missing"] == ["verification plan with evidence requirements"]
     response = client.patch(f"{endpoint}/verification-plan", json={"verification_plan": "Clarified owner test steps"})
+    assert response.status_code == 400, response.text
+    response = client.patch(f"{endpoint}/verification-plan", json={
+        "verification_plan": "Clarified owner test steps", "requirements": [{"kind": "api-test", "methods": ["pytest"]}],
+        "alternatives_reason": "Native API proof",
+    })
     assert response.status_code == 200, response.text
-    assert response.json()["verification_requirements"] is None
-    assert response.json()["review_evidence_missing"] == before
+    assert response.json()["review_evidence_missing"] == ["api-test (executed, current revision)"]
 
 
 def test_evidence_cannot_claim_different_executed_revision(client, isolate_settings):
@@ -134,6 +138,31 @@ def test_evidence_cannot_claim_different_executed_revision(client, isolate_setti
         "execution": "executed", "executed_revision": "0" * 40,
     })
     assert response.status_code == 400, response.text
+
+
+def test_stored_requirements_enforce_revision_contract(client, isolate_settings):
+    root, item = case(client, isolate_settings)
+    _, revision = workspace(client, root, item)
+    endpoint = f"{BASE}/cases/{item['id']}"
+    plan = {"verification_plan": "Check account access", "requirements": [{"kind": "api-test", "methods": ["pytest"]}],
+            "alternatives_reason": "Native account controls"}
+    assert client.patch(endpoint + "/verification-plan", json=plan).status_code == 200
+    artifact = root / "remediation/cases" / str(item["id"]) / "output.txt"
+    artifact.write_text("Account controls passed\n")
+    assert client.post(endpoint + "/evidence", json={
+        "kind": "api-test", "method": "pytest", "environment": "local", "command": "pytest",
+        "outcome": "passed", "observed": "Pass", "proved": "Account access", "revision": revision,
+        "executed_revision": revision, "artifact_path": str(artifact.relative_to(root)),
+    }).status_code == 201
+    current = client.get(endpoint).json()
+    assert current["review_evidence_ready"]
+    stored = current["verification_requirements"]
+    stored["requirements"][0]["revision"] = "ancestor"
+    with db.get_connection() as connection:
+        connection.execute("UPDATE remediation_cases SET verification_requirements_json=? WHERE id=?", (json.dumps(stored), item["id"]))
+    current = client.get(endpoint).json()
+    assert not current["review_evidence_ready"]
+    assert current["verification_matches"][0]["evidence_ids"] == []
 
 
 def test_source_resolution_reports_existing_case_without_merging(client, isolate_settings):

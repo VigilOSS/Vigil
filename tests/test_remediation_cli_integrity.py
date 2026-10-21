@@ -232,13 +232,16 @@ def publication(monkeypatch, tmp_path):
     previous = 'b' * 40
     config = {'repository': str(tmp_path), 'base_branch': 'develop'}
     case = {'id': 1, 'status': 'approved', 'approval_current': True,
-            'approvals': [{'review_digest': digest}], 'worktree_path': str(workspace),
+            'approvals': [{'review_digest': digest, 'evidence_cutoff_id': 2}], 'worktree_path': str(workspace),
             'worktree_branch': 'fix/SEC-123', 'worktree_revision': revision, 'base_branch': 'develop',
-            'verification_requirements': [{'kind': 'profile-check'}],
+            'verification_requirements': {'requirements': [{'kind': 'profile-check'}]},
+            'verification_matches': [{'requirement_index': 0, 'evidence_ids': [1], 'missing': None}],
             'release_plan': {'production_canary_decision': 'not_required',
                              'production_canary_rationale': 'Local verification suffices',
                              'monitoring': 'Monitor rejection counts'},
-            'evidence': [{'id': 1, 'kind': 'pr_publication', 'method': 'github', 'revision': previous}]}
+            'evidence': [{'id': 1, 'kind': 'profile-check', 'method': 'pytest', 'outcome': 'passed',
+                          'revision': revision, 'observed': '1 passed', 'proved': 'Ownership boundary'},
+                         {'id': 2, 'kind': 'pr_publication', 'method': 'github', 'revision': previous}]}
     directory = tmp_path / 'remediation/cases/1'
     directory.mkdir(parents=True)
     root_cause = 'Report owner was not checked'

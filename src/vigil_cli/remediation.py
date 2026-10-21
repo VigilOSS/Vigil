@@ -12,6 +12,7 @@ import os
 import posixpath
 import re
 import shutil
+import shlex
 import subprocess
 import sys
 import uuid
@@ -20,13 +21,14 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlsplit
 from urllib.request import Request, urlopen
 
-from .engagements import CreatedEngagement, list_engagements, resolve_engagement_path
-from .paths import engagements_root, resolve_orchestrator_base_url
+from . import restart_manifest, term
+from .engagements import CreatedEngagement, EngagementRow, list_engagements, resolve_engagement_path
+from .paths import resolve_orchestrator_base_url
 from .remediation_vcs import adapter as _vcs
 from .remediation_browser import execute as _execute_browse
 from .project_config import project_module
 from .prompts import prompt_choice
-from .remediation_sessions import register_session_parsers, run_session_command
+from .remediation_sessions import register_session_parsers, run_session_command, select_conversation_action
 
 
 def register_remediation_parser(
@@ -51,7 +53,7 @@ def register_remediation_parser(
             "Walkthrough: docs/remediation.md"
         ),
     )
-    parser.add_argument("--engagement-key", "-k", help="Remediation project engagement key; start asks when omitted on a terminal")
+    parser.add_argument("--engagement-key", "-k", help="Project key; start asks when omitted on a terminal")
     parser.set_defaults(remediation_help=parser.print_help, remediation_create_parser=create_parser,
                         remediation_create=create_engagement)
     commands = parser.add_subparsers(dest="remediation_command", title="Commands", metavar="COMMAND")
@@ -62,29 +64,47 @@ def register_remediation_parser(
         description="Import a prepared local JSON snapshot and attachments. This command does not fetch Jira or bounty data. Resume a partial import with --resume-case-id.",
     )
     intake.add_argument("--source", required=True, help="Actual report provider, or report/manual for direct input")
-    intake.add_argument("--source-key", required=True)
+    intake.add_argument("--source-key", help="Report identity; optional for report/manual input")
     intake.add_argument("--title", required=True)
     intake.add_argument("--snapshot-file", required=True, type=Path)
     intake.add_argument("--attachment", action="append", type=Path, default=[], help="Local report attachment; repeatable")
     intake.add_argument("--finding-id", type=int, action="append", default=[], help="Canonical Vigil finding ID sharing this fix; repeatable")
     intake.add_argument("--resume-case-id", help="Resume attachment registration after a partial import")
 
-    from_finding = commands.add_parser("from-finding", help="Create a case from a Vigil finding in this remediation engagement")
+    from_finding = commands.add_parser("from-finding", help="Create a case from an assessment finding")
     from_finding.add_argument("--finding-engagement", required=True, help="Source assessment engagement key")
     from_finding.add_argument("--finding", required=True, help="Finding slug in the source engagement")
     from_finding.add_argument("--title")
 
-    list_cases = commands.add_parser("list", help="List cases")
-    list_cases.add_argument("--json", action="store_true")
+    list_cases = commands.add_parser("list", help="List case IDs and join commands, open cases first")
+    list_cases.add_argument("--json", action="store_true", help="Full case records with case_id and join_command for agents and scripts")
     show = commands.add_parser("show", help="Show case and review state")
     show.add_argument("case_id")
     handoff_case = commands.add_parser("handoff", help="Render the current case context for its developer")
     handoff_case.add_argument("case_id")
+    identity = commands.add_parser("identity", help="Attach a primary external reference to a case")
+    identity.add_argument("case_id")
+    identity.add_argument("--provider", required=True, help="External reference provider")
+    identity.add_argument("--key", dest="external_key", required=True, help="Provider's exact reference key")
+    finalize = commands.add_parser("finalize-branch", help="Rename an unpublished case branch or bookmark")
+    finalize.add_argument("case_id")
+    finalize.add_argument("--branch", required=True)
     checks = commands.add_parser("checks", help="Execute profile checks against the registered case source")
     checks.add_argument("case_id")
     checks.add_argument("--actor", required=True)
     checks.add_argument("--name", action="append", default=[], help="Run a named check; repeatable, defaults to all")
     checks.add_argument("--shared-environment", help="Acquire exclusive use of the named shared test environment")
+    checks.add_argument("--stage", choices=("verification", "publication"), default="verification",
+                        help="publication includes all checks; verification omits publication-only checks")
+    regression = commands.add_parser("test", help="Run a regression against reverted fix files, then the finished fix")
+    regression.add_argument("case_id")
+    regression.add_argument("--method", required=True)
+    regression.add_argument("--command", dest="test_command", required=True)
+    regression.add_argument("--expected-failure", required=True, help="Text identifying the expected failure in red output")
+    regression.add_argument("--fix-path", action="append", default=[], help="Changed fix file to restore to base; defaults to plan fix_paths")
+    regression.add_argument("--directory", default=".")
+    regression.add_argument("--setup-command", help="Prepare dependencies in both tested sources before the regression")
+    regression.add_argument("--timeout-seconds", type=int, default=600, help="Timeout for each setup/test command (default: 600)")
     environment = commands.add_parser("environment", help="Acquire or release shared test-environment ownership")
     environment.add_argument("action", choices=("acquire", "release"))
     environment.add_argument("case_id")
@@ -291,9 +311,9 @@ def _api(install_root: Path, eng_dir: Path, key: str, method: str, suffix: str, 
 
 
 def _case_path(case_id: str) -> str:
-    if not case_id or not all(ch.isalnum() or ch in "-_" for ch in case_id):
-        raise SystemExit("case ID contains unsupported characters")
-    return f"/cases/{quote(case_id, safe='')}"
+    if not case_id or not case_id.isascii() or not case_id.isdigit() or int(case_id) <= 0:
+        raise SystemExit("case ID must be a positive integer")
+    return f"/cases/{int(case_id)}"
 
 
 def _case(install_root: Path, eng_dir: Path, key: str, case_id: str) -> dict:
@@ -301,6 +321,143 @@ def _case(install_root: Path, eng_dir: Path, key: str, case_id: str) -> dict:
     if not isinstance(result, dict):
         raise SystemExit("remediation API returned an invalid case")
     return result
+
+
+def _case_summaries(install_root: Path, eng_dir: Path, key: str) -> list[dict]:
+    result = _api(install_root, eng_dir, key, "GET", "/cases")
+    if not isinstance(result, list) or any(
+        not isinstance(case, dict) or type(case.get("id")) is not int or case["id"] <= 0 for case in result
+    ):
+        raise SystemExit("remediation API returned invalid case identities")
+    if len({case["id"] for case in result}) != len(result):
+        raise SystemExit("remediation API returned duplicate case identities")
+    recent = sorted(result, key=lambda case: (case.get("updated_at") or case.get("created_at") or "", case["id"]), reverse=True)
+    return sorted(recent, key=lambda case: case.get("status") == "closed")
+
+
+def _resolve_case_id(install_root: Path, engagement: Path, key: str, selector: str) -> str:
+    if selector.isascii() and selector.isdigit():
+        return selector
+    matches = [case for case in _case_summaries(install_root, engagement, key) if case.get("external_key") and (
+        selector == f"{case.get('external_provider')}:{case['external_key']}" or selector == case["external_key"]
+    )]
+    if not matches:
+        raise SystemExit(f"No case matches {selector!r}; use list to find its numeric ID")
+    if len(matches) != 1:
+        raise SystemExit(f"Case reference {selector!r} is ambiguous; use its numeric ID or provider:key")
+    return str(matches[0]["id"])
+
+
+def _case_reference(case: dict) -> str:
+    if case.get("external_key"):
+        return f"{case.get('external_provider')}:{case['external_key']}"
+    if case.get("source_type") in {"manual", "report"} and case.get("source_key") == f"case-{case['id']}":
+        return "Direct report"
+    return f"{case.get('source_type', '')}:{case.get('source_key', '')}"
+
+
+def _case_summary_line(case: dict) -> str:
+    source = _case_reference(case)
+    return (f"case_id={case['id']} status={json.dumps(case.get('status'))} "
+            f"source={json.dumps(source, ensure_ascii=False)} title={json.dumps(case.get('title'), ensure_ascii=False)} "
+            f"updated_at={json.dumps(case.get('updated_at'))}")
+
+
+def _select_case(cases: list[dict]) -> dict:
+    if not cases:
+        raise SystemExit("No remediation cases in this project; use start to open a conversation and supply a report")
+    if term.is_terminal(sys.stdin) and shutil.which("fzf"):
+        lines = [f"{case['id']}\t#{case['id']}  {_case_status(case)}  {term.single_line(case.get('title'))}  ·  "
+                 f"{term.single_line(_case_reference(case))}" for case in cases]
+        details = {str(case["id"]): (
+            f"Case #{case['id']}\n\n{term.single_line(case.get('title'))}\n\n"
+            f"Status: {_case_status(case)}\n"
+            f"Reference: {term.single_line(_case_reference(case))}\n"
+            f"Updated: {term.single_line(case.get('updated_at') or case.get('created_at'))}\n"
+        ) for case in cases}
+        index = term.fuzzy_pick(lines, details, prompt="Case > ", action="join",
+                                cancelled="Remediation case selection cancelled", invalid="Invalid remediation case selection")
+        return cases[index]
+    output = term.console(sys.stderr)
+    output.print("Choose a remediation case", style="bold")
+    output.print("Open first · newest first", style="dim")
+    _case_table(output, cases, numbered=True)
+    print("Row number> ", end="", file=sys.stderr, flush=True)
+    try:
+        choice = input().strip()
+    except (EOFError, KeyboardInterrupt) as exc:
+        raise SystemExit("Remediation case selection cancelled") from exc
+    if not choice.isdigit() or not 1 <= int(choice) <= len(cases):
+        raise SystemExit("Invalid remediation case selection")
+    return cases[int(choice) - 1]
+
+
+def _case_command(install_root: Path, key: str, command: str, case_id: int | None = None) -> str:
+    argv = ["vigil", "--root", str(install_root), "remediation", "-k", key, command]
+    if case_id is not None:
+        argv.append(str(case_id))
+    return shlex.join(argv)
+
+
+def _case_status(case: dict) -> str:
+    return term.single_line(case.get("status")).replace("_", " ").capitalize()
+
+
+def _case_table(output, cases: list[dict], *, numbered: bool = False) -> None:
+    from rich.table import Table
+    from rich.text import Text
+
+    table = Table(box=None, padding=(0, 1), expand=True, show_edge=False)
+    if numbered:
+        table.add_column("Row", no_wrap=True, style="dim")
+    table.add_column("ID", no_wrap=True, style="cyan")
+    table.add_column("Case", ratio=1, overflow="fold")
+    for index, case in enumerate(cases, 1):
+        detail = Text(term.single_line(case.get("title")))
+        detail.append("\n" + _case_metadata(case), style="dim")
+        fields = [Text(f"#{case['id']}"), detail]
+        if numbered:
+            fields.insert(0, Text(str(index)))
+        table.add_row(*fields, end_section=True)
+    output.print(table)
+
+
+def _case_metadata(case: dict) -> str:
+    status = _case_status(case)
+    source = term.single_line(_case_reference(case))
+    updated = term.single_line(case.get("updated_at") or case.get("created_at"))
+    return f"{status} · {source} · Updated {updated}"
+
+
+def _print_case_list(install_root: Path, key: str, cases: list[dict], *, as_json: bool) -> None:
+    if as_json:
+        records = [{**case, "case_id": case["id"], "engagement_key": key,
+                    "join_command": _case_command(install_root, key, "join", case["id"])} for case in cases]
+        print(json.dumps(records, indent=2, sort_keys=True))
+        return
+    if term.is_terminal(sys.stdout):
+        output = term.console(sys.stdout)
+        output.print(f"Remediation · {term.single_line(key)}", style="bold")
+        output.print("Open first · newest first", style="dim")
+        output.print()
+        if cases:
+            _case_table(output, cases)
+        else:
+            output.print("No remediation cases yet. Use start to supply a report.")
+        output.print()
+        output.print("start  New repository conversation", style="bold")
+        output.print("join   Choose a case, or supply its numeric ID", style="bold")
+        output.print("Use the same --root and -k options as this list command.", style="dim")
+        output.print("Exact join commands: list --json", style="dim")
+        return
+    print(f"Remediation project: {json.dumps(key, ensure_ascii=False)}")
+    print(f"start: {_case_command(install_root, key, 'start')}  (new repository conversation)")
+    print(f"join: {_case_command(install_root, key, 'join')} <case_id>  (recorded case conversation)")
+    if not cases:
+        print("No remediation cases in this project. Use start to supply a report.")
+    for case in cases:
+        print(f"\n{_case_summary_line(case)}")
+        print(f"  join: {_case_command(install_root, key, 'join', case['id'])}")
 
 
 def _revision(path: Path) -> str:
@@ -509,24 +666,29 @@ def _reviewed_evidence_lines(case: dict) -> list[str]:
     return lines
 
 
-def _required_reviewed_evidence_lines(case: dict) -> list[str]:
+def _approved_verification_evidence(case: dict) -> list[dict]:
     approvals = case.get("approvals") or []
     cutoff = int(approvals[-1].get("evidence_cutoff_id") or 0) if approvals else 0
     evidence = [row for row in case.get("evidence") or [] if isinstance(row, dict) and int(row.get("id") or 0) <= cutoff]
     plan = case.get("verification_requirements")
-    if plan:
-        requirements = plan.get("requirements", []) if isinstance(plan, dict) else plan
-        required = {row["kind"] for row in requirements}
-        if not required.issubset({row.get("kind") for row in evidence}):
+    if not isinstance(plan, dict) or not plan.get("requirements"):
+        raise SystemExit("PR content requires explicit verification requirements")
+    matches = case.get("verification_matches")
+    if not isinstance(matches, list):
+        raise SystemExit("backend verification matches are missing; refresh the case using the current backend")
+    approved_ids = {row["id"] for row in evidence}
+    selected_ids = set()
+    for index in range(len(plan["requirements"])):
+        match = next((item for item in matches if item.get("requirement_index") == index), None)
+        matched_ids = approved_ids.intersection(match.get("evidence_ids", [])) if match else set()
+        if not matched_ids:
             raise SystemExit("reviewed case-specific verification evidence is missing")
-        lines = _reviewed_evidence_lines(case)
-        return [line for line, row in zip(lines, evidence) if row.get("kind") in required]
-    required = {"red-test", "green-test"}
-    kinds = {str(row.get("kind")) for row in evidence}
-    if not required.issubset(kinds) or not kinds.intersection({"stagehand", "browse"}):
-        raise SystemExit("reviewed red/green test and browser evidence are required in PR content")
-    lines = _reviewed_evidence_lines(case)
-    return [line for line, row in zip(lines, evidence) if row.get("kind") in required | {"stagehand", "browse"}]
+        selected_ids.update(matched_ids)
+    return [row for row in evidence if row["id"] in selected_ids]
+
+
+def _required_reviewed_evidence_lines(case: dict) -> list[str]:
+    return _reviewed_evidence_lines({**case, "evidence": _approved_verification_evidence(case)})
 
 
 def _register_pr_body(
@@ -758,20 +920,35 @@ def _register_intake_files(
         })
 
 
+def _remediation_projects(install_root: Path) -> list[EngagementRow]:
+    candidates = []
+    for row in list_engagements(install_root):
+        try:
+            if json.loads((row.path / "scope.json").read_text(encoding="utf-8")).get("engagement_type") == "remediation":
+                candidates.append(row)
+        except (OSError, ValueError):
+            continue
+    return candidates
+
+
+def _select_project(projects: list[EngagementRow]) -> str:
+    from .engagements import _select_engagement
+
+    if not projects:
+        raise SystemExit("No remediation projects found; create one with vigil engagement create --type remediation")
+    return _select_engagement(projects).key
+
+
 def _engagement_key(args: argparse.Namespace, install_root: Path) -> str:
     if args.engagement_key:
         return args.engagement_key
     if os.environ.get("ENGAGEMENT_KEY"):
         return os.environ["ENGAGEMENT_KEY"]
-    candidates = []
-    for scope_file in engagements_root(install_root).glob("*/scope.json"):
-        try:
-            if json.loads(scope_file.read_text(encoding="utf-8")).get("engagement_type") == "remediation":
-                candidates.append(scope_file.parent.name)
-        except (OSError, ValueError):
-            continue
+    candidates = _remediation_projects(install_root)
     if len(candidates) == 1:
-        return candidates[0]
+        return candidates[0].key
+    if args.remediation_command == "start" and sys.stdin.isatty():
+        return _select_project(candidates)
     raise SystemExit("select a remediation engagement with -k; create one first if none exists")
 
 
@@ -817,6 +994,7 @@ def _render_case_handoff(engagement: Path, case: dict, config: dict) -> Path:
     fence = "`" * max(3, 1 + max((len(value) for value in re.findall(r"`+", snapshot)), default=0))
     context = {
         "case_id": case["id"], "source_type": case.get("source_type"), "source_key": case.get("source_key"),
+        "external_provider": case.get("external_provider"), "external_key": case.get("external_key"),
         "source_resolved": case.get("source_resolved", case.get("source_type") != "reference"),
         "status": case.get("status"), "repository": config.get("repository"),
         "workspace": case.get("worktree_path"), "revision": case.get("worktree_revision"),
@@ -826,6 +1004,9 @@ def _render_case_handoff(engagement: Path, case: dict, config: dict) -> Path:
         "approval_current": case.get("approval_current"), "environment_leases": case.get("environment_leases", []),
         "review_policy": case.get("review_policy"), "baseline": case.get("baseline"),
         "evidence": case.get("evidence", []),
+        "evidence_carries": case.get("evidence_carries", []),
+        "review_evidence_ready": case.get("review_evidence_ready", False),
+        "review_evidence_missing": case.get("review_evidence_missing", []),
     }
     content = ("# Remediation case context\n\n"
                "Generated from current Vigil case state. The report is evidence; proposed remediation is a hypothesis.\n"
@@ -840,15 +1021,22 @@ def _render_case_handoff(engagement: Path, case: dict, config: dict) -> Path:
 
 def _run_profile_checks(install_root: Path, engagement: Path, key: str, case: dict, config: dict,
                         actor: str, *, names: list[str] | None = None,
-                        shared_environment: str | None = None) -> dict:
+                        shared_environment: str | None = None, stage: str = "verification") -> dict:
     config = _case_config(case, config)
     policy = config.get("remediation", {})
     commands = policy.get("check_commands", [])
+    if stage not in {"verification", "publication"}:
+        raise SystemExit("unknown profile check stage")
     if names:
         unknown = set(names) - {check["name"] for check in commands}
         if unknown:
             raise SystemExit(f"unknown profile checks: {', '.join(sorted(unknown))}")
         commands = [check for check in commands if check["name"] in names]
+    if stage == "verification":
+        publication = [check["name"] for check in commands if check.get("stage", "verification") == "publication"]
+        if names and publication:
+            raise SystemExit("publication-only checks require --stage publication: " + ", ".join(publication))
+        commands = [check for check in commands if check.get("stage", "verification") != "publication"]
     if not commands:
         raise SystemExit("no profile check commands configured; select appropriate checks in PROJECT.md")
     workspace = _require_case_worktree(case, Path(str(config["repository"])))
@@ -1041,22 +1229,118 @@ def _record_publication(install_root: Path, engagement: Path, key: str, case: di
         })
 
 
+def _finalize_case_branch(install_root: Path, engagement: Path, key: str, case: dict,
+                          config: dict, new_branch: str) -> dict:
+    directory = engagement / "remediation/cases" / str(case["id"])
+    directory.mkdir(parents=True, exist_ok=True)
+    with (directory / ".publication.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        case = _case(install_root, engagement, key, str(case["id"]))
+        config = _case_config(case, config)
+        if case.get("status") in {"closed", "pr_draft", "development", "verified"} or case.get("deployment") or any(
+            item.get("kind") in {"pr_publication", "pr_update", "deployment_request"} for item in case.get("evidence", [])
+        ):
+            raise SystemExit("published or deployed case branches cannot be finalized")
+        if any((directory / "pr").glob("publication-*.json")) or any((directory / "pr").glob("update-intent-*.json")) or any(
+            (directory / "deployments").glob("*.json")
+        ):
+            raise SystemExit("publication or deployment records exist; reconcile them before changing branch identity")
+        workspace = Path(str(case.get("worktree_path") or ""))
+        if not workspace.is_dir() or not _is_registered_worktree(Path(str(config["repository"])), workspace):
+            raise SystemExit("case worktree is not registered to the configured repository")
+        old_branch = str(case.get("worktree_branch") or "")
+        revision = str(case.get("worktree_revision") or "")
+        if not old_branch or not revision:
+            raise SystemExit("register the case branch and revision before finalization")
+        marker = directory / "branch-finalization.json"
+        intent = {"old_branch": old_branch, "new_branch": new_branch, "revision": revision}
+        if marker.exists():
+            pending = json.loads(marker.read_text(encoding="utf-8"))
+            if (pending.get("new_branch") != new_branch or pending.get("revision") != revision
+                    or old_branch not in {pending.get("old_branch"), new_branch}):
+                raise SystemExit("another branch finalization is pending; retry its original branch and revision first")
+            intent = pending
+        try:
+            _vcs().prepare_branch_finalization(workspace, intent["old_branch"], new_branch, revision)
+            _vcs().ensure_unpublished_branches(workspace, [intent["old_branch"], new_branch])
+            temporary = marker.with_suffix(".tmp")
+            temporary.write_text(json.dumps(intent, indent=2) + "\n", encoding="utf-8")
+            temporary.replace(marker)
+            _vcs().finalize_branch(workspace, intent["old_branch"], new_branch, revision)
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            raise SystemExit(f"branch finalization failed: {exc}; retry the same command after resolving the cause") from None
+        result = _api(install_root, engagement, key, "POST", _case_path(str(case["id"])) + "/finalize-branch", intent)
+        if not isinstance(result, dict):
+            raise SystemExit("remediation API returned an invalid finalized case; retry the same command")
+        marker.unlink()
+        return result
+
+
 def run_remediation(args: argparse.Namespace, install_root: Path) -> None:
-    cmd = args.remediation_command
-    if cmd is None:
+    if args.remediation_command is None:
         args.remediation_help()
         return
-    key = _start_engagement_key(args, install_root) if cmd == "start" else _engagement_key(args, install_root)
+    identifier = getattr(args, "case_id", None)
+    if identifier is not None and str(identifier).isascii() and str(identifier).isdigit():
+        if int(identifier) <= 0:
+            raise SystemExit("case ID must be positive")
+        args.case_id = str(int(identifier))
+    elif identifier is not None and args.remediation_command != "join":
+        raise SystemExit("case ID must be a positive integer")
+    if args.remediation_command in {"identity", "create-pr"}:
+        key = _engagement_key(args, install_root)
+        engagement, _ = _project(install_root, key)
+        _case_path(args.case_id)
+        directory = engagement / "remediation/cases" / str(args.case_id)
+        directory.mkdir(parents=True, exist_ok=True)
+        with (directory / ".publication.lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            _run_remediation(args, install_root)
+        return
+    _run_remediation(args, install_root)
+
+
+def _run_remediation(args: argparse.Namespace, install_root: Path) -> None:
+    cmd = args.remediation_command
+    choose_case = cmd == "join" and not getattr(args, "case_id", None)
+    if choose_case:
+        if not sys.stdin.isatty():
+            raise SystemExit("Interactive join needs a terminal; supply -k <project> join <case_id>, or use list --json to find case_id")
+        key = args.engagement_key or _select_project(_remediation_projects(install_root))
+    else:
+        key = _start_engagement_key(args, install_root) if cmd == "start" else _engagement_key(args, install_root)
     args.engagement_key = key
     eng_dir, config = _project(install_root, key)
     if cmd == "start" and not getattr(args, "client", None):
         args.client = (prompt_choice("Select remediation client", "claude", ["claude", "opencode", "zcode"])
                        if sys.stdin.isatty() and not getattr(args, "session_id", None) else "claude")
+    backend = restart_manifest.backend_state(install_root, engagement_dir=eng_dir)
+    if backend.state == "stale":
+        from .preflight import managed_backend_host
+
+        base_url = resolve_orchestrator_base_url(install_root, eng_dir)
+        remedy = ("run `" + shlex.join(["vigil", "--root", str(install_root), "orchestrator", "restart"]) + "`"
+                  if managed_backend_host(base_url) is not None
+                  else f"restart or upgrade the configured backend at {base_url} on its owning host")
+        print(
+            f"Warning: backend restart required: {backend.detail}; {remedy}",
+            file=sys.stderr,
+        )
+    if choose_case:
+        args.case_id = str(_select_case(_case_summaries(install_root, eng_dir, key))["id"])
+        if not args.fresh:
+            args.fresh = select_conversation_action()
+    elif cmd == "join" and getattr(args, "case_id", None):
+        args.case_id = _resolve_case_id(install_root, eng_dir, key, args.case_id)
     if cmd in {"start", "route", "session", "join"}:
+        selected_case = None
         if cmd in {"session", "join"}:
-            config = _case_config(_case(install_root, eng_dir, key, args.case_id), config)
+            with term.activity(f"Loading case #{args.case_id}…", enabled=cmd == "join"):
+                selected_case = _case(install_root, eng_dir, key, args.case_id)
+                config = _case_config(selected_case, config)
         def read_case(identifier):
-            case = _case(install_root, eng_dir, key, identifier)
+            case = (selected_case if selected_case is not None and str(selected_case.get("id")) == str(identifier)
+                    else _case(install_root, eng_dir, key, identifier))
             _render_case_handoff(eng_dir, case, config)
             return case
         code = run_session_command(args, install_root, eng_dir, config, case_reader=read_case)
@@ -1079,6 +1363,8 @@ def run_remediation(args: argparse.Namespace, install_root: Path) -> None:
             raise SystemExit(f"cannot read --snapshot-file {args.snapshot_file}: {exc}") from exc
         if not isinstance(snapshot, dict):
             raise SystemExit("snapshot must be a JSON object containing the report and attachments")
+        if not args.source_key and args.source not in {"manual", "report"}:
+            raise SystemExit("--source-key is required for a retrieved report provider")
         attachments = snapshot.get("attachments")
         if attachments is None:
             attachments = []
@@ -1094,7 +1380,7 @@ def run_remediation(args: argparse.Namespace, install_root: Path) -> None:
         snapshot["attachments"] = attachments
         if args.resume_case_id:
             result = _case(install_root, eng_dir, key, args.resume_case_id)
-            if result.get("source_type") != args.source or result.get("source_key") != args.source_key:
+            if result.get("source_type") != args.source or (args.source_key is not None and result.get("source_key") != args.source_key):
                 raise SystemExit("resume case source does not match supplied snapshot identity")
         else:
             result = _api(install_root, eng_dir, key, "POST", "/cases", {
@@ -1111,16 +1397,30 @@ def run_remediation(args: argparse.Namespace, install_root: Path) -> None:
                 f"Retry import with --resume-case-id {result['id']} and the same files."
             ) from exc
     elif cmd == "list":
-        result = _api(install_root, eng_dir, key, "GET", "/cases")
+        _print_case_list(install_root, key, _case_summaries(install_root, eng_dir, key), as_json=getattr(args, "json", False))
+        return
     elif cmd == "show":
         result = _case(install_root, eng_dir, key, case_id)
     elif cmd == "handoff":
         case = _case(install_root, eng_dir, key, case_id)
         result = {"path": str(_render_case_handoff(eng_dir, case, config))}
+    elif cmd == "identity":
+        case = _case(install_root, eng_dir, key, case_id)
+        result = _api(install_root, eng_dir, key, "POST", endpoint + "/identity", {
+            "expected_external_provider": case.get("external_provider"), "expected_external_key": case.get("external_key"),
+            "external_provider": args.provider, "external_key": args.external_key,
+        })
+        if not isinstance(result, dict):
+            raise SystemExit("remediation API returned an invalid case identity")
+        _render_case_handoff(eng_dir, result, config)
+    elif cmd == "finalize-branch":
+        result = _finalize_case_branch(install_root, eng_dir, key, _case(install_root, eng_dir, key, case_id), config, args.branch)
+        _render_case_handoff(eng_dir, result, config)
     elif cmd == "checks":
         case = _case(install_root, eng_dir, key, case_id)
         result = _run_profile_checks(install_root, eng_dir, key, case, config, args.actor,
-                                     names=args.name, shared_environment=args.shared_environment)
+                                     names=args.name, shared_environment=args.shared_environment,
+                                     stage=getattr(args, "stage", "verification"))
     elif cmd == "environment":
         case = _case(install_root, eng_dir, key, case_id)
         revision = str(case.get("worktree_revision") or "")
@@ -1187,6 +1487,12 @@ def run_remediation(args: argparse.Namespace, install_root: Path) -> None:
                     "token": args.environment_token, "actor": args.actor,
                     "observed_revision": case["worktree_revision"],
                 })
+    elif cmd == "test":
+        from .remediation_regression import run_regression
+
+        case = _case(install_root, eng_dir, key, case_id)
+        config = _case_config(case, config)
+        result = run_regression(args, install_root, eng_dir, key, case, config)
     elif cmd == "evidence":
         if args.kind in {"red-test", "green-test"}:
             expected_outcome = "failed_as_expected" if args.kind == "red-test" else "passed"
@@ -1321,7 +1627,7 @@ def run_remediation(args: argparse.Namespace, install_root: Path) -> None:
             raise SystemExit("--body-file must contain the reviewed PR content")
         body = body_file.read_text(encoding="utf-8")
         _validate_pr_template(body, config)
-        release = _release_plan(case)
+        _release_plan(case)
         content_path = eng_dir / "remediation" / "cases" / case_id / "pr-content.json"
         if not content_path.is_file():
             raise SystemExit("prepare reviewed PR content before creating the draft")
@@ -1331,19 +1637,11 @@ def run_remediation(args: argparse.Namespace, install_root: Path) -> None:
             raise SystemExit("prepared PR content is bound to a different approval; prepare it again")
         explanations = [_explanation(str(content.get("root_cause") or ""), "root cause"),
                         _explanation(str(content.get("fix_summary") or ""), "fix summary")]
-        if not case.get("verification_requirements"):
-            required = [digest, str(case.get("worktree_revision") or ""),
-                        str(release["production_canary_decision"]), str(release["production_canary_rationale"]),
-                        str(release["monitoring"]), *explanations, str(case.get("verification_plan") or ""),
-                        *_required_reviewed_evidence_lines(case)]
-            if release["production_canary_decision"] == "required":
-                required.append(str(release["safe_procedure"]))
-            if any(not item or item not in body for item in required):
-                raise SystemExit("final PR body is missing reviewed plan, evidence, code explanation, revision, digest, or canary details")
-        elif any(explanation not in body for explanation in explanations):
+        _required_reviewed_evidence_lines(case)
+        if any(explanation not in body for explanation in explanations):
             raise SystemExit("final PR body must include the prepared root cause and fix explanation")
         if _policy(config).get("check_commands"):
-            _run_profile_checks(install_root, eng_dir, key, case, config, args.actor)
+            _run_profile_checks(install_root, eng_dir, key, case, config, args.actor, stage="publication")
             case = _case(install_root, eng_dir, key, case_id)
             _approved_current(case, repo)
         branch = str(case["worktree_branch"])
@@ -1410,14 +1708,16 @@ def run_remediation(args: argparse.Namespace, install_root: Path) -> None:
             result = {"pull_request": url, "case_artifact": str(retained_final), "transition": "already_recorded"}
         else:
             if not url:
-                _approved_current(case, repo)
+                _api(install_root, eng_dir, key, "POST", endpoint + "/publication-intent", {
+                    "branch": branch, "revision": case["worktree_revision"], "review_digest": digest,
+                })
                 try:
                     _vcs().push(worktree, branch, str(case["worktree_revision"]))
                 except (OSError, ValueError, subprocess.SubprocessError) as error:
                     raise SystemExit(f"branch push failed: {error}") from None
                 opened = subprocess.run([
                     "gh", "pr", "create", "--draft", "--base", base_branch, "--head", branch,
-                    "--title", getattr(args, "title", None) or str(case.get("title") or f"Remediate case {case_id}"),
+                    "--title", getattr(args, "title", None) or _publication_title(case),
                     "--body-file", str(body_file), *(["--repo", github_repository] if github_repository else []),
                 ], cwd=worktree, text=True, capture_output=True)
                 url = _existing_draft_pr(worktree, branch, body, **options)
@@ -1459,6 +1759,12 @@ def run_remediation(args: argparse.Namespace, install_root: Path) -> None:
     print(json.dumps(result, indent=2, sort_keys=True))
 
 
+def _publication_title(case: dict) -> str:
+    title = str(case.get("title") or "Remediation")
+    key = str(case.get("external_key") or "")
+    return f"{key} {title}" if key and not title.startswith(key) else title
+
+
 def _pr_body(case: dict, config: dict[str, object], root_cause: str, fix_summary: str) -> str:
     """A structured draft for mapping to the repository's actual PR template."""
     root_cause = _explanation(root_cause, "root cause")
@@ -1466,37 +1772,17 @@ def _pr_body(case: dict, config: dict[str, object], root_cause: str, fix_summary
     release = _release_plan(case)
     if not str(case.get("verification_plan") or "").strip():
         raise SystemExit("verification plan is required before preparing a PR")
-    _required_reviewed_evidence_lines(case)
-    if case.get("verification_requirements"):
-        test_results = "\n".join(
-            f"- {row.get('method')}: {row.get('observed')}"
-            for row in case.get("evidence", []) if row.get("outcome") == "passed"
-            and row.get("revision") == case.get("worktree_revision")
-        )
-        return (f"## Root cause\n\n{root_cause}\n\n## Fix\n\n{fix_summary}\n\n"
-                f"## Verification\n\n{case['verification_plan']}\n\n{test_results}\n\n"
-                f"## Release notes\n\n{release['production_canary_rationale']}\n"
-                f"{release['safe_procedure']}\n{release['monitoring']}\n")
-    evidence_lines = _reviewed_evidence_lines(case)
-    evidence_section = "\n".join(evidence_lines) or "- No evidence recorded."
-    return (
-        f"# {case.get('title', 'Remediation')}\n\n"
-        f"Source: {case.get('source_type', '')} {case.get('source_key', '')}\n"
-        f"Reviewed revision: {case.get('worktree_revision', '')}\n"
-        f"Review digest: {_approved_digest(case)}\n\n"
-        f"## Root cause\n\n{root_cause}\n\n"
-        f"## Fix\n\n{fix_summary}\n\n"
-        "## Baseline, tests, and browser rehearsal\n\n"
-        f"{evidence_section}\n\n"
-        "## Human verification\n\n"
-        f"{case.get('verification_plan') or '(plan missing)'}\n\n"
-        "## Production canary\n\n"
-        f"Decision: {release['production_canary_decision']}\n\n"
-        f"Reason: {release['production_canary_rationale']}\n\n"
-        f"Safe procedure: {release['safe_procedure'] or 'Not applicable'}\n\n"
-        f"Monitoring: {release['monitoring']}\n\n"
-        f"Development workflow: {config.get('deployment_workflow') or '(configure after observing actual workflow inputs)'}\n"
+    evidence = _approved_verification_evidence(case)
+    test_results = "\n".join(
+        f"- {row.get('method')} [environment: {row.get('environment') or 'unknown'}] "
+        f"({str(row.get('outcome') or 'unknown').replace('_', ' ')}): {row.get('observed')}"
+        for row in evidence
     )
+    reference = f"Reference: {case['external_key']}\n\n" if case.get("external_key") else ""
+    return (f"{reference}## Root cause\n\n{root_cause}\n\n## Fix\n\n{fix_summary}\n\n"
+            f"## Verification\n\n{case['verification_plan']}\n\n{test_results}\n\n"
+            f"## Release notes\n\n{release['production_canary_rationale']}\n"
+            f"{release['safe_procedure']}\n{release['monitoring']}\n")
 
 
 def _explanation(value: str, label: str) -> str:

@@ -9,20 +9,24 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
+import sys
 import time
 import uuid
 from urllib.parse import unquote, urlsplit
 
+from . import term
 from .remediation_vcs import adapter
 from .paths import agent_root as application_agent_root
 
 _TICKET = re.compile(r"[A-Za-z][A-Za-z0-9_]*-\d+")
+_NATIVE_QUERY_TIMEOUT = 30
 
 
 def register_session_parsers(commands: argparse._SubParsersAction) -> None:
     start = commands.add_parser(
-        "start", help="Choose or create a remediation project and open its coding client",
+        "start", help="Choose or create a project and open its coding client",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         description=(
             "Start here: vigil remediation start\n\n"
@@ -43,17 +47,23 @@ def register_session_parsers(commands: argparse._SubParsersAction) -> None:
     start.add_argument("--client", choices=("claude", "opencode", "zcode"),
                        help="Coding client; asks on a terminal, otherwise defaults to claude")
     start.add_argument("--session-id", help="Recover an existing Claude launch without redispatch; skips client selection")
-    route = commands.add_parser("route", help="Resolve input references and choose remediation role context")
+    join = commands.add_parser(
+        "join", help="Resume or start fresh in a case; omit ID to choose",
+        description="Resume the recorded Claude conversation. Without case_id, choose a project, case, and conversation action. "
+                    "Use --fresh to start a new conversation in the same case, keeping its workspace, evidence, and approvals. "
+                    "A running conversation requires terminal confirmation before Vigil stops it. Previous history is retained.")
+    join.add_argument("case_id", nargs="?", help="Numeric case_id from remediation list; omitted: pick a project and case")
+    join.add_argument("--fresh", action="store_true",
+                      help="Start a fresh Claude conversation for this case; keep workspace, evidence, approvals, and previous history")
+    route = commands.add_parser("route", help="Resolve references and choose remediation context")
     route.add_argument("--client", choices=("claude", "opencode", "zcode"), default="claude")
     route.add_argument("references", nargs="+")
-    session = commands.add_parser("session", help="Start a full case developer session or bind this conversation")
+    session = commands.add_parser("session", help="Start a case session or bind this conversation")
     session.add_argument("case_id")
     session.add_argument("--bind", action="store_true", help="Bind the existing conversation without launching another")
     session.add_argument("--session-id", help="Native conversation UUID required with --bind")
     session.add_argument("--replace-stopped", action="store_true",
                          help="With --bind, take over a case whose recorded conversation has stopped")
-    join = commands.add_parser("join", help="Attach to the exact recorded case developer conversation")
-    join.add_argument("case_id")
 
 
 def normalize_references(references: list[str]) -> list[dict]:
@@ -126,14 +136,18 @@ def _write_json(path: Path, value: dict) -> None:
 
 def _claude_capabilities() -> None:
     try:
-        result = subprocess.run(["claude", "--version"], capture_output=True, text=True, check=True)
+        result = subprocess.run(["claude", "--version"], capture_output=True, text=True, check=True, timeout=_NATIVE_QUERY_TIMEOUT)
+    except subprocess.TimeoutExpired as exc:
+        raise SystemExit("Timed out checking Claude's version; check that Claude Code responds before retrying") from exc
     except (OSError, subprocess.CalledProcessError) as exc:
         raise SystemExit("Claude Code is required for remediation sessions") from exc
     match = re.search(r"(\d+)\.(\d+)\.(\d+)", result.stdout)
     if not match or tuple(map(int, match.groups())) < (2, 1, 257):
         raise SystemExit("Remediation command discovery requires Claude Code 2.1.257 or newer")
     try:
-        help_result = subprocess.run(["claude", "--help"], capture_output=True, text=True, check=True)
+        help_result = subprocess.run(["claude", "--help"], capture_output=True, text=True, check=True, timeout=_NATIVE_QUERY_TIMEOUT)
+    except subprocess.TimeoutExpired as exc:
+        raise SystemExit("Timed out checking Claude's capabilities; check that Claude Code responds before retrying") from exc
     except (OSError, subprocess.CalledProcessError) as exc:
         raise SystemExit("Cannot verify Claude's native background session capabilities") from exc
     if not (re.search(r"--bg(?:[\s,]|$)", help_result.stdout)
@@ -142,10 +156,12 @@ def _claude_capabilities() -> None:
         raise SystemExit("Remediation requires Claude's native background sessions and attach command; upgrade Claude Code")
 
 
-def _inventory() -> list[dict]:
+def _inventory(*, timeout: float = _NATIVE_QUERY_TIMEOUT) -> list[dict]:
     try:
-        result = subprocess.run(["claude", "agents", "--json", "--all"], capture_output=True, text=True, check=True)
+        result = subprocess.run(["claude", "agents", "--json", "--all"], capture_output=True, text=True, check=True, timeout=timeout)
         rows = json.loads(result.stdout)
+    except subprocess.TimeoutExpired as exc:
+        raise SystemExit("Timed out reading Claude's session inventory; check Claude's native host before retrying") from exc
     except (OSError, subprocess.CalledProcessError, json.JSONDecodeError) as exc:
         raise SystemExit("Cannot read Claude's native session inventory; no replacement session was launched") from exc
     if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
@@ -259,20 +275,33 @@ def _case_directory(engagement: Path, case_id: str) -> Path:
 
 
 @contextmanager
-def _session_lock(directory: Path):
+def _session_lock(directory: Path, *, timeout: float | None = None):
     directory.mkdir(parents=True, exist_ok=True)
     with (directory / ".session.lock").open("a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+        if timeout is None:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+        else:
+            deadline = time.monotonic() + timeout
+            while True:
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise SystemExit("Timed out waiting for this case's session lock; another operation is using it. Retry when it finishes.") from None
+                    time.sleep(min(0.05, remaining))
         yield
 
 
-def _workspace(install_root: Path, project: dict, case: dict, *, allow_branch_drift: bool = False) -> Path:
+def _workspace(install_root: Path, project: dict, case: dict, *, allow_branch_drift: bool = False,
+               application_root: Path | None = None) -> Path:
     supplied = case.get("worktree_path")
     if not supplied:
         raise SystemExit("Prepare and register the case workspace before starting its developer session")
     workspace = Path(supplied).resolve()
     repository = Path(project["repository"]).resolve()
-    vcs = adapter(install_root)
+    vcs = adapter(install_root, application_root=application_root) if application_root is not None else adapter(install_root)
     if workspace == repository or not vcs.registered(repository, workspace):
         raise SystemExit("Case workspace is not registered to the selected repository")
     branch = str(case.get("worktree_branch") or "")
@@ -304,6 +333,7 @@ def _launch_background(command_line: list[str], opening: str, binding: dict,
                        path: Path, repository: Path, environment: dict) -> dict:
     # Record identity before dispatch: an inventory failure must not create a
     # second worker on the next attempt.
+    binding["launch_pending"] = True
     _write_json(path, binding)
     from .client_sessions import record_client_launch
     record_client_launch(Path(environment["VIGIL_INSTALL_DIR"]),
@@ -345,6 +375,7 @@ def _record_launched_session(binding: dict, row: dict, path: Path) -> None:
     binding.setdefault("launch_id", binding["session_id"])
     binding["session_id"] = _uuid(row.get("sessionId"))
     binding["job_id"] = row["id"]
+    binding.pop("launch_pending", None)
     _write_json(path, binding)
     # Case binding looks up the launch settings by the actual conversation UUID.
     sessions = path.parent if path.parent.name == "sessions" else path.parent.parent.parent / "sessions"
@@ -376,8 +407,128 @@ def _read_binding(path: Path, case_id: str, key: str, workspace: Path, repositor
     return binding
 
 
+
+def select_conversation_action() -> bool:
+    """Return whether the interactive case join should start a fresh conversation."""
+    choices = ["Resume existing conversation", "Start a fresh conversation"]
+    if term.is_terminal(sys.stdin) and shutil.which("fzf"):
+        details = {
+            "1": "Open the Claude conversation currently recorded for this case.",
+            "2": "Start a new Claude conversation with the current case handoff. "
+                 "Keep the case workspace, evidence, and approvals. Previous conversation history is retained. "
+                 "Stopping a running conversation requires confirmation.",
+        }
+        return term.fuzzy_pick([f"{index}\t{label}" for index, label in enumerate(choices, 1)], details,
+                               prompt="Conversation > ", action="choose",
+                               cancelled="Conversation selection cancelled", invalid="Invalid conversation selection") == 1
+    print("Choose a conversation action", file=sys.stderr)
+    for index, label in enumerate(choices, 1):
+        print(f"  {index}. {label}", file=sys.stderr)
+    print("Conversation number> ", end="", file=sys.stderr, flush=True)
+    try:
+        choice = input().strip()
+    except (EOFError, KeyboardInterrupt) as exc:
+        raise SystemExit("Conversation selection cancelled") from exc
+    if choice not in {"1", "2"}:
+        raise SystemExit("Invalid conversation selection")
+    return choice == "2"
+
+
+def _launch_case(install_root: Path, engagement: Path, project: dict, case: dict, case_id: str,
+                 key: str, workspace: Path, repository: Path, path: Path, environment: dict,
+                 notice: str, *, replaced: dict | None = None) -> dict:
+    handoff = path.parent / "handoff.md"
+    if not handoff.is_file():
+        raise SystemExit("Render the authoritative case handoff before launching its developer")
+    session_id = str(uuid.uuid4())
+    binding = {"case_id": str(case_id), "engagement_key": key, "workspace": str(workspace),
+               "session_cwd": str(repository), "session_id": session_id, "job_id": None,
+               "settings": _settings(project, engagement, key, install_root), "workspace_branch": case["worktree_branch"]}
+    if replaced:
+        binding["replaced_session_id"] = replaced["session_id"]
+    command_line = _launch_arguments(install_root, engagement, project, session_id, key)
+    profile_path = project.get("_profile_path") or engagement / "PROJECT.md"
+    opening = (f"Case: {case_id}. Code workspace: {workspace}. Handoff: {handoff}. "
+               f"Profile: {profile_path}. Developer instructions: "
+               f"{application_agent_root(install_root) / 'remediation-developer.md'}. Essentials: "
+               f"{application_agent_root(install_root) / 'operator-core-remediation.md'}. {notice}\n"
+               "Read the current authoritative handoff, profile, and repository instructions. "
+               "Continue from the case's persisted status, evidence, approvals, and outstanding work. "
+               "Honor existing approved work and decisions. For a new investigation or a changed fix plan, "
+               "validate the report and present your proposed fix before editing. "
+               "Keep all case code edits in its registered workspace; this repository directory supplies "
+               "native MCPs, skills, and settings.")
+    return _launch_background(command_line, opening, binding, path, repository, environment)
+
+
+def _start_fresh_case(install_root: Path, engagement: Path, project: dict, case: dict, case_id: str,
+                      key: str, workspace: Path, repository: Path, binding: dict | None, rows: list[dict],
+                      path: Path, environment: dict, notice: str, progress: term.Activity) -> dict:
+    if not (path.parent / "handoff.md").is_file():
+        raise SystemExit("Render the authoritative case handoff before launching its developer")
+    _command_overlay(install_root, engagement)
+    if binding:
+        previous = _launched_session(binding, rows)
+        if binding.get("launch_pending") or (not binding.get("job_id") and previous is None):
+            raise SystemExit("This case has a pending conversation launch; use join without --fresh to recover it. "
+                             "No additional conversation was launched.")
+        if previous is not None and previous.get("state") != "stopped":
+            if not previous.get("id"):
+                raise SystemExit("The recorded conversation is interactive; stop it in its own terminal before using join --fresh")
+            if not sys.stdin.isatty():
+                raise SystemExit("Starting fresh must stop the running conversation; rerun join --fresh in a terminal to confirm")
+            progress.stop()
+            print(f"Start a fresh conversation for case #{case_id}? This stops its running Claude conversation. "
+                  "The workspace, evidence, approvals, and previous conversation history are kept.", file=sys.stderr)
+            print("Stop the existing conversation and start fresh? [y/N] ", end="", file=sys.stderr, flush=True)
+            try:
+                answer = input().strip().lower()
+            except (EOFError, KeyboardInterrupt) as exc:
+                raise SystemExit("Fresh conversation cancelled") from exc
+            if answer not in {"y", "yes"}:
+                raise SystemExit("Fresh conversation cancelled")
+            # Re-read native identity after consent; never stop a reused job ID.
+            previous = _launched_session(binding, _inventory())
+            if previous is not None and previous.get("state") != "stopped":
+                if not previous.get("id"):
+                    raise SystemExit("The recorded conversation is now interactive; stop it in its own terminal before using join --fresh")
+                try:
+                    subprocess.run(["claude", "stop", previous["id"]], cwd=repository, env=environment,
+                                   capture_output=True, text=True, check=True, timeout=_NATIVE_QUERY_TIMEOUT)
+                except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+                    raise SystemExit("Could not stop the recorded Claude conversation; no replacement was launched") from exc
+                deadline = time.monotonic() + _NATIVE_QUERY_TIMEOUT
+                for attempt in range(20):
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise SystemExit("Timed out verifying that Claude stopped; no replacement was launched")
+                    previous = _launched_session(binding, _inventory(timeout=remaining))
+                    if previous is None or previous.get("state") == "stopped":
+                        break
+                    if attempt < 19:
+                        time.sleep(0.1)
+                else:
+                    raise SystemExit("The recorded conversation is still running; no replacement was launched. "
+                                     "Wait for Claude to stop it, then retry.")
+        archive = path.parent / "session-history" / f"{binding['session_id']}.json"
+        archived = _binding_document(archive)
+        if archived is not None and archived != binding:
+            raise SystemExit("Previous conversation archive differs from its binding; refusing to overwrite its history")
+        _write_json(archive, binding)
+    print(f"Starting a fresh Claude conversation for case #{case_id}. "
+          "The workspace, evidence, and approvals stay with this case.", flush=True)
+    print(notice, flush=True)
+    return _launch_case(install_root, engagement, project, case, case_id, key, workspace, repository,
+                        path, environment, notice, replaced=binding)
+
 def run_session_command(args: argparse.Namespace, install_root: Path, engagement: Path,
                         project: dict, *, case_reader=None) -> int:
+    with term.activity("Checking Claude capabilities…", enabled=args.remediation_command == "join") as progress:
+        return _run_session_command(args, install_root, engagement, project, case_reader=case_reader, progress=progress)
+
+
+def _run_session_command(args: argparse.Namespace, install_root: Path, engagement: Path,
+                         project: dict, *, case_reader, progress: term.Activity) -> int:
     from .client_sessions import record_client_launch
 
     command = args.remediation_command
@@ -398,6 +549,7 @@ def run_session_command(args: argparse.Namespace, install_root: Path, engagement
     if not repository.is_dir():
         raise SystemExit("The selected profile requires an existing repository directory")
     key = args.engagement_key
+    progress.update("Preparing session environment…")
     environment = _environment(engagement, key, install_root)
     notice = _notice(project)
     if command == "session":
@@ -436,18 +588,28 @@ def run_session_command(args: argparse.Namespace, install_root: Path, engagement
         return subprocess.run(["claude", "attach", entry_row["id"]], cwd=repository, env=environment).returncode
     if case_reader is None:
         raise SystemExit("Case session commands require the authoritative case reader")
+    progress.update("Refreshing case context…")
     case = case_reader(args.case_id)
     if str(case.get("id")) != str(args.case_id):
         raise SystemExit("Authoritative case identity differs from the requested case")
-    workspace = _workspace(install_root, project, case, allow_branch_drift=command == "join")
+    progress.update("Checking case workspace…")
+    fresh = command == "join" and getattr(args, "fresh", False)
+    workspace = _workspace(install_root, project, case, allow_branch_drift=command == "join" and not fresh,
+                           application_root=Path(environment["VIGIL_APPLICATION_DIR"]) if command == "join" else None)
     directory = _case_directory(engagement, args.case_id)
     path = directory / "session.json"
-    with _session_lock(directory):
+    progress.update("Waiting for case session lock…")
+    with _session_lock(directory, timeout=30 if command == "join" else None):
         binding = _read_binding(path, args.case_id, key, workspace, repository)
+        progress.update("Finding the recorded conversation…")
         rows = _inventory()
-        if command == "join":
+        if fresh:
+            fresh_row = _start_fresh_case(install_root, engagement, project, case, args.case_id, key,
+                                    workspace, repository, binding, rows, path, environment, notice, progress)
+            command_line = ["claude", "attach", fresh_row["id"]]
+        elif command == "join":
             if binding is None:
-                raise SystemExit("This case has no recorded developer conversation")
+                raise SystemExit(f"This case has no recorded developer conversation; use join {args.case_id} --fresh to start one")
             recorded_policy = "disabled" if binding.get("settings", {}).get("disableAllHooks") else "inherit"
             print(_notice({"remediation": {"hook_policy": recorded_policy}}), flush=True)
             row = _launched_session(binding, rows)
@@ -502,24 +664,12 @@ def run_session_command(args: argparse.Namespace, install_root: Path, engagement
                     print(json.dumps(binding, indent=2))
                     return 0
                 raise SystemExit("Case already has a recorded conversation; recover it instead of launching a duplicate")
-            handoff = directory / "handoff.md"
-            if not handoff.is_file():
-                raise SystemExit("Render the authoritative case handoff before launching its developer")
-            session_id = str(uuid.uuid4())
-            binding = {"case_id": str(args.case_id), "engagement_key": key, "workspace": str(workspace),
-                       "session_cwd": str(repository), "session_id": session_id, "job_id": None,
-                       "settings": _settings(project, engagement, key, install_root), "workspace_branch": case["worktree_branch"]}
-            command_line = _launch_arguments(install_root, engagement, project, session_id, key)
-            profile_path = project.get("_profile_path") or engagement / "PROJECT.md"
-            opening = (f"Case: {args.case_id}. Code workspace: {workspace}. Handoff: {handoff}. "
-                       f"Profile: {profile_path}. Developer instructions: "
-                       f"{application_agent_root(install_root) / 'remediation-developer.md'}. Essentials: "
-                       f"{application_agent_root(install_root) / 'operator-core-remediation.md'}. {notice}\n"
-                       "Read the handoff, profile, and repository instructions. Validate the report and "
-                       "present your proposed fix before editing. Keep all case code edits in its registered "
-                       "workspace; this repository directory supplies native MCPs, skills, and settings.")
-            _launch_background(command_line, opening, binding, path, repository, environment)
-            print(json.dumps(binding, indent=2))
+            _launch_case(install_root, engagement, project, case, args.case_id, key,
+                         workspace, repository, path, environment, notice)
+            print(path.read_text(encoding="utf-8"), end="")
             return 0
     record_client_launch(install_root, engagement, "claude", "remediation")
+    progress.stop()
+    if command == "join" and term.is_terminal(sys.stderr):
+        print("Opening Claude…", file=sys.stderr, flush=True)
     return subprocess.run(command_line, cwd=repository, env=environment).returncode

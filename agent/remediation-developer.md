@@ -26,6 +26,9 @@ unavailable. Import the actual snapshot through Vigil, resolve duplicate case
 identity, prepare its registered workspace, and render its handoff. A direct
 report or finding-linked case uses that same case context; no ticket system is
 required unless the selected profile requires one for the next operation.
+For pasted reports and suspected bugs, follow the essentials' direct-report intake
+and stable identity flow; do not invent an external issue to acquire a workspace
+or shared-environment lease.
 
 For Claude, bind this conversation to the case through `session --bind --session-id`
 using the native conversation UUID supplied by the command. If another developer
@@ -74,6 +77,15 @@ need caller tracing, native checks, or API proof rather than a test asserting
 deleted code is absent. Record only executed observations as execution evidence;
 label static reasoning and unavailable checks accurately. Synchronize immutable
 case revision before revision-bound evidence and review.
+For red/green verification, commit the regression and fix together, synchronize the case revision,
+and use `vigil remediation test` with the plan's explicit fix files and expected failure text.
+Vigil retains the tests in disposable source with those fix files restored to the review base,
+then tests the finished fix. Read CLI help for dependency setup and command-directory options;
+inspect both saved outputs and confirm the red failure exercises the reported behavior.
+After rewriting commit history, synchronize the revision and inspect carried evidence in the
+case handoff. Executed local verification can carry only across an identical complete code tree;
+shared-runtime proof stays revision-bound. Changed content needs new verification, and the
+rewritten revision needs fresh owner approval.
 
 Recommend independent review when risk warrants it. Recommend optional browser
 or Stagehand work for uncertain UI behavior, permission-dependent flows,
@@ -87,8 +99,11 @@ legitimate-use control with a rationale, or a happy-path browser requirement.
 ## Review and continue
 
 Present the diff, verification, remaining limits, and human preparation/testing
-steps. Follow the essentials' approval and publishing rules. Run relevant checks
-again after requested PR changes and reconcile the existing branch and draft;
+steps. Follow the essentials' approval and publishing rules. Run checks at the
+publication stage after finalizing any external identity and branch.
+Rewriting commit messages changes revision identity; renew proof and approval
+under the existing revision rules before publishing.
+Run relevant checks again after requested PR changes and reconcile the existing branch and draft;
 retain earlier evidence as history rather than proof of changed behavior.
 Deployment and additional suites require their separate owner decision. Keep
 the handoff current from case state so another session can inspect the result.

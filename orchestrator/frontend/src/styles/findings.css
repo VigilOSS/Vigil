@@ -22,8 +22,18 @@
   border-top: 1px dashed var(--border);
 }
 .findings-workspace .findings-sort { display: inline-flex; align-items: center; gap: 8px; }
-.findings-workspace .findings-recent-bar { margin: 0 0 12px; }
+.findings-workspace .findings-recent-bar { margin: 0; padding: 0; border: 0; background: transparent; min-height: 0; gap: 8px 16px; }
 .findings-workspace .findings-recent-bar .timestamp { color: inherit; }
+.findings-workspace .findings-toolbar-panel { position: relative; border: 0; box-shadow: none; background: transparent; }
+.findings-workspace .findings-toolbar-panel .toolbar { padding: 8px 0; gap: 12px; }
+.findings-workspace .findings-toolbar-panel .search-wrap { min-width: 180px; }
+.findings-workspace .findings-toolbar-panel .toolbar-right { flex-wrap: wrap; gap: 8px; }
+.findings-workspace .findings-filter-popover { position: absolute; z-index: 20; top: 100%; right: 0; width: min(760px, 100%); border: 1px solid var(--border); border-radius: 8px; background: var(--panel-strong); box-shadow: 0 12px 32px #0003; max-height: 60vh; overflow: auto; }
+.findings-workspace .findings-filter-popover[hidden] { display: none; }
+.findings-workspace .findings-filter-popover .filter-row { grid-template-columns: repeat(3, minmax(0, 1fr)); padding: 14px; }
+.findings-workspace .findings-filter-popover .findings-order-row { border-top: 0; }
+.findings-workspace .findings-active-filters { display: flex; flex-wrap: wrap; gap: 6px; padding: 4px 0 10px; align-items: center; }
+.findings-workspace .findings-active-filters .qa-btn { max-width: 100%; overflow-wrap: anywhere; white-space: normal; }
 .findings-workspace .filter-row > .ui-clear-filters { min-width: 9rem; justify-self: end; text-align: right; }
 .findings-workspace .toolbar-right .ui-segmented button { gap: 6px; }
 
@@ -128,8 +138,11 @@
 }
 @media (max-width: 1000px) {
   .findings-workspace .filter-row { grid-template-columns: minmax(0, 1fr); }
+  .findings-workspace .findings-toolbar-panel .toolbar { flex-wrap: wrap; }
+  .findings-workspace .findings-toolbar-panel .search-wrap { flex-basis: 100%; }
 }
 @media (max-width: 620px) {
+  .findings-workspace .findings-filter-popover .filter-row { grid-template-columns: minmax(0, 1fr); }
   .findings-workspace .mini-finding-row { grid-template-columns: auto minmax(0, 1fr); align-items: start; }
   .findings-workspace .mini-finding-row > .mini-badges,
   .findings-workspace .mini-finding-row > .finding-row-time { grid-column: 2; justify-self: start; justify-content: flex-start; justify-items: start; }

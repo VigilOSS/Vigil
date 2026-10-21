@@ -370,7 +370,7 @@ def _running_cli_package() -> Path | None:
         return None
 
 
-def _backend_state(install_root: Path) -> ConsumerState:
+def backend_state(install_root: Path, *, engagement_dir: Path | None = None) -> ConsumerState:
     """Ask the running backend; it is the only thing that knows what it imported.
 
     The comparison is deliberately server-side. The backend snapshots a digest of
@@ -378,7 +378,23 @@ def _backend_state(install_root: Path) -> ConsumerState:
     re-derives it per request, so no second implementation of the input set has
     to agree with it from out here.
     """
-    return _backend_state_from_probe(install_root, _readyz_backend_runtime(install_root))
+    if engagement_dir is None:
+        return _backend_state_from_probe(install_root, _readyz_backend_runtime(install_root))
+    from .paths import resolve_orchestrator_base_url
+    from .preflight import managed_backend_host
+    from .status import _orchestrator_readyz_snapshot
+
+    base_url = resolve_orchestrator_base_url(install_root, engagement_dir)
+    _, readiness = _orchestrator_readyz_snapshot(install_root, engagement_dir=engagement_dir)
+    probe = _backend_probe_from_readiness(readiness)
+    if not probe.reachable:
+        return _backend_unknown(f"cannot check backend freshness at {base_url}")
+    if managed_backend_host(base_url) is None:
+        if probe.runtime and probe.runtime.get("restart_required") is True:
+            return ConsumerState("backend", _BACKEND_LABEL, "stale", "",
+                                 "configured remote backend reports changed application inputs")
+        return _backend_unknown("remote application release is managed on its owning host")
+    return _backend_state_from_probe(install_root, probe)
 
 
 def backend_state_from_readiness(install_root: Path, readiness: dict[str, object]) -> ConsumerState:
@@ -884,7 +900,7 @@ def consumer_states(
     cli = cli_state(source_root=resolved_source)
     states = [
         cli,
-        _backend_state(install_root),
+        backend_state(install_root),
         _frontend_state(application_root),
         _report_state(application_root),
         _runtime_image_state(application_root, runner=runner, docker_ok=docker_ok),

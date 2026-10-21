@@ -10,7 +10,7 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![CI](https://github.com/VigilOSS/Vigil/actions/workflows/ci.yml/badge.svg)](https://github.com/VigilOSS/Vigil/actions/workflows/ci.yml)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
-[![Version](https://img.shields.io/badge/version-2.0.0-green.svg)](https://github.com/VigilOSS/Vigil/releases/tag/v2.0.0)
+[![Version](https://img.shields.io/badge/version-2.1.0-green.svg)](https://github.com/VigilOSS/Vigil/releases/tag/v2.1.0)
 
 </div>
 
@@ -93,7 +93,7 @@ Install [uv](https://docs.astral.sh/uv/getting-started/installation/), then inst
 It includes the CLI, backend, prompts, documentation, and prebuilt UI; Git and Node are not needed.
 
 ```bash
-uv tool install --from https://github.com/VigilOSS/Vigil/releases/download/v2.0.0/vigil-2.0.0-py3-none-any.whl vigil
+uv tool install --from https://github.com/VigilOSS/Vigil/releases/download/v2.1.0/vigil-2.1.0-py3-none-any.whl vigil
 ```
 
 Install and sign in to an agent client before starting an operator. Engagement clients:

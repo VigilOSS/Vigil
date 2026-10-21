@@ -5,6 +5,39 @@ versioning follows [Semantic Versioning][semver].
 
 Durable design decisions live in [`docs/adr/`](docs/adr/).
 
+## [2.1.0] - 2026-10-21
+
+### Added
+
+- Remediation accepts direct reports with stable numeric case identities and optional external
+  references. Reviewed branch finalization and publication intent keep identity changes from
+  racing an approved publication.
+- Remediation review exposes matched verification evidence, paged evidence and history,
+  environment leases, artifact previews and publication receipts. Paired regression runs prove
+  the selected fix against disposable baseline and finished source trees.
+- Native client projects keep stable per-engagement entrypoints and immutable task contexts.
+  Client checks inspect project bindings, release assets and native hook receipts.
+- Engagement Files and a unified Activity feed expose artifacts and recorded work alongside
+  paged Runs, Coverage, Code and command inventories.
+
+### Changed
+
+- Operator tabs share status labels, filtering, record navigation and deep links. Findings places
+  severity and recent changes in a compact header with filters available from one toolbar.
+- Submissions groups the queue, document, review, versions and export into one workspace.
+- Remediation start and join provide project/case selection and progress feedback. Fresh
+  conversations preserve case evidence and history, with consent before stopping active workers.
+- Executed local verification can carry across identical code trees while approval and runtime
+  evidence remain bound to their reviewed revisions.
+
+### Fixed
+
+- An explicit submission selection wins over the queue's initial automatic selection.
+- Remediation case navigation isolates pending requests and drafts; external references remain
+  searchable alongside the current case state.
+- Native session recovery resolves project identity, and ZCode checks account for supported
+  marketplace registration modes.
+
 ## [2.0.0] - 2026-10-19
 
 ### Added

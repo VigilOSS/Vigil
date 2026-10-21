@@ -45,7 +45,7 @@ def test_worktree_uses_profile_base_and_repository_workspace(monkeypatch, tmp_pa
     monkeypatch.setattr(remediation, '_api', lambda *_args: {})
     args = parser().parse_args(['remediation', '-k', 'acme', 'worktree', '1', '--branch', 'fix/SEC-1'])
     remediation.run_remediation(args, tmp_path)
-    assert calls[0] == (repository, repository / 'worktrees/fix/SEC-1', 'fix/SEC-1', 'develop')
+    assert calls[0] == (repository, repository / 'worktrees/case-1', 'fix/SEC-1', 'develop')
 
 
 def test_sync_accepts_registered_repository_local_workspace(monkeypatch, tmp_path):
@@ -100,10 +100,11 @@ def test_generic_green_evidence_accepts_native_runner(monkeypatch, tmp_path):
 def test_short_pr_body_does_not_require_case_ledger(monkeypatch):
     case = {'title': 'Restrict report ownership', 'source_key': 'SEC-1',
             'verification_plan': 'Open your own report. Another user cannot open it.',
-            'verification_requirements': [{'kind': 'green-test', 'methods': ['pytest']}],
+            'verification_requirements': {'requirements': [{'kind': 'green-test', 'methods': ['pytest']}]},
             'release_plan': {'production_canary_decision': 'not_required',
                              'production_canary_rationale': 'No production fixture is required.',
                              'safe_procedure': '', 'monitoring': 'Watch authorization errors.'},
+            'verification_matches': [{'requirement_index': 0, 'evidence_ids': [1]}],
             'approvals': [{'review_digest': 'd' * 64, 'evidence_cutoff_id': 1}],
             'approval_current': True, 'worktree_revision': 'a' * 40,
             'evidence': [{'id': 1, 'kind': 'green-test', 'method': 'pytest', 'outcome': 'passed',

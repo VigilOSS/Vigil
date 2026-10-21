@@ -294,4 +294,3 @@ export function EntryView({ entry, ui }: { entry: FeedEntry; ui: EntryUi }): Rea
   if (entry.type === "burst") return <BurstView entry={entry} ui={ui} />;
   return <RowView entry={entry} ui={ui} />;
 }
-

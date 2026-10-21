@@ -105,8 +105,8 @@ def test_backend_jj_revision_review_diff_and_red_ancestry(repository, tmp_path):
     assert service._actual_revision(str(workspace)) == green
     assert service._registered_worktree(repository, workspace)
     assert service._worktree_clean(str(workspace))
-    assert service._commit_ancestor(str(workspace), red, green)
-    assert not service._commit_ancestor(str(workspace), green, red)
+    assert service._vcs.ancestor(workspace, red, green)
+    assert not service._vcs.ancestor(workspace, green, red)
     assert service._evidence_revision(str(workspace), green) == green
     base, head, patch, truncated, total = service._review_patch(str(workspace))
     assert head == green
@@ -323,7 +323,9 @@ def test_jj_github_pr_creation_and_reconciliation_use_same_explicit_origin(
         "status": "approved",
         "approval_current": True,
         "approvals": [{"review_digest": digest, "evidence_cutoff_id": 3}],
-        "evidence": evidence,
+        "verification_matches": [{"requirement_index": index, "evidence_ids": [row["id"]]}
+                                 for index, row in enumerate(evidence)],
+        "evidence": evidence, "verification_requirements": {"requirements": [{"kind": row["kind"]} for row in evidence]},
         "worktree_path": str(workspace),
         "worktree_branch": "codex/gh-case",
         "worktree_revision": sha,

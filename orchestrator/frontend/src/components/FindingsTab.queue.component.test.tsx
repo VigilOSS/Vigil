@@ -87,6 +87,29 @@ afterEach(() => {
 });
 
 describe("opening a finding reads its detail once", () => {
+  it("lets operators filter from the disclosure and remove a selected facet from the queue", async () => {
+    render(tab({ findings: [record("VA-001", "Medium claim"), record("VA-002", "High claim", { severity: "high" })] as never[] }));
+    const trigger = screen.getByRole("button", { name: "Filters (0)" });
+    fireEvent.click(trigger);
+    const filters = screen.getByRole("region", { name: "Finding filters" });
+    expect(filters.contains(document.activeElement)).toBe(true);
+    fireEvent.click(within(filters).getByRole("button", { name: /High/ }));
+    expect(within(queue()).getByText("High claim")).toBeTruthy();
+    fireEvent.keyDown(filters, { key: "Escape" });
+    expect(document.activeElement).toBe(trigger);
+    expect(trigger.getAttribute("aria-expanded")).toBe("false");
+    fireEvent.click(trigger);
+    fireEvent.pointerDown(screen.getByRole("banner"));
+    expect(trigger.getAttribute("aria-expanded")).toBe("false");
+    expect(screen.getByRole("button", { name: "Filters (1)" })).toBeTruthy();
+    fireEvent.click(trigger);
+    act(() => within(queue()).getByRole("button", { name: /High claim/ }).focus());
+    expect(trigger.getAttribute("aria-expanded")).toBe("false");
+    fireEvent.click(screen.getByRole("button", { name: "Remove severity High" }));
+    expect(within(queue()).getByText("Medium claim")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Filters (0)" })).toBeTruthy();
+  });
+
   it("looks a deep-linked finding up once while the page around it keeps re-rendering", async () => {
     const listed = record("VA-012", "Export claim");
     vi.mocked(getAssessmentFinding).mockResolvedValue(detail(listed) as never);
@@ -139,6 +162,7 @@ describe("status and severity read as words", () => {
 
   it("labels every workflow and verification chip in sentence case", () => {
     render(tab({ findings: rows as never[] }));
+    fireEvent.click(screen.getByRole("button", { name: /^Filters \(/ }));
     expect(within(screen.getByRole("group", { name: "Workflow" })).getByRole("button", { name: /^Draft/ })).toBeTruthy();
     const verification = screen.getByRole("group", { name: "Verification" });
     expect(within(verification).getByRole("button", { name: /^Pending runtime proof/ })).toBeTruthy();
@@ -270,6 +294,7 @@ describe("links that carry filters", () => {
       record("VA-003", "Verified claim"),
     ];
     render(tab({ findings: rows as never[] }));
+    fireEvent.click(screen.getByRole("button", { name: /^Filters \(/ }));
     const verification = screen.getByRole("group", { name: "Verification" });
     expect(within(verification).getByRole("button", { name: /^Unreviewed/ }).getAttribute("aria-pressed")).toBe("true");
     expect(within(verification).getByRole("button", { name: /^Blocked/ }).getAttribute("aria-pressed")).toBe("true");
@@ -306,6 +331,7 @@ describe("links followed while the queue is open", () => {
       window.dispatchEvent(new HashChangeEvent("hashchange"));
     });
     expect(screen.queryByRole("button", { name: /Verified claim/ })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /^Filters \(/ }));
     expect(within(screen.getByRole("group", { name: "Verification" })).getByRole("button", { name: /^Unreviewed/ }).getAttribute("aria-pressed")).toBe("true");
     expect(window.location.hash).toBe("#/engagements/acme?tab=findings");
   });

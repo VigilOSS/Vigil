@@ -20,6 +20,15 @@ remediation. A ticket reference stays unresolved until the profile-selected
 reader retrieves its canonical identity and actual report. Reuse an existing
 case only after identity resolution; a similar title alone is insufficient.
 
+Direct reports and suspected bugs need no ticket: import `manual` or `report` input
+without a source key and investigate in its stable case workspace. Case creation
+does not confirm the report. Attach a primary external reference with `identity`
+when supplied; preserve the original snapshot and finding links. Before publishing
+approval, use `finalize-branch` if repository policy requires a different branch
+name, then run `checks --stage publication`. The CLI owns these contracts.
+Internal case IDs keep evidence and sessions stable; external key formats belong
+to the selected profile. Do not add internal IDs or workspace paths as PR boilerplate.
+
 Each case owns registered code workspace and evidence history. The repository
 session directory supplies native MCPs, skills, and settings; perform case
 edits and checks against the registered workspace, using explicit paths and
@@ -43,6 +52,9 @@ The first recorded plan needs both a readable brief and nonempty structured
 evidence requirements through `plan --requirements-file`, with the reason for
 the selected methods. Consult CLI help and the remediation documentation for
 the executable contract. A conversational plan alone does not configure gates.
+For selected red/green proof, name the fix files in the plan and use `vigil remediation test`.
+It retains committed regressions in disposable source with those fixes restored to the review
+base, then tests the finished fix. Review the expected failure, restored files, and both outputs.
 
 One explicit initial publishing approval authorizes the reviewed patch's push
 and draft PR. Requested updates to an existing PR authorize their corresponding

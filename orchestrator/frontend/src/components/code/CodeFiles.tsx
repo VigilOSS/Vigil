@@ -202,4 +202,3 @@ function rank(classification: string): number {
   const index = RISK_ORDER.indexOf(classification);
   return index < 0 ? RISK_ORDER.length : index;
 }
-

@@ -564,6 +564,7 @@ describe("finding investigation workspace", () => {
       if (document.querySelector('.ui-chip[aria-pressed="true"]')) committedPages.push(document.querySelector(".pager")?.textContent ?? "");
     }}><FindingsTab engagementKey="demo" findings={records as never[]} fallbackFindings={[]} chains={[]} chainLinks={[]} assessmentRefreshVersion={0} /></Profiler></ToastProvider>);
     fireEvent.click(within(screen.getAllByRole("navigation", { name: /Result pages/ })[0]).getByRole("button", { name: "Next" }));
+    fireEvent.click(screen.getByRole("button", { name: /^Filters \(/ }));
     fireEvent.click(screen.getByRole("button", { name: /^Active/ }));
     expect(committedPages.length).toBeGreaterThan(0);
     expect(committedPages.every((page) => page.includes("Page 1 of 2"))).toBe(true);
@@ -571,6 +572,7 @@ describe("finding investigation workspace", () => {
 
   it("keeps its reset control mounted and exposes the selected filter to assistive technology", async () => {
     render(<ToastProvider><FindingsTab engagementKey="demo" findings={[finding] as never[]} fallbackFindings={[]} chains={[]} chainLinks={[]} assessmentRefreshVersion={0} /></ToastProvider>);
+    fireEvent.click(screen.getByRole("button", { name: /^Filters \(/ }));
     const clear = screen.getByRole("button", { name: /^Clear filters/ }) as HTMLButtonElement;
     expect(clear.disabled).toBe(true);
     const high = within(screen.getByRole("group", { name: "Severity" })).getByRole("button", { name: /^High/ });
@@ -587,6 +589,7 @@ describe("finding investigation workspace", () => {
     const second = { ...finding, id: 13, slug: "VA-013", title: "Z second claim", severity: "low", workflow_status: "blocked" };
     const props = { engagementKey: "demo", findings: [first, second] as never[], fallbackFindings: [], chains: [], chainLinks: [], assessmentRefreshVersion: 0 };
     const view = render(<ToastProvider><FindingsTab {...props} /></ToastProvider>);
+    fireEvent.click(screen.getByRole("button", { name: /^Filters \(/ }));
     fireEvent.click(within(screen.getByRole("group", { name: group })).getByRole("button", { name }));
     view.rerender(<ToastProvider><FindingsTab {...props} findings={[first] as never[]} assessmentRefreshVersion={1} /></ToastProvider>);
     const active = within(screen.getByRole("group", { name: group })).getByRole("button", { name });
@@ -613,6 +616,7 @@ describe("finding investigation workspace", () => {
     vi.mocked(listAssessmentFindingGroups).mockResolvedValue([{ root: finding, siblings: [sibling], sibling_count: 1, residual_path_count: 0 }] as never);
     render(<ToastProvider><FindingsTab engagementKey="demo" findings={[finding, sibling] as never[]} fallbackFindings={[]} chains={[]} chainLinks={[]} assessmentRefreshVersion={0} /></ToastProvider>);
     await waitFor(() => expect(screen.queryByText("Loading groups")).toBeNull());
+    fireEvent.click(screen.getByRole("button", { name: /^Filters \(/ }));
     fireEvent.click(within(screen.getByRole("group", { name: "Severity" })).getByRole("button", { name: /^Low/ }));
     const queue = screen.getByRole("region", { name: "Finding queue" });
     expect(within(queue).getByRole("button", { name: "Shared claim" })).toBeTruthy();

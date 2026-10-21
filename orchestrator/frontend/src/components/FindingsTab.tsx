@@ -805,6 +805,18 @@ export function FindingsTab({
   }, [routeFilters]);
   const [query, setQuery] = useState(queueContext.query);
   const [sevFilters, setSevFilters] = useState<Set<string>>(() => new Set(queueContext.severity));
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const filtersTriggerRef = useRef<HTMLButtonElement>(null);
+  const filtersPanelRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!filtersOpen) return;
+    filtersPanelRef.current?.querySelector<HTMLButtonElement>("button:not(:disabled)")?.focus();
+    const dismiss = (event: PointerEvent) => {
+      if (event.target instanceof Node && !filtersPanelRef.current?.contains(event.target) && !filtersTriggerRef.current?.contains(event.target)) setFiltersOpen(false);
+    };
+    document.addEventListener("pointerdown", dismiss);
+    return () => document.removeEventListener("pointerdown", dismiss);
+  }, [filtersOpen]);
   const [workflowFilters, setWorkflowFilters] = useState<Set<string>>(() => new Set(queueContext.workflow));
   const [verifFilters, setVerifFilters] = useState<Set<string>>(() => new Set(queueContext.verification));
   const [recencyFilter, setRecencyFilter] = useState<RecencyFilter | null>(queueContext.recency);
@@ -1616,7 +1628,7 @@ export function FindingsTab({
     <div className="findings-redesign findings-workspace">
       <PageHeader
         title="Findings"
-        purpose="Every security claim recorded for this engagement. Review what is new or changed, then open a finding to check its evidence."
+        purpose="Review security claims and their evidence."
         hidden={investigating}
         stats={ledgerPending || ledgerEmpty ? [] : [
           { value: currentCount, label: "current", title: "Findings that are not merged or false positive; the rail and Overview count these" },
@@ -1624,18 +1636,9 @@ export function FindingsTab({
         ]}
         status={ledgerLoading && derivedList.length > 0 ? "Updating…" : null}
         actions={ledgerPending || ledgerEmpty ? null : <SevSpark counts={severityCounts} />}
-      />
-
-      {routeLookupLoading && !routedSlugListed && <p className="meta-text" role="status">Loading finding {initialFindingSlug}…</p>}
-      {routeLookupError && !routedSlugListed && <p className="error-text" role="alert">Finding {initialFindingSlug} unavailable: {routeLookupError} <button type="button" className="ghost-button" onClick={() => setRouteLookupAttempt((value) => value + 1)}>Retry finding lookup</button></p>}
-      <SlowLoadHint active={ledgerLoading} what="the finding ledger" detail="Large ledgers can take several seconds." />
-      {ledgerError && <p className="error-text" role="alert">Finding ledger unavailable: {ledgerError}{derivedList.length > 0 ? " Showing previously loaded records; this list may be stale." : ""}</p>}
+      >
       {!investigating && !ledgerPending && derivedList.length > 0 && (
         <section className="intel-workbar findings-recent-bar" aria-label="Recent finding changes">
-          <div className="intel-workbar-title">
-            <span className="sev-dot" />
-            <span>Recent changes</span>
-          </div>
           <span className="intel-workbar-stat">
             {recentChanges.created} new · {recentChanges.changed} changed {recentChanges.sinceVisit ? "since you last looked" : "in the last 24 hours"}
           </span>
@@ -1657,6 +1660,11 @@ export function FindingsTab({
           )}
         </section>
       )}
+      </PageHeader>
+      {routeLookupLoading && !routedSlugListed && <p className="meta-text" role="status">Loading finding {initialFindingSlug}…</p>}
+      {routeLookupError && !routedSlugListed && <p className="error-text" role="alert">Finding {initialFindingSlug} unavailable: {routeLookupError} <button type="button" className="ghost-button" onClick={() => setRouteLookupAttempt((value) => value + 1)}>Retry finding lookup</button></p>}
+      <SlowLoadHint active={ledgerLoading} what="the finding ledger" detail="Large ledgers can take several seconds." />
+      {ledgerError && <p className="error-text" role="alert">Finding ledger unavailable: {ledgerError}{derivedList.length > 0 ? " Showing previously loaded records; this list may be stale." : ""}</p>}
       <div className="panel findings-toolbar-panel" hidden={investigating || ledgerEmpty}>
         <div className="toolbar">
           <div className="search-wrap">
@@ -1694,6 +1702,22 @@ export function FindingsTab({
                 { value: "table", label: <><Table2 size={14} aria-hidden /> Table</> },
               ]}
             />
+            <div className="findings-sort">
+              <SegmentedControl<FindingsSort | "column">
+                label="Sort findings"
+                value={activeSort ?? "column"}
+                onChange={(next) => { if (next !== "column") chooseSort(next); }}
+                options={FINDINGS_SORTS.map((option) => ({ value: option, label: SORT_LABELS[option], description: SORT_HINTS[option] }))}
+              />
+            </div>
+            <button
+              ref={filtersTriggerRef}
+              type="button"
+              className="qa-btn"
+              aria-expanded={filtersOpen}
+              aria-controls="finding-filters"
+              onClick={() => setFiltersOpen((open) => !open)}
+            >Filters ({activeFilterCount})</button>
             <button
               type="button"
               className="qa-btn"
@@ -1706,6 +1730,9 @@ export function FindingsTab({
             </button>
           </div>
         </div>
+        <div ref={filtersPanelRef} id="finding-filters" className="findings-filter-popover" role="region" aria-label="Finding filters" hidden={!filtersOpen}
+          onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget) && event.relatedTarget !== filtersTriggerRef.current) setFiltersOpen(false); }}
+          onKeyDown={(event) => { if (event.key === "Escape") { event.stopPropagation(); setFiltersOpen(false); filtersTriggerRef.current?.focus(); } }}>
         <div className="findings-order-row">
           <FilterGroup label="Recency">
             {RECENCY_FILTERS.map((filter) => {
@@ -1723,15 +1750,6 @@ export function FindingsTab({
               );
             })}
           </FilterGroup>
-          <div className="findings-sort">
-            <span className="ui-filter-label" aria-hidden="true">Sort</span>
-            <SegmentedControl<FindingsSort | "column">
-              label="Sort findings"
-              value={activeSort ?? "column"}
-              onChange={(next) => { if (next !== "column") chooseSort(next); }}
-              options={FINDINGS_SORTS.map((option) => ({ value: option, label: SORT_LABELS[option], description: SORT_HINTS[option] }))}
-            />
-          </div>
         </div>
         <div className="filter-row">
           <FilterGroup label="Severity">
@@ -1772,6 +1790,15 @@ export function FindingsTab({
           </FilterGroup>
           <ClearFiltersButton count={activeFilterCount} onClear={clearAll} />
         </div>
+        </div>
+        {activeFilterCount > 0 && <div className="findings-active-filters" aria-label="Active finding filters">
+          {query && <button type="button" className="qa-btn" aria-label="Remove search filter" onClick={() => changeQuery("")}>Search: {query} ×</button>}
+          {[...sevFilters].map((value) => <button type="button" className="qa-btn" key={`severity-${value}`} aria-label={`Remove severity ${severityLabel(value)}`} onClick={() => toggle(sevFilters, setSevFilters, value)}>{severityLabel(value)} ×</button>)}
+          {[...workflowFilters].map((value) => <button type="button" className="qa-btn" key={`workflow-${value}`} aria-label={`Remove workflow ${statusLabel("finding-workflow", value)}`} onClick={() => toggle(workflowFilters, setWorkflowFilters, value)}>{statusLabel("finding-workflow", value)} ×</button>)}
+          {[...verifFilters].map((value) => <button type="button" className="qa-btn" key={`verification-${value}`} aria-label={`Remove verification ${statusLabel("finding-verification", value)}`} onClick={() => toggle(verifFilters, setVerifFilters, value)}>{statusLabel("finding-verification", value)} ×</button>)}
+          {recencyFilter && <button type="button" className="qa-btn" aria-label="Remove recency filter" onClick={() => chooseRecency(null)}>{RECENCY_LABELS[recencyFilter]} ×</button>}
+          {!filtersOpen && <ClearFiltersButton count={activeFilterCount} onClear={clearAll} />}
+        </div>}
       </div>
 
       <div ref={resultsRef} className="findings-shell" hidden={investigating}>

@@ -177,6 +177,7 @@ describe("sorting", () => {
 describe("recency filters", () => {
   it("filters new and changed findings within a window without overlap", () => {
     renderTab();
+    fireEvent.click(screen.getByRole("button", { name: /^Filters \(/ }));
     const chips = screen.getByRole("group", { name: "Recency" });
     fireEvent.click(within(chips).getByRole("button", { name: /^New 24h/ }));
     expect(queueTitles()).toEqual(["Fresh claim"]);
@@ -193,6 +194,7 @@ describe("recency filters", () => {
     const bar = screen.getByRole("region", { name: "Recent finding changes" });
     expect(bar.textContent).toContain("1 new · 1 changed since you last looked");
     fireEvent.click(within(bar).getByRole("button", { name: /Review/ }));
+    fireEvent.click(screen.getByRole("button", { name: /^Filters \(/ }));
     const chips = screen.getByRole("group", { name: "Recency" });
     expect(within(chips).getByRole("button", { name: /^Since my last visit/ }).getAttribute("aria-pressed")).toBe("true");
     expect(queueTitles()).toEqual(["Old claim changed recently", "Fresh claim"]);
@@ -202,6 +204,7 @@ describe("recency filters", () => {
     renderTab();
     const bar = screen.getByRole("region", { name: "Recent finding changes" });
     expect(bar.textContent).toContain("1 new · 1 changed in the last 24 hours");
+    fireEvent.click(screen.getByRole("button", { name: /^Filters \(/ }));
     const since = within(screen.getByRole("group", { name: "Recency" })).getByRole("button", { name: /^Since my last visit/ }) as HTMLButtonElement;
     expect(since.disabled).toBe(true);
   });

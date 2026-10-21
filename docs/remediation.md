@@ -10,6 +10,40 @@ enough; no earlier Vigil assessment is required.
 Create one remediation engagement per repository and keep using it. Several assessment findings can
 share one case when one fix covers them.
 
+## Start or rejoin work
+
+- `vigil remediation start` opens a new conversation in the project repository. With no project
+  selected, the terminal offers a project picker when several remediation projects are available.
+- `vigil remediation join` offers project and case pickers, then a choice to resume the recorded
+  Claude conversation or start a fresh conversation for that case.
+- `vigil remediation -k <project-key> join` goes directly to that project's case picker.
+- `vigil remediation -k <project-key> join <case_id>` resumes directly, without prompting.
+- Add `--fresh` to start a fresh conversation for the selected case. If its recorded conversation
+  is running, Vigil asks before stopping it; stopping requires an interactive terminal.
+
+Find the numeric `case_id` and an exact join command with:
+
+```bash
+vigil remediation -k <project-key> list
+vigil remediation -k <project-key> list --json
+```
+
+The case ID identifies the Vigil remediation case; the source key identifies its ticket or report.
+Lists and case pickers put open cases first, ordered by most recent update, followed by closed cases.
+In a terminal, lists show numeric IDs beside titles and metadata in a table that wraps to fit the
+window. Pickers support typing to filter when `fzf` is installed; the selected row has a details
+preview beside the list, or below it in a narrow window. Without `fzf`, a numbered table offers the
+same selection. Use the same `--root` and `-k` options when changing from `list` to `start` or `join`.
+`list --json` retains every case summary field and adds explicit `case_id`, `engagement_key`, and
+`join_command` fields for agents and scripts. ID-less `join` requires a terminal; scripts supply
+the project key and case ID. A fresh conversation reads the current case handoff and keeps the same
+workspace, evidence, approvals, and environment leases. Future joins open the new conversation;
+the previous transcript remains in Claude's history. Use `start` for new project work.
+During join preparation, a terminal spinner shows case loading, workspace checks, and conversation
+lookup, then ends before Claude takes over the terminal. Claude queries and case-session lock waits
+time out after 30 seconds with retry guidance. The attachment itself continues for the conversation's
+normal lifetime.
+
 ## First ticket, end to end
 
 1. Install and sign in to your chosen client. Review the repository profile below
@@ -124,8 +158,9 @@ supply authentication, or bypass workspace trust. Personal and nested repository
 apply. Surface conflicting requirements with their sources before dependent work.
 
 `repository`, instruction files, PR guidance, and template references resolve relative to `PROJECT.md`.
-`workspace_directory` resolves inside the repository; a branch such as `fix/SEC-123` produces
-`<repository>/worktrees/fix/SEC-123`. Without it, the workspace stays under the case directory.
+`workspace_directory` resolves inside the repository. New workspaces use a stable
+`<repository>/<workspace_directory>/case-<id>` directory, independent of branch names.
+Without it, the workspace stays under the case directory.
 `base_branch` defaults to `main`, but each case records its selected branch and base commit for review
 and PR creation. Existing cases retain their registered workspace and review policy; later profile
 changes cannot silently retarget them.
@@ -209,8 +244,9 @@ own. A profile can require a linked development ticket before publishing; Vigil 
 Launching and attaching need Claude Code 2.1.257 or newer. `start` runs the conversation in the
 background and attaches you to it, so you can always rejoin the same conversation. Ctrl-D detaches
 without stopping it; reopening it from the agents view reattaches the same conversation with its
-original settings. To pick up changed profile settings, stop it with `claude stop <id>` and run
-`start` again. If startup exits before attaching, look in `claude agents --json --all` and the
+original settings. For an existing case, use `join <case_id> --fresh` to start with current launch settings and
+the case's captured policy. For an unbound project conversation, stop it with `claude stop <id>`
+and run `start` again. If startup exits before attaching, look in `claude agents --json --all` and the
 engagement's `remediation/sessions/` receipts, then recover the recorded launch by its receipt UUID;
 this never starts another conversation:
 
@@ -222,16 +258,15 @@ Claude Code's own background worktree isolation is turned off for these sessions
 already has its own workspace. For an existing case:
 
 ```bash
-vigil remediation -k <engagement-key> session <case-id>
 vigil remediation -k <engagement-key> join <case-id>
+vigil remediation -k <engagement-key> join <case-id> --fresh
 ```
 
-`session` launches a worker only when no binding exists. For one case, the agent binds its existing
-UUID with `session --bind --session-id <uuid>`. `join` attaches to the recorded conversation; missing
-or mismatched identities require recovery rather than replacement. When the recorded conversation has
-stopped, `session --bind --session-id <uuid> --replace-stopped` binds the new one and keeps the old
-UUID as `replaced_session_id`; a running conversation is never replaced. Native
-binding, hosted worker launch, and exact joining currently support Claude only.
+`join --fresh` refreshes the handoff and launches a new developer conversation. If launch or attachment
+is interrupted, use ordinary `join <case-id>` to recover the recorded launch before trying fresh again.
+Agents use `session` to launch an unbound worker or `session --bind --session-id <uuid>` to bind their
+existing conversation; `--replace-stopped` permits an explicitly agreed replacement. See
+`vigil remediation session --help` for binding options. Native binding and joining support Claude only.
 
 ### OpenCode and ZCode repository context
 
@@ -342,9 +377,48 @@ rem show <case-id>
 
 `import` stores a JSON object supplied by the existing source reader; it does not fetch tickets.
 Preserve retrieval provenance, original report, analysis, and attachment references. Direct reports
-can use `--source report`. Attachments are copied and indexed as untrusted source evidence. Partial
+can use `--source report` or `--source manual` without `--source-key`; Vigil derives the source
+reference from the permanent numeric case ID. Attachments are copied and indexed as untrusted source evidence. Partial
 registration prints the case ID: retry with `--resume-case-id <id>` and the same files. No
 organization-side export utility or handoff skill is required.
+
+A pasted example or suspected bug needs no external issue. Import it, prepare its workspace, and
+investigate before deciding whether it is real. Creating a case does not confirm the report.
+
+```bash
+rem import --source manual --title 'Possible account boundary bug' --snapshot-file report.json
+rem worktree <case-id>
+# After investigation, attach the primary external reference when one exists:
+rem identity <case-id> --provider tracker --key ACME-123
+rem finalize-branch <case-id> --branch fix/ACME-123-account-boundary
+rem join tracker:ACME-123
+```
+
+The original report and finding links stay intact. Current lists, pickers, and handoffs use the
+attached external reference; evidence and session ownership keep using the permanent case ID.
+Numeric join arguments always mean case IDs; use `provider:key` for numeric external keys or
+references shared by several providers. Bare unique external keys also work. References are exact
+and scoped to the selected engagement. External formats and publication branch conventions belong
+to your profile. Default PR titles and generated bodies use the primary external key when set.
+Template-authored titles and bodies retain your wording. Vigil does not add an internal case-number
+or workspace-path footer.
+
+Finalize branch identity before publishing approval. Finalization renames the local Git branch or
+JJ bookmark without moving the directory or rewriting commits, and can be retried after an
+interrupted backend update. It refuses published branches, remote-name collisions, dirty source,
+or changed revisions. The same-revision rename preserves evidence and environment leases, but
+changes the review package and requires renewed approval and PR preparation. If the case is
+already approved, transition it back to review before requesting approval again. Rewriting commit
+messages yourself changes revision IDs; synchronize the revision and renew applicable runtime
+proof. Changing the primary reference also invalidates approval. Published identities stay fixed.
+
+When `development_ticket_required = true`, publishing approval requires a primary external
+reference. Existing provider-backed intake identities also satisfy this requirement; direct reports,
+unresolved references, and finding-linked cases need an explicit reference. Vigil does not fetch or
+create that external issue or verify its existence from its label alone. Before the first push,
+the backend validates the current approval and retains a publication intent in the case directory.
+Identity changes and branch finalization then stay blocked, including after an interrupted push;
+retry `create-pr` to reconcile publication on the same branch.
 
 For a Vigil finding, reuse the linked-case path:
 
@@ -372,12 +446,24 @@ scratch changes for you, and refuses a different repository found at a case's re
 on a case-insensitive filesystem, tracked paths that differ only in letter case show up as renames in
 every snapshot and land in the case commit; remove them before review.
 
+Executed local verification evidence also records the complete tested code tree. When a squash or commit
+rewrite preserves that exact tree, the evidence continues to satisfy current-code requirements;
+the case history and handoff record its original and current revisions. Changed files, file modes,
+symlinks, submodule revisions, or content introduced by a rebase require new verification. An unchanged
+patch on a changed base is insufficient. Original evidence receipts remain tied to what actually ran.
+Approval must be renewed after a revision rewrite. Browser, confirmed runtime, and deployment proof
+continue to require their exact served revisions. Shared-environment receipts and reasoned evidence
+need fresh verification after a revision rewrite; code-tree equality alone cannot establish their state.
+Use a named shared environment for checks that depend on a running service or a revision-derived
+build identity, so those checks stay bound to the execution revision.
+
 Commit the relevant changes, record the commit, then run checks:
 
 ```bash
 rem sync-revision <case-id>
 rem checks <case-id> --actor <owner>
 rem checks <case-id> --actor <owner> --name tests
+rem checks <case-id> --actor <owner> --stage publication
 ```
 
 Checks use the profile settings the case started with. Each runs from its `directory` inside the
@@ -386,8 +472,16 @@ workspace with `VIGIL_CASE_WORKTREE`, `VIGIL_REPOSITORY`, `VIGIL_CASE_REVISION`,
 `sync-revision` moves it forward when the case is rebased onto a newer base, never backwards, and it
 cannot be set directly. Vigil saves each check's output, exit code, commit, and directory. A check
 that changes files, such as a formatter, does not count as a pass: commit the change, sync, and
-rerun. All profile checks must pass for review and again before publishing; `--name` runs a single
-check during development.
+rerun. Checks default to the verification stage. A check with `stage = "publication"` is skipped
+during ordinary verification; run `checks --stage publication` after finalizing the branch and
+external reference. That stage includes all configured checks. All profile checks must pass before
+approval, and `create-pr` reruns them before publishing. `--name` selects checks within the requested
+stage; it cannot waive the approval or publication requirements. Omitted stages mean verification.
+
+For example, a private naming check can use `{ name = "ticket", stage = "publication", command =
+"python tools/check_ticket.py" }` alongside ordinary lint and test commands. Its external-key format
+remains repository policy. Cases retain their captured check settings; changing a live profile does
+not silently change an existing case's requirements.
 
 There is one shared local environment, not one per workspace. A check can run in a throwaway
 container that mounts the case workspace and borrows dependencies installed in the main checkout.
@@ -458,7 +552,7 @@ rem baseline <case-id> --outcome runtime_reproduced --method pytest \
 ```
 
 Each requirement names the evidence kind, the allowed methods, the expected outcome, whether the
-evidence must be from the current commit or may come from an earlier one (`ancestor`), and whether it
+evidence describes the current case source (`current`), and whether it
 must actually run (`executed`) or may be reasoned from code (`reasoned`). Runtime requirements can
 also name a `shared_environment` and set `runtime_identity_required`. Explain your choice of methods
 with `--alternatives-reason`; an empty list cannot waive verification. Before approval, Vigil checks
@@ -470,6 +564,43 @@ keeps the recorded requirements, and a new requirements file replaces them.
 For a code/test-confirmed baseline without safe runtime reproduction, `baseline` needs the explicit
 owner decision: `--owner-decision proceed --owner-actor <owner> --owner-reason <reason>`. Existing case
 plans and evidence remain recorded; changing requirements does not reinterpret prior evidence.
+
+### Regression proof in one commit
+
+Commit the regression tests and fix together, then `sync-revision`. For a red/green plan, name
+the fix files explicitly in the red requirement; keep regression test files out of that list:
+
+```json
+[
+  {"kind":"red-test","methods":["pytest"],"outcome":"failed_as_expected",
+   "revision":"current","execution":"executed","fix_paths":["src/accounts.py"]},
+  {"kind":"green-test","methods":["pytest"],"outcome":"passed",
+   "revision":"current","execution":"executed"}
+]
+```
+
+```bash
+rem test <case-id> --method pytest --command 'python -m pytest tests/test_accounts.py' \
+  --expected-failure 'test_cross_account_write' --setup-command 'python -m pip install -e .'
+```
+
+Vigil creates a disposable checkout of the committed case source, restores the named fix files to
+the recorded review base, and runs the command while retaining the regression tests. Red succeeds
+only when the command fails and its output includes the named expected failure. Vigil then runs
+the same command against the finished fix and requires a passing result. It saves both command
+outputs, working directories, exit codes, and the red source tree and restored file list. Source
+changes during verification invalidate the result. The disposable checkout is removed afterward.
+Both commands receive `VIGIL_REPOSITORY`, `VIGIL_CASE_WORKTREE`, `VIGIL_CASE_REVISION`, and
+`VIGIL_CASE_BASE_REVISION`; `VIGIL_CASE_WORKTREE` identifies the source actually being tested.
+
+Use `--directory` for a repository-relative command directory and `--setup-command` to prepare
+dependencies in both sources. Ignored dependencies are not copied automatically. `--fix-path` is
+repeatable and must match the plan's fix files. Use `rem test` for red proof; a manually recorded
+test output without scratch provenance cannot satisfy a red requirement. Red/green proof remains
+a case-specific choice; native API, analysis, or browser requirements can be selected independently.
+Each command defaults to a 600-second timeout; adjust it with `--timeout-seconds`. Full stdout and
+stderr are retained on disk. Runs above the 16 MiB output receipt limit retain those files and stop
+without claiming verification; select a focused command and rerun.
 
 ### Optional browser proof
 

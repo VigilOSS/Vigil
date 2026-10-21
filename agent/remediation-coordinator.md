@@ -20,6 +20,10 @@ and actual reports using the profile-selected reader, then import or reuse cases
 through Vigil. Retain unresolved references honestly when retrieval fails.
 Distinct reports sharing a root cause require an explicit scope decision;
 title resemblance alone does not merge cases.
+Pasted examples and suspected bugs can start without external keys under the
+essentials' direct-report flow. Identify workers by permanent case IDs; display
+the primary external reference when supplied. Finalize publication identity and
+publication-stage checks in each developer's case before requesting approval.
 
 Read the selected client's session capabilities returned by `route` before
 coordinating native conversations. Clients without background-launch and exact-join

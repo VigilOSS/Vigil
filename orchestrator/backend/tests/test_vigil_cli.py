@@ -4274,7 +4274,7 @@ def test_engagement_create_infers_localhost_url_as_web(tmp_path: Path, monkeypat
     assert manifest["target"] == "http://localhost:8080"
 
 
-def test_engagement_select_uses_shared_terminal_picker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+def test_engagement_select_preserves_fuzzy_selection_identity(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from vigil_cli import engagements
 
     root = tmp_path / "install" / "agent" / "engagements"
@@ -4288,11 +4288,22 @@ def test_engagement_select_uses_shared_terminal_picker(tmp_path: Path, monkeypat
         (path / "scope.json").write_text('{"status":"in_progress","current_phase":"recon"}', encoding="utf-8")
         (path / "engagement.json").write_text(json.dumps({"key": path.name, "target": path.name, "created_at": created_at}), encoding="utf-8")
 
+    def fake_which(command: str) -> str | None:
+        return "/usr/bin/fzf" if command == "fzf" else None
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        assert argv[0] == "fzf"
+        offered = str(kwargs["input"]).splitlines()
+        selected = next(row for row in offered if newer.name in row.split("\t", 1)[1])
+        return subprocess.CompletedProcess(argv, 0, selected + "\n", "")
+
+    monkeypatch.setenv("TERM", "xterm-256color")
+    monkeypatch.setattr(engagements.shutil, "which", fake_which)
+    monkeypatch.setattr(engagements.subprocess, "run", fake_run)
     monkeypatch.setattr(engagements.sys, "stdin", _TTYStdin())
-    monkeypatch.setattr("builtins.input", lambda: "2")
+    monkeypatch.setattr("builtins.input", lambda: pytest.fail("fuzzy selection must not fall back to a row prompt"))
 
     assert engagements.resolve_engagement_path(tmp_path / "install", select=True) == newer.resolve()
-    assert "Select engagement" in capsys.readouterr().err
 
 
 def test_runtime_start_rejects_running_container_with_wrong_mount(tmp_path: Path) -> None:
@@ -5124,6 +5135,16 @@ def test_auth_select_selector_overrides_current_engagement(tmp_path: Path, monke
             "active_identity": auth_module.DEFAULT_IDENTITY,
         }
 
+    def fake_which(command: str) -> str | None:
+        return "/usr/bin/fzf" if command == "fzf" else None
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        offered = str(kwargs["input"]).splitlines()
+        selected = next(row for row in offered if newer.name in row.split("\t", 1)[1])
+        return subprocess.CompletedProcess(argv, 0, selected + "\n", "")
+
+    monkeypatch.setattr(engagements.shutil, "which", fake_which)
+    monkeypatch.setattr(engagements.subprocess, "run", fake_run)
     monkeypatch.setattr(engagements.sys, "stdin", _TTYStdin())
     monkeypatch.setattr("builtins.input", lambda: "2")
     monkeypatch.chdir(older)

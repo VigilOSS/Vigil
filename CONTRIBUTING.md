@@ -52,6 +52,15 @@ the prompts, backend, and UI assets. `vigil up` starts the local stack. For UI w
 `npm ci && npm run dev` in `orchestrator/frontend/`; the Vite dev server proxies API calls to the
 backend at `http://127.0.0.1:18000`.
 
+When using Vigil to remediate Vigil itself, keep the running operator stack on an installed
+release so edits to the checkout do not change its backend inputs. Replace the editable install
+with `uv tool install --force --from <wheel-url> vigil`, using the wheel URL from the
+[installation guide](docs/installation.md), then run `vigil orchestrator restart` to switch the
+backend to that release. Run checkout tests through the backend venv as described in `AGENTS.md`.
+For an editable install, backend edits require `vigil orchestrator restart`: the running process
+keeps its imported code until restarted. `vigil status`, remediation commands, and the remediation
+page show when its inputs have changed.
+
 The complete verification matrix is in `AGENTS.md`.
 
 New Python behavior and bug fixes start with a focused failing regression: write a test that fails

@@ -204,4 +204,3 @@ def test_run_listing_statement_count_does_not_grow_with_the_page(
     assert len(large_page) == 6
 
     assert len(large) == len(small), (len(small), len(large))
-

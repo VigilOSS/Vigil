@@ -306,6 +306,14 @@ quality checks — no LLM, no network, no real backend. Cases live under `tests/
 `src/vigil_cli/restart_manifest.py` derives what an install invalidated; read its docstring before
 changing this area.
 
+For development of Vigil through a remediation engagement, run the operator backend from an
+installed release and run tests against the checkout. Follow the release-wheel upgrade instructions
+in `docs/installation.md` and restart with `vigil orchestrator restart` after switching from an
+editable install. An editable backend retains imported code while its source files change;
+`/readyz` reports `backend_runtime.restart_required`, surfaced by `vigil status`, remediation
+commands, and the remediation page. Restart deliberately before verifying behavior of the
+updated backend.
+
 **Never judge application content by mtime.** A release is one matched CLI/backend/agent/docs/UI
 bundle; `install.py` initializes or adopts private data without copying source. Compare content
 digests stamped on consumers — see `src/vigil_cli/image_freshness.py`. `workspace.json` records

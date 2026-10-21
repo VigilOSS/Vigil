@@ -64,7 +64,7 @@ def test_cli_report_to_workspace_checks_and_handoff(client, isolate_settings, mo
                        '--title', 'Account boundary', '--snapshot-file', str(source))
     identifier = str(imported['id'])
     registered = command('worktree', identifier, '--branch', 'fix/SEC-123')
-    workspace = repository / 'worktrees/fix/SEC-123'
+    workspace = repository / f'worktrees/case-{identifier}'
     assert Path(registered['worktree_path']) == workspace
     assert not workspace.is_relative_to(engagement)
     assert registered['base_branch'] == 'develop'

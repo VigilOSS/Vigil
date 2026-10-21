@@ -7,6 +7,11 @@ import {
   ApiError,
   approveRemediationCase,
   getRemediationCase,
+  getBackendReadiness,
+  getRemediationEvidencePage,
+  getRemediationEvidence,
+  getRemediationHistoryPage,
+  readRemediationEvidenceText,
   getRemediationDiff,
   listRemediationCases,
   recordRemediationHumanVerification,
@@ -27,6 +32,11 @@ vi.mock("../lib/api", () => ({
   },
   approveRemediationCase: vi.fn(),
   getRemediationCase: vi.fn(),
+  getBackendReadiness: vi.fn(),
+  getRemediationEvidencePage: vi.fn(),
+  getRemediationEvidence: vi.fn(),
+  getRemediationHistoryPage: vi.fn(),
+  readRemediationEvidenceText: vi.fn(),
   getRemediationDiff: vi.fn(),
   listRemediationCases: vi.fn(),
   recordRemediationHumanVerification: vi.fn(),
@@ -72,6 +82,7 @@ const reviewedCase: RemediationCase = {
 
 beforeEach(() => {
   window.sessionStorage.clear();
+  vi.mocked(getBackendReadiness).mockResolvedValue({ backend_runtime: { restart_required: false, changed_inputs: [] } });
   vi.mocked(listEngagements).mockResolvedValue([{ id: 1, key: "assessment", target: "Assessment", engagement_type: "offensive" } as Awaited<ReturnType<typeof listEngagements>>[number]]);
   vi.mocked(listRemediationCases).mockResolvedValue([reviewedCase]);
   vi.mocked(getRemediationCase).mockResolvedValue(reviewedCase);
@@ -98,6 +109,152 @@ function deferred<T>() {
   const promise = new Promise<T>((done) => { resolve = done; });
   return { promise, resolve };
 }
+
+it("finds a direct report by its attached external key", async () => {
+  const item = { ...reviewedCase, source_type: "manual", source_key: "case-7",
+    external_provider: "tracker", external_key: "ACME-103" };
+  vi.mocked(listRemediationCases).mockResolvedValue([item]);
+  vi.mocked(getRemediationCase).mockResolvedValue(item);
+  render(<RemediationPage engagementKey="acme" onBack={() => {}} />);
+  expect(await screen.findByText("ACME-103")).toBeTruthy();
+});
+
+it("previews evidence on demand as literal text and displays integrity failures", async () => {
+  vi.mocked(readRemediationEvidenceText).mockResolvedValue({ text: "<script>target text</script>\nPassed", truncated: true });
+  render(<RemediationPage engagementKey="acme" onBack={() => {}} />);
+  await openSection("Evidence");
+  expect(readRemediationEvidenceText).toHaveBeenCalledTimes(0);
+  fireEvent.click(screen.getByRole("button", { name: "Preview test-output.txt" }));
+  expect(await screen.findByText(/<script>target text/)).toBeTruthy();
+  expect(screen.getByText(/Preview limited to/)).toBeTruthy();
+});
+
+it("shows artifact integrity failures and can retry a preview", async () => {
+  vi.mocked(readRemediationEvidenceText).mockRejectedValueOnce(new Error("Evidence file changed since registration")).mockResolvedValueOnce({ text: "Registered output", truncated: false });
+  render(<RemediationPage engagementKey="acme" onBack={() => {}} />);
+  await openSection("Evidence");
+  fireEvent.click(screen.getByRole("button", { name: "Preview test-output.txt" }));
+  expect(await screen.findByRole("alert")).toHaveProperty("textContent", "Evidence file changed since registration");
+  fireEvent.click(screen.getByRole("button", { name: "Hide test-output.txt" }));
+  fireEvent.click(screen.getByRole("button", { name: "Preview test-output.txt" }));
+  expect(await screen.findByText("Registered output")).toBeTruthy();
+});
+
+it("makes backend restart-required state visible", async () => {
+  vi.mocked(getBackendReadiness).mockResolvedValue({ backend_runtime: { restart_required: true, changed_inputs: ["app/services/remediation.py"] } });
+  render(<RemediationPage engagementKey="acme" onBack={() => {}} />);
+  expect(await screen.findByText(/Backend restart required/)).toBeTruthy();
+});
+
+it("shows backend requirement matches and follows them to evidence", async () => {
+  vi.mocked(getRemediationCase).mockResolvedValue({ ...reviewedCase,
+    verification_requirements: { alternatives_reason: "", requirements: [{ kind: "laravel_test", methods: ["phpunit"], outcome: "passed", revision: "current", execution: "executed", rationale: "Authorization coverage" }] },
+    verification_matches: [{ requirement_index: 0, evidence_ids: [4], missing: null }],
+    environment_leases: [{ token: "lease-1", environment: "development", actor: "Acme owner", revision: "abc123", observed_revision: "abc123", acquired_at: "2026-10-14", released_at: null, released_by: null }],
+  });
+  render(<RemediationPage engagementKey="acme" onBack={() => {}} />);
+  await openSection("Review");
+  fireEvent.click(screen.getByRole("button", { name: "View evidence #4" }));
+  expect(screen.getByText("Authorization regression")).toBeTruthy();
+  await openSection("Delivery");
+  expect(screen.getByText(/Acme owner/)).toBeTruthy();
+});
+
+it("opens matching evidence beyond the initial page without reading intervening pages", async () => {
+  vi.mocked(getRemediationCase).mockResolvedValue({ ...reviewedCase,
+    verification_requirements: { alternatives_reason: "", requirements: [{ kind: "laravel_test", methods: ["phpunit"], outcome: "passed", revision: "current", execution: "executed", rationale: "Authorization coverage" }] },
+    verification_matches: [{ requirement_index: 0, evidence_ids: [99], missing: null }],
+  });
+  vi.mocked(getRemediationEvidence).mockResolvedValue({ ...reviewedCase.evidence[1], id: 99, proved: "Matched later proof" });
+  render(<RemediationPage engagementKey="acme" onBack={() => {}} />);
+  await openSection("Review");
+  fireEvent.click(screen.getByRole("button", { name: "View evidence #99" }));
+  expect(await screen.findByText("Matched later proof")).toBeTruthy();
+  expect(getRemediationEvidence).toHaveBeenCalledWith("acme", 7, 99);
+  expect(getRemediationEvidencePage).toHaveBeenCalledTimes(0);
+});
+
+it("keeps the latest out-of-page evidence selection when earlier reads finish late", async () => {
+  const earlier = deferred<Awaited<ReturnType<typeof getRemediationEvidence>>>();
+  const latest = deferred<Awaited<ReturnType<typeof getRemediationEvidence>>>();
+  vi.mocked(getRemediationEvidence).mockReturnValueOnce(earlier.promise).mockReturnValueOnce(latest.promise);
+  vi.mocked(getRemediationCase).mockResolvedValue({ ...reviewedCase,
+    verification_requirements: { alternatives_reason: "", requirements: [99, 100].map(() => ({ kind: "laravel_test", methods: ["phpunit"], outcome: "passed", revision: "current" as const, execution: "executed" as const, rationale: "Authorization coverage" })) },
+    verification_matches: [99, 100].map((id, index) => ({ requirement_index: index, evidence_ids: [id], missing: null })),
+  });
+  render(<RemediationPage engagementKey="acme" onBack={() => {}} />);
+  await openSection("Review");
+  fireEvent.click(screen.getByRole("button", { name: "View evidence #99" }));
+  await openSection("Review");
+  fireEvent.click(screen.getByRole("button", { name: "View evidence #100" }));
+  await act(async () => { latest.resolve({ ...reviewedCase.evidence[1], id: 100, proved: "Latest selected proof" }); });
+  expect(screen.getByText("Latest selected proof")).toBeTruthy();
+  await act(async () => { earlier.resolve({ ...reviewedCase.evidence[1], id: 99, proved: "Earlier selected proof" }); });
+  expect(screen.getByText("Latest selected proof")).toBeTruthy();
+  expect(screen.queryByText("Earlier selected proof")).toBeNull();
+});
+
+it("allows pagination in another case and ignores an earlier case's pending page", async () => {
+  const earlier = deferred<Awaited<ReturnType<typeof getRemediationEvidencePage>>>();
+  const latest = deferred<Awaited<ReturnType<typeof getRemediationEvidencePage>>>();
+  const secondCase = { ...reviewedCase, id: 8, source_key: "SEC-43", title: "Second case", evidence_total: 3 };
+  vi.mocked(listRemediationCases).mockResolvedValue([reviewedCase, secondCase]);
+  vi.mocked(getRemediationCase).mockImplementation(async (_key, id) => id === 8 ? secondCase : { ...reviewedCase, evidence_total: 3 });
+  vi.mocked(getRemediationEvidencePage).mockReturnValueOnce(earlier.promise).mockReturnValueOnce(latest.promise);
+  const { rerender } = render(<RemediationPage engagementKey="acme" initialCaseId={7} onBack={() => {}} />);
+  await openSection("Evidence");
+  fireEvent.click(screen.getByRole("button", { name: "Load more evidence" }));
+  fireEvent.click(screen.getByRole("button", { name: /^SEC-43/ }));
+  expect(window.location.hash).toContain("case=8");
+  rerender(<RemediationPage engagementKey="acme" initialCaseId={8} onBack={() => {}} />);
+  await screen.findByRole("heading", { name: "Second case" });
+  await openSection("Evidence");
+  fireEvent.click(screen.getByRole("button", { name: "Load more evidence" }));
+  expect(getRemediationEvidencePage).toHaveBeenCalledWith("acme", 8, 2);
+  await act(async () => { earlier.resolve({ items: [{ ...reviewedCase.evidence[1], id: 99, proved: "Stale page proof" }], total: 3, limit: 20, offset: 2 }); });
+  expect((screen.getByRole("button", { name: "Loading evidence…" }) as HTMLButtonElement).disabled).toBe(true);
+  await act(async () => { latest.resolve({ items: [{ ...reviewedCase.evidence[1], id: 100, proved: "Second case proof" }], total: 3, limit: 20, offset: 2 }); });
+  expect(screen.getByText("Second case proof")).toBeTruthy();
+  expect(screen.queryByText("Stale page proof")).toBeNull();
+});
+
+it("shows configured checks and the recorded PR with its reviewed revision", async () => {
+  vi.mocked(getRemediationCase).mockResolvedValue({ ...reviewedCase,
+    checks: [{ name: "Authorization", command: "npm test", evidence_ids: [4], missing: null }, { name: "Build", command: "npm run build", evidence_ids: [], missing: "Build proof missing" }],
+    pull_request: { url: "https://github.example/acme/project/pull/42", revision: "abc123", branch: "fix/acme-42", base_branch: "main", review_digest: digest, body_sha256: "abc", evidence_id: 99, current: true },
+  });
+  render(<RemediationPage engagementKey="acme" onBack={() => {}} />);
+  await openSection("Review");
+  expect(screen.getByText("Build proof missing")).toBeTruthy();
+  expect(screen.getByText("Authorization")).toBeTruthy();
+  await openSection("Delivery");
+  expect(screen.getByRole("link", { name: "Open recorded PR ↗" }).getAttribute("href")).toBe("https://github.example/acme/project/pull/42");
+  expect(screen.getByText(/fix\/acme-42 → main/)).toBeTruthy();
+});
+
+it("loads subsequent evidence and history pages on demand", async () => {
+  vi.mocked(getRemediationCase).mockResolvedValue({ ...reviewedCase, evidence_total: 3, history_total: 1 });
+  vi.mocked(getRemediationEvidencePage).mockResolvedValue({ items: [{ ...reviewedCase.evidence[1], id: 8, proved: "Additional proof" }], total: 3, limit: 20, offset: 2 });
+  vi.mocked(getRemediationHistoryPage).mockResolvedValue({ items: [{ id: 1, from_status: "new", to_status: "review", actor: "Acme owner", reason: "Ready for review" }], total: 1, limit: 20, offset: 0 });
+  render(<RemediationPage engagementKey="acme" onBack={() => {}} />);
+  await openSection("Evidence");
+  fireEvent.click(screen.getByRole("button", { name: "Load more evidence" }));
+  expect(await screen.findByText("Additional proof")).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "History" }));
+  fireEvent.click(screen.getByRole("button", { name: "Load more history" }));
+  expect((await screen.findAllByText(/Ready for review/)).length).toBeGreaterThan(0);
+});
+
+it("loads the diff only when Review opens and reuses it across tabs", async () => {
+  render(<RemediationPage engagementKey="acme" onBack={() => {}} />);
+  await screen.findByRole("heading", { name: reviewedCase.title });
+  expect(getRemediationDiff).toHaveBeenCalledTimes(0);
+  await openSection("Review");
+  await screen.findByText(/deny other users/);
+  await openSection("Evidence");
+  await openSection("Review");
+  expect(getRemediationDiff).toHaveBeenCalledTimes(1);
+});
 
 it("keeps initial plan setup with the case developer before enabling text-only updates", async () => {
   vi.mocked(getRemediationCase).mockResolvedValue({ ...reviewedCase, verification_plan: "" });
@@ -397,6 +554,9 @@ describe("remediation workspace", () => {
     const history = screen.getByRole("region", { name: "Case history" });
     expect(within(history).getByText(/Approved by owner/)).toBeTruthy();
     const raw = within(history).getByText("Raw case record").closest("details");
+    raw!.open = true;
+    fireEvent(raw!, new Event("toggle"));
+    await waitFor(() => expect(raw?.querySelector("pre")).toBeTruthy());
     const record = JSON.parse(raw?.querySelector("pre")?.textContent || "{}");
     expect(record.review_digest).toBe(digest);
     expect(record.approvals).toEqual([approval]);
@@ -562,7 +722,7 @@ describe("remediation workspace", () => {
     expect(screen.getByText("Environment: development")).toBeTruthy();
     expect(screen.getByText(/php artisan test --filter=ProfileAuthorization/)).toBeTruthy();
     await openSection("Review");
-    expect(screen.getByText(/deny other users/)).toBeTruthy();
+    expect(await screen.findByText(/deny other users/)).toBeTruthy();
   });
 
   it("saves a changed human plan and requires an explicit approval action", async () => {
@@ -574,6 +734,8 @@ describe("remediation workspace", () => {
     await waitFor(() => expect(updateRemediationVerificationPlan).toHaveBeenCalledWith("acme", 7,
       "Open Manage as owner; save the verified fixture."));
     expect(approveRemediationCase).not.toHaveBeenCalled();
+    await waitFor(() => expect((screen.getByRole("button", { name: "Approve reviewed snapshot" }) as HTMLButtonElement).disabled).toBe(true));
+    await screen.findByText(/deny other users/);
     fireEvent.change(screen.getByLabelText("Reviewer"), { target: { value: "owner" } });
     fireEvent.click(screen.getByRole("button", { name: "Approve reviewed snapshot" }));
     await waitFor(() => expect(approveRemediationCase).toHaveBeenCalledWith("acme", 7, "owner", digest, "ui"));

@@ -29,6 +29,25 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 _REAL_READYZ_BACKEND_RUNTIME = restart_manifest._readyz_backend_runtime
 
 
+def test_backend_only_state_reports_stale_inputs_without_probing_docker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vigil_cli import application
+
+    monkeypatch.setattr(application, "application_root_for_workspace", lambda _: tmp_path)
+    monkeypatch.setattr(restart_manifest, "_readyz_backend_runtime", lambda _: restart_manifest.BackendProbe(
+        reachable=True, runtime={
+            "install_root": str(tmp_path), "application_root": str(tmp_path),
+            "restart_required": True, "changed_inputs": ["app/services/remediation.py"],
+        },
+    ))
+    monkeypatch.setattr(restart_manifest.docker, "daemon_available", lambda **_: pytest.fail("backend probe must not query Docker"))
+    state = restart_manifest.backend_state(tmp_path)
+    assert state.state == "stale"
+    assert state.remedy == "vigil orchestrator restart"
+    assert "app/services/remediation.py" in state.detail
+
+
 class FakeStream(io.StringIO):
     def __init__(self, *, tty: bool) -> None:
         super().__init__()
@@ -57,7 +76,7 @@ def _styled_environment(monkeypatch: pytest.MonkeyPatch) -> None:
 def _no_live_orchestrator(monkeypatch: pytest.MonkeyPatch):
     """Keep the backend consumer hermetic.
 
-    ``_backend_state`` asks the real ``/readyz``, so on a maintainer's box with a
+    ``backend_state`` asks the real ``/readyz``, so on a maintainer's box with a
     live orchestrator these assertions would read that process instead of the
     fixture. Tests that care about a reachable backend override this.
 
@@ -802,7 +821,7 @@ def _backend_state_for(
     monkeypatch.setattr(
         orchestrator, "orchestrator_status_payload", lambda _root, **_kw: payload
     )
-    return restart_manifest._backend_state(install_root)
+    return restart_manifest.backend_state(install_root)
 
 
 def test_a_reachable_backend_with_no_runtime_block_is_unknown_not_cleared(
@@ -936,7 +955,7 @@ def test_an_unclassifiable_probe_failure_is_unknown(
 def test_readyz_records_why_it_could_not_be_reached(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """The snapshot must keep the OSError apart, not collapse it into one bool.
 
-    `_backend_state` cannot separate a refusal from a timeout if the only thing
+    `backend_state` cannot separate a refusal from a timeout if the only thing
     it is handed is `reachable: False`.
     """
     import urllib.request

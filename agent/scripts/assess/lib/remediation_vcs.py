@@ -137,6 +137,20 @@ def _jj_store(path: Path) -> Path:
     )
 
 
+def tree_id(path: Path, ref: str) -> str:
+    """Exact complete Git tree identity, including modes, symlinks and submodules."""
+    commit = resolve_revision(path, ref)
+    if is_jj(path):
+        if _log(path, commit, "conflict") == "true":
+            raise ValueError("Conflicted revisions cannot identify tested content")
+        store = _jj_store(path) / "store"
+        target = (store / "git_target").read_text().strip()
+        args = ["git", "--git-dir", str((store / target).resolve())]
+    else:
+        args = ["git", "-C", str(path)]
+    return _run([*args, "rev-parse", "--verify", "--end-of-options", f"{commit}^{{tree}}"])
+
+
 def registered(repo: Path, path: Path) -> bool:
     if path.is_symlink():
         return False
@@ -246,6 +260,99 @@ def create_workspace(repo: Path, path: Path, name: str, base: str) -> None:
         _run(command(path, "bookmark", "create", name, "-r", "@"))
     else:
         _run(["git", "-C", str(repo), "worktree", "add", "-b", name, str(path), resolved])
+
+
+def ensure_unpublished_branches(path: Path, names: list[str]) -> None:
+    """Refuse refs already present at the publishing origin; fail closed on errors."""
+    if is_jj(path):
+        remotes = _run(command(path, 'git', 'remote', 'list')).splitlines()
+        configured = any(line.split(maxsplit=1)[0] == 'origin' for line in remotes if line.split())
+    else:
+        configured = 'origin' in _run(['git', '-C', str(path), 'remote']).splitlines()
+    if not configured:
+        return
+    origin = _origin_url(path)
+    refs = [f'refs/heads/{name}' for name in names]
+    result = subprocess.run(['git', 'ls-remote', '--exit-code', '--', origin, *refs],
+                            capture_output=True, text=True, timeout=30)
+    if result.returncode == 2:
+        return
+    if result.returncode:
+        raise ValueError('Cannot verify unpublished case branches at origin')
+    raise ValueError('Case branch exists at origin; reconcile publication before finalizing')
+
+
+def _finalization_state(path: Path, old_name: str, new_name: str, expected_revision: str) -> tuple[bool, bool]:
+    """Validate workspace/ref safety and report old/new local ref presence."""
+    for name in (old_name, new_name):
+        if not isinstance(name, str) or name == '@' or name.startswith('-'):
+            raise ValueError('Case branch must be a valid Git branch name')
+        try:
+            if _run(['git', 'check-ref-format', '--branch', name]) != name:
+                raise ValueError('Case branch must be a valid Git branch name')
+        except subprocess.CalledProcessError:
+            raise ValueError('Case branch must be a valid Git branch name') from None
+    if not registered(path, path):
+        raise ValueError('Case workspace is not registered')
+    if status(path) or revision(path) != expected_revision:
+        raise ValueError('Case source changed before branch finalization')
+    if is_jj(path):
+        remote = _run(command(path, 'bookmark', 'list', '--all-remotes',
+                              f'exact:{old_name}', f'exact:{new_name}',
+                              '-T', 'if(remote && remote != "git", name ++ "\\n")'))
+        existing = _run(command(path, 'bookmark', 'list', f'exact:{new_name}',
+                                '-T', 'if(!remote, name ++ "\\n")'))
+        old_exists = bool(_run(command(path, 'bookmark', 'list', f'exact:{old_name}',
+                                       '-T', 'if(!remote, name ++ "\\n")')))
+    else:
+        refs = _run(['git', '-C', str(path), 'for-each-ref', '--format=%(refname)',
+                     'refs/remotes/']).splitlines()
+        remote = any(ref.removeprefix('refs/remotes/').partition('/')[2] in {old_name, new_name}
+                     for ref in refs)
+        refs = _run(['git', '-C', str(path), 'for-each-ref', '--format=%(refname)',
+                     'refs/heads/']).splitlines()
+        existing = f'refs/heads/{new_name}' in refs
+        old_exists = f'refs/heads/{old_name}' in refs
+    if remote:
+        raise ValueError('Case branch has a remote reference; reconcile publication before finalizing')
+    return old_exists, bool(existing)
+
+
+def verify_finalized_branch(path: Path, old_name: str, new_name: str, expected_revision: str) -> None:
+    """Attest a completed rename without changing refs or commits."""
+    old_exists, existing = _finalization_state(path, old_name, new_name, expected_revision)
+    if not existing or not branch_matches(path, new_name) or (old_exists and old_name != new_name):
+        raise ValueError('Finalized branch must replace the old branch in the registered workspace')
+
+
+def prepare_branch_finalization(path: Path, old_name: str, new_name: str, expected_revision: str) -> bool:
+    """Validate a planned rename before persisting recovery intent; return whether needed."""
+    old_exists, existing = _finalization_state(path, old_name, new_name, expected_revision)
+    if old_name == new_name:
+        if not branch_matches(path, old_name):
+            raise ValueError('Case branch differs from the registered workspace')
+        return False
+    if existing:
+        if not old_exists and branch_matches(path, new_name):
+            return False
+        raise ValueError('Final case branch already exists')
+    if not old_exists or not branch_matches(path, old_name):
+        raise ValueError('Case branch differs from the registered workspace')
+    return True
+
+
+def finalize_branch(path: Path, old_name: str, new_name: str, expected_revision: str) -> None:
+    """Rename a case ref, accepting a completed rename after registration failure.
+
+    Callers must also check publication state and the actual origin before renaming.
+    """
+    if not prepare_branch_finalization(path, old_name, new_name, expected_revision):
+        return
+    if is_jj(path):
+        _run(command(path, 'bookmark', 'rename', old_name, new_name))
+    else:
+        _run(['git', '-C', str(path), 'branch', '-m', old_name, new_name])
+    verify_finalized_branch(path, old_name, new_name, expected_revision)
 
 
 def push(path: Path, name: str, approved: str, *, expected_remote_revision: str | None = None) -> None:

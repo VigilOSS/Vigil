@@ -187,7 +187,8 @@ def container_host_url(url: str) -> str:
     return url.replace("127.0.0.1", "host.docker.internal").replace("localhost", "host.docker.internal")
 
 
-def add_assess_import_path(install_root: Path) -> None:
-    scripts_dir = agent_root(install_root) / "scripts"
+def add_assess_import_path(install_root: Path, *, application_root: Path | None = None) -> None:
+    # A caller may reuse its already-validated application for this operation.
+    scripts_dir = (application_root / "agent" if application_root is not None else agent_root(install_root)) / "scripts"
     if str(scripts_dir) not in sys.path:
         sys.path.insert(0, str(scripts_dir))

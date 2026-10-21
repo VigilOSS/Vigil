@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from typing import Any, Literal
+from pathlib import PurePosixPath
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, PositiveInt, field_validator, model_validator
 
@@ -14,10 +15,54 @@ router = APIRouter(prefix="/engagements/{engagement_key}/remediation", tags=["re
 class CaseCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
     source_type: str = Field(min_length=1, pattern=r"^[a-z][a-z0-9_-]*$")
-    source_key: str = Field(min_length=1)
+    source_key: str | None = Field(default=None, min_length=1)
+    external_provider: str | None = Field(default=None, min_length=1)
+    external_key: str | None = Field(default=None, min_length=1)
     title: str = Field(min_length=1)
     snapshot: dict[str, Any]
     finding_ids: list[PositiveInt] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def source_and_identity(self):
+        if self.source_key is None and self.source_type not in {"manual", "report"}:
+            raise ValueError("Source key is required for this provider")
+        _paired_external(self.external_provider, self.external_key)
+        return self
+
+
+def _paired_external(provider: str | None, key: str | None) -> None:
+    if (provider is None) != (key is None) or any(
+        value is not None and not value.strip() for value in (provider, key)
+    ):
+        raise ValueError("External provider and key must both be nonempty or both null")
+
+
+class CaseIdentity(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    expected_external_provider: str | None
+    expected_external_key: str | None
+    external_provider: str | None
+    external_key: str | None
+
+    @model_validator(mode="after")
+    def paired_identity(self):
+        _paired_external(self.expected_external_provider, self.expected_external_key)
+        _paired_external(self.external_provider, self.external_key)
+        return self
+
+
+class BranchFinalization(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    old_branch: str = Field(min_length=1)
+    new_branch: str = Field(min_length=1)
+    revision: str = Field(min_length=1)
+
+
+class PublicationIntent(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    review_digest: str = Field(min_length=1)
+    revision: str = Field(min_length=1)
+    branch: str = Field(min_length=1)
 
 
 class CasePatch(BaseModel):
@@ -43,13 +88,24 @@ class VerificationRequirement(BaseModel):
     kind: str = Field(min_length=1)
     methods: list[str] = Field(min_length=1)
     outcome: str = Field(default="passed", min_length=1)
-    revision: Literal["current", "ancestor"] = "current"
+    revision: Literal["current"] = "current"
     execution: Literal["executed", "reasoned"] = "executed"
     rationale: str = ""
     shared_environment: str | None = Field(default=None, min_length=1)
     runtime_identity_required: bool = False
     browser_purpose: Literal["happy-path", "bad-path", "other"] | None = None
     legitimate_use_control: bool = False
+    fix_paths: list[str] = Field(default_factory=list)
+
+    @field_validator("fix_paths")
+    @classmethod
+    def repository_fix_files(cls, value: list[str]) -> list[str]:
+        if len(value) != len(set(value)) or any(
+            not path or path == "." or PurePosixPath(path).is_absolute()
+            or ".." in PurePosixPath(path).parts or str(PurePosixPath(path)) != path for path in value
+        ):
+            raise ValueError("fix_paths must name distinct repository-relative files")
+        return sorted(value)
 
     @field_validator("methods")
     @classmethod
@@ -60,6 +116,13 @@ class VerificationRequirement(BaseModel):
 
     @model_validator(mode="after")
     def validate_browser_control(self):
+        if self.kind == "red-test" and (
+            self.execution != "executed" or self.outcome != "failed_as_expected" or not self.fix_paths
+            or self.shared_environment or self.runtime_identity_required
+        ):
+            raise ValueError("Red tests require local executed expected failure and explicit fix_paths")
+        if self.kind != "red-test" and self.fix_paths:
+            raise ValueError("Only red-test requirements name fix_paths")
         methods = {method.casefold() for method in self.methods}
         browser = methods & {"stagehand", "browse"}
         if self.browser_purpose is not None and (not browser or methods - {"stagehand", "browse"}):
@@ -156,6 +219,7 @@ class EvidenceCreate(BaseModel):
     executed_directory: str | None = None
     shared_environment: str | None = None
     environment_token: str | None = None
+    scratch_proof: dict[str, Any] | None = None
 
 
 class ApprovalCreate(BaseModel):
@@ -213,6 +277,21 @@ def create_case(engagement_key: str, body: CaseCreate):
     return remediation.create_case(engagement_key, body.model_dump())
 
 
+@router.post("/cases/{case_id}/identity")
+def update_identity(engagement_key: str, case_id: int, body: CaseIdentity):
+    return remediation.update_identity(engagement_key, case_id, body.model_dump())
+
+
+@router.post("/cases/{case_id}/finalize-branch")
+def finalize_branch(engagement_key: str, case_id: int, body: BranchFinalization):
+    return remediation.finalize_branch(engagement_key, case_id, body.model_dump())
+
+
+@router.post("/cases/{case_id}/publication-intent")
+def publication_intent(engagement_key: str, case_id: int, body: PublicationIntent):
+    return remediation.publication_intent(engagement_key, case_id, body.model_dump())
+
+
 @router.post("/cases/{case_id}/resolve-source")
 def resolve_source(engagement_key: str, case_id: int, body: CaseCreate):
     return remediation.resolve_source(engagement_key, case_id, body.model_dump())
@@ -234,8 +313,27 @@ def confirm_environment(engagement_key: str, body: EnvironmentConfirm):
 
 
 @router.get("/cases/{case_id}")
-def get_case(engagement_key: str, case_id: int):
-    return remediation.get_case(engagement_key, case_id)
+def get_case(engagement_key: str, case_id: int,
+             evidence_limit: int | None = Query(default=None, ge=1, le=100),
+             history_limit: int | None = Query(default=None, ge=1, le=100)):
+    return remediation.get_case(engagement_key, case_id, evidence_limit=evidence_limit, history_limit=history_limit)
+
+
+@router.get("/cases/{case_id}/evidence")
+def list_evidence(engagement_key: str, case_id: int,
+                  limit: int = Query(default=20, ge=1, le=100), offset: int = Query(default=0, ge=0)):
+    return remediation.case_records(engagement_key, case_id, "evidence", limit=limit, offset=offset)
+
+
+@router.get("/cases/{case_id}/history")
+def list_history(engagement_key: str, case_id: int,
+                 limit: int = Query(default=20, ge=1, le=100), offset: int = Query(default=0, ge=0)):
+    return remediation.case_records(engagement_key, case_id, "history", limit=limit, offset=offset)
+
+
+@router.get("/cases/{case_id}/evidence/{evidence_id}")
+def get_evidence(engagement_key: str, case_id: int, evidence_id: int):
+    return remediation.evidence_record(engagement_key, case_id, evidence_id)
 
 
 @router.get("/cases/{case_id}/diff")

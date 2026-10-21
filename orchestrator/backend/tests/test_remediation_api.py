@@ -34,12 +34,14 @@ def _case(client, isolate_settings, **overrides):
     payload.update(overrides)
     response = client.post(f"{BASE}/cases", json=payload)
     assert response.status_code == 201, response.text
-    # These lifecycle regressions exercise already-recorded prose plans and their
-    # evidence history. New-plan contracts are covered by test_remediation_policy.
+    # Lifecycle tests configure native regression and browser requirements explicitly.
     identifier = response.json()["id"]
     with db.get_connection() as connection:
-        connection.execute("UPDATE remediation_cases SET verification_plan=? WHERE id=?",
-                           ("Recorded verification plan", identifier))
+        connection.execute("UPDATE remediation_cases SET verification_plan=?,verification_requirements_json=? WHERE id=?",
+                           ("Recorded verification plan", json.dumps({"requirements": [
+                               {"kind": "green-test", "methods": ["Laravel", "pytest"], "outcome": "passed", "revision": "current", "execution": "executed"},
+                               {"kind": "stagehand", "methods": ["stagehand", "browse"], "outcome": "passed", "revision": "current", "execution": "executed", "browser_purpose": "happy-path"},
+                           ]}), identifier))
     return client.get(f"{BASE}/cases/{identifier}").json()
 
 
@@ -76,11 +78,12 @@ def _review_evidence(
         file = proof_dir / f"{kind}.txt"
         file.write_text(f"{kind}: {outcome}\n")
         response = client.post(f"{BASE}/cases/{case_id}/evidence", json={
-            "kind": kind, "method": method, "environment": "local", "outcome": outcome,
+            "kind": "baseline" if kind == "red-test" else kind, "method": method, "environment": "local", "outcome": outcome,
             "command": "php artisan test --filter AccountScopeTest",
             "observed": outcome, "proved": "Security boundary regression",
             "artifact_path": str(file.relative_to(root)),
             "revision": red_revision if kind == "red-test" else (green_revision or revision),
+            "executed_revision": red_revision if kind == "red-test" else (green_revision or revision),
         })
         assert response.status_code == 201, response.text
     run = case_root / "stagehand" / "local-happy"
@@ -99,12 +102,22 @@ def _review_evidence(
     for file in sorted(run.iterdir()):
         response = client.post(f"{BASE}/cases/{case_id}/evidence", json={
             "kind": "screenshot" if file.suffix == ".png" else "stagehand",
+            "outcome": "passed",
             "method": "stagehand", "environment": "local", "command": "trusted script via Chrome CDP",
             "observed": "passed", "proved": "Human happy path rehearsed",
             "artifact_path": str(file.relative_to(root)),
             "revision": (stagehand_artifact_revisions or {}).get(file.name, stagehand_revision or revision),
+            "executed_revision": (stagehand_artifact_revisions or {}).get(file.name, stagehand_revision or revision),
         })
         assert response.status_code == 201, response.text
+    # A confirmed served-revision lease is fixture state; artifact tests preserve
+    # browser runtime validation rather than bypassing it.
+    token = f"browser-{case_id}-{revision}"
+    with db.get_connection() as connection:
+        connection.execute("INSERT OR IGNORE INTO remediation_environment_leases(token,scope,environment,case_id,revision,actor,observed_revision,released_at) VALUES(?,?,?,?,?,?,?,CURRENT_TIMESTAMP)",
+                           (token, str(root.resolve()), "acme-local", case_id, revision, "Acme", revision))
+        connection.execute("UPDATE remediation_evidence SET shared_environment=?,environment_token=?,runtime_revision=revision WHERE case_id=? AND method='stagehand' AND revision=?",
+                           ("acme-local", token, case_id, revision))
 
 
 def test_remediation_intake_preserves_snapshot_and_hints_without_merging(client, isolate_settings):
@@ -253,60 +266,6 @@ def test_remediation_rejects_claimed_revision_that_is_not_worktree_head(client, 
     assert _approve(client, case["id"]).status_code == 409
 
 
-@pytest.mark.parametrize(
-    ("red_revision_kind", "expected_ready"),
-    [("sibling", False), ("same-commit", False), ("ancestor", True)],
-)
-def test_remediation_review_requires_red_test_commit_ancestor(
-    client, isolate_settings, red_revision_kind, expected_ready,
-):
-    case = _case(client, isolate_settings)
-    root = isolate_settings["engagements_dir"] / KEY
-    worktree = root / "remediation" / "cases" / str(case["id"]) / "worktree"
-    worktree.mkdir(parents=True)
-    code = worktree / "fix.php"
-    code.write_text("base")
-    subprocess.run(["git", "init", "-q", "--initial-branch=main", str(worktree)], check=True)
-
-    def commit(message: str) -> str:
-        subprocess.run(["git", "-C", str(worktree), "add", "fix.php"], check=True)
-        subprocess.run([
-            "git", "-C", str(worktree), "-c", "user.name=Vigil Test",
-            "-c", "user.email=test@example.invalid", "commit", "-qm", message,
-        ], check=True)
-        return subprocess.check_output(["git", "-C", str(worktree), "rev-parse", "HEAD"], text=True).strip()
-
-    ancestor = commit("Base")
-    subprocess.run(["git", "-C", str(worktree), "switch", "-qc", "red-branch"], check=True)
-    code.write_text("red branch")
-    sibling = commit("Unrelated red test")
-    subprocess.run(["git", "-C", str(worktree), "switch", "-q", "main"], check=True)
-    subprocess.run(["git", "-C", str(worktree), "switch", "-qc", "feature"], check=True)
-    code.write_text("fixed")
-    revision = commit("Fix")
-    red_revision = {
-        "sibling": sibling,
-        "same-commit": revision, "ancestor": ancestor,
-    }[red_revision_kind]
-
-    assert client.patch(f"{BASE}/cases/{case['id']}", json={
-        "worktree_path": str(worktree), "worktree_revision": revision,
-    }).status_code == 200
-    assert client.patch(f"{BASE}/cases/{case['id']}/baseline", json={
-        "outcome": "runtime_reproduced", "method": "Laravel", "proved": "Reproduced",
-    }).status_code == 200
-    assert client.patch(f"{BASE}/cases/{case['id']}/verification-plan", json={
-        "verification_plan": "Run Laravel regression and rehearse happy path",
-    }).status_code == 200
-    _review_evidence(client, root, case["id"], revision, red_revision=red_revision)
-    assert client.post(f"{BASE}/cases/{case['id']}/transition", json={
-        "status": "review", "actor": "operator", "reason": "Ready",
-    }).status_code == 200
-    detail = client.get(f"{BASE}/cases/{case['id']}").json()
-    assert detail["review_evidence_ready"] is expected_ready
-    assert _approve(client, case["id"]).status_code == (201 if expected_ready else 409)
-
-
 def test_remediation_case_without_plan_requires_plan_requirements(client, isolate_settings):
     _engagement(isolate_settings)
     response = client.post(f"{BASE}/cases", json={
@@ -316,7 +275,7 @@ def test_remediation_case_without_plan_requires_plan_requirements(client, isolat
     assert detail["review_evidence_missing"] == ["verification plan with evidence requirements"]
 
 
-def test_remediation_prose_plan_accepts_red_green_from_any_test_runner(client, isolate_settings):
+def test_remediation_explicit_plan_accepts_native_test_runner(client, isolate_settings):
     case = _case(client, isolate_settings)
     root = isolate_settings["engagements_dir"] / KEY
     worktree = root / "remediation" / "cases" / str(case["id"]) / "worktree"
@@ -356,7 +315,7 @@ def test_remediation_evidence_resolves_green_and_stagehand_commit_refs(
     )
     detail = client.get(endpoint).json()
     assert detail["review_evidence_ready"] is True
-    assert all(item["revision"] == revision for item in detail["evidence"] if item["kind"] != "red-test")
+    assert all(item["revision"] == revision for item in detail["evidence"] if item["kind"] != "baseline")
 
 
 @pytest.mark.parametrize("stale_artifact", ["script.py", "screen.png"])
@@ -415,7 +374,7 @@ def test_remediation_evidence_rejects_unresolvable_revision(client, isolate_sett
     assert client.get(f"{BASE}/cases/{case['id']}").json()["evidence"] == []
 
 
-def test_remediation_legacy_approval_requires_valid_red_evidence_at_approval_cutoff(client, isolate_settings):
+def test_remediation_approval_requires_valid_evidence_at_approval_cutoff(client, isolate_settings):
     case = _case(client, isolate_settings)
     root = isolate_settings["engagements_dir"] / KEY
     worktree = root / "remediation" / "cases" / str(case["id"]) / "worktree"
@@ -446,8 +405,8 @@ def test_remediation_legacy_approval_requires_valid_red_evidence_at_approval_cut
 
     with db.get_connection() as connection:
         connection.execute(
-            "UPDATE remediation_evidence SET revision=? WHERE case_id=? AND kind='red-test'",
-            (revision, case["id"]),
+            "UPDATE remediation_evidence SET executed_revision=? WHERE case_id=? AND kind='green-test'",
+            ("invalid-executed-source", case["id"]),
         )
     historical_digest = client.get(f"{BASE}/cases/{case['id']}").json()["review_digest"]
     with db.get_connection() as connection:
@@ -457,14 +416,11 @@ def test_remediation_legacy_approval_requires_valid_red_evidence_at_approval_cut
         )
     proof = root / "remediation" / "cases" / str(case["id"]) / "proofs" / "later-red.txt"
     proof.write_text("failing test at pre-fix commit\n")
-    ancestor = subprocess.check_output([
-        "git", "-C", str(worktree), "rev-parse", "HEAD^",
-    ], text=True).strip()
     later = client.post(f"{BASE}/cases/{case['id']}/evidence", json={
-        "kind": "red-test", "method": "Laravel", "environment": "local",
-        "outcome": "failed_as_expected", "command": "php artisan test --filter AccountScopeTest",
+        "kind": "green-test", "method": "Laravel", "environment": "local",
+        "outcome": "passed", "command": "php artisan test --filter AccountScopeTest",
         "observed": "failed", "proved": "Security boundary regression",
-        "artifact_path": str(proof.relative_to(root)), "revision": ancestor,
+        "artifact_path": str(proof.relative_to(root)), "revision": revision, "executed_revision": revision,
     })
     assert later.status_code == 201, later.text
     detail = client.get(f"{BASE}/cases/{case['id']}").json()
@@ -732,7 +688,10 @@ def test_remediation_stagehand_result_shape_preserves_case_access(
     assert response.status_code == 200, response.text
     detail = response.json()
     assert detail["review_evidence_ready"] is False
-    assert ("passed browser happy-path result.json at current revision" in detail["review_evidence_missing"]) is result_missing
+    browser_missing = remediation._browser_evidence_missing(
+        {"id": case["id"], "worktree_revision": None}, detail["evidence"], root,
+    )
+    assert ("passed browser happy-path result.json at current revision" in browser_missing) is result_missing
     assert detail["evidence"][0]["id"] == evidence.json()["id"]
     if method == "PATCH":
         assert detail["title"] == "Updated case"
@@ -797,7 +756,7 @@ def test_remediation_review_requires_baseline_outcome(client, isolate_settings):
     assert allowed.status_code == 200, allowed.text
     assert _approve(client, case["id"]).status_code == 409
     missing = client.get(f"{BASE}/cases/{case['id']}").json()["review_evidence_missing"]
-    assert "red test" in " ".join(missing)
+    assert "green-test" in " ".join(missing)
     _review_evidence(client, isolate_settings["engagements_dir"] / KEY, case["id"], revision)
     assert _approve(client, case["id"]).status_code == 201
     client.post(f"{BASE}/cases/{case['id']}/transition", json={
@@ -1331,14 +1290,21 @@ def test_remediation_review_accepts_complete_browse_bundle(client, isolate_setti
         (run / "commands.json").write_text(json.dumps(commands))
     with db.get_connection() as conn:
         conn.execute('DELETE FROM remediation_evidence WHERE case_id=? AND method=?', (case['id'], 'stagehand'))
+        plan = json.loads(conn.execute('SELECT verification_requirements_json FROM remediation_cases WHERE id=?', (case['id'],)).fetchone()[0])
+        plan['requirements'][1]['kind'] = 'browse'
+        conn.execute('UPDATE remediation_cases SET verification_requirements_json=? WHERE id=?', (json.dumps(plan), case['id']))
     for file in run.iterdir():
         response = client.post(endpoint + '/evidence', json={
             'kind': 'screenshot' if file.suffix == '.png' else 'browse', 'method': 'browse',
             'environment': 'local', 'command': 'trusted script with browse tools',
             'observed': 'Form worked', 'proved': 'Owner update saved',
             'artifact_path': str(file.relative_to(root)), 'revision': revision,
+            'executed_revision': revision, 'outcome': 'passed',
         })
         assert response.status_code == 201, response.text
+    with db.get_connection() as conn:
+        conn.execute("UPDATE remediation_evidence SET shared_environment=?,environment_token=?,runtime_revision=revision WHERE case_id=? AND method='browse'",
+                     ('acme-local', f'browser-{case["id"]}-{revision}', case['id']))
     if damage in {"commands.json", "script.py", "screen.png"}:
         (run / damage).write_text("tampered")
     assert client.get(endpoint).json()['review_evidence_ready'] is (damage is None)
