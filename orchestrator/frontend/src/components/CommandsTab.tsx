@@ -1,59 +1,105 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
-import { engagementHref } from "../lib/workspaceRoutes";
-import { CopyInline } from "./formatting";
-import type {
-  AssessmentCommandRun,
-  AssessmentCommandRunDetail,
-  CommandRunStatus,
-} from "../lib/api";
-import {
-  getAssessmentCommandRun,
-  listAssessmentCommandRuns,
-} from "../lib/api";
-import { useBodyScrollLock, useModalFocus } from "../lib/modalScrollLock";
-import { Skeleton, TableSkeleton } from "./Skeletons";
+// ── CommandsTab ───────────────────────────────────────────────────────
+// Every tool command agents ran through Vigil. The tab reads the operator
+// command ledger (lib/commandsApi.ts): engagement and filter counts
+// (`/command-runs/facets`), server-paged rows (`/page`, via the grid), one
+// run's full record (`/command-runs/{id}`) and its place in the paged order
+// (`/position`) for the record's Previous / Next. Search, filters, sort and
+// the "needs attention" rule all run on the server, so counts and stepping
+// cover the whole ledger, never a loaded slice. Opening a run replaces the
+// list with the shared record view; Back, Escape and browser Back return to
+// the list with its filters, sort and scroll intact. Scope, chips, search and
+// sort also survive leaving the tab (sessionStorage, per engagement).
 
-// ag-grid is heavy (~470 kB). Lazy-load the grid so it lands in a
-// code-split chunk and never bloats the main entry bundle. The Suspense
-// fallback reuses the existing TableSkeleton gate.
+import { lazy, Suspense, useCallback, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode, type RefObject } from "react";
+import {
+  DEFAULT_COMMAND_FILTERS,
+  DEFAULT_COMMAND_SORT,
+  COMMAND_SORT_LABELS,
+  activeCommandFilterCount,
+  commandFiltersKey,
+  commandStatusReason,
+  commandViewKey,
+  fetchCommandFacets,
+  fetchCommandPage,
+  fetchCommandPosition,
+  getCommandRunRecord,
+  parseCommandView,
+  searchToken,
+  type CommandView,
+  type CommandFacet,
+  type CommandFilters,
+  type CommandLedgerRow,
+  type CommandScope,
+  type CommandSort,
+} from "../lib/commandsApi";
+import type { AssessmentCommandRunDetail } from "../lib/api";
+import { formatDuration } from "../lib/serverTime";
+import { engagementHref, writeWorkspaceHash } from "../lib/workspaceRoutes";
+import { useBodyScrollLock, useModalFocus } from "../lib/modalScrollLock";
+import { CopyInline } from "./formatting";
+import { KVTime } from "./drawer/DrawerKit";
+import { JsonView } from "./JsonView";
+import { CardSkeleton, Skeleton, SlowLoadHint, TableSkeleton } from "./Skeletons";
+import {
+  RecordBody,
+  RecordCopyButton,
+  RecordCopyLinkButton,
+  RecordHeader,
+  RecordTabs,
+  RecordView,
+  useResultsScrollMemory,
+} from "./record/RecordView";
+import { useRecordPosition } from "./record/recordNavigation";
+import { useCoalescedRequest, useCoalescedRunner } from "../lib/useCoalescedRequest";
+import { useLiveRefreshToken } from "../lib/useLiveRefreshToken";
+import {
+  ClearFiltersButton,
+  EmptyState,
+  FacetChipGroup,
+  FilterGroup,
+  PageHeader,
+  ResultsSummary,
+  ScopeToggle,
+  StatusPill,
+  compareStatus,
+  describeSort,
+  statusLabel,
+  statusTone,
+} from "./ui";
+import type { CommandsGridHandle } from "./CommandsGrid";
+import "../styles/commands.css";
+
+// ag-grid is heavy (~470 kB): the grid lands in a code-split chunk.
 const CommandsGrid = lazy(() => import("./CommandsGrid"));
 
-// ── Props ─────────────────────────────────────────────────────────────
 type CommandsTabProps = {
   engagementKey: string;
+  /** Bumped by EngagementPage on live updates (WebSocket / polling). */
+  refreshVersion?: number;
+  /** `command=<id>` from the route: opens that run's record (links from run receipts). */
+  commandId?: number;
+  /** `dtab=` from the route: the open record's section. */
+  initialDrawerTab?: string;
+  /** Reports the ledger's "needs attention" total from each counts read, for the rail badge while open. */
+  onAttentionCount?: (count: number) => void;
 };
 
-// ── Constants ─────────────────────────────────────────────────────────
-// Initial fetch cap. Findings/Intel follow the same approach: pull a
-// page wide enough to cover every realistic engagement and filter
-// client-side. Anything past this cap is lost to the initial view;
-// in practice a single engagement's command-run count lives well under.
-const INITIAL_FETCH_LIMIT = 1000;
+const SEARCH_DEBOUNCE_MS = 300;
+// A burst of live updates reloads counts and rows at most this often (with a trailing reload).
+const LIVE_RELOAD_MIN_MS = 10_000;
+// Facet values the server returns; the chip rows show the top few and expand to the rest.
+const FACET_LIMIT = 200;
+const CHIPS_SHOWN = 10;
+// The chip text for runs that declared no technique or probe kind.
+const NONE_DECLARED = "None declared";
+const PALETTE_LIMIT = 30;
 
-// Status color map — drives the row-left bar, status pill, filter chips,
-// and sparkline bars. Trust failures stay distinct from ordinary tool failure.
-export const STATUS_COLORS: Record<CommandRunStatus, string> = {
-  queued: "var(--chip-slate)",
-  running: "var(--chip-navy)",
-  completed: "var(--chip-green)",
-  failed: "var(--chip-red)",
-  timed_out: "var(--chip-orange)",
-  killed: "var(--chip-maroon)",
-  lost: "var(--chip-purple)",
-};
-const STATUS_ORDER: readonly CommandRunStatus[] = [
-  "queued", "running", "completed", "failed", "timed_out", "killed", "lost",
-];
-const INCOMPLETE_OUTPUT_RETENTION = new Set([
-  "measurement_conflict",
-  "partially_measured",
-  "preview_only",
-  "unmeasured",
-]);
+const ATTENTION_RULE =
+  "Runs that did not plainly complete or succeed, returned partial results, were superseded, or whose output is unsettled, untrusted, suppressed or only partly measured.";
 
-// Tool color map. Keep the bin name keyed so it also works for short-tail
-// tools the operator might pipe through. Anything missing falls back to
-// a hash-derived color so colors are stable across reloads.
+// ── Colors ────────────────────────────────────────────────────────────
+// Tool, agent, technique and probe-kind hues (tags and chip dots). Unknown
+// values fall back to a hash-derived color so colors stay stable across reloads.
 const TOOL_COLORS: Record<string, string> = {
   nmap: "var(--chip-teal)",
   curl: "var(--chip-navy)",
@@ -80,9 +126,7 @@ const TOOL_COLORS: Record<string, string> = {
   python3: "var(--chip-green)",
 };
 
-// Small hand-tuned palette for the hash fallback so colors stay within the
-// existing design language.
-const TOOL_HASH_PALETTE = [
+const HASH_PALETTE = [
   "var(--chip-navy)",
   "var(--chip-teal)",
   "var(--chip-green)",
@@ -97,21 +141,18 @@ const TOOL_HASH_PALETTE = [
 
 function hashString(s: string): number {
   let h = 0;
-  for (let i = 0; i < s.length; i += 1) {
-    h = (h * 31 + s.charCodeAt(i)) >>> 0;
-  }
+  for (let i = 0; i < s.length; i += 1) h = (h * 31 + s.charCodeAt(i)) >>> 0;
   return h;
 }
 
-export function toolColor(bin: string): string {
+export function toolColor(bin: string | null | undefined): string {
   const key = (bin || "").toLowerCase();
   if (TOOL_COLORS[key]) return TOOL_COLORS[key];
   if (!key) return "var(--chip-muted-grey)";
-  return TOOL_HASH_PALETTE[hashString(key) % TOOL_HASH_PALETTE.length];
+  return HASH_PALETTE[hashString(key) % HASH_PALETTE.length];
 }
 
-// Agent role color map. Keyed on a substring of the agent name so renames
-// to `recon-analyst`, `recon-v2`, etc. still get the recon hue.
+// Keyed on a substring so `recon-analyst`, `recon-v2` keep the recon hue.
 const AGENT_ROLE_COLORS: { key: string; color: string }[] = [
   { key: "recon", color: "var(--chip-navy)" },
   { key: "surface", color: "var(--chip-teal)" },
@@ -123,49 +164,37 @@ const AGENT_ROLE_COLORS: { key: string; color: string }[] = [
   { key: "code", color: "var(--chip-ochre)" },
 ];
 
-export function agentColor(name: string): string {
+export function agentColor(name: string | null | undefined): string {
   const n = (name || "").toLowerCase();
-  for (const { key, color } of AGENT_ROLE_COLORS) {
-    if (n.includes(key)) return color;
-  }
+  for (const { key, color } of AGENT_ROLE_COLORS) if (n.includes(key)) return color;
   if (!n) return "var(--chip-muted-grey)";
-  return TOOL_HASH_PALETTE[hashString(n) % TOOL_HASH_PALETTE.length];
+  return HASH_PALETTE[hashString(n) % HASH_PALETTE.length];
 }
 
-// ── Technique color map ───────────────────────────────────────────────
-// Five tiers, grouped by vulnerability family. Follows the inline-style
-// + CSS-class pattern used for TOOL_COLORS / AGENT_ROLE_COLORS /
-// ITYPE_COLORS in IntelTab. Unknown values fall back to a hash-derived
-// color from TOOL_HASH_PALETTE — the enum may grow at the server side
-// without needing a frontend redeploy.
+// Five tiers by vulnerability family; the enum may grow server-side.
 const TECHNIQUE_COLORS: Record<string, string> = {
-  // Red tier — classic high-severity web/app injection + exec.
   SSRF: "var(--chip-red)",
   XSS: "var(--chip-red)",
   XXE: "var(--chip-red)",
   SSTI: "var(--chip-red)",
   CMDI: "var(--chip-red)",
   RCE: "var(--chip-red)",
-  // Orange tier — injection + smuggling + redirect families.
   SQLI: "var(--chip-orange)",
   NOSQLI: "var(--chip-orange)",
   LFI: "var(--chip-orange)",
   RFI: "var(--chip-orange)",
   "REQUEST-SMUGGLING": "var(--chip-orange)",
   "OPEN-REDIRECT": "var(--chip-orange)",
-  // Purple tier — authz / session / CSRF-family.
   IDOR: "var(--chip-purple)",
   AUTH: "var(--chip-purple)",
   JWT: "var(--chip-purple)",
   CSRF: "var(--chip-purple)",
   CORS: "var(--chip-purple)",
-  // Teal tier — discovery / validation (non-attack probes).
   RECON: "var(--chip-teal)",
   DISCOVERY: "var(--chip-teal)",
   OSINT: "var(--chip-teal)",
   FUZZ: "var(--chip-teal)",
   "CVE-VALIDATION": "var(--chip-teal)",
-  // Muted tier — catch-all / miscellaneous.
   "INFO-DISCLOSURE": "var(--chip-muted-grey)",
   "RATE-LIMIT": "var(--chip-muted-grey)",
   "EXPLOIT-CHAIN": "var(--chip-muted-grey)",
@@ -175,816 +204,290 @@ const TECHNIQUE_COLORS: Record<string, string> = {
 function techniqueColor(t: string | null | undefined): string {
   if (!t) return "var(--chip-muted-grey)";
   const up = t.toUpperCase();
-  if (TECHNIQUE_COLORS[up]) return TECHNIQUE_COLORS[up];
-  return TOOL_HASH_PALETTE[hashString(up) % TOOL_HASH_PALETTE.length];
+  return TECHNIQUE_COLORS[up] ?? HASH_PALETTE[hashString(up) % HASH_PALETTE.length];
 }
 
-// Probe_kind is a closed 6-value enum — no hash fallback needed.
-const PROBE_KIND_ORDER = [
-  "fingerprint",
-  "baseline",
-  "payload",
-  "exploit",
-  "replay",
-  "cleanup",
-] as const;
-type ProbeKind = (typeof PROBE_KIND_ORDER)[number];
-
-const PROBE_KIND_COLORS: Record<ProbeKind, string> = {
-  fingerprint: "var(--chip-teal)",    // teal — low-touch recon probes
-  baseline: "var(--chip-slate)",      // slate — control requests
-  payload: "var(--chip-orange)",      // orange — attack payload
-  exploit: "var(--chip-red)",         // red — attacker-outcome proof
-  replay: "var(--chip-purple)",       // purple — lateral primitive use
-  cleanup: "var(--chip-muted-grey)",  // muted — post-op tidy
+// Probe kind is a closed six-value enum.
+const PROBE_KIND_COLORS: Record<string, string> = {
+  fingerprint: "var(--chip-teal)",
+  baseline: "var(--chip-slate)",
+  payload: "var(--chip-orange)",
+  exploit: "var(--chip-red)",
+  replay: "var(--chip-purple)",
+  cleanup: "var(--chip-muted-grey)",
 };
 
 function probeKindColor(pk: string | null | undefined): string {
-  if (!pk) return "var(--chip-muted-grey)";
-  const k = pk.toLowerCase() as ProbeKind;
-  return PROBE_KIND_COLORS[k] || "var(--chip-muted-grey)";
+  return PROBE_KIND_COLORS[(pk || "").toLowerCase()] ?? "var(--chip-muted-grey)";
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────
-// Build a translucent tint from a CSS var color token without appending
-// hex-alpha digits (which break when the value is var(--chip-*)).
-// pct ≈ 10 reproduces the old "1a" alpha; pct ≈ 13 reproduces "22".
 function tint(color: string, pct = 10): string {
   return `color-mix(in srgb, ${color} ${pct}%, transparent)`;
 }
 
-export function relTime(iso: string | undefined | null): string {
-  if (!iso) return "";
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return "";
-  const now = new Date();
-  const diffSec = Math.max(0, Math.round((now.getTime() - d.getTime()) / 1000));
-  if (diffSec < 60) return `${diffSec}s ago`;
-  const min = Math.round(diffSec / 60);
-  if (min < 60) return `${min}m ago`;
-  const h = Math.round(min / 60);
-  if (h < 24) return `${h}h ago`;
-  const day = Math.round(h / 24);
-  if (day < 7) return `${day}d ago`;
-  return d.toISOString().slice(0, 10);
-}
-
-export function fmtDuration(ms: number): string {
-  if (!ms || ms <= 0) return "—";
-  if (ms < 1000) return `${ms}ms`;
-  const s = ms / 1000;
-  if (s < 60) return `${s.toFixed(1)}s`;
-  const m = Math.floor(s / 60);
-  const r = Math.round(s - m * 60);
-  return `${m}m ${r}s`;
-}
-
-// Mid-truncate a string. Keeps the head + a "…" + tail so the most
-// signalful parts of a long command (binary up front, target at the end)
-// both stay visible.
+// Mid-truncate: keep the binary up front and the target at the end.
 function midTruncate(text: string, max: number): string {
-  if (!text) return "";
-  if (text.length <= max) return text;
+  if (!text || text.length <= max) return text || "";
   const head = Math.max(1, Math.floor((max - 1) * 0.6));
   const tail = Math.max(1, max - 1 - head);
   return `${text.slice(0, head)}…${text.slice(text.length - tail)}`;
 }
 
-function lifecycleStatus(row: AssessmentCommandRun): CommandRunStatus {
-  if (STATUS_ORDER.includes(row.status)) return row.status;
-  // Compatibility for responses from servers predating durable lifecycle status.
-  if (row.timed_out) return "timed_out";
-  return row.success ? "completed" : "failed";
+const INCOMPLETE_OUTPUT_RETENTION = new Set(["measurement_conflict", "partially_measured", "preview_only", "unmeasured"]);
+
+// ── Record sections ──────────────────────────────────────────────────
+// `dtab` in the URL; the record opens on "command".
+type CommandSection = "command" | "stdout" | "stderr" | "context" | "audit";
+const COMMAND_SECTIONS: readonly CommandSection[] = ["command", "stdout", "stderr", "context", "audit"];
+
+function isCommandSection(value: string | null | undefined): value is CommandSection {
+  return typeof value === "string" && (COMMAND_SECTIONS as readonly string[]).includes(value);
 }
 
-function statusLabel(status: CommandRunStatus): string {
-  if (status === "timed_out") return "timed out";
-  return status;
+function sectionParam(section: CommandSection): CommandSection | undefined {
+  return section === "command" ? undefined : section;
 }
 
-// ── Target extraction ────────────────────────────────────────────────
-// Best-effort "what did this command hit?" for at-a-glance row rendering
-// and the target: filter scope. Strategy:
-//   1. First http(s):// URL in the command string wins — return its host.
-//   2. Else, parse argv for common target flags (-u/--url/--target/-t).
-//      Skip -d (curl POST body conflict).
-//   3. Else, tool-specific heuristics: nmap takes the last positional
-//      argv; ffuf/sqlmap/katana use -u.
-//   4. Else, bare FQDN in positional argv.
-//   5. Else "" — rendered as an em-dash.
-const FQDN_RE = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/i;
-const URL_RE = /(https?:\/\/[^\s"']+)/i;
+/** The open record: its id, and its list row once known (a deep link starts without one). */
+type OpenRun = { id: number; row: CommandLedgerRow | null };
 
-function extractInferredTarget(row: AssessmentCommandRun): string {
-  // 1. URL in the command string.
-  const urlMatch = (row.command || "").match(URL_RE);
-  if (urlMatch) {
-    const raw = urlMatch[1].replace(/[),.;'"]+$/, "");
-    try {
-      return new URL(raw).host;
-    } catch {
-      return raw;
-    }
+type RecordRead = { id: number; record: AssessmentCommandRunDetail | null; error: string | null };
+
+function readSavedView(engagementKey: string): CommandView {
+  try {
+    return parseCommandView(window.sessionStorage.getItem(commandViewKey(engagementKey)));
+  } catch {
+    return parseCommandView(null);
   }
-
-  const argv = Array.isArray(row.argv) ? row.argv : [];
-  const lower = argv.map((a) => a.toLowerCase());
-
-  // 2. Common target flags. Skip -d on purpose (curl body conflict).
-  const TARGET_FLAGS = new Set(["-u", "--url", "--target", "-t"]);
-  for (let i = 0; i < argv.length - 1; i += 1) {
-    if (TARGET_FLAGS.has(lower[i])) {
-      const val = argv[i + 1];
-      if (val) {
-        if (URL_RE.test(val)) {
-          try {
-            return new URL(val).host;
-          } catch {
-            return val;
-          }
-        }
-        return val;
-      }
-    }
-    // Support `--url=value` / `-u=value`.
-    for (const flag of TARGET_FLAGS) {
-      if (lower[i].startsWith(`${flag}=`)) {
-        const val = argv[i].slice(flag.length + 1);
-        if (val) {
-          if (URL_RE.test(val)) {
-            try {
-              return new URL(val).host;
-            } catch {
-              return val;
-            }
-          }
-          return val;
-        }
-      }
-    }
-  }
-
-  // 3. Tool-specific fallbacks.
-  const bin = (row.tool_bin || "").toLowerCase();
-  if (bin === "nmap") {
-    // Last positional argv — skip flags and their obvious values.
-    for (let i = argv.length - 1; i >= 1; i -= 1) {
-      const a = argv[i];
-      if (!a.startsWith("-")) return a;
-    }
-  }
-
-  // 4. Any bare FQDN in argv.
-  for (const a of argv.slice(1)) {
-    if (!a.startsWith("-") && FQDN_RE.test(a)) return a;
-  }
-  return "";
 }
 
-// ── Search tokenizer ─────────────────────────────────────────────────
-// Scopes recognised in the search box. The new scopes (technique / probe /
-// intent / destructive / write) match against the four command-metadata
-// audit fields added in 2026-04. `write` is an intentional alias for
-// `destructive` — reads naturally for operators ("show me every write").
-const SCOPES = [
-  "tool",
-  "agent",
-  "phase",
-  "rc",
-  "status",
-  "target",
-  "hash",
-  "technique",
-  "probe",
-  "intent",
-  "destructive",
-  "write",
-] as const;
-type Scope = (typeof SCOPES)[number];
-
-type ParsedQuery = {
-  tokens: { scope: Scope; value: string }[];
-  freeTerms: string[];
-};
-
-// Pull one whitespace-delimited token from the input, but allow a quoted
-// string on the value side of a `scope:"multi word"` pair so the intent
-// scope can do substring matches on phrases. Quotes are stripped from
-// the returned value.
-const TOKEN_RE = /(\S+?:"[^"]*"|"[^"]*"|\S+)/g;
-
-function parseQuery(q: string): ParsedQuery {
-  const tokens: ParsedQuery["tokens"] = [];
-  const freeTerms: string[] = [];
-  let m: RegExpExecArray | null;
-  while ((m = TOKEN_RE.exec(q || "")) !== null) {
-    let tok = m[1];
-    // Bare quoted phrase → free term (with quotes stripped).
-    if (tok.startsWith('"') && tok.endsWith('"')) {
-      const inner = tok.slice(1, -1).toLowerCase();
-      if (inner) freeTerms.push(inner);
-      continue;
-    }
-    const idx = tok.indexOf(":");
-    if (idx > 0) {
-      const scope = tok.slice(0, idx).toLowerCase();
-      let value = tok.slice(idx + 1);
-      // scope:"multi word" — strip the quotes, preserve spaces.
-      if (value.startsWith('"') && value.endsWith('"')) {
-        value = value.slice(1, -1);
-      }
-      if ((SCOPES as readonly string[]).includes(scope)) {
-        tokens.push({ scope: scope as Scope, value: value.toLowerCase() });
-        continue;
-      }
-    }
-    freeTerms.push(tok.toLowerCase());
-  }
-  return { tokens, freeTerms };
-}
-
-// ── Derived row ──────────────────────────────────────────────────────
-// One-pass normalisation keyed by row id. Computed once per fetch and
-// re-used by every filter / render / duplicate-detection pass.
-//
-// Design choice for search: we do NOT round-trip free terms to the
-// backend `q` FTS param for the live list. Instead, a single initial
-// fetch pulls all command runs and free terms narrow client-side via
-// `searchCorpus.includes()`. Rationale:
-//   - Scope filters (status, rc, target) require computed fields the
-//     backend doesn't index (status bucket, derived target), so we'd
-//     still need a client-side pass anyway.
-//   - Duplicate detection + sparkline need the unfiltered set too.
-//   - Typing in the search box becomes instant (no re-fetch).
-//   - Tradeoff: stdout/stderr preview matches only kick in after the
-//     drawer pulls the detail fetch. That's acceptable for v1.
-export type Derived = {
-  row: AssessmentCommandRun;
-  id: number;
-  status: CommandRunStatus;
-  statusLabel: string;
-  target: string;
-  targetSource: "stored" | "inferred" | "none";
-  commandPreview: string;
-  toolBin: string;
-  agentName: string;
-  phase: string;
-  rcBucket: "zero" | "nonzero" | "timeout" | "none";
-  // Command-metadata audit fields, normalised for filtering. Values stay
-  // nullable; consumers must render null as "—", not "null".
-  techniqueKey: string; // upper-cased match key, "" when absent
-  probeKind: string; // lower-cased match key, "" when absent
-  intent: string; // verbatim, trimmed — may be ""
-  destructive: boolean | null;
-  searchCorpus: string;
-};
-
-function derive(row: AssessmentCommandRun): Derived {
-  const status = lifecycleStatus(row);
-  const storedTarget = (row.target_host || "").trim();
-  const inferredTarget = storedTarget ? "" : extractInferredTarget(row);
-  const target = storedTarget || inferredTarget;
-  const targetSource: Derived["targetSource"] = storedTarget
-    ? "stored"
-    : inferredTarget
-    ? "inferred"
-    : "none";
-  const rcBucket: Derived["rcBucket"] = row.timed_out
-    ? "timeout"
-    : row.return_code === 0
-    ? "zero"
-    : row.return_code == null
-    ? "none"
-    : "nonzero";
-  const techniqueKey = (row.technique || "").trim().toUpperCase();
-  const probeKind = (row.probe_kind || "").trim().toLowerCase();
-  const intent = (row.intent || "").trim();
-  const destructive = row.destructive == null ? null : Boolean(row.destructive);
-  const corpusParts = [
-    row.command,
-    (row.argv || []).join(" "),
-    row.tool_name,
-    row.tool_bin,
-    row.agent_name,
-    row.phase,
-    row.route,
-    target,
-    row.stdout_suppression_reason,
-    row.stderr_suppression_reason,
-    row.notes,
-    // Include the metadata fields in the free-term corpus so typing a bare
-    // term like "ssrf" still matches — the scope: tokens are exact-match.
-    techniqueKey,
-    probeKind,
-    intent,
-  ];
-  return {
-    row,
-    id: row.id,
-    status,
-    statusLabel: statusLabel(status),
-    target,
-    targetSource,
-    commandPreview: row.command || "",
-    toolBin: row.tool_bin || row.tool_name || "",
-    agentName: row.agent_name || "",
-    phase: row.phase || "",
-    rcBucket,
-    techniqueKey,
-    probeKind,
-    intent,
-    destructive,
-    searchCorpus: corpusParts.filter(Boolean).join(" \n ").toLowerCase(),
-  };
-}
-
-// ── Icons ────────────────────────────────────────────────────────────
 const IconSearch = () => (
-  <svg
-    viewBox="0 0 24 24"
-    fill="none"
-    stroke="currentColor"
-    strokeWidth={2}
-    strokeLinecap="round"
-    strokeLinejoin="round"
-    className="search-icon"
-  >
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" className="search-icon" aria-hidden="true">
     <circle cx={11} cy={11} r={7} />
     <path d="M21 21l-4.3-4.3" />
   </svg>
 );
 const IconClose = () => (
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} aria-hidden="true">
     <path d="M6 6l12 12M18 6L6 18" />
   </svg>
 );
 
-// ── DetailModal ───────────────────────────────────────────────────────
-// Centred modal that hosts the per-row Drawer. Shared shell: three tabs
-// (Commands / Intel / Findings) reuse the same .detail-modal-* CSS.
-// Backdrop click + Esc + × button all close; focus moves into the panel
-// on open so keyboard users land inside the dialog, then restores the
-// explicit row/palette invoker supplied by the caller.
-function DetailModal({
-  children,
-  onClose,
-  titleId,
-  returnFocusRef,
-}: {
-  children: React.ReactNode;
-  onClose: () => void;
-  titleId?: string;
-  returnFocusRef: RefObject<HTMLElement | null>;
-}) {
-  const panelRef = useRef<HTMLDivElement | null>(null);
-  useModalFocus(panelRef, onClose, true, returnFocusRef);
-  // Lock body scroll while the modal is mounted so wheel / trackpad /
-  // PageUp/PageDown never bubble to the page behind. Reference-counted
-  // via modalScrollLock so stacked or rapidly re-opened modals never
-  // leave the lock stuck on.
-  useBodyScrollLock();
-  return (
-    <div
-      className="detail-modal-overlay"
-      onClick={(e) => {
-        if (e.target === e.currentTarget) onClose();
-      }}
-      role="presentation"
-    >
-      <div
-        ref={panelRef}
-        className="detail-modal-panel"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={titleId}
-        tabIndex={-1}
-      >
-        <button
-          type="button"
-          className="detail-modal-close"
-          onClick={onClose}
-          aria-label="Close detail"
-          title="Close (Esc)"
-        >
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
-            <path d="M6 6l12 12M18 6L6 18" />
-          </svg>
-        </button>
-        {children}
-      </div>
-    </div>
-  );
-}
+const SEARCH_TOKENS: Array<[string, string]> = [
+  ["tool:curl", "derived tool or tool name"],
+  ["agent:recon-specialist", "agent name"],
+  ["phase:consume-test", "phase"],
+  ["status:failed", "lifecycle status; status:retained / status:empty match output retention"],
+  ["rc:0  rc:!0  rc:timeout", "exit outcome"],
+  ["target:app.example.com", "stored or inferred target"],
+  ["hash:7a2e47", "command hash prefix (runs of the same command)"],
+  ["technique:ssrf  probe:exploit", "command metadata"],
+  ['intent:"token leak"', "intent text"],
+  ["write:true", "runs that declared they change target state"],
+  ["3f2a91c4  #1024", "run_uuid prefix or run id"],
+];
 
 // ── Component ────────────────────────────────────────────────────────
-export function CommandsTab({ engagementKey }: CommandsTabProps) {
-  const [rows, setRows] = useState<AssessmentCommandRun[]>([]);
-  const [loading, setLoading] = useState<boolean>(true);
-  const [loadError, setLoadError] = useState<string | null>(null);
+// Each engagement gets its own workspace state (and its own saved view).
+export function CommandsTab(props: CommandsTabProps) {
+  return <CommandsWorkspace key={props.engagementKey} {...props} />;
+}
 
-  const [query, setQuery] = useState("");
-  const [toolFilters, setToolFilters] = useState<Set<string>>(new Set());
-  const [agentFilters, setAgentFilters] = useState<Set<string>>(new Set());
-  const [statusFilters, setStatusFilters] = useState<Set<CommandRunStatus>>(new Set());
-  const [ledgerScope, setLedgerScope] = useState<"attention" | "all">("attention");
-  const [techniqueFilters, setTechniqueFilters] = useState<Set<string>>(new Set());
-  const [probeKindFilters, setProbeKindFilters] = useState<Set<string>>(new Set());
-  const [cmdOpen, setCmdOpen] = useState(false);
-  const commandInvokerRef = useRef<HTMLElement | null>(null);
-
-  const [selectedId, setSelectedId] = useState<number | null>(null);
-  // Detail-modal open state. Separate from `selectedId` so j/k can walk
-  // the list without forcing the modal open, and so the modal closes on
-  // Escape without discarding the keyboard-navigation cursor.
-  const [detailOpen, setDetailOpen] = useState(false);
-  const detailInvokerRef = useRef<HTMLElement | null>(null);
-
-  // Detail cache for full stdout/stderr. Keyed by command-run id and
-  // populated lazily when the drawer's stdout/stderr tab is opened.
-  const [detailCache, setDetailCache] = useState<Map<number, AssessmentCommandRunDetail>>(
-    () => new Map(),
-  );
-  const [detailLoading, setDetailLoading] = useState<Set<number>>(() => new Set());
-  const [detailErrors, setDetailErrors] = useState<Map<number, string>>(() => new Map());
+function CommandsWorkspace({ engagementKey, refreshVersion = 0, commandId, initialDrawerTab, onAttentionCount }: CommandsTabProps) {
+  const [saved] = useState(() => readSavedView(engagementKey));
+  const [filters, setFilters] = useState<CommandFilters>(saved.filters);
+  const [searchText, setSearchText] = useState(saved.filters.q);
+  const [sort, setSort] = useState<CommandSort>(saved.sort);
+  const [open, setOpen] = useState<OpenRun | null>(commandId !== undefined ? { id: commandId, row: null } : null);
+  const [cursorId, setCursorId] = useState<number | null>(commandId ?? null);
+  const [section, setSection] = useState<CommandSection>(isCommandSection(initialDrawerTab) ? initialDrawerTab : "command");
+  const [gridWindow, setGridWindow] = useState<{ total: number | null; first: number; last: number }>({ total: null, first: 0, last: 0 });
+  const [gridError, setGridError] = useState<string | null>(null);
+  const [paletteOpen, setPaletteOpen] = useState(false);
 
   const searchRef = useRef<HTMLInputElement | null>(null);
+  const invokerRef = useRef<HTMLElement | null>(null);
+  const paletteInvokerRef = useRef<HTMLElement | null>(null);
+  const gridHandleRef = useRef<CommandsGridHandle | null>(null);
+  const cursorIndexRef = useRef<number | null>(null);
 
-  // Fetch — no server filters, pull enough to show everything. See the
-  // `Derived` doc block for why we don't round-trip free terms through FTS
-  // as the user types. `showSpinner=false` is used for background refreshes
-  // (poll tick, tab revisit) so the list doesn't flicker to a loading state.
-  const reloadInFlightRef = useRef(false);
-  const reloadQueuedRef = useRef<{ engagementKey: string; showSpinner: boolean } | null>(null);
-  const activeEngagementKeyRef = useRef(engagementKey);
-  activeEngagementKeyRef.current = engagementKey;
-  const reload = useCallback(
-    async (showSpinner = true) => {
-      if (reloadInFlightRef.current) {
-        const queued = reloadQueuedRef.current;
-        reloadQueuedRef.current = {
-          engagementKey,
-          showSpinner: showSpinner || queued?.showSpinner === true,
-        };
-        return;
-      }
-      reloadInFlightRef.current = true;
-      try {
-        let next: { engagementKey: string; showSpinner: boolean } | null = {
-          engagementKey,
-          showSpinner,
-        };
-        while (next) {
-          const request = next;
-          reloadQueuedRef.current = null;
-          if (request.showSpinner && activeEngagementKeyRef.current === request.engagementKey) {
-            setLoading(true);
-          }
-          try {
-            const items = await listAssessmentCommandRuns(request.engagementKey, {
-              limit: INITIAL_FETCH_LIMIT,
-              offset: 0,
-            });
-            if (activeEngagementKeyRef.current === request.engagementKey) {
-              setRows(items);
-              setLoadError(null);
-            }
-          } catch (err) {
-            if (
-              request.showSpinner
-              && activeEngagementKeyRef.current === request.engagementKey
-            ) {
-              setRows([]);
-            }
-            if (activeEngagementKeyRef.current === request.engagementKey) {
-              setLoadError(err instanceof Error ? err.message : "Failed to load command runs");
-            }
-          } finally {
-            if (
-              request.showSpinner
-              && activeEngagementKeyRef.current === request.engagementKey
-            ) {
-              setLoading(false);
-            }
-          }
-          next = reloadQueuedRef.current;
-        }
-      } finally {
-        reloadInFlightRef.current = false;
-      }
-    },
-    [engagementKey],
+  // Typing updates the box at once; the server sees it after a pause.
+  useEffect(() => {
+    if (searchText === filters.q) return;
+    const timer = window.setTimeout(() => setFilters((current) => ({ ...current, q: searchText })), SEARCH_DEBOUNCE_MS);
+    return () => window.clearTimeout(timer);
+  }, [searchText, filters.q]);
+
+  useEffect(() => {
+    try {
+      window.sessionStorage.setItem(commandViewKey(engagementKey), JSON.stringify({ filters, sort } satisfies CommandView));
+    } catch {
+      // Browser storage may be unavailable; the view just resets next visit.
+    }
+  }, [engagementKey, filters, sort]);
+
+  // Live updates: a burst reloads at most once per window, plus a trailing reload.
+  const refreshToken = useLiveRefreshToken(refreshVersion, LIVE_RELOAD_MIN_MS);
+
+  const filtersKey = useMemo(() => commandFiltersKey(filters), [filters]);
+  const facetsKey = `${engagementKey}\u0000${filtersKey}`;
+  const facets = useCoalescedRequest(
+    facetsKey,
+    useCallback(() => fetchCommandFacets(engagementKey, filters, FACET_LIMIT), [engagementKey, filters]),
+    refreshToken,
   );
-
-  // Initial load on mount + engagement change.
+  const counts = facets.dataKey === facetsKey ? facets.data : null;
+  const lastCounts = facets.data;
+  const ledgerAttention = counts?.engagement_totals.attention;
   useEffect(() => {
-    void reload(true);
-  }, [reload]);
+    if (ledgerAttention != null) onAttentionCount?.(ledgerAttention);
+  }, [ledgerAttention, onAttentionCount]);
 
-  // Periodic refresh while the tab is mounted (30s) plus an immediate
-  // refresh when the tab regains visibility. The parent `EngagementPage`
-  // deliberately does not refetch command runs on WS ticks to avoid
-  // pulling a large list on every event, so the tab owns its own cadence.
+  // ── The open run ────
+  // The URL owns which run is open and which section it shows.
   useEffect(() => {
-    const POLL_MS = 30_000;
-    const interval = window.setInterval(() => void reload(false), POLL_MS);
-    const onVisible = () => {
-      if (document.visibilityState === "visible") void reload(false);
-    };
-    document.addEventListener("visibilitychange", onVisible);
-    return () => {
-      window.clearInterval(interval);
-      document.removeEventListener("visibilitychange", onVisible);
-    };
-  }, [reload]);
-
-  // Equality proves only that the client reached its requested boundary,
-  // not that an older row exists. Report the uncertainty without claiming
-  // that the server definitely truncated the ledger.
-  const limitReached = rows.length >= INITIAL_FETCH_LIMIT;
-
-  const derivedList = useMemo<Derived[]>(() => rows.map(derive), [rows]);
-
-  const derivedById = useMemo(() => {
-    const m = new Map<number, Derived>();
-    for (const d of derivedList) m.set(d.id, d);
-    return m;
-  }, [derivedList]);
-
-  // Tool counts (global, for chip rendering + "top 10" slicing).
-  const toolCounts = useMemo(() => {
-    const c: Record<string, number> = {};
-    for (const d of derivedList) {
-      const key = d.toolBin || d.row.tool_name || "(unknown)";
-      c[key] = (c[key] || 0) + 1;
+    if (commandId === undefined) {
+      setOpen(null);
+      return;
     }
-    return c;
-  }, [derivedList]);
+    setOpen((current) => (current?.id === commandId ? current : { id: commandId, row: null }));
+    setCursorId(commandId);
+  }, [commandId]);
+  useEffect(() => {
+    setSection(isCommandSection(initialDrawerTab) ? initialDrawerTab : "command");
+  }, [initialDrawerTab]);
 
-  const agentCounts = useMemo(() => {
-    const c: Record<string, number> = {};
-    for (const d of derivedList) {
-      if (!d.agentName) continue;
-      c[d.agentName] = (c[d.agentName] || 0) + 1;
+  // The record reads the full run (command, argv, output previews) by id; a
+  // live refresh re-reads it so a running command's outcome appears in place.
+  // Reads coalesce: one in flight, one trailing re-read after a refresh burst.
+  const openId = open?.id ?? null;
+  const [read, setRead] = useState<RecordRead | null>(null);
+  const openIdRef = useRef(openId);
+  openIdRef.current = openId;
+  const readRecord = useCoalescedRunner(async () => {
+    const id = openIdRef.current;
+    if (id === null) return;
+    try {
+      const fresh = await getCommandRunRecord(engagementKey, id);
+      if (openIdRef.current === id) setRead({ id, record: fresh, error: null });
+    } catch (error) {
+      if (openIdRef.current !== id) return;
+      const message = error instanceof Error ? error.message : "request failed";
+      setRead((current) => (current?.id === id && current.record ? { ...current, error: message } : { id, record: null, error: message }));
     }
-    return c;
-  }, [derivedList]);
+  });
+  useEffect(() => {
+    if (openId !== null) void readRecord();
+  }, [openId, refreshToken, readRecord]);
+  const record = read?.id === openId ? read.record : null;
+  const readError = read?.id === openId ? read.error : null;
+  const linkError = openId !== null && !record && !open?.row ? readError : null;
+  const investigating = open !== null && (record !== null || open.row !== null);
+  // A deep-linked run shows its record's shape until the first read lands.
+  const recordLoading = openId !== null && !investigating && !linkError;
 
-  const statusCounts = useMemo(() => {
-    const c: Record<CommandRunStatus, number> = {
-      queued: 0,
-      running: 0,
-      completed: 0,
-      failed: 0,
-      timed_out: 0,
-      killed: 0,
-      lost: 0,
-    };
-    for (const d of derivedList) c[d.status] += 1;
-    return c;
-  }, [derivedList]);
+  // A run opened from outside the list (a receipt link, the palette) that
+  // needs no attention widens the default scope so it sits in the results.
+  const widenedFor = useRef<number | null>(null);
+  useEffect(() => {
+    if (!record || widenedFor.current === record.id) return;
+    widenedFor.current = record.id;
+    if (record.needs_attention === false) setFilters((current) => (current.scope === "attention" ? { ...current, scope: "all" } : current));
+  }, [record]);
 
-  const needsAttention = useCallback((d: Derived) => {
-    const retention = (d.row.output_retention_status || "").toLowerCase();
-    const integrity = (d.row.output_integrity_status || "").toLowerCase();
-    const cleanup = (d.row.output_cleanup_status || "").toLowerCase();
-    return d.status !== "completed"
-      || !d.row.success
-      || Boolean(d.row.partial_results)
-      || Boolean(d.row.superseded_by_id)
-      || integrity === "pending"
-      || integrity === "warning"
-      || retention === "untrusted"
-      || retention === "integrity_failure"
-      || retention.startsWith("suppression_")
-      || INCOMPLETE_OUTPUT_RETENTION.has(retention)
-      || ["deferred", "pending", "warning"].includes(cleanup);
+  // ── Open, step, close ────
+  const openRun = useCallback((row: CommandLedgerRow, invoker: HTMLElement | null) => {
+    invokerRef.current = invoker ?? searchRef.current;
+    cursorIndexRef.current = gridHandleRef.current?.indexOf(row.id) ?? cursorIndexRef.current;
+    setOpen({ id: row.id, row });
+    setCursorId(row.id);
+    setSection("command");
+    writeWorkspaceHash(engagementHref(engagementKey, { tab: "commands", command: row.id }));
+  }, [engagementKey]);
+  // Stepping keeps the open section, like the Findings record.
+  const stepTo = useCallback((row: CommandLedgerRow) => {
+    setOpen({ id: row.id, row });
+    setCursorId(row.id);
+    writeWorkspaceHash(engagementHref(engagementKey, { tab: "commands", command: row.id, dtab: sectionParam(section) }));
+  }, [engagementKey, section]);
+  const closeRecord = useCallback(() => {
+    setOpen(null);
+    writeWorkspaceHash(engagementHref(engagementKey, { tab: "commands" }));
+  }, [engagementKey]);
+  const chooseSection = useCallback((next: CommandSection) => {
+    setSection(next);
+    if (openId !== null) writeWorkspaceHash(engagementHref(engagementKey, { tab: "commands", command: openId, dtab: sectionParam(next) }));
+  }, [engagementKey, openId]);
+
+  // Previous / Next walk the paged list in the grid's order: the server
+  // locates the open run under the current filters and sort, so stepping
+  // crosses block boundaries the grid has not loaded.
+  const navigation = useRecordPosition<CommandLedgerRow>({
+    key: openId === null ? null : String(openId),
+    identity: JSON.stringify([engagementKey, filtersKey, sort.sort, sort.dir, refreshToken]),
+    load: () => fetchCommandPosition(engagementKey, openId as number, filters, sort),
+    keyOf: (row) => String(row.id),
+    open: stepTo,
+  });
+  if (typeof navigation.index === "number") cursorIndexRef.current = navigation.index;
+
+  // Back to results lands on the run last shown: scroll its position into
+  // view (loading its block) so the row can take focus and the highlight.
+  const resultsRef = useRef<HTMLDivElement | null>(null);
+  const revealRun = useCallback((key: string) => {
+    const handle = gridHandleRef.current;
+    if (!handle) return;
+    const index = handle.indexOf(Number(key)) ?? cursorIndexRef.current;
+    if (index != null) handle.reveal(index);
   }, []);
-  const attentionCount = useMemo(
-    () => derivedList.filter(needsAttention).length,
-    [derivedList, needsAttention],
-  );
+  useResultsScrollMemory(resultsRef, investigating, { recordKey: openId, reveal: revealRun });
 
-  // Technique counts over the full fetched set (rendered chips are top-10
-  // by count, the rest are addressable via the `technique:` search scope).
-  // Blank-technique rows don't render a chip — they show up under the
-  // "absent" bucket in the drawer, not in the filter bar.
-  const techniqueCounts = useMemo(() => {
-    const c: Record<string, number> = {};
-    for (const d of derivedList) {
-      if (!d.techniqueKey) continue;
-      c[d.techniqueKey] = (c[d.techniqueKey] || 0) + 1;
-    }
-    return c;
-  }, [derivedList]);
-
-  // Probe-kind counts. Closed 6-value enum — render all six present
-  // buckets in fixed order so the chip row is stable across result sets.
-  const probeKindCounts = useMemo(() => {
-    const c: Record<string, number> = {};
-    for (const d of derivedList) {
-      if (!d.probeKind) continue;
-      c[d.probeKind] = (c[d.probeKind] || 0) + 1;
-    }
-    return c;
-  }, [derivedList]);
-
-  // ── Filtering ────
-  const parsedQuery = useMemo(() => parseQuery(query), [query]);
-
-  const matchesQuery = useCallback(
-    (d: Derived, parsed: ParsedQuery): boolean => {
-      for (const tok of parsed.tokens) {
-        const v = tok.value;
-        switch (tok.scope) {
-          case "tool": {
-            const a = (d.toolBin || "").toLowerCase();
-            const b = (d.row.tool_name || "").toLowerCase();
-            if (a !== v && b !== v) return false;
-            break;
-          }
-          case "agent":
-            if ((d.agentName || "").toLowerCase() !== v) return false;
-            break;
-          case "phase":
-            if ((d.phase || "").toLowerCase() !== v) return false;
-            break;
-          case "rc": {
-            if (v === "0" && d.rcBucket !== "zero") return false;
-            else if (v === "!0" && d.rcBucket !== "nonzero") return false;
-            else if (v === "timeout" && d.rcBucket !== "timeout") return false;
-            else if (!["0", "!0", "timeout"].includes(v)) return false;
-            break;
-          }
-          case "status": {
-            if (v === "retained") {
-              const r = (d.row.output_retention_status || "").toLowerCase();
-              if (r !== "retained") return false;
-            } else if (v === "empty") {
-              const r = (d.row.output_retention_status || "").toLowerCase();
-              if (r !== "empty") return false;
-            } else if (v !== d.status) {
-              return false;
-            }
-            break;
-          }
-          case "target":
-            if (!(d.target || "").toLowerCase().includes(v)) return false;
-            break;
-          case "hash":
-            if (!(d.row.command_hash || "").toLowerCase().startsWith(v)) return false;
-            break;
-          case "technique": {
-            // Exact match on the normalised upper-case key. Tokenizer lower-
-            // cased v; compare against the lower-cased technique key.
-            if ((d.techniqueKey || "").toLowerCase() !== v) return false;
-            break;
-          }
-          case "probe": {
-            if ((d.probeKind || "") !== v) return false;
-            break;
-          }
-          case "intent": {
-            // Substring match — intent is free-form, operators search for
-            // phrases like intent:"verify token leak" via the quoted form.
-            if (!d.intent.toLowerCase().includes(v)) return false;
-            break;
-          }
-          case "destructive":
-          case "write": {
-            // Boolean match with common spellings. NULL destructive never
-            // matches either true or false (intentional — NULL = undeclared,
-            // not "not destructive").
-            const want =
-              v === "true" || v === "1" || v === "yes"
-                ? true
-                : v === "false" || v === "0" || v === "no"
-                ? false
-                : null;
-            if (want == null) return false;
-            if (d.destructive !== want) return false;
-            break;
-          }
-        }
-      }
-      if (parsed.freeTerms.length) {
-        for (const t of parsed.freeTerms) if (!d.searchCorpus.includes(t)) return false;
-      }
-      return true;
-    },
-    [],
-  );
-
-  const filtered = useMemo(() => {
-    const list = derivedList.filter((d) => {
-      if (ledgerScope === "attention" && !needsAttention(d)) return false;
-      const toolKey = d.toolBin || d.row.tool_name || "(unknown)";
-      if (toolFilters.size && !toolFilters.has(toolKey)) return false;
-      if (agentFilters.size && !agentFilters.has(d.agentName)) return false;
-      if (statusFilters.size && !statusFilters.has(d.status)) return false;
-      if (techniqueFilters.size && !techniqueFilters.has(d.techniqueKey)) return false;
-      if (probeKindFilters.size && !probeKindFilters.has(d.probeKind)) return false;
-      if (!matchesQuery(d, parsedQuery)) return false;
-      return true;
+  // ── Filters ────
+  const setScope = useCallback((scope: CommandScope) => setFilters((current) => ({ ...current, scope })), []);
+  const toggleValue = useCallback((dimension: "status" | "tool" | "agent" | "technique" | "probe_kind", value: string) => {
+    setFilters((current) => {
+      const values = current[dimension];
+      return { ...current, [dimension]: values.includes(value) ? values.filter((item) => item !== value) : [...values, value] };
     });
-    // Newest first — the command runs table already orders this way on the
-    // backend, but scope filters can reshuffle the page so enforce again.
-    list.sort((a, b) => {
-      const aT = a.row.created_at || a.row.started_at;
-      const bT = b.row.created_at || b.row.started_at;
-      if (aT && bT && aT !== bT) return bT.localeCompare(aT);
-      return b.id - a.id;
-    });
-    return list;
-  }, [
-    derivedList,
-    ledgerScope,
-    needsAttention,
-    toolFilters,
-    agentFilters,
-    statusFilters,
-    techniqueFilters,
-    probeKindFilters,
-    parsedQuery,
-    matchesQuery,
-  ]);
+  }, []);
+  const clearFilters = useCallback(() => {
+    setSearchText("");
+    setFilters((current) => ({ ...DEFAULT_COMMAND_FILTERS, scope: current.scope }));
+  }, []);
+  // A search typed elsewhere (a target cell, a record action) replaces the box at once.
+  const search = useCallback((q: string) => {
+    setSearchText(q);
+    setFilters((current) => ({ ...current, q }));
+  }, []);
+  const searchFromRecord = useCallback((q: string) => {
+    search(q);
+    closeRecord();
+  }, [search, closeRecord]);
 
-  // Duplicate detection — compute a count map keyed by command_hash on
-  // the *filtered* rows so operators see cluster density of what's
-  // currently on screen, not the full engagement.
-  const dupCounts = useMemo(() => {
-    const m = new Map<string, number>();
-    for (const d of filtered) {
-      const h = d.row.command_hash;
-      if (!h) continue;
-      m.set(h, (m.get(h) || 0) + 1);
-    }
-    return m;
-  }, [filtered]);
+  const activeFilters = activeCommandFilterCount({ ...filters, q: searchText });
 
-  // Keep selection valid — if the current selected row drops out of the
-  // filtered set (filters changed, rows removed), pick the first
-  // filtered row so j/k still has something to anchor on. We do NOT
-  // auto-select on first mount any more; the modal should only open on
-  // an explicit user click.
-  useEffect(() => {
-    if (selectedId != null && !derivedById.has(selectedId)) {
-      setSelectedId(filtered[0]?.id ?? null);
-      setDetailOpen(false);
-    }
-  }, [filtered, derivedById, selectedId]);
-
-  const selectedDerived = selectedId != null ? derivedById.get(selectedId) ?? null : null;
-
-  // ── Detail fetch for drawer stdout/stderr ────
-  const ensureDetail = useCallback(
-    (id: number) => {
-      if (detailCache.has(id)) return;
-      if (detailLoading.has(id)) return;
-      setDetailErrors((errors) => { const next = new Map(errors); next.delete(id); return next; });
-      setDetailLoading((s) => {
-        const next = new Set(s);
-        next.add(id);
-        return next;
-      });
-      getAssessmentCommandRun(engagementKey, id)
-        .then((detail) => {
-          setDetailCache((m) => {
-            const next = new Map(m);
-            next.set(id, detail);
-            return next;
-          });
-        })
-        .catch((error: unknown) => {
-          setDetailErrors((errors) => new Map(errors).set(id, error instanceof Error ? error.message : "Command detail unavailable"));
-        })
-        .finally(() => {
-          setDetailLoading((s) => {
-            const next = new Set(s);
-            next.delete(id);
-            return next;
-          });
-        });
-    },
-    [detailCache, detailLoading, engagementKey],
-  );
+  // ── Palette ────
+  const openPalette = useCallback((invoker?: HTMLElement) => {
+    if (paletteOpen) return;
+    const origin = invoker ?? document.activeElement;
+    paletteInvokerRef.current = origin instanceof HTMLElement && origin.isConnected ? origin : searchRef.current;
+    setPaletteOpen(true);
+  }, [paletteOpen]);
+  const jumpTo = useCallback((row: CommandLedgerRow) => {
+    setPaletteOpen(false);
+    if (investigatingRef.current) stepTo(row);
+    else openRun(row, paletteInvokerRef.current);
+  }, [openRun, stepTo]);
 
   // ── Keyboard ────
-  const filteredRef = useRef(filtered);
-  filteredRef.current = filtered;
-  const selectedRef = useRef(selectedId);
-  selectedRef.current = selectedId;
-
-  const detailOpenRef = useRef(detailOpen);
-  detailOpenRef.current = detailOpen;
-
-  const openCommandPalette = useCallback((invoker?: HTMLElement) => {
-    if (cmdOpen) return;
-    // Closing the detail removes its controls; restore its original table opener.
-    const origin = invoker ?? (detailOpenRef.current ? detailInvokerRef.current : document.activeElement);
-    commandInvokerRef.current = origin instanceof HTMLElement && origin.isConnected ? origin : searchRef.current;
-    setDetailOpen(false);
-    setCmdOpen(true);
-  }, [cmdOpen]);
+  const investigatingRef = useRef(investigating);
+  investigatingRef.current = investigating;
+  const navigationRef = useRef(navigation);
+  navigationRef.current = navigation;
+  const totalRef = useRef(gridWindow.total);
+  totalRef.current = gridWindow.total;
+  const cursorRef = useRef(cursorId);
+  cursorRef.current = cursorId;
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -993,626 +496,528 @@ export function CommandsTab({ engagementKey }: CommandsTabProps) {
       const isInteractive = isTyping || Boolean(target?.closest("button, a, [role='button'], [role='combobox'], [role='listbox']"));
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
         e.preventDefault();
-        openCommandPalette();
+        openPalette();
         return;
       }
+      // The palette handles its own keys.
+      if (document.querySelector('[aria-modal="true"]')) return;
       if (!isTyping && e.key === "/") {
         e.preventDefault();
-        searchRef.current?.focus();
+        if (investigatingRef.current) closeRecord();
+        queueMicrotask(() => {
+          searchRef.current?.focus({ preventScroll: true });
+          searchRef.current?.scrollIntoView?.({ block: "center" });
+        });
         return;
       }
-      if (e.key === "Escape") {
-        if (isTyping) {
-          searchRef.current?.blur();
-          return;
-        }
-        // Escape closes the modal without clearing selection so j/k keeps
-        // its anchor. A second Escape (modal already closed) un-selects.
-        if (detailOpenRef.current) {
-          setDetailOpen(false);
-        } else {
-          setSelectedId(null);
-        }
+      if (e.key === "Escape" && isTyping && target === searchRef.current) {
+        searchRef.current?.blur();
         return;
       }
-      if (!isInteractive && (e.key === "[" || e.key === "]")) {
+      if (isInteractive || e.metaKey || e.ctrlKey || e.altKey) return;
+      const back = e.key === "k";
+      const forward = e.key === "j";
+      if (investigatingRef.current) {
+        // [ / ] belong to the record view; j / k step the same way.
+        if (!back && !forward) return;
+        const { onPrevious, onNext, pending } = navigationRef.current;
+        const step = back ? onPrevious : onNext;
+        if (!step || pending) return;
         e.preventDefault();
-        const list = filteredRef.current;
-        if (!list.length) return;
-        const cur = selectedRef.current;
-        const idx = list.findIndex((d) => d.id === cur);
-        if (idx < 0) {
-          if (list[0]) setSelectedId(list[0].id);
-          return;
-        }
-        const next =
-          e.key === "[" ? Math.max(0, idx - 1) : Math.min(list.length - 1, idx + 1);
-        setSelectedId(list[next].id);
+        step();
+        return;
       }
-      if (!isInteractive && (e.key === "j" || e.key === "k")) {
+      if (back || forward) {
+        // j / k move the list cursor (and keyboard focus) a row; Enter opens it.
+        const handle = gridHandleRef.current;
+        const total = totalRef.current;
+        if (!handle || !total) return;
         e.preventDefault();
-        const list = filteredRef.current;
-        if (!list.length) return;
-        const cur = selectedRef.current;
-        const idx = list.findIndex((d) => d.id === cur);
-        if (idx < 0 && list[0]) {
-          setSelectedId(list[0].id);
-          return;
-        }
-        const next =
-          e.key === "k" ? Math.max(0, idx - 1) : Math.min(list.length - 1, idx + 1);
-        setSelectedId(list[next].id);
-      }
-      // Enter opens the modal for the currently selected row (handy when
-      // j/k has moved the cursor but the modal is closed).
-      if (!isInteractive && e.key === "Enter" && selectedRef.current != null) {
-        e.preventDefault();
-        setDetailOpen(true);
+        const from = cursorRef.current != null ? handle.indexOf(cursorRef.current) ?? cursorIndexRef.current : cursorIndexRef.current;
+        const next = from == null ? 0 : Math.min(total - 1, Math.max(0, from + (forward ? 1 : -1)));
+        cursorIndexRef.current = next;
+        handle.reveal(next, true);
+        const row = handle.rowAt(next);
+        if (row) setCursorId(row.id);
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [openCommandPalette]);
+  }, [openPalette, closeRecord]);
 
-  // ── Chip toggle helpers ────
-  const toggle = <T,>(set: Set<T>, setter: (s: Set<T>) => void, val: T) => {
-    const next = new Set(set);
-    if (next.has(val)) next.delete(val);
-    else next.add(val);
-    setter(next);
-  };
-
-  const clearAll = () => {
-    setToolFilters(new Set());
-    setAgentFilters(new Set());
-    setStatusFilters(new Set());
-    setTechniqueFilters(new Set());
-    setProbeKindFilters(new Set());
-    setQuery("");
-  };
-
-  const activeFilterCount =
-    toolFilters.size +
-    agentFilters.size +
-    statusFilters.size +
-    techniqueFilters.size +
-    probeKindFilters.size +
-    (query ? 1 : 0);
-
-  // Top 10 tools by count for the chip bar. Everything else is accessible
-  // via the free-text `tool:` scope.
-  const topTools = useMemo(() => {
-    return Object.entries(toolCounts)
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 10);
-  }, [toolCounts]);
-
-  const topAgents = useMemo(() => {
-    return Object.entries(agentCounts)
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 10);
-  }, [agentCounts]);
-
-  // Top 10 techniques by count. Everything else is accessible via the
-  // free-text `technique:` scope — same approach as the tool chip group.
-  const topTechniques = useMemo(() => {
-    return Object.entries(techniqueCounts)
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 10);
-  }, [techniqueCounts]);
-
-  // Probe-kind chips render in the canonical PROBE_KIND_ORDER (not count
-  // order) so operators scan them in the same place every time. Buckets
-  // with 0 count drop out unless they're currently an active filter.
-  const probeKindChips = useMemo(() => {
-    return PROBE_KIND_ORDER.map((k) => [k, probeKindCounts[k] || 0] as const).filter(
-      ([k, n]) => n > 0 || probeKindFilters.has(k),
-    );
-  }, [probeKindCounts, probeKindFilters]);
+  // ── Derived view ────
+  const scopeTotals = lastCounts?.scope_totals ?? null;
+  const engagementTotals = lastCounts?.engagement_totals ?? null;
+  const matching = counts?.total ?? gridWindow.total;
+  const sortLabel = COMMAND_SORT_LABELS[sort.sort];
+  const empty = counts !== null && counts.total === 0;
+  const firstLoad = lastCounts === null && !facets.error;
+  const updating = facets.loading && lastCounts !== null;
+  const recordHeader = record ?? open?.row ?? null;
+  // An engagement with no runs at all has nothing to search or filter.
+  const nothingRecorded = engagementTotals?.all === 0;
 
   return (
-    <div className="findings-redesign">
-      <div className="page-head">
-        <div>
-          <h1 className="page-title">Commands</h1>
-          <div className="page-crumbs">
-            Engagement <code>{engagementKey}</code> ·{" "}
-            <span>
-              {filtered.length} shown · {derivedList.length} loaded
-              {loading && " · loading…"}
-              {limitReached && (
-                <>
-                  {" · "}
-                  <span
-                    className="pill pill-unreviewed"
-                    title={`The request returned ${INITIAL_FETCH_LIMIT} rows. More rows may exist. Filters only narrow this loaded snapshot; they do not fetch hidden rows.`}
-                  >
-                    command limit reached — results may be incomplete
-                  </span>
-                </>
-              )}
-            </span>
-          </div>
-        </div>
-        <StatusSpark counts={statusCounts} />
-      </div>
+    <div className="findings-redesign commands-page">
+      <PageHeader
+        title="Commands"
+        purpose="Every tool command agents ran through Vigil, newest first. Open a run for its full command, output and outcome."
+        stats={[
+          { value: engagementTotals?.all, label: "runs" },
+          { value: engagementTotals?.all ? engagementTotals.attention : null, label: "need attention", tone: "warning", title: ATTENTION_RULE },
+        ]}
+        status={updating ? "Updating…" : null}
+        actions={nothingRecorded ? null : (
+          <button type="button" className="ui-button commands-jump" onClick={(event) => openPalette(event.currentTarget)}>
+            Jump to… <kbd>⌘K</kbd>
+          </button>
+        )}
+        hidden={investigating}
+      >
+        {!nothingRecorded && <ScopeToggle
+          label="Command run scope"
+          scope={filters.scope}
+          onChange={setScope}
+          attentionCount={scopeTotals?.attention}
+          allCount={scopeTotals?.all}
+          attentionRule={ATTENTION_RULE}
+        />}
+      </PageHeader>
 
-      {/* Toolbar */}
-      <div className="panel findings-toolbar-panel">
-        <div className="toolbar">
-          <div className="toolbar-left" role="group" aria-label="Command ledger scope">
-            <button
-              type="button"
-              className={`qa-btn ${ledgerScope === "attention" ? "is-active" : ""}`}
-              aria-pressed={ledgerScope === "attention"}
-              onClick={() => setLedgerScope("attention")}
-            >
-              Needs attention <span className="filter-count">{attentionCount}</span>
-            </button>
-            <button
-              type="button"
-              className={`qa-btn ${ledgerScope === "all" ? "is-active" : ""}`}
-              aria-pressed={ledgerScope === "all"}
-              onClick={() => setLedgerScope("all")}
-            >
-              All <span className="filter-count">{derivedList.length}</span>
-            </button>
-          </div>
-          <div className="search-wrap">
+      <section className="panel commands-filters" aria-label="Search and filters" hidden={investigating || nothingRecorded}>
+        <div className="commands-search-row">
+          <div className="search-wrap commands-search">
             <IconSearch />
             <input
               ref={searchRef}
               className="search-input"
               type="search"
               aria-label="Search command runs"
-              placeholder="Search command / argv / notes… (try tool:curl technique:ssrf probe:exploit write:true)"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search commands, targets, intent, run IDs… or tool:curl rc:!0"
+              value={searchText}
+              onChange={(event) => setSearchText(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") setFilters((current) => ({ ...current, q: searchText }));
+              }}
             />
-            {query && (
-              <button
-                type="button"
-                className="icon-btn"
-                onClick={() => setQuery("")}
-                aria-label="Clear command search"
-                title="Clear"
-                style={{ width: 22, height: 22 }}
-              >
+            {searchText && (
+              <button type="button" className="icon-btn" onClick={() => search("")} aria-label="Clear command search" title="Clear" style={{ width: 22, height: 22 }}>
                 <IconClose />
               </button>
             )}
-            <span className="search-kbd">/</span>
+            <span className="search-kbd" aria-hidden="true">/</span>
           </div>
-          <div className="toolbar-right">
-            <button type="button" className="qa-btn" onClick={(event) => openCommandPalette(event.currentTarget)}>
-              Jump to…{" "}
-              <span className="search-kbd" style={{ marginLeft: 4 }}>
-                ⌘K
-              </span>
-            </button>
-          </div>
+          <details className="commands-syntax">
+            <summary>Search syntax</summary>
+            <dl>
+              {SEARCH_TOKENS.map(([token, meaning]) => (
+                <div key={token}>
+                  <dt><code>{token}</code></dt>
+                  <dd>{meaning}</dd>
+                </div>
+              ))}
+            </dl>
+            <p className="meta-text">Free words match the command, tool, agent, phase, target, intent and notes. Every term must match.</p>
+          </details>
         </div>
+        <div className="commands-chip-rows">
+          <CommandFacetChips
+            label="Status"
+            facet={lastCounts?.facets.status ?? null}
+            selected={filters.status}
+            onToggle={(value) => toggleValue("status", value)}
+            order={(a, b) => compareStatus("command", a, b)}
+            statusDomain="command"
+            labelFor={(value) => statusLabel("command", value)}
+            showAll
+          />
+          <CommandFacetChips
+            label="Tool"
+            facet={lastCounts?.facets.tool ?? null}
+            selected={filters.tool}
+            onToggle={(value) => toggleValue("tool", value)}
+            labelFor={(value) => value || "(unknown)"}
+            colorFor={toolColor}
+            scope="tool"
+          />
+          <CommandFacetChips
+            label="Agent"
+            facet={lastCounts?.facets.agent ?? null}
+            selected={filters.agent}
+            onToggle={(value) => toggleValue("agent", value)}
+            labelFor={(value) => value || "(no agent)"}
+            colorFor={agentColor}
+            scope="agent"
+          />
+          <CommandFacetChips
+            label="Technique"
+            facet={lastCounts?.facets.technique ?? null}
+            selected={filters.technique}
+            onToggle={(value) => toggleValue("technique", value)}
+            labelFor={(value) => value || NONE_DECLARED}
+            colorFor={techniqueColor}
+            scope="technique"
+          />
+          <CommandFacetChips
+            label="Kind"
+            facet={lastCounts?.facets.probe_kind ?? null}
+            selected={filters.probe_kind}
+            onToggle={(value) => toggleValue("probe_kind", value)}
+            labelFor={(value) => value || NONE_DECLARED}
+            colorFor={probeKindColor}
+            scope="probe"
+          />
+          <ClearFiltersButton count={activeFilters} onClear={clearFilters} />
+        </div>
+      </section>
 
-        <div className="filter-row">
-          {topTools.length > 0 && (
-            <div className="filter-group">
-              <span className="filter-label">Tool</span>
-              {topTools.map(([bin, n]) => {
-                const color = toolColor(bin);
-                return (
-                  <button
-                    key={`tool:${bin}`}
-                    type="button"
-                    className={`filter-chip ctool ${toolFilters.has(bin) ? "is-active" : ""}`}
-                    aria-label={`Filter by tool ${bin}`}
-                    aria-pressed={toolFilters.has(bin)}
-                    onClick={() => toggle(toolFilters, setToolFilters, bin)}
-                    style={
-                      toolFilters.has(bin)
-                        ? { borderColor: color, background: tint(color), color }
-                        : undefined
-                    }
-                  >
-                    <span className="sev-dot" style={{ background: color }} />
-                    {bin}
-                    <span className="filter-count">{n}</span>
-                  </button>
-                );
-              })}
-            </div>
-          )}
-          {topAgents.length > 0 && (
-            <div className="filter-group">
-              <span className="filter-label">Agent</span>
-              {topAgents.map(([name, n]) => {
-                const color = agentColor(name);
-                return (
-                  <button
-                    key={`agent:${name}`}
-                    type="button"
-                    className={`filter-chip cagent ${agentFilters.has(name) ? "is-active" : ""}`}
-                    aria-label={`Filter by agent ${name}`}
-                    aria-pressed={agentFilters.has(name)}
-                    onClick={() => toggle(agentFilters, setAgentFilters, name)}
-                    style={
-                      agentFilters.has(name)
-                        ? { borderColor: color, background: tint(color), color }
-                        : undefined
-                    }
-                  >
-                    <span className="sev-dot" style={{ background: color }} />
-                    {name}
-                    <span className="filter-count">{n}</span>
-                  </button>
-                );
-              })}
-            </div>
-          )}
-          <div className="filter-group">
-            <span className="filter-label">Status</span>
-            {STATUS_ORDER.map((s) => {
-              const count = statusCounts[s];
-              if (!count && !statusFilters.has(s)) return null;
-              return (
-                <button
-                  key={`status:${s}`}
-                  type="button"
-                  className={`filter-chip cstatus-${s} ${statusFilters.has(s) ? "is-active" : ""}`}
-                  aria-label={`Filter by lifecycle status ${statusLabel(s)}`}
-                  aria-pressed={statusFilters.has(s)}
-                  onClick={() => toggle(statusFilters, setStatusFilters, s)}
-                >
-                  <span className="sev-dot" style={{ background: STATUS_COLORS[s] }} />
-                  {statusLabel(s)}
-                  <span className="filter-count">{count}</span>
-                </button>
-              );
-            })}
-          </div>
-          {topTechniques.length > 0 && (
-            <div className="filter-group">
-              <span className="filter-label">Technique</span>
-              {topTechniques.map(([tech, n]) => {
-                const color = techniqueColor(tech);
-                return (
-                  <button
-                    key={`tech:${tech}`}
-                    type="button"
-                    className={`filter-chip ctech ${techniqueFilters.has(tech) ? "is-active" : ""}`}
-                    aria-label={`Filter by technique ${tech}`}
-                    aria-pressed={techniqueFilters.has(tech)}
-                    onClick={() => toggle(techniqueFilters, setTechniqueFilters, tech)}
-                    style={
-                      techniqueFilters.has(tech)
-                        ? { borderColor: color, background: tint(color), color }
-                        : undefined
-                    }
-                  >
-                    <span className="sev-dot" style={{ background: color }} />
-                    {tech}
-                    <span className="filter-count">{n}</span>
-                  </button>
-                );
-              })}
-            </div>
-          )}
-          {probeKindChips.length > 0 && (
-            <div className="filter-group">
-              <span className="filter-label">Kind</span>
-              {probeKindChips.map(([pk, n]) => {
-                const color = probeKindColor(pk);
-                const active = probeKindFilters.has(pk);
-                return (
-                  <button
-                    key={`pk:${pk}`}
-                    type="button"
-                    className={`filter-chip cpk-${pk} ${active ? "is-active" : ""}`}
-                    aria-label={`Filter by probe kind ${pk}`}
-                    aria-pressed={active}
-                    onClick={() => toggle(probeKindFilters, setProbeKindFilters, pk)}
-                  >
-                    <span className="sev-dot" style={{ background: color }} />
-                    {pk}
-                    <span className="filter-count">{n}</span>
-                  </button>
-                );
-              })}
-            </div>
-          )}
-          {activeFilterCount > 0 && (
-            <button type="button" className="filter-clear" onClick={clearAll}>
-              Clear all ({activeFilterCount})
-            </button>
-          )}
-        </div>
-      </div>
-
-      {loadError && (
-        <div className="panel findings-toolbar-panel" style={{ padding: 12 }}>
-          <p className="error-text" role="alert" style={{ textAlign: "left" }}>
-            {loadError}
-          </p>
-        </div>
+      {facets.error && (
+        <p className="error-text commands-banner" role="alert">
+          Command counts unavailable: {facets.error}{lastCounts ? " · Showing the last counts read." : ""}
+        </p>
+      )}
+      {gridError && (
+        <p className="error-text commands-banner" role="alert">Command runs could not be loaded: {gridError}</p>
+      )}
+      {recordLoading && (
+        <section className="commands-record-loading" aria-label={`Loading command run #${openId}`} aria-busy="true">
+          <CardSkeleton lines={4} />
+          <SlowLoadHint active what={`command run #${openId}`} />
+        </section>
+      )}
+      {linkError && (
+        <p className="error-text commands-banner" role="alert">Command run #{openId} could not be opened: {linkError}</p>
       )}
 
-      {/* List (detail renders as a centred modal below) */}
-      {loadError && rows.length === 0 ? null : <div className="findings-shell">
-        <section className="list-panel panel">
-          {loading ? (
-            <TableSkeleton
-              rows={8}
-              showHeader={false}
-              columns={["8%", "10%", "30%", "12%", "12%", "10%", "8%", "10%"]}
+      <div ref={resultsRef} className="commands-results" hidden={investigating || recordLoading}>
+        <div className="commands-results-head" hidden={nothingRecorded}>
+          {matching != null ? (
+            <ResultsSummary
+              shown={matching}
+              total={engagementTotals?.all ?? null}
+              noun="command runs"
+              sort={describeSort(sortLabel.column, sort.dir, sortLabel.kind)}
             />
           ) : (
-            <Suspense
-              fallback={
-                <TableSkeleton
-                  rows={8}
-                  showHeader={false}
-                  columns={["8%", "10%", "30%", "12%", "12%", "10%", "8%", "10%"]}
-                />
-              }
-            >
-              <CommandsGrid
-                rows={filtered}
-                dupCounts={dupCounts}
-                selectedId={selectedId}
-                onRowOpen={(id, invoker) => {
-                  setSelectedId(id);
-                  detailInvokerRef.current = invoker ?? searchRef.current;
-                  setDetailOpen(true);
-                }}
-                onTargetClick={(target) => setQuery(`target:${target}`)}
-                onDupClick={(hash) => setQuery(`hash:${hash.slice(0, 12)}`)}
-              />
-            </Suspense>
+            <Skeleton width={260} height={12} />
           )}
-          <div className="list-footer">
-            <span>{filtered.length} runs</span>
-          </div>
-        </section>
-
-      </div>}
-
-      {detailOpen && selectedDerived && (
-        <DetailModal
-          onClose={() => setDetailOpen(false)}
-          titleId="commands-detail-modal-title"
-          returnFocusRef={detailInvokerRef}
-        >
-          <Drawer
-            d={selectedDerived}
-            engagementKey={engagementKey}
-            detail={detailCache.get(selectedDerived.id) ?? null}
-            detailLoading={detailLoading.has(selectedDerived.id)}
-            detailError={detailErrors.get(selectedDerived.id) ?? null}
-            onRequestDetail={ensureDetail}
-            titleId="commands-detail-modal-title"
-          />
-        </DetailModal>
-      )}
-
-      <div className="findings-shortcuts">
-        <span>
-          <code>/</code> focus search
-        </span>
-        <span>
-          <code>⌘K</code> jump to command
-        </span>
-        <span>
-          <code>j / k</code> move
-        </span>
-        <span>
-          <code>[ / ]</code> prev / next
-        </span>
-        <span>
-          <code>Enter</code> open detail
-        </span>
-        <span>
-          <code>Esc</code> close detail
-        </span>
-      </div>
-
-      {cmdOpen && (
-        <CommandPalette
-          derivedList={derivedList}
-          returnFocusRef={commandInvokerRef}
-          onSelect={(id) => {
-            setSelectedId(id);
-            detailInvokerRef.current = commandInvokerRef.current ?? searchRef.current;
-            setCmdOpen(false);
-            setDetailOpen(true);
-          }}
-          onClose={() => setCmdOpen(false)}
-        />
-      )}
-    </div>
-  );
-}
-
-// ── StatusSpark ───────────────────────────────────────────────────────
-function StatusSpark({ counts }: { counts: Record<CommandRunStatus, number> }) {
-  const max = Math.max(1, ...Object.values(counts));
-  return (
-    <div className="sev-sparkline-wrap">
-      <span className="sev-label">By status</span>
-      <div className="sev-sparkline">
-        {STATUS_ORDER.map((s) => {
-          const c = counts[s] || 0;
-          const h = Math.max(4, (c / max) * 26);
-          return (
-            <div
-              key={s}
-              className="sev-bar"
-              style={{
-                height: `${h}px`,
-                background: STATUS_COLORS[s],
-                opacity: c ? 1 : 0.2,
-              }}
-              title={`${statusLabel(s)}: ${c}`}
-            >
-              <span>{c}</span>
-            </div>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
-// ── Drawer ────────────────────────────────────────────────────────────
-type DrawerTabId = "overview" | "stdout" | "stderr" | "audit";
-
-function Drawer({
-  d,
-  engagementKey,
-  detail,
-  detailLoading,
-  detailError,
-  onRequestDetail,
-  titleId,
-}: {
-  d: Derived;
-  engagementKey: string;
-  detail: AssessmentCommandRunDetail | null;
-  detailLoading: boolean;
-  detailError: string | null;
-  onRequestDetail: (id: number) => void;
-  titleId?: string;
-}) {
-  const [tab, setTab] = useState<DrawerTabId>("overview");
-  useEffect(() => {
-    setTab("overview");
-  }, [d?.id]);
-
-  useEffect(() => {
-    if (!d) return;
-    if ((tab === "stdout" || tab === "stderr" || d.row.finding_id != null) && !detail && !detailError) {
-      onRequestDetail(d.id);
-    }
-  }, [tab, d, detail, detailError, onRequestDetail]);
-
-  const color = STATUS_COLORS[d.status];
-  const tabs: { id: DrawerTabId; label: string; count?: number }[] = [
-    { id: "overview", label: "Overview" },
-    {
-      id: "stdout",
-      label: "Stdout preview",
-      count:
-        detail?.stdout_preview.length ||
-        d.row.stdout_preview_chars ||
-        (d.row.stdout_bytes > 0 ? 1 : 0),
-    },
-    {
-      id: "stderr",
-      label: "Stderr preview",
-      count:
-        detail?.stderr_preview.length ||
-        d.row.stderr_preview_chars ||
-        (d.row.stderr_bytes > 0 ? 1 : 0),
-    },
-    { id: "audit", label: "Audit" },
-  ];
-
-  return (
-    <aside className="drawer-panel panel">
-      <div
-        className="drawer-hero"
-        style={{ ["--drawer-accent" as string]: color }}
-      >
-        <span
-          aria-hidden
-          style={{
-            position: "absolute",
-            left: 0,
-            top: 0,
-            bottom: 0,
-            width: 4,
-            background: color,
-            borderRadius: "2px 0 0 2px",
-          }}
-        />
-        <div className="drawer-top">
-          <div className="drawer-slug">
-            <span className="mono">{d.row.run_uuid}</span>
-            <CopyInline text={d.row.run_uuid} ariaLabel="Copy run UUID">uuid</CopyInline>
-          </div>
-          {/* Maximize was retired with the move to a centred modal — it
-              already fills the viewport, so there's no "expand" left; the
-              modal's own × (upper-right) handles dismiss. */}
-        </div>
-        <h2
-          id={titleId}
-          className="drawer-title mono"
-          style={{ color: toolColor(d.toolBin) }}
-        >
-          {d.toolBin || "(unknown)"}
-        </h2>
-        <div className="hero-meta">
-          <span
-            className="hero-sev"
-            style={{ background: tint(color, 13), color }}
-          >
-            <span className="sev-dot" style={{ background: color }} />
-            {d.statusLabel}
-          </span>
-          {d.agentName && (
-            <span
-              className="tag"
-              style={{ color: agentColor(d.agentName), background: tint(agentColor(d.agentName)) }}
-            >
-              {d.agentName}
+          {!empty && gridWindow.total != null && gridWindow.total > 0 && gridWindow.last > 0 && (
+            <span className="meta-text commands-range">
+              Rows {gridWindow.first.toLocaleString()}–{gridWindow.last.toLocaleString()} in view
             </span>
           )}
-          {d.phase && <span className="tag">{d.phase}</span>}
-          {d.row.audit_source && (
-            <span className="tag">{d.row.audit_source}</span>
-          )}
+        </div>
+        <SlowLoadHint active={firstLoad} what="the command ledger" />
+        {counts && counts.total === 0 ? (
+          <CommandsEmpty
+            filters={filters}
+            activeFilters={activeFilters}
+            ledgerTotal={counts.engagement_totals.all}
+            allInScope={counts.scope_totals.all}
+            onClearFilters={clearFilters}
+            onShowAll={() => setScope("all")}
+          />
+        ) : (
+          <section className="panel commands-grid-panel" aria-label="Command runs" aria-busy={facets.loading}>
+            <Suspense fallback={<TableSkeleton rows={10} showHeader={false} />}>
+              <CommandsGrid
+                engagementKey={engagementKey}
+                filters={filters}
+                filtersKey={filtersKey}
+                refreshToken={refreshToken}
+                initialSort={sort}
+                selectedId={cursorId}
+                onRowOpen={openRun}
+                onWindow={setGridWindow}
+                onError={setGridError}
+                onSortChange={setSort}
+                onTargetClick={(target) => search(searchToken("target", target))}
+                onHandle={(handle) => { gridHandleRef.current = handle; }}
+              />
+            </Suspense>
+          </section>
+        )}
+        <div className="findings-shortcuts" hidden={nothingRecorded}>
+          <span><code>/</code> search</span>
+          <span><code>⌘K</code> jump to a run</span>
+          <span><code>j / k</code> move</span>
+          <span><code>Enter</code> open</span>
+          <span><code>[ / ]</code> previous / next in a record</span>
+          <span><code>Esc</code> back to results</span>
         </div>
       </div>
-      <div className="drawer-tabs">
-        {tabs.map((t) => (
-          <button
-            key={t.id}
-            type="button"
-            className={`drawer-tab ${tab === t.id ? "is-active" : ""}`}
-            onClick={() => setTab(t.id)}
-            aria-pressed={tab === t.id}
-          >
-            {t.label}
-            {t.count != null && t.count > 0 && (
-              <span className="count">{t.count}</span>
-            )}
-          </button>
-        ))}
-      </div>
-      <div className="drawer-body">
-        {detailError && <p className="error-text" role="alert">{detailError} <button type="button" className="ghost-button" onClick={() => onRequestDetail(d.id)}>Retry command detail</button></p>}
-        {tab === "overview" && <OverviewPane d={d} engagementKey={engagementKey} detail={detail} detailLoading={detailLoading} />}
-        {tab === "stdout" && (
-          <StreamPane
-            d={d}
-            kind="stdout"
-            detail={detail}
-            detailLoading={detailLoading}
+
+      {investigating && open && recordHeader && (
+        <RecordView
+          label="Command run record"
+          noun="command run"
+          navigation={navigation}
+          onBack={closeRecord}
+          titleId="command-record-title"
+          returnFocusRef={invokerRef}
+          className="commands-record"
+        >
+          <CommandRecord
+            key={open.id}
+            id={open.id}
+            header={recordHeader}
+            record={record}
+            readError={readError}
+            engagementKey={engagementKey}
+            section={section}
+            onSectionChange={chooseSection}
+            onSearch={searchFromRecord}
+            titleId="command-record-title"
           />
-        )}
-        {tab === "stderr" && (
-          <StreamPane
-            d={d}
-            kind="stderr"
-            detail={detail}
-            detailLoading={detailLoading}
-          />
-        )}
-        {tab === "audit" && <AuditPane d={d} />}
-      </div>
-    </aside>
+        </RecordView>
+      )}
+
+      {paletteOpen && (
+        <CommandPalette
+          engagementKey={engagementKey}
+          returnFocusRef={paletteInvokerRef}
+          onSelect={jumpTo}
+          onClose={() => setPaletteOpen(false)}
+        />
+      )}
+    </div>
   );
 }
 
-// ── Drawer panes ─────────────────────────────────────────────────────
+// ── Facet chips ──────────────────────────────────────────────────────
+// One labelled chip row per dimension with the server's counts (each facet
+// ignores its own filter, so a chip shows what choosing it gives), through the
+// shared FacetChipGroup. Values past the server's facet limit are named with
+// the search token that still finds them.
+function CommandFacetChips({
+  label,
+  facet,
+  selected,
+  onToggle,
+  order,
+  showAll = false,
+  scope,
+  ...look
+}: {
+  label: string;
+  facet: CommandFacet | null;
+  selected: string[];
+  onToggle: (value: string) => void;
+  order?: (a: string, b: string) => number;
+  /** Every value is shown (a short, fixed vocabulary such as the statuses). */
+  showAll?: boolean;
+  /** The search scope that finds an unlisted value (`tool:name`). */
+  scope?: string;
+  labelFor: (value: string) => string;
+  colorFor?: (value: string) => string | undefined;
+  statusDomain?: "command";
+}) {
+  if (!facet) {
+    return (
+      <FilterGroup label={label}>
+        {[0, 1, 2].map((index) => <Skeleton key={index} width={84} height={24} rounded />)}
+      </FilterGroup>
+    );
+  }
+  const values = order ? [...facet.values].sort((a, b) => order(a.value, b.value)) : facet.values;
+  if (values.length === 0 && selected.length === 0) return null;
+  return (
+    <FacetChipGroup
+      label={label}
+      values={values}
+      selected={new Set(selected)}
+      onToggle={onToggle}
+      collapsedLimit={showAll ? Number.POSITIVE_INFINITY : CHIPS_SHOWN}
+      unlistedCount={facet.distinct - facet.values.length}
+      unlistedHint={scope && (
+        <>they cover {facet.omitted_count.toLocaleString("en-US")} runs; search <code>{scope}:name</code></>
+      )}
+      {...look}
+    />
+  );
+}
+
+function CommandsEmpty({
+  filters,
+  activeFilters,
+  ledgerTotal,
+  allInScope,
+  onClearFilters,
+  onShowAll,
+}: {
+  filters: CommandFilters;
+  activeFilters: number;
+  ledgerTotal: number;
+  allInScope: number;
+  onClearFilters: () => void;
+  onShowAll: () => void;
+}) {
+  if (ledgerTotal === 0) {
+    return (
+      <EmptyState variant="empty" title="No command runs recorded yet.">
+        Agents record every tool command they run through Vigil here, with its output and outcome.
+      </EmptyState>
+    );
+  }
+  const showAll = filters.scope === "attention" && allInScope > 0
+    ? <button type="button" className="ui-button" onClick={onShowAll}>Show all {allInScope.toLocaleString()} runs</button>
+    : undefined;
+  if (activeFilters === 0) {
+    return (
+      <EmptyState variant="empty" title="No command runs need attention." action={showAll}>
+        Every recorded run completed cleanly and kept its output.
+      </EmptyState>
+    );
+  }
+  return (
+    <EmptyState variant="filtered" title="No command runs match these filters." onClearFilters={onClearFilters} action={showAll}>
+      {filters.scope === "attention" ? "Only runs that need attention are searched." : null}
+    </EmptyState>
+  );
+}
+
+// ── CommandRecord ─────────────────────────────────────────────────────
+// One command run inside the shared record view (CommandsTab owns the view,
+// the list order and the URL). The header shows from the list row at once;
+// the sections wait for the full record read.
+type HeaderFields = {
+  status: CommandLedgerRow["status"];
+  return_code: number | null;
+  timeout_seconds_requested?: number | null;
+  tool_bin: string;
+  tool_name: string;
+  agent_name: string;
+  phase: string;
+  technique?: string | null;
+  probe_kind?: string | null;
+  destructive?: boolean | null;
+  intent?: string | null;
+  created_at: string;
+  started_at?: string | null;
+  completed_at?: string | null;
+  duration_ms: number;
+  attention_reasons?: string[];
+  command?: string;
+  command_preview?: string;
+};
+
+function CommandRecord({
+  id,
+  header,
+  record,
+  readError,
+  engagementKey,
+  section,
+  onSectionChange,
+  onSearch,
+  titleId,
+}: {
+  id: number;
+  header: HeaderFields;
+  record: AssessmentCommandRunDetail | null;
+  readError: string | null;
+  engagementKey: string;
+  section: CommandSection;
+  onSectionChange: (section: CommandSection) => void;
+  onSearch: (q: string) => void;
+  titleId: string;
+}) {
+  const tool = header.tool_bin || header.tool_name || "";
+  const toolHue = toolColor(tool);
+  const command = record?.command ?? header.command_preview ?? "";
+  const running = header.status === "running" || header.status === "queued";
+  const technique = (header.technique || "").trim().toUpperCase();
+  const probeKind = (header.probe_kind || "").trim().toLowerCase();
+  const intent = (header.intent || "").trim();
+  return (
+    <>
+      <RecordHeader
+        id={`Command run #${id}`}
+        copyId={String(id)}
+        copyIdLabel="Copy command run ID"
+        title={intent || <span className="mono">{midTruncate(command, 160) || "(no command recorded)"}</span>}
+        titleId={titleId}
+        tone={statusTone("command", header.status)}
+        actions={
+          <>
+            <RecordCopyButton
+              label="Copy command"
+              text={() => record?.command ?? ""}
+              successMessage="Command copied"
+              failureMessage="Could not copy the command. Select it in the Command section instead."
+              disabled={!record?.command}
+            />
+            <RecordCopyLinkButton noun="command run" />
+          </>
+        }
+        pills={
+          <>
+            <StatusPill domain="command" value={header.status} reason={commandStatusReason({ status: header.status, return_code: header.return_code, timeout_seconds_requested: header.timeout_seconds_requested ?? null, attention_reasons: header.attention_reasons }) || undefined} />
+            <span className="tag" style={{ color: toolHue, background: tint(toolHue) }} title="Tool">{tool || "(unknown tool)"}</span>
+            {header.agent_name && (
+              <span className="tag" style={{ color: agentColor(header.agent_name), background: tint(agentColor(header.agent_name)) }} title="Agent">
+                {header.agent_name}
+              </span>
+            )}
+            {header.phase && <span className="tag" title="Phase">{header.phase}</span>}
+            {technique && (
+              <span className="tag" style={{ color: techniqueColor(technique), background: tint(techniqueColor(technique)) }} title="Technique">{technique}</span>
+            )}
+            {probeKind && (
+              <span className="tag" style={{ color: probeKindColor(probeKind), background: tint(probeKindColor(probeKind)) }} title="Probe kind">{probeKind}</span>
+            )}
+            {header.destructive && <span className="tag warning">writes target state</span>}
+          </>
+        }
+        datesLabel="Command run dates"
+        dates={[
+          { label: "Started", value: header.started_at || header.created_at },
+          {
+            label: "Finished",
+            value: header.completed_at,
+            fallback: running ? "still running" : "not recorded",
+            detail: header.completed_at && header.duration_ms > 0 ? <> · ran {formatDuration(header.duration_ms)}</> : undefined,
+          },
+        ]}
+      />
+      <RecordTabs
+        label="Command run sections"
+        active={section}
+        onChange={onSectionChange}
+        tabs={[
+          { id: "command", label: "Command", count: record?.argv?.length || undefined },
+          { id: "stdout", label: "Stdout" },
+          { id: "stderr", label: "Stderr" },
+          { id: "context", label: "Context" },
+          { id: "audit", label: "Audit" },
+        ]}
+      />
+      <RecordBody busy={!record && !readError}>
+        {readError && (
+          <p className="error-text" role="alert">
+            {record ? `Showing the last read of this run. Refresh failed: ${readError}` : `Command run details unavailable: ${readError}`}
+          </p>
+        )}
+        {!record ? (
+          readError ? null : (
+            <div className="commands-preview-skeleton" aria-label="Loading command run" role="status">
+              {Array.from({ length: 5 }).map((_, index) => <Skeleton key={index} width={index === 4 ? "55%" : "90%"} height={10} />)}
+            </div>
+          )
+        ) : (
+          <>
+            {section === "command" && <CommandPane record={record} engagementKey={engagementKey} />}
+            {(section === "stdout" || section === "stderr") && <StreamPane key={section} record={record} kind={section} />}
+            {section === "context" && <ContextPane record={record} engagementKey={engagementKey} onSearch={onSearch} />}
+            {section === "audit" && <AuditPane record={record} onSearch={onSearch} />}
+          </>
+        )}
+      </RecordBody>
+    </>
+  );
+}
+
+// ── Record panes ─────────────────────────────────────────────────────
 function KV({ k, v, mono, copyText }: { k: string; v: unknown; mono?: boolean; copyText?: string }) {
   if (v === undefined || v === null || v === "") return null;
   const str = typeof v === "string" ? v : String(v);
@@ -1620,471 +1025,343 @@ function KV({ k, v, mono, copyText }: { k: string; v: unknown; mono?: boolean; c
   return (
     <div className="kv">
       <p className="k">{k}</p>
-      <p className={`v ${mono ? "mono" : ""}`} style={{ display: "flex", alignItems: "center", gap: 6 }}>
-        <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{str}</span>
+      <p className={`v commands-kv-value ${mono ? "mono" : ""}`}>
+        <span className="commands-kv-text">{str}</span>
         {copyText && <CopyInline text={copyText} ariaLabel={`Copy ${k}`}>copy</CopyInline>}
       </p>
     </div>
   );
 }
 
-// ── Command-metadata KV cells ────────────────────────────────────────
-// Unlike the generic `KV` helper, these always render a row even when
-// the value is null — the rule is "null → em-dash", never a missing row
-// or the string "null". Shapes match the existing .kv / .k / .v classes
-// so they slot into .kv-grid without CSS churn.
-const MUTED_DASH = "—";
-
-function MutedValue() {
+// Command-metadata rows always render: a null field reads "—" (posted before
+// the metadata existed), never a missing row.
+function MetaKV({ k, children }: { k: string; children?: ReactNode }) {
   return (
-    <p className="v" style={{ color: "var(--muted)" }}>
-      {MUTED_DASH}
-    </p>
+    <div className="kv">
+      <p className="k">{k}</p>
+      <p className="v">{children ?? <span className="commands-muted">—</span>}</p>
+    </div>
   );
 }
 
-function TechniqueKV({ technique }: { technique: string }) {
-  if (!technique) {
-    return (
-      <div className="kv">
-        <p className="k">Technique</p>
-        <MutedValue />
-      </div>
-    );
-  }
-  const color = techniqueColor(technique);
+function SearchTag({ scope, value, color, onSearch, label }: { scope: string; value: string; color: string; onSearch: (q: string) => void; label?: string }) {
+  return (
+    <button
+      type="button"
+      className="tag commands-search-tag"
+      style={{ color, background: tint(color) }}
+      onClick={() => onSearch(searchToken(scope, value))}
+      title={`Show runs with ${searchToken(scope, value)}`}
+      aria-label={`Show runs with ${scope} ${value}`}
+    >
+      {label ?? value}
+    </button>
+  );
+}
+
+function LinkedFindingKV({ record, engagementKey }: { record: AssessmentCommandRunDetail; engagementKey: string }) {
+  if (record.finding_id == null) return null;
   return (
     <div className="kv">
-      <p className="k">Technique</p>
+      <p className="k">Linked finding</p>
       <p className="v">
-        <span
-          className="pill"
-          style={{ background: tint(color), color, letterSpacing: "0.06em" }}
-        >
-          <span className="sev-dot" style={{ background: color }} />
-          {technique}
-        </span>
+        {record.finding_slug
+          ? <a className="mono" href={engagementHref(engagementKey, { tab: "findings", finding: record.finding_slug })}>{record.finding_slug}</a>
+          : <>Finding #{record.finding_id} (no slug recorded)</>}
       </p>
     </div>
   );
 }
 
-function ProbeKindKV({ probeKind }: { probeKind: string }) {
-  if (!probeKind) {
-    return (
-      <div className="kv">
-        <p className="k">Probe kind</p>
-        <MutedValue />
-      </div>
-    );
-  }
-  const color = probeKindColor(probeKind);
-  return (
-    <div className="kv">
-      <p className="k">Probe kind</p>
-      <p className="v">
-        <span
-          className={`pill cpk-${probeKind}`}
-          style={{ background: tint(color), color }}
-        >
-          <span className="sev-dot" style={{ background: color }} />
-          {probeKind}
-        </span>
-      </p>
-    </div>
-  );
+function targetLabel(record: AssessmentCommandRunDetail, stored: string) {
+  return record.target_source === "inferred" ? "Target (inferred from command)" : stored;
 }
 
-function IntentKV({ intent }: { intent: string }) {
-  if (!intent) {
-    return (
-      <div className="kv">
-        <p className="k">Intent</p>
-        <MutedValue />
-      </div>
-    );
-  }
-  // Intent is free-form ≤200 chars. Render as a soft-accent pill so it's
-  // visually distinct from the mono technical fields around it — operators
-  // scan for it as prose, not as a code token.
-  return (
-    <div className="kv">
-      <p className="k">Intent</p>
-      <p className="v" style={{ whiteSpace: "normal" }}>
-        <span
-          className="pill"
-          style={{
-            background: "var(--count-bg)",
-            color: "var(--accent)",
-            textTransform: "none",
-            letterSpacing: 0,
-            fontWeight: 400,
-            fontSize: "0.78rem",
-          }}
-        >
-          {intent}
-        </span>
-      </p>
-    </div>
-  );
-}
-
-function DestructiveKV({ destructive }: { destructive: boolean | null }) {
-  if (destructive == null) {
-    return (
-      <div className="kv">
-        <p className="k">Destructive</p>
-        <MutedValue />
-      </div>
-    );
-  }
-  // True gets the warn-tinted pill (amber/red) so operators can scan a
-  // drawer and immediately see "this touched target state". False gets
-  // the ok-tinted pill — still a positive signal, just reversed.
-  const pillClass = destructive ? "pill-active" : "pill-reported";
-  return (
-    <div className="kv">
-      <p className="k">Destructive</p>
-      <p className="v">
-        <span className={`pill ${pillClass}`}>
-          {destructive ? "yes — writes target state" : "no"}
-        </span>
-      </p>
-    </div>
-  );
-}
-
-function OverviewPane({ d, engagementKey, detail, detailLoading }: { d: Derived; engagementKey: string; detail: AssessmentCommandRunDetail | null; detailLoading: boolean }) {
-  const row = d.row;
-  const findingSlug = detail?.finding_slug ?? row.finding_slug;
+function CommandPane({ record, engagementKey }: { record: AssessmentCommandRunDetail; engagementKey: string }) {
   return (
     <>
-      <div className="section">
-        <p className="section-title">Command</p>
-        <pre className="pre" style={{ maxHeight: 180 }}>{row.command}</pre>
+      <div className="kv-grid" aria-label="Command run facts">
+        <KV k="Tool" v={record.tool_bin || record.tool_name || "(unknown)"} mono />
+        <KV k="Agent" v={record.agent_name || "Not recorded"} />
+        <KV k={targetLabel(record, "Target")} v={record.target || "Not recorded"} mono={Boolean(record.target)} />
+        <KV k="Duration" v={formatDuration(record.duration_ms)} />
+        <LinkedFindingKV record={record} engagementKey={engagementKey} />
       </div>
-      {row.argv && row.argv.length > 0 && (
-        <div className="section">
-          <p className="section-title">
-            Argv <span className="count">{row.argv.length}</span>
-          </p>
+      <section className="section">
+        <h3 className="section-title">Command</h3>
+        <pre className="pre">{record.command || "(no command recorded)"}</pre>
+      </section>
+      {record.argv && record.argv.length > 0 && (
+        <section className="section">
+          <h3 className="section-title">
+            Argv <span className="count">{record.argv.length}</span>
+          </h3>
           <ol className="steps mono">
-            {row.argv.map((a, i) => (
-              <li key={i}>{a}</li>
-            ))}
+            {record.argv.map((arg, index) => <li key={index}>{arg}</li>)}
           </ol>
-        </div>
+        </section>
       )}
-      <div className="section">
-        <p className="section-title">Metadata</p>
-        <div className="kv-grid">
-          <KV k="Started" v={row.started_at} mono />
-          <KV k="Completed" v={row.completed_at} mono />
-          <KV k="Lifecycle status" v={d.statusLabel} />
-          <KV k="Output recovery baseline" v={row.output_recovery_observed_at || "—"} mono />
-          <KV k="Duration" v={fmtDuration(row.duration_ms)} />
-          <KV k="Return code" v={row.return_code == null ? "—" : String(row.return_code)} />
-          <KV k="Timed out" v={row.timed_out ? "yes" : "no"} />
-          <KV k="Success" v={row.success ? "yes" : "no"} />
-          <KV k="Agent" v={row.agent_name} />
-          <KV k="Phase" v={row.phase} />
-          <KV k="Tool name" v={row.tool_name} mono />
-          <KV k="Tool bin" v={row.tool_bin} mono />
-          <KV k="Route" v={row.route} mono />
-          <KV k="Audit source" v={row.audit_source} />
-          <KV
-            k="Command hash"
-            v={row.command_hash ? `${row.command_hash.slice(0, 12)}…` : ""}
-            mono
-            copyText={row.command_hash}
-          />
-          <KV
-            k="Run UUID"
-            v={row.run_uuid}
-            mono
-            copyText={row.run_uuid}
-          />
-          {d.target && (
-            <KV
-              k={d.targetSource === "inferred" ? "Target (inferred from command)" : "Target (stored)"}
-              v={d.target}
-              mono
-            />
-          )}
-          <KV k="Auth context" v={row.auth_context} mono />
-          <KV k="Scope version" v={row.scope_version} mono />
-          <KV k="Finding ID" v={row.finding_id} mono />
-          {row.finding_id != null && <div className="kv"><span className="k">Linked finding</span><span className="v">{findingSlug ? <a className="mono" href={engagementHref(engagementKey, { tab: "findings", finding: findingSlug })}>{findingSlug}</a> : detailLoading ? "Loading finding association…" : "Finding route unavailable"}</span></div>}
-          <KV k="Results" v={row.partial_results ? "partial" : "complete"} />
-          {/* Command-metadata audit fields. Always render the row even when
-              null so operators see "field is absent" vs. "field is missing
-              from the UI". Null renders as the em-dash muted — a deliberate
-              choice for rows posted before the 2026-04 schema migration. */}
-          <TechniqueKV technique={d.techniqueKey} />
-          <ProbeKindKV probeKind={d.probeKind} />
-          <IntentKV intent={d.intent} />
-          <DestructiveKV destructive={d.destructive} />
-        </div>
-      </div>
-      {row.superseded_by_id != null && (
+      {record.superseded_by_id != null && (
         <div className="callout">
-          <p className="section-title">Superseded by run {row.superseded_by_id}</p>
-          <p>This row remains in the immutable command ledger for audit history.</p>
+          <p className="section-title">Superseded by run {record.superseded_by_id}</p>
+          <p>
+            This row remains in the immutable command ledger for audit history.{" "}
+            <a href={engagementHref(engagementKey, { tab: "commands", command: record.superseded_by_id })}>Open command run #{record.superseded_by_id}</a>
+          </p>
         </div>
       )}
-      {row.notes && (
+      {record.notes && (
         <div className="callout">
           <p className="section-title">Notes</p>
-          <p>{row.notes}</p>
+          <p className="commands-prewrap">{record.notes}</p>
         </div>
       )}
     </>
   );
 }
 
-function StreamPane({
-  d,
-  kind,
-  detail,
-  detailLoading,
-}: {
-  d: Derived;
-  kind: "stdout" | "stderr";
-  detail: AssessmentCommandRunDetail | null;
-  detailLoading: boolean;
-}) {
-  const row = d.row;
-  const retention = (row.output_retention_status || "").toLowerCase();
-  const integrity = (row.output_integrity_status || "").toLowerCase();
-  const preview = detail
-    ? kind === "stdout"
-      ? detail.stdout_preview
-      : detail.stderr_preview
-    : "";
-  const suppressionReason =
-    kind === "stdout" ? row.stdout_suppression_reason : row.stderr_suppression_reason;
-  const artifactRef =
-    kind === "stdout" ? row.stdout_artifact_ref : row.stderr_artifact_ref;
-  const sha = kind === "stdout" ? row.stdout_sha256 : row.stderr_sha256;
-  const bytes = kind === "stdout" ? row.stdout_bytes : row.stderr_bytes;
-  const previewChars =
-    (kind === "stdout" ? row.stdout_preview_chars : row.stderr_preview_chars) ?? 0;
+function ContextPane({ record, engagementKey, onSearch }: { record: AssessmentCommandRunDetail; engagementKey: string; onSearch: (q: string) => void }) {
+  const technique = (record.technique || "").trim().toUpperCase();
+  const probeKind = (record.probe_kind || "").trim().toLowerCase();
+  const intent = (record.intent || "").trim();
+  return (
+    <>
+      <section className="section">
+        <h3 className="section-title">Outcome</h3>
+        <div className="kv-grid">
+          <KV k="Lifecycle status" v={statusLabel("command", record.status)} />
+          <KV k="Return code" v={record.return_code == null ? "—" : String(record.return_code)} />
+          <KV k="Timed out" v={record.timed_out ? "yes" : "no"} />
+          <KV k="Timeout requested" v={record.timeout_seconds_requested ? `${record.timeout_seconds_requested}s` : undefined} />
+          <KV k="Success" v={record.success ? "yes" : "no"} />
+          <KV k="Results" v={record.partial_results ? "partial" : "complete"} />
+          <KV k="Needs attention" v={record.attention_reasons?.length ? record.attention_reasons.join(" · ") : "no"} />
+          <KV k="Duration" v={formatDuration(record.duration_ms)} />
+          <KVTime k="Started" v={record.started_at} />
+          <KVTime k="Completed" v={record.completed_at} />
+          <KVTime k="Recorded" v={record.created_at} />
+          {record.output_recovery_observed_at
+            ? <KVTime k="Output recovery baseline" v={record.output_recovery_observed_at} />
+            : <KV k="Output recovery baseline" v="—" />}
+        </div>
+      </section>
+      <section className="section">
+        <h3 className="section-title">Who ran it, where</h3>
+        <div className="kv-grid">
+          <KV k="Agent" v={record.agent_name} />
+          <KV k="Phase" v={record.phase} />
+          <KV k="Tool name" v={record.tool_name} mono />
+          <KV k="Tool bin" v={record.tool_bin} mono />
+          <KV k="Route" v={record.route} mono />
+          <KV k="Audit source" v={record.audit_source} />
+          {record.target && <KV k={targetLabel(record, "Target (stored)")} v={record.target} mono />}
+          <KV k="Auth context" v={record.auth_context} mono />
+          <KV k="Scope version" v={record.scope_version} mono />
+          <KV k="Working directory" v={record.working_dir} mono />
+          <KV k="Finding ID" v={record.finding_id} mono />
+          <LinkedFindingKV record={record} engagementKey={engagementKey} />
+        </div>
+      </section>
+      <section className="section">
+        <h3 className="section-title">What it was for</h3>
+        <div className="kv-grid">
+          <MetaKV k="Technique">
+            {technique ? <SearchTag scope="technique" value={technique} color={techniqueColor(technique)} onSearch={onSearch} /> : undefined}
+          </MetaKV>
+          <MetaKV k="Probe kind">
+            {probeKind ? <SearchTag scope="probe" value={probeKind} color={probeKindColor(probeKind)} onSearch={onSearch} /> : undefined}
+          </MetaKV>
+          <MetaKV k="Intent">{intent ? <span className="commands-intent">{intent}</span> : undefined}</MetaKV>
+          <MetaKV k="Destructive">
+            {record.destructive == null ? undefined : (
+              <StatusPill
+                tone={record.destructive ? "warning" : "neutral"}
+                value={record.destructive ? "destructive" : "read-only"}
+                label={record.destructive ? "Yes, writes target state" : "No"}
+                size="sm"
+              />
+            )}
+          </MetaKV>
+        </div>
+      </section>
+    </>
+  );
+}
+
+function StreamPane({ record, kind }: { record: AssessmentCommandRunDetail; kind: "stdout" | "stderr" }) {
+  const retention = (record.output_retention_status || "").toLowerCase();
+  const integrity = (record.output_integrity_status || "").toLowerCase();
+  const preview = kind === "stdout" ? record.stdout_preview : record.stderr_preview;
+  const suppressionReason = kind === "stdout" ? record.stdout_suppression_reason : record.stderr_suppression_reason;
+  const artifactRef = kind === "stdout" ? record.stdout_artifact_ref : record.stderr_artifact_ref;
+  const sha = kind === "stdout" ? record.stdout_sha256 : record.stderr_sha256;
+  const bytes = kind === "stdout" ? record.stdout_bytes : record.stderr_bytes;
 
   if (integrity === "pending" || integrity === "warning") {
     return (
-      <div className="section">
-        <div className="callout" style={{ borderLeft: "4px solid var(--chip-red)" }}>
+      <section className="section">
+        <div className="callout commands-callout-danger">
           <p className="section-title">Output integrity is {integrity}</p>
           <p>
             Captured output is shown below, but it has not passed integrity verification.
-            {" "}{row.output_integrity_warning || "Vigil has not proved that this artifact stayed stable; treat it as untrusted evidence."}
+            {" "}{record.output_integrity_warning || "Vigil has not proved that this artifact stayed stable; treat it as untrusted evidence."}
           </p>
         </div>
-        {detailLoading && !detail ? (
-          <div aria-busy="true" aria-label={`Loading ${kind}`} style={{ display: "grid", gap: 6, marginTop: 10 }}>
-            {Array.from({ length: 4 }).map((_, i) => (
-              <Skeleton key={i} width={i === 3 ? "55%" : "90%"} height={9} />
-            ))}
-          </div>
-        ) : detail ? (
-          <>
-            <p className="section-title" style={{ marginTop: 10 }}>Captured output preview</p>
-            <pre className="pre" style={{ marginTop: 6 }}>{preview || "(empty preview)"}</pre>
-          </>
-        ) : previewChars > 0 ? (
-          <p className="empty" style={{ marginTop: 10, textAlign: "left" }}>
-            A preview is recorded but has not loaded yet.
-          </p>
-        ) : null}
+        <h3 className="section-title">Captured output preview</h3>
+        <pre className="pre commands-output">{preview || "(empty preview)"}</pre>
         <div className="kv-grid">
           <KV k="Bytes captured" v={bytes} />
-          <KV k="Preview chars" v={previewChars} />
           <KV k="Retention" v={retention || "unknown"} />
           <KV k="Integrity" v={integrity} />
           <KV k="SHA-256" v={sha} mono copyText={sha} />
         </div>
-      </div>
+      </section>
     );
   }
 
   if (retention === "suppressed" || retention.startsWith("suppression_")) {
     const spillMayRemain = retention !== "suppressed";
     return (
-      <div className="section">
-        <div className="callout" style={{ borderLeft: "4px solid var(--pending)" }}>
+      <section className="section">
+        <div className="callout commands-callout-pending">
           <p className="section-title">{spillMayRemain ? "Suppression incomplete" : "Suppressed"}</p>
           <p>{suppressionReason || "Output was suppressed by the capture layer."}</p>
           {spillMayRemain && (
-            <p>{row.output_cleanup_warning || "Raw spill bytes may remain in the private host-exec directory and are blocked from artifact indexing."}</p>
+            <p>{record.output_cleanup_warning || "Raw spill bytes may remain in the private host-exec directory and are blocked from artifact indexing."}</p>
           )}
         </div>
         <div className="kv-grid">
           <KV k="Bytes captured" v={bytes} />
           <KV k="SHA-256" v={sha} mono copyText={sha} />
         </div>
-      </div>
+      </section>
     );
   }
 
-  if (
-    retention === "untrusted"
-    || retention === "integrity_failure"
-    || INCOMPLETE_OUTPUT_RETENTION.has(retention)
-  ) {
+  if (retention === "untrusted" || retention === "integrity_failure" || INCOMPLETE_OUTPUT_RETENTION.has(retention)) {
     const incompleteMeasurement = INCOMPLETE_OUTPUT_RETENTION.has(retention);
     return (
-      <div className="section">
-        <div className="callout" style={{ borderLeft: "4px solid var(--chip-red)" }}>
+      <section className="section">
+        <div className="callout commands-callout-danger">
           <p className="section-title">{incompleteMeasurement ? "Output measurement is incomplete" : "Output is not trustworthy"}</p>
-          <p>{row.output_integrity_warning || (incompleteMeasurement
+          <p>{record.output_integrity_warning || (incompleteMeasurement
             ? "Vigil could not establish complete byte totals for this output; do not treat zero-valued storage defaults as proof of no output."
             : "Vigil could not prove that this output stayed stable.")}</p>
         </div>
         <div className="kv-grid">
           <KV k="Retention" v={retention} />
-          <KV k="Integrity" v={row.output_integrity_status || "warning"} />
+          <KV k="Integrity" v={record.output_integrity_status || "warning"} />
         </div>
-        {preview ? (
-          <pre className="pre" style={{ marginTop: 10 }}>{preview}</pre>
-        ) : previewChars > 0 ? (
-          <p className="empty" style={{ marginTop: 10, textAlign: "left" }}>
-            A preview is recorded but has not loaded yet.
-          </p>
-        ) : null}
-      </div>
+        {preview ? <pre className="pre commands-output">{preview}</pre> : null}
+      </section>
     );
   }
 
-  if (retention === "empty" || (bytes === 0 && previewChars === 0 && !preview)) {
+  if (retention === "empty" || (bytes === 0 && !preview)) {
     return (
-      <div className="section">
-        <p className="empty" style={{ textAlign: "left" }}>No output.</p>
+      <section className="section">
+        <p className="meta-text">No output.</p>
         <div className="kv-grid">
           <KV k="Bytes captured" v={bytes} />
           <KV k="Retention" v={retention || "empty"} />
         </div>
-      </div>
+      </section>
     );
   }
 
   return (
-    <div className="section">
-      {detailLoading && !detail ? (
-        <div aria-busy="true" aria-label={`Loading ${kind}`} style={{ display: "grid", gap: 6 }}>
-          {Array.from({ length: 4 }).map((_, i) => (
-            <Skeleton key={i} width={i === 3 ? "55%" : "90%"} height={9} />
-          ))}
-        </div>
-      ) : detail ? (
-        <>
-          <p className="section-title">Captured output preview</p>
-          <pre className="pre" style={{ marginTop: 6 }}>{preview || "(empty preview)"}</pre>
-        </>
-      ) : (
-        <p className="empty" style={{ textAlign: "left" }}>
-          Preview not loaded yet. Re-open this tab to fetch.
-        </p>
-      )}
+    <section className="section">
+      <h3 className="section-title">Captured output preview</h3>
+      <pre className="pre commands-output">{preview || "(empty preview)"}</pre>
       {retention === "artifact" && artifactRef && (
-        <div className="callout" style={{ marginTop: 10 }}>
+        <div className="callout">
           <p className="section-title">Full output artifact</p>
           <p>
-            Full output spilled to{" "}
-            <span className="mono">{artifactRef}</span>
+            Full output spilled to <span className="mono">{artifactRef}</span>
           </p>
-          <div style={{ display: "flex", gap: 6 }}>
+          <div className="commands-callout-actions">
             <CopyInline text={artifactRef} ariaLabel="Copy artifact reference">Copy artifact reference</CopyInline>
           </div>
         </div>
       )}
-      <div className="kv-grid" style={{ marginTop: 10 }}>
+      <div className="kv-grid">
         <KV k="Bytes captured" v={bytes} />
-        <KV k="Preview chars" v={previewChars} />
         <KV k="Retention" v={retention || "retained"} />
         <KV k="SHA-256" v={sha} mono copyText={sha} />
       </div>
-    </div>
+    </section>
   );
 }
 
-function AuditPane({ d }: { d: Derived }) {
-  const row = d.row;
+function AuditPane({ record, onSearch }: { record: AssessmentCommandRunDetail; onSearch: (q: string) => void }) {
   return (
     <>
-      <div className="section">
-        <p className="section-title">Identifiers</p>
+      <section className="section">
+        <h3 className="section-title">Identifiers</h3>
         <div className="kv-grid">
-          <KV k="ID" v={row.id} mono />
-          <KV
-            k="Run UUID"
-            v={row.run_uuid}
-            mono
-            copyText={row.run_uuid}
-          />
-          <KV
-            k="Command hash"
-            v={row.command_hash}
-            mono
-            copyText={row.command_hash}
-          />
-          <KV k="Engagement ID" v={row.engagement_id} mono />
+          <KV k="ID" v={record.id} mono />
+          <KV k="Run UUID" v={record.run_uuid} mono copyText={record.run_uuid} />
+          <KV k="Command hash" v={record.command_hash} mono copyText={record.command_hash} />
+          <KV k="Engagement ID" v={record.engagement_id} mono />
         </div>
-      </div>
-      <div className="section">
-        <p className="section-title">Output hashes</p>
+        {record.command_hash && (
+          <button type="button" className="ui-button commands-same-command" onClick={() => onSearch(searchToken("hash", record.command_hash.slice(0, 12)))}>
+            Show runs with this command
+          </button>
+        )}
+      </section>
+      <section className="section">
+        <h3 className="section-title">Output hashes</h3>
         <div className="kv-grid">
-          <KV
-            k="Stdout SHA-256"
-            v={row.stdout_sha256}
-            mono
-            copyText={row.stdout_sha256}
-          />
-          <KV k="Stdout bytes" v={row.stdout_bytes} />
-          <KV
-            k="Stderr SHA-256"
-            v={row.stderr_sha256}
-            mono
-            copyText={row.stderr_sha256}
-          />
-          <KV k="Stderr bytes" v={row.stderr_bytes} />
+          <KV k="Stdout SHA-256" v={record.stdout_sha256} mono copyText={record.stdout_sha256} />
+          <KV k="Stdout bytes" v={record.stdout_bytes} />
+          <KV k="Stderr SHA-256" v={record.stderr_sha256} mono copyText={record.stderr_sha256} />
+          <KV k="Stderr bytes" v={record.stderr_bytes} />
         </div>
-      </div>
-      <div className="section">
-        <p className="section-title">Retention & source</p>
+      </section>
+      <section className="section">
+        <h3 className="section-title">Retention &amp; source</h3>
         <div className="kv-grid">
-          <KV k="Retention" v={row.output_retention_status} />
-          <KV k="Audit source" v={row.audit_source} />
-          <KV k="Stdout artifact ref" v={row.stdout_artifact_ref} mono />
-          <KV k="Stderr artifact ref" v={row.stderr_artifact_ref} mono />
-          <KV
-            k="Stdout suppression"
-            v={row.stdout_suppression_reason}
-          />
-          <KV
-            k="Stderr suppression"
-            v={row.stderr_suppression_reason}
-          />
-          <KV k="Indexed at" v={row.indexed_for_embeddings_at} mono />
+          <KV k="Retention" v={record.output_retention_status} />
+          <KV k="Integrity" v={record.output_integrity_status} />
+          <KV k="Integrity warning" v={record.output_integrity_warning} />
+          <KV k="Cleanup" v={record.output_cleanup_status} />
+          <KV k="Cleanup warning" v={record.output_cleanup_warning} />
+          <KV k="Audit source" v={record.audit_source} />
+          <KV k="Stdout artifact ref" v={record.stdout_artifact_ref} mono />
+          <KV k="Stderr artifact ref" v={record.stderr_artifact_ref} mono />
+          <KV k="Stdout suppression" v={record.stdout_suppression_reason} />
+          <KV k="Stderr suppression" v={record.stderr_suppression_reason} />
+          <KVTime k="Indexed at" v={record.indexed_for_embeddings_at} />
         </div>
-      </div>
+      </section>
+      <section className="section">
+        <h3 className="section-title">Raw record</h3>
+        <JsonView value={record} label={`command run #${record.id}`} />
+      </section>
     </>
   );
 }
 
-// ── Command palette ──────────────────────────────────────────────────
+// ── Jump palette ─────────────────────────────────────────────────────
+// Searches the whole ledger on the server (every scope, no chip filters):
+// the same grammar as the search box, so a run_uuid prefix or `#id` finds
+// any run, not just the loaded rows.
 function CommandPalette({
-  derivedList,
+  engagementKey,
   onSelect,
   onClose,
   returnFocusRef,
 }: {
-  derivedList: Derived[];
-  onSelect: (id: number) => void;
+  engagementKey: string;
+  onSelect: (row: CommandLedgerRow) => void;
   onClose: () => void;
   returnFocusRef: RefObject<HTMLElement | null>;
 }) {
   const [q, setQ] = useState("");
   const [idx, setIdx] = useState(0);
+  const [answer, setAnswer] = useState<{ q: string; total: number; items: CommandLedgerRow[] } | null>(null);
+  const [error, setError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const panelRef = useRef<HTMLDivElement | null>(null);
   useBodyScrollLock();
@@ -2094,72 +1371,30 @@ function CommandPalette({
     inputRef.current?.focus();
   }, []);
 
-  const results = useMemo(() => {
-    const parsed = parseQuery(q);
-    const list = derivedList.filter((d) => {
-      for (const tok of parsed.tokens) {
-        const v = tok.value;
-        switch (tok.scope) {
-          case "tool": {
-            const a = (d.toolBin || "").toLowerCase();
-            const b = (d.row.tool_name || "").toLowerCase();
-            if (a !== v && b !== v) return false;
-            break;
-          }
-          case "agent":
-            if ((d.agentName || "").toLowerCase() !== v) return false;
-            break;
-          case "phase":
-            if ((d.phase || "").toLowerCase() !== v) return false;
-            break;
-          case "status":
-            if (v !== d.status) return false;
-            break;
-          case "target":
-            if (!(d.target || "").toLowerCase().includes(v)) return false;
-            break;
-          case "hash":
-            if (!(d.row.command_hash || "").toLowerCase().startsWith(v)) return false;
-            break;
-          case "rc":
-            if (v === "0" && d.rcBucket !== "zero") return false;
-            else if (v === "!0" && d.rcBucket !== "nonzero") return false;
-            else if (v === "timeout" && d.rcBucket !== "timeout") return false;
-            break;
-          case "technique":
-            if ((d.techniqueKey || "").toLowerCase() !== v) return false;
-            break;
-          case "probe":
-            if ((d.probeKind || "") !== v) return false;
-            break;
-          case "intent":
-            if (!d.intent.toLowerCase().includes(v)) return false;
-            break;
-          case "destructive":
-          case "write": {
-            const want =
-              v === "true" || v === "1" || v === "yes"
-                ? true
-                : v === "false" || v === "0" || v === "no"
-                ? false
-                : null;
-            if (want == null) return false;
-            if (d.destructive !== want) return false;
-            break;
-          }
-        }
-      }
-      for (const t of parsed.freeTerms) if (!d.searchCorpus.includes(t)) return false;
-      return true;
-    });
-    return list.slice(0, 30);
-  }, [q, derivedList]);
-
   useEffect(() => {
-    setIdx(0);
-  }, [q]);
+    let active = true;
+    const timer = window.setTimeout(() => {
+      fetchCommandPage(engagementKey, { ...DEFAULT_COMMAND_FILTERS, scope: "all", q }, { ...DEFAULT_COMMAND_SORT, limit: PALETTE_LIMIT, offset: 0 })
+        .then((page) => {
+          if (!active) return;
+          setAnswer({ q, total: page.total, items: page.items });
+          setError(null);
+          setIdx(0);
+        })
+        .catch((cause: unknown) => {
+          if (active) setError(cause instanceof Error ? cause.message : "Search failed");
+        });
+    }, q ? 200 : 0);
+    return () => {
+      active = false;
+      window.clearTimeout(timer);
+    };
+  }, [engagementKey, q]);
 
-  const onKey = (e: React.KeyboardEvent<HTMLInputElement>) => {
+  const results = answer?.items ?? [];
+  const listId = useId();
+  const optionId = (id: number) => `${listId}-run-${id}`;
+  const onKey = (e: ReactKeyboardEvent<HTMLInputElement>) => {
     if (e.key === "ArrowDown") {
       e.preventDefault();
       setIdx((i) => Math.min(results.length - 1, i + 1));
@@ -2168,7 +1403,7 @@ function CommandPalette({
       setIdx((i) => Math.max(0, i - 1));
     } else if (e.key === "Enter") {
       e.preventDefault();
-      if (results[idx]) onSelect(results[idx].id);
+      if (results[idx]) onSelect(results[idx]);
     }
   };
 
@@ -2180,48 +1415,54 @@ function CommandPalette({
           <input
             ref={inputRef}
             className="cmd-input"
+            role="combobox"
+            aria-expanded={results.length > 0}
+            aria-controls={listId}
+            aria-autocomplete="list"
+            aria-activedescendant={results[idx] ? optionId(results[idx].id) : undefined}
             aria-label="Search commands to jump to"
-            placeholder="Jump to command · try 'tool:curl target:example.com' or a run_uuid prefix"
+            placeholder="Jump to a run · a run_uuid prefix, #id, tool:curl target:app.example.com"
             value={q}
             onChange={(e) => setQ(e.target.value)}
             onKeyDown={onKey}
           />
-          <span className="search-kbd">esc</span>
+          <span className="search-kbd" aria-hidden="true">esc</span>
         </div>
-        <div className="cmd-list">
-          {results.length === 0 ? (
-            <div className="cmd-empty">No command runs match.</div>
-          ) : (
-            results.map((d, i) => (
-              <button
-                type="button"
-                key={d.id}
-                className={`cmd-item ${i === idx ? "is-active" : ""}`}
-                onMouseEnter={() => setIdx(i)}
-                onFocus={() => setIdx(i)}
-                onClick={() => onSelect(d.id)}
-              >
-                <span
-                  className="sev-dot"
-                  style={{ background: STATUS_COLORS[d.status] }}
-                />
-                <span>
-                  <span className="cmd-title mono">
-                    {midTruncate(d.commandPreview, 96)}
-                  </span>
-                  <span className="cmd-sub">
-                    {d.toolBin}
-                    {d.agentName ? ` · ${d.agentName}` : ""}
-                    {d.phase ? ` · ${d.phase}` : ""}
-                    {d.target ? ` · ${d.target}` : ""}
-                  </span>
-                </span>
+        <p className="meta-text commands-palette-count" role="status">
+          {error
+            ? `Search failed: ${error}`
+            : answer === null
+              ? "Searching…"
+              : answer.total === 0
+                ? "No command runs match."
+                : `${answer.total.toLocaleString()} ${answer.total === 1 ? "match" : "matches"}${answer.total > results.length ? ` · showing the newest ${results.length}` : ""}${answer.q ? "" : " · newest runs"}`}
+        </p>
+        <div className="cmd-list" id={listId} role="listbox" aria-label="Matching command runs">
+          {results.map((row, i) => (
+            <button
+              type="button"
+              key={row.id}
+              id={optionId(row.id)}
+              role="option"
+              aria-selected={i === idx}
+              tabIndex={-1}
+              className={`cmd-item ${i === idx ? "is-active" : ""}`}
+              onMouseEnter={() => setIdx(i)}
+              onFocus={() => setIdx(i)}
+              onClick={() => onSelect(row)}
+            >
+              <StatusPill domain="command" value={row.status} size="sm" />
+              <span>
+                <span className="cmd-title mono">{row.intent?.trim() || midTruncate(row.command_preview, 96)}</span>
                 <span className="cmd-sub">
-                  {d.statusLabel}
+                  #{row.id} · {row.tool || "(unknown tool)"}
+                  {row.agent_name ? ` · ${row.agent_name}` : ""}
+                  {row.target ? ` · ${row.target}` : ""}
                 </span>
-              </button>
-            ))
-          )}
+              </span>
+              <span className="cmd-sub mono">{row.run_uuid.slice(0, 8)}</span>
+            </button>
+          ))}
         </div>
       </div>
     </div>

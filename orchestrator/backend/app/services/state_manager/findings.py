@@ -89,6 +89,7 @@ from .finding_snapshots import (
     is_file_finding,
     load_code_repo_snapshot_states,
 )
+from ..sql_like import like_contains
 
 _CODE_SNAPSHOT_WRITE_MODES = CODE_SNAPSHOT_WRITE_MODES
 
@@ -3886,6 +3887,23 @@ def _validated_enum_filter(
         )
     return normalized
 
+# The newest transition-ledger row per finding, for the list and point reads.
+# ``updated_at`` moves whenever a finding is re-recorded, so whole batches share
+# one value; the ledger records each real change. MAX(id) is a seek on
+# idx_assessment_finding_transitions_finding that never reads the ledger's large
+# before/after bodies, and the id (not ``created_at``, which has one-second
+# resolution) decides which row is newest. Null when a finding has no ledger row.
+_LAST_TRANSITION_COLUMNS = """last_transition.created_at AS last_transition_at,
+                last_transition.action AS last_transition_action,
+                last_transition.actor AS last_transition_actor"""
+_LAST_TRANSITION_JOIN = """LEFT JOIN assessment_finding_transitions AS last_transition
+                ON last_transition.id = (
+                    SELECT MAX(ledger.id) FROM assessment_finding_transitions AS ledger
+                    WHERE ledger.engagement_id = findings.engagement_id
+                      AND ledger.finding_id = findings.id
+                )"""
+
+
 def list_findings(
     engagement_id: int,
     *,
@@ -3933,8 +3951,7 @@ def list_findings(
         where.append("LOWER(findings.slug) = LOWER(?)")
         params.append(slug)
     if search:
-        escaped = _escape_like(search.lower())
-        needle = f"%{escaped}%"
+        needle = like_contains(search.lower())
         where.append(
             "("
             "LOWER(findings.slug) LIKE ? ESCAPE '\\' OR "
@@ -3961,9 +3978,11 @@ def list_findings(
     with _common.get_connection() as connection:
         rows = connection.execute(
             f"""
-            SELECT findings.*, merged.slug AS merged_into_slug
+            SELECT findings.*, merged.slug AS merged_into_slug,
+                {_LAST_TRANSITION_COLUMNS}
             FROM assessment_findings AS findings
             LEFT JOIN assessment_findings AS merged ON merged.id = findings.merged_into_finding_id
+            {_LAST_TRANSITION_JOIN}
             WHERE {' AND '.join(where)}
             ORDER BY
                 CASE findings.status
@@ -3999,18 +4018,17 @@ def list_findings(
         ]
 
 
-def _escape_like(value: str) -> str:
-    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-
 def get_finding(engagement_id: int, slug: str) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     slug = canonical_finding_alias(slug) or slug
     with _common.get_connection() as connection:
         row = connection.execute(
-            """
-            SELECT findings.*, merged.slug AS merged_into_slug
+            f"""
+            SELECT findings.*, merged.slug AS merged_into_slug,
+                {_LAST_TRANSITION_COLUMNS}
             FROM assessment_findings AS findings
             LEFT JOIN assessment_findings AS merged ON merged.id = findings.merged_into_finding_id
+            {_LAST_TRANSITION_JOIN}
             WHERE findings.engagement_id = ? AND findings.slug = ?
             """,
             (engagement.id, slug),

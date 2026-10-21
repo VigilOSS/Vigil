@@ -16,6 +16,7 @@ from fastapi import HTTPException, status
 from ..db import get_connection
 from .events import _engagement_or_404
 from .search import canonical_finding_alias, expanded_fts_query
+from .sql_like import escape_like
 
 PREVIEW_BYTES = 4096
 # Verified command-output registration receives a bounded sample from the
@@ -27,15 +28,6 @@ GET_CONTENT_BYTES = 65536
 
 def _utcnow_iso() -> str:
     return dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def _escape_like(value: str) -> str:
-    """Escape SQL LIKE metacharacters with a backslash.
-
-    Callers must pair the resulting pattern with ``LIKE ? ESCAPE '\\'`` so
-    SQLite treats ``\\%`` / ``\\_`` / ``\\\\`` as literal characters.
-    """
-    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 def _engagement_root(engagement_id: int) -> tuple[Any, Path]:
@@ -1240,7 +1232,7 @@ def search_artifacts(
         # Slugs are validated to canonical `<PREFIX>-NNN` and won't contain
         # LIKE wildcards today; escape defensively in case the validator
         # ever relaxes.
-        escaped_slug = _escape_like(canonical_finding)
+        escaped_slug = escape_like(canonical_finding)
         where.append(
             "(a.related_finding_slug = ? OR a.indexed_text LIKE ? ESCAPE '\\' "
             "OR a.relative_path LIKE ? ESCAPE '\\')"
@@ -1385,7 +1377,7 @@ def set_scratch_under_prefix(
     # (URL-encoded artifacts). Escape both with a backslash and tell SQLite
     # to use that as the escape character so the prefix matches as a literal
     # path segment.
-    escaped_prefix = _escape_like(normalized)
+    escaped_prefix = escape_like(normalized)
     like_pattern = f"{escaped_prefix}%"
     with get_connection() as connection:
         rows = connection.execute(

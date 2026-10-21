@@ -1,0 +1,352 @@
+/* Activity view (components/ActivityTab.tsx). Theme colors come only from the
+ * app.css tokens, so the dark theme needs no overrides here. */
+
+/* Bounded to the viewport under the sticky workspace header: the page
+ * header and filters stay put while the entries scroll. */
+.activity-page {
+  display: flex;
+  flex-direction: column;
+  height: calc(100vh - var(--workspace-header-height) - 48px);
+  min-height: 560px;
+  min-width: 0;
+}
+.activity-page > .ui-page-header { flex: none; }
+
+.activity-view {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--ink);
+  overflow: hidden;
+}
+
+/* ── Filters ──────────────────────────────────────────── */
+
+.activity-filters {
+  display: grid;
+  gap: 10px;
+  padding: 14px 20px 10px;
+  border-bottom: 1px solid var(--divider);
+}
+.activity-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; }
+.activity-notice { margin: -2px 0 0; color: var(--ink-2); font-size: 12px; }
+.activity-results { margin: 0; }
+
+.activity-reset:focus-visible,
+.activity-summary:focus-visible,
+.activity-new-pill:focus-visible,
+.activity-scroll:focus-visible,
+.activity-entity:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* The shared ledger search box (app.css .findings-redesign .search-wrap), compact. */
+.findings-redesign.activity-page .activity-search { flex: 1 1 280px; min-width: 0; max-width: 560px; padding: 6px 10px; border-radius: 10px; }
+.findings-redesign.activity-page .activity-search .search-input { font-size: 13px; }
+.activity-search .search-input::-webkit-search-cancel-button { display: none; }
+
+.activity-reset {
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  font-size: 12px;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+  padding: 3px 4px;
+}
+
+/* ── Scroll region ────────────────────────────────────── */
+
+.activity-scroll {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.activity-scroll.is-reloading .activity-day,
+.activity-scroll.is-reloading .activity-foot { opacity: 0.55; transition: opacity 120ms ease; }
+
+.activity-new-pill {
+  position: sticky;
+  top: 40px;
+  z-index: 3;
+  display: block;
+  margin: 8px auto -38px;
+  padding: 6px 14px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--panel);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.18);
+  cursor: pointer;
+}
+
+.activity-day-head {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin: 0;
+  padding: 7px 20px;
+  border-bottom: 1px solid var(--divider);
+  background: var(--panel-soft);
+  font-size: 12px;
+  font-weight: 700;
+}
+.activity-day-meta { color: var(--muted); font-weight: 400; font-variant-numeric: tabular-nums; }
+
+.activity-list,
+.activity-members { list-style: none; margin: 0; padding: 0; }
+
+.activity-entry { border-bottom: 1px solid var(--divider); }
+.activity-members .activity-entry:last-child { border-bottom: 0; }
+
+/* ── One-line entry ───────────────────────────────────── */
+
+.activity-line {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 34px;
+  padding: 3px 20px;
+}
+
+.activity-time {
+  flex: none;
+  width: 62px;
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.activity-actor {
+  flex: 0 0 200px;
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--ink-2);
+}
+.activity-actor-kind {
+  flex: none;
+  padding: 0 5px;
+  border-left: 3px solid currentColor;
+  border-radius: 2px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.activity-actor.actor-operator .activity-actor-kind { color: var(--accent); background: var(--count-bg); }
+.activity-actor.actor-agent .activity-actor-kind { color: var(--chip-teal); background: color-mix(in srgb, var(--chip-teal) 12%, transparent); }
+.activity-actor.actor-system .activity-actor-kind { color: var(--muted); background: color-mix(in srgb, var(--muted) 12%, transparent); }
+.activity-actor-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.activity-members .activity-actor { flex-basis: 170px; }
+
+.activity-summary {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 6px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+.activity-summary:hover { background: var(--panel-hover); }
+.activity-summary-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.activity-caret {
+  flex: none;
+  width: 0;
+  height: 0;
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  border-left: 5px solid var(--muted);
+  transition: transform 120ms ease;
+}
+.activity-summary[aria-expanded="true"] .activity-caret { transform: rotate(90deg); }
+.activity-sep { color: var(--muted); }
+.activity-burst-range {
+  margin-left: 8px;
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.activity-span { font-variant-numeric: tabular-nums; }
+.activity-view .mono { font-family: "IBM Plex Mono", "SFMono-Regular", ui-monospace, monospace; font-size: 12px; }
+
+.activity-entities { flex: none; display: inline-flex; align-items: center; gap: 4px; max-width: 38%; overflow: hidden; }
+.activity-entity,
+.activity-entity-more {
+  flex: none;
+  max-width: 220px;
+  padding: 1px 7px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--count-bg);
+  color: var(--count-ink);
+  font-family: "IBM Plex Mono", "SFMono-Regular", ui-monospace, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.activity-view a.activity-entity { text-decoration: none; }
+.activity-view a.activity-entity:hover { text-decoration: underline; border-color: var(--accent-muted); }
+.activity-entity-more { background: transparent; color: var(--muted); }
+
+.activity-status { flex: none; }
+.activity-entity.is-unlinked { border-style: dashed; background: transparent; color: var(--muted); }
+
+/* Cards: a dispatch and a folded burst read as one entry with members. */
+.activity-card { background: color-mix(in srgb, var(--panel-soft) 75%, var(--panel)); }
+.activity-dispatch > .activity-line { box-shadow: inset 3px 0 0 var(--chip-teal); }
+.activity-burst > .activity-line { box-shadow: inset 3px 0 0 var(--border-strong); }
+.activity-card-note {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  /* Margins, not padding: a clamped box shows overflow inside its padding. */
+  margin: -2px 20px 7px 92px;
+  padding: 0;
+  color: var(--ink-2);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.activity-card-note .k,
+.activity-detail .k,
+.activity-verbatim .k {
+  margin-right: 4px;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.activity-members {
+  margin: 0 20px 8px 92px;
+  border-left: 2px solid var(--border-strong);
+  background: var(--panel);
+}
+.activity-members .activity-line { padding: 2px 8px 2px 10px; }
+.activity-members .activity-detail,
+.activity-members .activity-card-note { margin-left: 10px; }
+.activity-members .activity-members { margin-left: 10px; margin-right: 0; }
+
+/* ── Detail disclosure ────────────────────────────────── */
+
+.activity-detail {
+  display: grid;
+  gap: 10px;
+  margin: 2px 20px 10px 92px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel-soft);
+  font-size: 12.5px;
+}
+.activity-members .activity-detail { margin-right: 8px; }
+.activity-detail-summary { margin: 0; font-weight: 600; overflow-wrap: anywhere; }
+.activity-kv-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 8px 16px; }
+.activity-detail .kv { min-width: 0; }
+.activity-detail .kv .k { margin: 0 0 2px; }
+.activity-detail .kv .v { margin: 0; color: var(--ink); overflow-wrap: anywhere; }
+.activity-detail .kv .v.mono { font-family: "IBM Plex Mono", "SFMono-Regular", ui-monospace, monospace; font-size: 12px; }
+.activity-detail-entities { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.activity-detail-entities .activity-entities { max-width: none; flex-wrap: wrap; }
+.activity-unlinked {
+  flex-basis: 100%;
+  display: grid;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  color: var(--ink-2);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.activity-verbatim-head { display: flex; align-items: center; gap: 8px; }
+.activity-verbatim pre {
+  margin: 4px 0 0;
+  max-height: 320px;
+  overflow: auto;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--panel);
+  color: var(--ink);
+  font-family: "IBM Plex Mono", "SFMono-Regular", ui-monospace, monospace;
+  font-size: 12px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.activity-metadata > summary { cursor: pointer; color: var(--accent); font-size: 12px; }
+.activity-metadata[open] > summary { margin-bottom: 6px; }
+
+/* ── States ───────────────────────────────────────────── */
+
+@keyframes activity-fresh {
+  from { background-color: color-mix(in srgb, var(--accent-soft) 30%, transparent); }
+  to { background-color: transparent; }
+}
+.activity-entry.is-new > .activity-line { animation: activity-fresh 6s ease-out; }
+@media (prefers-reduced-motion: reduce) {
+  .activity-entry.is-new > .activity-line { animation: none; box-shadow: inset 3px 0 0 var(--accent-soft); }
+  .activity-caret { transition: none; }
+}
+
+.activity-skeleton { display: grid; padding: 6px 0; }
+.activity-skeleton-row { display: flex; align-items: center; gap: 12px; padding: 10px 20px; border-bottom: 1px solid var(--divider); }
+.activity-slow:empty { display: none; }
+.activity-slow { margin: 6px 20px; }
+.activity-slow .slow-load-hint { margin: 0; }
+.activity-error { margin: 10px 20px; color: var(--danger); font-size: 13px; }
+.activity-foot { padding: 16px 20px 28px; text-align: center; }
+.activity-foot .meta-text { margin: 0; color: var(--muted); font-size: 12px; }
+
+/* ── Narrow screens ───────────────────────────────────── */
+/* The page grows with its content; the entries keep their own scroller so
+ * the "new entries" pill and live catch-up still work. Each entry wraps:
+ * time and actor, then the summary, then status and linked records. */
+@media (max-width: 760px) {
+  .activity-page { height: auto; min-height: 0; }
+  .activity-view { flex: none; }
+  .activity-filters { padding: 12px; }
+  .findings-redesign.activity-page .activity-search { flex-basis: 100%; max-width: none; }
+  .activity-scroll { flex: none; height: 70vh; min-height: 360px; }
+  .activity-day-head { padding: 7px 12px; flex-wrap: wrap; }
+  .activity-line { flex-wrap: wrap; gap: 2px 10px; padding: 6px 12px; }
+  .activity-actor { flex: 1 1 auto; }
+  .activity-summary { order: 3; flex: 1 1 100%; padding: 2px 0; }
+  .activity-summary-text { white-space: normal; overflow-wrap: anywhere; }
+  .activity-line > .activity-status,
+  .activity-line > .activity-entity,
+  .activity-line > .activity-entities { order: 4; }
+  .activity-entities { max-width: 100%; flex-wrap: wrap; }
+  .activity-detail,
+  .activity-members,
+  .activity-card-note { margin-left: 12px; margin-right: 12px; }
+}

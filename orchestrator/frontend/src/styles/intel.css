@@ -1,0 +1,122 @@
+/* ── Intel workspace ──────────────────────────────────────────────────
+ * The page header, chips, status pills and empty states are the shared
+ * primitives (styles/ui.css); the list rows reuse the Findings list
+ * vocabulary (app.css). An open record (the shared RecordView) replaces the
+ * results; the results stay mounted behind it so filters, search, page and
+ * scroll survive. Their own display rules would otherwise beat the [hidden]
+ * attribute. Tokens only, so light and dark both resolve. */
+
+.intel-page > [hidden] { display: none; }
+
+.intel-route-missing {
+  margin: 0 0 12px;
+  text-align: left;
+}
+
+/* Active work sits under the page title as the header's status strip. */
+.findings-redesign .ui-page-header .intel-workbar { margin: 0; }
+
+/* Filter rows: one labelled chip group per dimension. */
+.findings-redesign .intel-filter-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 18px;
+}
+
+/* By-URL lookup: label, input, Go. */
+.findings-redesign .intel-by-url { flex: 1 1 auto; min-width: 0; }
+.findings-redesign .intel-url-input {
+  flex: 1 1 260px;
+  min-width: 0;
+  width: 100%;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel-strong);
+  color: var(--ink);
+  font: inherit;
+  font-size: 0.82rem;
+}
+.findings-redesign .intel-url-input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* Full-text and by-URL results. Long bodies and URLs truncate inside their
+ * card instead of widening the page. */
+.findings-redesign .intel-lookups { display: grid; gap: 14px; padding: 14px; }
+.findings-redesign .intel-lookup-note { margin: -4px 0 8px; max-width: 90ch; }
+.findings-redesign .intel-lookup-list { display: grid; gap: 4px; min-width: 0; }
+.findings-redesign .intel-url-block { margin-top: 8px; min-width: 0; }
+.findings-redesign .intel-lookups .link-card {
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  min-width: 0;
+  max-width: 100%;
+  text-align: left;
+}
+.findings-redesign .intel-lookups .link-card > * { min-width: 0; }
+.findings-redesign .intel-lookup-text { display: grid; gap: 2px; min-width: 0; }
+.findings-redesign .intel-lookups .link-sub { max-width: 32ch; }
+.findings-redesign .intel-lookup-text .link-sub { max-width: none; }
+.findings-redesign .intel-static-card { cursor: default; }
+.findings-redesign .intel-static-card:hover { background: inherit; border-color: var(--border); }
+
+/* The list: a summary line, sortable headers, rows. */
+.intel-list-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 4px 16px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--divider);
+}
+.findings-redesign .intel-sort-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+  cursor: pointer;
+}
+.findings-redesign .intel-sort-button:hover { color: var(--ink); }
+.findings-redesign .intel-sort-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.findings-redesign .list-header [aria-sort="ascending"] .intel-sort-button,
+.findings-redesign .list-header [aria-sort="descending"] .intel-sort-button { color: var(--ink); }
+.findings-redesign .intel-status-head { display: flex; justify-content: flex-end; }
+/* Each row's title is the button that opens its record; focus outlines the row. */
+.findings-redesign .intel-row-open {
+  display: block;
+  max-width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.findings-redesign .intel-row-open:focus-visible { outline: none; }
+.findings-redesign .frow:has(.intel-row-open:focus-visible) {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.intel-list-panel .slow-load-hint { padding: 0 16px 10px; }
+/* The type reads as a plain label, not a status pill. */
+.findings-redesign .intel-table .frow-sev { text-transform: none; letter-spacing: 0; font-size: 0.8rem; }
+/* A row's meta line stays one line: the subtitle shortens first. */
+.findings-redesign .intel-table .frow-meta > * { flex: none; white-space: nowrap; }
+.findings-redesign .intel-table .frow-meta > .mono {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.findings-redesign .intel-load-errors {
+  padding: 10px 14px;
+  color: var(--danger);
+  font-size: 0.78rem;
+  text-align: left;
+}

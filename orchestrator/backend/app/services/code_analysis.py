@@ -33,7 +33,7 @@ from .code_analysis_support import (
     _CURRENT_SUCCESSFUL_REVIEW_EXISTS_SQL,
     _LEAD_OPEN_STATUS_PLACEHOLDERS,
     _LEAD_OPEN_STATUS_VALUES,
-    _QUEUE_ACTIVE_STATUSES,
+    _queue_lane_sql,
     _REPORTABLE_FINDING_STATUSES,
     _TERMINAL_TRIGGER_RESOLUTION_STATUSES,
     _TRIGGER_STATUSES,
@@ -52,6 +52,9 @@ from .code_analysis_support import (
     _canonical_structural_callables,
     _coerce_float,
     _coerce_int,
+    _awaiting_verdict_column_sql,
+    awaiting_verdict_attempt_ids,
+    _current_analysis_results_sql,
     _current_attempt_result_count_sql,
     _current_result_receipt_sql,
     _current_suspicious_analysis_counts,
@@ -95,6 +98,8 @@ from .code_analysis_support import (
     _sync_module_rollup,
     _sync_trigger_status_for_file,
     canonical_structural_language,
+    code_track_enabled,
+    structural_index_state,
     structural_input_identity_digest,
     variant_input_identity_digest,
 )
@@ -117,6 +122,7 @@ from .code_analysis_support import (
     STRUCTURAL_CALLABLE_IDENTITY_SCHEMA as STRUCTURAL_CALLABLE_IDENTITY_SCHEMA,
     STRUCTURAL_INPUT_IDENTITY_SCHEMA as STRUCTURAL_INPUT_IDENTITY_SCHEMA,
 )
+from .sql_like import like_contains
 
 # =========================================================================
 # Repository Management
@@ -1431,8 +1437,7 @@ def list_code_files(
         params.append(analysis_status)
     if search is not None:
         clauses.append("files.file_path LIKE ? ESCAPE '\\'")
-        escaped = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-        params.append(f"%{escaped}%")
+        params.append(like_contains(search))
     from_where = f"""
         FROM code_files AS files
         JOIN code_repos AS repos
@@ -2998,36 +3003,13 @@ def queue_stats(engagement_id: int) -> dict[str, Any]:
     """
     engagement = _engagement_or_404(engagement_id)
     with get_connection() as connection:
-        rows = connection.execute(
-            f"""
-            WITH ranked AS (
-                SELECT queue.status, queue.assigned_agent, queue.lease_token,
-                       ROW_NUMBER() OVER (
-                           PARTITION BY queue.file_id
-                           ORDER BY queue.id DESC
-                       ) AS attempt_rank,
-                       SUM(CASE WHEN queue.status IN ('pending', 'processing')
-                                THEN 1 ELSE 0 END) OVER (
-                           PARTITION BY queue.file_id
-                       ) AS active_count
-                FROM code_analysis_queue AS queue
-                JOIN code_files AS files
-                  ON files.id = queue.file_id
-                 AND files.engagement_id = queue.engagement_id
-                JOIN code_repos AS repos
-                  ON repos.id = files.repo_id
-                 AND repos.engagement_id = files.engagement_id
-                 AND repos.active_generation > 0
-                WHERE queue.engagement_id = ?
-                  AND queue.repo_generation = repos.active_generation
-                  AND {_analysis_repo_sql("repos")}
-                  AND queue.source_superseded_at IS NULL
-            )
-            SELECT status, assigned_agent, lease_token, attempt_rank, active_count
-            FROM ranked
-            """,
-            (engagement.id,),
-        ).fetchall()
+        lanes = {
+            str(row["lane"]): int(row["total"])
+            for row in connection.execute(
+                f"SELECT lane, COUNT(*) AS total FROM ({_queue_lane_sql()}) GROUP BY lane",
+                (engagement.id,),
+            ).fetchall()
+        }
         historical_total = _scalar_row(
             connection,
             f"""
@@ -3077,38 +3059,16 @@ def queue_stats(engagement_id: int) -> dict[str, Any]:
             ).fetchall()
             if int(row["queue_items"]) > 0
         ]
-    counts: dict[str, int] = {}
-    current_attempt_total = 0
-    invalid_active_identity = 0
-    invalid_active_history = 0
-    for row in rows:
-        if int(row["attempt_rank"]) == 1:
-            current_attempt_total += 1
-            status_value = str(row["status"])
-            latest_is_active = status_value in _QUEUE_ACTIVE_STATUSES
-            if int(row["active_count"] or 0) > (1 if latest_is_active else 0):
-                invalid_active_history += 1
-                continue
-            assigned_agent = str(row["assigned_agent"] or "")
-            lease_token = str(row["lease_token"] or "")
-            invalid_identity = (
-                status_value == "pending" and bool(assigned_agent or lease_token)
-            ) or (
-                status_value == "processing"
-                and not bool(assigned_agent and lease_token)
-            )
-            if invalid_identity:
-                invalid_active_identity += 1
-                continue
-            counts[status_value] = counts.get(status_value, 0) + 1
-    actionable_total = sum(counts.values())
+    invalid_active_identity = lanes.pop("invalid_active_identity", 0)
+    invalid_active_history = lanes.pop("invalid_active_history", 0)
+    current_attempt_total = sum(lanes.values()) + invalid_active_identity + invalid_active_history
     return {
-        "pending": counts.get("pending", 0),
-        "processing": counts.get("processing", 0),
-        "done": counts.get("done", 0),
-        "error": counts.get("error", 0),
-        "needs_context": counts.get("needs_context", 0),
-        "total": actionable_total,
+        "pending": lanes.get("pending", 0),
+        "processing": lanes.get("processing", 0),
+        "done": lanes.get("done", 0),
+        "error": lanes.get("error", 0),
+        "needs_context": lanes.get("needs_context", 0),
+        "total": sum(lanes.values()),
         "historical_total": historical_total,
         "superseded_history": historical_total - current_attempt_total,
         "invalid_active_identity": invalid_active_identity,
@@ -3191,6 +3151,7 @@ def list_queue_items(
     batch_theme: str | None = None,
     queue_mode: str | None = None,
     stale_minutes: int | None = None,
+    current_only: bool = False,
     limit: int | None = None,
     offset: int = 0,
 ) -> dict[str, Any]:
@@ -3204,6 +3165,10 @@ def list_queue_items(
     unclaimable one is identifiable rather than invisible. Ordering matches the
     claim order `fetch` applies, so a page fed back through `--ids-file` is
     claimed in the order it was shown.
+
+    `current_only` narrows the page to the rows `stats` counts: each
+    analysis-repository file's latest attempt, in its status lane, without the
+    invalid active rows `stats` reports separately (`_queue_lane_sql`).
 
     `stale_minutes` narrows the page to processing rows whose lease has not
     proved life inside that window — the same abandonment measure `reset-stale`
@@ -3238,6 +3203,13 @@ def list_queue_items(
     if status_filter is not None:
         clauses.append("queue.status = ?")
         params.append(status_filter)
+    if current_only:
+        statuses = sorted(_QUEUE_STATUSES)
+        clauses.append(
+            f"queue.id IN (SELECT attempt_id FROM ({_queue_lane_sql()})"
+            f" WHERE lane IN ({', '.join('?' for _ in statuses)}))"
+        )
+        params.extend([engagement.id, *statuses])
     if repo_id is not None:
         clauses.append("files.repo_id = ?")
         params.append(_coerce_int(repo_id, field_name="repo_id"))
@@ -5361,6 +5333,86 @@ def create_analysis_result(
         return hydrated
 
 
+# Every receipt of an active repository, superseded ones included. Superseded
+# receipts keep the path their own snapshot recorded and may outlive their
+# queue attempt.
+_ALL_ANALYSIS_RESULTS_SQL = """
+        FROM code_analysis_results AS results
+        LEFT JOIN assessment_findings AS findings
+          ON findings.engagement_id = results.engagement_id
+         AND findings.slug = results.finding_slug
+        LEFT JOIN code_analysis_queue AS result_queue
+          ON result_queue.id = results.queue_item_id
+         AND result_queue.engagement_id = results.engagement_id
+        JOIN code_files AS files
+          ON files.id = results.file_id
+         AND files.engagement_id = results.engagement_id
+        LEFT JOIN code_source_generation_files AS generation_files
+          ON generation_files.engagement_id = results.engagement_id
+         AND generation_files.repo_id = files.repo_id
+         AND generation_files.repo_generation = results.repo_generation
+         AND generation_files.file_id = results.file_id
+        JOIN code_repos AS repos
+          ON repos.id = files.repo_id
+         AND repos.engagement_id = files.engagement_id
+         AND repos.active_generation > 0
+        WHERE results.engagement_id = ?
+"""
+_RECORDED_RESULT_FILE_PATH_SQL = "COALESCE(generation_files.file_path, files.file_path)"
+
+
+def get_analysis_result(engagement_id: int, result_id: int) -> dict[str, Any]:
+    """One receipt by id, current or not, for the operator record view.
+
+    Carries everything the full listing does, plus where the receipt stands:
+    ``current`` (listed by the current-receipt reads), ``awaiting_verdict``
+    (backs a suspicious review still awaiting a verdict), the attempt that
+    wrote it, and the file's latest attempt.
+    """
+    engagement = _engagement_or_404(engagement_id)
+    with get_connection() as connection:
+        awaiting_ids = awaiting_verdict_attempt_ids(connection, engagement.id)
+        row = connection.execute(
+            f"""
+            SELECT
+                results.*,
+                findings.status AS finding_workflow_status,
+                findings.verification_status AS finding_verification_status,
+                {_RECORDED_RESULT_FILE_PATH_SQL} AS file_path,
+                files.repo_id, repos.repo_key, repos.repo_role,
+                result_queue.status AS queue_status,
+                result_queue.disposition AS queue_disposition,
+                (
+                    SELECT replacement.id
+                    FROM code_analysis_results AS replacement
+                    WHERE replacement.supersedes_result_id = results.id
+                ) AS replaced_by_result_id,
+                (
+                    SELECT latest.id || ':' || latest.status
+                    FROM code_analysis_queue AS latest
+                    WHERE latest.engagement_id = results.engagement_id
+                      AND latest.file_id = results.file_id
+                      AND latest.repo_generation = repos.active_generation
+                      AND latest.source_superseded_at IS NULL
+                    ORDER BY latest.id DESC LIMIT 1
+                ) AS latest_attempt,
+                results.id IN (SELECT results.id {_current_analysis_results_sql()}) AS current,
+                {_awaiting_verdict_column_sql()}
+            {_ALL_ANALYSIS_RESULTS_SQL}
+              AND results.id = ?
+            """,
+            (engagement.id, awaiting_ids, engagement.id, result_id),
+        ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="analysis result not found")
+    record = _hydrate_code_analysis_result(row)
+    latest_id, _, latest_status = str(record.pop("latest_attempt") or "").partition(":")
+    record["latest_attempt"] = {"id": int(latest_id), "status": latest_status} if latest_id else None
+    record["current"] = bool(record["current"])
+    record["awaiting_verdict"] = bool(record["awaiting_verdict"])
+    return record
+
+
 def list_analysis_results(
     engagement_id: int,
     *,
@@ -5372,7 +5424,7 @@ def list_analysis_results(
     include_superseded: bool = False,
 ) -> list[dict[str, Any]]:
     engagement = _engagement_or_404(engagement_id)
-    clauses = ["results.engagement_id = ?"]
+    clauses: list[str] = []
     params: list[Any] = [engagement.id]
     if file_id is not None:
         clauses.append("results.file_id = ?")
@@ -5389,28 +5441,12 @@ def list_analysis_results(
     if disposition is not None:
         clauses.append("results.disposition = ?")
         params.append(disposition)
-    if not include_superseded:
-        clauses.append(
-            "(" + _current_result_receipt_sql(
-                "results",
-                "result_queue",
-                "files",
-                "repos",
-                allow_processing=True,
-            ) + ")"
-        )
-    queue_join = "LEFT JOIN" if include_superseded else "JOIN"
-    generation_file_join = ""
     file_path_projection = "files.file_path"
     if include_superseded:
-        generation_file_join = """
-        LEFT JOIN code_source_generation_files AS generation_files
-          ON generation_files.engagement_id = results.engagement_id
-         AND generation_files.repo_id = files.repo_id
-         AND generation_files.repo_generation = results.repo_generation
-         AND generation_files.file_id = results.file_id
-        """
-        file_path_projection = "COALESCE(generation_files.file_path, files.file_path)"
+        file_path_projection = _RECORDED_RESULT_FILE_PATH_SQL
+        source_sql = _ALL_ANALYSIS_RESULTS_SQL
+    else:
+        source_sql = _current_analysis_results_sql()
     query = f"""
         SELECT
             results.*,
@@ -5422,22 +5458,8 @@ def list_analysis_results(
                 FROM code_analysis_results AS replacement
                 WHERE replacement.supersedes_result_id = results.id
             ) AS replaced_by_result_id
-        FROM code_analysis_results AS results
-        LEFT JOIN assessment_findings AS findings
-          ON findings.engagement_id = results.engagement_id
-         AND findings.slug = results.finding_slug
-        {queue_join} code_analysis_queue AS result_queue
-          ON result_queue.id = results.queue_item_id
-         AND result_queue.engagement_id = results.engagement_id
-        JOIN code_files AS files
-          ON files.id = results.file_id
-         AND files.engagement_id = results.engagement_id
-        {generation_file_join}
-        JOIN code_repos AS repos
-          ON repos.id = files.repo_id
-         AND repos.engagement_id = files.engagement_id
-         AND repos.active_generation > 0
-        WHERE {' AND '.join(clauses)}
+        {source_sql}
+        {''.join(f" AND {clause}" for clause in clauses)}
         ORDER BY results.id DESC
     """
     with get_connection() as connection:
@@ -6414,10 +6436,7 @@ def require_proof_source_prerequisites(connection, engagement_id: int, binding: 
 
 
 def _structural_index_current(repo: dict[str, Any]) -> bool:
-    generation = repo.get('structural_index_generation')
-    return (generation is not None and int(generation) == int(repo.get('active_generation', 0) or 0)
-            and repo.get('structural_index_schema') == STRUCTURAL_INDEX_SCHEMA
-            and bool(repo.get('structural_index_manifest_path')))
+    return bool(structural_index_state(repo)["current"])
 
 
 # =========================================================================
@@ -8654,6 +8673,9 @@ def code_readiness(
     warnings = list(dict.fromkeys(warnings))
     payload = {
         "track": "code",
+        # Blockers stay fail-closed for transitions; this says whether they
+        # describe owed work at all.
+        "track_enabled": code_track_enabled(engagement, has_repositories=bool(repos)),
         "target_phase": target_phase,
         "transition_ready": not blockers,
         "blockers": blockers,

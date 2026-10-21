@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+from datetime import datetime
 from pathlib import PurePosixPath
 from typing import Any, Iterable
 from urllib.parse import urlsplit
@@ -378,8 +379,8 @@ def _receipt_health_rows(
 ) -> list[dict[str, Any]]:
     rows = connection.execute(
         f"""
-        SELECT receipts.id, receipts.recorded_health, receipts.evidence_kind,
-               receipts.source_read_id,
+        SELECT receipts.id, receipts.run_id, receipts.recorded_health,
+               receipts.evidence_kind, receipts.source_read_id,
                receipts.command_run_id,
                receipts.artifact_id,
                receipts.artifact_relative_path, receipts.evidence_sha256,
@@ -667,87 +668,207 @@ def _code_receipt_has_exact_artifact_proof(
     )
 
 
+def _placeholders(values: Iterable[Any]) -> str:
+    return ",".join("?" for _ in values)
+
+
+def _lineage_ids_by_run(
+    connection: sqlite3.Connection, runs: Iterable[sqlite3.Row | dict[str, Any]]
+) -> dict[int, list[int]]:
+    """Return each run's recovery lineage (itself first, then its ancestors).
+
+    Equivalent to ``_run_lineage_ids`` per run, but resolves every ancestor of
+    a page with one bounded query per lineage depth instead of one recursive
+    query per run. A page of runs that were never resumed costs no query.
+    """
+
+    parents: dict[int, int | None] = {}
+    for run in runs:
+        parent = run["resumed_from_run_id"]
+        parents[int(run["id"])] = int(parent) if parent is not None else None
+    run_ids = list(parents)
+    existing = set(run_ids)
+    pending = {parent for parent in parents.values() if parent is not None} - existing
+    while pending:
+        ordered = sorted(pending)
+        rows = connection.execute(
+            f"SELECT id, resumed_from_run_id FROM assessment_runs "
+            f"WHERE id IN ({_placeholders(ordered)})",
+            tuple(ordered),
+        ).fetchall()
+        for row in rows:
+            parent = row["resumed_from_run_id"]
+            parents[int(row["id"])] = int(parent) if parent is not None else None
+            existing.add(int(row["id"]))
+        # An ancestor id with no row ends that lineage, as the recursive query does.
+        for missing in pending - existing:
+            parents[missing] = None
+        pending = {
+            parent
+            for parent in (parents[int(row["id"])] for row in rows)
+            if parent is not None and parent not in parents
+        }
+    lineages: dict[int, list[int]] = {}
+    for run_id in run_ids:
+        lineage: list[int] = []
+        current: int | None = run_id
+        while current is not None and current in existing and current not in lineage:
+            lineage.append(current)
+            current = parents.get(current)
+        lineages[run_id] = lineage
+    return lineages
+
+
+def _counts_by_run(
+    connection: sqlite3.Connection,
+    engagement_id: int,
+    run_ids: list[int],
+    lineages: dict[int, list[int]],
+) -> dict[int, dict[str, int]]:
+    """Every run's accounting counts from one grouped query per table.
+
+    Run-owned tables count the run itself; findings and proof receipts count
+    its whole recovery lineage, exactly as a resumed run reports them.
+    """
+
+    placeholders = _placeholders(run_ids)
+
+    def grouped(query: str) -> dict[int, sqlite3.Row]:
+        return {
+            int(row["run_id"]): row
+            for row in connection.execute(
+                query.format(placeholders=placeholders), (engagement_id, *run_ids)
+            ).fetchall()
+        }
+
+    sources = grouped(
+        """
+        SELECT run_id, COUNT(*) AS total,
+               SUM(inventory_status = 'included') AS included,
+               SUM(inventory_status = 'excluded') AS excluded,
+               SUM(inventory_status = 'missing') AS missing
+        FROM assessment_run_sources
+        WHERE engagement_id = ? AND run_id IN ({placeholders}) GROUP BY run_id
+        """
+    )
+    obligations = grouped(
+        """
+        SELECT run_id, COUNT(*) AS total,
+               SUM(hard = 1 AND status IN ('open', 'blocked', 'deferred', 'accepted_gap'))
+                   AS open_hard
+        FROM assessment_run_obligations
+        WHERE engagement_id = ? AND run_id IN ({placeholders}) GROUP BY run_id
+        """
+    )
+    candidates = grouped(
+        """
+        SELECT run_id, COUNT(*) AS total,
+               SUM(state IN ('open', 'deferred')) AS open
+        FROM assessment_run_candidates
+        WHERE engagement_id = ? AND run_id IN ({placeholders}) GROUP BY run_id
+        """
+    )
+    simple = {
+        name: grouped(
+            f"SELECT run_id, COUNT(*) AS total FROM {table} "
+            "WHERE engagement_id = ? AND run_id IN ({placeholders}) GROUP BY run_id"
+        )
+        for name, table in (
+            ("source_reads", "assessment_run_source_reads"),
+            ("tool_signals", "assessment_run_tool_signals"),
+            ("discovery_passes", "assessment_run_discovery_passes"),
+            ("code_receipt_links", "assessment_run_code_receipt_links"),
+        )
+    }
+    lineage_ids = sorted({run_id for lineage in lineages.values() for run_id in lineage})
+    lineage_placeholders = _placeholders(lineage_ids)
+    receipts_by_run: dict[int, int] = {
+        int(row["run_id"]): int(row["total"])
+        for row in connection.execute(
+            f"""
+            SELECT run_id, COUNT(*) AS total FROM assessment_proof_receipts
+            WHERE engagement_id = ? AND run_id IN ({lineage_placeholders})
+            GROUP BY run_id
+            """,
+            (engagement_id, *lineage_ids),
+        ).fetchall()
+    }
+    findings_by_receipt_run: dict[int, set[int]] = {}
+    for row in connection.execute(
+        f"""
+        SELECT DISTINCT receipts.run_id, links.finding_id
+        FROM assessment_finding_proof_receipts AS links
+        JOIN assessment_proof_receipts AS receipts
+          ON receipts.id = links.proof_receipt_id
+        WHERE links.engagement_id = ? AND receipts.engagement_id = ?
+          AND receipts.run_id IN ({lineage_placeholders})
+        """,
+        (engagement_id, engagement_id, *lineage_ids),
+    ).fetchall():
+        findings_by_receipt_run.setdefault(int(row["run_id"]), set()).add(
+            int(row["finding_id"])
+        )
+
+    def value(rows: dict[int, sqlite3.Row], run_id: int, column: str = "total") -> int:
+        row = rows.get(run_id)
+        return int(row[column] or 0) if row is not None else 0
+
+    result: dict[int, dict[str, int]] = {}
+    for run_id in run_ids:
+        lineage = lineages[run_id]
+        linked_findings: set[int] = set()
+        for lineage_id in lineage:
+            linked_findings.update(findings_by_receipt_run.get(lineage_id, ()))
+        result[run_id] = {
+            "inventory_total": value(sources, run_id),
+            "inventory_included": value(sources, run_id, "included"),
+            "inventory_excluded": value(sources, run_id, "excluded"),
+            "inventory_missing": value(sources, run_id, "missing"),
+            "source_reads": value(simple["source_reads"], run_id),
+            "obligations": value(obligations, run_id),
+            "open_hard_obligations": value(obligations, run_id, "open_hard"),
+            "candidates": value(candidates, run_id),
+            "open_candidates": value(candidates, run_id, "open"),
+            "tool_signals": value(simple["tool_signals"], run_id),
+            "discovery_passes": value(simple["discovery_passes"], run_id),
+            "code_receipt_links": value(simple["code_receipt_links"], run_id),
+            "findings": len(linked_findings),
+            "proof_receipts": sum(
+                receipts_by_run.get(lineage_id, 0) for lineage_id in lineage
+            ),
+        }
+    return result
+
+
 def _run_counts(
     connection: sqlite3.Connection, engagement_id: int, run_id: int
 ) -> dict[str, int]:
-    def scalar(query: str, parameters: tuple[Any, ...] = ()) -> int:
-        return int(connection.execute(query, (engagement_id, run_id, *parameters)).fetchone()[0])
-
-    counts = {
-        "inventory_total": scalar(
-            "SELECT COUNT(*) FROM assessment_run_sources WHERE engagement_id = ? AND run_id = ?"
-        ),
-        "inventory_included": scalar(
-            "SELECT COUNT(*) FROM assessment_run_sources WHERE engagement_id = ? AND run_id = ? AND inventory_status = 'included'"
-        ),
-        "inventory_excluded": scalar(
-            "SELECT COUNT(*) FROM assessment_run_sources WHERE engagement_id = ? AND run_id = ? AND inventory_status = 'excluded'"
-        ),
-        "inventory_missing": scalar(
-            "SELECT COUNT(*) FROM assessment_run_sources WHERE engagement_id = ? AND run_id = ? AND inventory_status = 'missing'"
-        ),
-        "source_reads": scalar(
-            "SELECT COUNT(*) FROM assessment_run_source_reads WHERE engagement_id = ? AND run_id = ?"
-        ),
-        "obligations": scalar(
-            "SELECT COUNT(*) FROM assessment_run_obligations WHERE engagement_id = ? AND run_id = ?"
-        ),
-        "open_hard_obligations": scalar(
-            "SELECT COUNT(*) FROM assessment_run_obligations WHERE engagement_id = ? AND run_id = ? AND hard = 1 AND status IN ('open', 'blocked', 'deferred', 'accepted_gap')"
-        ),
-        "candidates": scalar(
-            "SELECT COUNT(*) FROM assessment_run_candidates WHERE engagement_id = ? AND run_id = ?"
-        ),
-        "open_candidates": scalar(
-            "SELECT COUNT(*) FROM assessment_run_candidates WHERE engagement_id = ? AND run_id = ? AND state IN ('open', 'deferred')"
-        ),
-        "tool_signals": scalar(
-            "SELECT COUNT(*) FROM assessment_run_tool_signals WHERE engagement_id = ? AND run_id = ?"
-        ),
-        "discovery_passes": scalar(
-            "SELECT COUNT(*) FROM assessment_run_discovery_passes WHERE engagement_id = ? AND run_id = ?"
-        ),
-        "code_receipt_links": scalar(
-            "SELECT COUNT(*) FROM assessment_run_code_receipt_links WHERE engagement_id = ? AND run_id = ?"
-        ),
-    }
-    lineage_ids = _run_lineage_ids(connection, run_id)
-    placeholders = ",".join("?" for _ in lineage_ids)
-    linked_findings = connection.execute(
-        f"""
-        SELECT COUNT(DISTINCT finding_id)
-        FROM assessment_finding_proof_receipts
-        WHERE engagement_id = ? AND proof_receipt_id IN (
-            SELECT id FROM assessment_proof_receipts
-            WHERE engagement_id = ? AND run_id IN ({placeholders})
-        )
-        """,
-        (engagement_id, engagement_id, *lineage_ids),
-    ).fetchone()
-    counts["findings"] = int(linked_findings[0])
-    counts["proof_receipts"] = int(
-        connection.execute(
-            f"""
-            SELECT COUNT(*) FROM assessment_proof_receipts
-            WHERE engagement_id = ? AND run_id IN ({placeholders})
-            """,
-            (engagement_id, *lineage_ids),
-        ).fetchone()[0]
-    )
-    return counts
+    lineages = {run_id: _run_lineage_ids(connection, run_id)}
+    return _counts_by_run(connection, engagement_id, [run_id], lineages)[run_id]
 
 
 def _current_blockers(
     connection: sqlite3.Connection,
-    run: sqlite3.Row,
+    run: sqlite3.Row | dict[str, Any],
+    *,
+    counts: dict[str, int] | None = None,
+    effective_proof_health: dict[str, int] | None = None,
 ) -> list[dict[str, Any]]:
+    """Derive the run's live blockers.
+
+    Callers that already hold the run's counts or effective proof health pass
+    them in so a page of runs never recomputes either one per run.
+    """
+
     run_id = int(run["id"])
     engagement_id = int(run["engagement_id"])
     blockers: list[dict[str, Any]] = []
-    counts = _run_counts(connection, engagement_id, run_id)
-    effective_proof_health = _effective_evidence_health_counts(
-        connection, engagement_id, run
-    )
+    if counts is None:
+        counts = _run_counts(connection, engagement_id, run_id)
+    if effective_proof_health is None:
+        effective_proof_health = _effective_evidence_health_counts(
+            connection, engagement_id, run
+        )
     if str(run["run_purpose"]) == "scan":
         if not _json_value(run["target_identity_json"], {}):
             blockers.append(
@@ -1002,6 +1123,8 @@ def _current_blockers(
                 "action": "record the observed proof before completion",
             }
         )
+    # The counts use the same predicates as these row queries, so a zero count
+    # proves an empty result without asking again.
     obligation_rows = connection.execute(
         """
         SELECT id, identity_key, status FROM assessment_run_obligations
@@ -1010,7 +1133,7 @@ def _current_blockers(
         ORDER BY id
         """,
         (engagement_id, run_id),
-    ).fetchall()
+    ).fetchall() if counts["open_hard_obligations"] else []
     for row in obligation_rows:
         blockers.append(
             {
@@ -1028,7 +1151,7 @@ def _current_blockers(
         ORDER BY id
         """,
         (engagement_id, run_id),
-    ).fetchall()
+    ).fetchall() if counts["open_candidates"] else []
     for row in candidate_rows:
         blockers.append(
             {
@@ -1054,7 +1177,7 @@ def _current_blockers(
         ORDER BY candidates.id
         """,
         (engagement_id, run_id),
-    ).fetchall()
+    ).fetchall() if counts["candidates"] else []
     for row in promoted_rows:
         finding_slug = str(row["finding_slug"])
         verification_status = str(row["verification_status"] or "missing")
@@ -1086,96 +1209,201 @@ def _current_blockers(
     return blockers
 
 
-def _serialize_run(
-    connection: sqlite3.Connection, row: sqlite3.Row | dict[str, Any]
-) -> dict[str, Any]:
-    record = dict(row)
-    run_id = int(record["id"])
-    engagement_id = int(record["engagement_id"])
-    record["target_identity"] = _json_value(record.pop("target_identity_json", "{}"), {})
-    record["source_generations"] = _json_value(record.pop("source_generations_json", "[]"), [])
-    record["exclusions"] = _json_value(record.pop("exclusions_json", "[]"), [])
-    seal_json = record.pop("seal_json", None)
-    record["seal"] = _json_value(seal_json, None)
-    record["instructions_stale"] = (
-        bool(record["instructions_stale"])
-        if record.get("instructions_stale") is not None
-        else None
-    )
-    record["counts"] = _run_counts(connection, engagement_id, run_id)
-    record["proof_health"] = _evidence_health_counts(connection, engagement_id, run_id)
-    record["blockers"] = _current_blockers(connection, row)
-    record["lifecycle_history"] = [
-        dict(event)
-        for event in connection.execute(
-            """
-            SELECT id, from_status, to_status, reason, created_at
-            FROM assessment_run_lifecycle_events
-            WHERE engagement_id = ? AND run_id = ? ORDER BY id
-            """,
-            (engagement_id, run_id),
-        ).fetchall()
-    ]
-    lineage_ids = _run_lineage_ids(connection, run_id)
-    lineage_placeholders = ",".join("?" for _ in lineage_ids)
-    record["finding_slugs"] = [
-        str(finding["slug"])
-        for finding in connection.execute(
-            f"""
-            SELECT DISTINCT findings.slug
-            FROM assessment_findings AS findings
-            JOIN assessment_finding_proof_receipts AS links ON links.finding_id = findings.id
-            JOIN assessment_proof_receipts AS receipts ON receipts.id = links.proof_receipt_id
-            WHERE findings.engagement_id = ?
-              AND receipts.run_id IN ({lineage_placeholders})
-            ORDER BY findings.slug
-            """,
-            (engagement_id, *lineage_ids),
-        ).fetchall()
-    ]
-    # ``finding_slugs`` are findings whose verification CITES this run's receipts.
-    # A ``--for-finding`` start (or a later ``finding link``) records intent to
-    # verify before any citation exists; it is reported apart so an associated
-    # run never reads as unlinked and a citation is never implied. It is per run,
-    # not per lineage, because the verification gate requires the run's own link.
-    record["associated_finding_slugs"] = [
-        str(finding["slug"])
-        for finding in connection.execute(
-            """
-            SELECT DISTINCT findings.slug
-            FROM assessment_findings AS findings
-            JOIN assessment_finding_links AS links ON links.finding_id = findings.id
-            WHERE findings.engagement_id = ?
-              AND links.engagement_id = findings.engagement_id
-              AND links.link_kind = 'proof_run' AND links.target_kind = 'assessment_run'
-              AND links.retired_at IS NULL
-              AND links.target_id = ?
-            ORDER BY findings.slug
-            """,
-            (engagement_id, run_id),
-        ).fetchall()
-    ]
-    warnings: list[str] = []
-    if str(record.get("actual_model") or "unknown") == "unknown":
-        warnings.append("provider-observed model identity is unknown")
-    if record.get("launcher_effective_model") is None:
-        warnings.append("launcher-effective model identity is unknown")
-    if record.get("instructions_stale"):
-        warnings.append("installed instructions were stale at dispatch time")
-    record["warnings"] = warnings
-    record["observed_cost"] = None
-    if record.get("started_at") and record.get("finished_at"):
-        try:
-            from datetime import datetime
+def _elapsed_seconds(record: dict[str, Any]) -> float | None:
+    if not (record.get("started_at") and record.get("finished_at")):
+        return None
+    try:
+        started = datetime.fromisoformat(str(record["started_at"]).replace("Z", "+00:00"))
+        finished = datetime.fromisoformat(str(record["finished_at"]).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return max(0.0, (finished - started).total_seconds())
 
-            started = datetime.fromisoformat(str(record["started_at"]).replace("Z", "+00:00"))
-            finished = datetime.fromisoformat(str(record["finished_at"]).replace("Z", "+00:00"))
-            record["elapsed_seconds"] = max(0.0, (finished - started).total_seconds())
-        except ValueError:
-            record["elapsed_seconds"] = None
-    else:
-        record["elapsed_seconds"] = None
-    return record
+
+def _serialize_runs(
+    connection: sqlite3.Connection, rows: list[sqlite3.Row]
+) -> list[dict[str, Any]]:
+    """Serialize a page of runs with a bounded number of statements.
+
+    Every fact a run row carries is read for the whole page at once; only
+    scan-specific blockers and resumed-run effective evidence, which depend on
+    one run's own records, still read per run.
+    """
+
+    if not rows:
+        return []
+    engagement_id = int(rows[0]["engagement_id"])
+    run_ids = [int(row["id"]) for row in rows]
+    placeholders = _placeholders(run_ids)
+    lineages = _lineage_ids_by_run(connection, rows)
+    counts_by_run = _counts_by_run(connection, engagement_id, run_ids, lineages)
+    lineage_ids = sorted({run_id for lineage in lineages.values() for run_id in lineage})
+    lineage_placeholders = _placeholders(lineage_ids)
+
+    receipts_by_run: dict[int, list[dict[str, Any]]] = {}
+    for receipt in _receipt_health_rows(
+        connection,
+        engagement_id,
+        where_sql=f"receipts.run_id IN ({lineage_placeholders})",
+        parameters=tuple(lineage_ids),
+    ):
+        receipts_by_run.setdefault(int(receipt["run_id"]), []).append(receipt)
+
+    lifecycle_by_run: dict[int, list[dict[str, Any]]] = {}
+    for event in connection.execute(
+        f"""
+        SELECT id, run_id, from_status, to_status, reason, created_at
+        FROM assessment_run_lifecycle_events
+        WHERE engagement_id = ? AND run_id IN ({placeholders}) ORDER BY id
+        """,
+        (engagement_id, *run_ids),
+    ).fetchall():
+        record = dict(event)
+        lifecycle_by_run.setdefault(int(record.pop("run_id")), []).append(record)
+
+    cited_by_receipt_run: dict[int, set[str]] = {}
+    for finding in connection.execute(
+        f"""
+        SELECT DISTINCT receipts.run_id, findings.slug
+        FROM assessment_findings AS findings
+        JOIN assessment_finding_proof_receipts AS links ON links.finding_id = findings.id
+        JOIN assessment_proof_receipts AS receipts ON receipts.id = links.proof_receipt_id
+        WHERE findings.engagement_id = ?
+          AND receipts.run_id IN ({lineage_placeholders})
+        """,
+        (engagement_id, *lineage_ids),
+    ).fetchall():
+        cited_by_receipt_run.setdefault(int(finding["run_id"]), set()).add(
+            str(finding["slug"])
+        )
+
+    associated_by_run: dict[int, list[str]] = {}
+    for finding in connection.execute(
+        f"""
+        SELECT DISTINCT links.target_id AS run_id, findings.slug
+        FROM assessment_findings AS findings
+        JOIN assessment_finding_links AS links ON links.finding_id = findings.id
+        WHERE findings.engagement_id = ?
+          AND links.engagement_id = findings.engagement_id
+          AND links.link_kind = 'proof_run' AND links.target_kind = 'assessment_run'
+          AND links.retired_at IS NULL
+          AND links.target_id IN ({placeholders})
+        ORDER BY findings.slug
+        """,
+        (engagement_id, *run_ids),
+    ).fetchall():
+        associated_by_run.setdefault(int(finding["run_id"]), []).append(
+            str(finding["slug"])
+        )
+
+    dispatch_ids = sorted({int(row["producer_dispatch_id"]) for row in rows})
+    dispatch_intent = {
+        int(dispatch["id"]): dispatch
+        for dispatch in connection.execute(
+            f"""
+            SELECT id, task, finding_slugs_json FROM assessment_dispatches
+            WHERE id IN ({_placeholders(dispatch_ids)})
+            """,
+            tuple(dispatch_ids),
+        ).fetchall()
+    }
+
+    proof_work_by_run: dict[int, list[int]] = {}
+    for link in connection.execute(
+        f"""
+        SELECT links.run_id, links.work_id
+        FROM assessment_proof_work_runs AS links
+        JOIN assessment_proof_work AS work ON work.id = links.work_id
+        WHERE work.engagement_id = ? AND links.run_id IN ({placeholders})
+        ORDER BY links.work_id
+        """,
+        (engagement_id, *run_ids),
+    ).fetchall():
+        proof_work_by_run.setdefault(int(link["run_id"]), []).append(int(link["work_id"]))
+
+    serialized: list[dict[str, Any]] = []
+    for row in rows:
+        record = dict(row)
+        run_id = int(record["id"])
+        lineage = lineages[run_id]
+        lineage_receipts = [
+            receipt
+            for lineage_id in lineage
+            for receipt in receipts_by_run.get(lineage_id, ())
+        ]
+        counts = counts_by_run[run_id]
+        proof_health = _health_counts(lineage_receipts)
+        # A run that never resumed evaluates exactly its own receipts, which are
+        # its whole lineage; a resumed run selects its effective set itself.
+        effective_proof_health = (
+            dict(proof_health)
+            if record.get("resumed_from_run_id") is None
+            else _effective_evidence_health_counts(connection, engagement_id, row)
+        )
+        record["target_identity"] = _json_value(record.pop("target_identity_json", "{}"), {})
+        record["source_generations"] = _json_value(
+            record.pop("source_generations_json", "[]"), []
+        )
+        record["exclusions"] = _json_value(record.pop("exclusions_json", "[]"), [])
+        record["seal"] = _json_value(record.pop("seal_json", None), None)
+        record["instructions_stale"] = (
+            bool(record["instructions_stale"])
+            if record.get("instructions_stale") is not None
+            else None
+        )
+        record["counts"] = counts
+        record["proof_health"] = proof_health
+        record["blockers"] = _current_blockers(
+            connection,
+            row,
+            counts=counts,
+            effective_proof_health=effective_proof_health,
+        )
+        record["lifecycle_history"] = lifecycle_by_run.get(run_id, [])
+        cited: set[str] = set()
+        for lineage_id in lineage:
+            cited.update(cited_by_receipt_run.get(lineage_id, ()))
+        record["finding_slugs"] = sorted(cited)
+        # ``finding_slugs`` are findings whose verification CITES this run's receipts.
+        # A ``--for-finding`` start (or a later ``finding link``) records intent to
+        # verify before any citation exists; it is reported apart so an associated
+        # run never reads as unlinked and a citation is never implied. It is per run,
+        # not per lineage, because the verification gate requires the run's own link.
+        record["associated_finding_slugs"] = associated_by_run.get(run_id, [])
+        # What the producing dispatch was asked to do, and the findings it was
+        # dispatched for. Intent only: neither implies the run cites anything.
+        dispatch = dispatch_intent.get(int(record["producer_dispatch_id"]))
+        record["producer_dispatch_task"] = str(dispatch["task"] or "") if dispatch else ""
+        dispatch_slugs = (
+            _json_value(dispatch["finding_slugs_json"], []) if dispatch else []
+        )
+        record["dispatch_finding_slugs"] = [
+            str(slug) for slug in dispatch_slugs if isinstance(slug, str) and slug
+        ] if isinstance(dispatch_slugs, list) else []
+        # Same scope as ``counts.proof_receipts``: the whole recovery lineage.
+        evidence_kinds: dict[str, int] = {}
+        for receipt in lineage_receipts:
+            kind = str(receipt["evidence_kind"])
+            evidence_kinds[kind] = evidence_kinds.get(kind, 0) + 1
+        record["evidence_kind_counts"] = dict(sorted(evidence_kinds.items()))
+        record["proof_work_ids"] = proof_work_by_run.get(run_id, [])
+        warnings: list[str] = []
+        if str(record.get("actual_model") or "unknown") == "unknown":
+            warnings.append("provider-observed model identity is unknown")
+        if record.get("launcher_effective_model") is None:
+            warnings.append("launcher-effective model identity is unknown")
+        if record.get("instructions_stale"):
+            warnings.append("installed instructions were stale at dispatch time")
+        record["warnings"] = warnings
+        record["elapsed_seconds"] = _elapsed_seconds(record)
+        serialized.append(record)
+    return serialized
+
+
+def _serialize_run(
+    connection: sqlite3.Connection, row: sqlite3.Row
+) -> dict[str, Any]:
+    return _serialize_runs(connection, [row])[0]
 
 
 _RESUME_REASON = "resumed from terminal run"
@@ -1755,7 +1983,7 @@ def list_assessment_runs(
             """,
             (engagement.id, limit, offset),
         ).fetchall()
-        return [_serialize_run(connection, row) for row in rows]
+        return _serialize_runs(connection, rows)
 
 
 def get_assessment_run(engagement_id: int, run_id: int) -> dict[str, Any]:
@@ -1791,8 +2019,10 @@ def transition_assessment_run(
         seal: dict[str, Any] | None = None
         seal_sha256 = ""
         blockers: list[dict[str, Any]] = []
+        counts: dict[str, int] = {}
         if requested in TERMINAL_RUN_STATUSES:
-            blockers = _current_blockers(connection, run)
+            counts = _run_counts(connection, engagement.id, run_id)
+            blockers = _current_blockers(connection, run, counts=counts)
             if requested == "completed" and blockers:
                 effective = "partial"
         lifecycle_cursor = connection.execute(
@@ -1813,7 +2043,6 @@ def transition_assessment_run(
         assert lifecycle_event is not None
         transition_at = str(lifecycle_event["created_at"])
         if requested in TERMINAL_RUN_STATUSES:
-            counts = _run_counts(connection, engagement.id, run_id)
             lifecycle_history = [
                 dict(event)
                 for event in connection.execute(

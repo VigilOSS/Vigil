@@ -1,0 +1,1134 @@
+/* Code view (components/CodeAnalysisTab.tsx + components/code/*).
+ * `cv-` = code view. Colors come from the theme tokens in app.css, so light
+ * and dark need no separate rules except where a mix needs a dark base. */
+
+.cv {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+}
+
+/* ── Header strip ─────────────────────────────────────── */
+
+/* PageHeader body: phase stepper, state line, key numbers. */
+.cv-head-body {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+
+.cv-stepper {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 0.8rem;
+}
+
+.cv-step {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px 4px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  background: var(--panel-soft);
+}
+
+.cv-step-completed {
+  color: var(--ok);
+  border-color: color-mix(in srgb, var(--ok) 35%, transparent);
+}
+
+.cv-step-active {
+  color: var(--ink);
+  font-weight: 650;
+  border-color: var(--accent);
+  background: var(--count-bg-active);
+}
+
+.cv-step-active .cv-step-mark {
+  color: var(--warn);
+}
+
+.cv-state {
+  margin: 0;
+  font-size: 1rem;
+  color: var(--ink);
+}
+
+.cv-numbers {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.cv-number {
+  display: grid;
+  align-content: start;
+  gap: 2px;
+  height: 100%;
+  box-sizing: border-box;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel-soft);
+  color: inherit;
+  text-decoration: none;
+}
+
+.cv-number:hover {
+  border-color: var(--border-strong);
+  background: var(--panel-hover);
+}
+
+.cv-number:focus-visible,
+.cv-tab:focus-visible,
+.cv-repo-head:focus-visible,
+.cv-disclosure:focus-visible,
+.cv-result-open:focus-visible,
+.cv-module-head:focus-visible,
+.cv-check-link:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.cv-number-label {
+  font-size: 0.74rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.cv-number-value {
+  font-size: 1.2rem;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+}
+
+.cv-number-detail {
+  font-size: 0.76rem;
+  color: var(--ink-2);
+}
+
+/* ── Section tabs (the Findings drawer idiom) ─────────── */
+
+/* Sticks just below the sticky workspace header (styles/workspace.css). */
+.cv-tabs {
+  position: sticky;
+  top: var(--workspace-header-height);
+  z-index: 5;
+  display: flex;
+  gap: 2px;
+  padding: 0 8px;
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+}
+
+.cv-tabs[hidden] {
+  display: none;
+}
+
+.cv-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 11px 12px 9px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: none;
+  color: var(--ink-2);
+  font: inherit;
+  font-size: 0.86rem;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.cv-tab:hover {
+  color: var(--drawer-tab-active-ink);
+}
+
+.cv-tab.is-active {
+  color: var(--drawer-tab-active-ink);
+  border-bottom-color: var(--drawer-tab-active-ink);
+  font-weight: 650;
+}
+
+.cv-count {
+  display: inline-block;
+  min-width: 1.4em;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--count-bg);
+  color: var(--count-ink);
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.cv-tab.is-active .cv-count {
+  background: var(--count-bg-active);
+  color: var(--count-ink-active);
+}
+
+.cv-panel {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+  transition: opacity 0.15s;
+}
+
+.cv-panel.is-refreshing,
+.cv-results.is-refreshing {
+  opacity: 0.85;
+}
+
+/* ── Sections ─────────────────────────────────────────── */
+
+.cv-section {
+  display: grid;
+  gap: 12px;
+  align-content: start;
+  min-width: 0;
+}
+
+.cv-section-head h3 {
+  margin: 0 0 2px;
+  font-size: 1.02rem;
+  color: var(--ink);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.cv-section-head-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.cv-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.cv-small-button {
+  padding: 6px 12px;
+  font-size: 0.8rem;
+}
+
+.cv-ok {
+  margin: 0;
+  color: var(--ok);
+  font-weight: 600;
+}
+
+.cv-inline-note {
+  margin: 0;
+  font-size: 0.88rem;
+  color: var(--ink-2);
+}
+
+.cv-inline-note.is-warn {
+  padding: 8px 10px;
+  border-left: 3px solid var(--warn);
+  background: color-mix(in srgb, var(--warn) 8%, transparent);
+}
+
+.cv-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--panel-soft);
+  color: var(--ink-2);
+  font-size: 0.76rem;
+  white-space: nowrap;
+}
+
+.cv-chip.is-warn {
+  border-color: color-mix(in srgb, var(--warn) 45%, transparent);
+  background: color-mix(in srgb, var(--warn) 10%, transparent);
+  color: var(--warn);
+}
+
+.cv-path {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: "Source Code Pro", "SFMono-Regular", monospace;
+  font-size: 0.82rem;
+  color: var(--ink);
+}
+
+/* Operator values (keys, digests, paths) shown whole, wrapping anywhere. */
+.cv-mono {
+  font-family: "Source Code Pro", "SFMono-Regular", monospace;
+  font-size: 0.82rem;
+  overflow-wrap: anywhere;
+}
+
+.cv-facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 8px 16px;
+  margin: 0;
+}
+
+.cv-facts dt,
+.cv-identity-list dt {
+  font-size: 0.72rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.cv-facts dd,
+.cv-identity-list dd {
+  margin: 2px 0 0;
+  color: var(--ink);
+  font-size: 0.88rem;
+  overflow-wrap: anywhere;
+}
+
+/* ── Overview checklist ───────────────────────────────── */
+
+.cv-checklist {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.cv-check {
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--panel);
+}
+
+.cv-check.is-required {
+  border-left-color: var(--danger);
+}
+
+.cv-check.is-optional {
+  border-left-color: var(--pending);
+}
+
+.cv-check-main {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 10px;
+}
+
+.cv-check-label {
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.cv-check-count {
+  font-size: 1.05rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+}
+
+.cv-check-link {
+  font-size: 0.84rem;
+  color: var(--accent);
+  white-space: nowrap;
+}
+
+/* Details sits at the right of the row and opens to a full-width line. */
+.cv-check-main .cv-raw {
+  order: 1;
+  margin-left: auto;
+}
+
+.cv-check-main .cv-check-link {
+  order: 2;
+}
+
+.cv-check-main .cv-raw[open] {
+  order: 3;
+  flex-basis: 100%;
+  margin-left: 0;
+}
+
+.cv-check-repos,
+.cv-check-reasons {
+  margin: 0;
+  font-size: 0.84rem;
+}
+
+.cv-check-reasons {
+  padding-left: 18px;
+  color: var(--ink-2);
+}
+
+.cv-raw summary,
+.cv-identity summary,
+.cv-anchor-list summary,
+.cv-diagnostics summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 0.8rem;
+  width: fit-content;
+}
+
+.cv-raw ul {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  font-size: 0.82rem;
+  color: var(--ink-2);
+  overflow-wrap: anywhere;
+}
+
+.cv-checklist.is-compact .cv-check {
+  padding: 8px 10px;
+}
+
+/* ── Repositories ─────────────────────────────────────── */
+
+.cv-repo-list {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.cv-repo {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  scroll-margin-top: calc(var(--workspace-header-height) + 56px);
+}
+
+.cv-repo.is-open {
+  border-color: var(--border-strong);
+}
+
+.cv-repo-head,
+.cv-disclosure,
+.cv-module-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 10px;
+  width: 100%;
+  padding: 10px 12px;
+  border: 0;
+  border-radius: 8px;
+  background: none;
+  color: var(--ink);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.cv-repo-head:hover,
+.cv-disclosure:hover,
+.cv-module-head:hover:not(:disabled) {
+  background: var(--panel-hover);
+}
+
+.cv-module-head:disabled {
+  cursor: default;
+}
+
+.cv-chevron {
+  width: 1em;
+  color: var(--muted);
+}
+
+.cv-repo-name {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+
+.cv-repo-tag {
+  font-family: "Source Code Pro", "SFMono-Regular", monospace;
+  font-size: 0.76rem;
+  font-weight: 500;
+  color: var(--muted);
+}
+
+.cv-repo-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.cv-repo-body {
+  display: grid;
+  gap: 12px;
+  padding: 4px 16px 14px 34px;
+}
+
+.cv-warnings {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.cv-warnings li {
+  display: grid;
+  gap: 2px;
+  padding: 8px 10px;
+  border-left: 3px solid var(--warn);
+  background: color-mix(in srgb, var(--warn) 8%, transparent);
+  border-radius: 0 6px 6px 0;
+  font-size: 0.88rem;
+  color: var(--ink);
+}
+
+.cv-warning-detail {
+  color: var(--ink-2);
+  font-size: 0.84rem;
+}
+
+.cv-identity-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 8px 16px;
+  margin: 8px 0 0;
+}
+
+.cv-repo-group {
+  border-top: 1px solid var(--divider);
+  padding-top: 8px;
+}
+
+.cv-disclosure {
+  font-weight: 600;
+  color: var(--ink-2);
+}
+
+.cv-repo-group .cv-repo-list {
+  margin-top: 8px;
+}
+
+/* ── Review queue ─────────────────────────────────────── */
+
+.cv-bar {
+  display: flex;
+  height: 12px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--panel-soft);
+  border: 1px solid var(--border);
+}
+
+.cv-bar-seg {
+  display: block;
+  height: 100%;
+}
+
+.cv-seg-done { background: var(--ok); }
+.cv-seg-processing { background: var(--accent-soft); }
+.cv-seg-needs_context { background: var(--pending); }
+.cv-seg-error { background: var(--danger); }
+.cv-seg-pending { background: color-mix(in srgb, var(--muted) 35%, transparent); }
+
+.cv-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 0.86rem;
+  color: var(--ink-2);
+}
+
+.cv-legend li {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.cv-legend strong {
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+
+.cv-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+}
+
+.cv-lanes {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+  align-items: start;
+  gap: 16px;
+}
+
+.cv-lanes:empty {
+  display: none;
+}
+
+.cv-quiet-lanes {
+  margin-top: -4px;
+}
+
+.cv-lane-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.cv-lane-head h4 {
+  margin: 0;
+  font-size: 0.95rem;
+  color: var(--ink);
+}
+
+.cv-lane-error .cv-lane-head h4 { color: var(--danger); }
+
+.cv-jobs {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.cv-job {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--divider);
+}
+
+.cv-job:last-child {
+  border-bottom: 0;
+}
+
+.cv-job-meta,
+.cv-result-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  font-size: 0.8rem;
+  color: var(--ink-2);
+}
+
+/* ── Files ────────────────────────────────────────────── */
+
+.cv-table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: auto;
+  font-size: 0.86rem;
+}
+
+.cv-table th,
+.cv-table td {
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--divider);
+  text-align: left;
+  vertical-align: middle;
+  color: var(--ink);
+}
+
+.cv-table thead th {
+  font-size: 0.72rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.cv-num {
+  text-align: right !important;
+  font-variant-numeric: tabular-nums;
+}
+
+.cv-path-cell {
+  max-width: 0;
+  width: 60%;
+}
+
+.cv-mini-bar {
+  display: block;
+  width: 100%;
+  min-width: 80px;
+  height: 8px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: var(--panel-soft);
+  border: 1px solid var(--border);
+}
+
+.cv-mini-bar > span {
+  display: block;
+  height: 100%;
+  background: var(--ok);
+}
+
+.cv-filter-pill {
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--accent);
+  background: var(--count-bg-active);
+  color: var(--accent);
+  font-size: 0.8rem;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+/* ── Results ──────────────────────────────────────────── */
+
+.cv-results-tools {
+  display: grid;
+  gap: 10px;
+}
+
+.cv-search {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 9px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--ink);
+  font: inherit;
+  font-size: 0.9rem;
+}
+
+.cv-search:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.cv-facets {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 18px;
+  transition: opacity 0.15s;
+}
+
+.cv-facets.is-refreshing {
+  opacity: 0.7;
+}
+
+.cv-results-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 14px;
+  scroll-margin-top: calc(var(--workspace-header-height) + 56px);
+}
+
+.cv-results-range {
+  color: var(--ink-2);
+  font-size: 0.8rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.cv-pager {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.cv-pager-bottom {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.cv-not-listed {
+  margin: 0;
+  padding: 8px 10px 8px 26px;
+  border-left: 3px solid var(--warn);
+  background: color-mix(in srgb, var(--warn) 8%, transparent);
+  color: var(--ink-2);
+  font-size: 0.84rem;
+}
+
+.cv-results {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border-top: 1px solid var(--divider);
+  transition: opacity 0.15s;
+}
+
+.cv-result {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 7px 6px;
+  border-bottom: 1px solid var(--divider);
+  cursor: pointer;
+}
+
+.cv-result:hover {
+  background: var(--panel-hover);
+}
+
+.cv-result.is-suppressed {
+  opacity: 0.6;
+}
+
+.cv-result-open {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  padding: 2px 0;
+  border: 0;
+  background: none;
+  color: var(--ink);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.cv-result-open:hover .cv-path {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.cv-result-fn {
+  flex: none;
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ink-2);
+  font-family: "Source Code Pro", "SFMono-Regular", monospace;
+  font-size: 0.78rem;
+}
+
+.cv-result-meta {
+  justify-content: flex-end;
+}
+
+/* ── Result record (inside the shared record view) ───── */
+
+.cv-record .record-title {
+  overflow-wrap: anywhere;
+}
+
+.cv-record-fn {
+  color: var(--ink-2);
+  font-family: "Source Code Pro", "SFMono-Regular", monospace;
+  font-size: 0.8em;
+}
+
+.cv-result-review {
+  display: grid;
+  gap: 14px;
+}
+
+.cv-result-field h3 {
+  margin: 0 0 2px;
+  font-size: 0.72rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.cv-result-field p {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--ink);
+  font-size: 0.9rem;
+  max-width: 110ch;
+}
+
+.cv-anchor-list {
+  display: grid;
+  gap: 4px;
+  margin: 0 0 12px;
+  padding-left: 18px;
+  font-size: 0.82rem;
+  overflow-wrap: anywhere;
+}
+
+.cv-anchor-label {
+  display: block;
+  color: var(--ink-2);
+}
+
+.cv-table-scroll {
+  overflow-x: auto;
+}
+
+.cv-coverage-notes {
+  min-width: 260px;
+  color: var(--ink-2);
+  font-size: 0.82rem;
+  overflow-wrap: anywhere;
+}
+
+.cv-leads {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.cv-leads > li {
+  display: grid;
+  gap: 4px;
+  padding: 8px 10px;
+  border: 1px solid var(--divider);
+  border-radius: 6px;
+  font-size: 0.86rem;
+}
+
+.cv-leads p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.cv-lead-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.cv-lead-head .cv-path {
+  flex: 1 1 240px;
+}
+
+
+/* ── Risk tier (sentence case, severity marker) ──────── */
+
+.cv-risk {
+  --cv-risk: var(--muted);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ink);
+  font-size: 0.8rem;
+  white-space: nowrap;
+}
+
+.cv-risk::before {
+  content: "";
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  background: var(--cv-risk);
+}
+
+.cv-risk-critical { --cv-risk: var(--sev-critical); }
+.cv-risk-high { --cv-risk: var(--sev-high); }
+.cv-risk-medium { --cv-risk: var(--sev-medium); }
+.cv-risk-low { --cv-risk: var(--sev-low); }
+
+/* A section a blocker link pointed at, and the rows it counts. */
+.cv-focusable {
+  scroll-margin-top: calc(var(--workspace-header-height) + 56px);
+}
+
+.cv-focusable.is-focused {
+  box-shadow: 0 0 0 2px var(--accent-muted);
+}
+
+.cv-table tr.is-marked > * {
+  background: color-mix(in srgb, var(--warn) 9%, transparent);
+}
+
+.cv-lane-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px 12px;
+}
+
+.cv-lane-pager {
+  display: inline-flex;
+  gap: 6px;
+}
+
+.cv-inline-note p,
+.cv-inline-note ul {
+  margin: 0;
+}
+
+.cv-inline-note ul {
+  padding-left: 18px;
+}
+
+/* ── Quality ──────────────────────────────────────────── */
+
+.cv-groups {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.cv-group {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+}
+
+.cv-group > summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.cv-group > summary::-webkit-details-marker {
+  display: none;
+}
+
+.cv-group > summary::before {
+  content: "▸";
+  width: 1em;
+  color: var(--muted);
+}
+
+.cv-group[open] > summary::before {
+  content: "▾";
+}
+
+.cv-group[open] > summary {
+  border-bottom: 1px solid var(--divider);
+}
+
+.cv-group > :not(summary) {
+  margin: 8px 12px 12px;
+}
+
+.cv-group-title {
+  font-weight: 650;
+  color: var(--ink);
+}
+
+.cv-group-count {
+  color: var(--ink-2);
+  font-size: 0.86rem;
+}
+
+.cv-plain-list {
+  display: grid;
+  gap: 4px;
+  padding-left: 18px;
+  font-size: 0.86rem;
+  overflow-wrap: anywhere;
+}
+
+/* ── Modules / diagnostics ────────────────────────────── */
+
+.cv-module-list {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border-top: 1px solid var(--divider);
+}
+
+.cv-module {
+  border-bottom: 1px solid var(--divider);
+}
+
+.cv-module-body {
+  padding: 0 12px 12px 34px;
+}
+
+.cv-diagnostics {
+  display: block;
+}
+
+.cv-diagnostics summary {
+  font-size: 0.86rem;
+}
+
+.cv-diagnostics.has-problems summary {
+  color: var(--danger);
+  font-weight: 600;
+}
+
+.cv-diagnostics .cv-facts {
+  margin-top: 10px;
+}
+
+/* Below this the path needs the row's width; the facts move under it. */
+@media (max-width: 1180px) {
+  .cv-result {
+    grid-template-columns: auto minmax(0, 1fr);
+    row-gap: 4px;
+  }
+
+  .cv-result-meta {
+    grid-column: 2 / -1;
+    justify-content: flex-start;
+  }
+}
+
+@media (max-width: 900px) {
+  .cv-result-meta {
+    grid-column: 1 / -1;
+  }
+
+  .cv-pager {
+    margin-left: 0;
+  }
+
+  .cv-repo-chips {
+    margin-left: 0;
+  }
+}
+
+/* The workspace header stops being sticky at this width (styles/workspace.css). */
+@media (max-width: 620px) {
+  .cv-tabs {
+    top: 0;
+  }
+}

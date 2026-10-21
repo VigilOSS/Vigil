@@ -1729,6 +1729,13 @@ def _create_core_tables(connection: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_events_engagement_created "
         "ON events(engagement_id, created_at DESC, id DESC)"
     )
+    # Stored event spellings mix SQLite and ISO-8601, so the timeline and the
+    # Activity feed order events by ``julianday(created_at)``; indexing that
+    # expression lets a page stop after its rows instead of sorting them all.
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_events_engagement_julianday "
+        "ON events(engagement_id, julianday(created_at) DESC, id DESC)"
+    )
 
 
 # Additive column spec for engagement_credentials (multi-identity session store,
@@ -2009,6 +2016,12 @@ def _create_assessment_entity_tables(connection: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_assessment_request_observations_created "
         "ON assessment_request_observations(engagement_id, created_at DESC, id DESC)"
     )
+    # One variant's observations (its count on an inventory page, its own
+    # list) are read by variant, never by walking the engagement's observations.
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_assessment_request_observations_variant "
+        "ON assessment_request_observations(request_variant_id, created_at DESC, id DESC)"
+    )
     connection.execute(
         """
             CREATE TABLE IF NOT EXISTS assessment_coverage_items (
@@ -2121,6 +2134,13 @@ def _create_assessment_entity_tables(connection: sqlite3.Connection) -> None:
             "ALTER TABLE assessment_probe_runs "
             "ADD COLUMN outcome_assertion TEXT NOT NULL DEFAULT ''"
         )
+    # Child key first: ``ON DELETE SET NULL`` enforcement looks probes up by
+    # ``coverage_item_id`` alone, so an engagement-leading index would leave
+    # every coverage-item delete (and the dedupe below) scanning all probes.
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_assessment_probe_runs_coverage_item "
+        "ON assessment_probe_runs(coverage_item_id, engagement_id)"
+    )
     _dedupe_coverage_items(connection)
     connection.execute(
         """
@@ -2339,6 +2359,10 @@ def _create_assessment_finding_tables(connection: sqlite3.Connection) -> None:
                 FOREIGN KEY(finding_id) REFERENCES assessment_findings(id) ON DELETE CASCADE
             )
             """
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_assessment_finding_transitions_finding "
+        "ON assessment_finding_transitions(engagement_id, finding_id, id)"
     )
     connection.execute(
         """
@@ -3093,6 +3117,21 @@ def _create_artifacts_table_and_fts(connection: sqlite3.Connection) -> None:
     connection.execute(
         "CREATE INDEX IF NOT EXISTS idx_assessment_artifacts_scratch "
         "ON assessment_artifacts(engagement_id, scratch)"
+    )
+    # Artifact rows hold each file's full extracted text inline, and every
+    # column after ``indexed_text`` sits behind that text's overflow chain, so
+    # a per-engagement row walk reads the whole corpus. Hot filters therefore
+    # seek or stay index-only. Producer run leads so both the evidence-health
+    # lookup and ``ON DELETE SET NULL`` enforcement from command runs seek.
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_assessment_artifacts_producer_run "
+        "ON assessment_artifacts(producer_command_run_id, engagement_id)"
+    )
+    # Submission attachment eligibility: counts are index-only and pages walk
+    # newest-first without touching the rows they skip.
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_assessment_artifacts_attachment_eligible "
+        "ON assessment_artifacts(engagement_id, present, scratch, updated_at DESC, id DESC, kind, sha256)"
     )
     artifact_fts_columns = {
         row[1]
@@ -4026,6 +4065,13 @@ def _apply_additive_migrations(connection: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_code_analysis_results_binding_status "
         "ON code_analysis_results(engagement_id, repo_generation, receipt_binding_status)"
     )
+    # Receipt checks correlate each queue attempt with its own results. Without
+    # a key on the attempt, the planner seeks by (engagement, generation) and
+    # rescans every result of the generation per attempt: quadratic per repo.
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_code_analysis_results_queue_receipt "
+        "ON code_analysis_results(engagement_id, queue_item_id, file_id, repo_generation)"
+    )
 
     trigger_columns = _table_columns(connection, "code_analysis_triggers")
     for col_name, col_def in {
@@ -4501,6 +4547,29 @@ def _create_activity_table(connection: sqlite3.Connection) -> None:
     connection.execute(
         "CREATE INDEX IF NOT EXISTS idx_activity_entries_actor "
         "ON activity_entries(engagement_id, actor_kind, actor_name)"
+    )
+    # The activity list orders and range-filters on ``julianday(occurred_at)``
+    # because stored timestamps mix SQLite and ISO-8601 spellings; indexing the
+    # same expression lets each page read in order instead of sorting the log.
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_activity_entries_engagement_julianday "
+        "ON activity_entries(engagement_id, julianday(occurred_at) DESC, id DESC)"
+    )
+    # The Activity feed counts every audit row by category on each load; the
+    # category and actor-kind expressions read only these columns, so the
+    # count stays index-only.
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_activity_entries_engagement_kind_title "
+        "ON activity_entries(engagement_id, actor_kind, actor_name, title)"
+    )
+    # An OAST probe's point read finds its latest operator verdict entry
+    # (``state_manager/oob.py:OOB_VERDICT_AUDIT_TITLE``); the partial index
+    # holds only those entries, so the read seeks them instead of walking the
+    # engagement's audit log.
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_activity_entries_oob_verdict "
+        "ON activity_entries(engagement_id, julianday(occurred_at) DESC, id DESC) "
+        "WHERE actor_kind = 'operator' AND title = 'oob probe verdict'"
     )
 
 
@@ -5911,6 +5980,58 @@ def _run_data_migrations(connection: sqlite3.Connection) -> None:
     # ── End Intel Tables ──────────────────────────────────────
 
     _migrate_legacy_finding_slug_references(connection)
+    _migrate_command_run_tool_bins(connection)
+
+
+COMMAND_RUN_TOOL_BIN_MIGRATION_ID = "command-run-tool-bin-v2"
+
+
+def _migrate_command_run_tool_bins(connection: sqlite3.Connection) -> None:
+    """Once per database: rewrite ``tool_bin`` on runs stored before the
+    derivation understood shell scripts (``;``/``for``/options there). The
+    ``schema_migrations`` marker records how many rows changed and keeps later
+    startups from re-scanning the ledger.
+
+    The ledger scan runs without the write lock: on a large ledger it outlasts
+    the busy timeout another startup worker would wait for. The marker re-check,
+    rewrite and marker insert then commit under one ``BEGIN IMMEDIATE``, so
+    workers that start together record the migration exactly once."""
+    _create_migration_history_tables(connection)
+    if connection.in_transaction:
+        connection.commit()
+
+    def recorded() -> bool:
+        return connection.execute(
+            "SELECT 1 FROM schema_migrations WHERE migration_id = ?",
+            (COMMAND_RUN_TOOL_BIN_MIGRATION_ID,),
+        ).fetchone() is not None
+
+    if recorded():
+        return
+    # Lazy: the state-manager services import this module.
+    from .services.state_manager.command_runs import (
+        rewrite_command_run_tool_bins,
+        stale_command_run_tool_bins,
+    )
+
+    stale = stale_command_run_tool_bins(connection)
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        if not recorded():
+            rewritten = rewrite_command_run_tool_bins(connection, stale)
+            connection.execute(
+                """
+                INSERT INTO schema_migrations (
+                    migration_id, from_version, to_version, migrated_rows,
+                    warning_count, backup_path, report_json
+                ) VALUES (?, ?, ?, ?, 0, '', '{}')
+                """,
+                (COMMAND_RUN_TOOL_BIN_MIGRATION_ID, "tool-bin-v1", "tool-bin-v2", rewritten),
+            )
+        connection.execute("COMMIT")
+    except Exception:
+        connection.execute("ROLLBACK")
+        raise
 
 
 def _create_assessment_work_items_table(connection: sqlite3.Connection) -> None:
@@ -5999,6 +6120,12 @@ def _create_assessment_work_items_table(connection: sqlite3.Connection) -> None:
     connection.execute(
         "CREATE INDEX IF NOT EXISTS idx_assessment_work_items_source "
         "ON assessment_work_items(engagement_id, source)"
+    )
+    # Child key first for the same reason as the probe-run index: deleting a
+    # coverage item must seek its work items, not scan the whole buffer.
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_assessment_work_items_coverage_item "
+        "ON assessment_work_items(coverage_item_id, engagement_id)"
     )
     columns = {
         row[1] for row in connection.execute("PRAGMA table_info(assessment_work_items)")
@@ -7446,20 +7573,6 @@ def create_event(
         ).fetchone()
         assert row is not None
         return Event.from_row(row)
-
-
-def list_events_for_engagement(engagement_id: int) -> list[Event]:
-    with get_connection() as connection:
-        rows = connection.execute(
-            """
-            SELECT id, engagement_id, event_type, phase, task_name, agent_name, summary, created_at
-            FROM events
-            WHERE engagement_id = ?
-            ORDER BY id ASC
-            """,
-            (engagement_id,),
-        ).fetchall()
-    return [Event.from_row(row) for row in rows]
 
 
 def get_latest_event_for_engagement(engagement_id: int, prefix: str) -> Event | None:

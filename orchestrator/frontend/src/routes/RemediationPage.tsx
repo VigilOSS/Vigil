@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type MutableRefObject } from "react";
 
 import {
   ApiError,
@@ -12,6 +12,7 @@ import {
   updateRemediationReleasePlan,
   updateRemediationVerificationPlan,
   getAssessmentFinding,
+  getEngagement,
   listEngagements,
   updateRemediationFindings,
   type Engagement,
@@ -25,10 +26,13 @@ import {
   type RemediationReleasePlan,
 } from "../lib/api";
 import { ThemeToggle } from "../components/ThemeToggle";
+import { Skeleton } from "../components/Skeletons";
+import { EmptyState, SeverityTag, StatusPill, statusLabel } from "../components/ui";
 import { JsonView } from "../components/JsonView";
 import { CodeBlock } from "../components/formatting";
 import { engagementHref, remediationHref, writeWorkspaceHash } from "../lib/workspaceRoutes";
 import { InvalidRemediationDraftError, readRemediationDrafts, writeRemediationDrafts, type RemediationDrafts, type RemediationDraftValues } from "../lib/remediationDrafts";
+import "../styles/workspace.css";
 import "../styles/remediation.css";
 
 type Props = { engagementKey: string; onBack: () => void; initialCaseId?: number };
@@ -126,14 +130,14 @@ function LinkedFindings({ selected, disabled, onSave }: {
     <div className="remediation-section-heading"><div><h3>Linked findings</h3><p>Current assessment state · {selected.linked_findings.length} linked</p></div><button type="button" onClick={() => { setEditing(!editing); setError(null); }} disabled={disabled || busy}>{editing ? "Cancel linking" : "Link finding"}</button></div>
     {selected.linked_findings.length ? <ul className="remediation-finding-list">{selected.linked_findings.map((finding) => <li key={finding.id}>
       <a href={engagementHref(finding.engagement_key, { tab: "findings", finding: finding.slug })} aria-disabled={saving || undefined} onClick={(event) => { if (saving) event.preventDefault(); }}><span className="remediation-finding-key">{finding.engagement_key} / {finding.slug}</span><strong>{finding.title}</strong>{finding.root_cause_key && <span className="remediation-finding-key">Root cause: {finding.root_cause_key}</span>}</a>
-      <span className={`remediation-severity remediation-severity-${finding.severity}`}>{finding.severity}</span><span>{finding.verification_status.replace(/_/g, " ")}</span>
+      <SeverityTag severity={finding.severity} size="sm" /><StatusPill domain="finding-verification" value={finding.verification_status} size="sm" />
       <button type="button" className="remediation-text-button" onClick={() => save(selected.linked_findings.filter((item) => item.id !== finding.id).map((item) => item.id))} disabled={disabled || busy} aria-label={`Unlink ${finding.slug}`}>Unlink</button>
     </li>)}</ul> : <p>No Vigil findings linked to this case.</p>}
     {editing && <div className="remediation-link-editor">
       <div className="remediation-field-grid"><div><label htmlFor="remediation-link-source">Source engagement</label><select id="remediation-link-source" value={source} disabled={saving || disabled} onChange={(event) => { if (saving || disabled) return; invalidate(); setSource(event.target.value); }}><option value="">Select engagement</option>{sources.map((item) => <option key={item.key} value={item.key}>{item.key} · {item.target}</option>)}</select></div>
       <div><label htmlFor="remediation-link-slug">Finding slug</label><input id="remediation-link-slug" value={slug} disabled={saving || disabled} onChange={(event) => { if (saving || disabled) return; invalidate(); setSlug(event.target.value); }} placeholder="SEC-001" /></div></div>
       <button type="button" onClick={find} disabled={!source || !slug.trim() || busy || disabled}>Find finding</button>
-      {candidate && <div className="remediation-link-candidate"><div><strong>{candidate.title}</strong><p>{candidate.slug} · {candidate.severity} · {candidate.verification_status.replace(/_/g, " ")}</p></div><button type="button" onClick={() => save([...selected.linked_findings.map((item) => item.id), candidate.id])} disabled={busy || disabled || selected.linked_findings.some((item) => item.id === candidate.id)}>{selected.linked_findings.some((item) => item.id === candidate.id) ? "Already linked" : "Add to case"}</button></div>}
+      {candidate && <div className="remediation-link-candidate"><div><strong>{candidate.title}</strong><p>{candidate.slug} · <SeverityTag severity={candidate.severity} size="sm" /> · {statusLabel("finding-verification", candidate.verification_status)}</p></div><button type="button" onClick={() => save([...selected.linked_findings.map((item) => item.id), candidate.id])} disabled={busy || disabled || selected.linked_findings.some((item) => item.id === candidate.id)}>{selected.linked_findings.some((item) => item.id === candidate.id) ? "Already linked" : "Add to case"}</button></div>}
       <p className="remediation-help">Link findings that share this fix. Changing links requires a new review approval.</p>
     </div>}
     {error && <p role="alert">{error}</p>}
@@ -141,12 +145,126 @@ function LinkedFindings({ selected, disabled, onSave }: {
 }
 
 export function RemediationPage(props: Props) {
-  return <RemediationWorkspace key={`${props.engagementKey}:${props.initialCaseId ?? ""}`} {...props} />;
+  return <RemediationWorkspace key={props.engagementKey} {...props} />;
 }
 
+function caseMatches(item: RemediationCaseSummary, query: string): boolean {
+  return `${item.title} ${item.source_key} ${item.source_type} ${item.status} ${item.linked_findings.map((finding) => `${finding.slug} ${finding.title}`).join(" ")}`.toLowerCase().includes(query.toLowerCase());
+}
+
+// The page: header, case queue and the open case. The queue (its search,
+// scroll and loaded list) lives here and survives choosing a case; only the
+// open case's workspace remounts per case, so nothing from one case's edits
+// or in-flight saves can land on another.
 function RemediationWorkspace({ engagementKey, onBack, initialCaseId }: Props) {
   const [cases, setCases] = useState<RemediationCaseSummary[]>([]);
-  const [selectedId, setSelectedId] = useState<number | null>(initialCaseId ?? null);
+  const [loading, setLoading] = useState(true);
+  const [listError, setListError] = useState<string | null>(null);
+  const [listAttempt, setListAttempt] = useState(0);
+  const [query, setQuery] = useState("");
+  const [engagement, setEngagement] = useState<Engagement | null>(null);
+  // The open case's busy state and its synchronous link-mutation lock.
+  const [busy, setBusy] = useState(false);
+  const navigationLock = useRef(false);
+  const selectedId = initialCaseId ?? cases[0]?.id ?? null;
+
+  useEffect(() => {
+    let active = true;
+    setLoading(true);
+    setListError(null);
+    listRemediationCases(engagementKey).then((next) => {
+      if (active) setCases(next);
+    }).catch((failure: unknown) => {
+      if (active) setListError(failure instanceof Error ? failure.message : "Could not load cases");
+    }).finally(() => {
+      if (active) setLoading(false);
+    });
+    return () => { active = false; };
+  }, [engagementKey, listAttempt]);
+
+  // Header identity and lifecycle; the page works without them.
+  useEffect(() => {
+    let active = true;
+    Promise.resolve().then(() => getEngagement(engagementKey)).then((value) => { if (active) setEngagement(value); }).catch(() => undefined);
+    return () => { active = false; };
+  }, [engagementKey]);
+
+  function chooseCase(caseId: number) {
+    if (caseId === selectedId || busy || navigationLock.current) return;
+    writeWorkspaceHash(remediationHref(engagementKey, caseId));
+  }
+
+  // The open case's latest record replaces its queue entry.
+  function acceptCase(next: RemediationCase) {
+    setCases((values) => values.map((item) => item.id === next.id ? next : item));
+  }
+
+  const visibleCases = cases.filter((item) => caseMatches(item, query));
+
+  return (
+    <div className="remediation-page">
+      <header className="dashboard-header workspace-header remediation-header">
+        <div>
+          <p className="eyebrow">Vigil / {engagementKey} · Remediation</p>
+          <h1>{engagement?.target || engagementKey}</h1>
+        </div>
+        <div className="page-actions">
+          <div className="status-summary">
+            <div className="status-summary-row">
+              <span className="status-summary-label">Engagement lifecycle</span>
+              {engagement ? <StatusPill domain="engagement" value={engagement.status || "unknown"} /> : <Skeleton width={84} height={20} rounded />}
+            </div>
+          </div>
+          <ThemeToggle />
+          <button type="button" className="ghost-button" onClick={onBack} disabled={busy} title="Back to engagements">Back</button>
+        </div>
+      </header>
+      <div className="remediation-layout">
+        <aside className="remediation-queue" aria-label="Case queue">
+          <div className="remediation-section-heading"><h2>Cases</h2><span>{visibleCases.length} / {cases.length}</span></div>
+          <div className="remediation-queue-search"><label className="sr-only" htmlFor="remediation-search">Search cases</label><input id="remediation-search" placeholder="Search cases…" value={query} onChange={(event) => setQuery(event.target.value)} /></div>
+          {loading && cases.length === 0 ? <p>Loading cases…</p> : listError ? <><p role="alert">{listError}</p><button type="button" onClick={() => setListAttempt((attempt) => attempt + 1)}>Retry loading cases</button></> : cases.length === 0 ? <p>No remediation cases imported yet.</p> : (
+            <ul>
+              {visibleCases.map((item) => (
+                <li key={item.id}>
+                  <button type="button" className={selectedId === item.id ? "is-selected" : ""} onClick={() => chooseCase(item.id)} disabled={busy} aria-current={selectedId === item.id ? "page" : undefined}>
+                    <span className="remediation-case-key"><span>{item.source_type === "finding" ? `Finding #${item.source_key}` : item.source_key}</span><span>#{item.id}</span></span>
+                    <strong>{item.title}</strong>
+                    <span className="remediation-case-status"><StatusPill domain="remediation" value={item.status} size="sm" /> · {item.linked_findings.length} finding{item.linked_findings.length === 1 ? "" : "s"}</span>
+                    {item.linked_findings.map((finding) => <span key={finding.id} className="remediation-case-finding"><span>{finding.title}</span><span>{finding.slug} · <SeverityTag severity={finding.severity} size="sm" /> · {statusLabel("finding-verification", finding.verification_status)}</span>{finding.root_cause_key && <span>Root cause: {finding.root_cause_key}</span>}</span>)}
+                    {item.duplicate_hints?.length > 0 && <span className="remediation-case-status">{item.duplicate_hints.length} possible duplicate{item.duplicate_hints.length === 1 ? "" : "s"}</span>}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+          {!listError && cases.length > 0 && !visibleCases.length && <p>No cases match your search.</p>}
+        </aside>
+
+        <RemediationCaseWorkspace
+          key={selectedId ?? "none"}
+          engagementKey={engagementKey}
+          caseId={selectedId}
+          listState={listError ? "failed" : loading && cases.length === 0 ? "loading" : cases.length === 0 ? "empty" : "ready"}
+          onCase={acceptCase}
+          onBusyChange={setBusy}
+          navigationLock={navigationLock}
+        />
+      </div>
+    </div>
+  );
+}
+
+type CaseWorkspaceProps = {
+  engagementKey: string;
+  caseId: number | null;
+  listState: "loading" | "failed" | "empty" | "ready";
+  onCase: (next: RemediationCase) => void;
+  onBusyChange: (busy: boolean) => void;
+  navigationLock: MutableRefObject<boolean>;
+};
+
+function RemediationCaseWorkspace({ engagementKey, caseId: selectedId, listState, onCase, onBusyChange, navigationLock: linkMutationPending }: CaseWorkspaceProps) {
   const [selected, setSelected] = useState<RemediationCase | null>(null);
   const [plan, setPlan] = useState("");
   const [baseline, setBaseline] = useState<Partial<RemediationBaseline>>({});
@@ -158,14 +276,10 @@ function RemediationWorkspace({ engagementKey, onBack, initialCaseId }: Props) {
   const [diff, setDiff] = useState<RemediationDiff | null>(null);
   const [diffError, setDiffError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [loading, setLoading] = useState(true);
-  const [listError, setListError] = useState<string | null>(null);
   const [caseError, setCaseError] = useState<string | null>(null);
-  const [listAttempt, setListAttempt] = useState(0);
   const [caseAttempt, setCaseAttempt] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const [query, setQuery] = useState("");
   const [activePane, setActivePane] = useState("overview");
   const [drafts, setDrafts] = useState<RemediationDrafts>({});
   const [draftStorageError, setDraftStorageError] = useState<string | null>(null);
@@ -173,28 +287,22 @@ function RemediationWorkspace({ engagementKey, onBack, initialCaseId }: Props) {
   const [discardFailed, setDiscardFailed] = useState(false);
   const workspaceActive = useRef(true);
   const caseReads = useRef(0);
-  const linkMutationPending = useRef(false);
+  const onCaseRef = useRef(onCase);
+  onCaseRef.current = onCase;
 
   useEffect(() => {
     workspaceActive.current = true;
     return () => { workspaceActive.current = false; };
   }, []);
 
+  // The queue shows this case's latest record; the page locks the queue and Back while it is busy.
   useEffect(() => {
-    let active = true;
-    setLoading(true);
-    setListError(null);
-    listRemediationCases(engagementKey).then((next) => {
-      if (!active) return;
-      setCases(next);
-      setSelectedId((current) => current ?? next[0]?.id ?? null);
-    }).catch((failure: unknown) => {
-      if (active) setListError(failure instanceof Error ? failure.message : "Could not load cases");
-    }).finally(() => {
-      if (active) setLoading(false);
-    });
-    return () => { active = false; };
-  }, [engagementKey, listAttempt]);
+    if (selected) onCaseRef.current(selected);
+  }, [selected]);
+  useEffect(() => {
+    onBusyChange(busy);
+  }, [busy, onBusyChange]);
+  useEffect(() => () => onBusyChange(false), [onBusyChange]);
 
   useEffect(() => {
     if (selectedId == null) {
@@ -302,16 +410,6 @@ function RemediationWorkspace({ engagementKey, onBack, initialCaseId }: Props) {
     applyDraftValues(selected, {});
   }
 
-  function chooseCase(caseId: number) {
-    if (caseId === selectedId || busy || linkMutationPending.current) return;
-    setSelectedId(caseId);
-    setSelected(null);
-    setDiff(null);
-    setNotice(null);
-    setActivePane("overview");
-    writeWorkspaceHash(remediationHref(engagementKey, caseId));
-  }
-
   async function saveFindings(ids: number[]) {
     if (!selected || busy || linkMutationPending.current) return;
     linkMutationPending.current = true;
@@ -324,7 +422,6 @@ function RemediationWorkspace({ engagementKey, onBack, initialCaseId }: Props) {
       const next = await updateRemediationFindings(engagementKey, caseId, ids);
       if (!current()) return;
       setSelected(next);
-      setCases((values) => values.map((item) => item.id === next.id ? next : item));
       setDiff(null);
       setNotice("Linked findings updated. Review approval must match the new case snapshot.");
       try {
@@ -350,7 +447,6 @@ function RemediationWorkspace({ engagementKey, onBack, initialCaseId }: Props) {
       clearDraft("plan", selected.id, plan);
       setSelected(next);
       setPlan(next.verification_plan || "");
-      setCases((current) => current.map((item) => item.id === next.id ? next : item));
       try {
         setDiff(await getRemediationDiff(engagementKey, next.id));
         setDiffError(null);
@@ -430,7 +526,6 @@ function RemediationWorkspace({ engagementKey, onBack, initialCaseId }: Props) {
     try {
       const next = await getRemediationCase(engagementKey, selected.id);
       setSelected(next);
-      setCases((current) => current.map((item) => item.id === next.id ? next : item));
       applyDraftValues(next, drafts);
       setError(null);
       try {
@@ -455,7 +550,6 @@ function RemediationWorkspace({ engagementKey, onBack, initialCaseId }: Props) {
       await approveRemediationCase(engagementKey, selected.id, reviewer.trim(), diff.review_digest, "ui");
       const next = await getRemediationCase(engagementKey, selected.id);
       setSelected(next);
-      setCases((current) => current.map((item) => item.id === next.id ? next : item));
       setNotice("Reviewed snapshot approved. Any later code or plan change requires a new approval.");
       setError(null);
     } catch (failure) {
@@ -508,47 +602,20 @@ function RemediationWorkspace({ engagementKey, onBack, initialCaseId }: Props) {
     const draft = drafts[field];
     return draft != null && (draft.review_digest !== (selected.review_digest ?? null) || draft.worktree_revision !== selected.worktree_revision || JSON.stringify(draft.base_value) !== JSON.stringify(savedDraftValues(selected)[field]));
   });
-  const visibleCases = cases.map((item) => item.id === selected?.id ? selected : item).filter((item) => `${item.title} ${item.source_key} ${item.source_type} ${item.status} ${item.linked_findings.map((finding) => `${finding.slug} ${finding.title}`).join(" ")}`.toLowerCase().includes(query.toLowerCase()));
-
   return (
-    <div className="remediation-page">
-      <header className="remediation-header">
-        <div className="remediation-header-title">
-          <button type="button" className="remediation-back" onClick={onBack} disabled={busy}>← Engagements</button>
-          <div><span className="remediation-eyebrow">Vigil / Remediation</span><h1>{engagementKey}</h1></div>
-        </div>
-        <ThemeToggle />
-      </header>
-      {error && <div className="remediation-message remediation-error" role="alert">{error}</div>}
-      {notice && <div className="remediation-message" role="status">{notice}</div>}
-      <div className="remediation-layout">
-        <aside className="remediation-queue" aria-label="Case queue">
-          <div className="remediation-section-heading"><h2>Cases</h2><span>{visibleCases.length} / {cases.length}</span></div>
-          <div className="remediation-queue-search"><label className="sr-only" htmlFor="remediation-search">Search cases</label><input id="remediation-search" placeholder="Search cases…" value={query} onChange={(event) => setQuery(event.target.value)} /></div>
-          {loading ? <p>Loading cases…</p> : listError ? <><p role="alert">{listError}</p><button type="button" onClick={() => setListAttempt((attempt) => attempt + 1)}>Retry loading cases</button></> : cases.length === 0 ? <p>No remediation cases imported yet.</p> : (
-            <ul>
-              {visibleCases.map((item) => (
-                <li key={item.id}>
-                  <button type="button" className={selectedId === item.id ? "is-selected" : ""} onClick={() => chooseCase(item.id)} disabled={busy} aria-current={selectedId === item.id ? "page" : undefined}>
-                    <span className="remediation-case-key"><span>{item.source_type === "finding" ? `Finding #${item.source_key}` : item.source_key}</span><span>#{item.id}</span></span>
-                    <strong>{item.title}</strong>
-                    <span className="remediation-case-status"><span className="remediation-status-dot" />{item.status.replace(/_/g, " ")} · {item.linked_findings.length} finding{item.linked_findings.length === 1 ? "" : "s"}</span>
-                    {item.linked_findings.map((finding) => <span key={finding.id} className="remediation-case-finding"><span>{finding.title}</span><span>{finding.slug} · {finding.severity} · {finding.verification_status.replace(/_/g, " ")}</span>{finding.root_cause_key && <span>Root cause: {finding.root_cause_key}</span>}</span>)}
-                    {item.duplicate_hints?.length > 0 && <span className="remediation-case-status">{item.duplicate_hints.length} possible duplicate{item.duplicate_hints.length === 1 ? "" : "s"}</span>}
-                  </button>
-                </li>
-              ))}
-            </ul>
-          )}
-          {!loading && !listError && cases.length > 0 && !visibleCases.length && <p>No cases match your search.</p>}
-        </aside>
-
         <main className="remediation-workspace">
-          {!selected ? (caseError ? <><p role="alert">{caseError}</p><button type="button" onClick={() => setCaseAttempt((attempt) => attempt + 1)}>Retry loading case</button></> : selectedId == null ? <p>Select a case to begin.</p> : <p>Loading case…</p>) : (
+          {error && <div className="remediation-message remediation-error" role="alert">{error}</div>}
+          {notice && <div className="remediation-message" role="status">{notice}</div>}
+          {!selected ? (caseError ? <><p role="alert">{caseError}</p><button type="button" onClick={() => setCaseAttempt((attempt) => attempt + 1)}>Retry loading case</button></>
+            : selectedId != null ? <p>Loading case…</p>
+            : listState === "empty" ? <EmptyState variant="empty" title="No remediation cases yet.">Import a finding or a ticket as a case; it appears in the queue on the left.</EmptyState>
+            : listState === "loading" ? <p>Loading cases…</p>
+            : listState === "failed" ? <p>Cases could not be loaded; retry from the queue.</p>
+            : <p>Select a case to begin.</p>) : (
             <fieldset className="remediation-case-controls" disabled={busy}>
               <div className="remediation-title-row">
                 <div><p className="remediation-eyebrow">Case #{selected.id} · {selected.source_type === "finding" ? `Vigil finding #${selected.source_key} intake` : `${selected.source_type} · ${selected.source_key}`}</p><h2>{selected.title}</h2></div>
-                <div className="remediation-title-actions"><span className="remediation-state">{selected.status.replace(/_/g, " ")}</span><button type="button" onClick={refreshCase} disabled={busy}>Refresh case</button></div>
+                <div className="remediation-title-actions"><StatusPill domain="remediation" value={selected.status} /><button type="button" onClick={refreshCase} disabled={busy}>Refresh case</button></div>
               </div>
               {selected.status === "closed" && <p className="remediation-help">This case is closed. Its plans and evidence are read-only.</p>}
               {(Object.keys(drafts).length > 0 || draftStorageError) && <div className="remediation-draft-status" role="status">
@@ -642,9 +709,9 @@ function RemediationWorkspace({ engagementKey, onBack, initialCaseId }: Props) {
               {deployment && <section className="remediation-section" hidden={activePane !== "delivery"}><div className="remediation-section-heading"><h3>Development deployment</h3></div><p className="remediation-deployment-link">Workflow: {deployment.workflow} · run {deployment.run_id} · expected {deployment.expected_revision}</p></section>}
 
               <section className="remediation-section remediation-review" hidden={activePane !== "delivery"}>
-                <div className="remediation-section-heading"><h3>Human development verification</h3><span>{selected.human_verifications?.length || 0} results</span></div>
+                <div className="remediation-section-heading"><h3>Human development verification</h3><span>{selected.human_verifications?.length || 0} {selected.human_verifications?.length === 1 ? "result" : "results"}</span></div>
                 <p>Execute the saved plan in development and record the observed outcome. The record is tied to the confirmed deployment revision.</p>
-                {selected.human_verifications?.length > 0 && <ul className="remediation-human-history">{selected.human_verifications.map((item) => <li key={item.id}><strong>{item.result}</strong> · {item.actor} · {item.observed_revision}<p>{item.notes}</p></li>)}</ul>}
+                {selected.human_verifications?.length > 0 && <ul className="remediation-human-history">{selected.human_verifications.map((item) => <li key={item.id}><StatusPill domain="remediation-verification" value={item.result} size="sm" /> · {item.actor} · {item.observed_revision}<p>{item.notes}</p></li>)}</ul>}
                 {selected.status === "development" && (
                   <div className="remediation-human-form">
                     <label htmlFor="remediation-human-actor">Human verification actor</label>
@@ -693,7 +760,5 @@ function RemediationWorkspace({ engagementKey, onBack, initialCaseId }: Props) {
             </fieldset>
           )}
         </main>
-      </div>
-    </div>
   );
 }

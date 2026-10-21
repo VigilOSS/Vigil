@@ -1,0 +1,75 @@
+/* ── Surfaces workspace ───────────────────────────────────────────────
+ * The page header, scope toggle, chips, status pills and empty states are
+ * the shared primitives (styles/ui.css). An open record (the shared
+ * RecordView) replaces the results; the results stay mounted behind it so
+ * the scope, filters and scroll survive. */
+
+.surfaces-results[hidden],
+.surfaces-results > .panel[hidden],
+.surfaces-grid-wrap[hidden] { display: none; }
+.surfaces-list-panel .slow-load-hint { padding: 0 16px 10px; }
+
+.surfaces-route-missing {
+  margin: 0 0 12px;
+  text-align: left;
+}
+
+/* Filter rows: one labelled chip group per dimension. */
+.findings-redesign .surfaces-filter-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 18px;
+}
+
+/* The list card: a summary line over the grid. */
+.findings-redesign .surfaces-list-panel { padding: 0; overflow: hidden; }
+.surfaces-list-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 4px 16px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--divider);
+}
+.surfaces-list-head .meta-text { margin: 0; font-size: 0.8rem; }
+.findings-redesign .surfaces-load-error { margin: 0; padding: 12px 16px; text-align: left; }
+
+/* Bounded grid: the page chrome stays put while the rows scroll. */
+.findings-redesign .surfaces-grid-host {
+  min-height: 360px;
+  height: clamp(360px, calc(100vh - 340px), 1400px);
+}
+.surfaces-page .surface-link-count { font-variant-numeric: tabular-nums; color: var(--ink); }
+.surfaces-page .surface-cell-muted { color: var(--muted); }
+.surfaces-page .ag-cell .ui-status { vertical-align: middle; }
+
+/* Change status: rationale, follow-up condition, the transitions. */
+.findings-redesign .surface-lifecycle { gap: 8px; }
+/* Matches the follow-up condition input under it. */
+.findings-redesign .surface-rationale-field {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 7px 8px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--panel-strong);
+  color: var(--ink);
+  font: inherit;
+  font-size: 0.82rem;
+  resize: vertical;
+}
+.findings-redesign .surface-rationale-field:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.surface-status-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.findings-redesign .surface-status-error { margin: 0; text-align: left; }
+.findings-redesign .surface-admin-closure > .filter-chip { justify-self: start; }
+
+@media (max-width: 700px) {
+  .findings-redesign.surfaces-page .toolbar { flex-wrap: wrap; }
+  .findings-redesign.surfaces-page .search-wrap { min-width: 0; flex: 1 1 100%; }
+}

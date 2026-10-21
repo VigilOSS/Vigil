@@ -80,6 +80,8 @@ When you are about to copy one of these into a second file, stop and import.
   outcomes. Only `tested` and `signal` cover a class.
 - `orchestrator/backend/app/services/state_manager/coverage.py:CoverageStatus` owns coverage status;
   the standalone CLI mirror is `agent/scripts/assess/commands/resolve.py:_COVERAGE_STATUSES`.
+- `orchestrator/backend/app/services/state_manager/command_run_queries.py:_RUN_NEEDS_ATTENTION_SQL` (twin
+  `command_run_attention_reasons`) owns "run needs attention"; `command_runs.py:_derive_tool_bin` owns `tool_bin`; `db.py` re-derives old rows once.
 - `orchestrator/backend/app/services/state_manager/_common.py:SUBMISSION_STATUSES` owns submission
   status; `agent/scripts/assess/lib/contract_registry.py:SUBMISSION_STATUSES` is the CLI mirror.
 - `orchestrator/backend/app/api/assessment.py:FindingPatchRequest` owns patchable finding fields;
@@ -276,6 +278,9 @@ A prompt change is **not** prompt-only when the prompt defines an artifact the b
 
 - `orchestrator/backend/app/api/assessment.py` — live-state routes for recon, coverage, findings,
   command runs, and bulk ingestion; finding history supports summary and lossless transition reads.
+  Coverage ledger reads (`coverage-items/page`, `facets`, `reasons`, one item, its page `position`) come from `state_manager/coverage.py`.
+  Operator pages `command-runs/page|facets|{id}/position` (`command_run_queries.py`) and `request-variants/page|facets|{id}`
+  `[/position|/observations]` (`coverage.py`); bare lists stay the CLI contract. `findings?view=summary` omits `details`/`notes`; `PATCH oob-probes/{nonce}` audits a verdict; `oob.py:oob_verdict_entry` defines one.
   `assessment_operator.py` owns dispatch/handoff/decision/checkpoint routes; `submissions.py` owns immutable submission/sent-reply APIs.
 - `orchestrator/backend/app/api/intel.py` — per-engagement intel reads and writes. `/resolve` maps
   untyped finding intel ids through the canonical search index without guessing across entity tables;
@@ -283,6 +288,8 @@ A prompt change is **not** prompt-only when the prompt defines an artifact the b
 - `orchestrator/backend/app/api/code_analysis.py` — the only repo/file ingest write, lease-owned queue
   work, generation-bound compare-and-swap, and paginated queue reads. Its `item_ids` page and
   `code-dispatch fetch --ids-file` share ordering and current-generation filtering.
+  The Code view reads `analysis-results/page` (`scope=current|awaiting_verdict`) and `{id}[/position]` (`analysis-results`
+  is the CLI listing), `analysis-queue?current_only=` lanes (stats SQL), `repos/review-progress`, readiness `track_enabled`.
 - `orchestrator/backend/app/services/state_manager/proof_work.py` owns current proof preparation, atomic dispatch claims, live approval independent of bindings, derived `queue_state`/`reverification_required`, and explicit release after execution ends.
   `api/assessment_proof_work.py` and `agent/scripts/assess/commands/proof_work.py` expose it; finding status and its `next_test` still own proof owed.
   `orchestrator/backend/app/services/scope_admission.py` bridges to the canonical agent scope matcher.
@@ -295,6 +302,11 @@ A prompt change is **not** prompt-only when the prompt defines an artifact the b
 - `orchestrator/backend/app/services/state_manager/coverage_readiness.py` owns readiness and per-host verdicts; `finding_snapshots.py` owns finding snapshot/author provenance.
 - `orchestrator/backend/app/services/state_manager/command_runs.py` owns run writes and output integrity; `command_run_queries.py`, `assessment_jobs.py`, and `host_liveness.py` own their reads and ledgers.
 - `orchestrator/backend/app/services/submission_versions.py` — CLI/UI submission snapshots; neither changes submission status nor submits externally. See ADR 0025.
+  `_ELIGIBLE_ATTACHMENT_SQL` owns what the attachment picker offers (never internal submission-workspace files);
+  `publication_readiness` and `attachment_page` back the read-only readiness and attachment routes in `api/submissions.py`.
+- `orchestrator/backend/app/services/activity_feed.py` owns the merged Activity feed (`GET /activity`, `api/activity.py`):
+  categories, mirrored-event exclusion, cursors, cached summary-text search, and entity `ref`/`unlinked_reason`.
+- `orchestrator/backend/app/services/artifacts.py:ARTIFACT_SPECS` owns the engagement Files roster: listed root documents only, read with a byte bound.
 - `orchestrator/backend/app/services/assessment_memory.py` and `artifact_index.py` own the bounded
   resume brief and artifact index; output points to drill-down commands instead of embedding data.
 - `orchestrator/backend/app/reply_render.py` — the versioned exact-bytes outbound renderer; `agent/scripts/assess/lib/reply_render.py` is an import-only bridge so draft previews and the backend cannot fork the format.
@@ -309,8 +321,11 @@ A prompt change is **not** prompt-only when the prompt defines an artifact the b
 
 - `tools/public_identity_policy.py` owns local/CI private policy loading; tracked guards contain no private fingerprints.
 - `orchestrator/frontend/` — operator SPA: `components/TabBar.tsx` owns tabs, `lib/api.ts` REST,
-  `lib/theme.ts` theme state, and `app.css` shared tokens.
+  `lib/theme.ts` theme state, and `app.css` shared tokens. `lib/serverTime.ts` owns backend
+  timestamp parsing (zone-less database times are UTC); `components/formatting.tsx` `TimeStamp` renders them.
 - `orchestrator/frontend/src/routes/RemediationPage.tsx` — remediation workspace entrypoint.
 - `orchestrator/frontend/src/lib/workspaceRoutes.ts` — canonical hash links/history. `App.tsx` routes separate assessment/remediation workspaces.
+- `orchestrator/frontend/src/components/record/RecordView.tsx` — the one record (detail) view tabs open an entity in: Back/position/Previous-Next bar,
+  header, section tabs, Escape and focus return; `record/recordNavigation.ts` walks the shown order or asks the server (`position`) for paged lists.
 - `orchestrator/frontend/src/components/ProofWorkTab.tsx` consumes durable proof work; UI actions never launch agents or verify findings.
 - `orchestrator/report/src/lib/poc.ts` owns copy-and-run `curl` quoting.

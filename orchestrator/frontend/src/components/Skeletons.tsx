@@ -13,7 +13,43 @@
 // aria-busy / aria-hidden semantics are preserved so assistive tech treats a
 // loading region as transient rather than reading the placeholder bars.
 
-import type { CSSProperties, ReactNode } from "react";
+import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
+
+/** How long a load runs before the page says it is still working. */
+const SLOW_LOAD_MS = 2_000;
+
+/**
+ * True once `active` has stayed true for SLOW_LOAD_MS, so a slow load can say
+ * it is still working instead of looking stuck. The one slow-load timer every
+ * view uses.
+ */
+export function useSlowLoad(active: boolean, delayMs = SLOW_LOAD_MS): boolean {
+  const [slow, setSlow] = useState(false);
+  useEffect(() => {
+    setSlow(false);
+    if (!active) return undefined;
+    const timer = window.setTimeout(() => setSlow(true), delayMs);
+    return () => window.clearTimeout(timer);
+  }, [active, delayMs]);
+  return slow;
+}
+
+/**
+ * The line under a skeleton once a load is slow: "Still loading <what>…".
+ * Renders nothing until the load has run SLOW_LOAD_MS.
+ *
+ *   <TableSkeleton rows={8} />
+ *   <SlowLoadHint active={loading} what="the finding ledger" />
+ */
+export function SlowLoadHint({ active, what, detail }: { active: boolean; what: string; detail?: ReactNode }) {
+  const slow = useSlowLoad(active);
+  if (!slow) return null;
+  return (
+    <p className="meta-text slow-load-hint" role="status">
+      Still loading {what}…{detail ? <> {detail}</> : null}
+    </p>
+  );
+}
 
 interface SkeletonProps {
   width?: number | string;

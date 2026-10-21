@@ -24,7 +24,7 @@
 //   • Least CSS: one structural import + one ~20-line class.
 //
 // This module is only ever imported by the lazy grid components
-// (CommandsGrid / SurfacesGrid / FindingsGrid), so ag-grid + its CSS land
+// (Commands, Surfaces, Findings, HTTP, Runs, Coverage, OAST), so ag-grid + its CSS land
 // in a code-split chunk and never bloat the main entry bundle.
 
 import { AllCommunityModule, ModuleRegistry } from "ag-grid-community";
@@ -60,10 +60,22 @@ export const GRID_THEME_PROP = "legacy" as const;
 export const GRID_ROW_HEIGHT = 38;
 export const GRID_HEADER_HEIGHT = 34;
 
+// The structural stylesheet ships no icon font, so ag-grid's icon glyphs
+// render as empty boxes. Text arrows keep the active sort direction visible
+// in every grid header (styled by `.grid-sort-icon` in app.css). Column-level
+// `icons` apply to that column's header, so the shared default covers every
+// grid that spreads `defaultColDef`.
+const GRID_SORT_ICONS = {
+  sortAscending: '<span class="grid-sort-icon" aria-hidden="true">↑</span>',
+  sortDescending: '<span class="grid-sort-icon" aria-hidden="true">↓</span>',
+  sortUnSort: '<span class="grid-sort-icon" aria-hidden="true"></span>',
+};
+
 // Shared default column definition. Individual grids extend per-column.
 export const defaultColDef = {
   resizable: true,
   sortable: true,
+  icons: GRID_SORT_ICONS,
   // Filtering stays in React state feeding rowData (the existing chip /
   // search pipeline), so the per-column floating filters are off.
   filter: false,

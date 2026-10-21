@@ -1,4 +1,4 @@
-import { memo, useEffect, useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import type {
   AssessmentAttackChain,
   AssessmentAttackChainDetail,
@@ -7,27 +7,42 @@ import type {
   AssessmentFindingDetail,
   AssessmentSummary,
   Engagement,
-  EventRecord,
   PerHostCoverage,
   PerHostCoverageHost,
   PerHostOutcome,
   ReportReadiness,
+  ReportReadinessCoverage,
 } from "../lib/api";
 import { getReportReadiness } from "../lib/api";
+import { listActivityFeed, type ActivityFeedPage } from "../lib/activityApi";
+import { createCoalescedRunner } from "../lib/coalesce";
+import { compareServerTime } from "../lib/serverTime";
 import { engagementHref } from "../lib/workspaceRoutes";
+import { EntityChips } from "./activity/ActivityEntries";
+import { compareSeverity, RETIRED_WORKFLOWS } from "./FindingsTab";
+import { TimeStamp } from "./formatting";
 import { PhaseWaterfall } from "./PhaseWaterfall";
-import { ChartSkeleton } from "./Skeletons";
+import { CardSkeleton, ChartSkeleton, Skeleton, SlowLoadHint } from "./Skeletons";
+import { EmptyState, PageHeader, SeverityTag, StatusPill, humanizeStatus, statusLabel, type StatusTone } from "./ui";
 import { SeverityDonut } from "./charts/SeverityDonut";
 import { SummaryStatBar } from "./charts/SummaryStatBar";
 import type { SummaryStatBarItem } from "./charts/SummaryStatBar";
+import "../styles/overview.css";
 
-const SEVERITY_ORDER = ["critical", "high", "medium", "low", "info"];
+// Verification states that still need a verifier's decision. The attention
+// count, the Finding queue and the filtered Findings link all use this set.
+const AWAITING_VERIFICATION = ["unreviewed", "disputed", "pending_runtime_proof", "blocked"] as const;
+const QUEUE_LIMIT = 5;
 
 // Below-the-fold list caps (scroll-length reduction). Lists render up to the
 // cap by default with a "Show all N" expander revealing the rest in place; no
-// data is removed — everything stays reachable. Activity is already capped to
-// the last 5 events at the source (latestEvents slice).
+// data is removed — everything stays reachable. Latest activity reads only
+// the newest few entries; the Activity view holds the full record.
 const ATTACK_CHAIN_CAP = 8;
+const LATEST_ACTIVITY_LIMIT = 5;
+// Report blockers listed per kind before that kind's "Show all" expander.
+const REPORT_BLOCKER_CAP = 10;
+const REPORT_BLOCKERS_ID = "report-blockers";
 
 // Per-host coverage matrix: cap visible rows and collapse the whole section
 // when the host count is large. Both are scroll-length controls; all hosts
@@ -52,7 +67,6 @@ function readPerHostCollapsed(defaultCollapsed: boolean): boolean {
 
 type OverviewTabProps = {
   engagementKey: string;
-  events: EventRecord[];
   assessmentSummary: AssessmentSummary | null;
   findings: (AssessmentFindingDetail | AssessmentFinding)[];
   findingsLoading?: boolean;
@@ -62,19 +76,38 @@ type OverviewTabProps = {
   currentPhase: string;
   trackState?: Engagement["track_state"];
   aggregateComplete?: boolean;
+  /** Advances on every change; the latest activity follows it. */
   assessmentRefreshVersion: number;
+  /** Advances only when report readiness can have changed; readiness re-reads on it. */
+  readinessRefreshVersion: number;
 };
 
-function sortFindings(findings: (AssessmentFindingDetail | AssessmentFinding)[]) {
-  return [...findings].sort((left, right) => {
-    const severityDelta = SEVERITY_ORDER.indexOf(left.severity) - SEVERITY_ORDER.indexOf(right.severity);
-    if (severityDelta !== 0) return severityDelta;
-    return left.title.localeCompare(right.title);
-  });
+type QueueFinding = AssessmentFindingDetail | AssessmentFinding;
+
+function lastChange(finding: QueueFinding): string | null | undefined {
+  return "last_transition_at" in finding ? finding.last_transition_at || finding.updated_at : finding.updated_at;
 }
 
-function verificationSummary(finding: AssessmentFindingDetail | AssessmentFinding) {
-  return finding.verification_status;
+// The findings whose verification is unsettled: current findings first, then
+// the most severe, then the most recently changed.
+function verificationQueue(findings: QueueFinding[]): QueueFinding[] {
+  return findings
+    .filter((finding) => (AWAITING_VERIFICATION as readonly string[]).includes(finding.verification_status))
+    .sort((left, right) =>
+      Number(RETIRED_WORKFLOWS.has(left.workflow_status)) - Number(RETIRED_WORKFLOWS.has(right.workflow_status))
+      || compareSeverity(left.severity, right.severity)
+      || compareServerTime(lastChange(left), lastChange(right), "desc")
+      || left.title.localeCompare(right.title));
+}
+
+const formatCount = (value: number | null | undefined) => (value ?? 0).toLocaleString("en-US");
+
+/** Scroll to an Overview section and move focus to it (in-page; the hash is the route). */
+function revealSection(id: string) {
+  const section = document.getElementById(id);
+  if (!section) return;
+  section.scrollIntoView?.({ block: "start" });
+  section.focus({ preventScroll: true });
 }
 
 // C58 — labels for the five C40 per-host objectives. The map is the only
@@ -91,11 +124,12 @@ function objectiveLabel(objective: string): string {
   return OBJECTIVE_LABELS[objective] ?? objective.replace(/_/g, " ");
 }
 
-function outcomeBadgeClass(outcome: PerHostOutcome | undefined): string {
-  if (!outcome) return "badge severity-info";
-  if (outcome.deferred) return "badge severity-medium";
-  if (outcome.met) return "badge severity-low";
-  return "badge severity-high";
+// Matrix marks are WARN-only objective outcomes, not severities.
+function outcomeTone(outcome: PerHostOutcome | undefined): StatusTone {
+  if (!outcome) return "neutral";
+  if (outcome.deferred) return "paused";
+  if (outcome.met) return "success";
+  return "warning";
 }
 
 function outcomeMarker(outcome: PerHostOutcome | undefined): string {
@@ -120,26 +154,19 @@ export function OverviewTab(props: OverviewTabProps) {
   return <OverviewWorkspace key={props.engagementKey} {...props} />;
 }
 
-function OverviewWorkspace({ engagementKey, events, assessmentSummary, findings, findingsLoading = false, findingsLoadError = null, chains, chainLinks, currentPhase, trackState, aggregateComplete, assessmentRefreshVersion }: OverviewTabProps) {
+function OverviewWorkspace({ engagementKey, assessmentSummary, findings, findingsLoading = false, findingsLoadError = null, chains, chainLinks, currentPhase, trackState, aggregateComplete, assessmentRefreshVersion, readinessRefreshVersion }: OverviewTabProps) {
   const s = assessmentSummary;
   const [readiness, setReadiness] = useState<ReportReadiness | null>(null);
   const [readinessError, setReadinessError] = useState<string | null>(null);
-  // Memoize the per-render derivations so the 2s WebSocket refresh doesn't
-  // re-sort / re-filter when the underlying arrays are unchanged (cache hit).
-  // Deps are exactly the source arrays each derivation reads, so live updates
-  // still flow through: a new `findings` / `events` identity recomputes.
-  const sortedFindings = useMemo(() => sortFindings(findings), [findings]);
-  const latestEvents = useMemo(
-    () => events.filter((e) => e.event_type !== "artifact.updated").slice(-5),
-    [events],
-  );
+  const [activity, setActivity] = useState<ActivityFeedPage | null>(null);
+  const [activityError, setActivityError] = useState<string | null>(null);
+  const mounted = useRef(true);
+  // Memoized so a live refresh that leaves `findings` unchanged does not re-sort.
+  const queue = useMemo(() => verificationQueue(findings), [findings]);
+  const awaitingHref = engagementHref(engagementKey, { tab: "findings", verification: AWAITING_VERIFICATION.join(",") });
 
-  // Per-chain linked-finding titles. Previously recomputed on EVERY render as
-  // O(chains × links × findings) — for each chain it filtered all chainLinks
-  // then did a linear findings.find() per link. Here we build slug/id finding
-  // indexes once, then bucket the finding-kind links by chain_key in a single
-  // pass, preserving chainLinks' original order (so the joined string matches
-  // today exactly). Result: a Map<chain_key, string[]> resolved lazily.
+  // Each chain's linked findings, in chainLinks order: slug/id indexes are
+  // built once, then finding-kind links are bucketed by chain_key in one pass.
   const linkedFindingsByChain = useMemo(() => {
     const bySlug = new Map<string, AssessmentFindingDetail | AssessmentFinding>();
     const byId = new Map<number, AssessmentFindingDetail | AssessmentFinding>();
@@ -147,16 +174,16 @@ function OverviewWorkspace({ engagementKey, events, assessmentSummary, findings,
       bySlug.set(f.slug, f);
       if ("id" in f) byId.set(f.id, f);
     }
-    const out = new Map<string, string[]>();
+    const out = new Map<string, { slug: string | null; title: string }[]>();
     for (const link of chainLinks) {
       if (link.entity_kind !== "finding") continue;
       const match =
         (link.entity_ref ? bySlug.get(link.entity_ref) : undefined) ??
         (link.entity_id != null ? byId.get(link.entity_id) : undefined);
-      const title = match ? match.title : link.entity_ref || `finding #${link.entity_id}`;
+      const entry = { slug: match?.slug ?? link.entity_ref ?? null, title: match ? match.title : link.entity_ref || `finding #${link.entity_id}` };
       const list = out.get(link.chain_key);
-      if (list) list.push(title);
-      else out.set(link.chain_key, [title]);
+      if (list) list.push(entry);
+      else out.set(link.chain_key, [entry]);
     }
     return out;
   }, [chainLinks, findings]);
@@ -190,46 +217,114 @@ function OverviewWorkspace({ engagementKey, events, assessmentSummary, findings,
   ];
 
   useEffect(() => {
-    let cancelled = false;
-    getReportReadiness(engagementKey)
-      .then((row) => {
-        if (!cancelled) {
-          setReadiness(row);
-          setReadinessError(null);
-        }
-      })
-      .catch((error: unknown) => {
-        if (!cancelled) setReadinessError(error instanceof Error ? error.message : String(error));
-      });
+    mounted.current = true;
     return () => {
-      cancelled = true;
+      mounted.current = false;
     };
-  }, [engagementKey, assessmentRefreshVersion]);
+  }, []);
 
+  // Readiness re-reads when a change can move it (`readinessRefreshVersion`);
+  // the latest activity on every change. Each keeps one request in flight and
+  // re-runs once afterwards if more bumps arrived, so refresh bursts never
+  // starve a slow read; the last loaded value stays on screen meanwhile.
+  const loadReadiness = useMemo(() => createCoalescedRunner(async () => {
+    try {
+      const row = await getReportReadiness(engagementKey);
+      if (!mounted.current) return;
+      setReadiness(row);
+      setReadinessError(null);
+    } catch (error) {
+      if (mounted.current) setReadinessError(error instanceof Error ? error.message : String(error));
+    }
+  }), [engagementKey]);
+  const loadActivity = useMemo(() => createCoalescedRunner(async () => {
+    try {
+      const page = await listActivityFeed(engagementKey, { limit: LATEST_ACTIVITY_LIMIT });
+      if (!mounted.current) return;
+      setActivity(page);
+      setActivityError(null);
+    } catch (error) {
+      if (mounted.current) setActivityError(error instanceof Error ? error.message : String(error));
+    }
+  }), [engagementKey]);
+  const seenReadinessVersion = useRef<number | null>(null);
+  useEffect(() => {
+    const mode = seenReadinessVersion.current === null ? "join" : "refresh";
+    if (seenReadinessVersion.current === readinessRefreshVersion) return;
+    seenReadinessVersion.current = readinessRefreshVersion;
+    void loadReadiness(mode);
+  }, [loadReadiness, readinessRefreshVersion]);
+  const seenActivityVersion = useRef<number | null>(null);
+  useEffect(() => {
+    const mode = seenActivityVersion.current === null ? "join" : "refresh";
+    if (seenActivityVersion.current === assessmentRefreshVersion) return;
+    seenActivityVersion.current = assessmentRefreshVersion;
+    void loadActivity(mode);
+  }, [loadActivity, assessmentRefreshVersion]);
+
+  const awaitingCount = s ? AWAITING_VERIFICATION.reduce((total, status) => total + (s.finding_verification_statuses?.[status] ?? 0), 0) : null;
   return (
     <>
+      <PageHeader
+        className="overview-page-header"
+        title="Overview"
+        purpose="Where this engagement stands: what needs you now, the findings awaiting verification, track progress and report readiness."
+        stats={[{ value: s?.finding_count, label: "current findings", title: "Findings that are not merged or false positive" }]}
+      />
       <section className="panel overview-attention" aria-labelledby="attention-title">
-        <div className="panel-header"><h2 id="attention-title">Needs attention</h2><a href={engagementHref(engagementKey, { tab: "runs" })}>Open runs</a></div>
-        {s === null ? <p className="meta-text">Loading engagement summary…</p> : <div className="attention-row">
-          <a href={engagementHref(engagementKey, { tab: "coverage" })}><strong>{s.coverage_blocker_count}</strong> coverage blockers</a>
-          <a href={engagementHref(engagementKey, { tab: "submissions" })}><strong>{s.report_blocker_count}</strong> report blockers</a>
-          <a href={engagementHref(engagementKey, { tab: "findings" })}><strong>{["unreviewed", "disputed", "pending_runtime_proof", "blocked"].reduce((total, status) => total + (s.finding_verification_statuses?.[status] ?? 0), 0)}</strong> findings awaiting verification</a>
+        <div className="panel-header"><h2 id="attention-title">Needs attention</h2></div>
+        {s === null ? (
+          <div className="attention-row" role="status" aria-busy="true" aria-label="Loading engagement summary">
+            <Skeleton width={200} height={14} />
+            <Skeleton width={130} height={14} />
+            <Skeleton width={220} height={14} />
+            <SlowLoadHint active what="the engagement summary" />
+          </div>
+        ) : <div className="attention-row">
+          {/* Each count opens exactly the records it counts. The coverage and
+              report gates are listed, with their causes, under Report blockers. */}
+          <button type="button" className="overview-attention-link" onClick={() => revealSection(REPORT_BLOCKERS_ID)} title="The report gate's surface coverage check: discovered or partially covered surfaces on hosts with active findings, and deferred high-risk surfaces">
+            <strong>{formatCount(s.coverage_blocker_count)}</strong> surfaces block the coverage check
+          </button>
+          <button type="button" className="overview-attention-link" onClick={() => revealSection(REPORT_BLOCKERS_ID)} title="Everything that stops a final report export; listed under Report blockers">
+            <strong>{formatCount(s.report_blocker_count)}</strong> report blockers
+          </button>
+          <a href={awaitingHref} title="Unreviewed, disputed, pending runtime proof or blocked verification">
+            <strong>{formatCount(awaitingCount)}</strong> findings awaiting verification
+          </a>
         </div>}
       </section>
 
       <section className="panel overview-finding-queue" aria-labelledby="finding-queue-title">
         <div className="panel-header"><h2 id="finding-queue-title">Finding queue</h2><a href={engagementHref(engagementKey, { tab: "findings" })}>All findings</a></div>
+        <p className="meta-text overview-queue-purpose">Findings whose verification is not settled: current findings first, most severe first, then the most recently changed.</p>
         <div className="finding-queue-list">
-          {sortedFindings.slice(0, 5).map(f => <div className="finding-queue-row" key={f.slug}>
-            <span className={`badge severity-${f.severity}`}>{f.severity}</span>
-            <a href={engagementHref(engagementKey, { tab: "findings", finding: f.slug })}>{f.title}</a>
-            <span className="meta-text">{f.workflow_status}</span>
-            <span className="meta-text">{verificationSummary(f)}</span>
+          {queue.slice(0, QUEUE_LIMIT).map((f) => <div className="finding-queue-row overview-queue-row" key={f.slug}>
+            <SeverityTag severity={f.severity} size="sm" />
+            <a className="overview-queue-title" href={engagementHref(engagementKey, { tab: "findings", finding: f.slug })}>{f.title}</a>
+            <StatusPill domain="finding-workflow" value={f.workflow_status} size="sm" />
+            <StatusPill domain="finding-verification" value={f.verification_status} size="sm" />
           </div>)}
-          {findingsLoading && <p className="meta-text" role="status">Loading finding ledger…</p>}
-          {findingsLoadError && <p className="error-text" role="status">{sortedFindings.length > 0 ? "Finding ledger refresh failed. Showing last available finding records: " : "Finding ledger unavailable: "}{findingsLoadError}</p>}
-          {sortedFindings.length === 0 && !findingsLoading && !findingsLoadError && <p className="meta-text">{s === null ? "Loading findings…" : "No findings recorded yet."}</p>}
-          {sortedFindings.length > 5 && <p className="meta-text">Showing 5 of {sortedFindings.length} loaded findings. Open all findings for the full ledger.</p>}
+          {/* The first ledger read shows placeholder rows; a reload keeps the
+              rows already shown. Until the summary arrives an empty ledger is
+              not yet known to be empty. */}
+          {!findingsLoadError && findings.length === 0 && (findingsLoading || s === null) && (
+            <CardSkeleton lines={QUEUE_LIMIT} title={false} />
+          )}
+          <SlowLoadHint active={findingsLoading} what="the finding ledger" />
+          {findingsLoadError && <p className="error-text" role="status">{findings.length > 0 ? "Finding ledger refresh failed. Showing last available finding records: " : "Finding ledger unavailable: "}{findingsLoadError}</p>}
+          {!findingsLoading && !findingsLoadError && findings.length === 0 && s !== null && (
+            <EmptyState variant="empty" compact title="No findings recorded yet." />
+          )}
+          {!findingsLoading && !findingsLoadError && findings.length > 0 && queue.length === 0 && (
+            <EmptyState variant="empty" compact title="No finding is awaiting verification.">Every finding's verification is settled.</EmptyState>
+          )}
+          {queue.length > 0 && (
+            <p className="meta-text overview-queue-footer">
+              Showing {Math.min(QUEUE_LIMIT, queue.length)} of {queue.length.toLocaleString("en-US")} {queue.length === 1 ? "finding" : "findings"} awaiting verification.{" "}
+              <a href={awaitingHref}>Review them in Findings</a>
+            </p>
+          )}
         </div>
       </section>
 
@@ -260,7 +355,7 @@ function OverviewWorkspace({ engagementKey, events, assessmentSummary, findings,
             </li>
           </ol>
           <p className="meta-text">
-            Record the operator decision in the engagement workflow. Review existing evidence in <a href={engagementHref(engagementKey, { tab: "http" })}>HTTP traffic</a> or <a href={engagementHref(engagementKey, { tab: "log" })}>the audit log</a>.
+            Record the operator decision in the engagement workflow. Review existing evidence in <a href={engagementHref(engagementKey, { tab: "http" })}>HTTP traffic</a> or <a href={engagementHref(engagementKey, { tab: "activity" })}>the activity record</a>.
           </p>
           <p className="meta-text">
             Detail: <code>agent/references/runtime-guides/cdn-ip-blocking.md</code>
@@ -324,7 +419,7 @@ function OverviewWorkspace({ engagementKey, events, assessmentSummary, findings,
           <h2>Coverage</h2>
           <a href={engagementHref(engagementKey, { tab: "coverage" })}>Full coverage ledger</a>
         </div>
-        {s === null ? <p className="meta-text">Loading coverage summary…</p> : <SummaryStatBar items={[
+        {s === null ? <ChartSkeleton variant="bar" height={48} label="Coverage summary" /> : <SummaryStatBar items={[
           { label: "Targets", value: s.target_count },
           { label: "Probe runs", value: s.probe_count },
         ]} />}
@@ -335,58 +430,57 @@ function OverviewWorkspace({ engagementKey, events, assessmentSummary, findings,
       )}
 
       {readiness && !readiness.ready && (
-        <section className="panel report-blockers-panel">
-          <div className="panel-header">
-            <h2>Report blockers</h2>
-          </div>
-          <div className="blocker-list">
-            {readiness.blockers.map((blocker, index) => {
-              const affected = blocker.slug ? [blocker.slug] : blocker.slugs || [];
-              return (
-                <article key={`${blocker.kind}-${index}`} className="blocker-row">
-                  <span className="badge severity-high">{blocker.kind.replace(/_/g, " ")}</span>
-                  <div>
-                    {affected.length > 0 && (
-                      <p className="meta-text">
-                        Findings: {affected.map((slug, index) => <span key={slug}>{index > 0 && ", "}<a href={engagementHref(engagementKey, { tab: "findings", finding: slug })}><code>{slug}</code></a></span>)}
-                      </p>
-                    )}
-                    <p>{blocker.detail || "No detail provided."}</p>
-                  </div>
-                </article>
-              );
-            })}
-          </div>
-        </section>
+        <ReportBlockers engagementKey={engagementKey} blockers={readiness.blockers} coverage={readiness.coverage} />
       )}
       {readinessError && (
         <section className="panel">
           <p className="meta-text">Report readiness unavailable: {readinessError}</p>
         </section>
       )}
-      {!readiness && !readinessError && <p className="meta-text" role="status">Loading report readiness…</p>}
+      {!readiness && !readinessError && (
+        <section className="panel" aria-labelledby="report-checks-title">
+          <div className="panel-header"><h2 id="report-checks-title">Report checks</h2></div>
+          <CardSkeleton lines={3} title={false} />
+          <SlowLoadHint active what="report readiness" />
+        </section>
+      )}
 
-      <section className="engagement-grid">
-        <article className="panel">
-          <p className="eyebrow">Attack chains</p>
-          <div style={{ display: "grid", gap: "12px", marginTop: "8px" }}>
+      <section className="panel overview-chains" aria-labelledby="attack-chains-title">
+        <div className="panel-header"><h2 id="attack-chains-title">Attack chains</h2></div>
+        <div className="overview-chain-list">
             {visibleChains.map((c) => {
               const linkedFindings = linkedFindingsByChain.get(c.chain_key) ?? [];
               return (
-                <div key={c.chain_key} style={{ display: "grid", gap: "4px" }}>
-                  <div style={{ display: "flex", alignItems: "baseline", gap: "8px", flexWrap: "wrap" }}>
-                    <span className={`badge severity-${c.severity}`}>{c.severity}</span>
+                <article key={c.chain_key} className="overview-chain">
+                  <div className="overview-chain-head">
+                    <SeverityTag severity={c.severity} size="sm" />
                     <strong>{c.title}</strong>
-                    <span className="meta-text">{c.status}</span>
+                    <StatusPill value={c.status} tone="neutral" label={humanizeStatus(c.status)} size="sm" />
                   </div>
-                  {c.narrative && <p className="meta-text">{c.narrative}</p>}
                   {linkedFindings.length > 0 && (
-                    <p className="meta-text">Findings: {linkedFindings.join(", ")}</p>
+                    <p className="meta-text overview-chain-findings">
+                      Findings:{" "}
+                      {linkedFindings.map((linked, index) => (
+                        <span key={`${linked.slug ?? linked.title}-${index}`}>
+                          {index > 0 && ", "}
+                          {linked.slug
+                            ? <a href={engagementHref(engagementKey, { tab: "findings", finding: linked.slug })} title={linked.title}><code>{linked.slug}</code></a>
+                            : linked.title}
+                        </span>
+                      ))}
+                    </p>
                   )}
-                </div>
+                  {/* Narratives run long; the chain reads by its title and findings. */}
+                  {c.narrative && (
+                    <details className="detail-disclosure overview-chain-narrative">
+                      <summary>Narrative</summary>
+                      <p>{c.narrative}</p>
+                    </details>
+                  )}
+                </article>
               );
             })}
-            {chains.length === 0 && <p className="meta-text">No attack chains linked yet.</p>}
+            {chains.length === 0 && <EmptyState variant="empty" compact title="No attack chains linked yet." />}
             {chains.length > ATTACK_CHAIN_CAP && (
               <button
                 type="button"
@@ -399,35 +493,156 @@ function OverviewWorkspace({ engagementKey, events, assessmentSummary, findings,
                   : `Show all ${chains.length} chains`}
               </button>
             )}
-          </div>
-        </article>
+        </div>
       </section>
 
-      {latestEvents.length > 0 && (
-        <section className="panel">
-          <div className="panel-header">
-            <h2>Latest activity</h2>
-          </div>
-          <div className="timeline">
-            {latestEvents.map((event) => (
-              <article key={event.id} className="timeline-row">
-                <div className="timeline-pill">{event.phase}</div>
-                <div className="timeline-body">
-                  <div className="timeline-title-row">
-                    <strong>{event.task_name}</strong>
-                    <span className="meta-text">{event.agent_name}</span>
-                  </div>
-                  <p>{event.summary}</p>
-                </div>
-              </article>
-            ))}
-          </div>
-        </section>
-      )}
+      <LatestActivity engagementKey={engagementKey} page={activity} error={activityError} />
     </>
   );
 }
 
+
+// Report blockers grouped by kind, largest kind first and open; each kind
+// lists its blockers as one compact line each, with every blocker one click
+// away. The coverage blocker names the surfaces behind the coverage check.
+function ReportBlockers({ engagementKey, blockers, coverage }: { engagementKey: string; blockers: ReportReadiness["blockers"]; coverage?: ReportReadinessCoverage }) {
+  const kinds = useMemo(() => {
+    const byKind = new Map<string, ReportReadiness["blockers"]>();
+    for (const blocker of blockers) {
+      const list = byKind.get(blocker.kind);
+      if (list) list.push(blocker);
+      else byKind.set(blocker.kind, [blocker]);
+    }
+    return [...byKind.entries()].sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]));
+  }, [blockers]);
+  return (
+    <section className="panel report-blockers-panel" id={REPORT_BLOCKERS_ID} tabIndex={-1} aria-labelledby="report-blockers-title">
+      <div className="panel-header">
+        <h2 id="report-blockers-title">Report blockers</h2>
+        <span className="meta-text">{blockers.length.toLocaleString("en-US")} {blockers.length === 1 ? "blocker" : "blockers"} in {kinds.length} {kinds.length === 1 ? "kind" : "kinds"}</span>
+      </div>
+      <p className="meta-text">Everything that stops a final report export, grouped by kind. Open a kind to see each blocker and the findings it names.</p>
+      <div className="report-blocker-groups">
+        {kinds.map(([kind, items], index) => (
+          <ReportBlockerKind key={kind} engagementKey={engagementKey} kind={kind} items={items} coverage={coverage} defaultOpen={index === 0} />
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function ReportBlockerKind({ engagementKey, kind, items, coverage, defaultOpen }: { engagementKey: string; kind: string; items: ReportReadiness["blockers"]; coverage?: ReportReadinessCoverage; defaultOpen: boolean }) {
+  const [expanded, setExpanded] = useState(false);
+  const visible = expanded ? items : items.slice(0, REPORT_BLOCKER_CAP);
+  return (
+    <details className="report-blocker-kind" open={defaultOpen}>
+      <summary>
+        <span className="report-blocker-kind-label">{humanizeStatus(kind)}</span>
+        <span className="report-blocker-kind-count">{items.length.toLocaleString("en-US")}</span>
+      </summary>
+      <div className="blocker-list">
+        {visible.map((blocker, index) => {
+          const affected = blocker.slug ? [blocker.slug] : blocker.slugs || [];
+          return (
+            <article key={`${kind}-${index}`} className="blocker-row">
+              {affected.length > 0 && (
+                <span className="blocker-findings">
+                  {affected.map((slug, slugIndex) => <span key={slug}>{slugIndex > 0 && ", "}<a href={engagementHref(engagementKey, { tab: "findings", finding: slug })}><code>{slug}</code></a></span>)}
+                </span>
+              )}
+              <span className="blocker-detail">
+                {kind === "coverage" && coverage ? <CoverageGateDetail engagementKey={engagementKey} coverage={coverage} /> : <BlockerDetail detail={blocker.detail} />}
+              </span>
+            </article>
+          );
+        })}
+      </div>
+      {items.length > REPORT_BLOCKER_CAP && (
+        <button
+          type="button"
+          className="timeline-show-more overview-show-more"
+          onClick={() => setExpanded((value) => !value)}
+          aria-expanded={expanded}
+        >
+          {expanded ? "Show fewer" : `Show all ${items.length} ${humanizeStatus(kind).toLowerCase()} blockers`}
+        </button>
+      )}
+    </details>
+  );
+}
+
+// Report gates name some causes as one stored `field=value` pair
+// ("verification_status=unreviewed"). Show those as a label and the value's
+// operator wording; the exact stored text stays on hover. Prose details
+// render verbatim.
+const BLOCKER_FIELD_LABELS: Record<string, { label: string; domain?: "finding-verification" | "finding-workflow" }> = {
+  verification_status: { label: "Verification", domain: "finding-verification" },
+  workflow_status: { label: "Workflow", domain: "finding-workflow" },
+};
+
+function readableBlockerDetail(detail: string): string | null {
+  const match = /^([a-z][a-z0-9_]*)=(\S+)$/.exec(detail.trim());
+  if (!match) return null;
+  const [, field, value] = match;
+  const known = BLOCKER_FIELD_LABELS[field];
+  if (known?.domain) return `${known.label}: ${statusLabel(known.domain, value)}`;
+  return `${known?.label ?? humanizeStatus(field)}: ${value}`;
+}
+
+function BlockerDetail({ detail }: { detail?: string | null }) {
+  if (!detail) return <>No detail provided.</>;
+  const readable = readableBlockerDetail(detail);
+  return readable ? <span title={detail}>{readable}</span> : <>{detail}</>;
+}
+
+function CoverageGateDetail({ engagementKey, coverage }: { engagementKey: string; coverage: ReportReadinessCoverage }) {
+  const count = (rows: unknown[] | undefined) => (rows?.length ?? 0).toLocaleString("en-US");
+  return (
+    <>
+      {(coverage.blocker_count ?? 0).toLocaleString("en-US")} surfaces block the coverage check:{" "}
+      {count(coverage.unresolved_surfaces)} discovered surfaces on hosts with active findings,{" "}
+      {count(coverage.partially_covered_surfaces)} partially covered, {count(coverage.high_risk_deferred_surfaces)} deferred high-risk.{" "}
+      <a href={engagementHref(engagementKey, { tab: "surfaces" })}>Open surfaces</a>
+    </>
+  );
+}
+
+// The newest few Activity entries as plain sentences with links to the
+// records they name; the Activity view holds the full, filterable record.
+function LatestActivity({ engagementKey, page, error }: { engagementKey: string; page: ActivityFeedPage | null; error: string | null }) {
+  const categoryLabels = useMemo(
+    () => new Map((page?.categories ?? []).map((category) => [category.key, category.label])),
+    [page?.categories],
+  );
+  return (
+    <section className="panel overview-latest-activity" aria-labelledby="latest-activity-title">
+      <div className="panel-header">
+        <h2 id="latest-activity-title">Latest activity</h2>
+        <a href={engagementHref(engagementKey, { tab: "activity" })}>All activity</a>
+      </div>
+      {error && <p className="error-text" role="status">{page ? "Activity refresh failed. Showing the last loaded entries: " : "Activity unavailable: "}{error}</p>}
+      {!page && !error && <div aria-busy="true"><CardSkeleton lines={LATEST_ACTIVITY_LIMIT} /></div>}
+      {page && page.items.length === 0 && <EmptyState variant="empty" compact title="No activity recorded yet." />}
+      {page && page.items.length > 0 && (
+        <ol className="timeline">
+          {page.items.map((item) => (
+            <li key={item.id} className="timeline-row">
+              <div className="timeline-pill">{categoryLabels.get(item.category) ?? item.category}</div>
+              <div className="timeline-body">
+                <div className="timeline-title-row">
+                  <strong>{item.actor.name || item.actor.kind}</strong>
+                  <TimeStamp value={item.occurred_at} mode="relative" className="meta-text" />
+                </div>
+                <p>{item.summary}</p>
+                <EntityChips engagementKey={engagementKey} entities={item.entities} />
+              </div>
+            </li>
+          ))}
+        </ol>
+      )}
+    </section>
+  );
+}
 
 type ReadinessPanelProps = {
   readiness: ReportReadiness;
@@ -518,14 +733,16 @@ function ReadinessPanel({ readiness }: ReadinessPanelProps) {
   const effectiveFilter = filterAvailable && scopeLiteralsOnly;
 
   return (
-    <section className="panel" data-testid="readiness-panel">
+    <section className="panel" data-testid="readiness-panel" aria-labelledby="report-checks-title">
       <div className="panel-header">
-        <h2>Report checks</h2>
-        <span
-          className={`badge ${readiness.ready ? "severity-low" : "severity-high"}`}
-          data-testid="readiness-overall-badge"
-        >
-          {readiness.ready ? "READY" : `BLOCKED (${readiness.blocker_count})`}
+        <h2 id="report-checks-title">Report checks</h2>
+        <span data-testid="readiness-overall-badge">
+          <StatusPill
+            value={readiness.ready ? "ready" : "blocked"}
+            tone={readiness.ready ? "success" : "danger"}
+            label={readiness.ready ? "Ready" : `Blocked · ${readiness.blocker_count.toLocaleString("en-US")} ${readiness.blocker_count === 1 ? "blocker" : "blockers"}`}
+            title={readiness.ready ? "Every report check passes" : "A final report export is blocked; see Report blockers"}
+          />
         </span>
       </div>
 
@@ -816,12 +1033,8 @@ const ReadinessMatrixRow = memo(function ReadinessMatrixRow({
           : "";
         return (
           <td key={obj} className="readiness-cell">
-            <span
-              className={outcomeBadgeClass(outcome)}
-              title={evidence}
-              data-testid={`readiness-cell-${row.host}-${obj}`}
-            >
-              {outcomeMarker(outcome)}
+            <span data-testid={`readiness-cell-${row.host}-${obj}`}>
+              <StatusPill value={outcomeMarker(outcome)} tone={outcomeTone(outcome)} label={outcomeMarker(outcome)} title={evidence || undefined} size="sm" />
             </span>
           </td>
         );

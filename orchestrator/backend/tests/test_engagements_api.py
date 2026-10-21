@@ -1633,7 +1633,7 @@ def test_events_summary_uses_targeted_latest_queries(client, isolate_settings, m
     def fail_full_timeline(*_args, **_kwargs):
         raise AssertionError("summary must not build the full timeline")
 
-    monkeypatch.setattr(db_module, "list_events_for_engagement", fail_full_timeline)
+    monkeypatch.setattr(events_service, "_load_stored_events", fail_full_timeline)
     monkeypatch.setattr(events_service, "_load_activity_signals", fail_full_timeline)
 
     response = client.get("/engagements/2026-03-30-120000-example/events/summary")

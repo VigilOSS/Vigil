@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import HTTPException, status
 
 from .artifact_index import _normalize_relative_path
+from .engagement_tracks import has_track
 from .state_manager.findings import (
     CODE_SNAPSHOT_PROVENANCE_KEY,
     finding_code_snapshot_status,
@@ -18,6 +20,7 @@ from .state_manager._common import LEAD_OPEN_STATUSES
 from .variant_scopes import (
     variant_parent_finding_set_digest as _variant_parent_finding_set_digest,
 )
+from .sql_like import like_contains
 
 STRUCTURAL_INPUT_IDENTITY_SCHEMA = "structural-input-identity/v1"
 STRUCTURAL_INDEX_SCHEMA = "structural-index/v7"
@@ -1084,6 +1087,56 @@ def _get_queue_rows(connection, engagement_id: int, item_ids: set[int]) -> dict[
 _QUEUE_ACTIVE_STATUSES = frozenset({"pending", "processing"})
 
 
+def _queue_lane_sql() -> str:
+    """Each analysis-repository file's latest current attempt and its lane.
+
+    The single owner of the queue's status lanes: ``queue_stats`` counts these
+    rows and ``list_queue_items(current_only=True)`` pages them. ``lane`` is the
+    attempt's status, or ``invalid_active_history`` (an older attempt is still
+    active) / ``invalid_active_identity`` (a pending attempt holds a lease or a
+    processing one lacks it) for a latest attempt ``fetch`` cannot serve. Older
+    attempts are history and are not listed. Selects ``attempt_id, file_id,
+    repo_id, lane`` and takes the engagement id.
+    """
+    active = ", ".join(f"'{value}'" for value in sorted(_QUEUE_ACTIVE_STATUSES))
+    return f"""
+        SELECT attempt_id, file_id, repo_id,
+               CASE
+                   WHEN active_count > (CASE WHEN status IN ({active}) THEN 1 ELSE 0 END)
+                       THEN 'invalid_active_history'
+                   WHEN (status = 'pending' AND (assigned_agent != '' OR lease_token != ''))
+                     OR (status = 'processing' AND (assigned_agent = '' OR lease_token = ''))
+                       THEN 'invalid_active_identity'
+                   ELSE status
+               END AS lane
+        FROM (
+            SELECT queue.id AS attempt_id, queue.file_id, files.repo_id, queue.status,
+                   COALESCE(queue.assigned_agent, '') AS assigned_agent,
+                   COALESCE(queue.lease_token, '') AS lease_token,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY queue.file_id
+                       ORDER BY queue.id DESC
+                   ) AS attempt_rank,
+                   SUM(CASE WHEN queue.status IN ({active}) THEN 1 ELSE 0 END) OVER (
+                       PARTITION BY queue.file_id
+                   ) AS active_count
+            FROM code_analysis_queue AS queue
+            JOIN code_files AS files
+              ON files.id = queue.file_id
+             AND files.engagement_id = queue.engagement_id
+            JOIN code_repos AS repos
+              ON repos.id = files.repo_id
+             AND repos.engagement_id = files.engagement_id
+             AND repos.active_generation > 0
+            WHERE queue.engagement_id = ?
+              AND queue.repo_generation = repos.active_generation
+              AND {_analysis_repo_sql("repos")}
+              AND queue.source_superseded_at IS NULL
+        )
+        WHERE attempt_rank = 1
+    """
+
+
 def _canonical_queue_attempt_state(
     current_rows: list[dict[str, Any]],
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None, str | None]:
@@ -1809,6 +1862,13 @@ def _invalid_active_history_exists_sql(files_alias: str) -> str:
     """
 
 
+# Receipts recorded before receipts were bound to the structural index. Indexing
+# binds the ones that name exactly one callable (``legacy_bound``) and marks the
+# rest ``legacy_ambiguous`` / ``legacy_missing``; none of these is current.
+_UNBOUND_LEGACY_RECEIPT = "legacy_unbound"
+_UNMATCHED_LEGACY_RECEIPTS = ("legacy_ambiguous", "legacy_missing")
+
+
 def _current_result_receipt_sql(
     result_alias: str,
     queue_alias: str,
@@ -1816,7 +1876,12 @@ def _current_result_receipt_sql(
     repos_alias: str,
     *,
     allow_processing: bool,
+    bound_receipts_only: bool = True,
 ) -> str:
+    binding_clause = f"""
+        AND {result_alias}.receipt_binding_status NOT IN (
+            'legacy_ambiguous', 'legacy_missing', 'legacy_unbound'
+        )""" if bound_receipts_only else ""
     if allow_processing:
         status_clause = (
             f"({queue_alias}.status = 'processing' OR "
@@ -1831,10 +1896,7 @@ def _current_result_receipt_sql(
     return f"""
         {result_alias}.superseded_at IS NULL
         AND {result_alias}.source_superseded_at IS NULL
-        AND ({_result_not_replaced_sql(result_alias)})
-        AND {result_alias}.receipt_binding_status NOT IN (
-            'legacy_ambiguous', 'legacy_missing', 'legacy_unbound'
-        )
+        AND ({_result_not_replaced_sql(result_alias)}){binding_clause}
         AND {result_alias}.engagement_id = {queue_alias}.engagement_id
         AND {result_alias}.queue_item_id = {queue_alias}.id
         AND {result_alias}.file_id = {queue_alias}.file_id
@@ -1920,19 +1982,27 @@ _CURRENT_ACCOUNTED_FILE_EXISTS_SQL = _current_terminal_review_exists_sql(
 )
 
 
-def _current_suspicious_analysis_counts(
-    connection,
-    engagement_id: int,
-) -> dict[int, int]:
+def _suspicious_awaiting_verdict_sql() -> str:
+    """Attempts whose file still awaits a verdict on a suspicious review.
+
+    The single owner of "suspicious, awaiting a verdict": per file of an
+    analysis repository, the latest successful terminal review of the current
+    generation concluded ``suspicious``. A queued, running, or failed
+    re-review does not resolve it; only a later successful review does. The
+    readiness obligation counts these attempts and the operator results page
+    lists the receipts behind them. Selects ``repo_id, file_id, attempt_id``
+    and takes the engagement id as its one parameter.
+    """
     semantic_review = _successful_terminal_review_row_sql(
         "semantic_attempt",
         include_superseded_results=True,
     )
-    rows = connection.execute(
-        f"""
-        WITH semantic_attempts AS (
+    return f"""
+        SELECT repo_id, file_id, attempt_id
+        FROM (
             SELECT files.repo_id,
                    semantic_attempt.file_id,
+                   semantic_attempt.id AS attempt_id,
                    semantic_attempt.disposition,
                    ROW_NUMBER() OVER (
                        PARTITION BY semantic_attempt.file_id
@@ -1952,9 +2022,18 @@ def _current_suspicious_analysis_counts(
               AND semantic_attempt.source_superseded_at IS NULL
               AND ({semantic_review})
         )
-        SELECT repo_id, COUNT(*) AS suspicious_count
-        FROM semantic_attempts
         WHERE semantic_rank = 1 AND disposition = 'suspicious'
+    """
+
+
+def _current_suspicious_analysis_counts(
+    connection,
+    engagement_id: int,
+) -> dict[int, int]:
+    rows = connection.execute(
+        f"""
+        SELECT repo_id, COUNT(*) AS suspicious_count
+        FROM ({_suspicious_awaiting_verdict_sql()})
         GROUP BY repo_id
         ORDER BY repo_id
         """,
@@ -2178,6 +2257,638 @@ def _sync_trigger_status_for_file(connection, engagement_id: int, file_id: int) 
                 int(trigger_row["id"]),
             ),
         )
+
+
+# =========================================================================
+# Operator UI read projections
+# =========================================================================
+
+
+def structural_index_state(repo: dict[str, Any]) -> dict[str, Any]:
+    """Explain whether a repository's structural index is bound to its snapshot.
+
+    The single owner of the stale-index rule: ``current`` is what the readiness
+    gate (``structural_index_stale``) and source-bound proof prerequisites
+    check; ``reasons`` names which conditions failed so an operator can tell
+    a re-index from a rebuild.
+    """
+    active_generation = int(repo.get("active_generation", 0) or 0)
+    generation = repo.get("structural_index_generation")
+    if generation is None:
+        return {
+            "current": False,
+            "reasons": [
+                {
+                    "code": "never_indexed",
+                    "message": "No code index has been built for this repository snapshot.",
+                }
+            ],
+        }
+    reasons: list[dict[str, str]] = []
+    if int(generation) != active_generation:
+        reasons.append(
+            {
+                "code": "snapshot_mismatch",
+                "message": (
+                    f"The code index was built for snapshot {int(generation)}; "
+                    f"the current snapshot is {active_generation}."
+                ),
+            }
+        )
+    schema = str(repo.get("structural_index_schema") or "")
+    if schema != STRUCTURAL_INDEX_SCHEMA:
+        reasons.append(
+            {
+                "code": "format_outdated",
+                "message": (
+                    f"The code index uses format {schema or 'unknown'}; "
+                    f"the current format is {STRUCTURAL_INDEX_SCHEMA}."
+                ),
+            }
+        )
+    if not repo.get("structural_index_manifest_path"):
+        reasons.append(
+            {
+                "code": "manifest_missing",
+                "message": "The code index manifest location is not recorded.",
+            }
+        )
+    return {"current": not reasons, "reasons": reasons}
+
+
+def code_track_enabled(engagement: Any, *, has_repositories: bool) -> bool:
+    """Whether code review applies to the engagement at all.
+
+    True when the engagement's durable track state enables the code track
+    (``engagement_tracks`` owns that rule, including older type-only scopes)
+    or a repository snapshot exists. Readiness reports it so a web or incident
+    engagement is not shown code blockers as owed work.
+    """
+    return has_repositories or has_track(Path(engagement.engagement_root), "code")
+
+
+_FINISHED_NOT_REVIEWED_MESSAGES: dict[str, str] = {
+    "legacy_receipts": (
+        "{count} finished review(s) only have receipts recorded before receipts were "
+        "tied to the code index, so those files do not count as reviewed. Rebuilding "
+        "the code index binds the receipts that name a single indexed function."
+    ),
+    "legacy_unmatched_receipts": (
+        "{count} finished review(s) only have receipts recorded before receipts were "
+        "tied to the code index that could not be matched to one indexed function; "
+        "re-review those files."
+    ),
+    "skipped": (
+        "{count} finished job(s) recorded a skip; a skip with a reason accounts for "
+        "the file but is not a review."
+    ),
+    "receipt_requirements": (
+        "{count} finished review(s) lack what a counted review needs: a current "
+        "receipt bound to the reviewed source with evidence, CWE coverage, and notes "
+        "for a clean result."
+    ),
+}
+
+
+def repo_review_progress(connection, engagement_id: int) -> list[dict[str, Any]]:
+    """Admitted, finished, and reviewed file counts per active repository.
+
+    "Reviewed" is the readiness/coverage definition (a current successful
+    terminal review); "finished" is the queue's done lane (``_queue_lane_sql``,
+    what ``analysis-queue/stats`` counts). ``finished_not_reviewed`` says why a
+    finished file does not count, so the gap between the two is explained.
+    Reference repositories are listed with their role so a caller never
+    presents them as owed work; they have no lanes.
+    """
+    rows = connection.execute(
+        f"""
+        SELECT repos.id AS repo_id, repos.repo_role,
+               COUNT(files.id) AS admitted_files,
+               COALESCE(SUM(
+                   CASE WHEN files.id IS NOT NULL
+                         AND ({_CURRENT_SUCCESSFUL_REVIEW_EXISTS_SQL})
+                   THEN 1 ELSE 0 END
+               ), 0) AS reviewed_files
+        FROM code_repos AS repos
+        LEFT JOIN code_files AS files
+          ON files.repo_id = repos.id
+         AND files.engagement_id = repos.engagement_id
+         AND files.retired_at IS NULL
+        WHERE repos.engagement_id = ? AND repos.active_generation > 0
+        GROUP BY repos.id
+        ORDER BY repos.id
+        """,
+        (engagement_id,),
+    ).fetchall()
+    live_receipt = (
+        "receipt.engagement_id = attempt.engagement_id"
+        " AND receipt.queue_item_id = attempt.id"
+        " AND receipt.file_id = attempt.file_id"
+        " AND receipt.superseded_at IS NULL"
+        f" AND ({_result_not_replaced_sql('receipt')})"
+    )
+    finished: dict[int, int] = {}
+    reasons: dict[int, dict[str, int]] = {}
+    for row in connection.execute(
+        f"""
+        SELECT repo_id, reviewed, disposition, receipts, unbound, unmatched, COUNT(*) AS total
+        FROM (
+            SELECT lanes.repo_id,
+                   ({_CURRENT_SUCCESSFUL_REVIEW_EXISTS_SQL}) AS reviewed,
+                   attempt.disposition,
+                   (SELECT COUNT(*) FROM code_analysis_results AS receipt
+                     WHERE {live_receipt}) AS receipts,
+                   (SELECT COUNT(*) FROM code_analysis_results AS receipt
+                     WHERE {live_receipt} AND receipt.receipt_binding_status = ?) AS unbound,
+                   (SELECT COUNT(*) FROM code_analysis_results AS receipt
+                     WHERE {live_receipt} AND receipt.receipt_binding_status IN (?, ?)) AS unmatched
+            FROM ({_queue_lane_sql()}) AS lanes
+            JOIN code_analysis_queue AS attempt ON attempt.id = lanes.attempt_id
+            JOIN code_files AS files
+              ON files.id = lanes.file_id
+             AND files.engagement_id = attempt.engagement_id
+            WHERE lanes.lane = 'done' AND files.retired_at IS NULL
+        )
+        GROUP BY repo_id, reviewed, disposition, receipts, unbound, unmatched
+        """,
+        (_UNBOUND_LEGACY_RECEIPT, *_UNMATCHED_LEGACY_RECEIPTS, engagement_id),
+    ).fetchall():
+        repo_id, total = int(row["repo_id"]), int(row["total"])
+        finished[repo_id] = finished.get(repo_id, 0) + total
+        if row["reviewed"]:
+            continue
+        receipts, unbound, unmatched = int(row["receipts"]), int(row["unbound"]), int(row["unmatched"])
+        if row["disposition"] == "skipped":
+            code = "skipped"
+        elif receipts and unbound + unmatched == receipts:
+            code = "legacy_unmatched_receipts" if unmatched else "legacy_receipts"
+        else:
+            code = "receipt_requirements"
+        repo_reasons = reasons.setdefault(repo_id, {})
+        repo_reasons[code] = repo_reasons.get(code, 0) + total
+    return [
+        {
+            "repo_id": int(row["repo_id"]),
+            "repo_role": str(row["repo_role"] or ANALYSIS_REPO_ROLE),
+            "admitted_files": int(row["admitted_files"]),
+            "reviewed_files": int(row["reviewed_files"]),
+            "finished_files": finished.get(int(row["repo_id"]), 0),
+            "finished_not_reviewed": [
+                {
+                    "code": code,
+                    "count": count,
+                    "message": _FINISHED_NOT_REVIEWED_MESSAGES[code].format(count=count),
+                }
+                for code in _FINISHED_NOT_REVIEWED_MESSAGES
+                if (count := reasons.get(int(row["repo_id"]), {}).get(code, 0))
+            ],
+        }
+        for row in rows
+    ]
+
+
+MAX_ANALYSIS_RESULT_PAGE = 200
+DEFAULT_ANALYSIS_RESULT_PAGE = 25
+# Open questions first, then settled receipts; unknown dispositions sort last.
+ANALYSIS_RESULT_DISPOSITION_ORDER: tuple[str, ...] = (
+    "finding",
+    "suspicious",
+    "needs_context",
+    "clean",
+    "skipped",
+)
+# The projection the Code view renders. The full listing keeps every column
+# (and its raw ``*_json`` twin) for the assess CLI; the page drops what the
+# view never shows.
+_ANALYSIS_RESULT_PAGE_COLUMNS = (
+    "id",
+    "queue_item_id",
+    "file_id",
+    "agent_name",
+    "receipt_kind",
+    "receipt_binding_status",
+    "function_name",
+    "hypothesis",
+    "evidence",
+    "disposition",
+    "confidence",
+    "finding_slug",
+    "cwe_id",
+    "slot_type",
+    "notes",
+    "superseded_at",
+    "created_at",
+)
+
+
+def _like_sql(expression: str) -> str:
+    return f"COALESCE({expression}, '') LIKE ? ESCAPE '\\'"
+
+
+_ANALYSIS_RESULT_SOURCE_JOINS = """
+        FROM code_analysis_results AS results
+        LEFT JOIN assessment_findings AS findings
+          ON findings.engagement_id = results.engagement_id
+         AND findings.slug = results.finding_slug
+        JOIN code_analysis_queue AS result_queue
+          ON result_queue.id = results.queue_item_id
+         AND result_queue.engagement_id = results.engagement_id
+        JOIN code_files AS files
+          ON files.id = results.file_id
+         AND files.engagement_id = results.engagement_id
+        JOIN code_repos AS repos
+          ON repos.id = files.repo_id
+         AND repos.engagement_id = files.engagement_id
+         AND repos.active_generation > 0
+        WHERE results.engagement_id = ?
+"""
+
+
+def _current_analysis_results_sql(*, bound_receipts_only: bool = True) -> str:
+    # The single owner of "current analysis receipts": the operator page and
+    # ``code_analysis.list_analysis_results`` (without superseded rows) both
+    # select from it. Callers append ``AND`` filters after its WHERE clause.
+    return f"""{_ANALYSIS_RESULT_SOURCE_JOINS}
+          AND ({_current_result_receipt_sql(
+              "results", "result_queue", "files", "repos",
+              allow_processing=True, bound_receipts_only=bound_receipts_only,
+          )})
+    """
+
+
+def awaiting_verdict_attempt_ids(connection, engagement_id: int) -> str:
+    """The attempt ids of ``_suspicious_awaiting_verdict_sql`` as a JSON array.
+
+    Read once per request: the window over every attempt is the expensive
+    part, and a page uses the set in several queries.
+    """
+    return json.dumps([
+        int(row[0])
+        for row in connection.execute(
+            f"SELECT attempt_id FROM ({_suspicious_awaiting_verdict_sql()})", (engagement_id,)
+        ).fetchall()
+    ])
+
+
+def _awaiting_verdict_results_sql() -> str:
+    """Receipts behind each attempt in ``_suspicious_awaiting_verdict_sql``.
+
+    These are the receipts that let the attempt count as a successful
+    suspicious review, so every counted file lists at least one; they stay
+    listed while a re-review is queued, running, or failed. Takes the
+    engagement id, then ``awaiting_verdict_attempt_ids``.
+    """
+    return f"""{_ANALYSIS_RESULT_SOURCE_JOINS}
+          AND ({_awaiting_verdict_receipt_sql()})
+    """
+
+
+def _awaiting_verdict_receipt_sql() -> str:
+    """Whether receipt ``results`` (of attempt ``result_queue``) backs an
+    attempt awaiting a verdict; takes ``awaiting_verdict_attempt_ids``. The
+    single owner shared by the ``awaiting_verdict`` scope and the per-row
+    ``awaiting_verdict`` flag."""
+    return f"""
+        results.disposition = 'suspicious'
+        AND result_queue.id IN (SELECT value FROM json_each(?))
+        AND results.file_id = result_queue.file_id
+        AND results.repo_generation = result_queue.repo_generation
+        AND ({_valid_claimed_result_receipt_sql("result_queue", "results")})
+        AND (trim(results.evidence) != '' OR trim(results.evidence_ref) != '')
+    """
+
+
+# The operator results page scopes; the route validates against this alias.
+AnalysisResultScope = Literal["current", "awaiting_verdict"]
+
+
+def _analysis_result_source(engagement_id: int, scope: str, awaiting_ids: str) -> tuple[str, list[Any]]:
+    if scope == "awaiting_verdict":
+        return _awaiting_verdict_results_sql(), [engagement_id, awaiting_ids]
+    return _current_analysis_results_sql(), [engagement_id]
+
+
+@dataclass(frozen=True, slots=True)
+class AnalysisResultFilters:
+    """The operator page's filters; ``position`` applies the same ones."""
+
+    scope: AnalysisResultScope = "current"
+    dispositions: tuple[str, ...] = ()
+    confidences: tuple[str, ...] = ()
+    workflow_statuses: tuple[str, ...] = ()
+    cwe: str | None = None
+    agent: str | None = None
+    slot: str | None = None
+    file: str | None = None
+    function: str | None = None
+    terms: tuple[str, ...] = ()
+
+
+def _json_array_sql(column: str) -> str:
+    return f"CASE WHEN json_valid({column}) THEN {column} ELSE '[]' END"
+
+
+def _analysis_result_clauses(filters: AnalysisResultFilters) -> list[tuple[str, str, list[Any]]]:
+    """``(facet, clause, params)`` per active filter; ``facet`` is "" for the
+    filters no facet counts, so a facet can ignore exactly its own filter."""
+    clauses: list[tuple[str, str, list[Any]]] = []
+
+    def add_in(facet: str, expression: str, values: tuple[str, ...]) -> None:
+        wanted = [value for value in values if value]
+        if wanted:
+            clauses.append((facet, f"{expression} IN ({','.join('?' for _ in wanted)})", wanted))
+
+    def add_like(expression: str, value: str | None) -> None:
+        if value and value.strip():
+            clauses.append(("", _like_sql(expression), [like_contains(value.strip())]))
+
+    add_in("disposition", "results.disposition", filters.dispositions)
+    add_in("confidence", "results.confidence", filters.confidences)
+    add_in("workflow_status", "findings.status", filters.workflow_statuses)
+    add_like("results.cwe_id", filters.cwe)
+    add_like("results.agent_name", filters.agent)
+    add_like("results.slot_type", filters.slot)
+    add_like("files.file_path", filters.file)
+    if filters.function and filters.function.strip():
+        clauses.append((
+            "",
+            f"""EXISTS (
+                SELECT 1 FROM json_each({_json_array_sql("results.callable_refs_json")}) AS ref
+                WHERE {_like_sql(
+                    "COALESCE(json_extract(ref.value, '$.name'), '') || ' ' || "
+                    "COALESCE(json_extract(ref.value, '$.qualified_name'), '')"
+                )}
+            )""",
+            [like_contains(filters.function.strip())],
+        ))
+    # Every free-text term must match one of the fields the view renders.
+    corpus = " || ' ' || ".join(
+        f"COALESCE({expression}, '')"
+        for expression in (
+            "results.receipt_kind",
+            "results.receipt_binding_status",
+            "files.file_path",
+            "results.hypothesis",
+            "results.evidence",
+            "results.notes",
+            "results.agent_name",
+            "results.finding_slug",
+            "results.cwe_id",
+            "results.slot_type",
+            "results.disposition",
+            "results.confidence",
+            "findings.status",
+            "findings.verification_status",
+        )
+    )
+    callable_text = (
+        "COALESCE(json_extract(ref.value, '$.name'), '') || ' ' || "
+        "COALESCE(json_extract(ref.value, '$.qualified_name'), '') || ' ' || "
+        "COALESCE(json_extract(ref.value, '$.file_path'), '')"
+    )
+    span_text = (
+        "COALESCE(json_extract(span.value, '$.file_path'), '') || ' ' || "
+        "COALESCE(json_extract(span.value, '$.label'), '')"
+    )
+    for term in filters.terms:
+        term = term.strip()
+        if not term:
+            continue
+        clauses.append((
+            "",
+            f"""({_like_sql(corpus)}
+                OR EXISTS (
+                    SELECT 1 FROM json_each({_json_array_sql("results.callable_refs_json")}) AS ref
+                    WHERE {_like_sql(callable_text)}
+                )
+                OR EXISTS (
+                    SELECT 1 FROM json_each({_json_array_sql("results.reviewed_spans_json")}) AS span
+                    WHERE {_like_sql(span_text)}
+                ))""",
+            [like_contains(term)] * 3,
+        ))
+    return clauses
+
+
+def _filter_sql(clauses: list[tuple[str, str, list[Any]]], *, skip: str = "") -> tuple[str, list[Any]]:
+    kept = [(clause, params) for facet, clause, params in clauses if not skip or facet != skip]
+    return "".join(f"\n AND {clause}" for clause, _ in kept), [param for _, params in kept for param in params]
+
+
+def _analysis_result_order_sql() -> tuple[str, list[Any]]:
+    cases = " ".join(f"WHEN ? THEN {index}" for index in range(len(ANALYSIS_RESULT_DISPOSITION_ORDER)))
+    return (
+        f"CASE results.disposition {cases} ELSE {len(ANALYSIS_RESULT_DISPOSITION_ORDER)} END, results.id DESC",
+        list(ANALYSIS_RESULT_DISPOSITION_ORDER),
+    )
+
+
+def _awaiting_verdict_column_sql() -> str:
+    """The ``awaiting_verdict`` flag of a listed receipt; takes
+    ``awaiting_verdict_attempt_ids``."""
+    return f"COALESCE(({_awaiting_verdict_receipt_sql()}), 0) AS awaiting_verdict"
+
+
+def _analysis_page_rows(connection, sql: str, params: tuple[Any, ...]) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for row in connection.execute(sql, params).fetchall():
+        item = dict(row)
+        item["callable_refs"] = _json_decode(item.pop("callable_refs_json"), [])
+        item["reviewed_spans"] = _json_decode(item.pop("reviewed_spans_json"), [])
+        item["callable_ref_count"] = len(item["callable_refs"])
+        item["awaiting_verdict"] = bool(item["awaiting_verdict"])
+        items.append(item)
+    return items
+
+
+def _analysis_page_select_sql() -> str:
+    columns = ", ".join(f"results.{column}" for column in _ANALYSIS_RESULT_PAGE_COLUMNS)
+    return f"""
+        SELECT {columns},
+               results.callable_refs_json, results.reviewed_spans_json,
+               files.repo_id, files.file_path,
+               findings.status AS finding_workflow_status,
+               findings.verification_status AS finding_verification_status,
+               {_awaiting_verdict_column_sql()}
+    """
+
+
+def _unlisted_legacy_receipts(connection, engagement_id: int) -> list[dict[str, Any]]:
+    """Receipts that would be current but predate receipt binding."""
+    rows = connection.execute(
+        f"""
+        SELECT results.receipt_binding_status AS binding, COUNT(*) AS total
+        {_current_analysis_results_sql(bound_receipts_only=False)}
+          AND results.receipt_binding_status IN (?, ?, ?)
+        GROUP BY results.receipt_binding_status
+        """,
+        (engagement_id, _UNBOUND_LEGACY_RECEIPT, *_UNMATCHED_LEGACY_RECEIPTS),
+    ).fetchall()
+    counts = {str(row["binding"]): int(row["total"]) for row in rows}
+    unbound = counts.get(_UNBOUND_LEGACY_RECEIPT, 0)
+    unmatched = sum(counts.get(status, 0) for status in _UNMATCHED_LEGACY_RECEIPTS)
+    reasons: list[dict[str, Any]] = []
+    if unbound:
+        reasons.append({
+            "code": "legacy_receipts",
+            "count": unbound,
+            "message": (
+                f"{unbound} receipt(s) were recorded before receipts were tied to the code "
+                "index, so they are not listed. Rebuilding the code index binds the ones "
+                "that name a single indexed function."
+            ),
+        })
+    if unmatched:
+        reasons.append({
+            "code": "legacy_unmatched_receipts",
+            "count": unmatched,
+            "message": (
+                f"{unmatched} receipt(s) recorded before receipts were tied to the code index "
+                "could not be matched to one indexed function, so they are not listed. "
+                "Re-reviewing the file replaces them."
+            ),
+        })
+    return reasons
+
+
+def analysis_result_page(
+    connection,
+    engagement_id: int,
+    filters: AnalysisResultFilters = AnalysisResultFilters(),
+    *,
+    limit: int = DEFAULT_ANALYSIS_RESULT_PAGE,
+    offset: int = 0,
+) -> dict[str, Any]:
+    """One page of analysis receipts, with facet counts and why rows are missing.
+
+    ``scope="current"`` lists current receipts; ``"awaiting_verdict"`` lists
+    the receipts behind every file still awaiting a verdict on a suspicious
+    review (the readiness obligation). Each facet counts under every other
+    filter but its own. ``awaiting_verdict`` always summarises that scope and
+    ``not_listed`` names receipts no scope lists.
+    """
+    awaiting_ids = awaiting_verdict_attempt_ids(connection, engagement_id)
+    source_sql, source_params = _analysis_result_source(engagement_id, filters.scope, awaiting_ids)
+    clauses = _analysis_result_clauses(filters)
+    filter_sql, filter_params = _filter_sql(clauses)
+    counts = connection.execute(
+        f"SELECT COUNT(*) AS total, COUNT(DISTINCT results.file_id) AS files {source_sql}{filter_sql}",
+        (*source_params, *filter_params),
+    ).fetchone()
+    total = int(counts["total"])
+    order_sql, order_params = _analysis_result_order_sql()
+    items = _analysis_page_rows(
+        connection,
+        f"""
+        {_analysis_page_select_sql()}
+        {source_sql}{filter_sql}
+        ORDER BY {order_sql}
+        LIMIT ? OFFSET ?
+        """,
+        (awaiting_ids, *source_params, *filter_params, *order_params, limit, offset),
+    )
+
+    facets: dict[str, dict[str, int]] = {}
+    for name, expression in (
+        ("disposition", "results.disposition"),
+        ("confidence", "results.confidence"),
+        ("workflow_status", "findings.status"),
+    ):
+        facet_sql, facet_params = _filter_sql(clauses, skip=name)
+        facets[name] = {
+            str(row["value"]): int(row["total"])
+            for row in connection.execute(
+                f"""
+                SELECT {expression} AS value, COUNT(*) AS total
+                {source_sql}{facet_sql}
+                  AND COALESCE({expression}, '') != ''
+                GROUP BY {expression}
+                ORDER BY {expression}
+                """,
+                (*source_params, *facet_params),
+            ).fetchall()
+        }
+    awaiting_sql, awaiting_params = _analysis_result_source(engagement_id, "awaiting_verdict", awaiting_ids)
+    awaiting = connection.execute(
+        f"SELECT COUNT(DISTINCT results.file_id) AS files, COUNT(*) AS results {awaiting_sql}",
+        tuple(awaiting_params),
+    ).fetchone()
+    return {
+        "scope": filters.scope,
+        "total": total,
+        "file_total": int(counts["files"]),
+        "offset": offset,
+        "count": len(items),
+        "has_more": offset + len(items) < total,
+        "items": items,
+        "facets": facets,
+        "awaiting_verdict": {"files": int(awaiting["files"]), "results": int(awaiting["results"])},
+        "not_listed": _unlisted_legacy_receipts(connection, engagement_id),
+    }
+
+
+def analysis_result_position(
+    connection,
+    engagement_id: int,
+    result_id: int,
+    filters: AnalysisResultFilters = AnalysisResultFilters(),
+) -> dict[str, Any]:
+    """Where one receipt sits in the page order under ``filters``.
+
+    ``{index, total, previous, next}``: ``previous`` / ``next`` are page rows;
+    ``index`` is null (and both neighbours null) when the receipt is not in
+    the filtered results. Uses the page's exact source, filters, and order.
+    """
+    exists = connection.execute(
+        "SELECT 1 FROM code_analysis_results WHERE id = ? AND engagement_id = ?",
+        (result_id, engagement_id),
+    ).fetchone()
+    if exists is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="analysis result not found")
+    awaiting_ids = awaiting_verdict_attempt_ids(connection, engagement_id)
+    source_sql, source_params = _analysis_result_source(engagement_id, filters.scope, awaiting_ids)
+    filter_sql, filter_params = _filter_sql(_analysis_result_clauses(filters))
+    total = _scalar_row(
+        connection, f"SELECT COUNT(*) {source_sql}{filter_sql}", (*source_params, *filter_params)
+    )
+    order_sql, order_params = _analysis_result_order_sql()
+    ranked = connection.execute(
+        f"""
+        WITH ranked AS (
+            SELECT results.id AS id, ROW_NUMBER() OVER (ORDER BY {order_sql}) - 1 AS position
+            {source_sql}{filter_sql}
+        ),
+        target AS (SELECT position FROM ranked WHERE id = ?)
+        SELECT ranked.id, ranked.position
+        FROM ranked, target
+        WHERE ranked.position BETWEEN target.position - 1 AND target.position + 1
+        """,
+        (*order_params, *source_params, *filter_params, result_id),
+    ).fetchall()
+    positions = {int(row["id"]): int(row["position"]) for row in ranked}
+    index = positions.get(result_id)
+    neighbours: dict[int, dict[str, Any]] = {}
+    neighbour_ids = [row_id for row_id in positions if row_id != result_id]
+    if neighbour_ids:
+        neighbours = {
+            int(item["id"]): item
+            for item in _analysis_page_rows(
+                connection,
+                f"""
+                {_analysis_page_select_sql()}
+                {source_sql}{filter_sql}
+                  AND results.id IN ({','.join('?' for _ in neighbour_ids)})
+                """,
+                (awaiting_ids, *source_params, *filter_params, *neighbour_ids),
+            )
+        }
+    by_position = {position: row_id for row_id, position in positions.items()}
+    return {
+        "index": index,
+        "total": total,
+        "previous": None if index is None else neighbours.get(by_position.get(index - 1, -1)),
+        "next": None if index is None else neighbours.get(by_position.get(index + 1, -1)),
+    }
 
 
 # ``code_analysis`` remains the service's public import surface.  Include the

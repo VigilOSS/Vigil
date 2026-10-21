@@ -352,6 +352,7 @@ def test_legacy_work_item_unit_column_migration_keeps_foreign_key(
             CREATE TABLE assessment_work_items (
                 id INTEGER PRIMARY KEY,
                 engagement_id INTEGER NOT NULL,
+                coverage_item_id INTEGER,
                 status TEXT NOT NULL DEFAULT 'pending',
                 type TEXT NOT NULL DEFAULT 'unknown',
                 priority_score INTEGER NOT NULL DEFAULT 0,

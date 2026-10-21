@@ -1,66 +1,52 @@
-import { useEffect, useEffectEvent, useRef, useState } from "react";
+import { useCallback, useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
 
 import { FileDown } from "lucide-react";
 
 import {
   AssessmentAttackChainDetail,
   AssessmentAttackChainLink,
-  AssessmentCoverageItem,
   AssessmentFindingDetail,
-  AssessmentService,
+  AssessmentFindingSummary,
   AssessmentSurface,
   ApiError,
   AssessmentSummary,
-  AssessmentTarget,
-  Artifact,
-  ArtifactContent,
-  CodeAnalysisResult,
-  CodeCoverage,
-  CodeModule,
-  CodeQueueItem,
   CodeQueueStats,
-  CodeReadiness,
-  CodeReadinessTarget,
-  CodeRepo,
   Engagement,
-  EngagementSession,
-  EventRecord,
   IntelSummary,
+  ProofWorkList,
   engagementWebSocketUrl,
   exportReport,
   getAssessmentSummary,
-  getCodeCoverage,
   getCodeQueueStats,
-  getCodeReadiness,
   getEngagement,
+  getIntelReadiness,
   getIntelSummary,
-  listActivityEntries,
-  listArtifacts,
   listAssessmentAttackChainLinks,
   listAssessmentAttackChains,
-  listAssessmentCoverageItems,
+  listAssessmentFindingSummaries,
   listAssessmentFindings,
-  listAssessmentServices,
-  listAssessmentTargets,
-  listCodeAnalysisResults,
-  listCodeModules,
-  listCodeQueueItems,
-  listCodeRepos,
-  listEngagementSessions,
-  listEvents,
+  listAssessmentRuns,
+  listOobProbes,
+  listProofWork,
   listSurfaces,
-  readArtifact,
   reportDownloadUrl,
 } from "../lib/api";
+import { DEFAULT_COMMAND_FILTERS, fetchCommandFacets } from "../lib/commandsApi";
+import { listSubmissionDesk } from "../lib/submissionsApi";
+import { countCallbacksToReview } from "../lib/oastApi";
+import { proofNeedsAttentionCount } from "../lib/proofWorkApi";
+import { ALL_LIVE_SCOPES, INITIAL_SCOPE_VERSIONS, bumpScopes, scopeVersion, scopesForMessage, type LiveScope, type ScopeVersions } from "../lib/liveScopes";
+import { railBadges, type RailBadgeInputs } from "../lib/railBadges";
+import { RUN_ATTENTION_HEALTH, collectBarePages, runHealth, type RunHealthKey } from "../lib/runAudit";
 import { ActivityTab } from "../components/ActivityTab";
-import { ArtifactViewer } from "../components/ArtifactViewer";
 import { CodeAnalysisTab } from "../components/CodeAnalysisTab";
 import { CommandsTab } from "../components/CommandsTab";
 import { CoverageTab } from "../components/CoverageTab";
+import { FilesTab } from "../components/FilesTab";
+import { FindingRuntimeProof } from "../components/FindingRuntimeProof";
 import { FindingsTab } from "../components/FindingsTab";
 import { HttpTab } from "../components/HttpTab";
 import { IntelTab } from "../components/IntelTab";
-import { LogTab } from "../components/LogTab";
 import { OastTab } from "../components/OastTab";
 import { OverviewTab } from "../components/OverviewTab";
 import { ProofWorkTab } from "../components/ProofWorkTab";
@@ -70,7 +56,8 @@ import { SubmissionsTab } from "../components/SubmissionsTab";
 import { TabBar, TABS } from "../components/TabBar";
 import type { TabKey } from "../components/TabBar";
 import { ThemeToggle } from "../components/ThemeToggle";
-import { CardSkeleton, TableSkeleton } from "../components/Skeletons";
+import { CardSkeleton, Skeleton, TableSkeleton } from "../components/Skeletons";
+import { StatusPill } from "../components/ui";
 import { useToast } from "../contexts/ToastContext";
 import { engagementHref, writeWorkspaceHash } from "../lib/workspaceRoutes";
 import "../styles/workspace.css";
@@ -87,7 +74,7 @@ type EngagementPageProps = {
   // idempotent (compare-before-set guards against a redundant render).
   initialTab?: string;
   initialFindingSlug?: string;
-  // Drawer tab for a deep-linked finding.
+  // Open record section (`dtab`) for a deep-linked finding, run, or coverage item.
   initialDrawerTab?: string;
   initialIntelType?: string;
   initialIntelId?: number;
@@ -95,29 +82,158 @@ type EngagementPageProps = {
   initialRunId?: number;
   initialRunSection?: string;
   initialRunObject?: string;
+  // Proof work item to highlight (?tab=proof&work=…).
+  initialWorkId?: number;
+  // Command run to open (?tab=commands&command=…).
+  initialCommandId?: number;
+  initialSurfaceId?: number;
+  initialProbeId?: number;
+  initialFlowId?: number;
+  // Coverage item whose record is open (?tab=coverage&item=…).
+  initialCoverageItemId?: number;
+  // Submission whose document is open (?tab=submissions&submission=…&dtab=…).
+  initialSubmissionSlug?: string;
+  // Engagement file open in the viewer (?tab=artifacts&file=…).
+  initialFileName?: string;
+  // Activity search, categories (comma-separated), actor kind and time range
+  // (?tab=activity&q=…&cats=…&actor=…&range=…).
+  initialActivityQuery?: string;
+  initialActivityCategories?: string;
+  initialActivityActor?: string;
+  initialActivityRange?: string;
+  // HTTP sub-view (?tab=http&view=inventory|exchanges).
+  initialHttpView?: string;
 };
 
-const ASSESSMENT_WIDE_FETCH_LIMIT = 5000;
-const RECENT_EVENT_LIMIT = 200;
+const SURFACE_FETCH_LIMIT = 5000;
+const RUN_PAGE_SIZE = 200;
+// WebSocket messages arrive in bursts; refresh at most once per window.
+const WS_THROTTLE_MS = 2000;
+// Polling cadence while the live socket is down.
+const POLL_INTERVAL_MS = 30_000;
+// Rail badge sources refresh at most this often (the assessment summary can
+// take tens of seconds when its cache is cold).
+const BADGE_INTERVAL_MS = 15_000;
+const SUBMISSIONS_BADGE_INTERVAL_MS = 60_000;
+// Run health without the Runs view open reads the whole run list.
+const RUNS_BADGE_INTERVAL_MS = 60_000;
+// A command run can change the run list only through the evidence health of
+// a run receipt that cites it (its retained output), which is rare; the open
+// Runs view folds command changes into one re-read this long after the first.
+const RUNS_COMMAND_DELAY_MS = 60_000;
 
-function formatStatusLabel(value: string | undefined) {
-  return (value ?? "unknown").replace(/_/g, " ");
+// The live scopes each view's `refreshVersion` follows (lib/liveScopes.ts).
+// Activity and Files follow every change: the audit log records every
+// mutation, and engagement-root files are written outside the API. Runs
+// follows command changes only after RUNS_COMMAND_DELAY_MS (see below).
+const VIEW_SCOPES: Record<TabKey, readonly LiveScope[]> = {
+  overview: ALL_LIVE_SCOPES,
+  findings: ["findings"],
+  proof: ["proof", "findings"],
+  submissions: ["submissions", "findings"],
+  intel: ["intel"],
+  surfaces: ["surfaces"],
+  http: ["http", "surfaces"],
+  coverage: ["coverage"],
+  code: ["code"],
+  runs: ["runs"],
+  commands: ["commands"],
+  oast: ["oast"],
+  activity: ALL_LIVE_SCOPES,
+  artifacts: ALL_LIVE_SCOPES,
+};
+const RUNTIME_PROOF_SCOPES: readonly LiveScope[] = ["findings", "proof", "runs"];
+const READINESS_SCOPES: readonly LiveScope[] = ["readiness"];
+
+const HTTP_VIEWS = new Set(["inventory", "exchanges"]);
+
+type RefreshChannel = {
+  task: () => Promise<void>;
+  minIntervalMs: number;
+  inFlight: boolean;
+  queued: boolean;
+  lastStartedAt: number;
+  timer: ReturnType<typeof setTimeout> | null;
+};
+
+// Independent single-flight loads keyed by data source. A request that
+// arrives while the same source is loading folds into one follow-up load, so
+// a slow source (the summary) never stacks requests and never delays another
+// source or a tab's own refresh. A "join" request shares an in-flight load
+// instead of queueing another (the mount refresh, which StrictMode repeats).
+class CoalescedLoads {
+  private channels = new Map<string, RefreshChannel>();
+  private disposed = false;
+
+  run(name: string, task: () => Promise<void>, minIntervalMs = 0, mode: "join" | "rerun" = "rerun") {
+    if (this.disposed) return;
+    let channel = this.channels.get(name);
+    if (!channel) {
+      channel = { task, minIntervalMs, inFlight: false, queued: false, lastStartedAt: 0, timer: null };
+      this.channels.set(name, channel);
+    }
+    channel.task = task;
+    channel.minIntervalMs = minIntervalMs;
+    if (channel.inFlight) {
+      if (mode === "rerun") channel.queued = true;
+      return;
+    }
+    const wait = channel.lastStartedAt + minIntervalMs - Date.now();
+    if (wait > 0) {
+      // Trailing load so the last change inside the interval is not lost.
+      channel.timer ??= setTimeout(() => {
+        channel.timer = null;
+        this.run(name, channel.task, channel.minIntervalMs);
+      }, wait);
+      return;
+    }
+    if (channel.timer !== null) {
+      clearTimeout(channel.timer);
+      channel.timer = null;
+    }
+    channel.inFlight = true;
+    channel.queued = false;
+    channel.lastStartedAt = Date.now();
+    void channel.task().catch(() => undefined).finally(() => {
+      channel.inFlight = false;
+      if (channel.queued) {
+        channel.queued = false;
+        this.run(name, channel.task, channel.minIntervalMs);
+      }
+    });
+  }
+
+  // Stops new loads and pending trailing timers. In-flight state is kept so
+  // a development StrictMode remount (dispose, then revive) joins the load
+  // already running instead of starting a duplicate.
+  dispose() {
+    this.disposed = true;
+    for (const channel of this.channels.values()) {
+      if (channel.timer !== null) clearTimeout(channel.timer);
+      channel.timer = null;
+      channel.queued = false;
+    }
+  }
+
+  revive() {
+    this.disposed = false;
+  }
+}
+
+function errorText(error: unknown, fallback = "request failed"): string {
+  return error instanceof Error ? error.message : error == null ? fallback : String(error);
 }
 
 const VALID_TAB_KEYS = new Set<string>(TABS.map((t) => t.key));
 
 function coerceTabKey(value: string | undefined): TabKey {
+  // Bookmarked audit-log links open the merged Activity view.
+  if (value === "log") return "activity";
   return value && VALID_TAB_KEYS.has(value) ? (value as TabKey) : "overview";
 }
 
-function nextCodeReadinessTarget(persistedPhase: string): CodeReadinessTarget {
-  switch (persistedPhase) {
-    case "ingest": return "classify-map";
-    case "classify-map": return "hunt";
-    case "hunt": return "verify-variant";
-    case "verify-variant": return "fuzz";
-    default: return "complete";
-  }
+function hasCodeTrack(engagement: Engagement): boolean {
+  return Boolean(engagement.track_state?.code) || engagement.engagement_type === "code" || engagement.engagement_type === "both";
 }
 
 export function EngagementPage(props: EngagementPageProps) {
@@ -136,6 +252,19 @@ function EngagementWorkspace({
   initialRunId,
   initialRunSection,
   initialRunObject,
+  initialWorkId,
+  initialCommandId,
+  initialSurfaceId,
+  initialProbeId,
+  initialFlowId,
+  initialCoverageItemId,
+  initialSubmissionSlug,
+  initialFileName,
+  initialActivityQuery,
+  initialActivityCategories,
+  initialActivityActor,
+  initialActivityRange,
+  initialHttpView,
 }: EngagementPageProps) {
   const { toast } = useToast();
   const [engagement, setEngagement] = useState<Engagement | null>(null);
@@ -155,40 +284,48 @@ function EngagementWorkspace({
   const [pendingDrawerTab, setPendingDrawerTab] = useState<string | undefined>(
     coerceTabKey(initialTab) === "findings" ? initialDrawerTab : undefined,
   );
-  const [sessions, setSessions] = useState<EngagementSession[]>([]);
-  const [events, setEvents] = useState<EventRecord[]>([]);
-  const [artifacts, setArtifacts] = useState<Artifact[]>([]);
   const [assessmentSummary, setAssessmentSummary] = useState<AssessmentSummary | null>(null);
-  const [assessmentFindings, setAssessmentFindings] = useState<AssessmentFindingDetail[]>([]);
-  const [assessmentFindingsLoaded, setAssessmentFindingsLoaded] = useState(false);
-  const [assessmentFindingsError, setAssessmentFindingsError] = useState<string | null>(null);
+  // The full finding ledger (Findings) and its lean rows without `details`
+  // (Overview, Surfaces). Each keeps the findings-scope version it was read
+  // at, so the views show whichever is fresher.
+  const [assessmentFindings, setAssessmentFindings] = useState<{ rows: AssessmentFindingDetail[]; version: number } | null>(null);
+  const [findingSummaries, setFindingSummaries] = useState<{ rows: AssessmentFindingSummary[]; version: number } | null>(null);
+  const [findingRowsError, setFindingRowsError] = useState<string | null>(null);
   const [assessmentChains, setAssessmentChains] = useState<AssessmentAttackChainDetail[]>([]);
   const [assessmentChainLinks, setAssessmentChainLinks] = useState<AssessmentAttackChainLink[]>([]);
-  const [assessmentTargets, setAssessmentTargets] = useState<AssessmentTarget[]>([]);
-  const [assessmentServices, setAssessmentServices] = useState<AssessmentService[]>([]);
-  const [assessmentCoverageItems, setAssessmentCoverageItems] = useState<AssessmentCoverageItem[]>([]);
-  const [assessmentRefreshVersion, setAssessmentRefreshVersion] = useState(0);
-  const [codeRepos, setCodeRepos] = useState<CodeRepo[]>([]);
-  const [codeModules, setCodeModules] = useState<CodeModule[]>([]);
-  const [codeQueueStats, setCodeQueueStats] = useState<CodeQueueStats | null>(null);
-  const [codeQueueItems, setCodeQueueItems] = useState<CodeQueueItem[]>([]);
-  const [codeCoverage, setCodeCoverage] = useState<CodeCoverage | null>(null);
-  const [codeReadiness, setCodeReadiness] = useState<CodeReadiness | null>(null);
-  const [codeCompletionReadiness, setCodeCompletionReadiness] = useState<CodeReadiness | null>(null);
-  const [codeResults, setCodeResults] = useState<CodeAnalysisResult[]>([]);
-  const [codeLoadError, setCodeLoadError] = useState<string | null>(null);
+  // Per-scope refresh counters; each view's refreshVersion sums the scopes it reads.
+  const [scopeVersions, setScopeVersions] = useState<ScopeVersions>(INITIAL_SCOPE_VERSIONS);
   const [intelSummary, setIntelSummary] = useState<IntelSummary | null>(null);
-  const [assessmentSurfaces, setAssessmentSurfaces] = useState<AssessmentSurface[]>([]);
+  // Null until the surface ledger first loads, so Surfaces can tell loading from empty.
+  const [assessmentSurfaces, setAssessmentSurfaces] = useState<AssessmentSurface[] | null>(null);
   const [surfaceLoadError, setSurfaceLoadError] = useState<string | null>(null);
-  const [activityTotal, setActivityTotal] = useState<number>(0);
-  const [selectedName, setSelectedName] = useState<string | null>(null);
-  const [selectedArtifact, setSelectedArtifact] = useState<ArtifactContent | null>(null);
-  const [artifactLoadError, setArtifactLoadError] = useState<{ name: string; message: string } | null>(null);
+  // Rail badge inputs beyond the summary (see lib/railBadges.ts).
+  const [proofNeedsAttention, setProofNeedsAttention] = useState<RailBadgeInputs["proofNeedsAttention"]>(null);
+  const [submissionsToDo, setSubmissionsToDo] = useState<number | null>(null);
+  const [openIntelLeads, setOpenIntelLeads] = useState<number | null>(null);
+  const [codeQueueStats, setCodeQueueStats] = useState<CodeQueueStats | null>(null);
+  const [oastToReview, setOastToReview] = useState<number | null>(null);
+  const [runHealthCounts, setRunHealthCounts] = useState<Record<RunHealthKey, number> | null>(null);
+  const [commandsNeedingAttention, setCommandsNeedingAttention] = useState<number | null>(null);
+  // The commands-scope pass the open Runs view last folded in (RUNS_COMMAND_DELAY_MS).
+  const [runsCommandVersion, setRunsCommandVersion] = useState(0);
+  const runsCommandTimerRef = useRef<number | null>(null);
   const [exportingReport, setExportingReport] = useState(false);
+  // Failed refreshes by data source. `loadError` is the engagement record
+  // itself; a dropped live socket is tracked separately in `liveUpdates`
+  // because polling keeps the data current while it reconnects.
+  const [refreshErrors, setRefreshErrors] = useState<Record<string, string>>({});
+  const [liveUpdates, setLiveUpdates] = useState<"connecting" | "live" | "polling">("connecting");
   const activeEngagement = engagement?.key === engagementKey ? engagement : null;
-  const selectedNameRef = useRef<string | null>(selectedName);
-  const refreshInFlightRef = useRef<Promise<void> | null>(null);
-  const refreshQueuedRef = useRef(false);
+  const loadsRef = useRef<CoalescedLoads | null>(null);
+  const hasLoadedOnceRef = useRef(false);
+  // Scopes changed since the last refresh pass; the mount pass reads everything.
+  const pendingScopesRef = useRef(new Set<LiveScope>(ALL_LIVE_SCOPES));
+  // Synchronous mirror of `scopeVersions` for the loaders below.
+  const scopeVersionsRef = useRef<ScopeVersions>(INITIAL_SCOPE_VERSIONS);
+  // Page datasets by name → the scope version they were last read at; a view
+  // re-reads a dataset only when its scope moved since.
+  const datasetVersionsRef = useRef(new Map<string, number>());
   const socketConnectedRef = useRef(false);
   const hasConnectedOnceRef = useRef(false);
   // Tracks whether the live feed has dropped since the last successful open,
@@ -197,35 +334,62 @@ function EngagementWorkspace({
   const lastWsRefreshRef = useRef(0);
   const wsThrottleTimerRef = useRef<number | null>(null);
   const mountedRef = useRef(true);
-  const artifactRequestRef = useRef(0);
+  const shellRef = useRef<HTMLElement | null>(null);
+  const headerRef = useRef<HTMLElement | null>(null);
 
+  // Sticky offsets and viewport-bounded panes read the header's real height
+  // (it grows when the target name or track list wraps). workspace.css holds
+  // the first-paint default.
   useEffect(() => {
-    mountedRef.current = true;
-    return () => { mountedRef.current = false; artifactRequestRef.current += 1; };
+    const header = headerRef.current;
+    const shell = shellRef.current;
+    if (!header || !shell || typeof ResizeObserver === "undefined") return;
+    const apply = () => shell.style.setProperty("--workspace-header-height", `${header.getBoundingClientRect().height}px`);
+    apply();
+    const observer = new ResizeObserver(apply);
+    observer.observe(header);
+    return () => observer.disconnect();
   }, []);
 
+  // One load coordinator per mounted workspace. A StrictMode remount revives
+  // the same instance so the mount refresh joins the load already running.
   useEffect(() => {
-    selectedNameRef.current = selectedName;
-  }, [selectedName]);
+    mountedRef.current = true;
+    const loads = loadsRef.current ?? new CoalescedLoads();
+    loads.revive();
+    loadsRef.current = loads;
+    return () => {
+      mountedRef.current = false;
+      loads.dispose();
+      if (runsCommandTimerRef.current !== null) window.clearTimeout(runsCommandTimerRef.current);
+      runsCommandTimerRef.current = null;
+    };
+  }, []);
 
-  function refreshArtifacts() {
-    return listArtifacts(engagementKey).then((nextArtifacts) => {
-      setArtifacts(nextArtifacts);
-      if (!selectedName) {
-        const firstAvailable = nextArtifacts.find((artifact) => artifact.exists);
-        if (firstAvailable) {
-          setSelectedName(firstAvailable.name);
-        }
+  function settle(source: string, error: unknown) {
+    if (!mountedRef.current) return;
+    setRefreshErrors((current) => {
+      if (error === undefined) {
+        if (!(source in current)) return current;
+        const next = { ...current };
+        delete next[source];
+        return next;
       }
+      return { ...current, [source]: errorText(error) };
     });
   }
 
-  function refreshSelectedArtifact(name: string) {
-    const request = ++artifactRequestRef.current;
-    setArtifactLoadError(null);
-    return readArtifact(engagementKey, name)
-      .then(value => { if (mountedRef.current && request === artifactRequestRef.current) { setSelectedArtifact(value); setArtifactLoadError(null); } })
-      .catch((error: unknown) => { if (mountedRef.current && request === artifactRequestRef.current) setArtifactLoadError({ name, message: error instanceof Error ? error.message : "Artifact refresh failed" }); });
+  // Run one source's load through its coalescing channel and record the
+  // outcome for the refresh banner.
+  function load(source: string, task: () => Promise<unknown>, minIntervalMs = 0) {
+    loadsRef.current?.run(source, async () => {
+      try {
+        await task();
+        settle(source, undefined);
+      } catch (error) {
+        settle(source, error ?? new Error("request failed"));
+      }
+    }, minIntervalMs);
   }
 
   async function refreshEngagement() {
@@ -235,239 +399,184 @@ function EngagementWorkspace({
     return nextEngagement;
   }
 
-  function refreshSessions() {
-    return listEngagementSessions(engagementKey).then(setSessions);
+  function markStale(scopes: Iterable<LiveScope>) {
+    for (const scope of scopes) pendingScopesRef.current.add(scope);
   }
 
-  function refreshEvents() {
-    return listEvents(engagementKey, RECENT_EVENT_LIMIT).then(setEvents);
-  }
-
-  async function refreshCodeAnalysis(persistedPhase: string) {
-    const failures: string[] = [];
-    const captureFailure = (label: string, error: unknown) => {
-      const detail = error instanceof Error ? error.message : "request failed";
-      failures.push(`${label}: ${detail}`);
-    };
-    const targetPhase = nextCodeReadinessTarget(persistedPhase);
-    const readinessRequests = targetPhase === "complete"
-      ? [
-          getCodeReadiness(engagementKey, "complete")
-            .then((value) => {
-              setCodeReadiness(value);
-              setCodeCompletionReadiness(value);
-            })
-            .catch((error: unknown) => {
-              captureFailure("readiness", error);
-            }),
-        ]
-      : [
-          getCodeReadiness(engagementKey, targetPhase)
-            .then(setCodeReadiness)
-            .catch((error: unknown) => {
-              captureFailure("next-transition readiness", error);
-            }),
-          getCodeReadiness(engagementKey, "complete")
-            .then(setCodeCompletionReadiness)
-            .catch((error: unknown) => {
-              captureFailure("completion readiness", error);
-            }),
-        ];
-    await Promise.all([
-      listCodeRepos(engagementKey)
-        .then(setCodeRepos)
-        .catch((error: unknown) => {
-          captureFailure("repositories", error);
-        }),
-      listCodeModules(engagementKey)
-        .then(setCodeModules)
-        .catch((error: unknown) => {
-          captureFailure("modules", error);
-        }),
-      getCodeQueueStats(engagementKey)
-        .then(setCodeQueueStats)
-        .catch((error: unknown) => {
-          captureFailure("queue", error);
-        }),
-      Promise.all(
-        (["error", "needs_context", "pending"] as const).map((status) =>
-          listCodeQueueItems(engagementKey, { status, limit: 5 }),
-        ),
-      )
-        .then((pages) => {
-          setCodeQueueItems(
-            pages
-              .flatMap((page) => page.items)
-              .sort((a, b) => b.priority - a.priority || a.id - b.id)
-              .slice(0, 5),
-          );
-        })
-        .catch((error: unknown) => {
-          captureFailure("next work", error);
-        }),
-      getCodeCoverage(engagementKey)
-        .then(setCodeCoverage)
-        .catch((error: unknown) => {
-          captureFailure("coverage", error);
-        }),
-      ...readinessRequests,
-      listCodeAnalysisResults(engagementKey)
-        .then(setCodeResults)
-        .catch((error: unknown) => {
-          captureFailure("results", error);
-        }),
-    ]);
-    setCodeLoadError(
-      failures.length > 0
-        ? `Some code-analysis data is unavailable: ${failures.join("; ")}`
-        : null,
-    );
-  }
-
-  const refreshPage = useEffectEvent(async () => {
-    try {
-      let refreshedEngagement: Engagement;
+  // Load a page dataset when its scope moved since it was last read. The
+  // version is taken when the read starts, so a change that lands meanwhile
+  // leaves the dataset stale for the next pass; a failed read leaves it stale.
+  function loadDataset(name: string, scope: LiveScope, task: (version: number) => Promise<unknown>, source = name) {
+    const version = scopeVersionsRef.current[scope];
+    if (datasetVersionsRef.current.get(name) === version) return;
+    datasetVersionsRef.current.set(name, version);
+    load(source, async () => {
       try {
-        refreshedEngagement = await refreshEngagement();
-        if (!mountedRef.current) return;
+        await task(version);
       } catch (error) {
-        const message = error instanceof Error ? error.message : "Failed to load engagement";
-        setLoadError(message);
+        if (datasetVersionsRef.current.get(name) === version) datasetVersionsRef.current.delete(name);
+        throw error;
+      }
+    });
+  }
+
+  // Rail badge sources, refreshed only when a change touched their scope.
+  // Each is coalesced on its own so the slow assessment summary never delays
+  // the cheap counts, tab data, or tab refreshes, and refreshes at most every
+  // BADGE_INTERVAL_MS (with a trailing load). An open Runs, Proof work,
+  // Submissions, Commands or OAST view reports its own count from the read it
+  // already makes (its count callback prop), so its badge never lags the page
+  // and is not read twice; the other open views' badges stay live here.
+  // The summary refreshes on every pass while a view that shows it (Overview,
+  // Coverage) is open.
+  const loadBadges = useEffectEvent((current: Engagement, scopes: ReadonlySet<LiveScope>) => {
+    const keep = <T,>(apply: (value: T) => void) => (value: T) => { if (mountedRef.current) apply(value); };
+    // The summary feeds the Findings, Surfaces, and Coverage badges.
+    if (scopes.has("summary")) load("summary", () => getAssessmentSummary(engagementKey).then(keep(setAssessmentSummary)),
+      activeTab === "overview" || activeTab === "coverage" ? 0 : BADGE_INTERVAL_MS);
+    if (scopes.has("proof") && activeTab !== "proof") load("proof work", () => listProofWork(engagementKey)
+      .then(keep((queue: ProofWorkList) => setProofNeedsAttention(proofNeedsAttentionCount(queue)))), BADGE_INTERVAL_MS);
+    // The listing evaluates every finding's workspace, so it refreshes least often.
+    if (scopes.has("submissions") && activeTab !== "submissions") load("submissions", () => listSubmissionDesk(engagementKey, { findingLimit: 1 })
+      .then(keep((listing: Awaited<ReturnType<typeof listSubmissionDesk>>) => setSubmissionsToDo(listing.counts.actionable))),
+      SUBMISSIONS_BADGE_INTERVAL_MS);
+    if (scopes.has("intel")) load("intel readiness", () => getIntelReadiness(engagementKey)
+      .then(keep((readiness: Awaited<ReturnType<typeof getIntelReadiness>>) => setOpenIntelLeads(readiness.applicable ? readiness.open_leads.length : null))),
+      BADGE_INTERVAL_MS);
+    if (hasCodeTrack(current) && scopes.has("code")) {
+      load("code queue", () => getCodeQueueStats(engagementKey).then(keep(setCodeQueueStats)), BADGE_INTERVAL_MS);
+    }
+    if (scopes.has("oast") && activeTab !== "oast") load("OAST callbacks", () => listOobProbes(engagementKey, "fired")
+      .then(keep((probes: Awaited<ReturnType<typeof listOobProbes>>) => setOastToReview(countCallbacksToReview(probes)))),
+      BADGE_INTERVAL_MS);
+    if (scopes.has("commands") && activeTab !== "commands") load("command attention", () => fetchCommandFacets(engagementKey, DEFAULT_COMMAND_FILTERS, 1)
+      .then(keep((facets: Awaited<ReturnType<typeof fetchCommandFacets>>) => setCommandsNeedingAttention(facets.engagement_totals.attention))),
+      BADGE_INTERVAL_MS);
+    if (scopes.has("runs") && activeTab !== "runs") load("run health", async () => {
+      const runs = await collectBarePages((offset, limit) => listAssessmentRuns(engagementKey, { limit, offset }), RUN_PAGE_SIZE);
+      const counts: Record<RunHealthKey, number> = { healthy: 0, attention: 0, failed: 0, running: 0 };
+      for (const run of runs) counts[runHealth(run).key] += 1;
+      keep(handleRunHealth)(counts);
+    }, RUNS_BADGE_INTERVAL_MS);
+  });
+
+  // Page-level data for one view, re-read only where its scope moved. Views
+  // not listed here own their reads.
+  const loadTabData = useEffectEvent((tab: TabKey) => {
+    const keep = <T,>(apply: (value: T) => void) => (value: T) => { if (mountedRef.current) apply(value); };
+    const findingRows = (full: boolean) => {
+      if (full) {
+        loadDataset("finding ledger", "findings", (version) => listAssessmentFindings(engagementKey).then((rows) => {
+          if (!mountedRef.current) return;
+          setAssessmentFindings({ rows, version });
+          setFindingRowsError(null);
+        }).catch((error: unknown) => {
+          if (mountedRef.current) setFindingRowsError(errorText(error));
+          throw error;
+        }), "findings");
         return;
       }
-
-      // Always refresh events + assessment summary (lightweight, needed for tab counts)
-      const promises: Promise<unknown>[] = [
-        refreshEvents(),
-        getAssessmentSummary(engagementKey).then(setAssessmentSummary),
-        // Intel summary is cheap and drives the Intel tab count + left-rail
-        // per-type counts. Refresh failures retain the previous summary.
-        getIntelSummary(engagementKey).then(setIntelSummary),
-        // Activity entry count for the Log tab badge. Fetch the first page
-        // only — we just need `total`.
-        listActivityEntries(engagementKey, { limit: 1 })
-          .then((resp) => setActivityTotal(resp.total)),
-      ];
-
-      // Only fetch data needed by the active tab
-      const tab = activeTab;
-      switch (tab) {
-        case "overview":
-        case "findings":
-          promises.push(
-            listAssessmentFindings(engagementKey).then((findings) => {
-              if (!mountedRef.current) return;
-              setAssessmentFindings(findings);
-              setAssessmentFindingsLoaded(true);
-              setAssessmentFindingsError(null);
-            }).catch((error: unknown) => {
-              if (mountedRef.current) setAssessmentFindingsError(error instanceof Error ? error.message : String(error));
-              throw error;
-            }),
-            listAssessmentAttackChains(engagementKey).then(setAssessmentChains),
-            listAssessmentAttackChainLinks(engagementKey).then(setAssessmentChainLinks),
-          );
-          break;
-        case "coverage":
-          promises.push(
-            listAssessmentTargets(engagementKey).then(setAssessmentTargets),
-            listAssessmentServices(engagementKey).then(setAssessmentServices),
-            listAssessmentCoverageItems(engagementKey, { limit: ASSESSMENT_WIDE_FETCH_LIMIT }).then(setAssessmentCoverageItems),
-          );
-          break;
-        case "code":
-          if (refreshedEngagement.track_state?.code) {
-            promises.push(refreshCodeAnalysis(refreshedEngagement.track_state.code.phase));
-          } else {
-            setCodeLoadError("Canonical code track state unavailable.");
-          }
-          break;
-        case "activity":
-          promises.push(refreshSessions());
-          break;
-        case "surfaces":
-          promises.push(
-            listSurfaces(engagementKey, { limit: ASSESSMENT_WIDE_FETCH_LIMIT })
-              .then((surfaces) => {
-                setAssessmentSurfaces(surfaces);
-                setSurfaceLoadError(null);
-              })
-              .catch((error: unknown) => {
-                setSurfaceLoadError(
-                  error instanceof Error ? error.message : "Failed to load attack surfaces",
-                );
-              }),
-          );
-          break;
-        case "intel":
-          // IntelTab owns its own per-entity fetches; only the summary is
-          // needed at the page level (already fetched above for tab counts).
-          break;
-        case "runs":
-          // RunsTab owns bounded run/detail/drill-down and comparison reads.
-          break;
-        case "submissions":
-          // SubmissionsTab owns finding selection, workspace reads, attachment
-          // choices, immutable export, recovery, and version history.
-          break;
-        case "commands":
-          // CommandsTab owns its own fetch (list + lazy detail); the page
-          // only needs the active-tab switch to trigger the component mount.
-          break;
-        case "http":
-          // HttpTab owns its own fetch (variants + observations) and a
-          // visibility-driven refresh, mirroring CommandsTab. The page only
-          // needs the active-tab switch to trigger the component mount.
-          break;
-        case "oast":
-          // OastTab owns its own fetch (probe list + lazy per-probe detail)
-          // and a visibility-driven refresh, mirroring CommandsTab.
-          break;
-        case "log":
-          // LogTab owns its own search+fetch; page-level only needs the
-          // total (already fetched above for the tab count).
-          break;
-        case "artifacts":
-          promises.push(refreshArtifacts());
-          break;
+      // The full ledger already covers this version; the lean rows add nothing.
+      if (datasetVersionsRef.current.get("finding ledger") === scopeVersionsRef.current.findings) return;
+      loadDataset("finding summaries", "findings", (version) => listAssessmentFindingSummaries(engagementKey).then((rows) => {
+        if (!mountedRef.current) return;
+        setFindingSummaries({ rows, version });
+        setFindingRowsError(null);
+      }).catch((error: unknown) => {
+        if (mountedRef.current) setFindingRowsError(errorText(error));
+        throw error;
+      }), "findings");
+    };
+    const chains = () => {
+      loadDataset("attack chains", "findings", () => listAssessmentAttackChains(engagementKey).then(keep(setAssessmentChains)));
+      loadDataset("attack chain links", "findings", () => listAssessmentAttackChainLinks(engagementKey).then(keep(setAssessmentChainLinks)));
+    };
+    switch (tab) {
+      case "overview":
+        findingRows(false);
+        chains();
+        break;
+      case "findings":
+        findingRows(true);
+        chains();
+        break;
+      case "intel":
+        // Per-type counts for the Intel view's type rail.
+        loadDataset("intel summary", "intel", () => getIntelSummary(engagementKey).then(keep(setIntelSummary)));
+        break;
+      case "surfaces": {
+        // Linked findings resolve their titles and severities from the lean rows.
+        findingRows(false);
+        const version = scopeVersionsRef.current.surfaces;
+        if (datasetVersionsRef.current.get("surfaces") === version) break;
+        datasetVersionsRef.current.set("surfaces", version);
+        // SurfacesTab reports this failure itself.
+        loadsRef.current?.run("surfaces", () => listSurfaces(engagementKey, { limit: SURFACE_FETCH_LIMIT })
+          .then((surfaces) => {
+            if (!mountedRef.current) return;
+            setAssessmentSurfaces(surfaces);
+            setSurfaceLoadError(null);
+          })
+          .catch((error: unknown) => {
+            if (datasetVersionsRef.current.get("surfaces") === version) datasetVersionsRef.current.delete("surfaces");
+            if (mountedRef.current) setSurfaceLoadError(errorText(error, "Failed to load attack surfaces"));
+          }));
+        break;
       }
-
-      const results = await Promise.allSettled(promises);
-      const errors = results.filter((result): result is PromiseRejectedResult => result.status === "rejected");
-      if (errors.length > 0) setLoadError(errors.map(result => result.reason instanceof Error ? result.reason.message : String(result.reason)).join("; "));
-      setAssessmentRefreshVersion((version) => version + 1);
-
-      const nextSelectedName = selectedNameRef.current;
-      if (tab === "artifacts" && nextSelectedName) {
-        await refreshSelectedArtifact(nextSelectedName);
-      }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Failed to load engagement details";
-      setLoadError(message);
+      default:
+        break;
     }
   });
 
-  const requestRefresh = useEffectEvent(() => {
-    if (!mountedRef.current) return;
-    if (refreshInFlightRef.current) {
-      refreshQueuedRef.current = true;
+  // One refresh pass: re-read the engagement, advance the refresh counter of
+  // every scope that changed (views reading them refetch their own data), then
+  // refresh those scopes' badges and the active view's page data without
+  // waiting on either.
+  const refreshPage = useEffectEvent(async () => {
+    const scopes = new Set(pendingScopesRef.current);
+    pendingScopesRef.current.clear();
+    let refreshed: Engagement;
+    try {
+      refreshed = await refreshEngagement();
+    } catch (error) {
+      // Nothing was refreshed; the next pass retries these scopes.
+      markStale(scopes);
+      if (mountedRef.current) setLoadError(errorText(error, "Failed to load engagement"));
       return;
     }
-
-    const task = (async () => {
-      do {
-        refreshQueuedRef.current = false;
-        await refreshPage();
-      } while (mountedRef.current && refreshQueuedRef.current);
-    })().finally(() => {
-      refreshInFlightRef.current = null;
-    });
-    refreshInFlightRef.current = task;
+    if (!mountedRef.current) return;
+    // Views mount with fresh data on the first load; later passes ask them to refetch.
+    if (hasLoadedOnceRef.current && scopes.size > 0) {
+      scopeVersionsRef.current = bumpScopes(scopeVersionsRef.current, scopes);
+      setScopeVersions(scopeVersionsRef.current);
+      if (scopes.has("commands") && activeTab === "runs" && runsCommandTimerRef.current === null) {
+        runsCommandTimerRef.current = window.setTimeout(() => {
+          runsCommandTimerRef.current = null;
+          // A runs-scope pass since then already re-read the list (pass
+          // numbers only grow), so this re-reads only when none did.
+          if (mountedRef.current) setRunsCommandVersion(scopeVersionsRef.current.commands);
+        }, RUNS_COMMAND_DELAY_MS);
+      }
+    }
+    hasLoadedOnceRef.current = true;
+    loadBadges(refreshed, scopes);
+    loadTabData(activeTab);
   });
 
-  // Throttled refresh for WebSocket messages — at most once per 2 seconds to
+  const requestRefresh = useEffectEvent((mode: "join" | "rerun" = "rerun") => {
+    if (!mountedRef.current) return;
+    loadsRef.current?.run("engagement", refreshPage, 0, mode);
+  });
+
+  // A refresh that cannot know what changed (polling, a tab back in view, a
+  // reconnect) refreshes every scope.
+  const requestFullRefresh = useEffectEvent(() => {
+    markStale(ALL_LIVE_SCOPES);
+    requestRefresh();
+  });
+
+  // Throttled refresh for WebSocket messages — at most once per window to
   // avoid constant re-renders during rapid-fire backend events.
-  const WS_THROTTLE_MS = 2000;
   const throttledRefresh = useEffectEvent(() => {
     const now = Date.now();
     const elapsed = now - lastWsRefreshRef.current;
@@ -487,25 +596,16 @@ function EngagementWorkspace({
   });
 
   useEffect(() => {
-    requestRefresh();
+    requestRefresh("join");
   }, [engagementKey]);
 
-  // Refresh tab-specific data when switching tabs
+  // A tab switch loads only that view's page-level data where it is stale.
+  // It is not a full refresh: the view mounts and reads its own data, and the
+  // badges are already live.
   useEffect(() => {
     if (!activeEngagement) return;
-    requestRefresh();
+    loadTabData(activeTab);
   }, [activeTab]);
-
-  useEffect(() => {
-    if (!activeEngagement || !selectedName || activeTab !== "artifacts") {
-      artifactRequestRef.current += 1;
-      setSelectedArtifact(null);
-      setArtifactLoadError(null);
-      return;
-    }
-    void refreshSelectedArtifact(selectedName);
-    return () => { artifactRequestRef.current += 1; };
-  }, [activeEngagement?.key, engagementKey, selectedName, activeTab]);
 
   useEffect(() => {
     if (!activeEngagement) return;
@@ -523,7 +623,7 @@ function EngagementWorkspace({
         if (cancelled) return;
         socketConnectedRef.current = true;
         reconnectDelayMs = 1000;
-        setLoadError((current) => current === "Live updates unavailable" ? null : current);
+        setLiveUpdates("live");
         // Toast only on a genuine recovery: the live feed had dropped (error
         // or a close after we'd connected at least once) and is now back. The
         // first connect on mount is not a "reconnect" so it stays silent.
@@ -532,7 +632,8 @@ function EngagementWorkspace({
           toast("Live updates reconnected", "success");
         }
         if (hasConnectedOnceRef.current) {
-          requestRefresh();
+          // Changes made while disconnected were never announced.
+          requestFullRefresh();
         } else {
           hasConnectedOnceRef.current = true;
         }
@@ -540,7 +641,7 @@ function EngagementWorkspace({
       socket.onerror = () => {
         if (cancelled) return;
         liveFeedDroppedRef.current = true;
-        setLoadError((current) => current ?? "Live updates unavailable");
+        setLiveUpdates("polling");
       };
       socket.onclose = () => {
         socketConnectedRef.current = false;
@@ -548,6 +649,7 @@ function EngagementWorkspace({
           liveFeedDroppedRef.current = true;
         }
         if (cancelled) return;
+        setLiveUpdates("polling");
         reconnectTimer = window.setTimeout(() => {
           connect();
         }, reconnectDelayMs);
@@ -555,25 +657,20 @@ function EngagementWorkspace({
       };
       socket.onmessage = (message) => {
         if (cancelled) return;
-        let payload: { type?: string; event?: EventRecord };
+        // Every well-formed frame names what changed; the refresh it triggers
+        // re-reads only the scopes that change can touch.
+        let parsed: unknown;
         try {
           if (typeof message.data !== "string") throw new TypeError("non-text frame");
-          payload = JSON.parse(message.data) as { type?: string; event?: EventRecord };
+          parsed = JSON.parse(message.data);
         } catch {
           socketConnectedRef.current = false;
           liveFeedDroppedRef.current = true;
-          setLoadError((current) => current ?? "Live updates unavailable");
+          setLiveUpdates("polling");
           socket?.close();
           return;
         }
-        if (payload.type === "event.created") {
-          setEvents((current) => {
-            const nextEvent = payload.event;
-            if (!nextEvent) return current;
-            if (current.at(-1)?.id === nextEvent.id) return current;
-            return [...current, nextEvent].slice(-RECENT_EVENT_LIMIT);
-          });
-        }
+        markStale(scopesForMessage(parsed));
         throttledRefresh();
       };
     };
@@ -603,24 +700,24 @@ function EngagementWorkspace({
       if (document.hidden || socketConnectedRef.current) {
         return;
       }
-      requestRefresh();
-    }, 30000);
+      requestFullRefresh();
+    }, POLL_INTERVAL_MS);
 
     return () => window.clearInterval(interval);
   }, [activeEngagement?.key]);
 
+  // A tab back in view refreshes everything, including while the first load
+  // runs (that refresh folds into one more pass after it).
   useEffect(() => {
-    if (!activeEngagement) return;
-
     const handleVisibilityChange = () => {
       if (!document.hidden) {
-        requestRefresh();
+        requestFullRefresh();
       }
     };
 
     document.addEventListener("visibilitychange", handleVisibilityChange);
     return () => document.removeEventListener("visibilitychange", handleVisibilityChange);
-  }, [activeEngagement?.key]);
+  }, []);
 
   // Deep-link sync: re-apply the parsed-route entry params when they change.
   // This handles a hashchange that arrives while this engagement is ALREADY
@@ -631,7 +728,12 @@ function EngagementWorkspace({
   useEffect(() => {
     const nextTab = coerceTabKey(initialTab);
     setActiveTab((current) => (current === nextTab ? current : nextTab));
-  }, [initialTab]);
+    // An unknown or retired `tab=` (a bookmarked `log`) shows another view;
+    // the address names the view actually shown.
+    if (initialTab !== undefined && initialTab !== nextTab) {
+      writeWorkspaceHash(engagementHref(engagementKey, { tab: nextTab }), "replace");
+    }
+  }, [initialTab, engagementKey]);
 
   useEffect(() => {
     const nextTab = coerceTabKey(initialTab);
@@ -641,28 +743,55 @@ function EngagementWorkspace({
     setPendingDrawerTab((current) => (current === nextDrawerTab ? current : nextDrawerTab));
   }, [initialTab, initialFindingSlug, initialDrawerTab]);
 
-  const displayEvents = events;
-  const displayFindings = assessmentFindings.length > 0 ? assessmentFindings : (assessmentSummary?.top_findings ?? []);
+  // The fresher of the full ledger and the lean rows, else the summary's top findings.
+  const ledgerRows = assessmentFindings?.rows ?? null;
+  const findingRows = assessmentFindings && (!findingSummaries || assessmentFindings.version >= findingSummaries.version)
+    ? assessmentFindings.rows
+    : findingSummaries?.rows ?? null;
+  const findingRowsLoaded = findingRows !== null;
+  const displayFindings = findingRows && findingRows.length > 0 ? findingRows : (assessmentSummary?.top_findings ?? []);
   const chains = assessmentChains.length > 0 ? assessmentChains : (assessmentSummary?.attack_chains ?? []);
   const displaySummary = assessmentSummary;
-
-  const intelTotal = intelSummary
-    ? Object.values(intelSummary.counts).reduce((a, b) => a + b, 0)
-    : undefined;
-
-  const tabCounts: Partial<Record<TabKey, number | string>> = {
-    findings: displaySummary?.finding_count != null ? `${displaySummary.finding_count} current` : displayFindings.length > 0 ? `${displayFindings.length} loaded` : undefined,
-    coverage: displaySummary?.coverage_count ?? 0,
-    code: codeRepos.length > 0 ? codeResults.length : undefined,
-    intel: intelTotal,
-    surfaces: displaySummary?.open_surface_count != null ? `${displaySummary.open_surface_count} open` : assessmentSurfaces.length > 0 ? `${assessmentSurfaces.length} loaded` : undefined,
-    // HTTP count = request-variant count, available cheaply in the summary
-    // (already fetched for every tab). OAST has no summary figure, so its
-    // count badge is owned by the tab (left undefined here).
-    http: displaySummary?.request_variant_count || undefined,
-    log: activityTotal || undefined,
+  const viewVersion = (tab: TabKey) => {
+    const version = scopeVersion(scopeVersions, VIEW_SCOPES[tab]);
+    return tab === "runs" ? Math.max(version, runsCommandVersion) : version;
   };
+  const activityCategories = useMemo(
+    () => initialActivityCategories?.split(",").map((value) => value.trim()).filter(Boolean),
+    [initialActivityCategories],
+  );
+  const routed = <T,>(tab: TabKey, value: T) => (initialTab === tab ? value : undefined);
 
+  const tabBadges = railBadges({
+    summary: displaySummary,
+    loadedFindingCount: findingRows?.length ?? 0,
+    loadedSurfaceCount: assessmentSurfaces?.length ?? 0,
+    proofNeedsAttention,
+    submissionsToDo,
+    openIntelLeads,
+    codeQueue: codeQueueStats,
+    runHealth: runHealthCounts,
+    commandsNeedingAttention,
+    oastCallbacksToReview: oastToReview,
+  });
+  // The open Proof work view reports the count its own "Needs attention" scope shows.
+  const handleProofQueueCounts = useCallback((counts: { needs_attention: number }) => setProofNeedsAttention(counts.needs_attention), []);
+  const handleRunHealth = useCallback((counts: Record<RunHealthKey, number>) => {
+    setRunHealthCounts((current) => (current && [...RUN_ATTENTION_HEALTH].every((key) => current[key] === counts[key]) ? current : counts));
+  }, []);
+
+  const runtimeProofVersion = scopeVersion(scopeVersions, RUNTIME_PROOF_SCOPES);
+  const renderRuntimeProof = useCallback(
+    (finding: { slug: string }) => <FindingRuntimeProof key={finding.slug} engagementKey={engagementKey} slug={finding.slug} refreshVersion={runtimeProofVersion} />,
+    [engagementKey, runtimeProofVersion],
+  );
+
+  const refreshFailures: Array<[string, string]> = [
+    ...(loadError ? [["engagement", loadError] as [string, string]] : []),
+    ...Object.entries(refreshErrors),
+  ];
+
+  // One history entry per activation (a click, Enter or Space on the rail).
   const handleTabChange = (tab: TabKey) => {
     setActiveTab(tab);
     // A finding deep-link only applies to the findings tab. Switching tabs
@@ -719,12 +848,13 @@ function EngagementWorkspace({
   };
 
   return (
-    <main className="shell engagement-shell">
+    <main className="shell engagement-shell" ref={shellRef}>
       {/* Header */}
-      <section className="dashboard-header workspace-header">
+      <section className="dashboard-header workspace-header" ref={headerRef}>
         <div>
           <p className="eyebrow">Vigil / {engagementKey}</p>
-          <h1>{activeEngagement?.target ?? engagementKey}</h1>
+          {/* Not a heading: each view's PageHeader title is the page's one h1. */}
+          <p className="workspace-target">{activeEngagement?.target ?? engagementKey}</p>
           {activeEngagement && (Object.keys(activeEngagement.track_state ?? {}).length > 0 ? (
             <ul className="workspace-header-tracks" aria-label="Enabled track status">
               {Object.entries(activeEngagement.track_state ?? {}).map(([track, state]) => <li key={track}>
@@ -738,9 +868,9 @@ function EngagementWorkspace({
           <div className="status-summary">
             <div className="status-summary-row">
               <span className="status-summary-label">Engagement lifecycle</span>
-              <span className={`status-pill status-${engagement?.status ?? "queued"}`}>
-                {formatStatusLabel(activeEngagement?.status)}
-              </span>
+              {activeEngagement
+                ? <StatusPill domain="engagement" value={activeEngagement.status || "unknown"} />
+                : <Skeleton width={84} height={20} rounded />}
             </div>
           </div>
           <button
@@ -756,7 +886,17 @@ function EngagementWorkspace({
           <button className="ghost-button" onClick={onBack}>Back</button>
         </div>
       </section>
-      {loadError && <div className="workspace-refresh-error error-text" role="status">{activeEngagement ? "Refresh failed. Showing last available data: " : "Engagement unavailable: "}{loadError}</div>}
+      {!activeEngagement && loadError && <div className="workspace-refresh-error error-text" role="status">Engagement unavailable: {loadError}</div>}
+      {activeEngagement && refreshFailures.length > 0 && (
+        <div className="workspace-refresh-error error-text" role="status">
+          Refresh failed. Showing the last loaded data. {refreshFailures.map(([source, message]) => `${source}: ${message}`).join("; ")}
+        </div>
+      )}
+      {activeEngagement && liveUpdates === "polling" && (
+        <div className="workspace-live-status" role="status">
+          Live updates unavailable. Checking for changes every {POLL_INTERVAL_MS / 1000} seconds while reconnecting.
+        </div>
+      )}
 
       {!activeEngagement ? (
         // Initial page load: show a skeleton until the engagement resolves.
@@ -770,57 +910,70 @@ function EngagementWorkspace({
         )
       ) : (
         <div className="workspace-layout">
-          <TabBar active={activeTab} onChange={handleTabChange} counts={tabCounts} />
+          <TabBar active={activeTab} onChange={handleTabChange} badges={tabBadges} />
           <div className="workspace-main" id="workspace-panel" role="tabpanel" aria-labelledby={`workspace-tab-${activeTab}`} tabIndex={0}>
 
           {activeTab === "overview" && (
             <OverviewTab
               engagementKey={engagementKey}
-              events={displayEvents}
               assessmentSummary={displaySummary}
               findings={displayFindings}
-              findingsLoading={!assessmentFindingsLoaded && assessmentFindingsError === null}
-              findingsLoadError={assessmentFindingsError}
+              findingsLoading={!findingRowsLoaded && findingRowsError === null}
+              findingsLoadError={findingRowsError}
               chains={chains}
               chainLinks={assessmentChainLinks}
               currentPhase={activeEngagement.current_phase}
               trackState={activeEngagement.track_state}
               aggregateComplete={activeEngagement.aggregate_complete}
-              assessmentRefreshVersion={assessmentRefreshVersion}
+              assessmentRefreshVersion={viewVersion("overview")}
+              readinessRefreshVersion={scopeVersion(scopeVersions, READINESS_SCOPES)}
             />
           )}
 
           {activeTab === "findings" && (
             <FindingsTab
               engagementKey={engagementKey}
-              findings={displayFindings}
-              ledgerLoading={!assessmentFindingsLoaded && assessmentFindingsError === null}
-              ledgerError={assessmentFindingsError}
+              findings={ledgerRows && ledgerRows.length > 0 ? ledgerRows : (displaySummary?.top_findings ?? [])}
+              ledgerLoading={ledgerRows === null && findingRowsError === null}
+              ledgerError={findingRowsError}
               fallbackFindings={displaySummary?.top_findings ?? []}
               chains={assessmentChains}
               chainLinks={assessmentChainLinks}
-              assessmentRefreshVersion={assessmentRefreshVersion}
+              assessmentRefreshVersion={viewVersion("findings")}
               initialFindingSlug={pendingFindingSlug}
               initialDrawerTab={pendingDrawerTab}
+              renderRuntimeProof={renderRuntimeProof}
             />
           )}
 
-          {activeTab === "proof" && <ProofWorkTab engagementKey={engagementKey} refreshVersion={assessmentRefreshVersion} />}
+          {activeTab === "proof" && (
+            <ProofWorkTab
+              engagementKey={engagementKey}
+              refreshVersion={viewVersion("proof")}
+              workId={routed("proof", initialWorkId)}
+              onQueueCounts={handleProofQueueCounts}
+            />
+          )}
 
           {activeTab === "runs" && (
             <RunsTab
               engagementKey={engagementKey}
-              refreshVersion={assessmentRefreshVersion}
+              refreshVersion={viewVersion("runs")}
               initialRunId={initialRunId}
               initialSection={initialRunSection}
               initialObject={initialRunObject}
+              initialDrawerTab={routed("runs", initialDrawerTab)}
+              onHealthCounts={handleRunHealth}
             />
           )}
 
           {activeTab === "submissions" && (
             <SubmissionsTab
               engagementKey={engagementKey}
-              refreshVersion={assessmentRefreshVersion}
+              refreshVersion={viewVersion("submissions")}
+              initialSubmissionSlug={routed("submissions", initialSubmissionSlug)}
+              initialDrawerTab={routed("submissions", initialDrawerTab)}
+              onToDoCount={setSubmissionsToDo}
             />
           )}
 
@@ -828,15 +981,7 @@ function EngagementWorkspace({
             <CodeAnalysisTab
               engagementKey={engagementKey}
               persistedPhase={activeEngagement.track_state?.code?.phase ?? "unknown"}
-              loadError={codeLoadError}
-              repos={codeRepos}
-              modules={codeModules}
-              queueStats={codeQueueStats}
-              queueItems={codeQueueItems}
-              coverage={codeCoverage}
-              readiness={codeReadiness}
-              completionReadiness={codeCompletionReadiness}
-              results={codeResults}
+              refreshVersion={viewVersion("code")}
             />
           )}
 
@@ -844,22 +989,31 @@ function EngagementWorkspace({
             <CoverageTab
               engagementKey={engagementKey}
               summary={displaySummary}
-              targets={assessmentTargets}
-              services={assessmentServices}
-              coverageItems={assessmentCoverageItems}
+              refreshVersion={viewVersion("coverage")}
+              initialItemId={routed("coverage", initialCoverageItemId)}
+              initialDrawerTab={routed("coverage", initialDrawerTab)}
             />
           )}
 
           {activeTab === "activity" && (
-            <ActivityTab engagementKey={engagementKey} events={displayEvents} sessions={sessions} />
+            <ActivityTab
+              engagementKey={engagementKey}
+              refreshVersion={viewVersion("activity")}
+              initialQuery={routed("activity", initialActivityQuery)}
+              initialCategories={routed("activity", activityCategories)}
+              initialActor={routed("activity", initialActivityActor)}
+              initialRange={routed("activity", initialActivityRange)}
+            />
           )}
 
           {activeTab === "intel" && (
             <IntelTab
               engagementKey={engagementKey}
               summary={intelSummary}
-              initialIntelType={initialTab === "intel" ? initialIntelType : undefined}
-              initialIntelId={initialTab === "intel" ? initialIntelId : undefined}
+              refreshVersion={viewVersion("intel")}
+              initialIntelType={routed("intel", initialIntelType)}
+              initialIntelId={routed("intel", initialIntelId)}
+              initialDrawerTab={routed("intel", initialDrawerTab)}
             />
           )}
 
@@ -867,38 +1021,50 @@ function EngagementWorkspace({
             <SurfacesTab
               engagementKey={engagementKey}
               surfaces={assessmentSurfaces}
+              snapshotLimit={SURFACE_FETCH_LIMIT}
               loadError={surfaceLoadError}
               findings={displayFindings}
+              initialSurfaceId={routed("surfaces", initialSurfaceId)}
+              initialDrawerTab={routed("surfaces", initialDrawerTab)}
             />
           )}
 
           {activeTab === "http" && (
             <HttpTab
               engagementKey={engagementKey}
-              refreshVersion={assessmentRefreshVersion}
-              initialRequestVariantId={initialTab === "http" ? initialRequestVariantId : undefined}
+              refreshVersion={viewVersion("http")}
+              initialView={routed("http", initialHttpView && HTTP_VIEWS.has(initialHttpView) ? initialHttpView as "inventory" | "exchanges" : undefined)}
+              initialRequestVariantId={routed("http", initialRequestVariantId)}
+              initialFlowId={routed("http", initialFlowId)}
+              initialDrawerTab={routed("http", initialDrawerTab)}
             />
           )}
 
           {activeTab === "commands" && (
-            <CommandsTab engagementKey={engagementKey} />
+            <CommandsTab
+              engagementKey={engagementKey}
+              refreshVersion={viewVersion("commands")}
+              commandId={routed("commands", initialCommandId)}
+              initialDrawerTab={routed("commands", initialDrawerTab)}
+              onAttentionCount={setCommandsNeedingAttention}
+            />
           )}
 
           {activeTab === "oast" && (
-            <OastTab engagementKey={engagementKey} refreshVersion={assessmentRefreshVersion} />
-          )}
-
-          {activeTab === "log" && (
-            <LogTab engagementKey={engagementKey} refreshVersion={assessmentRefreshVersion} />
+            <OastTab
+              engagementKey={engagementKey}
+              refreshVersion={viewVersion("oast")}
+              initialProbeId={routed("oast", initialProbeId)}
+              initialDrawerTab={routed("oast", initialDrawerTab)}
+              onToReviewCount={setOastToReview}
+            />
           )}
 
           {activeTab === "artifacts" && (
-            <ArtifactViewer
-              artifacts={artifacts}
-              selectedName={selectedName}
-              selectedArtifact={selectedArtifact}
-              loadError={artifactLoadError?.name === selectedName ? artifactLoadError.message : null}
-              onSelect={setSelectedName}
+            <FilesTab
+              engagementKey={engagementKey}
+              refreshVersion={viewVersion("artifacts")}
+              initialFileName={routed("artifacts", initialFileName)}
             />
           )}
           </div>

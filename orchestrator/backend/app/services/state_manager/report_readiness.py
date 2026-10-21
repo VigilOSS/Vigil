@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
@@ -66,6 +67,52 @@ def _normalize_report_evidence_ref(root: Path, evidence_ref: str) -> str:
         return _normalize_relative_path(root, evidence_ref)
     except HTTPException:
         return evidence_ref
+
+
+_REPORT_ARTIFACT_COLUMNS = (
+    "id",
+    "relative_path",
+    "present",
+    "scratch",
+    "producer_agent_id",
+    "producer_command_run_id",
+    "related_finding_slug",
+    "related_chain_key",
+    "related_surface_id",
+    "related_request_variant_id",
+)
+
+
+def _artifact_rows_by_id(
+    connection,
+    engagement_id: int,
+    artifact_ids: Iterable[int],
+    *,
+    include_text: bool,
+) -> dict[int, dict[str, Any]]:
+    """Load the named artifacts of one engagement by id, in id order.
+
+    ``indexed_text`` is the file's full extracted text; only the markdown
+    citation scan reads it.
+    """
+    ids = sorted({int(artifact_id) for artifact_id in artifact_ids})
+    if not ids:
+        return {}
+    columns = ", ".join(
+        f"artifacts.{column}"
+        for column in (*_REPORT_ARTIFACT_COLUMNS, *(("indexed_text",) if include_text else ()))
+    )
+    # CROSS JOIN pins the requested ids as the outer loop so each artifact is a
+    # rowid seek; left to itself the planner prefers walking the engagement.
+    rows = connection.execute(
+        f"SELECT {columns} FROM json_each(?) AS wanted "
+        "CROSS JOIN assessment_artifacts AS artifacts ON artifacts.id = wanted.value "
+        "WHERE artifacts.engagement_id = ? "
+        "ORDER BY artifacts.id",
+        (json.dumps(ids), engagement_id),
+    ).fetchall()
+    return {int(row["id"]): dict(row) for row in rows}
+
 
 def _report_candidate_records(engagement_id: int) -> list[dict[str, Any]]:
     engagement = _engagement_or_404(engagement_id)
@@ -725,17 +772,54 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
             )
 
     with _common.get_connection() as connection:
-        artifact_rows = {
-            str(row["relative_path"]): dict(row)
+        # Artifact rows carry each file's full extracted text, so reading every
+        # row of a long engagement materializes gigabytes. Enumerate paths from
+        # the covering (engagement_id, relative_path) index and load rows only
+        # for what this gate inspects: durable markdown notes (with their text)
+        # and the evidence the reportable candidates cite (without it).
+        artifact_ids_by_path = {
+            str(row["relative_path"]): int(row["id"])
             for row in connection.execute(
-                "SELECT * FROM assessment_artifacts WHERE engagement_id = ?",
+                "SELECT id, relative_path FROM assessment_artifacts WHERE engagement_id = ?",
                 (engagement_id,),
             ).fetchall()
         }
-        missing_citations: dict[str, set[str]] = {}
-        for artifact_path, artifact in artifact_rows.items():
-            if not _is_durable_markdown_path(artifact_path):
+        evidence_artifact_ids = {
+            int(row["evidence_artifact_id"])
+            for row in candidates
+            if row.get("evidence_artifact_id") is not None
+        }
+        for row in candidates:
+            evidence_ref = str(row.get("evidence_ref", "") or "").strip()
+            if not evidence_ref:
                 continue
+            try:
+                indexed_path = _normalize_report_evidence_ref(engagement_root, evidence_ref)
+            except (OSError, RuntimeError, ValueError):
+                # Prefetch only: the candidate loop below normalizes again and
+                # fails exactly where it always has.
+                continue
+            if indexed_path in artifact_ids_by_path:
+                evidence_artifact_ids.add(artifact_ids_by_path[indexed_path])
+        markdown_artifacts = _artifact_rows_by_id(
+            connection,
+            engagement_id,
+            [
+                artifact_id
+                for path, artifact_id in artifact_ids_by_path.items()
+                if _is_durable_markdown_path(path)
+            ],
+            include_text=True,
+        )
+        artifact_rows_by_id = {
+            **_artifact_rows_by_id(
+                connection, engagement_id, evidence_artifact_ids, include_text=False
+            ),
+            **markdown_artifacts,
+        }
+        missing_citations: dict[str, set[str]] = {}
+        for artifact in markdown_artifacts.values():
+            artifact_path = str(artifact["relative_path"])
             if not bool(artifact.get("present")):
                 continue
             if bool(artifact.get("scratch")):
@@ -788,7 +872,6 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
                     ),
                 }
             )
-        artifact_rows_by_id = {int(a["id"]): a for a in artifact_rows.values() if a.get("id")}
         for row in candidates:
             slug = str(row.get("slug", ""))
             evidence_ref = str(row.get("evidence_ref", "") or "").strip()
@@ -838,7 +921,12 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
                 )
                 continue
             indexed_evidence_ref = _normalize_report_evidence_ref(engagement_root, evidence_ref)
-            artifact = artifact_rows.get(indexed_evidence_ref)
+            indexed_artifact_id = artifact_ids_by_path.get(indexed_evidence_ref)
+            artifact = (
+                artifact_rows_by_id.get(indexed_artifact_id)
+                if indexed_artifact_id is not None
+                else None
+            )
             if artifact is None:
                 blockers.append(
                     {

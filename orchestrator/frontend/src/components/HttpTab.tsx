@@ -1,15 +1,22 @@
 // ── HttpTab ───────────────────────────────────────────────────────────
-// Read-only view over the engagement's HTTP traffic. One grid row per
-// REQUEST VARIANT (assessment_request_variants); the per-variant detail
-// drawer lists the request_observations recorded against that variant.
+// Read-only view over the engagement's HTTP traffic, in two views named in the
+// URL (`view=`): the endpoint inventory (one row per REQUEST VARIANT, with
+// every observation recorded against it) and the captured exchanges (the
+// full-flow store, `view=exchanges`). Opening a request or an exchange
+// replaces the list with the shared record view; Back, Escape and browser
+// Back return to the list.
 //
-// Data is fetched once at the tab level (variants + observations) and
-// filtered client-side via method chips + a text search on path/host —
-// mirroring CommandsTab/SurfacesTab's React-state filter pipeline (NOT
-// ag-grid column filters). The grid itself is lazy-loaded so ag-grid lands
-// in the shared code-split chunk and never bloats the main entry bundle.
+// The inventory is server-backed end to end: paged rows with a visible total
+// (`/request-variants/page`, read by the infinite grid), server search and
+// facet counts (`/facets`), a deep-linked request read by id, its place in
+// the paged order for Previous / Next (`/{id}/position`), and its own
+// observation history (`/{id}/observations`). Nothing is counted over a
+// loaded window. Exchanges filter server-side and load newest first, a page
+// at a time. The grids are lazy-loaded so ag-grid lands in the shared
+// code-split chunk and never bloats the main entry bundle.
 
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import type { GridApi } from "ag-grid-community";
 import { engagementHref, writeWorkspaceHash } from "../lib/workspaceRoutes";
 import type {
   CapturePolicy,
@@ -25,36 +32,70 @@ import {
   getCapturePolicy,
   getHttpFlow,
   listHttpFlows,
-  listRequestObservations,
-  listRequestVariants,
   setCapturePolicy,
 } from "../lib/api";
-import { useBodyScrollLock, useModalFocus } from "../lib/modalScrollLock";
+import {
+  DEFAULT_REQUEST_VARIANT_ORDER,
+  EMPTY_REQUEST_VARIANT_FILTERS,
+  FLOW_PAGE_SIZE,
+  FLOW_REFRESH_PROBE,
+  REQUEST_VARIANT_FACETS,
+  REQUEST_VARIANT_SORT_LABELS,
+  activeRequestVariantFilterCount,
+  fetchRequestVariant,
+  fetchRequestVariantFacets,
+  fetchRequestVariantObservations,
+  fetchRequestVariantPosition,
+  readLedgerHead,
+  requestVariantFiltersKey,
+  type RequestVariantFacetName,
+  type RequestVariantFilters,
+  type RequestVariantOrder,
+} from "../lib/httpApi";
 import { useToast } from "../contexts/ToastContext";
-import { CodeBlock, RelTime } from "./formatting";
-import { KV, ProseSection } from "./drawer/DrawerKit";
-import { TableSkeleton } from "./Skeletons";
+import { CodeBlock, TimeStamp, formatBytes } from "./formatting";
+import { KV, KVTime, ProseSection } from "./drawer/DrawerKit";
+import { CardSkeleton, SlowLoadHint, TableSkeleton } from "./Skeletons";
+import {
+  ClearFiltersButton,
+  EmptyState,
+  FacetChipGroup,
+  PageHeader,
+  ResultsSummary,
+  SegmentedControl,
+  StatusPill,
+  describeSort,
+  statusEntry,
+  statusTone,
+  type FacetChipValue,
+  type PageStat,
+} from "./ui";
+import { useCoalescedRequest } from "../lib/useCoalescedRequest";
+import { useLiveRefreshToken } from "../lib/useLiveRefreshToken";
+import {
+  RecordBody,
+  RecordCopyButton,
+  RecordCopyLinkButton,
+  RecordHeader,
+  RecordTabs,
+  RecordView,
+  useResultsScrollMemory,
+} from "./record/RecordView";
+import { useLedgerWindow } from "./record/ledgerWindow";
+import { useGridView, useRecordPosition, useWindowedNavigation, windowedReviewOrder } from "./record/recordNavigation";
+import type { HttpGridWindow } from "./HttpGrid";
+import "../styles/http.css";
 
 const HttpGrid = lazy(() => import("./HttpGrid"));
 const HttpFlowsGrid = lazy(() => import("./HttpFlowsGrid"));
 
-// Compact human byte size — shared with the flows grid / drawer.
-function fmtBytes(n: number | null | undefined): string {
-  if (n == null || n <= 0) return "0 B";
-  if (n < 1024) return `${n} B`;
-  const kb = n / 1024;
-  if (kb < 1024) return `${kb < 10 ? kb.toFixed(1) : Math.round(kb)} KB`;
-  const mb = kb / 1024;
-  return `${mb < 10 ? mb.toFixed(1) : Math.round(mb)} MB`;
-}
-
-// Which sub-view of the HTTP tab is active: the legacy request-variant list
-// or the Phase-5 canonical full-flow store.
+// Which view of the HTTP tab is active: the request-variant inventory or the
+// canonical full-flow store (`view=exchanges` in the URL).
 type HttpView = "variants" | "flows";
 
 // ── HTTP method colors ────────────────────────────────────────────────
 // Mapped onto the Vigil palette. The class drives the colored .method-badge in
-// both the grid and the drawer hero — see app.css "HTTP method colors".
+// both the grids and the record title — see app.css "HTTP method colors".
 const METHOD_CLASSES: Record<string, string> = {
   GET: "m-get",
   POST: "m-post",
@@ -69,20 +110,24 @@ export function methodClass(method: string): string {
   return METHOD_CLASSES[(method || "").toUpperCase()] || "m-other";
 }
 
-// Map an HTTP status code to a status-class bucket (2xx/3xx/4xx/5xx).
-export function statusClass(status: number | null | undefined): string {
-  if (status == null) return "";
+const methodColor = (method: string) => `var(--${methodClass(method)})`;
+
+// An HTTP status code's class in the shared `http-response` vocabulary
+// (2xx, 3xx, 4xx, 5xx; anything below 200 reads as 1xx).
+function responseClass(status: number): string {
   const bucket = Math.floor(status / 100);
-  if (bucket === 2) return "s-2xx";
-  if (bucket === 3) return "s-3xx";
-  if (bucket === 4) return "s-4xx";
-  if (bucket >= 5) return "s-5xx";
-  return "s-1xx";
+  return bucket >= 5 ? "5xx" : bucket >= 2 ? `${bucket}xx` : "1xx";
+}
+
+/** One response status code as a status pill (tone by class, the code as text). */
+export function HttpStatusPill({ status, size = "sm" }: { status: number; size?: "sm" | "md" }) {
+  const entry = statusEntry("http-response", responseClass(status));
+  return <StatusPill value={String(status)} label={String(status)} tone={entry.tone} title={`${status}: ${entry.meaning}`} size={size} />;
 }
 
 // ── Schema pretty-print ───────────────────────────────────────────────
 // The *_schema_json columns are JSON-encoded strings. Parse + re-stringify
-// with 2-space indent for the drawer; fall back to the raw string when it
+// with 2-space indent for the record; fall back to the raw string when it
 // isn't valid JSON. An empty / "{}" schema renders nothing.
 function prettyJson(raw: string | null | undefined): string | null {
   const text = (raw || "").trim();
@@ -115,303 +160,413 @@ const IconClose = () => (
   </svg>
 );
 
+type ToastFn = (message: string, type?: "success" | "error" | "info") => void;
+
 type HttpTabProps = {
   engagementKey: string;
+  /** `request=` in the URL: the request variant whose record is open. */
   initialRequestVariantId?: number;
   // Bumped by EngagementPage after every successful page refresh (including
   // WebSocket-driven ones). A change triggers a silent background reload so
   // this tab stays live alongside the others without flickering to a spinner.
   refreshVersion?: number;
+  /** `flow=` in the URL: the captured exchange whose record is open. */
+  initialFlowId?: number;
+  /** `dtab=` in the URL: the open record's section. */
+  initialDrawerTab?: string;
+  /** `view=` in the URL: endpoint inventory or captured exchanges. */
+  initialView?: "inventory" | "exchanges";
 };
 
-const INITIAL_FETCH_LIMIT = 5000;
+// A request record reads its observation history this many at a time.
+const OBSERVATION_PAGE_SIZE = 100;
+const SEARCH_DEBOUNCE_MS = 300;
+// A burst of live updates refreshes the inventory at most this often (with a trailing refresh).
+const LIVE_REFRESH_MIN_MS = 5000;
 
-export function HttpTab({ engagementKey, refreshVersion, initialRequestVariantId }: HttpTabProps) {
+const PURPOSE = "Every request Vigil has seen against the target. The endpoint inventory groups them into distinct request shapes; captured exchanges keep full requests and responses while full-flow capture is on.";
+
+// ── Record sections (`dtab` in the URL) ───────────────────────────────
+type VariantSection = "request" | "observations" | "schema";
+const VARIANT_SECTIONS: readonly VariantSection[] = ["request", "observations", "schema"];
+type FlowSection = "exchange" | "headers" | "bodies" | "routing";
+const FLOW_SECTIONS: readonly FlowSection[] = ["exchange", "headers", "bodies", "routing"];
+
+function isVariantSection(value: string | null | undefined): value is VariantSection {
+  return typeof value === "string" && (VARIANT_SECTIONS as readonly string[]).includes(value);
+}
+function isFlowSection(value: string | null | undefined): value is FlowSection {
+  return typeof value === "string" && (FLOW_SECTIONS as readonly string[]).includes(value);
+}
+
+const EMPTY_FLOWS: HttpFlow[] = [];
+/** The rows a ledger window holds (null before its first page). */
+type HeldFlows = HttpFlow[] | null;
+const rowId = (row: { id: number }) => row.id;
+
+function schemaBlocksOf(variant: RequestVariant): { label: string; text: string }[] {
+  const fields: [string, string | undefined][] = [
+    ["Query schema", variant.query_schema_json],
+    ["Body schema", variant.body_schema_json],
+    ["Path schema", variant.path_schema_json],
+    ["Cookie schema", variant.cookie_schema_json],
+    ["Header schema", variant.header_schema_json],
+  ];
+  return fields.flatMap(([label, raw]) => {
+    const text = prettyJson(raw);
+    return text ? [{ label, text }] : [];
+  });
+}
+
+function viewFromRoute(initialView: HttpTabProps["initialView"], flowId?: number, requestId?: number): HttpView {
+  // A record link names its view: an exchange opens the exchanges, a request the inventory.
+  if (flowId !== undefined) return "flows";
+  if (requestId !== undefined) return "variants";
+  return initialView === "exchanges" ? "flows" : "variants";
+}
+
+/** The list URL of a view (`view=exchanges` for the exchanges; the inventory is the default). */
+function listHref(engagementKey: string, view: HttpView): string {
+  return engagementHref(engagementKey, { tab: "http", view: view === "flows" ? "exchanges" : undefined });
+}
+
+type ViewCounts = { variants: number | null; exchanges: { count: number; partial: boolean } | null };
+
+export function HttpTab({ engagementKey, refreshVersion, initialRequestVariantId, initialFlowId, initialDrawerTab, initialView }: HttpTabProps) {
   const { toast } = useToast();
-  const [variants, setVariants] = useState<RequestVariant[]>([]);
-  const [observations, setObservations] = useState<RequestObservation[]>([]);
-  const [observationsLoaded, setObservationsLoaded] = useState(false);
-  const [observationError, setObservationError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [loadError, setLoadError] = useState<string | null>(null);
-
-  const [query, setQuery] = useState("");
-  const [methodFilters, setMethodFilters] = useState<Set<string>>(new Set());
-  const [selected, setSelected] = useState<RequestVariant | null>(null);
-  const [view, setView] = useState<HttpView>("variants");
-
-  const searchRef = useRef<HTMLInputElement | null>(null);
-  const drawerInvokerRef = useRef<HTMLElement | null>(null);
-  const consumedRequestVariantRef = useRef<number | undefined>(undefined);
-  const closeRequest = useCallback(() => {
-    setSelected(null);
-    writeWorkspaceHash(engagementHref(engagementKey, { tab: "http" }));
+  const [view, setView] = useState<HttpView>(() => viewFromRoute(initialView, initialFlowId, initialRequestVariantId));
+  // The URL owns the view; history and links move it.
+  useEffect(() => {
+    setView(viewFromRoute(initialView, initialFlowId, initialRequestVariantId));
+  }, [initialView, initialFlowId, initialRequestVariantId]);
+  const chooseView = useCallback((next: HttpView) => {
+    setView(next);
+    writeWorkspaceHash(listHref(engagementKey, next));
   }, [engagementKey]);
 
-  // Fetch variants + observations together. Both are read-only and the
-  // observations are grouped to variants client-side, so a single fetch
-  // covers the whole tab. `showSpinner=false` is used for background
-  // refreshes (WS tick / visibility) so the list doesn't flicker.
-  const reloadInFlightRef = useRef(false);
-  const reloadQueuedRef = useRef<{ engagementKey: string; showSpinner: boolean } | null>(null);
-  const activeEngagementKeyRef = useRef(engagementKey);
-  activeEngagementKeyRef.current = engagementKey;
-  const reload = useCallback(
-    async (showSpinner = true) => {
-      if (reloadInFlightRef.current) {
-        const queued = reloadQueuedRef.current;
-        reloadQueuedRef.current = {
-          engagementKey,
-          showSpinner: showSpinner || queued?.showSpinner === true,
-        };
-        return;
-      }
-      reloadInFlightRef.current = true;
-      try {
-        let next: { engagementKey: string; showSpinner: boolean } | null = {
-          engagementKey,
-          showSpinner,
-        };
-        while (next) {
-          const request = next;
-          reloadQueuedRef.current = null;
-          if (request.showSpinner && activeEngagementKeyRef.current === request.engagementKey) {
-            setLoading(true);
-          }
-          try {
-            const [variantResult, observationResult] = await Promise.allSettled([
-              listRequestVariants(request.engagementKey, { limit: INITIAL_FETCH_LIMIT }),
-              listRequestObservations(request.engagementKey, { limit: INITIAL_FETCH_LIMIT }),
-            ]);
-            if (activeEngagementKeyRef.current === request.engagementKey) {
-              if (variantResult.status === "rejected") throw variantResult.reason;
-              setVariants(variantResult.value);
-              setLoadError(null);
-              if (observationResult.status === "fulfilled") {
-                setObservations(observationResult.value);
-                setObservationsLoaded(true);
-                setObservationError(null);
-              } else {
-                setObservationError(
-                  observationResult.reason instanceof Error
-                    ? observationResult.reason.message
-                    : "Failed to load request observations",
-                );
-              }
-            }
-          } catch (err) {
-            if (
-              activeEngagementKeyRef.current === request.engagementKey
-              && request.showSpinner
-            ) {
-              setVariants([]);
-              setObservations([]);
-              setObservationsLoaded(false);
-            }
-            if (activeEngagementKeyRef.current === request.engagementKey) {
-              setLoadError(err instanceof Error ? err.message : "Failed to load HTTP traffic");
-            }
-          } finally {
-            if (
-              request.showSpinner
-              && activeEngagementKeyRef.current === request.engagementKey
-            ) {
-              setLoading(false);
-            }
-          }
-          next = reloadQueuedRef.current;
-        }
-      } finally {
-        reloadInFlightRef.current = false;
-      }
-    },
-    [engagementKey],
+  // Counts each view last reported, so the switch shows both.
+  const [counts, setCounts] = useState<ViewCounts>({ variants: null, exchanges: null });
+  useEffect(() => setCounts({ variants: null, exchanges: null }), [engagementKey]);
+  const reportVariants = useCallback((variants: number) => {
+    setCounts((current) => (current.variants === variants ? current : { ...current, variants }));
+  }, []);
+  const reportExchanges = useCallback((count: number, partial: boolean) => {
+    setCounts((current) => (current.exchanges?.count === count && current.exchanges.partial === partial
+      ? current
+      : { ...current, exchanges: { count, partial } }));
+  }, []);
+
+  const viewSwitch = (
+    <SegmentedControl<HttpView>
+      label="HTTP view"
+      value={view}
+      onChange={chooseView}
+      options={[
+        {
+          value: "variants",
+          label: "Endpoint inventory",
+          count: counts.variants,
+          description: "One row per distinct request shape (method, host, path, parameters), with every time it was seen.",
+        },
+        {
+          value: "flows",
+          label: "Captured exchanges",
+          count: counts.exchanges?.count,
+          countPartial: counts.exchanges?.partial,
+          description: "Full request and response records the Vigil proxy captured while full-flow capture was on.",
+        },
+      ]}
+    />
   );
 
-  useEffect(() => {
-    void reload(true);
-  }, [reload]);
-
-  // Silent background reload whenever the parent's refresh version bumps
-  // (poll tick / WebSocket event). Skip the very first render so it doesn't
-  // double-fetch alongside the mount load above. matches how other tabs ride
-  // the page-level WS refresh.
-  const didInitialMountRef = useRef(false);
-  useEffect(() => {
-    if (!didInitialMountRef.current) {
-      didInitialMountRef.current = true;
-      return;
-    }
-    void reload(false);
-  }, [refreshVersion, reload]);
-
-  // Background refresh when visibility returns so the tab stays live alongside
-  // the EngagementPage WS refresh (which re-mounts/keeps this tab and the
-  // parent throttle owns the cadence). A light visibility refresh matches
-  // CommandsTab's self-owned refresh approach.
-  useEffect(() => {
-    const onVisible = () => {
-      if (document.visibilityState === "visible") void reload(false);
-    };
-    document.addEventListener("visibilitychange", onVisible);
-    return () => document.removeEventListener("visibilitychange", onVisible);
-  }, [reload]);
-
-  // Group observations by request_variant_id (fetched once at tab level).
-  const observationsByVariant = useMemo(() => {
-    const m = new Map<number, RequestObservation[]>();
-    for (const o of observations) {
-      const list = m.get(o.request_variant_id) ?? [];
-      list.push(o);
-      m.set(o.request_variant_id, list);
-    }
-    // Newest observation first within each variant.
-    for (const list of m.values()) {
-      list.sort((a, b) => (b.created_at || "").localeCompare(a.created_at || ""));
-    }
-    return m;
-  }, [observations]);
-
-  const observationCounts = useMemo(() => {
-    const m = new Map<number, number>();
-    for (const [id, list] of observationsByVariant) m.set(id, list.length);
-    return m;
-  }, [observationsByVariant]);
-
-  // Resolve exact cross-workspace links only after the bounded variant ledger
-  // has loaded. Consume each id once so closing the drawer does not reopen it.
-  useEffect(() => {
-    if (!initialRequestVariantId) {
-      if (consumedRequestVariantRef.current !== undefined) setSelected(null);
-      consumedRequestVariantRef.current = undefined;
-      return;
-    }
-    if (loading) return;
-    if (consumedRequestVariantRef.current === initialRequestVariantId) return;
-    const variant = variants.find((candidate) => candidate.id === initialRequestVariantId);
-    if (variant) {
-      consumedRequestVariantRef.current = initialRequestVariantId;
-      setView("variants");
-      setSelected(variant);
-    } else {
-      consumedRequestVariantRef.current = undefined;
-      setSelected(null);
-    }
-  }, [initialRequestVariantId, loading, variants]);
-
-  // Method counts over the unfiltered set so chips stay meaningful.
-  const methodCounts = useMemo(() => {
-    const c: Record<string, number> = {};
-    for (const v of variants) {
-      const k = (v.method || "GET").toUpperCase();
-      c[k] = (c[k] || 0) + 1;
-    }
-    return c;
-  }, [variants]);
-
-  const filtered = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    return variants.filter((v) => {
-      if (methodFilters.size && !methodFilters.has((v.method || "GET").toUpperCase()))
-        return false;
-      if (q) {
-        const corpus = [
-          v.normalized_path,
-          v.host,
-          v.canonical_url,
-          v.path_template,
-          v.content_type_family,
-          v.auth_context,
-          v.discovery_source,
-        ]
-          .filter(Boolean)
-          .join(" \n ")
-          .toLowerCase();
-        if (!corpus.includes(q)) return false;
-      }
-      return true;
-    });
-  }, [variants, methodFilters, query]);
-
-  // Keep selection valid if it drops out of the variant set on refresh.
-  useEffect(() => {
-    if (selected && !variants.some((v) => v.id === selected.id)) {
-      setSelected(null);
-    }
-  }, [variants, selected]);
-
-  const toggleMethod = (m: string) => {
-    setMethodFilters((cur) => {
-      const next = new Set(cur);
-      if (next.has(m)) next.delete(m);
-      else next.add(m);
-      return next;
-    });
-  };
-
-  const clearAll = () => {
-    setQuery("");
-    setMethodFilters(new Set());
-  };
-
-  const activeFilterCount = methodFilters.size + (query ? 1 : 0);
-
-  // `/` focuses search, Esc blurs / closes the drawer. Only active in the
-  // variants view — the flows view (HttpFlowsView) owns its own shortcuts.
-  useEffect(() => {
-    if (view !== "variants") return;
-    const onKey = (e: KeyboardEvent) => {
-      const target = e.target as HTMLElement | null;
-      const tag = (target?.tagName || "").toLowerCase();
-      const isTyping = tag === "input" || tag === "textarea";
-      if (!isTyping && e.key === "/") {
-        e.preventDefault();
-        searchRef.current?.focus();
-        return;
-      }
-      if (e.key === "Escape") {
-        if (isTyping) searchRef.current?.blur();
-        else if (selected) closeRequest();
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [selected, view, closeRequest]);
-
-  const variantLimitReached = variants.length >= INITIAL_FETCH_LIMIT;
-  const observationLimitReached = observations.length >= INITIAL_FETCH_LIMIT;
-
   return (
-    <div className="findings-redesign">
-      <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 10 }}>
-        <HttpViewToggle view={view} onChange={setView} />
-      </div>
+    <div className="findings-redesign http-page">
       {view === "flows" ? (
         <HttpFlowsView
+          key={engagementKey}
           engagementKey={engagementKey}
           refreshVersion={refreshVersion}
           toast={toast}
+          initialFlowId={initialFlowId}
+          initialDrawerTab={initialDrawerTab}
+          viewSwitch={viewSwitch}
+          onCount={reportExchanges}
         />
       ) : (
-        <>
+        <HttpInventoryView
+          key={engagementKey}
+          engagementKey={engagementKey}
+          refreshVersion={refreshVersion}
+          toast={toast}
+          initialRequestVariantId={initialRequestVariantId}
+          initialDrawerTab={initialDrawerTab}
+          viewSwitch={viewSwitch}
+          onTotal={reportVariants}
+        />
+      )}
+    </div>
+  );
+}
+
+/** The HTTP page header: one title and purpose for both views, hidden under an open record. */
+function HttpPageHeader({ hidden, stats, status, actions, children }: {
+  hidden: boolean;
+  stats?: PageStat[];
+  status?: ReactNode;
+  actions?: ReactNode;
+  children: ReactNode;
+}) {
+  return (
+    <PageHeader title="HTTP" purpose={PURPOSE} stats={stats} status={status} actions={actions} hidden={hidden} className="http-head">
+      {children}
+    </PageHeader>
+  );
+}
+
+/** A view's saved search and filters (sessionStorage, per engagement), or an empty object. */
+function readSavedView(key: string): Record<string, unknown> {
+  try {
+    const value: unknown = JSON.parse(window.sessionStorage.getItem(key) || "{}");
+    return value && typeof value === "object" ? value as Record<string, unknown> : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeSavedView(key: string, view: object): void {
+  try {
+    window.sessionStorage.setItem(key, JSON.stringify(view));
+  } catch {
+    // Browser storage may be unavailable; the view just resets next visit.
+  }
+}
+
+const savedString = (value: unknown) => (typeof value === "string" ? value : "");
+const savedStrings = (value: unknown) => (Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : []);
+
+// ── Endpoint inventory ────────────────────────────────────────────────
+
+const FACET_GROUPS: { name: RequestVariantFacetName; label: string; collapsedLimit?: number }[] = [
+  { name: "method", label: "Method" },
+  { name: "auth_context", label: "Auth" },
+  { name: "source", label: "Source" },
+  { name: "host", label: "Host", collapsedLimit: 6 },
+  { name: "content_type", label: "Content type" },
+];
+
+/** The open request: its id, and its row once known (a deep link starts without one). */
+type OpenRequest = { id: number; row: RequestVariant | null };
+
+function HttpInventoryView({
+  engagementKey,
+  refreshVersion,
+  toast,
+  initialRequestVariantId,
+  initialDrawerTab,
+  viewSwitch,
+  onTotal,
+}: {
+  engagementKey: string;
+  refreshVersion?: number;
+  toast: ToastFn;
+  initialRequestVariantId?: number;
+  initialDrawerTab?: string;
+  viewSwitch: ReactNode;
+  onTotal: (total: number) => void;
+}) {
+  // Search and filters survive leaving the tab.
+  const viewKey = `http.inventory.${engagementKey}`;
+  const [filters, setFilters] = useState<RequestVariantFilters>(() => {
+    const saved = readSavedView(viewKey);
+    const restored = { ...EMPTY_REQUEST_VARIANT_FILTERS, q: savedString(saved.q) };
+    for (const name of REQUEST_VARIANT_FACETS) restored[name] = savedStrings(saved[name]);
+    return restored;
+  });
+  const [searchText, setSearchText] = useState(filters.q);
+  useEffect(() => writeSavedView(viewKey, { ...filters, q: searchText }), [viewKey, filters, searchText]);
+  const [order, setOrder] = useState<RequestVariantOrder>(DEFAULT_REQUEST_VARIANT_ORDER);
+  const refreshToken = useLiveRefreshToken(refreshVersion, LIVE_REFRESH_MIN_MS);
+  const [gridWindow, setGridWindow] = useState<HttpGridWindow>({ total: null, first: 0, last: 0 });
+  const [gridError, setGridError] = useState<string | null>(null);
+  const searchRef = useRef<HTMLInputElement | null>(null);
+  const invokerRef = useRef<HTMLElement | null>(null);
+  const gridApiRef = useRef<GridApi<RequestVariant> | null>(null);
+
+  // Typing updates the box immediately; the server sees it after a pause.
+  useEffect(() => {
+    if (searchText === filters.q) return undefined;
+    const timer = window.setTimeout(() => setFilters((current) => ({ ...current, q: searchText })), SEARCH_DEBOUNCE_MS);
+    return () => window.clearTimeout(timer);
+  }, [searchText, filters.q]);
+
+  const filtersKey = useMemo(() => requestVariantFiltersKey(filters), [filters]);
+  const facets = useCoalescedRequest(
+    `${engagementKey}\u0000${filtersKey}`,
+    useCallback(() => fetchRequestVariantFacets(engagementKey, filters), [engagementKey, filters]),
+    refreshToken,
+  );
+  const engagementTotal = facets.data?.engagement_total ?? null;
+  useEffect(() => {
+    if (engagementTotal != null) onTotal(engagementTotal);
+  }, [engagementTotal, onTotal]);
+
+  const activeFilterCount = activeRequestVariantFilterCount(filters);
+  const toggleFacet = (name: RequestVariantFacetName, value: string) => {
+    setFilters((current) => {
+      const values = current[name].includes(value) ? current[name].filter((entry) => entry !== value) : [...current[name], value];
+      return { ...current, [name]: values };
+    });
+  };
+  const clearAll = () => {
+    setSearchText("");
+    setFilters(EMPTY_REQUEST_VARIANT_FILTERS);
+  };
+
+  // ── The open request (`request=` in the URL) ────
+  const [selected, setSelected] = useState<OpenRequest | null>(initialRequestVariantId !== undefined ? { id: initialRequestVariantId, row: null } : null);
+  const [lastOpenedId, setLastOpenedId] = useState<number | null>(initialRequestVariantId ?? null);
+  const [section, setSection] = useState<VariantSection>(isVariantSection(initialDrawerTab) ? initialDrawerTab : "request");
+  const [linkError, setLinkError] = useState<{ id: number; message: string; missing: boolean } | null>(null);
+  useEffect(() => {
+    if (initialRequestVariantId === undefined) {
+      setSelected(null);
+      return;
+    }
+    setLastOpenedId(initialRequestVariantId);
+    setSelected((current) => (current?.id === initialRequestVariantId ? current : { id: initialRequestVariantId, row: null }));
+  }, [initialRequestVariantId]);
+  useEffect(() => {
+    setSection(isVariantSection(initialDrawerTab) ? initialDrawerTab : "request");
+  }, [initialDrawerTab]);
+
+  // A linked request is read by id, and the open one re-read on live
+  // refresh: its counts and dates move as traffic arrives.
+  const selectedId = selected?.id ?? null;
+  const needsRow = selected !== null && selected.row === null;
+  useEffect(() => {
+    if (selectedId === null) return undefined;
+    if (!needsRow && refreshToken === 0) return undefined;
+    let active = true;
+    fetchRequestVariant(engagementKey, selectedId)
+      .then((row) => {
+        if (!active) return;
+        setLinkError(null);
+        setSelected((current) => (current?.id === row.id ? { id: row.id, row } : current));
+      })
+      .catch((error: unknown) => {
+        if (!active) return;
+        const missing = error instanceof ApiError && error.status === 404;
+        setLinkError({ id: selectedId, message: error instanceof Error ? error.message : "request failed", missing });
+      });
+    return () => {
+      active = false;
+    };
+    // Re-read on a live refresh even when the row is already known.
+  }, [engagementKey, selectedId, needsRow, refreshToken]);
+
+  const openRecord = useCallback((row: RequestVariant, invoker: HTMLElement | null) => {
+    invokerRef.current = invoker ?? searchRef.current;
+    setSelected({ id: row.id, row });
+    setLastOpenedId(row.id);
+    setSection("request");
+    writeWorkspaceHash(engagementHref(engagementKey, { tab: "http", request: row.id }));
+  }, [engagementKey]);
+  // Stepping keeps the open section.
+  const stepTo = useCallback((row: RequestVariant) => {
+    setSelected({ id: row.id, row });
+    setLastOpenedId(row.id);
+    writeWorkspaceHash(engagementHref(engagementKey, { tab: "http", request: row.id, dtab: section === "request" ? undefined : section }));
+  }, [engagementKey, section]);
+  const closeRecord = useCallback(() => {
+    setSelected(null);
+    setLinkError(null);
+    writeWorkspaceHash(listHref(engagementKey, "variants"));
+  }, [engagementKey]);
+  const chooseSection = useCallback((next: VariantSection) => {
+    setSection(next);
+    if (selectedId !== null) writeWorkspaceHash(engagementHref(engagementKey, { tab: "http", request: selectedId, dtab: next === "request" ? undefined : next }));
+  }, [engagementKey, selectedId]);
+
+  const unresolved = selected !== null && selected.row === null && linkError?.id === selected.id ? linkError : null;
+  const investigating = selected !== null && unresolved === null;
+
+  // Previous / Next walk the paged inventory in the grid's order: the server
+  // locates the open request under the current filters and sort.
+  const navigation = useRecordPosition<RequestVariant>({
+    key: investigating && selectedId !== null ? String(selectedId) : null,
+    identity: JSON.stringify([engagementKey, filtersKey, order.sort, order.dir, refreshToken]),
+    load: () => fetchRequestVariantPosition(engagementKey, selectedId as number, filters, order),
+    keyOf: (row) => String(row.id),
+    open: stepTo,
+  });
+  // Back to results lands on the record last shown: scroll the grid to it
+  // (by row when its block is loaded, else by its server position).
+  const lastIndexRef = useRef<number | null>(null);
+  if (investigating && typeof navigation.index === "number") lastIndexRef.current = navigation.index;
+  const reveal = useCallback((key: string) => {
+    const api = gridApiRef.current;
+    if (!api) return;
+    const node = api.getRowNode(key);
+    if (node) api.ensureNodeVisible(node, "middle");
+    else if (lastIndexRef.current !== null) api.ensureIndexVisible(lastIndexRef.current, "middle");
+  }, []);
+  const resultsRef = useRef<HTMLDivElement | null>(null);
+  useResultsScrollMemory(resultsRef, investigating, { recordKey: investigating ? selectedId : null, reveal });
+
+  // `/` focuses search (from a record too), Esc leaves the search box.
+  const investigatingRef = useRef(investigating);
+  investigatingRef.current = investigating;
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      const tag = (target?.tagName || "").toLowerCase();
+      const isTyping = tag === "input" || tag === "textarea" || tag === "select";
+      if (!isTyping && e.key === "/" && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        e.preventDefault();
+        if (investigatingRef.current) closeRecord();
+        queueMicrotask(() => searchRef.current?.focus());
+        return;
+      }
+      if (e.key === "Escape" && isTyping && target === searchRef.current) searchRef.current?.blur();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [closeRecord]);
+
+  const empty = engagementTotal === 0;
+  const noMatches = !empty && gridWindow.total === 0;
+  const sortLabel = REQUEST_VARIANT_SORT_LABELS[order.sort];
+  const facetGroups = facets.data?.facets;
+
+  return (
+    <>
+      <HttpPageHeader
+        hidden={investigating}
+        stats={[{ value: engagementTotal, label: "request variants", title: "Distinct request shapes in the endpoint inventory" }]}
+        status={facets.loading && facets.data ? "Updating…" : null}
+      >
+        {viewSwitch}
+      </HttpPageHeader>
+
       {/* Toolbar */}
-      <div className="panel findings-toolbar-panel">
+      <div className="panel findings-toolbar-panel" hidden={investigating}>
         <div className="toolbar">
           <div className="search-wrap">
             <IconSearch />
             <input
               ref={searchRef}
+              type="search"
               className="search-input"
-              placeholder="Search endpoint inventory — path, host, URL…"
+              placeholder="Search the inventory — path, host, URL, parameter, source…"
               aria-label="Search endpoint inventory"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
+              value={searchText}
+              onChange={(e) => setSearchText(e.target.value)}
             />
-            {query && (
+            {searchText && (
               <button
                 type="button"
                 className="icon-btn"
-                onClick={() => setQuery("")}
+                onClick={() => setSearchText("")}
                 title="Clear"
                 aria-label="Clear endpoint search"
                 style={{ width: 22, height: 22 }}
@@ -421,329 +576,374 @@ export function HttpTab({ engagementKey, refreshVersion, initialRequestVariantId
             )}
             <span className="search-kbd">/</span>
           </div>
-          <div className="toolbar-right">
-            <span className="meta-text">
-              {filtered.length} of {variants.length} variant
-              {variants.length === 1 ? "" : "s"}
-              {loading && " · loading…"}
-              {variantLimitReached && " · variant limit reached · results may be incomplete"}
-            </span>
-          </div>
         </div>
-        <div className="filter-row">
-          {Object.keys(methodCounts).length > 0 && (
-            <div className="filter-group">
-              <span className="filter-label">Method</span>
-              {Object.keys(methodCounts)
-                .sort((a, b) => methodCounts[b] - methodCounts[a] || a.localeCompare(b))
-                .map((m) => (
-                  <button
-                    key={m}
-                    type="button"
-                    className={`filter-chip method-chip ${methodClass(m)} ${
-                      methodFilters.has(m) ? "is-active" : ""
-                    }`}
-                    aria-pressed={methodFilters.has(m)}
-                    onClick={() => toggleMethod(m)}
-                  >
-                    <span className={`sev-dot method-dot ${methodClass(m)}`} />
-                    {m}
-                    <span className="filter-count">{methodCounts[m]}</span>
-                  </button>
-                ))}
-            </div>
-          )}
-          {activeFilterCount > 0 && (
-            <button type="button" className="filter-clear" onClick={clearAll}>
-              Clear all ({activeFilterCount})
-            </button>
-          )}
+        <div className="filter-row http-filter-row" hidden={empty}>
+          {FACET_GROUPS.map(({ name, label, collapsedLimit }) => {
+            const group = facetGroups?.[name];
+            if (!group) return null;
+            const selectedValues = new Set(filters[name]);
+            // A dimension every variant shares filters nothing.
+            if (group.distinct <= 1 && selectedValues.size === 0) return null;
+            const values: FacetChipValue[] = group.values.map((entry) => ({ value: entry.value ?? "", count: entry.count }));
+            return (
+              <FacetChipGroup
+                key={name}
+                label={label}
+                values={values}
+                selected={selectedValues}
+                onToggle={(value) => toggleFacet(name, value)}
+                colorFor={name === "method" ? methodColor : undefined}
+                collapsedLimit={collapsedLimit}
+                unlistedCount={Math.max(0, group.distinct - group.values.length)}
+              />
+            );
+          })}
+          <ClearFiltersButton count={activeFilterCount} onClear={clearAll} />
         </div>
       </div>
 
-      {loadError && (
-        <div className="panel findings-toolbar-panel" style={{ padding: 12 }}>
-          <p className="error-text" role="alert" style={{ textAlign: "left" }}>
-            {loadError}
+      {facets.error && !facets.data && (
+        <div className="panel findings-toolbar-panel http-banner" hidden={investigating}>
+          <p className="error-text" role="alert">Endpoint inventory counts unavailable: {facets.error}</p>
+        </div>
+      )}
+      {gridError && (
+        <div className="panel findings-toolbar-panel http-banner" hidden={investigating}>
+          <p className="error-text" role="alert">
+            Endpoint inventory unavailable: {gridError}
+            {gridWindow.total != null ? " · Showing the last loaded rows." : ""}
           </p>
         </div>
       )}
-      {!loading && initialRequestVariantId != null && !variants.some((variant) => variant.id === initialRequestVariantId) && <p className="meta-text" role="status">Request #{initialRequestVariantId} cannot be resolved from the loaded endpoint inventory. The bounded snapshot may be incomplete; refresh or inspect the full ledger.</p>}
-      {observationError && (
-        <div className="panel findings-toolbar-panel" style={{ padding: 12 }}>
-          <p className="error-text" role="alert" style={{ textAlign: "left" }}>
-            Request observations unavailable: {observationError}
-            {observationsLoaded ? " (showing the last loaded observation history)" : ""}
-          </p>
-        </div>
+      {unresolved && (
+        <p className="meta-text http-banner-text" role="status">
+          {unresolved.missing
+            ? `Request #${unresolved.id} is not in the endpoint inventory.`
+            : `Request #${unresolved.id} could not be opened: ${unresolved.message}`}
+        </p>
       )}
 
-      {/* Variants table */}
-      <section className="panel">
-        <div className="panel-header">
-          <h2>Endpoint inventory</h2>
-          <p className="meta-text">
-            {filtered.length} variant{filtered.length === 1 ? "" : "s"}
-            {observationsLoaded
-              ? ` · ${observations.length} observations`
-              : " · observations unavailable"}
-            {observationLimitReached
-              ? " · observation limit reached · results may be incomplete"
-              : ""}
-          </p>
-        </div>
+      {/* Inventory grid (the open record replaces it below) */}
+      <div ref={resultsRef} className="http-results" hidden={investigating}>
+        <section className="panel http-list-panel">
+          <div className="http-list-head">
+            {gridWindow.total != null ? (
+              <ResultsSummary
+                shown={gridWindow.total}
+                total={engagementTotal}
+                noun="request variants"
+                sort={describeSort(sortLabel.label, order.dir, sortLabel.kind)}
+              />
+            ) : (
+              <span className="meta-text" role="status">{facets.error || gridError ? "" : "Counting request variants…"}</span>
+            )}
+            {gridWindow.total != null && gridWindow.total > 0 && gridWindow.last > 0 && (
+              <span className="meta-text http-window">
+                Showing {gridWindow.first.toLocaleString()}–{gridWindow.last.toLocaleString()}
+              </span>
+            )}
+          </div>
+          <SlowLoadHint active={gridWindow.total == null && !gridError && !facets.error} what="the endpoint inventory" />
+          {empty ? (
+            <EmptyState variant="empty" title="No endpoint inventory recorded yet.">
+              Agents and the Vigil proxy add a request variant for each distinct request shape they see.
+            </EmptyState>
+          ) : (
+            <>
+              {noMatches && (
+                activeFilterCount > 0 ? (
+                  <EmptyState variant="filtered" title="No request variants match these filters." onClearFilters={clearAll}>
+                    The search and filters apply to the whole inventory of {(engagementTotal ?? 0).toLocaleString()} request variants.
+                  </EmptyState>
+                ) : (
+                  <EmptyState variant="empty" title="No request variants to show yet." />
+                )
+              )}
+              <div className="http-grid-wrap" hidden={noMatches}>
+                <Suspense fallback={<TableSkeleton rows={8} showHeader={false} />}>
+                  <HttpGrid
+                    engagementKey={engagementKey}
+                    filters={filters}
+                    filtersKey={filtersKey}
+                    refreshToken={refreshToken}
+                    selectedId={lastOpenedId}
+                    onRowOpen={openRecord}
+                    onWindow={setGridWindow}
+                    onError={setGridError}
+                    onSortChange={setOrder}
+                    onApi={(api) => { gridApiRef.current = api; }}
+                  />
+                </Suspense>
+              </div>
+            </>
+          )}
+        </section>
+      </div>
 
-        {loading ? (
-          <TableSkeleton rows={8} showHeader={false} />
-        ) : loadError && variants.length === 0 ? null : variants.length === 0 ? (
-          <p className="empty-state" style={{ padding: "20px", color: "var(--muted)" }}>
-            No endpoint inventory recorded yet.
-          </p>
-        ) : (
-          <Suspense fallback={<TableSkeleton rows={8} showHeader={false} />}>
-            <HttpGrid
-              rows={filtered}
-              observationCounts={observationCounts}
-              selectedId={selected?.id ?? null}
-              onRowOpen={(variant, invoker) => {
-                drawerInvokerRef.current = invoker ?? searchRef.current;
-                setSelected(variant);
-                writeWorkspaceHash(engagementHref(engagementKey, { tab: "http", request: variant.id }));
-              }}
-            />
-          </Suspense>
-        )}
-      </section>
-
-      {selected && (
-        <HttpDrawer
-          variant={selected}
-          observations={observationsByVariant.get(selected.id) ?? []}
-          observationsLoaded={observationsLoaded}
-          observationError={observationError}
-          toast={toast}
-          onClose={closeRequest}
-          returnFocusRef={drawerInvokerRef}
-        />
+      {investigating && selected !== null && (
+        <RecordView
+          label="Request record"
+          noun="request"
+          navigation={navigation}
+          onBack={closeRecord}
+          titleId="http-request-record-title"
+          returnFocusRef={invokerRef}
+          className="http-record"
+        >
+          <VariantRecord
+            key={selected.id}
+            engagementKey={engagementKey}
+            variantId={selected.id}
+            variant={selected.row}
+            section={section}
+            onSectionChange={chooseSection}
+            refreshToken={refreshToken}
+            toast={toast}
+            titleId="http-request-record-title"
+          />
+        </RecordView>
       )}
 
-      <div className="findings-shortcuts">
+      <div className="findings-shortcuts" hidden={investigating}>
         <span>
           <code>/</code> focus search
         </span>
         <span>
-          <code>Esc</code> close detail
+          <code>[ / ]</code> previous / next in a record
+        </span>
+        <span>
+          <code>Esc</code> back to results
         </span>
       </div>
-        </>
-      )}
-    </div>
+    </>
   );
 }
 
-// ── View toggle ───────────────────────────────────────────────────────
-// Segmented control (reuses the Findings .view-toggle styling) switching
-// between the legacy request-variant list and the Phase-5 flow store.
-function HttpViewToggle({
-  view,
-  onChange,
-}: {
-  view: HttpView;
-  onChange: (v: HttpView) => void;
-}) {
-  return (
-    <div className="view-toggle" role="group" aria-label="HTTP view">
-      <button
-        type="button"
-        className={view === "variants" ? "is-active" : ""}
-        onClick={() => onChange("variants")}
-        aria-pressed={view === "variants"}
-      >
-        Endpoint inventory
-      </button>
-      <button
-        type="button"
-        className={view === "flows" ? "is-active" : ""}
-        onClick={() => onChange("flows")}
-        aria-pressed={view === "flows"}
-      >
-        Captured exchanges
-      </button>
-    </div>
-  );
+// ── VariantRecord ─────────────────────────────────────────────────────
+// One request variant inside the shared record view: what the request is
+// (method, URL, auth, discovery, hashes), every observation recorded against
+// it (read from the server, newest first, a page at a time), and the
+// parameter schemas Vigil inferred.
+
+type ObservationHistory = {
+  items: RequestObservation[];
+  total: number;
+  hasMore: boolean;
+  loading: boolean;
+  error: string | null;
+};
+
+function useObservationHistory(engagementKey: string, variantId: number, enabled: boolean, refreshToken: number) {
+  const [history, setHistory] = useState<ObservationHistory>({ items: [], total: 0, hasMore: false, loading: true, error: null });
+  const loadedRef = useRef(0);
+  loadedRef.current = history.items.length;
+  const requestRef = useRef(0);
+
+  // First page, and on live refresh the pages already shown (newest first).
+  useEffect(() => {
+    if (!enabled) return;
+    const request = ++requestRef.current;
+    const limit = Math.min(500, Math.max(OBSERVATION_PAGE_SIZE, loadedRef.current));
+    setHistory((current) => ({ ...current, loading: true }));
+    fetchRequestVariantObservations(engagementKey, variantId, { limit, offset: 0 })
+      .then((page) => {
+        if (request !== requestRef.current) return;
+        setHistory({ items: page.items, total: page.total, hasMore: page.has_more, loading: false, error: null });
+      })
+      .catch((error: unknown) => {
+        if (request !== requestRef.current) return;
+        setHistory((current) => ({ ...current, loading: false, error: error instanceof Error ? error.message : "request failed" }));
+      });
+  }, [engagementKey, variantId, enabled, refreshToken]);
+
+  const loadMore = useCallback(() => {
+    const request = ++requestRef.current;
+    const offset = loadedRef.current;
+    setHistory((current) => ({ ...current, loading: true }));
+    fetchRequestVariantObservations(engagementKey, variantId, { limit: OBSERVATION_PAGE_SIZE, offset })
+      .then((page) => {
+        if (request !== requestRef.current) return;
+        setHistory((current) => ({
+          items: [...current.items, ...page.items.filter((item) => !current.items.some((known) => known.id === item.id))],
+          total: page.total,
+          hasMore: page.has_more,
+          loading: false,
+          error: null,
+        }));
+      })
+      .catch((error: unknown) => {
+        if (request !== requestRef.current) return;
+        setHistory((current) => ({ ...current, loading: false, error: error instanceof Error ? error.message : "request failed" }));
+      });
+  }, [engagementKey, variantId]);
+
+  return { history, loadMore };
 }
 
-// ── Variant detail drawer ─────────────────────────────────────────────
-// Centred modal styled to match the Surface drawer (.finding-overlay +
-// .drawer-panel). Hero = method badge + path; KV grid of the variant
-// metadata; the parsed schema JSON blocks; and the Observations section
-// listing the request_observations recorded for this variant.
-function HttpDrawer({
+function VariantRecord({
+  engagementKey,
+  variantId,
   variant,
-  observations,
-  observationsLoaded,
-  observationError,
+  section,
+  onSectionChange,
+  refreshToken,
   toast,
-  onClose,
-  returnFocusRef,
+  titleId,
 }: {
-  variant: RequestVariant;
-  observations: RequestObservation[];
-  observationsLoaded: boolean;
-  observationError: string | null;
-  toast: (message: string, type?: "success" | "error" | "info") => void;
-  onClose: () => void;
-  returnFocusRef: RefObject<HTMLElement | null>;
+  engagementKey: string;
+  variantId: number;
+  /** Null while a linked request is read by id. */
+  variant: RequestVariant | null;
+  section: VariantSection;
+  onSectionChange: (section: VariantSection) => void;
+  refreshToken: number;
+  toast: ToastFn;
+  titleId: string;
 }) {
-  useBodyScrollLock();
-  const panelRef = useRef<HTMLElement | null>(null);
-  useModalFocus(panelRef, onClose, true, returnFocusRef);
-  const method = (variant.method || "GET").toUpperCase();
+  const { history, loadMore } = useObservationHistory(engagementKey, variantId, variant !== null && section === "observations", refreshToken);
 
-  const schemaBlocks: { label: string; text: string }[] = [];
-  const schemaFields: [string, string | undefined][] = [
-    ["Query schema", variant.query_schema_json],
-    ["Body schema", variant.body_schema_json],
-    ["Path schema", variant.path_schema_json],
-    ["Cookie schema", variant.cookie_schema_json],
-    ["Header schema", variant.header_schema_json],
-  ];
-  for (const [label, raw] of schemaFields) {
-    const pretty = prettyJson(raw);
-    if (pretty) schemaBlocks.push({ label, text: pretty });
+  if (!variant) {
+    return (
+      <>
+        <RecordHeader id={`Request #${variantId}`} title={`Request #${variantId}`} titleId={titleId} />
+        <RecordBody busy>
+          <p className="meta-text" role="status">Loading request #{variantId}…</p>
+          <CardSkeleton lines={4} />
+        </RecordBody>
+      </>
+    );
   }
 
+  const method = (variant.method || "GET").toUpperCase();
+  const schemaBlocks = schemaBlocksOf(variant);
+  const shownSection: VariantSection = section === "schema" && schemaBlocks.length === 0 ? "request" : section;
+  const observationCount = history.items.length > 0 || !history.loading ? Math.max(history.total, variant.observation_count) : variant.observation_count;
+  const remaining = Math.max(0, history.total - history.items.length);
   return (
-    <div className="finding-overlay" role="presentation" onClick={onClose}>
-      <article
-        ref={panelRef}
-        className="drawer-panel panel"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="http-detail-modal-title"
-        tabIndex={-1}
-        onClick={(event) => event.stopPropagation()}
-        style={{ maxWidth: "760px", width: "min(94vw, 760px)", maxHeight: "90vh", overflow: "auto" }}
-      >
-        <div className="drawer-hero">
-          <div className="drawer-top">
-            <div className="drawer-slug">
-              <span className={`method-badge ${methodClass(method)}`}>{method}</span>
-            </div>
-            <div className="drawer-nav">
-              <button type="button" className="icon-btn" onClick={onClose} title="Close (Esc)">
-                <IconClose />
-              </button>
-            </div>
-          </div>
-          <h2 id="http-detail-modal-title" className="drawer-title mono">
-            {variant.normalized_path || "/"}
-          </h2>
-          <div className="hero-meta">
-            <span className="tag">{variant.host}</span>
+    <>
+      <RecordHeader
+        id={`Request #${variant.id}`}
+        copyId={String(variant.id)}
+        copyIdLabel="Copy request ID"
+        title={
+          <>
+            <span className={`method-badge ${methodClass(method)}`}>{method}</span>{" "}
+            <span className="mono" title={variant.normalized_path || "/"}>{variant.normalized_path || "/"}</span>
+          </>
+        }
+        titleId={titleId}
+        accent={methodColor(method)}
+        actions={
+          <>
+            <RecordCopyButton
+              label="Copy canonical URL"
+              text={() => variant.canonical_url}
+              successMessage="URL copied"
+              failureMessage="Could not copy the URL. Select it in the Request section instead."
+              disabled={!variant.canonical_url}
+            />
+            <RecordCopyLinkButton noun="request" />
+          </>
+        }
+        pills={
+          <>
+            <span className="tag mono" title="Host">{variant.host}</span>
             {variant.content_type_family && variant.content_type_family !== "unknown" && (
-              <span className="tag">{variant.content_type_family}</span>
+              <span className="tag" title="Content type">{variant.content_type_family}</span>
             )}
-            {variant.auth_context && <span className="tag">{variant.auth_context}</span>}
-            {variant.discovery_source && <span className="tag">{variant.discovery_source}</span>}
-          </div>
-        </div>
-
-        <div className="drawer-body">
-          <div className="section">
-            <p className="section-title">Metadata</p>
-            <div className="kv-grid">
-              <KV k="Method" v={method} />
-              <KV k="Scheme" v={variant.scheme} />
-              <KV k="Host" v={variant.host} mono toast={variant.host ? toast : undefined} />
-              <KV k="Port" v={variant.port} mono />
-              <KV
-                k="Canonical URL"
-                v={variant.canonical_url}
-                mono
-                toast={variant.canonical_url ? toast : undefined}
-              />
-              <KV k="Path template" v={variant.path_template} mono />
-              <KV k="Content-Type" v={variant.content_type_family} />
-              <KV k="Auth context" v={variant.auth_context} />
-              <KV k="Discovery source" v={variant.discovery_source} />
-              <KV
-                k="Params hash"
-                v={variant.params_schema_hash}
-                mono
-                toast={variant.params_schema_hash ? toast : undefined}
-              />
-              <KV
-                k="Body hash"
-                v={variant.body_schema_hash}
-                mono
-                toast={variant.body_schema_hash ? toast : undefined}
-              />
-              <div className="kv">
-                <p className="k">First seen</p>
-                <p className="v">
-                  {variant.first_seen_at ? <RelTime iso={variant.first_seen_at} /> : "—"}
-                </p>
+            {variant.auth_context && <span className="tag" title="Auth context">{variant.auth_context}</span>}
+            {variant.discovery_source && <span className="tag" title="Discovered by">{variant.discovery_source}</span>}
+            <span className="record-pill-reason">
+              Seen {variant.observation_count.toLocaleString()} {variant.observation_count === 1 ? "time" : "times"}
+            </span>
+          </>
+        }
+        datesLabel="Request dates"
+        dates={[
+          { label: "First seen", value: variant.first_seen_at },
+          { label: "Last seen", value: variant.last_seen_at },
+        ]}
+      />
+      <RecordTabs
+        label="Request sections"
+        active={shownSection}
+        onChange={onSectionChange}
+        tabs={[
+          { id: "request", label: "Request" },
+          { id: "observations", label: "Observations", count: observationCount },
+          { id: "schema", label: "Parameters & schema", count: schemaBlocks.length, hidden: schemaBlocks.length === 0 },
+        ]}
+      />
+      <RecordBody>
+        {shownSection === "request" && (
+          <>
+            <section className="section">
+              <h3 className="section-title">Request</h3>
+              <div className="kv-grid">
+                <KV k="Method" v={method} />
+                <KV k="Scheme" v={variant.scheme} />
+                <KV k="Host" v={variant.host} mono toast={variant.host ? toast : undefined} />
+                <KV k="Port" v={variant.port} mono />
+                <KV
+                  k="Canonical URL"
+                  v={variant.canonical_url}
+                  mono
+                  toast={variant.canonical_url ? toast : undefined}
+                />
+                <KV k="Path template" v={variant.path_template} mono />
+                <KV k="Content-Type" v={variant.content_type_family} />
+                <KV k="Auth context" v={variant.auth_context} />
+                <KV k="Discovery source" v={variant.discovery_source} />
+                <KV
+                  k="Params hash"
+                  v={variant.params_schema_hash}
+                  mono
+                  toast={variant.params_schema_hash ? toast : undefined}
+                />
+                <KV
+                  k="Body hash"
+                  v={variant.body_schema_hash}
+                  mono
+                  toast={variant.body_schema_hash ? toast : undefined}
+                />
+                <KVTime k="First seen" v={variant.first_seen_at} />
+                <KVTime k="Last seen" v={variant.last_seen_at} />
+                <KVTime k="Last observed" v={variant.last_observed_at} />
               </div>
-              <div className="kv">
-                <p className="k">Last seen</p>
-                <p className="v">
-                  {variant.last_seen_at ? <RelTime iso={variant.last_seen_at} /> : "—"}
-                </p>
-              </div>
-            </div>
-          </div>
+            </section>
+            {variant.notes && variant.notes.trim() && (
+              <ProseSection title="Notes" text={variant.notes} mode="rendered" toast={toast} kind="callout" />
+            )}
+          </>
+        )}
 
-          {variant.notes && variant.notes.trim() && (
-            <ProseSection title="Notes" text={variant.notes} mode="rendered" toast={toast} kind="callout" />
-          )}
-
-          {schemaBlocks.length > 0 && (
-            <div className="section">
-              <p className="section-title">Request schema</p>
-              <div className="http-schema-grid">
-                {schemaBlocks.map((b) => (
-                  <CodeBlock
-                    key={b.label}
-                    label={b.label}
-                    text={b.text}
-                    onCopied={() => toast("Copied", "success")}
-                  />
-                ))}
-              </div>
-            </div>
-          )}
-
-          <div className="section">
-            <p className="section-title">
-              Observations <span className="count">{observations.length}</span>
-            </p>
-            {observationError && !observationsLoaded ? (
-              <p className="error-text" role="alert" style={{ padding: "12px 0" }}>
-                Observation history unavailable: {observationError}
+        {shownSection === "observations" && (
+          <section className="section">
+            <h3 className="section-title">
+              Observations <span className="count">{observationCount.toLocaleString()}</span>
+            </h3>
+            {history.error && history.items.length === 0 ? (
+              <p className="error-text" role="alert">
+                Observation history unavailable: {history.error}
               </p>
-            ) : observations.length === 0 ? (
-              <p className="empty" style={{ padding: "12px 0" }}>
-                No observations recorded for this variant yet.
-              </p>
+            ) : history.loading && history.items.length === 0 ? (
+              <CardSkeleton lines={3} />
+            ) : history.items.length === 0 ? (
+              <EmptyState variant="empty" compact title="No observations recorded for this request yet." />
             ) : (
               <div className="http-obs-list">
-                {observations.map((o) => {
+                {history.items.map((o) => {
                   const payload = prettyJson(o.raw_payload);
                   return (
                     <div key={o.id} className="http-obs-card">
                       <div className="http-obs-head">
                         <span className="http-obs-url mono">{o.observed_url}</span>
-                        {o.response_status != null && (
-                          <span className={`status-badge ${statusClass(o.response_status)}`}>
-                            {o.response_status}
-                          </span>
-                        )}
+                        {o.response_status != null && <HttpStatusPill status={o.response_status} />}
                       </div>
                       <div className="http-obs-meta">
                         {o.source_name && <span className="tag">{o.source_name}</span>}
                         {o.evidence_ref && <span className="tag">{o.evidence_ref}</span>}
-                        <RelTime iso={o.created_at} />
+                        <TimeStamp value={o.created_at} mode="both" fallback={null} />
                       </div>
                       {payload && (
                         <CodeBlock
@@ -757,23 +957,52 @@ function HttpDrawer({
                 })}
               </div>
             )}
-          </div>
-        </div>
-      </article>
-    </div>
+            {history.items.length > 0 && (
+              <div className="http-older">
+                <p className="meta-text">
+                  {history.items.length.toLocaleString()} of {history.total.toLocaleString()} observations shown, newest first.
+                </p>
+                {history.hasMore && (
+                  <button type="button" className="ghost-button" onClick={loadMore} disabled={history.loading}>
+                    {history.loading
+                      ? "Loading observations…"
+                      : `Show ${Math.min(OBSERVATION_PAGE_SIZE, remaining).toLocaleString()} more ${Math.min(OBSERVATION_PAGE_SIZE, remaining) === 1 ? "observation" : "observations"}`}
+                  </button>
+                )}
+                {history.error && (
+                  <p className="error-text" role="alert">Could not load observations: {history.error}</p>
+                )}
+              </div>
+            )}
+          </section>
+        )}
+
+        {shownSection === "schema" && (
+          <section className="section">
+            <h3 className="section-title">Parameters & schema</h3>
+            <div className="http-schema-grid">
+              {schemaBlocks.map((b) => (
+                <CodeBlock
+                  key={b.label}
+                  label={b.label}
+                  text={b.text}
+                  onCopied={() => toast("Copied", "success")}
+                />
+              ))}
+            </div>
+          </section>
+        )}
+      </RecordBody>
+    </>
   );
 }
 
-// ── Flows view (Phase-5 canonical full-flow store) ────────────────────
-// A second sub-view of the HTTP tab rendering assessment_http_flows. Unlike
-// the variants view (fetch-once + filter-in-React), the filter set here is
-// pushed to the backend as query params so large corpora filter server-side.
-// An unfiltered snapshot (`allFlows`) drives the facet chips/dropdowns +
-// counts; the grid renders `results` (the server-filtered slice, or the full
-// snapshot when no filter is active).
-type ToastFn = (message: string, type?: "success" | "error" | "info") => void;
-
-const FLOWS_FETCH_LIMIT = 5000;
+// ── Flows view (canonical full-flow store) ────────────────────────────
+// The second view of the HTTP tab, rendering assessment_http_flows. The
+// filter set is pushed to the backend as query params so large corpora filter
+// server-side. The unfiltered ledger drives the filter chips and their counts
+// and is the list when no filter is active; a filter reads its own
+// server-filtered ledger. Both load newest first, a page at a time.
 
 type CapturePolicyPartialSuccess = {
   policy: CapturePolicy;
@@ -794,116 +1023,66 @@ function capturePolicyPartialSuccess(error: unknown): CapturePolicyPartialSucces
   };
 }
 
+// Typing in the filters waits for a pause before the server sees it.
+const FLOW_FILTER_DEBOUNCE_MS = 250;
+
+/** Value → count over the loaded exchanges, most common first. */
+function countBy(flows: HttpFlow[], valueOf: (flow: HttpFlow) => string | null | undefined): FacetChipValue[] {
+  const counts = new Map<string, number>();
+  for (const flow of flows) {
+    const value = valueOf(flow);
+    if (value == null || value === "") continue;
+    counts.set(value, (counts.get(value) ?? 0) + 1);
+  }
+  return [...counts].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).map(([value, count]) => ({ value, count }));
+}
+
+const FLOW_SORT_LABELS: Record<string, { label: string; kind: "time" | "number" | "text" }> = {
+  seen: { label: "Seen", kind: "time" },
+  method: { label: "Method", kind: "text" },
+  host: { label: "Host", kind: "text" },
+  path: { label: "Path", kind: "text" },
+  status: { label: "Status", kind: "number" },
+  ctype: { label: "Content type", kind: "text" },
+  auth: { label: "Auth", kind: "text" },
+  reqbytes: { label: "Request size", kind: "number" },
+  respbytes: { label: "Response size", kind: "number" },
+};
+
 function HttpFlowsView({
   engagementKey,
   refreshVersion,
   toast,
+  initialFlowId,
+  initialDrawerTab,
+  viewSwitch,
+  onCount,
 }: {
   engagementKey: string;
   refreshVersion?: number;
   toast: ToastFn;
+  initialFlowId?: number;
+  initialDrawerTab?: string;
+  /** The inventory / exchanges switch; hidden with the list while a record is open. */
+  viewSwitch: ReactNode;
+  onCount: (count: number, partial: boolean) => void;
 }) {
-  const [allFlows, setAllFlows] = useState<HttpFlow[]>([]);
-  const [results, setResults] = useState<HttpFlow[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [resultsLoading, setResultsLoading] = useState(false);
-  const [loadError, setLoadError] = useState<string | null>(null);
-
-  // Server-side filter axes (names align 1:1 with the backend query params).
-  const [host, setHost] = useState("");
-  const [method, setMethod] = useState("");
-  const [status, setStatus] = useState(""); // exact response_status; "" = any
-  const [ctype, setCtype] = useState("");
-  const [auth, setAuth] = useState("");
-  const [truncated, setTruncated] = useState<"" | "true" | "false">("");
-  const [query, setQuery] = useState("");
-
-  const [selected, setSelected] = useState<HttpFlow | null>(null);
-  const searchRef = useRef<HTMLInputElement | null>(null);
-  const drawerInvokerRef = useRef<HTMLElement | null>(null);
-
-  // ── Unfiltered facet snapshot ────
-  const reloadInFlightRef = useRef(false);
-  const reloadQueuedRef = useRef<{ engagementKey: string; showSpinner: boolean } | null>(null);
-  const activeEngagementKeyRef = useRef(engagementKey);
-  activeEngagementKeyRef.current = engagementKey;
-  const reload = useCallback(
-    async (showSpinner = true) => {
-      if (reloadInFlightRef.current) {
-        const queued = reloadQueuedRef.current;
-        reloadQueuedRef.current = {
-          engagementKey,
-          showSpinner: showSpinner || queued?.showSpinner === true,
-        };
-        return;
-      }
-      reloadInFlightRef.current = true;
-      try {
-        let next: { engagementKey: string; showSpinner: boolean } | null = {
-          engagementKey,
-          showSpinner,
-        };
-        while (next) {
-          const request = next;
-          reloadQueuedRef.current = null;
-          if (request.showSpinner && activeEngagementKeyRef.current === request.engagementKey) {
-            setLoading(true);
-          }
-          try {
-            const items = await listHttpFlows(request.engagementKey, {
-              limit: FLOWS_FETCH_LIMIT,
-            });
-            if (activeEngagementKeyRef.current === request.engagementKey) {
-              setAllFlows(items);
-              setLoadError(null);
-            }
-          } catch (err) {
-            if (
-              request.showSpinner
-              && activeEngagementKeyRef.current === request.engagementKey
-            ) {
-              setAllFlows([]);
-            }
-            if (activeEngagementKeyRef.current === request.engagementKey) {
-              setLoadError(err instanceof Error ? err.message : "Failed to load HTTP flows");
-            }
-          } finally {
-            if (
-              request.showSpinner
-              && activeEngagementKeyRef.current === request.engagementKey
-            ) {
-              setLoading(false);
-            }
-          }
-          next = reloadQueuedRef.current;
-        }
-      } finally {
-        reloadInFlightRef.current = false;
-      }
-    },
-    [engagementKey],
+  // Server-side filter axes (names align 1:1 with the backend query params);
+  // they and the search survive leaving the tab.
+  const viewKey = `http.exchanges.${engagementKey}`;
+  const [saved] = useState(() => readSavedView(viewKey));
+  const [host, setHost] = useState(savedString(saved.host));
+  const [method, setMethod] = useState(savedString(saved.method));
+  const [status, setStatus] = useState(/^\d+$/.test(savedString(saved.status)) ? savedString(saved.status) : ""); // exact response_status; "" = any
+  const [ctype, setCtype] = useState(savedString(saved.ctype));
+  const [auth, setAuth] = useState(savedString(saved.auth));
+  const [truncated, setTruncated] = useState<"" | "true" | "false">(saved.truncated === "true" || saved.truncated === "false" ? saved.truncated : "");
+  const [query, setQuery] = useState(savedString(saved.query));
+  useEffect(
+    () => writeSavedView(viewKey, { host, method, status, ctype, auth, truncated, query }),
+    [viewKey, host, method, status, ctype, auth, truncated, query],
   );
-
-  useEffect(() => {
-    void reload(true);
-  }, [reload]);
-
-  const didMountRef = useRef(false);
-  useEffect(() => {
-    if (!didMountRef.current) {
-      didMountRef.current = true;
-      return;
-    }
-    void reload(false);
-  }, [refreshVersion, reload]);
-
-  useEffect(() => {
-    const onVisible = () => {
-      if (document.visibilityState === "visible") void reload(false);
-    };
-    document.addEventListener("visibilitychange", onVisible);
-    return () => document.removeEventListener("visibilitychange", onVisible);
-  }, [reload]);
+  const searchRef = useRef<HTMLInputElement | null>(null);
 
   // ── Active server filters ────
   const serverFilters = useMemo<HttpFlowFilters>(() => {
@@ -917,85 +1096,82 @@ function HttpFlowsView({
     if (query.trim()) f.q = query.trim();
     return f;
   }, [host, method, status, ctype, auth, truncated, query]);
-
-  const filtersActive = Object.keys(serverFilters).length > 0;
-
-  // ── Server-side filtered results (debounced so typing `q` doesn't spam
-  // the backend). When nothing is filtered we reuse the snapshot directly. ──
+  const serverKey = JSON.stringify(serverFilters);
+  const [appliedKey, setAppliedKey] = useState(serverKey);
   useEffect(() => {
-    if (!filtersActive) {
-      setResults(allFlows);
-      setResultsLoading(false);
-      return;
+    // Clearing every filter shows the unfiltered ledger at once.
+    if (serverKey === "{}") {
+      setAppliedKey(serverKey);
+      return undefined;
     }
-    let cancelled = false;
-    setResultsLoading(true);
-    const handle = window.setTimeout(() => {
-      listHttpFlows(engagementKey, { ...serverFilters, limit: FLOWS_FETCH_LIMIT })
-        .then((items) => {
-          if (!cancelled) {
-            setResults(items);
-            setLoadError(null);
-          }
-        })
-        .catch((err) => {
-          if (!cancelled) {
-            setResults([]);
-            setLoadError(err instanceof Error ? err.message : "Failed to filter HTTP flows");
-          }
-        })
-        .finally(() => {
-          if (!cancelled) setResultsLoading(false);
-        });
-    }, 250);
-    return () => {
-      cancelled = true;
-      window.clearTimeout(handle);
-    };
-  }, [engagementKey, filtersActive, serverFilters, allFlows]);
+    const handle = window.setTimeout(() => setAppliedKey(serverKey), FLOW_FILTER_DEBOUNCE_MS);
+    return () => window.clearTimeout(handle);
+  }, [serverKey]);
+  const filtersActive = appliedKey !== "{}";
 
-  // Drop the selection only when the flow leaves the full set (not merely the
-  // filtered view) so the drawer survives a filter change.
+  // A refresh of the newest page reads only the exchanges newer than those
+  // held (exchanges are append-only, newest first); older pages read as asked.
+  const allRowsRef = useRef<HeldFlows>(null);
+  const filteredRowsRef = useRef<HeldFlows>(null);
+  const fetchAll = useCallback((offset: number, limit: number) => {
+    const read = (from: number, size: number) => listHttpFlows(engagementKey, { limit: size, offset: from });
+    return offset === 0 ? readLedgerHead(read, allRowsRef.current, limit, rowId, FLOW_REFRESH_PROBE) : read(offset, limit);
+  }, [engagementKey]);
+  const fetchFiltered = useCallback((offset: number, limit: number) => {
+    const filters = JSON.parse(appliedKey) as HttpFlowFilters;
+    const read = (from: number, size: number) => listHttpFlows(engagementKey, { ...filters, limit: size, offset: from });
+    return offset === 0 ? readLedgerHead(read, filteredRowsRef.current, limit, rowId, FLOW_REFRESH_PROBE) : read(offset, limit);
+  }, [engagementKey, appliedKey]);
+  const allLedger = useLedgerWindow<HttpFlow>({
+    identity: engagementKey,
+    pageSize: FLOW_PAGE_SIZE,
+    fetchPage: fetchAll,
+    keyOf: rowId,
+    failureMessage: "Failed to load HTTP flows",
+  });
+  const filteredLedger = useLedgerWindow<HttpFlow>({
+    identity: `${engagementKey}\u0000${appliedKey}`,
+    pageSize: FLOW_PAGE_SIZE,
+    fetchPage: fetchFiltered,
+    keyOf: rowId,
+    failureMessage: "Failed to filter HTTP flows",
+    enabled: filtersActive,
+  });
+  allRowsRef.current = allLedger.rows;
+  filteredRowsRef.current = filteredLedger.rows;
+  const resultsLedger = filtersActive ? filteredLedger : allLedger;
+  const allFlows = allLedger.rows ?? EMPTY_FLOWS;
+  const results = resultsLedger.rows ?? EMPTY_FLOWS;
+  const loading = allLedger.rows === null && !allLedger.error;
+  const resultsLoading = serverKey !== appliedKey || resultsLedger.loading;
+  const loadError = resultsLedger.error ?? (filtersActive ? null : allLedger.error);
+  const allPartial = allLedger.rows !== null && !allLedger.complete;
+
   useEffect(() => {
-    if (selected && !allFlows.some((f) => f.flow_uid === selected.flow_uid)) {
-      setSelected(null);
-    }
-  }, [allFlows, selected]);
+    if (allLedger.rows !== null) onCount(allLedger.rows.length, allPartial);
+  }, [allLedger.rows, allPartial, onCount]);
 
-  // ── Facets from the unfiltered snapshot ────
-  const methodCounts = useMemo(() => {
-    const c: Record<string, number> = {};
-    for (const f of allFlows) {
-      const k = (f.method || "GET").toUpperCase();
-      c[k] = (c[k] || 0) + 1;
-    }
-    return c;
-  }, [allFlows]);
+  // Live refresh, throttled like the inventory's. The unfiltered ledger feeds
+  // the chips, so both re-read while a filter is on (each only its new rows).
+  const refreshToken = useLiveRefreshToken(refreshVersion, LIVE_REFRESH_MIN_MS);
+  const { refresh: refreshAll } = allLedger;
+  const { refresh: refreshFiltered } = filteredLedger;
+  useEffect(() => {
+    if (refreshToken === 0) return;
+    void refreshAll();
+    void refreshFiltered();
+  }, [refreshToken, refreshAll, refreshFiltered]);
 
-  const hostOptions = useMemo(
-    () => Array.from(new Set(allFlows.map((f) => f.host).filter(Boolean))).sort(),
+  // ── Filter chips from the unfiltered ledger ────
+  const methodValues = useMemo(() => countBy(allFlows, (f) => (f.method || "GET").toUpperCase()), [allFlows]);
+  const hostValues = useMemo(() => countBy(allFlows, (f) => f.host), [allFlows]);
+  const statusValues = useMemo(
+    () => countBy(allFlows, (f) => (f.response_status == null ? null : String(f.response_status)))
+      .sort((a, b) => Number(a.value) - Number(b.value)),
     [allFlows],
   );
-  const ctypeOptions = useMemo(
-    () => Array.from(new Set(allFlows.map((f) => f.content_type_family).filter(Boolean))).sort(),
-    [allFlows],
-  );
-  const authOptions = useMemo(
-    () => Array.from(new Set(allFlows.map((f) => f.auth_context).filter(Boolean))).sort(),
-    [allFlows],
-  );
-  const statusOptions = useMemo(
-    () =>
-      Array.from(
-        new Set(
-          allFlows
-            .map((f) => f.response_status)
-            .filter((s): s is number => s != null),
-        ),
-      ).sort((a, b) => a - b),
-    [allFlows],
-  );
-
+  const ctypeValues = useMemo(() => countBy(allFlows, (f) => f.content_type_family), [allFlows]);
+  const authValues = useMemo(() => countBy(allFlows, (f) => f.auth_context), [allFlows]);
   const truncatedCount = useMemo(
     () => allFlows.filter((f) => f.request_body_truncated || f.response_body_truncated).length,
     [allFlows],
@@ -1020,27 +1196,112 @@ function HttpFlowsView({
     setQuery("");
   };
 
-  const toggleMethod = (m: string) => setMethod((cur) => (cur === m ? "" : m));
+  // The server filters on one value per dimension: a chip selects it, the same chip clears it.
+  const pick = (setter: (value: string) => void, current: string) => (value: string) => setter(current === value ? "" : value);
+  const one = (value: string) => new Set(value ? [value] : []);
 
-  // `/` focuses search, Esc blurs / closes the drawer.
+  // ── The open exchange (`flow=` in the URL) ────
+  const [openId, setOpenId] = useState<number | null>(initialFlowId ?? null);
+  const [lastOpenedUid, setLastOpenedUid] = useState<string | null>(null);
+  const [section, setSection] = useState<FlowSection>(isFlowSection(initialDrawerTab) ? initialDrawerTab : "exchange");
+  const invokerRef = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    setOpenId(initialFlowId ?? null);
+  }, [initialFlowId]);
+  useEffect(() => {
+    setSection(isFlowSection(initialDrawerTab) ? initialDrawerTab : "exchange");
+  }, [initialDrawerTab]);
+
+  const resultById = useMemo(() => new Map(results.map((flow) => [flow.id, flow])), [results]);
+  const listedFlow = openId === null ? undefined : resultById.get(openId);
+  // An exchange outside the loaded results (a link, or one a filter hides)
+  // is read by id so its record shows; older pages load back to it.
+  const [linked, setLinked] = useState<{ id: number; flow: HttpFlow | null; error: string | null } | null>(null);
+  const linkedRef = useRef(linked);
+  linkedRef.current = linked;
+  const needsRead = openId !== null && resultsLedger.rows !== null && listedFlow === undefined;
+  useEffect(() => {
+    if (!needsRead || openId === null) return undefined;
+    const known = linkedRef.current;
+    if (known?.id === openId && (known.flow || known.error)) return undefined;
+    let active = true;
+    setLinked({ id: openId, flow: null, error: null });
+    getHttpFlow(engagementKey, String(openId))
+      .then((flow) => { if (active) setLinked({ id: openId, flow, error: null }); })
+      .catch((error: unknown) => {
+        if (active) setLinked({ id: openId, flow: null, error: error instanceof Error ? error.message : "request failed" });
+      });
+    return () => {
+      active = false;
+    };
+  }, [needsRead, openId, engagementKey]);
+  const openFlow = listedFlow ?? (linked?.id === openId ? linked.flow ?? undefined : undefined);
+  const investigating = openId !== null && openFlow !== undefined;
+  const linkError = openId !== null && listedFlow === undefined && linked?.id === openId ? linked.error : null;
+
+  const openRecord = useCallback((flow: HttpFlow, invoker: HTMLElement | null) => {
+    invokerRef.current = invoker ?? searchRef.current;
+    setOpenId(flow.id);
+    setLastOpenedUid(flow.flow_uid);
+    setSection("exchange");
+    writeWorkspaceHash(engagementHref(engagementKey, { tab: "http", flow: flow.id }));
+  }, [engagementKey]);
+  const stepTo = useCallback((id: number) => {
+    setOpenId(id);
+    writeWorkspaceHash(engagementHref(engagementKey, { tab: "http", flow: id, dtab: section === "exchange" ? undefined : section }));
+  }, [engagementKey, section]);
+  const closeRecord = useCallback(() => {
+    setOpenId(null);
+    writeWorkspaceHash(listHref(engagementKey, "flows"));
+  }, [engagementKey]);
+  const chooseSection = useCallback((next: FlowSection) => {
+    setSection(next);
+    if (openId !== null) writeWorkspaceHash(engagementHref(engagementKey, { tab: "http", flow: openId, dtab: next === "exchange" ? undefined : next }));
+  }, [engagementKey, openId]);
+  useEffect(() => {
+    if (openFlow) setLastOpenedUid(openFlow.flow_uid);
+  }, [openFlow]);
+
+  const [gridView, reportGridView] = useGridView<number>();
+  const review = useMemo(() => windowedReviewOrder(results.map(rowId), gridView, "seen"), [results, gridView]);
+  const navigation = useWindowedNavigation({
+    order: review.order,
+    current: investigating ? openId : null,
+    loaded: listedFlow !== undefined,
+    window: resultsLedger,
+    growsAt: review.growsAt,
+    open: stepTo,
+  });
+  const resultsRef = useRef<HTMLDivElement | null>(null);
+  const flowGridApiRef = useRef<GridApi<HttpFlow> | null>(null);
+  const revealFlow = useCallback((key: string) => {
+    const node = flowGridApiRef.current?.getRowNode(key);
+    if (node) flowGridApiRef.current?.ensureNodeVisible(node, "middle");
+  }, []);
+  useResultsScrollMemory(resultsRef, investigating, {
+    recordKey: investigating && openFlow ? openFlow.flow_uid || String(openFlow.id) : null,
+    reveal: revealFlow,
+  });
+
+  // `/` focuses search (from a record too), Esc leaves a filter field.
+  const investigatingRef = useRef(investigating);
+  investigatingRef.current = investigating;
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
       const tag = (target?.tagName || "").toLowerCase();
       const isTyping = tag === "input" || tag === "textarea" || tag === "select";
-      if (!isTyping && e.key === "/") {
+      if (!isTyping && e.key === "/" && !e.metaKey && !e.ctrlKey && !e.altKey) {
         e.preventDefault();
-        searchRef.current?.focus();
+        if (investigatingRef.current) closeRecord();
+        queueMicrotask(() => searchRef.current?.focus());
         return;
       }
-      if (e.key === "Escape") {
-        if (isTyping) (target as HTMLElement).blur();
-        else if (selected) setSelected(null);
-      }
+      if (e.key === "Escape" && isTyping && !investigatingRef.current) target?.blur();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [selected]);
+  }, [closeRecord]);
 
   // ── HAR export honouring the active filters ────
   const onExportHar = () => {
@@ -1058,19 +1319,40 @@ function HttpFlowsView({
     toast("Exporting HAR…", "info");
   };
 
-  const snapshotLimitReached = allFlows.length >= FLOWS_FETCH_LIMIT;
+  const olderUnloaded = resultsLedger.rows !== null && !resultsLedger.complete;
+  const sortEntry = gridView?.sort[0];
+  const sortLabel = FLOW_SORT_LABELS[sortEntry?.colId ?? "seen"] ?? FLOW_SORT_LABELS.seen;
+  const noMatches = filtersActive && !resultsLoading && resultsLedger.rows !== null && results.length === 0;
 
   return (
     <>
-      <CapturePolicyControl engagementKey={engagementKey} toast={toast} />
+      <HttpPageHeader
+        hidden={investigating}
+        stats={[{
+          value: allLedger.rows === null ? null : `${allFlows.length.toLocaleString()}${allPartial ? "+" : ""}`,
+          label: "captured exchanges",
+          title: allPartial ? "Counted among the loaded exchanges; older ones are not loaded yet" : undefined,
+        }]}
+        actions={(
+          <button type="button" className="ui-button" onClick={onExportHar}>
+            Export HAR
+          </button>
+        )}
+      >
+        {viewSwitch}
+      </HttpPageHeader>
+      <div className="http-flows-head" hidden={investigating}>
+        <CapturePolicyControl engagementKey={engagementKey} toast={toast} />
+      </div>
 
       {/* Toolbar */}
-      <div className="panel findings-toolbar-panel">
+      <div className="panel findings-toolbar-panel" hidden={investigating}>
         <div className="toolbar">
           <div className="search-wrap">
             <IconSearch />
             <input
               ref={searchRef}
+              type="search"
               className="search-input"
               placeholder="Search captured exchanges — URL, path, host…"
               aria-label="Search captured exchanges"
@@ -1091,197 +1373,144 @@ function HttpFlowsView({
             )}
             <span className="search-kbd">/</span>
           </div>
-          <div className="toolbar-right">
-            <span className="meta-text">
-              {results.length} of {allFlows.length} flow
-              {allFlows.length === 1 ? "" : "s"}
-              {(loading || resultsLoading) && " · loading…"}
-              {snapshotLimitReached && " · flow limit reached · results may be incomplete"}
-            </span>
-            <button type="button" className="qa-btn" onClick={onExportHar}>
-              Export HAR
-            </button>
-          </div>
         </div>
 
-        <div className="filter-row">
-          {Object.keys(methodCounts).length > 0 && (
-            <div className="filter-group">
-              <span className="filter-label">Method</span>
-              {Object.keys(methodCounts)
-                .sort((a, b) => methodCounts[b] - methodCounts[a] || a.localeCompare(b))
-                .map((m) => (
-                  <button
-                    key={m}
-                    type="button"
-                    className={`filter-chip method-chip ${methodClass(m)} ${
-                      method === m ? "is-active" : ""
-                    }`}
-                    aria-pressed={method === m}
-                    onClick={() => toggleMethod(m)}
-                  >
-                    <span className={`sev-dot method-dot ${methodClass(m)}`} />
-                    {m}
-                    <span className="filter-count">{methodCounts[m]}</span>
-                  </button>
-                ))}
-            </div>
+        <div className="filter-row http-filter-row">
+          {methodValues.length > 1 || method ? (
+            <FacetChipGroup label="Method" values={methodValues} selected={one(method)} onToggle={pick(setMethod, method)} colorFor={methodColor} partial={allPartial} />
+          ) : null}
+          {statusValues.length > 1 || status ? (
+            <FacetChipGroup label="Status" values={statusValues} selected={one(status)} onToggle={pick(setStatus, status)} partial={allPartial} />
+          ) : null}
+          {hostValues.length > 1 || host ? (
+            <FacetChipGroup label="Host" values={hostValues} selected={one(host)} onToggle={pick(setHost, host)} collapsedLimit={6} partial={allPartial} />
+          ) : null}
+          {ctypeValues.length > 1 || ctype ? (
+            <FacetChipGroup label="Content type" values={ctypeValues} selected={one(ctype)} onToggle={pick(setCtype, ctype)} partial={allPartial} />
+          ) : null}
+          {authValues.length > 1 || auth ? (
+            <FacetChipGroup label="Auth" values={authValues} selected={one(auth)} onToggle={pick(setAuth, auth)} partial={allPartial} />
+          ) : null}
+          {(truncatedCount > 0 || truncated) && (
+            <FacetChipGroup
+              label="Body"
+              values={[{ value: "true", count: truncatedCount }, { value: "false", count: allFlows.length - truncatedCount }]
+                .filter((entry) => entry.count > 0 || truncated === entry.value)}
+              selected={one(truncated)}
+              partial={allPartial}
+              onToggle={(value) => setTruncated((current) => (current === value ? "" : value as "true" | "false"))}
+              labelFor={(value) => (value === "true" ? "Truncated" : "Complete")}
+              descriptionFor={(value) => (value === "true"
+                ? "The request or response body was cut at the capture size cap."
+                : "Both bodies were captured in full.")}
+            />
           )}
-
-          {hostOptions.length > 0 && (
-            <div className="filter-select-group">
-              <span className="filter-label">Host</span>
-              <select
-                className="filter-select"
-                aria-label="Filter captured exchanges by host"
-                value={host}
-                onChange={(e) => setHost(e.target.value)}
-              >
-                <option value="">All hosts</option>
-                {hostOptions.map((h) => (
-                  <option key={h} value={h}>
-                    {h}
-                  </option>
-                ))}
-              </select>
-            </div>
-          )}
-
-          {statusOptions.length > 0 && (
-            <div className="filter-select-group">
-              <span className="filter-label">Status</span>
-              <select
-                className="filter-select"
-                aria-label="Filter captured exchanges by status"
-                value={status}
-                onChange={(e) => setStatus(e.target.value)}
-              >
-                <option value="">Any</option>
-                {statusOptions.map((s) => (
-                  <option key={s} value={String(s)}>
-                    {s}
-                  </option>
-                ))}
-              </select>
-            </div>
-          )}
-
-          {ctypeOptions.length > 0 && (
-            <div className="filter-select-group">
-              <span className="filter-label">Type</span>
-              <select
-                className="filter-select"
-                aria-label="Filter captured exchanges by content type"
-                value={ctype}
-                onChange={(e) => setCtype(e.target.value)}
-              >
-                <option value="">All types</option>
-                {ctypeOptions.map((c) => (
-                  <option key={c} value={c}>
-                    {c}
-                  </option>
-                ))}
-              </select>
-            </div>
-          )}
-
-          {authOptions.length > 0 && (
-            <div className="filter-select-group">
-              <span className="filter-label">Auth</span>
-              <select
-                className="filter-select"
-                aria-label="Filter captured exchanges by authentication context"
-                value={auth}
-                onChange={(e) => setAuth(e.target.value)}
-              >
-                <option value="">All</option>
-                {authOptions.map((a) => (
-                  <option key={a} value={a}>
-                    {a}
-                  </option>
-                ))}
-              </select>
-            </div>
-          )}
-
-          <div className="filter-select-group">
-            <span className="filter-label">Body</span>
-            <select
-              className="filter-select"
-              aria-label="Filter captured exchanges by body truncation"
-              value={truncated}
-              onChange={(e) => setTruncated(e.target.value as "" | "true" | "false")}
-              title="Filter by body-truncation state"
-            >
-              <option value="">Any</option>
-              <option value="true">Truncated ({truncatedCount})</option>
-              <option value="false">Complete</option>
-            </select>
-          </div>
-
-          {activeFilterCount > 0 && (
-            <button type="button" className="filter-clear" onClick={clearAll}>
-              Clear all ({activeFilterCount})
-            </button>
-          )}
+          <ClearFiltersButton count={activeFilterCount} onClear={clearAll} />
         </div>
       </div>
 
       {loadError && (
-        <div className="panel findings-toolbar-panel" style={{ padding: 12 }}>
-          <p className="error-text" role="alert" style={{ textAlign: "left" }}>
+        <div className="panel findings-toolbar-panel http-banner" hidden={investigating}>
+          <p className="error-text" role="alert">
             {loadError}
+            {resultsLedger.rows !== null ? " · Showing the last loaded exchanges." : ""}
           </p>
         </div>
       )}
-
-      {/* Flows table */}
-      <section className="panel">
-        <div className="panel-header">
-          <h2>Captured exchanges</h2>
-          <p className="meta-text">
-            {results.length} flow{results.length === 1 ? "" : "s"}
-            {truncatedCount ? ` · ${truncatedCount} truncated` : ""}
-          </p>
+      {openId !== null && !openFlow && !linkError && resultsLedger.rows !== null && (
+        <p className="meta-text http-banner-text" role="status">Loading exchange #{openId}…</p>
+      )}
+      {linkError && (
+        <div className="panel findings-toolbar-panel http-banner">
+          <p className="error-text" role="alert">Exchange #{openId} could not be opened: {linkError}</p>
         </div>
-
-        {loading ? (
-          <TableSkeleton rows={8} showHeader={false} />
-        ) : loadError && allFlows.length === 0 ? null : allFlows.length === 0 ? (
-          <p className="empty-state" style={{ padding: "20px", color: "var(--muted)" }}>
-            No full HTTP exchanges captured yet. Enable full-flow capture above and route
-            future traffic through the Vigil proxy to populate this view.
-          </p>
-        ) : (
-          <Suspense fallback={<TableSkeleton rows={8} showHeader={false} />}>
-            <HttpFlowsGrid
-              rows={results}
-              selectedUid={selected?.flow_uid ?? null}
-              onRowOpen={(flow, invoker) => {
-                drawerInvokerRef.current = invoker ?? searchRef.current;
-                setSelected(flow);
-              }}
-            />
-          </Suspense>
-        )}
-      </section>
-
-      {selected && (
-        <FlowDrawer
-          engagementKey={engagementKey}
-          flow={selected}
-          toast={toast}
-          onClose={() => setSelected(null)}
-          returnFocusRef={drawerInvokerRef}
-        />
       )}
 
-      <div className="findings-shortcuts">
+      {/* Flows table (the open record replaces it below) */}
+      <div ref={resultsRef} className="http-results" hidden={investigating}>
+        <section className="panel http-list-panel">
+          <div className="http-list-head">
+            {resultsLedger.rows !== null && !noMatches && results.length > 0 ? (
+              <ResultsSummary
+                shown={results.length}
+                total={allFlows.length}
+                partial={allPartial}
+                noun="captured exchanges"
+                sort={describeSort(sortLabel.label, sortEntry?.sort ?? "desc", sortLabel.kind)}
+              />
+            ) : (
+              <span className="meta-text" role="status">{!loading && resultsLoading ? "Filtering…" : ""}</span>
+            )}
+            {truncatedCount > 0 && <span className="meta-text">{truncatedCount.toLocaleString()} truncated</span>}
+          </div>
+          <SlowLoadHint active={loading} what="the captured exchanges" />
+
+          {loading ? (
+            <TableSkeleton rows={8} showHeader={false} />
+          ) : allLedger.rows === null ? null : allFlows.length === 0 ? (
+            <EmptyState variant="empty" title="No full HTTP exchanges captured yet.">
+              Enable full-flow capture above and route future traffic through the Vigil proxy to populate this view.
+            </EmptyState>
+          ) : noMatches ? (
+            <EmptyState variant="filtered" title="No captured exchanges match these filters." onClearFilters={clearAll} />
+          ) : resultsLedger.rows === null && resultsLedger.error ? null : (
+            <Suspense fallback={<TableSkeleton rows={8} showHeader={false} />}>
+              <HttpFlowsGrid
+                rows={results}
+                selectedUid={lastOpenedUid}
+                onRowOpen={openRecord}
+                onViewChange={reportGridView}
+                onApi={(api) => { flowGridApiRef.current = api; }}
+              />
+            </Suspense>
+          )}
+          {resultsLedger.rows !== null && results.length > 0 && (olderUnloaded || resultsLedger.extendError) && (
+            <div className="list-footer">
+              <span>Older exchanges not loaded yet.</span>
+              {olderUnloaded && (
+                <button type="button" className="ui-button" onClick={() => void resultsLedger.loadOlder()} disabled={resultsLedger.extending}>
+                  {resultsLedger.extending ? "Loading older exchanges…" : `Load ${FLOW_PAGE_SIZE.toLocaleString()} older exchanges`}
+                </button>
+              )}
+              {resultsLedger.extendError && !investigating && (
+                <span className="error-text" role="alert">Could not load older exchanges: {resultsLedger.extendError}</span>
+              )}
+            </div>
+          )}
+        </section>
+      </div>
+
+      {investigating && openFlow && (
+        <RecordView
+          label="Exchange record"
+          noun="exchange"
+          navigation={navigation}
+          onBack={closeRecord}
+          titleId="http-exchange-record-title"
+          returnFocusRef={invokerRef}
+          className="http-record"
+        >
+          <FlowRecord
+            key={openFlow.id}
+            engagementKey={engagementKey}
+            flow={openFlow}
+            section={section}
+            onSectionChange={chooseSection}
+            toast={toast}
+            titleId="http-exchange-record-title"
+          />
+        </RecordView>
+      )}
+
+      <div className="findings-shortcuts" hidden={investigating}>
         <span>
           <code>/</code> focus search
         </span>
         <span>
-          <code>Esc</code> close detail
+          <code>[ / ]</code> previous / next in a record
+        </span>
+        <span>
+          <code>Esc</code> back to results
         </span>
       </div>
     </>
@@ -1362,15 +1591,15 @@ function CapturePolicyControl({
   if (loading) {
     return (
       <div className="panel findings-toolbar-panel" style={{ padding: 12 }}>
-        <span className="meta-text">Loading capture policy…</span>
+        <CardSkeleton lines={1} />
       </div>
     );
   }
   if (!policy) {
     return (
       <div className="panel findings-toolbar-panel" style={{ padding: 12 }}>
-        <p className="empty" style={{ textAlign: "left" }}>
-          {error ?? "Capture policy unavailable."}
+        <p className="error-text" role="alert" style={{ textAlign: "left" }}>
+          Capture policy unavailable{error ? `: ${error}` : "."}
         </p>
       </div>
     );
@@ -1384,14 +1613,14 @@ function CapturePolicyControl({
       <div className="toolbar" style={{ alignItems: "center" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           <span className="filter-label">Capture policy</span>
-          <span
-            className={`pill ${enabled ? "pill-reported" : "pill-unreviewed"}`}
-            role="status"
-          >
-            Full-flow capture {enabled ? "ON" : "OFF"}
-          </span>
+          <StatusPill
+            value={enabled ? "on" : "off"}
+            label={`Full-flow capture ${enabled ? "on" : "off"}`}
+            tone={enabled ? "success" : "neutral"}
+            title={enabled ? "The Vigil proxy records full requests and responses." : "The Vigil proxy records request shapes only."}
+          />
           <span className="meta-text">
-            Request bodies {policy.capture_request_bodies ? "ON" : "OFF"} · Response bodies {policy.capture_response_bodies ? "ON" : "OFF"} · {fmtBytes(policy.max_body_bytes)} cap
+            Request bodies {policy.capture_request_bodies ? "on" : "off"} · Response bodies {policy.capture_response_bodies ? "on" : "off"} · {formatBytes(policy.max_body_bytes)} cap
           </span>
           {saving && <span className="meta-text">saving…</span>}
         </div>
@@ -1489,39 +1718,35 @@ function CapturePolicyControl({
   );
 }
 
-// ── Flow detail drawer ────────────────────────────────────────────────
-// Centred modal (same .finding-overlay + .drawer-panel shell as HttpDrawer)
-// showing the selected flow's request/response metadata, routing-integrity
-// indicators (host_mismatch), body metadata + truncation flags, and the
-// captured header maps. Raw body bytes are engagement-local artifacts, not
-// inlined here — the operator materialises them via Export HAR. On open we
-// re-hydrate from GET /http-flows/{flow_uid} for the canonical row.
-function FlowDrawer({
+// ── FlowRecord ────────────────────────────────────────────────────────
+// One captured exchange inside the shared record view: request/response
+// metadata and the evidence export, the captured header maps, body metadata +
+// truncation flags, and routing-integrity indicators (host_mismatch). Raw body
+// bytes are engagement-local artifacts, not inlined here — the operator
+// materialises them via Export HAR. On open the record re-reads
+// GET /http-flows/{flow_uid} for the canonical row.
+function FlowRecord({
   engagementKey,
   flow,
+  section,
+  onSectionChange,
   toast,
-  onClose,
-  returnFocusRef,
+  titleId,
 }: {
   engagementKey: string;
   flow: HttpFlow;
+  section: FlowSection;
+  onSectionChange: (section: FlowSection) => void;
   toast: ToastFn;
-  onClose: () => void;
-  returnFocusRef: RefObject<HTMLElement | null>;
+  titleId: string;
 }) {
-  useBodyScrollLock();
-  const panelRef = useRef<HTMLElement | null>(null);
-  useModalFocus(panelRef, onClose, true, returnFocusRef);
-  const [row, setRow] = useState<HttpFlow>(flow);
-  useEffect(() => {
-    setRow(flow);
-  }, [flow]);
+  const [canonical, setCanonical] = useState<HttpFlow | null>(null);
   useEffect(() => {
     let cancelled = false;
-    if (!flow.flow_uid) return;
+    if (!flow.flow_uid) return undefined;
     getHttpFlow(engagementKey, flow.flow_uid)
       .then((full) => {
-        if (!cancelled) setRow(full);
+        if (!cancelled) setCanonical(full);
       })
       .catch(() => {
         // Keep the list row on failure — it already carries the full shape.
@@ -1530,125 +1755,148 @@ function FlowDrawer({
       cancelled = true;
     };
   }, [engagementKey, flow.flow_uid]);
+  const row = canonical ?? flow;
 
   const method = (row.method || "GET").toUpperCase();
-  const reqHeaders = row.request_headers && Object.keys(row.request_headers).length > 0
-    ? JSON.stringify(row.request_headers, null, 2)
-    : null;
-  const respHeaders = row.response_headers && Object.keys(row.response_headers).length > 0
-    ? JSON.stringify(row.response_headers, null, 2)
-    : null;
-
+  const requestHeaders = row.request_headers ?? {};
+  const responseHeaders = row.response_headers ?? {};
+  const headerCount = Object.keys(requestHeaders).length + Object.keys(responseHeaders).length;
+  const reqHeaders = Object.keys(requestHeaders).length > 0 ? JSON.stringify(requestHeaders, null, 2) : null;
+  const respHeaders = Object.keys(responseHeaders).length > 0 ? JSON.stringify(responseHeaders, null, 2) : null;
+  const notes = [
+    row.response_status == null ? "no response recorded" : "",
+    row.host_mismatch ? "host mismatch: URL authority, Host header and SNI disagree" : "",
+    row.request_body_truncated ? "request body truncated" : "",
+    row.response_body_truncated ? "response body truncated" : "",
+  ].filter(Boolean);
   return (
-    <div className="finding-overlay" role="presentation" onClick={onClose}>
-      <article
-        ref={panelRef}
-        className="drawer-panel panel"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="http-flow-modal-title"
-        tabIndex={-1}
-        onClick={(event) => event.stopPropagation()}
-        style={{ maxWidth: "820px", width: "min(94vw, 820px)", maxHeight: "90vh", overflow: "auto" }}
-      >
-        <div className="drawer-hero">
-          <div className="drawer-top">
-            <div className="drawer-slug">
-              <span className={`method-badge ${methodClass(method)}`}>{method}</span>
-              {row.response_status != null && (
-                <span className={`status-badge ${statusClass(row.response_status)}`}>
-                  {row.response_status}
-                </span>
-              )}
-            </div>
-            <div className="drawer-nav">
-              <button type="button" className="icon-btn" onClick={onClose} title="Close (Esc)">
-                <IconClose />
-              </button>
-            </div>
-          </div>
-          <h2 id="http-flow-modal-title" className="drawer-title mono">
-            {row.path || row.url || "/"}
-          </h2>
-          <div className="hero-meta">
-            {row.host && <span className="tag">{row.host}</span>}
+    <>
+      <RecordHeader
+        id={`Exchange #${row.id}`}
+        copyId={String(row.id)}
+        copyIdLabel="Copy exchange ID"
+        title={
+          <>
+            <span className={`method-badge ${methodClass(method)}`}>{method}</span>{" "}
+            <span className="mono" title={row.path || row.url || "/"}>{row.path || row.url || "/"}</span>
+          </>
+        }
+        titleId={titleId}
+        tone={row.response_status == null ? "neutral" : statusTone("http-response", responseClass(row.response_status))}
+        actions={
+          <>
+            <RecordCopyButton
+              label="Copy URL"
+              text={() => row.url}
+              successMessage="URL copied"
+              failureMessage="Could not copy the URL. Select it in the Exchange section instead."
+              disabled={!row.url}
+            />
+            <RecordCopyLinkButton noun="exchange" />
+          </>
+        }
+        pills={
+          <>
+            {row.response_status != null && <HttpStatusPill status={row.response_status} size="md" />}
+            {notes.length > 0 && <span className="record-pill-reason">{notes.join(" · ")}</span>}
+            {row.host && <span className="tag mono" title="Host">{row.host}</span>}
             {row.content_type_family && row.content_type_family !== "unknown" && (
-              <span className="tag">{row.content_type_family}</span>
+              <span className="tag" title="Content type">{row.content_type_family}</span>
             )}
-            {row.auth_context && <span className="tag">{row.auth_context}</span>}
+            {row.auth_context && <span className="tag" title="Auth context">{row.auth_context}</span>}
             {row.request_variant_id != null && (
               <a className="tag" href={engagementHref(engagementKey, { tab: "http", request: row.request_variant_id })}>Request variant #{row.request_variant_id}</a>
             )}
-            {row.host_mismatch && (
-              <span className="tag warning" title="URL authority / Host header / SNI disagree">
-                host mismatch
-              </span>
+          </>
+        }
+        datesLabel="Exchange dates"
+        dates={[
+          { label: "Started", value: row.started_at, detail: row.timing_ms != null ? <> · took {row.timing_ms} ms</> : undefined },
+          { label: "Captured", value: row.created_at },
+        ]}
+      />
+      <RecordTabs
+        label="Exchange sections"
+        active={section}
+        onChange={onSectionChange}
+        tabs={[
+          { id: "exchange", label: "Exchange" },
+          { id: "headers", label: "Headers", count: headerCount },
+          { id: "bodies", label: "Bodies" },
+          { id: "routing", label: "Routing integrity" },
+        ]}
+      />
+      <RecordBody>
+        {section === "exchange" && (
+          <>
+            <section className="section">
+              <h3 className="section-title">Evidence</h3>
+              <p className="meta-text">
+                The flow UID and body artifact paths identify the captured evidence without altering it.
+              </p>
+              <div className="quick-actions">
+                <a
+                  className="qa-btn"
+                  href={exportHarUrl(engagementKey, { flow_uid: row.flow_uid })}
+                  download={`${row.flow_uid}.har`}
+                >
+                  Export this exchange as HAR
+                </a>
+              </div>
+            </section>
+            <section className="section">
+              <h3 className="section-title">Metadata</h3>
+              <div className="kv-grid">
+                <KV k="Method" v={method} />
+                <KV k="Scheme" v={row.scheme} />
+                <KV k="Host" v={row.host} mono toast={row.host ? toast : undefined} />
+                <KV k="Port" v={row.port} mono />
+                <KV k="URL" v={row.url} mono toast={row.url ? toast : undefined} />
+                <KV k="Path" v={row.path} mono />
+                <KV k="Status" v={row.response_status} />
+                <KV k="Request content-type" v={row.request_content_type} />
+                <KV k="Response content-type" v={row.response_content_type} />
+                <KV k="Content-Type family" v={row.content_type_family} />
+                <KV k="Auth context" v={row.auth_context} />
+                <KV k="Timing" v={row.timing_ms != null ? `${row.timing_ms} ms` : undefined} />
+                <KV k="Flow UID" v={row.flow_uid} mono toast={row.flow_uid ? toast : undefined} />
+                <KVTime k="Started" v={row.started_at} />
+                <KVTime k="Captured" v={row.created_at} />
+              </div>
+            </section>
+          </>
+        )}
+
+        {section === "headers" && (
+          <section className="section">
+            <h3 className="section-title">Headers</h3>
+            {reqHeaders || respHeaders ? (
+              <div className="http-schema-grid">
+                {reqHeaders && (
+                  <CodeBlock
+                    label="Request headers"
+                    text={reqHeaders}
+                    onCopied={() => toast("Copied", "success")}
+                  />
+                )}
+                {respHeaders && (
+                  <CodeBlock
+                    label="Response headers"
+                    text={respHeaders}
+                    onCopied={() => toast("Copied", "success")}
+                  />
+                )}
+              </div>
+            ) : (
+              <p className="meta-text">No headers were captured for this exchange.</p>
             )}
-          </div>
-        </div>
+          </section>
+        )}
 
-        <div className="drawer-body">
-          <div className="section">
-            <p className="section-title">Evidence</p>
+        {section === "bodies" && (
+          <section className="section">
+            <h3 className="section-title">Bodies</h3>
             <p className="meta-text">
-              The flow UID and body artifact paths identify the captured evidence without altering it.
-            </p>
-            <div className="quick-actions">
-              <a
-                className="qa-btn"
-                href={exportHarUrl(engagementKey, { flow_uid: row.flow_uid })}
-                download={`${row.flow_uid}.har`}
-              >
-                Export this exchange as HAR
-              </a>
-            </div>
-          </div>
-
-          <div className="section">
-            <p className="section-title">Metadata</p>
-            <div className="kv-grid">
-              <KV k="Method" v={method} />
-              <KV k="Scheme" v={row.scheme} />
-              <KV k="Host" v={row.host} mono toast={row.host ? toast : undefined} />
-              <KV k="Port" v={row.port} mono />
-              <KV k="URL" v={row.url} mono toast={row.url ? toast : undefined} />
-              <KV k="Path" v={row.path} mono />
-              <KV k="Status" v={row.response_status} />
-              <KV k="Request content-type" v={row.request_content_type} />
-              <KV k="Response content-type" v={row.response_content_type} />
-              <KV k="Content-Type family" v={row.content_type_family} />
-              <KV k="Auth context" v={row.auth_context} />
-              <KV k="Timing" v={row.timing_ms != null ? `${row.timing_ms} ms` : undefined} />
-              <KV k="Flow UID" v={row.flow_uid} mono toast={row.flow_uid ? toast : undefined} />
-              <div className="kv">
-                <p className="k">Started</p>
-                <p className="v">{row.started_at ? <RelTime iso={row.started_at} /> : "—"}</p>
-              </div>
-              <div className="kv">
-                <p className="k">Captured</p>
-                <p className="v">{row.created_at ? <RelTime iso={row.created_at} /> : "—"}</p>
-              </div>
-            </div>
-          </div>
-
-          <div className="section">
-            <p className="section-title">Routing integrity</p>
-            <div className="kv-grid">
-              <KV k="URL authority" v={row.url_authority} mono />
-              <KV k="Host header" v={row.host_header} mono />
-              <KV k="SNI" v={row.sni} mono />
-              <div className="kv">
-                <p className="k">Host mismatch</p>
-                <p className="v" style={{ color: row.host_mismatch ? "var(--warn)" : undefined }}>
-                  {row.host_mismatch ? "yes" : "no"}
-                </p>
-              </div>
-            </div>
-          </div>
-
-          <div className="section">
-            <p className="section-title">Bodies</p>
-            <p className="meta-text" style={{ margin: "0 0 8px" }}>
               Raw body bytes stay engagement-local as artifacts. Use Export HAR to materialise
               the content.
             </p>
@@ -1676,32 +1924,27 @@ function FlowDrawer({
                 toast={toast}
               />
             </div>
-          </div>
+          </section>
+        )}
 
-          {(reqHeaders || respHeaders) && (
-            <div className="section">
-              <p className="section-title">Headers</p>
-              <div className="http-schema-grid">
-                {reqHeaders && (
-                  <CodeBlock
-                    label="Request headers"
-                    text={reqHeaders}
-                    onCopied={() => toast("Copied", "success")}
-                  />
-                )}
-                {respHeaders && (
-                  <CodeBlock
-                    label="Response headers"
-                    text={respHeaders}
-                    onCopied={() => toast("Copied", "success")}
-                  />
-                )}
+        {section === "routing" && (
+          <section className="section">
+            <h3 className="section-title">Routing integrity</h3>
+            <div className="kv-grid">
+              <KV k="URL authority" v={row.url_authority} mono />
+              <KV k="Host header" v={row.host_header} mono />
+              <KV k="SNI" v={row.sni} mono />
+              <div className="kv">
+                <p className="k">Host mismatch</p>
+                <p className={`v${row.host_mismatch ? " http-warn" : ""}`}>
+                  {row.host_mismatch ? "yes" : "no"}
+                </p>
               </div>
             </div>
-          )}
-        </div>
-      </article>
-    </div>
+          </section>
+        )}
+      </RecordBody>
+    </>
   );
 }
 
@@ -1744,7 +1987,7 @@ function FlowBodyMeta({
         <KV k="Content-Type" v={contentType || "—"} />
         <KV k="Capture status" v={captureStatus || "unknown"} />
         <KV k="Capture error" v={captureError || "—"} />
-        <KV k="Size" v={fmtBytes(bytes)} />
+        <KV k="Size" v={formatBytes(bytes)} />
         <div className="kv">
           <p className="k">Truncated</p>
           <p className="v" style={{ color: truncated ? "var(--warn)" : undefined }}>

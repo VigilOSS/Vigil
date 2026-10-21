@@ -6,11 +6,13 @@ import os
 from typing import Annotated, Any, Literal, TypeAlias
 
 import anyio
-from fastapi import APIRouter, Query, Response, status
+from fastapi import APIRouter, Depends, Query, Response, status
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
 
 from ..services import activity as activity_service
+from ..db import get_connection
 from ..services import code_analysis
+from ..services import code_analysis_support
 from ..services import code_fuzz_completion
 from ..services.engagements import get_engagement_or_404
 from ..services.events import create_event_for_engagement
@@ -999,16 +1001,30 @@ async def commit_repo_refresh(
     return record
 
 
+def _with_structural_index_state(repo: dict[str, Any]) -> dict[str, Any]:
+    return {**repo, "structural_index_state": code_analysis_support.structural_index_state(repo)}
+
+
 @router.get("/repos")
 def list_repos(engagement_key: str) -> list[dict[str, Any]]:
     engagement = get_engagement_or_404(engagement_key)
-    return code_analysis.list_code_repos(engagement.id)
+    return [
+        _with_structural_index_state(repo)
+        for repo in code_analysis.list_code_repos(engagement.id)
+    ]
+
+
+@router.get("/repos/review-progress")
+def list_repo_review_progress(engagement_key: str) -> list[dict[str, Any]]:
+    engagement = get_engagement_or_404(engagement_key)
+    with get_connection() as connection:
+        return code_analysis_support.repo_review_progress(connection, engagement.id)
 
 
 @router.get("/repos/{repo_id}")
 def get_repo(engagement_key: str, repo_id: int) -> dict[str, Any]:
     engagement = get_engagement_or_404(engagement_key)
-    return code_analysis.get_code_repo(engagement.id, repo_id)
+    return _with_structural_index_state(code_analysis.get_code_repo(engagement.id, repo_id))
 
 
 @router.patch("/repos/{repo_id}")
@@ -1187,6 +1203,10 @@ def list_queue_items(
     batch_theme: str | None = Query(default=None, max_length=256),
     queue_mode: CodeQueueMode | None = Query(default=None),
     stale_minutes: int | None = Query(default=None, ge=1, le=1440),
+    current_only: bool = Query(
+        default=False,
+        description="Only the latest attempt per file that analysis-queue/stats counts in its status lane.",
+    ),
     limit: int = Query(default=200, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
 ) -> dict[str, Any]:
@@ -1199,6 +1219,7 @@ def list_queue_items(
         batch_theme=batch_theme,
         queue_mode=queue_mode,
         stale_minutes=stale_minutes,
+        current_only=current_only,
         limit=limit,
         offset=offset,
     )
@@ -1516,6 +1537,7 @@ async def create_analysis_result(engagement_key: str, request: AnalysisResultRec
             result=request.disposition,
             metadata={
                 "file_id": record["file_id"],
+                "result_id": record["id"],
                 "queue_item_id": request.queue_item_id,
                 "finding_slug": request.finding_slug,
                 "disposition": request.disposition,
@@ -1549,6 +1571,83 @@ def list_analysis_results(
         disposition=disposition,
         include_superseded=include_superseded,
     )
+
+
+def _analysis_result_filters(
+    scope: code_analysis_support.AnalysisResultScope = Query(
+        default="current",
+        description="current receipts, or the receipts behind files awaiting a verdict on a suspicious review",
+    ),
+    disposition: Annotated[list[str] | None, Query()] = None,
+    confidence: Annotated[list[str] | None, Query()] = None,
+    workflow_status: Annotated[list[str] | None, Query()] = None,
+    cwe: str | None = Query(default=None, max_length=256),
+    agent: str | None = Query(default=None, max_length=256),
+    slot: str | None = Query(default=None, max_length=256),
+    file: str | None = Query(default=None, max_length=1024),
+    function: str | None = Query(default=None, max_length=512),
+    q: Annotated[list[str] | None, Query()] = None,
+) -> code_analysis_support.AnalysisResultFilters:
+    return code_analysis_support.AnalysisResultFilters(
+        scope=scope,
+        dispositions=tuple(disposition or ()),
+        confidences=tuple(confidence or ()),
+        workflow_statuses=tuple(workflow_status or ()),
+        cwe=cwe,
+        agent=agent,
+        slot=slot,
+        file=file,
+        function=function,
+        terms=tuple(q or ()),
+    )
+
+
+@router.get("/analysis-results/page")
+def list_analysis_result_page(
+    engagement_key: str,
+    filters: Annotated[code_analysis_support.AnalysisResultFilters, Depends(_analysis_result_filters)],
+    limit: int = Query(
+        default=code_analysis_support.DEFAULT_ANALYSIS_RESULT_PAGE,
+        ge=1,
+        le=code_analysis_support.MAX_ANALYSIS_RESULT_PAGE,
+    ),
+    offset: int = Query(default=0, ge=0),
+) -> dict[str, Any]:
+    """Analysis receipts for the operator view: paged, filtered, and compact.
+
+    ``{scope, total, file_total, offset, count, has_more, items, facets,
+    awaiting_verdict: {files, results}, not_listed: [{code, count, message}]}``.
+    ``GET /analysis-results`` stays the complete listing the assess CLI reads.
+    """
+    engagement = get_engagement_or_404(engagement_key)
+    with get_connection() as connection:
+        return code_analysis_support.analysis_result_page(
+            connection, engagement.id, filters, limit=limit, offset=offset
+        )
+
+
+@router.get("/analysis-results/{result_id}/position")
+def get_analysis_result_position(
+    engagement_key: str,
+    result_id: int,
+    filters: Annotated[code_analysis_support.AnalysisResultFilters, Depends(_analysis_result_filters)],
+) -> dict[str, Any]:
+    """``{index, total, previous, next}``: the receipt's place in the page order
+    under these filters and the page rows beside it (``index`` null when the
+    receipt is not in the filtered results)."""
+    engagement = get_engagement_or_404(engagement_key)
+    with get_connection() as connection:
+        return code_analysis_support.analysis_result_position(
+            connection, engagement.id, result_id, filters
+        )
+
+
+@router.get("/analysis-results/{result_id}")
+def get_analysis_result(engagement_key: str, result_id: int) -> dict[str, Any]:
+    """One receipt by id, superseded or not, with its standing (``current``,
+    ``awaiting_verdict``, ``queue_status``, ``latest_attempt``)."""
+    engagement = get_engagement_or_404(engagement_key)
+    return code_analysis.get_analysis_result(engagement.id, result_id)
 
 
 @router.post("/variant-checks", status_code=status.HTTP_201_CREATED)

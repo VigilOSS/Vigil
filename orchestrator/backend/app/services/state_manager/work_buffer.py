@@ -40,6 +40,7 @@ from typing import Any
 from ..events import _engagement_or_404
 from . import _common
 from ._common import _fetch_all, _parse_url
+from ..sql_like import escape_like
 
 
 # ---------------------------------------------------------------------------
@@ -796,8 +797,7 @@ _UNIT_BATCH_BY_TIER = {
 
 
 def _literal_like_prefix(value: str) -> str:
-    escaped = value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-    return escaped.rstrip("/") + "/%"
+    return escape_like(value).rstrip("/") + "/%"
 
 
 def fetch_work_items_by_unit(

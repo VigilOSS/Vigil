@@ -182,9 +182,11 @@ from conversation alone. In an already open conversation, run `vigil-resume` you
 use `vigil engagement start` so preflight checks and engagement selection run. Upgrades and private workspace layout: [installation](docs/installation.md).
 
 Talk to the operator in your native agent client. The UI at `http://127.0.0.1:18000` shows
-findings, evidence, coverage, and proof work. A blocked proof stays visible while other
-investigations continue. The operator claims proof work before dispatching a specialist,
-so reopening a conversation is not a reason to launch the same work again.
+findings, evidence, coverage, and proof work. Each engagement groups its deliverables
+(findings, proof work, submissions), what is known about the target, the runs and commands
+that executed, and one Activity record of agent, operator, and system actions. A blocked proof
+stays visible while other investigations continue. The operator claims proof work before
+dispatching a specialist, so reopening a conversation is not a reason to launch the same work again.
 
 A local library or CLI bug can be proved through its supported API in Kali. A live application
 test reuses admitted targets and checks the applicable exploit approval. The specialist treats

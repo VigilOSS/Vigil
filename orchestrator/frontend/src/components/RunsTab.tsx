@@ -1,84 +1,73 @@
-import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
-import { engagementHref, writeWorkspaceHash } from "../lib/workspaceRoutes";
+// ── RunsTab ───────────────────────────────────────────────────────────
+// The Runs workspace: every evidence-gathering session, newest first, with
+// the shared "Needs attention" scope and filters for what an operator triages
+// by (health, track, live evidence, blockers, time, role, finding, client).
+// Opening a run replaces the list with the shared record view; Back, Escape
+// and browser Back return to the list, on the run last shown.
+//
+// Loading: one list read per refresh signal. Refreshes coalesce — one read
+// in flight, one trailing re-read if more signals arrived — and the last
+// loaded list stays on screen while a refresh runs or fails. Search, chips,
+// scope and grid sort survive leaving the tab (sessionStorage, per engagement).
 
-import type {
-  AssessmentRun,
-  AssessmentRunChild,
-  AuditBlocker,
-  RunAuditSection,
-  RunComparison,
-} from "../lib/api";
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { GridApi } from "ag-grid-community";
+import { Search, X } from "lucide-react";
+
+import "../styles/runs.css";
+import { createCoalescedRunner } from "../lib/coalesce";
 import {
-  getAssessmentRun,
-  getAssessmentRunComparison,
-  listAssessmentRunChildren,
-  listAssessmentRuns,
-} from "../lib/api";
-import {
-  appendAuditPage,
-  auditUiReducer,
-  blockerDestination,
-  chooseRunSelection,
+  EMPTY_RUN_FILTERS,
+  RUN_ATTENTION_HEALTH,
+  RUN_ATTENTION_RULE,
+  RUN_SORT_COLUMNS,
+  RUN_TIME_RANGES,
+  activeRunFilterCount,
   collectBarePages,
-  dispatchProvenance,
-  elapsedLabel,
-  initialAuditUiState,
-  lifecyclePresentation,
-  normalizedComparison,
+  compareRunRowsNewestFirst,
+  currentBlockers,
+  defaultSectionForRun,
+  deriveRunRow,
+  filterRuns,
+  invalidRunLink,
+  isRunAuditSection,
+  parseRunsView,
+  runFacetCounts,
+  serializeRunsView,
+  statusText,
+  type RunAuditSection,
+  type RunFilters,
+  type RunHealthKey,
+  type RunRow,
+  type RunScope,
+  type RunSort,
 } from "../lib/runAudit";
-import { TableSkeleton } from "./Skeletons";
+import { getAssessmentRun, listAssessmentRuns, type AssessmentRun } from "../lib/api";
+import { engagementHref, parseWorkspaceRoute, writeWorkspaceHash } from "../lib/workspaceRoutes";
+import { useViewportPane } from "../lib/viewportPane";
+import { CardSkeleton, SlowLoadHint, TableSkeleton } from "./Skeletons";
+import { isRunRecordTab, RunDetail, runRecordTabForSection, type RunRecordTab } from "./RunDetail";
+import { RecordView, useResultsScrollMemory } from "./record/RecordView";
+import { listNavigation, useGridView } from "./record/recordNavigation";
+import {
+  ClearFiltersButton,
+  EmptyState,
+  FilterChip,
+  FilterGroup,
+  PageHeader,
+  ResultsSummary,
+  ScopeToggle,
+  describeSort,
+  statusLabel,
+  statusOrder,
+} from "./ui";
+
+const RunsGrid = lazy(() => import("./RunsGrid"));
 
 const RUN_PAGE_SIZE = 200;
-const CHILD_PAGE_SIZE = 50;
-const SECTIONS: { key: RunAuditSection; label: string }[] = [
-  { key: "sources", label: "Sources" },
-  { key: "source-reads", label: "Source reads" },
-  { key: "dispatches", label: "Dispatches" },
-  { key: "commands", label: "Command evidence" },
-  { key: "observed-events", label: "Observed events" },
-  { key: "decision-history", label: "Decision history" },
-  { key: "proof-receipts", label: "Proof and events" },
-  { key: "obligations", label: "Obligations" },
-  { key: "candidates", label: "Candidates" },
-  { key: "tool-signals", label: "Tool signals" },
-  { key: "discovery-passes", label: "Discovery passes" },
-  { key: "code-receipts", label: "Code receipts" },
-  { key: "comparisons", label: "Comparison records" },
-];
-
-const PROOF_SECTION_KEYS = new Set<RunAuditSection>([
-  "dispatches",
-  "commands",
-  "observed-events",
-  "decision-history",
-  "proof-receipts",
-]);
-
-const OVERVIEW_COUNT_KEYS: Record<"proof" | "scan", Set<string>> = {
-  proof: new Set(["findings", "proof_receipts"]),
-  scan: new Set([
-    "inventory_total",
-    "source_reads",
-    "obligations",
-    "candidates",
-    "findings",
-    "proof_receipts",
-  ]),
-};
-
-type ChildState = {
-  items: AssessmentRunChild[];
-  total: number;
-  nextOffset: number;
-  hasMore: boolean;
-};
-
-const EMPTY_CHILD_STATE: ChildState = {
-  items: [],
-  total: 0,
-  nextOffset: 0,
-  hasMore: false,
-};
+const HEALTH_ORDER = statusOrder("run-health") as RunHealthKey[];
+// The grid never shrinks below this; shorter windows scroll the page.
+const MIN_GRID_HEIGHT = 260;
 
 type RunsTabProps = {
   engagementKey: string;
@@ -86,636 +75,500 @@ type RunsTabProps = {
   initialRunId?: number;
   initialSection?: string;
   initialObject?: string;
+  /** Open record section (`dtab`). */
+  initialDrawerTab?: string;
+  /** Reports run health after each successful list load (feeds the rail badge). */
+  onHealthCounts?: (counts: Record<RunHealthKey, number>) => void;
 };
 
 function validSection(value: string | undefined): RunAuditSection | null {
-  return SECTIONS.some((section) => section.key === value)
-    ? (value as RunAuditSection)
-    : null;
+  return isRunAuditSection(value) ? value : null;
 }
 
-function statusLabel(value: string | undefined): string {
-  return (value || "unknown").replace(/_/g, " ");
+function toggled<T>(values: ReadonlySet<T>, value: T): Set<T> {
+  const next = new Set(values);
+  if (next.has(value)) next.delete(value);
+  else next.add(value);
+  return next;
 }
 
-function formatDate(value?: string | null): string {
-  if (!value) return "Not recorded";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  return new Intl.DateTimeFormat(undefined, {
-    dateStyle: "medium",
-    timeStyle: "medium",
-  }).format(date);
+const viewKey = (engagementKey: string) => `runs.queue.${engagementKey}`;
+
+function readSavedView(engagementKey: string) {
+  try {
+    return parseRunsView(window.sessionStorage.getItem(viewKey(engagementKey)));
+  } catch {
+    return parseRunsView(null);
+  }
 }
 
-function titleForChild(row: AssessmentRunChild, section: RunAuditSection): string {
-  const candidates = section === "sources"
-    ? [row.path, row.target_key, row.content_sha256]
-    : section === "source-reads"
-      ? [row.path, row.source_path, row.source_sha256]
-      : section === "dispatches"
-        ? [row.agent_id, row.agent_role, row.client_name]
-      : section === "commands"
-        ? [(row.command as Record<string, unknown> | undefined)?.command, row.observed_result]
-      : section === "observed-events"
-        ? [row.evidence_kind, row.artifact_relative_path, row.observed_result]
-      : section === "decision-history"
-        ? [row.detail, row.object_type, row.to_status]
-      : section === "proof-receipts"
-        ? [row.evidence_kind, row.artifact_relative_path, row.observed_result]
-      : section === "obligations"
-        ? [row.object_key, row.identity_key, row.obligation_kind]
-        : section === "candidates"
-          ? [row.identity_key, row.source_anchor, row.vulnerability_family]
-          : section === "tool-signals"
-            ? [row.observed_signature, row.signal_kind, row.source_anchor]
-            : section === "discovery-passes"
-              ? [row.identity_key, row.terminal_reason, row.frontier_identity_sha256]
-              : section === "code-receipts"
-                ? [row.receipt_kind, row.target_key, row.obligation_status]
-          : [row.selection, row.baseline_run_id, row.comparison_sha256];
-  const title = candidates.find((value) => typeof value === "string" && value.trim());
-  return typeof title === "string" ? title : `${statusLabel(section)} record`;
+/** A `run=` value in the address that names no run (the route parser drops it). */
+function readInvalidRunLink(): string | null {
+  if (typeof window === "undefined") return null;
+  const route = parseWorkspaceRoute(window.location.hash);
+  return route.kind === "engagement" ? invalidRunLink(route.params) : null;
 }
 
-function rowDomId(section: RunAuditSection, id: number | string | undefined): string | undefined {
-  return id === undefined ? undefined : `run-audit-${section}-${String(id).replace(/[^a-zA-Z0-9_-]/g, "-")}`;
+export function RunsTab(props: RunsTabProps) {
+  return <RunsWorkspace key={props.engagementKey} {...props} />;
 }
 
-function AuditJson({ value }: { value: unknown }) {
-  return (
-    <pre className="run-audit-json">
-      {JSON.stringify(value, null, 2)}
-    </pre>
-  );
-}
-
-function RunComparisonPanel({
-  baseline,
-  comparison,
-  comparisonError,
-  comparisonGroups,
-  comparisonLoading,
-  detail,
-  runs,
-  setBaseline,
-}: {
-  baseline: string;
-  comparison: RunComparison | null;
-  comparisonError: string | null;
-  comparisonGroups: ReturnType<typeof normalizedComparison>;
-  comparisonLoading: boolean;
-  detail: AssessmentRun;
-  runs: AssessmentRun[];
-  setBaseline: (value: string) => void;
-}) {
-  const compatibility = comparison
-    ? comparison.target_compatible === true && comparison.source_compatible === true
-      ? "compatible"
-      : comparison.target_compatible === null || comparison.source_compatible === null
-        ? "unknown"
-        : "drift"
-    : null;
-
-  return (
-    <section className="run-audit-comparison">
-      <div className="run-comparison-heading">
-        <div><h2>Deterministic comparison</h2><p className="meta-text">Latest compatible baseline by default; no model call.</p></div>
-        <label>
-          Baseline
-          <select value={baseline} onChange={(event) => setBaseline(event.target.value)}>
-            <option value="">Latest compatible</option>
-            {runs.filter((run) => run.id !== detail.id).map((run) => (
-              <option key={run.id} value={run.id}>{run.run_uuid} · {statusLabel(run.status)}</option>
-            ))}
-          </select>
-        </label>
-      </div>
-      {comparisonLoading && <p className="meta-text">Comparing recorded identities…</p>}
-      {comparisonError && <p className="error-text">{comparisonError}</p>}
-      {comparison && (
-        <>
-          <p className={`run-compatibility ${compatibility === "compatible" ? "is-compatible" : compatibility === "unknown" ? "is-unknown" : "has-drift"}`}>
-            {compatibility === "compatible"
-              ? `Target and source compatible with run ${comparison.baseline_run_id}`
-              : compatibility === "unknown"
-                ? `Compatibility with run ${comparison.baseline_run_id} is unknown because target or source identity was not recorded`
-                : `Target or source drift from run ${comparison.baseline_run_id}; unresolved prior records remain unknown`}
-          </p>
-          <div className="run-comparison-grid">
-            {comparisonGroups.map((group) => (
-              <section key={group.key} className={`comparison-${group.key}`}>
-                <header><h3>{statusLabel(group.key)}</h3><span>{group.items.length}</span></header>
-                {group.items.length === 0 ? <p>None</p> : (
-                  <ul>{group.items.map((item) => <li key={item}>{item}</li>)}</ul>
-                )}
-              </section>
-            ))}
-          </div>
-        </>
-      )}
-    </section>
-  );
-}
-
-export function RunsTab({
+function RunsWorkspace({
   engagementKey,
-  refreshVersion,
+  refreshVersion = 0,
   initialRunId,
   initialSection,
   initialObject,
+  initialDrawerTab,
+  onHealthCounts,
 }: RunsTabProps) {
-  const [runs, setRuns] = useState<AssessmentRun[]>([]);
-  const [runsLoading, setRunsLoading] = useState(true);
-  const [runsError, setRunsError] = useState<string | null>(null);
+  const [saved] = useState(() => readSavedView(engagementKey));
+  const [runs, setRuns] = useState<AssessmentRun[] | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [selectedRunId, setSelectedRunId] = useState<number | null>(initialRunId ?? null);
-  const [detail, setDetail] = useState<AssessmentRun | null>(null);
-  const [detailLoading, setDetailLoading] = useState(false);
-  const [detailError, setDetailError] = useState<string | null>(null);
-  const [ui, dispatchUi] = useReducer(auditUiReducer, {
-    ...initialAuditUiState,
-    section: validSection(initialSection) ?? initialAuditUiState.section,
-  });
-  const [children, setChildren] = useState<ChildState>(EMPTY_CHILD_STATE);
-  const [childrenLoading, setChildrenLoading] = useState(false);
-  const [childrenError, setChildrenError] = useState<string | null>(null);
-  const [baseline, setBaseline] = useState("");
-  const [comparison, setComparison] = useState<RunComparison | null>(null);
-  const [comparisonLoading, setComparisonLoading] = useState(false);
-  const [comparisonError, setComparisonError] = useState<string | null>(null);
-  const [advancedOpen, setAdvancedOpen] = useState(false);
-  const childrenRequestRef = useRef(0);
-  const runsRequestRef = useRef(0);
-  const childrenIdentityRef = useRef("");
+  const [chosenSection, setChosenSection] = useState<RunAuditSection | null>(validSection(initialSection));
+  const [chosenTab, setChosenTab] = useState<RunRecordTab | null>(isRunRecordTab(initialDrawerTab) ? initialDrawerTab : null);
+  const [gridView, reportGridView] = useGridView<number>();
+  const gridApiRef = useRef<GridApi<RunRow> | null>(null);
+  const setGridApi = useCallback((api: GridApi<RunRow> | null) => { gridApiRef.current = api; }, []);
+  const [linkedRun, setLinkedRun] = useState<{ id: number; run: AssessmentRun | null; error: string | null } | null>(null);
+  const [filters, setFilters] = useState<RunFilters>(saved.filters);
+  const [scope, setScope] = useState<RunScope>(saved.scope);
+  const [badRunLink, setBadRunLink] = useState<string | null>(readInvalidRunLink);
+  const invokerRef = useRef<HTMLElement | null>(null);
+  const searchRef = useRef<HTMLInputElement | null>(null);
+  const aliveRef = useRef(true);
 
-  const loadRuns = useCallback(async (showSpinner: boolean) => {
-    const requestId = ++runsRequestRef.current;
-    if (showSpinner) setRunsLoading(true);
+  useEffect(() => {
+    aliveRef.current = true;
+    return () => {
+      aliveRef.current = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    const onHash = () => setBadRunLink(readInvalidRunLink());
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
+
+  const loadRuns = useMemo(() => createCoalescedRunner(async () => {
+    setLoading(true);
     try {
-      const accumulated = await collectBarePages(
+      const all = await collectBarePages(
         (offset, limit) => listAssessmentRuns(engagementKey, { limit, offset }),
         RUN_PAGE_SIZE,
       );
-      if (requestId !== runsRequestRef.current) return;
-      setRuns(accumulated);
-      setSelectedRunId((current) => chooseRunSelection(
-        accumulated.map((run) => run.id),
-        current,
-        initialRunId,
-      ));
-      setRunsError(null);
-    } catch (error) {
-      if (requestId !== runsRequestRef.current) return;
-      setRunsError(error instanceof Error ? error.message : "Failed to load assessment runs");
+      if (!aliveRef.current) return;
+      setRuns(all);
+      setError(null);
+    } catch (failure) {
+      if (aliveRef.current) setError(failure instanceof Error ? failure.message : "Failed to load assessment runs");
     } finally {
-      if (requestId === runsRequestRef.current) setRunsLoading(false);
+      if (aliveRef.current) setLoading(false);
     }
-  }, [engagementKey, initialRunId]);
+  }), [engagementKey]);
 
   useEffect(() => {
-    void loadRuns(true);
+    void loadRuns("join");
   }, [loadRuns]);
 
-  const didRefreshRef = useRef(false);
+  const seenVersion = useRef(refreshVersion);
   useEffect(() => {
-    if (!didRefreshRef.current) {
-      didRefreshRef.current = true;
-      return;
-    }
-    void loadRuns(false);
-  }, [refreshVersion, loadRuns]);
+    if (seenVersion.current === refreshVersion) return;
+    seenVersion.current = refreshVersion;
+    void loadRuns("refresh");
+  }, [loadRuns, refreshVersion]);
 
+  // The URL owns which run is open and which record section it shows.
   useEffect(() => {
-    if (initialRunId) {
-      setSelectedRunId(initialRunId);
-      setBaseline("");
-      setAdvancedOpen(false);
-    }
+    setSelectedRunId(initialRunId ?? null);
   }, [initialRunId]);
-
   useEffect(() => {
-    dispatchUi({ type: "select-section", section: validSection(initialSection) ?? initialAuditUiState.section });
+    setChosenSection(validSection(initialSection));
   }, [initialSection]);
-
   useEffect(() => {
-    if (selectedRunId === null) {
-      setDetail(null);
-      return;
-    }
+    setChosenTab(isRunRecordTab(initialDrawerTab) ? initialDrawerTab : null);
+  }, [initialDrawerTab]);
+
+  const listedRun = selectedRunId === null ? undefined : runs?.find((run) => run.id === selectedRunId);
+  // A deep link can name a run the list does not hold (another page of a
+  // concurrent write, or a mistyped id): read it once so the record opens or
+  // explains why it cannot. The read depends only on which run is wanted, so
+  // recording its progress never cancels it.
+  const linkedReadId = selectedRunId !== null && runs !== null && !listedRun ? selectedRunId : null;
+  useEffect(() => {
+    if (linkedReadId === null) return undefined;
     let active = true;
-    setDetailLoading(true);
-    setDetail((current) => current?.id === selectedRunId ? current : null);
-    setDetailError(null);
-    getAssessmentRun(engagementKey, selectedRunId)
-      .then((next) => {
-        if (active) setDetail(next);
-      })
-      .catch((error: unknown) => {
-        if (!active) return;
-        setDetailError(error instanceof Error ? error.message : "Failed to load run detail");
-      })
-      .finally(() => {
-        if (active) setDetailLoading(false);
+    setLinkedRun((current) => (current?.id === linkedReadId ? current : { id: linkedReadId, run: null, error: null }));
+    getAssessmentRun(engagementKey, linkedReadId)
+      .then((run) => { if (active) setLinkedRun({ id: linkedReadId, run, error: null }); })
+      .catch((failure: unknown) => {
+        if (active) setLinkedRun({ id: linkedReadId, run: null, error: failure instanceof Error ? failure.message : "Run not found" });
       });
     return () => {
       active = false;
     };
-  }, [engagementKey, selectedRunId, refreshVersion]);
+  }, [engagementKey, linkedReadId]);
 
-  const loadChildren = useCallback(async (offset: number, replace: boolean) => {
-    if (selectedRunId === null) return;
-    const requestId = ++childrenRequestRef.current;
-    setChildrenLoading(true);
-    setChildrenError(null);
-    try {
-      const page = await listAssessmentRunChildren(
-        engagementKey,
-        selectedRunId,
-        ui.section,
-        { limit: CHILD_PAGE_SIZE, offset },
-      );
-      if (requestId !== childrenRequestRef.current) return;
-      setChildren((current) => {
-        const merged = appendAuditPage(replace ? [] : current.items, page);
-        return {
-          items: merged.items,
-          total: page.total,
-          nextOffset: merged.nextOffset,
-          hasMore: merged.hasMore,
-        };
-      });
-    } catch (error) {
-      if (requestId !== childrenRequestRef.current) return;
-      setChildrenError(error instanceof Error ? error.message : "Failed to load run records");
-    } finally {
-      if (requestId === childrenRequestRef.current) setChildrenLoading(false);
-    }
-  }, [engagementKey, selectedRunId, ui.section]);
-
-  useEffect(() => {
-    const identity = `${engagementKey}:${selectedRunId}:${ui.section}`;
-    if (childrenIdentityRef.current !== identity) {
-      childrenIdentityRef.current = identity;
-      setChildren(EMPTY_CHILD_STATE);
-    }
-    if (selectedRunId !== null) void loadChildren(0, true);
-  }, [selectedRunId, ui.section, refreshVersion, loadChildren]);
-
-  const focusedObject = (
-    initialObject
+  const selectedRun = listedRun ?? (linkedRun?.id === selectedRunId ? linkedRun?.run ?? undefined : undefined);
+  const section = chosenSection ?? defaultSectionForRun(selectedRun?.run_purpose);
+  // An explicit section wins; a ledger link (`section=`) opens the section it
+  // belongs to; otherwise the record opens on its overview. Blockers exist only
+  // while the run has some.
+  const requestedTab: RunRecordTab = chosenTab ?? (chosenSection ? runRecordTabForSection(chosenSection) : "overview");
+  const recordTab: RunRecordTab = requestedTab === "blockers" && selectedRun && currentBlockers(selectedRun).length === 0 ? "overview" : requestedTab;
+  const focusedObject = initialObject
     && selectedRunId === initialRunId
-    && ui.section === validSection(initialSection)
-  ) ? initialObject : undefined;
+    && chosenSection !== null
+    && chosenSection === validSection(initialSection)
+    ? initialObject
+    : undefined;
 
-  useEffect(() => {
-    if (!focusedObject || childrenLoading || childrenError) return;
-    const target = rowDomId(ui.section, focusedObject);
-    const element = target ? document.getElementById(target) : null;
-    if (element) {
-      element.scrollIntoView({ block: "center", behavior: "smooth" });
-      return;
+  // From the list: remember the row for the return trip. Stepping between
+  // records keeps the open section, like the Findings record.
+  const openRun = useCallback((id: number, invoker: HTMLElement | null) => {
+    invokerRef.current = invoker ?? searchRef.current;
+    setSelectedRunId(id);
+    setChosenSection(null);
+    setChosenTab(null);
+    writeWorkspaceHash(engagementHref(engagementKey, { tab: "runs", run: id }));
+  }, [engagementKey]);
+
+  const stepToRun = useCallback((id: number) => {
+    setSelectedRunId(id);
+    setChosenSection(null);
+    setChosenTab(recordTab);
+    writeWorkspaceHash(engagementHref(engagementKey, { tab: "runs", run: id, dtab: recordTab === "overview" ? undefined : recordTab }));
+  }, [engagementKey, recordTab]);
+
+  const closeRun = useCallback(() => {
+    setSelectedRunId(null);
+    setChosenSection(null);
+    setChosenTab(null);
+    writeWorkspaceHash(engagementHref(engagementKey, { tab: "runs" }));
+  }, [engagementKey]);
+
+  const chooseTab = useCallback((next: RunRecordTab) => {
+    setChosenTab(next);
+    if (selectedRunId === null) return;
+    // Keep a chosen ledger only on the section it belongs to.
+    const keep = chosenSection !== null && runRecordTabForSection(chosenSection) === next ? chosenSection : undefined;
+    writeWorkspaceHash(engagementHref(engagementKey, { tab: "runs", run: selectedRunId, dtab: next === "overview" ? undefined : next, section: keep }));
+  }, [chosenSection, engagementKey, selectedRunId]);
+
+  const chooseSection = useCallback((next: RunAuditSection) => {
+    setChosenSection(next);
+    if (selectedRunId !== null) {
+      writeWorkspaceHash(engagementHref(engagementKey, { tab: "runs", run: selectedRunId, dtab: recordTab === "overview" ? undefined : recordTab, section: next }), "replace");
     }
-    if (children.hasMore) void loadChildren(children.nextOffset, false);
-  }, [children, childrenLoading, childrenError, focusedObject, loadChildren, ui.section]);
+  }, [engagementKey, recordTab, selectedRunId]);
 
+  const rows = useMemo(() => (runs ?? []).map((run) => deriveRunRow(run)), [runs]);
+  const filtered = useMemo(() => filterRuns(rows, filters, Date.now(), scope), [rows, filters, scope]);
+  const facets = useMemo(() => runFacetCounts(rows, filters, scope), [rows, filters, scope]);
+  const healthCounts = useMemo(() => {
+    const counts: Record<RunHealthKey, number> = { healthy: 0, attention: 0, failed: 0, running: 0 };
+    for (const row of rows) counts[row.health.key] += 1;
+    return counts;
+  }, [rows]);
   useEffect(() => {
-    if (selectedRunId === null) {
-      setComparison(null);
-      return;
+    if (runs !== null) onHealthCounts?.(healthCounts);
+  }, [runs, healthCounts, onHealthCounts]);
+  const attentionTotal = [...RUN_ATTENTION_HEALTH].reduce((total, key) => total + healthCounts[key], 0);
+  const activeFilters = activeRunFilterCount(filters);
+  const setFilter = <K extends keyof RunFilters>(key: K, value: RunFilters[K]) =>
+    setFilters((current) => ({ ...current, [key]: value }));
+  const clearFilters = () => setFilters(EMPTY_RUN_FILTERS);
+
+  // A status chip outside the scope widens it; narrowing the scope drops
+  // status chips it excludes. The list never silently shows nothing.
+  const toggleHealth = (key: RunHealthKey) => {
+    const next = toggled(filters.health, key);
+    if (scope === "attention" && next.has(key) && !RUN_ATTENTION_HEALTH.has(key)) setScope("all");
+    setFilter("health", next);
+  };
+  const chooseScope = (next: RunScope) => {
+    setScope(next);
+    if (next === "attention") {
+      setFilters((current) => ({ ...current, health: new Set([...current.health].filter((key) => RUN_ATTENTION_HEALTH.has(key))) }));
     }
-    let active = true;
-    setComparisonLoading(true);
-    setComparison(null);
-    setComparisonError(null);
-    const baselineId = baseline ? Number(baseline) : undefined;
-    getAssessmentRunComparison(engagementKey, selectedRunId, baselineId)
-      .then((next) => {
-        if (active) setComparison(next);
-      })
-      .catch((error: unknown) => {
-        if (!active) return;
-        setComparison(null);
-        setComparisonError(
-          error instanceof Error ? error.message : "No compatible baseline is available",
-        );
-      })
-      .finally(() => {
-        if (active) setComparisonLoading(false);
-      });
-    return () => {
-      active = false;
-    };
-  }, [baseline, engagementKey, selectedRunId, refreshVersion]);
+  };
 
-  const blockers = useMemo(() => {
-    if (!detail) return [];
-    if (detail.blockers?.length) return detail.blockers;
-    return detail.seal?.blockers ?? [];
-  }, [detail]);
-
-  const comparisonGroups = comparison ? normalizedComparison(comparison) : [];
-  const lifecycleRows = lifecyclePresentation(detail?.lifecycle_history ?? []);
-  const proofHealth = Object.entries(detail?.proof_health ?? {});
-  const counts = Object.entries(detail?.counts ?? {});
-  const provenance = detail ? dispatchProvenance(detail) : {};
-  const purpose = detail?.run_purpose === "scan" ? "scan" : "proof";
-  const overviewCounts = counts.filter(([name]) => OVERVIEW_COUNT_KEYS[purpose].has(name));
-  const visibleSections = purpose === "proof" && !advancedOpen
-    ? SECTIONS.filter((section) => PROOF_SECTION_KEYS.has(section.key))
-    : SECTIONS;
-  const targetIdentity = detail?.target_identity ?? {};
-  const hasTargetIdentity = Object.keys(targetIdentity).length > 0;
-
+  const sort: RunSort = gridView?.sort[0] ?? saved.sort;
+  const sortColumn = RUN_SORT_COLUMNS[sort.colId];
   useEffect(() => {
-    if (
-      detail?.run_purpose === "proof"
-      && !advancedOpen
-      && !PROOF_SECTION_KEYS.has(ui.section)
-    ) {
-      dispatchUi({ type: "select-section", section: "proof-receipts" });
+    try {
+      window.sessionStorage.setItem(viewKey(engagementKey), serializeRunsView({ filters, scope, sort }));
+    } catch {
+      // Browser storage may be unavailable; the view just resets next visit.
     }
-  }, [advancedOpen, detail?.run_purpose, ui.section]);
+  }, [engagementKey, filters, scope, sort]);
+
+  const firstLoad = runs === null && !error;
+  const investigating = selectedRunId !== null && selectedRun !== undefined;
+  // Previous / Next walk the list as shown: current filters, grid sort. Until
+  // the grid reports its order (a deep link opens the record before the hidden
+  // grid has laid out its rows), walk the grid's default sort.
+  const reviewOrder = useMemo(() => {
+    const visible = new Set(filtered.map((row) => row.id));
+    const shown = gridView?.ids.filter((id) => visible.has(id));
+    if (shown && shown.length === visible.size) return shown;
+    return [...filtered].sort(compareRunRowsNewestFirst).map((row) => row.id);
+  }, [filtered, gridView]);
+  const reviewNavigation = listNavigation(reviewOrder, selectedRunId, stepToRun);
+  const resultsRef = useRef<HTMLDivElement | null>(null);
+  const revealRow = useCallback((key: string) => {
+    const api = gridApiRef.current;
+    const node = api?.getRowNode(key);
+    if (api && node) api.ensureNodeVisible(node, "middle");
+  }, []);
+  useResultsScrollMemory(resultsRef, investigating, { recordKey: investigating ? selectedRunId : null, reveal: revealRow });
+  const gridHostRef = useRef<HTMLDivElement | null>(null);
+  const { height: gridHeight } = useViewportPane(gridHostRef, MIN_GRID_HEIGHT, [runs !== null, filtered.length === 0, error, badRunLink]);
+
+  const linkedRunMissing = selectedRunId !== null && !selectedRun && linkedRun?.id === selectedRunId && linkedRun.error;
+  const filteredEmpty = runs !== null && runs.length > 0 && filtered.length === 0;
 
   return (
-    <div className="runs-audit">
-      <section className="panel run-audit-toolbar">
-        <p className="eyebrow">Shared audit</p>
-        <h2>Assessment runs</h2>
-        <p className="meta-text">
-          Code, web, blue, and shared work use the same durable evidence trail.
-        </p>
-      </section>
-      <div className="run-audit-layout">
-        <aside className="panel run-audit-rail" aria-label="Assessment runs">
-          <div className="run-rail-heading">
-            <strong>Run history</strong>
-            <span className="tab-count">{runs.length}</span>
-          </div>
-          {runsLoading && <TableSkeleton rows={5} />}
-          {runsError && <p className="error-text">{runsError}</p>}
-          {!runsLoading && !runsError && runs.length === 0 && (
-            <p className="empty-state">No assessment runs have been recorded.</p>
-          )}
-          <div className="run-rail-list">
-            {runs.map((run) => (
-              <button
-                type="button"
-                key={run.id}
-                className={`run-rail-row ${run.id === selectedRunId ? "is-selected" : ""}`}
-                onClick={() => {
-                  setSelectedRunId(run.id);
-                  setBaseline("");
-                  writeWorkspaceHash(engagementHref(engagementKey, { tab: "runs", run: run.id, section: ui.section }));
-                }}
-              >
-                <span className={`run-status-mark status-${run.status}`} aria-hidden="true" />
-                <span>
-                  <strong>{run.run_uuid}</strong>
-                  <small>{statusLabel(run.run_kind)} · {statusLabel(run.run_purpose)}</small>
-                </span>
-                <span className={`status-pill status-${run.status}`}>{statusLabel(run.status)}</span>
+    <div className="findings-redesign runs-page">
+      <PageHeader
+        title="Runs"
+        purpose="Each run is one evidence-gathering session by an agent; open one to see what it tested and what it proved."
+        stats={runs === null ? [] : [
+          { value: runs.length, label: "runs" },
+          { value: attentionTotal, label: "need attention", tone: attentionTotal > 0 ? "warning" : undefined, title: RUN_ATTENTION_RULE },
+          { value: healthCounts.running, label: "running" },
+        ]}
+        status={loading && runs !== null ? "Updating…" : null}
+        hidden={investigating}
+      >
+        {runs !== null && runs.length > 0 && (
+          <ScopeToggle
+            scope={scope}
+            onChange={chooseScope}
+            attentionCount={facets.scope.attention}
+            allCount={facets.scope.all}
+            attentionRule={RUN_ATTENTION_RULE}
+          />
+        )}
+      </PageHeader>
+
+      {(runs === null || runs.length > 0) && <div className="panel findings-toolbar-panel runs-toolbar" hidden={investigating}>
+        <div className="toolbar">
+          <div className="search-wrap">
+            <Search className="search-icon" aria-hidden="true" />
+            <input
+              ref={searchRef}
+              className="search-input"
+              type="search"
+              aria-label="Search runs"
+              placeholder="Search run, task, agent, finding, model…"
+              value={filters.query}
+              onChange={(event) => setFilter("query", event.target.value)}
+            />
+            {filters.query && (
+              <button type="button" className="icon-btn" onClick={() => setFilter("query", "")} aria-label="Clear run search">
+                <X size={14} />
               </button>
-            ))}
+            )}
           </div>
-        </aside>
-
-        <div className="run-audit-workspace">
-          {detailLoading && !detail && (
-            <section className="panel"><TableSkeleton rows={6} /></section>
-          )}
-          {detailError && <section className="panel" role="alert"><p className="error-text">{detailError}{detail && " · Showing last recorded run detail."}</p></section>}
-          {!detailLoading && !detailError && !detail && runs.length > 0 && (
-            <section className="panel"><p className="empty-state">Select a run to inspect it.</p></section>
-          )}
-
-          {detail && (
-            <>
-              <section className="panel run-audit-summary">
-                <header className="run-detail-header">
-                  <div>
-                    <p className="eyebrow">{statusLabel(detail.run_kind)} · {statusLabel(detail.run_purpose)}</p>
-                    <h2>{detail.run_uuid}</h2>
-                  </div>
-                  <span className={`status-pill status-${detail.status}`}>{statusLabel(detail.status)}</span>
-                </header>
-
-                <dl className="run-identity-strip">
-                  <div><dt>Started</dt><dd>{formatDate(detail.started_at ?? detail.created_at)}</dd></div>
-                  <div><dt>Finished</dt><dd>{formatDate(detail.finished_at)}</dd></div>
-                  <div><dt>Elapsed</dt><dd>{elapsedLabel(detail.started_at ?? detail.created_at, detail.finished_at)}</dd></div>
-                  <div>
-                    <dt>Observed cost</dt>
-                    <dd>{detail.observed_cost == null ? "Not recorded" : `$${detail.observed_cost.toFixed(4)}`}</dd>
-                  </div>
-                </dl>
-
-                {overviewCounts.length > 0 && (
-                  <div className="run-metric-strip" aria-label="Run counts">
-                    {overviewCounts.map(([name, value]) => (
-                      <div key={name}><strong>{value}</strong><span>{statusLabel(name)}</span></div>
-                    ))}
-                  </div>
-                )}
-
-                {(hasTargetIdentity || proofHealth.length > 0) && (
-                  <div className="run-detail-columns">
-                  {hasTargetIdentity && <div>
-                    <h3>Target identity</h3>
-                    <AuditJson value={targetIdentity} />
-                  </div>}
-                  {proofHealth.length > 0 && <div>
-                    <h3>Proof health</h3>
-                    <dl className="run-proof-health">
-                      {proofHealth.map(([name, value]) => (
-                        <div key={name}><dt>{statusLabel(name)}</dt><dd>{String(value)}</dd></div>
-                      ))}
-                    </dl>
-                  </div>}
-                </div>)}
-                {detail.finding_slugs && detail.finding_slugs.length > 0 && (
-                  <div className="run-finding-links">
-                    <h3>Linked findings</h3>
-                    <div>
-                      {detail.finding_slugs.map((slug) => (
-                        <a
-                          key={slug}
-                          href={engagementHref(engagementKey, { tab: "findings", finding: slug })}
-                        >
-                          {slug}
-                        </a>
-                      ))}
-                    </div>
-                  </div>
-                )}
-                {detail.resumed_from_run_id && (
-                  <p className="run-resume-line">
-                    Continued from <a href={engagementHref(engagementKey, { tab: "runs", run: detail.resumed_from_run_id })}>run #{detail.resumed_from_run_id}</a>
-                  </p>
-                )}
-              </section>
-
-              <section className="panel run-audit-blockers">
-                <div className="panel-header">
-                  <div><h2>Blockers</h2><p className="meta-text">Each item names the object and corrective action.</p></div>
-                  <span className="tab-count">{blockers.length}</span>
-                </div>
-                {blockers.length === 0 ? (
-                  <p className="run-clear-state">No recorded blockers.</p>
-                ) : (
-                  <div className="run-blocker-list">
-                    {blockers.map((blocker: AuditBlocker, index) => (
-                      <article key={`${String(blocker.object_type)}-${String(blocker.object_id)}-${index}`}>
-                        <span className="badge badge-warn">{statusLabel(blocker.code)}</span>
-                        <div>
-                          <code className="run-blocker-object">{statusLabel(blocker.object_type)}{blocker.object_id == null ? "" : ` #${blocker.object_id}`}</code>
-                          <strong>{blocker.message || `${statusLabel(blocker.object_type)} ${String(blocker.object_id ?? "")}`}</strong>
-                          <p>{blocker.action || "Inspect and settle this recorded blocker."}</p>
-                        </div>
-                        <a href={blockerDestination(engagementKey, detail.id, blocker)}>Open object →</a>
-                      </article>
-                    ))}
-                  </div>
-                )}
-              </section>
-
-              <section className="panel run-audit-advanced">
-                <button
-                  type="button"
-                  className="run-advanced-toggle"
-                  aria-expanded={advancedOpen}
-                  onClick={() => setAdvancedOpen((open) => !open)}
-                >
-                  <span><strong>Advanced audit</strong><small>Complete accounting, provenance, lifecycle, and comparison data</small></span>
-                  <span aria-hidden="true">{advancedOpen ? "−" : "+"}</span>
-                </button>
-                {advancedOpen && <div className="run-advanced-content">
-                  <section>
-                    <h2>Complete accounting</h2>
-                    <div className="run-metric-strip" aria-label="Complete run counts">
-                      {counts.map(([name, value]) => (
-                        <div key={name}><strong>{value}</strong><span>{statusLabel(name)}</span></div>
-                      ))}
-                    </div>
-                  </section>
-                  <section>
-                    <div className="panel-header">
-                      <div><h2>Identity and provenance</h2><p className="meta-text">Observed dispatch and immutable source boundaries.</p></div>
-                    </div>
-                    <div className="run-detail-columns">
-                      <div><h3>Target identity</h3><AuditJson value={targetIdentity} /></div>
-                      <div><h3>Dispatch</h3><AuditJson value={provenance} /></div>
-                      <div><h3>Source generations</h3><AuditJson value={detail.source_generations ?? []} /></div>
-                      <div><h3>Exclusions</h3><AuditJson value={detail.exclusions ?? []} /></div>
-                      <div><h3>Terminal seal</h3><AuditJson value={detail.seal ?? { seal_sha256: detail.seal_sha256 }} /></div>
-                    </div>
-                    {detail.warnings && detail.warnings.length > 0 && (
-                      <ul className="run-provenance-warnings">
-                        {detail.warnings.map((warning) => <li key={warning}>{warning}</li>)}
-                      </ul>
-                    )}
-                  </section>
-                  <section className="run-audit-history">
-                    <div className="panel-header"><div><h2>Lifecycle history</h2><p className="meta-text">Recorded transitions remain distinct from current status.</p></div></div>
-                    {lifecycleRows.length === 0 ? (
-                      <p className="empty-state">No lifecycle events recorded.</p>
-                    ) : (
-                      <ol>
-                        {lifecycleRows.map(({ key, transition, event }) => (
-                          <li key={key}>
-                            <span className="run-history-dot" aria-hidden="true" />
-                            <div>
-                              <strong>{transition.split(" → ").map(statusLabel).join(" → ")}</strong>
-                              <p>{formatDate(event.created_at)}{event.actor ? ` · ${event.actor}` : ""}</p>
-                              {event.reason && <p>{event.reason}</p>}
-                            </div>
-                          </li>
-                        ))}
-                      </ol>
-                    )}
-                  </section>
-                  {purpose === "proof" && <RunComparisonPanel
-                    baseline={baseline}
-                    comparison={comparison}
-                    comparisonError={comparisonError}
-                    comparisonGroups={comparisonGroups}
-                    comparisonLoading={comparisonLoading}
-                    detail={detail}
-                    runs={runs}
-                    setBaseline={setBaseline}
-                  />}
-                </div>}
-              </section>
-
-              {purpose === "scan" && <RunComparisonPanel
-                baseline={baseline}
-                comparison={comparison}
-                comparisonError={comparisonError}
-                comparisonGroups={comparisonGroups}
-                comparisonLoading={comparisonLoading}
-                detail={detail}
-                runs={runs}
-                setBaseline={setBaseline}
-              />}
-
-              <section className="panel run-audit-drilldown">
-                <div className="panel-header">
-                  <div><h2>Recorded work</h2><p className="meta-text">Bounded pages from the selected run.</p></div>
-                  <span className="tab-count">{children.total}</span>
-                </div>
-                <div className="run-section-tabs" role="tablist" aria-label="Run records">
-                  {visibleSections.map((section) => (
-                    <button
-                      type="button"
-                      role="tab"
-                      aria-selected={ui.section === section.key}
-                      key={section.key}
-                      onClick={() => {
-                        dispatchUi({ type: "select-section", section: section.key });
-                        writeWorkspaceHash(engagementHref(engagementKey, { tab: "runs", run: selectedRunId, section: section.key }));
-                      }}
-                    >
-                      {section.label}
-                    </button>
-                  ))}
-                </div>
-                {childrenError && <p className="error-text" role="alert">{childrenError}{children.items.length > 0 && " · Showing last recorded ledger."}</p>}
-                {focusedObject && !childrenLoading && !childrenError && !children.hasMore && !children.items.some((row) => String(row.id) === focusedObject) && (
-                  <p className="error-text" role="alert">Requested record #{focusedObject} is not present in this run's recorded ledger.</p>
-                )}
-                {childrenLoading && children.items.length === 0 && <TableSkeleton rows={4} />}
-                {!childrenLoading && !childrenError && children.items.length === 0 && (
-                  <p className="empty-state">No {statusLabel(ui.section)} recorded for this run.</p>
-                )}
-                <div className="run-record-list">
-                  {children.items.map((row, index) => {
-                    const id = rowDomId(ui.section, row.id);
-                    const focused = focusedObject != null && String(row.id) === focusedObject;
-                    return (
-                      <article id={id} key={row.id ?? `${ui.section}-${index}`} className={focused ? "is-focused" : ""}>
-                        <header>
-                          <strong>{titleForChild(row, ui.section)}</strong>
-                          {row.id !== undefined && <span>#{String(row.id)}</span>}
-                        </header>
-                        <AuditJson value={row} />
-                      </article>
-                    );
-                  })}
-                </div>
-                {children.hasMore && (
-                  <button
-                    type="button"
-                    className="ghost-button run-load-more"
-                    disabled={childrenLoading}
-                    onClick={() => void loadChildren(children.nextOffset, false)}
-                  >
-                    {childrenLoading ? "Loading…" : `Load more · ${Math.max(0, children.total - children.items.length)} remaining`}
-                  </button>
-                )}
-              </section>
-            </>
-          )}
+          <div className="toolbar-right">
+            <label className="runs-select">
+              <span>Finding</span>
+              <select value={filters.finding} onChange={(event) => setFilter("finding", event.target.value)} aria-label="Filter by finding">
+                <option value="">Any finding</option>
+                {facets.findings.map(([slug, count]) => <option key={slug} value={slug}>{slug} ({count})</option>)}
+              </select>
+            </label>
+            <label className="runs-select">
+              <span>Client</span>
+              <select value={filters.client} onChange={(event) => setFilter("client", event.target.value)} aria-label="Filter by client">
+                <option value="">Any client</option>
+                {facets.clients.map(([client, count]) => <option key={client} value={client}>{client} ({count})</option>)}
+              </select>
+            </label>
+          </div>
         </div>
+        <div className="filter-row runs-filter-row">
+          <FilterGroup label="Status">
+            {HEALTH_ORDER.map((key) => (
+              <FilterChip
+                key={key}
+                label={statusLabel("run-health", key)}
+                status={{ domain: "run-health", value: key }}
+                count={facets.health[key]}
+                selected={filters.health.has(key)}
+                onToggle={() => toggleHealth(key)}
+              />
+            ))}
+          </FilterGroup>
+          <FilterGroup label="Track">
+            {facets.tracks.map(([track, count]) => (
+              <FilterChip
+                key={track}
+                label={statusText(track)}
+                count={count}
+                selected={filters.tracks.has(track)}
+                onToggle={() => setFilter("tracks", toggled(filters.tracks, track))}
+              />
+            ))}
+          </FilterGroup>
+          <FilterGroup label="Evidence">
+            <FilterChip
+              label="Live target evidence"
+              description="Runs that recorded an HTTP exchange, browser action, or out-of-band callback against the target."
+              count={facets.live}
+              selected={filters.liveOnly}
+              onToggle={() => setFilter("liveOnly", !filters.liveOnly)}
+            />
+            <FilterChip
+              label="Has blockers"
+              count={facets.blockers}
+              selected={filters.blockersOnly}
+              onToggle={() => setFilter("blockersOnly", !filters.blockersOnly)}
+            />
+          </FilterGroup>
+          <FilterGroup label="Started">
+            {RUN_TIME_RANGES.map((range) => (
+              <FilterChip
+                key={range.key}
+                label={range.label}
+                count={facets.ranges[range.key]}
+                selected={filters.range === range.key}
+                onToggle={() => setFilter("range", range.key)}
+              />
+            ))}
+          </FilterGroup>
+          <FilterGroup label="Role">
+            {facets.roles.map(([role, count]) => (
+              <FilterChip
+                key={role}
+                label={statusText(role)}
+                count={count}
+                selected={filters.roles.has(role)}
+                onToggle={() => setFilter("roles", toggled(filters.roles, role))}
+              />
+            ))}
+          </FilterGroup>
+          <ClearFiltersButton count={activeFilters} onClear={clearFilters} />
+        </div>
+      </div>}
+
+      {badRunLink !== null && !investigating && (
+        <p className="runs-banner error-text" role="alert">
+          Run link “{badRunLink}” does not name a run; run links use the run number, such as run=42.{" "}
+          <button type="button" className="runs-link-button" onClick={closeRun}>Dismiss</button>
+        </p>
+      )}
+
+      {error && runs !== null && (
+        <p className="runs-banner error-text" role="alert">
+          Could not refresh runs: {error} · Showing the last loaded list.
+        </p>
+      )}
+
+      {selectedRunId !== null && !selectedRun && !linkedRunMissing && runs !== null && (
+        <div className="runs-banner" role="status" aria-busy="true" aria-label={`Loading run #${selectedRunId}`}>
+          <CardSkeleton lines={3} />
+          <SlowLoadHint active what={`run #${selectedRunId}`} />
+        </div>
+      )}
+
+      {linkedRunMissing && (
+        <p className="runs-banner error-text" role="alert">
+          Run #{selectedRunId} could not be opened: {linkedRun?.error}{" "}
+          <button type="button" className="runs-link-button" onClick={closeRun}>Show all runs</button>
+        </p>
+      )}
+
+      <div ref={resultsRef} className="findings-shell runs-shell" hidden={investigating}>
+        <section className="list-panel panel" aria-label="Assessment runs" aria-busy={loading}>
+          {runs !== null && runs.length > 0 && (
+            <div className="runs-results-head">
+              <ResultsSummary
+                shown={filtered.length}
+                total={runs.length}
+                noun="runs"
+                sort={sortColumn ? describeSort(sortColumn.label, sort.sort, sortColumn.kind) : undefined}
+              />
+            </div>
+          )}
+          {firstLoad && (
+            <div className="runs-loading">
+              <TableSkeleton rows={8} columns={["9%", "14%", "20%", "10%", "25%", "10%", "6%"]} />
+              <SlowLoadHint active={firstLoad} what="runs" detail="Large engagements can take a few seconds." />
+            </div>
+          )}
+          {runs === null && error && (
+            <div className="runs-empty-state" role="alert">
+              <p className="error-text">{error}</p>
+              <button type="button" className="qa-btn" onClick={() => void loadRuns("refresh")}>Try again</button>
+            </div>
+          )}
+          {runs !== null && runs.length === 0 && (
+            <EmptyState variant="empty" title="No assessment runs have been recorded.">
+              Agents record a run whenever they gather evidence for a finding or scan a target.
+            </EmptyState>
+          )}
+          {filteredEmpty && (
+            <EmptyState
+              variant="filtered"
+              title={activeFilters > 0 ? "No runs match these filters." : "No run needs attention."}
+              onClearFilters={activeFilters > 0 ? clearFilters : () => chooseScope("all")}
+              clearLabel={activeFilters > 0 ? "Clear filters" : "Show all runs"}
+              action={activeFilters > 0 && scope === "attention" ? (
+                <button type="button" className="ui-button" onClick={() => chooseScope("all")}>Show all runs</button>
+              ) : undefined}
+            >
+              {scope === "attention" && facets.scope.all > 0
+                ? `${facets.scope.all} ${facets.scope.all === 1 ? "run matches" : "runs match"} outside the Needs attention scope.`
+                : undefined}
+            </EmptyState>
+          )}
+          {runs !== null && runs.length > 0 && !filteredEmpty && (
+            <div ref={gridHostRef} className="runs-grid-frame" style={gridHeight ? { height: gridHeight } : undefined}>
+              <Suspense fallback={<TableSkeleton rows={8} showHeader={false} />}>
+                <RunsGrid
+                  engagementKey={engagementKey}
+                  rows={filtered}
+                  selectedId={selectedRunId}
+                  onRowOpen={openRun}
+                  onViewChange={reportGridView}
+                  initialSort={sort}
+                  onApi={setGridApi}
+                />
+              </Suspense>
+            </div>
+          )}
+        </section>
       </div>
+
+      {investigating && (
+        <RecordView
+          label="Run record"
+          noun="run"
+          navigation={reviewNavigation}
+          onBack={closeRun}
+          titleId="run-record-title"
+          returnFocusRef={invokerRef}
+        >
+          <RunDetail
+            key={selectedRun.id}
+            engagementKey={engagementKey}
+            run={selectedRun}
+            runs={runs ?? []}
+            tab={recordTab}
+            section={section}
+            focusedObject={focusedObject}
+            refreshVersion={refreshVersion}
+            titleId="run-record-title"
+            onTabChange={chooseTab}
+            onSectionChange={chooseSection}
+          />
+        </RecordView>
+      )}
     </div>
   );
 }

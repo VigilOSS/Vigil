@@ -1,0 +1,446 @@
+/* ── OAST view ─────────────────────────────────────────────────────────
+ * The page header, scope, chips, pills and empty states are the shared
+ * primitives (styles/ui.css); this file holds the probe list's frame, the
+ * record's callback ledger and the verdict dialog. A probe waiting for
+ * review keeps a warn edge in the grid; expired/ignored rows read as
+ * finished. Tokens only, so light and dark both resolve. */
+
+.oast-route-notice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  margin: 0 0 10px;
+  padding: 8px 12px;
+  border: 1px solid var(--divider);
+  border-left: 3px solid var(--accent);
+  border-radius: 6px;
+  background: var(--panel-soft);
+  color: var(--ink-2);
+  font-size: 0.84rem;
+}
+
+.findings-redesign .oast-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  padding: 12px;
+}
+.findings-redesign .oast-banner .error-text { margin: 0; text-align: left; }
+
+.oast-toolbar .filter-row {
+  align-items: center;
+}
+
+.oast-legend {
+  margin-left: auto;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--ink-2);
+}
+
+.oast-legend[open] {
+  flex-basis: 100%;
+  margin-left: 0;
+}
+
+.oast-legend summary {
+  width: fit-content;
+  cursor: pointer;
+  color: var(--accent);
+}
+
+.oast-legend summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.oast-legend dl {
+  display: grid;
+  gap: 6px;
+  margin: 8px 0 2px;
+}
+
+.oast-legend dl > div {
+  display: grid;
+  grid-template-columns: 170px minmax(0, 1fr);
+  gap: 10px;
+  align-items: baseline;
+}
+
+.oast-legend dd {
+  margin: 0;
+}
+
+/* Grid: bounded so the toolbar never scrolls away; the header row stays
+ * pinned inside the grid viewport. */
+.findings-redesign .oast-grid-host {
+  height: calc(100vh - 420px);
+  min-height: 320px;
+}
+
+.oast-grid-panel {
+  padding: 0;
+  overflow: hidden;
+}
+
+.oast-grid-panel > .ui-empty { margin: 16px; }
+
+.oast-grid-panel .oast-results-summary {
+  margin: 0;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--divider);
+}
+
+.ag-theme-vigil .oast-row-fired {
+  box-shadow: inset 3px 0 0 var(--warn);
+}
+
+.ag-theme-vigil .oast-row-finished .ag-cell {
+  color: var(--muted);
+}
+
+.oast-hits {
+  display: inline-block;
+  min-width: 22px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--count-bg);
+  color: var(--count-ink);
+  font-weight: 600;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.oast-linked {
+  overflow-wrap: anywhere;
+}
+
+.oast-unattributed {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 1px 8px;
+  border: 1px dashed var(--warn);
+  border-radius: 4px;
+  color: var(--warn);
+  font-family: "Source Sans 3", "Segoe UI", sans-serif;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.oast-unattributed::before {
+  content: "!";
+  font-weight: 700;
+}
+
+/* ── Record ──
+ * An open probe (the shared RecordView) replaces the results; the results
+ * stay mounted behind it so the view, filters and scroll survive. */
+.oast-results[hidden] { display: none; }
+
+.oast-route-missing {
+  margin: 0 0 12px;
+  text-align: left;
+}
+
+.oast-callbacks-loading {
+  display: grid;
+  gap: 8px;
+  padding: 8px 0;
+}
+
+.findings-redesign .oast-callbacks-error {
+  margin: 0;
+  text-align: left;
+}
+
+.oast-callback-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px 20px;
+  margin: 4px 0 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--divider);
+  border-radius: 6px;
+  background: var(--panel-soft);
+}
+
+.oast-callback-facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  flex: 1 1 300px;
+  color: var(--ink-2);
+  font-size: 12px;
+}
+
+.oast-callback-facts strong {
+  color: var(--ink);
+}
+
+.oast-source-masked {
+  flex-basis: 100%;
+  color: var(--ink-2);
+}
+
+.oast-histogram {
+  margin: 0;
+  width: 240px;
+  flex-shrink: 0;
+}
+
+.oast-histogram svg {
+  display: block;
+  width: 100%;
+  height: 36px;
+}
+
+.oast-histogram-bar {
+  fill: var(--accent);
+}
+
+.oast-histogram figcaption {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.oast-groups {
+  margin-bottom: 10px;
+}
+
+.oast-callback-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--divider);
+  border-radius: 6px;
+}
+
+.oast-callback-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.oast-callback-table th {
+  position: sticky;
+  top: 0;
+  padding: 7px 10px;
+  background: var(--panel-soft);
+  border-bottom: 1px solid var(--divider);
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-align: left;
+  text-transform: uppercase;
+}
+
+.oast-callback-table td {
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--divider);
+  vertical-align: middle;
+  color: var(--ink);
+}
+
+.oast-callback-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.oast-private-tag {
+  margin-left: 6px;
+  padding: 0 5px;
+  border: 1px solid var(--border-strong);
+  border-radius: 3px;
+  color: var(--muted);
+  font-family: "Source Sans 3", "Segoe UI", sans-serif;
+  font-size: 10px;
+}
+
+.oast-receipt-toggle {
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.oast-receipt-toggle[aria-expanded="true"] {
+  background: var(--count-bg-active);
+}
+
+.oast-receipt-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.oast-receipt-row td {
+  background: var(--panel-soft);
+}
+
+.oast-receipt-row .code-block {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.findings-redesign .section .oast-receipt-meta {
+  margin: 6px 0 2px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.oast-receipt-meta code {
+  overflow-wrap: anywhere;
+  color: var(--ink-2);
+}
+
+.oast-pager {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.oast-pager .meta-text {
+  margin-right: auto;
+}
+
+@media (max-width: 900px) {
+  .oast-legend dl > div {
+    grid-template-columns: 1fr;
+    gap: 2px;
+  }
+
+  .oast-histogram {
+    width: 100%;
+  }
+}
+
+/* Grid cell content keeps its own height instead of stretching to the row. */
+.oast-grid-host .ui-status,
+.oast-grid-host .oast-unattributed,
+.oast-grid-host .oast-hits {
+  align-self: center;
+  line-height: 1.5;
+}
+
+.oast-pager .ghost-button {
+  padding: 4px 12px;
+  font-size: 12px;
+}
+
+/* The toolbar has its own clear button; hide the browser's duplicate. */
+.oast-view .search-input::-webkit-search-cancel-button {
+  display: none;
+}
+
+/* ── Operator verdict ── */
+
+.oast-verdict-text {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  margin: 0;
+  color: var(--ink-2);
+  font-size: 0.86rem;
+  line-height: 1.5;
+}
+
+.oast-verdict-recorded {
+  display: grid;
+  gap: 6px;
+}
+
+.findings-redesign .section .oast-verdict-note {
+  margin: 0;
+  padding: 8px 10px;
+  border-left: 3px solid var(--divider);
+  border-radius: 4px;
+  background: var(--panel-soft);
+  color: var(--ink);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.oast-verdict-button.oast-verdict-confirmed { color: var(--ok); }
+.oast-verdict-button.oast-verdict-ignored { color: var(--ink-2); }
+
+/* Verdict confirmation dialog */
+.oast-dialog-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  background: rgba(0, 0, 0, 0.45);
+}
+
+.oast-dialog {
+  display: grid;
+  gap: 12px;
+  width: min(560px, 100%);
+  max-height: calc(100vh - 32px);
+  overflow-y: auto;
+  padding: 18px 20px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--panel-strong);
+  color: var(--ink);
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.25);
+}
+
+.oast-dialog:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.oast-dialog h2 { margin: 0; font-size: 1.05rem; line-height: 1.3; }
+.oast-dialog-lede { margin: 0; color: var(--ink-2); font-size: 0.86rem; line-height: 1.5; }
+
+.oast-dialog-facts { display: grid; gap: 6px; margin: 0; font-size: 0.82rem; }
+.oast-dialog-facts > div { display: grid; grid-template-columns: 90px minmax(0, 1fr); gap: 10px; align-items: baseline; }
+.oast-dialog-facts dt { color: var(--muted); }
+.oast-dialog-facts dd { margin: 0; overflow-wrap: anywhere; }
+.oast-dialog-change { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+
+.oast-dialog-note { display: grid; gap: 4px; font-size: 0.82rem; color: var(--ink-2); }
+.oast-dialog-note textarea {
+  width: 100%;
+  min-height: 72px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--ink);
+  font: inherit;
+  font-size: 0.86rem;
+  resize: vertical;
+  box-sizing: border-box;
+}
+.oast-dialog-note textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+.oast-dialog-error {
+  margin: 0;
+  padding: 7px 10px;
+  border-left: 3px solid var(--danger);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--danger) 8%, transparent);
+  color: var(--danger);
+  font-size: 0.8rem;
+  overflow-wrap: anywhere;
+}
+
+.oast-dialog-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 8px; }
+
+/* The verdict buttons are full buttons, spaced wider than icon actions. */
+.oast-view .record-actions { gap: 6px; }

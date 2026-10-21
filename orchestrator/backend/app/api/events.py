@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 from ..models.event import Event
 from ..services.engagements import get_engagement_or_404
 from ..services.events import create_event_for_engagement, list_events_for_engagement, summarize_events_for_engagement
+from ..services.timestamps import iso_utc
 from ..ws import broadcaster
 
 router = APIRouter(prefix="/engagements/{engagement_key}/events", tags=["events"])
@@ -40,7 +41,7 @@ def _event_response(event: Event) -> EventResponse:
         task_name=event.task_name,
         agent_name=event.agent_name,
         summary=event.summary,
-        created_at=event.created_at,
+        created_at=iso_utc(event.created_at),
     )
 
 
@@ -76,10 +77,7 @@ def list_events(
     limit: int | None = Query(default=None, ge=1, le=1000),
 ) -> list[EventResponse]:
     engagement = get_engagement_or_404(engagement_key)
-    events = list_events_for_engagement(engagement.id)
-    if limit is not None:
-        events = events[-limit:]
-    return [_event_response(event) for event in events]
+    return [_event_response(event) for event in list_events_for_engagement(engagement.id, limit=limit)]
 
 
 @router.get("/summary")

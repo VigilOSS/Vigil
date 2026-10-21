@@ -80,6 +80,17 @@ describe("App engagement loading", () => {
     expect(await screen.findByText("Request variant 19")).toBeTruthy();
   });
 
+  it("passes proof-work and command deep links to the engagement page", async () => {
+    vi.mocked(EngagementPage).mockImplementation(({ initialTab, initialWorkId, initialCommandId }) => (
+      <div>Tab {initialTab} work {initialWorkId ?? "none"} command {initialCommandId ?? "none"}</div>
+    ));
+    window.location.hash = "#/engagements/demo?tab=proof&work=9";
+    render(<App />);
+    expect(await screen.findByText("Tab proof work 9 command none")).toBeTruthy();
+    window.location.hash = "#/engagements/demo?tab=commands&command=77";
+    expect(await screen.findByText("Tab commands work none command 77")).toBeTruthy();
+  });
+
   it("does not turn an unsafe numeric deep link into a different rounded record ID", async () => {
     window.location.hash = "#/engagements/demo?tab=http&request=9007199254740993";
     render(<App />);

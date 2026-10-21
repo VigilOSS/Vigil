@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import enum
+import fnmatch
 import hashlib
 import json
 import re
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Literal, get_args
 from urllib.parse import urlparse
 from fastapi import HTTPException, status
 
 from ..events import _engagement_or_404
+from ..sql_like import like_contains
 
 from . import _common
 from ._common import (
@@ -1257,6 +1260,1023 @@ def list_coverage_items(
             tuple(params),
         ).fetchall()
     return [dict(row) for row in rows]
+
+
+# ── Operator coverage ledger (paged list, facets, reason rollup, detail) ──
+#
+# ``list_coverage_items`` above is the bare-list contract ``vigil assess fetch``
+# pages. The operator UI reads the ledger through the functions below instead:
+# server paging with a visible total, server-side facet counts, and one shared
+# definition of an item's latest reason.
+#
+# ``notes`` is a newline-appended log (``_common._append_notes``). Its first line
+# is the note the item was created with — ingest provenance such as "Auto-generated
+# from request observation" or a gf-bucket match. Every later line is a reason an
+# operator or agent recorded with a status change. The latest reason is therefore
+# the last line AFTER the first, once trailing whitespace is trimmed; an item that
+# was never touched has none. Python (``coverage_latest_reason``) and SQL (the
+# reason filter and rollup below) both implement exactly this rule.
+
+COVERAGE_LEDGER_PAGE_DEFAULT_LIMIT = 100
+COVERAGE_LEDGER_PAGE_MAX_LIMIT = 500
+COVERAGE_LEDGER_FACET_DEFAULT_LIMIT = 200
+COVERAGE_LEDGER_REASON_DEFAULT_LIMIT = 100
+COVERAGE_LEDGER_GROUP_MAX_LIMIT = 5000
+COVERAGE_LEDGER_RELATED_LIMIT = 50
+
+_COVERAGE_NOTE_TRIM_CHARS = "\n\r\t "
+_COVERAGE_NOTE_BODY_SQL = "rtrim(coverage.notes, char(10, 13, 9, 32))"
+
+
+def _coverage_note_body(notes: str | None) -> str:
+    return (notes or "").rstrip(_COVERAGE_NOTE_TRIM_CHARS)
+
+
+def coverage_created_from(notes: str | None) -> str:
+    """The note the item was created with (line 1 of its note log)."""
+    return _coverage_note_body(notes).split("\n", 1)[0]
+
+
+def coverage_latest_reason(notes: str | None) -> str | None:
+    """The last recorded reason, or None when only the creation note exists."""
+    body = _coverage_note_body(notes)
+    if "\n" not in body:
+        return None
+    return body.rsplit("\n", 1)[1]
+
+
+def coverage_note_lines(notes: str | None) -> list[dict[str, Any]]:
+    """The note log as lines, oldest first; the creation note is flagged."""
+    return [
+        {"text": line, "provenance": index == 0}
+        for index, line in enumerate(_coverage_note_body(notes).split("\n"))
+        if line.strip()
+    ]
+
+
+# An item's host, matching how the ledger groups it: a service-bound item lives
+# under its target's host (falling back to the service endpoint's host), a
+# request-variant item under the variant's host. Lower-cased so filters, facets
+# and sorting agree regardless of how the host was first recorded.
+_SERVICE_ENDPOINT_SQL = "lower(trim(services.endpoint))"
+_SERVICE_ENDPOINT_REST_SQL = (
+    f"(CASE WHEN instr({_SERVICE_ENDPOINT_SQL}, '://') > 0 "
+    f"THEN substr({_SERVICE_ENDPOINT_SQL}, instr({_SERVICE_ENDPOINT_SQL}, '://') + 3) "
+    f"ELSE {_SERVICE_ENDPOINT_SQL} END)"
+)
+_SERVICE_ENDPOINT_HOST_SQL = (
+    f"(CASE WHEN {_SERVICE_ENDPOINT_REST_SQL} LIKE '[%' "
+    f"THEN substr({_SERVICE_ENDPOINT_REST_SQL}, 2, instr({_SERVICE_ENDPOINT_REST_SQL}, ']') - 2) "
+    f"ELSE substr({_SERVICE_ENDPOINT_REST_SQL}, 1, min("
+    f"instr({_SERVICE_ENDPOINT_REST_SQL} || ':', ':'), "
+    f"instr({_SERVICE_ENDPOINT_REST_SQL} || '/', '/'), "
+    f"instr({_SERVICE_ENDPOINT_REST_SQL} || ' ', ' ')) - 1) END)"
+)
+_COVERAGE_ITEM_HOST_SQL = (
+    "(CASE WHEN services.id IS NOT NULL THEN lower(COALESCE("
+    "NULLIF(targets.host, ''), NULLIF(targets.hostname, ''), NULLIF(targets.identity, ''), "
+    f"{_SERVICE_ENDPOINT_HOST_SQL})) "
+    "WHEN request_variants.id IS NOT NULL THEN lower(request_variants.host) "
+    "ELSE '' END)"
+)
+_COVERAGE_LEDGER_JOINS = """
+LEFT JOIN assessment_request_variants AS request_variants ON request_variants.id = coverage.request_variant_id
+LEFT JOIN assessment_services AS services ON services.id = coverage.service_id
+LEFT JOIN assessment_targets AS targets ON targets.id = services.target_id
+"""
+
+# Sortable columns: public name -> (SQL expression, nullable). A nullable
+# expression sorts its missing values last in both directions. Anything else is
+# rejected at the route, never interpolated.
+CoverageLedgerSort = Literal[
+    "updated_at",
+    "created_at",
+    "status",
+    "attack_family",
+    "input_slot",
+    "auth_context",
+    "method",
+    "url",
+    "host",
+    "id",
+]
+# Status sort order, most urgent first: the operator UI's ``coverage`` status
+# vocabulary order (frontend ``ui/statusTones.ts``). The rank counts down, so a
+# descending sort leads with the most urgent and an ascending one with the least;
+# a stored legacy value outside the tuple ranks NULL and sorts last either way.
+_COVERAGE_STATUS_URGENCY: tuple[str, ...] = tuple(
+    status.value
+    for status in (
+        CoverageStatus.BLOCKED,
+        CoverageStatus.DEFERRED,
+        CoverageStatus.PENDING,
+        CoverageStatus.QUEUED,
+        CoverageStatus.COVERED,
+        CoverageStatus.NOT_APPLICABLE,
+    )
+)
+assert sorted(_COVERAGE_STATUS_URGENCY) == sorted(COVERAGE_STATUSES)
+_COVERAGE_STATUS_URGENCY_SQL = (
+    "(CASE coverage.status "
+    + " ".join(
+        f"WHEN '{value}' THEN {len(_COVERAGE_STATUS_URGENCY) - index}"
+        for index, value in enumerate(_COVERAGE_STATUS_URGENCY)
+    )
+    + " END)"
+)
+_COVERAGE_LEDGER_SORTS: dict[str, tuple[str, bool]] = {
+    "updated_at": ("coverage.updated_at", False),
+    "created_at": ("coverage.created_at", False),
+    "status": (_COVERAGE_STATUS_URGENCY_SQL, True),
+    "attack_family": ("coverage.attack_family", False),
+    "input_slot": ("coverage.input_slot", False),
+    "auth_context": ("coverage.auth_context", False),
+    "method": ("request_variants.method", True),
+    "url": ("COALESCE(request_variants.canonical_url, services.endpoint)", True),
+    "host": (_COVERAGE_ITEM_HOST_SQL, False),
+    "id": ("coverage.id", False),
+}
+assert set(_COVERAGE_LEDGER_SORTS) == set(get_args(CoverageLedgerSort))
+_COVERAGE_LEDGER_JOINED_SORTS = frozenset({"method", "url", "host"})
+
+# Facet dimension -> (SQL expression, needs the joins). Missing method/host
+# values count under "" so every item lands in exactly one bucket.
+_COVERAGE_LEDGER_FACETS: dict[str, tuple[str, bool]] = {
+    "status": ("coverage.status", False),
+    "attack_family": ("coverage.attack_family", False),
+    "auth_context": ("coverage.auth_context", False),
+    "input_slot": ("coverage.input_slot", False),
+    "method": ("COALESCE(request_variants.method, '')", True),
+    "host": (_COVERAGE_ITEM_HOST_SQL, True),
+}
+
+_COVERAGE_LEDGER_SEARCH_COLUMNS = (
+    "coverage.notes",
+    "coverage.attack_family",
+    "coverage.input_slot",
+    "coverage.auth_context",
+    "request_variants.canonical_url",
+    "services.endpoint",
+    "services.service",
+)
+
+
+@dataclass(frozen=True)
+class CoverageLedgerFilters:
+    """Operator ledger filters. Multi-valued dimensions OR within themselves and
+    AND across dimensions; an unknown value narrows to nothing."""
+
+    statuses: tuple[str, ...] = ()
+    attack_families: tuple[str, ...] = ()
+    auth_contexts: tuple[str, ...] = ()
+    input_slots: tuple[str, ...] = ()
+    methods: tuple[str, ...] = ()
+    hosts: tuple[str, ...] = ()
+    q: str = ""
+    reason: str | None = None
+    reason_missing: bool = False
+    created_from: str | None = None
+
+
+def _coverage_ledger_where(
+    engagement_id: int,
+    filters: CoverageLedgerFilters,
+    *,
+    exclude: str | None = None,
+) -> tuple[str, list[Any], bool]:
+    """WHERE clause, bound params, and whether the request/service joins are needed."""
+    clauses = ["coverage.engagement_id = ?"]
+    params: list[Any] = [engagement_id]
+    needs_join = False
+
+    def any_of(expression: str, values: tuple[str, ...]) -> None:
+        clauses.append(f"{expression} IN ({', '.join('?' for _ in values)})")
+        params.extend(values)
+
+    if filters.statuses and exclude != "status":
+        any_of("coverage.status", filters.statuses)
+    if filters.attack_families and exclude != "attack_family":
+        any_of("coverage.attack_family", filters.attack_families)
+    if filters.auth_contexts and exclude != "auth_context":
+        any_of("coverage.auth_context", filters.auth_contexts)
+    if filters.input_slots and exclude != "input_slot":
+        any_of("coverage.input_slot", filters.input_slots)
+    if filters.methods and exclude != "method":
+        any_of(_COVERAGE_LEDGER_FACETS["method"][0], tuple(value.upper() for value in filters.methods))
+        needs_join = True
+    if filters.hosts and exclude != "host":
+        any_of(_COVERAGE_ITEM_HOST_SQL, tuple(value.strip().lower() for value in filters.hosts))
+        needs_join = True
+    for term in filters.q.split():
+        pattern = like_contains(term)
+        clauses.append(
+            "("
+            + " OR ".join(f"{column} LIKE ? ESCAPE '\\'" for column in _COVERAGE_LEDGER_SEARCH_COLUMNS)
+            + ")"
+        )
+        params.extend([pattern] * len(_COVERAGE_LEDGER_SEARCH_COLUMNS))
+        needs_join = True
+    body = _COVERAGE_NOTE_BODY_SQL
+    if filters.reason is not None:
+        reason = filters.reason
+        if not reason or "\n" in reason:
+            # A latest reason is one non-empty line; nothing else can match.
+            clauses.append("0")
+        else:
+            clauses.append(
+                f"substr({body}, -length(?)) = ? AND substr({body}, -length(?) - 1, 1) = char(10)"
+            )
+            params.extend([reason, reason, reason])
+    if filters.reason_missing:
+        clauses.append(f"instr({body}, char(10)) = 0")
+    if filters.created_from is not None:
+        clauses.append(
+            f"substr({body}, 1, length(?)) = ? AND "
+            f"(length({body}) = length(?) OR substr({body}, length(?) + 1, 1) = char(10))"
+        )
+        params.extend([filters.created_from] * 4)
+    return " AND ".join(clauses), params, needs_join
+
+
+def _coverage_ledger_row(row: Any) -> dict[str, Any]:
+    record = dict(row)
+    notes = record.pop("notes", "")
+    record["latest_reason"] = coverage_latest_reason(notes)
+    record["created_from"] = coverage_created_from(notes)
+    return record
+
+
+_COVERAGE_LEDGER_ROW_COLUMNS = f"""
+    coverage.id,
+    coverage.engagement_id,
+    coverage.request_variant_id,
+    coverage.service_id,
+    coverage.application_unit_id,
+    coverage.auth_context,
+    coverage.input_slot,
+    coverage.attack_family,
+    coverage.status,
+    coverage.notes,
+    coverage.created_at,
+    coverage.updated_at,
+    request_variants.method,
+    request_variants.canonical_url,
+    request_variants.normalized_path,
+    request_variants.host,
+    services.endpoint AS service_endpoint,
+    services.service AS service_name,
+    {_COVERAGE_ITEM_HOST_SQL} AS item_host
+"""
+
+
+def page_coverage_items(
+    engagement_id: int,
+    filters: CoverageLedgerFilters,
+    *,
+    sort: str = "updated_at",
+    direction: str = "desc",
+    limit: int = COVERAGE_LEDGER_PAGE_DEFAULT_LIMIT,
+    offset: int = 0,
+) -> dict[str, Any]:
+    """One page of the operator ledger plus the total matching the filters."""
+    engagement = _engagement_or_404(engagement_id)
+    if sort not in _COVERAGE_LEDGER_SORTS or direction not in {"asc", "desc"}:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="unsupported coverage sort")
+    limit = max(1, min(int(limit), COVERAGE_LEDGER_PAGE_MAX_LIMIT))
+    offset = max(0, int(offset))
+    where, params, needs_join = _coverage_ledger_where(engagement.id, filters)
+    expression, nullable = _COVERAGE_LEDGER_SORTS[sort]
+    sql_direction = direction.upper()
+    order = f"{expression} {sql_direction}, coverage.id {sql_direction}"
+    if nullable:
+        order = f"({expression}) IS NULL, {order}"
+    joins = _COVERAGE_LEDGER_JOINS if needs_join else ""
+    sort_joins = _COVERAGE_LEDGER_JOINS if needs_join or sort in _COVERAGE_LEDGER_JOINED_SORTS else ""
+    with _common.get_connection() as connection:
+        total = int(
+            connection.execute(
+                f"SELECT COUNT(*) FROM assessment_coverage_items AS coverage {joins} WHERE {where}",
+                tuple(params),
+            ).fetchone()[0]
+        )
+        # Page ids first (joins only when the filter or sort needs them), then
+        # hydrate just those rows.
+        page_ids = [
+            int(row[0])
+            for row in connection.execute(
+                f"""
+                SELECT coverage.id
+                FROM assessment_coverage_items AS coverage {sort_joins}
+                WHERE {where}
+                ORDER BY {order}
+                LIMIT ? OFFSET ?
+                """,
+                (*params, limit, offset),
+            ).fetchall()
+        ]
+        hydrated: dict[int, dict[str, Any]] = {}
+        if page_ids:
+            rows = connection.execute(
+                f"""
+                SELECT {_COVERAGE_LEDGER_ROW_COLUMNS}
+                FROM assessment_coverage_items AS coverage {_COVERAGE_LEDGER_JOINS}
+                WHERE coverage.id IN ({', '.join('?' for _ in page_ids)})
+                """,
+                tuple(page_ids),
+            ).fetchall()
+            hydrated = {int(row["id"]): _coverage_ledger_row(row) for row in rows}
+    items = [hydrated[item_id] for item_id in page_ids if item_id in hydrated]
+    return {
+        "total": total,
+        "offset": offset,
+        "count": len(items),
+        "has_more": offset + len(items) < total,
+        "items": items,
+    }
+
+
+
+def coverage_item_position(
+    engagement_id: int,
+    coverage_item_id: int,
+    filters: CoverageLedgerFilters,
+    *,
+    sort: str = "updated_at",
+    direction: str = "desc",
+) -> dict[str, Any]:
+    """Where one item sits in the paged ledger order, with the rows either side.
+
+    Uses the exact filter and ``ORDER BY`` of ``page_coverage_items`` so record
+    navigation walks the grid's order across block boundaries. ``index`` is
+    null when the item does not match the filters.
+    """
+    engagement = _engagement_or_404(engagement_id)
+    if sort not in _COVERAGE_LEDGER_SORTS or direction not in {"asc", "desc"}:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="unsupported coverage sort")
+    where, params, needs_join = _coverage_ledger_where(engagement.id, filters)
+    expression, nullable = _COVERAGE_LEDGER_SORTS[sort]
+    sql_direction = direction.upper()
+    order = f"{expression} {sql_direction}, coverage.id {sql_direction}"
+    if nullable:
+        order = f"({expression}) IS NULL, {order}"
+    joins = _COVERAGE_LEDGER_JOINS if needs_join else ""
+    sort_joins = _COVERAGE_LEDGER_JOINS if needs_join or sort in _COVERAGE_LEDGER_JOINED_SORTS else ""
+    with _common.get_connection() as connection:
+        exists = connection.execute(
+            "SELECT 1 FROM assessment_coverage_items WHERE id = ? AND engagement_id = ?",
+            (coverage_item_id, engagement.id),
+        ).fetchone()
+        if exists is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="coverage item not found")
+        total = int(
+            connection.execute(
+                f"SELECT COUNT(*) FROM assessment_coverage_items AS coverage {joins} WHERE {where}",
+                tuple(params),
+            ).fetchone()[0]
+        )
+        ranked = connection.execute(
+            f"""
+            WITH ranked AS (
+                SELECT coverage.id AS id, ROW_NUMBER() OVER (ORDER BY {order}) - 1 AS position
+                FROM assessment_coverage_items AS coverage {sort_joins}
+                WHERE {where}
+            ),
+            target AS (SELECT position FROM ranked WHERE id = ?)
+            SELECT ranked.id, ranked.position
+            FROM ranked, target
+            WHERE ranked.position BETWEEN target.position - 1 AND target.position + 1
+            """,
+            (*params, coverage_item_id),
+        ).fetchall()
+        positions = {int(row[0]): int(row[1]) for row in ranked}
+        index = positions.get(coverage_item_id)
+        neighbour_ids = [item_id for item_id in positions if item_id != coverage_item_id]
+        hydrated: dict[int, dict[str, Any]] = {}
+        if neighbour_ids:
+            rows = connection.execute(
+                f"""
+                SELECT {_COVERAGE_LEDGER_ROW_COLUMNS}
+                FROM assessment_coverage_items AS coverage {_COVERAGE_LEDGER_JOINS}
+                WHERE coverage.id IN ({', '.join('?' for _ in neighbour_ids)})
+                """,
+                tuple(neighbour_ids),
+            ).fetchall()
+            hydrated = {int(row["id"]): _coverage_ledger_row(row) for row in rows}
+
+    def neighbour(offset: int) -> dict[str, Any] | None:
+        if index is None:
+            return None
+        return next((hydrated[item_id] for item_id, pos in positions.items() if pos == index + offset), None)
+
+    return {"index": index, "total": total, "previous": neighbour(-1), "next": neighbour(1)}
+
+def coverage_item_facets(
+    engagement_id: int,
+    filters: CoverageLedgerFilters,
+    *,
+    facet_limit: int = COVERAGE_LEDGER_FACET_DEFAULT_LIMIT,
+) -> dict[str, Any]:
+    """Per-dimension counts under the current filters, each dimension ignoring its
+    own filter, plus the engagement-wide status totals the status bar shows."""
+    engagement = _engagement_or_404(engagement_id)
+    facet_limit = max(1, min(int(facet_limit), COVERAGE_LEDGER_GROUP_MAX_LIMIT))
+    facets: dict[str, Any] = {}
+    with _common.get_connection() as connection:
+        status_totals = {
+            str(row["status"]): int(row["total"])
+            for row in connection.execute(
+                "SELECT status, COUNT(*) AS total FROM assessment_coverage_items "
+                "WHERE engagement_id = ? GROUP BY status",
+                (engagement.id,),
+            ).fetchall()
+        }
+        where, params, needs_join = _coverage_ledger_where(engagement.id, filters)
+        total = int(
+            connection.execute(
+                "SELECT COUNT(*) FROM assessment_coverage_items AS coverage "
+                f"{_COVERAGE_LEDGER_JOINS if needs_join else ''} WHERE {where}",
+                tuple(params),
+            ).fetchone()[0]
+        )
+        for name, (expression, expression_joins) in _COVERAGE_LEDGER_FACETS.items():
+            where, params, needs_join = _coverage_ledger_where(engagement.id, filters, exclude=name)
+            joins = _COVERAGE_LEDGER_JOINS if needs_join or expression_joins else ""
+            rows = connection.execute(
+                f"""
+                SELECT {expression} AS value, COUNT(*) AS total
+                FROM assessment_coverage_items AS coverage {joins}
+                WHERE {where}
+                GROUP BY value
+                """,
+                tuple(params),
+            ).fetchall()
+            facets[name] = _common._ranked_facet_values([(row["value"], int(row["total"])) for row in rows], facet_limit)
+    return {"total": total, "status_totals": status_totals, "facets": facets}
+
+
+def coverage_reason_rollup(
+    engagement_id: int,
+    filters: CoverageLedgerFilters,
+    *,
+    reason_limit: int = COVERAGE_LEDGER_REASON_DEFAULT_LIMIT,
+) -> dict[str, Any]:
+    """Latest reason -> item count, per status, under the current filters.
+
+    Items with no recorded reason are grouped by the note they were created with
+    (``reason`` null, ``created_from`` set), so "pending because ingest matched the
+    idor bucket and nobody has tried it" stays distinguishable from other causes.
+    """
+    engagement = _engagement_or_404(engagement_id)
+    reason_limit = max(1, min(int(reason_limit), COVERAGE_LEDGER_GROUP_MAX_LIMIT))
+    where, params, needs_join = _coverage_ledger_where(engagement.id, filters)
+    joins = _COVERAGE_LEDGER_JOINS if needs_join else ""
+    # SQL groups by everything after the creation line (cheap, set-based);
+    # Python reduces each group to its last line and merges equal reasons.
+    with _common.get_connection() as connection:
+        rows = connection.execute(
+            f"""
+            SELECT
+                status,
+                CASE WHEN instr(body, char(10)) = 0 THEN NULL
+                     ELSE substr(body, instr(body, char(10)) + 1) END AS tail,
+                CASE WHEN instr(body, char(10)) = 0 THEN body ELSE NULL END AS created_from,
+                COUNT(*) AS total
+            FROM (
+                SELECT coverage.status AS status, {_COVERAGE_NOTE_BODY_SQL} AS body
+                FROM assessment_coverage_items AS coverage {joins}
+                WHERE {where}
+            )
+            GROUP BY status, tail, created_from
+            """,
+            tuple(params),
+        ).fetchall()
+    by_status: dict[str, dict[tuple[str | None, str | None], int]] = {}
+    for row in rows:
+        tail = row["tail"]
+        key = (tail.rsplit("\n", 1)[-1], None) if tail is not None else (None, row["created_from"])
+        bucket = by_status.setdefault(str(row["status"]), {})
+        bucket[key] = bucket.get(key, 0) + int(row["total"])
+    statuses = []
+    for status_value in sorted(by_status):
+        bucket = by_status[status_value]
+        ranked = sorted(
+            bucket.items(),
+            key=lambda entry: (-entry[1], entry[0][0] is None, entry[0][0] or "", entry[0][1] or ""),
+        )
+        statuses.append(
+            {
+                "status": status_value,
+                "count": sum(bucket.values()),
+                "distinct": len(ranked),
+                "omitted_count": sum(count for _key, count in ranked[reason_limit:]),
+                "reasons": [
+                    {"reason": reason, "created_from": created_from, "count": count}
+                    for (reason, created_from), count in ranked[:reason_limit]
+                ],
+            }
+        )
+    return {"total": sum(group["count"] for group in statuses), "statuses": statuses}
+
+
+# ── Operator HTTP inventory (request-variant page, facets, position, detail) ──
+#
+# ``list_request_variants``/``list_request_observations`` above are the bare
+# lists ``vigil assess fetch`` pages. The HTTP view reads the inventory through
+# the functions below instead: server paging with a visible total, server-side
+# search and facet counts, and each variant's observation count over ALL of its
+# observations (not the newest window a client loaded).
+
+REQUEST_VARIANT_PAGE_DEFAULT_LIMIT = 100
+REQUEST_VARIANT_PAGE_MAX_LIMIT = 500
+REQUEST_VARIANT_FACET_DEFAULT_LIMIT = 200
+
+RequestVariantSort = Literal[
+    "last_seen_at",
+    "first_seen_at",
+    "method",
+    "path",
+    "host",
+    "port",
+    "content_type",
+    "auth_context",
+    "source",
+    "observations",
+    "id",
+]
+_REQUEST_VARIANT_SORTS: dict[str, str] = {
+    "last_seen_at": "variant.last_seen_at",
+    "first_seen_at": "variant.first_seen_at",
+    "method": "variant.method",
+    "path": "variant.normalized_path",
+    "host": "lower(variant.host)",
+    "port": "variant.port",
+    "content_type": "variant.content_type_family",
+    "auth_context": "variant.auth_context",
+    "source": "variant.discovery_source",
+    "observations": "COALESCE(observed.observation_count, 0)",
+    "id": "variant.id",
+}
+assert set(_REQUEST_VARIANT_SORTS) == set(get_args(RequestVariantSort))
+
+# Facet dimension -> column; each facet ignores its own filter.
+_REQUEST_VARIANT_FACETS: dict[str, str] = {
+    "method": "upper(variant.method)",
+    "auth_context": "variant.auth_context",
+    "content_type": "variant.content_type_family",
+    "source": "variant.discovery_source",
+    "host": "lower(variant.host)",
+}
+
+# A search term matches the path, host, URL or template, any parameter name in
+# the query/body/path/cookie schemas, or the content type, auth context and
+# discovery source the inventory shows.
+_REQUEST_VARIANT_SEARCH_COLUMNS = (
+    "variant.normalized_path",
+    "variant.path_template",
+    "variant.canonical_url",
+    "variant.host",
+    "variant.query_schema_json",
+    "variant.body_schema_json",
+    "variant.path_schema_json",
+    "variant.cookie_schema_json",
+    "variant.content_type_family",
+    "variant.auth_context",
+    "variant.discovery_source",
+)
+
+
+@dataclass(frozen=True)
+class RequestVariantFilters:
+    """Operator inventory filters. Multi-valued dimensions OR within themselves
+    and AND across dimensions; every whitespace-separated ``q`` term must match."""
+
+    methods: tuple[str, ...] = ()
+    auth_contexts: tuple[str, ...] = ()
+    content_types: tuple[str, ...] = ()
+    sources: tuple[str, ...] = ()
+    hosts: tuple[str, ...] = ()
+    q: str = ""
+
+
+def _request_variant_where(
+    engagement_id: int, filters: RequestVariantFilters, *, exclude: str | None = None
+) -> tuple[str, list[Any]]:
+    clauses = ["variant.engagement_id = ?"]
+    params: list[Any] = [engagement_id]
+    for name, values in (
+        ("method", tuple(value.upper() for value in filters.methods)),
+        ("auth_context", filters.auth_contexts),
+        ("content_type", filters.content_types),
+        ("source", filters.sources),
+        ("host", tuple(value.strip().lower() for value in filters.hosts)),
+    ):
+        if values and exclude != name:
+            clauses.append(f"{_REQUEST_VARIANT_FACETS[name]} IN ({', '.join('?' for _ in values)})")
+            params.extend(values)
+    for term in filters.q.split():
+        clauses.append(
+            "("
+            + " OR ".join(f"{column} LIKE ? ESCAPE '\\'" for column in _REQUEST_VARIANT_SEARCH_COLUMNS)
+            + ")"
+        )
+        params.extend([like_contains(term)] * len(_REQUEST_VARIANT_SEARCH_COLUMNS))
+    return " AND ".join(clauses), params
+
+
+def _request_variant_order(sort: str, direction: str) -> tuple[str, bool]:
+    """``ORDER BY`` text and whether it needs the per-variant observation counts."""
+    if sort not in _REQUEST_VARIANT_SORTS or direction not in {"asc", "desc"}:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="unsupported request-variant sort")
+    sql_direction = direction.upper()
+    return f"{_REQUEST_VARIANT_SORTS[sort]} {sql_direction}, variant.id {sql_direction}", sort == "observations"
+
+
+_OBSERVATION_COUNTS_JOIN = """
+LEFT JOIN (
+    SELECT request_variant_id, COUNT(*) AS observation_count
+    FROM assessment_request_observations
+    WHERE engagement_id = ?
+    GROUP BY request_variant_id
+) AS observed ON observed.request_variant_id = variant.id
+"""
+
+
+def _hydrate_request_variants(connection: Any, engagement_id: int, ids: list[int]) -> dict[int, dict[str, Any]]:
+    """Variant rows plus ``observation_count``/``last_observed_at`` over every
+    observation of each variant. The unary ``+`` keeps the planner on the
+    per-variant index rather than walking the engagement's observations."""
+    if not ids:
+        return {}
+    placeholders = ", ".join("?" for _ in ids)
+    rows = connection.execute(
+        f"SELECT * FROM assessment_request_variants WHERE id IN ({placeholders})", tuple(ids)
+    ).fetchall()
+    counts = {
+        int(row["request_variant_id"]): (int(row["observation_count"]), row["last_observed_at"])
+        for row in connection.execute(
+            f"""
+            SELECT request_variant_id, COUNT(*) AS observation_count, MAX(created_at) AS last_observed_at
+            FROM assessment_request_observations
+            WHERE +engagement_id = ? AND request_variant_id IN ({placeholders})
+            GROUP BY request_variant_id
+            """,
+            (engagement_id, *ids),
+        ).fetchall()
+    }
+    hydrated: dict[int, dict[str, Any]] = {}
+    for row in rows:
+        record = dict(row)
+        count, last_observed_at = counts.get(int(row["id"]), (0, None))
+        record["observation_count"] = count
+        record["last_observed_at"] = last_observed_at
+        hydrated[int(row["id"])] = record
+    return hydrated
+
+
+def page_request_variants(
+    engagement_id: int,
+    filters: RequestVariantFilters,
+    *,
+    sort: str = "last_seen_at",
+    direction: str = "desc",
+    limit: int = REQUEST_VARIANT_PAGE_DEFAULT_LIMIT,
+    offset: int = 0,
+) -> dict[str, Any]:
+    """One page of the HTTP inventory plus the total matching the filters."""
+    engagement = _engagement_or_404(engagement_id)
+    order, needs_counts = _request_variant_order(sort, direction)
+    limit = max(1, min(int(limit), REQUEST_VARIANT_PAGE_MAX_LIMIT))
+    offset = max(0, int(offset))
+    where, params = _request_variant_where(engagement.id, filters)
+    join, join_params = (_OBSERVATION_COUNTS_JOIN, [engagement.id]) if needs_counts else ("", [])
+    with _common.get_connection() as connection:
+        total = int(
+            connection.execute(
+                f"SELECT COUNT(*) FROM assessment_request_variants AS variant WHERE {where}", tuple(params)
+            ).fetchone()[0]
+        )
+        page_ids = [
+            int(row[0])
+            for row in connection.execute(
+                f"""
+                SELECT variant.id FROM assessment_request_variants AS variant {join}
+                WHERE {where} ORDER BY {order} LIMIT ? OFFSET ?
+                """,
+                (*join_params, *params, limit, offset),
+            ).fetchall()
+        ]
+        hydrated = _hydrate_request_variants(connection, engagement.id, page_ids)
+    items = [hydrated[variant_id] for variant_id in page_ids if variant_id in hydrated]
+    return {
+        "total": total,
+        "offset": offset,
+        "count": len(items),
+        "has_more": offset + len(items) < total,
+        "items": items,
+    }
+
+
+def _request_variant_or_404(connection: Any, engagement_id: int, request_variant_id: int) -> None:
+    if connection.execute(
+        "SELECT 1 FROM assessment_request_variants WHERE id = ? AND engagement_id = ?",
+        (request_variant_id, engagement_id),
+    ).fetchone() is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="request variant not found")
+
+
+def request_variant_position(
+    engagement_id: int,
+    request_variant_id: int,
+    filters: RequestVariantFilters,
+    *,
+    sort: str = "last_seen_at",
+    direction: str = "desc",
+) -> dict[str, Any]:
+    """Where one variant sits in the page order for these filters, with the rows
+    either side (``index`` null when it does not match the filters)."""
+    engagement = _engagement_or_404(engagement_id)
+    order, needs_counts = _request_variant_order(sort, direction)
+    where, params = _request_variant_where(engagement.id, filters)
+    join, join_params = (_OBSERVATION_COUNTS_JOIN, [engagement.id]) if needs_counts else ("", [])
+    with _common.get_connection() as connection:
+        _request_variant_or_404(connection, engagement.id, request_variant_id)
+        total = int(
+            connection.execute(
+                f"SELECT COUNT(*) FROM assessment_request_variants AS variant WHERE {where}", tuple(params)
+            ).fetchone()[0]
+        )
+        ranked = connection.execute(
+            f"""
+            WITH ranked AS (
+                SELECT variant.id AS id, ROW_NUMBER() OVER (ORDER BY {order}) - 1 AS position
+                FROM assessment_request_variants AS variant {join}
+                WHERE {where}
+            ),
+            target AS (SELECT position FROM ranked WHERE id = ?)
+            SELECT ranked.id, ranked.position
+            FROM ranked, target
+            WHERE ranked.position BETWEEN target.position - 1 AND target.position + 1
+            """,
+            (*join_params, *params, request_variant_id),
+        ).fetchall()
+        positions = {int(row[0]): int(row[1]) for row in ranked}
+        index = positions.get(request_variant_id)
+        hydrated = _hydrate_request_variants(
+            connection, engagement.id, [variant_id for variant_id in positions if variant_id != request_variant_id]
+        )
+
+    def neighbour(step: int) -> dict[str, Any] | None:
+        if index is None:
+            return None
+        return next(
+            (hydrated[variant_id] for variant_id, pos in positions.items() if pos == index + step and variant_id in hydrated),
+            None,
+        )
+
+    return {"index": index, "total": total, "previous": neighbour(-1), "next": neighbour(1)}
+
+
+def request_variant_facets(
+    engagement_id: int,
+    filters: RequestVariantFilters,
+    *,
+    facet_limit: int = REQUEST_VARIANT_FACET_DEFAULT_LIMIT,
+) -> dict[str, Any]:
+    """Per-dimension counts under the current filters, each dimension ignoring its
+    own filter, plus the unfiltered inventory size."""
+    engagement = _engagement_or_404(engagement_id)
+    facet_limit = max(1, min(int(facet_limit), COVERAGE_LEDGER_GROUP_MAX_LIMIT))
+    facets: dict[str, Any] = {}
+    with _common.get_connection() as connection:
+        where, params = _request_variant_where(engagement.id, filters)
+        total = int(
+            connection.execute(
+                f"SELECT COUNT(*) FROM assessment_request_variants AS variant WHERE {where}", tuple(params)
+            ).fetchone()[0]
+        )
+        engagement_total = int(
+            connection.execute(
+                "SELECT COUNT(*) FROM assessment_request_variants WHERE engagement_id = ?", (engagement.id,)
+            ).fetchone()[0]
+        )
+        for name, expression in _REQUEST_VARIANT_FACETS.items():
+            facet_where, facet_params = _request_variant_where(engagement.id, filters, exclude=name)
+            rows = connection.execute(
+                f"""
+                SELECT {expression} AS value, COUNT(*) AS total
+                FROM assessment_request_variants AS variant
+                WHERE {facet_where}
+                GROUP BY value
+                """,
+                tuple(facet_params),
+            ).fetchall()
+            facets[name] = _common._ranked_facet_values([(row["value"], int(row["total"])) for row in rows], facet_limit)
+    return {"total": total, "engagement_total": engagement_total, "facets": facets}
+
+
+def get_request_variant_detail(engagement_id: int, request_variant_id: int) -> dict[str, Any]:
+    """One variant with its observation count and latest observation time."""
+    engagement = _engagement_or_404(engagement_id)
+    with _common.get_connection() as connection:
+        _request_variant_or_404(connection, engagement.id, request_variant_id)
+        return _hydrate_request_variants(connection, engagement.id, [request_variant_id])[request_variant_id]
+
+
+def page_request_variant_observations(
+    engagement_id: int,
+    request_variant_id: int,
+    *,
+    limit: int = REQUEST_VARIANT_PAGE_DEFAULT_LIMIT,
+    offset: int = 0,
+) -> dict[str, Any]:
+    """Every observation of one variant, newest first, paged with a total."""
+    engagement = _engagement_or_404(engagement_id)
+    limit = max(1, min(int(limit), REQUEST_VARIANT_PAGE_MAX_LIMIT))
+    offset = max(0, int(offset))
+    with _common.get_connection() as connection:
+        _request_variant_or_404(connection, engagement.id, request_variant_id)
+        total = int(
+            connection.execute(
+                "SELECT COUNT(*) FROM assessment_request_observations WHERE engagement_id = ? AND request_variant_id = ?",
+                (engagement.id, request_variant_id),
+            ).fetchone()[0]
+        )
+        items = _fetch_all(
+            connection,
+            """
+            SELECT * FROM assessment_request_observations
+            WHERE engagement_id = ? AND request_variant_id = ?
+            ORDER BY created_at DESC, id DESC
+            LIMIT ? OFFSET ?
+            """,
+            (engagement.id, request_variant_id, limit, offset),
+        )
+    return {
+        "total": total,
+        "offset": offset,
+        "count": len(items),
+        "has_more": offset + len(items) < total,
+        "items": items,
+    }
+
+
+_HTTP_METHOD_TOKENS = frozenset({"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"})
+
+
+def _blocked_technique_target(target_ref: str) -> tuple[str, str]:
+    """(host, path) a blocked technique's free-text ``target_ref`` points at.
+
+    Accepts the shapes operators record: a URL (optionally prefixed with an HTTP
+    method), a bare path, ``host``, ``host:port`` or ``host /path``. Either part
+    may be empty.
+    """
+    tokens = target_ref.strip().split()
+    if tokens and tokens[0].upper() in _HTTP_METHOD_TOKENS:
+        tokens = tokens[1:]
+    if not tokens:
+        return "", ""
+    first = tokens[0]
+    if "://" in first:
+        try:
+            parsed = urlparse(first)
+        except ValueError:
+            return "", ""
+        return (parsed.hostname or "").rstrip(".").lower(), parsed.path
+    if first.startswith("/"):
+        return "", first.split("?", 1)[0]
+    host_part, _, path = first.partition("/")
+    host = _host_from_endpoint(host_part)
+    if path:
+        return host, "/" + path.split("?", 1)[0]
+    if len(tokens) > 1 and tokens[1].startswith("/"):
+        return host, tokens[1].split("?", 1)[0]
+    return host, ""
+
+
+def _blocked_technique_relation(target_ref: str, *, item_host: str, item_path: str) -> str | None:
+    """"endpoint" when the technique names this item's endpoint, "host" when it
+    names the item's host, None when it is about something else."""
+    host, path = _blocked_technique_target(target_ref)
+    if host and not (host == item_host or ("*" in host and fnmatch.fnmatchcase(item_host, host))):
+        return None
+    if path and item_path and (path == item_path or fnmatch.fnmatchcase(item_path, path)):
+        return "endpoint"
+    return "host" if host else None
+
+
+def get_coverage_item_detail(engagement_id: int, coverage_item_id: int) -> dict[str, Any]:
+    """Everything that explains one coverage item's state."""
+    engagement = _engagement_or_404(engagement_id)
+    with _common.get_connection() as connection:
+        row = connection.execute(
+            f"""
+            SELECT {_COVERAGE_LEDGER_ROW_COLUMNS}
+            FROM assessment_coverage_items AS coverage {_COVERAGE_LEDGER_JOINS}
+            WHERE coverage.id = ? AND coverage.engagement_id = ?
+            """,
+            (coverage_item_id, engagement.id),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="coverage item not found")
+        item = dict(row)
+        work_total = int(
+            connection.execute(
+                "SELECT COUNT(*) FROM assessment_work_items WHERE coverage_item_id = ? AND engagement_id = ?",
+                (coverage_item_id, engagement.id),
+            ).fetchone()[0]
+        )
+        work_items = _fetch_all(
+            connection,
+            """
+            SELECT id, status, retry_count, terminal_reason, triage_rationale, type, source,
+                   method, url, assigned_agent, priority_score, priority_reason, live_status,
+                   consumed_at, created_at, updated_at
+            FROM assessment_work_items
+            WHERE coverage_item_id = ? AND engagement_id = ?
+            ORDER BY updated_at DESC, id DESC
+            LIMIT ?
+            """,
+            (coverage_item_id, engagement.id, COVERAGE_LEDGER_RELATED_LIMIT),
+        )
+        probe_total = int(
+            connection.execute(
+                "SELECT COUNT(*) FROM assessment_probe_runs WHERE coverage_item_id = ? AND engagement_id = ?",
+                (coverage_item_id, engagement.id),
+            ).fetchone()[0]
+        )
+        probe_runs = _fetch_all(
+            connection,
+            """
+            SELECT probes.id, probes.attack_family, probes.input_slot, probes.auth_context,
+                   probes.payload_family, probes.tool_name, probes.agent_name, probes.result_status,
+                   probes.observed_http_status, probes.signal_type, probes.outcome_assertion,
+                   probes.evidence_ref, probes.notes, probes.lens, probes.target_host,
+                   probes.target_path, probes.finding_id, findings.slug AS finding_slug,
+                   probes.created_at
+            FROM assessment_probe_runs AS probes
+            LEFT JOIN assessment_findings AS findings ON findings.id = probes.finding_id
+            WHERE probes.coverage_item_id = ? AND probes.engagement_id = ?
+            ORDER BY probes.created_at DESC, probes.id DESC
+            LIMIT ?
+            """,
+            (coverage_item_id, engagement.id, COVERAGE_LEDGER_RELATED_LIMIT),
+        )
+        request_variant = None
+        if item["request_variant_id"] is not None:
+            variant = connection.execute(
+                """
+                SELECT id, method, scheme, host, port, normalized_path, path_template, canonical_url,
+                       auth_context, content_type_family, discovery_source, first_seen_at, last_seen_at
+                FROM assessment_request_variants
+                WHERE id = ? AND engagement_id = ?
+                """,
+                (item["request_variant_id"], engagement.id),
+            ).fetchone()
+            request_variant = dict(variant) if variant is not None else None
+        service = None
+        if item["service_id"] is not None:
+            service_row = connection.execute(
+                """
+                SELECT id, target_id, endpoint, port, protocol, service, state, coverage_status, updated_at
+                FROM assessment_services
+                WHERE id = ? AND engagement_id = ?
+                """,
+                (item["service_id"], engagement.id),
+            ).fetchone()
+            service = dict(service_row) if service_row is not None else None
+        techniques = _fetch_all(
+            connection,
+            """
+            SELECT id, technique_key, technique, target_kind, target_ref, reason, retry_state,
+                   evidence_ref, notes, created_at, updated_at
+            FROM assessment_blocked_techniques
+            WHERE engagement_id = ?
+            ORDER BY updated_at DESC, id DESC
+            """,
+            (engagement.id,),
+        )
+    notes = item.pop("notes", "")
+    item["latest_reason"] = coverage_latest_reason(notes)
+    item["created_from"] = coverage_created_from(notes)
+    item_path = (request_variant or {}).get("normalized_path") or ""
+    related = []
+    for technique in techniques:
+        relation = _blocked_technique_relation(
+            str(technique["target_ref"]), item_host=str(item["item_host"] or ""), item_path=item_path
+        )
+        if relation is not None:
+            related.append({**technique, "relation": relation})
+    related.sort(key=lambda technique: technique["relation"] != "endpoint")
+    return {
+        "item": item,
+        "note_lines": coverage_note_lines(notes),
+        "work_items": {"total": work_total, "items": work_items},
+        "probe_runs": {"total": probe_total, "items": probe_runs},
+        "request_variant": request_variant,
+        "service": service,
+        "blocked_techniques": related,
+    }
+
 
 def _pending_work_item_ids_for_coverage_item(
     connection, engagement_id: int, coverage_item_id: int

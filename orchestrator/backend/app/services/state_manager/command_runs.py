@@ -5,7 +5,6 @@ import hashlib
 import json
 import os
 import re
-import shlex
 import sqlite3
 import stat
 import uuid
@@ -873,68 +872,315 @@ def _serialize_host_exec_replay(row: sqlite3.Row) -> dict[str, Any]:
     return serialized
 
 
+# ── tool_bin: the tool a command run exercised ──────────────────────
+#
+# ``tool_name`` is route-derived (every /api/command call is ``command``), so
+# ``tool_bin`` is the discriminator operators filter by and phase readiness
+# buckets on. Agents mostly run multi-line ``bash -c`` scripts, so the command
+# is scanned as shell: quotes, comments, heredoc bodies, ``$(…)``/backtick
+# substitutions, array assignments, redirections, function definitions and
+# compound-command keywords are all understood, and every simple command
+# becomes a candidate. The first candidate of the best tier wins:
+#
+#   tool > plumbing utility > a shell running a script file > print/shell builtin,
+#
+# with a candidate inside a ``$(…)`` substitution ranked just below the same
+# tier at the top level (``ENC=$(python3 …); curl …`` is a curl run; a script
+# whose only tool runs inside ``TOKEN=$(sqlite3 …)`` is a sqlite3 run). A word
+# that is not a plausible executable name (shell syntax, an option, a variable,
+# a number) is never a candidate.
+
 _SHELL_TOOL_WRAPPERS = {"bash", "dash", "ksh", "sh", "zsh"}
 
 _PREFIX_TOOL_WRAPPERS = {
     "command",
     "env",
+    "exec",
     "gtimeout",
     "ionice",
     "nice",
     "nohup",
+    "setsid",
     "stdbuf",
     "sudo",
+    "time",
     "timeout",
+    "xargs",
 }
 
 _SINGLE_ARG_WRAPPER_OPTIONS = {
     "env": {"-C", "--chdir", "-S", "--split-string", "-u", "--unset"},
+    "exec": {"-a"},
     "gtimeout": {"-k", "--kill-after", "-s", "--signal"},
     "ionice": {"-c", "--class", "-n", "--classdata"},
     "nice": {"-n", "--adjustment"},
     "stdbuf": {"-e", "-i", "-o"},
     "sudo": {"-C", "-g", "-h", "-p", "-r", "-T", "-t", "-u"},
+    "time": {"-f", "--format", "-o", "--output"},
     "timeout": {"-k", "--kill-after", "-s", "--signal"},
+    "xargs": {
+        "-a", "--arg-file", "-d", "--delimiter", "-E", "-I", "-L", "--max-lines",
+        "-n", "--max-args", "-P", "--max-procs", "-s", "--max-chars",
+    },
 }
 
 _TIMEOUT_DURATION_RE = re.compile(r"^\d+(?:\.\d+)?[smhd]?$")
 
-_SHELL_COMMAND_SEPARATORS = {"&&", "||", ";", "|", "|&", "&"}
+# Builtins that print, test, or set up the shell. A script made only of these
+# resolves to its first one; anything else in the script outranks them.
+_SHELL_BUILTIN_NAMES = frozenset(
+    {
+        ".", ":", "[", "[[", "alias", "bg", "break", "builtin", "cd", "continue",
+        "declare", "dirs", "disown", "echo", "eval", "exit", "export", "false", "fg",
+        "getopts", "hash", "jobs", "let", "local", "mapfile", "popd", "printf", "pushd",
+        "pwd", "read", "readarray", "readonly", "return", "set", "shift", "shopt",
+        "source", "test", "times", "trap", "true", "type", "typeset", "ulimit", "umask",
+        "unalias", "unset", "wait",
+    }
+)
 
-_SHELL_PREAMBLE_BUILTINS = {
-    ".",
-    "alias",
-    "cd",
-    "export",
-    "local",
-    "popd",
-    "pushd",
-    "readonly",
-    "set",
-    "shopt",
-    "source",
-    "typeset",
-    "ulimit",
-    "umask",
-    "unalias",
-    "unset",
-}
+# Plumbing that moves, filters or inspects data around the tool under test.
+# A script whose only commands are these resolves to the first one.
+_PLUMBING_UTILITIES = frozenset(
+    {
+        "awk", "base64", "basename", "cat", "chmod", "chown", "cmp", "column", "comm",
+        "cp", "cut", "date", "df", "diff", "dirname", "du", "egrep", "fgrep", "file",
+        "find", "fold", "fuser", "gawk", "getent", "grep", "gunzip", "gzip", "head",
+        "hexdump", "hostname", "iconv", "id", "jq", "kill", "killall", "ln", "ls",
+        "md5sum", "mkdir", "mktemp", "mv", "nl", "od", "paste", "pgrep", "pkill", "ps",
+        "readlink", "realpath", "rev", "rm", "rmdir", "sed", "seq", "sha1sum",
+        "sha256sum", "sleep", "sort", "split", "ss", "stat", "tac", "tail", "tar", "tee",
+        "touch", "tr", "uname", "uniq", "unzip", "wc", "which", "whoami", "xxd", "yes",
+        "zcat",
+    }
+)
+
+# Compound-command keywords that may precede a command in the same list.
+_SHELL_LEADING_KEYWORDS = frozenset(
+    {"!", "{", "}", "do", "done", "elif", "else", "esac", "fi", "if", "then", "until", "while"}
+)
+
+_TIER_TOOL = 0
+_TIER_UTILITY = 2
+_TIER_SHELL = 4
+_TIER_BUILTIN = 6
+_SUBSTITUTION_TIER_OFFSET = 1
+_MAX_SHELL_NESTING = 4
+
+_EXECUTABLE_NAME_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.+-]*$")
+_NUMERIC_WORD_RE = re.compile(r"^[\d.]+$")
+_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]*\])?\+?=")
+_ARRAY_ASSIGNMENT_PREFIX_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\+?=$")
+
+# Longest first so ``>>`` is not read as two ``>``.
+_SHELL_REDIRECT_OPERATORS = ("<<<", "<<-", "&>>", "<<", ">>", "<>", ">&", "<&", ">|", "&>", "<", ">")
+_SHELL_CONTROL_OPERATORS = (";;&", ";;", ";&", "&&", "||", "|&", ";", "&", "|", "(", ")")
+_SHELL_WORD_BREAK = frozenset(" \t\r\n;&|<>()")
 
 
-def _shell_tokens(command: str) -> list[str]:
-    try:
-        lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|")
-        lexer.whitespace_split = True
-        return list(lexer)
-    except ValueError:
-        return command.split()
+class _ShellWord:
+    __slots__ = ("value", "substitutions", "quoted")
+
+    def __init__(self, value: str, substitutions: list[str], quoted: bool) -> None:
+        self.value = value
+        self.substitutions = substitutions
+        self.quoted = quoted
 
 
-def _is_env_assignment(token: str) -> bool:
-    if "=" not in token:
-        return False
-    name, _value = token.split("=", 1)
-    return bool(name) and name.replace("_", "").isalnum()
+def _skip_quoted(text: str, index: int) -> int:
+    """Index just past the quoted string opening at ``index``."""
+    quote = text[index]
+    position = index + 1
+    while position < len(text):
+        char = text[position]
+        if quote == '"' and char == "\\":
+            position += 2
+            continue
+        if char == quote:
+            return position + 1
+        position += 1
+    return len(text)
+
+
+def _matching_close(text: str, open_index: int, opener: str = "(", closer: str = ")") -> int:
+    """Index just past the ``closer`` balancing the ``opener`` at ``open_index``."""
+    depth = 0
+    position = open_index
+    while position < len(text):
+        char = text[position]
+        if char == "\\":
+            position += 2
+            continue
+        if char in "'\"":
+            position = _skip_quoted(text, position)
+            continue
+        if char == opener:
+            depth += 1
+        elif char == closer:
+            depth -= 1
+            if depth == 0:
+                return position + 1
+        position += 1
+    return len(text)
+
+
+def _scan_shell_word(text: str, index: int) -> tuple[_ShellWord, int]:
+    buffer: list[str] = []
+    substitutions: list[str] = []
+    quoted = False
+    length = len(text)
+    position = index
+    while position < length:
+        char = text[position]
+        if char == "(" and _ARRAY_ASSIGNMENT_PREFIX_RE.match("".join(buffer)):
+            end = _matching_close(text, position)
+            buffer.append(text[position:end])
+            position = end
+            continue
+        if char in "<>" and not buffer and text.startswith("(", position + 1):
+            end = _matching_close(text, position + 1)
+            substitutions.append(text[position + 2 : end - 1])
+            buffer.append(text[position:end])
+            position = end
+            continue
+        if char in _SHELL_WORD_BREAK:
+            break
+        if char == "\\":
+            if position + 1 < length and text[position + 1] != "\n":
+                buffer.append(text[position + 1])
+            position += 2
+            continue
+        if char == "'":
+            end = _skip_quoted(text, position)
+            buffer.append(text[position + 1 : max(position + 1, end - 1)])
+            quoted = True
+            position = end
+            continue
+        if char == '"':
+            position += 1
+            while position < length and text[position] != '"':
+                inner = text[position]
+                if inner == "\\" and position + 1 < length:
+                    buffer.append(text[position + 1])
+                    position += 2
+                    continue
+                if text.startswith("$(", position) and not text.startswith("$((", position):
+                    end = _matching_close(text, position + 1)
+                    substitutions.append(text[position + 2 : end - 1])
+                    buffer.append(text[position:end])
+                    position = end
+                    continue
+                if inner == "`":
+                    end = text.find("`", position + 1)
+                    end = length if end < 0 else end
+                    substitutions.append(text[position + 1 : end])
+                    buffer.append(text[position : end + 1])
+                    position = end + 1
+                    continue
+                buffer.append(inner)
+                position += 1
+            quoted = True
+            position += 1
+            continue
+        if char == "`":
+            end = text.find("`", position + 1)
+            end = length if end < 0 else end
+            substitutions.append(text[position + 1 : end])
+            buffer.append(text[position : end + 1])
+            position = end + 1
+            continue
+        if text.startswith("$((", position):
+            end = _matching_close(text, position + 1)
+            buffer.append(text[position:end])
+            position = end
+            continue
+        if text.startswith("$(", position):
+            end = _matching_close(text, position + 1)
+            substitutions.append(text[position + 2 : end - 1])
+            buffer.append(text[position:end])
+            position = end
+            continue
+        if text.startswith("${", position):
+            end = _matching_close(text, position + 1, "{", "}")
+            buffer.append(text[position:end])
+            position = end
+            continue
+        buffer.append(char)
+        position += 1
+    return _ShellWord("".join(buffer), substitutions, quoted), position
+
+
+def _skip_heredoc_bodies(text: str, index: int, heredocs: list[tuple[str, bool]]) -> int:
+    position = index
+    for delimiter, strip_tabs in heredocs:
+        while position < len(text):
+            line_end = text.find("\n", position)
+            line = text[position : len(text) if line_end < 0 else line_end]
+            position = len(text) if line_end < 0 else line_end + 1
+            if (line.lstrip("\t") if strip_tabs else line).rstrip("\r") == delimiter:
+                break
+    return position
+
+
+def _scan_shell(text: str) -> list[tuple[str, Any]]:
+    """Tokens ``("word", _ShellWord)``, ``("op", str)`` and ``("redirect", str)``;
+    newlines are ``("op", "\\n")``. Comments, heredoc bodies and arithmetic
+    commands are dropped."""
+    tokens: list[tuple[str, Any]] = []
+    heredocs: list[tuple[str, bool]] = []
+    heredoc_operator = ""
+    length = len(text)
+    position = 0
+    while position < length:
+        char = text[position]
+        if char == "\\" and text.startswith("\n", position + 1):
+            position += 2
+            continue
+        if char in " \t\r":
+            position += 1
+            continue
+        if char == "\n":
+            tokens.append(("op", "\n"))
+            position = _skip_heredoc_bodies(text, position + 1, heredocs)
+            heredocs = []
+            continue
+        if char == "#":
+            line_end = text.find("\n", position)
+            position = length if line_end < 0 else line_end
+            continue
+        if text.startswith("((", position):
+            position = _matching_close(text, position)
+            continue
+        if char in "<>" and text.startswith("(", position + 1):
+            word, position = _scan_shell_word(text, position)
+            tokens.append(("word", word))
+            continue
+        redirect = next((op for op in _SHELL_REDIRECT_OPERATORS if text.startswith(op, position)), "")
+        if redirect:
+            tokens.append(("redirect", redirect))
+            heredoc_operator = redirect if redirect in {"<<", "<<-"} else ""
+            position += len(redirect)
+            continue
+        control = next((op for op in _SHELL_CONTROL_OPERATORS if text.startswith(op, position)), "")
+        if control:
+            tokens.append(("op", control))
+            position += len(control)
+            continue
+        word, position = _scan_shell_word(text, position)
+        if word.value.isdigit() and not word.quoted and position < length and text[position] in "<>":
+            continue  # a file-descriptor number before a redirection
+        if heredoc_operator:
+            heredocs.append((word.value, heredoc_operator == "<<-"))
+            heredoc_operator = ""
+        tokens.append(("word", word))
+    return tokens
+
+
+def _executable_name(word: str) -> str:
+    name = Path(word).name if "/" in word else word
+    if not _EXECUTABLE_NAME_RE.match(name) or _NUMERIC_WORD_RE.match(name):
+        return ""
+    return name
 
 
 def _strip_wrapper_options(wrapper: str, tokens: list[str]) -> list[str]:
@@ -942,13 +1188,15 @@ def _strip_wrapper_options(wrapper: str, tokens: list[str]) -> list[str]:
     options_with_arg = _SINGLE_ARG_WRAPPER_OPTIONS.get(wrapper, set())
     while remaining:
         token = remaining[0]
-        if wrapper == "env" and _is_env_assignment(token):
+        if wrapper == "env" and _ASSIGNMENT_RE.match(token):
             remaining.pop(0)
             continue
         if not token.startswith("-") or token == "-":
             break
         option = remaining.pop(0)
         option_name = option.split("=", 1)[0]
+        if wrapper == "command" and option_name in {"-v", "-V"}:
+            return []  # ``command -v curl`` looks a tool up; it does not run it
         if option_name in options_with_arg and "=" not in option and remaining:
             remaining.pop(0)
     if (
@@ -958,39 +1206,6 @@ def _strip_wrapper_options(wrapper: str, tokens: list[str]) -> list[str]:
     ):
         remaining.pop(0)
     return remaining
-
-
-def _derive_tool_bin_from_tokens(tokens: list[str], *, depth: int = 0) -> str:
-    if depth > 4:
-        return ""
-    remaining = list(tokens)
-    while remaining:
-        token = remaining.pop(0).strip()
-        if not token:
-            continue
-        if _is_env_assignment(token):
-            continue
-        bare = Path(token).name
-        if bare in _SHELL_TOOL_WRAPPERS:
-            for idx, arg in enumerate(remaining):
-                if _is_shell_command_string_flag(arg):
-                    if idx + 1 < len(remaining):
-                        return _derive_tool_bin_from_tokens(
-                            _shell_tokens(remaining[idx + 1]),
-                            depth=depth + 1,
-                        )
-                    break
-            return bare
-        if bare in _PREFIX_TOOL_WRAPPERS:
-            remaining = _strip_wrapper_options(bare, remaining)
-            continue
-        if bare in _SHELL_PREAMBLE_BUILTINS:
-            post_preamble = _skip_shell_preamble_tokens(remaining)
-            if post_preamble is not None:
-                remaining = post_preamble
-                continue
-        return bare.split(";", 1)[0].split("|", 1)[0].strip() or bare
-    return ""
 
 
 def _is_shell_command_string_flag(arg: str) -> bool:
@@ -1008,27 +1223,189 @@ def _is_shell_command_string_flag(arg: str) -> bool:
     )
 
 
-def _skip_shell_preamble_tokens(tokens: list[str]) -> list[str] | None:
-    for idx, token in enumerate(tokens):
-        if token in _SHELL_COMMAND_SEPARATORS:
-            return tokens[idx + 1 :]
-    return None
+def _simple_command_candidates(
+    words: list[str], *, depth: int, in_substitution: bool
+) -> list[tuple[int, str]]:
+    """Candidates for one simple command: assignments and wrappers are skipped,
+    a ``sh -c`` script is analysed in place."""
+    offset = _SUBSTITUTION_TIER_OFFSET if in_substitution else 0
+    remaining = list(words)
+    while remaining and _ASSIGNMENT_RE.match(remaining[0]):
+        remaining.pop(0)
+    while remaining:
+        name = _executable_name(remaining[0].strip())
+        if not name:
+            return []
+        remaining.pop(0)
+        if name in _PREFIX_TOOL_WRAPPERS:
+            remaining = _strip_wrapper_options(name, remaining)
+            continue
+        if name in _SHELL_TOOL_WRAPPERS:
+            for index, arg in enumerate(remaining):
+                if _is_shell_command_string_flag(arg):
+                    if index + 1 < len(remaining) and depth < _MAX_SHELL_NESTING:
+                        return _script_candidates(
+                            remaining[index + 1], depth=depth + 1, in_substitution=in_substitution
+                        )
+                    break
+            return [(_TIER_SHELL + offset, name)]
+        if name in _SHELL_BUILTIN_NAMES:
+            return [(_TIER_BUILTIN + offset, name)]
+        if name in _PLUMBING_UTILITIES:
+            return [(_TIER_UTILITY + offset, name)]
+        return [(_TIER_TOOL + offset, name)]
+    return []
+
+
+def _script_candidates(script: str, *, depth: int, in_substitution: bool) -> list[tuple[int, str]]:
+    """Candidates, in script order, for every simple command in ``script``
+    (including those inside function bodies and command substitutions)."""
+    candidates: list[tuple[int, str]] = []
+    functions: set[str] = set()
+    case_depth = 0
+    expect_case_pattern = False
+
+    def substitutions(words: list[_ShellWord]) -> None:
+        if depth >= _MAX_SHELL_NESTING:
+            return
+        for word in words:
+            for body in word.substitutions:
+                candidates.extend(_script_candidates(body, depth=depth + 1, in_substitution=True))
+
+    def flush(words: list[_ShellWord], terminator: str) -> None:
+        nonlocal case_depth, expect_case_pattern
+        index = 0
+        while True:
+            while index < len(words) and not words[index].quoted and words[index].value in _SHELL_LEADING_KEYWORDS:
+                if words[index].value == "esac":
+                    case_depth = max(0, case_depth - 1)
+                    expect_case_pattern = False
+                index += 1
+            if index >= len(words):
+                return
+            if expect_case_pattern:
+                # ``pattern)`` / ``a|b)`` heads of a case arm are not commands.
+                if terminator == ")":
+                    expect_case_pattern = False
+                return
+            head = "" if words[index].quoted else words[index].value
+            if head != "function":
+                break
+            if index + 1 < len(words):
+                functions.add(words[index + 1].value)
+            # ``function g { nmap …; }``: the body opens on the same line.
+            index += 2
+        rest = words[index:]
+        if head in {"for", "select"}:
+            substitutions(rest)
+            return
+        if head == "case":
+            substitutions(rest)
+            case_depth += 1
+            # ``case $x in a) …`` on one line: this ``)`` already closed the
+            # first arm's pattern, so the next simple command is its body.
+            expect_case_pattern = not (
+                terminator == ")" and len(rest) > 3 and rest[2].value == "in"
+            )
+            return
+        substitutions(rest)
+        values = [word.value for word in rest]
+        command_index = next((i for i, value in enumerate(values) if not _ASSIGNMENT_RE.match(value)), None)
+        if command_index is not None and values[command_index] in functions:
+            return
+        candidates.extend(
+            _simple_command_candidates(values, depth=depth, in_substitution=in_substitution)
+        )
+
+    tokens = _scan_shell(script)
+    words: list[_ShellWord] = []
+    redirect_target = False
+    position = 0
+    while position < len(tokens):
+        kind, value = tokens[position]
+        position += 1
+        if kind == "redirect":
+            redirect_target = True
+            continue
+        if kind == "word":
+            if redirect_target:
+                redirect_target = False
+                substitutions([value])
+                continue
+            words.append(value)
+            continue
+        redirect_target = False
+        if (
+            value == "("
+            and len(words) == 1
+            and position < len(tokens)
+            and tokens[position] == ("op", ")")
+        ):
+            # ``name() { …; }``: a function definition; its body follows.
+            functions.add(words[0].value)
+            words = []
+            position += 1
+            continue
+        flush(words, value)
+        words = []
+        if value in {";;", ";&", ";;&"} and case_depth:
+            expect_case_pattern = True
+    flush(words, "")
+    return candidates
+
+
+def _best_tool(candidates: list[tuple[int, str]]) -> str:
+    if not candidates:
+        return ""
+    best_tier = min(tier for tier, _name in candidates)
+    return next(name for tier, name in candidates if tier == best_tier)
 
 
 def _derive_tool_bin(command: str, argv: list[str] | None) -> str:
-    """Return the first executable token of the command. The route-derived
-    ``tool_name`` collapses every /api/command call to ``command``; tool_bin
-    is the discriminator (cat vs curl vs sqlmap) that operator filtering
-    actually needs."""
+    """The tool a run exercised: argv when recorded (a ``sh -c`` script in it is
+    analysed as shell), otherwise the command text as a shell script. Empty when
+    neither names a plausible executable."""
     if argv:
-        derived = _derive_tool_bin_from_tokens([str(token) for token in argv])
+        derived = _best_tool(
+            _simple_command_candidates([str(token) for token in argv], depth=0, in_substitution=False)
+        )
         if derived:
             return derived
     text = (command or "").strip()
     if not text:
         return ""
-    derived = _derive_tool_bin_from_tokens(_shell_tokens(text))
-    return derived or text.split()[0]
+    return _best_tool(_script_candidates(text, depth=0, in_substitution=False))
+
+
+def stale_command_run_tool_bins(connection: sqlite3.Connection) -> list[tuple[str, int]]:
+    """``(derived tool_bin, run id)`` for every stored run whose ``tool_bin``
+    differs from :func:`_derive_tool_bin`. Read-only, so a caller can scan a
+    large ledger without holding the write lock. Rows recorded before the
+    derivation understood shell scripts carry shell syntax (``;``, ``for``)."""
+    stale: list[tuple[str, int]] = []
+    for row in connection.execute(
+        "SELECT id, command, argv_json, tool_bin FROM assessment_command_runs"
+    ):
+        try:
+            argv = json.loads(row[2] or "[]")
+        except json.JSONDecodeError:
+            argv = []
+        derived = _derive_tool_bin(row[1] or "", argv if isinstance(argv, list) else None)
+        if derived != (row[3] or ""):
+            stale.append((derived, int(row[0])))
+    return stale
+
+
+def rewrite_command_run_tool_bins(
+    connection: sqlite3.Connection, stale: list[tuple[str, int]]
+) -> int:
+    """Store the derived names found by :func:`stale_command_run_tool_bins`
+    and return how many runs were rewritten. Idempotent: a run's command and
+    argv never change, so a stale scan always derives the current value."""
+    connection.executemany(
+        "UPDATE assessment_command_runs SET tool_bin = ? WHERE id = ?", stale
+    )
+    return len(stale)
 
 
 def _resolve_artifact_dir(engagement, override: str | None) -> str | None:

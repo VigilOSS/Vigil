@@ -20,28 +20,6 @@ export type Engagement = {
   session_count: number;
 };
 
-export type EngagementSession = {
-  id: number;
-  session_id: string;
-  session_path: string;
-  status: string;
-  merge_state: string;
-  assigned_targets: string[];
-  created_at: string;
-  updated_at: string;
-  merged_at: string | null;
-};
-
-export type EventRecord = {
-  id: number;
-  event_type: string;
-  phase: string;
-  task_name: string;
-  agent_name: string;
-  summary: string;
-  created_at: string;
-};
-
 export type SurfaceStatus =
   | "discovered"
   | "covered"
@@ -59,7 +37,10 @@ export type AssessmentSurface = {
   evidence_ref: string;
   status: SurfaceStatus;
   followup_condition?: string;
+  created_at: string;
   updated_at: string;
+  /** The server's one open-surface rule: anything except covered and not applicable. */
+  open: boolean;
   vendor_saas?: boolean;
   // The ARCHITECTURE axis, orthogonal to `surface_type`'s security meaning: how
   // the host framework discovers and runs the code. Empty for an ordinary
@@ -175,7 +156,21 @@ export type FindingDetails = {
 
 export type AssessmentFindingDetail = AssessmentFinding & {
   id: number;
+  engagement_id?: number;
   row_version: number;
+  // Finding list/detail rows only; summary `top_findings` omit both.
+  created_at?: string;
+  last_seen_at?: string;
+  // Newest transition-ledger entry (list and point reads); null when the
+  // finding has no ledger rows. "Changed" means this, never updated_at.
+  last_transition_at?: string | null;
+  last_transition_action?: string | null;
+  last_transition_actor?: string | null;
+  status_reason?: string;
+  merged_into_finding_id?: number | null;
+  code_snapshot_attestation_status?: string;
+  // Current runtime proof plan; untrusted verifier-authored text.
+  next_test?: ProofNextTest | null;
   evidence_ref: string;
   evidence_artifact_id?: number | null;
   notes: string;
@@ -216,24 +211,6 @@ export type AssessmentProofReceipt = {
   oob_event_id?: number | null;
 };
 
-export type SubmissionFindingSummary = {
-  id: number;
-  slug: string;
-  title: string;
-  severity: string;
-  workflow_status: string;
-  verification_status: string;
-  submission_status: string;
-  submission_platform: string;
-  submission_ref: string;
-  submission_url: string;
-  row_version: number;
-  version_count: number;
-  latest_version_number: number | null;
-  staging_version_count: number;
-  failed_version_count: number;
-};
-
 export type SubmissionVersion = {
   id: number;
   finding_id: number;
@@ -256,16 +233,47 @@ export type SubmissionVersion = {
   completed_at: string | null;
   stale: boolean;
   idempotent_replay: boolean;
+  failure_reason?: string;
+  // `{}` for markdown packages; the archive manifest for zip packages.
+  manifest?: SubmissionPackageManifest | Record<string, never>;
+  sources?: SubmissionVersionSources;
 };
 
-export type SubmissionAttachment = {
-  id: number;
-  relative_path: string;
-  kind: string;
+export type SubmissionPackageAttachment = {
+  artifact_id: number;
+  archive_path: string;
+  original_relative_path: string;
   media_type: string;
   size_bytes: number;
   sha256: string;
-  present: boolean;
+};
+
+export type SubmissionPackageManifest = {
+  schema: string;
+  finding_slug: string;
+  submission_sha256: string;
+  attachments: SubmissionPackageAttachment[];
+};
+
+// Exact inputs the immutable version was built from.
+export type SubmissionVersionSources = {
+  finding: {
+    id: number;
+    slug: string;
+    row_version: number;
+    updated_at: string;
+    workflow_status: string;
+    verification_status: string;
+  };
+  workspace: {
+    artifact_id: number;
+    submission_path: string;
+    submission_sha256: string;
+    external_body_sha256?: string;
+    context_path: string;
+    context_sha256: string;
+  };
+  attachments: SubmissionPackageAttachment[];
 };
 
 export type SubmissionAttachmentPage = {
@@ -284,18 +292,6 @@ export type SubmissionOrphanPage = {
   next_after: string | null;
 };
 
-export type SubmissionWorkspace = {
-  present: boolean;
-  submission_path: string;
-  context_path: string;
-  markdown: string;
-  submission_sha256: string;
-  external_body_sha256?: string;
-  context: Record<string, unknown>;
-  final_ready: boolean;
-  blockers: string[];
-};
-
 export type SubmissionPendingVersion = {
   id: number;
   finding_slug: string;
@@ -304,25 +300,6 @@ export type SubmissionPendingVersion = {
   failure_reason: string;
   staging_relative_path: string;
   relative_path: string;
-};
-
-export type SubmissionDetail = {
-  finding: AssessmentFindingDetail;
-  workspace: SubmissionWorkspace;
-  eligible_attachments: SubmissionAttachment[];
-  eligible_attachments_page: SubmissionAttachmentPage;
-  versions: SubmissionVersion[];
-  versions_page: SubmissionAttachmentPage;
-  pending_version_count: number;
-  pending_versions: SubmissionPendingVersion[];
-  pending_versions_page: SubmissionAttachmentPage;
-};
-
-export type SubmissionListing = {
-  findings: SubmissionFindingSummary[];
-  findings_page: SubmissionAttachmentPage;
-  staging_count: number;
-  failed_count: number;
 };
 
 export type SubmissionExportInput = {
@@ -505,10 +482,19 @@ export type PerHostCoverage = {
   scope_hosts?: string[];
 };
 
+// The report gate's coverage blocker relays the surface coverage check.
+export type ReportReadinessCoverage = {
+  blocker_count?: number;
+  unresolved_surfaces?: unknown[];
+  partially_covered_surfaces?: unknown[];
+  high_risk_deferred_surfaces?: unknown[];
+};
+
 export type ReportReadiness = {
   ready: boolean;
   blocker_count: number;
   blockers: ReportReadinessBlocker[];
+  coverage?: ReportReadinessCoverage;
   // C58 — backend embeds the C40 per-host coverage projection here so the
   // Readiness panel renders both Definition-of-Done gates and per-host
   // outcomes from one fetch.
@@ -522,16 +508,6 @@ export type AssessmentProbe = {
   agent_name: string;
   evidence_ref: string;
   created_at: string;
-};
-
-export type AssessmentProbeDetail = AssessmentProbe & {
-  id: number;
-  auth_context: string;
-  input_slot: string;
-  payload_family: string;
-  tool_name: string;
-  notes: string;
-  observed_http_status?: number | null;
 };
 
 export type AssessmentCoverageGap = {
@@ -606,6 +582,15 @@ export type AssessmentSummary = {
   top_surfaces: AssessmentSurface[];
   top_findings: AssessmentFinding[];
   recent_probes: AssessmentProbe[];
+  // Coverage items by last observed reachability of their target.
+  coverage_by_reachability?: {
+    total: number;
+    reachable: number;
+    blackholed: number;
+    dead: number;
+    unknown: number;
+    unprobed: number;
+  };
   open_coverage_items: AssessmentCoverageGap[];
   attack_chains: AssessmentAttackChain[];
   service_coverage_gaps: AssessmentServiceGap[];
@@ -633,6 +618,7 @@ export type AssessmentRunSeal = {
 
 export type AssessmentRun = {
   id: number;
+  engagement_id?: number;
   run_uuid: string;
   run_kind: "code" | "web" | "blue" | "shared";
   run_purpose?: string;
@@ -671,26 +657,26 @@ export type AssessmentRun = {
   seal?: AssessmentRunSeal | null;
   blockers?: AuditBlocker[];
   seal_sha256?: string | null;
-  observed_cost?: number | null;
   finding_slugs?: string[];
+  // Findings this run produced or touched (possibly empty).
+  associated_finding_slugs?: string[];
+  // Wall-clock seconds; null until both started_at and finished_at exist.
+  elapsed_seconds?: number | null;
   warnings?: string[];
   resumed_from_run_id?: number | null;
+  // What the producing dispatch was asked to do (intent, not evidence).
+  producer_dispatch_task?: string;
+  // Findings the producing dispatch was sent for (intent, not a citation).
+  dispatch_finding_slugs?: string[];
+  // Receipts by evidence kind across the run's recovery lineage.
+  evidence_kind_counts?: Record<string, number>;
+  // Proof-work items this run is recorded against.
+  proof_work_ids?: number[];
 };
 
 export type AssessmentRunChild = {
   id?: number | string;
   [key: string]: unknown;
-};
-
-export type Artifact = {
-  name: string;
-  relative_path: string;
-  media_type: string;
-  exists: boolean;
-};
-
-export type ArtifactContent = Artifact & {
-  content: string;
 };
 
 function appBaseUrl(): URL {
@@ -785,7 +771,10 @@ async function readError(response: Response): Promise<{ message: string; body: u
   return { message: text, body: undefined };
 }
 
-async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+// Shared JSON request helper: resolves app-relative paths, sets the JSON
+// content type for bodies, and throws ApiError on non-ok responses. Domain
+// modules (lib/<domain>Api.ts) build their fetchers on this.
+export async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers ?? {});
   if (!headers.has("Content-Type") && init.body) {
     headers.set("Content-Type", "application/json");
@@ -1052,15 +1041,6 @@ export function deleteEngagement(engagementKey: string) {
   );
 }
 
-export function listEngagementSessions(engagementKey: string) {
-  return request<EngagementSession[]>(`/engagements/${engagementKey}/sessions`);
-}
-
-export function listEvents(engagementKey: string, limit = 200) {
-  const query = new URLSearchParams({ limit: String(limit) });
-  return request<EventRecord[]>(`/engagements/${engagementKey}/events?${query.toString()}`);
-}
-
 export function getAssessmentSummary(engagementKey: string) {
   return request<AssessmentSummary>(`/engagements/${engagementKey}/assessment/summary`);
 }
@@ -1150,60 +1130,17 @@ export function listAssessmentFindings(engagementKey: string) {
   return request<AssessmentFindingDetail[]>(`/engagements/${engagementKey}/assessment/findings`);
 }
 
+/** A finding ledger row without its `details` payload (the list's bulk). */
+export type AssessmentFindingSummary = Omit<AssessmentFindingDetail, "details">;
+
+/** The finding ledger's rows without `details`, for views that list findings but never read their claims. */
+export function listAssessmentFindingSummaries(engagementKey: string) {
+  return request<AssessmentFindingSummary[]>(`/engagements/${encodeURIComponent(engagementKey)}/assessment/findings?view=summary`);
+}
+
 export function getAssessmentFinding(engagementKey: string, findingSlug: string) {
   return request<AssessmentFindingDetail>(
     `/engagements/${encodeURIComponent(engagementKey)}/assessment/findings/${encodeURIComponent(findingSlug)}`,
-  );
-}
-
-export function listSubmissions(
-  engagementKey: string,
-  params: { findingOffset?: number; findingLimit?: number } = {},
-) {
-  const query = new URLSearchParams();
-  if (params.findingOffset != null) query.set("finding_offset", String(params.findingOffset));
-  if (params.findingLimit != null) query.set("finding_limit", String(params.findingLimit));
-  const qs = query.toString();
-  return request<SubmissionListing>(
-    `/engagements/${encodeURIComponent(engagementKey)}/assessment/submissions${qs ? `?${qs}` : ""}`,
-  );
-}
-
-export function getSubmissionDetail(
-  engagementKey: string,
-  findingSlug: string,
-  params: {
-    attachmentOffset?: number;
-    attachmentLimit?: number;
-    versionOffset?: number;
-    versionLimit?: number;
-    pendingVersionOffset?: number;
-    pendingVersionLimit?: number;
-    selectedAttachmentIds?: number[];
-  } = {},
-) {
-  const query = new URLSearchParams();
-  if (params.attachmentOffset != null) {
-    query.set("attachment_offset", String(params.attachmentOffset));
-  }
-  if (params.attachmentLimit != null) {
-    query.set("attachment_limit", String(params.attachmentLimit));
-  }
-  if (params.versionOffset != null) query.set("version_offset", String(params.versionOffset));
-  if (params.versionLimit != null) query.set("version_limit", String(params.versionLimit));
-  if (params.pendingVersionOffset != null) {
-    query.set("pending_version_offset", String(params.pendingVersionOffset));
-  }
-  if (params.pendingVersionLimit != null) {
-    query.set("pending_version_limit", String(params.pendingVersionLimit));
-  }
-  for (const attachmentId of params.selectedAttachmentIds ?? []) {
-    query.append("attachment_id", String(attachmentId));
-  }
-  const qs = query.toString();
-  return request<SubmissionDetail>(
-    `/engagements/${encodeURIComponent(engagementKey)}/assessment/submissions/` +
-      `${encodeURIComponent(findingSlug)}${qs ? `?${qs}` : ""}`,
   );
 }
 
@@ -1297,33 +1234,12 @@ export function listAssessmentFindingGroups(engagementKey: string) {
   return request<AssessmentFindingGroup[]>(`/engagements/${engagementKey}/assessment/finding-groups`);
 }
 
-export function listAssessmentProbes(
-  engagementKey: string,
-  params: { limit?: number; offset?: number } = {},
-) {
-  const query = new URLSearchParams();
-  if (params.limit != null) query.set("limit", String(params.limit));
-  if (params.offset != null) query.set("offset", String(params.offset));
-  const qs = query.toString();
-  return request<AssessmentProbeDetail[]>(
-    `/engagements/${engagementKey}/assessment/probe-runs${qs ? `?${qs}` : ""}`,
-  );
-}
-
 export function listAssessmentAttackChains(engagementKey: string) {
   return request<AssessmentAttackChainDetail[]>(`/engagements/${engagementKey}/assessment/attack-chains`);
 }
 
 export function listAssessmentAttackChainLinks(engagementKey: string) {
   return request<AssessmentAttackChainLink[]>(`/engagements/${engagementKey}/assessment/attack-chain-links`);
-}
-
-export function listArtifacts(engagementKey: string) {
-  return request<Artifact[]>(`/engagements/${engagementKey}/artifacts`);
-}
-
-export function readArtifact(engagementKey: string, artifactName: string) {
-  return request<ArtifactContent>(`/engagements/${engagementKey}/artifacts/${artifactName}`);
 }
 
 // ── Single-file report export ───────────────────────────
@@ -1357,76 +1273,6 @@ export function reportDownloadUrl(engagementKey: string, artifactId: number): st
   );
 }
 
-// ── Coverage & discovery types ──────────────────────────
-
-export type AssessmentTarget = {
-  id: number;
-  identity: string;
-  kind: string;
-  host: string;
-  ip_address: string | null;
-  hostname: string | null;
-  notes: string;
-  discovered_by: string;
-  created_at: string;
-  updated_at: string;
-  vendor_saas?: boolean;
-};
-
-export type AssessmentService = {
-  id: number;
-  target_id: number;
-  endpoint: string;
-  port: number | null;
-  protocol: string;
-  service: string;
-  state: string;
-  coverage_status: string;
-  banner: string;
-  notes: string;
-  discovered_by: string;
-  created_at: string;
-  updated_at: string;
-};
-
-export type AssessmentCoverageItem = {
-  id: number;
-  request_variant_id: number | null;
-  service_id: number | null;
-  auth_context: string;
-  input_slot: string;
-  attack_family: string;
-  status: string;
-  notes: string;
-  created_at: string;
-  updated_at: string;
-  method: string | null;
-  canonical_url: string | null;
-  service_endpoint: string | null;
-  service_name: string | null;
-};
-
-export function listAssessmentTargets(engagementKey: string) {
-  return request<AssessmentTarget[]>(`/engagements/${engagementKey}/assessment/targets`);
-}
-
-export function listAssessmentServices(engagementKey: string) {
-  return request<AssessmentService[]>(`/engagements/${engagementKey}/assessment/services`);
-}
-
-export function listAssessmentCoverageItems(
-  engagementKey: string,
-  params: { limit?: number; offset?: number } = {},
-) {
-  const query = new URLSearchParams();
-  if (params.limit != null) query.set("limit", String(params.limit));
-  if (params.offset != null) query.set("offset", String(params.offset));
-  const qs = query.toString();
-  return request<AssessmentCoverageItem[]>(
-    `/engagements/${engagementKey}/assessment/coverage-items${qs ? `?${qs}` : ""}`,
-  );
-}
-
 // ── Assessment command runs ─────────────────────────────
 // Schema mirrors `assessment_command_runs` + `_serialize_command_run` in the
 // backend: list rows elide the preview text (preview_chars counts + hashes
@@ -1441,7 +1287,11 @@ export type CommandRunStatus =
   | "killed"
   | "lost";
 
-export type AssessmentCommandRun = {
+// `GET /command-runs/{id}` (lib/commandsApi.ts `getCommandRunRecord`): the full
+// run with its retained output previews, plus the server's "needs attention"
+// rule and target. Artifact refs remain the authority for output that spilled
+// beyond the preview.
+export type AssessmentCommandRunDetail = {
   id: number;
   engagement_id: number;
   run_uuid: string;
@@ -1466,7 +1316,7 @@ export type AssessmentCommandRun = {
   stderr_sha256: string;
   stdout_preview: string;
   stderr_preview: string;
-  // Listings: always "" with preview_chars populated. Detail: full text.
+  // Length of the retained preview text.
   stdout_preview_chars?: number;
   stderr_preview_chars?: number;
   output_retention_status: string; // retained | artifact | suppressed | suppression_pending | suppression_deferred | preview_only | partially_measured | measurement_conflict | unmeasured | untrusted | integrity_failure | empty
@@ -1502,75 +1352,19 @@ export type AssessmentCommandRun = {
   intent?: string | null;
   probe_kind?: string | null;
   destructive?: boolean | null;
+  /** The server's attention rule (`command_run_queries.py`) and its plain-language reasons. */
+  needs_attention: boolean;
+  attention_reasons: string[];
+  /** The stored target host or, when none was stored, one inferred from the command. */
+  target: string;
+  target_source: "stored" | "inferred" | "none";
 };
-
-// Detail fetch returns the retained preview text (include_output=true server-side).
-// Artifact refs remain the authority for output that spilled beyond that preview.
-export type AssessmentCommandRunDetail = AssessmentCommandRun;
-
-export type ListAssessmentCommandRunsParams = {
-  q?: string;
-  agent_name?: string;
-  phase?: string;
-  tool_name?: string;
-  tool_bin?: string;
-  audit_source?: string;
-  // Backend currently only exposes success + timed_out (no `failed` param).
-  // Rows where success=false && !timed_out are the "failed" bucket;
-  // consumers derive that client-side.
-  success?: boolean;
-  timed_out?: boolean;
-  // Command-metadata filter axes. Technique + probe_kind are exact matches.
-  // intent_q runs an FTS5-scoped `intent:` match server-side. destructive
-  // is a tri-state: undefined = don't filter; true/false = exact match.
-  technique?: string;
-  probe_kind?: string;
-  destructive?: boolean;
-  intent_q?: string;
-  include_output?: boolean;
-  limit?: number;
-  offset?: number;
-};
-
-export function listAssessmentCommandRuns(
-  engagementKey: string,
-  params: ListAssessmentCommandRunsParams = {},
-) {
-  const query = new URLSearchParams();
-  if (params.q) query.set("q", params.q);
-  if (params.agent_name) query.set("agent_name", params.agent_name);
-  if (params.phase) query.set("phase", params.phase);
-  if (params.tool_name) query.set("tool_name", params.tool_name);
-  if (params.tool_bin) query.set("tool_bin", params.tool_bin);
-  if (params.audit_source) query.set("audit_source", params.audit_source);
-  if (params.success != null) query.set("success", params.success ? "true" : "false");
-  if (params.timed_out != null) query.set("timed_out", params.timed_out ? "true" : "false");
-  if (params.technique) query.set("technique", params.technique);
-  if (params.probe_kind) query.set("probe_kind", params.probe_kind);
-  if (params.destructive != null)
-    query.set("destructive", params.destructive ? "true" : "false");
-  if (params.intent_q) query.set("intent_q", params.intent_q);
-  if (params.include_output) query.set("include_output", "true");
-  if (params.limit != null) query.set("limit", String(params.limit));
-  if (params.offset != null) query.set("offset", String(params.offset));
-  const qs = query.toString();
-  return request<AssessmentCommandRun[]>(
-    `/engagements/${engagementKey}/assessment/command-runs${qs ? `?${qs}` : ""}`,
-  );
-}
-
-export function getAssessmentCommandRun(engagementKey: string, commandRunId: number) {
-  return request<AssessmentCommandRunDetail>(
-    `/engagements/${engagementKey}/assessment/command-runs/${commandRunId}`,
-  );
-}
 
 // ── HTTP traffic types ──────────────────────────────────
 // Mirrors `assessment_request_variants` / `assessment_request_observations`
-// in orchestrator/backend/app/db.py. The list endpoints return raw row
-// dicts (state_manager.list_request_variants / list_request_observations);
-// the schema_json fields are JSON-encoded strings the frontend parses for
-// pretty display. All read-only — no mutation routes exist for these.
+// in orchestrator/backend/app/db.py, as the inventory reads in lib/httpApi.ts
+// return them; the schema_json fields are JSON-encoded strings the frontend
+// parses for pretty display. All read-only — no mutation routes exist for these.
 
 export type RequestVariant = {
   id: number;
@@ -1595,6 +1389,10 @@ export type RequestVariant = {
   notes: string;
   first_seen_at: string;
   last_seen_at: string;
+  /** Counts over ALL of the variant's observations (lib/httpApi.ts reads). */
+  observation_count: number;
+  /** Newest observation time; null when the variant has none. */
+  last_observed_at: string | null;
 };
 
 export type RequestObservation = {
@@ -1608,32 +1406,6 @@ export type RequestObservation = {
   raw_payload: string;
   created_at: string;
 };
-
-export function listRequestVariants(
-  engagementKey: string,
-  params: { limit?: number; offset?: number } = {},
-) {
-  const query = new URLSearchParams();
-  if (params.limit != null) query.set("limit", String(params.limit));
-  if (params.offset != null) query.set("offset", String(params.offset));
-  const qs = query.toString();
-  return request<RequestVariant[]>(
-    `/engagements/${engagementKey}/assessment/request-variants${qs ? `?${qs}` : ""}`,
-  );
-}
-
-export function listRequestObservations(
-  engagementKey: string,
-  params: { limit?: number; offset?: number } = {},
-) {
-  const query = new URLSearchParams();
-  if (params.limit != null) query.set("limit", String(params.limit));
-  if (params.offset != null) query.set("offset", String(params.offset));
-  const qs = query.toString();
-  return request<RequestObservation[]>(
-    `/engagements/${engagementKey}/assessment/request-observations${qs ? `?${qs}` : ""}`,
-  );
-}
 
 // ── OAST (out-of-band) types ────────────────────────────
 // Mirrors `assessment_oob_probes` / `assessment_oob_interactions` in
@@ -1676,8 +1448,20 @@ export type OobInteraction = {
   created_at: string;
 };
 
+export type OobVerdict = "confirmed" | "ignored";
+
+/** The operator verdict behind a confirmed or ignored probe (lib/oastApi.ts `recordOobVerdict`). */
+export type OobProbeVerdict = {
+  verdict: OobVerdict;
+  note: string;
+  actor: string;
+  recorded_at: string;
+};
+
 export type OobProbeDetail = OobProbe & {
   interactions: OobInteraction[];
+  /** The latest verdict; null while the probe has none. */
+  verdict?: OobProbeVerdict | null;
 };
 
 export function listOobProbes(engagementKey: string, status?: string) {
@@ -1835,6 +1619,15 @@ export function engagementWebSocketUrl(engagementKey: string): string {
 
 // ── Code analysis types ─────────────────────────────────
 
+/** Whether a repository's structural index matches its current snapshot, and why not. */
+export type StructuralIndexState = {
+  current: boolean;
+  reasons: Array<{
+    code: "never_indexed" | "snapshot_mismatch" | "format_outdated" | "manifest_missing" | string;
+    message: string;
+  }>;
+};
+
 export type CodeRepo = {
   id: number;
   repo_key: string;
@@ -1888,49 +1681,7 @@ export type CodeRepo = {
   git_churn: Record<string, unknown>;
   created_at: string;
   updated_at: string;
-};
-
-export type CodeFile = {
-  id: number;
-  repo_id: number;
-  file_path: string;
-  language: string;
-  loc: number;
-  file_hash: string;
-  classification: string;
-  role: string;
-  slot_types: string[];
-  analysis_priority: number;
-  analysis_status: string;
-  analysis_depth: string;
-  skip_reason: string;
-  variant_check_status: string;
-  module_id: number | null;
-  git_churn_score: number;
-  has_past_cve_fix: boolean;
-  header_snippet: string;
-  notes: string;
-  structural_analysis_status: "pending" | "complete" | "degraded" | "unsupported";
-  structural_analysis_mode:
-    | ""
-    | "tree_sitter"
-    | "lightweight_regex"
-    | "streaming_security_fallback"
-    | "none";
-  structural_degradation_reason: string;
-  structural_source_size: number;
-  structural_bytes_scanned: number;
-  structural_unavailable_dimensions: string[];
-  structural_artifact_truncated: boolean;
-  structural_truncated_dimensions: string[];
-  structural_signal_counts: {
-    entry_points?: number;
-    imports?: number;
-    security_sinks?: number;
-    security_sources?: number;
-  };
-  created_at: string;
-  updated_at: string;
+  structural_index_state?: StructuralIndexState;
 };
 
 export type CodeModule = {
@@ -2050,6 +1801,9 @@ export type CodeCoverage = {
       warnings?: string[];
     }>;
   };
+  // Unprocessed trigger counts by kind, and open analysis leases.
+  trigger_summary?: Record<string, number>;
+  open_leases_count?: number;
 };
 
 export type CodeReadinessTarget =
@@ -2060,10 +1814,27 @@ export type CodeReadinessTarget =
   | "complete";
 
 export type CodeReadiness = {
+  track?: "code";
   target_phase: CodeReadinessTarget;
   transition_ready: boolean;
+  /** False for a web or blue engagement with no repository: its code blockers are not owed work. */
+  track_enabled: boolean;
   structural_debt_count?: number;
-  structural_debt?: Array<{ repo_id: number; file_path: string }>;
+  // Present only when requested with include_debt_paths=true.
+  structural_debt?: Array<{
+    repo_id: number;
+    file_path: string;
+    classification: string;
+    structural_analysis_status: string;
+    structural_artifact_truncated: boolean;
+  }>;
+  fuzz_completion?: {
+    repos: Array<Record<string, unknown>>;
+    pending_target_ids: number[];
+    pending_finding_slugs: string[];
+    applicability_ready: boolean;
+    completion_ready: boolean;
+  };
   blockers: Array<{
     code: string;
     message: string;
@@ -2076,6 +1847,7 @@ export type CodeReadiness = {
   };
 };
 
+// One analysis receipt as the results page lists it (lib/codeApi.ts reads).
 export type CodeAnalysisResult = {
   id: number;
   queue_item_id: number | null;
@@ -2111,35 +1883,18 @@ export type CodeAnalysisResult = {
   notes: string;
   finding_workflow_status?: string | null;
   finding_verification_status?: string | null;
-  audit_metadata: Record<string, unknown>;
   created_at: string;
-};
-
-export type CodeFilePage = {
-  total: number;
-  offset: number;
-  count: number;
-  has_more: boolean;
-  items: CodeFile[];
+  repo_id: number;
+  callable_ref_count: number;
+  /** The file still awaits a verdict on this suspicious review. */
+  awaiting_verdict: boolean;
+  superseded_at: string | null;
 };
 
 // ── Code analysis API functions ─────────────────────────
 
 export function listCodeRepos(engagementKey: string) {
   return request<CodeRepo[]>(`/engagements/${engagementKey}/assessment/code/repos`);
-}
-
-export function listCodeFiles(
-  engagementKey: string,
-  params?: { repo_id?: number; classification?: string; limit?: number; offset?: number },
-) {
-  const query = new URLSearchParams();
-  if (params?.repo_id != null) query.set("repo_id", String(params.repo_id));
-  if (params?.classification) query.set("classification", params.classification);
-  if (params?.limit != null) query.set("limit", String(params.limit));
-  if (params?.offset != null) query.set("offset", String(params.offset));
-  const qs = query.toString();
-  return request<CodeFilePage>(`/engagements/${engagementKey}/assessment/code/files${qs ? `?${qs}` : ""}`);
 }
 
 export function listCodeModules(engagementKey: string, repoId?: number) {
@@ -2149,19 +1904,6 @@ export function listCodeModules(engagementKey: string, repoId?: number) {
 
 export function getCodeQueueStats(engagementKey: string) {
   return request<CodeQueueStats>(`/engagements/${engagementKey}/assessment/code/analysis-queue/stats`);
-}
-
-export function listCodeQueueItems(
-  engagementKey: string,
-  params: { status?: CodeQueueStatus; limit?: number } = {},
-) {
-  const query = new URLSearchParams();
-  if (params.status) query.set("status", params.status);
-  if (params.limit != null) query.set("limit", String(params.limit));
-  const qs = query.toString();
-  return request<CodeQueuePage>(
-    `/engagements/${engagementKey}/assessment/code/analysis-queue${qs ? `?${qs}` : ""}`,
-  );
 }
 
 export function getCodeCoverage(engagementKey: string, repoId?: number) {
@@ -2174,14 +1916,6 @@ export function getCodeReadiness(engagementKey: string, targetPhase: CodeReadine
   return request<CodeReadiness>(
     `/engagements/${engagementKey}/assessment/code/readiness?${query.toString()}`,
   );
-}
-
-export function listCodeAnalysisResults(engagementKey: string, params?: { file_id?: number; disposition?: string }) {
-  const query = new URLSearchParams();
-  if (params?.file_id != null) query.set("file_id", String(params.file_id));
-  if (params?.disposition) query.set("disposition", params.disposition);
-  const qs = query.toString();
-  return request<CodeAnalysisResult[]>(`/engagements/${engagementKey}/assessment/code/analysis-results${qs ? `?${qs}` : ""}`);
 }
 
 // ── Intel types ─────────────────────────────────────────
@@ -2398,30 +2132,7 @@ export type IntelByUrlResponse = {
   request_variants: Record<string, unknown>[];
 };
 
-// ── Activity log types ──────────────────────────────────
-
-export type ActivityEntry = {
-  id: number;
-  engagement_id: number;
-  occurred_at: string;
-  actor_kind: "operator" | "agent" | "hook" | "system";
-  actor_name: string;
-  title: string;
-  action: string;
-  result: string;
-  artifact_ref: string;
-  body_markdown: string;
-  metadata: Record<string, unknown>;
-  created_at: string;
-  updated_at: string;
-};
-
-export type ListActivityEntriesResponse = {
-  total: number;
-  items: ActivityEntry[];
-};
-
-// ── Intel & Activity fetchers ───────────────────────────
+// ── Intel fetchers ──────────────────────────────────────
 // The backend bodies these call are implemented in `app/api/intel.py`; an
 // engagement with no intel returns 200 with zero counts, not an error. Callers
 // still catch, so one failing intel fetch cannot block the rest of a refresh.
@@ -2527,23 +2238,6 @@ export function intelByUrl(engagementKey: string, url: string) {
   );
 }
 
-export function listActivityEntries(
-  engagementKey: string,
-  params: { q?: string; actor_kind?: string; since?: string; until?: string; limit?: number; offset?: number } = {},
-) {
-  const query = new URLSearchParams();
-  if (params.q) query.set("q", params.q);
-  if (params.actor_kind) query.set("actor_kind", params.actor_kind);
-  if (params.since) query.set("since", params.since);
-  if (params.until) query.set("until", params.until);
-  if (params.limit != null) query.set("limit", String(params.limit));
-  if (params.offset != null) query.set("offset", String(params.offset));
-  const qs = query.toString();
-  return request<ListActivityEntriesResponse>(
-    `/engagements/${engagementKey}/activity-entries${qs ? `?${qs}` : ""}`,
-  );
-}
-
 // `listSurfaces` is an alias over the existing assessment endpoint; the
 // SurfacesTab imports this name for parity with §3b.
 export const listSurfaces = listAssessmentSurfaces;
@@ -2568,44 +2262,6 @@ export function patchAssessmentSurface(
     {
       method: "PATCH",
       body: JSON.stringify(payload),
-    },
-  );
-}
-
-export function patchIntelRecord(
-  engagementKey: string,
-  entityType: IntelEntityType,
-  intelId: number,
-  patch: Record<string, unknown>,
-) {
-  const path = intelEntityPath(entityType);
-  return request<IntelRecord>(
-    `/engagements/${engagementKey}/intel/${path}/${intelId}`,
-    {
-      method: "PATCH",
-      body: JSON.stringify({ payload: patch }),
-    },
-  );
-}
-
-export type IntelSupersedeResult = {
-  superseded: IntelRecord;
-  current: IntelRecord;
-};
-
-export function supersedeIntelRecord(
-  engagementKey: string,
-  entityType: IntelEntityType,
-  intelId: number,
-  newPayload: Record<string, unknown>,
-  rationale: string = "",
-) {
-  const path = intelEntityPath(entityType);
-  return request<IntelSupersedeResult>(
-    `/engagements/${engagementKey}/intel/${path}/${intelId}/supersede`,
-    {
-      method: "POST",
-      body: JSON.stringify({ payload: newPayload, rationale }),
     },
   );
 }
@@ -2667,11 +2323,60 @@ export type ProofWork = {
   next_test: ProofNextTest | null;
   created_at: string;
   updated_at: string;
+  // Queue listing only: the finding as the operator knows it.
+  finding_id?: number;
+  finding_title?: string;
+  finding_severity?: string;
+  // Per linked run: enough to list it without the run ledger.
+  runs?: ProofWorkRunSummary[];
+  blocker_cause?: string | null;
+  approval_decision?: "approved" | "revoked" | null;
+  waiting_on_work_id?: number | null;
+  event_count?: number;
+};
+export type ProofWorkRunSummary = {
+  id: number;
+  run_uuid: string;
+  run_kind: string;
+  status: string;
+  started_at: string | null;
+  finished_at: string | null;
+  proof_receipts: number;
+};
+/** A parked finding that still owes runtime proof. */
+export type ProofOwedEntry = {
+  finding_slug: string;
+  finding_id: number;
+  title: string;
+  canonical_location: string;
+  work_ids: number[];
+  queue_state: ProofWorkQueueState;
+  next_test: ProofNextTest | null;
+  severity?: string;
+  // The parking decision's own words, and when it was made.
+  parked_reason?: string;
+  parked_at?: string | null;
+  // The finding is bound to a sealed source snapshot.
+  source_bound?: boolean;
+  // Admitted hosts a live proof could name (suggestions, not authority).
+  suggested_hosts?: string[];
+};
+/** A finding whose verdict was reset after its runtime evidence changed. */
+export type ProofReverification = {
+  finding_slug: string;
+  finding_id: number;
+  title?: string;
+  severity?: string;
+  invalidating_transition_id: number;
+  next_action: string;
+  work_ids: number[];
 };
 export type ProofWorkList = {
-  reverification_required: Array<{finding_slug: string; finding_id: number; invalidating_transition_id: number; next_action: string; work_ids: number[]}>;
-  owed: Array<{finding_slug: string; finding_id: number; title: string; canonical_location: string; work_ids: number[]; queue_state: ProofWorkQueueState; next_test: ProofNextTest | null}>;
+  reverification_required: ProofReverification[];
+  owed: ProofOwedEntry[];
   items: ProofWork[];
+  // Nonzero queue-state counts only.
+  queue_state_counts?: Partial<Record<ProofWorkQueueState, number>>;
 };
 export type ProofWorkPreparation = {finding_slug: string; route: "code" | "web"; objective: string; target_hosts: string[]};
 

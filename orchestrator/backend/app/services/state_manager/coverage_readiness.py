@@ -35,6 +35,14 @@ class SurfaceStatus(enum.StrEnum):
 
 SURFACE_STATUSES = frozenset(SurfaceStatus)
 SURFACE_RESOLUTION_STATUSES = SURFACE_STATUSES - {SurfaceStatus.DISCOVERED}
+# A surface is retired only when it is covered or ruled not applicable; every
+# other status — including administratively closed, which never earns coverage —
+# is open work. The summary badge and each surface row's ``open`` flag read this.
+OPEN_SURFACE_STATUSES = SURFACE_STATUSES - {SurfaceStatus.COVERED, SurfaceStatus.NOT_APPLICABLE}
+
+
+def surface_is_open(status_value: str | None) -> bool:
+    return status_value in OPEN_SURFACE_STATUSES
 HIGH_RISK_DEFERRED_SURFACE_TYPES: frozenset[str] = frozenset(
     {"account_recovery", "dynamic_render", "object_reference", "privileged_write"}
 )

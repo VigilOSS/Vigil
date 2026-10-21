@@ -1,0 +1,173 @@
+/* ── Commands ─────────────────────────────────────────────────────────
+ * The command ledger (search, chip filters, server-paged grid) and its run
+ * record. Page header, chips, status pills and empty states are the shared
+ * primitives (styles/ui.css); the record frame is styles/record.css. Tokens
+ * only, so light and dark both resolve. */
+
+/* An open record hides the list behind it; the list's own display rules
+ * would otherwise beat the [hidden] attribute. */
+.commands-page > [hidden],
+.commands-page [hidden].commands-filters,
+.commands-results > [hidden] { display: none; }
+
+.commands-page { display: grid; gap: 12px; min-width: 0; }
+.commands-page > .ui-page-header { margin: 0; }
+
+.commands-jump kbd {
+  margin-left: 4px;
+  padding: 0 5px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--panel-soft);
+  color: var(--muted);
+  font: 0.7rem "Source Code Pro", "SFMono-Regular", monospace;
+}
+
+/* ── Search and filters ── */
+.commands-filters {
+  display: grid;
+  gap: 10px;
+  padding: 12px 14px;
+  min-width: 0;
+}
+.commands-search-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px 12px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.findings-redesign.commands-page .commands-search {
+  flex: 1 1 320px;
+  min-width: 0;
+  padding: 7px 10px;
+  border-radius: 10px;
+}
+.findings-redesign.commands-page .commands-search .search-input { font-size: 0.88rem; }
+.commands-search .search-input::-webkit-search-cancel-button { display: none; }
+
+.commands-syntax {
+  flex: 0 1 auto;
+  padding-top: 7px;
+  font-size: 0.8rem;
+  color: var(--ink-2);
+  min-width: 0;
+}
+.commands-syntax summary { cursor: pointer; color: var(--accent); }
+.commands-syntax summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+.commands-syntax[open] {
+  flex-basis: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--divider);
+  border-radius: 8px;
+  background: var(--panel-soft);
+}
+.commands-syntax dl {
+  display: grid;
+  grid-template-columns: minmax(0, max-content) minmax(0, 1fr);
+  gap: 4px 14px;
+  margin: 8px 0 6px;
+}
+.commands-syntax dl > div { display: contents; }
+.commands-syntax dt { margin: 0; }
+.commands-syntax dd { margin: 0; color: var(--muted); }
+.commands-syntax code { font-size: 0.76rem; overflow-wrap: anywhere; }
+.commands-syntax .meta-text { margin: 0; }
+
+.commands-chip-rows { display: grid; gap: 8px; min-width: 0; }
+.commands-chip-rows > .ui-clear-filters { justify-self: start; }
+
+.commands-banner { margin: 0; text-align: left; }
+.commands-record-loading { display: grid; gap: 8px; }
+
+/* ── Results ── */
+.commands-results { display: grid; gap: 8px; min-width: 0; }
+.commands-results-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 4px 16px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.commands-results-head .ui-results-summary { margin: 0; }
+.commands-range { font-size: 0.78rem; }
+
+.commands-grid-panel { padding: 0; overflow: hidden; min-width: 0; }
+.findings-redesign.commands-page .commands-grid-host {
+  /* Bounded: the page header and filters stay put while the grid scrolls. */
+  height: min(72vh, 900px);
+  min-height: 420px;
+}
+.commands-grid-host .ag-cell { display: flex; align-items: center; }
+.commands-grid-host .ag-cell > * { min-width: 0; }
+/* Cells inherit the row's line height; tags and pills keep their own. */
+.commands-grid-host .tag { line-height: 1.35; }
+
+.commands-status-cell {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: 100%;
+}
+.commands-status-note {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ink-2);
+  font-size: 0.74rem;
+}
+.commands-tool { font-weight: 600; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+.commands-command { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink); }
+.commands-muted { color: var(--muted); }
+.commands-ink-2 { color: var(--ink-2); }
+
+/* ── Record body ── */
+.commands-record .record-body a { color: var(--accent); }
+.commands-record .record-body a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.commands-prewrap { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.commands-preview-skeleton { display: grid; gap: 6px; }
+/* Output previews get room to read; the section scrolls past 60% of the
+ * viewport instead of the page growing without bound. */
+.commands-record .pre.commands-output { max-height: 60vh; }
+.commands-record .section > .meta-text { margin: 0; }
+.commands-record .callout.commands-callout-danger { border-left: 4px solid var(--danger); }
+.commands-record .callout.commands-callout-pending { border-left: 4px solid var(--pending); }
+.commands-callout-actions { display: flex; gap: 6px; }
+.commands-kv-value { display: flex; align-items: center; gap: 6px; }
+.commands-kv-text { overflow: hidden; text-overflow: ellipsis; overflow-wrap: anywhere; }
+.commands-intent { white-space: normal; color: var(--ink); }
+.commands-search-tag {
+  border: 0;
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.74rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+.commands-search-tag:hover { text-decoration: underline; }
+.commands-search-tag:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.commands-same-command { margin-top: 10px; }
+
+/* ── Palette ── */
+.findings-redesign .commands-palette-count { margin: 0; padding: 6px 14px; border-bottom: 1px solid var(--divider); font-size: 0.78rem; }
+.findings-redesign.commands-page .cmd-item { grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; }
+.findings-redesign.commands-page .cmd-item .cmd-title { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The run_uuid prefix sits in its own right-hand column. */
+.findings-redesign.commands-page .cmd-item > .cmd-sub { grid-column: 3; align-self: center; }
+
+@media (max-width: 720px) {
+  .commands-filters { padding: 10px; }
+  /* One swipeable line per dimension keeps the grid within reach on a phone. */
+  .commands-chip-rows .ui-filter-group {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    padding-bottom: 2px;
+    scrollbar-width: thin;
+  }
+  .commands-chip-rows .ui-filter-group > * { flex: none; }
+  .findings-redesign.commands-page .commands-grid-host { height: 64vh; min-height: 320px; }
+  .commands-syntax dl { grid-template-columns: minmax(0, 1fr); }
+  .commands-syntax dd { margin-bottom: 4px; }
+}

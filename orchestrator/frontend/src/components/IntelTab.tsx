@@ -1,3 +1,13 @@
+// ── IntelTab ──────────────────────────────────────────────────────────
+// What Vigil learned about the target, one list across every intel type
+// (tech stack, people, emails, domains, credentials, CVEs, DNS, social,
+// breaches, org facts, notes and leads). The list filters in the browser
+// (type, status per vocabulary, source, search) and sorts by priority
+// (active leads first, then newest) or by a column; a full-text search and a
+// by-URL lookup ask the server. Each type loads on its own and re-reads when
+// the workspace says intel changed. Opening a record replaces the list with
+// the shared record view; Back, Escape and browser Back return to the list.
+
 import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { engagementHref, writeWorkspaceHash } from "../lib/workspaceRoutes";
 import type {
@@ -15,28 +25,66 @@ import {
   listIntelCredentials,
   searchIntel,
 } from "../lib/api";
+import { useCoalescedRunner } from "../lib/useCoalescedRequest";
 import { useResizableColumns } from "../lib/useResizableColumns";
 import { JsonTree } from "./ArtifactViewer";
 import { JsonView } from "./JsonView";
 import { useBodyScrollLock, useModalFocus } from "../lib/modalScrollLock";
-import { ProvenanceBlock } from "./formatting";
+import { ProvenanceBlock, TimeStamp } from "./formatting";
+import { compareServerTime } from "../lib/serverTime";
 import {
-  CopyChip,
   KV,
+  KVTime,
   ProseModeToggle,
   ProseSection,
   SectionHead,
 } from "./drawer/DrawerKit";
 import type { ProseMode, ToastFn } from "./drawer/DrawerKit";
 import { useToast } from "../contexts/ToastContext";
-import { TableSkeleton } from "./Skeletons";
+import { SlowLoadHint, TableSkeleton } from "./Skeletons";
+import {
+  ClearFiltersButton,
+  EmptyState,
+  FacetChipGroup,
+  FilterChip,
+  FilterGroup,
+  PageHeader,
+  ResultsSummary,
+  ScopeToggle,
+  SortIndicator,
+  StatusPill,
+  ariaSort,
+  describeSort,
+  severityColor,
+  statusLabel,
+  statusOrder,
+  type Scope,
+  type SortDirection,
+  type SortKind,
+  type StatusDomain,
+} from "./ui";
+import {
+  RecordBody,
+  RecordCopyLinkButton,
+  RecordHeader,
+  RecordTabs,
+  RecordView,
+  useResultsScrollMemory,
+  type RecordDate,
+  type RecordNavigation,
+} from "./record/RecordView";
+import { listNavigation } from "./record/recordNavigation";
+import "../styles/intel.css";
 
 // ── Props ────────────────────────────────────────────────────────────
 type IntelTabProps = {
   engagementKey: string;
   summary: IntelSummary | null;
+  /** Bumped by the workspace when intel changed; a change re-reads the records in the background. */
+  refreshVersion?: number;
   initialIntelType?: string;
   initialIntelId?: number;
+  initialDrawerTab?: string;
 };
 
 // ── Entity types ─────────────────────────────────────────────────────
@@ -73,12 +121,26 @@ const ENTITY_LABEL = new Map<string, string>(
 );
 
 const PAGE_SIZE = 40;
+// A burst of intel events re-reads the ledger at most this often (with a trailing read).
+const LIVE_REFRESH_MIN_MS = 5000;
+
+// The list's order: priority (active leads first, then most recently
+// updated) unless the operator sorts by a column.
+type IntelSortKey = "priority" | "type" | "title" | "location" | "status";
+type IntelSort = { key: IntelSortKey; dir: SortDirection };
+const PRIORITY_SORT: IntelSort = { key: "priority", dir: "desc" };
+const SORT_COLUMNS: Record<Exclude<IntelSortKey, "priority">, { label: string; kind: SortKind }> = {
+  type: { label: "Type", kind: "text" },
+  title: { label: "Title", kind: "text" },
+  location: { label: "Location", kind: "text" },
+  status: { label: "Status", kind: "status" },
+};
 
 // Column widths for the Intel list. Order matches the columns rendered
 // in the list-header / IntelRow below: [sev-bar, type, title, location,
 // tags, status]. Persisted under its own key so the Findings and Intel
 // tabs don't trample each other.
-const INTEL_LIST_DEFAULTS = [10, 120, 480, 260, 260, 140];
+const INTEL_LIST_DEFAULTS = [10, 110, 320, 200, 180, 130];
 const INTEL_LIST_MINS = [8, 80, 200, 120, 140, 100];
 
 // Severity-ish palette reused for CVE chips (CVSS buckets) and credential
@@ -91,17 +153,6 @@ function cvssBucket(score: number | null | undefined): string | null {
   if (score >= 4) return "medium";
   if (score > 0) return "low";
   return "info";
-}
-
-const SEV_COLORS: Record<string, string> = {
-  critical: "var(--sev-critical)",
-  high: "var(--sev-high)",
-  medium: "var(--sev-medium)",
-  low: "var(--sev-low)",
-  info: "var(--sev-info)",
-};
-function sevDotColor(sev: string): string {
-  return SEV_COLORS[sev] || "var(--sev-info)";
 }
 
 // Per-entity accent colors used when a row has no CVSS-derived severity
@@ -121,41 +172,24 @@ const ITYPE_COLORS: Record<string, string> = {
   note: "var(--chip-muted)",
 };
 
-// Status color buckets. Arbitrary status strings from different intel types
-// (domain live_status, credential state, CVE validation_status, etc.) collapse
-// into a small semantic palette so the Status filter chips read consistently.
-const STATUS_COLORS: Record<string, string> = {
-  active: "var(--ok)",
-  blocked: "var(--danger)",
-  exploited: "var(--chip-maroon)",
-  false_positive: "var(--chip-muted)",
-  unreviewed: "var(--chip-unreviewed)",
-};
-function statusColorKey(s: string): string {
-  const v = s.toLowerCase();
-  if (v === "active" || v === "open" || v === "in_progress" || v === "live" || v === "up" || v === "valid" || v === "version_match") return "active";
-  if (v === "blocked" || v === "down" || v === "dead" || v === "revoked" || v === "invalid") return "blocked";
-  if (v === "exploited") return "exploited";
-  if (v === "resolved" || v === "ruled_out" || v === "false_positive") return "false_positive";
-  return "unreviewed";
+// Each type's status speaks its own vocabulary (components/ui/statusTones):
+// a lead's status, a CVE's validation, a technology's confidence, a domain's
+// liveness, a credential's state. They are filtered and labelled per
+// vocabulary, never mixed in one row of chips.
+const STATUS_GROUPS: { domain: StatusDomain; label: string }[] = [
+  { domain: "intel-lead", label: "Lead status" },
+  { domain: "intel-cve", label: "CVE validation" },
+  { domain: "intel-confidence", label: "Confidence" },
+  { domain: "liveness", label: "Liveness" },
+  { domain: "credential", label: "Credential state" },
+];
+
+/** Status filter key: the vocabulary and the value (`intel-lead:open`). */
+function statusKey(domain: StatusDomain, value: string): string {
+  return `${domain}:${value}`;
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────
-function relTime(iso: string | undefined | null): string {
-  if (!iso) return "";
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return "";
-  const now = new Date();
-  const diffMin = Math.round((now.getTime() - d.getTime()) / 60000);
-  if (diffMin < 1) return "just now";
-  if (diffMin < 60) return `${diffMin}m ago`;
-  const h = Math.round(diffMin / 60);
-  if (h < 24) return `${h}h ago`;
-  const day = Math.round(h / 24);
-  if (day < 7) return `${day}d ago`;
-  return d.toISOString().slice(0, 10);
-}
-
 function fmtCell(value: unknown): string {
   if (value == null) return "";
   if (typeof value === "string") return value;
@@ -170,6 +204,11 @@ function fmtCell(value: unknown): string {
 function truncate(text: string, max: number): string {
   if (!text) return "";
   return text.length > max ? text.slice(0, max - 1) + "…" : text;
+}
+
+/** An http(s) address, the only scheme rendered as a link (ADR 0018). */
+function isWebUrl(value: unknown): value is string {
+  return typeof value === "string" && /^https?:\/\//i.test(value);
 }
 
 function extractHost(url: string): string {
@@ -215,10 +254,10 @@ const SCOPES = [
   "record",
   "tag",
 ] as const;
-type Scope = (typeof SCOPES)[number];
+type QueryScope = (typeof SCOPES)[number];
 
 type ParsedQuery = {
-  tokens: { scope: Scope; value: string }[];
+  tokens: { scope: QueryScope; value: string }[];
   freeTerms: string[];
 };
 
@@ -233,7 +272,7 @@ function parseQuery(q: string): ParsedQuery {
     if (idx > 0) {
       const scope = tok.slice(0, idx).toLowerCase();
       if ((SCOPES as readonly string[]).includes(scope)) {
-        tokens.push({ scope: scope as Scope, value: tok.slice(idx + 1).toLowerCase() });
+        tokens.push({ scope: scope as QueryScope, value: tok.slice(idx + 1).toLowerCase() });
         continue;
       }
     }
@@ -251,8 +290,8 @@ type Derived = {
   subtitle: string;
   location: string;
   status: string | null;
-  statusLabel: string;
-  statusPill: string | null; // css pill class (e.g. "pill-active") or null
+  /** The vocabulary `status` belongs to (lead status, CVE validation, confidence, liveness, credential state). */
+  statusDomain: StatusDomain | null;
   sev: string | null; // sev-* tier for coloring, or null
   sevLabel: string | null;
   source: string;
@@ -314,8 +353,7 @@ function derive(entity: EntityFilter, raw: Record<string, unknown>, index: numbe
   let subtitle = "";
   let location = "";
   let status: string | null = null;
-  let statusLabel = "";
-  let statusPill: string | null = null;
+  let statusDomain: StatusDomain | null = null;
   let sev: string | null = null;
   let sevLabel: string | null = null;
   let host = "";
@@ -329,9 +367,7 @@ function derive(entity: EntityFilter, raw: Record<string, unknown>, index: numbe
       location = (raw.evidence_ref as string) || "";
       const conf = (raw.confidence as string) || "";
       status = conf || null;
-      statusLabel = conf;
-      statusPill = conf ? "pill-unreviewed" : null;
-      if (conf) tags.push(conf);
+      statusDomain = conf ? "intel-confidence" : null;
       break;
     }
     case "person": {
@@ -359,11 +395,7 @@ function derive(entity: EntityFilter, raw: Record<string, unknown>, index: numbe
       host = title;
       const live = (raw.live_status as string) || "";
       status = live || null;
-      statusLabel = live;
-      if (live) tags.push(live);
-      if (live === "live" || live === "up" || live === "active") statusPill = "pill-active";
-      else if (live === "down" || live === "dead") statusPill = "pill-blocked";
-      else if (live) statusPill = "pill-unreviewed";
+      statusDomain = live ? "liveness" : null;
       if (kind) tags.push(kind);
       break;
     }
@@ -381,11 +413,7 @@ function derive(entity: EntityFilter, raw: Record<string, unknown>, index: numbe
       const st =
         (raw.status as string) || (raw.state as string) || (raw.disposition as string) || "";
       status = st || null;
-      statusLabel = st;
-      if (st === "active" || st === "valid") statusPill = "pill-active";
-      else if (st === "blocked" || st === "revoked" || st === "invalid") statusPill = "pill-blocked";
-      else if (st) statusPill = "pill-unreviewed";
-      if (st) tags.push(st);
+      statusDomain = st ? "credential" : null;
       const secretKind = (raw.secret_kind as string) || (raw.kind as string) || "";
       if (secretKind) tags.push(secretKind);
       break;
@@ -402,11 +430,7 @@ function derive(entity: EntityFilter, raw: Record<string, unknown>, index: numbe
       sevLabel = score != null ? `CVSS ${score.toFixed(1)}` : null;
       const valStatus = (raw.validation_status as string) || "";
       status = valStatus || null;
-      statusLabel = valStatus.replace(/_/g, " ");
-      if (valStatus === "exploited") statusPill = "pill-exploited";
-      else if (valStatus === "version_match") statusPill = "pill-active";
-      else if (valStatus === "ruled_out") statusPill = "pill-false_positive";
-      else if (valStatus === "unverified") statusPill = "pill-unreviewed";
+      statusDomain = valStatus ? "intel-cve" : null;
       if (cveId) tags.push(cveId);
       const cwe = (raw.cwe_id as string) || "";
       if (cwe) tags.push(cwe);
@@ -454,9 +478,7 @@ function derive(entity: EntityFilter, raw: Record<string, unknown>, index: numbe
       subtitle = truncate((raw.body_markdown as string) || "", 160);
       const leadStatus = (raw.lead_status as string) || "";
       status = leadStatus || null;
-      statusLabel = leadStatus.replace(/_/g, " ");
-      if (leadStatus === "open" || leadStatus === "in_progress") statusPill = "pill-active";
-      else if (leadStatus === "resolved" || leadStatus === "ruled_out") statusPill = "pill-false_positive";
+      statusDomain = leadStatus ? "intel-lead" : null;
       const sourceAgent = (raw.source_agent as string) || "";
       if (sourceAgent) tags.push(sourceAgent);
       const raw_tags = raw.tags;
@@ -475,6 +497,7 @@ function derive(entity: EntityFilter, raw: Record<string, unknown>, index: numbe
     subtitle,
     location,
     status || "",
+    status && statusDomain ? statusLabel(statusDomain, status) : "",
     sev || "",
     source,
     agent,
@@ -500,13 +523,13 @@ function derive(entity: EntityFilter, raw: Record<string, unknown>, index: numbe
     subtitle,
     location,
     status,
-    statusLabel,
-    statusPill,
+    statusDomain,
     sev,
     sevLabel,
     source,
     host,
-    tags,
+    // A tag can arrive twice (the source agent is often also a tag).
+    tags: tags.filter((tag, index) => tags.findIndex((other) => other.toLowerCase() === tag.toLowerCase()) === index),
     updated_at,
     created_at,
     supersededById,
@@ -514,6 +537,48 @@ function derive(entity: EntityFilter, raw: Record<string, unknown>, index: numbe
     raw,
     searchCorpus: corpusParts.filter(Boolean).join(" \n ").toLowerCase(),
   };
+}
+
+// ── Sorting ──────────────────────────────────────────────────────────
+
+/** Urgency order: by vocabulary (lead, CVE, confidence, liveness, credential), then lifecycle; none last. */
+function statusRank(d: Derived): number | null {
+  if (!d.statusDomain || !d.status) return null;
+  const group = STATUS_GROUPS.findIndex((entry) => entry.domain === d.statusDomain);
+  const order = statusOrder(d.statusDomain);
+  const index = order.indexOf(d.status);
+  return group * 100 + (index < 0 ? order.length : index);
+}
+
+function compareIntel(sort: IntelSort): (a: Derived, b: Derived) => number {
+  const newest = (a: Derived, b: Derived) => compareServerTime(a.updated_at || a.created_at, b.updated_at || b.created_at, "desc");
+  return (a, b) => {
+    if (sort.key === "priority") {
+      // Active leads are the operator's current work queue; keep them first
+      // without filtering out reference notes or historical knowledge.
+      return activeLeadRank(a) - activeLeadRank(b) || newest(a, b) || a.title.localeCompare(b.title);
+    }
+    let delta = 0;
+    if (sort.key === "type") delta = a.entityLabel.localeCompare(b.entityLabel);
+    else if (sort.key === "title") delta = a.title.localeCompare(b.title, undefined, { sensitivity: "base" });
+    else if (sort.key === "location") delta = (a.location || "\uffff").localeCompare(b.location || "\uffff");
+    else if (sort.key === "status") {
+      const rankA = statusRank(a);
+      const rankB = statusRank(b);
+      // Records without a status sort last in both directions.
+      if ((rankA === null) !== (rankB === null)) return rankA === null ? 1 : -1;
+      // Ascending runs from the least urgent; descending puts the most urgent first.
+      delta = (rankB ?? 0) - (rankA ?? 0);
+    }
+    if (sort.dir === "desc") delta = -delta;
+    return delta || newest(a, b) || a.title.localeCompare(b.title);
+  };
+}
+
+function describeIntelSort(sort: IntelSort): string {
+  if (sort.key === "priority") return "Priority, active leads first, then most recently updated";
+  const column = SORT_COLUMNS[sort.key];
+  return describeSort(column.label, sort.dir, column.kind);
 }
 
 // ── Highlight helper ─────────────────────────────────────────────────
@@ -567,89 +632,111 @@ const IconExternal = () => (
     <path d="M19 14v6H4V4h6" />
   </svg>
 );
-// ── DetailModal ──────────────────────────────────────────────────────
-// Shared modal shell used across tabs. See CommandsTab.tsx for design
-// notes on focus trap, aria roles, and the z-index relationship with
-// the Cmd/Ctrl-K palette.
-function DetailModal({
-  children,
-  onClose,
-  titleId,
-}: {
-  children: React.ReactNode;
-  onClose: () => void;
-  titleId?: string;
-}) {
-  const panelRef = useRef<HTMLDivElement | null>(null);
-  useModalFocus(panelRef, onClose);
-  useBodyScrollLock();
-  return (
-    <div
-      className="detail-modal-overlay"
-      onClick={(e) => {
-        if (e.target === e.currentTarget) onClose();
-      }}
-      role="presentation"
-    >
-      <div
-        ref={panelRef}
-        className="detail-modal-panel"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={titleId}
-        tabIndex={-1}
-      >
-        <button
-          type="button"
-          className="detail-modal-close"
-          onClick={onClose}
-          aria-label="Close detail"
-          title="Close (Esc)"
-        >
-          <IconClose />
-        </button>
-        {children}
-      </div>
-    </div>
-  );
+// ── Saved view ───────────────────────────────────────────────────────
+// Scope, search, filters and sort survive leaving the tab (sessionStorage,
+// per engagement).
+
+const ATTENTION_RULE = "Open leads: current (not superseded) notes whose lead status is open or in progress.";
+
+/** A lead still to follow up: the readiness rule for open leads. */
+function isOpenLead(d: Derived): boolean {
+  return d.entity === "note" && d.supersededById == null && (d.status === "open" || d.status === "in_progress");
+}
+
+type IntelView = {
+  scope: Scope;
+  query: string;
+  entity: EntityFilter[];
+  status: string[];
+  source: string[];
+  hideSuperseded: boolean;
+  sort: IntelSort;
+};
+
+const viewKey = (engagementKey: string) => `intel.view.${engagementKey}`;
+const SORT_KEYS: readonly IntelSortKey[] = ["priority", "type", "title", "location", "status"];
+
+function readView(engagementKey: string): IntelView {
+  const strings = (value: unknown) => (Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : []);
+  let value: Record<string, unknown> = {};
+  try {
+    value = JSON.parse(window.sessionStorage.getItem(viewKey(engagementKey)) || "{}") as Record<string, unknown>;
+  } catch {
+    // Browser storage may be unavailable or hold something else; start fresh.
+  }
+  const sort = (value.sort ?? {}) as Record<string, unknown>;
+  return {
+    scope: value.scope === "attention" ? "attention" : "all",
+    query: typeof value.query === "string" ? value.query : "",
+    entity: strings(value.entity).filter(isEntityFilter),
+    status: strings(value.status),
+    source: strings(value.source),
+    hideSuperseded: value.hideSuperseded === true,
+    sort: SORT_KEYS.includes(sort.key as IntelSortKey) && (sort.dir === "asc" || sort.dir === "desc")
+      ? { key: sort.key as IntelSortKey, dir: sort.dir }
+      : PRIORITY_SORT,
+  };
 }
 
 // ── Component ────────────────────────────────────────────────────────
-export function IntelTab({
+export function IntelTab(props: IntelTabProps) {
+  // Each engagement keeps its own caches and saved view.
+  return <IntelWorkspace key={props.engagementKey} {...props} />;
+}
+
+function IntelWorkspace({
   engagementKey,
   summary,
+  refreshVersion,
   initialIntelType,
   initialIntelId,
+  initialDrawerTab,
 }: IntelTabProps) {
-  // Per-entity caches (each entity is loaded lazily). Using a Map means we
-  // only refetch an entity when its cache is cold.
+  // Per-entity caches: each type loads, and refreshes, on its own.
   const [cache, setCache] = useState<Map<EntityFilter, Record<string, unknown>[]>>(
     () => new Map(),
   );
-  const [loading, setLoading] = useState<Set<EntityFilter>>(new Set());
+  // Types whose first read has not answered yet.
+  const [loading, setLoading] = useState<Set<EntityFilter>>(() => new Set(ENTITY_FILTERS.map((spec) => spec.key)));
   const [errors, setErrors] = useState<Map<EntityFilter, string>>(new Map());
   const [readiness, setReadiness] = useState<IntelReadiness | null>(null);
   const [readinessError, setReadinessError] = useState<string | null>(null);
 
-  // Which entities have been fetched / are in-flight (as refs for mutable
-  // access inside async callbacks).
-  const inflight = useRef<Set<EntityFilter>>(new Set());
-  const fetchedRef = useRef<Set<EntityFilter>>(new Set());
-
-  const [query, setQuery] = useState("");
-  const [entityFilters, setEntityFilters] = useState<Set<EntityFilter>>(new Set());
-  const [statusFilters, setStatusFilters] = useState<Set<string>>(new Set());
-  const [sourceFilters, setSourceFilters] = useState<Set<string>>(new Set());
+  const [savedView] = useState(() => readView(engagementKey));
+  const [scope, setScope] = useState<Scope>(savedView.scope);
+  const [query, setQuery] = useState(savedView.query);
+  const [entityFilters, setEntityFilters] = useState<Set<EntityFilter>>(() => new Set(savedView.entity));
+  // `${vocabulary}:${value}` keys (statusKey), so equal values of different vocabularies stay apart.
+  const [statusFilters, setStatusFilters] = useState<Set<string>>(() => new Set(savedView.status));
+  const [sourceFilters, setSourceFilters] = useState<Set<string>>(() => new Set(savedView.source));
+  const [sort, setSort] = useState<IntelSort>(savedView.sort);
   const [page, setPage] = useState(0);
   const [cmdOpen, setCmdOpen] = useState(false);
   const commandInvokerRef = useRef<HTMLElement | null>(null);
   // When true, rows whose ``superseded_by_id`` is set are filtered out
   // client-side. Default off so the audit trail remains visible by default;
   // operators flip this on to mirror the report-writer view.
-  const [hideSuperseded, setHideSuperseded] = useState(false);
+  const [hideSuperseded, setHideSuperseded] = useState(savedView.hideSuperseded);
+  useEffect(() => {
+    const view: IntelView = {
+      scope,
+      query,
+      entity: [...entityFilters],
+      status: [...statusFilters],
+      source: [...sourceFilters],
+      hideSuperseded,
+      sort,
+    };
+    try {
+      window.sessionStorage.setItem(viewKey(engagementKey), JSON.stringify(view));
+    } catch {
+      // Browser storage may be unavailable; the view just resets next visit.
+    }
+  }, [engagementKey, scope, query, entityFilters, statusFilters, sourceFilters, hideSuperseded, sort]);
 
-  // Secondary lookups (FTS search + by-URL).
+  // Secondary lookups (full-text search + by-URL).
   const [fts, setFts] = useState<IntelSearchHit[] | null>(null);
+  const [ftsQuery, setFtsQuery] = useState("");
   const [ftsError, setFtsError] = useState<string | null>(null);
   const [ftsLoading, setFtsLoading] = useState(false);
   const [ftsVisibleCount, setFtsVisibleCount] = useState(PAGE_SIZE);
@@ -659,17 +746,21 @@ export function IntelTab({
   const [urlError, setUrlError] = useState<string | null>(null);
   const [urlLoading, setUrlLoading] = useState(false);
 
+  // `selectedId` is the highlighted row (j / k move it); `detailOpen` says
+  // whether its record replaces the list.
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  // Detail-modal open state. See CommandsTab.tsx for design notes.
   const [detailOpen, setDetailOpen] = useState(false);
+  const [recordTab, setRecordTab] = useState<IntelRecordTab>(isIntelRecordTab(initialDrawerTab) ? initialDrawerTab : "overview");
+  // Each row's open button (the row's focus target).
   const rowRefs = useRef<Map<string, HTMLButtonElement>>(new Map());
-  const lastFocusIdRef = useRef<string | null>(null);
+  // The element that opened the record; focus returns to it on Back.
+  const invokerRef = useRef<HTMLElement | null>(null);
   const appliedRouteRecordRef = useRef<string | null>(null);
 
   // Column widths for the Intel list. Separate storage key from the
   // Findings list so the two don't collide.
   const {
-    gridTemplate: listGridTemplate,
+    widths: listWidths,
     startResize: startListResize,
     resetColumn: resetListColumn,
   } = useResizableColumns(
@@ -677,100 +768,113 @@ export function IntelTab({
     INTEL_LIST_DEFAULTS,
     INTEL_LIST_MINS,
   );
+  // The title column takes the room the others leave (never below its set width).
+  const listGridTemplate = listWidths
+    .map((width, index) => (index === 2 ? `minmax(${width}px, 1fr)` : `${width}px`))
+    .join(" ");
 
   const searchRef = useRef<HTMLInputElement | null>(null);
 
-  // Fetch each entity on mount; skip if already loaded. The engagementKey
-  // change invalidates the whole cache.
+  // Each type loads on its own (a slow or failing type never holds up the
+  // rest). Every load goes through one coalesced runner (lib/coalesce): a
+  // refresh that arrives while a pass runs queues exactly one more pass after
+  // it, so a burst never cancels the pass in flight. Each answer clears its
+  // type's loading mark whichever pass it belongs to; rows already shown stay
+  // until their type answers.
+  const mountedRef = useRef(true);
   useEffect(() => {
-    // Reset caches when the engagement changes.
-    setCache(new Map());
-    setErrors(new Map());
-    fetchedRef.current = new Set();
-    inflight.current = new Set();
-
-    let cancelled = false;
-
-    const fetchOne = (spec: FilterSpec) => {
-      if (fetchedRef.current.has(spec.key) || inflight.current.has(spec.key)) return;
-      inflight.current.add(spec.key);
-      setLoading((prev) => new Set(prev).add(spec.key));
-
-      const p: Promise<Record<string, unknown>[]> =
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+  const runLoad = useCoalescedRunner(useCallback(async () => {
+    const key = engagementKey;
+    const current = () => mountedRef.current;
+    const reads = ENTITY_FILTERS.map((spec) => {
+      const read: Promise<Record<string, unknown>[]> =
         spec.key === "credentials"
-          ? listIntelCredentials(engagementKey)
-          : listIntel(engagementKey, spec.key as IntelEntityType).then(
-              (payload: ListIntelResponse) =>
-                payload.items as unknown as Record<string, unknown>[],
+          ? listIntelCredentials(key)
+          : listIntel(key, spec.key as IntelEntityType).then(
+              (payload: ListIntelResponse) => payload.items as unknown as Record<string, unknown>[],
             );
-
-      p.then((items) => {
-        if (cancelled) return;
-        setCache((prev) => {
-          const next = new Map(prev);
-          next.set(spec.key, items);
-          return next;
-        });
-        fetchedRef.current.add(spec.key);
-      })
-        .catch((err: unknown) => {
-          if (cancelled) return;
-          setCache((prev) => {
-            const next = new Map(prev);
-            next.set(spec.key, []);
-            return next;
-          });
+      return read
+        .then((items) => {
+          if (!current()) return;
+          setCache((prev) => new Map(prev).set(spec.key, items));
           setErrors((prev) => {
+            if (!prev.has(spec.key)) return prev;
             const next = new Map(prev);
-            next.set(spec.key, err instanceof Error ? err.message : "Failed to load");
+            next.delete(spec.key);
             return next;
           });
-          fetchedRef.current.add(spec.key);
+        })
+        .catch((err: unknown) => {
+          if (!current()) return;
+          // A failed refresh keeps the rows already shown; a failed first read shows none.
+          setCache((prev) => (prev.has(spec.key) ? prev : new Map(prev).set(spec.key, [])));
+          setErrors((prev) => new Map(prev).set(spec.key, err instanceof Error ? err.message : "Failed to load"));
         })
         .finally(() => {
-          if (cancelled) return;
-          inflight.current.delete(spec.key);
+          if (!current()) return;
           setLoading((prev) => {
+            if (!prev.has(spec.key)) return prev;
             const next = new Set(prev);
             next.delete(spec.key);
             return next;
           });
         });
-    };
-
-    for (const spec of ENTITY_FILTERS) fetchOne(spec);
-
-    return () => {
-      cancelled = true;
-    };
-  }, [engagementKey]);
-
-  useEffect(() => {
-    let cancelled = false;
-    setReadiness(null);
-    setReadinessError(null);
-    getIntelReadiness(engagementKey)
+    });
+    const readinessRead = getIntelReadiness(key)
       .then((payload) => {
-        if (!cancelled) setReadiness(payload);
+        if (!current()) return;
+        setReadiness(payload);
+        setReadinessError(null);
       })
       .catch((err: unknown) => {
-        if (!cancelled) {
-          setReadinessError(err instanceof Error ? err.message : "Readiness unavailable");
-        }
+        if (current()) setReadinessError(err instanceof Error ? err.message : "Readiness unavailable");
       });
-    return () => {
-      cancelled = true;
-    };
-  }, [engagementKey]);
+    await Promise.allSettled([...reads, readinessRead]);
+  }, [engagementKey]));
 
-  // Derived list across all entities.
+  // The first load; StrictMode's repeated mount joins the pass in flight.
+  useEffect(() => {
+    void runLoad("join");
+  }, [runLoad]);
+
+  // Live refresh: a burst of intel events re-reads at most once per
+  // LIVE_REFRESH_MIN_MS, with a trailing read; the runner coalesces a signal
+  // that lands while a pass runs.
+  const refreshTimerRef = useRef(0);
+  const lastRefreshRef = useRef(0);
+  const firstRefreshVersion = useRef(refreshVersion);
+  useEffect(() => {
+    if (refreshVersion === firstRefreshVersion.current || refreshTimerRef.current) return;
+    const fire = () => {
+      refreshTimerRef.current = 0;
+      lastRefreshRef.current = Date.now();
+      void runLoad("refresh");
+    };
+    const wait = lastRefreshRef.current + LIVE_REFRESH_MIN_MS - Date.now();
+    if (wait <= 0) fire();
+    else refreshTimerRef.current = window.setTimeout(fire, wait);
+  }, [refreshVersion, runLoad]);
+  useEffect(() => () => window.clearTimeout(refreshTimerRef.current), []);
+
+  // Derived list across all entities. A refresh replaces one type's rows at a
+  // time; only that type is derived again.
+  const derivedByRows = useRef(new WeakMap<Record<string, unknown>[], Derived[]>());
   const derivedList = useMemo<Derived[]>(() => {
     const out: Derived[] = [];
     for (const spec of ENTITY_FILTERS) {
-      const rows = cache.get(spec.key) || [];
-      rows.forEach((row, i) => {
-        out.push(derive(spec.key, row as Record<string, unknown>, i));
-      });
+      const rows = cache.get(spec.key);
+      if (!rows) continue;
+      let derived = derivedByRows.current.get(rows);
+      if (!derived) {
+        derived = rows.map((row, i) => derive(spec.key, row, i));
+        derivedByRows.current.set(rows, derived);
+      }
+      out.push(...derived);
     }
     return out;
   }, [cache]);
@@ -781,18 +885,58 @@ export function IntelTab({
     return m;
   }, [derivedList]);
 
-  const writeIntelHash = useCallback((record?: Derived) => {
-    writeWorkspaceHash(engagementHref(engagementKey, { tab: "intel", intel_type: record?.entity, intel_id: record ? String(record.raw.id) : undefined }));
+  // The URL names the open record (`intel_type` + `intel_id`) and its
+  // section (`dtab`). A record without a stored id cannot be linked to, so it
+  // opens without a route.
+  const writeIntelHash = useCallback((record?: Derived, tab?: IntelRecordTab) => {
+    const routable = record !== undefined && record.raw.id != null;
+    writeWorkspaceHash(engagementHref(engagementKey, {
+      tab: "intel",
+      intel_type: routable ? record.entity : undefined,
+      intel_id: routable ? String(record.raw.id) : undefined,
+      dtab: routable && tab && tab !== "overview" ? tab : undefined,
+    }));
   }, [engagementKey]);
 
-  const openRecord = useCallback((record: Derived) => {
+  const detailOpenRef = useRef(detailOpen);
+  detailOpenRef.current = detailOpen;
+  const recordTabRef = useRef(recordTab);
+  recordTabRef.current = recordTab;
+
+  // Opening from the results remembers the opener for the return trip and
+  // starts on Overview; moving between records while one is open (Previous /
+  // Next, j / k, the palette) keeps the open section when the next record has it.
+  const openRecord = useCallback((record: Derived, invoker?: HTMLElement | null) => {
+    const stepping = detailOpenRef.current;
+    if (!stepping) {
+      const active = document.activeElement;
+      invokerRef.current = invoker
+        ?? (active instanceof HTMLElement && active !== document.body ? active : null)
+        ?? searchRef.current;
+    }
+    const tab = stepping && intelTabVisible(record, recordTabRef.current) ? recordTabRef.current : "overview";
+    // A record without a stored id has no link: the URL leaving the routed
+    // record must not close it.
+    if (record.raw.id == null) appliedRouteRecordRef.current = null;
     setSelectedId(record.id);
-    lastFocusIdRef.current = record.id;
+    setRecordTab(tab);
     setDetailOpen(true);
-    writeIntelHash(record);
+    writeIntelHash(record, tab);
   }, [writeIntelHash]);
 
-  const openHydratedRecord = useCallback((entity: IntelEntityType, raw: Record<string, unknown>) => {
+  const closeRecord = useCallback(() => {
+    setDetailOpen(false);
+    appliedRouteRecordRef.current = null;
+    writeIntelHash();
+  }, [writeIntelHash]);
+
+  const chooseRecordTab = useCallback((next: IntelRecordTab) => {
+    setRecordTab(next);
+    const record = selectedId ? derivedById.get(selectedId) : undefined;
+    if (record) writeIntelHash(record, next);
+  }, [derivedById, selectedId, writeIntelHash]);
+
+  const openHydratedRecord = useCallback((entity: IntelEntityType, raw: Record<string, unknown>, invoker?: HTMLElement | null) => {
     const sourceId = raw.id;
     const currentRows = cache.get(entity) || [];
     const existing = currentRows.find((row) => row.id === sourceId);
@@ -811,7 +955,7 @@ export function IntelTab({
       }
       return next;
     });
-    openRecord(record);
+    openRecord(record, invoker);
   }, [cache, openRecord]);
 
   useEffect(() => {
@@ -822,16 +966,25 @@ export function IntelTab({
       }
       return;
     }
-    const key = `${initialIntelType}:${initialIntelId}`;
+    const key = intelRouteKey(initialIntelType, initialIntelId);
     if (appliedRouteRecordRef.current === key) return;
     const target = derivedById.get(key);
-    if (!target) return;
+    if (!target) {
+      // The link names a record the ledger does not hold (or not yet): the
+      // record on screen no longer answers it, so the results show instead.
+      if (detailOpenRef.current) setDetailOpen(false);
+      appliedRouteRecordRef.current = null;
+      return;
+    }
+    if (!detailOpenRef.current) invokerRef.current = rowRefs.current.get(target.id) ?? searchRef.current;
     appliedRouteRecordRef.current = key;
     setSelectedId(target.id);
-    lastFocusIdRef.current = target.id;
     setCmdOpen(false);
     setDetailOpen(true);
   }, [initialIntelType, initialIntelId, derivedById]);
+  useEffect(() => {
+    setRecordTab(isIntelRecordTab(initialDrawerTab) ? initialDrawerTab : "overview");
+  }, [initialDrawerTab]);
 
   // Filtering.
   const parsedQuery = useMemo(() => parseQuery(query), [query]);
@@ -911,40 +1064,31 @@ export function IntelTab({
     [],
   );
 
+  // Search and the superseded switch narrow everything; each chip group then
+  // counts the rows the OTHER groups leave, so a chip never offers a value
+  // that cannot match. Statuses OR together across vocabularies.
+  const searched = useMemo(
+    () => derivedList.filter((d) => (scope === "all" || isOpenLead(d))
+      && !(hideSuperseded && d.supersededById != null)
+      && matchesQuery(d, parsedQuery)),
+    [derivedList, scope, hideSuperseded, parsedQuery, matchesQuery],
+  );
+  const passes = useCallback((d: Derived, skip: "entity" | "status" | "source" | null) => (
+    (skip === "entity" || !entityFilters.size || entityFilters.has(d.entity))
+    && (skip === "status" || !statusFilters.size
+      || (d.statusDomain !== null && d.status !== null && statusFilters.has(statusKey(d.statusDomain, d.status))))
+    && (skip === "source" || !sourceFilters.size || sourceFilters.has(d.source))
+  ), [entityFilters, statusFilters, sourceFilters]);
   const filtered = useMemo(() => {
-    const list = derivedList.filter((d) => {
-      if (entityFilters.size && !entityFilters.has(d.entity)) return false;
-      if (statusFilters.size && !statusFilters.has(d.status || "__none__")) return false;
-      if (sourceFilters.size && !sourceFilters.has(d.source || "__none__")) return false;
-      if (hideSuperseded && d.supersededById != null) return false;
-      if (!matchesQuery(d, parsedQuery)) return false;
-      return true;
-    });
-    // Active leads are the operator's current work queue. Keep them on page 1
-    // without filtering out reference notes or historical knowledge.
-    list.sort((a, b) => {
-      const rankDelta = activeLeadRank(a) - activeLeadRank(b);
-      if (rankDelta !== 0) return rankDelta;
-      const aT = a.updated_at || a.created_at;
-      const bT = b.updated_at || b.created_at;
-      if (aT && bT && aT !== bT) return bT.localeCompare(aT);
-      return a.title.localeCompare(b.title);
-    });
+    const list = searched.filter((d) => passes(d, null));
+    list.sort(compareIntel(sort));
     return list;
-  }, [
-    derivedList,
-    entityFilters,
-    statusFilters,
-    sourceFilters,
-    hideSuperseded,
-    parsedQuery,
-    matchesQuery,
-  ]);
+  }, [searched, passes, sort]);
 
   // Reset page when filters change.
   useEffect(() => {
     setPage(0);
-  }, [entityFilters, statusFilters, sourceFilters, hideSuperseded, query]);
+  }, [scope, entityFilters, statusFilters, sourceFilters, hideSuperseded, query, sort]);
 
   const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
   useEffect(() => {
@@ -952,8 +1096,24 @@ export function IntelTab({
   }, [totalPages]);
   const pageRows = filtered.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
 
-  // Keep selection valid — if filters drop the currently selected row,
-  // fall through to the first filtered row. No auto-open-modal on mount.
+  // The page follows the highlighted row: j / k, [ / ], the palette and a
+  // record's Previous / Next can move past the shown page.
+  const filteredRef = useRef(filtered);
+  filteredRef.current = filtered;
+  const showRow = useCallback((id: string) => {
+    const index = filteredRef.current.findIndex((d) => d.id === id);
+    if (index >= 0) setPage(Math.floor(index / PAGE_SIZE));
+  }, []);
+  useEffect(() => {
+    if (selectedId) showRow(selectedId);
+  }, [selectedId, showRow]);
+  useEffect(() => {
+    if (!selectedId || detailOpen) return;
+    rowRefs.current.get(selectedId)?.scrollIntoView?.({ block: "nearest" });
+  }, [selectedId, page, detailOpen]);
+
+  // Keep selection valid — if the record leaves the ledger, fall through to
+  // the first row. Nothing opens on mount without a route.
   useEffect(() => {
     if (selectedId && !derivedById.has(selectedId)) {
       setSelectedId(derivedList[0]?.id ?? null);
@@ -962,26 +1122,38 @@ export function IntelTab({
   }, [derivedList, derivedById, selectedId]);
 
   const selectedDerived = selectedId ? derivedById.get(selectedId) ?? null : null;
+  const investigating = detailOpen && selectedDerived !== null;
+
+  // Previous / Next walk the results as shown: current filters, the list's
+  // order, across every page. Each entity type loads on its own, so until
+  // every one has arrived the record's place in the results is not known.
+  const reviewIds = useMemo(() => filtered.map((d) => d.id), [filtered]);
+  const stepToRecord = useCallback((id: string) => {
+    const record = derivedById.get(id);
+    if (record) openRecord(record);
+  }, [derivedById, openRecord]);
+  const reviewNavigation: RecordNavigation = loading.size > 0
+    ? { index: undefined, total: undefined, pending: true }
+    : listNavigation(reviewIds, selectedId, stepToRecord);
+  const resultsRef = useRef<HTMLDivElement | null>(null);
+  // Back to results lands on the record last shown, on its page.
+  useResultsScrollMemory(resultsRef, investigating, { recordKey: investigating ? selectedId : null, reveal: showRow });
 
   // Keyboard shortcuts (same as FindingsTab).
-  const filteredRef = useRef(filtered);
-  filteredRef.current = filtered;
   const selectedRef = useRef(selectedId);
   selectedRef.current = selectedId;
-  const detailOpenRef = useRef(detailOpen);
-  detailOpenRef.current = detailOpen;
+  const derivedByIdRef = useRef(derivedById);
+  derivedByIdRef.current = derivedById;
+  const navigationRef = useRef<RecordNavigation>(reviewNavigation);
+  navigationRef.current = reviewNavigation;
 
+  // The palette opens over whatever is on screen, the open record included.
   const openCommandPalette = useCallback((invoker?: HTMLElement) => {
     if (cmdOpen) return;
-    // Detail controls unmount before the palette, so keep the connected row opener.
-    const origin = invoker ?? (detailOpenRef.current
-      ? rowRefs.current.get(lastFocusIdRef.current ?? "") ?? searchRef.current
-      : document.activeElement);
-    commandInvokerRef.current = origin instanceof HTMLElement && origin.isConnected ? origin : searchRef.current;
-    if (detailOpenRef.current) writeIntelHash();
-    setDetailOpen(false);
+    const origin = invoker ?? document.activeElement;
+    commandInvokerRef.current = origin instanceof HTMLElement && origin.isConnected && origin !== document.body ? origin : searchRef.current;
     setCmdOpen(true);
-  }, [cmdOpen, writeIntelHash]);
+  }, [cmdOpen]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -995,7 +1167,13 @@ export function IntelTab({
       }
       if (!isTyping && e.key === "/") {
         e.preventDefault();
-        searchRef.current?.focus();
+        if (detailOpenRef.current) closeRecord();
+        // After the results (and their scroll position) are back, bring the
+        // search box into view: it is what the operator asked for.
+        queueMicrotask(() => {
+          searchRef.current?.focus({ preventScroll: true });
+          searchRef.current?.scrollIntoView?.({ block: "center" });
+        });
         return;
       }
       if (e.key === "Escape") {
@@ -1003,14 +1181,12 @@ export function IntelTab({
           searchRef.current?.blur();
           return;
         }
-        if (detailOpenRef.current) {
-          setDetailOpen(false);
-        } else {
-          setSelectedId(null);
-        }
+        // The open record handles its own Escape (back to results).
+        if (!detailOpenRef.current) setSelectedId(null);
         return;
       }
-      if (!isInteractive && (e.key === "[" || e.key === "]")) {
+      // The open record handles [ / ] itself.
+      if (!isInteractive && !detailOpenRef.current && (e.key === "[" || e.key === "]")) {
         e.preventDefault();
         const list = filteredRef.current;
         if (!list.length) return;
@@ -1025,6 +1201,12 @@ export function IntelTab({
       }
       if (!isInteractive && (e.key === "j" || e.key === "k")) {
         e.preventDefault();
+        if (detailOpenRef.current) {
+          const { onPrevious, onNext, pending } = navigationRef.current;
+          const step = e.key === "k" ? onPrevious : onNext;
+          if (step && !pending) step();
+          return;
+        }
         const list = filteredRef.current;
         if (!list.length) return;
         const cur = selectedRef.current;
@@ -1036,37 +1218,48 @@ export function IntelTab({
         const next = e.key === "k" ? Math.max(0, idx - 1) : Math.min(list.length - 1, idx + 1);
         setSelectedId(list[next].id);
       }
-      if (!isInteractive && e.key === "Enter" && selectedRef.current != null) {
+      if (!isInteractive && !detailOpenRef.current && e.key === "Enter" && selectedRef.current != null) {
+        const record = derivedByIdRef.current.get(selectedRef.current);
+        if (!record) return;
         e.preventDefault();
-        setDetailOpen(true);
+        openRecord(record, rowRefs.current.get(record.id));
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [openCommandPalette]);
+  }, [openCommandPalette, closeRecord, openRecord]);
 
-  // Counts.
+  // Counts, each within what the other filters leave.
   const entityCounts = useMemo(() => {
     const c: Record<string, number> = {};
-    for (const d of derivedList) c[d.entity] = (c[d.entity] || 0) + 1;
+    for (const d of searched) if (passes(d, "entity")) c[d.entity] = (c[d.entity] || 0) + 1;
     return c;
-  }, [derivedList]);
-  const statusCounts = useMemo(() => {
-    const c: Record<string, number> = {};
-    for (const d of derivedList) {
-      if (!d.status) continue;
-      c[d.status] = (c[d.status] || 0) + 1;
+  }, [searched, passes]);
+  // Per vocabulary, in urgency order.
+  const statusGroups = useMemo(() => {
+    const counts = new Map<StatusDomain, Map<string, number>>();
+    for (const d of searched) {
+      if (!d.statusDomain || !d.status || !passes(d, "status")) continue;
+      const group = counts.get(d.statusDomain) ?? new Map<string, number>();
+      group.set(d.status, (group.get(d.status) ?? 0) + 1);
+      counts.set(d.statusDomain, group);
     }
-    return c;
-  }, [derivedList]);
-  const sourceCounts = useMemo(() => {
-    const c: Record<string, number> = {};
-    for (const d of derivedList) {
-      if (!d.source) continue;
-      c[d.source] = (c[d.source] || 0) + 1;
-    }
-    return c;
-  }, [derivedList]);
+    return STATUS_GROUPS.map(({ domain, label }) => {
+      const group = counts.get(domain) ?? new Map<string, number>();
+      const order = statusOrder(domain);
+      const rank = (value: string) => (order.indexOf(value) < 0 ? order.length : order.indexOf(value));
+      const values = [...group].sort((a, b) => rank(a[0]) - rank(b[0]) || a[0].localeCompare(b[0])).map(([value, count]) => ({ value, count }));
+      // A selected status with no rows left stays visible so it can be cleared.
+      const selected = new Set([...statusFilters].filter((key) => key.startsWith(`${domain}:`)).map((key) => key.slice(domain.length + 1)));
+      return { domain, label, values, selected };
+    }).filter((group) => group.values.length > 0 || group.selected.size > 0);
+  }, [searched, passes, statusFilters]);
+  const sourceValues = useMemo(() => {
+    const c = new Map<string, number>();
+    for (const d of searched) if (d.source && passes(d, "source")) c.set(d.source, (c.get(d.source) ?? 0) + 1);
+    return [...c].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).map(([value, count]) => ({ value, count }));
+  }, [searched, passes]);
+  const openLeadRows = useMemo(() => derivedList.reduce((acc, d) => acc + (isOpenLead(d) ? 1 : 0), 0), [derivedList]);
   const supersededCount = useMemo(
     () => derivedList.reduce((acc, d) => acc + (d.supersededById != null ? 1 : 0), 0),
     [derivedList],
@@ -1084,11 +1277,12 @@ export function IntelTab({
     setEntityFilters(new Set());
     setStatusFilters(new Set());
     setSourceFilters(new Set());
+    setHideSuperseded(false);
     setQuery("");
   };
 
   const activeFilterCount =
-    entityFilters.size + statusFilters.size + sourceFilters.size + (query ? 1 : 0);
+    entityFilters.size + statusFilters.size + sourceFilters.size + (hideSuperseded ? 1 : 0) + (query ? 1 : 0);
 
   const loadingAny = loading.size > 0;
   const firstReadinessLead = readiness?.open_leads[0];
@@ -1096,132 +1290,219 @@ export function IntelTab({
     ?? readiness?.exploited_unlinked_cves[0]
     ?? readiness?.dangling_links[0];
 
-  // FTS search.
+  // FTS search and the by-URL lookup. Only the latest request of each may
+  // answer: an older one that lands late is dropped.
+  const ftsRequestRef = useRef(0);
   const runSearch = () => {
+    const request = ++ftsRequestRef.current;
     const q = query.trim();
     if (!q) {
       setFts(null);
       setFtsError(null);
+      setFtsLoading(false);
       setFtsVisibleCount(PAGE_SIZE);
       return;
     }
     setFtsLoading(true);
     setFtsError(null);
+    setFtsQuery(q);
     setFtsVisibleCount(PAGE_SIZE);
     searchIntel(engagementKey, { q })
-      .then((rows) => setFts(rows))
+      .then((rows) => {
+        if (request === ftsRequestRef.current) setFts(rows);
+      })
       .catch((err: unknown) => {
+        if (request !== ftsRequestRef.current) return;
         setFts([]);
         setFtsError(err instanceof Error ? err.message : "Search failed");
       })
-      .finally(() => setFtsLoading(false));
+      .finally(() => {
+        if (request === ftsRequestRef.current) setFtsLoading(false);
+      });
   };
 
+  const urlRequestRef = useRef(0);
   const runUrlSearch = () => {
+    const request = ++urlRequestRef.current;
     const u = urlQuery.trim();
     if (!u) {
       setUrlResults(null);
       setUrlError(null);
+      setUrlLoading(false);
       return;
     }
     setUrlLoading(true);
     setUrlError(null);
     intelByUrl(engagementKey, u)
-      .then((resp) => setUrlResults(resp))
+      .then((resp) => {
+        if (request === urlRequestRef.current) setUrlResults(resp);
+      })
       .catch((err: unknown) => {
+        if (request !== urlRequestRef.current) return;
         setUrlResults(null);
         setUrlError(err instanceof Error ? err.message : "By-URL lookup failed");
       })
-      .finally(() => setUrlLoading(false));
+      .finally(() => {
+        if (request === urlRequestRef.current) setUrlLoading(false);
+      });
+  };
+  const clearUrlLookup = () => {
+    urlRequestRef.current += 1;
+    setUrlQuery("");
+    setUrlResults(null);
+    setUrlError(null);
+    setUrlLoading(false);
+  };
+
+  const routeKey = isEntityFilter(initialIntelType) && initialIntelId != null ? intelRouteKey(initialIntelType, initialIntelId) : null;
+  const routeMissing = routeKey !== null && !loadingAny && !derivedById.has(routeKey);
+
+  const empty = !loadingAny && derivedList.length === 0 && errors.size === 0;
+  const openLeadCount = readiness?.applicable ? readiness.open_leads.length : null;
+  const ftsStale = fts !== null && ftsQuery !== query.trim();
+  const sortHeader = (key: Exclude<IntelSortKey, "priority">, label: string, columnIndex?: number, className?: string) => {
+    const direction = sort.key === key ? sort.dir : null;
+    return (
+      <span role="columnheader" aria-sort={ariaSort(direction)} className={className}>
+        <button
+          type="button"
+          className="intel-sort-button"
+          onClick={() => setSort((current) => (current.key === key
+            ? { key, dir: current.dir === "asc" ? "desc" : "asc" }
+            // A status column starts with the most urgent first; text columns A to Z.
+            : { key, dir: SORT_COLUMNS[key].kind === "status" ? "desc" : "asc" }))}
+          title={`Sort by ${label.toLowerCase()}`}
+        >
+          {label}
+          <SortIndicator direction={direction} />
+        </button>
+        {columnIndex !== undefined && (
+          <span
+            className="col-resize-handle"
+            onPointerDown={(e) => startListResize(columnIndex, e)}
+            onDoubleClick={() => resetListColumn(columnIndex)}
+          />
+        )}
+      </span>
+    );
   };
 
   return (
-    <div className="findings-redesign">
-      <div className="page-head">
-        <div>
-          <h1 className="page-title">Intel</h1>
-          <div className="page-crumbs">
-            Engagement <code>{engagementKey}</code> ·{" "}
-            <span>
-              {filtered.length} of {derivedList.length} records
-              {loadingAny && " · loading…"}
-            </span>
-          </div>
-        </div>
-        <EntitySpark counts={entityCounts} />
-      </div>
-
-      {readiness?.applicable && (
-        <section className="intel-workbar" aria-label="Intel active work readiness">
-          <div className="intel-workbar-title">
-            <span className="sev-dot" />
-            <span>Active work</span>
-          </div>
-          <button
-            type="button"
-            className="intel-workbar-stat"
-            onClick={() => {
-              setEntityFilters(new Set(["note"]));
-              setStatusFilters(new Set(["open", "in_progress"]));
-              setSourceFilters(new Set());
-              setQuery("");
-            }}
-          >
-            {readiness.open_leads.length} open {readiness.open_leads.length === 1 ? "lead" : "leads"}
+    <div className="findings-redesign intel-page">
+      <PageHeader
+        title="Intel"
+        purpose="What Vigil learned about the target: tech stack, people, domains, credentials, CVEs and notes. Open leads are the follow-ups still to do."
+        stats={[
+          { value: loadingAny && derivedList.length === 0 ? null : derivedList.length, label: "records" },
+          {
+            value: openLeadCount,
+            label: openLeadCount === 1 ? "open lead" : "open leads",
+            tone: openLeadCount ? "warning" : undefined,
+            title: "Current (not superseded) notes whose lead status is open or in progress",
+          },
+        ]}
+        status={loadingAny && derivedList.length > 0 ? `${loading.size} of ${ENTITY_FILTERS.length} types still loading` : null}
+        actions={(
+          <button type="button" className="ui-button" onClick={(event) => openCommandPalette(event.currentTarget)}>
+            Jump to… <span className="search-kbd">⌘K</span>
           </button>
-          <span className="intel-workbar-stat">
-            {readiness.open_high_cves.length} high-risk {readiness.open_high_cves.length === 1 ? "CVE" : "CVEs"}
-          </span>
-          <span className="intel-workbar-stat">
-            {readiness.exploited_unlinked_cves.length} unlinked exploited
-          </span>
-          <span className="intel-workbar-stat">
-            {readiness.dangling_links.length} dangling {readiness.dangling_links.length === 1 ? "link" : "links"}
-          </span>
-          {firstReadinessLead && (
+        )}
+        hidden={investigating}
+      >
+        {!empty && (
+          <ScopeToggle
+            scope={scope}
+            onChange={setScope}
+            attentionCount={loadingAny && derivedList.length === 0 ? null : openLeadRows}
+            allCount={loadingAny && derivedList.length === 0 ? null : derivedList.length}
+            partial={loadingAny}
+            attentionRule={ATTENTION_RULE}
+            label="Intel scope"
+          />
+        )}
+        {readiness?.applicable && (
+          <section className="intel-workbar" aria-label="Intel active work readiness">
+            <div className="intel-workbar-title">
+              <span className="sev-dot" />
+              <span>Active work</span>
+            </div>
             <button
               type="button"
-              className="intel-workbar-review"
-              aria-label={`Review ${firstReadinessLead.title}`}
-              onClick={() => openHydratedRecord("note", { ...firstReadinessLead })}
+              className="intel-workbar-stat"
+              title="Show these leads: current notes whose lead status is open or in progress"
+              onClick={() => {
+                // Exactly the leads readiness counts: the Needs attention scope, unfiltered.
+                clearAll();
+                setScope("attention");
+              }}
             >
-              Review first <span aria-hidden="true">›</span>
+              {readiness.open_leads.length} open {readiness.open_leads.length === 1 ? "lead" : "leads"}
             </button>
-          )}
-          {!firstReadinessLead && firstReadinessCve && (
-            <button
-              type="button"
-              className="intel-workbar-review"
-              aria-label={`Review ${firstReadinessCve.cve_id}`}
-              onClick={() => openHydratedRecord("cve", { ...firstReadinessCve })}
-            >
-              Review first <span aria-hidden="true">›</span>
-            </button>
-          )}
-        </section>
-      )}
-      {readiness && !readiness.applicable && (
-        <div className="intel-workbar intel-workbar-muted">
-          Intel closure readiness is not applicable to this {readiness.engagement_type} engagement.
-        </div>
-      )}
-      {readinessError && (
-        <div className="intel-workbar intel-workbar-muted">Intel readiness unavailable: {readinessError}</div>
+            <span className="intel-workbar-stat" title="CVSS 7 or higher with a public proof of concept, not yet ruled out or exploited">
+              {readiness.open_high_cves.length} high-risk {readiness.open_high_cves.length === 1 ? "CVE" : "CVEs"}
+            </span>
+            <span className="intel-workbar-stat" title="Exploited CVEs with no linked finding">
+              {readiness.exploited_unlinked_cves.length} unlinked exploited
+            </span>
+            <span className="intel-workbar-stat" title="CVEs linked to a finding that is missing, a false positive, or merged">
+              {readiness.dangling_links.length} dangling {readiness.dangling_links.length === 1 ? "link" : "links"}
+            </span>
+            {firstReadinessLead && (
+              <button
+                type="button"
+                className="intel-workbar-review"
+                aria-label={`Review ${firstReadinessLead.title}`}
+                onClick={(event) => openHydratedRecord("note", { ...firstReadinessLead }, event.currentTarget)}
+              >
+                Review first <span aria-hidden="true">›</span>
+              </button>
+            )}
+            {!firstReadinessLead && firstReadinessCve && (
+              <button
+                type="button"
+                className="intel-workbar-review"
+                aria-label={`Review ${firstReadinessCve.cve_id}`}
+                onClick={(event) => openHydratedRecord("cve", { ...firstReadinessCve }, event.currentTarget)}
+              >
+                Review first <span aria-hidden="true">›</span>
+              </button>
+            )}
+          </section>
+        )}
+        {readiness && !readiness.applicable && (
+          <div className="intel-workbar intel-workbar-muted">
+            Intel closure readiness is not applicable to this {readiness.engagement_type} engagement.
+          </div>
+        )}
+        {readinessError && (
+          <div className="intel-workbar intel-workbar-muted">Intel readiness unavailable: {readinessError}</div>
+        )}
+      </PageHeader>
+
+      {routeMissing && (
+        <p className="intel-route-missing error-text" role="alert">
+          Intel record {initialIntelType} #{initialIntelId} was not found in this engagement.
+        </p>
       )}
 
       {/* Toolbar */}
-      <div className="panel findings-toolbar-panel">
+      <div className="panel findings-toolbar-panel" hidden={investigating}>
         <div className="toolbar">
           <div className="search-wrap">
             <IconSearch />
             <input
               ref={searchRef}
+              type="search"
               className="search-input"
-              placeholder="Search any field — name, host, tag, value… (try type:cve cvss:high status:active)"
+              aria-label="Search intel"
+              placeholder="Filter any field — name, host, tag, value… (try type:cve cvss:high status:open). Enter searches full text."
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               onKeyDown={(e) => {
-                if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) runSearch();
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  runSearch();
+                }
               }}
             />
             {query && (
@@ -1230,6 +1511,7 @@ export function IntelTab({
                 className="icon-btn"
                 onClick={() => setQuery("")}
                 title="Clear"
+                aria-label="Clear intel search"
                 style={{ width: 22, height: 22 }}
               >
                 <IconClose />
@@ -1238,187 +1520,141 @@ export function IntelTab({
             <span className="search-kbd">/</span>
           </div>
           <div className="toolbar-right">
-            <button type="button" className="qa-btn" onClick={runSearch} disabled={ftsLoading}>
-              {ftsLoading ? "Searching…" : "FTS"}
-            </button>
-            <button type="button" className="qa-btn" onClick={(event) => openCommandPalette(event.currentTarget)}>
-              Jump to… <span className="search-kbd" style={{ marginLeft: 4 }}>⌘K</span>
+            <button
+              type="button"
+              className="ui-button"
+              onClick={runSearch}
+              disabled={ftsLoading || !query.trim()}
+              title="Ask the server's full-text index (word matches, ranked by relevance). The list below filters as you type."
+            >
+              {ftsLoading ? "Searching…" : "Full-text search"}
             </button>
           </div>
         </div>
-        <div className="filter-row">
-          <div className="filter-group">
-            <span className="filter-label">Type</span>
+        <div className="filter-row intel-filter-row">
+          <FilterGroup label="Type">
             {ENTITY_FILTERS.map((spec) => {
-              const count = entityCounts[spec.key]
-                ?? summaryCounts[spec.summaryKey || spec.key]
-                ?? 0;
+              const loaded = cache.has(spec.key);
+              const count = loaded ? entityCounts[spec.key] ?? 0 : summaryCounts[spec.summaryKey || spec.key] ?? 0;
               if (!count && !entityFilters.has(spec.key)) return null;
               return (
-                <button
+                <FilterChip
                   key={spec.key}
-                  type="button"
-                  className={`filter-chip itype-${spec.key} ${entityFilters.has(spec.key) ? "is-active" : ""}`}
-                  onClick={() => toggle(entityFilters, setEntityFilters, spec.key)}
-                >
-                  <span className="sev-dot" style={{ background: ITYPE_COLORS[spec.key] }} />
-                  {spec.label}
-                  <span className="filter-count">{count}</span>
-                </button>
+                  label={spec.label}
+                  count={count}
+                  color={ITYPE_COLORS[spec.key]}
+                  selected={entityFilters.has(spec.key)}
+                  onToggle={() => toggle(entityFilters, setEntityFilters, spec.key)}
+                />
               );
             })}
-          </div>
-          {Object.keys(statusCounts).length > 0 && (
-            <div className="filter-group">
-              <span className="filter-label">Status</span>
-              {Object.entries(statusCounts)
-                .sort((a, b) => b[1] - a[1])
-                .slice(0, 12)
-                .map(([s, n]) => (
-                  <button
-                    key={s}
-                    type="button"
-                    className={`filter-chip istatus-${statusColorKey(s)} ${statusFilters.has(s) ? "is-active" : ""}`}
-                    onClick={() => toggle(statusFilters, setStatusFilters, s)}
-                  >
-                    <span className="sev-dot" style={{ background: STATUS_COLORS[statusColorKey(s)] }} />
-                    {s.replace(/_/g, " ")}
-                    <span className="filter-count">{n}</span>
-                  </button>
-                ))}
-            </div>
-          )}
-          {Object.keys(sourceCounts).length > 0 && (
-            <div className="filter-group">
-              <span className="filter-label">Source</span>
-              {Object.entries(sourceCounts)
-                .sort((a, b) => b[1] - a[1])
-                .slice(0, 8)
-                .map(([s, n]) => (
-                  <button
-                    key={s}
-                    type="button"
-                    className={`filter-chip isource ${sourceFilters.has(s) ? "is-active" : ""}`}
-                    onClick={() => toggle(sourceFilters, setSourceFilters, s)}
-                  >
-                    <span className="sev-dot" style={{ background: "var(--chip-teal)" }} />
-                    {s}
-                    <span className="filter-count">{n}</span>
-                  </button>
-                ))}
-            </div>
-          )}
-          {activeFilterCount > 0 && (
-            <button type="button" className="filter-clear" onClick={clearAll}>
-              Clear all ({activeFilterCount})
-            </button>
+          </FilterGroup>
+          {statusGroups.map((group) => (
+            <FacetChipGroup
+              key={group.domain}
+              label={group.label}
+              values={group.values}
+              selected={group.selected}
+              onToggle={(value) => toggle(statusFilters, setStatusFilters, statusKey(group.domain, value))}
+              labelFor={(value) => statusLabel(group.domain, value)}
+              statusDomain={group.domain}
+            />
+          ))}
+          {(sourceValues.length > 0 || sourceFilters.size > 0) && (
+            <FacetChipGroup
+              label="Source"
+              values={sourceValues}
+              selected={sourceFilters}
+              onToggle={(value) => toggle(sourceFilters, setSourceFilters, value)}
+            />
           )}
           {supersededCount > 0 && (
-            <label
-              className="filter-chip"
-              style={{ cursor: "pointer", marginLeft: "auto" }}
-              title="Hide rows whose superseded_by_id is set so the list mirrors the report-writer view."
-            >
-              <input
-                type="checkbox"
-                checked={hideSuperseded}
-                onChange={(e) => setHideSuperseded(e.target.checked)}
-                style={{ marginRight: 4 }}
-              />
-              Hide superseded
-              <span className="filter-count">{supersededCount}</span>
-            </label>
+            <FilterChip
+              label="Hide superseded"
+              count={supersededCount}
+              selected={hideSuperseded}
+              onToggle={() => setHideSuperseded((current) => !current)}
+              description="Hide records replaced by a newer one, so the list mirrors the report-writer view."
+            />
           )}
+          <ClearFiltersButton count={activeFilterCount} onClear={clearAll} />
         </div>
 
-        {/* Secondary by-URL input (preserves original IntelTab capability). */}
+        {/* Secondary by-URL lookup. */}
         <div className="filter-row">
-          <div className="filter-group" style={{ flex: "1 1 auto" }}>
+          <div className="filter-group intel-by-url">
             <span className="filter-label">By URL</span>
             <input
               type="search"
-              className="search-input"
-              placeholder="Lookup anything from this URL…"
+              className="intel-url-input"
+              aria-label="Look up intel by URL"
+              placeholder="Look up everything recorded for a URL…"
               value={urlQuery}
               onChange={(e) => setUrlQuery(e.target.value)}
               onKeyDown={(e) => {
                 if (e.key === "Enter") runUrlSearch();
               }}
-              style={{
-                border: "1px solid var(--border)",
-                borderRadius: 6,
-                padding: "6px 10px",
-                fontSize: "0.82rem",
-                minWidth: 0,
-                width: "100%",
-                flex: "1 1 260px",
-              }}
             />
-            <button type="button" className="qa-btn" onClick={runUrlSearch} disabled={urlLoading}>
+            <button type="button" className="ui-button" onClick={runUrlSearch} disabled={urlLoading}>
               {urlLoading ? "Looking up…" : "Go"}
             </button>
             {(urlResults || urlError) && (
-              <button
-                type="button"
-                className="filter-clear"
-                onClick={() => {
-                  setUrlQuery("");
-                  setUrlResults(null);
-                  setUrlError(null);
-                }}
-              >
-                Clear
+              <button type="button" className="ui-clear-filters" onClick={clearUrlLookup}>
+                Clear lookup
               </button>
             )}
           </div>
         </div>
       </div>
 
-      {/* FTS / by-URL side panels (only render when in use). */}
+      {/* Full-text / by-URL results (only render when in use). */}
       {(fts !== null || ftsError || urlResults || urlError) && (
-        <div className="panel findings-toolbar-panel" style={{ padding: 14, display: "grid", gap: 14 }}>
+        <div className="panel findings-toolbar-panel intel-lookups" hidden={investigating}>
           {fts !== null && (
             <div>
               <p className="section-title">
-                FTS results <span className="count">{fts.length}</span>
+                Full-text matches for “{ftsQuery}” <span className="count">{fts.length}</span>
               </p>
-              {ftsError && <p className="empty" style={{ padding: 8 }}>{ftsError}</p>}
-              {fts.length === 0 && !ftsError && <p className="empty" style={{ padding: 8 }}>No hits.</p>}
+              <p className="meta-text intel-lookup-note">
+                From the server's full-text index: whole-word matches across every intel body, ranked by relevance. The list
+                below filters by substring as you type{ftsStale ? `; it now shows “${query.trim() || "everything"}”, press Enter to search that` : ""}.
+              </p>
+              {ftsError && <p className="error-text" role="alert">{ftsError}</p>}
+              {fts.length === 0 && !ftsError && <EmptyState variant="empty" compact title="No full-text matches." />}
               {fts.length > 0 && (
-                <div style={{ display: "grid", gap: 4 }}>
+                <div className="intel-lookup-list">
                   {fts.slice(0, ftsVisibleCount).map((hit, i) => (
                     <button
                       key={`${hit.entity_type}:${hit.source_id}:${i}`}
                       type="button"
                       className="link-card"
-                      onClick={() => {
+                      onClick={(event) => {
                         const match = derivedList.find(
                           (d) =>
                             d.entity === (hit.entity_type as EntityFilter) &&
                             ((d.raw.id as number | undefined) === hit.source_id),
                         );
-                        if (match) openRecord(match);
+                        if (match) openRecord(match, event.currentTarget);
                         else openHydratedRecord(hit.entity_type, {
                           ...hit.record,
                           id: hit.source_id,
                           source_name: hit.record.source_name ?? hit.source_name,
-                        });
+                        }, event.currentTarget);
                       }}
                     >
-                      <span className="link-kind">{hit.entity_type}</span>
-                      <span>
+                      <span className="link-kind">{ENTITY_LABEL.get(hit.entity_type) ?? hit.entity_type}</span>
+                      <span className="intel-lookup-text">
                         <span className="link-title">{hit.key}</span>
-                        <br />
                         <span className="link-sub">{truncate(hit.body, 180)}</span>
                       </span>
                       <span className="link-sub">{hit.source_name}</span>
-                      <span className="link-go">›</span>
+                      <span className="link-go" aria-hidden="true">›</span>
                     </button>
                   ))}
                   {ftsVisibleCount < fts.length && (
-                    <div className="list-footer" style={{ marginTop: 6 }}>
+                    <div className="list-footer">
                       <span>
-                        Showing {ftsVisibleCount} of {fts.length} results
+                        Showing {ftsVisibleCount} of {fts.length} matches
                       </span>
                       <button
                         type="button"
@@ -1433,91 +1669,89 @@ export function IntelTab({
               )}
             </div>
           )}
+          {urlError && <p className="error-text" role="alert">By-URL lookup failed: {urlError}</p>}
           {urlResults !== null && (
             <div>
               <p className="section-title">
-                By-URL: <code>{urlQuery}</code>
+                Recorded for <code>{urlQuery}</code>
               </p>
-              {urlError && <p className="empty" style={{ padding: 8 }}>{urlError}</p>}
+              {urlResults.domains.length + urlResults.services.length + urlResults.surfaces.length + urlResults.request_variants.length === 0 && (
+                <EmptyState variant="empty" compact title="Nothing recorded for this URL." />
+              )}
               <UrlResultBlock
                 label="Domains"
                 rows={urlResults.domains as unknown as Record<string, unknown>[]}
-                onOpen={(row) => openHydratedRecord("domain", row)}
+                onOpen={(row, invoker) => openHydratedRecord("domain", row, invoker)}
               />
-              <UrlResultBlock label="Services" rows={urlResults.services} href={intelWorkspaceHref(engagementKey, "coverage")} />
-              <UrlResultBlock label="Surfaces" rows={urlResults.surfaces} href={intelWorkspaceHref(engagementKey, "surfaces")} />
-              <UrlResultBlock label="Request variants" rows={urlResults.request_variants} href={intelWorkspaceHref(engagementKey, "http")} />
+              <UrlResultBlock
+                label="Services"
+                rows={urlResults.services}
+                note={<>Services have no record view; their coverage shows under <a href={engagementHref(engagementKey, { tab: "coverage" })}>Coverage</a>.</>}
+              />
+              <UrlResultBlock
+                label="Surfaces"
+                rows={urlResults.surfaces}
+                hrefFor={(row) => (typeof row.id === "number" ? engagementHref(engagementKey, { tab: "surfaces", surface: row.id }) : undefined)}
+              />
+              <UrlResultBlock
+                label="Request variants"
+                rows={urlResults.request_variants}
+                hrefFor={(row) => (typeof row.id === "number" ? engagementHref(engagementKey, { tab: "http", request: row.id }) : undefined)}
+              />
             </div>
           )}
         </div>
       )}
 
-      {/* List (detail renders as a centred modal below) */}
-      <div className="findings-shell">
-        <section className="list-panel panel">
-          <div className="list-scroll-x">
-            <div
-              className="list-header"
-              style={{ gridTemplateColumns: listGridTemplate, minWidth: "fit-content" }}
-            >
-              <span />
-              <span>
-                Type
-                <span
-                  className="col-resize-handle"
-                  onPointerDown={(e) => startListResize(1, e)}
-                  onDoubleClick={() => resetListColumn(1)}
-                />
-              </span>
-              <span>
-                Title / subtitle
-                <span
-                  className="col-resize-handle"
-                  onPointerDown={(e) => startListResize(2, e)}
-                  onDoubleClick={() => resetListColumn(2)}
-                />
-              </span>
-              <span>
-                Location
-                <span
-                  className="col-resize-handle"
-                  onPointerDown={(e) => startListResize(3, e)}
-                  onDoubleClick={() => resetListColumn(3)}
-                />
-              </span>
-              <span>
-                Tags
-                <span
-                  className="col-resize-handle"
-                  onPointerDown={(e) => startListResize(4, e)}
-                  onDoubleClick={() => resetListColumn(4)}
-                />
-              </span>
-              <span style={{ textAlign: "right" }}>Status</span>
+      {/* List (an open record replaces it; the list keeps its state behind) */}
+      <div ref={resultsRef} className="findings-shell" hidden={investigating}>
+        <section className="list-panel panel intel-list-panel">
+          {!empty && (
+            <div className="intel-list-head">
+              <ResultsSummary
+                shown={filtered.length}
+                total={derivedList.length}
+                noun="intel records"
+                sort={describeIntelSort(sort)}
+                partial={loadingAny}
+              />
+              {sort.key !== "priority" && (
+                <button type="button" className="ui-clear-filters" onClick={() => setSort(PRIORITY_SORT)}>
+                  Sort by priority
+                </button>
+              )}
             </div>
-            <div className="list-scroll">
-              {pageRows.length === 0 && loadingAny ? (
-                <TableSkeleton
-                  rows={8}
-                  showHeader={false}
-                  columns={["12%", "18%", "34%", "20%", "16%"]}
-                />
-              ) : pageRows.length === 0 ? (
-                <div className="empty">
-                  No intel records match.
-                  <div style={{ marginTop: 10 }}>
-                    <button type="button" className="qa-btn" onClick={clearAll}>
-                      Clear filters
-                    </button>
-                  </div>
-                </div>
-              ) : (
-                pageRows.map((d) => (
+          )}
+          <div className="list-scroll-x">
+            {/* A table of records: each row's title is the button that opens it. */}
+            <div role="table" aria-label="Intel records" className="intel-table">
+              <div
+                className="list-header"
+                role="row"
+                style={{ gridTemplateColumns: listGridTemplate, minWidth: "fit-content" }}
+              >
+                <span aria-hidden="true" />
+                {sortHeader("type", "Type", 1)}
+                {sortHeader("title", "Title / subtitle", 2)}
+                {sortHeader("location", "Location", 3)}
+                <span role="columnheader">
+                  Tags
+                  <span
+                    className="col-resize-handle"
+                    aria-hidden="true"
+                    onPointerDown={(e) => startListResize(4, e)}
+                    onDoubleClick={() => resetListColumn(4)}
+                  />
+                </span>
+                {sortHeader("status", "Status", undefined, "intel-status-head")}
+              </div>
+              <div className="list-scroll" role="rowgroup">
+                {pageRows.map((d) => (
                   <IntelRow
                     key={d.id}
                     d={d}
                     selected={selectedId === d.id}
-                    onClick={() => openRecord(d)}
+                    onOpen={(invoker) => openRecord(d, invoker)}
                     freeTerms={parsedQuery.freeTerms}
                     gridTemplate={listGridTemplate}
                     registerRef={(id, el) => {
@@ -1525,41 +1759,64 @@ export function IntelTab({
                       else rowRefs.current.delete(id);
                     }}
                   />
-                ))
-              )}
+                ))}
+              </div>
             </div>
+            {pageRows.length === 0 && loadingAny ? (
+              <TableSkeleton
+                rows={8}
+                showHeader={false}
+                columns={["12%", "18%", "34%", "20%", "16%"]}
+              />
+            ) : empty ? (
+              <EmptyState variant="empty" title="No intel recorded yet.">
+                Agents record what they learn here: the tech stack, people, domains, credentials, CVEs, and notes with leads to follow up.
+              </EmptyState>
+            ) : pageRows.length === 0 && activeFilterCount > 0 ? (
+              <EmptyState variant="filtered" title="No intel records match these filters." onClearFilters={clearAll} />
+            ) : pageRows.length === 0 && scope === "attention" ? (
+              <EmptyState
+                variant="empty"
+                title="No open leads."
+                action={<button type="button" className="ui-button" onClick={() => setScope("all")}>Show all {derivedList.length.toLocaleString()}</button>}
+              >
+                Every current lead is resolved or ruled out.
+              </EmptyState>
+            ) : pageRows.length === 0 ? (
+              <EmptyState variant="empty" title="No intel records to show." />
+            ) : null}
           </div>
-          <div className="list-footer">
-            <span>
-              {filtered.length} records · page {page + 1} / {totalPages}
-            </span>
-            <div className="pager-group">
-              <button
-                type="button"
-                className="pager-btn"
-                disabled={page === 0}
-                onClick={() => setPage((p) => p - 1)}
-              >
-                Prev
-              </button>
-              <button
-                type="button"
-                className="pager-btn"
-                disabled={page >= totalPages - 1}
-                onClick={() => setPage((p) => p + 1)}
-              >
-                Next
-              </button>
+          <SlowLoadHint active={loadingAny} what="intel records" />
+          {!empty && (
+            <div className="list-footer">
+              <span>
+                {filtered.length} records · page {page + 1} / {totalPages}
+              </span>
+              <div className="pager-group">
+                <button
+                  type="button"
+                  className="pager-btn"
+                  disabled={page === 0}
+                  onClick={() => setPage((p) => p - 1)}
+                >
+                  Prev
+                </button>
+                <button
+                  type="button"
+                  className="pager-btn"
+                  disabled={page >= totalPages - 1}
+                  onClick={() => setPage((p) => p + 1)}
+                >
+                  Next
+                </button>
+              </div>
             </div>
-          </div>
+          )}
           {errors.size > 0 && (
-            <div
-              className="empty"
-              style={{ textAlign: "left", padding: "10px 14px", fontSize: "0.78rem" }}
-            >
+            <div className="intel-load-errors" role="alert">
               {Array.from(errors.entries()).map(([k, v]) => (
                 <div key={k}>
-                  <code>{k}</code>: {v}
+                  {ENTITY_LABEL.get(k) ?? k} unavailable: {v}
                 </div>
               ))}
             </div>
@@ -1567,29 +1824,32 @@ export function IntelTab({
         </section>
       </div>
 
-      {detailOpen && selectedDerived && (
-        <DetailModal
-          onClose={() => {
-            setDetailOpen(false);
-            writeIntelHash();
-            const el =
-              lastFocusIdRef.current != null
-                ? rowRefs.current.get(lastFocusIdRef.current)
-                : null;
-            queueMicrotask(() => el?.focus());
-          }}
-          titleId="intel-detail-modal-title"
+      {investigating && (
+        <RecordView
+          label="Intel record"
+          noun="intel record"
+          navigation={reviewNavigation}
+          onBack={closeRecord}
+          titleId="intel-record-title"
+          returnFocusRef={invokerRef}
         >
-          <Drawer key={selectedDerived.id} d={selectedDerived} engagementKey={engagementKey} titleId="intel-detail-modal-title" />
-        </DetailModal>
+          <IntelRecord
+            key={selectedDerived.id}
+            d={selectedDerived}
+            engagementKey={engagementKey}
+            tab={intelTabVisible(selectedDerived, recordTab) ? recordTab : "overview"}
+            onTabChange={chooseRecordTab}
+            titleId="intel-record-title"
+          />
+        </RecordView>
       )}
 
-      <div className="findings-shortcuts">
+      <div className="findings-shortcuts" hidden={investigating}>
         <span><code>/</code> focus search</span>
+        <span><code>Enter</code> full-text search (in the search box)</span>
         <span><code>⌘K</code> jump to record</span>
         <span><code>j / k</code> move</span>
         <span><code>[ / ]</code> prev / next</span>
-        <span><code>Enter</code> open detail</span>
         <span><code>Esc</code> close detail</span>
       </div>
 
@@ -1599,8 +1859,8 @@ export function IntelTab({
           returnFocusRef={commandInvokerRef}
           onSelect={(id) => {
             const record = derivedById.get(id);
-            if (record) openRecord(record);
             setCmdOpen(false);
+            if (record) openRecord(record, commandInvokerRef.current);
           }}
           onClose={() => setCmdOpen(false)}
         />
@@ -1609,51 +1869,32 @@ export function IntelTab({
   );
 }
 
-// ── EntitySpark ──────────────────────────────────────────────────────
-function EntitySpark({ counts }: { counts: Record<string, number> }) {
-  const entries = ENTITY_FILTERS.filter((s) => counts[s.key]);
-  if (entries.length === 0) return null;
-  const max = Math.max(1, ...entries.map((s) => counts[s.key]));
-  return (
-    <div className="sev-sparkline-wrap">
-      <span className="sev-label">By type</span>
-      <div className="sev-sparkline">
-        {entries.map((s) => {
-          const c = counts[s.key] || 0;
-          const h = Math.max(4, (c / max) * 26);
-          return (
-            <div
-              key={s.key}
-              className="sev-bar"
-              style={{ height: `${h}px`, background: "var(--accent)", opacity: c ? 0.85 : 0.2 }}
-              title={`${s.label}: ${c}`}
-            >
-              <span>{c}</span>
-            </div>
-          );
-        })}
-      </div>
-    </div>
-  );
+/** A CVE whose CVSS score gives it a severity colour. */
+function isCveWithSeverity(d: Derived): boolean {
+  return d.entity === "cve" && d.sev != null;
 }
 
 // ── IntelRow ─────────────────────────────────────────────────────────
+// One table row. The title is the row's button (keyboard and assistive
+// technology open the record through it); a click anywhere on the row opens
+// it too, unless the operator is selecting text.
 function IntelRow({
   d,
   selected,
-  onClick,
+  onOpen,
   freeTerms,
   gridTemplate,
   registerRef,
 }: {
   d: Derived;
   selected: boolean;
-  onClick: () => void;
+  onOpen: (invoker: HTMLElement | null) => void;
   freeTerms: string[];
   gridTemplate?: string;
   registerRef?: (id: string, el: HTMLButtonElement | null) => void;
 }) {
-  const isCveWithSev = d.entity === "cve" && d.sev != null;
+  const openRef = useRef<HTMLButtonElement | null>(null);
+  const isCveWithSev = isCveWithSeverity(d);
   const barClass = isCveWithSev ? `sevbar-${d.sev}` : `ibar-${d.entity}`;
   const pillClass = isCveWithSev ? String(d.sev) : `itype-${d.entity}`;
   const superseded = d.supersededById != null;
@@ -1664,21 +1905,33 @@ function IntelRow({
     ? { textDecoration: "line-through", opacity: 0.55 }
     : undefined;
   return (
-    <button
-      type="button"
+    <div
+      role="row"
       className={`frow ${selected ? "is-selected" : ""} ${superseded ? "is-superseded" : ""}`}
-      onClick={onClick}
+      onClick={() => {
+        const selection = window.getSelection?.();
+        if (selection && selection.type === "Range" && selection.toString().length > 0) return;
+        onOpen(openRef.current);
+      }}
       data-id={d.id}
+      data-record-key={d.id}
       data-superseded={superseded ? "true" : undefined}
-      ref={(el) => registerRef?.(d.id, el)}
       style={gridTemplate ? { gridTemplateColumns: gridTemplate, minWidth: "fit-content" } : { minWidth: "fit-content" }}
     >
-      <span className={`frow-sevbar ${barClass}`} />
-      <span className={`frow-sev ${pillClass}`}>{d.entityLabel}</span>
-      <span className="frow-main">
-        <span className="frow-title" style={supersededStyle}>
+      <span className={`frow-sevbar ${barClass}`} aria-hidden="true" />
+      <span role="cell" className={`frow-sev ${pillClass}`}>{d.entityLabel}</span>
+      <span role="cell" className="frow-main">
+        <button
+          type="button"
+          className="frow-title intel-row-open"
+          style={supersededStyle}
+          ref={(el) => {
+            openRef.current = el;
+            registerRef?.(d.id, el);
+          }}
+        >
           {highlight(d.title, freeTerms)}
-        </span>
+        </button>
         <span className="frow-meta">
           {d.subtitle && <span className="mono" style={supersededStyle}>{truncate(d.subtitle, 80)}</span>}
           {d.source && (
@@ -1690,13 +1943,13 @@ function IntelRow({
           {d.updated_at && (
             <>
               <span className="dot" />
-              <span>{relTime(d.updated_at)}</span>
+              <TimeStamp value={d.updated_at} />
             </>
           )}
         </span>
       </span>
-      <span className="frow-loc" style={supersededStyle}>{d.location || ""}</span>
-      <span className="frow-tags">
+      <span role="cell" className="frow-loc" style={supersededStyle}>{d.location || ""}</span>
+      <span role="cell" className="frow-tags">
         {superseded && (
           <span className="tag" title={`Replaced by intel id=${d.supersededById}`}>
             superseded → #{d.supersededById}
@@ -1707,116 +1960,142 @@ function IntelRow({
           <span key={`t-${i}-${t}`} className="tag">{t}</span>
         ))}
       </span>
-      <span className="frow-status">
-        {d.statusPill && d.status ? (
-          <span className={`pill ${d.statusPill}`}>{d.statusLabel || d.status}</span>
-        ) : d.status ? (
-          <span className="pill pill-unreviewed">{d.statusLabel || d.status}</span>
-        ) : null}
+      <span role="cell" className="frow-status">
+        {d.status && d.statusDomain ? <StatusPill domain={d.statusDomain} value={d.status} size="sm" /> : null}
       </span>
-    </button>
+    </div>
   );
 }
 
-// ── Drawer ───────────────────────────────────────────────────────────
-type DrawerProps = {
+// ── Record ───────────────────────────────────────────────────────────
+// One intel record inside the shared RecordView (IntelTab owns the view, the
+// list order and the URL). Sections: Overview (the entity's fields, body,
+// notes, provenance), Links & tags, Provenance (fields beyond the canonical
+// four) and Raw.
+
+type IntelRecordTab = "overview" | "references" | "provenance" | "raw";
+const INTEL_RECORD_TABS: readonly IntelRecordTab[] = ["overview", "references", "provenance", "raw"];
+
+function isIntelRecordTab(value: string | undefined): value is IntelRecordTab {
+  return (INTEL_RECORD_TABS as readonly string[]).includes(value ?? "");
+}
+
+/** The route identity of a record: `intel_type` + `intel_id`. */
+function intelRouteKey(entity: EntityFilter, id: unknown): string {
+  return `${entity}:${String(id)}`;
+}
+
+// The canonical provenance block (agent / captured / artifact / evidence)
+// renders on Overview. The Provenance section only appears when there are
+// EXTRA provenance fields, so nothing is dropped and nothing is shown twice.
+const PROVENANCE_CANONICAL = ["agent_name", "captured_at", "artifact_ref", "evidence_quote"];
+
+function provenanceExtraCount(d: Derived): number {
+  const provenance = (d.raw.provenance as Record<string, unknown>) || {};
+  return Object.keys(provenance).filter((k) => !PROVENANCE_CANONICAL.includes(k)).length;
+}
+
+// Links & tags: tags + a record URL + a linked-finding deep link (CVE).
+function referenceCount(d: Derived): number {
+  return (Array.isArray(d.raw.tags) ? (d.raw.tags as unknown[]).length : 0)
+    + (d.raw.url ? 1 : 0)
+    + (d.raw.linked_finding_slug ? 1 : 0);
+}
+
+function intelTabVisible(d: Derived, tab: IntelRecordTab): boolean {
+  if (tab === "references") return referenceCount(d) > 0;
+  if (tab === "provenance") return provenanceExtraCount(d) > 0;
+  return true;
+}
+
+/** "CVE", "Tech component", "DNS record": one record of the entity type. */
+function entityNoun(entity: EntityFilter): string {
+  const singular = ENTITY_FILTERS.find((spec) => spec.key === entity)?.singular ?? entity;
+  return singular.charAt(0).toUpperCase() + singular.slice(1);
+}
+
+function recordIdLabel(d: Derived): string {
+  const noun = entityNoun(d.entity);
+  return d.raw.id != null ? `${noun} #${String(d.raw.id)}` : noun;
+}
+
+type IntelRecordProps = {
   d: Derived;
   engagementKey: string;
-  titleId?: string;
+  tab: IntelRecordTab;
+  onTabChange: (tab: IntelRecordTab) => void;
+  titleId: string;
 };
 
-type TabId = "overview" | "references" | "provenance" | "raw";
-
-function Drawer({ d, engagementKey, titleId }: DrawerProps) {
+function IntelRecord({ d, engagementKey, tab, onTabChange, titleId }: IntelRecordProps) {
   const { toast } = useToast();
-  const [tab, setTab] = useState<TabId>("overview");
   const [proseMode, setProseMode] = useState<ProseMode>("rendered");
 
-  const provenance = (d.raw.provenance as Record<string, unknown>) || {};
-  // The canonical provenance block (agent/captured/artifact/evidence) now
-  // renders inline on Overview. The dedicated Provenance tab only appears when
-  // there are EXTRA provenance fields beyond those four, so nothing is dropped
-  // but the common case isn't shown twice.
-  const PROVENANCE_CANONICAL = ["agent_name", "captured_at", "artifact_ref", "evidence_quote"];
-  const provExtraCount = Object.keys(provenance).filter(
-    (k) => !PROVENANCE_CANONICAL.includes(k),
-  ).length;
-
-  // Links & tags tab count: tags + a record URL + a linked-finding deep link
-  // (CVE). Notes + the note body now live on Overview (rendered markdown), so
-  // they no longer count here.
-  const refCount =
-    (Array.isArray((d.raw as Record<string, unknown>).tags) ? (d.raw.tags as unknown[]).length : 0) +
-    (d.raw.url ? 1 : 0) +
-    (d.raw.linked_finding_slug ? 1 : 0);
-
-  const tabs: { id: TabId; label: string; count?: number; hidden?: boolean }[] = [
-    { id: "overview", label: "Overview" },
-    { id: "references", label: "Links & tags", count: refCount, hidden: refCount === 0 },
-    {
-      id: "provenance",
-      label: "Provenance",
-      count: provExtraCount,
-      hidden: provExtraCount === 0,
-    },
-    { id: "raw", label: "Raw" },
-  ];
-  const visibleTabs = tabs.filter((t) => !t.hidden);
-  const isCveWithSev = d.entity === "cve" && d.sev != null;
+  const refCount = referenceCount(d);
+  const provExtraCount = provenanceExtraCount(d);
+  const isCveWithSev = isCveWithSeverity(d);
   const sevClass = d.sev || "info";
-  const heroAccentClass = isCveWithSev ? `sev-${d.sev}` : `itype-${d.entity}`;
   const heroPillClass = isCveWithSev ? sevClass : `itype-${d.entity}`;
-  const heroDotColor = isCveWithSev ? sevDotColor(sevClass) : ITYPE_COLORS[d.entity];
-
-  // Prose toggle is only meaningful on Overview (notes / note body render as
-  // markdown there); other tabs don't surface prose.
-  const showProseToggle = tab === "overview";
+  const heroDotColor = isCveWithSev ? severityColor(sevClass) : ITYPE_COLORS[d.entity];
+  const dates: RecordDate[] = [
+    { label: "Created", value: d.created_at || null },
+    { label: "Updated", value: d.updated_at || null },
+  ];
+  if (d.supersededAt) dates.push({ label: "Superseded", value: d.supersededAt });
 
   return (
-    <aside className="drawer-panel panel">
-      <div className={`drawer-hero ${heroAccentClass}`}>
-        <div className="drawer-top">
-          <div className="drawer-slug">
-            <span>{d.id}</span>
-            <CopyChip text={d.id} toast={toast} label="Copy id" />
-          </div>
-          {/* Maximize retired with the move to a centred modal. The
-              modal's own × close button handles dismissal. */}
-        </div>
-        <h2 id={titleId} className="drawer-title">{d.title}</h2>
-        <div className="hero-meta">
-          <span className={`hero-sev ${heroPillClass}`}>
-            <span className="sev-dot" style={{ background: heroDotColor }} />
-            {d.entityLabel}
-          </span>
-          {d.sevLabel && <span className="tag cve">{d.sevLabel}</span>}
-          {d.statusPill && d.status && (
-            <span className={`pill ${d.statusPill}`}>{d.statusLabel || d.status}</span>
-          )}
-          {d.source && <span className="tag">{d.source}</span>}
-        </div>
-      </div>
-      <div className="drawer-tabs">
-        {visibleTabs.map((t) => (
-          <button
-            key={t.id}
-            type="button"
-            className={`drawer-tab ${tab === t.id ? "is-active" : ""}`}
-            onClick={() => setTab(t.id)}
-          >
-            {t.label}
-            {t.count != null && t.count > 0 && <span className="count">{t.count}</span>}
-          </button>
-        ))}
-        {showProseToggle && <ProseModeToggle mode={proseMode} onChange={setProseMode} />}
-      </div>
-      <div className="drawer-body">
+    <>
+      <RecordHeader
+        id={recordIdLabel(d)}
+        copyId={d.id}
+        copyIdLabel="Copy intel ID"
+        title={d.title}
+        titleId={titleId}
+        accent={heroDotColor}
+        actions={<RecordCopyLinkButton noun="intel record" />}
+        pills={
+          <>
+            <span className={`hero-sev ${heroPillClass}`}>
+              <span className="sev-dot" style={{ background: heroDotColor }} />
+              {entityNoun(d.entity)}
+            </span>
+            {d.sevLabel && <span className="tag cve">{d.sevLabel}</span>}
+            {d.status && d.statusDomain && (
+              <StatusPill
+                domain={d.statusDomain}
+                value={d.status}
+                reason={d.supersededById != null ? `Superseded by #${d.supersededById}` : undefined}
+              />
+            )}
+            {(!d.status || !d.statusDomain) && d.supersededById != null && (
+              <span className="record-pill-reason">Superseded by #{d.supersededById}</span>
+            )}
+            {d.source && <span className="tag">{d.source}</span>}
+          </>
+        }
+        datesLabel="Intel record dates"
+        dates={dates}
+      />
+      <RecordTabs
+        label="Intel record sections"
+        active={tab}
+        onChange={onTabChange}
+        tabs={[
+          { id: "overview", label: "Overview" },
+          { id: "references", label: "Links & tags", count: refCount, hidden: refCount === 0 },
+          { id: "provenance", label: "Provenance", count: provExtraCount, hidden: provExtraCount === 0 },
+          { id: "raw", label: "Raw" },
+        ]}
+        // Prose (the note body, free-form notes) renders on Overview only.
+        trailing={tab === "overview" ? <ProseModeToggle mode={proseMode} onChange={setProseMode} /> : undefined}
+      />
+      <RecordBody>
         {tab === "overview" && <OverviewPane d={d} proseMode={proseMode} toast={toast} />}
         {tab === "references" && <ReferencesPane d={d} engagementKey={engagementKey} toast={toast} />}
         {tab === "provenance" && <ProvenancePane d={d} />}
         {tab === "raw" && <RawPane d={d} />}
-      </div>
-    </aside>
+      </RecordBody>
+    </>
   );
 }
 
@@ -1862,7 +2141,7 @@ function OverviewPane({
 
   // URL of the record (social profile, etc.) — rendered as an external link
   // in the KV grid when present.
-  const recordUrl = typeof raw.url === "string" && /^https?:\/\//i.test(raw.url) ? raw.url : undefined;
+  const recordUrl = isWebUrl(raw.url) ? raw.url : undefined;
 
   let specific: React.ReactNode = null;
   switch (d.entity) {
@@ -1874,8 +2153,8 @@ function OverviewPane({
           <KV k="Version" v={raw.version} mono toast={toast} />
           <KV k="Confidence" v={raw.confidence} />
           <KV k="Evidence ref" v={raw.evidence_ref} mono toast={toast} />
-          <KV k="First seen" v={raw.first_seen_at} />
-          <KV k="Last seen" v={raw.last_seen_at} />
+          <KVTime k="First seen" v={fmtCell(raw.first_seen_at)} />
+          <KVTime k="Last seen" v={fmtCell(raw.last_seen_at)} />
         </div>
       );
       break;
@@ -1966,8 +2245,8 @@ function OverviewPane({
           <KV k="Type" v={raw.record_type} mono />
           <KV k="Name" v={raw.name} mono toast={toast} />
           <KV k="Value" v={raw.value} mono toast={toast} />
-          <KV k="First seen" v={raw.first_seen} />
-          <KV k="Last seen" v={raw.last_seen} />
+          <KVTime k="First seen" v={fmtCell(raw.first_seen)} />
+          <KVTime k="Last seen" v={fmtCell(raw.last_seen)} />
         </div>
       );
       break;
@@ -2022,7 +2301,7 @@ function OverviewPane({
           <KV k="Title" v={raw.title} />
           <KV k="Source agent" v={raw.source_agent} mono toast={toast} />
           <KV k="Tags" v={Array.isArray(raw.tags) ? (raw.tags as string[]).join(", ") : ""} />
-          <KV k="Lead status" v={fmtCell(raw.lead_status).replace(/_/g, " ")} />
+          <KV k="Lead status" v={raw.lead_status ? statusLabel("intel-lead", fmtCell(raw.lead_status)) : ""} />
           <KV k="Authored by" v={raw.authored_by} mono toast={toast} />
           <KV k="Scope" v={raw.scope} />
           <KV k="Validity" v={raw.validity_context} />
@@ -2044,44 +2323,44 @@ function OverviewPane({
 
   return (
     <>
-      <div className="section">
-        <p className="section-title">{d.entityLabel}</p>
+      <section className="section">
+        <h3 className="section-title">{entityNoun(d.entity)}</h3>
         {specific}
-      </div>
-      <div className="section">
-        <p className="section-title">Metadata</p>
+      </section>
+      {/* Created / Updated / Superseded times are in the record header. */}
+      <section className="section">
+        <h3 className="section-title">Metadata</h3>
         <div className="kv-grid">
           <KV k="Source" v={d.source} toast={d.source ? toast : undefined} />
           <KV k="Record ID" v={raw.id} mono toast={raw.id != null ? toast : undefined} />
-          <KV k="Created" v={d.created_at || raw.created_at} />
-          <KV k="Updated" v={d.updated_at || raw.updated_at} />
+          {d.supersededById != null && <KV k="Superseded by" v={`#${d.supersededById}`} mono />}
         </div>
-      </div>
-      {/* Note body + free-form notes now render through the shared prose
+      </section>
+      {/* Note body + free-form notes render through the shared prose
           renderer (rendered markdown by default, raw text when toggled) with
-          a copy chip, matching the Findings drawer. */}
+          a copy chip, matching the Findings record. */}
       <ProseSection title="Body" text={bodyMarkdown} mode={proseMode} toast={toast} />
       <ProseSection title="Notes" text={notes} mode={proseMode} toast={toast} />
       {hasProvenance && (
-        <div className="section">
-          <SectionHead title="Provenance" />
+        <section className="section">
+          <h3 className="section-title">Provenance</h3>
           <ProvenanceBlock
             agent={prov.agent_name as string | undefined}
             captured={prov.captured_at as string | undefined}
             artifactRef={prov.artifact_ref as string | undefined}
             evidenceQuote={prov.evidence_quote as string | undefined}
           />
-        </div>
+        </section>
       )}
       {additional.length > 0 && (
-        <div className="section">
-          <p className="section-title">Additional details</p>
+        <section className="section">
+          <h3 className="section-title">Additional details</h3>
           <div className="json-children">
             {additional.map((key) => (
               <JsonTree key={key} label={key} value={toJsonValue(raw[key])} defaultOpen />
             ))}
           </div>
-        </div>
+        </section>
       )}
     </>
   );
@@ -2102,43 +2381,48 @@ function ReferencesPane({
   const linkedFindingSlug = (raw.linked_finding_slug as string) || "";
 
   if (!url && tags.length === 0 && !linkedFindingSlug) {
-    return <p className="empty">No links or tags recorded.</p>;
+    return <EmptyState variant="empty" compact title="No links or tags recorded." />;
   }
   return (
     <>
       {tags.length > 0 && (
-        <div className="section inline-row">
-          <p className="section-title section-title--inline">Tags</p>
+        <section className="section inline-row">
+          <h3 className="section-title section-title--inline">Tags</h3>
           <div className="tag-row tag-row--inline">
             {tags.map((t, i) => (
               <span key={`${i}-${t}`} className="tag">{t}</span>
             ))}
           </div>
-        </div>
+        </section>
       )}
       {linkedFindingSlug && (
-        <div className="section">
+        <section className="section">
           <SectionHead title="Linked finding" copyText={linkedFindingSlug} toast={toast} />
           <ul className="ref-list">
             <li>
               <a className="mono" href={engagementHref(engagementKey, { tab: "findings", finding: linkedFindingSlug })}>{linkedFindingSlug}</a>
             </li>
           </ul>
-        </div>
+        </section>
       )}
       {url && (
-        <div className="section">
+        <section className="section">
           <SectionHead title="URL" copyText={url} toast={toast} />
           <ul className="ref-list">
             <li>
-              <a href={url} target="_blank" rel="noopener noreferrer">
-                {url}
-                <IconExternal />
-                <span className="host">{extractHost(url)}</span>
-              </a>
+              {/* Target-recorded text: only a web address becomes a link. */}
+              {isWebUrl(url) ? (
+                <a href={url} target="_blank" rel="noopener noreferrer">
+                  {url}
+                  <IconExternal />
+                  <span className="host">{extractHost(url)}</span>
+                </a>
+              ) : (
+                <span className="mono">{url}</span>
+              )}
             </li>
           </ul>
-        </div>
+        </section>
       )}
     </>
   );
@@ -2147,14 +2431,11 @@ function ReferencesPane({
 function ProvenancePane({ d }: { d: Derived }) {
   const prov = (d.raw.provenance as Record<string, unknown>) || {};
   if (Object.keys(prov).length === 0)
-    return <p className="empty">No provenance recorded.</p>;
-  const extras = Object.entries(prov).filter(
-    ([k]) =>
-      !["agent_name", "captured_at", "artifact_ref", "evidence_quote"].includes(k),
-  );
+    return <EmptyState variant="empty" compact title="No provenance recorded." />;
+  const extras = Object.entries(prov).filter(([k]) => !PROVENANCE_CANONICAL.includes(k));
   return (
-    <div className="section">
-      <p className="section-title">Provenance</p>
+    <section className="section">
+      <h3 className="section-title">Provenance</h3>
       <ProvenanceBlock
         agent={prov.agent_name as string | undefined}
         captured={prov.captured_at as string | undefined}
@@ -2168,59 +2449,90 @@ function ProvenancePane({ d }: { d: Derived }) {
           ))}
         </div>
       )}
-    </div>
+    </section>
   );
 }
 
 function RawPane({ d }: { d: Derived }) {
   return (
-    <div className="section">
-      <p className="section-title">Raw record</p>
+    <section className="section">
+      <h3 className="section-title">Raw record</h3>
       <JsonView value={d.raw} />
-    </div>
+    </section>
   );
 }
 
 // ── By-URL summary block ─────────────────────────────────────────────
+// One kind of record the URL matched. Domains open their intel record,
+// surfaces and request variants link to their own record view, and kinds
+// without a record view (services) list what they are and say so.
 function UrlResultBlock({
   label,
   rows,
-  href,
+  hrefFor,
   onOpen,
+  note,
 }: {
   label: string;
   rows: Record<string, unknown>[];
-  href?: string;
-  onOpen?: (row: Record<string, unknown>) => void;
+  hrefFor?: (row: Record<string, unknown>) => string | undefined;
+  onOpen?: (row: Record<string, unknown>, invoker: HTMLElement) => void;
+  note?: React.ReactNode;
 }) {
+  // Long lists show a page at a time; every row stays one click away.
+  const [visible, setVisible] = useState(PAGE_SIZE);
   if (!rows || rows.length === 0) return null;
   return (
-    <div style={{ marginTop: 8 }}>
+    <div className="intel-url-block">
       <p className="section-title">
         {label} <span className="count">{rows.length}</span>
       </p>
-      <div style={{ display: "grid", gap: 4 }}>
-        {rows.map((row, i) => {
-          const content = (
+      {note && <p className="meta-text intel-lookup-note">{note}</p>}
+      <div className="intel-lookup-list">
+        {rows.slice(0, visible).map((row, i) => {
+          const key = String(row.id ?? i);
+          const content = (go: boolean) => (
             <>
               <span className="link-kind">{label.toLowerCase()}</span>
               <span className="link-title mono">{truncate(summarizeRow(row), 220)}</span>
-              <span className="link-go" aria-hidden="true">›</span>
+              {go ? <span className="link-go" aria-hidden="true">›</span> : <span />}
             </>
           );
           if (onOpen) {
             return (
-              <button key={String(row.id ?? i)} type="button" className="link-card" onClick={() => onOpen(row)}>
-                {content}
+              <button key={key} type="button" className="link-card" onClick={(event) => onOpen(row, event.currentTarget)}>
+                {content(true)}
               </button>
             );
           }
+          const href = hrefFor?.(row);
+          if (href) {
+            return (
+              <a key={key} className="link-card" href={href}>
+                {content(true)}
+              </a>
+            );
+          }
           return (
-            <a key={String(row.id ?? i)} className="link-card" href={href}>
-              {content}
-            </a>
+            <div key={key} className="link-card intel-static-card">
+              {content(false)}
+            </div>
           );
         })}
+        {visible < rows.length && (
+          <div className="list-footer">
+            <span>
+              Showing {visible.toLocaleString()} of {rows.length.toLocaleString()} {label.toLowerCase()}
+            </span>
+            <button
+              type="button"
+              className="pager-btn"
+              onClick={() => setVisible((count) => Math.min(count + PAGE_SIZE, rows.length))}
+            >
+              Show next {Math.min(PAGE_SIZE, rows.length - visible)}
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -2232,10 +2544,6 @@ function summarizeRow(row: Record<string, unknown>): string {
     if (typeof v === "string" && v) return v;
   }
   return fmtCell(row);
-}
-
-function intelWorkspaceHref(engagementKey: string, tab: "coverage" | "surfaces" | "http"): string {
-  return engagementHref(engagementKey, { tab });
 }
 
 // ── Command palette ──────────────────────────────────────────────────
@@ -2341,14 +2649,16 @@ function CommandPalette({
               >
                 <span
                   className="sev-dot"
-                  style={{ background: sevDotColor(d.sev || "info") }}
+                  aria-hidden="true"
+                  style={{ background: isCveWithSeverity(d) ? severityColor(d.sev) : ITYPE_COLORS[d.entity] }}
                 />
                 <span>
                   <span className="cmd-title">{d.title}</span>
                   <span className="cmd-sub">
                     {d.entityLabel}
+                    {d.sevLabel ? ` · ${d.sevLabel}` : ""}
                     {d.source ? ` · ${d.source}` : ""}
-                    {d.status ? ` · ${d.status}` : ""}
+                    {d.status && d.statusDomain ? ` · ${statusLabel(d.statusDomain, d.status)}` : ""}
                   </span>
                 </span>
                 <span className="cmd-sub">{d.location || ""}</span>

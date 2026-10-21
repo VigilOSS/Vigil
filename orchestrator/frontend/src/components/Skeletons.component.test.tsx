@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen } from "@testing-library/react";
-import { afterEach, expect, it } from "vitest";
-import { CardSkeleton, ChartSkeleton, TableSkeleton } from "./Skeletons";
+import { act, cleanup, render, screen } from "@testing-library/react";
+import { afterEach, expect, it, vi } from "vitest";
+import { CardSkeleton, ChartSkeleton, SlowLoadHint, TableSkeleton } from "./Skeletons";
 
 afterEach(cleanup);
 
@@ -15,4 +15,19 @@ it("names table and generic loading regions", () => {
   render(<><TableSkeleton rows={2} /><CardSkeleton /></>);
   expect(screen.getByRole("status", { name: "Loading table" })).toBeTruthy();
   expect(screen.getByRole("status", { name: "Loading content" })).toBeTruthy();
+});
+
+it("says a load is still working only after it has run for a while", () => {
+  vi.useFakeTimers();
+  try {
+    const { rerender } = render(<SlowLoadHint active what="the finding ledger" />);
+    act(() => { vi.advanceTimersByTime(1_999); });
+    expect(screen.queryByText(/Still loading/)).toBeNull();
+    act(() => { vi.advanceTimersByTime(1); });
+    expect(screen.getByRole("status").textContent).toBe("Still loading the finding ledger…");
+    rerender(<SlowLoadHint active={false} what="the finding ledger" />);
+    expect(screen.queryByText(/Still loading/)).toBeNull();
+  } finally {
+    vi.useRealTimers();
+  }
 });

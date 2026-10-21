@@ -135,6 +135,8 @@ approval and linked proof runs. Each entry shows a readiness state derived by th
 unprepared, ready, needs approval, in progress, blocked, stale, or done. It can prepare work,
 record exact-work approval, reconcile state, and release ended ownership only after backend
 liveness checks. Preparing or finishing a task never confirms the finding. Run evidence and the existing finding-verification requirements still apply.
+Each entry links to its finding and its proof runs, a run links back to the proof work it served,
+and a finding that awaits runtime proof shows the same entry in its own view.
 A revised next test makes earlier work for that finding history: it keeps its runs and evidence,
 reads stale or done, and the finding reads unprepared until work is prepared for the new plan.
 New work reads blocked while an earlier owner of the same finding and route has not ended and

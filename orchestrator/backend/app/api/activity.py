@@ -2,17 +2,20 @@
 
 Real bodies for the ``activity_entries`` side of plan §1d. ``events`` stays
 the source of truth for structured state-change events; this router owns
-the prose/narrative log that used to live in ``log.md``.
+the prose/narrative log that used to live in ``log.md`` and ``/activity``,
+the merged newest-first feed of both (``services/activity_feed.py``).
 """
 from __future__ import annotations
 
 import functools
-from typing import Any
+from typing import Any, Literal
 
 import anyio
 from fastapi import APIRouter, Query, status
+from pydantic import BaseModel
 
 from ..services import activity as activity_service
+from ..services import activity_feed
 from ..services.engagements import get_engagement_or_404
 from ..ws import broadcaster
 from .intel_schemas import (
@@ -25,6 +28,62 @@ from .intel_schemas import (
 router = APIRouter(prefix="/engagements/{engagement_key}", tags=["activity"])
 
 
+class ActivityFeedActor(BaseModel):
+    name: str
+    kind: Literal["operator", "agent", "system"]
+
+
+class ActivityFeedEntity(BaseModel):
+    type: str
+    key: str
+    label: str
+    # The record the chip opens, by type: finding ``finding_slug``; run
+    # ``run_id``; http_variant ``request_variant_id``; surface ``surface_id``;
+    # intel ``intel_type`` + ``intel_id``; chain ``chain_key`` + the
+    # ``finding_slug`` whose record shows it; code_file ``code_file_id``,
+    # ``repo_id``, ``file_path`` and ``result_id`` (null when unknown); file
+    # ``file_name`` (an engagement root document). Null with
+    # ``unlinked_reason`` when no record can be opened.
+    ref: dict[str, str | int | None] | None = None
+    unlinked_reason: str = ""
+
+
+class ActivityFeedDispatch(BaseModel):
+    agent_id: str
+    role: str
+    run_id: int | None = None
+
+
+class ActivityFeedItem(BaseModel):
+    id: str
+    source: Literal["audit", "event"]
+    source_id: int
+    cursor: str
+    occurred_at: str
+    actor: ActivityFeedActor
+    category: str
+    kind: str
+    summary: str
+    entities: list[ActivityFeedEntity]
+    dispatch: ActivityFeedDispatch | None = None
+    # Verbatim stored fields (ADR 0019) for the row's disclosure.
+    detail: dict[str, Any]
+
+
+class ActivityFeedCategory(BaseModel):
+    key: str
+    label: str
+    count: int
+    default: bool
+
+
+class ActivityFeedResponse(BaseModel):
+    items: list[ActivityFeedItem]
+    has_more: bool
+    total: int
+    categories: list[ActivityFeedCategory]
+
+
 async def _broadcast(engagement_key: str, record_type: str, payload: dict[str, Any]) -> None:
     await broadcaster.publish(
         engagement_key,
@@ -34,6 +93,36 @@ async def _broadcast(engagement_key: str, record_type: str, payload: dict[str, A
             "record_type": record_type,
             "payload": payload,
         },
+    )
+
+
+@router.get("/activity", response_model=ActivityFeedResponse)
+def list_activity_feed(
+    engagement_key: str,
+    category: list[str] = Query(default=[], description="Repeat or comma-separate; default hides tool calls."),
+    actor: str = Query(default="", max_length=16),
+    q: str = Query(default="", max_length=1024),
+    since: str = Query(default="", max_length=64),
+    until: str = Query(default="", max_length=64),
+    before: str = Query(default="", max_length=128),
+    after: str = Query(default="", max_length=128),
+    limit: int = Query(default=100, ge=1, le=500),
+) -> ActivityFeedResponse:
+    """Audit-log entries merged with structured events, newest first."""
+    engagement = get_engagement_or_404(engagement_key)
+    categories = [part.strip() for value in category for part in value.split(",") if part.strip()]
+    return ActivityFeedResponse(
+        **activity_feed.list_activity_feed(
+            engagement.id,
+            categories=categories or None,
+            actor=actor,
+            q=q,
+            since=since or None,
+            until=until or None,
+            before=before or None,
+            after=after or None,
+            limit=limit,
+        )
     )
 
 

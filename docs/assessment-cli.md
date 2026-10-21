@@ -181,9 +181,13 @@ produces a deterministic ZIP and a manifest.
 activity ledger, and consumes every bounded failed-version and orphan-diagnostic
 page.
 
-The orchestrator's Submissions tab offers the same review, attachment, export,
-recovery, paged finding/history, and download workflow for humans. **Neither path
-changes external submission status or sends anything to a platform.**
+The orchestrator's Submissions view offers the same review, attachment, export,
+recovery, version history, and download workflow for humans. It starts from the
+files the latest blind-triage packet reviewed, or else the latest version's files,
+and checks readiness for the exact selection before export. The attachment picker
+offers the finding's and the engagement's registered files, never the submission
+workspace's own internal files. **Neither path changes external submission status
+or sends anything to a platform.**
 
 ---
 

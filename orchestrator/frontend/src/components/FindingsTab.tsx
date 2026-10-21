@@ -17,18 +17,54 @@ import type {
   FindingProvenance,
   FindingReference,
   IntelResolutionResult,
+  ProofNextTest,
 } from "../lib/api";
-import { Check, Copy, Link as LinkIcon, List, Table2 } from "lucide-react";
+import { List, Table2 } from "lucide-react";
 import { getAssessmentFinding, getAssessmentFindingTransition, listAssessmentFindingGroups, listAssessmentFindingLinks, listAssessmentFindingTransitions, resolveIntelIds } from "../lib/api";
 import { JsonTree } from "./ArtifactViewer";
 import { JsonView } from "./JsonView";
 import { engagementHref, parseWorkspaceRoute, writeWorkspaceHash } from "../lib/workspaceRoutes";
+import { createCoalescedRunner } from "../lib/coalesce";
 import { useBodyScrollLock, useModalFocus } from "../lib/modalScrollLock";
 import "../styles/findings.css";
-import { CodeBlock, isCurlLike } from "./formatting";
-import { CopyChip, KV, Prose, ProseModeToggle, SectionHead } from "./drawer/DrawerKit";
+import { CodeBlock, isCurlLike, TimeStamp } from "./formatting";
+import { CopyChip, KV, KVTime, Prose, ProseModeToggle, SectionHead } from "./drawer/DrawerKit";
 import type { ProseMode, ToastFn } from "./drawer/DrawerKit";
-import { Skeleton, TableSkeleton } from "./Skeletons";
+import { Skeleton, SlowLoadHint, TableSkeleton } from "./Skeletons";
+import {
+  ClearFiltersButton,
+  EmptyState,
+  FilterChip,
+  FilterGroup,
+  PageHeader,
+  ResultsSummary,
+  SegmentedControl,
+  SeverityTag,
+  StatusPill,
+  compareStatus,
+  describeSort,
+  humanizeStatus,
+  severityColor,
+  severityLabel,
+  statusLabel,
+  type SortDirection,
+  type SortKind,
+} from "./ui";
+import {
+  compareByRecency,
+  countRecency,
+  findingChangedAt,
+  FINDINGS_SORTS,
+  LAST_VISIT_DWELL_MS,
+  matchesRecency,
+  newestLedgerTime,
+  RECENCY_FILTERS,
+  readLastVisit,
+  summarizeRecentChanges,
+  writeLastVisit,
+  type FindingsSort,
+  type RecencyFilter,
+} from "../lib/findingRecency";
 
 // Optional flat table view — lazy-loaded ag-grid (code-split chunk).
 // The grouped root-cause list remains the default and is NOT lazy.
@@ -38,6 +74,31 @@ const FindingsGrid = lazy(() => import("./FindingsGrid"));
 // group (root + its siblings) OR a standalone finding. Only the grouped view
 // paginates — the Table view is ag-grid, which virtualizes its own rows.
 const GROUPED_PAGE_SIZE = 25;
+
+const SORT_LABELS: Record<FindingsSort, string> = {
+  severity: "Severity",
+  newest: "Newest",
+  changed: "Recently changed",
+};
+const SORT_HINTS: Record<FindingsSort, string> = {
+  severity: "Highest severity first; the list view groups findings by root cause",
+  newest: "Most recently recorded first, as one list",
+  changed: "Most recent ledger change first (verification, workflow, or content), as one list",
+};
+const RECENCY_LABELS: Record<RecencyFilter, string> = {
+  new24h: "New 24h",
+  new7d: "New 7d",
+  changed24h: "Changed 24h",
+  changed7d: "Changed 7d",
+  sinceVisit: "Since my last visit",
+};
+const RECENCY_HINTS: Record<RecencyFilter, string> = {
+  new24h: "Recorded in the last 24 hours",
+  new7d: "Recorded in the last 7 days",
+  changed24h: "Recorded earlier, with a ledger change in the last 24 hours",
+  changed7d: "Recorded earlier, with a ledger change in the last 7 days",
+  sinceVisit: "Recorded or changed since you last viewed these findings in this browser",
+};
 
 // View toggle, persisted in localStorage alongside findings.selected.
 type FindingsView = "grouped" | "table";
@@ -50,18 +111,146 @@ function readFindingsView(): FindingsView {
   }
 }
 
-function readQueueContext(engagementKey: string): { query: string; severity: string[]; workflow: string[]; verification: string[]; page: number } {
+// Each view keeps its own order: the grouped list defaults to severity (root
+// causes first), the flat table to creation date, newest first.
+type SortByView = Record<FindingsView, FindingsSort>;
+const DEFAULT_SORT_BY_VIEW: SortByView = { grouped: "severity", table: "newest" };
+// Each named sort as the results line describes it.
+const SORT_DESCRIPTIONS: Record<FindingsSort, string> = {
+  severity: describeSort("Severity", "desc", "rank"),
+  newest: describeSort("Created", "desc", "time"),
+  changed: describeSort("Last changed", "desc", "time"),
+};
+
+/** A column order the table reports after a header click. */
+export type TableColumnSort = { label: string; direction: SortDirection; kind: SortKind };
+
+type QueueContext = { query: string; severity: string[]; workflow: string[]; verification: string[]; recency: RecencyFilter | null; sort: SortByView; page: number };
+
+function readQueueContext(engagementKey: string): QueueContext {
   try {
     const value = JSON.parse(window.sessionStorage.getItem(`findings.queue.${engagementKey}`) || "{}");
     const strings = (items: unknown): string[] => Array.isArray(items) ? items.filter((item): item is string => typeof item === "string") : [];
-    return { query: typeof value.query === "string" ? value.query : "", severity: strings(value.severity), workflow: strings(value.workflow), verification: strings(value.verification), page: Number.isSafeInteger(value.page) && value.page >= 0 ? value.page : 0 };
+    const sortOf = (view: FindingsView): FindingsSort => (FINDINGS_SORTS as readonly unknown[]).includes(value.sort?.[view]) ? value.sort[view] : DEFAULT_SORT_BY_VIEW[view];
+    return {
+      query: typeof value.query === "string" ? value.query : "",
+      severity: strings(value.severity),
+      workflow: strings(value.workflow),
+      verification: strings(value.verification),
+      recency: (RECENCY_FILTERS as readonly unknown[]).includes(value.recency) ? value.recency : null,
+      sort: { grouped: sortOf("grouped"), table: sortOf("table") },
+      page: Number.isSafeInteger(value.page) && value.page >= 0 ? value.page : 0,
+    };
   } catch {
-    return { query: "", severity: [], workflow: [], verification: [], page: 0 };
+    return { query: "", severity: [], workflow: [], verification: [], recency: null, sort: DEFAULT_SORT_BY_VIEW, page: 0 };
   }
 }
+
+// A link can open the queue already filtered (Overview's "awaiting
+// verification" count names the verification states it counts):
+// `?tab=findings&verification=unreviewed,blocked`, likewise `severity`,
+// `workflow`, `recency` and `q`. Filters named in the address replace the
+// remembered ones; the address then drops them (replace, no history entry) so
+// the operator's later changes are not undone by a reload.
+const ROUTE_FILTER_PARAMS = ["q", "severity", "workflow", "verification", "recency"] as const;
+
+type RouteFilters = { filters: Pick<QueueContext, "query" | "severity" | "workflow" | "verification" | "recency" | "page">; href: string };
+
+function readRouteFilters(engagementKey: string): RouteFilters | null {
+  const route = parseWorkspaceRoute(window.location.hash);
+  if (route.kind !== "engagement" || route.key !== engagementKey || route.params.get("tab") !== "findings") return null;
+  const params = route.params;
+  if (!ROUTE_FILTER_PARAMS.some((name) => params.has(name))) return null;
+  const list = (name: string) => (params.get(name) ?? "").split(",").map((value) => value.trim()).filter(Boolean);
+  const recency = params.get("recency");
+  const kept = Object.fromEntries([...params].filter(([name]) => !(ROUTE_FILTER_PARAMS as readonly string[]).includes(name)));
+  return {
+    filters: {
+      query: params.get("q") ?? "",
+      severity: list("severity"),
+      workflow: list("workflow"),
+      verification: list("verification"),
+      recency: (RECENCY_FILTERS as readonly unknown[]).includes(recency) ? recency as RecencyFilter : null,
+      page: 0,
+    },
+    href: engagementHref(engagementKey, kept),
+  };
+}
+
+// Live refreshes bump `assessmentRefreshVersion` as often as every 2 s. Each
+// engagement-wide read here keeps ONE request in flight per key through the
+// shared coalescing runner (lib/coalesce): versions that arrive meanwhile fold
+// into a single follow-up request once it settles, so a slow response is never
+// discarded and re-requested indefinitely. Loaded data stays on screen while a
+// refresh runs; a failed refresh keeps it and reports the error. A new key
+// (engagement or finding) starts from empty, at once, or from `seed` when the
+// caller already holds that key's data: a seeded key is not read again until
+// the next version.
+type CoalescedLoad<T> = { key: string | null; data: T; loaded: boolean; error: string | null };
+type LoadChannel = { key: string; seen: number | null; run: ReturnType<typeof createCoalescedRunner> };
+
+function useCoalescedLoad<T>(key: string | null, version: number, load: () => Promise<T>, empty: T, seed?: T | null): CoalescedLoad<T> {
+  const [state, setState] = useState<CoalescedLoad<T>>({ key, data: empty, loaded: false, error: null });
+  const loadRef = useRef(load);
+  loadRef.current = load;
+  const emptyRef = useRef(empty);
+  emptyRef.current = empty;
+  const seedRef = useRef(seed);
+  seedRef.current = seed;
+  const channelRef = useRef<LoadChannel | null>(null);
+  const mountedRef = useRef(false);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
+  useEffect(() => {
+    if (key === null) {
+      channelRef.current = null;
+      return;
+    }
+    let channel = channelRef.current;
+    if (!channel || channel.key !== key) {
+      const seeded = seedRef.current;
+      // Each key has its own runner, so a new key never waits on the last one.
+      const current: LoadChannel = {
+        key,
+        seen: seeded != null ? version : null,
+        run: createCoalescedRunner(async () => {
+          const live = () => mountedRef.current && channelRef.current === current;
+          if (!live()) return;
+          try {
+            const data = await loadRef.current();
+            if (live()) setState({ key: current.key, data, loaded: true, error: null });
+          } catch (error) {
+            if (!live()) return;
+            const message = error instanceof Error ? error.message : String(error);
+            setState((previous) => ({ key: current.key, data: previous.key === current.key ? previous.data : emptyRef.current, loaded: true, error: message }));
+          }
+        }),
+      };
+      channel = current;
+      channelRef.current = channel;
+      if (seeded != null) setState({ key, data: seeded, loaded: true, error: null });
+    }
+    // Already read for this version: React StrictMode re-running the effect,
+    // or a seeded key.
+    if (channel.seen === version) return;
+    channel.seen = version;
+    void channel.run("refresh");
+  }, [key, version]);
+  if (key === null) return { key, data: empty, loaded: true, error: null };
+  if (state.key === key) return state;
+  return seed != null ? { key, data: seed, loaded: true, error: null } : { key, data: empty, loaded: false, error: null };
+}
+
+const NO_FINDING_LINKS: AssessmentFindingLink[] = [];
+const NO_FINDING_GROUPS: AssessmentFindingGroup[] = [];
+const NO_TRANSITIONS: AssessmentFindingTransitionSummary[] = [];
 import { useToast } from "../contexts/ToastContext";
 import { findingToMarkdown } from "../lib/findingMarkdown";
 import { FindingRemediation } from "./FindingRemediation";
+import { RecordBody, RecordCopyButton, RecordCopyLinkButton, RecordHeader, RecordTabs, RecordView, useResultsScrollMemory } from "./record/RecordView";
+import { listNavigation } from "./record/recordNavigation";
 
 // ── Types & helpers ───────────────────────────────────────────────────
 
@@ -83,19 +272,27 @@ type FindingsTabProps = {
   initialDrawerTab?: string;
   ledgerLoading?: boolean;
   ledgerError?: string | null;
+  // Optional "Runtime proof" section for a finding that still owes runtime
+  // proof (pending_runtime_proof and not merged), rendered in the Claim &
+  // evidence pane beside the outstanding-proof notice. The page owns proof
+  // work; this tab only places it.
+  renderRuntimeProof?: (finding: RuntimeProofSlotFinding) => React.ReactNode;
+};
+
+export type RuntimeProofSlotFinding = {
+  engagementKey: string;
+  slug: string;
+  title: string;
+  severity: string;
+  workflow_status: string;
+  verification_status: string;
+  next_test?: ProofNextTest | null;
 };
 
 const SEVERITY_ORDER = ["critical", "high", "medium", "low", "info"] as const;
 const SEV_RANK: Record<string, number> = Object.fromEntries(
   SEVERITY_ORDER.map((s, i) => [s, i]),
 );
-const SEV_COLORS: Record<string, string> = {
-  critical: "var(--sev-critical)",
-  high: "var(--sev-high)",
-  medium: "var(--sev-medium)",
-  low: "var(--sev-low)",
-  info: "var(--sev-info)",
-};
 
 const KNOWN_DETAIL_KEYS = new Set<string>([
   "discovered_by",
@@ -137,6 +334,11 @@ function isDetail(finding: FindingLike): finding is AssessmentFindingDetail {
   return "id" in finding;
 }
 
+// List-row recency fields; summary fallback rows carry none.
+function listRow(finding: FindingLike): Pick<AssessmentFindingDetail, "created_at" | "last_transition_at" | "last_transition_action" | "last_transition_actor"> {
+  return isDetail(finding) ? finding : {};
+}
+
 // The API returns `details` / `provenance` already parsed, under the same names
 // the writer used, so these are shape guards rather than parsers.
 function parseDetails(finding: FindingLike): FindingDetails {
@@ -169,49 +371,19 @@ function verificationKey(finding: FindingLike): string {
   return finding.verification_status;
 }
 
-// Human-readable labels shared across pill text, filter chip text, and
-// command-palette subtitles. Keep these maps together so a rename (e.g.
-// the old "Suppressed" → "False positive") lands everywhere at once.
-const WORKFLOW_LABELS: Record<string, string> = {
-  reported: "Reported",
-  merged: "Merged",
-  active: "Active",
-  exploited: "Exploited",
-  blocked: "Blocked",
-  false_positive: "False positive",
-};
-
-const VERIFICATION_LABELS: Record<string, string> = {
-  confirmed: "Verified",
-  downgraded: "Downgraded",
-  false_positive: "False positive",
-  disputed: "Disputed",
-  unreviewed: "Unreviewed",
-};
-
-// External-program submission state — a SEPARATE axis from workflow_status.
-// "none" is the default (never submitted externally) and is intentionally
-// absent here: rows with submission_status=none render no submission pill at
-// all, so this map only covers the meaningful, displayable states.
-const SUBMISSION_LABELS: Record<string, string> = {
-  submitted: "Submitted",
-  accepted: "Accepted",
-  needs_info: "Needs info",
-  rejected: "Rejected",
-  duplicate: "Duplicate",
-};
-
+// Status labels come from the shared vocabulary (components/ui/statusTones.ts),
+// so chips, pills, the table and the palette name a status the same way.
 function verificationLabel(finding: FindingLike): string {
-  const k = verificationKey(finding);
-  return VERIFICATION_LABELS[k] || k;
+  return statusLabel("finding-verification", verificationKey(finding));
 }
 
 function workflowLabel(finding: FindingLike): string {
-  return WORKFLOW_LABELS[finding.workflow_status] || finding.workflow_status;
+  return statusLabel("finding-workflow", finding.workflow_status);
 }
 
+// External-program submission state is a separate axis from workflow_status.
 function submissionLabel(finding: FindingLike): string {
-  return SUBMISSION_LABELS[finding.submission_status] || finding.submission_status;
+  return statusLabel("finding-submission", finding.submission_status);
 }
 
 // A submission_status is worth surfacing only when it is set to something
@@ -222,23 +394,25 @@ function hasSubmissionStatus(status: string | undefined | null): boolean {
   return !!status && status !== "none";
 }
 
-export function relTime(iso: string | undefined | null): string {
-  if (!iso) return "";
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return "";
-  const now = new Date();
-  const diffMin = Math.round((now.getTime() - d.getTime()) / 60000);
-  if (diffMin < 1) return "just now";
-  if (diffMin < 60) return `${diffMin}m ago`;
-  const h = Math.round(diffMin / 60);
-  if (h < 24) return `${h}h ago`;
-  const day = Math.round(h / 24);
-  if (day < 7) return `${day}d ago`;
-  return d.toISOString().slice(0, 10);
+// Source binding of a code finding to the repository generation under review.
+function SourceSnapshotPill({ status, size = "md" }: { status: string; size?: "sm" | "md" }) {
+  return <StatusPill domain="finding-source-snapshot" value={status} size={size} />;
 }
 
-export function sevDotColor(sev: string): string {
-  return SEV_COLORS[sev] || "var(--sev-info)";
+/** Workflow states outside the current findings (the summary's finding_count, the rail, Overview). */
+export const RETIRED_WORKFLOWS: ReadonlySet<string> = new Set(["merged", "false_positive"]);
+
+function plural(count: number, one: string, many = `${one}s`): string {
+  return `${count.toLocaleString("en-US")} ${count === 1 ? one : many}`;
+}
+
+/** Severity order (critical first); unknown severities sort last. */
+export function compareSeverity(a: string, b: string): number {
+  return (SEV_RANK[a] ?? 99) - (SEV_RANK[b] ?? 99);
+}
+
+function compareSeverityThenTitle(a: Derived, b: Derived): number {
+  return compareSeverity(a.severity, b.severity) || a.title.localeCompare(b.title);
 }
 
 function extractHost(url: string): string {
@@ -314,6 +488,8 @@ const SCOPES = [
   "slug",
   "family",
   "chain",
+  // The recorded location; `location:file:` keeps the source (code) findings.
+  "location",
 ] as const;
 type Scope = (typeof SCOPES)[number];
 
@@ -368,6 +544,13 @@ export type Derived = {
   summary: string;
   source_name: string;
   updated_at: string;
+  // When the finding was recorded, and its newest transition-ledger change
+  // (falling back to creation; see lib/findingRecency.ts). Empty when the row
+  // does not carry them (summary fallback rows).
+  created_at: string;
+  changed_at: string;
+  last_transition_action?: string;
+  last_transition_actor?: string;
   // details-derived
   cwe_id?: string;
   owasp_category?: string;
@@ -475,8 +658,10 @@ function buildSearchCorpus(d: Omit<Derived, "searchCorpus">): string {
     d.sink,
     (d.steps_to_reproduce || []).join(" "),
     (d.taint_path || []).join(" "),
-    JSON.stringify(d.poc_request || ""),
-    JSON.stringify(d.poc_response || ""),
+    // The request and response as the record shows them. Stringifying an
+    // absent capture put `""` in every corpus, so a quote matched everything.
+    d.poc_request ? formatHttp(d.poc_request, "req") : "",
+    d.poc_response ? formatHttp(d.poc_response, "resp") : "",
     d.links.map((l) => `${l.link_kind} ${l.target_kind}:${l.target_ref}`).join(" "),
     d.references
       .map((r) => (typeof r === "string" ? r : `${r.title || ""} ${r.url || ""}`))
@@ -548,50 +733,6 @@ const IconExternal = () => (
     <path d="M19 14v6H4V4h6" />
   </svg>
 );
-function InvestigationPanel({
-  children,
-  onClose,
-  onPrevious,
-  onNext,
-  position,
-}: {
-  children: React.ReactNode;
-  onClose: () => void;
-  onPrevious?: () => void;
-  onNext?: () => void;
-  position: string;
-}) {
-  const panelRef = useRef<HTMLElement | null>(null);
-  useEffect(() => {
-    panelRef.current?.focus({ preventScroll: true });
-    panelRef.current?.scrollIntoView?.({ block: "start", behavior: "instant" });
-  }, []);
-  return (
-    <section
-      ref={panelRef}
-      className="finding-investigation"
-      aria-label="Finding investigation"
-      tabIndex={-1}
-      onKeyDown={(event) => {
-        if (event.key === "Escape") {
-          event.stopPropagation();
-          onClose();
-        }
-      }}
-    >
-      <div className="finding-investigation-toolbar">
-        <button type="button" className="ghost-button" onClick={onClose} aria-label="Back to results">← Back to results</button>
-        <div className="finding-review-navigation" aria-label="Finding review navigation">
-          <span className="meta-text">{position}</span>
-          <button type="button" className="ghost-button" onClick={onPrevious} disabled={!onPrevious} aria-label="Previous finding">← Previous</button>
-          <button type="button" className="ghost-button" onClick={onNext} disabled={!onNext} aria-label="Next finding">Next →</button>
-        </div>
-      </div>
-      {children}
-    </section>
-  );
-}
-
 // ── JsonTree value safety ─────────────────────────────────────────────
 
 type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
@@ -635,6 +776,7 @@ export function FindingsTab({
   initialDrawerTab,
   ledgerLoading = false,
   ledgerError = null,
+  renderRuntimeProof,
 }: FindingsTabProps) {
   const [routeFinding, setRouteFinding] = useState<{ engagementKey: string; requestedSlug: string; finding: AssessmentFindingDetail } | null>(null);
   const resolvedInitialSlug = routeFinding?.engagementKey === engagementKey && routeFinding.requestedSlug === initialFindingSlug ? routeFinding.finding.slug : initialFindingSlug;
@@ -644,25 +786,61 @@ export function FindingsTab({
   const allFindingsRaw = useMemo(() => {
     const listed = findings.length > 0 ? findings : fallbackFindings;
     if (routeFinding?.engagementKey === engagementKey && routeFinding.finding.slug === resolvedInitialSlug && !listed.some((item) => item.slug === resolvedInitialSlug)) return [...listed, routeFinding.finding];
-    if (routeFinding?.engagementKey === engagementKey) return listed.map((item) => item.slug === routeFinding.finding.slug && (!isDetail(item) || routeFinding.finding.row_version > item.row_version) ? routeFinding.finding : item);
+    // A point read at the row's version is the same row plus its review
+    // (verification audit), so it stands in for the ledger row.
+    if (routeFinding?.engagementKey === engagementKey) return listed.map((item) => item.slug === routeFinding.finding.slug && (!isDetail(item) || routeFinding.finding.row_version >= item.row_version) ? routeFinding.finding : item);
     return listed;
   }, [findings, fallbackFindings, routeFinding, engagementKey, resolvedInitialSlug]);
-  const [allFindingLinks, setAllFindingLinks] = useState<AssessmentFindingLink[]>([]);
-  const [allFindingGroups, setAllFindingGroups] = useState<AssessmentFindingGroup[]>([]);
-  const [findingLinksError, setFindingLinksError] = useState<string | null>(null);
-  const [findingGroupsLoading, setFindingGroupsLoading] = useState(false);
-  const [findingGroupsError, setFindingGroupsError] = useState<string | null>(null);
-  const [transitions, setTransitions] = useState<AssessmentFindingTransitionSummary[]>([]);
-  const [transitionsLoading, setTransitionsLoading] = useState(false);
-  const [transitionsError, setTransitionsError] = useState<string | null>(null);
-  const [transitionsSlug, setTransitionsSlug] = useState<string | null>(null);
+  const findingLinksLoad = useCoalescedLoad(engagementKey, assessmentRefreshVersion, () => listAssessmentFindingLinks(engagementKey), NO_FINDING_LINKS);
+  const findingGroupsLoad = useCoalescedLoad(engagementKey, assessmentRefreshVersion, () => listAssessmentFindingGroups(engagementKey), NO_FINDING_GROUPS);
+  const allFindingLinks = findingLinksLoad.data;
+  const findingLinksError = findingLinksLoad.error;
+  const allFindingGroups = findingGroupsLoad.data;
+  const findingGroupsError = findingGroupsLoad.error;
 
-  const [queueContext] = useState(() => readQueueContext(engagementKey));
+  const [routeFilters] = useState(() => readRouteFilters(engagementKey));
+  const [queueContext] = useState(() => ({ ...readQueueContext(engagementKey), ...routeFilters?.filters }));
+  useEffect(() => {
+    if (routeFilters) writeWorkspaceHash(routeFilters.href, "replace");
+  }, [routeFilters]);
   const [query, setQuery] = useState(queueContext.query);
   const [sevFilters, setSevFilters] = useState<Set<string>>(() => new Set(queueContext.severity));
   const [workflowFilters, setWorkflowFilters] = useState<Set<string>>(() => new Set(queueContext.workflow));
   const [verifFilters, setVerifFilters] = useState<Set<string>>(() => new Set(queueContext.verification));
+  const [recencyFilter, setRecencyFilter] = useState<RecencyFilter | null>(queueContext.recency);
+  const [sortByView, setSortByView] = useState<SortByView>(queueContext.sort);
+  // A filtered link followed while the queue is already open.
+  useEffect(() => {
+    const apply = () => {
+      const next = readRouteFilters(engagementKey);
+      if (!next) return;
+      setQuery(next.filters.query);
+      setSevFilters(new Set(next.filters.severity));
+      setWorkflowFilters(new Set(next.filters.workflow));
+      setVerifFilters(new Set(next.filters.verification));
+      setRecencyFilter(next.filters.recency);
+      setGroupedPage(0);
+      writeWorkspaceHash(next.href, "replace");
+    };
+    window.addEventListener("hashchange", apply);
+    return () => window.removeEventListener("hashchange", apply);
+  }, [engagementKey]);
   const [cmdOpen, setCmdOpen] = useState(false);
+
+  // Recency windows are relative to "now"; re-evaluate them each minute.
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = window.setInterval(() => setNowMs(Date.now()), 60_000);
+    return () => window.clearInterval(timer);
+  }, []);
+  // The last-visit mark this page opened with (see lib/findingRecency.ts). It
+  // is read once per engagement and held for the visit, so "since my last
+  // visit" does not shift while the operator works through it.
+  const [visit, setVisit] = useState(() => ({ engagementKey, mark: readLastVisit(engagementKey) }));
+  const lastVisitMs = visit.engagementKey === engagementKey ? visit.mark : readLastVisit(engagementKey);
+  useEffect(() => {
+    setVisit((current) => current.engagementKey === engagementKey ? current : { engagementKey, mark: readLastVisit(engagementKey) });
+  }, [engagementKey]);
 
   const [selected, setSelected] = useState<string | null>(() => {
     try {
@@ -714,11 +892,18 @@ export function FindingsTab({
   // auto-open effect placed after derivedBySlug is in scope, below).
   const consumedInitialSlugRef = useRef<string | null>(null);
 
+  // Whether the routed finding is already among the loaded rows. A routed
+  // finding the rows lack is looked up once per route: the workspace hands
+  // over new arrays on every render while its ledger loads, and each one used
+  // to re-read the same finding. A lookup still running when the ledger lands
+  // completes; its point read is the record's detail.
+  const routedSlugListed = Boolean(initialFindingSlug) && (findings.length > 0 ? findings : fallbackFindings).some((item) => item.slug === initialFindingSlug);
+  const routedSlugListedRef = useRef(routedSlugListed);
+  routedSlugListedRef.current = routedSlugListed;
   useEffect(() => {
     let active = true;
-    const listed = findings.length > 0 ? findings : fallbackFindings;
     setRouteLookupError(null);
-    if (!initialFindingSlug || listed.some((item) => item.slug === initialFindingSlug)) {
+    if (!initialFindingSlug || routedSlugListedRef.current) {
       setRouteLookupLoading(false);
       return;
     }
@@ -734,55 +919,7 @@ export function FindingsTab({
       if (active) setRouteLookupError(error instanceof Error ? error.message : "Finding lookup failed");
     }).finally(() => { if (active) setRouteLookupLoading(false); });
     return () => { active = false; };
-  }, [engagementKey, initialFindingSlug, findings, fallbackFindings, routeLookupAttempt]);
-
-  // Fetch finding links
-  useEffect(() => {
-    let cancelled = false;
-    listAssessmentFindingLinks(engagementKey)
-      .then((rows) => {
-        if (!cancelled) {
-          setAllFindingLinks(rows);
-          setFindingLinksError(null);
-        }
-      })
-      .catch((error: unknown) => {
-        if (!cancelled) {
-          setAllFindingLinks([]);
-          setFindingLinksError(error instanceof Error ? error.message : String(error));
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [engagementKey, assessmentRefreshVersion]);
-
-  useEffect(() => {
-    let cancelled = false;
-    setFindingGroupsLoading(true);
-    setFindingGroupsError(null);
-    listAssessmentFindingGroups(engagementKey)
-      .then((rows) => {
-        if (!cancelled) {
-          setAllFindingGroups(rows);
-          setFindingGroupsError(null);
-        }
-      })
-      .catch((error: unknown) => {
-        if (!cancelled) {
-          setAllFindingGroups([]);
-          setFindingGroupsError(error instanceof Error ? error.message : String(error));
-        }
-      })
-      .finally(() => {
-        if (!cancelled) {
-          setFindingGroupsLoading(false);
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [engagementKey, assessmentRefreshVersion]);
+  }, [engagementKey, initialFindingSlug, routeLookupAttempt]);
 
   // ── Derived findings (one pass) ──
   const detailIdToSlug = useMemo(() => {
@@ -892,6 +1029,10 @@ export function FindingsTab({
         summary: f.summary,
         source_name: f.source_name,
         updated_at: f.updated_at,
+        created_at: listRow(f).created_at || "",
+        changed_at: findingChangedAt(listRow(f)),
+        last_transition_action: listRow(f).last_transition_action || undefined,
+        last_transition_actor: listRow(f).last_transition_actor || undefined,
         cwe_id: details.cwe_id,
         owasp_category: details.owasp_category,
         cvss_vector: details.cvss_vector,
@@ -1046,6 +1187,9 @@ export function FindingsTab({
             if (!hay.toLowerCase().includes(v)) return false;
             break;
           }
+          case "location":
+            if (!(d.canonical_location || "").toLowerCase().includes(v)) return false;
+            break;
         }
       }
       if (parsed.freeTerms.length) {
@@ -1056,21 +1200,21 @@ export function FindingsTab({
     [],
   );
 
+  const sort = sortByView[view];
+  // Date sorts flatten the grouped view into one date-ordered list.
+  const flatDateList = view === "grouped" && sort !== "severity";
   const filtered = useMemo(() => {
     const list = derivedList.filter((d) => {
       if (sevFilters.size && !sevFilters.has(d.severity)) return false;
       if (workflowFilters.size && !workflowFilters.has(d.workflow_status)) return false;
       if (verifFilters.size && !verifFilters.has(d.verificationKey)) return false;
+      if (!matchesRecency(d, recencyFilter, nowMs, lastVisitMs)) return false;
       if (!matchesQuery(d, parsedQuery)) return false;
       return true;
     });
-    list.sort((a, b) => {
-      const dRank = (SEV_RANK[a.severity] ?? 99) - (SEV_RANK[b.severity] ?? 99);
-      if (dRank !== 0) return dRank;
-      return a.title.localeCompare(b.title);
-    });
+    list.sort((a, b) => sort === "severity" ? compareSeverityThenTitle(a, b) : compareByRecency(a, b, sort));
     return list;
-  }, [derivedList, sevFilters, workflowFilters, verifFilters, parsedQuery, matchesQuery]);
+  }, [derivedList, sevFilters, workflowFilters, verifFilters, recencyFilter, nowMs, lastVisitMs, parsedQuery, matchesQuery, sort]);
 
   const filteredSlugs = useMemo(() => new Set(filtered.map((d) => d.slug)), [filtered]);
   const groupedFiltered = useMemo(() => {
@@ -1135,11 +1279,13 @@ export function FindingsTab({
   type StandaloneEntry = { kind: "standalone"; finding: Derived };
   type DisplayEntry = GroupEntry | StandaloneEntry;
   const displayEntries = useMemo<DisplayEntry[]>(() => {
+    // A date sort lists every finding on its own, in date order.
+    if (flatDateList) return filtered.map((finding) => ({ kind: "standalone", finding }));
     const entries: DisplayEntry[] = [];
     for (const group of groupedFiltered.groups) entries.push({ kind: "group", group });
     for (const finding of groupedFiltered.standalone) entries.push({ kind: "standalone", finding });
     return entries;
-  }, [groupedFiltered]);
+  }, [flatDateList, filtered, groupedFiltered]);
 
   const pageCount = Math.max(1, Math.ceil(displayEntries.length / GROUPED_PAGE_SIZE));
   const [groupedPage, setGroupedPage] = useState(queueContext.page);
@@ -1149,9 +1295,9 @@ export function FindingsTab({
   const safePage = Math.min(groupedPage, pageCount - 1);
   useEffect(() => {
     try {
-      window.sessionStorage.setItem(`findings.queue.${engagementKey}`, JSON.stringify({ query, severity: [...sevFilters], workflow: [...workflowFilters], verification: [...verifFilters], page: safePage }));
+      window.sessionStorage.setItem(`findings.queue.${engagementKey}`, JSON.stringify({ query, severity: [...sevFilters], workflow: [...workflowFilters], verification: [...verifFilters], recency: recencyFilter, sort: sortByView, page: safePage }));
     } catch { /* Browser storage may be unavailable. */ }
-  }, [engagementKey, query, sevFilters, workflowFilters, verifFilters, safePage]);
+  }, [engagementKey, query, sevFilters, workflowFilters, verifFilters, recencyFilter, sortByView, safePage]);
 
   // Window the entry list for the current page, then split the contiguous slice
   // back into { groups, standalone } so GroupedFindingsList renders unchanged.
@@ -1203,38 +1349,14 @@ export function FindingsTab({
     setDetailOpen(true);
   }, [resolvedInitialSlug, initialDrawerTab, derivedBySlug]);
 
-  // Transitions fetch
-  useEffect(() => {
-    if (!selected) {
-      setTransitions([]);
-      setTransitionsLoading(false);
-      setTransitionsError(null);
-      setTransitionsSlug(null);
-      return;
-    }
-    let cancelled = false;
-    setTransitionsLoading(true);
-    setTransitionsSlug(selected);
-    setTransitionsError(null);
-    listAssessmentFindingTransitions(engagementKey, selected)
-      .then((rows) => {
-        if (!cancelled) setTransitions(rows);
-      })
-      .catch((err: unknown) => {
-        if (!cancelled) {
-          setTransitions([]);
-          setTransitionsError(
-            err instanceof Error ? err.message : "Failed to load transition history",
-          );
-        }
-      })
-      .finally(() => {
-        if (!cancelled) setTransitionsLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [engagementKey, selected, assessmentRefreshVersion]);
+  // Transition history for the selected finding. Keyed by engagement AND
+  // slug, so one finding's history is never shown under another's title.
+  const transitionsLoad = useCoalescedLoad(
+    selected ? JSON.stringify([engagementKey, selected]) : null,
+    assessmentRefreshVersion,
+    () => (selected ? listAssessmentFindingTransitions(engagementKey, selected) : Promise.resolve(NO_TRANSITIONS)),
+    NO_TRANSITIONS,
+  );
 
   const openFinding = useCallback((slug: string) => {
     if (!detailOpen) returnFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -1248,7 +1370,6 @@ export function FindingsTab({
   const closeFinding = useCallback(() => {
     setDetailOpen(false);
     writeWorkspaceHash(engagementHref(engagementKey, { tab: "findings" }));
-    queueMicrotask(() => returnFocusRef.current?.isConnected && returnFocusRef.current.focus({ preventScroll: true }));
   }, [engagementKey]);
   const reviewFindings = useMemo(() => {
     if (view === "table") {
@@ -1258,8 +1379,27 @@ export function FindingsTab({
     }
     return displayEntries.flatMap((entry) => entry.kind === "standalone" ? [entry.finding] : [entry.group.root, ...entry.group.siblings]).filter((item) => filteredSlugs.has(item.slug));
   }, [view, filtered, filteredSlugs, displayEntries, tableOrder]);
-  const reviewIndex = reviewFindings.findIndex((item) => item.slug === selected);
+  const reviewSlugs = useMemo(() => reviewFindings.map((item) => item.slug), [reviewFindings]);
+  const reviewNavigation = listNavigation(reviewSlugs, selected, openFinding);
   const investigating = detailOpen && selectedDerived !== null;
+  const resultsRef = useRef<HTMLDivElement | null>(null);
+  // Back to results lands on the record last shown (after Previous / Next or
+  // a deep link): the table scrolls its row into view, the grouped list turns
+  // to the page that holds it.
+  const gridRevealRef = useRef<((slug: string) => void) | null>(null);
+  const displayEntriesRef = useRef(displayEntries);
+  displayEntriesRef.current = displayEntries;
+  const revealFinding = useCallback((slug: string) => {
+    if (view === "table") {
+      gridRevealRef.current?.(slug);
+      return;
+    }
+    const index = displayEntriesRef.current.findIndex((entry) => entry.kind === "standalone"
+      ? entry.finding.slug === slug
+      : entry.group.root.slug === slug || entry.group.siblings.some((sibling) => sibling.slug === slug));
+    if (index >= 0) setGroupedPage(Math.floor(index / GROUPED_PAGE_SIZE));
+  }, [view]);
+  useResultsScrollMemory(resultsRef, investigating, { recordKey: investigating ? selected : null, reveal: revealFinding });
 
   // ── Keyboard ──
   const filteredRef = useRef(reviewFindings);
@@ -1285,7 +1425,12 @@ export function FindingsTab({
       if (!isTyping && e.key === "/") {
         e.preventDefault();
         if (detailOpenRef.current) closeFinding();
-        queueMicrotask(() => searchRef.current?.focus({ preventScroll: true }));
+        // After the results (and their scroll position) are back, bring the
+        // search box into view: it is what the operator asked for.
+        queueMicrotask(() => {
+          searchRef.current?.focus({ preventScroll: true });
+          searchRef.current?.scrollIntoView?.({ block: "center" });
+        });
         return;
       }
       if (e.key === "Escape") {
@@ -1293,14 +1438,11 @@ export function FindingsTab({
           searchRef.current?.blur();
           return;
         }
-        if (detailOpenRef.current) {
-          closeFinding();
-        } else {
-          setSelected(null);
-        }
+        // The open record handles its own Escape (back to results).
+        if (!detailOpenRef.current) setSelected(null);
         return;
       }
-      if (!isInteractive && (e.key === "[" || e.key === "]")) {
+      if (!isInteractive && !detailOpenRef.current && (e.key === "[" || e.key === "]")) {
         e.preventDefault();
         const list = filteredRef.current;
         if (!list.length) return;
@@ -1353,6 +1495,41 @@ export function FindingsTab({
     for (const d of derivedList) c[d.verificationKey] = (c[d.verificationKey] || 0) + 1;
     return c;
   }, [derivedList]);
+  const recencyCounts = useMemo(() => countRecency(derivedList, nowMs, lastVisitMs), [derivedList, nowMs, lastVisitMs]);
+  // "Current" matches the rail badge and the assessment summary's
+  // finding_count: everything except merged and false-positive findings.
+  const currentCount = useMemo(() => derivedList.filter((d) => !RETIRED_WORKFLOWS.has(d.workflow_status)).length, [derivedList]);
+  const recentChanges = useMemo(() => summarizeRecentChanges(derivedList, nowMs, lastVisitMs), [derivedList, nowMs, lastVisitMs]);
+
+  // Record the last-visit mark once the loaded ledger has been on screen for
+  // LAST_VISIT_DWELL_MS while the page is visible (lib/findingRecency.ts
+  // defines the mark). The summary fallback is not the ledger and never
+  // counts; hiding the browser tab restarts the dwell.
+  const ledgerShown = findings.length > 0 && isDetail(findings[0]) && !ledgerLoading && !ledgerError;
+  const ledgerRef = useRef(findings);
+  ledgerRef.current = findings;
+  const visitRecordedRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!ledgerShown || visitRecordedRef.current === engagementKey) return;
+    let timer: number | undefined;
+    const arm = () => {
+      window.clearTimeout(timer);
+      timer = undefined;
+      if (document.visibilityState === "hidden") return;
+      timer = window.setTimeout(() => {
+        const mark = newestLedgerTime(ledgerRef.current.map((f) => ({ slug: f.slug, created_at: listRow(f).created_at, changed_at: findingChangedAt(listRow(f)) })));
+        if (mark == null) return;
+        writeLastVisit(engagementKey, mark);
+        visitRecordedRef.current = engagementKey;
+      }, LAST_VISIT_DWELL_MS);
+    };
+    arm();
+    document.addEventListener("visibilitychange", arm);
+    return () => {
+      window.clearTimeout(timer);
+      document.removeEventListener("visibilitychange", arm);
+    };
+  }, [ledgerShown, engagementKey]);
 
   const toggle = (
     set: Set<string>,
@@ -1375,34 +1552,112 @@ export function FindingsTab({
     setSevFilters(new Set());
     setWorkflowFilters(new Set());
     setVerifFilters(new Set());
+    setRecencyFilter(null);
     setQuery("");
     setGroupedPage(0);
   };
 
+  const chooseRecency = (filter: RecencyFilter | null) => {
+    setRecencyFilter(filter);
+    setGroupedPage(0);
+  };
+  // In the table a header click can sort by any column. The grid reports it
+  // back: a named order updates the control; any other column order leaves the
+  // control showing no named sort and the results line names that column.
+  // (`tableSortRequest` lets re-choosing a named sort re-apply it to the grid.)
+  const [tableCustomSort, setTableCustomSort] = useState(false);
+  const [tableColumnSort, setTableColumnSort] = useState<TableColumnSort | null>(null);
+  const [tableSortRequest, setTableSortRequest] = useState(0);
+  const chooseSort = (next: FindingsSort) => {
+    setSortByView((current) => current[view] === next ? current : { ...current, [view]: next });
+    if (view === "table") {
+      setTableCustomSort(false);
+      setTableColumnSort(null);
+      setTableSortRequest((value) => value + 1);
+    }
+    setGroupedPage(0);
+  };
+  const reportTableSort = useCallback((next: FindingsSort | null, column: TableColumnSort | null) => {
+    setTableCustomSort(next === null);
+    setTableColumnSort(next === null ? column : null);
+    if (next) setSortByView((current) => current.table === next ? current : { ...current, table: next });
+  }, []);
+  const activeSort: FindingsSort | null = view === "table" && tableCustomSort ? null : sort;
+  // After a recorded visit, narrow to what is unseen; on a first visit, put
+  // the newest changes first without hiding anything.
+  const reviewRecent = () => {
+    chooseRecency(recentChanges.filter);
+    chooseSort("changed");
+  };
+
   const activeFilterCount =
-    sevFilters.size + workflowFilters.size + verifFilters.size + (query ? 1 : 0);
+    sevFilters.size + workflowFilters.size + verifFilters.size + (recencyFilter ? 1 : 0) + (query ? 1 : 0);
+
+  const ledgerPending = derivedList.length === 0 && (ledgerLoading || Boolean(ledgerError));
+  // Nothing recorded: the page explains that instead of showing empty filters.
+  const ledgerEmpty = derivedList.length === 0 && !ledgerPending;
+  // An unsorted grid shows the rows in the named order they arrive in.
+  const orderDescription = view === "table"
+    ? activeSort ? SORT_DESCRIPTIONS[activeSort] : tableColumnSort ? describeSort(tableColumnSort.label, tableColumnSort.direction, tableColumnSort.kind) : SORT_DESCRIPTIONS[sort]
+    : sort === "severity" ? `${SORT_DESCRIPTIONS.severity}, root-cause groups first` : SORT_DESCRIPTIONS[sort];
+  const workflowValues = [...new Set([...Object.keys(workflowCounts), ...workflowFilters])].sort((a, b) => compareStatus("finding-workflow", a, b));
+  const verificationValues = [...new Set([...Object.keys(verifCounts), ...verifFilters])].sort((a, b) => compareStatus("finding-verification", a, b));
+  const pageRange = flatDateList
+    ? `findings ${pageRangeStart}–${pageRangeEnd} of ${displayEntries.length}`
+    : `${pageRangeStart}–${pageRangeEnd} of ${displayEntries.length} entries (${plural(groupedFiltered.groups.length, "root-cause group")}, ${plural(groupedFiltered.standalone.length, "ungrouped finding")})`;
+  const showPager = view === "grouped" && pageCount > 1 && filtered.length > 0;
+  const turnPage = (page: number, fromEnd: boolean) => {
+    setGroupedPage(Math.max(0, Math.min(pageCount - 1, page)));
+    // From the pager under the list, start the next page at its top.
+    if (fromEnd) resultsRef.current?.scrollIntoView?.({ block: "start" });
+  };
 
   return (
     <div className="findings-redesign findings-workspace">
-      <div className="page-head" hidden={investigating}>
-        <div>
-          <h1 className="page-title">Findings</h1>
-          <div className="page-crumbs">
-            Engagement <code>{engagementKey}</code> ·{" "}
-            <span>
-              {derivedList.length === 0 && (ledgerLoading || ledgerError) ? "Ledger pending" : `${filtered.length} of ${derivedList.length} findings`}
-            </span>
-          </div>
-        </div>
-        {!(derivedList.length === 0 && (ledgerLoading || ledgerError)) && <SevSpark counts={severityCounts} />}
-      </div>
+      <PageHeader
+        title="Findings"
+        purpose="Every security claim recorded for this engagement. Review what is new or changed, then open a finding to check its evidence."
+        hidden={investigating}
+        stats={ledgerPending || ledgerEmpty ? [] : [
+          { value: currentCount, label: "current", title: "Findings that are not merged or false positive; the rail and Overview count these" },
+          { value: derivedList.length, label: "recorded", title: "Every finding in the ledger, including merged and false-positive ones" },
+        ]}
+        status={ledgerLoading && derivedList.length > 0 ? "Updating…" : null}
+        actions={ledgerPending || ledgerEmpty ? null : <SevSpark counts={severityCounts} />}
+      />
 
-      {/* Toolbar */}
-      {routeLookupLoading && <p className="meta-text" role="status">Loading finding {initialFindingSlug}…</p>}
-      {routeLookupError && <p className="error-text" role="alert">Finding {initialFindingSlug} unavailable: {routeLookupError} <button type="button" className="ghost-button" onClick={() => setRouteLookupAttempt((value) => value + 1)}>Retry finding lookup</button></p>}
-      {ledgerLoading && <p className="meta-text" role="status">Loading finding ledger…</p>}
+      {routeLookupLoading && !routedSlugListed && <p className="meta-text" role="status">Loading finding {initialFindingSlug}…</p>}
+      {routeLookupError && !routedSlugListed && <p className="error-text" role="alert">Finding {initialFindingSlug} unavailable: {routeLookupError} <button type="button" className="ghost-button" onClick={() => setRouteLookupAttempt((value) => value + 1)}>Retry finding lookup</button></p>}
+      <SlowLoadHint active={ledgerLoading} what="the finding ledger" detail="Large ledgers can take several seconds." />
       {ledgerError && <p className="error-text" role="alert">Finding ledger unavailable: {ledgerError}{derivedList.length > 0 ? " Showing previously loaded records; this list may be stale." : ""}</p>}
-      <div className="panel findings-toolbar-panel" hidden={investigating}>
+      {!investigating && !ledgerPending && derivedList.length > 0 && (
+        <section className="intel-workbar findings-recent-bar" aria-label="Recent finding changes">
+          <div className="intel-workbar-title">
+            <span className="sev-dot" />
+            <span>Recent changes</span>
+          </div>
+          <span className="intel-workbar-stat">
+            {recentChanges.created} new · {recentChanges.changed} changed {recentChanges.sinceVisit ? "since you last looked" : "in the last 24 hours"}
+          </span>
+          {lastVisitMs != null && (
+            // The mark is the newest change on screen last time, not a clock time.
+            <span className="intel-workbar-stat">
+              last change you saw <TimeStamp value={new Date(lastVisitMs).toISOString()} />
+            </span>
+          )}
+          {recentChanges.created + recentChanges.changed > 0 && (
+            <button
+              type="button"
+              className="intel-workbar-review"
+              aria-label={lastVisitMs != null ? "Review findings new or changed since your last visit" : "Review the most recently changed findings first"}
+              onClick={reviewRecent}
+            >
+              Review first <span aria-hidden="true">›</span>
+            </button>
+          )}
+        </section>
+      )}
+      <div className="panel findings-toolbar-panel" hidden={investigating || ledgerEmpty}>
         <div className="toolbar">
           <div className="search-wrap">
             <IconSearch />
@@ -1428,29 +1683,17 @@ export function FindingsTab({
             <span className="search-kbd">/</span>
           </div>
           <div className="toolbar-right">
-            {/* Grouped (default) | Table view toggle. The grouped root-cause
-                list is the differentiator we keep; Table is the optional
-                flat ag-grid view over the same filtered rows. */}
-            <div className="view-toggle" role="group" aria-label="Findings view">
-              <button
-                type="button"
-                className={view === "grouped" ? "is-active" : ""}
-                aria-pressed={view === "grouped"}
-                onClick={() => setView("grouped")}
-                title="Grouped by root cause"
-              >
-                <List aria-hidden /> Grouped
-              </button>
-              <button
-                type="button"
-                className={view === "table" ? "is-active" : ""}
-                aria-pressed={view === "table"}
-                onClick={() => setView("table")}
-                title="Flat table"
-              >
-                <Table2 aria-hidden /> Table
-              </button>
-            </div>
+            {/* The grouped root-cause list is the default; Table is the
+                optional flat ag-grid view over the same filtered rows. */}
+            <SegmentedControl<FindingsView>
+              label="Findings view"
+              value={view}
+              onChange={setView}
+              options={[
+                { value: "grouped", label: <><List size={14} aria-hidden /> Grouped</> },
+                { value: "table", label: <><Table2 size={14} aria-hidden /> Table</> },
+              ]}
+            />
             <button
               type="button"
               className="qa-btn"
@@ -1463,83 +1706,92 @@ export function FindingsTab({
             </button>
           </div>
         </div>
+        <div className="findings-order-row">
+          <FilterGroup label="Recency">
+            {RECENCY_FILTERS.map((filter) => {
+              const unavailable = filter === "sinceVisit" && lastVisitMs == null;
+              return (
+                <FilterChip
+                  key={filter}
+                  label={RECENCY_LABELS[filter]}
+                  count={recencyCounts[filter]}
+                  selected={recencyFilter === filter}
+                  disabled={unavailable && recencyFilter !== filter}
+                  description={unavailable ? "No earlier visit to this engagement's findings is recorded in this browser." : RECENCY_HINTS[filter]}
+                  onToggle={() => chooseRecency(recencyFilter === filter ? null : filter)}
+                />
+              );
+            })}
+          </FilterGroup>
+          <div className="findings-sort">
+            <span className="ui-filter-label" aria-hidden="true">Sort</span>
+            <SegmentedControl<FindingsSort | "column">
+              label="Sort findings"
+              value={activeSort ?? "column"}
+              onChange={(next) => { if (next !== "column") chooseSort(next); }}
+              options={FINDINGS_SORTS.map((option) => ({ value: option, label: SORT_LABELS[option], description: SORT_HINTS[option] }))}
+            />
+          </div>
+        </div>
         <div className="filter-row">
-          <div className="filter-group" role="group" aria-label="Severity filters">
-            <span className="filter-label">Severity</span>
+          <FilterGroup label="Severity">
             {SEVERITY_ORDER.filter((s) => severityCounts[s] || sevFilters.has(s)).map((s) => (
-              <button
+              <FilterChip
                 key={s}
-                type="button"
-                className={`filter-chip sev-${s} ${sevFilters.has(s) ? "is-active" : ""}`}
-                aria-pressed={sevFilters.has(s)}
-                onClick={() => toggle(sevFilters, setSevFilters, s)}
-              >
-                <span className="sev-dot" style={{ background: sevDotColor(s) }} />
-                {s}
-                <span className="filter-count">{severityCounts[s] ?? 0}</span>
-              </button>
+                label={severityLabel(s)}
+                color={severityColor(s)}
+                count={severityCounts[s] ?? 0}
+                selected={sevFilters.has(s)}
+                onToggle={() => toggle(sevFilters, setSevFilters, s)}
+              />
             ))}
-          </div>
-          <div className="filter-group" role="group" aria-label="Workflow filters">
-            <span className="filter-label">Workflow</span>
-            {[...new Set([...Object.keys(workflowCounts), ...workflowFilters])].map((s) => (
-              <button
+          </FilterGroup>
+          <FilterGroup label="Workflow">
+            {workflowValues.map((s) => (
+              <FilterChip
                 key={s}
-                type="button"
-                className={`filter-chip ${workflowFilters.has(s) ? "is-active" : ""}`}
-                aria-pressed={workflowFilters.has(s)}
-                onClick={() => toggle(workflowFilters, setWorkflowFilters, s)}
-              >
-                {/*
-                  Same human-readable map as the row pills ("false_positive" ->
-                  "False positive", not the old "Suppressed"). Falls back to a
-                  _-stripped value for statuses we don't label.
-                */}
-                {WORKFLOW_LABELS[s] || s.replace(/_/g, " ")}
-                <span className="filter-count">{workflowCounts[s] ?? 0}</span>
-              </button>
+                label={statusLabel("finding-workflow", s)}
+                status={{ domain: "finding-workflow", value: s }}
+                count={workflowCounts[s] ?? 0}
+                selected={workflowFilters.has(s)}
+                onToggle={() => toggle(workflowFilters, setWorkflowFilters, s)}
+              />
             ))}
-          </div>
-          <div className="filter-group" role="group" aria-label="Verification filters">
-            <span className="filter-label">Verification</span>
-            {[...new Set([...Object.keys(verifCounts), ...verifFilters])].map((s) => (
-              <button
+          </FilterGroup>
+          <FilterGroup label="Verification">
+            {verificationValues.map((s) => (
+              <FilterChip
                 key={s}
-                type="button"
-                className={`filter-chip ${verifFilters.has(s) ? "is-active" : ""}`}
-                aria-pressed={verifFilters.has(s)}
-                onClick={() => toggle(verifFilters, setVerifFilters, s)}
-              >
-                {VERIFICATION_LABELS[s] || s.replace(/_/g, " ")}
-                <span className="filter-count">{verifCounts[s] ?? 0}</span>
-              </button>
+                label={statusLabel("finding-verification", s)}
+                status={{ domain: "finding-verification", value: s }}
+                count={verifCounts[s] ?? 0}
+                selected={verifFilters.has(s)}
+                onToggle={() => toggle(verifFilters, setVerifFilters, s)}
+              />
             ))}
-          </div>
-            <button type="button" className="filter-clear" disabled={activeFilterCount === 0} onClick={clearAll}>
-              Clear all ({activeFilterCount})
-            </button>
+          </FilterGroup>
+          <ClearFiltersButton count={activeFilterCount} onClear={clearAll} />
         </div>
       </div>
 
-      <div className={`findings-shell ${detailOpen && selectedDerived ? "has-investigation" : ""}`}>
+      <div ref={resultsRef} className="findings-shell" hidden={investigating}>
         <section className="list-panel panel" aria-label="Finding queue" hidden={investigating}>
-          {!(derivedList.length === 0 && (ledgerLoading || ledgerError)) && <>
+          {ledgerPending && ledgerLoading && <TableSkeleton rows={8} columns={["4%", "52%", "16%", "12%"]} showHeader={false} />}
+          {ledgerEmpty && (
+            <EmptyState variant="empty" title="No findings recorded yet.">
+              Findings appear here as agents record security claims for this engagement.
+            </EmptyState>
+          )}
+          {!ledgerPending && !ledgerEmpty && <>
           <div className="grouping-status">
-            <div>
-              <strong>{filtered.length}</strong> of <strong>{derivedList.length}</strong> findings {activeFilterCount > 0 ? "match" : "visible"}
-              {activeFilterCount > 0 || query.trim() ? (
-                <span className="meta-text"> · filtered by the current search or chips</span>
-              ) : (
-                <span className="meta-text"> · all findings shown</span>
-              )}
-            </div>
+            <ResultsSummary shown={filtered.length} total={derivedList.length} noun={derivedList.length === 1 ? "finding" : "findings"} sort={orderDescription} />
             <div className="grouping-status-meta">
-              {findingGroupsLoading ? (
+              {!findingGroupsLoad.loaded ? (
                 <span className="tag">Loading groups</span>
               ) : findingGroupsError ? (
                 <span className="tag warning">Grouping unavailable</span>
               ) : allFindingGroups.length > 0 ? (
-                <span className="tag root">{allFindingGroups.length} engagement root-cause groups</span>
+                <span className="tag root">{plural(allFindingGroups.length, "engagement root-cause group")}</span>
               ) : (
                 <span className="tag">No root-cause groups</span>
               )}
@@ -1561,33 +1813,14 @@ export function FindingsTab({
               )}
             </div>
           )}
-          {view === "grouped" && pageCount > 1 ? (
-            <div className="pager">
-              <button
-                type="button"
-                className="pager-button"
-                disabled={safePage === 0}
-                onClick={() => setGroupedPage(Math.max(0, safePage - 1))}
-              >
-                Prev
-              </button>
-              <span className="meta-text">
-                Page {safePage + 1} of {pageCount} · Showing {pageRangeStart}–{pageRangeEnd} of{" "}
-                {displayEntries.length}
-              </span>
-              <button
-                type="button"
-                className="pager-button"
-                disabled={safePage >= pageCount - 1}
-                onClick={() => setGroupedPage(Math.min(pageCount - 1, safePage + 1))}
-              >
-                Next
-              </button>
-            </div>
-          ) : null}
-          {derivedList.length === 0 ? <p className="empty">No findings recorded yet.</p> : view === "table" ? (
+          {showPager && <ResultPager position="top" page={safePage} pageCount={pageCount} range={pageRange} onPage={(page) => turnPage(page, false)} />}
+          {filtered.length === 0 ? (
+            <EmptyState variant="filtered" title="No findings match these filters." onClearFilters={clearAll}>
+              {recencyFilter ? `${RECENCY_LABELS[recencyFilter]} shows findings ${RECENCY_HINTS[recencyFilter].toLowerCase()}.` : null}
+            </EmptyState>
+          ) : view === "table" ? (
             <Suspense fallback={<TableSkeleton rows={10} showHeader={false} />}>
-              <FindingsGrid rows={filtered} selected={selected} onOpen={openFinding} onOrderChange={reportTableOrder} />
+              <FindingsGrid rows={filtered} selected={selected} onOpen={openFinding} onOrderChange={reportTableOrder} sort={sortByView.table} sortRequest={tableSortRequest} onSortChange={reportTableSort} revealRef={gridRevealRef} />
             </Suspense>
           ) : (
             <GroupedFindingsList
@@ -1597,16 +1830,23 @@ export function FindingsTab({
               onOpen={openFinding}
               freeTerms={parsedQuery.freeTerms}
               matchingSlugs={filteredSlugs}
+              timeKind={sort === "newest" ? "created" : "changed"}
+              flat={flatDateList}
+              paged={pageCount > 1}
             />
           )}
+          {showPager && <ResultPager position="bottom" page={safePage} pageCount={pageCount} range={pageRange} onPage={(page) => turnPage(page, true)} />}
           </>}
         </section>
+      </div>
       {detailOpen && selectedDerived && (
-        <InvestigationPanel
-          onClose={closeFinding}
-          onPrevious={reviewIndex > 0 ? () => openFinding(reviewFindings[reviewIndex - 1].slug) : undefined}
-          onNext={reviewIndex >= 0 && reviewIndex < reviewFindings.length - 1 ? () => openFinding(reviewFindings[reviewIndex + 1].slug) : undefined}
-          position={reviewIndex >= 0 ? `${reviewIndex + 1} of ${reviewFindings.length} results` : "Outside current results"}
+        <RecordView
+          label="Finding investigation"
+          noun="finding"
+          navigation={reviewNavigation}
+          onBack={closeFinding}
+          titleId="finding-investigation-title"
+          returnFocusRef={returnFocusRef}
         >
           <Drawer
             key={selectedDerived.slug}
@@ -1616,20 +1856,21 @@ export function FindingsTab({
             derivedBySlug={derivedBySlug}
             chainsByKey={chainsByKey}
             chainMembersByKey={chainMembersByKey}
-            transitions={transitionsSlug === selected ? transitions : []}
-            transitionsLoading={transitionsSlug !== selected || transitionsLoading}
-            transitionsError={transitionsSlug === selected ? transitionsError : null}
+            transitions={transitionsLoad.data}
+            transitionsLoading={!transitionsLoad.loaded}
+            transitionsError={transitionsLoad.error}
             onSelect={(slug) => { if (slug) openFinding(slug); }}
             onSectionChange={setReviewSection}
             onDetailLoaded={acceptFindingDetail}
+            detailLookupPending={routeLookupLoading && selectedDerived.slug === initialFindingSlug}
+            renderRuntimeProof={renderRuntimeProof}
             initialTab={drawerTabVisible(selectedDerived, reviewSection) ? reviewSection : "overview"}
             titleId="finding-investigation-title"
           />
-        </InvestigationPanel>
+        </RecordView>
       )}
-      </div>
 
-      <div className="findings-shortcuts" hidden={investigating}>
+      {!ledgerEmpty && <div className="findings-shortcuts" hidden={investigating}>
         <span>
           <code>/</code> focus search
         </span>
@@ -1648,7 +1889,7 @@ export function FindingsTab({
         <span>
           <code>Esc</code> close detail
         </span>
-      </div>
+      </div>}
 
       {cmdOpen && (
         <CommandPalette
@@ -1666,36 +1907,45 @@ export function FindingsTab({
   );
 }
 
+// One pager row; the grouped list shows it above and below its page.
+function ResultPager({ position, page, pageCount, range, onPage }: { position: "top" | "bottom"; page: number; pageCount: number; range: string; onPage: (page: number) => void }) {
+  return (
+    <nav className={`pager pager-${position}`} aria-label={`Result pages (${position === "top" ? "above" : "below"} the list)`}>
+      <button type="button" className="pager-button" disabled={page === 0} onClick={() => onPage(page - 1)}>
+        Prev
+      </button>
+      <span className="meta-text">Page {page + 1} of {pageCount} · {range}</span>
+      <button type="button" className="pager-button" disabled={page >= pageCount - 1} onClick={() => onPage(page + 1)}>
+        Next
+      </button>
+    </nav>
+  );
+}
+
 // ── SevSpark ──────────────────────────────────────────────────────────
 
+// The ledger's severity mix: one named bar per severity, its count above it.
 function SevSpark({ counts }: { counts: Record<string, number> }) {
   const max = Math.max(1, ...Object.values(counts));
+  const summary = SEVERITY_ORDER.map((s) => `${severityLabel(s)} ${counts[s] || 0}`).join(", ");
   return (
-    <div className="sev-sparkline-wrap">
-      <span className="sev-label">Severity</span>
-      <div className="sev-sparkline">
-        {SEVERITY_ORDER.map((s) => {
-          const c = counts[s] || 0;
-          const h = Math.max(4, (c / max) * 26);
-          return (
-            <div
-              key={s}
-              className="sev-bar"
-              style={{
-                height: `${h}px`,
-                background: SEV_COLORS[s],
-                opacity: c ? 1 : 0.2,
-              }}
-              title={`${s}: ${c}`}
-            >
-              <span>{c}</span>
-            </div>
-          );
-        })}
-      </div>
+    <div className="findings-sev-mix" role="img" aria-label={`Severity mix: ${summary}`}>
+      {SEVERITY_ORDER.map((s) => {
+        const c = counts[s] || 0;
+        const h = Math.max(4, (c / max) * 26);
+        return (
+          <div key={s} className="findings-sev-column" title={`${severityLabel(s)}: ${c}`}>
+            <span className="findings-sev-count">{c}</span>
+            <span className="findings-sev-bar" style={{ height: `${h}px`, background: severityColor(s), opacity: c ? 1 : 0.25 }} />
+            <span className="findings-sev-name">{severityLabel(s)}</span>
+          </div>
+        );
+      })}
     </div>
   );
 }
+
+type RowTimeKind = "created" | "changed";
 
 function GroupedFindingsList({
   groups,
@@ -1704,6 +1954,9 @@ function GroupedFindingsList({
   onOpen,
   freeTerms,
   matchingSlugs,
+  timeKind,
+  flat,
+  paged,
 }: {
   groups: { root: Derived; siblings: Derived[]; highestSeverity: string }[];
   standalone: Derived[];
@@ -1711,9 +1964,31 @@ function GroupedFindingsList({
   onOpen: (slug: string) => void;
   freeTerms: string[];
   matchingSlugs: Set<string>;
+  timeKind: RowTimeKind;
+  // A date-sorted page: one list in date order, no root-cause cards.
+  flat: boolean;
+  paged: boolean;
 }) {
-  if (groups.length === 0 && standalone.length === 0) {
-    return <div className="empty">No findings match.</div>;
+  if (flat) {
+    return (
+      <div className="grouped-findings findings-flat-list">
+        <section className="standalone-group">
+          <div className="group-siblings">
+            {standalone.map((d) => (
+              <FindingMiniRow
+                key={d.slug}
+                d={d}
+                selected={selected === d.slug}
+                onOpen={() => onOpen(d.slug)}
+                freeTerms={freeTerms}
+                timeKind={timeKind}
+                showRootCause
+              />
+            ))}
+          </div>
+        </section>
+      </div>
+    );
   }
   return (
     <div className="grouped-findings">
@@ -1725,6 +2000,7 @@ function GroupedFindingsList({
           onOpen={onOpen}
           freeTerms={freeTerms}
           rootContext={!matchingSlugs.has(group.root.slug)}
+          timeKind={timeKind}
         />
       ))}
       {standalone.length > 0 && (
@@ -1732,7 +2008,7 @@ function GroupedFindingsList({
           <div className="group-card-head">
             <div>
               <p className="eyebrow">Standalone Findings</p>
-              <h3>{standalone.length} ungrouped findings</h3>
+              <h3>{plural(standalone.length, "ungrouped finding")}{paged ? " on this page" : ""}</h3>
             </div>
           </div>
           <div className="group-siblings">
@@ -1743,6 +2019,7 @@ function GroupedFindingsList({
                 selected={selected === d.slug}
                 onOpen={() => onOpen(d.slug)}
                 freeTerms={freeTerms}
+                timeKind={timeKind}
               />
             ))}
           </div>
@@ -1752,20 +2029,38 @@ function GroupedFindingsList({
   );
 }
 
+// Right-aligned row time: when the finding was recorded under the Newest
+// sort, otherwise when it last changed. Absolute UTC is on hover.
+function RowTime({ d, kind }: { d: Derived; kind: RowTimeKind }) {
+  const value = kind === "created" ? d.created_at : d.changed_at;
+  if (!value) return <span className="finding-row-time" aria-hidden="true" />;
+  return (
+    <span className="finding-row-time">
+      <span className="finding-row-time-label">{kind === "created" ? "Created" : "Changed"}</span>
+      <TimeStamp value={value} />
+    </span>
+  );
+}
+
 function RootCauseGroupCard({
   group,
   selected,
   onOpen,
   freeTerms,
   rootContext,
+  timeKind,
 }: {
   group: { root: Derived; siblings: Derived[]; highestSeverity: string };
   selected: string | null;
   onOpen: (slug: string) => void;
   freeTerms: string[];
   rootContext: boolean;
+  timeKind: RowTimeKind;
 }) {
   const residualCount = group.siblings.filter((d) => d.root_cause_effect === "eliminates_attack_path").length;
+  // The card sorts by its most severe member; the badge is the root's own
+  // severity, and a more severe sibling is named separately.
+  const siblingOutranksRoot = compareSeverity(group.highestSeverity, group.root.severity) < 0;
   return (
     <section className="root-group-card">
       <div className="group-card-head">
@@ -1775,9 +2070,9 @@ function RootCauseGroupCard({
           <button
             type="button"
             className={`group-root-title ${selected === group.root.slug ? "is-selected" : ""}`}
+            data-record-key={group.root.slug}
             onClick={() => onOpen(group.root.slug)}
           >
-            <span className="sev-dot" style={{ background: sevDotColor(group.root.severity) }} />
             {highlight(group.root.title, freeTerms)}
           </button>
           <p className="meta-text">
@@ -1785,14 +2080,14 @@ function RootCauseGroupCard({
           </p>
         </div>
         <div className="group-card-metrics">
-          <span className={`badge severity-${group.highestSeverity}`}>{group.highestSeverity}</span>
+          <SeverityTag severity={group.root.severity} title={`Root severity: ${severityLabel(group.root.severity)}`} />
+          {siblingOutranksRoot && <span className="meta-text group-highest-severity">Highest in group: {severityLabel(group.highestSeverity)}</span>}
           {group.root.code_snapshot_status && group.root.code_snapshot_status !== "not_applicable" && (
-            <span className={`pill pill-source-${group.root.code_snapshot_status}`}>
-              source {group.root.code_snapshot_status}
-            </span>
+            <SourceSnapshotPill status={group.root.code_snapshot_status} />
           )}
-          <span className="tag root">{group.siblings.length} siblings</span>
-          {residualCount > 0 && <span className="tag chain">{residualCount} residual paths</span>}
+          <span className="tag root">{plural(group.siblings.length, "sibling")}</span>
+          {residualCount > 0 && <span className="tag chain">{plural(residualCount, "residual path")}</span>}
+          <RowTime d={group.root} kind={timeKind} />
         </div>
       </div>
       <div className="group-siblings">
@@ -1803,6 +2098,7 @@ function RootCauseGroupCard({
             selected={selected === d.slug}
             onOpen={() => onOpen(d.slug)}
             freeTerms={freeTerms}
+            timeKind={timeKind}
           />
         ))}
       </div>
@@ -1815,15 +2111,20 @@ function FindingMiniRow({
   selected,
   onOpen,
   freeTerms,
+  timeKind,
+  showRootCause = false,
 }: {
   d: Derived;
   selected: boolean;
   onOpen: () => void;
   freeTerms: string[];
+  timeKind: RowTimeKind;
+  // Flat date lists have no group cards, so each row names its root cause.
+  showRootCause?: boolean;
 }) {
   return (
-    <button type="button" className={`mini-finding-row ${selected ? "is-selected" : ""}`} onClick={onOpen}>
-      <span className="sev-dot" style={{ background: sevDotColor(d.severity) }} />
+    <button type="button" className={`mini-finding-row ${selected ? "is-selected" : ""}`} data-record-key={d.slug} onClick={onOpen}>
+      <SeverityTag severity={d.severity} size="sm" />
       <span className="mini-main">
         <strong>{highlight(d.title, freeTerms)}</strong>
         <span className="meta-text">
@@ -1832,21 +2133,19 @@ function FindingMiniRow({
         </span>
         {d.root_cause_note && <span className="meta-text">{d.root_cause_note}</span>}
       </span>
-      {d.root_cause_effect === "eliminates_attack_path" && <span className="tag chain">Residual path</span>}
-      {d.code_snapshot_status && d.code_snapshot_status !== "not_applicable" && (
-        <span className={`pill pill-source-${d.code_snapshot_status}`}>
-          source {d.code_snapshot_status}
-        </span>
-      )}
-      <span className={`pill pill-${d.workflow_status}`}>{d.workflowLabel}</span>
-      {hasSubmissionStatus(d.submission_status) && (
-        <span
-          className={`pill submission-pill submission-${d.submission_status}`}
-          title={`External submission: ${d.submissionLabel}`}
-        >
-          {d.submissionLabel}
-        </span>
-      )}
+      <span className="mini-badges">
+        {showRootCause && d.root_cause_role === "root" && (d.sibling_count ?? 0) > 0 && <span className="tag root">Root · {plural(d.sibling_count ?? 0, "sibling")}</span>}
+        {showRootCause && d.root_cause_role === "sibling" && d.root_cause_slug && <span className="tag root">Sibling of {d.root_cause_slug}</span>}
+        {d.root_cause_effect === "eliminates_attack_path" && <span className="tag chain">Residual path</span>}
+        {d.code_snapshot_status && d.code_snapshot_status !== "not_applicable" && (
+          <SourceSnapshotPill status={d.code_snapshot_status} size="sm" />
+        )}
+        <StatusPill domain="finding-workflow" value={d.workflow_status} size="sm" />
+        {hasSubmissionStatus(d.submission_status) && (
+          <StatusPill domain="finding-submission" value={d.submission_status} size="sm" title={`External submission: ${d.submissionLabel}`} />
+        )}
+      </span>
+      <RowTime d={d} kind={timeKind} />
     </button>
   );
 }
@@ -1866,9 +2165,13 @@ type DrawerProps = {
   onSelect: (slug: string | null) => void;
   onSectionChange: (tab: TabId) => void;
   onDetailLoaded: (finding: AssessmentFindingDetail) => void;
+  // The route's own lookup of this finding is still running; its point read
+  // becomes this record's detail, so the record does not read it again.
+  detailLookupPending?: boolean;
+  renderRuntimeProof?: (finding: RuntimeProofSlotFinding) => React.ReactNode;
   // The parent owns review-section context and validates conditional tabs.
   initialTab?: TabId;
-  titleId?: string;
+  titleId: string;
 };
 
 type TabId = "overview" | "submission" | "work" | "relationships" | "code" | "history";
@@ -1916,6 +2219,8 @@ function Drawer({
   onSelect,
   onSectionChange,
   onDetailLoaded,
+  detailLookupPending = false,
+  renderRuntimeProof,
   initialTab,
   titleId,
 }: DrawerProps) {
@@ -1923,30 +2228,36 @@ function Drawer({
   const deepLinkTab: TabId = initialTab ?? "overview";
   const [tab, setTabState] = useState<TabId>(deepLinkTab);
   const [proseMode, setProseMode] = useState<ProseMode>("rendered");
-  const [verificationAudit, setVerificationAudit] = useState(d.verification_audit);
-  const [claimFinding, setClaimFinding] = useState<AssessmentFindingDetail | null>(isDetail(d.finding) ? d.finding : null);
-  const [verificationAuditUnavailable, setVerificationAuditUnavailable] = useState(false);
-  const [detailRequestPending, setDetailRequestPending] = useState(!d.verification_audit);
-  const reviewIdentity = isDetail(d.finding) ? JSON.stringify([engagementKey, d.slug, d.finding.row_version, d.verification_status]) : null;
-  const lastReview = useRef<{ identity: string | null; finding: AssessmentFindingDetail } | null>(null);
+  // The finding's point read (verification audit, current receipts). It is
+  // keyed by the claim's identity, not by the row object: the ledger hands
+  // over new objects on every refresh, and each used to re-read the finding.
+  // One read per open, one per live refresh, one when the claim changes; a
+  // point read already in hand (a deep link) is not read again. A failed
+  // refresh keeps the evidence loaded for the same claim.
+  const reviewKey = JSON.stringify([engagementKey, d.slug, isDetail(d.finding) ? d.finding.row_version : null, d.verification_status]);
+  const detailLoad = useCoalescedLoad<AssessmentFindingDetail | null>(
+    detailLookupPending ? null : reviewKey,
+    refreshVersion,
+    () => getAssessmentFinding(engagementKey, d.slug).then((finding) => {
+      if (finding.slug !== d.slug) throw new Error("Finding detail returned a different identity");
+      return finding;
+    }),
+    null,
+    d.verification_audit && isDetail(d.finding) ? d.finding : null,
+  );
+  const claimFinding = detailLoad.data;
+  const detailRequestPending = detailLookupPending || !detailLoad.loaded;
+  const verificationAuditUnavailable = detailLoad.error !== null;
   const reviewFinding = claimFinding && (!isDetail(d.finding) || (claimFinding.row_version === d.finding.row_version && claimFinding.verification_status === d.verification_status)) ? claimFinding : null;
-  const currentAudit = reviewFinding ? verificationAudit : d.verification_audit;
+  const currentAudit = reviewFinding ? reviewFinding.verification_audit : d.verification_audit;
   const reviewRequestPending = detailRequestPending || (claimFinding !== null && reviewFinding === null);
-  const [mdCopied, setMdCopied] = useState(false);
-  const [linkCopied, setLinkCopied] = useState(false);
-  const copyMounted = useRef(true);
-  const mdCopyTimer = useRef<number | undefined>(undefined);
-  const linkCopyTimer = useRef<number | undefined>(undefined);
-  const mdCopyRequest = useRef(0);
-  const linkCopyRequest = useRef(0);
+  // A newer or fuller read replaces the ledger row it came from.
+  const onDetailLoadedRef = useRef(onDetailLoaded);
+  onDetailLoadedRef.current = onDetailLoaded;
   useEffect(() => {
-    copyMounted.current = true;
-    return () => {
-      copyMounted.current = false;
-      window.clearTimeout(mdCopyTimer.current);
-      window.clearTimeout(linkCopyTimer.current);
-    };
-  }, []);
+    if (claimFinding && claimFinding !== d.finding) onDetailLoadedRef.current(claimFinding);
+    // Only a new read is news; the row it replaced changing identity is not.
+  }, [claimFinding]);
   const setTab = (next: TabId) => {
     setTabState(next);
     onSectionChange(next);
@@ -1956,32 +2267,18 @@ function Drawer({
     setTabState(deepLinkTab);
   }, [deepLinkTab]);
 
-  useEffect(() => {
-    let current = true;
-    const retained = reviewIdentity !== null && lastReview.current?.identity === reviewIdentity ? lastReview.current.finding : null;
-    setVerificationAudit(d.verification_audit ?? retained?.verification_audit);
-    setClaimFinding(retained ?? (isDetail(d.finding) ? d.finding : null));
-    setVerificationAuditUnavailable(false);
-    setDetailRequestPending(!d.verification_audit);
-    if (d.verification_audit) {
-      if (isDetail(d.finding)) lastReview.current = { identity: reviewIdentity, finding: d.finding };
-      return () => { current = false; };
-    }
-    getAssessmentFinding(engagementKey, d.slug)
-      .then((finding) => {
-        if (finding.slug !== d.slug) throw new Error("Finding detail returned a different identity");
-        if (current) {
-          setVerificationAudit(finding.verification_audit);
-          setClaimFinding(finding);
-          lastReview.current = { identity: JSON.stringify([engagementKey, finding.slug, finding.row_version, finding.verification_status]), finding };
-          onDetailLoaded(finding);
-        }
+  const owesRuntimeProof = d.verification_status === "pending_runtime_proof" && d.workflow_status !== "merged";
+  const runtimeProof = owesRuntimeProof && renderRuntimeProof && isDetail(d.finding)
+    ? renderRuntimeProof({
+        engagementKey,
+        slug: d.slug,
+        title: d.title,
+        severity: d.severity,
+        workflow_status: d.workflow_status,
+        verification_status: d.verification_status,
+        next_test: (reviewFinding ?? d.finding).next_test,
       })
-      .catch(() => {
-        if (current) setVerificationAuditUnavailable(true);
-      }).finally(() => { if (current) setDetailRequestPending(false); });
-    return () => { current = false; };
-  }, [engagementKey, d.slug, d.finding, d.verification_audit, onDetailLoaded, reviewIdentity, refreshVersion]);
+    : null;
 
   const linkedFindings = d.links.filter((l) => l.target_kind === "finding");
   const linkedChains = d.links
@@ -2010,106 +2307,66 @@ function Drawer({
     { id: "code", label: "Code", count: codeCount, hidden: !codeCount },
     { id: "history", label: "History", count: transitionsLoading || transitionsError ? undefined : historyCount },
   ];
-  const visibleTabs = tabs.filter((t) => !t.hidden);
-
-  const copyMarkdown = async () => {
-    const request = ++mdCopyRequest.current;
-    setMdCopied(false);
-    try {
-      if (!navigator.clipboard) throw new Error("Clipboard unavailable");
-      await navigator.clipboard.writeText(findingToMarkdown(d));
-      if (!copyMounted.current || request !== mdCopyRequest.current) return;
-      setMdCopied(true);
-      window.clearTimeout(mdCopyTimer.current);
-      mdCopyTimer.current = window.setTimeout(() => setMdCopied(false), 1500);
-      toast("Copied submission as Markdown", "success");
-    } catch {
-      if (!copyMounted.current || request !== mdCopyRequest.current) return;
-      toast("Could not copy submission. Use the submission fields to copy manually.", "error");
-    }
-  };
-
-  const copyLink = async () => {
-    const request = ++linkCopyRequest.current;
-    setLinkCopied(false);
-    try {
-      if (!navigator.clipboard) throw new Error("Clipboard unavailable");
-      await navigator.clipboard.writeText(window.location.href);
-      if (!copyMounted.current || request !== linkCopyRequest.current) return;
-      setLinkCopied(true);
-      window.clearTimeout(linkCopyTimer.current);
-      linkCopyTimer.current = window.setTimeout(() => setLinkCopied(false), 1500);
-      toast("Link copied", "success");
-    } catch {
-      if (!copyMounted.current || request !== linkCopyRequest.current) return;
-      toast("Could not copy link. Copy the address from your browser.", "error");
-    }
-  };
 
   return (
-    <aside className="drawer-panel panel">
-      <div className={`drawer-hero sev-${d.severity}`}>
-        <div className="drawer-top">
-          <div className="drawer-slug">
-            <span>{d.slug}</span>
-            <CopyChip text={d.slug} toast={toast} label="Copy slug" />
-          </div>
-          <div className="drawer-header-actions">
-            <button
-              type="button"
-              className="copy-btn"
-              onClick={copyMarkdown}
+    <>
+      <RecordHeader
+        id={d.slug}
+        copyId={d.slug}
+        copyIdLabel="Copy slug"
+        title={d.title}
+        titleId={titleId}
+        accent={`var(--sev-${d.severity})`}
+        actions={
+          <>
+            <RecordCopyButton
+              label="Copy submission as Markdown"
+              text={() => findingToMarkdown(d)}
+              successMessage="Copied submission as Markdown"
+              failureMessage="Could not copy submission. Use the submission fields to copy manually."
               disabled={!isDetail(d.finding)}
-              title="Copy submission as Markdown"
-              aria-label="Copy submission as Markdown"
-            >
-              {mdCopied ? <Check size={13} /> : <Copy size={13} />}
-            </button>
-            <button
-              type="button"
-              className="copy-btn"
-              onClick={copyLink}
-              title="Copy link to this finding"
-              aria-label="Copy link to this finding"
-            >
-              {linkCopied ? <Check size={13} /> : <LinkIcon size={13} />}
-            </button>
-          </div>
-        </div>
-        <h2 id={titleId} className="drawer-title">{d.title}</h2>
-        <div className="hero-meta">
-          <span className={`hero-sev ${d.severity}`}>
-            <span className="sev-dot" style={{ background: sevDotColor(d.severity) }} />
-            {d.severity}
-          </span>
-          {d.cvss_score != null && (
-            <span className="cvss-chip">
-              CVSS <span className="cvss-num">{d.cvss_score.toFixed(1)}</span>
-            </span>
-          )}
-          <span className={`pill pill-${d.workflow_status}`}>{d.workflowLabel}</span>
-          <span className={`pill pill-${d.verificationKey}`}>{d.verificationLabel}</span>
-          {!reviewRequestPending && <span className="finding-evidence-mode">{reviewFinding?.evidence_type?.replace(/-/g, " ") || "Evidence mode unrecorded"}</span>}
-          {d.code_snapshot_status && d.code_snapshot_status !== "not_applicable" && (
-            <span
-              className={`pill pill-source-${d.code_snapshot_status}`}
-              title="Binding to the repository generation currently under review"
-            >
-              source {d.code_snapshot_status}
-            </span>
-          )}
-          {hasSubmissionStatus(d.submission_status) && (
-            <span
-              className={`pill submission-pill submission-${d.submission_status}`}
-              title={`External submission: ${d.submissionLabel}`}
-            >
-              {d.submissionLabel}
-            </span>
-          )}
-          {d.cwe_id && <span className="tag cwe">{d.cwe_id}</span>}
-        </div>
+            />
+            <RecordCopyLinkButton noun="finding" />
+            {/* Merged and false-positive findings are not submission candidates. */}
+            {!RETIRED_WORKFLOWS.has(d.workflow_status) && (
+              <a className="finding-record-action" href={engagementHref(engagementKey, { tab: "submissions", submission: d.slug })}>Open in Submissions</a>
+            )}
+          </>
+        }
+        pills={
+          <>
+            <SeverityTag severity={d.severity} />
+            {d.cvss_score != null && (
+              <span className="cvss-chip">
+                CVSS <span className="cvss-num">{d.cvss_score.toFixed(1)}</span>
+              </span>
+            )}
+            <StatusPill domain="finding-workflow" value={d.workflow_status} />
+            <StatusPill domain="finding-verification" value={d.verificationKey} />
+            {!reviewRequestPending && <span className="finding-evidence-mode">{reviewFinding?.evidence_type?.replace(/-/g, " ") || "Evidence mode unrecorded"}</span>}
+            {d.code_snapshot_status && d.code_snapshot_status !== "not_applicable" && (
+              <SourceSnapshotPill status={d.code_snapshot_status} />
+            )}
+            {hasSubmissionStatus(d.submission_status) && (
+              <StatusPill domain="finding-submission" value={d.submission_status} title={`External submission: ${d.submissionLabel}`} />
+            )}
+            {d.cwe_id && <span className="tag cwe">{d.cwe_id}</span>}
+          </>
+        }
+        datesLabel="Finding dates"
+        dates={[
+          { label: "Created", value: d.created_at },
+          {
+            label: "Last changed",
+            value: d.changed_at,
+            detail: d.last_transition_action
+              ? <> · {d.last_transition_action.replace(/_/g, " ")}{d.last_transition_actor ? ` by ${d.last_transition_actor}` : ""}</>
+              : undefined,
+          },
+        ]}
+      >
         {verificationAuditUnavailable && !reviewRequestPending && (
-          <div className="submission-blockers" role="status">{lastReview.current?.identity === reviewIdentity && (reviewFinding?.proof_receipts !== undefined || currentAudit !== undefined) ? "Claim review refresh unavailable; showing previously loaded evidence for this unchanged claim." : "Claim review status unavailable"}</div>
+          <div className="submission-blockers" role="status">{reviewFinding && (reviewFinding.proof_receipts !== undefined || currentAudit !== undefined) ? "Claim review refresh unavailable; showing previously loaded evidence for this unchanged claim." : "Claim review status unavailable"}</div>
         )}
         {currentAudit?.claim_review_pending && (
           <div className="submission-blockers" role="status" aria-label="Claim review pending">
@@ -2121,35 +2378,28 @@ function Drawer({
             </details>
           </div>
         )}
-      </div>
+      </RecordHeader>
       <FindingRemediation key={d.slug} engagementKey={engagementKey} findingSlug={d.slug} refreshVersion={refreshVersion} />
-      <div className="drawer-tabs">
-        {visibleTabs.map((t) => (
-          <button
-            key={t.id}
-            type="button"
-            className={`drawer-tab ${tab === t.id ? "is-active" : ""}`}
-            onClick={() => setTab(t.id)}
-            aria-current={tab === t.id ? "page" : undefined}
-          >
-            {t.label}
-            {t.count != null && <span className="count">{t.count}</span>}
-          </button>
-        ))}
-        {/* Prose view-mode toggle — a single drawer-wide control (Eye =
-            rendered markdown, Code = raw mono <pre>) applied to every prose
-            section. Only meaningful on tabs that render prose. */}
-        {(tab === "overview" || tab === "submission" || tab === "work" || tab === "relationships") && (
-          <div className="prose-mode-wrap">
-            <span className="prose-mode-label">View</span>
-            <ProseModeToggle mode={proseMode} onChange={setProseMode} />
-          </div>
-        )}
-      </div>
-      <div className="drawer-body">
+      <RecordTabs
+        tabs={tabs}
+        active={tab}
+        onChange={setTab}
+        label="Finding sections"
+        trailing={
+          // One record-wide prose view mode (Eye = rendered markdown, Code =
+          // raw mono <pre>), shown on the tabs that render prose.
+          (tab === "overview" || tab === "submission" || tab === "work" || tab === "relationships") && (
+            <>
+              <span className="prose-mode-label">View</span>
+              <ProseModeToggle mode={proseMode} onChange={setProseMode} />
+            </>
+          )
+        }
+      />
+      <RecordBody>
         {detailRequestPending && !isDetail(d.finding) && <p role="status">Loading finding detail…</p>}
         {!detailRequestPending && !isDetail(d.finding) && verificationAuditUnavailable && <p role="status">Finding detail unavailable. The ledger summary remains visible; reopen this finding to retry.</p>}
-        {tab === "overview" && isDetail(d.finding) && <OverviewPane engagementKey={engagementKey} d={d} receipts={reviewFinding?.proof_receipts} receiptsLoading={reviewRequestPending} proseMode={proseMode} toast={toast} />}
+        {tab === "overview" && isDetail(d.finding) && <OverviewPane engagementKey={engagementKey} d={d} receipts={reviewFinding?.proof_receipts} receiptsLoading={reviewRequestPending} proseMode={proseMode} toast={toast} runtimeProof={runtimeProof} />}
         {tab === "submission" && isDetail(d.finding) && <SubmissionPane d={d} proseMode={proseMode} toast={toast} />}
         {tab === "work" && isDetail(d.finding) && <WorkPane d={d} proseMode={proseMode} toast={toast} />}
         {tab === "code" && isDetail(d.finding) && <CodePane d={d} toast={toast} />}
@@ -2175,8 +2425,8 @@ function Drawer({
             error={transitionsError}
           />
         )}
-      </div>
-    </aside>
+      </RecordBody>
+    </>
   );
 }
 
@@ -2191,7 +2441,7 @@ function previewWords(text: string, limit: number): { text: string; truncated: b
   return { text: `${words.slice(0, limit).join(" ")}…`, truncated: true };
 }
 
-function OverviewPane({ engagementKey, d, receipts, receiptsLoading, proseMode, toast }: { engagementKey: string; d: Derived; receipts?: AssessmentProofReceipt[]; receiptsLoading: boolean; proseMode: ProseMode; toast: ToastFn }) {
+function OverviewPane({ engagementKey, d, receipts, receiptsLoading, proseMode, toast, runtimeProof }: { engagementKey: string; d: Derived; receipts?: AssessmentProofReceipt[]; receiptsLoading: boolean; proseMode: ProseMode; toast: ToastFn; runtimeProof?: React.ReactNode }) {
   const followupCount = d.required_followup?.length ?? 0;
   const runtimeLocation = d.canonical_location && !d.canonical_location.startsWith("file:") ? d.canonical_location : "";
   const hasSource = Boolean(d.entry_point || d.sink || d.provenance?.code_snapshot || d.canonical_location.startsWith("file:"));
@@ -2199,6 +2449,12 @@ function OverviewPane({ engagementKey, d, receipts, receiptsLoading, proseMode, 
   const response = d.poc_response ? formatHttp(d.poc_response, "resp") : "";
   return (
     <>
+      {/* What the claim still needs comes first: the proof work that would
+          settle it, ahead of the claim and impact prose. */}
+      {d.verification_status === "pending_runtime_proof" && d.workflow_status !== "merged" && (
+        <p className="finding-proof-gap" role="status">Runtime proof outstanding</p>
+      )}
+      {runtimeProof && <section className="finding-runtime-proof" aria-label="Runtime proof">{runtimeProof}</section>}
       {d.summary && (
         <div className="section">
           <SectionHead title="Security claim" copyText={d.summary} toast={toast} />
@@ -2206,9 +2462,6 @@ function OverviewPane({ engagementKey, d, receipts, receiptsLoading, proseMode, 
         </div>
       )}
       {d.impact && <section className="section"><div className="section-head-row"><h3 className="section-title">Impact</h3><CopyChip text={d.impact} toast={toast} label="Copy impact" /></div><Prose text={d.impact} mode={proseMode} /></section>}
-      {d.verification_status === "pending_runtime_proof" && d.workflow_status !== "merged" && (
-        <p className="finding-proof-gap" role="status">Runtime proof outstanding</p>
-      )}
       <div className="finding-evidence-contributions">
         <section className="finding-contribution">
           <h3>Runtime observation</h3>
@@ -2248,7 +2501,7 @@ function OverviewPane({ engagementKey, d, receipts, receiptsLoading, proseMode, 
                 <a className="finding-receipt-link" href={engagementHref(engagementKey, { tab: "runs", run: receipt.run_id, section: "proof-receipts", object: receipt.id })}>
                   <strong>Receipt #{receipt.id}</strong>
                   <span>{receipt.evidence_kind.replace(/_/g, " ")}</span>
-                  <span className={`finding-proof-health health-${receipt.evidence_health}`}>{receipt.evidence_health}</span>
+                  <StatusPill domain="receipt-health" value={receipt.evidence_health} size="sm" />
                   <span>Run #{receipt.run_id} ↗</span>
                 </a>
                 <details className="finding-receipt-record"><summary>Exact receipt record</summary><JsonView value={receipt} /></details>
@@ -2262,15 +2515,15 @@ function OverviewPane({ engagementKey, d, receipts, receiptsLoading, proseMode, 
         <div className="overview-attention" aria-label="Current attention">
           <p className="section-title">Current attention</p>
           <div className="attention-items">
-            {d.block_reason && <span className="pill pill-blocked">Blocked</span>}
+            {d.block_reason && <StatusPill value="blocked" tone="danger" label="Blocked" title="A blocker is recorded; see Work" />}
             {followupCount > 0 && (
-              <span className="pill pill-active">{followupCount} follow-up{followupCount === 1 ? "" : "s"}</span>
+              <StatusPill value="follow-up" tone="warning" label={plural(followupCount, "follow-up")} title="Required follow-up is recorded; see Work" />
             )}
             {d.root_cause_role === "root" && (
-              <span className="pill pill-unreviewed">Root · {d.sibling_count ?? 0} siblings</span>
+              <StatusPill value="root" tone="neutral" label={`Root · ${plural(d.sibling_count ?? 0, "sibling")}`} />
             )}
             {d.root_cause_role === "sibling" && (
-              <span className="pill pill-unreviewed">Linked to {d.root_cause_slug}</span>
+              <StatusPill value="sibling" tone="neutral" label={`Linked to ${d.root_cause_slug}`} />
             )}
           </div>
         </div>
@@ -2279,6 +2532,8 @@ function OverviewPane({ engagementKey, d, receipts, receiptsLoading, proseMode, 
         <summary>Advanced metadata</summary>
         <div className="kv-grid">
           <KV k="Discovered by" v={d.discovered_by} mono />
+          {/* updated_at moves on every re-record, so it is not "changed". */}
+          <KVTime k="Last re-recorded" v={d.updated_at} />
           <KV k="Deduplication key" v={d.root_cause_key} mono />
           <KV k="Merged into" v={d.merged_into_slug ?? undefined} mono />
           <KV k="Evidence ref" v={d.evidence_ref} mono />
@@ -2338,9 +2593,7 @@ function WorkPane({ d, proseMode, toast }: { d: Derived; proseMode: ProseMode; t
         <div className="section">
           <p className="section-title">Chain context</p>
           {d.chain_required !== undefined && (
-            <p><span className={`pill ${d.chain_required ? "pill-active" : "pill-unreviewed"}`}>
-              {d.chain_required ? "Chain required" : "Standalone"}
-            </span></p>
+            <p><StatusPill value={d.chain_required ? "chain-required" : "standalone"} tone={d.chain_required ? "warning" : "neutral"} label={d.chain_required ? "Chain required" : "Standalone"} /></p>
           )}
           {d.chain_rationale && <Prose text={d.chain_rationale} mode={proseMode} />}
         </div>
@@ -2665,8 +2918,8 @@ function RelationshipsPane({
           <p className="section-title">Root cause relationship</p>
           {d.root_cause_role === "root" ? (
             <p>
-              Root finding with {d.sibling_count ?? 0} linked sibling outcomes
-              {d.residual_path_count ? `; ${d.residual_path_count} retain a residual remediation path` : ""}.
+              Root finding with {plural(d.sibling_count ?? 0, "linked sibling outcome")}
+              {d.residual_path_count ? `; ${d.residual_path_count} ${d.residual_path_count === 1 ? "retains" : "retain"} a residual remediation path` : ""}.
             </p>
           ) : (
             <>
@@ -2713,13 +2966,13 @@ function RelationshipsPane({
                     </span>
                     <br />
                     <span className="link-sub">
-                      {target ? `${target.slug} · ${target.severity}` : "external"}
+                      {target ? `${target.slug} · ${severityLabel(target.severity)}` : "external"}
                     </span>
                   </span>
                   {target && (
                     <span
                       className="sev-dot"
-                      style={{ background: sevDotColor(target.severity) }}
+                      style={{ background: severityColor(target.severity) }}
                     />
                   )}
                   <span className="link-go">›</span>
@@ -2747,14 +3000,9 @@ function RelationshipsPane({
                     flexWrap: "wrap",
                   }}
                 >
-                  <span
-                    className={`hero-sev ${chain.severity}`}
-                    style={{ fontSize: "0.7rem", padding: "2px 8px" }}
-                  >
-                    {chain.severity}
-                  </span>
+                  <SeverityTag severity={chain.severity} size="sm" />
                   <strong style={{ fontSize: "0.94rem" }}>{chain.title}</strong>
-                  <span className={`pill pill-${chain.status}`}>{chain.status}</span>
+                  <StatusPill value={chain.status} tone="neutral" label={humanizeStatus(chain.status)} size="sm" />
                   <span
                     className="tag"
                     style={{ fontFamily: "'Source Code Pro', monospace" }}
@@ -2792,7 +3040,7 @@ function RelationshipsPane({
                         >
                           <span
                             className="sev-dot"
-                            style={{ background: sevDotColor(m.severity) }}
+                            style={{ background: severityColor(m.severity) }}
                           />
                           {m.slug.split("-").slice(0, 2).join("-")}
                         </button>
@@ -3001,9 +3249,9 @@ function HistoryRow({
   return (
     <div className={`tl-row action-${transition.action}`}>
       <div className="tl-head">
-        <span className="tl-action">{transition.action}</span>
+        <span className="tl-action">{transition.action.replace(/_/g, " ")}</span>
         <span className="tl-actor">{transition.actor || "system"}</span>
-        <span className="tl-time">{relTime(transition.created_at)}</span>
+        <TimeStamp className="tl-time" value={transition.created_at} />
       </div>
       <div className="tl-detail">
         {(isCreation || workflowChanged) && (
@@ -3011,27 +3259,27 @@ function HistoryRow({
             <span className="tl-change-label">Workflow</span>
             {!isCreation && (
               <>
-                <span className={`pill pill-${transition.from_workflow_status}`}>{transition.from_workflow_status}</span>
+                <StatusPill domain="finding-workflow" value={transition.from_workflow_status} size="sm" />
                 <span className="transition-arrow"> → </span>
               </>
             )}
-            <span className={`pill pill-${transition.to_workflow_status}`}>{transition.to_workflow_status}</span>
+            <StatusPill domain="finding-workflow" value={transition.to_workflow_status} size="sm" />
           </span>
         )}
         {sevChanged && (
           <span className="tl-change">
             <span className="tl-change-label">Severity</span>
-            <span className={`hero-sev ${transition.from_severity}`}>{transition.from_severity}</span>
+            <SeverityTag severity={transition.from_severity ?? ""} size="sm" />
             <span className="transition-arrow"> → </span>
-            <span className={`hero-sev ${transition.to_severity}`}>{transition.to_severity}</span>
+            <SeverityTag severity={transition.to_severity} size="sm" />
           </span>
         )}
         {verifChanged && (
           <span className="tl-change">
             <span className="tl-change-label">Verification</span>
-            <span className={`pill pill-${transition.from_verification_status}`}>{transition.from_verification_status}</span>
+            <StatusPill domain="finding-verification" value={transition.from_verification_status} size="sm" />
             <span className="transition-arrow"> → </span>
-            <span className={`pill pill-${transition.to_verification_status}`}>{transition.to_verification_status}</span>
+            <StatusPill domain="finding-verification" value={transition.to_verification_status} size="sm" />
           </span>
         )}
       </div>
@@ -3219,7 +3467,7 @@ function IntelPane({ d, toast }: { d: Derived; toast: ToastFn }) {
               tabs share one visual rhythm; the evidence quote sits beneath. */}
           <div className="kv-grid">
             <KV k="Agent" v={prov.agent_name} mono />
-            <KV k="Captured" v={prov.captured_at ? relTime(prov.captured_at) : undefined} />
+            <KVTime k="Captured" v={prov.captured_at} />
             <KV k="Artifact" v={prov.artifact_ref} mono toast={toast} />
           </div>
           {prov.evidence_quote && (
@@ -3241,6 +3489,9 @@ function IntelPane({ d, toast }: { d: Derived; toast: ToastFn }) {
 }
 
 // ── Command palette ───────────────────────────────────────────────────
+
+// Matches listed at once; the palette says how many more there are.
+const PALETTE_LIMIT = 30;
 
 function CommandPalette({
   derivedList,
@@ -3264,7 +3515,7 @@ function CommandPalette({
     inputRef.current?.focus();
   }, []);
 
-  const results = useMemo(() => {
+  const { results, matchCount } = useMemo(() => {
     const parsed = parseQuery(q);
     const list = derivedList.filter((d) => {
       for (const tok of parsed.tokens) {
@@ -3295,6 +3546,9 @@ function CommandPalette({
           case "family":
             if (!(d.defect_family || "").toLowerCase().includes(v)) return false;
             break;
+          case "location":
+            if (!(d.canonical_location || "").toLowerCase().includes(v)) return false;
+            break;
           default: {
             if (!d.searchCorpus.includes(v)) return false;
           }
@@ -3305,10 +3559,20 @@ function CommandPalette({
       }
       return true;
     });
-    list.sort(
-      (a, b) => (SEV_RANK[a.severity] ?? 99) - (SEV_RANK[b.severity] ?? 99),
-    );
-    return list.slice(0, 30);
+    // A typed slug is a request for that finding: an exact slug first, then
+    // slugs that start with the text, then titles that contain it, then
+    // anything that only mentions it. Severity orders each tier.
+    const text = parsed.freeTerms.join(" ");
+    const tier = (d: Derived) => {
+      if (!text) return 0;
+      const slug = d.slug.toLowerCase();
+      if (slug === text) return 0;
+      if (slug.startsWith(text)) return 1;
+      if (d.title.toLowerCase().includes(text)) return 2;
+      return 3;
+    };
+    list.sort((a, b) => tier(a) - tier(b) || compareSeverity(a.severity, b.severity));
+    return { results: list.slice(0, PALETTE_LIMIT), matchCount: list.length };
   }, [q, derivedList]);
 
   useEffect(() => {
@@ -3344,6 +3608,9 @@ function CommandPalette({
           />
           <span className="search-kbd">esc</span>
         </div>
+        {matchCount > results.length && (
+          <p className="cmd-more" role="status">Showing {results.length} of {matchCount} matches. Type more of a title or slug to narrow them.</p>
+        )}
         <div className="cmd-list">
           {results.length === 0 ? (
             <div className="cmd-empty">No findings match.</div>
@@ -3359,12 +3626,12 @@ function CommandPalette({
               >
                 <span
                   className="sev-dot"
-                  style={{ background: sevDotColor(d.severity) }}
+                  style={{ background: severityColor(d.severity) }}
                 />
                 <span>
                   <span className="cmd-title">{d.title}</span>
                   <span className="cmd-sub">
-                    {d.slug} · {d.severity} · {d.cwe_id || ""}
+                    {[d.slug, severityLabel(d.severity), d.cwe_id].filter(Boolean).join(" · ")}
                   </span>
                 </span>
                 <span className="cmd-sub">{d.canonical_location || ""}</span>

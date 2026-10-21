@@ -1,4 +1,5 @@
 import type { Engagement } from "../lib/api";
+import { StatusPill } from "./ui";
 
 type PhaseWaterfallProps = {
   currentPhase?: string;
@@ -22,9 +23,13 @@ export function PhaseWaterfall({ trackState, aggregateComplete, currentPhase }: 
             <div key={track} className="track-lane">
               <strong className="track-name">{track}</strong>
               <code>{state.phase || "unknown"}</code>
-              <span className={`badge ${state.repair_required ? "severity-high" : state.complete ? "severity-low" : "severity-info"}`}>
-                {state.repair_required ? "Repair required" : state.complete ? "Complete" : "In progress"}
-              </span>
+              {state.repair_required ? (
+                <StatusPill value="repair_required" tone="danger" label="Repair required" size="sm" />
+              ) : state.complete ? (
+                <StatusPill value="complete" tone="success" label="Complete" size="sm" />
+              ) : (
+                <StatusPill value="in_progress" tone="progress" label="In progress" size="sm" />
+              )}
             </div>
           ))}
         </div>

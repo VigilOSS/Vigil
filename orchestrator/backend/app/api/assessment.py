@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Annotated, Any, Literal
 
 import anyio
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from ..models.engagement import Engagement
@@ -18,7 +18,24 @@ from ..services import activity as activity_service
 from ..services import assessment_memory
 from ..services import artifact_index
 from ..services import state_manager
+from ..services.state_manager._common import CommandRunStatus
+from ..services.state_manager.command_run_queries import (
+    COMMAND_LEDGER_FACET_DEFAULT_LIMIT,
+    COMMAND_LEDGER_FACET_MAX_LIMIT,
+    COMMAND_LEDGER_PAGE_DEFAULT_LIMIT,
+    COMMAND_LEDGER_PAGE_MAX_LIMIT,
+    CommandLedgerFilters,
+    CommandLedgerSort,
+    command_run_facets,
+    command_run_position,
+    page_command_runs,
+)
 from ..services.state_manager.coverage import (
+    COVERAGE_LEDGER_FACET_DEFAULT_LIMIT,
+    COVERAGE_LEDGER_GROUP_MAX_LIMIT,
+    COVERAGE_LEDGER_PAGE_DEFAULT_LIMIT,
+    COVERAGE_LEDGER_PAGE_MAX_LIMIT,
+    COVERAGE_LEDGER_REASON_DEFAULT_LIMIT,
     DEFAULT_PROBE_RUN_LIMIT,
     DEFAULT_COVERAGE_ITEM_LIMIT,
     DEFAULT_REQUEST_OBSERVATION_LIMIT,
@@ -27,9 +44,27 @@ from ..services.state_manager.coverage import (
     MAX_ASSESSMENT_LIST_LIMIT,
     MAX_PROBE_RUN_LIST_LIMIT,
     MAX_REQUEST_LIST_LIMIT,
+    REQUEST_VARIANT_FACET_DEFAULT_LIMIT,
+    REQUEST_VARIANT_PAGE_DEFAULT_LIMIT,
+    REQUEST_VARIANT_PAGE_MAX_LIMIT,
+    CoverageLedgerFilters,
+    CoverageLedgerSort,
+    RequestVariantFilters,
+    RequestVariantSort,
     SurfaceStatus,
+    coverage_item_facets,
+    coverage_item_position,
+    coverage_reason_rollup,
+    get_coverage_item_detail,
+    get_request_variant_detail,
     list_attempts,
+    page_coverage_items,
+    page_request_variant_observations,
+    page_request_variants,
+    request_variant_facets,
+    request_variant_position,
 )
+from ..services.state_manager.coverage_readiness import surface_is_open
 # by_family_coverage lives in the depth_ledger submodule (it reuses the ledger's
 # per-unit scope/expected/covered helpers); the package re-exports the
 # ``depth_ledger`` FUNCTION under that name, shadowing the submodule attribute, so
@@ -43,6 +78,7 @@ from ..services.state_manager.http_flows import (
     DEFAULT_HTTP_FLOW_LIMIT,
     MAX_HTTP_FLOW_LIST_LIMIT,
 )
+from ..services.state_manager.oob import record_oob_probe_verdict
 from ..services.engagements import get_engagement_or_404
 from ..ws import broadcaster
 
@@ -709,6 +745,17 @@ class OobProbeRecordRequest(BaseModel):
     client_payload_host: str = Field(min_length=1, max_length=256, pattern=r".*\S.*")
     notes: str = Field(default="", max_length=4096)
     status: Literal["pending", "fired", "confirmed", "expired", "ignored"] = "pending"
+
+
+class OobProbeVerdictRequest(BaseModel):
+    """An operator's review of a probe that called back (``PATCH /oob-probes/{nonce}``):
+    ``confirmed`` (a real out-of-band interaction) or ``ignored`` (noise)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    verdict: Literal["confirmed", "ignored"]
+    note: str = Field(default="", max_length=4096)
+    actor: str = Field(default="operator", min_length=1, max_length=128, pattern=r".*\S.*")
 
 
 class OobInteractionRecordRequest(BaseModel):
@@ -1717,6 +1764,90 @@ def get_request_variants(
     return state_manager.list_request_variants(engagement.id, limit=limit, offset=offset)
 
 
+def _request_variant_filters(
+    method: Annotated[list[str] | None, Query()] = None,
+    auth_context: Annotated[list[str] | None, Query()] = None,
+    content_type: Annotated[list[str] | None, Query()] = None,
+    source: Annotated[list[str] | None, Query()] = None,
+    host: Annotated[list[str] | None, Query()] = None,
+    q: Annotated[str, Query(max_length=512)] = "",
+) -> RequestVariantFilters:
+    """Shared filters of the operator HTTP-inventory reads. Repeat a parameter to
+    match any of its values; every whitespace-separated ``q`` term must match the
+    path, host, URL, template, a parameter name, content type, auth or source."""
+    return RequestVariantFilters(
+        methods=tuple(method or ()),
+        auth_contexts=tuple(auth_context or ()),
+        content_types=tuple(content_type or ()),
+        sources=tuple(source or ()),
+        hosts=tuple(host or ()),
+        q=q,
+    )
+
+
+@router.get("/request-variants/page")
+def get_request_variants_page(
+    engagement_key: str,
+    filters: Annotated[RequestVariantFilters, Depends(_request_variant_filters)],
+    sort: RequestVariantSort = "last_seen_at",
+    dir: Literal["asc", "desc"] = "desc",
+    limit: int = Query(default=REQUEST_VARIANT_PAGE_DEFAULT_LIMIT, ge=1, le=REQUEST_VARIANT_PAGE_MAX_LIMIT),
+    offset: int = Query(default=0, ge=0),
+) -> dict[str, Any]:
+    """Operator inventory page: ``{total, offset, count, has_more, items}``; each
+    row is the variant plus ``observation_count``/``last_observed_at`` over all of
+    its observations. ``GET /request-variants`` stays the bare CLI list."""
+    engagement = get_engagement_or_404(engagement_key)
+    return page_request_variants(engagement.id, filters, sort=sort, direction=dir, limit=limit, offset=offset)
+
+
+@router.get("/request-variants/facets")
+def get_request_variant_facets(
+    engagement_key: str,
+    filters: Annotated[RequestVariantFilters, Depends(_request_variant_filters)],
+    facet_limit: int = Query(
+        default=REQUEST_VARIANT_FACET_DEFAULT_LIMIT, ge=1, le=COVERAGE_LEDGER_GROUP_MAX_LIMIT
+    ),
+) -> dict[str, Any]:
+    """Method/auth/content-type/source/host counts under the current filters, each
+    ignoring its own filter, plus ``engagement_total``."""
+    engagement = get_engagement_or_404(engagement_key)
+    return request_variant_facets(engagement.id, filters, facet_limit=facet_limit)
+
+
+@router.get("/request-variants/{request_variant_id}/position")
+def get_request_variant_position(
+    engagement_key: str,
+    request_variant_id: int,
+    filters: Annotated[RequestVariantFilters, Depends(_request_variant_filters)],
+    sort: RequestVariantSort = "last_seen_at",
+    dir: Literal["asc", "desc"] = "desc",
+) -> dict[str, Any]:
+    """``{index, total, previous, next}`` in the page order for these filters and
+    sort (``index`` null when the variant does not match them)."""
+    engagement = get_engagement_or_404(engagement_key)
+    return request_variant_position(engagement.id, request_variant_id, filters, sort=sort, direction=dir)
+
+
+@router.get("/request-variants/{request_variant_id}/observations")
+def get_request_variant_observations(
+    engagement_key: str,
+    request_variant_id: int,
+    limit: int = Query(default=REQUEST_VARIANT_PAGE_DEFAULT_LIMIT, ge=1, le=REQUEST_VARIANT_PAGE_MAX_LIMIT),
+    offset: int = Query(default=0, ge=0),
+) -> dict[str, Any]:
+    """Every observation of one variant, newest first: ``{total, offset, count, has_more, items}``."""
+    engagement = get_engagement_or_404(engagement_key)
+    return page_request_variant_observations(engagement.id, request_variant_id, limit=limit, offset=offset)
+
+
+@router.get("/request-variants/{request_variant_id}")
+def get_request_variant(engagement_key: str, request_variant_id: int) -> dict[str, Any]:
+    """One variant with ``observation_count`` and ``last_observed_at``."""
+    engagement = get_engagement_or_404(engagement_key)
+    return get_request_variant_detail(engagement.id, request_variant_id)
+
+
 @router.get("/request-observations")
 def get_request_observations(
     engagement_key: str,
@@ -1753,6 +1884,106 @@ def get_coverage_items(
         limit=limit,
         offset=offset,
     )
+
+
+def _coverage_ledger_filters(
+    status_values: Annotated[list[str] | None, Query(alias="status")] = None,
+    attack_family: Annotated[list[str] | None, Query()] = None,
+    auth_context: Annotated[list[str] | None, Query()] = None,
+    input_slot: Annotated[list[str] | None, Query()] = None,
+    method: Annotated[list[str] | None, Query()] = None,
+    host: Annotated[list[str] | None, Query()] = None,
+    q: Annotated[str, Query(max_length=512)] = "",
+    reason: Annotated[str | None, Query(max_length=8192)] = None,
+    reason_missing: bool = False,
+    created_from: Annotated[str | None, Query(max_length=8192)] = None,
+) -> CoverageLedgerFilters:
+    """Shared filters of the operator coverage-ledger reads. Repeat a parameter to
+    match any of its values; ``host`` matches the request-variant host or the
+    service's target host, the same host the ledger groups an item under."""
+    return CoverageLedgerFilters(
+        statuses=tuple(status_values or ()),
+        attack_families=tuple(attack_family or ()),
+        auth_contexts=tuple(auth_context or ()),
+        input_slots=tuple(input_slot or ()),
+        methods=tuple(method or ()),
+        hosts=tuple(host or ()),
+        q=q,
+        reason=reason,
+        reason_missing=reason_missing,
+        created_from=created_from,
+    )
+
+
+@router.get("/coverage-items/page")
+def get_coverage_items_page(
+    engagement_key: str,
+    filters: Annotated[CoverageLedgerFilters, Depends(_coverage_ledger_filters)],
+    sort: CoverageLedgerSort = "updated_at",
+    dir: Literal["asc", "desc"] = "desc",
+    limit: int = Query(default=COVERAGE_LEDGER_PAGE_DEFAULT_LIMIT, ge=1, le=COVERAGE_LEDGER_PAGE_MAX_LIMIT),
+    offset: int = Query(default=0, ge=0),
+) -> dict[str, Any]:
+    """Operator ledger page: ``{total, offset, count, has_more, items}``.
+
+    Unlike ``GET /coverage-items`` (the bare list ``vigil assess fetch`` pages),
+    rows carry ``latest_reason``/``created_from``/``item_host`` instead of the full
+    note log; ``GET /coverage-items/{id}`` returns the log.
+    """
+    engagement = get_engagement_or_404(engagement_key)
+    return page_coverage_items(
+        engagement.id, filters, sort=sort, direction=dir, limit=limit, offset=offset
+    )
+
+
+@router.get("/coverage-items/facets")
+def get_coverage_item_facets(
+    engagement_key: str,
+    filters: Annotated[CoverageLedgerFilters, Depends(_coverage_ledger_filters)],
+    facet_limit: int = Query(
+        default=COVERAGE_LEDGER_FACET_DEFAULT_LIMIT, ge=1, le=COVERAGE_LEDGER_GROUP_MAX_LIMIT
+    ),
+) -> dict[str, Any]:
+    """Counts per status/family/auth/slot/method/host under the current filters,
+    each dimension ignoring its own filter, plus engagement-wide status totals."""
+    engagement = get_engagement_or_404(engagement_key)
+    return coverage_item_facets(engagement.id, filters, facet_limit=facet_limit)
+
+
+@router.get("/coverage-items/reasons")
+def get_coverage_item_reasons(
+    engagement_key: str,
+    filters: Annotated[CoverageLedgerFilters, Depends(_coverage_ledger_filters)],
+    reason_limit: int = Query(
+        default=COVERAGE_LEDGER_REASON_DEFAULT_LIMIT, ge=1, le=COVERAGE_LEDGER_GROUP_MAX_LIMIT
+    ),
+) -> dict[str, Any]:
+    """Latest-reason rollup per status under the current filters."""
+    engagement = get_engagement_or_404(engagement_key)
+    return coverage_reason_rollup(engagement.id, filters, reason_limit=reason_limit)
+
+
+@router.get("/coverage-items/{coverage_item_id}/position")
+def get_coverage_item_position(
+    engagement_key: str,
+    coverage_item_id: int,
+    filters: Annotated[CoverageLedgerFilters, Depends(_coverage_ledger_filters)],
+    sort: CoverageLedgerSort = "updated_at",
+    dir: Literal["asc", "desc"] = "desc",
+) -> dict[str, Any]:
+    """``{index, total, previous, next}``: the item's place in the ledger page order
+    for these filters and sort, and the rows beside it (``index`` null when the
+    item does not match the filters)."""
+    engagement = get_engagement_or_404(engagement_key)
+    return coverage_item_position(engagement.id, coverage_item_id, filters, sort=sort, direction=dir)
+
+
+@router.get("/coverage-items/{coverage_item_id}")
+def get_coverage_item(engagement_key: str, coverage_item_id: int) -> dict[str, Any]:
+    """One coverage item with its note log, linked work items and probe runs, its
+    request variant or service, and blocked techniques on its host or endpoint."""
+    engagement = get_engagement_or_404(engagement_key)
+    return get_coverage_item_detail(engagement.id, coverage_item_id)
 
 
 @router.get("/probe-runs")
@@ -1877,6 +2108,86 @@ def get_command_runs(
         offset=offset,
         include_output=include_output,
     )
+
+
+def _command_ledger_filters(
+    status_values: Annotated[list[CommandRunStatus] | None, Query(alias="status")] = None,
+    tool: Annotated[list[str] | None, Query()] = None,
+    agent: Annotated[list[str] | None, Query()] = None,
+    technique: Annotated[list[str] | None, Query()] = None,
+    probe_kind: Annotated[list[str] | None, Query()] = None,
+    scope: Literal["all", "attention"] = "all",
+    q: Annotated[str, Query(max_length=1024)] = "",
+) -> CommandLedgerFilters:
+    """Shared filters of the operator command-ledger reads. Repeat ``status``,
+    ``tool`` (the derived tool, falling back to ``tool_name``), ``agent``,
+    ``technique`` or ``probe_kind`` (stored values; empty selects runs that
+    declared none) to match any value; ``scope=attention`` keeps runs that need
+    attention; ``q`` is
+    the search-box grammar (``tool:``/``agent:``/``phase:``/``rc:``/``status:``/
+    ``target:``/``hash:``/``technique:``/``probe:``/``intent:``/``destructive:``
+    tokens plus free terms, a run_uuid prefix, or ``#<id>``)."""
+    return CommandLedgerFilters(
+        statuses=tuple(str(value) for value in status_values or ()),
+        tools=tuple(tool or ()),
+        agents=tuple(agent or ()),
+        techniques=tuple(technique or ()),
+        probe_kinds=tuple(probe_kind or ()),
+        scope=scope,
+        q=q,
+    )
+
+
+@router.get("/command-runs/page")
+def get_command_runs_page(
+    engagement_key: str,
+    filters: Annotated[CommandLedgerFilters, Depends(_command_ledger_filters)],
+    sort: CommandLedgerSort = "created_at",
+    dir: Literal["asc", "desc"] = "desc",
+    limit: int = Query(default=COMMAND_LEDGER_PAGE_DEFAULT_LIMIT, ge=1, le=COMMAND_LEDGER_PAGE_MAX_LIMIT),
+    offset: int = Query(default=0, ge=0),
+) -> dict[str, Any]:
+    """Operator ledger page: ``{total, offset, count, has_more, items}``.
+
+    Unlike ``GET /command-runs`` (the list ``vigil assess command-run list``
+    pages), rows drop ``command``/``argv`` for ``command_preview``/``command_chars``
+    and carry ``tool``, ``target``/``target_source`` and
+    ``needs_attention``/``attention_reasons``; ``GET /command-runs/{id}`` keeps
+    the full record.
+    """
+    engagement = get_engagement_or_404(engagement_key)
+    return page_command_runs(
+        engagement.id, filters, sort=sort, direction=dir, limit=limit, offset=offset
+    )
+
+
+@router.get("/command-runs/facets")
+def get_command_run_facets(
+    engagement_key: str,
+    filters: Annotated[CommandLedgerFilters, Depends(_command_ledger_filters)],
+    facet_limit: int = Query(
+        default=COMMAND_LEDGER_FACET_DEFAULT_LIMIT, ge=1, le=COMMAND_LEDGER_FACET_MAX_LIMIT
+    ),
+) -> dict[str, Any]:
+    """Status/tool/agent/technique/probe_kind counts (each ignoring its own
+    filter), the attention/all scope pair under the other filters, and
+    engagement totals."""
+    engagement = get_engagement_or_404(engagement_key)
+    return command_run_facets(engagement.id, filters, facet_limit=facet_limit)
+
+
+@router.get("/command-runs/{command_run_id}/position")
+def get_command_run_position(
+    engagement_key: str,
+    command_run_id: int,
+    filters: Annotated[CommandLedgerFilters, Depends(_command_ledger_filters)],
+    sort: CommandLedgerSort = "created_at",
+    dir: Literal["asc", "desc"] = "desc",
+) -> dict[str, Any]:
+    """``{index, total, previous, next}`` in the page order for these filters
+    and sort (``index`` null when the run does not match them)."""
+    engagement = get_engagement_or_404(engagement_key)
+    return command_run_position(engagement.id, command_run_id, filters, sort=sort, direction=dir)
 
 
 @router.get("/command-runs/foreign-lane-recency")
@@ -2208,6 +2519,11 @@ async def mark_artifacts_scratch_under(
     return result
 
 
+def _with_open_flag(surface: dict[str, Any]) -> dict[str, Any]:
+    """A surface row plus ``open`` (``coverage_readiness.surface_is_open``)."""
+    return {**surface, "open": surface_is_open(surface.get("status"))}
+
+
 @router.get("/surfaces")
 def get_surfaces(
     engagement_key: str,
@@ -2215,7 +2531,7 @@ def get_surfaces(
     offset: int = Query(default=0, ge=0),
 ) -> list[dict[str, Any]]:
     engagement = get_engagement_or_404(engagement_key)
-    return state_manager.list_surfaces(engagement.id, limit=limit, offset=offset)
+    return [_with_open_flag(row) for row in state_manager.list_surfaces(engagement.id, limit=limit, offset=offset)]
 
 
 @router.get("/oob-probes")
@@ -2254,9 +2570,13 @@ def get_findings(
     runtime_proof_owed: bool = False,
     limit: int | None = Query(default=None, ge=1, le=MAX_ASSESSMENT_LIST_LIMIT),
     offset: int = Query(default=0, ge=0),
+    view: Literal["full", "summary"] = "full",
 ) -> list[dict[str, Any]]:
+    """The finding ledger. ``view=summary`` returns the same rows without
+    ``details`` and ``notes`` (most of the payload) for list views that never
+    show them; ``GET /findings/{slug}`` keeps the full record."""
     engagement = get_engagement_or_404(engagement_key)
-    return state_manager.list_findings(
+    rows = state_manager.list_findings(
         engagement.id,
         severity=severity,
         workflow_status=workflow_status,
@@ -2270,6 +2590,15 @@ def get_findings(
         limit=limit,
         offset=offset,
     )
+    if view == "summary":
+        return [
+            {key: value for key, value in row.items() if key not in _FINDING_SUMMARY_VIEW_OMITS}
+            for row in rows
+        ]
+    return rows
+
+
+_FINDING_SUMMARY_VIEW_OMITS = frozenset({"details", "notes"})
 
 
 @router.post("/assessment-runs", status_code=status.HTTP_201_CREATED)
@@ -3656,6 +3985,30 @@ async def create_oob_probe(engagement_key: str, request: OobProbeRecordRequest) 
     return record
 
 
+@router.patch("/oob-probes/{nonce}")
+async def patch_oob_probe_verdict(
+    engagement_key: str, nonce: str, request: OobProbeVerdictRequest
+) -> dict[str, Any]:
+    """Record an operator verdict on a probe with a callback and audit it.
+
+    Returns the probe as ``GET /oob-probes/{nonce}`` does (with ``verdict``);
+    404 for an unknown nonce, 409 when the probe has no callback to review.
+    """
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    probe = await anyio.to_thread.run_sync(
+        functools.partial(
+            record_oob_probe_verdict,
+            engagement.id,
+            nonce,
+            verdict=request.verdict,
+            note=request.note,
+            actor=request.actor.strip(),
+        )
+    )
+    await _broadcast(engagement.key, "oob_probe", probe)
+    return probe
+
+
 @router.post("/oob-probes/interactions")
 async def record_oob_interaction(engagement_key: str, request: OobInteractionRecordRequest) -> dict[str, Any]:
     """Correlate one observed OAST callback to its probe by nonce (``vigil oob poll``).
@@ -3700,6 +4053,7 @@ async def create_surface(engagement_key: str, request: SurfaceRecordRequest) -> 
             framework_registration=request.framework_registration,
         )
     )
+    record = _with_open_flag(record)
     await _broadcast(engagement.key, "surface", record)
     return record
 
@@ -3730,6 +4084,7 @@ async def update_surface_endpoint(
             followup_condition=request.followup_condition,
         )
     )
+    record = _with_open_flag(record)
     await _broadcast(engagement.key, "surface", record)
     return record
 

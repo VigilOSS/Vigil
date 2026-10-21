@@ -68,6 +68,12 @@ class SentReplyRequest(BaseModel):
     reason: str = Field(min_length=1, max_length=4096)
 
 
+ListingFilter = Literal[
+    "actionable", "ready", "blocked", "needs_draft", "exported", "filed",
+    "not_candidate", "incomplete_exports", "all",
+]
+
+
 @router.get("")
 async def list_submission_findings(
     engagement_key: str,
@@ -77,6 +83,11 @@ async def list_submission_findings(
         ge=1,
         le=submission_versions.MAX_SUBMISSION_PAGE_LIMIT,
     ),
+    readiness: ListingFilter = Query(default="actionable"),
+    severity: list[str] | None = Query(default=None),
+    platform: list[str] | None = Query(default=None),
+    q: str = Query(default="", max_length=512),
+    changed_within_hours: int | None = Query(default=None, ge=1, le=24 * 366),
 ) -> dict:
     engagement = await anyio.to_thread.run_sync(
         lambda: get_engagement_or_404(engagement_key)
@@ -87,6 +98,11 @@ async def list_submission_findings(
             engagement.id,
             limit=finding_limit,
             offset=finding_offset,
+            readiness=readiness,
+            severities=severity or [],
+            platforms=platform or [],
+            query=q,
+            changed_within_hours=changed_within_hours,
         )
     )
 
@@ -95,8 +111,6 @@ async def list_submission_findings(
 async def get_submission_detail(
     engagement_key: str,
     finding_slug: str,
-    attachment_id: list[int] | None = Query(default=None),
-    attachment_offset: int = Query(default=0, ge=0),
     attachment_limit: int = Query(
         default=submission_versions.DEFAULT_ATTACHMENT_PAGE_LIMIT,
         ge=1,
@@ -123,13 +137,61 @@ async def get_submission_detail(
             submission_versions.submission_detail,
             engagement.id,
             finding_slug,
-            attachment_ids=attachment_id or [],
-            attachment_offset=attachment_offset,
             attachment_limit=attachment_limit,
             version_offset=version_offset,
             version_limit=version_limit,
             pending_version_offset=pending_version_offset,
             pending_version_limit=pending_version_limit,
+        )
+    )
+
+
+@router.get("/{finding_slug}/readiness")
+async def get_submission_readiness(
+    engagement_key: str,
+    finding_slug: str,
+    attachment_id: list[int] | None = Query(default=None, max_length=1000),
+) -> dict:
+    """Export blockers for exactly the given attachment selection (read-only)."""
+    engagement = await anyio.to_thread.run_sync(
+        lambda: get_engagement_or_404(engagement_key)
+    )
+    return await anyio.to_thread.run_sync(
+        functools.partial(
+            submission_versions.publication_readiness,
+            engagement.id,
+            finding_slug,
+            attachment_id or [],
+        )
+    )
+
+
+@router.get("/{finding_slug}/attachments")
+async def list_submission_attachments(
+    engagement_key: str,
+    finding_slug: str,
+    scope: Literal["finding", "engagement"] = Query(default="finding"),
+    q: str = Query(default="", max_length=512),
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(
+        default=submission_versions.DEFAULT_ATTACHMENT_PAGE_LIMIT,
+        ge=1,
+        le=submission_versions.MAX_ATTACHMENT_PAGE_LIMIT,
+    ),
+) -> dict:
+    """Attachable artifacts: linked to the finding, or engagement-wide by path."""
+    engagement = await anyio.to_thread.run_sync(
+        lambda: get_engagement_or_404(engagement_key)
+    )
+    return await anyio.to_thread.run_sync(
+        functools.partial(
+            submission_versions.attachment_page,
+            engagement.id,
+            finding_slug,
+            scope=scope,
+            query=q,
+            offset=offset,
+            limit=limit,
         )
     )
 

@@ -29,6 +29,7 @@ from fastapi import HTTPException, status
 from ..db import get_connection
 from .events import _engagement_or_404
 from .search import fts_escape
+from .sql_like import like_contains
 
 
 @contextmanager
@@ -1949,9 +1950,6 @@ def intel_search(
         )
         params.append(lead_status)
     if provenance:
-        escaped_provenance = (
-            provenance.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-        )
         provenance_case = " ".join(
             f"WHEN '{known_type}' THEN (SELECT provenance_json FROM {table} record "
             "WHERE record.id = idx.source_id "
@@ -1962,7 +1960,7 @@ def intel_search(
             f"(CASE idx.entity_type {provenance_case} ELSE '' END) "
             "LIKE ? ESCAPE '\\'"
         )
-        params.append(f"%{escaped_provenance}%")
+        params.append(like_contains(provenance))
     params.extend([int(limit), int(offset)])
     query = (
         f"SELECT idx.entity_type, idx.source_id, idx.key, idx.body, idx.source_name, {select_rank} "

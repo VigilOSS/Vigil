@@ -5,6 +5,7 @@ import json
 from typing import Any
 from fastapi import HTTPException, status
 
+from .. import activity as activity_service
 from ..events import _engagement_or_404
 
 from . import _common
@@ -20,6 +21,50 @@ from . import _common
 # :func:`_create_oob_correlation_tables` and src/vigil_cli/oob.py.
 
 _OOB_PROBE_STATUSES = {"pending", "fired", "confirmed", "expired", "ignored"}
+
+# ``fired`` = a callback arrived and no operator has reviewed it ("to review").
+# An operator verdict moves a probe that called back to one of these; a later
+# poll never reverts it (see ``correlate_oob_interaction``).
+OOB_PROBE_VERDICTS = ("confirmed", "ignored")
+_OOB_VERDICT_SOURCE_STATUSES = {"fired", *OOB_PROBE_VERDICTS}
+# Audit-log title of a verdict; its metadata carries nonce/verdict/note.
+# ``db.py`` builds ``idx_activity_entries_oob_verdict`` over these entries.
+OOB_VERDICT_AUDIT_TITLE = "oob probe verdict"
+
+
+def oob_verdict_entry(
+    title: str, actor_kind: str, metadata: dict[str, Any]
+) -> tuple[str, str, str] | None:
+    """``(nonce, verdict, previous_status)`` when an audit entry is an OAST verdict.
+
+    Only ``record_oob_probe_verdict`` writes this title, as an operator entry;
+    a row logged under the same title by anyone else, or naming no known
+    verdict, is not a verdict. The probe point read and the Activity feed both
+    apply this rule.
+    """
+
+    def text(value: Any) -> str:
+        return value.strip() if isinstance(value, str) else ""
+
+    nonce, verdict = text(metadata.get("nonce")), text(metadata.get("verdict"))
+    if (
+        title != OOB_VERDICT_AUDIT_TITLE
+        or actor_kind != "operator"
+        or not nonce
+        or verdict not in OOB_PROBE_VERDICTS
+    ):
+        return None
+    return nonce, verdict, text(metadata.get("previous_status"))
+
+
+# Literal title and actor kind so the planner can use the partial index.
+_LATEST_OOB_VERDICT_SQL = f"""
+    SELECT title, actor_kind, actor_name, occurred_at, metadata_json
+    FROM activity_entries
+    WHERE engagement_id = ? AND actor_kind = 'operator' AND title = '{OOB_VERDICT_AUDIT_TITLE}'
+      AND json_valid(metadata_json) AND json_extract(metadata_json, '$.nonce') = ?
+    ORDER BY julianday(occurred_at) DESC, id DESC
+"""
 
 
 def _required_client_binding(client_name: str, client_payload_host: str) -> tuple[str, str]:
@@ -182,7 +227,95 @@ def get_oob_probe_by_nonce(engagement_id: int, nonce: str) -> dict[str, Any]:
             (probe["id"],),
         ).fetchall()
         probe["interactions"] = [dict(item) for item in interactions]
+        probe["verdict"] = _latest_verdict(connection, engagement.id, probe)
         return probe
+
+
+def _latest_verdict(connection, engagement_id: int, probe: dict[str, Any]) -> dict[str, Any] | None:
+    """The operator verdict entry behind the probe's current status, or None."""
+    if probe.get("status") not in OOB_PROBE_VERDICTS:
+        return None
+    for row in connection.execute(_LATEST_OOB_VERDICT_SQL, (engagement_id, probe["nonce"])):
+        metadata = json.loads(row["metadata_json"])
+        if not isinstance(metadata, dict):
+            continue
+        entry = oob_verdict_entry(row["title"], row["actor_kind"], metadata)
+        if entry is None or entry[0] != probe["nonce"] or entry[1] != probe["status"]:
+            continue
+        return {
+            "verdict": entry[1],
+            "note": metadata.get("note", ""),
+            "actor": row["actor_name"],
+            "recorded_at": row["occurred_at"],
+        }
+    return None
+
+
+def record_oob_probe_verdict(
+    engagement_id: int,
+    nonce: str,
+    *,
+    verdict: str,
+    note: str = "",
+    actor: str = "operator",
+) -> dict[str, Any]:
+    """Record an operator's review of a probe that called back.
+
+    ``verdict`` is ``confirmed`` (a real out-of-band interaction) or ``ignored``
+    (noise). Only a probe with a callback (``fired``, or one already reviewed)
+    takes a verdict; a pending or expired probe is a 409. The status change and
+    its audit entry (actor, note, previous status) commit together. Repeating
+    the current verdict without a note changes nothing and writes no entry.
+    Returns the probe as ``get_oob_probe_by_nonce`` does.
+    """
+    engagement = _engagement_or_404(engagement_id)
+    if verdict not in OOB_PROBE_VERDICTS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"invalid oob verdict '{verdict}'; allowed: {list(OOB_PROBE_VERDICTS)}",
+        )
+    nonce = str(nonce or "").strip()
+    note = str(note or "").strip()
+    with _common.get_connection() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        row = connection.execute(
+            "SELECT * FROM assessment_oob_probes WHERE engagement_id = ? AND nonce = ?",
+            (engagement.id, nonce),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"oob probe nonce='{nonce}' not found",
+            )
+        previous = str(row["status"] or "")
+        if previous not in _OOB_VERDICT_SOURCE_STATUSES:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"oob probe is {previous}: only a probe with a callback takes a verdict",
+            )
+        if previous != verdict or note:
+            connection.execute(
+                "UPDATE assessment_oob_probes SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (verdict, row["id"]),
+            )
+            activity_service.record_activity_entry(
+                engagement.id,
+                actor_kind="operator",
+                actor_name=actor,
+                title=OOB_VERDICT_AUDIT_TITLE,
+                action=f"probe {nonce}: {previous} -> {verdict}",
+                result=verdict,
+                body_markdown=note,
+                metadata={
+                    "nonce": nonce,
+                    "probe_id": int(row["id"]),
+                    "verdict": verdict,
+                    "previous_status": previous,
+                    "note": note,
+                    "target_url": row["target_url"],
+                },
+            )
+    return get_oob_probe_by_nonce(engagement.id, nonce)
 
 def correlate_oob_interaction(
     engagement_id: int,

@@ -171,9 +171,8 @@ vigil assess kali exec --technique RECON \
     wc -l /engagements/$ENGAGEMENT_KEY/scans/san_candidates.txt
   '
 
-# Step 5b — confirm live SAN-discovered names with a separate dnsx call so the
-# audit row records dnsx by name (a single nested wrapper would lose the
-# dnsx-specific audit metadata).
+# Step 5b — confirm live SAN-discovered names with a separate typed dnsx call
+# so the run gets the wrapper's rate profile and rate guard.
 vigil assess kali dnsx \
   -l /engagements/$ENGAGEMENT_KEY/scans/san_candidates.txt \
   -a -resp -silent \
@@ -182,7 +181,7 @@ vigil assess kali dnsx \
   --probe-kind fingerprint --phase recon --timeout 600
 ```
 
-Tradeoff for one-call collapse: `dnsx` is on the runtime container's `$PATH`, so a single `kali exec ... -- bash -c '... dnsx ...'` heredoc would also run, but the audit row would be stamped against `bash` rather than `dnsx`, and downstream coverage queries (`command-run list --tool-bin dnsx`) would miss the run. Use the two-call form unless audit fidelity is explicitly out of scope.
+Tradeoff for one-call collapse: `dnsx` is on the runtime container's `$PATH`, so a single `kali exec ... -- bash -c '... dnsx ...'` heredoc would also run, and its audit row would still name `dnsx` (`command-run list --tool-bin dnsx` finds it). Only the typed `kali dnsx` wrapper applies a dnsx rate profile and refuses a rate above the documented ceiling without `--allow-unsafe-rate`; a raw `dnsx` inside `bash -c` runs at whatever `-rl`/`-t` the script passes. Use the two-call form unless that rate control is explicitly out of scope.
 
 `san_live.txt` is the input to `vigil assess ingest endpoints subdomain-enum` — every confirmed live SAN-discovered name becomes a Phase 2 collection target.
 

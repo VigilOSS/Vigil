@@ -4,45 +4,123 @@
 // inline code + auto-linked URLs, a provenance object with a canonical
 // four-field shape, and a copy-to-clipboard affordance for mono refs.
 
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 
-// ── Relative time helpers ─────────────────────────────────────────────
+import {
+  formatAbsoluteTime,
+  formatAge,
+  formatRelativeTime,
+  parseServerTime,
+  type AbsoluteTimePrecision,
+  type ServerTimeInput,
+} from "../lib/serverTime";
+
+// ── Timestamps ────────────────────────────────────────────────────────
+//
+// Parsing and text formatting live in lib/serverTime.ts (zone-less database
+// timestamps are UTC). <TimeStamp> is the one way to render a backend time.
+
+// One shared 30 s clock keeps every mounted relative label honest without a
+// timer per row.
+const CLOCK_TICK_MS = 30_000;
+const clockListeners = new Set<() => void>();
+let clockNow = Date.now();
+let clockTimer: ReturnType<typeof setInterval> | null = null;
+
+function subscribeClock(listener: () => void) {
+  clockListeners.add(listener);
+  if (clockTimer === null) {
+    clockNow = Date.now();
+    clockTimer = setInterval(() => {
+      clockNow = Date.now();
+      clockListeners.forEach((notify) => notify());
+    }, CLOCK_TICK_MS);
+  }
+  return () => {
+    clockListeners.delete(listener);
+    if (clockListeners.size === 0 && clockTimer !== null) {
+      clearInterval(clockTimer);
+      clockTimer = null;
+    }
+  };
+}
+
+function readClock() {
+  return clockNow;
+}
+
+type TimeStampProps = {
+  value: ServerTimeInput;
+  /**
+   * relative: "4h ago" with absolute UTC on hover (tables, lists).
+   * absolute: "2026-10-20 14:07 UTC" with the age on hover.
+   * both: "2026-10-20 14:07:07 UTC · 4h ago" (detail panes); older times
+   *   keep counting ("· 3mo ago") rather than repeating the date.
+   */
+  mode?: "relative" | "absolute" | "both";
+  /** Precision of the absolute text; defaults to minutes (absolute) or seconds. */
+  precision?: AbsoluteTimePrecision;
+  /** Rendered when the value is missing. */
+  fallback?: ReactNode;
+  className?: string;
+};
+
+const BYTE_UNITS = ["KB", "MB", "GB", "TB"] as const;
 
 /**
- * Compact relative time ("3h ago"). Both tabs had near-identical copies
- * of this; extract the shared version so behavior stays consistent.
+ * A byte count in binary units with one decimal ("1.5 KB", "24.6 MB").
+ * An unknown size renders `empty` rather than a misleading zero.
  */
-export function relTime(iso: string | undefined | null): string {
-  if (!iso) return "";
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return "";
-  const now = new Date();
-  const diffSec = Math.max(0, Math.round((now.getTime() - d.getTime()) / 1000));
-  if (diffSec < 60) return `${diffSec}s ago`;
-  const min = Math.round(diffSec / 60);
-  if (min < 60) return `${min}m ago`;
-  const h = Math.round(min / 60);
-  if (h < 24) return `${h}h ago`;
-  const day = Math.round(h / 24);
-  if (day < 7) return `${day}d ago`;
-  return d.toISOString().slice(0, 10);
+export function formatBytes(value: number | null | undefined, empty = "—"): string {
+  if (value == null || !Number.isFinite(value) || value < 0) return empty;
+  if (value < 1024) return `${Math.round(value)} B`;
+  let size = value / 1024;
+  let unit = 0;
+  // Step up when rounding would print 1024.0 of the smaller unit.
+  while (unit < BYTE_UNITS.length - 1 && Number(size.toFixed(1)) >= 1024) {
+    size /= 1024;
+    unit += 1;
+  }
+  return `${size.toFixed(1)} ${BYTE_UNITS[unit]}`;
 }
 
-/** Full ISO for the title-attribute tooltip on a relative-time span. */
-export function absTime(iso: string | undefined | null): string {
-  if (!iso) return "";
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return iso;
-  return d.toISOString().replace("T", " ").replace("Z", " UTC");
-}
-
-export function RelTime({ iso }: { iso: string | undefined | null }) {
-  const rel = relTime(iso);
-  if (!rel) return null;
+/**
+ * A backend timestamp as `<time dateTime=ISO>`. Every mode carries the
+ * absolute UTC time in `title` or visible text, and in the accessible label.
+ * An unparseable value renders verbatim so recorded text is never hidden.
+ */
+export function TimeStamp({ value, mode = "relative", precision, fallback = "—", className }: TimeStampProps) {
+  // Subscribing re-renders on each shared tick; the label itself reads the
+  // current time so a first render after a long idle period is never stale.
+  useSyncExternalStore(subscribeClock, readClock, readClock);
+  const parsed = parseServerTime(value);
+  if (!parsed) {
+    if (!value) return <>{fallback}</>;
+    return <span className={className} title="Unrecognized timestamp format">{value}</span>;
+  }
+  const relative = formatRelativeTime(value);
+  const absolute = formatAbsoluteTime(value, precision ?? (mode === "absolute" ? "minute" : "second"));
+  const classes = ["timestamp", className].filter(Boolean).join(" ");
+  if (mode === "both") {
+    const age = formatAge(value);
+    return (
+      <time className={classes} dateTime={parsed.toISOString()} aria-label={`${absolute} (${age})`}>
+        {absolute}
+        <span className="timestamp-age" aria-hidden="true"> · {age}</span>
+      </time>
+    );
+  }
+  const text = mode === "absolute" ? absolute : relative;
+  const label = mode === "absolute" ? `${absolute} (${relative})` : `${relative} (${absolute})`;
   return (
-    <span className="rel-time" title={absTime(iso)}>
-      {rel}
-    </span>
+    <time
+      className={classes}
+      dateTime={parsed.toISOString()}
+      title={mode === "absolute" ? relative : absolute}
+      aria-label={label}
+    >
+      {text}
+    </time>
   );
 }
 
@@ -111,87 +189,6 @@ export function CopyInline({
   );
 }
 
-// ── Notes body ────────────────────────────────────────────────────────
-//
-// Markdown-lite: `\n\n` splits paragraphs; inline `code`, **bold**, and
-// bare URLs get rendered. A full markdown parser would be overkill here
-// and also pulls in chroma. The callers (Intel notes, Findings notes)
-// only ever store a note body — no tables, no headings deeper than h3,
-// no lists — so this scope matches the data.
-
-const URL_RE = /\bhttps?:\/\/[^\s<>()"]+/g;
-
-function renderInlineSegment(text: string, key: string): ReactNode {
-  // Tokenize on `code` spans, then on **bold**, then auto-link URLs.
-  const parts = text.split(/(`[^`]+`|\*\*[^*]+\*\*)/g).filter(Boolean);
-  const out: ReactNode[] = [];
-  for (let i = 0; i < parts.length; i += 1) {
-    const p = parts[i];
-    if (p.startsWith("`") && p.endsWith("`")) {
-      out.push(<code key={`${key}-c-${i}`}>{p.slice(1, -1)}</code>);
-      continue;
-    }
-    if (p.startsWith("**") && p.endsWith("**")) {
-      out.push(<strong key={`${key}-b-${i}`}>{p.slice(2, -2)}</strong>);
-      continue;
-    }
-    // Auto-link URLs inside plain text.
-    let last = 0;
-    URL_RE.lastIndex = 0;
-    let m: RegExpExecArray | null;
-    while ((m = URL_RE.exec(p)) !== null) {
-      if (m.index > last) out.push(p.slice(last, m.index));
-      out.push(
-        <a
-          key={`${key}-u-${i}-${m.index}`}
-          href={m[0]}
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          {m[0]}
-        </a>,
-      );
-      last = m.index + m[0].length;
-    }
-    if (last < p.length) out.push(p.slice(last));
-  }
-  return out;
-}
-
-/**
- * Render free-form notes as paragraphs. `\n\n` (or any sequence of blank
- * lines) splits paragraphs; single newlines within a paragraph are
- * preserved via <br>. Leading `# `/`## `/`### ` on a line becomes an h3
- * so longer structured notes render with visible hierarchy. A bare URL
- * auto-links; inline `code` and **bold** survive the round-trip.
- */
-export function NotesBody({ text }: { text: string }) {
-  if (!text || !text.trim()) return null;
-  const paragraphs = text.replace(/\r\n/g, "\n").split(/\n\s*\n/);
-  return (
-    <div className="notes-body">
-      {paragraphs.map((para, pIdx) => {
-        const trimmed = para.trim();
-        if (!trimmed) return null;
-        if (/^#{1,6}\s+/.test(trimmed)) {
-          const heading = trimmed.replace(/^#{1,6}\s+/, "");
-          return <h3 key={pIdx}>{renderInlineSegment(heading, `h-${pIdx}`)}</h3>;
-        }
-        // Preserve single newlines inside a paragraph via <br> so note
-        // authors who deliberately break lines don't have their intent
-        // flattened.
-        const lines = para.split("\n");
-        const children: ReactNode[] = [];
-        lines.forEach((line, lIdx) => {
-          if (lIdx > 0) children.push(<br key={`br-${pIdx}-${lIdx}`} />);
-          children.push(renderInlineSegment(line, `p-${pIdx}-${lIdx}`));
-        });
-        return <p key={pIdx}>{children}</p>;
-      })}
-    </div>
-  );
-}
-
 // ── Provenance block ──────────────────────────────────────────────────
 
 type ProvenanceBlockProps = {
@@ -226,7 +223,7 @@ export function ProvenanceBlock({
         {captured && (
           <div className="provenance-line">
             <span className="provenance-label">Captured</span>
-            <RelTime iso={captured} />
+            <TimeStamp value={captured} />
           </div>
         )}
         {artifactRef && (

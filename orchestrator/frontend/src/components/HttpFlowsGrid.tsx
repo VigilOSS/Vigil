@@ -1,14 +1,15 @@
 // ── HttpFlowsGrid ─────────────────────────────────────────────────────
-// ag-grid rendering of the HTTP tab's Phase-5 canonical flow store (one row
-// per assessment_http_flows row). Lazy-loaded by HttpTab (React.lazy +
+// ag-grid rendering of the HTTP tab's canonical flow store (one row per
+// assessment_http_flows row). Lazy-loaded by HttpTab (React.lazy +
 // Suspense) so ag-grid + its CSS land in the shared code-split chunk. Server-
 // side filtering happens upstream in HttpTab (the fetch passes the filters as
-// query params); this component only renders rows + wires row→detail-drawer
-// clicks — the exact HttpGrid / CommandsGrid contract.
+// query params); this component only renders rows, wires row→record clicks,
+// and reports the order it shows (after a header sort) for the record's
+// Previous / Next — the exact HttpGrid / CommandsGrid contract.
 
-import { useRef } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { AgGridReact } from "ag-grid-react";
-import type { CellKeyDownEvent, ColDef, ICellRendererParams, RowClickedEvent } from "ag-grid-community";
+import type { CellKeyDownEvent, ColDef, GridApi, ICellRendererParams, ModelUpdatedEvent, RowClickedEvent } from "ag-grid-community";
 import type { HttpFlow } from "../lib/api";
 import {
   AG_GRID_THEME,
@@ -19,26 +20,24 @@ import {
   focusGridInvoker,
   registerAgGrid,
 } from "../lib/agGrid";
-import { RelTime, relTime } from "./formatting";
-import { methodClass, statusClass } from "./HttpTab";
+import { TimeStamp, formatBytes } from "./formatting";
+import { formatRelativeTime, gridTimeComparator } from "../lib/serverTime";
+import { HttpStatusPill, methodClass } from "./HttpTab";
+import { StatusPill } from "./ui";
+
+import { readGridView, type GridView } from "./record/recordNavigation";
 
 registerAgGrid();
 
 type HttpFlowsGridProps = {
   rows: HttpFlow[];
   selectedUid: string | null;
+  /** The shown row order and the column sort behind it, after every model update. */
+  onViewChange?: (view: GridView<number>) => void;
   onRowOpen: (flow: HttpFlow, invoker: HTMLElement | null) => void;
+  /** The grid API once ready, null on unmount (record return reveals rows through it). */
+  onApi?: (api: GridApi<HttpFlow> | null) => void;
 };
-
-// Compact human byte size (matches the terse style used across the grids).
-export function fmtBytes(n: number | null | undefined): string {
-  if (n == null || n <= 0) return "—";
-  if (n < 1024) return `${n} B`;
-  const kb = n / 1024;
-  if (kb < 1024) return `${kb < 10 ? kb.toFixed(1) : Math.round(kb)} KB`;
-  const mb = kb / 1024;
-  return `${mb < 10 ? mb.toFixed(1) : Math.round(mb)} MB`;
-}
 
 function MethodCell({ data }: ICellRendererParams<HttpFlow>) {
   if (!data) return null;
@@ -48,13 +47,9 @@ function MethodCell({ data }: ICellRendererParams<HttpFlow>) {
 
 function StatusCell({ data }: ICellRendererParams<HttpFlow>) {
   if (!data || data.response_status == null) {
-    return <span style={{ color: "var(--muted)" }}>—</span>;
+    return <span className="http-cell-muted" aria-label="No response recorded">—</span>;
   }
-  return (
-    <span className={`status-badge ${statusClass(data.response_status)}`}>
-      {data.response_status}
-    </span>
-  );
+  return <HttpStatusPill status={data.response_status} />;
 }
 
 // Truncation / integrity flags: either-side body truncation and a scope
@@ -64,22 +59,27 @@ function FlagsCell({ data }: ICellRendererParams<HttpFlow>) {
   if (!data) return null;
   const trunc = data.request_body_truncated || data.response_body_truncated;
   if (!trunc && !data.host_mismatch) {
-    return <span style={{ color: "var(--muted)" }}>—</span>;
+    return <span className="http-cell-muted" aria-label="No flags">—</span>;
   }
   return (
-    <span style={{ display: "inline-flex", gap: 4 }}>
+    <span className="http-flags">
       {trunc && (
-        <span className="tag warning" title="Response/request body was truncated at capture time">
-          TRUNC
-        </span>
+        <StatusPill
+          value="truncated"
+          label="Truncated"
+          tone="warning"
+          size="sm"
+          title="The request or response body was cut at the capture size cap"
+        />
       )}
       {data.host_mismatch && (
-        <span
-          className="tag warning"
-          title="URL authority / Host header / SNI disagree — possible off-scope routing"
-        >
-          HOST≠
-        </span>
+        <StatusPill
+          value="host_mismatch"
+          label="Host mismatch"
+          tone="warning"
+          size="sm"
+          title="URL authority, Host header and SNI disagree: possible off-scope routing"
+        />
       )}
     </span>
   );
@@ -87,13 +87,16 @@ function FlagsCell({ data }: ICellRendererParams<HttpFlow>) {
 
 function LastSeenCell({ data }: ICellRendererParams<HttpFlow>) {
   if (!data) return null;
-  return <RelTime iso={data.created_at} />;
+  return <TimeStamp value={data.created_at} />;
 }
 
-export default function HttpFlowsGrid({ rows, selectedUid, onRowOpen }: HttpFlowsGridProps) {
+export default function HttpFlowsGrid({ rows, selectedUid, onRowOpen, onViewChange, onApi }: HttpFlowsGridProps) {
   const gridRef = useRef<AgGridReact<HttpFlow>>(null);
+  const onApiRef = useRef(onApi);
+  onApiRef.current = onApi;
+  useEffect(() => () => onApiRef.current?.(null), []);
 
-  const columnDefs: ColDef<HttpFlow>[] = [
+  const columnDefs = useMemo<ColDef<HttpFlow>[]>(() => [
     {
       headerName: "Method",
       colId: "method",
@@ -116,9 +119,8 @@ export default function HttpFlowsGrid({ rows, selectedUid, onRowOpen }: HttpFlow
       flex: 2,
       minWidth: 240,
       valueGetter: (p) => p.data?.path || p.data?.url || "/",
-      wrapText: true,
-      autoHeight: true,
-      cellClass: "ag-mono ag-wrap-cell",
+      tooltipValueGetter: (p) => p.data?.url || p.data?.path || "",
+      cellClass: "ag-mono ag-clip-cell",
       cellStyle: { color: "var(--ink)" },
     },
     {
@@ -146,8 +148,8 @@ export default function HttpFlowsGrid({ rows, selectedUid, onRowOpen }: HttpFlow
       headerName: "Req",
       colId: "reqbytes",
       width: 84,
-      valueGetter: (p) => p.data?.request_body_bytes ?? 0,
-      valueFormatter: (p) => fmtBytes(p.value as number),
+      valueGetter: (p) => p.data?.request_body_bytes ?? null,
+      valueFormatter: (p) => formatBytes(p.value as number | null),
       cellClass: "ag-mono",
       cellStyle: { color: "var(--muted)" },
     },
@@ -155,15 +157,15 @@ export default function HttpFlowsGrid({ rows, selectedUid, onRowOpen }: HttpFlow
       headerName: "Resp",
       colId: "respbytes",
       width: 84,
-      valueGetter: (p) => p.data?.response_body_bytes ?? 0,
-      valueFormatter: (p) => fmtBytes(p.value as number),
+      valueGetter: (p) => p.data?.response_body_bytes ?? null,
+      valueFormatter: (p) => formatBytes(p.value as number | null),
       cellClass: "ag-mono",
       cellStyle: { color: "var(--muted)" },
     },
     {
       headerName: "Flags",
       colId: "flags",
-      width: 110,
+      width: 150,
       sortable: false,
       cellRenderer: FlagsCell,
     },
@@ -171,14 +173,18 @@ export default function HttpFlowsGrid({ rows, selectedUid, onRowOpen }: HttpFlow
       headerName: "Seen",
       colId: "seen",
       width: 110,
+      // The default sort column stays on screen however narrow the grid.
+      pinned: "right",
       cellRenderer: LastSeenCell,
-      cellClass: "ag-mono",
       valueGetter: (p) => p.data?.created_at || "",
-      comparator: (_a, _b, nodeA, nodeB) =>
-        (nodeA.data?.created_at || "").localeCompare(nodeB.data?.created_at || ""),
-      valueFormatter: (p) => relTime(p.value as string),
+      // The default order, newest first; the header shows it.
+      initialSort: "desc",
+      sortingOrder: ["desc", "asc"],
+      // Missing capture times sort last in both directions.
+      comparator: gridTimeComparator,
+      valueFormatter: (p) => formatRelativeTime(p.value as string),
     },
-  ];
+  ], []);
 
   const onRowClicked = (event: RowClickedEvent<HttpFlow>) => {
     const sel = window.getSelection?.();
@@ -204,13 +210,14 @@ export default function HttpFlowsGrid({ rows, selectedUid, onRowOpen }: HttpFlow
         getRowId={(p) => p.data.flow_uid || String(p.data.id)}
         rowHeight={GRID_ROW_HEIGHT}
         headerHeight={GRID_HEADER_HEIGHT}
-        animateRows
+        tooltipShowDelay={400}
+        onGridReady={(event) => onApiRef.current?.(event.api)}
         onRowClicked={onRowClicked}
         onCellKeyDown={onCellKeyDown}
+        onModelUpdated={(event: ModelUpdatedEvent<HttpFlow>) => onViewChange?.(readGridView(event.api, (row) => row.id))}
         rowClassRules={{
           "ag-row-selected": (p) => (p.data?.flow_uid ?? null) === selectedUid,
         }}
-        overlayNoRowsTemplate='<span class="ag-vigil-empty">No HTTP flows match the current filters.</span>'
       />
     </div>
   );

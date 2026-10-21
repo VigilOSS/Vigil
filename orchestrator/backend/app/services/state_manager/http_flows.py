@@ -30,6 +30,7 @@ from urllib.parse import urlparse
 
 from . import _common
 from ._common import _engagement_or_404, _fetch_all, _json_text
+from ..sql_like import like_contains
 
 # Reuse the shared list caps so http-flow listing behaves like the other
 # request-grain lists (variants/observations).
@@ -84,10 +85,6 @@ def _bounded_http_flow_window(limit: int, offset: int) -> tuple[int, int]:
         max(1, min(int(limit), MAX_HTTP_FLOW_LIST_LIMIT)),
         max(0, int(offset)),
     )
-
-
-def _escape_like(value: str) -> str:
-    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 def _json_object_text(value: Any) -> str:
@@ -301,7 +298,7 @@ def list_http_flows(
     elif truncated is False:
         clauses.append("(request_body_truncated = 0 AND response_body_truncated = 0)")
     if q.strip():
-        like = f"%{_escape_like(q.strip())}%"
+        like = like_contains(q.strip())
         clauses.append(
             "(url LIKE ? ESCAPE '\\' OR path LIKE ? ESCAPE '\\' OR host LIKE ? ESCAPE '\\')"
         )

@@ -20,3 +20,16 @@ it("reports unavailable track state and preserves a legacy phase literally", () 
   expect(screen.getByText("legacy-phase")).toBeTruthy();
   expect(screen.queryByText("Recon")).toBeNull();
 });
+
+it("shows each track's state as a sentence-case status pill whose tone matches the state", () => {
+  const trackState = {
+    web: { phase: "complete", complete: true },
+    code: { phase: "hunt", complete: false },
+    blue: { phase: "triage", complete: false, repair_required: true },
+  };
+  render(<PhaseWaterfall trackState={trackState} aggregateComplete={false} />);
+  const tone = (text: string) => screen.getByText(text).closest(".ui-status")?.getAttribute("data-tone");
+  expect(tone("Complete")).toBe("success");
+  expect(tone("In progress")).toBe("progress");
+  expect(tone("Repair required")).toBe("danger");
+});

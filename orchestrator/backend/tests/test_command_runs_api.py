@@ -3496,7 +3496,8 @@ def test_init_db_rebuilds_command_run_fts_after_legacy_shape(isolate_settings):
     rows = state_manager.list_command_runs(1, q="legacy")
     assert len(rows) == 1
     assert rows[0]["command"] == "legacy nmap scan"
-    assert rows[0]["tool_bin"] == ""
+    # The one-time tool_bin migration derives the column for rows stored before it existed.
+    assert rows[0]["tool_bin"] == "legacy"
 
 
 def test_get_command_run_returns_full_record(client, isolate_settings):

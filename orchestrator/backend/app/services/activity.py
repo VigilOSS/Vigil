@@ -15,6 +15,7 @@ from fastapi import HTTPException, status
 from ..db import get_connection
 from .events import _engagement_or_404
 from .search import fts_escape
+from .timestamps import iso_z, parse_utc
 
 
 def _json_text(value: Any) -> str:
@@ -26,18 +27,14 @@ def _normalize_timestamp(value: str, *, field_name: str, blank_now: bool = False
     if not raw:
         if not blank_now:
             return ""
-        parsed = datetime.now(timezone.utc)
-    else:
-        try:
-            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-        except ValueError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                detail=f"{field_name} must be an ISO-8601 timestamp",
-            ) from exc
-        if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+        return iso_z(datetime.now(timezone.utc))
+    parsed = parse_utc(raw)
+    if parsed is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=f"{field_name} must be an ISO-8601 timestamp",
+        )
+    return iso_z(parsed)
 
 
 def _serialise(row: Any) -> dict[str, Any]:

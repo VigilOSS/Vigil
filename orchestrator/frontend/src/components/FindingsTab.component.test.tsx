@@ -530,8 +530,8 @@ describe("finding investigation workspace", () => {
     const records = Array.from({ length: 28 }, (_, index) => ({ ...finding, id: index + 1, slug: `VA-${index + 1}`, title: `Claim ${String(index + 1).padStart(2, "0")}` }));
     render(<ToastProvider><FindingsTab engagementKey="demo" findings={records as never[]} fallbackFindings={[]} chains={[]} chainLinks={[]} assessmentRefreshVersion={0} /></ToastProvider>);
     fireEvent.change(screen.getByPlaceholderText(/Search any field/), { target: { value: "Claim" } });
-    fireEvent.click(screen.getByRole("button", { name: "Next" }));
-    expect(screen.getByText(/Page 2 of 2/)).toBeTruthy();
+    fireEvent.click(within(screen.getAllByRole("navigation", { name: /Result pages/ })[0]).getByRole("button", { name: "Next" }));
+    expect(screen.getAllByText(/Page 2 of 2/)).toHaveLength(2);
     fireEvent.click(screen.getByRole("button", { name: /Claim 26/ }));
     await screen.findByRole("region", { name: "Finding investigation" });
     fireEvent.click(screen.getByRole("button", { name: /^History/ }));
@@ -544,7 +544,7 @@ describe("finding investigation workspace", () => {
     await screen.findByRole("heading", { name: "Claim 26" });
     fireEvent.click(screen.getByRole("button", { name: "Back to results" }));
     expect((screen.getByPlaceholderText(/Search any field/) as HTMLInputElement).value).toBe("Claim");
-    expect(screen.getByText(/Page 2 of 2/)).toBeTruthy();
+    expect(screen.getAllByText(/Page 2 of 2/)).toHaveLength(2);
     fireEvent.click(screen.getByRole("button", { name: /Claim 26/ }));
     expect(screen.getByRole("button", { name: /^History/ }).getAttribute("aria-current")).toBe("page");
   });
@@ -552,18 +552,18 @@ describe("finding investigation workspace", () => {
   it("does not reset the current result page when the same ledger refreshes", async () => {
     const records = Array.from({ length: 28 }, (_, index) => ({ ...finding, id: index + 1, slug: `VA-${index + 1}`, title: `Claim ${String(index + 1).padStart(2, "0")}` }));
     const view = render(<ToastProvider><FindingsTab engagementKey="demo" findings={records as never[]} fallbackFindings={[]} chains={[]} chainLinks={[]} assessmentRefreshVersion={0} /></ToastProvider>);
-    fireEvent.click(screen.getByRole("button", { name: "Next" }));
-    expect(screen.getByText(/Page 2 of 2/)).toBeTruthy();
+    fireEvent.click(within(screen.getAllByRole("navigation", { name: /Result pages/ })[0]).getByRole("button", { name: "Next" }));
+    expect(screen.getAllByText(/Page 2 of 2/)).toHaveLength(2);
     view.rerender(<ToastProvider><FindingsTab engagementKey="demo" findings={records.map((item) => ({ ...item })) as never[]} fallbackFindings={[]} chains={[]} chainLinks={[]} assessmentRefreshVersion={1} /></ToastProvider>);
-    expect(screen.getByText(/Page 2 of 2/)).toBeTruthy();
+    expect(screen.getAllByText(/Page 2 of 2/)).toHaveLength(2);
   });
   it("commits a filter change directly to its first result page without a transient old page", async () => {
     const records = Array.from({ length: 56 }, (_, index) => ({ ...finding, id: index + 1, slug: `VA-${index + 1}`, title: `Claim ${String(index + 1).padStart(2, "0")}`, workflow_status: index < 28 ? "active" : "blocked" }));
     const committedPages: string[] = [];
     render(<ToastProvider><Profiler id="filter-page" onRender={() => {
-      if (document.querySelector(".filter-chip.is-active")) committedPages.push(document.querySelector(".pager")?.textContent ?? "");
+      if (document.querySelector('.ui-chip[aria-pressed="true"]')) committedPages.push(document.querySelector(".pager")?.textContent ?? "");
     }}><FindingsTab engagementKey="demo" findings={records as never[]} fallbackFindings={[]} chains={[]} chainLinks={[]} assessmentRefreshVersion={0} /></Profiler></ToastProvider>);
-    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    fireEvent.click(within(screen.getAllByRole("navigation", { name: /Result pages/ })[0]).getByRole("button", { name: "Next" }));
     fireEvent.click(screen.getByRole("button", { name: /^Active/ }));
     expect(committedPages.length).toBeGreaterThan(0);
     expect(committedPages.every((page) => page.includes("Page 1 of 2"))).toBe(true);
@@ -571,25 +571,25 @@ describe("finding investigation workspace", () => {
 
   it("keeps its reset control mounted and exposes the selected filter to assistive technology", async () => {
     render(<ToastProvider><FindingsTab engagementKey="demo" findings={[finding] as never[]} fallbackFindings={[]} chains={[]} chainLinks={[]} assessmentRefreshVersion={0} /></ToastProvider>);
-    const clear = screen.getByRole("button", { name: /^Clear all/ }) as HTMLButtonElement;
+    const clear = screen.getByRole("button", { name: /^Clear filters/ }) as HTMLButtonElement;
     expect(clear.disabled).toBe(true);
-    const high = within(screen.getByRole("group", { name: "Severity filters" })).getByRole("button", { name: /^high/ });
+    const high = within(screen.getByRole("group", { name: "Severity" })).getByRole("button", { name: /^High/ });
     high.focus();
     fireEvent.click(high);
     expect(high.getAttribute("aria-pressed")).toBe("true");
     expect(document.activeElement).toBe(high);
-    expect(screen.getByRole("button", { name: /^Clear all/ })).toBe(clear);
+    expect(screen.getByRole("button", { name: /^Clear filters/ })).toBe(clear);
     expect(clear.disabled).toBe(false);
   });
 
-  it.each([{ group: "Severity filters", name: /^low/ }, { group: "Workflow filters", name: /^Blocked/ }, { group: "Verification filters", name: /^Verified/ }])("keeps an active zero-count $group option removable after refresh", async ({ name }) => {
+  it.each([{ group: "Severity", name: /^Low/ }, { group: "Workflow", name: /^Blocked/ }, { group: "Verification", name: /^Verified/ }])("keeps an active zero-count $group option removable after refresh", async ({ group, name }) => {
     const first = { ...finding, verification_status: "unreviewed" };
     const second = { ...finding, id: 13, slug: "VA-013", title: "Z second claim", severity: "low", workflow_status: "blocked" };
     const props = { engagementKey: "demo", findings: [first, second] as never[], fallbackFindings: [], chains: [], chainLinks: [], assessmentRefreshVersion: 0 };
     const view = render(<ToastProvider><FindingsTab {...props} /></ToastProvider>);
-    fireEvent.click(screen.getByRole("button", { name }));
+    fireEvent.click(within(screen.getByRole("group", { name: group })).getByRole("button", { name }));
     view.rerender(<ToastProvider><FindingsTab {...props} findings={[first] as never[]} assessmentRefreshVersion={1} /></ToastProvider>);
-    const active = screen.getByRole("button", { name });
+    const active = within(screen.getByRole("group", { name: group })).getByRole("button", { name });
     expect(active.getAttribute("aria-pressed")).toBe("true");
     expect(active.textContent).toContain("0");
     fireEvent.click(active);
@@ -598,26 +598,26 @@ describe("finding investigation workspace", () => {
   it("distinguishes a genuinely empty ledger from filtered results", async () => {
     render(<ToastProvider><FindingsTab engagementKey="demo" findings={[]} fallbackFindings={[]} chains={[]} chainLinks={[]} assessmentRefreshVersion={0} /></ToastProvider>);
     expect(screen.getByText("No findings recorded yet.")).toBeTruthy();
-    expect(screen.queryByText("No findings match.")).toBeNull();
+    expect(screen.queryByText("No findings match these filters.")).toBeNull();
   });
   it("labels engagement-wide root group counts separately from the current filtered results", async () => {
     vi.mocked(listAssessmentFindingGroups).mockResolvedValue([{ root: finding, siblings: [], sibling_count: 0, residual_path_count: 0 }] as never);
     render(<ToastProvider><FindingsTab engagementKey="demo" findings={[finding] as never[]} fallbackFindings={[]} chains={[]} chainLinks={[]} assessmentRefreshVersion={0} /></ToastProvider>);
     await waitFor(() => expect(screen.queryByText("Loading groups")).toBeNull());
     fireEvent.change(screen.getByRole("textbox", { name: "Search findings" }), { target: { value: "does-not-match" } });
-    expect(screen.getByText("1 engagement root-cause groups")).toBeTruthy();
-    expect(screen.getByText("No findings match.")).toBeTruthy();
+    expect(screen.getByText("1 engagement root-cause group")).toBeTruthy();
+    expect(screen.getByText("No findings match these filters.")).toBeTruthy();
   });
   it("keeps a filtered sibling's root available but explicitly identifies it as nonmatching context", async () => {
     const sibling = { ...finding, id: 13, slug: "VA-013", title: "Sibling claim", severity: "low" };
     vi.mocked(listAssessmentFindingGroups).mockResolvedValue([{ root: finding, siblings: [sibling], sibling_count: 1, residual_path_count: 0 }] as never);
     render(<ToastProvider><FindingsTab engagementKey="demo" findings={[finding, sibling] as never[]} fallbackFindings={[]} chains={[]} chainLinks={[]} assessmentRefreshVersion={0} /></ToastProvider>);
     await waitFor(() => expect(screen.queryByText("Loading groups")).toBeNull());
-    fireEvent.click(screen.getByRole("button", { name: /^low/ }));
+    fireEvent.click(within(screen.getByRole("group", { name: "Severity" })).getByRole("button", { name: /^Low/ }));
     const queue = screen.getByRole("region", { name: "Finding queue" });
     expect(within(queue).getByRole("button", { name: "Shared claim" })).toBeTruthy();
     expect(within(queue).getByText("Root context outside current filters")).toBeTruthy();
-    expect(queue.textContent).toContain("1 of 2 findings match");
+    expect(queue.textContent).toContain("1 of 2 findings");
   });
   it("contains finding-palette focus, closes on Escape and restores its opener", async () => {
     render(<ToastProvider><FindingsTab engagementKey="demo" findings={[finding] as never[]} fallbackFindings={[]} chains={[]} chainLinks={[]} assessmentRefreshVersion={0} /></ToastProvider>);
@@ -642,7 +642,7 @@ describe("finding investigation workspace", () => {
     expect(document.activeElement).toBe(opener);
     expect(document.body.classList.contains("detail-modal-open")).toBe(false);
   });
-  it("opens the arrow-selected finding on Enter and returns from review to the palette opener", async () => {
+  it("opens the arrow-selected finding on Enter and returns from review to that finding's row", async () => {
     render(<ToastProvider><FindingsTab engagementKey="demo" findings={[finding, { ...finding, slug: "VA-013", title: "Z second claim" }] as never[]} fallbackFindings={[]} chains={[]} chainLinks={[]} assessmentRefreshVersion={0} /></ToastProvider>);
     const opener = screen.getByRole("button", { name: /Jump to…/ });
     opener.focus();
@@ -654,7 +654,7 @@ describe("finding investigation workspace", () => {
     expect(screen.queryByRole("dialog", { name: "Jump to finding" })).toBeNull();
     expect(window.location.hash).toContain("finding=VA-013");
     fireEvent.click(screen.getByRole("button", { name: "Back to results" }));
-    await waitFor(() => expect(document.activeElement).toBe(opener));
+    await waitFor(() => expect(document.activeElement?.getAttribute("data-record-key")).toBe("VA-013"));
   });
 
   it("traverses the current table sort order and retains it when returning", async () => {
@@ -700,11 +700,22 @@ describe("finding investigation workspace", () => {
   it("distinguishes the unavailable or pending finding ledger from an empty result", async () => {
     const props = { engagementKey: "demo", findings: [], fallbackFindings: [], chains: [], chainLinks: [], assessmentRefreshVersion: 0 };
     const view = render(<ToastProvider><FindingsTab {...props} ledgerLoading /></ToastProvider>);
-    expect(screen.getByText("Loading finding ledger…")).toBeTruthy();
-    expect(screen.queryByText("No findings match.")).toBeNull();
+    expect(within(screen.getByRole("region", { name: "Finding queue" })).getByRole("status", { name: "Loading table" }).getAttribute("aria-busy")).toBe("true");
+    expect(screen.queryByText("No findings match these filters.")).toBeNull();
     view.rerender(<ToastProvider><FindingsTab {...props} ledgerError="Backend offline" /></ToastProvider>);
     expect(screen.getByRole("alert").textContent).toContain("Backend offline");
-    expect(screen.queryByText("No findings match.")).toBeNull();
+    expect(screen.queryByText("No findings match these filters.")).toBeNull();
+  });
+
+  it("says the finding ledger is slow with the shared hint after two seconds", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      render(<ToastProvider><FindingsTab engagementKey="demo" findings={[]} fallbackFindings={[]} chains={[]} chainLinks={[]} assessmentRefreshVersion={0} ledgerLoading /></ToastProvider>);
+      await act(async () => { await vi.advanceTimersByTimeAsync(2_100); });
+      expect(screen.getByText("Still loading the finding ledger… Large ledgers can take several seconds.")).toBeTruthy();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("shows runtime and source contributions with exact current receipt navigation", async () => {
@@ -714,7 +725,7 @@ describe("finding investigation workspace", () => {
     const receipt = screen.getByRole("link", { name: /Receipt #41/ });
     expect(receipt.getAttribute("href")).toContain("run=7");
     expect(receipt.getAttribute("href")).toContain("object=41");
-    expect(receipt.textContent).toContain("missing");
+    expect(receipt.textContent).toContain("Missing");
     expect(screen.queryByRole("link", { name: /Receipt #40/ })).toBeNull();
     expect(screen.getByText(/Authorization: Bearer operator-token/)).toBeTruthy();
   });
@@ -761,7 +772,7 @@ describe("finding investigation workspace", () => {
     const mismatched: string[] = [];
     const records = [finding, { ...finding, id: 13, slug: "VA-013", title: "Z second claim" }];
     render(<ToastProvider><Profiler id="history-identity" onRender={() => {
-      const investigation = document.querySelector(".finding-investigation");
+      const investigation = document.querySelector(".record-view");
       if (investigation?.querySelector("h2")?.textContent === "Z second claim" && investigation.textContent?.includes("First recorded decision")) mismatched.push(investigation.textContent);
     }}><FindingsTab engagementKey="demo" findings={records as never[]} fallbackFindings={[]} chains={[]} chainLinks={[]} assessmentRefreshVersion={0} initialFindingSlug="VA-012" /></Profiler></ToastProvider>);
     fireEvent.click(await screen.findByRole("button", { name: "History 1" }));

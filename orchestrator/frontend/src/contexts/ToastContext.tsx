@@ -6,8 +6,8 @@
 //   - styling is driven by our CSS vars via plain `app.css` classes instead
 //     of Tailwind utilities, so toasts read correctly in both themes;
 //   - a `ToastViewport` lives here so callers mount the stack once near the
-//     app root (z-index 45 — above the detail-modal overlay at 40, below the
-//     command palette at 50).
+//     app root (z-index 45 — above the tab confirmation dialogs at 40, below
+//     the command palette at 50).
 
 import {
   createContext,

@@ -17,6 +17,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Check, Code as CodeIcon, Copy, Eye } from "lucide-react";
 import { MarkdownBlock } from "../Markdown";
+import { TimeStamp } from "../formatting";
+import type { AbsoluteTimePrecision } from "../../lib/serverTime";
 
 // Toast callback type (matches useToast().toast). Threaded into the kit so
 // every copy affordance fires a consistent "Copied" toast.
@@ -172,6 +174,28 @@ export function KV({
       ) : (
         <p className={`v ${mono ? "mono" : ""}`}>{str}</p>
       )}
+    </div>
+  );
+}
+
+// KV row for a backend timestamp: absolute UTC plus age, as detail panes
+// show it. Missing values drop the row, matching KV.
+export function KVTime({
+  k,
+  v,
+  precision = "second",
+}: {
+  k: string;
+  v: string | null | undefined;
+  precision?: AbsoluteTimePrecision;
+}) {
+  if (!v) return null;
+  return (
+    <div className="kv">
+      <p className="k">{k}</p>
+      <p className="v">
+        <TimeStamp value={v} mode="both" precision={precision} />
+      </p>
     </div>
   );
 }

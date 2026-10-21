@@ -1230,3 +1230,49 @@ def test_an_explicit_verification_decision_still_reads_open_work_done(client, is
     assert decided.status_code == 200, decided.text
     assert client.get(f'{BASE}/proof-work/{work["id"]}').json()['queue_state'] == 'done'
     assert client.post(f'{BASE}/proof-work/{work["id"]}/reconcile', json={}).json()['status'] == 'resolved'
+
+
+def test_queue_explains_each_parked_finding_and_summarizes_linked_runs(client, isolate_settings):
+    seed(client, isolate_settings)
+    owed = client.get(f'{BASE}/proof-work').json()['owed'][0]
+    assert owed['severity'] == 'high'
+    assert owed['parked_reason'] == 'Runtime challenge still required'
+    assert owed['parked_at']
+    assert owed['source_bound'] is False
+    # The finding's own host first, then concrete admitted scope hosts.
+    assert owed['suggested_hosts'] == ['example.com']
+
+    work = prepare(client)
+    assert claim(client, work).status_code == 200
+    run = client.post(f'{BASE}/assessment-runs', json={
+        'run_uuid': 'proof-work-summary-run', 'run_kind': 'code',
+        'producer_dispatch_agent_id': 'PROOF-1',
+    })
+    assert run.status_code == 201, run.text
+    linked = client.patch(f'{BASE}/proof-work/{work["id"]}', json={
+        'agent_id': 'PROOF-1', 'status': 'claimed', 'run_id': run.json()['id'],
+    })
+    assert linked.status_code == 200, linked.text
+
+    item = client.get(f'{BASE}/proof-work').json()['items'][0]
+    assert item['finding_title'] == 'Acme replay hypothesis'
+    assert item['finding_severity'] == 'high'
+    assert item['run_ids'] == [run.json()['id']]
+    assert item['runs'] == [{
+        'id': run.json()['id'], 'run_uuid': 'proof-work-summary-run', 'run_kind': 'code',
+        'status': 'running', 'started_at': run.json()['started_at'], 'finished_at': None,
+        'proof_receipts': 0,
+    }]
+    projected = client.get(f'{BASE}/assessment-runs/{run.json()["id"]}').json()
+    assert projected['proof_work_ids'] == [work['id']]
+
+
+def test_suggested_hosts_follow_admitted_scope_only(client, isolate_settings):
+    path = seed(client, isolate_settings)
+    scope = json.loads((path / 'scope.json').read_text())
+    scope['scope_hosts'] = ['example.com', 'api.example.com', '*.example.com']
+    scope['scope'] = ['example.com', 'api.example.com', '*.example.com']
+    scope['out_of_scope'] = ['api.example.com']
+    (path / 'scope.json').write_text(json.dumps(scope))
+    owed = client.get(f'{BASE}/proof-work').json()['owed'][0]
+    assert owed['suggested_hosts'] == ['example.com']

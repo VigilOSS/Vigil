@@ -12,7 +12,10 @@ from . import _common
 from ._common import _scalar_row, _serialize_finding_record
 from .findings import list_exploit_candidates
 from .coverage import coverage_readiness, coverage_rollup, egress_block_status, vendor_saas_hosts_pending_decision
+from .coverage_readiness import OPEN_SURFACE_STATUSES
 from .report_readiness import report_readiness
+
+_OPEN_SURFACE_STATUS_VALUES = tuple(sorted(OPEN_SURFACE_STATUSES))
 
 SummaryCacheKey = tuple[tuple[str, int, int, int], int]
 
@@ -113,8 +116,9 @@ def _build_assessment_summary(engagement_id: int) -> dict[str, Any]:
         )
         open_surface_count = _scalar_row(
             connection,
-            "SELECT COUNT(*) FROM assessment_surfaces WHERE engagement_id = ? AND status IN ('discovered', 'deferred', 'partially-covered')",
-            (engagement_id,),
+            "SELECT COUNT(*) FROM assessment_surfaces WHERE engagement_id = ? "
+            f"AND status IN ({', '.join('?' for _ in _OPEN_SURFACE_STATUS_VALUES)})",
+            (engagement_id, *_OPEN_SURFACE_STATUS_VALUES),
         )
         credential_count = _scalar_row(connection, "SELECT COUNT(*) FROM assessment_credentials WHERE engagement_id = ?", (engagement_id,))
         access_count = _scalar_row(connection, "SELECT COUNT(*) FROM assessment_access_records WHERE engagement_id = ?", (engagement_id,))
@@ -250,6 +254,7 @@ def _build_assessment_summary(engagement_id: int) -> dict[str, Any]:
         "finding_count": finding_count,
         "finding_severities": {row["severity"]: int(row["total"]) for row in finding_severity_rows},
         "open_surface_count": open_surface_count,
+        "open_surface_statuses": list(_OPEN_SURFACE_STATUS_VALUES),
         "credential_count": credential_count,
         "access_count": access_count,
         "pivot_count": pivot_count,

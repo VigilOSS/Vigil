@@ -1,786 +1,360 @@
+// ── CoverageTab ───────────────────────────────────────────────────────
+// Every test Vigil planned for the target and where it stands. The tab loads
+// its own data from the coverage-ledger routes: engagement-wide status totals
+// and facet counts (`/coverage-items/facets`), the latest-reason rollup
+// (`/reasons`), server-paged rows (`/page`, via the grid), one item's
+// explanation (`/coverage-items/{id}`) and its place in the paged order
+// (`/coverage-items/{id}/position`) for the record's Previous / Next. Nothing
+// is capped to a loaded slice. Opening an item replaces the list with the
+// shared record view; Back, Escape and browser Back return to the list.
+// The view, filters, search, closed-items choice and grid sort survive leaving
+// the tab (sessionStorage, per engagement).
+
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { engagementHref } from "../lib/workspaceRoutes";
-import type {
-  AssessmentCoverageItem,
-  AssessmentService,
-  AssessmentSummary,
-  AssessmentTarget,
-} from "../lib/api";
+import type { AssessmentSummary } from "../lib/api";
+import {
+  EMPTY_COVERAGE_FILTERS,
+  fetchCoverageFacets,
+  fetchCoveragePosition,
+  fetchCoverageReasons,
+  type CoverageFilters,
+  type CoverageLedgerItem,
+  type CoverageReasonEntry,
+  type CoverageSortDir,
+  type CoverageSortKey,
+} from "../lib/coverageApi";
+import { engagementHref, writeWorkspaceHash } from "../lib/workspaceRoutes";
+import { TimeStamp } from "./formatting";
+import { PageHeader, SegmentedControl } from "./ui";
+import { CoverageItemRecord, isCoverageRecordTab, type CoverageRecordTab } from "./coverage/CoverageItemRecord";
+import { CoverageItemsView } from "./coverage/CoverageItemsView";
+import { CoverageReasonRollup } from "./coverage/CoverageReasonRollup";
+import { CoverageStatusBar } from "./coverage/CoverageStatusBar";
+import { OPEN_COVERAGE_STATUSES } from "./coverage/coverageStatus";
+import { coverageFiltersKey, parseCoverageView, type CoverageSavedView } from "./coverage/coverageGridModel";
+import { useCoalescedRequest } from "../lib/useCoalescedRequest";
+import { useLiveRefreshToken } from "../lib/useLiveRefreshToken";
+import { RecordView, useResultsScrollMemory } from "./record/RecordView";
+import { SlowLoadHint } from "./Skeletons";
+import { useRecordPosition } from "./record/recordNavigation";
+import "../styles/coverage.css";
 
 type CoverageTabProps = {
   engagementKey: string;
+  /** Engagement summary; only its service-level rollup is shown here. */
   summary: AssessmentSummary | null;
-  targets: AssessmentTarget[];
-  services: AssessmentService[];
-  coverageItems: AssessmentCoverageItem[];
+  /** Bumped by the page on live updates; reloads counts and visible rows. */
+  refreshVersion?: number;
+  /** Coverage item whose record is open (`item` in the URL). */
+  initialItemId?: number;
+  /** Open record section (`dtab` in the URL). */
+  initialDrawerTab?: string;
 };
 
-const PAGE_SIZE = 50;
-const ATTENTION_STATUSES = new Set(["pending", "queued", "deferred", "blocked"]);
-const STATUS_ORDER = ["blocked", "pending", "queued", "deferred", "covered", "not_applicable"];
+/** The open record: its id, and its row once known (a deep link starts without one). */
+type OpenItem = { id: number; row: CoverageLedgerItem | null };
 
-function statusLabel(value: string): string {
-  return value.replace(/_/g, " ");
-}
+type View = "reasons" | "items";
 
-function formatDate(value: string | null | undefined): string {
-  if (!value) return "Not recorded";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  return new Intl.DateTimeFormat(undefined, {
-    dateStyle: "medium",
-    timeStyle: "short",
-  }).format(date);
-}
+const SEARCH_DEBOUNCE_MS = 300;
+// A burst of live updates refreshes counts at most this often (with a trailing refresh).
+const LIVE_REFRESH_MIN_MS = 5000;
+const SHOW_ALL_REASONS_LIMIT = 5000;
 
-function extractHost(url: string): string {
+const viewKey = (engagementKey: string) => `coverage.view.${engagementKey}`;
+
+function readSavedView(engagementKey: string): CoverageSavedView {
   try {
-    return new URL(url).hostname;
+    return parseCoverageView(window.sessionStorage.getItem(viewKey(engagementKey)));
   } catch {
-    return url;
+    return parseCoverageView(null);
   }
 }
 
-type HostGroup = {
-  host: string;
-  items: AssessmentCoverageItem[];
-  serviceCount: number;
-};
-
-// ── Tokenized search ─────────────────────────────────────
-
-const SCOPES = [
-  "status",
-  "host",
-  "surface",
-  "method",
-  "family",
-  "slot",
-  "auth",
-  "endpoint",
-  "service",
-] as const;
-type Scope = (typeof SCOPES)[number];
-
-type ParsedQuery = {
-  tokens: { scope: Scope; value: string }[];
-  freeTerms: string[];
-};
-
-function parseQuery(q: string): ParsedQuery {
-  const tokens: ParsedQuery["tokens"] = [];
-  const freeTerms: string[] = [];
-  const re = /(\S+)/g;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(q || "")) !== null) {
-    const tok = m[1];
-    const idx = tok.indexOf(":");
-    if (idx > 0) {
-      const scope = tok.slice(0, idx).toLowerCase();
-      if ((SCOPES as readonly string[]).includes(scope)) {
-        tokens.push({ scope: scope as Scope, value: tok.slice(idx + 1).toLowerCase() });
-        continue;
-      }
-    }
-    freeTerms.push(tok.toLowerCase());
-  }
-  return { tokens, freeTerms };
+export function CoverageTab(props: CoverageTabProps) {
+  // A different engagement mounts afresh, starting from the view kept for it.
+  return <CoverageWorkspace key={props.engagementKey} {...props} />;
 }
 
-// ── Icons (inline SVG) ───────────────────────────────────
-
-const IconSearch = () => (
-  <svg
-    viewBox="0 0 24 24"
-    fill="none"
-    stroke="currentColor"
-    strokeWidth={2}
-    strokeLinecap="round"
-    strokeLinejoin="round"
-    className="search-icon"
-  >
-    <circle cx={11} cy={11} r={7} />
-    <path d="M21 21l-4.3-4.3" />
-  </svg>
-);
-const IconClose = () => (
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
-    <path d="M6 6l12 12M18 6L6 18" />
-  </svg>
-);
-
-export function CoverageTab({
-  engagementKey,
-  summary,
-  targets,
-  services,
-  coverageItems,
-}: CoverageTabProps) {
-  const [expandedHost, setExpandedHost] = useState<string | null>(null);
-  const [expandedItem, setExpandedItem] = useState<number | null>(null);
-  const [pages, setPages] = useState<Record<string, number>>({});
-  const [view, setView] = useState<"needs-action" | "ledger">("needs-action");
-
-  // Chip filters (multi-select sets)
-  const [statusFilters, setStatusFilters] = useState<Set<string>>(new Set());
-  const [familyFilters, setFamilyFilters] = useState<Set<string>>(new Set());
-  const [authFilters, setAuthFilters] = useState<Set<string>>(new Set());
-
-  // Tokenized search
-  const [query, setQuery] = useState("");
+function CoverageWorkspace({ engagementKey, summary, refreshVersion = 0, initialItemId, initialDrawerTab }: CoverageTabProps) {
+  const [saved] = useState(() => readSavedView(engagementKey));
+  const [view, setView] = useState<View>(initialItemId !== undefined ? "items" : saved.view);
+  const [filters, setFilters] = useState<CoverageFilters>(saved.filters);
+  const [searchText, setSearchText] = useState(saved.filters.q);
+  const [includeClosed, setIncludeClosed] = useState(saved.includeClosed);
+  const [showAllReasons, setShowAllReasons] = useState(false);
+  // Live updates, throttled into one refresh per window plus a trailing one;
+  // "Try again" after a failed read re-reads every source the same way.
+  const liveToken = useLiveRefreshToken(refreshVersion, LIVE_REFRESH_MIN_MS);
+  const [retryToken, setRetryToken] = useState(0);
+  const refreshToken = liveToken + retryToken;
+  const [selected, setSelected] = useState<OpenItem | null>(initialItemId !== undefined ? { id: initialItemId, row: null } : null);
+  const [recordTab, setRecordTab] = useState<CoverageRecordTab>(isCoverageRecordTab(initialDrawerTab) ? initialDrawerTab : "why");
+  const [gridSort, setGridSort] = useState<{ sort: CoverageSortKey; dir: CoverageSortDir }>(saved.sort);
+  const invokerRef = useRef<HTMLElement | null>(null);
   const searchRef = useRef<HTMLInputElement | null>(null);
 
-  const summaryAvailable = summary !== null;
-  const coverageStatuses = summary?.coverage_statuses ?? {};
-  const totalCoverage = Object.values(coverageStatuses).reduce((a, b) => a + b, 0);
-  const loadedCoverage = coverageItems.length;
-  const coverageIsPartial = totalCoverage > loadedCoverage;
-  const statusKeys = useMemo(
-    () => Object.keys(coverageStatuses).sort((a, b) => {
-      const aIndex = STATUS_ORDER.indexOf(a);
-      const bIndex = STATUS_ORDER.indexOf(b);
-      return (aIndex < 0 ? STATUS_ORDER.length : aIndex)
-        - (bIndex < 0 ? STATUS_ORDER.length : bIndex)
-        || a.localeCompare(b);
-    }),
-    [coverageStatuses],
-  );
+  // Typing updates the box immediately; the server sees it after a pause.
+  useEffect(() => {
+    if (searchText === filters.q) return;
+    const timer = window.setTimeout(() => setFilters((current) => ({ ...current, q: searchText })), SEARCH_DEBOUNCE_MS);
+    return () => window.clearTimeout(timer);
+  }, [searchText, filters.q]);
 
-  // Build lookup: service_id → target host / surface name
-  const serviceHostMap = useMemo(() => {
-    const targetHostById = new Map<number, string>();
-    for (const t of targets) targetHostById.set(t.id, t.host || t.hostname || t.identity);
-
-    const map = new Map<number, string>();
-    for (const svc of services) {
-      const targetHost = targetHostById.get(svc.target_id);
-      map.set(svc.id, targetHost || extractHost(svc.endpoint));
+  // The committed view (not the half-typed search) is kept for the next visit.
+  useEffect(() => {
+    try {
+      const kept: CoverageSavedView = { view, filters, includeClosed, sort: gridSort };
+      window.sessionStorage.setItem(viewKey(engagementKey), JSON.stringify(kept));
+    } catch {
+      // Browser storage may be unavailable; the view just resets next visit.
     }
-    return map;
-  }, [targets, services]);
+  }, [engagementKey, view, filters, includeClosed, gridSort]);
 
-  const serviceNameMap = useMemo(() => {
-    const m = new Map<number, string>();
-    for (const svc of services) m.set(svc.id, svc.service || "");
-    return m;
-  }, [services]);
-
-  // Services count per host
-  const serviceCountByHost = useMemo(() => {
-    const counts = new Map<string, number>();
-    for (const svc of services) {
-      const host = serviceHostMap.get(svc.id) ?? "unknown";
-      counts.set(host, (counts.get(host) ?? 0) + 1);
+  // The URL owns which item's record is open and which section it shows.
+  useEffect(() => {
+    if (initialItemId === undefined) {
+      setSelected(null);
+      return;
     }
-    return counts;
-  }, [services, serviceHostMap]);
+    setView("items");
+    setSelected((current) => (current?.id === initialItemId ? current : { id: initialItemId, row: null }));
+  }, [initialItemId]);
+  useEffect(() => {
+    setRecordTab(isCoverageRecordTab(initialDrawerTab) ? initialDrawerTab : "why");
+  }, [initialDrawerTab]);
 
-  // Resolve a row's host once so we can use it for both filtering & grouping
-  const hostOf = useCallback(
-    (item: AssessmentCoverageItem): string => {
-      if (item.service_id != null) {
-        const host = serviceHostMap.get(item.service_id);
-        if (host) return host;
-      }
-      if (item.canonical_url) return extractHost(item.canonical_url);
-      if (item.service_endpoint) return extractHost(item.service_endpoint);
-      return "unknown";
-    },
-    [serviceHostMap],
-  );
-
-  const surfaceOf = useCallback(
-    (item: AssessmentCoverageItem): string => {
-      if (item.service_name) return item.service_name;
-      if (item.service_id != null) return serviceNameMap.get(item.service_id) || "";
-      return "";
-    },
-    [serviceNameMap],
-  );
-
-  const parsedQuery = useMemo(() => parseQuery(query), [query]);
-
-  const matchesQuery = useCallback(
-    (item: AssessmentCoverageItem, parsed: ParsedQuery): boolean => {
-      const host = hostOf(item);
-      const surface = surfaceOf(item);
-      for (const tok of parsed.tokens) {
-        const v = tok.value;
-        switch (tok.scope) {
-          case "status":
-            if ((item.status || "").toLowerCase() !== v) return false;
-            break;
-          case "host":
-            if (!host.toLowerCase().includes(v)) return false;
-            break;
-          case "surface":
-          case "service":
-            if (!surface.toLowerCase().includes(v)) return false;
-            break;
-          case "method":
-            if ((item.method || "").toLowerCase() !== v) return false;
-            break;
-          case "family":
-            if (!(item.attack_family || "").toLowerCase().includes(v)) return false;
-            break;
-          case "slot":
-            if (!(item.input_slot || "").toLowerCase().includes(v)) return false;
-            break;
-          case "auth":
-            if (!(item.auth_context || "").toLowerCase().includes(v)) return false;
-            break;
-          case "endpoint": {
-            const hay = `${item.canonical_url || ""} ${item.service_endpoint || ""}`;
-            if (!hay.toLowerCase().includes(v)) return false;
-            break;
-          }
-        }
-      }
-      if (parsed.freeTerms.length) {
-        const corpus = [
-          item.status,
-          item.method,
-          item.attack_family,
-          item.input_slot,
-          item.auth_context,
-          item.canonical_url,
-          item.service_endpoint,
-          item.service_name,
-          item.notes,
-          host,
-          surface,
-        ]
-          .filter(Boolean)
-          .join(" ")
-          .toLowerCase();
-        for (const t of parsed.freeTerms) if (!corpus.includes(t)) return false;
-      }
-      return true;
-    },
-    [hostOf, surfaceOf],
-  );
-
-  // Apply chip + search filters
-  const filteredItems = useMemo(() => {
-    return coverageItems.filter((item) => {
-      if (statusFilters.size && !statusFilters.has(item.status)) return false;
-      if (familyFilters.size && !familyFilters.has(item.attack_family)) return false;
-      if (authFilters.size && !authFilters.has(item.auth_context)) return false;
-      if (!matchesQuery(item, parsedQuery)) return false;
-      return true;
-    });
-  }, [coverageItems, statusFilters, familyFilters, authFilters, parsedQuery, matchesQuery]);
-
-  const hasAnyFilter =
-    statusFilters.size + familyFilters.size + authFilters.size > 0 || Boolean(query.trim());
-
-  // Group filtered items by host (preserves tree structure)
-  const hostGroups = useMemo(() => {
-    const map = new Map<string, AssessmentCoverageItem[]>();
-
-    for (const item of filteredItems) {
-      const host = hostOf(item);
-      const list = map.get(host) ?? [];
-      list.push(item);
-      map.set(host, list);
-    }
-
-    // An unfiltered ledger preserves target hosts with no work. Once filters
-    // are active, an empty host is a false match and only adds noise.
-    if (!hasAnyFilter) {
-      for (const t of targets) {
-        const host = t.host || t.hostname || t.identity;
-        if (!map.has(host)) map.set(host, []);
-      }
-    }
-
-    const groups: HostGroup[] = [];
-    for (const [host, items] of map) {
-      groups.push({ host, items, serviceCount: serviceCountByHost.get(host) ?? 0 });
-    }
-    groups.sort((a, b) => b.items.length - a.items.length || a.host.localeCompare(b.host));
-    return groups;
-  }, [filteredItems, hasAnyFilter, hostOf, serviceCountByHost, targets]);
-
-  // Counts per chip dimension (independent of that dimension's own active filter)
-  const statusCounts = useMemo(() => {
-    const c: Record<string, number> = {};
-    for (const item of coverageItems) {
-      if (familyFilters.size && !familyFilters.has(item.attack_family)) continue;
-      if (authFilters.size && !authFilters.has(item.auth_context)) continue;
-      if (!matchesQuery(item, parsedQuery)) continue;
-      const key = item.status || "—";
-      c[key] = (c[key] || 0) + 1;
-    }
-    return c;
-  }, [coverageItems, familyFilters, authFilters, parsedQuery, matchesQuery]);
-
-  const familyCounts = useMemo(() => {
-    const c: Record<string, number> = {};
-    for (const item of coverageItems) {
-      if (statusFilters.size && !statusFilters.has(item.status)) continue;
-      if (authFilters.size && !authFilters.has(item.auth_context)) continue;
-      if (!matchesQuery(item, parsedQuery)) continue;
-      const key = item.attack_family || "—";
-      c[key] = (c[key] || 0) + 1;
-    }
-    return c;
-  }, [coverageItems, statusFilters, authFilters, parsedQuery, matchesQuery]);
-
-  const authCounts = useMemo(() => {
-    const c: Record<string, number> = {};
-    for (const item of coverageItems) {
-      if (statusFilters.size && !statusFilters.has(item.status)) continue;
-      if (familyFilters.size && !familyFilters.has(item.attack_family)) continue;
-      if (!matchesQuery(item, parsedQuery)) continue;
-      const key = item.auth_context || "—";
-      c[key] = (c[key] || 0) + 1;
-    }
-    return c;
-  }, [coverageItems, statusFilters, familyFilters, parsedQuery, matchesQuery]);
-
-  const statusOrder = useMemo(
-    () => Object.keys(statusCounts).sort((a, b) => a.localeCompare(b)),
-    [statusCounts],
-  );
-  const familyOrder = useMemo(
-    () => Object.keys(familyCounts).sort((a, b) => a.localeCompare(b)),
-    [familyCounts],
-  );
-  const authOrder = useMemo(
-    () => Object.keys(authCounts).sort((a, b) => a.localeCompare(b)),
-    [authCounts],
-  );
-
-  const activeFilterCount =
-    statusFilters.size + familyFilters.size + authFilters.size + (query ? 1 : 0);
-  const needsActionItems = summary?.open_coverage_items?.length
-    ? summary.open_coverage_items
-    : coverageItems.filter((item) => ATTENTION_STATUSES.has(item.status));
-  const serviceGaps = summary?.service_coverage_gaps ?? [];
-
-  const toggle = useCallback(
-    (
-      current: Set<string>,
-      setter: (next: Set<string>) => void,
-      value: string,
-    ) => {
-      const next = new Set(current);
-      if (next.has(value)) next.delete(value);
-      else next.add(value);
-      setter(next);
-    },
-    [],
-  );
-
-  const clearAll = useCallback(() => {
-    setStatusFilters(new Set());
-    setFamilyFilters(new Set());
-    setAuthFilters(new Set());
-    setQuery("");
+  const openItem = useCallback((item: CoverageLedgerItem, invoker: HTMLElement | null) => {
+    invokerRef.current = invoker ?? searchRef.current;
+    setSelected({ id: item.id, row: item });
+    setRecordTab("why");
+    writeWorkspaceHash(engagementHref(engagementKey, { tab: "coverage", item: item.id }));
+  }, [engagementKey]);
+  // Stepping keeps the open section, like the Findings record.
+  const stepToItem = useCallback((item: CoverageLedgerItem) => {
+    setSelected({ id: item.id, row: item });
+    writeWorkspaceHash(engagementHref(engagementKey, { tab: "coverage", item: item.id, dtab: recordTab === "why" ? undefined : recordTab }));
+  }, [engagementKey, recordTab]);
+  const closeItem = useCallback(() => {
+    setSelected(null);
+    writeWorkspaceHash(engagementHref(engagementKey, { tab: "coverage" }));
+  }, [engagementKey]);
+  const chooseRecordTab = useCallback((next: CoverageRecordTab) => {
+    setRecordTab(next);
+    if (selected) writeWorkspaceHash(engagementHref(engagementKey, { tab: "coverage", item: selected.id, dtab: next === "why" ? undefined : next }));
+  }, [engagementKey, selected]);
+  const acceptRow = useCallback((row: CoverageLedgerItem) => {
+    setSelected((current) => (current?.id === row.id ? { id: row.id, row } : current));
   }, []);
 
-  function getPage(host: string) {
-    return pages[host] ?? 0;
-  }
-  function setPage(host: string, page: number) {
-    setPages((p) => ({ ...p, [host]: page }));
-  }
+  const retry = useCallback(() => setRetryToken((token) => token + 1), []);
 
-  useEffect(() => {
-    setPages((current) => {
-      const next: Record<string, number> = {};
-      let changed = false;
-      for (const { host, items } of hostGroups) {
-        const totalPages = Math.max(1, Math.ceil(items.length / PAGE_SIZE));
-        const currentPage = current[host] ?? 0;
-        const clampedPage = Math.min(currentPage, totalPages - 1);
-        next[host] = clampedPage;
-        if (clampedPage !== currentPage) {
-          changed = true;
-        }
-      }
-      if (Object.keys(current).length !== Object.keys(next).length) {
-        changed = true;
-      }
-      return changed ? next : current;
-    });
-  }, [hostGroups]);
+  const filtersKey = useMemo(() => coverageFiltersKey(filters), [filters]);
 
-  // `/` focuses search, Esc blurs
+  // Previous / Next walk the paged list in the grid's order: the server
+  // locates the open item under the current filters and sort, so stepping
+  // crosses block boundaries the grid has not loaded.
+  const selectedId = selected?.id ?? null;
+  const resultsRef = useRef<HTMLDivElement | null>(null);
+  const recordNavigation = useRecordPosition<CoverageLedgerItem>({
+    key: selectedId === null ? null : String(selectedId),
+    identity: JSON.stringify([engagementKey, filtersKey, gridSort.sort, gridSort.dir, refreshToken]),
+    load: () => fetchCoveragePosition(engagementKey, selectedId as number, filters, gridSort),
+    keyOf: (item) => String(item.id),
+    open: stepToItem,
+  });
+  // Back to results lands on the item last shown (after stepping, or from a
+  // deep link), scrolling the grid to its row.
+  const revealRef = useRef<((index: number) => void) | null>(null);
+  const lastIndexRef = useRef<number | null>(null);
+  if (selectedId !== null && typeof recordNavigation.index === "number" && !recordNavigation.pending) {
+    lastIndexRef.current = recordNavigation.index;
+  }
+  useResultsScrollMemory(resultsRef, selected !== null, {
+    recordKey: selectedId,
+    reveal: () => {
+      if (lastIndexRef.current !== null) revealRef.current?.(lastIndexRef.current);
+    },
+  });
+  const facets = useCoalescedRequest(
+    `${engagementKey}\u0000${filtersKey}`,
+    useCallback(() => fetchCoverageFacets(engagementKey, filters), [engagementKey, filters]),
+    refreshToken,
+  );
+
+  const reasonFilters = useMemo<CoverageFilters>(
+    () => ({ ...EMPTY_COVERAGE_FILTERS, status: includeClosed ? [] : [...OPEN_COVERAGE_STATUSES] }),
+    [includeClosed],
+  );
+  const reasonLimit = showAllReasons ? SHOW_ALL_REASONS_LIMIT : undefined;
+  const rollup = useCoalescedRequest(
+    `${engagementKey}\u0000${includeClosed}\u0000${reasonLimit ?? ""}`,
+    useCallback(
+      () => fetchCoverageReasons(engagementKey, reasonFilters, reasonLimit),
+      [engagementKey, reasonFilters, reasonLimit],
+    ),
+    refreshToken,
+    view === "reasons",
+  );
+
+  const [refreshedAt, setRefreshedAt] = useState<string | null>(null);
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      const target = e.target as HTMLElement | null;
+    if (facets.data) setRefreshedAt(new Date().toISOString());
+  }, [facets.data]);
+
+  const statusTotals = facets.data?.status_totals ?? null;
+  const ledgerTotal = statusTotals ? Object.values(statusTotals).reduce((sum, count) => sum + count, 0) : null;
+  const openTotal = statusTotals
+    ? OPEN_COVERAGE_STATUSES.reduce((sum, status) => sum + (statusTotals[status] ?? 0), 0)
+    : null;
+
+  const showItems = useCallback((next: CoverageFilters) => {
+    setSearchText(next.q);
+    setFilters(next);
+    setView("items");
+  }, []);
+
+  const pickReason = useCallback(
+    (status: string, entry: CoverageReasonEntry) => {
+      showItems({
+        ...EMPTY_COVERAGE_FILTERS,
+        status: [status],
+        ...(entry.reason != null
+          ? { reason: entry.reason }
+          : { reason_missing: true, created_from: entry.created_from ?? "" }),
+      });
+    },
+    [showItems],
+  );
+
+  // `/` jumps to the item search from anywhere on the tab (not over a record).
+  const drawerOpenRef = useRef(false);
+  drawerOpenRef.current = selected !== null;
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
       const tag = (target?.tagName || "").toLowerCase();
-      const isTyping = tag === "input" || tag === "textarea";
-      if (!isTyping && e.key === "/") {
-        e.preventDefault();
-        searchRef.current?.focus();
-        return;
-      }
-      if (e.key === "Escape" && isTyping && target === searchRef.current) {
-        searchRef.current?.blur();
-      }
+      if (event.key !== "/" || tag === "input" || tag === "textarea" || target?.isContentEditable) return;
+      if (event.metaKey || event.ctrlKey || event.altKey || drawerOpenRef.current) return;
+      event.preventDefault();
+      setView("items");
+      window.setTimeout(() => searchRef.current?.focus(), 0);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  function splitEndpoint(item: AssessmentCoverageItem): { method: string; endpoint: string } {
-    const method = item.method ?? "";
-    if (item.canonical_url) {
-      try {
-        const url = new URL(item.canonical_url);
-        return { method, endpoint: url.pathname + url.search };
-      } catch {
-        return { method, endpoint: item.canonical_url };
-      }
-    }
-    return { method, endpoint: item.service_endpoint || "—" };
-  }
-
   return (
-    <>
-      {/* Coverage status breakdown */}
-      <section className="panel">
-        <div className="panel-header">
-          <h2>Test coverage</h2>
-          <p className="meta-text">
-            {summaryAvailable ? `${totalCoverage} total items` : "Summary unavailable"}
-          </p>
+    <div className="cov-page">
+      <PageHeader
+        className="cov-head"
+        title="Coverage"
+        titleId="coverage-title"
+        purpose="Every test Vigil planned for this target and where it stands. Blocked and deferred items always show why."
+        hidden={selected !== null}
+        stats={[
+          { value: openTotal, label: "open", tone: openTotal ? "warning" : undefined, title: "Blocked, deferred, pending or queued items that still owe a test" },
+          { value: ledgerTotal, label: ledgerTotal === 1 ? "item" : "items", title: "Every coverage item in the ledger" },
+        ]}
+        status={facets.loading && facets.data ? "Updating…" : refreshedAt ? <>Updated <TimeStamp value={refreshedAt} /></> : null}
+      >
+        <div className="cov-head-body">
+          <SegmentedControl<View>
+            label="Coverage view"
+            value={view}
+            onChange={setView}
+            options={[
+              {
+                value: "reasons",
+                label: "Open work by reason",
+                description: "Blocked, deferred, pending and queued items grouped by the latest reason recorded for each.",
+              },
+              { value: "items", label: "All items", description: "Every item in the ledger, with search and filters." },
+            ]}
+          />
+          {facets.error && !facets.data ? (
+            <p className="error-text" role="alert">
+              Coverage totals unavailable: {facets.error}{" "}
+              <button type="button" className="ui-clear-filters" onClick={retry} disabled={facets.loading}>
+                Try again
+              </button>
+            </p>
+          ) : (
+            <CoverageStatusBar
+              totals={statusTotals}
+              compact={view === "items"}
+              onPickStatus={(status) => showItems({ ...EMPTY_COVERAGE_FILTERS, status: [status] })}
+            />
+          )}
+          {!facets.data ? <SlowLoadHint active={facets.loading} what="coverage totals" detail="Large ledgers take a few seconds." /> : null}
         </div>
-        {!summaryAvailable ? (
-          <p className="data-boundary-note" role="status">
-            Summary unavailable. Showing {loadedCoverage.toLocaleString()} loaded row
-            {loadedCoverage === 1 ? "" : "s"} only; totals and percentages are unknown.
-          </p>
-        ) : totalCoverage > 0 ? (
-          <div className="coverage-bar-container">
-            <div className="coverage-bar" role="img" aria-label="Coverage status distribution">
-              {statusKeys.map((status) => {
-                const count = coverageStatuses[status];
-                const pct = totalCoverage > 0 ? (count / totalCoverage) * 100 : 0;
-                if (pct === 0) return null;
-                return (
-                  <div
-                    key={status}
-                    className={`coverage-segment coverage-segment-${status}`}
-                    style={{ width: `${pct}%` }}
-                    title={`${status}: ${count}`}
-                  />
-                );
-              })}
-            </div>
-            <div className="coverage-legend">
-              {statusKeys.map((status) => (
-                <span key={status} className="coverage-legend-item">
-                  <span className={`coverage-dot coverage-dot-${status}`} />
-                  {statusLabel(status)}: {coverageStatuses[status]}
-                </span>
-              ))}
-            </div>
-          </div>
-        ) : (
-          <p className="meta-text">No coverage data recorded yet.</p>
-        )}
-        {coverageIsPartial && (
-          <p className="data-boundary-note" role="status">
-            Showing the first {loadedCoverage.toLocaleString()} of {totalCoverage.toLocaleString()} items.
-            Filters below apply only to the loaded rows.
-          </p>
-        )}
-      </section>
+      </PageHeader>
 
-      <div className="coverage-view-switch" aria-label="Coverage view">
-        <button
-          type="button"
-          aria-pressed={view === "needs-action"}
-          onClick={() => setView("needs-action")}
-        >
-          Needs action
-          <span>{needsActionItems.length + serviceGaps.length}</span>
-        </button>
-        <button
-          type="button"
-          aria-pressed={view === "ledger"}
-          onClick={() => setView("ledger")}
-        >
-          Full ledger
-          <span>{loadedCoverage}</span>
-        </button>
+      <div ref={resultsRef} className="cov-results" hidden={selected !== null}>
+      {view === "reasons" ? (
+        <CoverageReasonRollup
+          rollup={rollup.data}
+          loading={rollup.loading}
+          error={rollup.error}
+          onRetry={retry}
+          includeClosed={includeClosed}
+          onIncludeClosedChange={setIncludeClosed}
+          showingAllReasons={showAllReasons}
+          onShowAllReasons={() => setShowAllReasons(true)}
+          onPickReason={pickReason}
+          serviceGaps={summary?.service_coverage_gaps ?? []}
+          ledgerTotal={ledgerTotal}
+        />
+      ) : (
+        <CoverageItemsView
+          engagementKey={engagementKey}
+          filters={filters}
+          filtersKey={filtersKey}
+          onFiltersChange={(next) => {
+            if (next.q !== filters.q) setSearchText(next.q);
+            setFilters(next);
+          }}
+          searchText={searchText}
+          onSearchTextChange={setSearchText}
+          searchRef={searchRef}
+          facets={facets.data}
+          facetsLoading={facets.loading}
+          facetsError={facets.error}
+          ledgerTotal={ledgerTotal}
+          refreshToken={refreshToken}
+          onRetry={retry}
+          selectedId={selectedId}
+          onRowOpen={openItem}
+          sort={gridSort}
+          onSortChange={setGridSort}
+          revealRef={revealRef}
+        />
+      )}
       </div>
 
-      {view === "needs-action" && (
-        <section className="panel coverage-debt">
-          <div className="panel-header">
-            <div>
-              <h2>Needs action</h2>
-              <p className="meta-text">Open coverage work and service-level gaps.</p>
-            </div>
-          </div>
-          {!summaryAvailable && <p className="meta-text">Coverage debt summary unavailable. Open the full ledger to inspect loaded coverage rows.</p>}
-          {needsActionItems.length === 0 && serviceGaps.length === 0 ? (
-            summaryAvailable ? <p className="run-clear-state">No coverage debt in the available summary.</p> : null
-          ) : (
-            <div className="coverage-debt-groups">
-              {needsActionItems.length > 0 && <section>
-                <h3>Coverage work <span>{needsActionItems.length}</span></h3>
-                <div className="coverage-debt-list">
-                  {needsActionItems.map((gap, index) => (
-                    <article key={`${gap.status}-${gap.attack_family}-${gap.input_slot}-${index}`}>
-                      <span className={`badge coverage-badge-${gap.status}`}>{statusLabel(gap.status)}</span>
-                      <div>
-                        <strong>{gap.method ? `${gap.method} ` : ""}{gap.canonical_url || gap.service_endpoint || "Unbound coverage item"}</strong>
-                        <p>{gap.attack_family} · {gap.input_slot} · {gap.auth_context}</p>
-                      </div>
-                      <time>{formatDate(gap.updated_at)}</time>
-                    </article>
-                  ))}
-                </div>
-              </section>}
-              {serviceGaps.length > 0 && <section>
-                <h3>Service gaps <span>{serviceGaps.length}</span></h3>
-                <div className="coverage-debt-list">
-                  {serviceGaps.map((gap, index) => (
-                    <article key={`${gap.endpoint}-${gap.coverage_status}-${index}`}>
-                      <span className={`badge coverage-badge-${gap.coverage_status}`}>{statusLabel(gap.coverage_status)}</span>
-                      <div><strong>{gap.endpoint}</strong><p>{gap.service || "Unclassified service"}</p></div>
-                      <time>{formatDate(gap.updated_at)}</time>
-                    </article>
-                  ))}
-                </div>
-              </section>}
-            </div>
-          )}
-          {coverageIsPartial && (
-            <p className="meta-text">This summary is engagement-wide; the full ledger below remains capped at {loadedCoverage.toLocaleString()} loaded rows.</p>
-          )}
-        </section>
-      )}
-
-      {/* Unified attack surface */}
-      {view === "ledger" && <section className="panel">
-        <div className="panel-header">
-          <h2>Attack surface</h2>
-          <p className="meta-text">
-            {targets.length} host{targets.length !== 1 ? "s" : ""}, {filteredItems.length}
-            {hasAnyFilter ? ` of ${coverageItems.length}` : ""} item
-            {filteredItems.length !== 1 ? "s" : ""}
-            {coverageIsPartial ? " loaded" : ""}
-          </p>
-        </div>
-
-        {/* Toolbar + filter chips (inherits .findings-redesign styles) */}
-        {coverageItems.length > 0 && (
-          <div className="findings-redesign">
-            <div className="panel findings-toolbar-panel">
-              <div className="toolbar">
-                <div className="search-wrap">
-                  <IconSearch />
-                  <input
-                    ref={searchRef}
-                    type="search"
-                    aria-label="Search coverage ledger"
-                    className="search-input"
-                    placeholder="Search host, endpoint, family, auth… (try status:covered host:api method:GET)"
-                    value={query}
-                    onChange={(e) => setQuery(e.target.value)}
-                  />
-                  {query && (
-                    <button
-                      type="button"
-                      className="icon-btn"
-                      onClick={() => setQuery("")}
-                      title="Clear"
-                      style={{ width: 22, height: 22 }}
-                    >
-                      <IconClose />
-                    </button>
-                  )}
-                  <span className="search-kbd">/</span>
-                </div>
-              </div>
-              <div className="filter-row">
-                {statusOrder.length > 0 && (
-                  <div className="filter-group">
-                    <span className="filter-label">Status</span>
-                    {statusOrder.map((s) => (
-                      <button
-                        key={s}
-                        type="button"
-                      className={`filter-chip ${statusFilters.has(s) ? "is-active" : ""}`}
-                      aria-pressed={statusFilters.has(s)}
-                        onClick={() => toggle(statusFilters, setStatusFilters, s)}
-                      >
-                        {s.replace(/_/g, " ")}
-                        <span className="filter-count">{statusCounts[s]}</span>
-                      </button>
-                    ))}
-                  </div>
-                )}
-                {familyOrder.length > 0 && (
-                  <div className="filter-group">
-                    <span className="filter-label">Attack family</span>
-                    {familyOrder.map((s) => (
-                      <button
-                        key={s}
-                        type="button"
-                      className={`filter-chip ${familyFilters.has(s) ? "is-active" : ""}`}
-                      aria-pressed={familyFilters.has(s)}
-                        onClick={() => toggle(familyFilters, setFamilyFilters, s)}
-                      >
-                        {s.replace(/_/g, " ")}
-                        <span className="filter-count">{familyCounts[s]}</span>
-                      </button>
-                    ))}
-                  </div>
-                )}
-                {authOrder.length > 0 && (
-                  <div className="filter-group">
-                    <span className="filter-label">Auth</span>
-                    {authOrder.map((s) => (
-                      <button
-                        key={s}
-                        type="button"
-                      className={`filter-chip ${authFilters.has(s) ? "is-active" : ""}`}
-                      aria-pressed={authFilters.has(s)}
-                        onClick={() => toggle(authFilters, setAuthFilters, s)}
-                      >
-                        {s.replace(/_/g, " ")}
-                        <span className="filter-count">{authCounts[s]}</span>
-                      </button>
-                    ))}
-                  </div>
-                )}
-                {activeFilterCount > 0 && (
-                  <button type="button" className="filter-clear" onClick={clearAll}>
-                    Clear all ({activeFilterCount})
-                  </button>
-                )}
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* Host groups */}
-        {hostGroups.length > 0 ? (
-          <div className="coverage-tree" style={{ marginTop: "14px" }}>
-            {hostGroups.map(({ host, items, serviceCount }) => {
-              const isExpanded = expandedHost === host;
-              const page = getPage(host);
-              const totalPages = Math.max(1, Math.ceil(items.length / PAGE_SIZE));
-              const pageItems = items.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
-
-              return (
-                <div key={host} className="coverage-tree-node">
-                  <button
-                    type="button"
-                    className="coverage-tree-header"
-                    aria-expanded={isExpanded}
-                    aria-controls={`coverage-host-${host.replace(/[^a-zA-Z0-9_-]/g, "-")}`}
-                    onClick={() => {
-                      setExpandedHost(isExpanded ? null : host);
-                    }}
-                  >
-                    <span>{isExpanded ? "▾" : "▸"}</span>
-                    <strong>{host}</strong>
-                    <span className="meta-text">
-                      {items.length} item{items.length !== 1 ? "s" : ""}
-                      {serviceCount > 0
-                        ? `, ${serviceCount} service${serviceCount !== 1 ? "s" : ""}`
-                        : ""}
-                    </span>
-                  </button>
-                  {isExpanded && (
-                    <div id={`coverage-host-${host.replace(/[^a-zA-Z0-9_-]/g, "-")}`} style={{ padding: "0 14px 14px" }}>
-                      {items.length > 0 ? (
-                        <>
-                          <div className="coverage-items-grid">
-                            <div className="coverage-items-header coverage-items-6col">
-                              <span>Method</span>
-                              <span>Endpoint</span>
-                              <span>Attack family</span>
-                              <span>Input slot</span>
-                              <span>Auth</span>
-                              <span>Status</span>
-                            </div>
-                            {pageItems.map((item) => {
-                              const { method, endpoint } = splitEndpoint(item);
-                              return (
-                                <div key={item.id} className="coverage-item-record">
-                                  <button
-                                    type="button"
-                                    className="coverage-items-row coverage-items-6col"
-                                    aria-expanded={expandedItem === item.id}
-                                    aria-controls={`coverage-item-${item.id}`}
-                                    onClick={() => setExpandedItem(expandedItem === item.id ? null : item.id)}
-                                  >
-                                    <span className="mono-text">{method || "—"}</span>
-                                    <span className="mono-text" title={item.canonical_url || item.service_endpoint || ""}>{endpoint}</span>
-                                    <span>{item.attack_family}</span>
-                                    <span>{item.input_slot}</span>
-                                    <span>{item.auth_context}</span>
-                                    <span className={`badge coverage-badge-${item.status}`}>{statusLabel(item.status)}</span>
-                                  </button>
-                                  {expandedItem === item.id && (
-                                    <div id={`coverage-item-${item.id}`} className="coverage-item-detail">
-                                      <div><span>Rationale / closeout notes</span><p>{item.notes || "No rationale recorded."}</p></div>
-                                      <dl>
-                                        <div><dt>Created</dt><dd>{formatDate(item.created_at)}</dd></div>
-                                        <div><dt>Updated</dt><dd>{formatDate(item.updated_at)}</dd></div>
-                                      </dl>
-                                      {item.request_variant_id != null && (
-                                        <a href={engagementHref(engagementKey, { tab: "http", request: item.request_variant_id })}>
-                                          Open request variant #{item.request_variant_id}
-                                        </a>
-                                      )}
-                                    </div>
-                                  )}
-                                </div>
-                              );
-                            })}
-                          </div>
-                          {totalPages > 1 && (
-                            <div className="pager">
-                              <button
-                                type="button"
-                                className="pager-button"
-                                disabled={page === 0}
-                                onClick={() => setPage(host, page - 1)}
-                              >
-                                Prev
-                              </button>
-                              <span className="meta-text">
-                                Page {page + 1} of {totalPages}
-                              </span>
-                              <button
-                                type="button"
-                                className="pager-button"
-                                disabled={page >= totalPages - 1}
-                                onClick={() => setPage(host, page + 1)}
-                              >
-                                Next
-                              </button>
-                            </div>
-                          )}
-                        </>
-                      ) : (
-                        <p className="meta-text" style={{ padding: "8px 0" }}>
-                          No coverage items for this host.
-                        </p>
-                      )}
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-        ) : (
-          <p className="meta-text" style={{ marginTop: "8px" }}>
-            {hasAnyFilter ? "No coverage items match the current filters." : "No targets discovered yet."}
-          </p>
-        )}
-      </section>}
-    </>
+      {selected ? (
+        <RecordView
+          label="Coverage item record"
+          noun="coverage item"
+          navigation={recordNavigation}
+          onBack={closeItem}
+          titleId="coverage-record-title"
+          returnFocusRef={invokerRef}
+          className={`cov-record${selected.row ? ` cov-status-${selected.row.status}` : ""}`}
+        >
+          <CoverageItemRecord
+            key={selected.id}
+            engagementKey={engagementKey}
+            itemId={selected.id}
+            row={selected.row}
+            tab={recordTab}
+            onTabChange={chooseRecordTab}
+            titleId="coverage-record-title"
+            refreshToken={refreshToken}
+            onRow={acceptRow}
+          />
+        </RecordView>
+      ) : null}
+    </div>
   );
 }

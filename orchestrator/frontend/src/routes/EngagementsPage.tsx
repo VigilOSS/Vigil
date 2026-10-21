@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { MoreHorizontal } from "lucide-react";
 import {
   deleteEngagement,
   getDashboardSummary,
@@ -6,11 +7,14 @@ import {
   type Engagement,
 } from "../lib/api";
 import { ThemeToggle } from "../components/ThemeToggle";
+import { TimeStamp } from "../components/formatting";
+import { compareServerTime } from "../lib/serverTime";
 import { CardSkeleton, ChartSkeleton } from "../components/Skeletons";
 import { SeverityDonut } from "../components/charts/SeverityDonut";
 import { SeverityMiniBar } from "../components/charts/SeverityMiniBar";
 import { SummaryStatBar } from "../components/charts/SummaryStatBar";
 import type { SummaryStatBarItem } from "../components/charts/SummaryStatBar";
+import { ResultsSummary, SortIndicator, StatusPill, compareStatus, describeSort, statusLabel, type SortDirection, type SortKind } from "../components/ui";
 import { useBodyScrollLock, useModalFocus } from "../lib/modalScrollLock";
 import "../styles/workspace.css";
 
@@ -36,6 +40,16 @@ const ENGAGEMENT_SORT_OPTIONS: { value: EngagementSort; label: string }[] = [
   { value: "target", label: "Target (A–Z)" },
   { value: "status", label: "Status" },
 ];
+// The ledger column each sort orders (none for "created", which the ledger
+// does not show), and the words for the order under the search.
+type LedgerColumn = "engagement" | "lifecycle" | "findings" | "updated";
+const ENGAGEMENT_SORT_ORDER: Record<EngagementSort, { column: LedgerColumn | null; label: string; direction: SortDirection; kind: SortKind }> = {
+  activity: { column: "updated", label: "Updated", direction: "desc", kind: "time" },
+  created: { column: null, label: "Created", direction: "desc", kind: "time" },
+  findings: { column: "findings", label: "Current findings", direction: "desc", kind: "number" },
+  target: { column: "engagement", label: "Engagement", direction: "asc", kind: "text" },
+  status: { column: "lifecycle", label: "Lifecycle", direction: "desc", kind: "status" },
+};
 function isEngagementSort(value: string | null): value is EngagementSort {
   return value != null && ENGAGEMENT_SORT_OPTIONS.some((o) => o.value === value);
 }
@@ -53,15 +67,6 @@ function sortedStatusBreakdown(byStatus: Record<string, number>): [string, numbe
   return Object.entries(byStatus).sort((a, b) => b[1] - a[1]);
 }
 
-// Newest-first comparator over ISO timestamps; unparseable / missing values
-// sort last so live engagements stay above malformed rows.
-function descByIso(a: string | undefined, b: string | undefined): number {
-  const ta = a ? new Date(a).getTime() : NaN;
-  const tb = b ? new Date(b).getTime() : NaN;
-  const va = Number.isNaN(ta) ? -Infinity : ta;
-  const vb = Number.isNaN(tb) ? -Infinity : tb;
-  return vb - va;
-}
 
 export function EngagementsPage({
   engagements,
@@ -77,7 +82,7 @@ export function EngagementsPage({
   const [sort, setSort] = useState<EngagementSort>(() => readEngagementSort());
   const [query, setQuery] = useState("");
   const deleteDialogRef = useRef<HTMLDivElement | null>(null);
-  const deleteOpenerRef = useRef<HTMLButtonElement | null>(null);
+  const deleteOpenerRef = useRef<HTMLElement | null>(null);
 
   // Persist the chosen sort so it survives reload (FindingsTab persistence idiom).
   useEffect(() => {
@@ -146,11 +151,11 @@ export function EngagementsPage({
   // (engagements with no summary row count as -1 so they sort last, desc).
   const sortedEngagements = useMemo(() => {
     const needle = query.trim().toLowerCase();
-    const copy = engagements.filter(row => !needle || `${row.target} ${row.key} ${row.status}`.toLowerCase().includes(needle));
+    const copy = engagements.filter(row => !needle || `${row.target} ${row.key} ${row.status} ${statusLabel("engagement", row.status)}`.toLowerCase().includes(needle));
     copy.sort((a, b) => {
       switch (sort) {
         case "created":
-          return descByIso(a.created_at, b.created_at);
+          return compareServerTime(a.created_at, b.created_at, "desc");
         case "findings": {
           const ca = findingByKey.get(a.key)?.count ?? -1;
           const cb = findingByKey.get(b.key)?.count ?? -1;
@@ -160,17 +165,26 @@ export function EngagementsPage({
         case "target":
           return (a.target || a.key).localeCompare(b.target || b.key);
         case "status": {
-          const cmp = (a.status || "").localeCompare(b.status || "");
+          // Lifecycle order (in progress, completed, archived), not alphabetical.
+          const cmp = compareStatus("engagement", a.status, b.status);
           if (cmp !== 0) return cmp;
           return (a.target || a.key).localeCompare(b.target || b.key);
         }
         case "activity":
         default:
-          return descByIso(a.updated_at, b.updated_at);
+          return compareServerTime(a.updated_at, b.updated_at, "desc");
       }
     });
     return copy;
   }, [engagements, sort, findingByKey, query]);
+
+  const order = ENGAGEMENT_SORT_ORDER[sort];
+  const sortHeader = (column: LedgerColumn, label: string) => (
+    <th aria-sort={order.column === column ? (order.direction === "asc" ? "ascending" : "descending") : undefined}>
+      {label}
+      {order.column === column && <> <SortIndicator direction={order.direction} /></>}
+    </th>
+  );
 
   const statBarItems: SummaryStatBarItem[] = useMemo(() => {
     const counts = summary?.engagement_counts;
@@ -300,7 +314,7 @@ export function EngagementsPage({
                 <ul className="dashboard-status-breakdown">
                   {statusBreakdown.map(([statusName, count]) => (
                     <li key={statusName} className="dashboard-status-row">
-                      <span className="dashboard-status-label">{statusName.replace(/_/g, " ")}</span>
+                      <span className="dashboard-status-label">{statusLabel("engagement", statusName)}</span>
                       <span className="dashboard-status-track" aria-hidden="true">
                         <span
                           className="dashboard-status-fill"
@@ -321,13 +335,21 @@ export function EngagementsPage({
 
       <section className="engagement-ledger">
         <p className="meta-text">Current findings exclude merged and false-positive records.</p>
+        {engagements.length > 0 && (
+          <ResultsSummary
+            shown={sortedEngagements.length}
+            total={engagements.length}
+            noun="engagements"
+            sort={describeSort(order.label, order.direction, order.kind)}
+          />
+        )}
         {loadError ? (
           <section className="panel empty-state error-text" role="alert">
             Engagement list unavailable: {loadError}
           </section>
         ) : null}
         {sortedEngagements.length > 0 && <div className="engagement-ledger-scroll" role="region" aria-label="Engagement ledger" tabIndex={0}><table className="engagement-ledger-table" aria-label="Engagements">
-          <thead><tr><th>Engagement</th><th>Lifecycle</th><th>Enabled tracks</th><th>Current findings</th><th>Updated</th><th><span className="sr-only">Actions</span></th></tr></thead>
+          <thead><tr>{sortHeader("engagement", "Engagement")}{sortHeader("lifecycle", "Lifecycle")}<th>Enabled tracks</th>{sortHeader("findings", "Current findings")}{sortHeader("updated", "Updated")}<th><span className="sr-only">Actions</span></th></tr></thead>
           <tbody>{sortedEngagements.map((engagement) => {
           const rollup = findingByKey.get(engagement.key);
           return (
@@ -343,28 +365,23 @@ export function EngagementsPage({
                     </button>
                   <p className="meta-text">{engagement.key}</p>
               </td>
-              <td><span className={`status-pill status-${engagement.status}`}>{engagement.status.replace(/_/g, " ")}</span></td>
+              <td><StatusPill domain="engagement" value={engagement.status || "unknown"} size="sm" /></td>
               <td><div className="index-track-list">{Object.entries(engagement.track_state ?? {}).map(([name, state]) => <span key={name}>{name}: {state.phase || "unknown"}</span>)}
                 {Object.keys(engagement.track_state ?? {}).length === 0 && <span className="meta-text">Track state unavailable · legacy: {engagement.current_phase}</span>}
                 {engagement.aggregate_complete === true && <span className="meta-text">All tracks complete</span>}
               </div></td>
               <td>{rollup ? <><strong>{rollup.count}</strong>{rollup.count > 0 && <SeverityMiniBar counts={rollup.severities} />}</> : <span className="meta-text">Unavailable</span>}</td>
-              <td><time dateTime={engagement.updated_at}>{Number.isNaN(Date.parse(engagement.updated_at)) ? engagement.updated_at || "Unknown" : new Date(engagement.updated_at).toLocaleString()}</time><p className="meta-text">{engagement.session_count} sessions</p></td>
+              <td><TimeStamp value={engagement.updated_at} fallback="Unknown" />{engagement.session_count > 0 && <p className="meta-text">{engagement.session_count} {engagement.session_count === 1 ? "session" : "sessions"}</p>}</td>
               <td>
-                  <button
-                    type="button"
-                    className="engagement-delete-button"
-                    onClick={(e) => {
-                      deleteOpenerRef.current = e.currentTarget;
-                      setPendingDelete(engagement);
-                      setConfirmText("");
-                      setDeleteError(null);
-                    }}
-                    aria-label={`Delete engagement ${engagement.key}`}
-                    title="Delete engagement and all findings, probes, command runs, and code analysis."
-                  >
-                    Delete
-                  </button>
+                <RowActions
+                  engagementKey={engagement.key}
+                  onDelete={(opener) => {
+                    deleteOpenerRef.current = opener;
+                    setPendingDelete(engagement);
+                    setConfirmText("");
+                    setDeleteError(null);
+                  }}
+                />
               </td>
             </tr>
           );
@@ -379,7 +396,7 @@ export function EngagementsPage({
           ))
         ) : null}
         {engagements.length === 0 && !loading && !loadError ? (
-          <section className="panel empty-state">No engagements discovered under `agent/engagements`.</section>
+          <section className="panel empty-state">No engagements discovered under <code>agent/engagements</code>.</section>
         ) : null}
       </section>
 
@@ -439,5 +456,72 @@ export function EngagementsPage({
         </div>
       ) : null}
     </main>
+  );
+}
+
+// Per-row secondary actions behind one quiet button, so the ledger does not
+// carry a destructive control on every row. Delete still opens the typed
+// confirmation dialog.
+function RowActions({ engagementKey, onDelete }: { engagementKey: string; onDelete: (opener: HTMLElement) => void }) {
+  const [open, setOpen] = useState(false);
+  const wrapRef = useRef<HTMLDivElement | null>(null);
+  const buttonRef = useRef<HTMLButtonElement | null>(null);
+  const itemRef = useRef<HTMLButtonElement | null>(null);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    itemRef.current?.focus();
+    const close = (event: Event) => {
+      if (event.target instanceof Node && wrapRef.current?.contains(event.target)) return;
+      setOpen(false);
+    };
+    document.addEventListener("pointerdown", close);
+    document.addEventListener("focusin", close);
+    return () => {
+      document.removeEventListener("pointerdown", close);
+      document.removeEventListener("focusin", close);
+    };
+  }, [open]);
+
+  return (
+    <div className="engagement-row-actions" ref={wrapRef}>
+      <button
+        ref={buttonRef}
+        type="button"
+        className="engagement-row-actions-button"
+        aria-label={`Actions for engagement ${engagementKey}`}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        title="Engagement actions"
+        onClick={() => setOpen((value) => !value)}
+      >
+        <MoreHorizontal size={16} aria-hidden="true" />
+      </button>
+      {open && (
+        <div className="engagement-row-menu" role="menu" aria-label={`Actions for engagement ${engagementKey}`}>
+          <button
+            ref={itemRef}
+            type="button"
+            role="menuitem"
+            className="engagement-row-menu-danger"
+            aria-label={`Delete engagement ${engagementKey}`}
+            title="Delete engagement and all findings, probes, command runs, and code analysis."
+            onKeyDown={(event) => {
+              if (event.key === "Escape" || event.key === "Tab") {
+                if (event.key === "Escape") event.preventDefault();
+                setOpen(false);
+                buttonRef.current?.focus();
+              }
+            }}
+            onClick={() => {
+              setOpen(false);
+              if (buttonRef.current) onDelete(buttonRef.current);
+            }}
+          >
+            Delete engagement…
+          </button>
+        </div>
+      )}
+    </div>
   );
 }

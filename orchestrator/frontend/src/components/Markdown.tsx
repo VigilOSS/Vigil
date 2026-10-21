@@ -13,16 +13,35 @@
 // "markdown body" section) and is driven entirely by theme vars so light
 // and dark both read correctly inside the drawer.
 
-import ReactMarkdown from "react-markdown";
+import type { ComponentPropsWithoutRef } from "react";
+import ReactMarkdown, { type Components, type ExtraProps } from "react-markdown";
 import remarkGfm from "remark-gfm";
 
-export function MarkdownBlock({ text }: { text: string }) {
+type HeadingTag = "h1" | "h2" | "h3" | "h4" | "h5" | "h6";
+const HEADING_TAGS: HeadingTag[] = ["h1", "h2", "h3", "h4", "h5", "h6"];
+
+// Each heading level rendered `offset` levels deeper (level 6 stays 6).
+function shiftedHeadings(offset: number): Components {
+  if (offset <= 0) return {};
+  return Object.fromEntries(HEADING_TAGS.map((tag, index) => {
+    const Shifted = HEADING_TAGS[Math.min(index + offset, HEADING_TAGS.length - 1)];
+    return [tag, ({ node: _node, ...props }: ComponentPropsWithoutRef<HeadingTag> & ExtraProps) => <Shifted {...props} />];
+  }));
+}
+
+/**
+ * `headingOffset` renders the text's headings that many levels deeper, so a
+ * document shown inside a page sits under the page's own headings (a
+ * document's "# Title" becomes an h2 with an offset of 1).
+ */
+export function MarkdownBlock({ text, headingOffset = 0 }: { text: string; headingOffset?: number }) {
   if (!text || !text.trim()) return null;
   return (
     <div className="md-body">
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={{
+          ...shiftedHeadings(headingOffset),
           // Open links in a new tab and harden the rel — react-markdown
           // already strips javascript: URLs, but noopener/noreferrer keeps
           // attacker-supplied links from reaching window.opener.

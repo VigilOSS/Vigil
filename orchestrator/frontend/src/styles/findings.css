@@ -8,22 +8,42 @@
   grid-template-columns: repeat(3, minmax(0, 1fr)) auto;
   align-items: start;
 }
-.findings-workspace .filter-group { min-width: 0; }
-.findings-workspace .filter-label { flex-basis: 100%; }
-.findings-workspace .filter-chip { font-weight: 500; }
-.findings-workspace .filter-clear {
-  min-width: 9rem;
-  margin-left: 0;
-  white-space: nowrap;
-  text-align: right;
+.findings-workspace .filter-row > .ui-filter-group { min-width: 0; align-content: flex-start; }
+/* Facet labels sit above their chips, one track per facet. */
+.findings-workspace .filter-row .ui-filter-label { flex-basis: 100%; }
+/* Recency chips and the sort control share one row above the facet chips. */
+.findings-workspace .findings-order-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px 20px;
+  padding: 10px 14px;
+  border-top: 1px dashed var(--border);
 }
-.findings-workspace .filter-clear:disabled { color: var(--muted); cursor: default; text-decoration: none; }
-.findings-workspace .findings-shell.has-investigation {
-  grid-template-columns: minmax(0, 1fr);
-  gap: 0;
-  align-items: start;
-  border-top: 1px solid var(--border);
-}
+.findings-workspace .findings-sort { display: inline-flex; align-items: center; gap: 8px; }
+.findings-workspace .findings-recent-bar { margin: 0 0 12px; }
+.findings-workspace .findings-recent-bar .timestamp { color: inherit; }
+.findings-workspace .filter-row > .ui-clear-filters { min-width: 9rem; justify-self: end; text-align: right; }
+.findings-workspace .toolbar-right .ui-segmented button { gap: 6px; }
+
+/* Header severity mix: count, bar and name per severity. */
+.findings-sev-mix { display: flex; align-items: flex-end; gap: 4px; }
+.findings-sev-column { display: grid; grid-template-rows: auto 26px auto; justify-items: center; align-items: end; gap: 2px; min-width: 2.7rem; }
+.findings-sev-bar { display: block; width: 18px; border-radius: 4px 4px 2px 2px; }
+.findings-sev-count { color: var(--ink-2); font-size: 0.72rem; font-variant-numeric: tabular-nums; }
+.findings-sev-name { color: var(--muted); font-size: 0.66rem; }
+
+.findings-workspace .mini-finding-row > .sev-tag { min-width: 4.6rem; }
+.findings-workspace .group-highest-severity { font-size: 0.74rem; }
+
+/* The pager repeats under a long page. */
+.findings-workspace .pager-bottom { padding: 14px 0 6px; border-top: 1px solid var(--border); }
+
+/* Jump palette: a note when it lists fewer matches than it found. */
+.findings-workspace .cmd-box { display: flex; flex-direction: column; }
+.findings-workspace .cmd-list { flex: 1 1 auto; min-height: 0; }
+.findings-workspace .cmd-more { margin: 0; padding: 8px 16px; border-bottom: 1px solid var(--border); color: var(--muted); font-size: 0.78rem; }
 .findings-workspace .list-panel {
   border: 0;
   border-radius: 0;
@@ -32,7 +52,7 @@
   display: block;
   min-width: 0;
 }
-.findings-workspace .page-head[hidden],
+.findings-workspace .findings-shell[hidden],
 .findings-workspace .findings-toolbar-panel[hidden],
 .findings-workspace .list-panel[hidden],
 .findings-workspace .findings-shortcuts[hidden] { display: none; }
@@ -42,33 +62,39 @@
 .findings-workspace .group-card-head { padding: 16px; gap: 10px; flex-wrap: wrap; }
 .findings-workspace .group-card-head h3 { font-size: 0.85rem; font-weight: 500; }
 .findings-workspace .grouping-status { font-size: 0.76rem; padding: 12px 16px; flex-wrap: wrap; }
+.findings-workspace .grouping-status .ui-results-summary { font-size: 0.8rem; }
 .findings-workspace .mini-finding-row { border-color: var(--border); transition: background 120ms ease; }
 .findings-workspace .mini-finding-row.is-selected { background: color-mix(in srgb, var(--accent) 8%, transparent); box-shadow: inset 3px 0 var(--accent); }
 .findings-workspace .mini-main { min-width: 0; }
 .findings-workspace .mini-main strong { font-weight: 550; line-height: 1.45; }
 .findings-workspace .mini-main .meta-text { overflow-wrap: anywhere; white-space: normal; }
-.findings-workspace .finding-investigation {
-  min-width: 0;
-  background: var(--panel-strong);
-  scroll-margin-top: 96px;
-}
-.findings-workspace .finding-investigation:focus { outline: none; }
-.findings-workspace .finding-investigation:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
-.findings-workspace .finding-investigation-toolbar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; padding: 12px 22px 0; }
-.findings-workspace .finding-review-navigation { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; }
-.findings-workspace .finding-review-navigation .meta-text { font-variant-numeric: tabular-nums; }
-.findings-workspace .finding-investigation .drawer-panel { border: 0; border-radius: 0; box-shadow: none; background: transparent; max-height: none; overflow: visible; display: block; }
-.findings-workspace .finding-investigation .drawer-hero { padding: 14px 24px 20px; border: 0; background: transparent; }
-.findings-workspace .finding-investigation .drawer-title { font-size: clamp(1.3rem, 1.75vw, 1.75rem); line-height: 1.25; letter-spacing: -0.025em; max-width: none; }
-.findings-workspace .finding-investigation .hero-meta { gap: 8px; }
-.findings-workspace .finding-investigation .submission-blockers { display: grid; gap: 4px; font-size: 0.78rem; line-height: 1.45; }
-.findings-workspace .finding-investigation .submission-blockers code { font-size: 0.7rem; overflow-wrap: anywhere; white-space: normal; }
+/* Row layout: severity dot | title + location | status badges | time. The
+ * time column keeps a fixed width so the times line up down the list. */
+.findings-workspace .mini-finding-row { grid-template-columns: auto minmax(0, 1fr) auto 8.5rem; }
+.findings-workspace .mini-badges { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
+.findings-workspace .finding-row-time { display: grid; justify-items: end; gap: 1px; color: var(--muted); font-size: 0.76rem; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.findings-workspace .finding-row-time-label { font-size: 0.66rem; letter-spacing: 0.06em; text-transform: uppercase; }
+.findings-workspace .finding-row-time .timestamp { color: var(--ink-2); }
+.findings-workspace .group-card-metrics { align-items: center; margin-left: auto; }
+.findings-workspace .group-card-metrics .finding-row-time { margin-left: 6px; min-width: 8.5rem; }
+.findings-workspace .finding-runtime-proof { margin: 0 0 24px; }
+.findings-workspace .finding-record-action { align-self: center; margin-left: 4px; color: var(--accent); font-size: 0.78rem; font-weight: 600; white-space: nowrap; text-decoration: underline; text-underline-offset: 3px; }
+/* Table cells center their content; badges must not inherit the grid's
+ * row-height line-height or they overflow the row. */
+.findings-workspace .grid-host .ag-cell { display: flex; align-items: center; }
+.findings-workspace .grid-host .ag-cell > * { min-width: 0; }
+.findings-workspace .grid-host .ag-cell .pill,
+.findings-workspace .grid-host .ag-cell .badge { line-height: 1.3; }
+.findings-workspace .findings-grid-title { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; white-space: normal; line-height: 1.4; margin-block: 6px; }
+.findings-workspace .findings-grid-ellipsis { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.findings-workspace .findings-grid-title-cell { display: grid; gap: 1px; min-width: 0; margin-block: 6px; }
+.findings-workspace .findings-grid-title-cell .findings-grid-title { margin-block: 0; }
+.findings-workspace .findings-grid-location { color: var(--ink-2); font-family: "Source Code Pro", "SFMono-Regular", monospace; font-size: 0.74rem; line-height: 1.4; }
+.findings-workspace .findings-grid-changed { display: grid; min-width: 0; line-height: 1.35; }
+.findings-workspace .findings-grid-changed-action { color: var(--muted); font-size: 0.72rem; }
+.findings-workspace .record-header .submission-blockers { display: grid; gap: 4px; font-size: 0.78rem; line-height: 1.45; }
+.findings-workspace .record-header .submission-blockers code { font-size: 0.7rem; overflow-wrap: anywhere; white-space: normal; }
 .findings-workspace .finding-evidence-mode { font-size: 0.75rem; color: var(--muted); }
-.findings-workspace .finding-investigation .drawer-tabs { padding: 0 20px; flex-wrap: wrap; gap: 2px; border-bottom: 1px solid var(--border); }
-.findings-workspace .finding-investigation .drawer-tab { font-size: 0.75rem; padding: 12px 9px; }
-.findings-workspace .finding-investigation .drawer-body { padding: 24px; overflow: visible; min-width: 0; }
-.findings-workspace .finding-investigation .section { margin-bottom: 24px; }
-.findings-workspace .finding-investigation .kv-grid { background: transparent; border: 0; border-radius: 0; }
 .findings-workspace .finding-evidence-contributions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 22px; padding: 22px 0; border-block: 1px solid var(--border); margin-bottom: 24px; }
 .findings-workspace .finding-contribution { min-width: 0; }
 .findings-workspace .finding-contribution h3,
@@ -83,15 +109,10 @@
 .findings-workspace .finding-receipt-link { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 14px; color: var(--ink); text-decoration: none; font-size: 0.8rem; }
 .findings-workspace .finding-receipt-link:hover strong { color: var(--accent); text-decoration: underline; text-underline-offset: 3px; }
 .findings-workspace .finding-receipt-link > span:last-child { margin-left: auto; color: var(--muted); }
-.findings-workspace .finding-proof-health { font-weight: 550; }
-.findings-workspace .health-healthy { color: var(--ok); }
-.findings-workspace .health-missing,
-.findings-workspace .health-stale,
-.findings-workspace .health-tombstoned { color: var(--warn); }
 .findings-workspace .finding-receipt-record { margin-top: 10px; font-size: 0.75rem; color: var(--muted); }
 .findings-workspace .finding-receipt-record summary { cursor: pointer; }
 .findings-workspace .finding-relation-link { display: inline-block; margin-top: 12px; font-size: 0.8rem; color: var(--accent); }
-.findings-workspace .finding-remediation { border-block: 1px solid var(--border); padding: 14px 24px; }
+.findings-workspace .finding-remediation { border-top: 1px solid var(--border); padding: 14px 24px; }
 .findings-workspace .finding-remediation-heading { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
 .findings-workspace .finding-remediation-heading .section-title { margin: 0; }
 .findings-workspace .finding-text-action { border: 0; background: transparent; padding: 0; color: var(--accent); font: inherit; font-size: 0.78rem; cursor: pointer; text-decoration: underline; text-underline-offset: 3px; }
@@ -102,24 +123,18 @@
 .findings-workspace .finding-remediation-intake { display: grid; gap: 10px; margin-top: 16px; font-size: 0.8rem; }
 .findings-workspace .finding-remediation-intake select { min-width: 0; width: 100%; border: 1px solid var(--border); background: var(--panel-strong); color: var(--ink); padding: 10px; font: inherit; }
 .findings-workspace .finding-remediation-intake > button { justify-self: start; }
-.findings-workspace .finding-investigation pre { max-width: 100%; }
 @media (max-width: 1180px) {
   .findings-workspace .finding-evidence-contributions { grid-template-columns: 1fr; }
 }
 @media (max-width: 1000px) {
   .findings-workspace .filter-row { grid-template-columns: minmax(0, 1fr); }
-  .findings-workspace .filter-clear { justify-self: end; }
-}
-@media (max-width: 850px) {
-  .findings-workspace .findings-shell.has-investigation { grid-template-columns: minmax(0, 1fr); }
-  .findings-workspace .finding-investigation { border-left: 0; border-top: 1px solid var(--border); }
-  .findings-workspace .finding-investigation { scroll-margin-top: 18px; }
-  .findings-workspace .finding-investigation .drawer-body { padding: 18px; }
 }
 @media (max-width: 620px) {
   .findings-workspace .mini-finding-row { grid-template-columns: auto minmax(0, 1fr); align-items: start; }
-  .findings-workspace .mini-finding-row > .pill,
-  .findings-workspace .mini-finding-row > .tag { grid-column: 2; justify-self: start; max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
+  .findings-workspace .mini-finding-row > .mini-badges,
+  .findings-workspace .mini-finding-row > .finding-row-time { grid-column: 2; justify-self: start; justify-content: flex-start; justify-items: start; }
+  .findings-workspace .mini-badges > .pill,
+  .findings-workspace .mini-badges > .tag { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
   .findings-workspace .mini-main strong,
   .findings-workspace .mini-main .meta-text { white-space: normal; overflow-wrap: anywhere; overflow: visible; }
   .findings-workspace .grouping-status > * { min-width: 0; max-width: 100%; }

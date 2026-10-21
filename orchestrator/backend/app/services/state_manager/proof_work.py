@@ -10,6 +10,7 @@ import hashlib
 import json
 from collections import Counter
 from typing import Any
+from urllib.parse import urlsplit
 
 from fastapi import HTTPException
 
@@ -255,10 +256,23 @@ def _serialize(connection, engagement_id, row, *, with_history=True, view=None):
         _normalized_binding(current) == _normalized_binding(stored)
         and _source_current(current)
     )
-    data['run_ids'] = [r['run_id'] for r in connection.execute(
-        'SELECT run_id FROM assessment_proof_work_runs WHERE work_id=? ORDER BY run_id',
+    data['finding_title'] = finding['title']
+    data['finding_severity'] = finding['severity']
+    linked_runs = connection.execute(
+        'SELECT l.run_id, r.id, r.run_uuid, r.run_kind, r.status, r.started_at, r.finished_at, '
+        '(SELECT COUNT(*) FROM assessment_proof_receipts p '
+        'WHERE p.engagement_id=r.engagement_id AND p.run_id=r.id) AS proof_receipts '
+        'FROM assessment_proof_work_runs l LEFT JOIN assessment_runs r ON r.id=l.run_id '
+        'WHERE l.work_id=? ORDER BY l.run_id',
         (data['id'],),
-    )]
+    ).fetchall()
+    data['run_ids'] = [r['run_id'] for r in linked_runs]
+    # A small per-run summary so the queue can show evidence without the run ledger.
+    data['runs'] = [
+        {key: r[key] for key in ('id', 'run_uuid', 'run_kind', 'status', 'started_at',
+                                 'finished_at', 'proof_receipts')}
+        for r in linked_runs if r['id'] is not None
+    ]
     data['event_count'] = connection.execute(
         'SELECT COUNT(*) FROM assessment_proof_work_events WHERE work_id=?', (data['id'],),
     ).fetchone()[0]
@@ -353,6 +367,54 @@ def _require_current(work):
         _fail('Finding no longer owes runtime proof; inspect its canonical verification state')
 
 
+def _parking_transition(connection, engagement_id, finding_id, park):
+    """The transition that parked the finding: its current plan's, else the newest entry."""
+    if park is not None:
+        return connection.execute(
+            'SELECT reason_code, reason_text, created_at FROM assessment_finding_transitions '
+            'WHERE engagement_id=? AND id=?', (engagement_id, park),
+        ).fetchone()
+    return connection.execute(
+        'SELECT reason_code, reason_text, created_at FROM assessment_finding_transitions '
+        "WHERE engagement_id=? AND finding_id=? AND to_verification_status='pending_runtime_proof' "
+        "AND COALESCE(from_verification_status,'')<>'pending_runtime_proof' ORDER BY id DESC LIMIT 1",
+        (engagement_id, finding_id),
+    ).fetchone()
+
+
+def _source_bound(finding) -> bool:
+    try:
+        provenance = json.loads(finding['provenance_json'] or '{}')
+    except json.JSONDecodeError:
+        return False
+    return isinstance(provenance, dict) and provenance.get('code_snapshot') is not None
+
+
+def _suggested_hosts(finding, view) -> list[str]:
+    """Hosts a live proof could name: the finding's own host, then concrete scope hosts.
+
+    Only hosts that pass the same admission check preparation applies are
+    suggested; wildcard and network scope entries name no single host.
+    """
+    candidates = []
+    for token in str(finding['canonical_location'] or '').split():
+        if '://' in token:
+            host = urlsplit(token).hostname
+            if host:
+                candidates.append(host)
+            break
+    candidates.extend(
+        host for host in view.scope_hosts
+        if host and not any(marker in host for marker in ('*', '/', ':'))
+    )
+    suggested = []
+    for raw in candidates:
+        host = raw.strip().lower().rstrip('.')
+        if host and host not in suggested and admitted_host(host, view.scope_hosts, view.out_of_scope or []):
+            suggested.append(host)
+    return suggested
+
+
 def get_proof_work(engagement_id: int, work_id: int) -> dict:
     with _common.get_connection() as connection:
         return _serialize(connection, engagement_id, _row(connection, engagement_id, work_id))
@@ -381,9 +443,17 @@ def list_proof_work(engagement_id: int) -> dict:
             # only work for the current plan decides what this finding needs next.
             work = [w for w in items
                     if w['finding_id'] == row['id'] and w['parking_transition_id'] == park]
+            parked = _parking_transition(connection, engagement_id, row['id'], park)
             owed.append({
                 'finding_slug': row['slug'], 'finding_id': row['id'],
                 'title': row['title'], 'canonical_location': row['canonical_location'],
+                'severity': row['severity'],
+                # Why the verifier parked it: the parking decision's own words.
+                'parked_reason': (parked['reason_text'] or parked['reason_code']) if parked else '',
+                'parked_at': parked['created_at'] if parked else None,
+                'source_bound': _source_bound(row),
+                # Suggestions only; preparation still admits every host itself.
+                'suggested_hosts': _suggested_hosts(row, view),
                 'next_test': current_next_test(
                     connection, engagement_id, row['id'], row['verification_status'],
                     workflow_status=row['status']),
@@ -403,6 +473,7 @@ def list_proof_work(engagement_id: int) -> dict:
             if transition_id is not None:
                 reverification.append({
                     'finding_id': finding['id'], 'finding_slug': finding['slug'], 'title': finding['title'],
+                    'severity': finding['severity'],
                     'invalidating_transition_id': transition_id,
                     'work_ids': [work['id'] for work in items if work['finding_id'] == finding['id']],
                     'next_action': 'Re-verify the finding; park a new runtime proof plan if execution is still needed.',

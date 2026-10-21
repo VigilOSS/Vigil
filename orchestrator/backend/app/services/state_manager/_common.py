@@ -430,6 +430,17 @@ def _scalar_row(connection, query: str, params: tuple[Any, ...]) -> int:
     row = connection.execute(query, params).fetchone()
     return int(row[0]) if row and row[0] is not None else 0
 
+def _ranked_facet_values(counts: list[tuple[Any, int]], limit: int) -> dict[str, Any]:
+    """A ledger facet: the ``limit`` most frequent values (ties by value), how
+    many distinct values exist, and how many rows the omitted values hold."""
+    ranked = sorted(counts, key=lambda entry: (-entry[1], "" if entry[0] is None else str(entry[0])))
+    return {
+        "values": [{"value": value, "count": count} for value, count in ranked[:limit]],
+        "distinct": len(ranked),
+        "omitted_count": sum(count for _value, count in ranked[limit:]),
+    }
+
+
 def _fetch_all(connection, query: str, params: tuple[Any, ...]) -> list[dict[str, Any]]:
     return [dict(row) for row in connection.execute(query, params).fetchall()]
 

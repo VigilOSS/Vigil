@@ -1,0 +1,211 @@
+/* ── Record view ──────────────────────────────────────────────────────
+ * The shared detail view (components/record/RecordView.tsx) every tab opens a
+ * record in: top bar, header, section tabs, body. One look for every record,
+ * so nothing here is scoped to a tab. The root also carries .findings-redesign,
+ * which supplies the section vocabulary (.section, .section-title, .kv-grid,
+ * .callout, .pill, .tag, .count, .copy-btn) record bodies are written in.
+ * Tokens only, so light and dark both resolve. */
+
+.record-view {
+  min-width: 0;
+  margin-top: 16px;
+  border-top: 1px solid var(--border);
+  background: var(--panel-strong);
+  /* Opening scrolls the record to where an unscrolled page puts it: under
+   * the sticky workspace header, past the panel padding and this margin. */
+  scroll-margin-top: calc(var(--workspace-header-height, 0px) + 40px);
+}
+.record-view:focus { outline: none; }
+.record-view:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+.record-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 12px 22px 0;
+}
+.record-nav {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.record-nav .meta-text { font-variant-numeric: tabular-nums; }
+.record-nav .ghost-button[aria-disabled="true"]:not(:disabled) { opacity: 0.55; cursor: progress; }
+.record-nav .record-nav-error { margin: 0; font-size: 0.78rem; text-align: right; }
+
+/* Header: identity row, title, pills, dates. The left bar carries the
+ * record's severity / health / status color. */
+.record-header {
+  position: relative;
+  display: grid;
+  gap: 10px;
+  padding: 14px 24px 20px;
+}
+.record-header.has-accent::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 4px;
+  background: var(--record-accent);
+}
+/* A status-colored record takes its pill's tone color (ui.css [data-tone]). */
+.record-header[data-tone] { --record-accent: var(--ui-tone); }
+/* The identity row wraps the actions below the ID on narrow screens rather
+ * than squeezing the ID to nothing. */
+.record-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.record-id {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-family: "Source Code Pro", "SFMono-Regular", monospace;
+  font-size: 0.76rem;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+.record-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 2px;
+}
+.record-actions .copy-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.record-actions .copy-btn svg { width: 13px; height: 13px; }
+.record-actions .copy-btn:disabled { opacity: 0.45; cursor: default; }
+.record-title {
+  margin: 0;
+  color: var(--ink);
+  font-size: clamp(1.3rem, 1.75vw, 1.75rem);
+  font-weight: 600;
+  line-height: 1.25;
+  letter-spacing: -0.025em;
+  overflow-wrap: anywhere;
+}
+/* The heading takes focus on open so assistive technology reads the record;
+ * it is not a control, so it draws no focus ring. */
+.record-title:focus { outline: none; }
+.record-title .mono {
+  font-family: "Source Code Pro", "SFMono-Regular", monospace;
+  font-size: 0.9em;
+  letter-spacing: 0;
+}
+.record-pills {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.record-pill-reason { color: var(--ink-2); font-size: 0.8rem; }
+.record-dates {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 22px;
+  margin-top: 12px;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+.record-dates-label { font-size: 0.68rem; letter-spacing: 0.08em; text-transform: uppercase; }
+.record-dates .timestamp { color: var(--ink); font-variant-numeric: tabular-nums; }
+.record-dates-detail { color: var(--ink-2); }
+
+/* Section tabs. */
+.record-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px;
+  padding: 0 20px;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  background: var(--drawer-tab-bar-bg);
+  overflow-x: auto;
+}
+.record-tab {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 12px 9px;
+  border: none;
+  border-bottom: 2px solid transparent;
+  background: none;
+  color: var(--ink-2);
+  font: inherit;
+  font-size: 0.75rem;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.record-tab:hover { color: var(--drawer-tab-active-ink); }
+.record-tab.is-active {
+  color: var(--drawer-tab-active-ink);
+  border-bottom-color: var(--drawer-tab-active-ink);
+  font-weight: 600;
+}
+.record-tab:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.record-tab.is-active .count {
+  background: var(--count-bg-active);
+  color: var(--count-ink-active);
+}
+.record-tabs-trailing {
+  margin-left: auto;
+  align-self: center;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* Body: the active section, packed to the top at content height. */
+.record-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-content: start;
+  gap: 18px;
+  min-width: 0;
+  padding: 24px;
+}
+/* Single shrinkable column: wide content (ledger tables, long tokens) scrolls
+ * inside its own box instead of widening the page. */
+.record-body .section { grid-template-columns: minmax(0, 1fr); margin-bottom: 24px; }
+.record-body .kv-grid { background: transparent; border: 0; border-radius: 0; }
+.record-body pre { max-width: 100%; }
+
+@media (max-width: 850px) {
+  .record-body { padding: 18px; }
+}
+
+/* A list row a record returns to (useResultsScrollMemory) scrolls into view
+ * clear of the sticky workspace header. */
+[data-record-key] { scroll-margin-top: calc(var(--workspace-header-height, 0px) + 16px); }
+
+/* The row the operator returned to from a record (useResultsScrollMemory):
+ * a brief accent wash so the eye finds it after stepping or a deep link. */
+.record-return-highlight {
+  animation: record-return-highlight 2.4s ease-out;
+}
+@keyframes record-return-highlight {
+  0%, 35% {
+    background-color: color-mix(in srgb, var(--accent) 16%, transparent);
+    box-shadow: inset 3px 0 0 var(--accent);
+  }
+  100% {
+    background-color: transparent;
+    box-shadow: inset 3px 0 0 transparent;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .record-return-highlight { animation: none; box-shadow: inset 3px 0 0 var(--accent); }
+}

@@ -26,6 +26,9 @@
   --accent-soft: #f4a259;
   /* Ink used on --accent-soft backgrounds (warm dark ink; same value both themes) */
   --accent-soft-ink: #2a1a08;
+  /* Ink on solid --accent fills (primary buttons): ≥ 4.5:1 on the fill and
+   * on its darkened hover in both themes. */
+  --on-accent: #fff;
   --ok: #2f7f52;
   --warn: #c64d15;
   --pending: #8c7b62;
@@ -90,11 +93,6 @@
   --m-head: #6b685d;    /* muted   — metadata */
   --m-options: #7c3aed; /* purple  — preflight */
   --m-other: #4b5563;   /* slate   — fallback */
-  --s-2xx: #2f7f52;     /* green */
-  --s-3xx: #0d6b6b;     /* teal */
-  --s-4xx: #a16207;     /* amber */
-  --s-5xx: #991b1b;     /* red */
-  --s-1xx: #6b685d;     /* muted */
 
   background: var(--page-bg-color);
   color: var(--ink);
@@ -128,6 +126,7 @@
   --accent-muted: rgba(121, 169, 212, 0.4);
   --accent-soft: #f7bb7b;
   --accent-soft-ink: #2a1a08;
+  --on-accent: #0d1117;
   --ok: #5fc08a;
   --warn: #f08a52;
   --pending: #b8ab92;
@@ -185,11 +184,6 @@
   --m-head: #a0a6b5;
   --m-options: #b08bf0;
   --m-other: #8a93a3;
-  --s-2xx: #5fc08a;
-  --s-3xx: #4fc4c4;
-  --s-4xx: #d8a23a;
-  --s-5xx: #e56c6c;
-  --s-1xx: #a0a6b5;
 }
 
 * {
@@ -239,13 +233,6 @@ textarea {
   gap: 14px;
 }
 
-.engagement-grid {
-  display: grid;
-  grid-template-columns: 0.9fr 1.1fr;
-  gap: 20px;
-  align-items: stretch;
-}
-
 /* ── Panels ─────────────────────────────────────────────── */
 
 .panel {
@@ -265,8 +252,7 @@ textarea {
   align-items: flex-start;
 }
 
-.page-actions,
-.engagement-actions {
+.page-actions {
   display: flex;
   gap: 10px;
   align-items: center;
@@ -294,24 +280,9 @@ textarea {
 
 /* ── Engagement list ────────────────────────────────────── */
 
-.engagement-column {
-  display: grid;
-  gap: 18px;
-}
-
 .engagement-card {
   display: grid;
   gap: 16px;
-}
-
-.engagement-card-clickable {
-  cursor: pointer;
-  transition: box-shadow 0.15s, border-color 0.15s;
-}
-
-.engagement-card-clickable:hover {
-  box-shadow: 0 20px 60px rgba(38, 38, 32, 0.14);
-  border-color: rgba(18, 18, 18, 0.2);
 }
 
 .engagement-open-button {
@@ -325,9 +296,7 @@ textarea {
   outline-offset: 3px;
 }
 
-.engagement-heading,
 .panel-header,
-.artifact-content-header,
 .timeline-title-row {
   display: flex;
   justify-content: space-between;
@@ -379,37 +348,6 @@ textarea {
   font-weight: 600;
 }
 
-/* ── Phase waterfall ────────────────────────────────────── */
-
-.waterfall {
-  display: grid;
-  /* Sized by the roster, not a hardcoded count: PhaseWaterfall renders one card
-     per canonical web phase, so a new phase must not silently wrap. */
-  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-  gap: 14px;
-}
-
-.phase-card {
-  border-radius: 18px;
-  padding: 18px;
-  border: 1px solid var(--border);
-  background: rgba(255, 255, 255, 0.7);
-}
-
-.phase-completed {
-  border-color: rgba(47, 127, 82, 0.28);
-  background: rgba(223, 243, 227, 0.9);
-}
-
-.phase-active {
-  border-color: rgba(244, 162, 89, 0.45);
-  background: rgba(255, 238, 216, 0.95);
-}
-
-.phase-pending {
-  background: rgba(246, 242, 232, 0.85);
-}
-
 /* ── Stat cards ─────────────────────────────────────────── */
 
 .stat-card {
@@ -431,16 +369,6 @@ textarea {
 .report-blockers-panel .blocker-list {
   display: grid;
   gap: 10px;
-}
-.report-blockers-panel .blocker-row {
-  display: grid;
-  grid-template-columns: auto 1fr;
-  gap: 12px;
-  align-items: flex-start;
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  padding: 12px;
-  background: rgba(153, 27, 27, 0.04);
 }
 .report-blockers-panel code + code {
   margin-left: 6px;
@@ -495,18 +423,32 @@ textarea {
   font-size: 1rem;
 }
 
+/* ── Timestamps (components/formatting.tsx TimeStamp) ──── */
+
+.timestamp {
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Detail-pane form ("<absolute> · <age>") may wrap between its parts. */
+.timestamp:has(> .timestamp-age) {
+  white-space: normal;
+}
+
+.timestamp-age {
+  color: var(--muted);
+  white-space: nowrap;
+}
+
 /* ── Buttons ────────────────────────────────────────────── */
 
 .primary-button,
-.secondary-button,
-.ghost-button,
-.artifact-row {
+.ghost-button {
   border: 0;
   cursor: pointer;
 }
 
 .primary-button,
-.secondary-button,
 .ghost-button {
   border-radius: 999px;
   padding: 12px 18px;
@@ -514,18 +456,28 @@ textarea {
 
 .primary-button {
   background: var(--accent);
-  color: white;
-}
-
-.secondary-button {
-  background: var(--accent-soft);
-  color: var(--accent-soft-ink);
+  color: var(--on-accent);
 }
 
 .ghost-button {
   background: rgba(255, 255, 255, 0.72);
   color: var(--accent);
   border: 1px solid var(--border);
+}
+
+/* Disabled shared controls read as unavailable: dimmed, flat, no hover
+ * feedback (hover rules are scoped to :not(:disabled)), and a not-allowed
+ * cursor. Controls that are busy rather than unavailable set their own
+ * progress cursor (export-report-button). */
+.primary-button:disabled,
+.ghost-button:disabled,
+.filter-chip:disabled,
+.findings-redesign .filter-chip:disabled,
+.findings-redesign .qa-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  box-shadow: none;
+  filter: saturate(0.4);
 }
 
 /* Export-report header control: align the lucide FileDown icon with its
@@ -544,13 +496,11 @@ textarea {
 
 /* ── Timeline ───────────────────────────────────────────── */
 
-.timeline,
-.artifact-list {
+.timeline {
   display: grid;
   gap: 10px;
 }
 
-.artifact-row,
 .timeline-row {
   display: grid;
   gap: 14px;
@@ -564,8 +514,7 @@ textarea {
 }
 
 .timeline-pill,
-.badge,
-.status-pill {
+.badge {
   border-radius: 999px;
   padding: 6px 10px;
   font-size: 0.74rem;
@@ -577,11 +526,6 @@ textarea {
 .badge {
   background: rgba(23, 53, 76, 0.08);
   color: var(--accent);
-}
-
-.badge-warn {
-  background: rgba(198, 77, 21, 0.14);
-  color: var(--warn);
 }
 
 .sessions-toggle {
@@ -625,157 +569,7 @@ textarea {
   background: rgba(23, 53, 76, 0.06);
 }
 
-/* ── Severity badges ────────────────────────────────────── */
-
-.severity-critical {
-  background: color-mix(in srgb, var(--sev-critical) 14%, transparent);
-  color: var(--sev-critical);
-}
-
-.severity-high {
-  background: color-mix(in srgb, var(--sev-high) 14%, transparent);
-  color: var(--sev-high);
-}
-
-.severity-medium {
-  background: color-mix(in srgb, var(--sev-medium) 14%, transparent);
-  color: var(--sev-medium);
-}
-
-.severity-low {
-  background: color-mix(in srgb, var(--sev-low) 10%, transparent);
-  color: var(--sev-low);
-}
-
-.severity-info {
-  background: color-mix(in srgb, var(--sev-info) 10%, transparent);
-  color: var(--sev-info);
-}
-
-/* ── Event type badges ──────────────────────────────────── */
-
-.event-type-finding {
-  background: rgba(47, 127, 82, 0.14);
-  color: var(--ok);
-}
-
-.event-type-chain {
-  background: color-mix(in srgb, var(--danger) 14%, transparent);
-  color: var(--danger);
-}
-
-.event-type-surface {
-  background: rgba(244, 162, 89, 0.18);
-  color: var(--warn);
-}
-
-.event-type-merge {
-  background: rgba(23, 53, 76, 0.1);
-  color: var(--accent);
-}
-
-.event-type-phase {
-  background: rgba(140, 123, 98, 0.12);
-  color: var(--pending);
-}
-
-.event-type-task {
-  background: rgba(23, 53, 76, 0.08);
-  color: var(--accent);
-}
-
-.event-timeline-controls {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-bottom: 10px;
-}
-
-.event-history-boundary {
-  margin: 0 0 14px;
-  padding: 9px 0;
-  border-top: 1px solid var(--divider);
-  border-bottom: 1px solid var(--divider);
-  color: var(--muted);
-  font-size: 0.78rem;
-}
-
-.event-provenance {
-  display: flex;
-  align-items: baseline;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-top: 3px;
-}
-
-.event-source-persisted {
-  background: rgba(47, 127, 82, 0.12);
-  color: var(--ok);
-}
-
-.event-source-inferred {
-  background: rgba(140, 123, 98, 0.12);
-  color: var(--pending);
-}
-
-/* ── Status pills ───────────────────────────────────────── */
-
-.status-queued,
-.status-pending,
-.status-draft,
-.status-unreviewed {
-  background: rgba(140, 123, 98, 0.12);
-  color: var(--pending);
-}
-
-.status-false_positive {
-  background: color-mix(in srgb, var(--chip-slate) 12%, transparent);
-  color: var(--chip-slate);
-}
-
-.status-running,
-.status-in_progress,
-.status-active {
-  background: rgba(244, 162, 89, 0.18);
-  color: var(--warn);
-}
-
-.status-completed,
-.status-confirmed,
-.status-exploited,
-.status-reported {
-  background: rgba(47, 127, 82, 0.16);
-  color: var(--ok);
-}
-
-.status-downgraded {
-  background: rgba(23, 53, 76, 0.12);
-  color: var(--accent);
-}
-
-.status-disputed {
-  background: color-mix(in srgb, var(--disputed) 16%, transparent);
-  color: var(--disputed);
-}
-
-.status-failed,
-.status-blocked {
-  background: color-mix(in srgb, var(--danger) 14%, transparent);
-  color: var(--danger);
-}
-
 /* ── Filter bar ─────────────────────────────────────────── */
-
-.filter-bar-panel {
-  padding: 14px 20px;
-}
-
-.filter-bar {
-  display: flex;
-  gap: 20px;
-  flex-wrap: wrap;
-  align-items: center;
-}
 
 .filter-group {
   display: flex;
@@ -806,15 +600,19 @@ textarea {
   transition: background 0.12s, border-color 0.12s;
 }
 
-.filter-chip:hover {
+.filter-chip:hover:not(:disabled) {
   background: rgba(255, 255, 255, 0.95);
 }
 
-.filter-active {
+/* Selected chip, wherever it renders (`is-active` class or aria-pressed).
+ * Domain variants (severity, method, status colors) layer on top under their
+ * own scopes. */
+.filter-chip.is-active,
+.filter-chip[aria-pressed="true"] {
   border-color: var(--accent);
-  background: var(--count-bg);
+  background: var(--count-bg-active);
   color: var(--accent);
-  font-weight: 500;
+  font-weight: 600;
 }
 
 .filter-count {
@@ -823,95 +621,6 @@ textarea {
 }
 
 /* ── Findings layout ────────────────────────────────────── */
-
-.findings-layout {
-  display: grid;
-  gap: 20px;
-  align-items: start;
-}
-
-.findings-list {
-  display: grid;
-  gap: 6px;
-}
-
-.finding-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 14px 16px;
-  border-radius: 18px;
-  border: 1px solid transparent;
-  background: rgba(255, 255, 255, 0.6);
-  cursor: pointer;
-  text-align: left;
-  width: 100%;
-  transition: background 0.16s, border-color 0.16s, transform 0.16s;
-}
-
-.finding-row:hover {
-  background: rgba(255, 255, 255, 0.9);
-  transform: translateY(-1px);
-}
-
-.finding-row-active {
-  border-color: rgba(23, 53, 76, 0.2);
-  background: rgba(255, 255, 255, 0.95);
-}
-
-.finding-row-suppressed {
-  opacity: 0.72;
-  border-style: dashed;
-}
-
-.finding-row-suppressed .finding-row-title {
-  text-decoration: line-through;
-}
-
-.finding-transitions {
-  display: grid;
-  gap: 10px;
-}
-
-.finding-transition-row {
-  border: 1px solid var(--border);
-  border-radius: 14px;
-  padding: 12px 14px;
-  background: var(--panel-soft);
-  display: grid;
-  gap: 4px;
-}
-
-.finding-transition-header {
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
-  align-items: baseline;
-}
-
-.finding-row-main {
-  display: grid;
-  gap: 4px;
-  min-width: 0;
-}
-
-.finding-row-title {
-  font-size: 1rem;
-}
-
-.finding-row-aside {
-  display: flex;
-  justify-content: flex-end;
-  align-items: center;
-  gap: 6px;
-}
-
-.finding-meta-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 12px;
-}
 
 .finding-overlay {
   position: fixed;
@@ -934,22 +643,6 @@ textarea {
   animation: modal-rise 0.2s ease-out;
 }
 
-.finding-modal-header {
-  display: flex;
-  justify-content: space-between;
-  gap: 16px;
-  align-items: flex-start;
-}
-
-.finding-modal-heading {
-  display: grid;
-  gap: 6px;
-}
-
-.finding-modal-heading h2 {
-  margin: 0;
-}
-
 .finding-modal-actions {
   display: flex;
   gap: 8px;
@@ -958,309 +651,7 @@ textarea {
   justify-content: flex-end;
 }
 
-.finding-modal-content {
-  display: grid;
-  gap: 18px;
-}
-
-.finding-mono {
-  font-family: "Source Code Pro", "SFMono-Regular", monospace;
-}
-
-.finding-steps {
-  margin: 0;
-  padding-left: 20px;
-  display: grid;
-  gap: 6px;
-}
-
-.finding-notes {
-  white-space: pre-wrap;
-  word-break: break-word;
-  font-family: "Source Code Pro", "SFMono-Regular", monospace;
-  font-size: 0.86rem;
-  line-height: 1.45;
-  background: rgba(16, 18, 26, 0.04);
-  padding: 12px;
-  border-radius: 12px;
-  margin: 4px 0 0;
-  max-height: 300px;
-  overflow-y: auto;
-}
-
-/* ── Coverage tab ───────────────────────────────────────── */
-
-.coverage-bar-container {
-  display: grid;
-  gap: 10px;
-}
-
-.coverage-bar {
-  display: flex;
-  height: 10px;
-  border-radius: 999px;
-  overflow: hidden;
-  background: rgba(0, 0, 0, 0.04);
-}
-
-.coverage-segment {
-  height: 100%;
-  transition: width 0.3s;
-}
-
-.coverage-segment-pending { background: var(--pending); }
-.coverage-segment-queued { background: var(--warn); }
-.coverage-segment-deferred { background: var(--accent-soft); }
-.coverage-segment-covered { background: var(--ok); }
-.coverage-segment-not_applicable { background: var(--muted); }
-.coverage-segment-blocked { background: var(--danger); }
-
-.coverage-legend {
-  display: flex;
-  gap: 16px;
-  flex-wrap: wrap;
-}
-
-.coverage-legend-item {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  font-size: 0.82rem;
-  color: var(--muted);
-}
-
-.coverage-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 999px;
-}
-
-.coverage-dot-pending { background: var(--pending); }
-.coverage-dot-queued { background: var(--warn); }
-.coverage-dot-deferred { background: var(--accent-soft); }
-.coverage-dot-covered { background: var(--ok); }
-.coverage-dot-not_applicable { background: var(--muted); }
-.coverage-dot-blocked { background: var(--danger); }
-
-.coverage-view-switch {
-  display: flex;
-  gap: 4px;
-  width: fit-content;
-  padding: 3px;
-  border: 1px solid var(--divider);
-  border-radius: 9px;
-  background: var(--panel-soft);
-}
-
-.coverage-view-switch button {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  border: 0;
-  border-radius: 6px;
-  padding: 7px 10px;
-  background: transparent;
-  color: var(--muted);
-  font: inherit;
-  font-size: 0.82rem;
-  cursor: pointer;
-}
-
-.coverage-view-switch button[aria-pressed="true"] {
-  background: var(--panel-strong);
-  color: var(--ink);
-  box-shadow: 0 1px 2px rgb(0 0 0 / 8%);
-}
-
-.coverage-view-switch button span,
-.coverage-debt h3 span {
-  color: var(--muted);
-  font: 0.72rem "Source Code Pro", "SFMono-Regular", monospace;
-}
-
-.coverage-debt,
-.coverage-debt-groups,
-.coverage-debt-groups > section,
-.coverage-debt-list {
-  display: grid;
-  gap: 12px;
-}
-
-.coverage-debt h3 {
-  display: flex;
-  align-items: baseline;
-  gap: 7px;
-  margin: 0;
-}
-
-.coverage-debt-list article {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  gap: 12px;
-  align-items: start;
-  padding-top: 11px;
-  border-top: 1px solid var(--divider);
-}
-
-.coverage-debt-list article > div {
-  min-width: 0;
-}
-
-.coverage-debt-list strong,
-.coverage-debt-list p {
-  overflow-wrap: anywhere;
-}
-
-.coverage-debt-list p,
-.coverage-debt-list time {
-  margin: 3px 0 0;
-  color: var(--muted);
-  font-size: 0.78rem;
-}
-
-.coverage-tree {
-  display: grid;
-  gap: 4px;
-}
-
-.coverage-tree-node {
-  border: 1px solid rgba(0, 0, 0, 0.05);
-  border-radius: 14px;
-  overflow: hidden;
-}
-
-.coverage-tree-header {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  padding: 12px 14px;
-  width: 100%;
-  background: rgba(255, 255, 255, 0.5);
-  border: none;
-  cursor: pointer;
-  text-align: left;
-  font: inherit;
-  flex-wrap: wrap;
-}
-
-.coverage-tree-header:hover {
-  background: rgba(255, 255, 255, 0.8);
-}
-
-.coverage-tree-children {
-  padding: 4px 14px 14px 32px;
-  display: grid;
-  gap: 8px;
-}
-
-.service-row {
-  padding: 8px 12px;
-  border-radius: 10px;
-  background: rgba(255, 255, 255, 0.5);
-  border: 1px solid rgba(0, 0, 0, 0.04);
-}
-
-.coverage-badge-pending { background: rgba(140, 123, 98, 0.12); color: var(--pending); }
-.coverage-badge-queued { background: rgba(244, 162, 89, 0.15); color: var(--warn); }
-.coverage-badge-covered { background: rgba(47, 127, 82, 0.14); color: var(--ok); }
-.coverage-badge-deferred { background: rgba(23, 53, 76, 0.08); color: var(--accent); }
-.coverage-badge-not_applicable { background: var(--panel-soft); color: var(--muted); }
-.coverage-badge-blocked { background: color-mix(in srgb, var(--danger) 13%, transparent); color: var(--danger); }
-.coverage-badge-partial { background: color-mix(in srgb, var(--warn) 13%, transparent); color: var(--warn); }
-
-.coverage-items-grid {
-  display: grid;
-  gap: 2px;
-  font-size: 0.86rem;
-}
-
-.coverage-items-header,
-.coverage-items-row {
-  display: grid;
-  grid-template-columns: 2fr 1fr 1fr 1fr auto;
-  gap: 8px;
-  padding: 8px 10px;
-  align-items: baseline;
-}
-
-.coverage-items-6col.coverage-items-header,
-.coverage-items-6col.coverage-items-row {
-  grid-template-columns: 70px 2fr 1fr 1fr 0.8fr auto;
-}
-
-.coverage-items-header {
-  font-weight: 600;
-  font-size: 0.78rem;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--muted);
-  border-bottom: 1px solid var(--border);
-}
-
-.coverage-items-row {
-  border-radius: 8px;
-}
-
-button.coverage-items-row {
-  width: 100%;
-  border: 0;
-  background: transparent;
-  color: inherit;
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
-}
-
-.coverage-item-record:nth-child(even) > .coverage-items-row {
-  background: rgba(255, 255, 255, 0.4);
-}
-
-.coverage-item-detail {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
-  gap: 16px;
-  align-items: start;
-  margin: 0 10px 8px;
-  padding: 12px 14px;
-  border-left: 2px solid var(--accent-muted);
-  background: var(--panel-soft);
-}
-
-.coverage-item-detail span,
-.coverage-item-detail dt {
-  color: var(--muted);
-  font-size: 0.7rem;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-}
-
-.coverage-item-detail p,
-.coverage-item-detail dl,
-.coverage-item-detail dd {
-  margin: 4px 0 0;
-}
-
-.coverage-item-detail dl {
-  display: grid;
-  gap: 7px;
-}
-
-.coverage-item-detail a {
-  color: var(--accent);
-  font-weight: 600;
-  text-decoration: none;
-  white-space: nowrap;
-}
-
-.coverage-item-detail a:hover { text-decoration: underline; }
-
-.coverage-filters {
-  display: flex;
-  gap: 12px;
-  flex-wrap: wrap;
-  align-items: center;
-  padding-top: 8px;
-}
+/* ── Filter selects ─────────────────────────────────────── */
 
 .filter-select-group {
   display: flex;
@@ -1331,84 +722,8 @@ button.coverage-items-row {
   padding: 1px 6px;
 }
 
-/* ── Artifacts ──────────────────────────────────────────── */
+/* ── JSON tree ──────────────────────────────────────────── */
 
-.artifact-layout {
-  display: grid;
-  grid-template-columns: 300px 1fr;
-  gap: 14px;
-  min-height: 0;
-  height: min(72vh, 920px);
-}
-
-.artifact-panel {
-  min-height: 0;
-}
-
-.artifact-list {
-  min-height: 0;
-  overflow: auto;
-  align-content: start;
-}
-
-.artifact-row:disabled {
-  cursor: not-allowed;
-  opacity: 0.58;
-}
-
-.artifact-active {
-  outline: 2px solid rgba(23, 53, 76, 0.2);
-}
-
-.artifact-content {
-  min-height: 0;
-  height: 100%;
-  border-radius: 18px;
-  padding: 16px;
-  background: rgba(16, 18, 26, 0.96);
-  color: #eceff8;
-  overflow: auto;
-}
-
-.artifact-content pre {
-  white-space: pre-wrap;
-  word-break: break-word;
-  margin: 16px 0 0;
-  font-family: "Source Code Pro", "SFMono-Regular", monospace;
-  font-size: 0.88rem;
-  line-height: 1.45;
-}
-
-.artifact-tags {
-  display: flex;
-  gap: 4px;
-}
-
-.artifact-markdown {
-  margin-top: 14px;
-}
-
-.artifact-code-block {
-  margin-top: 16px;
-  padding: 14px;
-  border-radius: 8px;
-  background: var(--panel-soft);
-}
-
-.artifact-jsonl {
-  display: grid;
-  gap: 10px;
-  margin-top: 14px;
-}
-
-.artifact-jsonl-row {
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 10px 12px;
-  background: var(--panel-soft);
-}
-
-.artifact-jsonl-row summary,
 .json-node summary {
   cursor: pointer;
   color: var(--ink);
@@ -1455,435 +770,27 @@ button.coverage-items-row {
   color: var(--json-null);
 }
 
-/* ── Code analysis ─────────────────────────────────────── */
+/* ── Visually hidden ────────────────────────────────────── */
 
-.code-phase-pipeline {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
-  gap: 8px;
-  margin-top: 12px;
-}
-
-.code-phase-step {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 6px;
-  padding: 14px 8px;
-  border-radius: 14px;
-  border: 1px solid var(--border);
-  text-align: center;
-}
-
-.code-phase-completed {
-  border-color: rgba(47, 127, 82, 0.28);
-  background: rgba(223, 243, 227, 0.9);
-}
-
-.code-phase-active {
-  border-color: rgba(244, 162, 89, 0.45);
-  background: rgba(255, 238, 216, 0.95);
-}
-
-.code-phase-pending {
-  background: rgba(246, 242, 232, 0.85);
-}
-
-.code-phase-indicator {
-  font-size: 1.1rem;
-  font-weight: 700;
-  line-height: 1;
-}
-
-.code-phase-completed .code-phase-indicator { color: var(--ok); }
-.code-phase-active .code-phase-indicator { color: var(--warn); }
-.code-phase-pending .code-phase-indicator { color: var(--muted); }
-
-.code-phase-label {
-  font-size: 0.78rem;
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  overflow-wrap: break-word;
-  word-break: break-word;
-}
-
-.code-repos-grid {
-  display: grid;
-  gap: 12px;
-  margin-top: 12px;
-}
-
-.code-readiness-panel {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 20px;
-}
-
-.code-readiness-primary {
-  display: grid;
-  gap: 10px;
-  min-width: 0;
-}
-
-.code-readiness-secondary {
-  margin: 0;
-  color: var(--muted);
-  font-size: 0.78rem;
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-}
-
-.code-repo-card {
-  display: grid;
-  gap: 10px;
-  padding: 16px;
-  border-radius: 18px;
-  border: 1px solid var(--border);
-  background: var(--panel-soft);
-}
-
-.code-repo-card.code-repo-has-debt {
-  border-left: 3px solid var(--warn);
-}
-
-.code-structural-debt {
-  display: grid;
-  gap: 4px;
-  padding-top: 10px;
-  border-top: 1px solid var(--divider);
-  color: var(--ink-2);
-  font-size: 0.78rem;
-}
-
-.code-structural-debt > strong {
-  color: var(--warn);
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-}
-
-.code-structural-debt p {
-  margin: 2px 0 0;
-}
-
-.code-structural-debt summary {
-  width: fit-content;
-  cursor: pointer;
-  color: var(--accent);
-  font-weight: 600;
-}
-
-.code-structural-debt ul {
-  display: grid;
-  gap: 3px;
-  margin: 6px 0 0;
-  padding-left: 18px;
-}
-
-.code-repo-header {
-  display: flex;
-  align-items: baseline;
-  gap: 10px;
-  flex-wrap: wrap;
-}
-
-.code-repo-stats {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 10px;
-}
-
-.code-repo-stat {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.code-repo-stat-value {
-  font-size: 1.1rem;
-  font-weight: 600;
-  color: var(--accent);
-}
-
-.code-repo-identity {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px 16px;
-  margin: 0;
-}
-
-.code-repo-identity > div {
-  min-width: 0;
-}
-
-.code-repo-identity dt {
-  color: var(--muted);
-  font-size: 0.7rem;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-}
-
-.code-repo-identity dd {
-  margin: 2px 0 0;
-  overflow-wrap: anywhere;
-}
-
-.code-repo-truth {
-  display: grid;
-  gap: 4px;
-  margin: 0;
-  padding: 10px 12px 10px 28px;
-  border-left: 3px solid var(--warn);
-  background: color-mix(in srgb, var(--warn) 8%, transparent);
-  color: var(--ink-2);
-  font-size: 0.78rem;
-}
-
-.code-stats-grid {
-  margin-top: 12px;
-}
-
-.code-queue-bar-wrap {
-  display: grid;
-  gap: 8px;
-  margin-top: 14px;
-}
-
-.code-queue-integrity {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px 14px;
-  margin-top: 14px;
-  padding-top: 12px;
-  border-top: 1px solid var(--divider);
-  color: var(--ink-2);
-  font-size: 0.78rem;
-}
-
-.code-next-work {
-  margin-top: 16px;
-}
-
-.code-next-work h3 {
-  margin: 0 0 8px;
-  font-size: 0.9rem;
-}
-
-.code-next-work ol {
-  display: grid;
-  gap: 6px;
-  margin: 0;
+/* Text for assistive technology only: kept in the accessibility tree,
+ * removed from the visual layout. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
   padding: 0;
-  list-style: none;
-}
-
-.code-next-work li {
-  display: grid;
-  grid-template-columns: auto minmax(180px, 1fr) auto auto;
-  align-items: baseline;
-  gap: 8px;
-  padding: 8px 0;
-  border-top: 1px solid var(--divider);
-}
-
-.code-segment-done { background: var(--ok); }
-.code-segment-processing { background: var(--accent-soft); }
-.code-segment-needs-context { background: var(--pending); }
-.code-segment-error { background: var(--danger); }
-
-.code-dot-done { background: var(--ok); }
-.code-dot-processing { background: var(--accent-soft); }
-.code-dot-needs-context { background: var(--pending); }
-.code-dot-error { background: var(--danger); }
-.code-dot-pending { background: rgba(23, 53, 76, 0.25); }
-
-.code-classification-grid {
-  display: grid;
-  gap: 8px;
-  margin-top: 10px;
-}
-
-.code-classification-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.code-classification-count {
-  font-weight: 600;
-  font-size: 1.05rem;
-  min-width: 36px;
-}
-
-.code-fn-stats {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 12px;
-  margin-top: 6px;
-  font-size: 0.88rem;
-  color: var(--ink-2);
-}
-
-.code-gate-status {
-  margin-top: 10px;
-  display: grid;
-  gap: 10px;
-}
-
-.code-gate-badge {
-  display: inline-block;
-  font-size: 1.2rem;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  padding: 6px 18px;
-  border-radius: 999px;
-}
-
-.code-gate-pass {
-  background: rgba(47, 127, 82, 0.16);
-  color: var(--ok);
-}
-
-.code-gate-fail {
-  background: color-mix(in srgb, var(--danger) 14%, transparent);
-  color: var(--danger);
-}
-
-.code-gate-reasons {
-  margin: 0;
-  padding-left: 20px;
-  display: grid;
-  gap: 4px;
-}
-
-.code-module-detail {
-  font-size: 0.88rem;
-  color: var(--ink-2);
-}
-
-.code-results-list {
-  display: grid;
-  gap: 6px;
-}
-
-.code-result-row {
-  display: grid;
-  gap: 6px;
-  padding: 12px 14px;
-  border-radius: 14px;
-  border: 1px solid rgba(0, 0, 0, 0.05);
-  background: rgba(255, 255, 255, 0.6);
-}
-
-.code-result-row-suppressed {
-  opacity: 0.72;
-  border-style: dashed;
-}
-
-.code-result-header {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
-.code-result-detail {
-  font-size: 0.86rem;
-  color: var(--ink-2);
-  display: flex;
-  gap: 6px;
-  min-width: 0;
+  margin: -1px;
   overflow: hidden;
-}
-
-.code-result-detail > span:last-child {
-  overflow: hidden;
-  text-overflow: ellipsis;
+  clip: rect(0, 0, 0, 0);
+  clip-path: inset(50%);
   white-space: nowrap;
-}
-/* FU8: when the row is expanded, let the span actually wrap. The
- * default rule above (white-space: nowrap on the child span) won the
- * specificity battle against an inline `whiteSpace: 'pre-wrap'` on the
- * parent div, so the click-to-expand toggle was visually inert for
- * long hypothesis/evidence text. Scoping the override to a parent
- * `is-expanded` class keeps the collapsed default and unlocks wrap
- * only on demand. */
-.code-result-detail.is-expanded > span:last-child {
-  overflow: visible;
-  text-overflow: clip;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
-.code-result-label {
-  font-weight: 600;
-  color: var(--muted);
-  flex-shrink: 0;
-}
-
-.code-result-expand {
-  width: fit-content;
-  padding: 0;
   border: 0;
-  background: transparent;
-  color: var(--accent);
-  font: inherit;
-  font-size: 0.78rem;
-  font-weight: 600;
-  cursor: pointer;
-}
-
-.code-result-expand:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 3px;
-}
-
-.code-disposition-finding { background: rgba(47, 127, 82, 0.14); color: var(--ok); }
-.code-disposition-suspicious { background: rgba(244, 162, 89, 0.18); color: var(--warn); }
-.code-disposition-clean { background: rgba(23, 53, 76, 0.08); color: var(--accent); }
-.code-disposition-needs_context { background: rgba(140, 123, 98, 0.12); color: var(--pending); }
-/* C50: `skipped` is an intentional analyst opt-out (test fixture,
- * generated code, minified, vendored dep, out-of-scope language). Muted
- * gray distinguishes it visually from `clean` (which implies a real
- * review happened and found nothing). */
-.code-disposition-skipped { background: rgba(23, 53, 76, 0.06); color: var(--muted); }
-
-.code-confidence-high { background: rgba(47, 127, 82, 0.14); color: var(--ok); }
-.code-confidence-medium { background: color-mix(in srgb, var(--sev-medium) 14%, transparent); color: var(--sev-medium); }
-.code-confidence-low { background: rgba(140, 123, 98, 0.12); color: var(--pending); }
-
-.code-status-ingested { background: rgba(23, 53, 76, 0.08); color: var(--accent); }
-.code-status-classified { background: rgba(244, 162, 89, 0.15); color: var(--warn); }
-.code-status-context_built { background: color-mix(in srgb, var(--sev-medium) 14%, transparent); color: var(--sev-medium); }
-.code-status-queued { background: rgba(140, 123, 98, 0.12); color: var(--pending); }
-.code-status-in_progress { background: rgba(244, 162, 89, 0.18); color: var(--warn); }
-.code-status-analyzed { background: rgba(47, 127, 82, 0.14); color: var(--ok); }
-.code-status-pending { background: rgba(140, 123, 98, 0.12); color: var(--pending); }
-.code-status-needs_context { background: rgba(140, 123, 98, 0.12); color: var(--pending); }
-.code-status-error { background: color-mix(in srgb, var(--danger) 12%, transparent); color: var(--danger); }
-.code-status-complete { background: rgba(47, 127, 82, 0.16); color: var(--ok); }
-
-@media (max-width: 760px) {
-  .code-readiness-panel {
-    display: grid;
-  }
-
-  .code-repo-identity {
-    grid-template-columns: 1fr;
-  }
-
-  .code-next-work li {
-    grid-template-columns: auto 1fr;
-  }
 }
 
 /* ── Typography ─────────────────────────────────────────── */
 
 .eyebrow,
 .meta-text,
-.path-text,
 .lead,
 .empty-state,
 .error-text {
@@ -1903,7 +810,6 @@ button.coverage-items-row {
 }
 
 .meta-text,
-.path-text,
 .empty-state {
   color: var(--muted);
   font-size: 0.9rem;
@@ -1917,63 +823,22 @@ button.coverage-items-row {
 /* ── Responsive ─────────────────────────────────────────── */
 
 @media (max-width: 1100px) {
-  .engagement-grid,
-  .artifact-layout,
-  .waterfall,
-  .findings-layout {
-    grid-template-columns: 1fr;
-  }
-
   .stats-grid {
     grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
-
-  .artifact-layout {
-    height: auto;
-  }
-
-  .artifact-list {
-    max-height: 240px;
-  }
-
-  .artifact-content {
-    min-height: 360px;
   }
 
   .finding-overlay {
     padding: 16px;
   }
-
-  .coverage-items-grid {
-    overflow-x: auto;
-  }
-
-  .coverage-items-header,
-  .coverage-items-row {
-    min-width: 700px;
-  }
 }
 
 @media (max-width: 900px) {
-  .engagement-grid {
-    grid-template-columns: 1fr;
-  }
-
-  .dashboard-header,
-  .finding-modal-header {
+  .dashboard-header {
     flex-direction: column;
   }
 
   .stats-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .waterfall {
-    grid-template-columns: 1fr;
-  }
-
-  .finding-meta-grid {
-    grid-template-columns: 1fr;
   }
 
   .status-summary {
@@ -2038,7 +903,6 @@ button.coverage-items-row {
   font-family: "Source Code Pro", "SFMono-Regular", monospace;
 }
 
-
 /* ── Findings tab (redesign) ──────────────────────────────────────────
  * Rules are scoped under `.findings-redesign` so that redefined class
  * names (filter-chip, filter-group, filter-label, filter-count, empty,
@@ -2053,28 +917,6 @@ button.coverage-items-row {
    * redeclare here. */
   display: block;
   min-width: 0;
-}
-
-.findings-redesign .page-head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 14px;
-  flex-wrap: wrap;
-}
-.findings-redesign .page-title { margin: 0; font-size: 1.6rem; letter-spacing: -0.01em; }
-.findings-redesign .page-crumbs {
-  font-size: 0.82rem;
-  color: var(--muted);
-  letter-spacing: 0.02em;
-}
-.findings-redesign .page-crumbs code {
-  font-family: "Source Code Pro", "SFMono-Regular", monospace;
-  background: rgba(23, 53, 76, 0.07);
-  border-radius: 6px;
-  padding: 1px 6px;
-  color: var(--accent);
 }
 
 /* Intel's advisory work queue stays compact: it raises unresolved leads and
@@ -2126,33 +968,13 @@ button.coverage-items-row {
   background: transparent;
   color: var(--accent);
   cursor: pointer;
-  font: 650 0.76rem inherit;
+  font: inherit;
+  font-size: 0.76rem;
+  font-weight: 650;
   white-space: nowrap;
 }
 .findings-redesign .intel-workbar-muted { color: var(--muted); }
 
-/* Surface-ledger controls emphasize queue truth without adding another card
- * layer. The source facet is intentionally a select: discovery pipelines can
- * create dozens of unique source names. */
-.findings-redesign .surface-ledger-counts {
-  color: var(--ink-2);
-  font-size: 0.78rem;
-  white-space: nowrap;
-}
-.findings-redesign .surface-ledger-counts strong {
-  color: var(--ink);
-  font-variant-numeric: tabular-nums;
-}
-.findings-redesign .surface-source-select {
-  max-width: 230px;
-  border: 1px solid var(--border);
-  border-radius: 7px;
-  padding: 4px 26px 4px 8px;
-  background: var(--panel-strong);
-  color: var(--ink-2);
-  font: inherit;
-  font-size: 0.76rem;
-}
 .findings-redesign .surface-followup-field {
   display: grid;
   gap: 4px;
@@ -2175,12 +997,6 @@ button.coverage-items-row {
   border-left: 3px solid var(--warn);
   padding-left: 12px;
 }
-.findings-redesign .status-discovered,
-.findings-redesign .status-deferred { background: rgba(140, 123, 98, 0.12); color: var(--pending); }
-.findings-redesign .status-partially-covered { background: rgba(244, 162, 89, 0.18); color: var(--warn); }
-.findings-redesign .status-covered { background: rgba(47, 127, 82, 0.16); color: var(--ok); }
-.findings-redesign .status-not_applicable { background: color-mix(in srgb, var(--chip-slate) 12%, transparent); color: var(--chip-slate); }
-.findings-redesign .status-administratively-closed { background: color-mix(in srgb, var(--danger) 14%, transparent); color: var(--danger); }
 
 /* Toolbar (search + filters) */
 .findings-redesign .findings-toolbar-panel { padding: 0; }
@@ -2234,14 +1050,6 @@ button.coverage-items-row {
   align-items: center;
 }
 
-/* Severity sparkline */
-.findings-redesign .sev-sparkline {
-  display: flex;
-  align-items: flex-end;
-  gap: 3px;
-  height: 28px;
-  padding: 0 4px;
-}
 .findings-redesign .sev-bar {
   width: 18px;
   border-radius: 4px 4px 2px 2px;
@@ -2256,34 +1064,6 @@ button.coverage-items-row {
   color: var(--muted);
   letter-spacing: 0.02em;
 }
-/*
- * Severity sparkline wrap: the label sits to the LEFT of the bar
- * container. The previous `display: grid` stack collapsed the label on
- * top of the bars, which visually overlapped the tallest severity
- * column. Switching to a flex row with explicit gap gives the label
- * breathing room and keeps the bars in a fixed-height container so the
- * absolutely-positioned count badges below each bar don't get clipped.
- */
-.findings-redesign .sev-sparkline-wrap {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding-bottom: 16px; /* leave room for the count badges under bars */
-}
-.findings-redesign .sev-sparkline-wrap .sev-sparkline {
-  height: 28px;
-  flex: 0 0 auto;
-}
-.findings-redesign .sev-label {
-  font-size: 0.7rem;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--muted);
-  margin: 0;
-  flex: 0 0 auto;
-  white-space: nowrap;
-}
-
 /* Filter chips row (scoped redefinition) */
 .findings-redesign .filter-row {
   display: flex;
@@ -2319,39 +1099,22 @@ button.coverage-items-row {
   gap: 5px;
   transition: background 0.12s, border-color 0.12s, color 0.12s;
 }
-.findings-redesign .filter-chip:hover { background: rgba(255, 255, 255, 0.95); }
-.findings-redesign .filter-chip.is-active {
+.findings-redesign .filter-chip:hover:not(:disabled) { background: rgba(255, 255, 255, 0.95); }
+.findings-redesign .filter-chip.is-active,
+.findings-redesign .filter-chip[aria-pressed="true"] {
   border-color: var(--accent);
-  background: rgba(23, 53, 76, 0.08);
+  background: var(--count-bg-active);
   color: var(--accent);
-  font-weight: 500;
+  font-weight: 600;
 }
-.findings-redesign .filter-chip.is-active.sev-critical { border-color: var(--sev-critical); background: color-mix(in srgb, var(--sev-critical) 10%, transparent); color: var(--sev-critical); }
-.findings-redesign .filter-chip.is-active.sev-high     { border-color: var(--sev-high);     background: color-mix(in srgb, var(--sev-high) 10%, transparent);     color: var(--sev-high); }
-.findings-redesign .filter-chip.is-active.sev-medium   { border-color: var(--sev-medium);   background: color-mix(in srgb, var(--sev-medium) 10%, transparent);   color: var(--sev-medium); }
-.findings-redesign .filter-chip.is-active.sev-low      { border-color: var(--sev-low);      background: color-mix(in srgb, var(--sev-low) 8%, transparent);       color: var(--sev-low); }
-.findings-redesign .filter-chip.is-active.sev-info     { border-color: var(--sev-info);     background: color-mix(in srgb, var(--sev-info) 10%, transparent);     color: var(--sev-info); }
 .findings-redesign .filter-count {
   font-size: 0.68rem;
   opacity: 0.75;
   font-variant-numeric: tabular-nums;
 }
-.findings-redesign .filter-clear {
-  margin-left: auto;
-  background: none;
-  border: none;
-  color: var(--muted);
-  cursor: pointer;
-  font-size: 0.76rem;
-  text-decoration: underline dotted;
-  text-underline-offset: 3px;
-}
-.findings-redesign .filter-clear:hover { color: var(--accent); }
 
-/* Master/detail — list panel takes the full content width. The detail
- * view now renders as a centered modal (.detail-modal-*) instead of a
- * right-hand column, so the shell is a single-column grid. The old
- * two-column rule was removed in 2026-04 along with the in-page drawer. */
+/* Results take the full content width; an open record replaces them in
+ * the shared record view (styles/record.css). */
 .findings-redesign .findings-shell {
   display: grid;
   grid-template-columns: 1fr;
@@ -2539,40 +1302,6 @@ button.coverage-items-row {
    * edge in both themes (the bg tints are faint on their own). */
   border: 1px solid color-mix(in srgb, currentColor 30%, transparent);
 }
-.findings-redesign .pill-active     { background: rgba(244, 162, 89, 0.18); color: var(--warn); }
-.findings-redesign .pill-reported   { background: rgba(47, 127, 82, 0.16); color: var(--ok); }
-.findings-redesign .pill-exploited  { background: color-mix(in srgb, var(--danger) 14%, transparent); color: var(--danger); }
-.findings-redesign .pill-blocked    { background: color-mix(in srgb, var(--danger) 14%, transparent); color: var(--danger); }
-.findings-redesign .pill-merged     { background: rgba(23, 53, 76, 0.1); color: var(--accent); }
-.findings-redesign .pill-false_positive { background: color-mix(in srgb, var(--chip-slate) 12%, transparent); color: var(--chip-slate); }
-.findings-redesign .pill-confirmed  { background: rgba(47, 127, 82, 0.14); color: var(--ok); }
-.findings-redesign .pill-unreviewed { background: rgba(140, 123, 98, 0.15); color: var(--pending); }
-.findings-redesign .pill-downgraded { background: rgba(23, 53, 76, 0.12); color: var(--accent); }
-.findings-redesign .pill-disputed   { background: color-mix(in srgb, var(--disputed) 16%, transparent); color: var(--disputed); }
-.findings-redesign .pill-source-current { background: rgba(47, 127, 82, 0.14); color: var(--ok); }
-.findings-redesign .pill-source-stale { background: color-mix(in srgb, var(--danger) 14%, transparent); color: var(--danger); }
-.findings-redesign .pill-source-unbound { background: rgba(140, 123, 98, 0.15); color: var(--pending); }
-
-/* ── Submission-status pills (external-program axis) ──────
- * A SEPARATE axis from the workflow/verification pills above: a finding can be
- * workflow_status=reported AND submission_status=accepted at once. The shared
- * .pill base supplies the chip shape; .submission-pill adds a leading ↗ marker
- * so the external-submission axis never reads as a workflow pill, and the
- * .submission-* classes reuse the same workflow/severity colour recipe
- * (accepted=green/ok, rejected=red/danger, needs_info=amber/warn,
- * submitted=neutral/pending, duplicate=muted/slate). "none" has no class — it
- * is never rendered. */
-.findings-redesign .submission-pill::before {
-  content: "↗";
-  margin-right: 1px;
-  font-size: 0.9em;
-  opacity: 0.75;
-}
-.findings-redesign .submission-accepted   { background: rgba(47, 127, 82, 0.16); color: var(--ok); }
-.findings-redesign .submission-rejected    { background: color-mix(in srgb, var(--danger) 14%, transparent); color: var(--danger); }
-.findings-redesign .submission-needs_info  { background: rgba(244, 162, 89, 0.18); color: var(--warn); }
-.findings-redesign .submission-submitted   { background: rgba(140, 123, 98, 0.15); color: var(--pending); }
-.findings-redesign .submission-duplicate   { background: color-mix(in srgb, var(--chip-slate) 12%, transparent); color: var(--chip-slate); }
 
 /* Pager */
 .findings-redesign .list-footer {
@@ -2720,44 +1449,6 @@ button.coverage-items-row {
 }
 
 /* Drawer */
-.findings-redesign .drawer-panel {
-  padding: 0;
-  overflow: hidden;
-  display: grid;
-  grid-template-rows: auto auto 1fr;
-  min-height: 0;
-  background: var(--panel-strong);
-  position: relative;
-}
-.findings-redesign .drawer-hero {
-  padding: 18px 20px 14px;
-  display: grid;
-  gap: 10px;
-  border-bottom: 1px solid var(--border);
-  position: relative;
-}
-.findings-redesign .drawer-hero::before {
-  content: "";
-  position: absolute;
-  left: 0; top: 0; bottom: 0;
-  width: 4px;
-}
-.findings-redesign .drawer-hero.sev-critical::before { background: var(--sev-critical); }
-.findings-redesign .drawer-hero.sev-high::before     { background: var(--sev-high); }
-.findings-redesign .drawer-hero.sev-medium::before   { background: var(--sev-medium); }
-.findings-redesign .drawer-hero.sev-low::before      { background: var(--sev-low); }
-.findings-redesign .drawer-hero.sev-info::before     { background: var(--sev-info); }
-.findings-redesign .drawer-top {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  gap: 10px;
-}
-.findings-redesign .drawer-nav {
-  display: flex;
-  gap: 4px;
-  align-items: center;
-}
 .findings-redesign .icon-btn {
   background: rgba(255, 255, 255, 0.7);
   border: 1px solid var(--border);
@@ -2768,18 +1459,10 @@ button.coverage-items-row {
   color: var(--accent);
   transition: background 0.12s, border-color 0.12s;
 }
-.findings-redesign .icon-btn:hover { background: rgba(255, 255, 255, 1); border-color: var(--border-strong); }
+.findings-redesign .icon-btn:hover:not(:disabled) { background: rgba(255, 255, 255, 1); border-color: var(--border-strong); }
 .findings-redesign .icon-btn:disabled { opacity: 0.35; cursor: not-allowed; }
 .findings-redesign .icon-btn svg { width: 14px; height: 14px; }
 
-.findings-redesign .drawer-slug {
-  font-family: "Source Code Pro", "SFMono-Regular", monospace;
-  font-size: 0.76rem;
-  color: var(--muted);
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
 .findings-redesign .copy-btn {
   background: none;
   border: none;
@@ -2792,19 +1475,6 @@ button.coverage-items-row {
 .findings-redesign .copy-btn:hover { background: rgba(0,0,0,0.05); color: var(--accent); }
 .findings-redesign .copy-btn svg { width: 12px; height: 12px; }
 
-.findings-redesign .drawer-title {
-  font-size: 1.18rem;
-  font-weight: 600;
-  color: var(--ink);
-  margin: 0;
-  line-height: 1.28;
-}
-.findings-redesign .hero-meta {
-  display: flex;
-  gap: 10px;
-  flex-wrap: wrap;
-  align-items: center;
-}
 .findings-redesign .hero-sev {
   display: inline-flex;
   align-items: center;
@@ -2855,9 +1525,17 @@ button.coverage-items-row {
   align-items: center;
   gap: 5px;
 }
-.findings-redesign .qa-btn:hover { border-color: var(--accent); background: white; }
-.findings-redesign .qa-btn.primary { background: var(--accent); color: white; border-color: var(--accent); }
-.findings-redesign .qa-btn.primary:hover { background: color-mix(in srgb, var(--accent) 80%, #000); }
+.findings-redesign .qa-btn:hover:not(:disabled) { border-color: var(--accent); background: white; }
+.findings-redesign .qa-btn.primary { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
+.findings-redesign .qa-btn.primary:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 80%, #000); }
+/* Selected segment in a qa-btn group (e.g. Commands "Needs attention" / "All"). */
+.findings-redesign .qa-btn.is-active,
+.findings-redesign .qa-btn[aria-pressed="true"] {
+  border-color: var(--accent);
+  background: var(--count-bg-active);
+  color: var(--accent);
+  font-weight: 600;
+}
 
 /* Drawer tabs
  *
@@ -2911,25 +1589,6 @@ button.coverage-items-row {
   color: var(--count-ink-active);
 }
 
-.findings-redesign .drawer-body {
-  overflow-y: auto;
-  padding: 18px 20px 24px;
-  display: grid;
-  gap: 18px;
-  /* Pack panes to the top at content height — without this the grid's auto
-   * rows stretch to fill a tall drawer, leaving short panes (Links, Intel,
-   * History) with large gaps and over-tall cards. */
-  align-content: start;
-  min-height: 0;
-  /* min-width: 0 on the grid container + overflow-wrap on prose
-   * children prevents long unbreakable strings (pasted URLs, JWTs,
-   * stack frames) from establishing a min-content width that forces
-   * horizontal scroll. Without these, an analyst pasting a long token
-   * into `summary` or `impact` overflows the modal panel even though
-   * the `<p>` would otherwise wrap. */
-  min-width: 0;
-}
-
 .findings-redesign .section-title {
   font-size: 0.74rem;
   letter-spacing: 0.1em;
@@ -2976,8 +1635,7 @@ button.coverage-items-row {
   border-top: 1px solid var(--border);
   border-bottom: 1px solid var(--border);
 }
-.findings-redesign .attention-items,
-.findings-redesign .intel-id-list {
+.findings-redesign .attention-items {
   display: flex;
   flex-wrap: wrap;
   gap: 7px;
@@ -3165,7 +1823,7 @@ button.coverage-items-row {
   display: grid; place-items: center;
   font-family: "Source Code Pro", "SFMono-Regular", monospace;
   font-size: 0.72rem;
-  color: white;
+  color: var(--on-accent);
   background: var(--accent);
 }
 .findings-redesign .taint-row:first-child .taint-bubble { background: var(--accent-soft); color: var(--accent-soft-ink); }
@@ -3537,25 +2195,6 @@ button.coverage-items-row {
   gap: 2px;
   min-width: 0;
 }
-.findings-redesign .ref-list a:hover .ref-primary { text-decoration: underline; }
-.findings-redesign .ref-list .ref-primary {
-  font-size: 0.9rem;
-  color: var(--ink);
-  font-weight: 500;
-  display: inline-flex;
-  gap: 6px;
-  align-items: center;
-}
-.findings-redesign .ref-list .ref-primary svg { color: var(--accent); }
-.findings-redesign .ref-list .ref-url {
-  font-family: "Source Code Pro", "SFMono-Regular", monospace;
-  font-size: 0.72rem;
-  color: var(--muted);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  max-width: 100%;
-}
 
 /* Command palette (rendered inside .findings-redesign wrapper) */
 .findings-redesign .cmd-overlay {
@@ -3640,108 +2279,10 @@ button.coverage-items-row {
   color: var(--accent);
 }
 
-/* Drawer animation — kept for the in-modal drawer panel which still
- * reuses the .drawer-panel class for its hero + tabs + body styling. */
-.findings-redesign .drawer-panel {
-  animation: drawer-slide 0.18s ease-out;
-}
-@keyframes drawer-slide {
-  from { opacity: 0; transform: translateY(6px); }
-  to { opacity: 1; transform: none; }
-}
-
-/*
- * Detail modal — centred, dialog-sized. Replaces the old in-page
- * right-hand drawer across Findings / Intel / Commands tabs. Shared
- * class so the visual vocabulary stays consistent: backdrop with blur,
- * light shadow on the panel, rounded corners, internal scroll, close
- * button in the upper-right, one z-index tier below .cmd-overlay so
- * Cmd/Ctrl-K can stack on top.
- */
-.findings-redesign .detail-modal-overlay {
-  position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.45);
-  -webkit-backdrop-filter: blur(4px);
-  backdrop-filter: blur(4px);
-  display: grid;
-  place-items: center;
-  padding: 32px;
-  z-index: 40;
-  animation: fade-in 0.16s ease-out;
-}
-.findings-redesign .detail-modal-panel {
-  position: relative;
-  width: min(1400px, 85vw);
-  height: min(900px, 85vh);
-  max-width: 1400px;
-  background: var(--panel-strong);
-  border: 1px solid var(--border);
-  border-radius: 14px;
-  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.25);
-  overflow: hidden;
-  display: grid;
-  grid-template-rows: auto auto 1fr;
-  animation: modal-rise 0.18s ease-out;
-  min-height: 0;
-}
-/* When the Drawer renders inside the modal the hero/tabs/body still use
- * their original classes. Kill the drawer-panel translate animation so
- * the entrance animation belongs to the modal panel only. */
-.findings-redesign .detail-modal-panel .drawer-panel {
-  animation: none;
-  border: 0;
-  background: transparent;
-  box-shadow: none;
-  display: contents;
-}
-.findings-redesign .detail-modal-panel .drawer-body {
-  overflow-y: auto;
-  min-height: 0;
-}
-.findings-redesign .detail-modal-close {
-  position: absolute;
-  top: 10px;
-  right: 10px;
-  z-index: 1;
-  width: 30px;
-  height: 30px;
-  border-radius: 8px;
-  border: 1px solid var(--border);
-  background: rgba(255, 255, 255, 0.9);
-  display: grid;
-  place-items: center;
-  cursor: pointer;
-  color: var(--ink-2);
-  transition: background 0.12s, border-color 0.12s, color 0.12s;
-}
-.findings-redesign .detail-modal-close:hover {
-  background: rgba(255, 255, 255, 1);
-  border-color: var(--border-strong);
-  color: var(--ink);
-}
-.findings-redesign .detail-modal-close svg {
-  width: 14px;
-  height: 14px;
-}
-
 /* Sticky first column for the Commands table so the Time cell stays in
  * view while the operator scrolls right into the (potentially very
  * wide) Command cell. The sticky offset is 0; z-index floats above the
  * other row cells so the background paints over neighbours. */
-.findings-redesign .list-header > span.col-sticky,
-.findings-redesign .frow > span.col-sticky {
-  position: sticky;
-  left: 10px; /* clear the 10px sevbar column */
-  background: var(--panel-strong);
-  z-index: 2;
-}
-.findings-redesign .frow:hover > span.col-sticky {
-  background: rgba(248, 246, 241, 0.98);
-}
-.findings-redesign .frow.is-selected > span.col-sticky {
-  background: rgba(23, 53, 76, 0.06);
-}
 
 /*
  * Resizable column handle. Sits at the right edge of each header cell
@@ -3808,18 +2349,6 @@ button.coverage-items-row {
 .findings-redesign .frow-sev.itype-org_fact        { color: var(--chip-ochre); }
 .findings-redesign .frow-sev.itype-note            { color: var(--chip-muted); }
 
-.findings-redesign .drawer-hero.itype-tech_component::before  { background: var(--chip-navy); }
-.findings-redesign .drawer-hero.itype-person::before          { background: var(--chip-purple); }
-.findings-redesign .drawer-hero.itype-email::before           { background: var(--chip-green); }
-.findings-redesign .drawer-hero.itype-domain::before          { background: var(--chip-teal); }
-.findings-redesign .drawer-hero.itype-credentials::before     { background: var(--chip-orange); }
-.findings-redesign .drawer-hero.itype-cve::before             { background: var(--chip-red); }
-.findings-redesign .drawer-hero.itype-dns_record::before      { background: var(--chip-slate); }
-.findings-redesign .drawer-hero.itype-social_profile::before  { background: var(--chip-pink); }
-.findings-redesign .drawer-hero.itype-breach_record::before   { background: var(--chip-maroon); }
-.findings-redesign .drawer-hero.itype-org_fact::before        { background: var(--chip-ochre); }
-.findings-redesign .drawer-hero.itype-note::before            { background: var(--chip-muted); }
-
 .findings-redesign .hero-sev.itype-tech_component  { background: color-mix(in srgb, var(--chip-navy) 10%, transparent);    color: var(--chip-navy); }
 .findings-redesign .hero-sev.itype-person          { background: color-mix(in srgb, var(--chip-purple) 12%, transparent);  color: var(--chip-purple); }
 .findings-redesign .hero-sev.itype-email           { background: color-mix(in srgb, var(--chip-green) 14%, transparent);   color: var(--chip-green); }
@@ -3835,79 +2364,12 @@ button.coverage-items-row {
 /* Intel filter chips: active-state tints. Inactive chips keep their sev-dot
  * visible so you can scan the whole filter bar by color, not just by label.
  * Active state swaps border + bg + text to the dot's hue. */
-.findings-redesign .filter-chip.is-active.itype-tech_component  { border-color: var(--chip-navy);   background: color-mix(in srgb, var(--chip-navy) 10%, transparent);   color: var(--chip-navy); }
-.findings-redesign .filter-chip.is-active.itype-person          { border-color: var(--chip-purple); background: color-mix(in srgb, var(--chip-purple) 12%, transparent); color: var(--chip-purple); }
-.findings-redesign .filter-chip.is-active.itype-email           { border-color: var(--chip-green);  background: color-mix(in srgb, var(--chip-green) 14%, transparent);  color: var(--chip-green); }
-.findings-redesign .filter-chip.is-active.itype-domain          { border-color: var(--chip-teal);   background: color-mix(in srgb, var(--chip-teal) 12%, transparent);   color: var(--chip-teal); }
-.findings-redesign .filter-chip.is-active.itype-credentials     { border-color: var(--chip-orange); background: color-mix(in srgb, var(--chip-orange) 14%, transparent); color: var(--chip-orange); }
-.findings-redesign .filter-chip.is-active.itype-cve             { border-color: var(--chip-red);    background: color-mix(in srgb, var(--chip-red) 12%, transparent);    color: var(--chip-red); }
-.findings-redesign .filter-chip.is-active.itype-dns_record      { border-color: var(--chip-slate);  background: color-mix(in srgb, var(--chip-slate) 12%, transparent);  color: var(--chip-slate); }
-.findings-redesign .filter-chip.is-active.itype-social_profile  { border-color: var(--chip-pink);   background: color-mix(in srgb, var(--chip-pink) 12%, transparent);   color: var(--chip-pink); }
-.findings-redesign .filter-chip.is-active.itype-breach_record   { border-color: var(--chip-maroon); background: color-mix(in srgb, var(--chip-maroon) 14%, transparent); color: var(--chip-maroon); }
-.findings-redesign .filter-chip.is-active.itype-org_fact        { border-color: var(--chip-ochre);  background: color-mix(in srgb, var(--chip-ochre) 14%, transparent);  color: var(--chip-ochre); }
-.findings-redesign .filter-chip.is-active.itype-note            { border-color: var(--chip-muted);  background: color-mix(in srgb, var(--chip-muted) 12%, transparent);  color: var(--chip-muted); }
-
-.findings-redesign .filter-chip.is-active.istatus-active         { border-color: var(--ok);               background: color-mix(in srgb, var(--ok) 14%, transparent);               color: var(--ok); }
-.findings-redesign .filter-chip.is-active.istatus-blocked        { border-color: var(--danger);            background: color-mix(in srgb, var(--danger) 12%, transparent);            color: var(--danger); }
-.findings-redesign .filter-chip.is-active.istatus-exploited      { border-color: var(--chip-maroon);       background: color-mix(in srgb, var(--chip-maroon) 14%, transparent);       color: var(--chip-maroon); }
-.findings-redesign .filter-chip.is-active.istatus-false_positive { border-color: var(--chip-muted);        background: color-mix(in srgb, var(--chip-muted) 12%, transparent);        color: var(--chip-muted); }
-.findings-redesign .filter-chip.is-active.istatus-unreviewed     { border-color: var(--chip-unreviewed);   background: color-mix(in srgb, var(--chip-unreviewed) 16%, transparent);   color: var(--chip-unreviewed-ink); }
-
-.findings-redesign .filter-chip.is-active.isource { border-color: var(--chip-teal); background: color-mix(in srgb, var(--chip-teal) 12%, transparent); color: var(--chip-teal); }
-
-/* Small screens — the detail modal shrinks via its own min() width cap.
- * The list shell is already single-column, no responsive override needed. */
-
-/* ── Commands tab variants ────────────────────────────────────────────
- * The Commands tab reuses the entire .findings-redesign shell (toolbar,
- * frow, drawer-hero, pill, tag, etc). Only what's needed here is a color
- * stripe + accent map for the five status buckets and filter-chip active
- * states (tool/agent chips drive their own inline color from JS, so no
- * CSS is needed for those).
- *
- * Status colors are in sync with STATUS_COLORS in CommandsTab.tsx:
- *   success    #2f7f52  (green)
- *   failed     #991b1b  (red)
- *   timed_out  #c64d15  (amber)
- *   suppressed #8c7b62  (muted)
- *   artifact   #0d6b6b  (teal)
- */
-.findings-redesign .cbar-success    { background: var(--chip-green); }
-.findings-redesign .cbar-failed     { background: var(--chip-red); }
-.findings-redesign .cbar-timed_out  { background: var(--chip-orange); }
-.findings-redesign .cbar-suppressed { background: var(--chip-muted); }
-.findings-redesign .cbar-artifact   { background: var(--chip-teal); }
 
 /* Return-code tag classes used by CommandsGrid RcCell */
 .tag-rc-ok      { background: color-mix(in srgb, var(--ok) 16%, transparent);      color: var(--ok); }
 .tag-rc-warn    { background: color-mix(in srgb, var(--warn) 14%, transparent);    color: var(--warn); }
 .tag-rc-danger  { background: color-mix(in srgb, var(--danger) 14%, transparent);  color: var(--danger); }
 .tag-rc-pending { background: color-mix(in srgb, var(--pending) 12%, transparent); color: var(--pending); }
-
-.findings-redesign .filter-chip.is-active.cstatus-success    { border-color: var(--chip-green);  background: color-mix(in srgb, var(--chip-green) 14%, transparent);  color: var(--chip-green); }
-.findings-redesign .filter-chip.is-active.cstatus-failed     { border-color: var(--chip-red);    background: color-mix(in srgb, var(--chip-red) 12%, transparent);    color: var(--chip-red); }
-.findings-redesign .filter-chip.is-active.cstatus-timed_out  { border-color: var(--chip-orange); background: color-mix(in srgb, var(--chip-orange) 14%, transparent); color: var(--chip-orange); }
-.findings-redesign .filter-chip.is-active.cstatus-suppressed { border-color: var(--chip-muted);  background: color-mix(in srgb, var(--chip-muted) 14%, transparent);  color: var(--chip-muted); }
-.findings-redesign .filter-chip.is-active.cstatus-artifact   { border-color: var(--chip-teal);   background: color-mix(in srgb, var(--chip-teal) 12%, transparent);   color: var(--chip-teal); }
-
-/* Technique chip active state is driven by inline style from JS (hash
- * fallback means we can't enumerate every possible class name), but we
- * keep a shared `.ctech` hook in case later CSS needs to target all
- * technique chips (e.g. cursor, spacing tweaks). */
-.findings-redesign .filter-chip.ctech { /* inline-color-driven */ }
-
-/* Probe kind chips — closed 6-value enum, each colored per PROBE_KIND_COLORS
- * in CommandsTab.tsx:
- *   fingerprint #0d6b6b (teal) | baseline #4b5563 (slate)
- *   payload     #c64d15 (orange) | exploit  #991b1b (red)
- *   replay      #7c3aed (purple) | cleanup  #6b685d (muted)
- */
-.findings-redesign .filter-chip.is-active.cpk-fingerprint { border-color: var(--chip-teal);     background: color-mix(in srgb, var(--chip-teal) 12%, transparent);     color: var(--chip-teal); }
-.findings-redesign .filter-chip.is-active.cpk-baseline    { border-color: var(--chip-slate);    background: color-mix(in srgb, var(--chip-slate) 12%, transparent);    color: var(--chip-slate); }
-.findings-redesign .filter-chip.is-active.cpk-payload     { border-color: var(--chip-orange);   background: color-mix(in srgb, var(--chip-orange) 14%, transparent);   color: var(--chip-orange); }
-.findings-redesign .filter-chip.is-active.cpk-exploit     { border-color: var(--chip-red);      background: color-mix(in srgb, var(--chip-red) 12%, transparent);      color: var(--chip-red); }
-.findings-redesign .filter-chip.is-active.cpk-replay      { border-color: var(--chip-purple);   background: color-mix(in srgb, var(--chip-purple) 12%, transparent);   color: var(--chip-purple); }
-.findings-redesign .filter-chip.is-active.cpk-cleanup     { border-color: var(--chip-muted-grey); background: color-mix(in srgb, var(--chip-muted-grey) 14%, transparent); color: var(--chip-muted-grey); }
 
 /* ──────────────────────────────────────────────────────────
  * Theme toggle button — lives in the page headers. Keeps the
@@ -4026,9 +2488,7 @@ body.detail-modal-open {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
-  /* Tight gap to the following NotesBody. The old 10px plus
-   * the .section grid's 4px gap plus NotesBody's own rhythm
-   * stacked to ~18px of air; drop to a single 6px breath. */
+  /* Tight gap to the prose that follows. */
   margin: 0 0 6px;
 }
 /* Inline variant used in Intel Notes & tags: "Tags <chips>" on one
@@ -4059,43 +2519,6 @@ body.detail-modal-open {
   letter-spacing: 0;
   font-family: inherit;
   font-size: 0.76rem;
-}
-
-.findings-redesign .notes-body {
-  display: grid;
-  gap: 10px;
-  font-size: 0.92rem;
-  line-height: 1.6;
-  color: var(--ink);
-  white-space: normal;
-}
-.findings-redesign .notes-body p { margin: 0; }
-/* Kill any top margin on the first child so the section-title sits
- * flush against the first paragraph/heading/blockquote. Fixes the
- * "Evidence" label floating ~20px above its own text in PoC. */
-.findings-redesign .notes-body > :first-child { margin-top: 0; }
-.findings-redesign .notes-body > :last-child { margin-bottom: 0; }
-.findings-redesign .notes-body a {
-  color: var(--accent);
-  text-decoration: underline;
-  text-decoration-thickness: 1px;
-  text-underline-offset: 2px;
-  word-break: break-word;
-}
-.findings-redesign .notes-body a:hover { text-decoration-thickness: 2px; }
-.findings-redesign .notes-body code {
-  font-family: "Source Code Pro", "SFMono-Regular", monospace;
-  background: var(--json-bg);
-  border: 1px solid var(--json-border);
-  border-radius: 5px;
-  padding: 0 5px;
-  font-size: 0.88em;
-}
-.findings-redesign .notes-body h3 {
-  margin: 0;
-  font-size: 1.02rem;
-  letter-spacing: -0.005em;
-  color: var(--ink);
 }
 
 /* Compact one-line provenance footer for the single-field (agent-only)
@@ -4171,25 +2594,6 @@ body.detail-modal-open {
   font-style: italic;
   line-height: 1.5;
 }
-/* Compact evidence callout for short prose observations in the
- * Findings PoC pane. Muted panel + accent bar; monospace tip-toed
- * in via Source Code Pro to help the eye tell evidence from flavor
- * prose. Longer (>200 char, multi-paragraph) evidence falls back to
- * NotesBody so paragraph structure survives. */
-.findings-redesign .evidence-inline {
-  font-family: "Source Code Pro", "SFMono-Regular", monospace;
-  font-size: 0.85rem;
-  line-height: 1.55;
-  padding: 10px 14px;
-  margin: 0;
-  background: var(--panel-soft);
-  border-left: 3px solid var(--accent-muted);
-  border-radius: 0 8px 8px 0;
-  color: var(--ink);
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
 .findings-redesign .copy-inline {
   border: 1px solid var(--border);
   background: var(--panel-soft);
@@ -4210,22 +2614,11 @@ body.detail-modal-open {
   border-color: var(--ok);
 }
 
-.findings-redesign .rel-time {
+.findings-redesign .provenance-line .timestamp {
   font-size: 0.82rem;
   color: var(--ink-2);
 }
 
-.findings-redesign .poc-steps {
-  display: grid;
-  gap: 8px;
-  padding-left: 24px;
-  margin: 0;
-  counter-reset: poc-step;
-}
-.findings-redesign .poc-steps li {
-  font-size: 0.9rem;
-  line-height: 1.55;
-}
 .findings-redesign .code-block {
   font-family: "Source Code Pro", "SFMono-Regular", monospace;
   font-size: 0.84rem;
@@ -4256,40 +2649,9 @@ body.detail-modal-open {
   font-weight: 600;
 }
 
-/* ──────────────────────────────────────────────────────────
- * Drawer header actions + copy-as-markdown / copy-link buttons
- * (Tier 1c). These reuse .copy-btn (slug copy) styling but sit
- * on the right of .drawer-top. lucide icons size themselves via
- * the size prop; the inherited .copy-btn svg rule keeps the
- * 12px slug-copy icon size, so set an explicit size here.
- * ────────────────────────────────────────────────────────── */
-.findings-redesign .drawer-header-actions {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-}
-.findings-redesign .drawer-header-actions .copy-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-}
-.findings-redesign .drawer-header-actions .copy-btn svg {
-  width: 13px;
-  height: 13px;
-}
-
-/* Prose view-mode toggle (rendered/raw) — sits at the right end of the
- * drawer-tabs bar. Compact segmented control; active segment picks up the
- * accent like the active drawer-tab. */
-/* "View" label + the Eye/Code toggle, pinned to the right of the tabs bar.
- * The label makes the toggle's purpose obvious instead of a bare icon pair. */
-.findings-redesign .prose-mode-wrap {
-  margin-left: auto;
-  align-self: center;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-}
+/* Prose view-mode toggle (rendered/raw): a "View" label + the Eye/Code
+ * segmented control. The label makes the toggle's purpose obvious instead of
+ * a bare icon pair; the active segment picks up the accent. */
 .findings-redesign .prose-mode-label {
   font-size: 0.68rem;
   letter-spacing: 0.08em;
@@ -4495,76 +2857,26 @@ body.detail-modal-open {
  * ────────────────────────────────────────────────────────── */
 :root[data-theme="dark"] .panel,
 :root[data-theme="dark"] .stat-card,
-:root[data-theme="dark"] .phase-card,
-:root[data-theme="dark"] .artifact-row,
-:root[data-theme="dark"] .timeline-row,
-:root[data-theme="dark"] .finding-row,
-:root[data-theme="dark"] .finding-transition-row,
-:root[data-theme="dark"] .coverage-tree-header,
-:root[data-theme="dark"] .service-row {
+:root[data-theme="dark"] .timeline-row {
   background: var(--panel);
   border-color: var(--border);
 }
-:root[data-theme="dark"] .phase-completed {
-  background: rgba(47, 127, 82, 0.18);
-  border-color: rgba(95, 192, 138, 0.35);
-}
-:root[data-theme="dark"] .phase-active {
-  background: rgba(240, 138, 82, 0.18);
-  border-color: rgba(240, 138, 82, 0.45);
-}
-:root[data-theme="dark"] .phase-pending {
-  background: var(--panel-soft);
-}
-:root[data-theme="dark"] .code-phase-completed {
-  background: rgba(47, 127, 82, 0.18);
-  border-color: rgba(95, 192, 138, 0.35);
-}
-:root[data-theme="dark"] .code-phase-active {
-  background: rgba(240, 138, 82, 0.18);
-  border-color: rgba(240, 138, 82, 0.45);
-}
-:root[data-theme="dark"] .code-phase-pending {
-  background: var(--panel-soft);
-}
 :root[data-theme="dark"] .ghost-button,
 :root[data-theme="dark"] .pager-button,
-:root[data-theme="dark"] .filter-chip {
+:root[data-theme="dark"] .filter-chip:not(.is-active, [aria-pressed="true"]) {
   background: var(--panel-soft);
 }
-:root[data-theme="dark"] .ghost-button:hover,
+:root[data-theme="dark"] .ghost-button:hover:not(:disabled),
 :root[data-theme="dark"] .pager-button:hover:not(:disabled) {
   background: var(--panel-hover);
 }
-:root[data-theme="dark"] .filter-chip:hover {
+:root[data-theme="dark"] .filter-chip:hover:not(:disabled, .is-active, [aria-pressed="true"]) {
   background: var(--panel-hover);
 }
-:root[data-theme="dark"] .coverage-items-row:nth-child(even) {
-  background: rgba(255, 255, 255, 0.03);
-}
-:root[data-theme="dark"] .coverage-bar {
-  background: rgba(255, 255, 255, 0.05);
-}
-:root[data-theme="dark"] .engagement-card-clickable:hover {
-  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.45);
-  border-color: var(--border-strong);
-}
-:root[data-theme="dark"] .finding-row:hover,
-:root[data-theme="dark"] .finding-row-active {
-  background: var(--panel-hover);
-}
-/* .artifact-content keeps its terminal-dark aesthetic (rgba(16,18,26,0.96))
- * in both light and dark themes so the near-white inner colors remain legible.
- * The dark override that flipped it to --elevated is intentionally removed. */
-
 /* findings-redesign drawer/list elements that bake in white */
-:root[data-theme="dark"] .findings-redesign .drawer-panel,
 :root[data-theme="dark"] .findings-redesign .frow.is-selected,
 :root[data-theme="dark"] .findings-redesign .frow:hover,
 :root[data-theme="dark"] .findings-redesign .list-header {
-  background: var(--panel-strong);
-}
-:root[data-theme="dark"] .findings-redesign .frow > span.col-sticky {
   background: var(--panel-strong);
 }
 :root[data-theme="dark"] .findings-redesign .callout {
@@ -4583,24 +2895,21 @@ body.detail-modal-open {
    * since it was dropped from the Metadata grid). Subtle tint instead. */
   background: rgba(255, 255, 255, 0.07);
 }
-:root[data-theme="dark"] .findings-redesign .icon-btn:hover {
+:root[data-theme="dark"] .findings-redesign .icon-btn {
+  /* A faint tint, not the light theme's near-white fill. */
+  background: rgba(255, 255, 255, 0.04);
+}
+:root[data-theme="dark"] .findings-redesign .icon-btn:hover:not(:disabled) {
   background: rgba(255, 255, 255, 0.07);
 }
 :root[data-theme="dark"] .findings-redesign .cmd-input-row,
 :root[data-theme="dark"] .findings-redesign .cmd-box {
   background: var(--panel-strong);
 }
-:root[data-theme="dark"] .findings-redesign .qa-btn:hover {
+:root[data-theme="dark"] .findings-redesign .qa-btn:not(.primary):hover:not(:disabled) {
   background: var(--panel-hover);
 }
-:root[data-theme="dark"] .findings-redesign .detail-modal-close {
-  background: var(--panel-strong);
-}
-:root[data-theme="dark"] .findings-redesign .detail-modal-close:hover {
-  background: var(--panel-hover);
-}
-:root[data-theme="dark"] .findings-redesign .pre,
-:root[data-theme="dark"] .finding-notes {
+:root[data-theme="dark"] .findings-redesign .pre {
   background: var(--json-bg);
   border-color: var(--json-border);
 }
@@ -4608,61 +2917,10 @@ body.detail-modal-open {
   background: rgba(255, 255, 255, 0.03);
   border-color: var(--border);
 }
-:root[data-theme="dark"] .findings-redesign .frow.is-selected > span.col-sticky {
-  background: rgba(121, 169, 212, 0.08);
-}
 
-/* itype/istatus/cstatus/cpk filter-chip.is-active rules now use color-mix(var(--chip-*))
- * which resolve to the dark chip values automatically — no dark overrides needed. */
-
-/* .hero-sev.* and .filter-chip.is-active.sev-* now use color-mix(var(--sev-*))
- * which resolves to dark values automatically — no dark overrides needed. */
+/* .hero-sev.* uses color-mix(var(--sev-*)) / var(--chip-*), which resolve to
+ * the dark values automatically — no dark overrides needed. */
 /* .tag.owasp, .tag.cve, .tag.chain now use chip/sev vars — no dark override needed. */
-
-:root[data-theme="dark"] .findings-redesign .pill-active     { background: rgba(240,138,82,0.22); color: #f4b092; }
-:root[data-theme="dark"] .findings-redesign .pill-reported   { background: rgba(95,192,138,0.22); color: #9fdcb8; }
-:root[data-theme="dark"] .findings-redesign .pill-exploited  { background: rgba(229,108,108,0.22); color: #f09494; }
-:root[data-theme="dark"] .findings-redesign .pill-blocked    { background: rgba(229,108,108,0.22); color: #f09494; }
-:root[data-theme="dark"] .findings-redesign .pill-merged     { background: rgba(121,169,212,0.18); color: #9ec5e8; }
-:root[data-theme="dark"] .findings-redesign .pill-confirmed  { background: rgba(95,192,138,0.22); color: #9fdcb8; }
-:root[data-theme="dark"] .findings-redesign .pill-unreviewed { background: rgba(184,171,146,0.18); color: #cec3ae; }
-:root[data-theme="dark"] .findings-redesign .pill-downgraded { background: rgba(121,169,212,0.2); color: #9ec5e8; }
-/* .pill-disputed uses --disputed var (both themes) — no dark override needed. */
-:root[data-theme="dark"] .findings-redesign .pill-false_positive { background: rgba(184,171,146,0.18); color: #cec3ae; }
-
-/* Submission-status pills — dark-theme bg/fg, mirroring the workflow pill
- * dark overrides above so the external-submission axis matches the theme. */
-:root[data-theme="dark"] .findings-redesign .submission-accepted   { background: rgba(95,192,138,0.22); color: #9fdcb8; }
-:root[data-theme="dark"] .findings-redesign .submission-rejected    { background: rgba(229,108,108,0.22); color: #f09494; }
-:root[data-theme="dark"] .findings-redesign .submission-needs_info  { background: rgba(240,138,82,0.22); color: #f4b092; }
-:root[data-theme="dark"] .findings-redesign .submission-submitted   { background: rgba(184,171,146,0.18); color: #cec3ae; }
-:root[data-theme="dark"] .findings-redesign .submission-duplicate   { background: rgba(184,171,146,0.18); color: #cec3ae; }
-
-/* .severity-* now use color-mix(var(--sev-*)) — dark override no longer needed. */
-
-:root[data-theme="dark"] .status-queued,
-:root[data-theme="dark"] .status-pending,
-:root[data-theme="dark"] .status-draft,
-:root[data-theme="dark"] .status-unreviewed { background: rgba(184,171,146,0.18); color: #cec3ae; }
-:root[data-theme="dark"] .status-running,
-:root[data-theme="dark"] .status-in_progress,
-:root[data-theme="dark"] .status-active     { background: rgba(240,138,82,0.22); color: #f4b092; }
-:root[data-theme="dark"] .status-completed,
-:root[data-theme="dark"] .status-confirmed,
-:root[data-theme="dark"] .status-exploited,
-:root[data-theme="dark"] .status-reported   { background: rgba(95,192,138,0.22); color: #9fdcb8; }
-:root[data-theme="dark"] .status-downgraded { background: rgba(121,169,212,0.2); color: #9ec5e8; }
-:root[data-theme="dark"] .status-blocked,
-:root[data-theme="dark"] .status-failed     { background: rgba(229,108,108,0.22); color: #f09494; }
-:root[data-theme="dark"] .status-false_positive { background: rgba(142,154,176,0.22); color: #bcc4d3; }
-/* .status-disputed uses --disputed var (both themes) — no dark override needed. */
-
-:root[data-theme="dark"] .event-type-finding { background: rgba(95,192,138,0.22); color: #9fdcb8; }
-:root[data-theme="dark"] .event-type-chain   { background: rgba(229,108,108,0.22); color: #f09494; }
-:root[data-theme="dark"] .event-type-surface { background: rgba(240,138,82,0.22); color: #f4b092; }
-:root[data-theme="dark"] .event-type-merge   { background: rgba(121,169,212,0.2); color: #9ec5e8; }
-:root[data-theme="dark"] .event-type-phase   { background: rgba(184,171,146,0.18); color: #cec3ae; }
-:root[data-theme="dark"] .event-type-task    { background: rgba(121,169,212,0.18); color: #9ec5e8; }
 
 /* .tab-count and .findings-redesign .count are now theme-aware via --count-bg /
  * --count-ink variables defined on :root — no dark override needed. */
@@ -4670,15 +2928,8 @@ body.detail-modal-open {
   background: rgba(247,187,123,0.3);
   color: var(--ink);
 }
-/* .panel code uses --count-bg which is theme-aware; only the page-crumbs
- * scoped code element retains its own accent-color in dark mode. */
-:root[data-theme="dark"] .findings-redesign .page-crumbs code {
-  background: rgba(121,169,212,0.12);
-  color: var(--accent);
-}
-
 /* ---- toasts ---- */
-/* Fixed bottom-right stack. z-index 45 sits above the detail-modal overlay
+/* Fixed bottom-right stack. z-index 45 sits above page overlays
  * (40) and below the command palette (50). All colors reference theme vars so
  * the stack reads correctly in both light and dark; the per-type accent is
  * keyed off data-toast-type and only tints the left border + icon. */
@@ -5002,6 +3253,36 @@ body.detail-modal-open {
   text-transform: uppercase;
 }
 
+/* Sort direction arrows: lib/agGrid.ts supplies these as the shared column
+ * icons because the structural stylesheet ships no icon font. */
+.ag-theme-vigil .grid-sort-icon {
+  margin-left: 4px;
+  color: var(--accent);
+  font-size: 0.8rem;
+  font-weight: 700;
+}
+
+/* In-cell filter buttons read as text links, not native buttons (the
+ * browser's default button face is unreadable under the dark theme). */
+.ag-theme-vigil .grid-link-button {
+  appearance: none;
+  max-width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--ink-2);
+  font: inherit;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.ag-theme-vigil .grid-link-button:hover { color: var(--accent); text-decoration: underline; }
+.ag-theme-vigil .grid-link-button:focus-visible,
+.ag-theme-vigil button.tag:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.ag-theme-vigil button.tag { border: 0; cursor: pointer; }
+
 /* Mono cells (command / location / target) — opt in via cellClass. */
 .ag-theme-vigil .ag-mono {
   font-family: "Source Code Pro", "SFMono-Regular", monospace;
@@ -5024,65 +3305,11 @@ body.detail-modal-open {
   white-space: nowrap;
 }
 
-.data-boundary-note {
-  margin: 12px 18px 16px;
-  padding: 9px 11px;
-  border-left: 3px solid var(--warn);
-  background: color-mix(in srgb, var(--warn) 7%, transparent);
-  color: var(--warn);
-  font-size: 0.76rem;
-  line-height: 1.45;
-}
-
-/* No-rows overlay uses our muted ink (the template injects .ag-vigil-empty). */
-.ag-theme-vigil .ag-vigil-empty {
-  color: var(--muted);
-  font-size: 0.84rem;
-}
-
 /* The grid lives inside a .list-panel-style card; keep its own border off
  * so the panel's border is the only frame. */
 .ag-theme-vigil .ag-root-wrapper {
   border: 0;
   background: transparent;
-}
-
-/* ---- findings view toggle (Grouped | Table) ----
- * Small segmented control sitting in the Findings toolbar-right. Reuses
- * the chip/qa-btn visual language. */
-.findings-redesign .view-toggle {
-  display: inline-flex;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  overflow: hidden;
-}
-.findings-redesign .view-toggle button {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  background: none;
-  border: 0;
-  padding: 5px 10px;
-  font: inherit;
-  font-size: 0.78rem;
-  color: var(--muted);
-  cursor: pointer;
-  transition: background 0.12s, color 0.12s;
-}
-.findings-redesign .view-toggle button + button {
-  border-left: 1px solid var(--border);
-}
-.findings-redesign .view-toggle button:hover {
-  color: var(--ink);
-  background: var(--panel-hover);
-}
-.findings-redesign .view-toggle button.is-active {
-  color: var(--accent);
-  background: var(--accent-muted);
-}
-.findings-redesign .view-toggle svg {
-  width: 14px;
-  height: 14px;
 }
 
 /* The grid sits inside the list panel; give it a usable height. */
@@ -5177,12 +3404,6 @@ body.detail-modal-open {
   font-weight: 600;
 }
 
-/* Per-engagement finding-count badge in the card heading. */
-.engagement-finding-badge {
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-}
-
 /* Per-engagement severity mini-bar (SeverityMiniBar.tsx). A thin horizontal
  * stacked bar; segment widths come from flex-grow set inline per severity. */
 .sev-minibar {
@@ -5227,9 +3448,6 @@ body.detail-modal-open {
 .v-stagger-1 { animation-delay: 0ms; }
 .v-stagger-2 { animation-delay: 60ms; }
 .v-stagger-3 { animation-delay: 120ms; }
-.v-stagger-4 { animation-delay: 180ms; }
-.v-stagger-5 { animation-delay: 240ms; }
-.v-stagger-6 { animation-delay: 300ms; }
 
 @media (prefers-reduced-motion: reduce) {
   .v-card-enter {
@@ -5323,43 +3541,6 @@ body.detail-modal-open {
 .findings-redesign .method-badge.m-options { color: var(--m-options); background: color-mix(in srgb, var(--m-options) 14%, transparent); }
 .findings-redesign .method-badge.m-other   { color: var(--m-other);   background: color-mix(in srgb, var(--m-other) 14%, transparent); }
 
-/* Method filter-chip leading dot tinted to the method color. */
-.findings-redesign .method-dot.m-get     { background: var(--m-get); }
-.findings-redesign .method-dot.m-post    { background: var(--m-post); }
-.findings-redesign .method-dot.m-put     { background: var(--m-put); }
-.findings-redesign .method-dot.m-patch   { background: var(--m-patch); }
-.findings-redesign .method-dot.m-delete  { background: var(--m-delete); }
-.findings-redesign .method-dot.m-head    { background: var(--m-head); }
-.findings-redesign .method-dot.m-options { background: var(--m-options); }
-.findings-redesign .method-dot.m-other   { background: var(--m-other); }
-
-/* Active method chip border + tint follow the method color. */
-.findings-redesign .filter-chip.method-chip.is-active.m-get     { border-color: var(--m-get);     color: var(--m-get);     background: color-mix(in srgb, var(--m-get) 10%, transparent); }
-.findings-redesign .filter-chip.method-chip.is-active.m-post    { border-color: var(--m-post);    color: var(--m-post);    background: color-mix(in srgb, var(--m-post) 10%, transparent); }
-.findings-redesign .filter-chip.method-chip.is-active.m-put     { border-color: var(--m-put);     color: var(--m-put);     background: color-mix(in srgb, var(--m-put) 10%, transparent); }
-.findings-redesign .filter-chip.method-chip.is-active.m-patch   { border-color: var(--m-patch);   color: var(--m-patch);   background: color-mix(in srgb, var(--m-patch) 10%, transparent); }
-.findings-redesign .filter-chip.method-chip.is-active.m-delete  { border-color: var(--m-delete);  color: var(--m-delete);  background: color-mix(in srgb, var(--m-delete) 10%, transparent); }
-.findings-redesign .filter-chip.method-chip.is-active.m-head    { border-color: var(--m-head);    color: var(--m-head);    background: color-mix(in srgb, var(--m-head) 10%, transparent); }
-.findings-redesign .filter-chip.method-chip.is-active.m-options { border-color: var(--m-options); color: var(--m-options); background: color-mix(in srgb, var(--m-options) 10%, transparent); }
-.findings-redesign .filter-chip.method-chip.is-active.m-other   { border-color: var(--m-other);   color: var(--m-other);   background: color-mix(in srgb, var(--m-other) 10%, transparent); }
-
-/* ---- HTTP response-status badges (observation rows) ---- */
-.findings-redesign .status-badge {
-  display: inline-flex;
-  align-items: center;
-  font-family: "Source Code Pro", "SFMono-Regular", monospace;
-  font-size: 0.7rem;
-  font-weight: 700;
-  padding: 2px 7px;
-  border-radius: 6px;
-  white-space: nowrap;
-}
-.findings-redesign .status-badge.s-1xx { color: var(--s-1xx); background: color-mix(in srgb, var(--s-1xx) 14%, transparent); }
-.findings-redesign .status-badge.s-2xx { color: var(--s-2xx); background: color-mix(in srgb, var(--s-2xx) 14%, transparent); }
-.findings-redesign .status-badge.s-3xx { color: var(--s-3xx); background: color-mix(in srgb, var(--s-3xx) 14%, transparent); }
-.findings-redesign .status-badge.s-4xx { color: var(--s-4xx); background: color-mix(in srgb, var(--s-4xx) 14%, transparent); }
-.findings-redesign .status-badge.s-5xx { color: var(--s-5xx); background: color-mix(in srgb, var(--s-5xx) 14%, transparent); }
-
 /* ---- HTTP drawer: request-schema grid + observation cards ---- */
 .findings-redesign .http-schema-grid {
   display: grid;
@@ -5404,33 +3585,6 @@ body.detail-modal-open {
   line-height: 1.45;
 }
 
-/* ---- OAST status badges (grid cell + drawer hero) ----
- * fired/confirmed → ok (green), pending → warn, everything else → muted. */
-.findings-redesign .oob-status-badge {
-  display: inline-flex;
-  align-items: center;
-  font-size: 0.68rem;
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  padding: 2px 8px;
-  border-radius: 999px;
-}
-.findings-redesign .oob-status-badge.oob-fired   { color: var(--warn); background: color-mix(in srgb, var(--warn) 16%, transparent); }
-.findings-redesign .oob-status-badge.oob-confirmed { color: var(--ok); background: color-mix(in srgb, var(--ok) 16%, transparent); }
-.findings-redesign .oob-status-badge.oob-pending { color: var(--warn);    background: color-mix(in srgb, var(--warn) 16%, transparent); }
-.findings-redesign .oob-status-badge.oob-muted   { color: var(--pending); background: color-mix(in srgb, var(--pending) 14%, transparent); }
-
-/* OAST status filter-chip dot + active state. */
-.findings-redesign .oob-status-dot.oob-fired   { background: var(--warn); }
-.findings-redesign .oob-status-dot.oob-confirmed { background: var(--ok); }
-.findings-redesign .oob-status-dot.oob-pending { background: var(--warn); }
-.findings-redesign .oob-status-dot.oob-muted   { background: var(--pending); }
-.findings-redesign .filter-chip.oob-status-chip.is-active.oob-fired   { border-color: var(--warn); color: var(--warn); background: color-mix(in srgb, var(--warn) 10%, transparent); }
-.findings-redesign .filter-chip.oob-status-chip.is-active.oob-confirmed { border-color: var(--ok); color: var(--ok); background: color-mix(in srgb, var(--ok) 10%, transparent); }
-.findings-redesign .filter-chip.oob-status-chip.is-active.oob-pending { border-color: var(--warn);    color: var(--warn);    background: color-mix(in srgb, var(--warn) 10%, transparent); }
-.findings-redesign .filter-chip.oob-status-chip.is-active.oob-muted   { border-color: var(--pending); color: var(--pending); background: color-mix(in srgb, var(--pending) 10%, transparent); }
-
 /* ---- OAST callback protocol badges (reuse method palette) ---- */
 .findings-redesign .oob-proto-badge {
   display: inline-flex;
@@ -5452,798 +3606,8 @@ body.detail-modal-open {
 .findings-redesign .oob-proto-badge.p-smtp  { color: var(--m-patch);   background: color-mix(in srgb, var(--m-patch) 14%, transparent); }
 .findings-redesign .oob-proto-badge.p-other { color: var(--m-other);   background: color-mix(in srgb, var(--m-other) 14%, transparent); }
 
-/* ---- OAST drawer: interaction sub-list ---- */
-.findings-redesign .oob-interaction-list {
-  display: grid;
-  gap: 10px;
-}
+/* ── Markdown image references and submission blockers ───── */
 
-.findings-redesign .oob-lifecycle-summary {
-  margin: 10px 0 0;
-  color: var(--ink-2);
-  font-size: 0.86rem;
-}
-
-.findings-redesign .oob-interaction-summary {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px 14px;
-  margin: 4px 0 12px;
-  padding: 10px 12px;
-  border: 1px solid var(--divider);
-  border-radius: 8px;
-  background: var(--panel-soft);
-  color: var(--muted);
-  font-size: 0.78rem;
-}
-
-.findings-redesign .oob-interaction-summary strong {
-  color: var(--ink);
-}
-
-.findings-redesign .oob-interaction-meta {
-  display: grid;
-  gap: 3px;
-  margin: 8px 0;
-  color: var(--muted);
-  font-size: 0.72rem;
-}
-
-.findings-redesign .oob-interaction-meta code {
-  overflow-wrap: anywhere;
-  color: var(--ink-2);
-}
-
-.findings-redesign .oob-receipt {
-  margin-top: 10px;
-}
-
-.findings-redesign .oob-receipt summary {
-  width: fit-content;
-  cursor: pointer;
-  color: var(--accent);
-  font-size: 0.78rem;
-}
-
-.findings-redesign .oob-receipt[open] summary {
-  margin-bottom: 8px;
-}
-.findings-redesign .oob-interaction-card {
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  background: var(--panel-soft);
-  padding: 10px 12px;
-  display: grid;
-  gap: 8px;
-}
-.findings-redesign .oob-interaction-head {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 8px;
-  color: var(--muted);
-  font-size: 0.78rem;
-}
-.findings-redesign .oob-remote {
-  font-size: 0.78rem;
-  color: var(--ink-2);
-  overflow-wrap: anywhere;
-}
-
-/* ── Shared assessment-run audit ──────────────────────────
- * A restrained master/detail ledger shared by code, web and blue runs.
- * Every recorded value renders verbatim: this view is the audit trail, so
- * presentation never rewrites what the run actually carried. */
-.runs-audit {
-  display: grid;
-  gap: 16px;
-}
-
-.run-detail-header,
-.run-rail-heading,
-.run-comparison-heading {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-}
-
-.run-audit-toolbar h2,
-.run-detail-header h2,
-.run-audit-workspace h2,
-.run-audit-workspace h3 {
-  margin: 0;
-}
-
-.run-audit-toolbar,
-.run-detail-header > div {
-  display: grid;
-  gap: 4px;
-}
-
-.run-load-more {
-  padding: 8px 13px;
-  white-space: nowrap;
-}
-
-.run-audit-layout {
-  display: grid;
-  grid-template-columns: minmax(245px, 0.28fr) minmax(0, 1fr);
-  gap: 16px;
-  align-items: start;
-}
-
-.run-audit-rail {
-  position: sticky;
-  top: 16px;
-  padding: 14px;
-  max-height: calc(100vh - 32px);
-  overflow: auto;
-}
-
-.run-rail-heading {
-  padding: 3px 4px 12px;
-}
-
-.run-rail-list,
-.run-audit-workspace,
-.run-record-list,
-.run-blocker-list {
-  display: grid;
-  gap: 10px;
-}
-
-.run-rail-row {
-  width: 100%;
-  display: grid;
-  grid-template-columns: 4px minmax(0, 1fr) auto;
-  gap: 10px;
-  align-items: center;
-  border: 1px solid transparent;
-  border-radius: 12px;
-  padding: 11px 10px;
-  color: var(--ink);
-  background: transparent;
-  text-align: left;
-  cursor: pointer;
-  transition: background 120ms ease, border-color 120ms ease, transform 120ms ease;
-}
-
-.run-rail-row:hover {
-  background: var(--panel-hover);
-  transform: translateX(2px);
-}
-
-.run-rail-row.is-selected {
-  background: color-mix(in srgb, var(--accent) 8%, var(--panel-strong));
-  border-color: var(--accent-muted);
-}
-
-.run-rail-row > span:nth-child(2) {
-  display: grid;
-  gap: 3px;
-  min-width: 0;
-}
-
-.run-rail-row strong,
-.run-rail-row small {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.run-rail-row small {
-  color: var(--muted);
-  font-size: 0.76rem;
-}
-
-.run-rail-row .status-pill {
-  padding: 4px 7px;
-  font-size: 0.62rem;
-}
-
-.run-status-mark {
-  width: 4px;
-  height: 34px;
-  border-radius: 999px;
-  background: var(--pending);
-}
-
-.run-status-mark.status-running { background: var(--warn); }
-.run-status-mark.status-completed { background: var(--ok); }
-.run-status-mark.status-partial,
-.run-status-mark.status-failed,
-.run-status-mark.status-interrupted,
-.run-status-mark.status-canceled { background: var(--danger); }
-
-.runs-audit .status-partial,
-.runs-audit .status-interrupted,
-.runs-audit .status-canceled {
-  background: color-mix(in srgb, var(--danger) 14%, transparent);
-  color: var(--danger);
-}
-
-.run-audit-summary,
-.run-audit-advanced,
-.run-audit-provenance,
-.run-audit-history,
-.run-audit-comparison,
-.run-audit-drilldown,
-.run-audit-blockers {
-  display: grid;
-  gap: 18px;
-}
-
-.run-advanced-toggle {
-  width: 100%;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  border: 0;
-  padding: 0;
-  background: transparent;
-  color: var(--ink);
-  text-align: left;
-  cursor: pointer;
-}
-
-.run-advanced-toggle > span:first-child {
-  display: grid;
-  gap: 3px;
-}
-
-.run-advanced-toggle small {
-  color: var(--muted);
-  font-size: 0.8rem;
-  font-weight: 400;
-}
-
-.run-advanced-toggle > span:last-child {
-  color: var(--accent);
-  font-size: 1.35rem;
-}
-
-.run-advanced-content {
-  display: grid;
-  gap: 24px;
-  padding-top: 18px;
-  border-top: 1px solid var(--divider);
-}
-
-.run-advanced-content > section {
-  display: grid;
-  gap: 14px;
-}
-
-.run-identity-strip {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  margin: 0;
-  border-top: 1px solid var(--divider);
-  border-bottom: 1px solid var(--divider);
-}
-
-.run-identity-strip > div {
-  padding: 13px 14px;
-  border-right: 1px solid var(--divider);
-  min-width: 0;
-}
-
-.run-identity-strip > div:last-child { border-right: 0; }
-.run-identity-strip dt,
-.run-proof-health dt {
-  color: var(--muted);
-  font-size: 0.72rem;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
-}
-.run-identity-strip dd,
-.run-proof-health dd {
-  margin: 5px 0 0;
-  font-weight: 600;
-  overflow-wrap: anywhere;
-}
-
-.run-metric-strip {
-  display: flex;
-  gap: 20px;
-  padding-bottom: 2px;
-  overflow-x: auto;
-}
-
-.run-metric-strip > div {
-  min-width: 86px;
-  display: grid;
-  gap: 2px;
-}
-
-.run-metric-strip strong { font-size: 1.35rem; color: var(--accent); }
-.run-metric-strip span { font-size: 0.72rem; color: var(--muted); white-space: nowrap; }
-
-.run-detail-columns {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 14px 22px;
-}
-
-.run-detail-columns > div {
-  min-width: 0;
-  display: grid;
-  align-content: start;
-  gap: 8px;
-}
-
-.run-audit-json {
-  margin: 0;
-  border-radius: 10px;
-  padding: 12px;
-  background: var(--json-bg);
-  border: 1px solid var(--json-border);
-  color: var(--ink-2);
-  font: 0.76rem/1.55 "Source Code Pro", "SFMono-Regular", monospace;
-  overflow: auto;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  max-height: 300px;
-}
-
-.run-proof-health {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin: 0;
-}
-
-.run-proof-health > div {
-  min-width: 105px;
-  border-left: 3px solid var(--accent-muted);
-  padding: 7px 10px;
-  background: var(--panel-soft);
-}
-
-.run-finding-links {
-  display: grid;
-  gap: 8px;
-  border-top: 1px solid var(--divider);
-  padding-top: 14px;
-}
-
-.run-finding-links > div {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 7px;
-}
-
-.run-finding-links a {
-  border-radius: 999px;
-  padding: 5px 9px;
-  background: var(--count-bg);
-  color: var(--accent);
-  font: 0.76rem "Source Code Pro", "SFMono-Regular", monospace;
-  text-decoration: none;
-}
-
-.run-finding-links a:hover { text-decoration: underline; }
-
-.run-resume-line {
-  margin: 0;
-  color: var(--muted);
-  font-size: 0.84rem;
-}
-
-.run-resume-line a {
-  color: var(--accent);
-  font-weight: 600;
-  text-decoration: none;
-}
-
-.run-resume-line a:hover { text-decoration: underline; }
-
-.run-provenance-warnings {
-  margin: 0;
-  padding: 11px 14px 11px 30px;
-  border-left: 3px solid var(--warn);
-  background: color-mix(in srgb, var(--warn) 8%, transparent);
-  color: var(--warn);
-}
-
-.run-clear-state,
-.run-compatibility {
-  margin: 0;
-  border-left: 3px solid var(--ok);
-  padding: 10px 12px;
-  color: var(--ok);
-  background: color-mix(in srgb, var(--ok) 8%, transparent);
-}
-
-.run-blocker-list article {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  align-items: start;
-  gap: 12px;
-  border-top: 1px solid var(--divider);
-  padding-top: 12px;
-}
-
-.run-blocker-list article:first-child { border-top: 0; padding-top: 0; }
-.run-blocker-list article > div { display: grid; gap: 3px; }
-.run-blocker-object { color: var(--muted); font-size: 0.72rem; }
-.run-blocker-list article p { margin: 4px 0 0; color: var(--muted); }
-.run-blocker-list article a { color: var(--accent); font-weight: 600; text-decoration: none; white-space: nowrap; }
-.run-blocker-list article a:hover { text-decoration: underline; }
-
-.run-audit-history ol {
-  list-style: none;
-  padding: 0;
-  margin: 0;
-  display: grid;
-}
-
-.run-audit-history li {
-  display: grid;
-  grid-template-columns: 14px minmax(0, 1fr);
-  gap: 10px;
-  padding: 0 0 16px;
-}
-
-.run-audit-history li:not(:last-child) > div { border-bottom: 1px solid var(--divider); padding-bottom: 16px; }
-.run-audit-history li p { margin: 3px 0 0; color: var(--muted); font-size: 0.84rem; }
-.run-history-dot { width: 9px; height: 9px; margin-top: 5px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 12%, transparent); }
-
-.run-comparison-heading label {
-  display: grid;
-  gap: 4px;
-  color: var(--muted);
-  font-size: 0.76rem;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-}
-
-.run-comparison-heading select {
-  min-width: 220px;
-  padding: 8px 10px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--panel-strong);
-  color: var(--ink);
-  font: inherit;
-  text-transform: none;
-  letter-spacing: normal;
-}
-
-.run-compatibility.has-drift {
-  border-left-color: var(--warn);
-  color: var(--warn);
-  background: color-mix(in srgb, var(--warn) 8%, transparent);
-}
-
-.run-compatibility.is-unknown {
-  border-left-color: var(--pending);
-  color: var(--muted);
-  background: color-mix(in srgb, var(--pending) 8%, transparent);
-}
-
-.run-comparison-grid {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  border-top: 1px solid var(--divider);
-}
-
-.run-comparison-grid > section {
-  padding: 14px;
-  border-right: 1px solid var(--divider);
-  min-width: 0;
-}
-.run-comparison-grid > section:last-child { border-right: 0; }
-.run-comparison-grid header { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; }
-.run-comparison-grid header span { color: var(--muted); }
-.run-comparison-grid p,
-.run-comparison-grid ul { margin: 10px 0 0; color: var(--muted); font-size: 0.82rem; }
-.run-comparison-grid ul { padding-left: 17px; display: grid; gap: 5px; }
-.run-comparison-grid li { overflow-wrap: anywhere; }
-.run-comparison-grid .comparison-new { border-top: 3px solid var(--warn); }
-.run-comparison-grid .comparison-persisting { border-top: 3px solid var(--accent); }
-.run-comparison-grid .comparison-resolved { border-top: 3px solid var(--ok); }
-.run-comparison-grid .comparison-unknown { border-top: 3px solid var(--pending); }
-
-.run-section-tabs {
-  display: flex;
-  gap: 4px;
-  border-bottom: 1px solid var(--divider);
-  overflow-x: auto;
-}
-
-.run-section-tabs button {
-  border: 0;
-  border-bottom: 2px solid transparent;
-  padding: 9px 12px;
-  background: transparent;
-  color: var(--muted);
-  cursor: pointer;
-  white-space: nowrap;
-}
-
-.run-section-tabs button[aria-selected="true"] {
-  color: var(--accent);
-  border-bottom-color: var(--accent);
-}
-
-.run-record-list article {
-  display: grid;
-  gap: 8px;
-  padding: 12px 0;
-  border-bottom: 1px solid var(--divider);
-  scroll-margin: 20vh;
-  transition: background 180ms ease, box-shadow 180ms ease;
-}
-
-.run-record-list article:last-child { border-bottom: 0; }
-.run-record-list article > header { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; }
-.run-record-list article > header span { color: var(--muted); font: 0.74rem "Source Code Pro", "SFMono-Regular", monospace; }
-.run-record-list article.is-focused { background: color-mix(in srgb, var(--accent-soft) 14%, transparent); box-shadow: 0 0 0 8px color-mix(in srgb, var(--accent-soft) 14%, transparent); }
-
-.run-load-more { justify-self: start; }
-
-@media (max-width: 1000px) {
-  .run-audit-layout { grid-template-columns: 1fr; }
-  .run-audit-rail { position: static; max-height: 300px; }
-  .run-identity-strip,
-  .run-comparison-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .run-comparison-grid > section:nth-child(2) { border-right: 0; }
-}
-
-@media (max-width: 700px) {
-  .run-detail-header,
-  .run-comparison-heading { align-items: flex-start; flex-direction: column; }
-  .run-identity-strip,
-  .run-comparison-grid,
-  .run-detail-columns { grid-template-columns: 1fr; }
-  .run-identity-strip > div,
-  .run-comparison-grid > section { border-right: 0; border-bottom: 1px solid var(--divider); }
-  .run-blocker-list article { grid-template-columns: 1fr; }
-  .run-comparison-heading label,
-  .run-comparison-heading select { width: 100%; }
-}
-
-/* ── Submission filing desk ─────────────────────────────── */
-
-.submissions-workspace {
-  display: grid;
-  grid-template-columns: minmax(230px, 0.24fr) minmax(0, 1fr);
-  gap: 18px;
-  align-items: start;
-}
-
-.submission-rail {
-  position: sticky;
-  top: 18px;
-  padding: 14px;
-  max-height: calc(100vh - 36px);
-  overflow: auto;
-}
-
-.submission-rail-heading,
-.submission-titlebar,
-.submission-ledger-heading {
-  display: flex;
-  justify-content: space-between;
-  gap: 12px;
-  align-items: flex-start;
-}
-
-.submission-rail-heading { padding: 4px 4px 14px; }
-.submission-rail-heading h2,
-.submission-titlebar h2,
-.submission-ledger-heading h3 { margin: 2px 0 0; }
-
-.submission-rail-actions { display: grid; justify-items: end; gap: 6px; }
-.submission-failed-count,
-.submission-finding-failed-count { color: var(--danger); font-size: 0.68rem; font-weight: 700; }
-
-.submission-recover-button {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  border: 1px solid color-mix(in srgb, var(--warn) 35%, var(--border));
-  border-radius: 8px;
-  padding: 6px 8px;
-  background: color-mix(in srgb, var(--warn) 8%, transparent);
-  color: var(--warn);
-  cursor: pointer;
-  font: 600 0.7rem inherit;
-}
-
-.submission-finding-scopes {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 4px;
-  margin-bottom: 10px;
-  padding: 3px;
-  border-radius: 9px;
-  background: var(--panel-soft);
-}
-.submission-finding-scopes button {
-  display: flex;
-  justify-content: space-between;
-  gap: 6px;
-  border: 0;
-  border-radius: 7px;
-  padding: 7px 8px;
-  background: transparent;
-  color: var(--muted);
-  cursor: pointer;
-  font: 650 0.69rem inherit;
-}
-.submission-finding-scopes button.is-active { background: var(--panel-strong); color: var(--ink); }
-.submission-finding-scopes button:disabled { cursor: default; opacity: 0.55; }
-.submission-finding-scopes span { color: var(--muted); }
-
-.submission-finding-list { display: grid; gap: 5px; }
-
-.submission-finding {
-  display: grid;
-  grid-template-columns: 4px minmax(0, 1fr) auto;
-  gap: 10px;
-  align-items: stretch;
-  width: 100%;
-  padding: 11px 10px;
-  border: 1px solid transparent;
-  border-radius: 12px;
-  background: transparent;
-  color: var(--ink);
-  text-align: left;
-  cursor: pointer;
-}
-
-.submission-finding:hover { background: var(--panel-hover); }
-.submission-finding.is-selected {
-  border-color: color-mix(in srgb, var(--accent) 28%, var(--border));
-  background: color-mix(in srgb, var(--accent) 7%, var(--panel-strong));
-}
-
-.submission-severity { width: 4px; border-radius: 999px; background: var(--sev-info); }
-.submission-severity.severity-critical { background: var(--sev-critical); }
-.submission-severity.severity-high { background: var(--sev-high); }
-.submission-severity.severity-medium { background: var(--sev-medium); }
-.submission-severity.severity-low { background: var(--sev-low); }
-
-.submission-finding-copy { display: grid; gap: 6px; min-width: 0; }
-.submission-finding-copy strong {
-  display: -webkit-box;
-  overflow: hidden;
-  font-size: 0.82rem;
-  line-height: 1.3;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-}
-.submission-finding-copy > span {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-  color: var(--muted);
-  font-size: 0.7rem;
-}
-.submission-finding-copy code { color: var(--accent); font-size: 0.7rem; }
-.submission-version-count {
-  align-self: center;
-  min-width: 22px;
-  padding: 2px 6px;
-  border-radius: 999px;
-  background: var(--count-bg);
-  color: var(--count-ink);
-  text-align: center;
-  font-size: 0.7rem;
-  font-weight: 700;
-}
-.submission-finding-counts { display: grid; align-content: center; justify-items: end; gap: 4px; }
-.submission-finding-failed-count { white-space: nowrap; }
-
-.submission-main { display: grid; gap: 14px; min-width: 0; }
-.submission-titlebar { min-width: 0; padding: 4px 2px 0; }
-.submission-titlebar > div:first-child { min-width: 0; }
-.submission-titlebar h2 { overflow-wrap: anywhere; }
-.submission-titlebar > div > p:last-child { margin: 6px 0 0; color: var(--muted); font-size: 0.8rem; }
-.submission-title-status { display: grid; justify-items: end; gap: 6px; }
-.submission-title-status span {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 7px 10px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  font-size: 0.75rem;
-  font-weight: 650;
-}
-.submission-title-status .is-ready { color: var(--ok); background: color-mix(in srgb, var(--ok) 8%, transparent); }
-.submission-title-status .is-blocked { color: var(--warn); background: color-mix(in srgb, var(--warn) 8%, transparent); }
-.submission-title-status .is-stale { color: var(--muted); background: var(--panel-soft); }
-
-.submission-external-record {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  border-block: 1px solid var(--divider);
-}
-.submission-external-record > div { display: grid; gap: 4px; padding: 9px 12px; }
-.submission-external-record > div + div { border-left: 1px solid var(--divider); }
-.submission-external-record span { color: var(--muted); font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.04em; }
-.submission-external-record strong,
-.submission-external-record code,
-.submission-external-record a { min-width: 0; overflow-wrap: anywhere; color: var(--ink-2); font-size: 0.75rem; }
-.submission-external-record a { color: var(--accent); }
-
-.submission-message { padding: 10px 12px; border-radius: 9px; border-left: 3px solid; font-size: 0.82rem; }
-.submission-message.is-error { border-color: var(--danger); background: color-mix(in srgb, var(--danger) 8%, transparent); color: var(--danger); }
-.submission-message.is-notice { border-color: var(--ok); background: color-mix(in srgb, var(--ok) 8%, transparent); color: var(--ok); }
-.submission-message.is-update {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  border-color: var(--warn);
-  background: color-mix(in srgb, var(--warn) 8%, transparent);
-  color: var(--ink-2);
-}
-.submission-message.is-update button {
-  flex: 0 0 auto;
-  border: 1px solid color-mix(in srgb, var(--warn) 45%, var(--border));
-  border-radius: 7px;
-  background: var(--panel-strong);
-  color: var(--ink);
-  padding: 6px 10px;
-  cursor: pointer;
-  font: inherit;
-  font-weight: 600;
-}
-.submission-message.is-update button:hover:not(:disabled) { border-color: var(--warn); }
-.submission-message.is-update button:disabled { cursor: wait; opacity: 0.7; }
-.submission-recovery-issues p { margin: 5px 0 0; }
-.submission-recovery-issues ul { margin: 5px 0 0; padding-left: 20px; }
-.submission-recovery-issues code { overflow-wrap: anywhere; color: inherit; }
-.submission-recovery-issues .submission-pending-row { border-color: color-mix(in srgb, var(--danger) 28%, transparent); }
-
-.submission-review-grid {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(280px, 0.36fr);
-  gap: 16px;
-  align-items: start;
-}
-
-.submission-document { padding: 0; overflow: hidden; min-height: 620px; }
-.submission-document-toolbar {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 12px;
-  padding: 10px 14px 0;
-  border-bottom: 1px solid var(--divider);
-  background: var(--panel-soft);
-}
-.submission-document-toolbar > div { display: flex; gap: 4px; }
-.submission-document-toolbar button {
-  border: 0;
-  border-bottom: 2px solid transparent;
-  padding: 9px 10px;
-  background: transparent;
-  color: var(--muted);
-  cursor: pointer;
-}
-.submission-document-toolbar button.is-active { border-bottom-color: var(--accent); color: var(--accent); }
-.submission-document-toolbar code { color: var(--muted); font-size: 0.68rem; }
-.submission-markdown { padding: 30px clamp(22px, 5vw, 58px) 50px; }
-.submission-markdown .md-body { color: var(--ink-2); font-size: 0.92rem; line-height: 1.65; }
-.submission-markdown .md-body h1,
-.submission-markdown .md-body h2,
-.submission-markdown .md-body h3 { color: var(--ink); margin: 1.4em 0 0.55em; }
-.submission-markdown .md-body h1:first-child,
-.submission-markdown .md-body > :first-child { margin-top: 0; }
-.submission-markdown .md-body pre,
-.submission-markdown .md-body code,
-.submission-raw,
-.submission-no-draft code { font-family: "Source Code Pro", "SFMono-Regular", monospace; }
-.submission-markdown .md-body pre,
-.submission-raw { background: var(--json-bg); border: 1px solid var(--json-border); }
-.submission-markdown .md-body pre { padding: 12px; overflow: auto; border-radius: 8px; }
 .md-image-reference {
   display: inline-grid;
   gap: 3px;
@@ -6257,104 +3621,7 @@ body.detail-modal-open {
 .md-image-reference > span { color: var(--warn); font-size: 0.68rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; }
 .md-image-reference > strong { color: var(--ink-2); font-size: 0.78rem; }
 .md-image-reference > code { overflow-wrap: anywhere; color: var(--muted); font-size: 0.7rem; }
-.submission-markdown .md-table-scroll {
-  max-width: 100%;
-  overflow-x: auto;
-  overscroll-behavior-inline: contain;
-}
-.submission-markdown .md-table-scroll:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.submission-markdown .md-body table { width: 100%; min-width: max-content; border-collapse: collapse; }
-.submission-markdown .md-body th,
-.submission-markdown .md-body td { padding: 7px; border: 1px solid var(--divider); text-align: left; }
-.submission-raw { margin: 20px; padding: 18px; border-radius: 9px; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.55; }
-.submission-no-draft { display: grid; gap: 8px; padding: 36px; color: var(--muted); }
-.submission-no-draft h3,
-.submission-no-draft p { margin: 0; }
-.submission-no-draft code { overflow-wrap: anywhere; color: var(--accent); }
 
-.submission-ledger { display: grid; gap: 14px; }
-.submission-ledger-section { border-radius: 16px; padding: 16px; }
-.submission-ledger-heading > span { color: var(--muted); font-size: 0.72rem; }
-.submission-help,
-.submission-muted { color: var(--muted); font-size: 0.78rem; line-height: 1.45; }
-.submission-attachment-list { display: grid; gap: 7px; margin-top: 12px; }
-.submission-attachment-page-count { margin: 10px 0 0; color: var(--muted); font-size: 0.72rem; }
-.submission-attachment {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  gap: 9px;
-  align-items: start;
-  padding: 9px;
-  border: 1px solid var(--divider);
-  border-radius: 9px;
-  cursor: pointer;
-}
-.submission-attachment:hover { border-color: var(--border-strong); }
-.submission-attachment input { margin-top: 2px; accent-color: var(--accent); }
-.submission-attachment span { display: grid; gap: 4px; min-width: 0; }
-.submission-attachment strong { overflow-wrap: anywhere; font: 0.72rem "Source Code Pro", "SFMono-Regular", monospace; }
-.submission-attachment small { color: var(--muted); font-size: 0.68rem; }
-.submission-attachment-pagination { display: grid; gap: 7px; margin-top: 10px; }
-.submission-attachment-pagination p { margin: 0; color: var(--warn); font-size: 0.72rem; }
-.submission-attachment-pagination button {
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 7px 9px;
-  background: var(--panel-soft);
-  color: var(--ink-2);
-  cursor: pointer;
-  font: 650 0.72rem inherit;
-}
-.submission-attachment-pagination button:disabled { cursor: wait; opacity: 0.65; }
 .submission-blockers { margin: 12px 0; padding: 8px 10px; border-left: 3px solid var(--warn); background: color-mix(in srgb, var(--warn) 7%, transparent); }
 .submission-blockers p { margin: 0; color: var(--warn); font-size: 0.75rem; line-height: 1.45; }
 .submission-blockers p + p { margin-top: 5px; }
-.submission-export-button { width: 100%; justify-content: center; margin-top: 14px; }
-
-.submission-pending-list { display: grid; gap: 9px; margin-top: 10px; }
-.submission-pending-row { display: grid; gap: 6px; padding: 10px; border: 1px solid var(--divider); border-radius: 9px; }
-.submission-pending-row > strong { font-size: 0.76rem; }
-.submission-pending-row > strong code { color: var(--accent); }
-.submission-pending-row > p { margin: 0; color: var(--danger); font-size: 0.72rem; line-height: 1.4; }
-.submission-pending-row dl { display: grid; gap: 5px; margin: 0; }
-.submission-pending-row dl > div { display: grid; gap: 2px; }
-.submission-pending-row dt { color: var(--muted); font-size: 0.64rem; text-transform: uppercase; letter-spacing: 0.04em; }
-.submission-pending-row dd { min-width: 0; margin: 0; }
-.submission-pending-row code { overflow-wrap: anywhere; color: var(--ink-2); font-size: 0.66rem; }
-
-.submission-history { display: grid; margin-top: 10px; }
-.submission-history-row {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 12px;
-  padding: 11px 0;
-  border-bottom: 1px solid var(--divider);
-}
-.submission-history-row:last-child { border-bottom: 0; }
-.submission-history-row > div { display: grid; gap: 3px; }
-.submission-history-row small { color: var(--muted); font-size: 0.69rem; }
-.submission-history-row a { display: inline-flex; gap: 5px; align-items: center; color: var(--accent); font-size: 0.74rem; font-weight: 650; text-decoration: none; }
-.submission-stale { margin-left: 6px; padding: 2px 5px; border-radius: 5px; background: color-mix(in srgb, var(--warn) 10%, transparent); color: var(--warn); font-size: 0.65rem; text-transform: uppercase; }
-
-@media (max-width: 1120px) {
-  .submissions-workspace,
-  .submission-review-grid { grid-template-columns: 1fr; }
-  .submission-external-record { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .submission-external-record > div:nth-child(3) { border-left: 0; border-top: 1px solid var(--divider); }
-  .submission-external-record > div:nth-child(4) { border-top: 1px solid var(--divider); }
-  .submission-rail { position: static; max-height: none; overflow: visible; }
-  .submission-document { min-height: 480px; }
-}
-
-@media (max-width: 700px) {
-  .submission-titlebar,
-  .submission-rail-heading,
-  .submission-document-toolbar { flex-direction: column; }
-  .submission-title-status { align-self: flex-start; }
-  .submission-document-toolbar { align-items: stretch; }
-  .submission-document-toolbar code { padding: 0 10px 8px; }
-  .submission-markdown { padding: 22px 18px 36px; }
-  .submission-external-record { grid-template-columns: 1fr; }
-  .submission-external-record > div + div { border-left: 0; border-top: 1px solid var(--divider); }
-}

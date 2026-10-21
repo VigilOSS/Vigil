@@ -35,6 +35,7 @@ vi.mock("../lib/api", () => ({
   updateRemediationVerificationPlan: vi.fn(),
   getAssessmentFinding: vi.fn(),
   listEngagements: vi.fn(),
+  getEngagement: vi.fn(() => Promise.reject(new Error("not needed"))),
   updateRemediationFindings: vi.fn(),
   remediationEvidenceFileUrl: vi.fn((_key: string, caseId: number, evidenceId: number) =>
     `/evidence/${caseId}/${evidenceId}`),
@@ -117,6 +118,35 @@ async function findSibling() {
 }
 
 describe("remediation workspace", () => {
+  it("keeps the case search and queue when choosing a case", async () => {
+    const second = { ...reviewedCase, id: 8, title: "Second case", source_key: "SEC-43" };
+    vi.mocked(listRemediationCases).mockResolvedValue([reviewedCase, second]);
+    vi.mocked(getRemediationCase).mockImplementation(async (_key, id) => id === 8 ? second : reviewedCase);
+    window.history.replaceState({}, "", "#/remediation/acme?case=7");
+    const { rerender } = render(<RemediationPage engagementKey="acme" initialCaseId={7} onBack={() => {}} />);
+    await screen.findByRole("heading", { name: reviewedCase.title });
+    const search = screen.getByRole("textbox", { name: "Search cases" }) as HTMLInputElement;
+    fireEvent.change(search, { target: { value: "SEC-4" } });
+    const listCalls = vi.mocked(listRemediationCases).mock.calls.length;
+    const queue = within(screen.getByRole("complementary", { name: "Case queue" }));
+    const secondEntry = queue.getAllByRole("button").find((button) => button.textContent?.includes("#8"));
+    expect(secondEntry).toBeTruthy();
+    fireEvent.click(secondEntry!);
+    expect(window.location.hash).toBe("#/remediation/acme?case=8");
+    rerender(<RemediationPage engagementKey="acme" initialCaseId={8} onBack={() => {}} />);
+    expect((screen.getByRole("textbox", { name: "Search cases" }) as HTMLInputElement).value).toBe("SEC-4");
+    expect(await screen.findByRole("heading", { name: "Second case" })).toBeTruthy();
+    expect(vi.mocked(listRemediationCases).mock.calls.length).toBe(listCalls);
+    expect(within(screen.getByRole("complementary", { name: "Case queue" })).getAllByRole("button").find((button) => button.getAttribute("aria-current") === "page")?.textContent).toContain("#8");
+  });
+
+  it("says when there are no cases instead of asking to select one", async () => {
+    vi.mocked(listRemediationCases).mockResolvedValue([]);
+    render(<RemediationPage engagementKey="acme" onBack={() => {}} />);
+    expect(await screen.findByText("No remediation cases yet.")).toBeTruthy();
+    expect(screen.queryByText("Select a case to begin.")).toBeNull();
+  });
+
   it("shows verification alternatives and distinguishes reasoned evidence", async () => {
     vi.mocked(getRemediationCase).mockResolvedValue({
       ...reviewedCase,
@@ -190,7 +220,7 @@ describe("remediation workspace", () => {
     let view = render(<RemediationPage engagementKey="acme" initialCaseId={7} onBack={onBack} />);
     await openSection("Review");
     fireEvent.change(screen.getByLabelText("Human verification plan"), { target: { value } });
-    fireEvent.click(screen.getByRole("button", { name: "← Engagements" }));
+    fireEvent.click(screen.getByRole("button", { name: "Back" }));
     expect(onBack).toHaveBeenCalledOnce();
     view.unmount();
     view = render(<RemediationPage engagementKey="another-engagement" initialCaseId={7} onBack={onBack} />);
@@ -340,7 +370,9 @@ describe("remediation workspace", () => {
     vi.mocked(getRemediationCase).mockResolvedValue({ ...reviewedCase, status: "closed" });
     render(<RemediationPage engagementKey="acme" initialCaseId={7} onBack={() => {}} />);
     await screen.findByRole("heading", { name: reviewedCase.title });
-    expect(within(screen.getByRole("complementary", { name: "Case queue" })).getByText(/closed · 1 finding/)).toBeTruthy();
+    const queue = within(screen.getByRole("complementary", { name: "Case queue" }));
+    await waitFor(() => expect(queue.getByText("Closed")).toBeTruthy());
+    expect(queue.getByText(/· 1 finding/)).toBeTruthy();
     expect(screen.getByLabelText("Baseline method").matches(":disabled")).toBe(true);
     expect(screen.getByLabelText("Human verification plan").matches(":disabled")).toBe(true);
     expect(screen.getByLabelText("Canary rationale").matches(":disabled")).toBe(true);
@@ -395,7 +427,9 @@ describe("remediation workspace", () => {
   it("shows current severity, verification and causal identity in queue and linked detail", async () => {
     render(<RemediationPage engagementKey="acme" onBack={() => {}} />);
     const queue = screen.getByRole("complementary", { name: "Case queue" });
-    expect(await within(queue).findByText(/SEC-001 · high · confirmed/)).toBeTruthy();
+    // Severity as colour and word, verification in the Findings view's words.
+    const severity = await within(queue).findByTitle("Severity: High");
+    expect(severity.parentElement?.textContent).toBe("SEC-001 · High · Verified");
     expect(within(queue).getByText("Current finding title")).toBeTruthy();
     expect(within(queue).getByText(/Root cause: authorization/)).toBeTruthy();
     const links = await screen.findByRole("region", { name: "Linked findings" });
@@ -416,7 +450,7 @@ describe("remediation workspace", () => {
     fireEvent.change(screen.getByLabelText("Finding slug"), { target: { value: "SEC-003" } });
     fireEvent.click(screen.getByRole("button", { name: "Unlink SEC-001" }));
     expect(updateRemediationFindings).toHaveBeenCalledTimes(1);
-    for (const name of ["Review", "Refresh case", "← Engagements", /Second case/]) {
+    for (const name of ["Review", "Refresh case", "Back", /Second case/]) {
       const button = screen.getByRole("button", { name });
       expect((button as HTMLButtonElement).disabled).toBe(true);
       fireEvent.click(button);
@@ -458,8 +492,9 @@ describe("remediation workspace", () => {
     render(<RemediationPage engagementKey="acme" onBack={() => {}} />);
     const link = await screen.findByRole("link", { name: /Current finding title/ });
     expect(link.getAttribute("href")).toBe("#/engagements/assessment?tab=findings&finding=SEC-001");
-    expect(screen.getByText("confirmed")).toBeTruthy();
-    expect(screen.getByText("high")).toBeTruthy();
+    const links = screen.getByRole("region", { name: "Linked findings" });
+    expect(within(links).getByText("Verified").closest(".ui-status")?.getAttribute("data-tone")).toBe("success");
+    expect(within(links).getByTitle("Severity: High").textContent).toBe("High");
     expect(screen.getByRole("heading", { name: "Intake snapshot" })).toBeTruthy();
   });
 
@@ -632,6 +667,16 @@ describe("remediation workspace", () => {
     await waitFor(() => expect(updateRemediationBaseline).toHaveBeenCalledWith("acme", 7, {
       outcome: "code_test_confirmed", method: "Laravel failing test", proved: "Code and failing test support report", owner_decision: "proceed", owner_actor: "owner", owner_reason: "Safe local replay unavailable",
     }));
+  });
+
+  it("labels each recorded human development result with its status", async () => {
+    const recorded = { ...reviewedCase, human_verifications: [{ id: 1, deployment_id: 1, actor: "owner", result: "blocked" as const, observed_revision: "abc123", notes: "Login was down." }] };
+    vi.mocked(listRemediationCases).mockResolvedValue([recorded]);
+    vi.mocked(getRemediationCase).mockResolvedValue(recorded);
+    render(<RemediationPage engagementKey="acme" onBack={() => {}} />);
+    await openSection("Delivery");
+    const pill = (await screen.findByText("Blocked", { selector: ".remediation-human-history *" })).closest(".ui-status");
+    expect(pill?.getAttribute("data-tone")).toBe("danger");
   });
 
   it("records a human development result against the confirmed deployed revision", async () => {

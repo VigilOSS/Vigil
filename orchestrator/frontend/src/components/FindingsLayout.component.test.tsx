@@ -6,6 +6,7 @@ import { resolve } from "node:path";
 
 const appStyles = readFileSync(resolve("src/app.css"), "utf8");
 const findingStyles = readFileSync(resolve("src/styles/findings.css"), "utf8");
+const uiStyles = readFileSync(resolve("src/styles/ui.css"), "utf8");
 const workspaceStyles = readFileSync(resolve("src/styles/workspace.css"), "utf8");
 const startup = readFileSync(resolve("src/main.tsx"), "utf8");
 const baseImportIndex = startup.search(/import\s+["']\.\/app\.css["']/);
@@ -44,21 +45,23 @@ function resolvedThemeStyles(styles: string): string {
 }
 
 function layout(width?: number, resolveTheme = false) {
-  const styles = (baseFirst ? appStyles + findingStyles + workspaceStyles : findingStyles + workspaceStyles + appStyles) + (width === undefined ? "" : responsiveStyles(width));
+  // The shared primitives' sheet loads before the findings sheet (the shell
+  // imports the primitives first); JSDOM cascades by order, not specificity.
+  const styles = (baseFirst ? appStyles + uiStyles + findingStyles + workspaceStyles : uiStyles + findingStyles + workspaceStyles + appStyles) + (width === undefined ? "" : responsiveStyles(width));
   return render(<>
     <style>{resolveTheme ? resolvedThemeStyles(styles) : styles}</style>
     <div className="findings-redesign findings-workspace">
       <div className="filter-row" data-testid="filters">
-        <div className="filter-group"><span className="filter-label">Severity</span><button className="filter-chip">high</button><button className="filter-chip is-active">critical</button></div>
-        <div className="filter-group"><span className="filter-label">Workflow</span><button className="filter-chip">Draft</button></div>
-        <div className="filter-group"><span className="filter-label">Verification</span><button className="filter-chip">Confirmed</button></div>
-        <button className="filter-clear" disabled>Clear all (0)</button>
+        <div className="ui-filter-group" role="group" aria-label="Severity"><span className="ui-filter-label">Severity</span><button className="ui-chip" aria-pressed="false">High</button><button className="ui-chip" aria-pressed="true">Critical</button></div>
+        <div className="ui-filter-group" role="group" aria-label="Workflow"><span className="ui-filter-label">Workflow</span><button className="ui-chip" aria-pressed="false">Draft</button></div>
+        <div className="ui-filter-group" role="group" aria-label="Verification"><span className="ui-filter-label">Verification</span><button className="ui-chip" aria-pressed="false">Verified</button></div>
+        <button className="ui-clear-filters" disabled>Clear filters</button>
       </div>
       <div className="findings-shell" data-testid="shell">
         <section className="list-panel" data-testid="queue">
           <div className="grouping-status">1 finding visible<div className="grouping-status-meta"><span className="tag" data-testid="group-count">10 engagement root-cause groups</span></div></div>
           <div className="grouped-findings"><div className="standalone-group" data-testid="group">
-            <button className="mini-finding-row" data-testid="finding-row"><span className="sev-dot" /><span className="mini-main"><strong data-testid="title">Matching finding with its full authored title</strong><span className="meta-text">https://target.example/recorded-location</span></span><span className="pill" data-testid="workflow">False positive</span><span className="pill" data-testid="verification">Unreviewed</span></button>
+            <button className="mini-finding-row" data-testid="finding-row"><span className="sev-dot" /><span className="mini-main"><strong data-testid="title">Matching finding with its full authored title</strong><span className="meta-text">https://target.example/recorded-location</span></span><span className="mini-badges" data-testid="badges"><span className="pill" data-testid="workflow">False positive</span><span className="pill" data-testid="verification">Unreviewed</span></span><span className="finding-row-time" data-testid="row-time"><span className="finding-row-time-label">Changed</span><time className="timestamp">3h ago</time></span></button>
           </div></div>
         </section>
       </div>
@@ -89,20 +92,21 @@ it("lets the finding workspace styles override shared base styles at startup", (
 
 it("keeps active and inactive filter typography dimensionally identical", () => {
   layout();
-  expect(getComputedStyle(screen.getByRole("button", { name: "high" })).fontWeight).toBe(getComputedStyle(screen.getByRole("button", { name: "critical" })).fontWeight);
+  expect(getComputedStyle(screen.getByRole("button", { name: "High" })).fontWeight).toBe(getComputedStyle(screen.getByRole("button", { name: "Critical" })).fontWeight);
 });
 
 it("gives finding filter groups independent tracks rather than wrapping whole groups on selection", () => {
   layout();
   expect(getComputedStyle(screen.getByTestId("filters")).display).toBe("grid");
-  expect(getComputedStyle(screen.getByRole("button", { name: "Clear all (0)" })).minWidth).toBe("9rem");
+  expect(getComputedStyle(screen.getByRole("button", { name: "Clear filters" })).minWidth).toBe("9rem");
 });
 
-it("keeps narrow finding text in a flexible track with all badges below it", () => {
+it("keeps narrow finding text in a flexible track with all badges and the row time below it", () => {
   layout(390);
   expect(getComputedStyle(screen.getByTestId("finding-row")).gridTemplateColumns).toBe("auto minmax(0, 1fr)");
-  expect(getComputedStyle(screen.getByTestId("workflow")).gridColumn).toBe("2");
-  expect(getComputedStyle(screen.getByTestId("verification")).gridColumn).toBe("2");
+  expect(getComputedStyle(screen.getByTestId("badges")).gridColumn).toBe("2");
+  expect(getComputedStyle(screen.getByTestId("row-time")).gridColumn).toBe("2");
+  expect(getComputedStyle(screen.getByTestId("workflow")).whiteSpace).toBe("normal");
   expect(getComputedStyle(screen.getByTestId("title")).whiteSpace).toBe("normal");
 });
 
@@ -112,9 +116,10 @@ it("lets narrow grouping counts wrap instead of clipping their recorded scope", 
   expect(getComputedStyle(screen.getByTestId("group-count")).overflowWrap).toBe("anywhere");
 });
 
-it("retains the dense four-column finding row at full desktop width", () => {
+it("retains the dense four-column finding row, with an aligned time column, at full desktop width", () => {
   layout(2560);
-  expect(getComputedStyle(screen.getByTestId("finding-row")).gridTemplateColumns).toBe("auto minmax(0, 1fr) auto auto");
+  expect(getComputedStyle(screen.getByTestId("finding-row")).gridTemplateColumns).toBe("auto minmax(0, 1fr) auto 8.5rem");
+  expect(getComputedStyle(screen.getByTestId("row-time")).whiteSpace).toBe("nowrap");
 });
 
 it("resets native palette buttons while preserving their active background", () => {
@@ -150,14 +155,15 @@ it("gives palette titles the flexible track and wraps complete locations beneath
   expect(getComputedStyle(screen.getByTestId("palette-list")).minWidth).toBe("0");
 });
 
-it.each(["light", "dark"])("uses %s theme surfaces for idle actions and keyboard hints without changing primary actions", (theme) => {
+it.each(["light", "dark"])("uses %s theme surfaces for idle actions and keyboard hints and keeps primary action text legible", (theme) => {
   document.documentElement.dataset.theme = theme;
   layout(undefined, true);
   expect(getComputedStyle(screen.getByTestId("idle-action")).backgroundColor).toBe(theme === "dark" ? "rgb(27, 35, 45)" : "rgb(255, 255, 255)");
   expect(getComputedStyle(screen.getByTestId("keyboard-hint")).backgroundColor).toBe(theme === "dark" ? "rgb(20, 26, 34)" : "rgb(247, 249, 251)");
   const primary = getComputedStyle(screen.getByTestId("primary-action"));
   expect(primary.backgroundColor).toBe(theme === "dark" ? "rgb(121, 169, 212)" : "rgb(23, 53, 76)");
-  expect(primary.color).toBe("rgb(255, 255, 255)");
+  // Dark text on the light dark-theme accent (7.6:1); white on the light-theme accent.
+  expect(primary.color).toBe(theme === "dark" ? "rgb(13, 17, 23)" : "rgb(255, 255, 255)");
   const tokens = getComputedStyle(document.documentElement);
   expect(tokens.getPropertyValue("--panel-strong").trim()).toBe(theme === "dark" ? "#1b232d" : "#fff");
   expect(tokens.getPropertyValue("--panel-soft").trim()).toBe(theme === "dark" ? "#141a22" : "#f7f9fb");

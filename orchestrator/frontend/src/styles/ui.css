@@ -1,0 +1,303 @@
+/* ── Shared workspace primitives ───────────────────────────────────────
+ * components/ui/*: page header, status pill, segmented control / scope
+ * toggle, empty state, filter chips, results summary, small button. One look
+ * on every tab, so nothing here is scoped to a tab. Tokens only, so light and
+ * dark both resolve. */
+
+/* Tone → color. Each primitive that carries `data-tone` reads --ui-tone.
+ * The default sits in :where() so any [data-tone] rule below outranks it. */
+:where(.ui-status, .ui-chip, .ui-page-stats li) {
+  --ui-tone: var(--muted);
+}
+[data-tone="danger"] { --ui-tone: var(--danger); }
+[data-tone="warning"] { --ui-tone: var(--warn); }
+[data-tone="paused"] { --ui-tone: var(--sev-medium); }
+[data-tone="progress"] { --ui-tone: var(--chip-teal); }
+[data-tone="pending"] { --ui-tone: var(--pending); }
+[data-tone="info"] { --ui-tone: var(--accent); }
+[data-tone="success"] { --ui-tone: var(--ok); }
+[data-tone="neutral"] { --ui-tone: var(--muted); }
+
+/* ── Page header ── */
+
+.ui-page-header {
+  display: grid;
+  gap: 10px;
+  margin: 0 0 14px;
+  min-width: 0;
+}
+.ui-page-header[hidden] { display: none; }
+.ui-page-header-row {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 8px 20px;
+  flex-wrap: wrap;
+}
+.ui-page-header-text {
+  display: grid;
+  gap: 3px;
+  min-width: min(100%, 280px);
+  flex: 1 1 420px;
+}
+.ui-page-title {
+  margin: 0;
+  font-size: 1.35rem;
+  line-height: 1.2;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  color: var(--ink);
+}
+.ui-page-purpose {
+  margin: 0;
+  max-width: 78ch;
+  color: var(--ink-2);
+  font-size: 0.88rem;
+  line-height: 1.45;
+}
+.ui-page-header-side {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  min-width: 0;
+}
+.ui-page-stats {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 14px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+.ui-page-stats strong {
+  color: var(--ink);
+  font-size: 1rem;
+  font-variant-numeric: tabular-nums;
+}
+.ui-page-stats li[data-tone] strong { color: var(--ui-tone); }
+.ui-page-status { color: var(--muted); font-size: 0.8rem; font-style: italic; }
+.ui-page-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.ui-page-header-body { min-width: 0; }
+
+/* ── Status pill (color + text + shape) ── */
+
+.ui-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+  padding: 1px 8px;
+  border: 1px solid color-mix(in srgb, var(--ui-tone) 38%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--ui-tone) 12%, transparent);
+  color: var(--ui-tone);
+  font-size: 0.76rem;
+  font-weight: 600;
+  line-height: 1.45;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+.ui-status-sm { padding: 0 7px; font-size: 0.72rem; gap: 4px; }
+.ui-status-label { overflow: hidden; text-overflow: ellipsis; }
+.ui-status-glyph { flex: none; }
+.ui-status-group {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  min-width: 0;
+  max-width: 100%;
+}
+.ui-status-reason {
+  color: var(--ink-2);
+  font-size: 0.78rem;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+/* ── Severity tag (colour, shape and word) ──
+ * The pill is for headers; the small form is a dot and word for dense rows
+ * and table cells. */
+.sev-tag {
+  --sev-tag-color: var(--sev-info);
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 1px 8px;
+  border: 1px solid color-mix(in srgb, var(--sev-tag-color) 38%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--sev-tag-color) 12%, transparent);
+  color: var(--sev-tag-color);
+  font-size: 0.76rem;
+  font-weight: 600;
+  line-height: 1.45;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+.sev-tag-dot { flex: none; width: 8px; height: 8px; border-radius: 2px; background: var(--sev-tag-color); }
+.sev-tag-sm { padding: 0; border: 0; background: none; font-size: 0.74rem; }
+
+/* ── Segmented control / scope toggle ── */
+
+.ui-segmented {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 3px;
+  max-width: 100%;
+  padding: 3px;
+  border: 1px solid var(--divider);
+  border-radius: 9px;
+  background: var(--panel-soft);
+}
+.ui-segmented button {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  padding: 5px 11px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ink-2);
+  font: inherit;
+  font-size: 0.8rem;
+  cursor: pointer;
+  transition: background-color 120ms ease, color 120ms ease;
+}
+.ui-segmented button:hover:not(:disabled):not([aria-pressed="true"]) { background: var(--panel-hover); }
+.ui-segmented button[aria-pressed="true"] {
+  background: var(--panel-strong);
+  color: var(--ink);
+  font-weight: 600;
+  box-shadow: 0 0 0 1px var(--border);
+}
+.ui-segmented button:disabled { opacity: 0.5; cursor: not-allowed; }
+.ui-segmented button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.ui-segmented-count {
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--count-bg);
+  color: var(--count-ink);
+  font-size: 0.7rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.ui-segmented button[aria-pressed="true"] .ui-segmented-count { background: var(--count-bg-active); color: var(--count-ink-active); }
+
+/* ── Empty state ── */
+
+.ui-empty {
+  display: grid;
+  justify-items: center;
+  gap: 6px;
+  padding: 36px 20px;
+  text-align: center;
+  color: var(--ink-2);
+}
+.ui-empty-compact { padding: 18px 12px; gap: 4px; }
+.ui-empty-icon { color: var(--muted); }
+.ui-empty-title { margin: 0; color: var(--ink); font-size: 0.95rem; font-weight: 600; }
+.ui-empty-compact .ui-empty-title { font-size: 0.86rem; }
+.ui-empty-detail { max-width: 62ch; font-size: 0.84rem; line-height: 1.5; color: var(--ink-2); }
+.ui-empty-detail > p { margin: 0; }
+.ui-empty-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin-top: 6px; }
+
+/* ── Small secondary button ── */
+
+.ui-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--accent);
+  font: inherit;
+  font-size: 0.8rem;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.ui-button:hover:not(:disabled) { background: var(--panel-hover); }
+.ui-button:disabled { opacity: 0.5; cursor: not-allowed; }
+.ui-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* ── Filter chips ── */
+
+.ui-filter-group {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+  max-width: 100%;
+}
+.ui-filter-label {
+  margin-right: 2px;
+  color: var(--muted);
+  font-size: 0.72rem;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+.ui-chip {
+  --ui-chip-color: var(--accent);
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+  padding: 3px 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--panel);
+  color: var(--ink-2);
+  font: inherit;
+  font-size: 0.76rem;
+  font-weight: 500;
+  line-height: 1.35;
+  cursor: pointer;
+  transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+.ui-chip[data-tone] { --ui-chip-color: var(--ui-tone); }
+.ui-chip:hover:not(:disabled):not([aria-pressed="true"]) { background: var(--panel-hover); }
+/* Selection changes color, never weight, so pressing a chip never reflows its row. */
+.ui-chip[aria-pressed="true"] {
+  border-color: var(--ui-chip-color);
+  background: color-mix(in srgb, var(--ui-chip-color) 12%, transparent);
+  color: var(--ui-chip-color);
+}
+.ui-chip:disabled { opacity: 0.5; cursor: not-allowed; }
+.ui-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.ui-chip-dot { flex: none; width: 8px; height: 8px; border-radius: 2px; background: var(--ui-chip-color); }
+.ui-chip[data-tone] .ui-status-glyph { color: var(--ui-tone); }
+.ui-chip-label { min-width: 0; overflow-wrap: anywhere; }
+.ui-chip-count { font-size: 0.68rem; opacity: 0.75; font-variant-numeric: tabular-nums; }
+.ui-clear-filters {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  font-size: 0.78rem;
+  text-decoration: underline dotted;
+  text-underline-offset: 3px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.ui-clear-filters:disabled { color: var(--muted); text-decoration: none; cursor: default; }
+.ui-clear-filters:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* ── Results summary and sort ── */
+
+.ui-results-summary { margin: 0; color: var(--muted); font-size: 0.8rem; }
+.ui-results-summary strong { color: var(--ink); font-variant-numeric: tabular-nums; }
+.ui-sort-indicator { vertical-align: -1px; margin-left: 3px; color: var(--accent); }
+
+@media (prefers-reduced-motion: reduce) {
+  .ui-segmented button, .ui-chip { transition: none; }
+}

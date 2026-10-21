@@ -512,17 +512,20 @@ def test_submission_detail_exposes_current_publication_gates(
     )
     assert registered.status_code == 201, registered.text
     artifact_id = registered.json()["id"]
-    selected = client.get(f"{BASE}/submissions/VA-001?attachment_id={artifact_id}")
+    selected = client.get(f"{BASE}/submissions/VA-001/readiness?attachment_id={artifact_id}")
     assert selected.status_code == 200, selected.text
-    assert selected.json()["workspace"]["final_ready"] is False
+    assert selected.json()["final_ready"] is False
     assert any(
         "different external attachments" in item
-        for item in selected.json()["workspace"]["blockers"]
+        for item in selected.json()["blockers"]
     )
     _approve_packet(client, isolate_settings, "VA-001", [registered.json()])
-    matched = client.get(f"{BASE}/submissions/VA-001?attachment_id={artifact_id}")
+    matched = client.get(f"{BASE}/submissions/VA-001/readiness?attachment_id={artifact_id}")
     assert matched.status_code == 200, matched.text
-    assert matched.json()["workspace"]["final_ready"] is True
+    assert matched.json()["final_ready"] is True
+    reviewed = client.get(f"{BASE}/submissions/VA-001")
+    assert reviewed.json()["default_attachment_ids"] == [artifact_id]
+    assert reviewed.json()["workspace"]["final_ready"] is True
 
 
 def test_finalization_rechecks_latest_blind_verdict(
@@ -655,18 +658,18 @@ def test_submission_detail_paginates_all_eligible_attachments_deterministically(
         assert response.status_code == 201, response.text
         registered.append(response.json())
 
-    first = client.get(
-        f"{BASE}/submissions/VA-001?attachment_offset=0&attachment_limit=1"
-    )
-    second = client.get(
-        f"{BASE}/submissions/VA-001?attachment_offset=1&attachment_limit=1"
-    )
+    detail = client.get(f"{BASE}/submissions/VA-001?attachment_limit=1")
+    first = client.get(f"{BASE}/submissions/VA-001/attachments?offset=0&limit=1")
+    second = client.get(f"{BASE}/submissions/VA-001/attachments?offset=1&limit=1")
 
+    assert detail.status_code == 200, detail.text
     assert first.status_code == 200, first.text
     assert second.status_code == 200, second.text
-    assert first.json()["eligible_attachments"][0]["id"] == registered[1]["id"]
-    assert second.json()["eligible_attachments"][0]["id"] == registered[0]["id"]
-    page = first.json()["eligible_attachments_page"]
+    assert detail.json()["eligible_attachments"] == first.json()["attachments"]
+    assert detail.json()["eligible_attachments_page"] == first.json()["page"]
+    assert first.json()["attachments"][0]["id"] == registered[1]["id"]
+    assert second.json()["attachments"][0]["id"] == registered[0]["id"]
+    page = first.json()["page"]
     assert page == {
         "offset": 0,
         "limit": 1,
@@ -676,7 +679,7 @@ def test_submission_detail_paginates_all_eligible_attachments_deterministically(
         "next_offset": 1,
     }
     assert page["total"] >= 2
-    assert second.json()["eligible_attachments_page"]["offset"] == 1
+    assert second.json()["page"]["offset"] == 1
 
     too_large = client.get(
         f"{BASE}/submissions/VA-001?attachment_limit=501"
@@ -911,7 +914,8 @@ def test_attachment_total_limit_stops_before_reading_later_artifacts(
     )
     reads = []
 
-    def read_attachment(_engagement_id, _root, artifact_id):
+    def read_attachment(_engagement_id, _root, artifact_id, *, record_mismatch):
+        assert record_mismatch is True
         reads.append(artifact_id)
         return (
             {
@@ -1845,3 +1849,339 @@ def test_unchanged_historical_packet_keeps_acceptance_after_rubric_update(
     rejected = _export(client, "VA-001", changed_path, changed_context)
     assert rejected.status_code == 409, rejected.text
     assert "blind triage" in rejected.json()["detail"].lower()
+
+
+def _register_file(
+    client,
+    isolate_settings,
+    relative_path: str,
+    content: bytes,
+    *,
+    kind: str = "proof",
+    related_finding_slug: str | None = "VA-001",
+) -> dict:
+    root = isolate_settings["engagements_dir"] / ENGAGEMENT_KEY
+    path = root / relative_path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(content)
+    payload = {"path": relative_path, "kind": kind, "media_type": "text/plain"}
+    if related_finding_slug is not None:
+        payload["related_finding_slug"] = related_finding_slug
+    registered = client.post(f"{BASE}/artifacts", json=payload)
+    assert registered.status_code == 201, registered.text
+    return registered.json()
+
+
+def test_submission_detail_shows_the_external_body_and_the_blind_reviewed_selection(
+    client, isolate_settings
+) -> None:
+    finding = _seed_reportable_finding(client, isolate_settings)
+    body = b"# External report\n\nVerified impact.\n"
+    workspace = body + b"\n---\n## OPERATOR DETAILS - NOT FOR SUBMISSION\ninternal note\n"
+    _write_workspace(
+        client, isolate_settings, finding, platform="hackerone",
+        markdown=workspace, external_body=body, reviewed=False,
+    )
+    poc = _register_file(client, isolate_settings, "submissions/VA-001/poc.py", b"print('acme')\n")
+    _register_file(client, isolate_settings, "evidence/other.txt", b"unrelated\n")
+    _approve_packet(client, isolate_settings, "VA-001", [poc])
+
+    detail = client.get(f"{BASE}/submissions/VA-001")
+
+    assert detail.status_code == 200, detail.text
+    payload = detail.json()
+    assert payload["workspace"]["external_body"] == body.decode("utf-8")
+    assert payload["workspace"]["markdown"] == workspace.decode("utf-8")
+    assert payload["platform"] == "hackerone"
+    triage = payload["blind_triage"]
+    assert triage["required"] is True
+    assert triage["accepted"] is True
+    assert triage["verdict"] == "Accept@P3"
+    assert len(triage["packet_id"]) == 64
+    assert [row["artifact_id"] for row in triage["attachments"]] == [poc["id"]]
+    assert payload["default_attachment_ids"] == [poc["id"]]
+    assert payload["default_attachment_source"] == "blind_triage"
+    assert [row["id"] for row in payload["default_attachments"]] == [poc["id"]]
+    readiness = payload["readiness"]
+    assert readiness["attachment_ids"] == [poc["id"]]
+    assert readiness["final_ready"] is True, readiness["blockers"]
+    assert readiness["existing_version_number"] is None
+    assert payload["workspace"]["final_ready"] is True
+
+
+def test_submission_readiness_endpoint_reports_blockers_for_a_selection(
+    client, isolate_settings
+) -> None:
+    finding = _seed_reportable_finding(client, isolate_settings)
+    submission_path, context_path = _write_workspace(client, isolate_settings, finding)
+    extra = _register_file(client, isolate_settings, "evidence/extra.txt", b"extra\n")
+
+    reviewed = client.get(f"{BASE}/submissions/VA-001/readiness")
+    differs = client.get(f"{BASE}/submissions/VA-001/readiness?attachment_id={extra['id']}")
+
+    assert reviewed.status_code == 200, reviewed.text
+    assert reviewed.json()["final_ready"] is True
+    assert reviewed.json()["attachment_ids"] == []
+    assert differs.status_code == 200, differs.text
+    assert differs.json()["final_ready"] is False
+    assert differs.json()["attachment_ids"] == [extra["id"]]
+    assert any("different external attachments" in item for item in differs.json()["blockers"])
+    guidance = {item["message"]: item for item in differs.json()["items"]}
+    triage_item = next(item for message, item in guidance.items() if "attachments" in message)
+    assert "triage-packet VA-001" in triage_item["command"]
+
+    exported = _export(client, "VA-001", submission_path, context_path)
+    assert exported.status_code == 201, exported.text
+    replay = client.get(f"{BASE}/submissions/VA-001/readiness")
+    assert replay.status_code == 200, replay.text
+    assert replay.json()["existing_version_number"] == 1
+    assert client.get(
+        f"{BASE}/submissions/VA-001/readiness?attachment_id={extra['id']}"
+    ).json()["existing_version_number"] is None
+
+
+def test_submission_reads_report_changed_attachments_without_writing_integrity_state(
+    client, isolate_settings
+) -> None:
+    finding = _seed_reportable_finding(client, isolate_settings)
+    submission_path, context_path = _write_workspace(client, isolate_settings, finding, reviewed=False)
+    capture = _register_file(client, isolate_settings, "evidence/capture.txt", b"registered\n")
+    _approve_packet(client, isolate_settings, "VA-001", [capture])
+    root = isolate_settings["engagements_dir"] / ENGAGEMENT_KEY
+    (root / "evidence" / "capture.txt").write_bytes(b"changed after registration\n")
+
+    def integrity() -> tuple[str, str]:
+        with get_connection() as connection:
+            row = connection.execute(
+                "SELECT integrity_status, updated_at FROM assessment_artifacts WHERE id = ?",
+                (capture["id"],),
+            ).fetchone()
+        return str(row["integrity_status"]), str(row["updated_at"])
+
+    before = integrity()
+    detail = client.get(f"{BASE}/submissions/VA-001")
+    readiness = client.get(f"{BASE}/submissions/VA-001/readiness?attachment_id={capture['id']}")
+
+    assert detail.status_code == 200, detail.text
+    assert readiness.status_code == 200, readiness.text
+    assert any("changed since registration" in item for item in detail.json()["readiness"]["blockers"])
+    assert any("changed since registration" in item for item in readiness.json()["blockers"])
+    assert integrity() == before
+
+    exported = _export(
+        client, "VA-001", submission_path, context_path, attachment_ids=[capture["id"]],
+    )
+    assert exported.status_code == 409, exported.text
+    assert integrity()[0] == "mismatch"
+
+
+def test_eligible_attachments_exclude_internal_submission_workspace_files(
+    client, isolate_settings
+) -> None:
+    finding = _seed_reportable_finding(client, isolate_settings)
+    _write_workspace(client, isolate_settings, finding)
+    linked_before = {
+        row["id"] for row in client.get(f"{BASE}/submissions/VA-001/attachments").json()["attachments"]
+    }
+    everything_before = client.get(f"{BASE}/submissions/VA-001/attachments?scope=engagement").json()
+    engagement_before = {row["id"] for row in everything_before["attachments"]}
+    internal = [
+        _register_file(client, isolate_settings, path, b"internal\n", kind="data")
+        for path in (
+            "submissions/VA-001/submission-context.json",
+            "submissions/VA-001/submission-body.md",
+            "submissions/VA-001/blind-triage/" + "a" * 64 + "/packet.md",
+            "submissions/VA-001/replies/reply-1.md",
+        )
+    ]
+    poc = _register_file(client, isolate_settings, "submissions/VA-001/poc.py", b"print(1)\n")
+    nested = _register_file(
+        client, isolate_settings, "submissions/VA-001/evidence/submission.md", b"capture\n",
+    )
+    unlinked = _register_file(
+        client, isolate_settings, "evidence/unlinked.txt", b"unlinked\n", related_finding_slug=None,
+    )
+
+    detail = client.get(f"{BASE}/submissions/VA-001")
+    linked = client.get(f"{BASE}/submissions/VA-001/attachments")
+    everything = client.get(f"{BASE}/submissions/VA-001/attachments?scope=engagement")
+
+    assert detail.status_code == 200, detail.text
+    internal_ids = {row["id"] for row in internal}
+    detail_ids = {row["id"] for row in detail.json()["eligible_attachments"]}
+    linked_ids = {row["id"] for row in linked.json()["attachments"]}
+    engagement_ids = {row["id"] for row in everything.json()["attachments"]}
+    assert detail_ids == linked_ids == linked_before | {poc["id"], nested["id"]}
+    assert engagement_ids == engagement_before | {poc["id"], nested["id"], unlinked["id"]}
+    assert not internal_ids & (detail_ids | engagement_ids)
+    assert everything.json()["page"]["total"] == everything_before["page"]["total"] + 3
+    assert detail.json()["engagement_attachment_total"] == everything.json()["page"]["total"]
+    searched = client.get(f"{BASE}/submissions/VA-001/attachments?scope=engagement&q=submissions/")
+    assert {row["id"] for row in searched.json()["attachments"]} == {poc["id"], nested["id"]}
+    assert searched.json()["page"]["total"] == 2
+    assert all("indexed_text" not in row and "preview_text" not in row
+               for row in everything.json()["attachments"])
+
+
+def test_attachment_browser_is_scoped_searchable_and_paged(
+    client, isolate_settings
+) -> None:
+    finding = _seed_reportable_finding(client, isolate_settings)
+    _write_workspace(client, isolate_settings, finding)
+    linked = [
+        _register_file(client, isolate_settings, f"evidence/page-{index}.txt", b"page\n")
+        for index in range(3)
+    ]
+    other = _register_file(
+        client, isolate_settings, "scans/Acme-Report.txt", b"scan\n", related_finding_slug=None,
+    )
+
+    first = client.get(f"{BASE}/submissions/VA-001/attachments?limit=2&q=evidence/page-")
+    second = client.get(f"{BASE}/submissions/VA-001/attachments?limit=2&offset=2&q=evidence/page-")
+    searched = client.get(f"{BASE}/submissions/VA-001/attachments?scope=engagement&q=acme-report")
+    literal = client.get(f"{BASE}/submissions/VA-001/attachments?scope=engagement&q=page_%25")
+
+    assert first.status_code == 200, first.text
+    assert [row["id"] for row in first.json()["attachments"]] == [linked[2]["id"], linked[1]["id"]]
+    assert first.json()["page"] == {
+        "offset": 0, "limit": 2, "returned": 2, "total": 3, "has_more": True, "next_offset": 2,
+    }
+    assert [row["id"] for row in second.json()["attachments"]] == [linked[0]["id"]]
+    assert [row["id"] for row in searched.json()["attachments"]] == [other["id"]]
+    assert searched.json()["attachments"][0]["related_finding_slug"] is None
+    assert literal.json()["attachments"] == []
+    assert client.get(f"{BASE}/submissions/VA-001/attachments?limit=501").status_code == 422
+    assert client.get(f"{BASE}/submissions/VA-001/attachments?scope=other").status_code == 422
+
+
+def _banded_finding(slug: str, title: str, severity: str) -> dict:
+    payload = _finding(slug, title, severity=severity)
+    payload["details"]["cvss_score"], payload["details"]["cvss_vector"] = {
+        "medium": (5.3, "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N"),
+        "low": (3.1, "CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:U/C:L/I:N/A:N"),
+    }[severity]
+    return payload
+
+
+def test_submission_listing_classifies_readiness_server_side(
+    client, isolate_settings
+) -> None:
+    from tests.test_report_export import _record_finding
+
+    finding = _seed_reportable_finding(client, isolate_settings)
+    _write_workspace(client, isolate_settings, finding, platform="hackerone")
+    _add_finding(client, _banded_finding("VA-002", "Needs a rendered draft", "medium"))
+    _add_finding(client, _finding("VA-003", "Already filed elsewhere"))
+    filed = client.patch(
+        f"{BASE}/findings/VA-003",
+        json={"submission_status": "submitted", "submission_ref": "H1-1001", "submission_platform": "hackerone"},
+    )
+    assert filed.status_code == 200, filed.text
+    _record_finding(client, _banded_finding("VA-004", "Still being verified", "low"))
+    _add_finding(client, _finding("VA-005", "Rendered but not reviewed"))
+    blocked = client.get(f"{BASE}/findings/VA-005").json()
+    _write_workspace(client, isolate_settings, blocked, reviewed=False)
+
+    listing = client.get(f"{BASE}/submissions")
+
+    assert listing.status_code == 200, listing.text
+    payload = listing.json()
+    rows = {row["slug"]: row for row in payload["findings"]}
+    assert payload["counts"] == {
+        "ready": 1, "blocked": 1, "needs_draft": 1, "exported": 0, "filed": 1,
+        "not_candidate": 1, "incomplete_exports": 0, "actionable": 3, "all": 5,
+    }
+    assert set(rows) == {"VA-001", "VA-002", "VA-005"}
+    assert payload["findings_page"]["total"] == 3
+    assert rows["VA-001"]["readiness"] == "ready"
+    assert rows["VA-001"]["default_platform"] == "hackerone"
+    assert rows["VA-002"]["readiness"] == "needs_draft"
+    assert rows["VA-002"]["default_platform"] is None
+    assert rows["VA-005"]["readiness"] == "blocked"
+    assert rows["VA-005"]["blocker_count"] >= 1
+    assert "blind triage" in rows["VA-005"]["first_blocker"]
+    assert all(row["updated_at"] for row in payload["findings"])
+
+    filed_rows = client.get(f"{BASE}/submissions?readiness=filed").json()
+    assert [row["slug"] for row in filed_rows["findings"]] == ["VA-003"]
+    assert filed_rows["findings"][0]["default_platform"] == "hackerone"
+    everything = client.get(f"{BASE}/submissions?readiness=all").json()
+    assert everything["findings_page"]["total"] == 5
+    searched = client.get(f"{BASE}/submissions?readiness=all&q=verified").json()
+    assert [row["slug"] for row in searched["findings"]] == ["VA-004"]
+    medium = client.get(f"{BASE}/submissions?readiness=all&severity=medium").json()
+    assert [row["slug"] for row in medium["findings"]] == ["VA-002"]
+    hackerone = client.get(f"{BASE}/submissions?readiness=all&platform=hackerone").json()
+    assert {row["slug"] for row in hackerone["findings"]} == {"VA-001", "VA-003"}
+    assert client.get(f"{BASE}/submissions?readiness=bogus").status_code == 422
+
+
+def test_submission_listing_reports_a_captured_body_and_recent_changes(
+    client, isolate_settings
+) -> None:
+    finding = _seed_reportable_finding(client, isolate_settings)
+    submission_path, context_path = _write_workspace(client, isolate_settings, finding)
+    exported = _export(client, "VA-001", submission_path, context_path)
+    assert exported.status_code == 201, exported.text
+
+    listing = client.get(f"{BASE}/submissions").json()
+
+    row = listing["findings"][0]
+    assert row["readiness"] == "exported"
+    assert row["latest_version_number"] == 1
+    assert row["latest_version_platform"] == "bugcrowd"
+    assert row["latest_version_completed_at"] == exported.json()["completed_at"]
+    assert listing["counts"]["exported"] == 1
+    recent = client.get(f"{BASE}/submissions?readiness=all&changed_within_hours=24").json()
+    assert [item["slug"] for item in recent["findings"]] == ["VA-001"]
+    with get_connection() as connection:
+        connection.execute(
+            "UPDATE assessment_findings SET updated_at = '2020-01-01T00:00:00Z' WHERE slug = 'VA-001'"
+        )
+    old = client.get(f"{BASE}/submissions?readiness=all&changed_within_hours=24").json()
+    assert old["findings"] == []
+
+
+def test_blind_triage_packet_without_artifact_ids_is_a_blocker_not_a_crash(
+    client, isolate_settings
+) -> None:
+    finding = _seed_reportable_finding(client, isolate_settings)
+    _write_workspace(client, isolate_settings, finding, reviewed=False)
+    capture = _register_file(client, isolate_settings, "evidence/capture.txt", b"capture\n")
+    _approve_packet(client, isolate_settings, "VA-001", [capture])
+    root = (isolate_settings["engagements_dir"] / ENGAGEMENT_KEY).resolve()
+    with get_connection() as connection:
+        packet_id = json.loads(connection.execute(
+            "SELECT payload_json FROM assessment_dispatch_decisions "
+            "WHERE kind = 'blind_triage_verdict' ORDER BY id DESC LIMIT 1"
+        ).fetchone()["payload_json"])["packet_id"]
+    manifest_path = root / "submissions" / "VA-001" / "blind-triage" / packet_id / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    for row in manifest["inputs"]["attachments"]:
+        row.pop("artifact_id")
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    detail = client.get(f"{BASE}/submissions/VA-001")
+    readiness = client.get(f"{BASE}/submissions/VA-001/readiness?attachment_id={capture['id']}")
+
+    assert detail.status_code == 200, detail.text
+    assert readiness.status_code == 200, readiness.text
+    assert readiness.json()["final_ready"] is False
+    assert detail.json()["default_attachment_ids"] == []
+
+
+def test_unreadable_program_brief_is_a_readiness_blocker_not_a_failed_read(
+    client, isolate_settings
+) -> None:
+    finding = _seed_reportable_finding(client, isolate_settings)
+    _write_workspace(client, isolate_settings, finding)
+    root = (isolate_settings["engagements_dir"] / ENGAGEMENT_KEY).resolve()
+    (root / "ENGAGEMENT.md").unlink()
+
+    detail = client.get(f"{BASE}/submissions/VA-001")
+    listing = client.get(f"{BASE}/submissions")
+
+    assert detail.status_code == 200, detail.text
+    assert any("program brief" in item for item in detail.json()["readiness"]["blockers"])
+    assert listing.status_code == 200, listing.text
+    assert listing.json()["findings"][0]["readiness"] == "blocked"

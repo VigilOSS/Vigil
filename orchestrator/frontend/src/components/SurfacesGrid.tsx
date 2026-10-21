@@ -1,12 +1,14 @@
 // ── SurfacesGrid ──────────────────────────────────────────────────────
 // ag-grid rendering of the Surfaces tab's already-filtered rows. Lazy-
 // loaded by SurfacesTab so ag-grid lands in a code-split chunk. Filtering
-// (chips + search) stays in SurfacesTab React state feeding rowData; this
-// component only renders + wires row→detail-drawer clicks.
+// (scope, chips + search) stays in SurfacesTab React state feeding rowData;
+// this component renders, opens a row's record, and reports what it shows
+// (row order and the column sort behind it) so the record's Previous / Next
+// walk it and the summary line names the order.
 
-import { useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { AgGridReact } from "ag-grid-react";
-import type { CellKeyDownEvent, ColDef, ICellRendererParams, RowClickedEvent } from "ag-grid-community";
+import type { CellKeyDownEvent, ColDef, GridApi, ICellRendererParams, ModelUpdatedEvent, RowClickedEvent } from "ag-grid-community";
 import type { AssessmentSurface } from "../lib/api";
 import {
   AG_GRID_THEME,
@@ -17,8 +19,13 @@ import {
   focusGridInvoker,
   registerAgGrid,
 } from "../lib/agGrid";
+import { gridTimeComparator } from "../lib/serverTime";
+import { TimeStamp } from "./formatting";
+import { StatusPill, compareStatus, humanizeStatus } from "./ui";
+import { readGridView, type GridView } from "./record/recordNavigation";
 
 registerAgGrid();
+
 
 type SurfacesGridProps = {
   rows: AssessmentSurface[];
@@ -26,12 +33,20 @@ type SurfacesGridProps = {
   linkCounts: Map<number, number>;
   selectedId: number | null;
   onRowOpen: (surface: AssessmentSurface, invoker: HTMLElement | null) => void;
+  /** The shown row order and the column sort behind it, after every model update. */
+  onViewChange?: (view: GridView<number>) => void;
+  /** The grid API once ready, null on unmount (record return reveals rows through it). */
+  onApi?: (api: GridApi<AssessmentSurface> | null) => void;
 };
 
 function StatusCell({ data }: ICellRendererParams<AssessmentSurface>) {
   if (!data) return null;
-  const label = (data.status || "").replace(/[-_]/g, " ") || "—";
-  return <span className={`badge status-${data.status}`} aria-label={`Status ${label}`}>{label}</span>;
+  return <StatusPill domain="surface" value={data.status} size="sm" />;
+}
+
+function UpdatedCell({ data }: ICellRendererParams<AssessmentSurface>) {
+  if (!data) return null;
+  return <TimeStamp value={data.updated_at} />;
 }
 
 export default function SurfacesGrid({
@@ -39,8 +54,13 @@ export default function SurfacesGrid({
   linkCounts,
   selectedId,
   onRowOpen,
+  onViewChange,
+  onApi,
 }: SurfacesGridProps) {
   const gridRef = useRef<AgGridReact<AssessmentSurface>>(null);
+  const onApiRef = useRef(onApi);
+  onApiRef.current = onApi;
+  useEffect(() => () => onApiRef.current?.(null), []);
 
   const FindingsCell = useMemo(
     () =>
@@ -48,9 +68,9 @@ export default function SurfacesGrid({
         if (!data) return null;
         const n = linkCounts.get(data.id) || 0;
         return n > 0 ? (
-          <span className="badge">{n}</span>
+          <span className="surface-link-count">{n}</span>
         ) : (
-          <span style={{ color: "var(--muted)" }}>—</span>
+          <span className="surface-cell-muted" aria-label="No linked findings">—</span>
         );
       },
     [linkCounts],
@@ -70,22 +90,29 @@ export default function SurfacesGrid({
       {
         headerName: "Type",
         colId: "type",
-        width: 130,
-        valueGetter: (p) => p.data?.surface_type || "unknown",
+        width: 140,
+        valueGetter: (p) => humanizeStatus(p.data?.surface_type || "unknown"),
+        cellClass: "ag-clip-cell",
         cellStyle: { color: "var(--ink-2)" },
       },
       {
         headerName: "Status",
         colId: "status",
-        width: 130,
+        width: 170,
         cellRenderer: StatusCell,
         valueGetter: (p) => p.data?.status || "",
+        // Lifecycle order, not alphabetical: ascending runs from the least
+        // urgent, so the first (descending) sort puts untested surfaces first.
+        comparator: (_a, _b, nodeA, nodeB) => compareStatus("surface", nodeB.data?.status, nodeA.data?.status),
+        sortingOrder: ["desc", "asc"],
       },
       {
         headerName: "Source",
         colId: "source",
         width: 150,
         valueGetter: (p) => p.data?.source_name || "—",
+        tooltipValueGetter: (p) => p.data?.source_name || "",
+        cellClass: "ag-clip-cell",
         cellStyle: { color: "var(--muted)" },
       },
       {
@@ -101,8 +128,8 @@ export default function SurfacesGrid({
       {
         headerName: "Follow-up",
         colId: "followup",
-        flex: 1.5,
-        minWidth: 180,
+        flex: 1.2,
+        minWidth: 150,
         valueGetter: (p) => p.data?.followup_condition || "—",
         tooltipValueGetter: (p) => p.data?.followup_condition || "",
         cellClass: "ag-clip-cell",
@@ -111,9 +138,21 @@ export default function SurfacesGrid({
       {
         headerName: "Findings",
         colId: "findings",
-        width: 100,
+        width: 96,
         sortable: false,
         cellRenderer: FindingsCell,
+      },
+      {
+        headerName: "Updated",
+        colId: "updated",
+        width: 112,
+        cellRenderer: UpdatedCell,
+        valueGetter: (p) => p.data?.updated_at || "",
+        // Missing update times sort last in both directions.
+        comparator: gridTimeComparator,
+        // The default order, newest first; the header shows it.
+        initialSort: "desc",
+        sortingOrder: ["desc", "asc"],
       },
     ],
     [FindingsCell],
@@ -133,7 +172,7 @@ export default function SurfacesGrid({
   };
 
   return (
-    <div className={`${AG_GRID_THEME} grid-host`}>
+    <div className={`${AG_GRID_THEME} grid-host surfaces-grid-host`}>
       <AgGridReact<AssessmentSurface>
         ref={gridRef}
         theme={GRID_THEME_PROP}
@@ -143,13 +182,14 @@ export default function SurfacesGrid({
         getRowId={(p) => String(p.data.id)}
         rowHeight={GRID_ROW_HEIGHT}
         headerHeight={GRID_HEADER_HEIGHT}
-        animateRows
+        tooltipShowDelay={400}
+        onGridReady={(event) => onApiRef.current?.(event.api)}
         onRowClicked={onRowClicked}
         onCellKeyDown={onCellKeyDown}
+        onModelUpdated={(event: ModelUpdatedEvent<AssessmentSurface>) => onViewChange?.(readGridView(event.api, (row) => row.id))}
         rowClassRules={{
           "ag-row-selected": (p) => p.data?.id === selectedId,
         }}
-        overlayNoRowsTemplate='<span class="ag-vigil-empty">No surfaces match the current filters.</span>'
       />
     </div>
   );
