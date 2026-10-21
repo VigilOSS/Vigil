@@ -31,7 +31,7 @@ import "../styles/overview.css";
 
 // Verification states that still need a verifier's decision. The attention
 // count, the Finding queue and the filtered Findings link all use this set.
-const AWAITING_VERIFICATION = ["unreviewed", "disputed", "pending_runtime_proof", "blocked"] as const;
+import { AWAITING_VERIFICATION } from "../lib/findingWorkflow";
 const QUEUE_LIMIT = 5;
 
 // Below-the-fold list caps (scroll-length reduction). Lists render up to the

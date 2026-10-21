@@ -88,7 +88,6 @@
 .findings-workspace .group-card-metrics { align-items: center; margin-left: auto; }
 .findings-workspace .group-card-metrics .finding-row-time { margin-left: 6px; min-width: 8.5rem; }
 .findings-workspace .finding-runtime-proof { margin: 0 0 24px; }
-.findings-workspace .finding-record-action { align-self: center; margin-left: 4px; color: var(--accent); font-size: 0.78rem; font-weight: 600; white-space: nowrap; text-decoration: underline; text-underline-offset: 3px; }
 /* Table cells center their content; badges must not inherit the grid's
  * row-height line-height or they overflow the row. */
 .findings-workspace .grid-host .ag-cell { display: flex; align-items: center; }

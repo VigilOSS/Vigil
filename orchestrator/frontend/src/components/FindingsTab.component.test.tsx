@@ -483,7 +483,7 @@ describe("finding investigation workspace", () => {
   });
 
   it.each([
-    ["Copy submission as Markdown", "Copied submission as Markdown"],
+    ["Copy write-up as Markdown", "Copied write-up as Markdown"],
     ["Copy link to this finding", "Link copied"],
   ])("waits for %s clipboard writes and exposes a rejected-write fallback", async (label, message) => {
     let resolve!: () => void;
@@ -500,7 +500,7 @@ describe("finding investigation workspace", () => {
     expect((await screen.findByRole("alert")).textContent).toMatch(/Could not copy/);
   });
 
-  it.each(["Copy submission as Markdown", "Copy link to this finding"])("does not mark finding B copied when a pending %s write from A finishes", async (label) => {
+  it.each(["Copy write-up as Markdown", "Copy link to this finding"])("does not mark finding B copied when a pending %s write from A finishes", async (label) => {
     let resolve!: () => void;
     const pending = new Promise<void>((done) => { resolve = done; });
     writeText.mockReturnValueOnce(pending);
@@ -695,7 +695,7 @@ describe("finding investigation workspace", () => {
     expect(screen.queryByText("No source contribution recorded.")).toBeNull();
     expect(screen.queryByText("Current proof receipts unavailable.")).toBeNull();
     expect(screen.queryByText("Evidence mode unrecorded")).toBeNull();
-    expect((screen.getByRole("button", { name: "Copy submission as Markdown" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "Copy write-up as Markdown" }) as HTMLButtonElement).disabled).toBe(true);
     await act(async () => { resolve(finding); });
     expect(await screen.findByText("AccountController.show")).toBeTruthy();
     expect(screen.getByRole("link", { name: /Receipt #41/ })).toBeTruthy();
@@ -738,7 +738,7 @@ describe("finding investigation workspace", () => {
     await screen.findByRole("region", { name: "Finding investigation" });
     expect(screen.getByRole("heading", { name: "Impact" })).toBeTruthy();
     expect(screen.getByText("private account data").tagName).toBe("STRONG");
-    fireEvent.click(screen.getByRole("button", { name: /Submission/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Write-up & evidence/ }));
     expect(screen.getByText("private account data").tagName).toBe("STRONG");
   });
   it("retains same-version current evidence on refresh failure but discards it after a claim change", async () => {
@@ -785,7 +785,7 @@ describe("finding investigation workspace", () => {
     await screen.findByRole("heading", { name: "Z second claim" });
     expect(mismatched).toEqual([]);
   });
-  it.each(["Copy link to this finding", "Copy submission as Markdown"])("does not show a late copy failure for the previous finding: %s", async (label) => {
+  it.each(["Copy link to this finding", "Copy write-up as Markdown"])("does not show a late copy failure for the previous finding: %s", async (label) => {
     let reject!: (reason: unknown) => void;
     writeText.mockReturnValueOnce(new Promise((_resolve, fail) => { reject = fail; }));
     render(<ToastProvider><FindingsTab engagementKey="demo" findings={[finding, { ...finding, slug: "VA-013", title: "Z second claim" }] as never[]} fallbackFindings={[]} chains={[]} chainLinks={[]} assessmentRefreshVersion={0} initialFindingSlug="VA-012" /><ToastViewport /></ToastProvider>);
@@ -793,18 +793,18 @@ describe("finding investigation workspace", () => {
     fireEvent.click(screen.getByRole("button", { name: "Next finding" }));
     await screen.findByRole("heading", { name: "Z second claim" });
     await act(async () => { reject(new Error("Clipboard denied")); });
-    expect(screen.queryByText(/Could not copy (link|submission)\./)).toBeNull();
+    expect(screen.queryByText(/Could not copy (link|write-up)\./)).toBeNull();
   });
-  it.each(["Copy link to this finding", "Copy submission as Markdown"])("keeps the newest copy result when an older request fails: %s", async (label) => {
+  it.each(["Copy link to this finding", "Copy write-up as Markdown"])("keeps the newest copy result when an older request fails: %s", async (label) => {
     let reject!: (reason: unknown) => void;
     writeText.mockReturnValueOnce(new Promise((_resolve, fail) => { reject = fail; })).mockResolvedValueOnce(undefined);
     workspace();
     const copy = await screen.findByRole("button", { name: label });
     fireEvent.click(copy);
     fireEvent.click(copy);
-    await screen.findByText(label.includes("Markdown") ? "Copied submission as Markdown" : "Link copied");
+    await screen.findByText(label.includes("Markdown") ? "Copied write-up as Markdown" : "Link copied");
     await act(async () => { reject(new Error("Older request denied")); });
-    expect(screen.queryByText(/Could not copy (link|submission)\./)).toBeNull();
+    expect(screen.queryByText(/Could not copy (link|write-up)\./)).toBeNull();
   });
 
   it("makes absent runtime proof explicit for a source-only claim", async () => {
@@ -894,7 +894,7 @@ describe("finding investigation workspace", () => {
     fireEvent.click(await screen.findByRole("button", { name: "History 0" }));
     expect(window.location.hash).toContain("dtab=history");
     rendered.rerender(<ToastProvider><FindingsTab engagementKey="demo" findings={[finding] as never[]} fallbackFindings={[]} chains={[]} chainLinks={[]} assessmentRefreshVersion={0} initialFindingSlug="VA-012" initialDrawerTab="submission" /></ToastProvider>);
-    await waitFor(() => expect(screen.getByRole("button", { name: /Submission/ }).getAttribute("aria-current")).toBe("page"));
+    await waitFor(() => expect(screen.getByRole("button", { name: /Write-up & evidence/ }).getAttribute("aria-current")).toBe("page"));
     rendered.rerender(<ToastProvider><FindingsTab engagementKey="demo" findings={[finding] as never[]} fallbackFindings={[]} chains={[]} chainLinks={[]} assessmentRefreshVersion={0} initialFindingSlug="VA-012" initialDrawerTab="history" /></ToastProvider>);
     await waitFor(() => expect(screen.getByRole("button", { name: "History 0" }).getAttribute("aria-current")).toBe("page"));
     rendered.rerender(<ToastProvider><FindingsTab engagementKey="demo" findings={[finding] as never[]} fallbackFindings={[]} chains={[]} chainLinks={[]} assessmentRefreshVersion={0} /></ToastProvider>);

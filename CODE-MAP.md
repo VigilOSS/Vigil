@@ -321,4 +321,5 @@ A prompt change is **not** prompt-only when the prompt defines an artifact the b
 - `orchestrator/frontend/src/components/record/RecordView.tsx` — the one record (detail) view tabs open an entity in: Back/position/Previous-Next bar,
   header, section tabs, Escape and focus return; `record/recordNavigation.ts` walks the shown order or asks the server (`position`) for paged lists.
 - `orchestrator/frontend/src/components/ProofWorkTab.tsx` consumes durable proof work; UI actions never launch agents or verify findings.
+- `orchestrator/frontend/src/components/FindingRecordHeader.tsx` shares finding identity/status axes and per-finding section navigation across review and disclosure queues.
 - `orchestrator/report/src/lib/poc.ts` owns copy-and-run `curl` quoting.

@@ -249,7 +249,9 @@ const NO_TRANSITIONS: AssessmentFindingTransitionSummary[] = [];
 import { useToast } from "../contexts/ToastContext";
 import { findingToMarkdown } from "../lib/findingMarkdown";
 import { FindingRemediation } from "./FindingRemediation";
-import { RecordBody, RecordCopyButton, RecordCopyLinkButton, RecordHeader, RecordTabs, RecordView, useResultsScrollMemory } from "./record/RecordView";
+import { RecordBody, RecordCopyButton, RecordCopyLinkButton, RecordTabs, RecordView, useResultsScrollMemory } from "./record/RecordView";
+import { FindingRecordHeader } from "./FindingRecordHeader";
+import { AWAITING_VERIFICATION } from "../lib/findingWorkflow";
 import { listNavigation } from "./record/recordNavigation";
 
 // ── Types & helpers ───────────────────────────────────────────────────
@@ -272,6 +274,7 @@ type FindingsTabProps = {
   initialDrawerTab?: string;
   ledgerLoading?: boolean;
   ledgerError?: string | null;
+  readyToExport?: number | null;
   // Optional "Runtime proof" section for a finding that still owes runtime
   // proof (pending_runtime_proof and not merged), rendered in the Claim &
   // evidence pane beside the outstanding-proof notice. The page owns proof
@@ -776,6 +779,7 @@ export function FindingsTab({
   initialDrawerTab,
   ledgerLoading = false,
   ledgerError = null,
+  readyToExport = null,
   renderRuntimeProof,
 }: FindingsTabProps) {
   const [routeFinding, setRouteFinding] = useState<{ engagementKey: string; requestedSlug: string; finding: AssessmentFindingDetail } | null>(null);
@@ -1633,6 +1637,8 @@ export function FindingsTab({
         stats={ledgerPending || ledgerEmpty ? [] : [
           { value: currentCount, label: "current", title: "Findings that are not merged or false positive; the rail and Overview count these" },
           { value: derivedList.length, label: "recorded", title: "Every finding in the ledger, including merged and false-positive ones" },
+          { value: derivedList.filter((d) => (AWAITING_VERIFICATION as readonly string[]).includes(d.verificationKey)).length, label: "awaiting verification", title: "Unreviewed, disputed, pending runtime proof or blocked findings" },
+          ...(readyToExport == null ? [] : [{ value: readyToExport, label: "ready to export", title: "Submission packages passing the backend export gates; separate from finding verification" }]),
         ]}
         status={ledgerLoading && derivedList.length > 0 ? "Updating…" : null}
         actions={ledgerPending || ledgerEmpty ? null : <SevSpark counts={severityCounts} />}
@@ -2328,7 +2334,7 @@ function Drawer({
 
   const tabs: { id: TabId; label: string; count?: number; hidden?: boolean }[] = [
     { id: "overview", label: "Claim & evidence" },
-    { id: "submission", label: "Submission", count: submissionCount || undefined },
+    { id: "submission", label: "Write-up & evidence", count: submissionCount || undefined },
     { id: "work", label: "Work" },
     { id: "relationships", label: "Relationships", count: relationshipsCount || undefined },
     { id: "code", label: "Code", count: codeCount, hidden: !codeCount },
@@ -2337,45 +2343,40 @@ function Drawer({
 
   return (
     <>
-      <RecordHeader
-        id={d.slug}
-        copyId={d.slug}
+      <FindingRecordHeader
+        engagementKey={engagementKey}
+        slug={d.slug}
+        severity={d.severity}
+        workflow={d.workflow_status}
+        verification={d.verificationKey}
+        submission={d.submission_status}
+        workspace="findings"
+        section={tab}
         copyIdLabel="Copy slug"
         title={d.title}
         titleId={titleId}
-        accent={`var(--sev-${d.severity})`}
         actions={
           <>
             <RecordCopyButton
-              label="Copy submission as Markdown"
+              label="Copy write-up as Markdown"
               text={() => findingToMarkdown(d)}
-              successMessage="Copied submission as Markdown"
-              failureMessage="Could not copy submission. Use the submission fields to copy manually."
+              successMessage="Copied write-up as Markdown"
+              failureMessage="Could not copy write-up. Use the individual fields to copy manually."
               disabled={!isDetail(d.finding)}
             />
             <RecordCopyLinkButton noun="finding" />
-            {/* Merged and false-positive findings are not submission candidates. */}
-            {!RETIRED_WORKFLOWS.has(d.workflow_status) && (
-              <a className="finding-record-action" href={engagementHref(engagementKey, { tab: "submissions", submission: d.slug })}>Open in Submissions</a>
-            )}
           </>
         }
         pills={
           <>
-            <SeverityTag severity={d.severity} />
             {d.cvss_score != null && (
               <span className="cvss-chip">
                 CVSS <span className="cvss-num">{d.cvss_score.toFixed(1)}</span>
               </span>
             )}
-            <StatusPill domain="finding-workflow" value={d.workflow_status} />
-            <StatusPill domain="finding-verification" value={d.verificationKey} />
             {!reviewRequestPending && <span className="finding-evidence-mode">{reviewFinding?.evidence_type?.replace(/-/g, " ") || "Evidence mode unrecorded"}</span>}
             {d.code_snapshot_status && d.code_snapshot_status !== "not_applicable" && (
               <SourceSnapshotPill status={d.code_snapshot_status} />
-            )}
-            {hasSubmissionStatus(d.submission_status) && (
-              <StatusPill domain="finding-submission" value={d.submission_status} title={`External submission: ${d.submissionLabel}`} />
             )}
             {d.cwe_id && <span className="tag cwe">{d.cwe_id}</span>}
           </>
@@ -2405,7 +2406,7 @@ function Drawer({
             </details>
           </div>
         )}
-      </RecordHeader>
+      </FindingRecordHeader>
       <FindingRemediation key={d.slug} engagementKey={engagementKey} findingSlug={d.slug} refreshVersion={refreshVersion} />
       <RecordTabs
         tabs={tabs}

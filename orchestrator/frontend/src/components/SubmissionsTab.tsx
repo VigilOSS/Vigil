@@ -134,6 +134,7 @@ export function SubmissionsTab(props: SubmissionsTabProps) {
 function SubmissionDesk({ engagementKey, refreshVersion = 0, initialSubmissionSlug, initialDrawerTab, onToDoCount }: SubmissionsTabProps) {
   const { toast } = useToast();
   const [saved] = useState(() => readDeskView(engagementKey));
+  const initialWindow = useRef(saved.loadedCount ?? SUBMISSION_PAGE_SIZE);
 
   // ── Filters (server-side) ───────────────────────────────────────────
   const [scope, setScope] = useState<Scope>(saved.scope);
@@ -232,7 +233,8 @@ function SubmissionDesk({ engagementKey, refreshVersion = 0, initialSubmissionSl
       first = false;
       setListingLoading(true);
       const loaded = listingRef.current?.findings.length ?? 0;
-      const limit = replace ? SUBMISSION_PAGE_SIZE : Math.min(SUBMISSION_MAX_PAGE_SIZE, Math.max(SUBMISSION_PAGE_SIZE, loaded));
+      const limit = Math.min(SUBMISSION_MAX_PAGE_SIZE, Math.max(SUBMISSION_PAGE_SIZE, replace ? initialWindow.current : loaded));
+      initialWindow.current = SUBMISSION_PAGE_SIZE;
       try {
         const next = await listSubmissionDesk(engagementKey, {
           ...filterParams,
@@ -318,13 +320,14 @@ function SubmissionDesk({ engagementKey, refreshVersion = 0, initialSubmissionSl
     const view: DeskView = {
       scope: scopeFellBack.current && scope === "all" ? "attention" : scope,
       state: stateFilter, severity: severityFilter, platform: platformFilter, recency, search: searchText, slug: selectedSlug, tab,
+      loadedCount: listing?.findings.length ?? saved.loadedCount,
     };
     try {
       window.sessionStorage.setItem(viewKey(engagementKey), JSON.stringify(view));
     } catch {
       // Browser storage may be unavailable; the view just resets next visit.
     }
-  }, [engagementKey, scope, stateFilter, severityFilter, platformFilter, recency, searchText, selectedSlug, tab]);
+  }, [engagementKey, scope, stateFilter, severityFilter, platformFilter, recency, searchText, selectedSlug, tab, listing, saved.loadedCount]);
 
   const selectedRow = useMemo(() => {
     const fresh = listing?.findings.find((row) => row.slug === selectedSlug) ?? null;
@@ -682,7 +685,9 @@ function SubmissionDesk({ engagementKey, refreshVersion = 0, initialSubmissionSl
         title="Submissions"
         purpose="Turn confirmed findings into immutable, exportable write-ups. Exporting never submits anything to the platform."
         stats={counts ? [
-          { value: counts.ready, label: "ready", title: listingFilterHint("ready") },
+          { value: counts.all, label: "findings", title: "Every finding in the disclosure queue, including those not yet eligible" },
+          { value: counts.not_candidate, label: "not eligible", title: "Verification or workflow state does not permit an export; review the finding first" },
+          { value: counts.ready, label: "ready to export", title: listingFilterHint("ready") },
           { value: needWork, label: "need work", tone: needWork ? "warning" : undefined, title: "Blocked or still needing a rendered draft." },
           { value: counts.exported, label: "exported", title: listingFilterHint("exported") },
           { value: counts.filed, label: "filed", title: listingFilterHint("filed") },

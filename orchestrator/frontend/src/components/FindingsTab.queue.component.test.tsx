@@ -87,6 +87,23 @@ afterEach(() => {
 });
 
 describe("opening a finding reads its detail once", () => {
+  it("counts verification work separately from backend package readiness", () => {
+    render(tab({ findings: [record("VA-001", "Unreviewed", { verification_status: "unreviewed" }), record("VA-002", "Confirmed")] as never[], readyToExport: 0 }));
+    const summary = screen.getByRole("list", { name: "Summary" });
+    expect(summary.textContent).toContain("2 recorded");
+    expect(summary.textContent).toContain("1 awaiting verification");
+    expect(summary.textContent).toContain("0 ready to export");
+  });
+  it("keeps the finding identity while moving from its write-up to the disclosure package", async () => {
+    const finding = record("VA-001", "Acme claim", { verification_status: "unreviewed" });
+    vi.mocked(getAssessmentFinding).mockResolvedValue(detail(finding) as never);
+    render(tab({ findings: [finding] as never[], initialFindingSlug: "VA-001", initialDrawerTab: "submission" }));
+    const nav = await screen.findByRole("navigation", { name: "Finding workflow" });
+    expect(within(nav).getByRole("link", { name: "Review finding" }).getAttribute("aria-current")).toBe("page");
+    expect(within(nav).getByRole("link", { name: "Disclosure package" }).getAttribute("href")).toBe("#/engagements/acme?tab=submissions&submission=VA-001");
+    expect(screen.getByRole("button", { name: /Write-up & evidence/ }).getAttribute("aria-current")).toBe("page");
+    expect(screen.getByRole("group", { name: "Verification status" }).textContent).toContain("Unreviewed");
+  });
   it("lets operators filter from the disclosure and remove a selected facet from the queue", async () => {
     render(tab({ findings: [record("VA-001", "Medium claim"), record("VA-002", "High claim", { severity: "high" })] as never[] }));
     const trigger = screen.getByRole("button", { name: "Filters (0)" });
@@ -375,15 +392,16 @@ describe("runtime proof inside a finding", () => {
 });
 
 describe("record actions", () => {
-  it("opens a current finding in Submissions and offers no link for a merged one", async () => {
+  it("keeps disclosure history reachable for current and merged findings", async () => {
     const current = record("VA-012", "Export claim");
     const merged = record("VA-013", "Merged claim", { workflow_status: "merged" });
     vi.mocked(getAssessmentFinding).mockImplementation(async (_key, slug) => detail(slug === "VA-012" ? current : merged) as never);
     const view = render(tab({ findings: [current, merged] as never[], initialFindingSlug: "VA-012" }));
     await screen.findByRole("heading", { name: "Export claim" });
-    expect(screen.getByRole("link", { name: "Open in Submissions" }).getAttribute("href")).toBe("#/engagements/acme?tab=submissions&submission=VA-012");
+    expect(screen.getByRole("link", { name: "Disclosure package" }).getAttribute("href")).toBe("#/engagements/acme?tab=submissions&submission=VA-012");
     view.rerender(tab({ findings: [current, merged] as never[], initialFindingSlug: "VA-013" }));
     await screen.findByRole("heading", { name: "Merged claim" });
-    expect(screen.queryByRole("link", { name: "Open in Submissions" })).toBeNull();
+    expect(screen.getByRole("link", { name: "Disclosure package" }).getAttribute("href")).toBe("#/engagements/acme?tab=submissions&submission=VA-013");
+    expect(screen.getByRole("group", { name: "Workflow status" }).textContent).toContain("Merged");
   });
 });

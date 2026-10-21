@@ -5,6 +5,22 @@ versioning follows [Semantic Versioning][semver].
 
 Durable design decisions live in [`docs/adr/`](docs/adr/).
 
+## [2.1.1] - 2026-10-21
+
+### Changed
+
+- Finding review and disclosure packages share identity, status axes and navigation while
+  retaining separate work queues. Write-up and evidence are distinct from the rendered package.
+- Summary counts distinguish verification work, export readiness and submission eligibility.
+
+### Fixed
+
+- Switching between finding review and disclosure preserves the selected record and section.
+- Returning to Submissions restores its loaded queue window and reveals the selected row
+  without scrolling the whole page.
+- Remediation review diffs handle high-numbered file descriptors while preserving output
+  limits, timeouts and approval gates.
+
 ## [2.1.0] - 2026-10-21
 
 ### Added

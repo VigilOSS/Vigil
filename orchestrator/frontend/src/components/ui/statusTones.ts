@@ -233,7 +233,7 @@ const VOCABULARIES = {
     needs_draft: entry("Needs draft", "pending", "Verified and reportable, but no submission has been rendered yet."),
     exported: entry("Exported", "progress", "The current body is already captured as an immutable version; file it on the platform."),
     filed: entry("Filed", "success", "The finding records an external submission status."),
-    not_candidate: entry("Not yet verified", "neutral", "Not confirmed/downgraded or not in a reportable workflow status."),
+    not_candidate: entry("Not eligible", "neutral", "Not confirmed/downgraded or not in a reportable workflow status."),
   },
   /** Submission package versions (`db.py` submission version CHECK). */
   "submission-version": {

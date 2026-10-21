@@ -280,6 +280,22 @@ afterEach(() => {
 });
 
 describe("SubmissionsTab", () => {
+  it("separates verification, package readiness and external filing in the shared finding header", async () => {
+    vi.mocked(listSubmissionDesk).mockResolvedValue(listing([row("VA-001", { verification_status: "unreviewed", readiness: "not_candidate" })]));
+    vi.mocked(getSubmissionDesk).mockResolvedValue(detail());
+    window.sessionStorage.setItem('finding.section.["acme","VA-001","findings"]', "history");
+    renderTab();
+    const nav = await screen.findByRole("navigation", { name: "Finding workflow" });
+    expect(within(nav).getByRole("link", { name: "Review finding" }).getAttribute("href")).toBe("#/engagements/acme?tab=findings&finding=VA-001&dtab=history");
+    expect(within(nav).getByRole("link", { name: "Disclosure package" }).getAttribute("aria-current")).toBe("page");
+    expect(screen.getByRole("group", { name: "Verification status" }).textContent).toContain("Unreviewed");
+    expect(screen.getByRole("group", { name: "Package readiness" }).textContent).toContain("Not eligible");
+    expect(screen.getByRole("group", { name: "External submission status" })).toBeTruthy();
+    const summary = screen.getByRole("list", { name: "Summary" });
+    expect(summary.textContent).toContain("231 findings");
+    expect(summary.textContent).toContain("120 not eligible");
+    expect(summary.textContent).toContain("4 ready to export");
+  });
   it("shows server-computed queue counts and filters the queue on the server", async () => {
     vi.mocked(listSubmissionDesk).mockResolvedValue(listing([row("VA-001")]));
     vi.mocked(getSubmissionDesk).mockResolvedValue(detail());
@@ -544,6 +560,25 @@ describe("SubmissionsTab", () => {
     });
     await waitFor(() => expect(listSubmissionDesk).toHaveBeenCalledTimes(2));
     expect(screen.getByText("Showing 1–4 of 4")).toBeTruthy();
+  });
+
+  it("restores the loaded queue window after leaving for finding review", async () => {
+    const rows = [row("VA-001"), row("VA-002"), row("VA-003"), row("VA-004")];
+    vi.mocked(listSubmissionDesk).mockImplementation(async (_key, params) => {
+      const offset = params?.findingOffset ?? 0;
+      const limit = params?.findingLimit ?? 3;
+      const selected = rows.slice(offset, offset + limit);
+      return listing(selected, { findings_page: { ...page(selected.length, 4, offset), limit } });
+    });
+    vi.mocked(getSubmissionDesk).mockResolvedValue(detail());
+    const view = renderTab();
+    fireEvent.click(await screen.findByRole("button", { name: "Load more" }));
+    await screen.findByText("Showing 1–4 of 4");
+    view.unmount();
+    vi.mocked(listSubmissionDesk).mockClear();
+    renderTab();
+    await waitFor(() => expect(vi.mocked(listSubmissionDesk).mock.calls[0][1]).toMatchObject({ findingOffset: 0, findingLimit: 4 }));
+    expect(await screen.findByText("Showing 1–4 of 4")).toBeTruthy();
   });
 
   it("ignores a late detail response for a finding that is no longer selected", async () => {

@@ -61,6 +61,7 @@ export type DeskView = {
   search: string;
   slug: string;
   tab: string;
+  loadedCount?: number;
 };
 
 export const DEFAULT_DESK_VIEW: DeskView = {
@@ -90,6 +91,7 @@ export function parseDeskView(text: string | null | undefined): DeskView {
       search: typeof value.search === "string" ? value.search : "",
       slug: typeof value.slug === "string" ? value.slug : "",
       tab: typeof value.tab === "string" ? value.tab : "body",
+      ...(Number.isSafeInteger(value.loadedCount) && Number(value.loadedCount) > 0 ? { loadedCount: Number(value.loadedCount) } : {}),
     };
   } catch {
     return DEFAULT_DESK_VIEW;

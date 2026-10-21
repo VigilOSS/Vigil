@@ -18,13 +18,13 @@ import type {
   SubmissionDeskRow,
   SubmissionReadiness,
 } from "../../lib/submissionsApi";
-import { engagementHref } from "../../lib/workspaceRoutes";
 import { useToast } from "../../contexts/ToastContext";
 import { CopyChip } from "../drawer/DrawerKit";
 import { TimeStamp, formatBytes } from "../formatting";
 import { MarkdownBlock } from "../Markdown";
 import { Skeleton, SlowLoadHint } from "../Skeletons";
-import { EmptyState, SeverityTag, StatusPill } from "../ui";
+import { EmptyState, StatusPill } from "../ui";
+import { FindingRecordHeader } from "../FindingRecordHeader";
 import { AttachmentPicker, type AttachmentMeta } from "./AttachmentPicker";
 import {
   nextVersionNumber,
@@ -562,17 +562,12 @@ export function SubmissionDocument({
   return (
     <section className="subm-card panel" aria-label={`Submission ${slug}`} aria-busy={detailLoading}>
       <header className="subm-card-head">
-        <div className="subm-card-identity">
-          <span className={`subm-sevbar sevbar-${severity}`} aria-hidden="true" />
-          <div className="subm-card-titles">
-            <div className="subm-card-slug">
-              <code>{slug}</code>
-              <CopyChip text={slug} toast={toast} label="Copy finding slug" />
-              <SeverityTag severity={severity} size="sm" />
-            </div>
-            <h2 title={title}>{title}</h2>
-          </div>
-          <div className="subm-card-action">
+        <FindingRecordHeader engagementKey={engagementKey} slug={slug} title={title}
+          titleId="submission-finding-title" severity={severity}
+          workflow={row?.workflow_status ?? detail?.finding.workflow_status}
+          verification={row?.verification_status ?? detail?.finding.verification_status}
+          submission={submissionStatus} workspace="submissions" section={tab}
+          actions={<div className="subm-card-action">
             <PrimaryAction
               engagementKey={engagementKey}
               detail={detail}
@@ -585,10 +580,10 @@ export function SubmissionDocument({
               onShowRenderGuide={() => onTab("body")}
             />
             <span className="subm-action-note">Exporting never submits anything.</span>
-          </div>
-        </div>
+          </div>}
+        />
         <div className="subm-card-meta">
-          {row && <QueuePill row={row} size="md" />}
+          {row && <span className="finding-status-axis" role="group" aria-label="Package readiness">Package <QueuePill row={row} size="md" /></span>}
           {latest ? (
             <span className={`subm-chip ${latest.stale ? "is-warn" : ""}`}>
               Latest v{latest.version_number}
@@ -602,21 +597,12 @@ export function SubmissionDocument({
             <span className="subm-chip">{detail ? "No version yet" : "Loading versions…"}</span>
           )}
           <span className="subm-chip">{platformLabel(platform)}</span>
-          {submissionStatus !== "none" && (
-            <StatusPill
-              domain="finding-submission"
-              value={submissionStatus}
-              reason={submissionRef ? <code>{submissionRef}</code> : undefined}
-            />
-          )}
+          {submissionRef && <code>{submissionRef}</code>}
           {submissionUrl && (
             externalHref
               ? <a href={externalHref} target="_blank" rel="noopener noreferrer" className="subm-meta-link">Platform report <ExternalLink size={12} aria-hidden="true" /></a>
               : <code className="subm-chip" title="Not an http(s) URL; shown as text">{submissionUrl}</code>
           )}
-          <a className="subm-meta-link" href={engagementHref(engagementKey, { tab: "findings", finding: slug })}>
-            Open finding <span aria-hidden="true">↗</span>
-          </a>
           {row?.updated_at && (
             <span className="subm-muted">Finding changed <SubmissionTime value={row.updated_at} /></span>
           )}

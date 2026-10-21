@@ -10,7 +10,7 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![CI](https://github.com/VigilOSS/Vigil/actions/workflows/ci.yml/badge.svg)](https://github.com/VigilOSS/Vigil/actions/workflows/ci.yml)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
-[![Version](https://img.shields.io/badge/version-2.1.0-green.svg)](https://github.com/VigilOSS/Vigil/releases/tag/v2.1.0)
+[![Version](https://img.shields.io/badge/version-2.1.1-green.svg)](https://github.com/VigilOSS/Vigil/releases/tag/v2.1.1)
 
 </div>
 
@@ -23,10 +23,11 @@ objective. Specialists follow callers, challenge guards, join paths across modul
 variants of defects they find. Promising leads stay on the books when runtime proof or access
 is still missing. Findings, evidence, coverage, and handoffs carry across sessions.
 
-Vigil was built by an application security engineer and refined over eight months and hundreds
-of hours of hands-on use. Much of that work is in the methodology: how to find something worth
-testing, how to tell a failed test from a real negative, and how to keep a plausible source bug
-from becoming an unsupported impact claim.
+Vigil was used by its creator to reach the top 75 individuals worldwide by reputation on
+HackerOne’s Q4 2026 leaderboard. Built by an application security engineer, it was refined over
+eight months and hundreds of hours of hands-on use. Much of that work is in the methodology:
+how to find something worth testing, how to tell a failed test from a real negative, and how to
+keep a plausible source bug from becoming an unsupported impact claim.
 
 **You are still the operator.** Review what the agents are testing and why. Ask for another
 pass when a conclusion is weak, check the proof, and read the final report. A completed workflow
@@ -93,7 +94,7 @@ Install [uv](https://docs.astral.sh/uv/getting-started/installation/), then inst
 It includes the CLI, backend, prompts, documentation, and prebuilt UI; Git and Node are not needed.
 
 ```bash
-uv tool install --from https://github.com/VigilOSS/Vigil/releases/download/v2.1.0/vigil-2.1.0-py3-none-any.whl vigil
+uv tool install --from https://github.com/VigilOSS/Vigil/releases/download/v2.1.1/vigil-2.1.1-py3-none-any.whl vigil
 ```
 
 Install and sign in to an agent client before starting an operator. Engagement clients:

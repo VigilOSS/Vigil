@@ -302,6 +302,7 @@ function EngagementWorkspace({
   // Rail badge inputs beyond the summary (see lib/railBadges.ts).
   const [proofNeedsAttention, setProofNeedsAttention] = useState<RailBadgeInputs["proofNeedsAttention"]>(null);
   const [submissionsToDo, setSubmissionsToDo] = useState<number | null>(null);
+  const [submissionsReady, setSubmissionsReady] = useState<number | null>(null);
   const [openIntelLeads, setOpenIntelLeads] = useState<number | null>(null);
   const [codeQueueStats, setCodeQueueStats] = useState<CodeQueueStats | null>(null);
   const [oastToReview, setOastToReview] = useState<number | null>(null);
@@ -438,7 +439,10 @@ function EngagementWorkspace({
       .then(keep((queue: ProofWorkList) => setProofNeedsAttention(proofNeedsAttentionCount(queue)))), BADGE_INTERVAL_MS);
     // The listing evaluates every finding's workspace, so it refreshes least often.
     if (scopes.has("submissions") && activeTab !== "submissions") load("submissions", () => listSubmissionDesk(engagementKey, { findingLimit: 1 })
-      .then(keep((listing: Awaited<ReturnType<typeof listSubmissionDesk>>) => setSubmissionsToDo(listing.counts.actionable))),
+      .then(keep((listing: Awaited<ReturnType<typeof listSubmissionDesk>>) => {
+        setSubmissionsToDo(listing.counts.actionable);
+        setSubmissionsReady(listing.counts.ready);
+      })),
       SUBMISSIONS_BADGE_INTERVAL_MS);
     if (scopes.has("intel")) load("intel readiness", () => getIntelReadiness(engagementKey)
       .then(keep((readiness: Awaited<ReturnType<typeof getIntelReadiness>>) => setOpenIntelLeads(readiness.applicable ? readiness.open_leads.length : null))),
@@ -936,6 +940,7 @@ function EngagementWorkspace({
               findings={ledgerRows && ledgerRows.length > 0 ? ledgerRows : (displaySummary?.top_findings ?? [])}
               ledgerLoading={ledgerRows === null && findingRowsError === null}
               ledgerError={findingRowsError}
+              readyToExport={submissionsReady}
               fallbackFindings={displaySummary?.top_findings ?? []}
               chains={assessmentChains}
               chainLinks={assessmentChainLinks}

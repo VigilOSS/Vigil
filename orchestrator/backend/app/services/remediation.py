@@ -6,7 +6,7 @@ import json
 import os
 import secrets
 import sqlite3
-import select
+import selectors
 import stat
 import subprocess
 import sys
@@ -282,16 +282,18 @@ def _bounded_vcs_diff(path_value: str, *revisions: str, limit: int) -> tuple[byt
     deadline = time.monotonic() + 30
     output = bytearray()
     try:
-        while True:
-            remaining_time = deadline - time.monotonic()
-            if remaining_time <= 0 or not select.select([process.stdout], [], [], remaining_time)[0]:
-                raise subprocess.TimeoutExpired(command, 30)
-            chunk = os.read(process.stdout.fileno(), min(64 * 1024, limit + 1 - len(output)))
-            if not chunk:
-                break
-            output.extend(chunk)
-            if len(output) > limit:
-                return bytes(output[:limit]), True
+        with selectors.DefaultSelector() as selector:
+            selector.register(process.stdout, selectors.EVENT_READ)
+            while True:
+                remaining_time = deadline - time.monotonic()
+                if remaining_time <= 0 or not selector.select(remaining_time):
+                    raise subprocess.TimeoutExpired(command, 30)
+                chunk = os.read(process.stdout.fileno(), min(64 * 1024, limit + 1 - len(output)))
+                if not chunk:
+                    break
+                output.extend(chunk)
+                if len(output) > limit:
+                    return bytes(output[:limit]), True
         code = process.wait(timeout=max(0, deadline - time.monotonic()))
         if code:
             raise subprocess.CalledProcessError(code, command)

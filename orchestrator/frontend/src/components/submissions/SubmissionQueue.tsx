@@ -1,3 +1,4 @@
+import { useEffect, useRef } from "react";
 import { gridTimeMode } from "../../lib/serverTime";
 import type { SubmissionDeskListing, SubmissionDeskRow } from "../../lib/submissionsApi";
 import { TimeStamp } from "../formatting";
@@ -54,6 +55,22 @@ export function SubmissionQueue({
   onRetry: () => void;
 }) {
   const rows = listing?.findings ?? [];
+  const queueRef = useRef<HTMLDivElement>(null);
+  const restored = useRef(false);
+  useEffect(() => {
+    if (restored.current || loading || !selectedSlug) return;
+    const container = queueRef.current;
+    const selected = container?.querySelector<HTMLElement>('[aria-pressed="true"]');
+    if (selected && container) {
+      // Only restore on arrival; later operator scrolling is authoritative.
+      // Move this pane only, never the document or its sticky navigation.
+      const row = selected.getBoundingClientRect();
+      const pane = container.getBoundingClientRect();
+      if (row.top < pane.top) container.scrollTop += row.top - pane.top;
+      else if (row.bottom > pane.bottom) container.scrollTop += row.bottom - pane.bottom;
+      restored.current = true;
+    }
+  }, [loading, selectedSlug, rows]);
   const page = listing?.findings_page;
   const nothingRecorded = listing != null && listing.counts.all === 0;
   return (
@@ -63,7 +80,7 @@ export function SubmissionQueue({
           ? <ResultsSummary shown={rows.length} total={page.total} noun={page.total === 1 ? "finding" : "findings"} sort={describeSort("Changed", "desc", "time")} />
           : <strong>Findings</strong>}
       </div>
-      <div className={`subm-queue-scroll ${loading && rows.length > 0 ? "is-reloading" : ""}`}>
+      <div ref={queueRef} className={`subm-queue-scroll ${loading && rows.length > 0 ? "is-reloading" : ""}`}>
         {error && (
           <div className="subm-inline-error" role="alert">
             <span>{error}</span>
