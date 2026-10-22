@@ -3239,6 +3239,28 @@ def _create_artifacts_table_and_fts(connection: sqlite3.Connection) -> None:
         )
 
 
+def _submission_platform_migration_needed(connection: sqlite3.Connection) -> bool:
+    row = connection.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='assessment_submission_versions'").fetchone()
+    return bool(row and "'ghsa'" not in row[0])
+
+
+def _migrate_submission_platform(connection: sqlite3.Connection) -> None:
+    if not _submission_platform_migration_needed(connection):
+        return
+    schema = connection.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='assessment_submission_versions'").fetchone()[0]
+    expanded = schema.replace("'bugcrowd', 'hackerone', 'direct'", "'bugcrowd', 'hackerone', 'direct', 'ghsa'")
+    if expanded == schema:
+        raise RuntimeError("unrecognized submission platform constraint; refusing migration")
+    sequence = connection.execute("SELECT seq FROM sqlite_sequence WHERE name='assessment_submission_versions'").fetchone()
+    connection.execute(expanded.replace("assessment_submission_versions", "assessment_submission_versions_next", 1))
+    columns = ", ".join('"' + row[1] + '"' for row in connection.execute("PRAGMA table_info(assessment_submission_versions)"))
+    connection.execute(f"INSERT INTO assessment_submission_versions_next ({columns}) SELECT {columns} FROM assessment_submission_versions")
+    connection.execute("DROP TABLE assessment_submission_versions")
+    connection.execute("ALTER TABLE assessment_submission_versions_next RENAME TO assessment_submission_versions")
+    if sequence is not None:
+        connection.execute("UPDATE sqlite_sequence SET seq = MAX(seq, ?) WHERE name='assessment_submission_versions'", (sequence[0],))
+
+
 def _create_submission_version_tables(connection: sqlite3.Connection) -> None:
     """Create the append-only records behind immutable submission exports.
 
@@ -3254,7 +3276,7 @@ def _create_submission_version_tables(connection: sqlite3.Connection) -> None:
             finding_id INTEGER NOT NULL REFERENCES assessment_findings(id) ON DELETE RESTRICT,
             version_number INTEGER NOT NULL CHECK(version_number >= 1),
             status TEXT NOT NULL CHECK(status IN ('staging', 'complete', 'failed')),
-            platform TEXT NOT NULL CHECK(platform IN ('bugcrowd', 'hackerone', 'direct')),
+            platform TEXT NOT NULL CHECK(platform IN ('bugcrowd', 'hackerone', 'direct', 'ghsa')),
             package_format TEXT NOT NULL CHECK(package_format IN ('markdown', 'zip')),
             actor_surface TEXT NOT NULL CHECK(actor_surface IN ('vigil-assess', 'web-ui')),
             relative_path TEXT NOT NULL,
@@ -6380,6 +6402,11 @@ def init_db() -> None:
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     db_path = database_path()
     _check_database_compatibility(db_path)
+    if db_path.exists():
+        with closing(sqlite3.connect(str(db_path))) as inspection:
+            migrate_submission_platform = _submission_platform_migration_needed(inspection)
+        if migrate_submission_platform:
+            _create_adjacent_migration_backup(db_path, label="submission-platform")
     if _database_needs_remediation_finding_link_migration(db_path):
         _create_adjacent_migration_backup(db_path, label="remediation-finding-links")
         _migrate_remediation_finding_links(db_path)
@@ -6432,7 +6459,7 @@ def init_db() -> None:
         connection.execute(f"PRAGMA busy_timeout = {_resolve_busy_timeout_ms()}")
         connection.execute("PRAGMA foreign_keys = ON")
         # WAL mode lets readers (including `sqlite3 .backup` snapshots and the
-        # 15-minute backend backup task) run concurrently with writers without
+        # hourly backend backup task) run concurrently with writers without
         # taking an exclusive lock. Without this, the rollback-journal default
         # causes backups to collide with active writes and return SQLITE_BUSY.
         connection.execute("PRAGMA journal_mode = WAL")
@@ -6452,6 +6479,7 @@ def init_db() -> None:
         _create_finding_next_test_table(connection)
         _create_command_runs_table_and_fts(connection)
         _create_artifacts_table_and_fts(connection)
+        _migrate_submission_platform(connection)
         _create_submission_version_tables(connection)
         _create_sent_reply_version_tables(connection)
         _create_http_flow_tables(connection)

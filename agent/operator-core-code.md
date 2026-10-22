@@ -304,7 +304,10 @@ Agent A / Agent B "Provide:" lists (`code-phase-3-verify-variant.md`, Verify + V
 regardless of phase; the Pre-Dispatch Checklist below turns the phase-specific lists into per-phase
 checkboxes.
 
-Do not end your turn while a launched specialist is still running: wait for its result, or launch it in the foreground, because a client can stop a background specialist when the operator's turn ends.
+Keep native task identities for launched specialists and verify the client's background completion
+behavior before relying on it across turns. Otherwise wait for the result in the current turn.
+After an interrupted return, inspect native task and command execution state before replacing work;
+for ZCode use `docs/zcode-setup.md` **Interrupted specialists**.
 
 ### Runtime Identity Block
 
@@ -494,6 +497,11 @@ The current operator owns this work. Use `vigil assess contract proof-work` to i
 claim, and reconcile durable proof work; the backend owns payloads, currentness, approval, and
 ownership. Choose the next step from each `vigil assess proof-work list` entry's `queue_state`
 and the finding's `next_test`:
+
+For early verification of an initial unreviewed finding, `proof-work prepare` accepts an explicit
+objective before a verifier records `next_test`. The same independent ownership, source, and
+execution-approval gates apply. This optional work appears in `items`; the `owed` roster remains
+the verifier's parked runtime-proof obligations. An invalidated verdict requires re-verification.
 
 - `unprepared` → prepare it, taking the objective from `next_test` and the route from its
   `route_hint` (`local` → `code`, `live` → `web`, `unknown` → decide from the evidence).

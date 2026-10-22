@@ -113,6 +113,11 @@ def _tools(client: str) -> dict[str, str]:
         if executable is None:
             raise SystemExit(f"{client} context requires {name}; install it before preparing the workspace")
         tools[name] = str(Path(executable).resolve())
+    # Docker remains optional at preparation time, but Kali helpers need its
+    # resolved directory even when a desktop client starts with a minimal PATH.
+    docker = shutil.which("docker")
+    if docker is not None:
+        tools["docker"] = str(Path(docker).resolve())
     return tools
 
 
@@ -146,7 +151,9 @@ def prepare_workspace(install_root: Path, engagement: Path, client: str, mode: s
         raise SystemExit("Matched Vigil helper is unavailable; reinstall the application before starting")
     # Pinned helpers may themselves invoke uv by name. Supply resolved executable
     # directories explicitly, even when Finder's PATH contains only system paths.
-    helper_path = ":".join(dict.fromkeys([*(str(Path(path).parent) for path in tools.values()),
+    helper_path = ":".join(dict.fromkeys([
+        *([str(Path(tools["docker"]).parent)] if "docker" in tools else []),
+        *(str(Path(path).parent) for path in tools.values()),
         "/usr/bin", "/bin", "/usr/sbin", "/sbin"]))
     exports = {"PATH": helper_path, "VIGIL_APPLICATION_DIR": str(agent.parent),
         "VIGIL_AGENT_ROOT": str(agent), "VIGIL_INSTALL_DIR": str(install_root.resolve()),

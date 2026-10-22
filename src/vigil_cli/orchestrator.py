@@ -252,7 +252,7 @@ def _warn_multiworker_caveats(workers: int) -> None:
       * The live-UI WebSocket broadcaster (app/ws.py) keeps connections in an
         in-process dict, so a write handled by worker A cannot push to a socket
         held by worker B — the dashboard sees only the events from its own worker.
-      * The 15-minute backup scheduler (app/services/backup.py) arms a per-process
+      * The hourly backup scheduler (app/services/backup.py) arms a per-process
         timer in each worker's lifespan, so N workers run N concurrent backups
         unless VIGIL_BACKUP_DISABLED is set on all but one.
     Workers greater than one therefore remain an explicitly caveated opt-in

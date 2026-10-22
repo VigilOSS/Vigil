@@ -103,3 +103,46 @@ def test_the_contract_carries_the_permanent_provenance_limit() -> None:
 
     assert "launcher-effective" in rendered
     assert "requested_model" in rendered
+
+
+def test_explicit_unknown_skill_is_rejected(monkeypatch, tmp_path):
+    skill_root = tmp_path / "skills"
+    (skill_root / "known").mkdir(parents=True)
+    (skill_root / "known/SKILL.md").write_text("# Known")
+    monkeypatch.setattr(contracts, "_agent_skills_root", lambda: skill_root)
+    errors, _ = contracts.validate_specialist_dispatch_contract(
+        {"role": "code-vuln-hunter", "skills": ["known", "typo"]}
+    )
+    assert any("typo" in error and "list-skills" in error for error in errors)
+
+
+def test_explicit_skill_requires_available_catalogue(monkeypatch, tmp_path):
+    monkeypatch.setattr(contracts, "_agent_skills_root", lambda: tmp_path / "missing")
+    errors, _ = contracts.validate_specialist_dispatch_contract(
+        {"role": "code-vuln-hunter", "skills": "known"}
+    )
+    assert any("skill catalogue" in error for error in errors)
+
+
+def test_agent_start_rejects_typo_before_contacting_backend(monkeypatch, tmp_path, capsys):
+    import pytest
+    from assess.commands.dispatch import agent as dispatch_agent
+
+    root = tmp_path / "skills"
+    root.mkdir()
+    monkeypatch.setattr(contracts, "_agent_skills_root", lambda: root)
+    calls = []
+    monkeypatch.setattr(dispatch_agent, "_client_for", lambda _: calls.append("backend"))
+    args = SimpleNamespace(agent_role="recon-specialist", agent_id="acme-recon",
+        task="Inspect the authorized surface", skills="typo", no_target_traffic=True)
+    with pytest.raises(SystemExit, match="1"):
+        dispatch_agent._register_dispatch(args)
+    assert calls == []
+    assert "unknown skill 'typo'" in capsys.readouterr().err
+
+
+def test_omitted_skills_work_without_catalogue(monkeypatch, tmp_path):
+    monkeypatch.setattr(contracts, "_agent_skills_root", lambda: tmp_path / "missing")
+    errors, warnings = contracts.validate_specialist_dispatch_contract({"role": "code-vuln-hunter"})
+    assert errors == []
+    assert any("skills not set" in warning for warning in warnings)

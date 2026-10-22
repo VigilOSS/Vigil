@@ -64,7 +64,7 @@ The `finding report --json` helper returns grouped report findings. Root and sib
 - `remediation`, `steps_to_reproduce`, `cwe_id`, `owasp_category` — projected from parsed `details`
 - `impact`, `evidence_detail` — projected from parsed `details`
 
-> **One public field shape.** Finding reads and writes both expose the parsed object as `details`; `details_json` is an internal database column and is never a second API format. A `--payload-file` document nests the object as `{"details": {...}, "expected_row_version": <n>}`; `--details-inline` takes the object directly as `{...}`. If a prompt, fixture, or recipe teaches public `details_json`, flag it as drift. **`--payload-file` is the default way to write authored prose** — Evidence and Steps to Reproduce routinely carry single quotes, double quotes, newlines, and backtick fences that corrupt `--details-inline`'s shell-single-quoted JSON, and a file has no shell quoting to corrupt. See "Submission-First Closeout" step 3 below for the full write-back procedure and payload shape.
+> **One public field shape.** Finding reads and writes both expose the parsed object as `details`; `details_json` is an internal database column and is never a second API format. A `--payload-file` document nests the object as `{"details": {...}, "expected_row_version": <n>}`; `--details-inline` takes the object directly as `{...}`. If a prompt, fixture, or recipe teaches public `details_json`, flag it as drift. **`--payload-file` is the default way to write authored prose** — Evidence and Steps to Reproduce routinely carry single quotes, double quotes, newlines, and backtick fences that corrupt `--details-inline`'s shell-single-quoted JSON, and a file has no shell quoting to corrupt. See "Submission-First Closeout" below for the full write-back procedure and payload shape.
 - top-level `groups` and `standalone`; each group has a `root` finding and `siblings`
 
 Sibling rows include
@@ -91,7 +91,7 @@ impact materially changed at report time) is the only exception.
 
 ## Writing Style
 
-Follow `agent/rules/reporting.md` for all writing rules — banned language, active voice,
+Follow `agent/rules/reporting.md` for all writing rules — concise prose,
 evidence formatting, remediation specificity, filler/padding, and section length limits.
 
 **Audience:** Technical reader who knows vulnerability classes. Assume familiarity with standard terms (XSS, SQLi, IDOR, SSRF, etc.).
@@ -107,145 +107,44 @@ the same evidence bar as the legacy report path — "Pre-Report Validation", "CV
 Calculation", and "Proof Standard by Finding Class" below apply per-finding here exactly as they
 do for the internal report — plus a mandatory blind triage gate before anything external ships.
 
-**The finding is the source of truth; `submission.md` is a render of it.** `export submission`
-renders this layout FROM the finding's own fields — full authoritative version in
-`agent/references/submission-format.md` "Structure":
+Canonical finding state owns claims, proof, and corrections. The default layout and field mapping
+live in `agent/references/submission-format.md`; use its recipient-specific capture path when the
+operator selects another presentation. OPERATOR DETAILS remains local reference material and never
+enters the outgoing body. Preserve exact captured evidence values in authored proof.
 
+The canonical submission closing procedure is `agent/agents/report-writer.md` "Mandatory Closing
+Sequence". Follow it rather than maintaining a second ordering here. Check proof readiness, author
+canonical finding fields, prepare the exact outgoing package, record Pass 1 QA, obtain independent
+blind review when required, publish, and finish the durable handoff. Recipient-specific body capture
+and presentation guidance are described in `agent/references/submission-format.md` "Recipient-specific
+outgoing body". Run `vigil assess contract export submission` for the executable options and gates.
+
+Use `finding update --payload-file <path.json>` for prose, code, quotes, and newlines. A patch uses
+`details` (not `details_json`), merges those keys, and requires `expected_row_version`. Do not combine
+a payload file with content flags. Include `notes_mode` when patching notes. Example shape:
+
+```json
+{
+  "summary": "<receipt-backed summary>",
+  "details": {
+    "steps_to_reproduce": "1. <recorded action>\n2. <recorded action>",
+    "repro_runs": [123],
+    "evidence": "<annotated proof, exact captured values>",
+    "impact": "<proved reach and preconditions>",
+    "remediation": "<specific control>"
+  },
+  "expected_row_version": 1,
+  "reason_text": "Author verified report content",
+  "source_name": "report-writer"
+}
 ```
-**Title:** / **VRT:** or **Weakness:** / **Severity:** / **CVSS**
----
-### Summary / ### Steps to Reproduce / ### Evidence / (### Attack Scenario) / ### Impact / ### Remediation
----
-## OPERATOR DETAILS — NOT FOR SUBMISSION
-```
 
-The second `---` closes the pasteable body. Everything below it is the single OPERATOR DETAILS
-reference section — finding metadata, hygiene warnings, structured proof, and linked command runs —
-present in local draft and final workspaces and excluded from the delivered package. `### Evidence` renders ONLY the authored `details.evidence`; the raw
-structured proof and linked runs stay in OPERATOR DETAILS, which you author Evidence FROM. You author
-each section ONCE, write it back to the finding, and re-render; a hand edit made only in
-`submission.md` is lost on the next render, while a write to the finding is durable and reproduces at
-publish. Storing the exact annotated Evidence in the finding keeps a re-render faithful — the raw
-tool output stays in `scans/` (or `tools/` for code/fuzz) and is referenced,
-never rendered.
-
-1. **Confirm proof readiness.** Before drafting, check the finding against "Proof Standard by
-   Finding Class" below and the CVSS↔severity / missing-field checks in "Pre-Report Validation"
-   (checks 3-6). A finding that fails these is not ready to draft — send it back to the operator
-   rather than drafting around the gap.
-2. **Scaffold.** Run:
-   ```bash
-   vigil assess export submission <slug> --platform bugcrowd|hackerone|direct --draft \
-     [--vrt-category <c> | --weakness <w>] [--output <dir>] [--overwrite] [--json]
-   ```
-   `--draft` always renders `$ENGAGEMENT_DIR/submissions/<slug>/submission.md` +
-   `submission-context.json` from the finding's fields, consolidates the finding metadata, any
-   hygiene warnings, the structured proof, and every linked command run into the single OPERATOR
-   DETAILS section below the second `---`, and marks any missing proof field with `[NEEDS: ...]` —
-   this is the normal report-writer entrypoint, not the final gate. This first render omits
-   `--overwrite` (no `submission.md` exists yet); every render after this one — the QA re-render
-   (step 4) and publish (step 6) — needs it, since the CLI refuses to clobber an existing
-   `submission.md` without it. Pick the platform by audience: `bugcrowd` / `hackerone` for an active program, `direct`
-   for a company-facing writeup with no external program (the code track's default — see
-   `agent/operator-core-code.md`). Template references for the per-platform scaffold:
-   `agent/skills/report-generation/templates/bugcrowd.md`,
-   `agent/skills/report-generation/templates/hackerone.md`,
-   `agent/skills/report-generation/templates/direct.md`.
-3. **Author each section, then WRITE it back to the finding.** Author the stable sections —
-   Summary, Steps to Reproduce, Evidence, (Attack Scenario), Impact, Remediation — resolving every
-   `[NEEDS: ...]` marker with real backend-sourced content; never fabricate to fill one. **Evidence
-   is authored, not tool-dumped:** build it from the OPERATOR DETAILS section's structured proof and
-   linked command runs PLUS a
-   *targeted* `vigil assess command-run list --q <the finding's url/param/header/file/function>`
-   (keyed tightly to this finding, not a broad sweep) to catch reproducing runs the linked set
-   missed; link any it finds (`vigil assess finding link <slug> --link-kind evidence --target-kind
-   command_run --target-id <run_id>` — durable reference), preserve every evidence value verbatim
-   (see "Evidence fidelity" in `agent/references/submission-format.md`), truncate to the proof lines,
-   and annotate each. `steps_to_reproduce` renders exactly as authored, with no numbering or marker
-   added — write it as ONE string carrying your own `1.`/`2.`/… numbering (a list of strings still
-   renders, one paragraph per item, but only a single block lets you control the numbers that later
-   prose cross-references — see `agent/references/submission-format.md` "Structure").
-   **Your edit authority is the fabrication boundary, not "edit only":** every command, argv, and
-   response value must trace to a `details.repro_runs` id (the "Reproduction runs" argv in OPERATOR
-   DETAILS) — if a step and its run disagree, the run is right. Within that boundary you may
-   renumber, reword, merge, label, add expected-result lines, and drop steps; see
-   `agent/agents/report-writer.md` Mandatory Closing Sequence step 1 for the authoritative rule.
-   Dropping a step re-triggers repro rehearsal before publish (`agent/phases/phase-8-report.md`
-   "Repro rehearsal"). An absent or unbindable reproduction is Pre-Report Validation check 5:
-   `QA BLOCKED`, not a drafting problem you can solve.
-
-   **Write via `--payload-file`, the default write path.** Evidence in particular routinely contains
-   single quotes, double quotes, newlines, and backtick fences that corrupt `--details-inline`'s
-   shell-single-quoted JSON or the shell command around it; a payload file has no shell quoting to
-   corrupt. Write the complete patch to a file with the Write tool — no shell quoting at all — then
-   pass only the file:
-   ```json
-   {
-     "summary": "<authored Summary — impact-first>",
-     "details": {
-       "steps_to_reproduce": "1. <step 1>\n2. <step 2>",
-       "evidence": "<annotated proof with exact captured values>",
-       "attack_scenario": "<optional: realistic adversary + starting access + action, ending at first compromise>",
-       "impact": "<proven, quantified>",
-       "remediation": "<specific control>"
-     },
-     "reason_text": "Authored submission-ready sections to the finding (backend is source of truth)",
-     "source_name": "report-writer",
-     "expected_row_version": <current row_version>
-   }
-   ```
-   ```bash
-   vigil assess finding update <slug> --payload-file <path.json>
-   ```
-   The document's `details` key MERGES into the finding's stored details (`steps_to_reproduce`,
-   `evidence`, `attack_scenario`, `impact`, `remediation`) — the key is `details`, not `details_json`
-   (see "Read vs write asymmetry" above) — without touching `cvss_vector`, `vrt_category`, or
-   `poc_*`. `--payload-file` CANNOT be combined with any content flag (`--summary`,
-   `--details-inline`, `--reason`, …) — the whole patch goes in the file, which must carry
-   `expected_row_version` (refresh it from the finding's last response) and, whenever it carries
-   `notes`, an explicit `notes_mode` of `"append"` or `"replace"`. Reserve `--details-inline` for a
-   short single-value edit with nothing to corrupt. The authored `details.evidence` is what renders
-   as the Evidence section; it does NOT by itself satisfy the strict gate's durable-proof requirement
-   (step 6) — the finding must separately carry `evidence_ref` pointing inside the engagement to an
-   indexed, present artifact (normally a raw file under `scans/`, set with `vigil assess finding
-   update <slug> --evidence-ref scans/<file>` after registering it). `poc_request`+`poc_response` and
-   `poc_code` remain useful content but do not replace that durable artifact. If nothing resolves a
-   marker, the finding is not ready — do not submit around it.
-4. **QA pass.** Re-render from the finding (`export submission <slug> --platform <same> --draft
-   --overwrite`), then run the "Post-Generation Self-Review" checks below (Rule-based: banned
-   language, active voice, evidence formatting, one root cause per submission, etc.) against the
-   re-rendered `submission.md`, same as the internal-report pass — this is Pass 1 of the
-   blind-triage gate; see "Review-and-Fix QA Mode" below for the reusable QA procedure. Fix anything
-   the checks surface at the SOURCE (the finding, step 3) and re-render — a fix made only in
-   `submission.md` is lost on the next render.
-5. **Blind triage — mandatory for every Medium-or-above finding.** Run
-   `agent/skills/blind-triage/SKILL.md` Pass 2 (the zero-context blind reviewer) against the QA'd
-   submission. Only a verdict starting `Accept` clears the finding for submission; anything else
-   routes back to fix the finding (step 3) or kill and re-run. Build the packet and record the
-   verdict with its `packet_id` exactly as that skill specifies.
-6. **Publish.** Read `vigil assess contract export submission`, then re-run `export submission
-   <slug> --platform <same platform> --overwrite` without `--draft` once its executable final gate
-   is satisfiable. This reproduces the authored content from the finding and exits non-zero before
-   writing if a gate fails — resolve the gap at the finding, do not bypass it. Final output must be
-   inside the engagement, and registering `submission.md` as a finding-linked `kind="submission"`
-   artifact must succeed. The export **never sets `submission_status`** — it omits the field, so
-   `create` lands `none` and `upsert` preserves whatever is already there. Set `submission_status`
-   explicitly, per "Submission Status Lifecycle" below, only once the finding is actually delivered
-   to its audience.
-7. **Mark the finding reported.** Same as the internal-report publish step below: set
-   `workflow_status=reported` for each finding once its submission is delivered. This lifecycle
-   transition is independent of `submission_status` and independent of program response.
-
-**Internal-ID hygiene (draft diagnostic; final gate).** `export submission` preserves authored
-finding content (while normalizing a valid evidence pointer to engagement-relative form), so a
-target-application UUID or filename in a PoC reaches you verbatim. Instead it FLAGS any
-internal identifier that leaked — engagement / finding / `producer_agent_id` UUIDs, absolute
-`$ENGAGEMENT_DIR` paths, `cases.db` references — as `hygiene_warnings` in `submission-context.json`
-and on stderr in draft mode; final mode refuses to write while any remain. The finding slug is kept
-out of the body by design. Fix every warning at the finding source and re-render. Editorial advice
-(title length) arrives separately as `advisories` / stderr `ADVISORY` lines and never blocks a
-publish — see "Hygiene warnings block; advisories do not" in
-`agent/references/submission-format.md`.
+`details.evidence` is authored prose; durable proof separately requires the indexed, present,
+finding-linked artifact named by `evidence_ref`. Linked runs come from explicit evidence links;
+search narrowly for missing reproducing runs and link them before writing. All commands, argv, and
+response values must trace to recorded reproduction runs. Internal-ID hygiene warnings block final
+capture; prose advisories do not. Resolve source claim changes through independent equivalence review
+or verification, never a correction memo outside canonical finding state.
 
 ## Report Structure (Legacy Internal Report — On-Demand Only)
 
@@ -466,7 +365,7 @@ done
 ```
 
 For each hit, fix the source-of-truth on the finding (NOT in `report.md`) via `--payload-file` — the
-default write path (see "Read vs write asymmetry" and "Submission-First Closeout" step 3 above):
+default write path (see "Read vs write asymmetry" and "Submission-First Closeout" above):
 
 ```json
 {

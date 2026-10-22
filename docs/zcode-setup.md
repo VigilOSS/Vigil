@@ -202,6 +202,35 @@ that the agent completed backend hydration. If setup is missing, stop the
 dependent work, report the failed check, repair the native setup, and begin a new
 task with the printed opening instructions.
 
+## Interrupted specialists
+
+[ZCode documents foreground and background subagents](https://zcode.z.ai/en/docs/subagents).
+Choose background execution for a long specialist when the installed client's Agent tool supports
+it, keep its returned native task identity, and wait for its terminal notification. Before relying
+on survival across a new user message, verify that behavior on the installed desktop/engine build.
+Vigil does not control native cancellation and a message alone is not proof that a specialist or
+its child command stopped.
+
+If a specialist return is interrupted:
+
+1. Run `/vigil-resume` when task context needs restoration. Inspect the native task status and
+   `vigil assess resume-brief --agent-id <dispatch-id>`, `vigil assess command-run list`, and
+   `vigil assess kali sweep-orphans` before launching a replacement. Wait for live work or stop it
+   using the appropriate native/runtime control; do not create duplicate work from a stale timestamp.
+2. Once the native task has returned and execution has ended, consume its final handoff with
+   `vigil assess agent close <dispatch-id>`. If it returned without a final handoff, record the
+   observed cancellation and execution state with
+   `vigil assess agent close <dispatch-id> --status failed --reason '<observed return and execution state>'`.
+3. Use `vigil assess agent continue <dispatch-id> --task '<remaining objective>'` to create a
+   linked replacement from the saved prompt packet and current backend state. Launch that packet
+   through the native Agent tool and retain its task identity; `agent continue` records the
+   replacement but does not start a native conversation. Inspect existing proof/queue ownership
+   before reclaiming work, and use their supported recovery contracts.
+
+Record the desktop/engine version, native task identity, observed terminal state and whether
+background execution survived when reporting a cancellation defect. The engagement observation
+alone does not establish a client-wide rule or an automatic resume guarantee.
+
 ## Capability boundaries
 
 ZCode documents `SessionStart` sources including `compact`, but native acceptance

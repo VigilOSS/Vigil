@@ -216,7 +216,7 @@ export type SubmissionVersion = {
   finding_id: number;
   version_number: number;
   status: "complete";
-  platform: "bugcrowd" | "hackerone" | "direct";
+  platform: "bugcrowd" | "hackerone" | "direct" | "ghsa";
   package_format: "markdown" | "zip";
   actor_surface: "vigil-assess" | "web-ui";
   relative_path: string;
@@ -303,7 +303,7 @@ export type SubmissionPendingVersion = {
 };
 
 export type SubmissionExportInput = {
-  platform: "bugcrowd" | "hackerone" | "direct";
+  platform: "bugcrowd" | "hackerone" | "direct" | "ghsa";
   submission_path: string;
   context_path: string;
   attachment_ids: number[];

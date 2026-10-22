@@ -1,8 +1,8 @@
 """Scheduled snapshot of ``orchestrator.sqlite3`` for disaster recovery.
 
-Every 15 minutes a WAL-coherent snapshot is written to
-``<data_dir>/backups/orchestrator.YYYYMMDDTHHMMSSZ.sqlite3``. The last 12
-snapshots are retained (3 hours of continuous coverage at default cadence).
+Every hour a WAL-coherent snapshot is written to
+``<data_dir>/backups/orchestrator.YYYYMMDDTHHMMSSZ.sqlite3``. The last four
+snapshots are retained.
 
 The scheduled task provides recovery points for operator mistakes against a live
 database and general logical corruption. Database migrations own their separate
@@ -30,8 +30,8 @@ SCHEDULER_DISABLED_ENV = "VIGIL_BACKUP_DISABLED"
 SCHEDULER_MAX_COPIES_ENV = "VIGIL_BACKUP_MAX_COPIES"
 
 
-DEFAULT_INTERVAL_SECONDS = 15 * 60
-DEFAULT_MAX_COPIES = 12
+DEFAULT_INTERVAL_SECONDS = 60 * 60
+DEFAULT_MAX_COPIES = 4
 BACKUP_PREFIX = "orchestrator."
 BACKUP_SUFFIX = ".sqlite3"
 

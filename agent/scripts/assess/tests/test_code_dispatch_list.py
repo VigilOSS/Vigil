@@ -260,3 +260,11 @@ def test_list_table_separates_long_values_without_truncating_them(
 
     code_dispatch._list(_config(tmp_path), {}, "json")
     assert json.loads(capsys.readouterr().out) == fake_client.payload
+
+
+@pytest.mark.parametrize("content,expected", [("56813\n", [56813]), ("56813", [56813]),
+    ("56813\n56814\n", [56813, 56814]), ("[56813]", [56813])])
+def test_ids_file_accepts_single_and_multiple_plain_ids(tmp_path, content, expected):
+    path = tmp_path / "ids.txt"
+    path.write_text(content)
+    assert code_dispatch._ids_from_file(str(path)) == expected

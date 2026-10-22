@@ -90,9 +90,9 @@ _DISPATCH_ROLES_WITHOUT_SKILLS: frozenset[str] = frozenset({"operator"})
 def _agent_skills_root() -> Path:
     """Resolve agent/skills/ relative to this file or VIGIL_REPO_ROOT.
 
-    Used for warn-only validation that named skills exist on disk. Returning a
-    bogus path is harmless because the caller treats a missing directory as
-    "skip the on-disk check" rather than a hard error.
+    Used to validate explicitly named skills against the installed catalogue.
+    A missing catalogue prevents validating supplied names; omitted skills
+    remain valid so specialists can select their own context.
     """
     override = os.environ.get("VIGIL_REPO_ROOT")
     if override:
@@ -328,11 +328,8 @@ def validate_specialist_dispatch_contract(
         elif value is not None and not str(value).strip():
             errors.append(f"{str_field} must be a non-empty string")
 
-    # Skills are required for every specialist role so the dispatch row is a
-    # truthful audit of which skill context the agent loaded. Operators are
-    # exempt because they coordinate phases rather than executing a single
-    # skill. Skip on-disk verification when the skills directory cannot be
-    # located so the validator stays usable from arbitrary CWDs.
+    # Omitted skills permit specialist self-selection. Explicit names must
+    # resolve to catalogue directory names before a dispatch is persisted.
     role_name = str(role_value).strip() if isinstance(role_value, str) else ""
     skills_value = payload.get("skills")
     skills_list: list[str] = []
@@ -359,13 +356,14 @@ def validate_specialist_dispatch_contract(
 
     if skills_list:
         skills_root = _agent_skills_root()
-        if skills_root.is_dir():
+        if not skills_root.is_dir():
+            errors.append("skill catalogue is unavailable; repair the matched Vigil installation before specifying --skills")
+        else:
             for skill_name in skills_list:
-                skill_path = skills_root / skill_name / "SKILL.md"
-                if not skill_path.is_file():
-                    warnings.append(
-                        f"skill '{skill_name}' has no SKILL.md under {skills_root} "
-                        "— typo or repo-relative path mismatch?"
+                if Path(skill_name).name != skill_name or not (skills_root / skill_name / "SKILL.md").is_file():
+                    errors.append(
+                        f"unknown skill '{skill_name}'; use `vigil assess list-skills` "
+                        "and pass the catalogue directory name"
                     )
 
     # C4a: WARN-only technique-cage lint over the free-text task. NEVER appended
@@ -2041,7 +2039,7 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
                 "Runtime Identity.",
                 "Every output path prints the exact authored rate budget (or an explicit no-target-traffic declaration). --emit-prompt requires the complete prompt-only object (authorized_phase, target, hunt_scope, mindset_lens, depth_expectation, oob, auth_context, credential_id, prior_state, coverage, cleanup, human_reach_decision, role_specific_additions); missing or empty values fail before the dispatch write. On a blue engagement it also validates and injects customer, platforms, and every owned regular-file tenant reference from scope.json before the write.",
                 "prompt_context prior_state is authored text capped at 4096 characters. Optional queue_item_ids (1–20 current code queue IDs) are resolved against the selected analysis repository into a backend-derived file/status manifest before dispatch. Optional lane_file names a generated code queue-fetch JSON file or newline list of indexed paths; it is validated before the write and rendered as exact item/LOC totals with bounded file/directory previews. Optional prior_agent_id quotes a bounded `agent render-handoff` result inside the untrusted prior-state boundary. Missing/stale queue IDs, an invalid lane file, or a missing handoff fail before the dispatch row is written.",
-                "`skills` on a specialist dispatch is a WARNING when missing, never a rejection — neither the CLI nor the backend blocks on it. A specialist picks its skills from what it observes, so the honest list is often known only after the dispatch runs. Set it when the applicable skill is already clear; otherwise name it in the handoff.",
+                "`skills` on a specialist dispatch is a WARNING when missing, never a rejection. Explicitly supplied names must resolve to installed skill directories; unknown names are rejected by the CLI before dispatch creation. A specialist picks its skills from what it observes, so the honest list is often known only after the dispatch runs. Set it when the applicable skill is already clear; otherwise name it in the handoff.",
                 "requested_model and requested_reasoning record the recipe YOU selected. An ordinary dispatch carries no launcher-effective or provider-observed model/reasoning — no trusted launcher integration attests them — so the row is an asserted recipe, never measured truth, and caller-supplied actual_/launcher_effective_ fields are dropped rather than stored. Leaving either unset is visible warning debt: the dispatch stays usable but is not replayable. Never invent a runtime model the client does not expose.",
                 "Discover skill names with `vigil assess list-skills` — each value must match a directory under `agent/skills/<name>/`.",
                 "On return, render the handoff and use `agent close` for ready/blocked handoffs; rows left `in-progress` past the dispatch's actual lifetime corrupt dedup checks. Use `agent done --status ...` for an explicit raw recovery write.",

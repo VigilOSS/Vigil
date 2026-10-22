@@ -102,7 +102,7 @@ The orchestrator UI is served from the backend at `http://127.0.0.1:18000` once
 - **Live DB**: `<workspace>/state/orchestrator.sqlite3` in a fresh workspace
 - **Scheduled backups**:
   `<workspace>/state/backups/orchestrator.<UTC-timestamp>.sqlite3`
-  — a WAL-coherent snapshot every 15 minutes, last 12 copies retained by default
+  — an hourly WAL-coherent snapshot, last four copies retained by default
   (override with `VIGIL_BACKUP_MAX_COPIES`), written by the backend process
   itself.
 

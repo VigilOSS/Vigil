@@ -552,7 +552,9 @@ def test_code_dispatch_fetch_normalizes_backend_assigned_agent_to_agent_name(
         }
     ]
     assert snapshots == [expected]
-    rendered = json.loads(capsys.readouterr().out)
+    captured = capsys.readouterr()
+    rendered = json.loads(captured.out)
+    assert "Saved audit snapshot:" in captured.err
     assert rendered == expected
     assert "assigned_agent" not in rendered[0]
     assert (tmp_path / rendered[0]["scratch_dir"]).is_dir()

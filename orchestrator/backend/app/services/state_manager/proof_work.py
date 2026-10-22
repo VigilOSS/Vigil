@@ -48,10 +48,26 @@ def _view(engagement_id):
     return get_engagement_view_or_404(_common._engagement_or_404(engagement_id).key)
 
 
+def _early_proof_eligible(connection, engagement_id, finding):
+    """Initial independent verification may be scheduled before a verifier parks it.
+
+    A previously invalidated verdict still requires canonical re-verification;
+    preparing early work must not revive an obsolete proof context.
+    """
+    if (finding['verification_status'] != 'unreviewed'
+            or finding['status'] in {'merged', 'false_positive', 'reported'}):
+        return False
+    return connection.execute(
+        "SELECT 1 FROM assessment_finding_transitions WHERE engagement_id=? AND finding_id=? "
+        "AND to_verification_status='unreviewed' AND from_verification_status<>'unreviewed' LIMIT 1",
+        (engagement_id, finding['id']),
+    ).fetchone() is None
+
+
 def _binding(connection, engagement_id, finding, route, objective, hosts, view):
     provenance = json.loads(finding['provenance_json'] or '{}')
     source = provenance.get('code_snapshot')
-    return {
+    binding = {
         'finding_claim_sha256': _current_claim_sha256(finding),
         # The park whose plan this work proves. A revised plan is a new park, so
         # work prepared for an earlier one becomes history, never the current item.
@@ -68,6 +84,9 @@ def _binding(connection, engagement_id, finding, route, objective, hosts, view):
         } if route == 'web' else {},
         'route': route, 'objective': objective, 'target_hosts': hosts,
     }
+    if _early_proof_eligible(connection, engagement_id, finding):
+        binding['verification_stage'] = 'unreviewed'
+    return binding
 
 
 # Derived readiness, never stored. Precedence is top to bottom: the first rule
@@ -241,8 +260,10 @@ def _serialize(connection, engagement_id, row, *, with_history=True, view=None):
     data['target_hosts'] = hosts
     data['approved'] = bool(data['approved'])
     data['authorized_phase'] = 'exploit' if data['route'] == 'web' else 'code-verify'
-    data['owed'] = owes_runtime_proof(finding)
-    data['verification_invalidated'] = _verification_invalidated(finding)
+    early = (stored.get('verification_stage') == 'unreviewed'
+             and _early_proof_eligible(connection, engagement_id, finding))
+    data['owed'] = owes_runtime_proof(finding) or early
+    data['verification_invalidated'] = _verification_invalidated(finding) and not early
     data['reverification_required'] = _reverification_transition(connection, engagement_id, finding) is not None
     # The finding's runtime proof plan: untrusted context for the worker, never authority.
     # The plan this work was prepared for; after a re-park, history keeps its own.
@@ -495,8 +516,9 @@ def prepare_proof_work(engagement_id: int, *, finding_slug: str, route: str,
         finding = _finding(connection, engagement_id, finding_slug)
         if finding['status'] == 'merged':
             _fail('Merged findings owe no proof work; prepare proof for the finding it was merged into', 400)
-        if not owes_runtime_proof(finding):
-            _fail('Only pending_runtime_proof findings can be prepared', 400)
+        if not owes_runtime_proof(finding) and not _early_proof_eligible(connection, engagement_id, finding):
+            _fail('Proof preparation requires pending_runtime_proof or an initial unreviewed finding; '
+                  'invalidated findings must be re-verified first', 400)
         binding = _binding(connection, engagement_id, finding, route, objective, hosts,
                            _view(engagement_id))
         if not _source_current(binding):

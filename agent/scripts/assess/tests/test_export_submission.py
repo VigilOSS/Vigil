@@ -3095,3 +3095,83 @@ def test_rehearsal_read_costs_exactly_one_round_trip(tmp_path, monkeypatch, caps
 
     reads = [g for g in fake.gets if g.startswith("dispatch-decisions")]
     assert reads == ["dispatch-decisions?kind=repro_rehearsal&limit=1000"]
+
+
+def test_authored_body_prepare_captures_exact_recipient_bytes(tmp_path, monkeypatch):
+    fake = _FakeClient(_finding(details=_complete_details()))
+    _install(monkeypatch, tmp_path, fake)
+    outgoing = b"## Reproducer\r\nRequires an authenticated member.\r\n"
+    (tmp_path / "advisory.md").write_bytes(outgoing)
+    (tmp_path / "SECURITY.md").write_text("Send a short reproducer.\n")
+    args = _parse(["submission", "VA-047", "--platform", "direct", "--body", "advisory.md", "--guidance", "SECURITY.md", "--prepare"], str(tmp_path))
+    export_submission.run(args)
+    directory = _submission_path(tmp_path).parent
+    assert (directory / "submission-body.md").read_bytes() == outgoing
+    context = json.loads((directory / "submission-context.json").read_text())
+    assert context["mode"] == "final"
+    assert context["body_source"]["sha256"] == hashlib.sha256(outgoing).hexdigest()
+    assert context["recipient_guidance"]["sha256"] == hashlib.sha256((tmp_path / "SECURITY.md").read_bytes()).hexdigest()
+    assert all(not endpoint.endswith("/exports") for endpoint, _ in fake.posts)
+
+
+def test_ghsa_renders_form_fields(tmp_path, monkeypatch):
+    details = _complete_details(ghsa={"ecosystem": "Composer", "package_name": "acme/example", "affected_versions": "< 2.0.1", "patched_versions": "2.0.1", "cwe_ids": ["CWE-639"], "vulnerable_functions": ["Acme.authorize"], "request_cve": False})
+    fake = _FakeClient(_finding(details=details))
+    _install(monkeypatch, tmp_path, fake)
+    export_submission.run(_parse(["submission", "VA-047", "--platform", "ghsa", "--prepare"], str(tmp_path)))
+    body = (_submission_path(tmp_path).parent / "submission-body.md").read_text()
+    assert "**Ecosystem:** Composer" in body
+    assert "**Affected versions:** < 2.0.1" in body
+    assert "**Request CVE:** No" in body
+
+
+@pytest.mark.parametrize("relative", ["../outside.md", "linked.md"])
+def test_authored_body_refuses_escape_and_symlink(tmp_path, monkeypatch, relative):
+    fake = _FakeClient(_finding(details=_complete_details()))
+    _install(monkeypatch, tmp_path, fake)
+    outside = tmp_path.parent / "outside.md"
+    outside.write_text("outgoing")
+    (tmp_path / "linked.md").symlink_to(outside)
+    with pytest.raises((AssessError, SystemExit)):
+        export_submission.run(_parse(["submission", "VA-047", "--platform", "direct", "--body", relative, "--prepare"], str(tmp_path)))
+
+
+def test_authored_capture_cannot_be_silently_replaced_by_house_render(tmp_path, monkeypatch):
+    fake = _FakeClient(_finding(details=_complete_details()))
+    _install(monkeypatch, tmp_path, fake)
+    outgoing = tmp_path / "advisory.md"
+    outgoing.write_text("Short recipient body.\n")
+    export_submission.run(_parse(["submission", "VA-047", "--platform", "direct", "--body", "advisory.md", "--prepare"], str(tmp_path)))
+    with pytest.raises(AssessError, match="repeat --body"):
+        export_submission.run(_parse(["submission", "VA-047", "--platform", "direct", "--overwrite", "--prepare"], str(tmp_path)))
+    assert (_submission_path(tmp_path).parent / "submission-body.md").read_bytes() == outgoing.read_bytes()
+
+
+def test_capture_rejects_oversized_final_workspace_before_writing(tmp_path, monkeypatch):
+    fake = _FakeClient(_finding(details=_complete_details()))
+    _install(monkeypatch, tmp_path, fake)
+    (tmp_path / "advisory.md").write_text("Short body")
+    monkeypatch.setattr(export_submission, "_WORKSPACE_MARKDOWN_MAX_BYTES", 10, raising=False)
+    with pytest.raises(AssessError, match="size limit"):
+        export_submission.run(_parse(["submission", "VA-047", "--platform", "direct", "--body", "advisory.md", "--prepare"], str(tmp_path)))
+    assert not _submission_path(tmp_path).exists()
+
+
+@pytest.mark.parametrize("option", ["--body", "--guidance"])
+@pytest.mark.parametrize("hardlink", [False, True])
+def test_capture_refuses_workspace_output_alias_before_writing(tmp_path, monkeypatch, option, hardlink):
+    fake = _FakeClient(_finding(details=_complete_details()))
+    _install(monkeypatch, tmp_path, fake)
+    output = _submission_path(tmp_path)
+    output.parent.mkdir(parents=True)
+    original = b"Original recipient text.\n"
+    output.write_bytes(original)
+    source = output
+    if hardlink:
+        import os
+        source = tmp_path / "authored.md"
+        os.link(output, source)
+    with pytest.raises(AssessError, match="workspace output"):
+        export_submission.run(_parse(["submission", "VA-047", "--platform", "direct", option, str(source), "--prepare", "--overwrite"], str(tmp_path)))
+    assert output.read_bytes() == original
+    assert source.read_bytes() == original

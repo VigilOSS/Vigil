@@ -28,7 +28,7 @@ from .sql_like import like_contains
 from .timestamps import parse_utc
 
 
-SUBMISSION_PLATFORMS = frozenset({"bugcrowd", "hackerone", "direct"})
+SUBMISSION_PLATFORMS = frozenset({"bugcrowd", "hackerone", "direct", "ghsa"})
 ACTOR_SURFACES = frozenset({"vigil-assess", "web-ui"})
 WORKSPACE_MARKDOWN_MAX_BYTES = 4 * 1024 * 1024
 WORKSPACE_CONTEXT_MAX_BYTES = 2 * 1024 * 1024
@@ -414,6 +414,18 @@ def _workspace_state(
     markdown_sha256 = _sha256(markdown)
     context = _load_context(context_bytes)
     blockers: list[str] = []
+    guidance = context.get("recipient_guidance")
+    if guidance is not None and (
+        not isinstance(guidance, dict)
+        or guidance.get("authority") != "presentation-only"
+        or not isinstance(guidance.get("text"), str)
+        or _sha256(guidance["text"].encode("utf-8")) != guidance.get("sha256")
+    ):
+        raise HTTPException(status_code=409, detail="invalid recipient guidance capture or digest")
+    platform_fields = context.get("platform_fields")
+    if platform_fields is not None and not isinstance(platform_fields, dict):
+        raise HTTPException(status_code=409, detail="invalid platform fields capture")
+    platform_fields_sha256 = _sha256(_canonical_json(platform_fields).encode("utf-8")) if platform_fields is not None else None
     body_path = (PurePosixPath(normalized_submission).parent / "submission-body.md").as_posix()
     try:
         _, external_body = _read_stable_file(
@@ -494,6 +506,8 @@ def _workspace_state(
         "markdown_text": markdown_text,
         "external_body": external_body,
         "external_body_sha256": _sha256(external_body),
+        "recipient_guidance_sha256": (guidance or {}).get("sha256"),
+        "platform_fields_sha256": platform_fields_sha256,
         "submission_sha256": markdown_sha256,
         "context": context,
         "context_sha256": _sha256(context_bytes),
@@ -677,6 +691,10 @@ def _packet_review_issue(
         or (inputs.get("submission") or {}).get("sha256") != workspace["external_body_sha256"]
     ):
         return f"{label} verdict covers a different submission body or platform"
+    if (inputs.get("recipient_guidance") or {}).get("sha256") != workspace.get("recipient_guidance_sha256"):
+        return f"{label} verdict covers different recipient guidance"
+    if (inputs.get("platform_fields") or {}).get("sha256") != workspace.get("platform_fields_sha256"):
+        return f"{label} verdict covers different platform fields"
     selected = sorted(
         (int(row["artifact_id"]), str(row["sha256"]), int(row["size_bytes"]))
         for row, _ in attachments
@@ -1297,6 +1315,8 @@ def _complete_version(engagement_id: int, row: Mapping[str, Any]) -> dict[str, A
         reviewed_workspace = {
             "finding": dict(finding),
             "external_body_sha256": workspace_source.get("external_body_sha256"),
+            "recipient_guidance_sha256": workspace_source.get("recipient_guidance_sha256"),
+            "platform_fields_sha256": workspace_source.get("platform_fields_sha256"),
         }
         triage_issue = _packet_review_issue(
             engagement_id, str(finding["slug"]), root, reviewed_workspace,
@@ -1366,6 +1386,9 @@ def _export_sources(
             "submission_path": workspace["submission_path"],
             "submission_sha256": workspace["submission_sha256"],
             "external_body_sha256": workspace["external_body_sha256"],
+            "recipient_guidance_sha256": workspace.get("recipient_guidance_sha256"),
+            "platform_fields_sha256": workspace.get("platform_fields_sha256"),
+            "platform_fields": workspace["context"].get("platform_fields"),
             "context_path": workspace["context_path"],
             "context_sha256": workspace["context_sha256"],
         },
@@ -2028,7 +2051,7 @@ def _blocker_guidance(
     lowered = message.lower()
     values = {
         "slug": slug,
-        "platform": platform or "<bugcrowd|hackerone|direct>",
+        "platform": platform or "<bugcrowd|hackerone|direct|ghsa>",
         "attachment_args": "".join(f" --attachment-id {value}" for value in attachment_ids),
     }
     for fragments, fix, command in _BLOCKER_GUIDANCE:
@@ -2241,6 +2264,9 @@ def submission_detail(
             "external_body_valid_utf8": external_valid,
             "submission_sha256": workspace["submission_sha256"],
             "external_body_sha256": workspace["external_body_sha256"],
+            "recipient_guidance_sha256": workspace.get("recipient_guidance_sha256"),
+            "platform_fields_sha256": workspace.get("platform_fields_sha256"),
+            "platform_fields": workspace["context"].get("platform_fields"),
             "context": workspace["context"],
             "final_ready": readiness["final_ready"],
             "blockers": readiness["blockers"],

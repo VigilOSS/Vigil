@@ -35,7 +35,7 @@ async def _broadcast(
 class SubmissionExportRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    platform: Literal["bugcrowd", "hackerone", "direct"]
+    platform: Literal["bugcrowd", "hackerone", "direct", "ghsa"]
     submission_path: str = Field(min_length=1, max_length=2048)
     context_path: str = Field(min_length=1, max_length=2048)
     attachment_ids: list[int] = Field(default_factory=list, max_length=1000)

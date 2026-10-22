@@ -151,11 +151,15 @@ from assess.lib.finding_render import (
 )
 from assess.lib.scope import rate_caps_for_dir
 
-_PLATFORMS = ("bugcrowd", "hackerone", "direct")
+# Mirrors submission_versions workspace read limits; enforced before any output write.
+_WORKSPACE_MARKDOWN_MAX_BYTES = 4 * 1024 * 1024
+_WORKSPACE_CONTEXT_MAX_BYTES = 2 * 1024 * 1024
+
+_PLATFORMS = ("bugcrowd", "hackerone", "direct", "ghsa")
 # The decision kind the Phase-8 reproduction rehearsal stamps
 # (``agent/phases/phase-8-report.md``), read here to ADVISE — never to gate.
 _REHEARSAL_DECISION_KIND = "repro_rehearsal"
-_PLATFORM_LABEL = {"bugcrowd": "Bugcrowd", "hackerone": "HackerOne", "direct": "Direct disclosure"}
+_PLATFORM_LABEL = {"bugcrowd": "Bugcrowd", "hackerone": "HackerOne", "direct": "Direct disclosure", "ghsa": "GitHub private advisory"}
 _REPORTABLE_STATUSES = {
     "active",
     "blocked",
@@ -187,7 +191,7 @@ def register(subparsers) -> None:
         choices=_PLATFORMS,
         help=(
             "Submission target: bugcrowd (VRT) | hackerone (weakness) | "
-            "direct (company-facing); required unless --recover is used."
+            "direct (company-facing) | ghsa (GitHub private advisory); required unless --recover is used."
         ),
     )
     p.add_argument(
@@ -201,6 +205,9 @@ def register(subparsers) -> None:
         default="",
         help="Override the output directory (default: $ENGAGEMENT_DIR/submissions/<slug>/).",
     )
+    p.add_argument("--body", default="", help="Capture an operator-authored UTF-8 outgoing body inside the engagement, preserving its exact bytes.")
+    p.add_argument("--guidance", default="", help="Capture recipient reporting guidance as presentation-only data; never changes verification or approval gates.")
+    p.add_argument("--prepare", action="store_true", help="Prepare and register a final-ready workspace for review without publishing an immutable version.")
     p.add_argument("--overwrite", action="store_true", help="Overwrite an existing submission.md.")
     p.add_argument("--json", dest="as_json", action="store_true", help="Emit a machine-readable summary to stdout.")
     p.add_argument(
@@ -232,6 +239,31 @@ def register(subparsers) -> None:
         help="HackerOne weakness (else read from finding details.weakness).",
     )
     p.set_defaults(func=run)
+
+
+def _capture_input(engagement_dir: str, value: str, label: str) -> tuple[bytes | None, dict | None]:
+    if not value:
+        return None, None
+    # Use the same bounded, no-symlink descriptor walk as packet capture.
+    from assess.commands.export_triage_packet import _read_regular_at
+
+    root = Path(engagement_dir).resolve()
+    source = Path(value)
+    if source.is_absolute():
+        try:
+            source = source.relative_to(root)
+        except ValueError as exc:
+            raise AssessError(f"export submission: {label} must be inside the engagement") from exc
+    try:
+        raw = _read_regular_at(root, source, label=label)
+        raw.decode("utf-8")
+    except (SystemExit, UnicodeDecodeError) as exc:
+        raise AssessError(f"export submission: invalid {label}: {exc}") from exc
+    if label == "authored outgoing body" and "OPERATOR DETAILS" in raw.decode("utf-8"):
+        raise AssessError("export submission: outgoing body contains an operator-only boundary")
+    if not raw.strip():
+        raise AssessError(f"export submission: {label} must not be empty")
+    return raw, {"path": source.as_posix(), "sha256": hashlib.sha256(raw).hexdigest(), "bytes": len(raw)}
 
 
 def _nonempty(value: object) -> str:
@@ -486,6 +518,15 @@ def _evaluate(
         missing.append("VRT category")
     elif platform == "hackerone" and not weak:
         missing.append("weakness")
+    if platform == "ghsa":
+        ghsa = detail_value(finding, "ghsa", {})
+        if not isinstance(ghsa, dict):
+            ghsa = {}
+        for field in ("ecosystem", "package_name", "affected_versions"):
+            if not isinstance(ghsa.get(field), str) or not ghsa[field].strip():
+                missing.append(f"ghsa.{field}")
+        if not isinstance(ghsa.get("request_cve"), bool):
+            missing.append("ghsa.request_cve (explicit boolean)")
     if not impact:
         missing.append("attacker-impact statement")
     if not durable_evidence["has_durable_proof"]:
@@ -1105,6 +1146,16 @@ def _render_markdown(
         lines += [f"**VRT:** {_needs(resolved['vrt'], 'VRT category')}", ""]
     elif platform == "hackerone":
         lines += [f"**Weakness:** {_needs(resolved['weakness'], 'weakness')}", ""]
+    elif platform == "ghsa":
+        ghsa = detail_value(finding, "ghsa", {})
+        ghsa = ghsa if isinstance(ghsa, dict) else {}
+        for key, label in (("ecosystem", "Ecosystem"), ("package_name", "Package name"), ("affected_versions", "Affected versions"), ("patched_versions", "Patched versions"), ("cwe_ids", "CWEs"), ("vulnerable_functions", "Vulnerable functions")):
+            value = ghsa.get(key)
+            if isinstance(value, list):
+                value = ", ".join(str(item) for item in value)
+            lines += [f"**{label}:** {value or '[not specified]'}", ""]
+        request = ghsa.get("request_cve")
+        lines += [f"**Request CVE:** {'Yes' if request is True else 'No' if request is False else '[NEEDS: ghsa.request_cve]'}", ""]
     # direct: no platform-taxonomy line (VRT / weakness dropped).
 
     severity = resolved["severity"]
@@ -1288,6 +1339,7 @@ def run(args) -> None:
             or attachment_ids
             or args.vrt_category
             or args.weakness
+            or args.body or args.guidance or args.prepare
         )
         if incompatible:
             raise AssessError(
@@ -1449,6 +1501,8 @@ def run(args) -> None:
         raise AssessError(
             "export submission: slug and --platform are required unless --recover is used"
         )
+    if draft and args.prepare:
+        raise AssessError("export submission: --prepare requires final mode, not --draft")
     if draft and attachment_ids:
         raise AssessError(
             "export submission: --attachment-id applies only to immutable final exports"
@@ -1465,6 +1519,8 @@ def run(args) -> None:
     # scope.json to ``{}`` without raising), so a submission renders whether or not
     # the engagement configured attribution headers.
     _, required_headers = rate_caps_for_dir(engagement_dir)
+    authored_body, body_source = _capture_input(engagement_dir, args.body, "authored outgoing body")
+    guidance, guidance_source = _capture_input(engagement_dir, args.guidance, "recipient guidance")
 
     if args.output_dir:
         out_dir = Path(args.output_dir)
@@ -1475,8 +1531,27 @@ def run(args) -> None:
     submission_md = out_dir / "submission.md"
     external_body_md = out_dir / "submission-body.md"
     context_json = out_dir / "submission-context.json"
+    for source in (body_source, guidance_source):
+        if source is None:
+            continue
+        input_path = Path(engagement_dir) / source["path"]
+        for output_path in (submission_md, external_body_md, context_json):
+            if input_path.resolve() == output_path.resolve() or (
+                output_path.exists() and input_path.samefile(output_path)
+            ):
+                raise AssessError("export submission: capture input aliases a workspace output; use an independent authored source file")
     submission_rel = _engagement_relative(submission_md.resolve(strict=False), engagement_dir)
     context_rel = _engagement_relative(context_json.resolve(strict=False), engagement_dir)
+    if context_json.is_file():
+        try:
+            previous_context = json.loads(context_json.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            previous_context = {}
+        if isinstance(previous_context, dict):
+            if previous_context.get("body_source") and not args.body:
+                raise AssessError("export submission: captured recipient body exists; repeat --body to preserve the selected outgoing body")
+            if previous_context.get("recipient_guidance") and not args.guidance:
+                raise AssessError("export submission: captured recipient guidance exists; repeat --guidance to preserve the selected reporting profile")
     if not draft and submission_rel is None:
         raise AssessError(
             "export submission: final output must be inside the engagement directory "
@@ -1552,7 +1627,7 @@ def run(args) -> None:
             [],
         )
         hygiene_warnings = _hygiene_warnings(
-            scan_markdown, slug, internal_ids, engagement_dir
+            authored_body.decode("utf-8") if authored_body is not None else scan_markdown, slug, internal_ids, engagement_dir
         )
         # Prose advisories are surfaced, never gated on: only leaks fail closed.
         advisories = title_advisories(resolved["title"])
@@ -1560,7 +1635,8 @@ def run(args) -> None:
         # hygiene gate reads (no warnings or advisories woven in yet, so nothing
         # measures the tool's own text) and confined to the pasteable body, so the
         # never-paste OPERATOR DETAILS proof is never counted as submission prose.
-        advisories += prose_advisories(scan_markdown, steps=resolved["steps"])
+        if authored_body is None:
+            advisories += prose_advisories(scan_markdown, steps=resolved["steps"])
         # These local advisories help repair legacy findings and transient fetch
         # failures before the backend final-publication gate checks currentness.
         for entry in repro_unresolved:
@@ -1645,8 +1721,15 @@ def run(args) -> None:
             advisories,
             include_operator_details=False,
         )
+        external_bytes = external_body.encode("utf-8") if authored_body is None else authored_body
+        if authored_body is not None:
+            # The reference appendix stays local. The outgoing file is an exact capture.
+            markdown = authored_body.decode("utf-8") + "\n" + "\n".join(_operator_details_block(
+                render_finding, resolved, linked_runs, repro_runs, repro_unresolved,
+                hygiene_warnings, advisories, draft,
+            ))
         submission_sha256 = hashlib.sha256(markdown.encode("utf-8")).hexdigest()
-        external_body_sha256 = hashlib.sha256(external_body.encode("utf-8")).hexdigest()
+        external_body_sha256 = hashlib.sha256(external_bytes).hexdigest()
         context = _build_context(
             slug,
             platform,
@@ -1669,7 +1752,17 @@ def run(args) -> None:
             submission_sha256,
             external_body_sha256,
         )
+        if body_source is not None:
+            context["body_source"] = body_source
+        if guidance_source is not None:
+            context["recipient_guidance"] = {**guidance_source, "authority": "presentation-only", "text": guidance.decode("utf-8")}
+        if platform == "ghsa":
+            context["platform_fields"] = detail_value(finding, "ghsa", {})
         context_text = json.dumps(context, indent=2, ensure_ascii=False)
+        if (len(markdown.encode("utf-8")) > _WORKSPACE_MARKDOWN_MAX_BYTES
+                or len(external_bytes) > _WORKSPACE_MARKDOWN_MAX_BYTES
+                or len((context_text + "\n").encode("utf-8")) > _WORKSPACE_CONTEXT_MAX_BYTES):
+            raise AssessError("export submission: captured workspace exceeds backend size limit; shorten the presentation without removing required proof")
 
         previous_submission = submission_md.read_bytes() if submission_md.exists() else None
         previous_external_body = external_body_md.read_bytes() if external_body_md.exists() else None
@@ -1682,7 +1775,7 @@ def run(args) -> None:
         try:
             out_dir.mkdir(parents=True, exist_ok=True)
             submission_md.write_text(markdown, encoding="utf-8")
-            external_body_md.write_text(external_body, encoding="utf-8")
+            external_body_md.write_bytes(external_bytes)
             context_json.write_text(context_text + "\n", encoding="utf-8")
         except OSError as exc:
             if not draft:
@@ -1740,7 +1833,7 @@ def run(args) -> None:
                 file=sys.stderr,
             )
 
-        if not draft:
+        if not draft and not args.prepare:
             if not artifact_registered or context_rel is None:
                 raise AssessError(
                     "export submission: final workspace was not durably registered; "

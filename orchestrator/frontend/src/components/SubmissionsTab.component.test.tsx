@@ -518,7 +518,7 @@ describe("SubmissionsTab", () => {
     renderTab();
 
     expect(await screen.findByText(
-      "vigil assess export submission VA-001 --platform <bugcrowd|hackerone|direct> --draft",
+      "vigil assess export submission VA-001 --platform <bugcrowd|hackerone|direct|ghsa> --draft",
     )).toBeTruthy();
     expect(screen.queryByText(/--platform bugcrowd/)).toBeNull();
     expect(await (await cardHeader()).findByRole("button", { name: /No rendered submission yet/ })).toBeTruthy();

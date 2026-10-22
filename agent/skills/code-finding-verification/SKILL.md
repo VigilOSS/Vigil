@@ -39,6 +39,12 @@ Audit trail requirement:
 - Every verification memo must state the concrete Read/rg/ctags lookups used
 - If verification results are recorded in machine-readable form, include `audit_metadata.cross_ref_usage` with the actual queries executed
 
+For runtime verification that builds native source or uses memory sanitizers, load
+`agent/skills/code-fuzz-campaign/SKILL.md` **Generation-Bound Build Workspace** and
+**Source-build and allocator preflight** before building. Record toolchain and allocator settings
+with the proof receipt; distinguish a diagnostic allocator configuration from the production
+configuration supporting the impact claim.
+
 ## Division of Labor
 
 - **Operator provides**: findings with stored source identity/evidence, the current Code Source

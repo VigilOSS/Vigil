@@ -190,6 +190,35 @@ If a valid build needs a product source/configuration input that the sealed mani
 stop and return to Phase 0 to include and ingest it into a new sealed generation. Do not fill that
 gap from the origin inside the derived workspace.
 
+### Source-build and allocator preflight
+
+Before compiling a sealed source tree, inspect its own build instructions and admitted build
+inputs. A repository snapshot may need generated configure/parser files that release tarballs
+include. Record the compiler, generator, sanitizer and dependency versions with the build receipt;
+cache toolchain dependencies in the runtime image or a prepared writable build volume, never in
+the sealed tree. For PHP source check `buildconf` prerequisites (autoconf, bison and re2c) before
+starting the build; the [PHP source installation guide](https://www.php.net/manual/en/install.unix.source.php)
+distinguishes repository builds from release archives. Use the versions required by the sealed
+branch's own build files rather than installing arbitrary latest versions.
+
+Check that the derived build directory supports creating and executing generated files. Container
+root does not override host mount permissions: a failed `chmod` on sealed source is not a reason
+to change its permissions. Use the generation-bound writable copy above. If the engagement mount
+cannot support the build, report the exact permission failure and provision an approved writable
+build volume through the audited runtime before proceeding; retain manifests and copy resulting
+build receipts/artifacts back to the engagement. Do not bypass the runtime driver's path checks.
+
+Inspect custom allocators before interpreting a clean sanitizer run. An allocator that suballocates
+larger blocks can hide individual allocation boundaries from ASan. For PHP/ZendMM, compare the
+normal allocator with a diagnostic `USE_ZEND_ALLOC=0` run when investigating Zend-managed memory;
+the [Zend allocator implementation](https://github.com/php/php-src/blob/master/Zend/zend_alloc.c)
+selects the system allocator for that diagnostic setting. Record this environment setting in the
+receipt and campaign configuration. Also preserve normal-allocator behavior: changing allocators
+can change layout, failure handling and memory-limit enforcement. A diagnostic crash establishes
+behavior in that configuration; trace or reproduce the claimed production behavior separately.
+Other projects require their own documented allocator/sanitizer switches. A clean run with an
+unvalidated allocation mode does not establish absence of memory defects.
+
 ### Audited runtime driver
 
 Author `tools/fuzz-state/runtime_driver.py` on the host, then execute it only through

@@ -29,7 +29,7 @@ def test_additive_schema_helpers_preserve_the_callers_transaction(create_schema)
         connection.close()
 
 
-def seed(client, isolate_settings):
+def seed(client, isolate_settings, *, park=True):
     path = write_engagement(isolate_settings['engagements_dir'])
     response = client.post(f'{BASE}/findings', json={
         'slug': 'VA-050', 'title': 'Acme replay hypothesis', 'severity': 'high',
@@ -38,6 +38,8 @@ def seed(client, isolate_settings):
         'provenance': _author_provenance(client, 'VA-050'),
     })
     assert response.status_code == 201, response.text
+    if not park:
+        return path
     response = client.post(f'{BASE}/findings/VA-050/verify', json={
         'verification_status': 'pending_runtime_proof', 'reason_code': 'source-review',
         'reason_text': 'Runtime challenge still required', 'source_name': 'verifier',
@@ -55,6 +57,45 @@ def prepare(client, route='code', **extra):
     })
     assert response.status_code == 201, response.text
     return response.json()
+
+
+@pytest.mark.parametrize('route', ['code', 'web'])
+def test_initial_unreviewed_finding_can_use_audited_proof_work(client, isolate_settings, route):
+    seed(client, isolate_settings, park=False)
+    work = prepare(client, route)
+    assert work['owed'] is True
+    assert work['verification_invalidated'] is False
+    assert work['next_test'] is None
+    if route == 'web':
+        assert work['queue_state'] == 'needs_approval'
+        assert claim(client, work).status_code == 409
+        approved = client.post(f'{BASE}/proof-work/{work["id"]}/approval', json={
+            'approved': True, 'actor': 'operator', 'human_confirmation': 'Approve bounded Acme early verification',
+        })
+        assert approved.status_code == 200, approved.text
+    else:
+        assert work['queue_state'] == 'ready'
+    claimed = claim(client, work)
+    assert claimed.status_code == 200, claimed.text
+    assert claimed.json()['launch_required'] is True
+    assert client.get(f'{BASE}/findings/VA-050').json()['verification_status'] == 'unreviewed'
+    listing = client.get(f'{BASE}/proof-work').json()
+    assert listing['owed'] == []
+    assert listing['items'][0]['queue_state'] == 'in_progress'
+
+
+def test_early_proof_work_stales_on_claim_edit_and_rejects_author_ownership(client, isolate_settings):
+    seed(client, isolate_settings, park=False)
+    work = prepare(client)
+    author = client.get(f'{BASE}/findings/VA-050').json()['provenance']['agent_id']
+    assert claim(client, work, author).status_code == 400
+    assert client.patch(f'{BASE}/findings/VA-050', json={'summary': 'Revised Acme hypothesis'}).status_code == 200
+    stale = client.get(f'{BASE}/proof-work/{work["id"]}').json()
+    assert stale['queue_state'] == 'stale'
+    assert claim(client, work).status_code == 409
+    fresh = prepare(client)
+    assert fresh['id'] != work['id']
+    assert fresh['queue_state'] == 'ready'
 
 
 def claim(client, work, agent='PROOF-1'):

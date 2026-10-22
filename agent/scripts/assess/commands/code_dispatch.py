@@ -62,6 +62,8 @@ _ACTION_HELP: dict[str, str] = {
         "additionally refuse a row that is not the canonical latest attempt.\n"
         "--json and --ids-only both emit a payload `fetch --ids-file` accepts, so "
         "explicit IDs stay recoverable after the queue-submission output scrolls.\n"
+        "--json emits a page object with items, item_ids and pagination metadata; "
+        "fetch emits a claim array. Diagnostics go to stderr.\n"
     ),
     "adopt-lease": (
         "Usage: vigil assess code-dispatch adopt-lease <item-id> <agent-name> "
@@ -446,6 +448,8 @@ def _ids_from_file(path_value: str) -> list[int]:
     except (ValueError, RecursionError):
         print("Queue ids file contains invalid or excessively complex JSON", file=sys.stderr)
         raise SystemExit(1) from None
+    if type(raw) is int and re.fullmatch(r"[1-9][0-9]*", text):
+        raw = [raw]
     if isinstance(raw, dict):
         raw = raw.get("item_ids", raw.get("ids"))
     if not isinstance(raw, list) or not raw:

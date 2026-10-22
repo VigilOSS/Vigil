@@ -5,11 +5,7 @@ or reading one module — which file owns a contract, what must change with it,
 and what silently breaks when it does not.
 
 **Size budget: this file stays under 32 KiB**, enforced by
-`orchestrator/backend/tests/test_doc_dead_paths.py`. A map is only useful while it
-can be scanned. If an addition
-would break the budget, something here has stopped earning its place: cut it, or
-push it into a docstring. Rewording until it fits is not the intended response —
-a byte ceiling cannot be satisfied that way.
+`orchestrator/backend/tests/test_doc_dead_paths.py`.
 
 ---
 
@@ -80,7 +76,7 @@ When you are about to copy one of these into a second file, stop and import.
 - `agent/scripts/assess/lib/kali_output.py:KALI_EXIT_CODES` owns terminal status exit codes;
   `kali_cli.py:emit_result` is the output funnel and renders the help table.
 - `agent/skills/<name>/SKILL.md` owns discovered skill names; directory walking is the roster.
-  `--skills` enforcement is CLI-only and advisory under ADR 0019.
+  `lib/contracts.py` rejects explicitly unknown names before dispatch; omitted skills allow self-selection.
 - `orchestrator/backend/app/api/report_export.py`'s five `_*_FIELDS` rosters own what the
   client-delivered HTML carries; `orchestrator/report/src/types.ts` is the other half, index signature
   dropped so a renderer reaching past them is a type error. See: `docs/maintainer-guide.md` report-template section.
@@ -215,6 +211,7 @@ A prompt change is **not** prompt-only when the prompt defines an artifact the b
 - `agent/scripts/assess/commands/export_submission.py` and `export_reply.py` assemble and present;
   neither rewrites authored content or masks credentials. Rendering helpers live in
   `agent/scripts/assess/lib/finding_render.py`.
+  Submission owns exact `--body`/`--guidance` capture and `--prepare`; GHSA fields are owned by backend `finding_details.py`.
 - `agent/scripts/assess/commands/operator_checkpoint.py` — `vigil assess operator-checkpoint`, the operator's own durable state. References plus one intent note; every reference is existence-checked in the write transaction.
 - `agent/scripts/assess/commands/resume_brief.py` — a **read**. It observes abandoned command runs, jobs and host children and names the verb that reconciles them; the reconciling write is owned solely by `vigil assess kali sweep-orphans`.
 - `agent/scripts/hooks/` — shared host hooks for activity logging, compaction, post-compaction
@@ -269,6 +266,7 @@ A prompt change is **not** prompt-only when the prompt defines an artifact the b
   is the CLI listing), `analysis-queue?current_only=` lanes (stats SQL), `repos/review-progress`, readiness `track_enabled`.
 - `orchestrator/backend/app/services/state_manager/proof_work.py` owns current proof preparation, atomic dispatch claims, live approval independent of bindings, derived `queue_state`/`reverification_required`, and explicit release after execution ends.
   `api/assessment_proof_work.py` and `agent/scripts/assess/commands/proof_work.py` expose it; finding status and its `next_test` still own proof owed.
+  `_early_proof_eligible` admits initial unreviewed work without changing the parked obligation roster or reviving invalidated verification.
   `orchestrator/backend/app/services/scope_admission.py` bridges to the canonical agent scope matcher.
 - `orchestrator/backend/app/services/state_manager/finding_next_tests.py` owns runtime proof plans, written with the parking transition,
   and `owes_runtime_proof`/`runtime_proof_owed_sql` (parked, not merged). Proof work binds the current park.
@@ -283,6 +281,7 @@ A prompt change is **not** prompt-only when the prompt defines an artifact the b
   `publication_readiness` and `attachment_page` back the read-only readiness and attachment routes in `api/submissions.py`.
   `_packet_review_issue` checks package freshness for blind triage and Pass 1 QA;
   `_pass1_qa_state` projects selection-specific QA. `state_manager/dispatches.py:record_decision` validates auditor attribution.
+  Body, guidance, and platform fields bind review identity; `app/db.py:_migrate_submission_platform` expands the GHSA constraint after backup.
 - `orchestrator/backend/app/services/activity_feed.py` owns the merged Activity feed (`GET /activity`, `api/activity.py`):
   categories, mirrored-event exclusion, cursors, cached summary-text search, and entity `ref`/`unlinked_reason`.
 - `orchestrator/backend/app/services/artifacts.py:ARTIFACT_SPECS` owns the engagement Files roster: listed root documents only, read with a byte bound.

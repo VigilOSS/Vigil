@@ -10,7 +10,7 @@ import type {
 // every queue state, readiness gate, and default attachment selection; this
 // module only names the shapes it returns.
 
-export type SubmissionPlatform = "bugcrowd" | "hackerone" | "direct";
+export type SubmissionPlatform = "bugcrowd" | "hackerone" | "direct" | "ghsa";
 
 // One queue state per finding, in the backend's precedence order.
 export type SubmissionQueueState =

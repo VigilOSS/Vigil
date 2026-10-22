@@ -94,7 +94,7 @@ def test_run_backup_now_default_rotation_keeps_bounded_window(client, isolate_se
 
     remaining = [p.name for p in backup_service.list_backups()]
     assert len(remaining) == backup_service.DEFAULT_MAX_COPIES
-    assert len(remaining) == 12
+    assert len(remaining) == 4
     for expected in timestamps[-backup_service.DEFAULT_MAX_COPIES:]:
         assert any(expected in name for name in remaining)
     for pruned in timestamps[:2]:
@@ -137,5 +137,36 @@ def test_scheduler_start_is_idempotent(isolate_settings, monkeypatch):
         first_timer = backup_service._scheduler_timer
         backup_service.start_scheduler(interval_seconds=86400, max_copies=3)
         assert backup_service._scheduler_timer is first_timer
+    finally:
+        backup_service.stop_scheduler()
+
+
+def test_scheduler_defaults_to_hourly_with_four_copies(isolate_settings, monkeypatch):
+    monkeypatch.delenv(backup_service.SCHEDULER_DISABLED_ENV, raising=False)
+    monkeypatch.delenv(backup_service.SCHEDULER_MAX_COPIES_ENV, raising=False)
+    timers = []
+    backups = []
+
+    class Timer:
+        def __init__(self, interval, function):
+            self.interval = interval
+            self.function = function
+            timers.append(self)
+
+        def start(self):
+            pass
+
+        def cancel(self):
+            pass
+
+    monkeypatch.setattr(backup_service.threading, 'Timer', Timer)
+    monkeypatch.setattr(backup_service, 'run_backup_now', lambda **kwargs: backups.append(kwargs))
+    backup_service.stop_scheduler()
+    try:
+        backup_service.start_scheduler()
+        assert timers[0].interval == 3600
+        timers[0].function()
+        assert backups == [{'max_copies': 4}]
+        assert timers[1].interval == 3600
     finally:
         backup_service.stop_scheduler()

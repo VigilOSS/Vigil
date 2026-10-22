@@ -393,7 +393,10 @@ client session/agent handle separately with `vigil assess agent bind-client-hand
 the backend dispatch ID. Read that command's contract for the actual client namespace and
 handle fields. A proof claim retry is inspection, not permission to spawn another worker. Launch only when
 the successful claim returns `launch_required: true`; otherwise inspect its existing owner/run.
-Do not end your turn while a launched specialist is still running: wait for its result, or launch it in the foreground, because a client can stop a background specialist when the operator's turn ends.
+Keep native task identities for launched specialists and verify the client's background completion
+behavior before relying on it across turns. Otherwise wait for the result in the current turn.
+After an interrupted return, inspect native task and command execution state before replacing work;
+for ZCode use `docs/zcode-setup.md` **Interrupted specialists**.
 
 Pass this block verbatim at the top of the dispatch prompt. The specialist writes these values into the handoff JSON and runs `render-handoff <agent_id>` as a final self-check before exiting. A 404 from render-handoff means the `agent_id` in the handoff does not match the registered dispatch.
 

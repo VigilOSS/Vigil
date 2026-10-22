@@ -5,6 +5,32 @@ versioning follows [Semantic Versioning][semver].
 
 Durable design decisions live in [`docs/adr/`](docs/adr/).
 
+## [2.2.0] - 2026-10-22
+
+### Added
+
+- Recipient-specific authored disclosure bodies and GitHub private advisory fields share the
+  exact-package QA, blind-review, and immutable export workflow.
+- CVSS v3.1 and v4.0 base vectors are validated against their matching scores.
+- Editing QA records identify the audited package separately from independent blind review.
+- Finding-linked artifact changes retain digest and producer history with visible change receipts.
+- Initial unreviewed findings can use independently owned, approval-gated proof scheduling.
+
+### Changed
+
+- Reporting instructions concentrate on evidence, exploit preconditions, recipient requirements,
+  and the executable closeout workflow.
+- Scheduled database backups run hourly and retain four snapshots by default.
+- Official engagement starts support concurrent clients while preserving active session contexts.
+
+### Fixed
+
+- Explicit dispatch skill names are validated before registration, and ID-list files accept
+  both single and multiple plain IDs consistently.
+- Native assessment wrappers include the resolved Docker executable directory.
+- Source-build and sanitizer guidance records prerequisites and allocator assumptions; native
+  specialist recovery preserves audited ownership and evidence.
+
 ## [2.1.2] - 2026-10-22
 
 ### Changed

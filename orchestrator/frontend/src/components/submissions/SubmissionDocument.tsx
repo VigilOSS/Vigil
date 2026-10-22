@@ -305,7 +305,7 @@ export function SubmissionDocument({
 
   const workspace = detail?.workspace;
   const operatorNotes = workspace?.present ? operatorSection(workspace.markdown) : null;
-  const renderCommand = `vigil assess export submission ${slug} --platform ${platform ?? "<bugcrowd|hackerone|direct>"} --draft`;
+  const renderCommand = `vigil assess export submission ${slug} --platform ${platform ?? "<bugcrowd|hackerone|direct|ghsa>"} --draft`;
 
   let body: ReactNode;
   if (!detail) {

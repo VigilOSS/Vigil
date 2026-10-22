@@ -12,6 +12,7 @@ export const PLATFORM_LABELS: Record<SubmissionPlatform, string> = {
   bugcrowd: "Bugcrowd",
   hackerone: "HackerOne",
   direct: "Direct disclosure",
+  ghsa: "GitHub private advisory",
 };
 
 export function platformLabel(value: string | null | undefined): string {

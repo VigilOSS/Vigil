@@ -242,3 +242,27 @@ def test_opencode_start_merges_opening_and_user_focus_once(context, monkeypatch,
     assert receipts[0][2:] == ("opencode", "web")
     history, _ = client_sessions.historical_client_starts(root)
     assert [(row["client"], row["event"]) for row in history] == [("opencode", "launch_requested")]
+
+
+def test_native_helper_executes_docker_from_resolved_directory(context, monkeypatch):
+    import os
+    import subprocess
+    from vigil_cli import assessment_clients as clients
+    root, engagement, _ = context
+    docker = root / "Acme container tools/docker"
+    docker.parent.mkdir()
+    docker.write_text("#!/bin/sh\nprintf '%s\\n' acme-docker\n")
+    docker.chmod(0o755)
+    original = clients.shutil.which
+    monkeypatch.setattr(clients.shutil, "which", lambda name: str(docker) if name == "docker" else original(name))
+    helper = root / "session-helper"
+    helper.mkdir()
+    (helper / "vigil").write_text('#!/bin/sh\nexec docker "$@"\n')
+    (helper / "vigil").chmod(0o755)
+    monkeypatch.setattr(clients, "session_cli_directory", lambda _: helper)
+    workspace, binding = clients.prepare_workspace(root, engagement, "zcode", "code")
+    result = subprocess.run([str(workspace / "bin/vigil"), "version"],
+        env={**os.environ, "PATH": "/usr/bin:/bin"}, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "acme-docker"
+    assert binding["tools"]["docker"] == str(docker.resolve())

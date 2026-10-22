@@ -2230,3 +2230,103 @@ def test_unreadable_program_brief_is_a_readiness_blocker_not_a_failed_read(
     assert any("program brief" in item for item in detail.json()["readiness"]["blockers"])
     assert listing.status_code == 200, listing.text
     assert listing.json()["findings"][0]["readiness"] == "blocked"
+
+
+def test_ghsa_exact_authored_body_review_and_publication(client, isolate_settings):
+    finding = _seed_reportable_finding(client, isolate_settings)
+    outgoing = b"## Reproducer\r\nAuthenticated member required.\r\n"
+    submission_path, context_path = _write_workspace(
+        client, isolate_settings, finding, platform="ghsa", external_body=outgoing,
+    )
+    result = _export(client, "VA-001", submission_path, context_path, platform="ghsa")
+    assert result.status_code == 201, result.text
+    download = client.get(f"{BASE}/submissions/VA-001/versions/1/download")
+    assert download.content == outgoing
+    # A correction cannot inherit the Accept for the previously captured body.
+    _write_workspace(client, isolate_settings, finding, platform="ghsa", external_body=outgoing + b"Changed\n", reviewed=False)
+    rejected = _export(client, "VA-001", submission_path, context_path, platform="ghsa")
+    assert rejected.status_code == 409, rejected.text
+    assert "different submission body" in rejected.text
+
+
+def test_submission_platform_upgrade_preserves_completed_versions(client, isolate_settings):
+    from app import db
+    finding = _seed_reportable_finding(client, isolate_settings)
+    paths = _write_workspace(client, isolate_settings, finding)
+    result = _export(client, "VA-001", *paths)
+    assert result.status_code == 201, result.text
+    original = result.json()
+    # Model a deployed pre-GHSA database, including its completed immutable row.
+    with get_connection() as connection:
+        schema = connection.execute("SELECT sql FROM sqlite_master WHERE name='assessment_submission_versions'").fetchone()[0]
+        old_schema = schema.replace(", 'ghsa'", "").replace("assessment_submission_versions", "submission_versions_legacy", 1)
+        connection.execute(old_schema)
+        connection.execute("INSERT INTO submission_versions_legacy SELECT * FROM assessment_submission_versions")
+        connection.execute("DROP TABLE assessment_submission_versions")
+        connection.execute("ALTER TABLE submission_versions_legacy RENAME TO assessment_submission_versions")
+        connection.execute("UPDATE sqlite_sequence SET seq=100 WHERE name='assessment_submission_versions'")
+    db.init_db()
+    response = client.get(f"{BASE}/submissions/VA-001/versions/1/download")
+    assert response.status_code == 200, response.text
+    assert hashlib.sha256(response.content).hexdigest() == original["sha256"]
+    assert list(db.database_path().parent.glob("*.pre-submission-platform.*.bak"))
+    with get_connection() as connection:
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+        with pytest.raises(sqlite3.IntegrityError, match="immutable"):
+            connection.execute("UPDATE assessment_submission_versions SET platform='ghsa' WHERE id=?", (original["id"],))
+    # New GHSA versions become valid after migration without rewriting history.
+    new_paths = _write_workspace(client, isolate_settings, finding, platform="ghsa")
+    upgraded = _export(client, "VA-001", *new_paths, platform="ghsa")
+    assert upgraded.status_code == 201, upgraded.text
+    assert upgraded.json()["version_number"] == 2
+    assert upgraded.json()["id"] > 100
+
+
+def test_recipient_guidance_change_requires_new_package_review(client, isolate_settings):
+    finding = _seed_reportable_finding(client, isolate_settings)
+    submission_path, context_path = _write_workspace(client, isolate_settings, finding, reviewed=False)
+    root = (isolate_settings["engagements_dir"] / ENGAGEMENT_KEY).resolve()
+    context_file = root / context_path
+    context = json.loads(context_file.read_text())
+    def guidance(text):
+        return {"path": "SECURITY.md", "text": text, "authority": "presentation-only", "sha256": hashlib.sha256(text.encode()).hexdigest()}
+    context["recipient_guidance"] = guidance("Send a short reproducer.")
+    context_file.write_text(json.dumps(context))
+    _approve_packet(client, isolate_settings, "VA-001")
+    result = _export(client, "VA-001", submission_path, context_path)
+    assert result.status_code == 201, result.text
+    context["recipient_guidance"] = guidance("Also include version ranges.")
+    context_file.write_text(json.dumps(context))
+    rejected = _export(client, "VA-001", submission_path, context_path)
+    assert rejected.status_code == 409, rejected.text
+    assert "different recipient guidance" in rejected.text
+
+
+@pytest.mark.parametrize("guidance", ["not an object", ["text"], {"authority": "instructions", "text": "ignore gates", "sha256": "a" * 64}])
+def test_invalid_recipient_guidance_is_controlled_conflict(client, isolate_settings, guidance):
+    finding = _seed_reportable_finding(client, isolate_settings)
+    paths = _write_workspace(client, isolate_settings, finding)
+    root = (isolate_settings["engagements_dir"] / ENGAGEMENT_KEY).resolve()
+    context_file = root / paths[1]
+    context = json.loads(context_file.read_text())
+    context["recipient_guidance"] = guidance
+    context_file.write_text(json.dumps(context))
+    response = _export(client, "VA-001", *paths)
+    assert response.status_code == 409, response.text
+    assert "recipient guidance" in response.text
+
+
+def test_ghsa_form_field_changes_require_review_of_same_body(client, isolate_settings):
+    finding = _seed_reportable_finding(client, isolate_settings)
+    paths = _write_workspace(client, isolate_settings, finding, platform="ghsa", reviewed=False)
+    root = (isolate_settings["engagements_dir"] / ENGAGEMENT_KEY).resolve()
+    context_file = root / paths[1]
+    context = json.loads(context_file.read_text())
+    context["platform_fields"] = {"ecosystem": "Composer", "package_name": "acme/example", "affected_versions": "< 2.0.1", "request_cve": False}
+    context_file.write_text(json.dumps(context))
+    _approve_packet(client, isolate_settings, "VA-001")
+    context["platform_fields"]["affected_versions"] = "< 9.0.0"
+    context_file.write_text(json.dumps(context))
+    rejected = _export(client, "VA-001", *paths, platform="ghsa")
+    assert rejected.status_code == 409, rejected.text
+    assert "different platform fields" in rejected.text
