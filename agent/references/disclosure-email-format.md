@@ -82,7 +82,7 @@ SUGGESTED FIX
 CVSS
 ====
 
-  <CVSS:3.1 vector string — score (SEVERITY)
+  <Complete CVSS v3.1 or v4.0 base vector — score (SEVERITY)
 
   Justify each factor on a separate line:
   - AV:X  -- reason

@@ -420,6 +420,18 @@ class BlindTriageVerdictPayload(BaseModel):
     ]
 
 
+class Pass1QAVerdictPayload(BaseModel):
+    """An editing auditor's checklist result, separate from independent triage."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    finding_slug: str = Field(min_length=1)
+    packet_id: str = Field(pattern=r"^[0-9a-f]{64}$")
+    auditor_dispatch_agent_id: str = Field(min_length=1)
+    verdict: Literal["pass", "blocked"]
+    reason: str = Field(min_length=1)
+
+
 class ReproRehearsalPayload(BaseModel):
     """A testing dispatch's result for the current authored reproduction."""
 
@@ -481,6 +493,8 @@ class DecisionCreate(BaseModel):
                 ) from exc
         elif self.kind == "blind_triage_verdict":
             BlindTriageVerdictPayload.model_validate(self.payload)
+        elif self.kind == "pass1_qa_verdict":
+            Pass1QAVerdictPayload.model_validate(self.payload)
         elif self.kind == "repro_rehearsal":
             ReproRehearsalPayload.model_validate(self.payload)
         return self

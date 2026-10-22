@@ -39,7 +39,7 @@ No platform-taxonomy row — `direct` is the one platform where the strict gate 
 
 **Severity:** [CRITICAL/HIGH/MEDIUM/LOW]
 
-**CVSS:** CVSS:3.1/[vector] ([score])
+**CVSS:** [complete CVSS v3.1 or v4.0 base vector] ([score])
 
 ---
 

@@ -14,6 +14,7 @@ from urllib.parse import urlparse
 from fastapi import HTTPException, status
 
 from ..db import get_connection
+from . import activity
 from .events import _engagement_or_404
 from .search import canonical_finding_alias, expanded_fts_query
 from .sql_like import escape_like
@@ -326,7 +327,16 @@ def _store_artifact(
     media_type_value = _media_type(relative_path, media_type)
     now = _utcnow_iso()
     linked_finding = _normalize_related_finding_slug(related_finding_slug)
+    content_change = None
     with get_connection() as connection:
+        # Capture the predecessor under the same write lock as the upsert and
+        # its provenance entry. Concurrent registrations must not skip a digest.
+        if not connection.in_transaction:
+            connection.execute("BEGIN IMMEDIATE")
+        previous = connection.execute(
+            "SELECT * FROM assessment_artifacts WHERE engagement_id = ? AND relative_path = ?",
+            (engagement_id, relative_path),
+        ).fetchone()
         _execute_artifact_upsert(
             connection,
             """
@@ -497,7 +507,43 @@ def _store_artifact(
                     "registration"
                 ),
             )
-    return _serialize_artifact(row)
+        if (
+            previous is not None
+            and previous["verified_device"] is None
+            and previous["sha256"]
+            and row["present"]
+            and previous["sha256"] != row["sha256"]
+            and (previous["related_finding_slug"] or row["related_finding_slug"])
+        ):
+            metadata = {
+                "artifact_id": int(row["id"]),
+                "relative_path": relative_path,
+                "previous_sha256": previous["sha256"],
+                "sha256": row["sha256"],
+                "previous_size_bytes": previous["size_bytes"],
+                "size_bytes": row["size_bytes"],
+                "previous_related_finding_slug": previous["related_finding_slug"],
+                "related_finding_slug": row["related_finding_slug"],
+                "previous_producer_agent_id": previous["producer_agent_id"],
+                "producer_agent_id": row["producer_agent_id"],
+                "previous_producer_command_run_id": previous["producer_command_run_id"],
+                "producer_command_run_id": row["producer_command_run_id"],
+            }
+            entry = activity.record_activity_entry(
+                engagement_id,
+                actor_kind="system",
+                actor_name=producer_agent_id or producer_agent_role or "operator",
+                title="artifact content changed",
+                action=relative_path,
+                result="Finding-linked artifact bytes changed; review the current package again.",
+                artifact_ref=relative_path,
+                metadata=metadata,
+            )
+            content_change = {**metadata, "activity_id": entry["id"]}
+    result = _serialize_artifact(row)
+    if content_change is not None:
+        result["content_change"] = content_change
+    return result
 
 
 def register_artifact(
@@ -1003,6 +1049,7 @@ def refresh_artifacts(
     """
     _engagement, root = _engagement_root(engagement_id)
     now = _utcnow_iso()
+    content_changes = []
     with get_connection() as connection:
         if artifact_id is None:
             rows = connection.execute(
@@ -1087,31 +1134,34 @@ def refresh_artifacts(
                     (media_type_value, now, now, int(row["id"])),
                 )
                 continue
-            connection.execute(
-                """
-                UPDATE assessment_artifacts
-                SET media_type = ?, size_bytes = ?, sha256 = ?, preview_text = ?,
-                    indexed_text = ?, present = 1, integrity_status = 'unverified',
-                    updated_at = ?, last_indexed_at = ?
-                WHERE id = ?
-                """,
-                (
-                    media_type_value,
-                    int(file_data["size_bytes"]),
-                    str(file_data["sha256"]),
-                    str(file_data["preview_text"]),
-                    str(file_data["indexed_text"]),
-                    now,
-                    now,
-                    int(row["id"]),
-                ),
+            refreshed = _store_artifact(
+                engagement_id,
+                relative_path=relative_path,
+                kind="",
+                media_type=media_type_value,
+                file_data=file_data,
+                producer_agent_id=None,
+                producer_agent_role=None,
+                producer_command_run_id=None,
+                related_finding_slug=None,
+                related_chain_key=None,
+                related_surface_id=None,
+                related_request_variant_id=None,
             )
+            if "content_change" in refreshed:
+                content_changes.append({
+                    "relative_path": relative_path,
+                    "content_change": refreshed["content_change"],
+                })
         connection.commit()
-    return {
+    result: dict[str, Any] = {
         "refreshed": len(rows),
         "present": present,
         "missing": missing,
     }
+    if content_changes:
+        result["content_changes"] = content_changes
+    return result
 
 
 def clear_finding_link(engagement_id: int, *, artifact_id: int) -> dict[str, Any]:

@@ -1,11 +1,14 @@
-"""Minimal, deterministic CVSS v3.1 base-score calculator."""
+"""Deterministic CVSS v3.1 and v4.0 base scores for finding integrity gates."""
 from __future__ import annotations
 
 import math
 
+from cvss import CVSS4
+from cvss.exceptions import CVSS4Error
+
 
 class CvssVectorError(ValueError):
-    """Raised when a vector is not a complete CVSS v3.1 base vector."""
+    """Raised when a vector is not a complete supported base vector."""
 
 
 _VALUES = {
@@ -21,6 +24,7 @@ _PR_VALUES = {
     "C": {"N": 0.85, "L": 0.68, "H": 0.50},
 }
 _REQUIRED = frozenset({"AV", "AC", "PR", "UI", "S", "C", "I", "A"})
+_REQUIRED_V4 = frozenset({"AV", "AC", "AT", "PR", "UI", "VC", "VI", "VA", "SC", "SI", "SA"})
 
 
 def _parse(vector: str) -> dict[str, str]:
@@ -52,7 +56,23 @@ def _round_up(value: float) -> float:
 
 
 def base_score(vector: str) -> float:
-    """Return the CVSS v3.1 base score for a complete base vector."""
+    """Return a base score using the version declared in the vector itself.
+
+    Findings store base scores only. In particular, CVSS4's calculator also
+    accepts threat/environmental metrics that affect its score; reject those
+    here rather than presenting an adjusted score as a base score.
+    """
+    vector = str(vector or "").strip()
+    version, *fields = vector.split("/")
+    if version == "CVSS:4.0":
+        if {field.partition(":")[0] for field in fields} != _REQUIRED_V4:
+            raise CvssVectorError("vector must contain every v4.0 base metric and no other metrics")
+        try:
+            return float(CVSS4(vector).scores()[0])
+        except CVSS4Error as exc:
+            raise CvssVectorError(str(exc)) from exc
+    if version != "CVSS:3.1":
+        raise CvssVectorError("vector must begin with CVSS:3.1 or CVSS:4.0")
     metrics = _parse(vector)
     impact_subscore = 1.0 - (
         (1.0 - _VALUES["C"][metrics["C"]])

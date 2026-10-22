@@ -1125,6 +1125,23 @@ def record_decision(
             from .findings import validate_claim_equivalence_decision
 
             validate_claim_equivalence_decision(connection, engagement.id, payload)
+        if kind == "pass1_qa_verdict":
+            connection.execute("BEGIN IMMEDIATE")
+            required = ("finding_slug", "packet_id", "auditor_dispatch_agent_id", "reason")
+            if (
+                any(not isinstance(payload.get(key), str) or not payload[key].strip() for key in required)
+                or payload.get("verdict") not in {"pass", "blocked"}
+                or len(payload["packet_id"]) != 64
+                or any(char not in "0123456789abcdef" for char in payload["packet_id"])
+            ):
+                raise HTTPException(status_code=422, detail="invalid Pass 1 QA payload")
+            _ensure_finding_slugs_exist(connection, engagement.id, [payload["finding_slug"]])
+            auditor = connection.execute(
+                "SELECT 1 FROM assessment_dispatches WHERE engagement_id = ? AND agent_id = ?",
+                (engagement.id, payload["auditor_dispatch_agent_id"]),
+            ).fetchone()
+            if auditor is None:
+                raise HTTPException(status_code=422, detail="Pass 1 QA requires a recorded auditor dispatch")
         if kind == "blind_triage_verdict":
             # Existing verdict rows retain their historical attribution. Every new
             # review names real dispatches; distinct IDs prove attribution, not

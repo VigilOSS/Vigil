@@ -4,27 +4,12 @@ The repo's **invariant map**: the things a reader cannot derive by listing files
 or reading one module — which file owns a contract, what must change with it,
 and what silently breaks when it does not.
 
-It is deliberately not an inventory. `ls`, `rg`, and a module's own docstring
-answer "what is this file?" better than a gloss here ever will, and they cannot
-go stale. Implementation detail belongs in the code it describes.
-
 **Size budget: this file stays under 32 KiB**, enforced by
 `orchestrator/backend/tests/test_doc_dead_paths.py`. A map is only useful while it
 can be scanned. If an addition
 would break the budget, something here has stopped earning its place: cut it, or
 push it into a docstring. Rewording until it fits is not the intended response —
 a byte ceiling cannot be satisfied that way.
-
-**Entry format** (enforced by `orchestrator/backend/tests/test_doc_dead_paths.py`):
-
-- Every entry opens with a backticked repo-root-relative path. A concept that
-  owns no file is not a map entry.
-- Symbol names, never line numbers — `module.py:symbol_name`. Line numbers do
-  not survive the next edit.
-- No line over 300 characters.
-- Point at an ADR or a test with `See:` instead of restating its reasoning.
-- Engagement-local paths are written `<engagement>/…` so they are not mistaken
-  for repo paths.
 
 ---
 
@@ -81,6 +66,9 @@ When you are about to copy one of these into a second file, stop and import.
 - `orchestrator/backend/app/api/assessment.py:FindingPatchRequest` owns patchable finding fields;
   `contract_registry.py:FINDING_PATCH_FIELDS` mirrors it. See:
   `orchestrator/backend/tests/test_finding_patch_contract_mirror.py`.
+- `orchestrator/backend/app/services/state_manager/cvss.py:base_score` owns CVSS v3.1/v4.0 base-vector
+  validation and scoring for finding writes and report readiness; `finding_details.py` owns the
+  generated schema vocabulary. See: `orchestrator/backend/tests/test_cvss40.py`.
 - `orchestrator/backend/app/services/state_manager/_common.py:VERIFICATION_STATUSES` owns finding
   verification status; `agent/scripts/assess/lib/contract_registry.py:VERIFICATION_STATUSES` mirrors it.
 - `orchestrator/backend/app/retry_state.py:RETRY_STATES` owns blocked-technique retries; unknown
@@ -295,11 +283,15 @@ A prompt change is **not** prompt-only when the prompt defines an artifact the b
 - `orchestrator/backend/app/services/submission_versions.py` — CLI/UI submission snapshots; neither changes submission status nor submits externally. See ADR 0025.
   `_ELIGIBLE_ATTACHMENT_SQL` owns what the attachment picker offers (never internal submission-workspace files);
   `publication_readiness` and `attachment_page` back the read-only readiness and attachment routes in `api/submissions.py`.
+  `_packet_review_issue` checks package freshness for blind triage and Pass 1 QA;
+  `_pass1_qa_state` projects selection-specific QA. `state_manager/dispatches.py:record_decision` validates auditor attribution.
 - `orchestrator/backend/app/services/activity_feed.py` owns the merged Activity feed (`GET /activity`, `api/activity.py`):
   categories, mirrored-event exclusion, cursors, cached summary-text search, and entity `ref`/`unlinked_reason`.
 - `orchestrator/backend/app/services/artifacts.py:ARTIFACT_SPECS` owns the engagement Files roster: listed root documents only, read with a byte bound.
 - `orchestrator/backend/app/services/assessment_memory.py` and `artifact_index.py` own the bounded
   resume brief and artifact index; output points to drill-down commands instead of embedding data.
+  `artifact_index.py:_store_artifact` records finding-linked digest changes atomically in `activity.py`;
+  registration and refresh expose change receipts to `agent/scripts/assess/commands/artifact.py`.
 - `orchestrator/backend/app/reply_render.py` — the versioned exact-bytes outbound renderer; `agent/scripts/assess/lib/reply_render.py` is an import-only bridge so draft previews and the backend cannot fork the format.
 - `orchestrator/backend/app/services/state_manager/run_accounting.py` owns run identity and lifecycle; `run_inventory.py` owns sources and obligations, `run_evidence.py` owns linked receipts, and `run_comparisons.py` owns comparisons. `proofs.py` owns immutable evidence receipts. See: ADR 0028.
 - `orchestrator/backend/app/services/engagements.py` — filesystem-to-DB sync. Explicit deletes are tombstoned so a later sync cannot resurrect them from leftover files.

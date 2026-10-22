@@ -233,8 +233,23 @@ the internal-report verbs only when the operator explicitly dispatched that mode
    Read finding GET after the write. If it shows `verification_audit.claim_review_pending`, hand the
    finding to the operator for an independent claim-equivalence review. The
    report writer cannot attest that the edited claim is equivalent to the
-   verified one; final publication waits for that review.
-4. **Checklist/QA (Pass 1)** — re-render (`export submission <slug> --platform <same> --draft --overwrite`) and run the pre-submission checklist in `agent/references/submission-format.md`, including every `hygiene_warnings` entry `export submission` reported. Fix gaps at the finding (step 3) and re-render — a fix made only in `submission.md` is lost on the next render. Return `QA PASS` or `QA BLOCKED` with the exact gap.
+   verified one; final publication waits for that review. This is distinct from material proof
+   invalidation: an equivalent claim can retain its terminal verification without fresh proof runs.
+   Keep corrections canonical: `finding retract-claim` records a corrected summary with append-only
+   `details.correction_history`; `finding history` exposes before/after transitions. Read their
+   contracts before choosing the correction path. Neither path grants an editorial bypass for a
+   changed claim; do not move corrections into a separate memo that rendered reports cannot read.
+   Example handoff: after `finding get <slug>`, the independent verifier reads the edited claim,
+   then uses `agent decision --kind claim_equivalence --payload-json` with
+   `{"finding_slug":"<slug>","verdict":"equivalent","claim_transition_id":<verification_audit.claim_transition_id>,"new_claim_sha256":"<verification_audit.current_claim_sha256>","verifier_dispatch_agent_id":"<verifier-dispatch-id>","reason":"<why the verified preconditions, action, and outcome are unchanged>"}`.
+   The ID and digest come from the current GET, not a prior draft. Consult `contract agent decision`
+   for eligible verifier roles; if the claim changed, record `changed` and return it for verification.
+4. **Checklist/QA (Pass 1)** — re-render (`export submission <slug> --platform <same> --draft --overwrite`) and run the pre-submission checklist in `agent/references/submission-format.md`, including every `hygiene_warnings` entry `export submission` reported. Fix gaps at the finding (step 3) and re-render — a fix made only in `submission.md` is lost on the next render. Build a fresh `export triage-packet <slug>` with the intended attachment selection after fixes;
+   record `agent decision --kind pass1_qa_verdict` for that packet with your dispatch ID and the
+   checklist result (`pass` or `blocked`), following `vigil assess contract agent decision`.
+   An editing auditor may record Pass 1; this does not make them an independent Pass 2 reviewer.
+   Re-record after package changes: submission detail reports missing, current, stale, or blocked QA.
+   Return `QA PASS` or `QA BLOCKED` with the exact gap.
 5. **Blind pre-submission triage (Pass 2)** — mandatory for every Medium-or-above finding, per `agent/skills/blind-triage/SKILL.md`. This is an operator-run dispatch of a separate zero-context agent (`agent/phases/phase-8-report.md` step d) — your job is to have authored a finding clean enough to survive it, and to fix and repeat steps 3-4 on anything but `Accept`. Include your actual writer dispatch ID in the handoff so the operator can attribute the reviewed packet; the backend rejects a reviewer who is the writer or the finding author.
 6. **Publish** — once Medium+ clears `Accept` (or Low/Informational clears `QA PASS`), re-run `export submission <slug> --platform <same> --overwrite` (no `--draft`). Read `vigil assess contract export submission` first: this applies the executable final gate and exits non-zero on any failure — resolve gaps at the finding, never bypass it. Then mark the finding: `vigil assess finding update <slug> --status reported --reason "Submission cleared for delivery" --source-name report-writer`. Once the operator has actually sent it to the program, they set `--submission-status submitted` separately (see "Per-Finding Dispatch" above).
 7. `vigil assess agent handoff --from-json <path>` — working artifact `submissions/<slug>/submission.md`; extras `qa_status`, `blind_triage_verdict`.

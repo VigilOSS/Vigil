@@ -1379,7 +1379,7 @@ def _cvss_pair_disagreement(details: dict[str, Any]) -> tuple[str, str] | None:
     except CvssVectorError as exc:
         return (
             "vector_invalid",
-            f"details.cvss_vector '{vector}' is not a valid CVSS v3.1 base "
+            f"details.cvss_vector '{vector}' is not a valid CVSS v3.1 or v4.0 base "
             f"vector: {exc}",
         )
     score = details.get("cvss_score")

@@ -204,3 +204,47 @@ def test_a_path_inside_the_engagement_survives_normalisation(tmp_path):
             canonical_artifact_path(str(engagement), spelling, operation="register artifact")
             == "tools/a.md"
         )
+
+
+def test_register_changed_linked_artifact_warns_without_corrupting_json(
+    monkeypatch, capsys, engagement
+) -> None:
+    row = {
+        "id": 7, "relative_path": "tools/a.md", "present": True,
+        "content_change": {
+            "previous_sha256": "a" * 64, "sha256": "b" * 64,
+            "activity_id": 42,
+        },
+    }
+    _install(monkeypatch, engagement, row)
+    artifact._run_register(_register_args(engagement, "tools/a.md"))
+    output = capsys.readouterr()
+    assert json.loads(output.out) == row
+    assert "content changed" in output.err
+    assert "tools/a.md" in output.err
+    assert "42" in output.err
+    assert "review" in output.err.lower()
+
+
+def test_refresh_changed_linked_artifact_warns_without_corrupting_json(
+    monkeypatch, capsys, engagement
+) -> None:
+    result = {
+        "refreshed": 1, "present": 1, "missing": 0,
+        "content_changes": [{
+            "relative_path": "tools/a.md",
+            "content_change": {
+                "previous_sha256": "a" * 64, "sha256": "b" * 64,
+                "activity_id": 42,
+            },
+        }],
+    }
+    _install(monkeypatch, engagement, result)
+    args = _register_args(engagement, "tools/a.md")
+    args.artifact_id = 7
+    artifact._run_refresh(args)
+    output = capsys.readouterr()
+    assert json.loads(output.out) == result
+    assert "content changed" in output.err
+    assert "tools/a.md" in output.err
+    assert "42" in output.err

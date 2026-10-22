@@ -81,7 +81,7 @@ FINDING_DETAIL_CORE_PROPERTIES: dict[str, dict[str, Any]] = {
     "cvss_vector": {
         "type": "string",
         "minLength": 1,
-        "description": "CVSS 3.1 vector string (e.g. 'CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N').",
+        "description": "Complete CVSS v3.1 or v4.0 base vector; the CVSS:3.1/ or CVSS:4.0/ prefix declares the version. Threat, temporal, environmental, and supplemental metrics are not accepted.",
     },
     "cvss_score": {
         "type": "number",
@@ -92,7 +92,7 @@ FINDING_DETAIL_CORE_PROPERTIES: dict[str, dict[str, Any]] = {
         # readiness blockers at once.
         "minimum": 0,
         "maximum": 10,
-        "description": "CVSS 3.1 base score (0.0-10.0). Must match cvss_vector.",
+        "description": "CVSS v3.1 or v4.0 base score (0.0-10.0). Must match cvss_vector using its declared version.",
     },
     "remediation": {
         "type": "string",

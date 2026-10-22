@@ -97,6 +97,10 @@ const BODY_SHA = "b".repeat(64);
 function readinessFor(overrides: Partial<SubmissionReadiness> = {}): SubmissionReadiness {
   return {
     attachment_ids: [11],
+    pass1_qa: {
+      status: "missing", verdict: null, packet_id: null,
+      auditor_dispatch_agent_id: null, reason: "", decided_at: null, issue: "",
+    },
     final_ready: true,
     blockers: [],
     items: [],
@@ -170,6 +174,10 @@ function detail(slug = "VA-001", overrides: Partial<SubmissionDeskDetail> = {}):
       blockers: [],
     },
     platform: "hackerone",
+    pass1_qa: {
+      status: "missing", verdict: null, packet_id: null,
+      auditor_dispatch_agent_id: null, reason: "", decided_at: null, issue: "",
+    },
     blind_triage: {
       required: true,
       verdict: "Accept@P3",
@@ -880,4 +888,24 @@ describe("SubmissionsTab", () => {
     // Icon plus one text block: the hash is inline in the sentence, not its own flex item.
     expect([...note.children].map((child) => child.tagName.toLowerCase())).toEqual(["svg", "span"]);
   });
+  it("shows stale editing QA separately from independent blind triage", async () => {
+    vi.mocked(listSubmissionDesk).mockResolvedValue(listing([row("VA-001")]));
+    const response = detail();
+    Object.assign(response, { pass1_qa: {
+      status: "stale", verdict: "pass", packet_id: "b".repeat(64),
+      auditor_dispatch_agent_id: "WRITE-VA-001", reason: "Checked preconditions after editing",
+      decided_at: "2026-09-09T13:00:00Z", issue: "Submission body changed after QA",
+    } });
+    response.readiness.pass1_qa = response.pass1_qa;
+    vi.mocked(getSubmissionDesk).mockResolvedValue(response);
+    vi.mocked(getSubmissionReadiness).mockResolvedValue({ finding_slug: "VA-001", ...response.readiness });
+    renderTab();
+    await (await cardHeader()).findByRole("button", { name: "Export v3…" });
+    fireEvent.click(screen.getByRole("tab", { name: /Readiness/ }));
+    expect(screen.getByText("Pass 1 QA")).toBeTruthy();
+    expect(screen.getByText(/Submission body changed after QA/)).toBeTruthy();
+    expect(screen.getByText(/WRITE-VA-001/)).toBeTruthy();
+    expect(screen.getByText("Blind triage")).toBeTruthy();
+  });
+
 });

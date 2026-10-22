@@ -28,8 +28,11 @@ that sounds more general or more serious.
 
 ## Severity is CVSS-derived — the CVSS→band table
 
-HackerOne severity comes **only** from the submitted CVSS:3.1 vector's score, run through the
-standard bands:
+When the program uses standard CVSS v3.1 or v4.0, record the matching base vector and score in
+Vigil using the standard bands below. Select a version enabled by the program. HackerOne can
+also apply asset severity caps or v3.1 environmental adjustments; keep those platform-specific
+results separate from Vigil's base-score pair. See [HackerOne severity](https://docs.hackerone.com/en/articles/8475343-severity)
+and [CVSS v4.0](https://docs.hackerone.com/en/articles/10502498-cvss-4-0).
 
 | Score | Band |
 |---|---|

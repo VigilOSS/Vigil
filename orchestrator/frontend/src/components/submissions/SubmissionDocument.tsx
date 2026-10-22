@@ -497,6 +497,7 @@ export function SubmissionDocument({
     );
   } else {
     const triage = detail.blind_triage;
+    const qa = readiness?.pass1_qa ?? detail.pass1_qa;
     body = (
       <div className="subm-readiness">
         {!readiness || checkingReadiness ? (
@@ -524,6 +525,19 @@ export function SubmissionDocument({
           </ol>
         )}
         <dl className="subm-facts">
+          <div>
+            <dt>Pass 1 QA</dt>
+            <dd>
+              {qa.status === "missing" ? "No checklist verdict recorded" : <>
+                {qa.status} · {qa.auditor_dispatch_agent_id}
+                {qa.packet_id && <> · packet <code>{shortHash(qa.packet_id)}</code></>}
+                {qa.decided_at && <> · <TimeStamp value={qa.decided_at} mode="both" /></>}
+                {qa.issue && <p>{qa.issue}</p>}
+                {qa.reason && <p>{qa.reason}</p>}
+              </>}
+              <span className="subm-muted"> Editing QA; independent blind triage remains separate.</span>
+            </dd>
+          </div>
           <div>
             <dt>Blind triage</dt>
             <dd>

@@ -355,9 +355,9 @@ Only proceed to report generation after validation passes or the operator resolv
 
 ## CVSS Sourcing and Calculation
 
-When a finding was validated by `vulnerability-analyst` or `exploit-developer`, the CVSS data may already be stored in the finding's `details` object as `cvss_vector` and `cvss_score`. Use that pre-computed vector as the starting point. Recalculate only if the final report scope or proved impact would shift at least one CVSS base metric (AV, AC, PR, UI, S, C, I, A) by one or more levels relative to what was recorded at validation time.
+When a finding was validated by `vulnerability-analyst` or `exploit-developer`, the CVSS data may already be stored in the finding's `details` object as `cvss_vector` and `cvss_score`. Use that pre-computed pair as the starting point. Recalculate when the final report scope or proved impact changes a base metric, or the recipient requires a different supported version. CVSS v3.1 and v4.0 use different metrics and scoring algorithms; calculate the pair afresh when changing versions. The shared specialist core owns the supported vector/score contract.
 
-If the report uses CVSS, calculate from the proved attack, not from the imagined worst case:
+For CVSS v3.1, calculate from the proved attack, not from the imagined worst case:
 
 - `AV`: Network for internet-reachable issues
 - `AC`: Low for stable repro, including a race reliably won by ordinary concurrent requests (per the CVSS 3.1 spec, Attack Complexity reflects conditions beyond the attacker's control, not merely that timing is involved). High only when success depends on a narrow window, kernel-level precision, or a chain fragile enough that most attempts fail
@@ -365,6 +365,12 @@ If the report uses CVSS, calculate from the proved attack, not from the imagined
 - `UI`: None unless a victim must click, view, or perform an action
 - `S`: Changed only when impact crosses into another trust domain
 - `C/I/A`: score only what the proof demonstrates
+
+For CVSS v4.0, distinguish attack complexity (`AC`) from deployment/execution requirements
+(`AT`), use its user-interaction values (`N`, `P`, `A`), and assess vulnerable-system
+(`VC/VI/VA`) and subsequent-system (`SC/SI/SA`) impacts separately. Do not map v3.1 `S` or
+`C/I/A` mechanically into v4.0. Preserve every supported precondition in the report regardless
+of which version the recipient requests.
 
 Common patterns:
 

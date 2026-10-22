@@ -126,7 +126,7 @@ appears nowhere in this document: the operator sets it in Bugcrowd's own priorit
 leaf you name already carries its default, and appending it to the `VRT:` line breaks that line's
 verbatim paste into the platform's VRT selector — see `templates/bugcrowd.md`]
 
-**CVSS:** CVSS:3.1/[vector] ([score])
+**CVSS:** [complete CVSS v3.1 or v4.0 base vector] ([score])
 
 **Asset:** [finding canonical_location, verbatim]
 **Run:** [details.run]

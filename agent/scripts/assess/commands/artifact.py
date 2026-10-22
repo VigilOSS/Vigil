@@ -437,6 +437,19 @@ def _run_register(args) -> None:
         client.close()
 
 
+def _warn_content_changes(rows: list[dict]) -> None:
+    for row in rows:
+        change = row.get("content_change")
+        if not isinstance(change, dict):
+            continue
+        print(
+            f"WARN artifact content changed: {row.get('relative_path')} "
+            f"({change.get('previous_sha256')} -> {change.get('sha256')}); "
+            f"history activity {change.get('activity_id')}. Review the current package again.",
+            file=sys.stderr,
+        )
+
+
 def _register_one(client, cfg, args, path: str) -> None:
     canonical_path = _canonical_artifact_path(
         cfg.engagement_dir, path, operation="register artifact"
@@ -446,6 +459,7 @@ def _register_one(client, cfg, args, path: str) -> None:
         artifact_path=canonical_path,
         operation="register artifact",
     )
+    _warn_content_changes([row])
     print(json.dumps(row, indent=2, ensure_ascii=False) if args.as_json else _render_rows([row]))
 
 
@@ -598,6 +612,7 @@ def _register_many(client, cfg, args, paths: list[str]) -> None:
         "outcomes": outcomes,
         "artifacts": artifacts,
     }
+    _warn_content_changes(artifacts)
     if args.as_json:
         print(json.dumps(result, indent=2, ensure_ascii=False))
     else:
@@ -624,6 +639,7 @@ def _run_refresh(args) -> None:
             operation="refresh artifacts",
             nonnegative_counts=("refreshed", "present", "missing"),
         )
+        _warn_content_changes(result.get("content_changes", []))
         print(json.dumps(result, indent=2, ensure_ascii=False) if args.as_json else _refresh_text(result))
     finally:
         client.close()

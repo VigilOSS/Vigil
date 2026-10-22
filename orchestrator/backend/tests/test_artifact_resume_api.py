@@ -270,6 +270,101 @@ def test_artifact_register_search_and_get(client, isolate_settings) -> None:
     assert by_finding.json()[0]["relative_path"] == "notes/VA-047-note.md"
 
 
+@pytest.mark.parametrize("operation", ["single", "bulk", "refresh"])
+def test_reregister_linked_artifact_records_digest_change_history(
+    client, isolate_settings, operation
+) -> None:
+    from app.services import activity
+
+    eng = _write_engagement(isolate_settings["engagements_dir"])
+    assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
+    (eng / "notes").mkdir(exist_ok=True)
+    path = eng / "notes" / "advisory.md"
+    path.write_text("Original Acme advisory", encoding="utf-8")
+    original = _register_note(client, "notes/advisory.md", related_finding_slug="VA-047")
+    path.write_text("Corrected Acme advisory with its precondition", encoding="utf-8")
+    payload = {"path": "notes/advisory.md", "producer_agent_id": "advisory-editor"}
+    if operation == "refresh":
+        response = client.post(f"{BASE}/artifacts/{original['id']}/refresh", json={})
+        assert response.status_code == 200, response.text
+        changes = response.json().get("content_changes")
+        assert changes, "refresh must retain the same digest history as registration"
+        changed = client.get(f"{BASE}/artifacts/{original['id']}").json()
+        changed["content_change"] = changes[0]["content_change"]
+    else:
+        bulk = operation == "bulk"
+        response = client.post(
+            f"{BASE}/artifacts/bulk" if bulk else f"{BASE}/artifacts",
+            json={"items": [payload]} if bulk else payload,
+        )
+        assert response.status_code == 201, response.text
+        changed = response.json()["artifacts"][0] if bulk else response.json()
+    change = changed.get("content_change")
+    assert change is not None, "changed linked artifact must disclose the replaced digest"
+    assert change["previous_sha256"] == original["sha256"]
+    assert change["sha256"] == changed["sha256"]
+    assert change["previous_size_bytes"] == original["size_bytes"]
+    history = activity.list_activity_entries(
+        original["engagement_id"], q="artifact content changed"
+    )["items"]
+    assert len(history) == 1
+    assert history[0]["id"] == change["activity_id"]
+    assert history[0]["metadata"]["previous_sha256"] == original["sha256"]
+    assert history[0]["metadata"]["sha256"] == changed["sha256"]
+    assert history[0]["metadata"]["related_finding_slug"] == "VA-047"
+    assert history[0]["metadata"]["previous_producer_command_run_id"] is None
+    assert history[0]["actor_name"] == ("operator" if operation == "refresh" else "advisory-editor")
+    assert history[0]["artifact_ref"] == "notes/advisory.md"
+    unchanged = _register_note(client, "notes/advisory.md")
+    assert unchanged.get("content_change") is None
+    assert activity.list_activity_entries(
+        original["engagement_id"], q="artifact content changed"
+    )["total"] == 1
+
+
+def test_linked_artifact_update_and_content_change_history_commit_together(
+    client, isolate_settings, monkeypatch
+) -> None:
+    from app.services import activity, artifact_index
+
+    eng = _write_engagement(isolate_settings["engagements_dir"])
+    assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
+    (eng / "notes").mkdir(exist_ok=True)
+    path = eng / "notes" / "advisory.md"
+    path.write_text("Original Acme advisory", encoding="utf-8")
+    original = _register_note(client, "notes/advisory.md", related_finding_slug="VA-047")
+    path.write_text("Corrected Acme advisory", encoding="utf-8")
+
+    def fail_history(*args, **kwargs):
+        raise RuntimeError("history unavailable")
+
+    monkeypatch.setattr(activity, "record_activity_entry", fail_history)
+    with pytest.raises(RuntimeError, match="history unavailable"):
+        artifact_index.register_artifact(original["engagement_id"], path="notes/advisory.md")
+    with db_module.get_connection() as connection:
+        stored = connection.execute(
+            "SELECT sha256, size_bytes FROM assessment_artifacts WHERE id = ?",
+            (original["id"],),
+        ).fetchone()
+    assert stored["sha256"] == original["sha256"]
+    assert stored["size_bytes"] == original["size_bytes"]
+
+
+def test_unlinked_artifact_reregistration_does_not_claim_finding_review_change(
+    client, isolate_settings
+) -> None:
+    eng = _write_engagement(isolate_settings["engagements_dir"])
+    assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
+    (eng / "notes").mkdir(exist_ok=True)
+    path = eng / "notes" / "scratch.md"
+    path.write_text("Acme working note", encoding="utf-8")
+    original = _register_note(client, "notes/scratch.md")
+    path.write_text("Acme working note revised", encoding="utf-8")
+    revised = _register_note(client, "notes/scratch.md")
+    assert revised["sha256"] != original["sha256"]
+    assert revised.get("content_change") is None
+
+
 def test_artifact_contract_has_no_operator_data_suppression_flag(
     client, isolate_settings
 ) -> None:
@@ -462,7 +557,14 @@ def test_artifact_refresh_can_target_one_id_and_clear_its_finding_link(
     refreshed = client.post(f"{BASE}/artifacts/{linked['id']}/refresh")
 
     assert refreshed.status_code == 200, refreshed.text
-    assert refreshed.json() == {"refreshed": 1, "present": 1, "missing": 0}
+    refresh_result = refreshed.json()
+    assert set(refresh_result) == {"refreshed", "present", "missing", "content_changes"}
+    assert {key: refresh_result[key] for key in ("refreshed", "present", "missing")} == {
+        "refreshed": 1, "present": 1, "missing": 0,
+    }
+    assert len(refresh_result["content_changes"]) == 1
+    assert refresh_result["content_changes"][0]["relative_path"] == "notes/linked.md"
+    assert refresh_result["content_changes"][0]["content_change"]["previous_sha256"] == linked["sha256"]
     assert client.get(f"{BASE}/artifacts/{linked['id']}").json()["content"] == "new linked"
     untouched = client.get(
         f"{BASE}/artifacts/search", params={"q": "new other"}

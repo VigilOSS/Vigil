@@ -101,6 +101,7 @@ export type SubmissionAttachmentRow = {
 export type SubmissionBlockerItem = { message: string; fix: string; command: string };
 
 export type SubmissionReadiness = {
+  pass1_qa: SubmissionPass1QA;
   attachment_ids: number[];
   final_ready: boolean;
   blockers: string[];
@@ -154,11 +155,22 @@ export type SubmissionDeskWorkspace = {
   external_body_valid_utf8: boolean;
 };
 
+export type SubmissionPass1QA = {
+  status: "missing" | "current" | "stale" | "blocked";
+  verdict: "pass" | "blocked" | null;
+  packet_id: string | null;
+  auditor_dispatch_agent_id: string | null;
+  reason: string;
+  decided_at: string | null;
+  issue: string;
+};
+
 export type SubmissionDeskDetail = {
   finding: AssessmentFindingDetail;
   workspace: SubmissionDeskWorkspace;
   platform: SubmissionPlatform | null;
   blind_triage: SubmissionBlindTriage;
+  pass1_qa: SubmissionPass1QA;
   latest_version: SubmissionVersion | null;
   default_attachment_ids: number[];
   default_attachment_source: "blind_triage" | "latest_version" | "none";

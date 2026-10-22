@@ -60,7 +60,10 @@ satisfy independently.
 
 **Identifier complexity matters for IDOR:** An IDOR on `/api/records/{uuid}` where the UUID is not leaked anywhere is materially less exploitable than `/api/records/{id}` where id is a sequential integer. The former requires the attacker to already know the target; the latter lets them sweep every record. Rate accordingly.
 
-**Code-only without runtime proof:** A vulnerability pattern confirmed in source code but never demonstrated against a running instance is less certain than one with a captured request/response. Code paths may be dead, gated by middleware not visible in the snippet, or patched at deploy time. Drop severity at least one tier from what a dynamically-proved equivalent would earn.
+**Source evidence and verification confidence:** Evaluate reachability, guards, deployment conditions,
+and the supported attacker outcome. Score the established attack path using its actual CVSS metrics;
+source-only evidence does not impose an automatic severity-tier reduction. Record unresolved proof
+gaps through the verification lifecycle and send them to the appropriate verifier before reporting.
 
 **Missing headers, stack traces, error messages, schema exposure, and configuration observations** are informational unless they directly enable a higher-impact attack. Rate these as informational — the theory that they "could help an attacker" is speculative chaining, not proved impact.
 

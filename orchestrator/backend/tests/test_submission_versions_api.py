@@ -1064,6 +1064,51 @@ def test_export_rejects_changed_or_unregistered_attachments(
     assert count == 0
 
 
+def test_export_rejects_accepted_attachment_after_changed_bytes_are_reregistered(
+    client, isolate_settings
+) -> None:
+    finding = _seed_reportable_finding(client, isolate_settings)
+    submission_path, context_path = _write_workspace(
+        client, isolate_settings, finding, reviewed=False
+    )
+    root = isolate_settings["engagements_dir"] / ENGAGEMENT_KEY
+    attachment = root / "evidence" / "capture.txt"
+    attachment.parent.mkdir(parents=True, exist_ok=True)
+    attachment.write_text("Reviewed Acme capture bytes\n", encoding="utf-8")
+    payload = {
+        "path": "evidence/capture.txt", "kind": "proof",
+        "related_finding_slug": "VA-001",
+    }
+    registered = client.post(f"{BASE}/artifacts", json=payload)
+    assert registered.status_code == 201, registered.text
+    reviewed_attachment = registered.json()
+    _approve_packet(client, isolate_settings, "VA-001", [reviewed_attachment])
+    accepted = client.get(
+        f"{BASE}/submissions/VA-001/readiness?attachment_id={reviewed_attachment['id']}"
+    )
+    assert accepted.status_code == 200, accepted.text
+    assert accepted.json()["blockers"] == []
+
+    attachment.write_text("Revised Acme capture bytes after review\n", encoding="utf-8")
+    updated = client.post(f"{BASE}/artifacts", json=payload)
+    assert updated.status_code == 201, updated.text
+    assert updated.json()["id"] == reviewed_attachment["id"]
+    assert updated.json()["sha256"] != reviewed_attachment["sha256"]
+    assert updated.json()["content_change"]["previous_sha256"] == reviewed_attachment["sha256"]
+
+    refused = _export(
+        client, "VA-001", submission_path, context_path,
+        attachment_ids=[reviewed_attachment["id"]],
+    )
+    assert refused.status_code == 409, refused.text
+    assert "different external attachments" in refused.json()["detail"]
+    with get_connection() as connection:
+        count = connection.execute(
+            "SELECT COUNT(*) FROM assessment_submission_versions WHERE status = 'complete'"
+        ).fetchone()[0]
+    assert count == 0
+
+
 def test_completed_versions_are_database_immutable_and_report_staleness(
     client, isolate_settings
 ) -> None:

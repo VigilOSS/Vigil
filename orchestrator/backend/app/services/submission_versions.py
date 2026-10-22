@@ -624,7 +624,7 @@ def _packet_attachment_identities(
     return sorted(identities)
 
 
-def _blind_triage_issue(
+def _packet_review_issue(
     engagement_id: int,
     slug: str,
     root: Path,
@@ -632,19 +632,27 @@ def _blind_triage_issue(
     platform: str,
     attachments: list[tuple[dict[str, Any], bytes]],
     connection: Any | None = None,
+    *,
+    decision_kind: str = "blind_triage_verdict",
 ) -> str | None:
     """Compare the latest verdict with the exact external package being exported."""
-    if not _blind_triage_required(workspace["finding"]):
+    is_qa = decision_kind == "pass1_qa_verdict"
+    label = "Pass 1 QA" if is_qa else "blind triage"
+    if not is_qa and not _blind_triage_required(workspace["finding"]):
         return None
-    decision = _latest_decision(engagement_id, "blind_triage_verdict", slug, connection)
+    decision = _latest_decision(engagement_id, decision_kind, slug, connection)
     if decision is None:
-        return "blind triage has no verdict for the current finding"
+        return f"{label} has no verdict for the current finding"
     payload = json.loads(decision["payload_json"])
-    if not re.fullmatch(r"Accept@P[1-5]", str(payload.get("verdict") or "")):
-        return "latest blind triage verdict does not accept this finding"
+    accepted = (
+        payload.get("verdict") == "pass" if is_qa
+        else bool(re.fullmatch(r"Accept@P[1-5]", str(payload.get("verdict") or "")))
+    )
+    if not accepted:
+        return f"latest {label} verdict does not accept this finding"
     packet_id = str(payload.get("packet_id") or "")
     if not re.fullmatch(r"[0-9a-f]{64}", packet_id):
-        return "latest blind triage verdict has no content-addressed packet"
+        return f"latest {label} verdict has no content-addressed packet"
     try:
         _, raw = _read_stable_file(
             root,
@@ -654,33 +662,33 @@ def _blind_triage_issue(
         )
         manifest = json.loads(raw)
     except (HTTPException, ValueError) as exc:
-        return f"blind triage packet manifest is unavailable or invalid: {exc}"
+        return f"{label} packet manifest is unavailable or invalid: {exc}"
     if not isinstance(manifest, dict) or manifest.get("packet_id") != packet_id:
-        return "blind triage packet manifest does not match its verdict"
+        return f"{label} packet manifest does not match its verdict"
     identity = {key: value for key, value in manifest.items() if key not in {"packet_id", "outputs"}}
     if _sha256(_canonical_json(identity).encode("utf-8")) != packet_id:
-        return "blind triage packet identity is invalid"
+        return f"{label} packet identity is invalid"
     inputs = manifest.get("inputs")
     if not isinstance(inputs, dict):
-        return "blind triage packet inputs are missing"
+        return f"{label} packet inputs are missing"
     if (
         manifest.get("finding_slug") != slug
         or manifest.get("platform") != platform
         or (inputs.get("submission") or {}).get("sha256") != workspace["external_body_sha256"]
     ):
-        return "blind triage verdict covers a different submission body or platform"
+        return f"{label} verdict covers a different submission body or platform"
     selected = sorted(
         (int(row["artifact_id"]), str(row["sha256"]), int(row["size_bytes"]))
         for row, _ in attachments
     )
     packet_attachments = inputs.get("attachments")
     if not isinstance(packet_attachments, list):
-        return "blind triage packet does not declare selected attachments"
+        return f"{label} packet does not declare selected attachments"
     reviewed = _packet_attachment_identities(packet_attachments)
     if reviewed is None:
-        return "blind triage packet attachments do not identify registered artifacts"
+        return f"{label} packet attachments do not identify registered artifacts"
     if selected != reviewed:
-        return "blind triage verdict covers different external attachments"
+        return f"{label} verdict covers different external attachments"
     _, brief = _read_stable_file(
         root, "ENGAGEMENT.md", max_bytes=WORKSPACE_MARKDOWN_MAX_BYTES,
         label="blind triage program brief",
@@ -700,7 +708,7 @@ def _blind_triage_issue(
             and (inputs.get("verdict_rubric") or {}).get("sha256") != _sha256(rubric)
         )
     ):
-        return "blind triage verdict covers an older program brief or rubric"
+        return f"{label} verdict covers an older program brief or rubric"
     return None
 
 
@@ -1290,7 +1298,7 @@ def _complete_version(engagement_id: int, row: Mapping[str, Any]) -> dict[str, A
             "finding": dict(finding),
             "external_body_sha256": workspace_source.get("external_body_sha256"),
         }
-        triage_issue = _blind_triage_issue(
+        triage_issue = _packet_review_issue(
             engagement_id, str(finding["slug"]), root, reviewed_workspace,
             str(row["platform"]), [(item, b"") for item in attachment_sources],
             connection,
@@ -1415,7 +1423,7 @@ def export_version(
                 ),
             )
         attachments.append(attachment)
-    triage_issue = _blind_triage_issue(
+    triage_issue = _packet_review_issue(
         engagement_id, slug, root, workspace, platform, attachments,
     )
     if triage_issue:
@@ -1720,8 +1728,8 @@ def _blind_triage_state(
     root: Path,
     finding: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """What the latest blind-triage verdict reviewed, for display and the
-    default attachment selection. Export gating stays in ``_blind_triage_issue``.
+    """What the latest packet review covered, for display and default selection.
+    Export gating stays in ``_packet_review_issue``.
 
     ``attachment_ids`` is ``None`` unless the packet manifest is readable and
     every reviewed attachment names a registered artifact.
@@ -1802,6 +1810,48 @@ def _blind_triage_state(
         )
     else:
         state["attachment_ids"] = [artifact_id for artifact_id, _sha, _size in identities]
+    return state
+
+
+def _pass1_qa_state(
+    engagement_id: int,
+    slug: str,
+    root: Path,
+    attachment_ids: list[int],
+    workspace: dict[str, Any] | None,
+    workspace_error: str,
+) -> dict[str, Any]:
+    """Visible editing QA history; it never substitutes for independent triage."""
+    decision = _latest_decision(engagement_id, "pass1_qa_verdict", slug)
+    state: dict[str, Any] = {
+        "status": "missing", "verdict": None, "packet_id": None,
+        "auditor_dispatch_agent_id": None, "reason": "", "decided_at": None, "issue": "",
+    }
+    if decision is None:
+        return state
+    payload = json.loads(decision["payload_json"])
+    state.update(
+        verdict=payload.get("verdict"), packet_id=payload.get("packet_id"),
+        auditor_dispatch_agent_id=payload.get("auditor_dispatch_agent_id"),
+        reason=payload.get("reason", ""), decided_at=decision["created_at"],
+    )
+    if payload.get("verdict") != "pass":
+        state.update(status="blocked", issue=payload.get("reason", "QA did not pass"))
+        return state
+    if workspace is None:
+        state.update(status="stale", issue=workspace_error or "submission workspace is unavailable")
+        return state
+    try:
+        rows, errors, _total = _resolve_attachments(
+            engagement_id, root, attachment_ids, verify_bytes=True,
+        )
+        issue = errors[0] if errors else _packet_review_issue(
+            engagement_id, slug, root, workspace, str(workspace["context"].get("platform") or ""),
+            [(row, b"") for row in rows], decision_kind="pass1_qa_verdict",
+        )
+    except HTTPException as exc:
+        issue = str(exc.detail)
+    state.update(status="stale" if issue else "current", issue=issue or "")
     return state
 
 
@@ -2031,7 +2081,7 @@ def _publication_readiness(
         blockers.extend(attachment_errors)
         if not attachment_errors:
             try:
-                triage_issue = _blind_triage_issue(
+                triage_issue = _packet_review_issue(
                     engagement_id, slug, root, dict(workspace), platform,
                     [(row, b"") for row in attachment_rows],
                 )
@@ -2090,6 +2140,10 @@ def publication_readiness(
         workspace=workspace,
         workspace_error=workspace_error,
         verify_bytes=True,
+    )
+    readiness["pass1_qa"] = _pass1_qa_state(
+        engagement_id, canonical_slug, _engagement_root(engagement_id), ids,
+        workspace, workspace_error,
     )
     return {"finding_slug": canonical_slug, **readiness}
 
@@ -2165,6 +2219,9 @@ def submission_detail(
         workspace=workspace,
         workspace_error=workspace_error,
         verify_bytes=True,
+    )
+    readiness["pass1_qa"] = _pass1_qa_state(
+        engagement_id, canonical_slug, root, default_ids, workspace, workspace_error,
     )
     submission_path, context_path = _workspace_paths(canonical_slug)
     if workspace is not None:
@@ -2258,6 +2315,7 @@ def submission_detail(
         "workspace": workspace_payload,
         "platform": platform,
         "blind_triage": triage,
+        "pass1_qa": readiness["pass1_qa"],
         "latest_version": latest_version,
         "default_attachment_ids": default_ids,
         "default_attachment_source": default_source,

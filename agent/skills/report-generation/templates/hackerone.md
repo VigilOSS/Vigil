@@ -39,7 +39,7 @@ row above empty.
 
 **Severity:** [CRITICAL/HIGH/MEDIUM/LOW]
 
-**CVSS:** CVSS:3.1/[vector] ([score])
+**CVSS:** [complete base vector in a CVSS version enabled by the program] ([score])
 
 ---
 
@@ -77,9 +77,9 @@ the steps — this is the severity justification. See "Attack Scenario vs Impact
   `CWE-20`). If two CWEs are plausible, use the one the PoC actually exercises. Confirm that the
   candidate is available in HackerOne's current weakness selector and use MITRE CWE to distinguish
   it from broader parent categories.
-- **Severity is CVSS-derived, not a separate scale.** HackerOne computes the Critical/High/
-  Medium/Low bucket directly from the submitted CVSS:3.1 vector through its own calculator — don't
-  hand-pick a severity that disagrees with the vector; fix the vector instead. See
+- **CVSS-derived severity.** Use a CVSS version enabled by the program; HackerOne supports
+  standard v3.1 and v4.0 calculators. Keep Vigil's base vector and score consistent. Platform
+  asset severity caps or environmental adjustments are separate from that base pair. See
   `agent/references/reporting/hackerone-weaknesses.md` for the CVSS→band table and the guardrail
   that weakness and severity are decoupled — never carry a Bugcrowd P-rating into this field.
 - **PoC is an operator-side attachment, not a rendered body line.** If the proof is a script, stage

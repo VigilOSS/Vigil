@@ -26,6 +26,7 @@ BASE = f"/engagements/{ENGAGEMENT_KEY}/assessment"
 _HIGH_VECTOR = "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N"  # 7.5
 _HIGH_SCORE = 7.5
 _INFO_VECTOR = "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:N"  # 0.0
+_V4_VECTOR = "CVSS:4.0/AV:N/AC:H/AT:P/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N"
 
 
 def _seed(client, isolate_settings) -> None:
@@ -349,3 +350,46 @@ def test_an_info_finding_is_representable_end_to_end(client, isolate_settings):
         if blocker.get("slug") == "VA-014"
         and blocker["kind"] in {"severity_cvss_mismatch", "cvss_vector_score_mismatch"}
     ], blockers
+
+
+def test_record_and_patch_cvss40_preserve_the_vector_and_check_merged_scores(client, isolate_settings):
+    _seed(client, isolate_settings)
+    created = _record(client, "VA-020", severity="critical", details={
+        "evidence": "Acme proof", "impact": "Acme impact",
+        "cvss_score": 9.2, "cvss_vector": _V4_VECTOR,
+    })
+    assert created.status_code == 201, created.text
+    assert client.get(f"{BASE}/findings/VA-020").json()["details"]["cvss_vector"] == _V4_VECTOR
+
+    bad = client.patch(f"{BASE}/findings/VA-020", json={"details": {"cvss_score": 9.8}})
+    assert bad.status_code == 400, bad.text
+    assert "9.2" in bad.json()["detail"]
+    assert client.get(f"{BASE}/findings/VA-020").json()["details"]["cvss_score"] == 9.2
+
+    changed_version = client.patch(f"{BASE}/findings/VA-020", json={"details": {
+        "cvss_score": _HIGH_SCORE, "cvss_vector": _HIGH_VECTOR,
+    }})
+    assert changed_version.status_code == 200, changed_version.text
+    restored = client.patch(f"{BASE}/findings/VA-020", json={"details": {
+        "cvss_score": 9.2, "cvss_vector": _V4_VECTOR,
+    }})
+    assert restored.status_code == 200, restored.text
+    # Seed a report candidate to exercise readiness's independent CVSS backstop.
+    with db_module.get_connection() as connection:
+        connection.execute(
+            "UPDATE assessment_findings SET verification_status='confirmed' WHERE slug='VA-020'"
+        )
+    blockers = client.get(f"{BASE}/report-readiness").json()["blockers"]
+    assert any(b.get("slug") == "VA-020" and b["kind"] == "finding_field_quality" for b in blockers)
+    assert not [b for b in blockers if b.get("slug") == "VA-020"
+                and b["kind"] in {"cvss_vector_invalid", "cvss_vector_score_mismatch", "severity_cvss_mismatch"}], blockers
+
+
+def test_record_rejects_cvss40_score_mismatch(client, isolate_settings):
+    _seed(client, isolate_settings)
+    response = _record(client, "VA-021", severity="critical", details={
+        "evidence": "Acme proof", "impact": "Acme impact",
+        "cvss_score": 9.8, "cvss_vector": _V4_VECTOR,
+    })
+    assert response.status_code == 400, response.text
+    assert "computes to 9.2" in response.json()["detail"]

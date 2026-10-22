@@ -133,6 +133,12 @@ Bad: "IDOR vulnerability found." Good: "IDOR in /api/users/{id} allows anonymous
 
 If your CVSS score does not fall within the matching severity range, adjust one or the other before recording.
 
+Record one complete CVSS v3.1 or v4.0 base vector in `details.cvss_vector` and its matching
+base score in `details.cvss_score`; the vector prefix declares the version. Use the recipient's
+required version for an external submission. Threat, temporal, environmental, and supplemental
+metrics are not accepted in these base-score fields. The backend validates the pair using that
+version's scoring algorithm; do not translate metrics or reuse a score across versions.
+
 The recording command's canonical payload shape is `vigil assess contract finding record`;
 read it before your first record, per the Contract-First Rule below. The full recording
 rules (dedup, chain metadata, the `notes` replayable-commands requirement) live in

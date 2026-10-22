@@ -37,7 +37,7 @@ that's the normal report-writer entrypoint.
 
 **Severity:** [CRITICAL/HIGH/MEDIUM/LOW]
 
-**CVSS:** CVSS:3.1/[vector] ([score])
+**CVSS:** [complete base vector in the program's required CVSS version] ([score])
 
 ---
 
