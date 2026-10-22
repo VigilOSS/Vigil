@@ -10,7 +10,7 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![CI](https://github.com/VigilOSS/Vigil/actions/workflows/ci.yml/badge.svg)](https://github.com/VigilOSS/Vigil/actions/workflows/ci.yml)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
-[![Version](https://img.shields.io/badge/version-2.1.1-green.svg)](https://github.com/VigilOSS/Vigil/releases/tag/v2.1.1)
+[![Version](https://img.shields.io/badge/version-2.1.2-green.svg)](https://github.com/VigilOSS/Vigil/releases/tag/v2.1.2)
 
 </div>
 
@@ -94,7 +94,7 @@ Install [uv](https://docs.astral.sh/uv/getting-started/installation/), then inst
 It includes the CLI, backend, prompts, documentation, and prebuilt UI; Git and Node are not needed.
 
 ```bash
-uv tool install --from https://github.com/VigilOSS/Vigil/releases/download/v2.1.1/vigil-2.1.1-py3-none-any.whl vigil
+uv tool install --from https://github.com/VigilOSS/Vigil/releases/download/v2.1.2/vigil-2.1.2-py3-none-any.whl vigil
 ```
 
 Install and sign in to an agent client before starting an operator. Engagement clients:
@@ -106,7 +106,8 @@ Project folder once, enable its local plugin, and begin a fresh task.
 
 Start without an engagement ID to choose an existing engagement by recent work
 or client opening, or choose **Create new engagement** using the same creation
-questions. This picker works for every client; an explicit ID skips it:
+questions. This picker works for every client and supports fzf search and previews.
+An explicit ID skips it; omitted client and mode flags are asked for next:
 
 ```bash
 vigil engagement start --client zcode

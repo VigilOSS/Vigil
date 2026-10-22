@@ -40,6 +40,29 @@ def project(root, key="acme", *, kind="remediation", created="2026-10-19T09:00:0
     return directory, repository
 
 
+def test_remediation_start_uses_shared_fzf_picker_with_create_action(onboarding, monkeypatch):
+    from vigil_cli import prompts
+
+    root, calls = onboarding
+    project(root, "acme-a")
+    selected, _ = project(root, "acme-b")
+    monkeypatch.setattr(cli.sys, "stdin", TerminalInput("1\n"))
+    monkeypatch.setattr(cli.term, "is_terminal", lambda _stream: True)
+    monkeypatch.setattr(prompts, "terminal_question", lambda *args, **kwargs: kwargs["choices"][0])
+    monkeypatch.setattr("shutil.which", lambda _name: "/usr/bin/fzf")
+    previews = []
+
+    def pick(lines, details, **kwargs):
+        assert "Create new remediation engagement" in lines[-1]
+        previews.extend(details.values())
+        return 1
+
+    monkeypatch.setattr(cli.term, "fuzzy_pick", pick)
+    cli.main(["--root", str(root), "remediation", "start", "--client", "claude"])
+    assert calls[0][1] == selected
+    assert any("recent" in preview and "acme-b" in preview for preview in previews)
+
+
 @pytest.mark.parametrize("arguments", [[], ["--help"], ["start", "--help"]])
 def test_remediation_entry_help_explains_start_without_resolving_project(onboarding, monkeypatch, capsys, arguments):
     root, calls = onboarding
@@ -185,7 +208,7 @@ def test_recovery_picker_exposes_only_existing_remediation_projects(onboarding, 
     monkeypatch.setattr(cli.sys, "stdin", TerminalInput())
     seen = []
 
-    def select(_label, _default, choices):
+    def select(_label, _default, choices, **kwargs):
         seen.extend(choices)
         return choices[0]
 

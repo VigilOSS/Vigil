@@ -971,7 +971,10 @@ def _start_engagement_key(args: argparse.Namespace, install_root: Path) -> str:
         choices.append("Create new remediation engagement")
     if not choices:
         raise SystemExit("No remediation engagements are available for recovery; pass -k with the original engagement key")
-    selected = prompt_choice("Select remediation engagement", choices[0], choices)
+    details = [f"{term.single_line(choice)}\n\nWorkspace: {term.single_line(row.path)}" for row, choice in zip(rows, choices)]
+    if not recovering:
+        details.append("Create a remediation engagement using the interactive creation questions.")
+    selected = prompt_choice("Select remediation engagement", choices[0], choices, searchable=True, details=details)
     if not recovering and selected == choices[-1]:
         parser = getattr(args, "remediation_create_parser", None)
         create = getattr(args, "remediation_create", None)

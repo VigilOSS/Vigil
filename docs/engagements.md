@@ -35,14 +35,16 @@ out-of-band callbacks.
 
 The creation type (`--type web` or `--type code`) selects the first durable track.
 Offensive engagements persist enabled tracks and their independent phases in
-`scope.json.tracks`; the stored engagement type is `offensive`. Use
-`vigil engagement add-track <key> web|code` to enable the second explicitly.
+`scope.json.tracks`; the stored engagement type is `offensive`. Starting a web or code
+session initializes that track when needed, recording the transition and preserving
+existing phases. `vigil engagement add-track <key> web|code` also initializes a track
+without launching a session.
 
-A session mode selects one enabled track's operator prompt for one client process. A single
-enabled track is selected automatically; with two tracks, an interactive `start` asks for
-one mode unless `--mode web` or `--mode code` is supplied. Noninteractive starts require
-the explicit mode. Change mode by starting a new client process. Selecting a session mode does
-not enable a track, reset its phase, or change scope.
+A session mode selects one operator prompt for one client process. Every offensive
+engagement offers both web and code. Interactive `start` asks for a mode whenever
+`--mode` is omitted, even with one initialized track. Noninteractive starts infer the
+sole initialized track and require `--mode` when there are two. Change mode by starting
+a new client process. Mode selection preserves target scope and exploit policy.
 
 `vigil engagement mode <key>` inspects enabled tracks, phases, and prompt paths.
 Inside a generated OpenCode or ZCode Project folder (including subfolders), Vigil
@@ -60,11 +62,15 @@ environment identities are reported for operator review.
 
 ## Starting a session
 
-`start` requires `--client`. With no explicit key, interactive starts always show the
-shared picker, even inside an engagement or with a persisted selection. Choose an
+Interactive `start` asks for engagement, client, then mode, skipping choices supplied
+as flags. With no explicit key, starts always show the shared picker, even inside an
+engagement or with a persisted selection. Choose an
 existing engagement or **Create new engagement**. Rows show status, tracks and recent
 activity; ordering uses meaningful recorded work and official client launch/open history,
-falling back to creation. Missing history is labeled. Noninteractive starts require a key.
+falling back to creation. Missing history is labeled. Both engagement and remediation
+startup use fzf search and workspace previews when fzf is installed; otherwise the
+terminal picker supports typing to filter. Questions use shared Rich presentation.
+Noninteractive engagement starts require a key and `--client`.
 
 Legacy CLI clients start from the engagement root with their engagement environment
 ([what the launcher exports](agent-clients.md#what-the-launcher-exports)). OpenCode and

@@ -51,6 +51,7 @@ from .engagements import (
     list_engagements,
     mutate_scope_file,
     plan_engagement,
+    prepare_engagement_mode,
     print_shell_cd_init,
     remediation_repository,
     remove_out_of_scope,
@@ -120,6 +121,7 @@ from .up import UpOptions, run_up
 
 
 _CREATE_ENGAGEMENT_TYPES = ["web", "code", "android", "remediation"]
+_ENGAGEMENT_CLIENTS = ["codex", "claude", "opencode", "zcode", "goose", "kimi", "pi"]
 
 
 # Explain release/workspace ownership on first initialization or CLI drift.
@@ -622,7 +624,7 @@ def _main(argv: list[str], *, project_mode: str | None = None) -> None:
     mode_p = engagement_sub.add_parser("mode", help="Inspect enabled tracks, phases, prompts, and session selection")
     mode_p.add_argument("key", nargs="?")
     mode_p.add_argument("--json", action="store_true")
-    mode_p.add_argument("--client", choices=["codex", "claude", "opencode", "zcode", "goose", "kimi", "pi"],
+    mode_p.add_argument("--client", choices=_ENGAGEMENT_CLIENTS,
                         help="Client for recovery commands (default: the bound session's client)")
     client_check_p = engagement_sub.add_parser(
         "client-check", help="Inspect client prerequisites without launching or changing services",
@@ -639,17 +641,18 @@ def _main(argv: list[str], *, project_mode: str | None = None) -> None:
     cd_p = engagement_sub.add_parser("cd-init")
     cd_p.add_argument("shell", choices=["zsh", "bash"], default="zsh", nargs="?")
     start_p = engagement_sub.add_parser(
-        "start", description="Start one client process in one enabled track. A single track "
-        "selects automatically; choose a mode interactively for two tracks or pass --mode. "
-        "Without an engagement key, a terminal shows the recent-engagement picker. "
-        "Noninteractive starts require a key and an explicit mode when ambiguous. "
+        "start", description="Start one client process with the selected operator context. "
+        "On a terminal, choose engagement, client, then mode; supplied flags skip their questions. "
+        "Web and code workflows are available to every offensive engagement. "
+        "Noninteractive starts require a key, --client, and an explicit mode when ambiguous. "
         "Switch modes by starting a new process.",
     )
     start_p.add_argument("key", nargs="?")
     start_p.add_argument("--select", action="store_true")
-    start_p.add_argument("--client", choices=["codex", "claude", "opencode", "zcode", "goose", "kimi", "pi"], required=True)
+    start_p.add_argument("--client", choices=_ENGAGEMENT_CLIENTS,
+                         help="Agent client; asks on a terminal when omitted")
     start_p.add_argument("--mode", choices=["web", "code", "blue", "remediation", "android"],
-                         help="Session prompt for this client process; asks on a terminal when ambiguous, otherwise required")
+                         help="Operator context for this session; asks on a terminal when omitted")
     start_p.add_argument("--thinking", choices=["off", "high", "max"], default=None,
                          help="Deprecated. DeepSeek thinking level for --client opencode: off=disabled, "
                               "high=on, max=maximum (default: client default — thinking on). "
@@ -1876,15 +1879,27 @@ def _select_start_mode(path: Path, requested: str | None, *, client: str, instal
     # Session environment, current-directory resolution and persisted pointers
     # cannot choose a mode for a new official start.
     modes = _start_modes(path)
+    choices = ["web", "code"] if modes.keys() & {"web", "code"} else list(modes)
     if requested:
-        selected = resolve_engagement_mode(path, requested, client=client, install_root=install_root)
-    elif len(modes) > 1 and sys.stdin.isatty():
-        selected = _prompt_choice("Select operator mode", next(iter(modes)), list(modes))
+        selected = requested
+    elif sys.stdin.isatty():
+        selected = _prompt_choice("Select operator mode", next(iter(modes)), choices)
     else:
         selected = resolve_engagement_mode(path, client=client, install_root=install_root)
     if reason := _start_client_limit(client, {selected}):
         raise SystemExit(reason)
-    return selected
+    return prepare_engagement_mode(install_root, path, selected, client=client)
+
+
+def _select_start_client(path: Path, requested: str | None) -> str:
+    if requested:
+        return requested
+    if not sys.stdin.isatty():
+        raise SystemExit("Noninteractive engagement start requires --client")
+    modes = set(_start_modes(path))
+    clients = [client for client in _ENGAGEMENT_CLIENTS
+               if not _start_client_limit(client, modes)]
+    return _prompt_choice("Select client", clients[0], clients)
 
 
 def _resolve_start_engagement(args: argparse.Namespace, install_root: Path) -> Path:
@@ -1901,7 +1916,7 @@ def _resolve_start_engagement(args: argparse.Namespace, install_root: Path) -> P
         try:
             modes = set(_start_modes(row.path))
             reason = _start_client_limit(args.client, {args.mode} if args.mode else modes)
-            if args.mode and args.mode not in modes:
+            if args.mode and args.mode not in modes and not (args.mode in {"web", "code"} and modes & {"web", "code"}):
                 reason = f"mode {args.mode} is not enabled"
         except (OSError, ValueError, SystemExit) as exc:
             reason = f"scope repair required: {exc}"
@@ -1910,7 +1925,9 @@ def _resolve_start_engagement(args: argparse.Namespace, install_root: Path) -> P
         limit = f" [unsupported: {reason}]" if reason else ""
         choices.append(f"{row.key} · {row.status} · {row.engagement_type} · {row.current_phase} · {row.target} · recent {recent}{partial}{limit}")
     choices.append("Create new engagement")
-    selected = _prompt_choice("Select engagement", choices[0], choices)
+    details = [f"{term.single_line(choice)}\n\nWorkspace: {term.single_line(row.path)}" for row, choice in zip(rows, choices)]
+    details.append("Create an engagement using the interactive creation questions.")
+    selected = _prompt_choice("Select engagement", choices[0], choices, searchable=True, details=details)
     if selected == choices[-1]:
         # The original parser supplies the complete canonical wizard defaults;
         # creation returns its committed result, never parsed CLI output.
@@ -2014,6 +2031,7 @@ def _engagement(args: argparse.Namespace, install_root: Path) -> None:
                 file=sys.stderr,
             )
         path = _resolve_start_engagement(args, install_root)
+        args.client = _select_start_client(path, args.client)
         args.mode = _select_start_mode(path, args.mode, client=args.client, install_root=install_root)
         if not args.skip_preflight:
             _preflight_engagement_start(install_root, path, args.client, mode=args.mode)

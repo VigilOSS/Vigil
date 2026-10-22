@@ -7,9 +7,11 @@ expose the `vigil-*` session commands.
 
 For every client, `vigil engagement start --client <client>` opens the shared
 recent-engagement picker with a **Create new engagement** action. An explicit
-engagement key skips that picker. If the selected engagement has two enabled
-tracks, an interactive start asks for one mode unless `--mode` is supplied;
-noninteractive starts require an explicit key and any ambiguous mode.
+engagement key skips that picker. Interactive starts then ask for any omitted client
+and mode. Both web and code are available for offensive engagements; startup initializes
+the chosen track when needed. The engagement and remediation pickers share fzf search
+and previews, with a searchable terminal fallback. Noninteractive engagement starts
+require an explicit key, `--client`, and any ambiguous mode.
 
 | Client | Model / runtime | Headless dispatch | Session commands |
 |--------|-----------------|-------------------|------------------|

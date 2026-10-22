@@ -131,24 +131,25 @@ def cli_argv(workspace, *arguments):
             "engagement", "start", *arguments, "--skip-preflight"]
 
 
-@pytest.mark.parametrize("selection", ["dual", "single", "explicit"])
+@pytest.mark.parametrize("selection", ["dual", "single", "explicit", "switch", "prompted-client"])
 def test_real_cli_opencode_selection_executes_bound_native_workspace(launch_environment, selection):
     workspace, environment, capture = launch_environment
-    selected = engagement(workspace, "acme-selected", dual=selection != "single",
+    selected = engagement(workspace, "acme-selected", dual=selection in {"dual", "explicit"},
                           created="2026-02-01T00:00:00Z")
     ambient = selected if selection == "single" else engagement(workspace, "acme-ambient")
     environment["VIGIL_SESSION_ENGAGEMENT_DIR"] = str(ambient)
     environment["ENGAGEMENT_DIR"] = str(ambient)
     environment["VIGIL_OPERATOR_MODE"] = "web"
     Path(environment["VIGIL_CONFIG"]).write_text(json.dumps({"active_engagement_dir": str(ambient)}))
-    arguments = ["--client", "opencode"]
+    arguments = [] if selection == "prompted-client" else ["--client", "opencode"]
     answers = []
     if selection == "explicit":
         arguments = [selected.name, *arguments, "--mode", "code"]
     else:
         answers.append(("Select engagement", "1"))
-        if selection == "dual":
-            answers.append(("Select operator mode", "2"))
+        if selection == "prompted-client":
+            answers.append(("Select client", "3"))
+        answers.append(("Select operator mode", "1" if selection == "single" else "2"))
     code, transcript = terminal_run(cli_argv(workspace, *arguments), environment=environment,
                                     cwd=ambient, answers=answers)
     assert code == 0, transcript

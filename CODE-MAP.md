@@ -126,8 +126,8 @@ When you are about to copy one of these into a second file, stop and import.
   and backend endpoints retain their existing owners. `client_checks.py:validate_context_binding` owns shared binding validation.
 - `src/vigil_cli/argv.py:passthrough_boundary` owns the opaque `--` boundary for universal CLI routing,
   startup forwarding and assessment root-flag hoisting; each parser retains ownership of its flags and validation.
-- `src/vigil_cli/prompts.py` owns shared terminal questions used by creation and engagement/mode selection;
-  `main.py` resolves interactive start selections before preflight without changing ambient resolution for other commands.
+- `src/vigil_cli/prompts.py` owns shared terminal questions and searchable start pickers for engagement and remediation, using `term.py:fuzzy_pick` or the terminal filter;
+  `main.py` resolves engagement, client, then mode before preflight without changing ambient resolution for other commands.
 - `src/vigil_cli/engagement_recency.py` owns the declared meaningful-work timestamp projection and UTC comparison;
   it reads existing database snapshots without initialization and excludes backend sync/housekeeping clocks.
 - `src/vigil_cli/client_sessions.py` owns historical launch reads and separate official-open markers;
@@ -135,7 +135,7 @@ When you are about to copy one of these into a second file, stop and import.
 - `agent/scripts/assess/lib/scope.py:ingest_scope_filter` must run on every new file-to-buffer ingest
   path. Arjun and proxy ingestion reuse already-filtered URLs.
 - `src/vigil_cli/engagements.py` owns durable offensive track creation, explicit add-track,
-  session mode validation, and engagement-local prompt routing. New offensive scopes store
+  session mode validation, official-start track initialization through `prepare_engagement_mode`, and engagement-local prompt routing. New offensive scopes store
   `tracks.web.phase` and/or `tracks.code.phase`; legacy scalar phase scopes remain readable.
   `agent/scripts/assess/lib/tracks.py` and
   `orchestrator/backend/app/services/engagement_tracks.py` read that contract for their
@@ -316,10 +316,8 @@ A prompt change is **not** prompt-only when the prompt defines an artifact the b
 - `orchestrator/frontend/` — operator SPA: `components/TabBar.tsx` owns tabs, `lib/api.ts` REST,
   `lib/theme.ts` theme state, and `app.css` shared tokens. `lib/serverTime.ts` owns backend
   timestamp parsing (zone-less database times are UTC); `components/formatting.tsx` `TimeStamp` renders them.
-- `orchestrator/frontend/src/routes/RemediationPage.tsx` — remediation workspace entrypoint.
 - `orchestrator/frontend/src/lib/workspaceRoutes.ts` — canonical hash links/history. `App.tsx` routes separate assessment/remediation workspaces.
 - `orchestrator/frontend/src/components/record/RecordView.tsx` — the one record (detail) view tabs open an entity in: Back/position/Previous-Next bar,
   header, section tabs, Escape and focus return; `record/recordNavigation.ts` walks the shown order or asks the server (`position`) for paged lists.
 - `orchestrator/frontend/src/components/ProofWorkTab.tsx` consumes durable proof work; UI actions never launch agents or verify findings.
 - `orchestrator/frontend/src/components/FindingRecordHeader.tsx` shares finding identity/status axes and per-finding section navigation across review and disclosure queues.
-- `orchestrator/report/src/lib/poc.ts` owns copy-and-run `curl` quoting.

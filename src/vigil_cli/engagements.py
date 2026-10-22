@@ -1196,6 +1196,18 @@ def engagement_mode_prompt(install_root: Path, mode: str) -> Path:
     return _canonical_operator_prompt(application_agent_root(install_root), mode)
 
 
+def prepare_engagement_mode(install_root: Path, engagement_dir: Path, mode: str, *, client: str) -> str:
+    """An official start selects a workflow and records its initial phase if needed.
+
+    Inspection and assessment resolvers remain read-only. Track initialization
+    uses the same audited mutation as an operator's explicit add-track command.
+    """
+    tracks = _engagement_modes(_read_json(engagement_dir / "scope.json"))
+    if mode in {"web", "code"} and tracks.keys() & {"web", "code"} and mode not in tracks:
+        add_engagement_track(install_root, engagement_dir.name, mode, actor="operator:start")
+    return resolve_engagement_mode(engagement_dir, mode, client=client, install_root=install_root)
+
+
 def engagement_mode_state(install_root: Path, engagement_dir: Path, *, client: str | None = None) -> dict[str, Any]:
     """Inspect tracks without choosing a prompt for an ambiguous engagement."""
     tracks = _engagement_modes(_read_json(engagement_dir / "scope.json"))
@@ -1758,7 +1770,8 @@ def start_engagement(install_root: Path, engagement_dir: Path, client: str, extr
             "Start this engagement with --client codex or --client claude, "
             "or create a remediation engagement for Pi."
         )
-    selected_mode = resolve_engagement_mode(engagement_dir, mode, client=client, install_root=install_root)
+    selected_mode = (prepare_engagement_mode(install_root, engagement_dir, mode, client=client)
+                     if mode else resolve_engagement_mode(engagement_dir, client=client, install_root=install_root))
     if client == "zcode" or (client == "opencode" and selected_mode in {"web", "code"}):
         from .assessment_clients import start_client
 

@@ -39,13 +39,88 @@ def engagement(root, key="acme", tracks=None, kind="offensive"):
     return path
 
 
+def test_start_asks_engagement_then_client_then_mode(setup, monkeypatch, capsys):
+    root, calls = setup
+    path = engagement(root)
+    monkeypatch.setattr(cli.sys, "stdin", TerminalInput("1\n2\n2\n"))
+    cli.main(["--root", str(root), "engagement", "start", "--skip-preflight"])
+    assert calls[-1][0][1:3] == (path, "claude")
+    assert calls[-1][0][4] == "code"
+    output = capsys.readouterr().err
+    assert output.index("Select engagement") < output.index("Select client") < output.index("Select operator mode")
+
+
+@pytest.mark.parametrize("initial,selected,phase", [("web", "code", "ingest"), ("code", "web", "recon")])
+@pytest.mark.parametrize("legacy", [False, True])
+def test_start_selected_mode_initializes_track_and_preserves_existing_state(setup, monkeypatch, initial, selected, phase, legacy):
+    root, calls = setup
+    path = engagement(root, tracks={initial: {"phase": "verify"}})
+    scope = {"engagement_type": initial, "current_phase": "verify"} if legacy else json.loads((path / "scope.json").read_text())
+    scope.update(hosts=["app.example.com"], exploit_policy="pause", required_headers={"X-Acme": "test"})
+    (path / "scope.json").write_text(json.dumps(scope))
+    monkeypatch.setattr(cli.sys, "stdin", io.StringIO())
+    cli.main(["--root", str(root), "engagement", "start", "acme", "--client", "zcode", "--mode", selected])
+    updated = json.loads((path / "scope.json").read_text())
+    assert updated["tracks"] == {initial: {"phase": "verify"}, selected: {"phase": phase}}
+    assert updated["track_transitions"][-1]["operation"] == f"add-{selected}"
+    for name in ("hosts", "exploit_policy", "required_headers"):
+        assert updated[name] == scope[name]
+    assert calls[0] == ("preflight", {"mode": selected})
+    assert calls[-1][0][4] == selected
+    cli.main(["--root", str(root), "engagement", "start", "acme", "--client", "zcode", "--mode", selected])
+    assert json.loads((path / "scope.json").read_text()) == updated
+
+
+def test_single_track_interactive_start_still_asks_for_mode(setup, monkeypatch, capsys):
+    root, calls = setup
+    engagement(root)
+    monkeypatch.setattr(cli.sys, "stdin", TerminalInput("2\n"))
+    cli.main(["--root", str(root), "engagement", "start", "acme", "--client", "codex"])
+    assert calls[-1][0][4] == "code"
+    assert "Select operator mode" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("missing", ["--client", "--mode"])
+def test_noninteractive_start_requires_missing_session_choice(setup, monkeypatch, missing):
+    root, calls = setup
+    engagement(root, tracks={"web": {"phase": "recon"}, "code": {"phase": "ingest"}})
+    flags = ["--mode", "web"] if missing == "--client" else ["--client", "codex"]
+    monkeypatch.setattr(cli.sys, "stdin", io.StringIO())
+    with pytest.raises(SystemExit, match=missing):
+        cli.main(["--root", str(root), "engagement", "start", "acme", *flags])
+    assert calls == []
+
+
+def test_engagement_start_uses_fzf_with_recency_preview_and_create_action(setup, monkeypatch):
+    from vigil_cli import prompts
+
+    root, calls = setup
+    engagement(root, "acme-a")
+    selected = engagement(root, "acme-b")
+    monkeypatch.setattr(cli.sys, "stdin", TerminalInput("1\n"))
+    monkeypatch.setattr(cli.term, "is_terminal", lambda _stream: True)
+    monkeypatch.setattr(prompts, "terminal_question", lambda *args, **kwargs: kwargs["choices"][0])
+    monkeypatch.setattr("shutil.which", lambda _name: "/usr/bin/fzf")
+    previews = []
+
+    def pick(lines, details, **kwargs):
+        assert "Create new engagement" in lines[-1]
+        previews.extend(details.values())
+        return 1
+
+    monkeypatch.setattr(cli.term, "fuzzy_pick", pick)
+    cli.main(["--root", str(root), "engagement", "start", "--client", "codex", "--mode", "web", "--skip-preflight"])
+    assert calls[-1][0][1] == selected
+    assert any("recent" in preview and "acme-b" in preview for preview in previews)
+
+
 @pytest.mark.parametrize("client", ["claude", "codex", "opencode", "zcode", "kimi", "goose"])
 def test_start_without_key_always_asks_even_for_single_ambient_engagement(setup, monkeypatch, capsys, client):
     root, calls = setup
     path = engagement(root)
     monkeypatch.chdir(path)
     monkeypatch.setenv("VIGIL_SESSION_ENGAGEMENT_DIR", str(path))
-    monkeypatch.setattr(cli.sys, "stdin", TerminalInput("1\n"))
+    monkeypatch.setattr(cli.sys, "stdin", TerminalInput("1\n\n"))
     cli.main(["--root", str(root), "engagement", "start", "--client", client, "--skip-preflight"])
     assert str(path) in str(calls[-1])
     assert "Select engagement" in capsys.readouterr().err
@@ -94,7 +169,7 @@ def test_picker_cancel_does_not_create_or_launch(setup, monkeypatch):
 
 def test_create_action_reuses_creation_questions_and_returns_created_path(setup, monkeypatch, capsys):
     root, calls = setup
-    monkeypatch.setattr(cli.sys, "stdin", TerminalInput("1\n2\nAcme\ny\n"))
+    monkeypatch.setattr(cli.sys, "stdin", TerminalInput("1\n2\nAcme\ny\n\n"))
     monkeypatch.setattr(engagements, "_verify_backend_install_root", lambda *_: engagements.BackendInstallRootStatus.VERIFIED)
     monkeypatch.setattr(engagements, "_emit_post_create_footer", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(engagements, "_install_client_kind", lambda *_: "none")
@@ -107,7 +182,7 @@ def test_create_action_reuses_creation_questions_and_returns_created_path(setup,
 def test_incompatible_selection_explains_native_limits_before_preflight(setup, monkeypatch, capsys):
     root, calls = setup
     engagement(root, kind="blue")
-    monkeypatch.setattr(cli.sys, "stdin", TerminalInput("1\n"))
+    monkeypatch.setattr(cli.sys, "stdin", TerminalInput("1\n\n"))
     with pytest.raises(SystemExit, match="zcode.*web.*code"):
         cli.main(["--root", str(root), "engagement", "start", "--client", "zcode"])
     assert calls == []
@@ -121,7 +196,7 @@ def test_picker_orders_normalized_activity_and_does_not_promote_invalid_creation
                          ("acme-unknown", "unknown")]:
         path = engagement(root, key)
         (path / "engagement.json").write_text(json.dumps({"created_at": created, "target": "https://example.com"}))
-    monkeypatch.setattr(cli.sys, "stdin", TerminalInput("1\n"))
+    monkeypatch.setattr(cli.sys, "stdin", TerminalInput("1\n\n"))
     cli.main(["--root", str(root), "engagement", "start", "--client", "codex", "--skip-preflight"])
     assert calls[-1][0][1].name == "acme-recent"
     output = capsys.readouterr().err
@@ -148,7 +223,7 @@ def test_cancel_during_create_confirmation_keeps_workspace_empty(setup, monkeypa
 
 def test_created_engagement_is_preserved_when_subsequent_start_fails(setup, monkeypatch):
     root, calls = setup
-    monkeypatch.setattr(cli.sys, "stdin", TerminalInput("1\n2\nAcme\ny\n"))
+    monkeypatch.setattr(cli.sys, "stdin", TerminalInput("1\n2\nAcme\ny\n\n"))
     monkeypatch.setattr(engagements, "_verify_backend_install_root", lambda *_: engagements.BackendInstallRootStatus.VERIFIED)
     monkeypatch.setattr(engagements, "_emit_post_create_footer", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(engagements, "_install_client_kind", lambda *_: "none")
@@ -183,8 +258,9 @@ def test_picker_identifies_scalar_engagement_type_alongside_its_phase(setup, mon
     monkeypatch.setattr(cli.sys, "stdin", TerminalInput())
     rendered = []
 
-    def select(label, default, choices):
-        rendered.extend(choices)
+    def select(label, default, choices, **kwargs):
+        if label == "Select engagement":
+            rendered.extend(choices)
         return choices[0]
 
     monkeypatch.setattr(cli, "_prompt_choice", select)

@@ -5,6 +5,20 @@ versioning follows [Semantic Versioning][semver].
 
 Durable design decisions live in [`docs/adr/`](docs/adr/).
 
+## [2.1.2] - 2026-10-22
+
+### Changed
+
+- Interactive engagement startup asks for engagement, client, then operator mode;
+  supplied flags skip their corresponding questions.
+- Engagement and remediation startup share fzf search and workspace previews, with
+  a searchable terminal fallback and shared Rich presentation.
+
+### Fixed
+
+- Starting web or code analysis initializes the selected workflow when needed,
+  preserving existing phases, target scope, exploit policy and transition history.
+
 ## [2.1.1] - 2026-10-21
 
 ### Changed

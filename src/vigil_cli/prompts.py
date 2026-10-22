@@ -1,6 +1,7 @@
 """Shared terminal questions; presentation stays off machine-readable stdout."""
 from __future__ import annotations
 
+import shutil
 import sys
 from contextlib import redirect_stdout
 from typing import Any
@@ -34,9 +35,26 @@ def terminal_question(kind: str, label: str, **kwargs: Any) -> Any:
     return answer
 
 
-def prompt_choice(label: str, default: str, choices: list[str], *, attempts: int = 3) -> str:
+def prompt_choice(label: str, default: str, choices: list[str], *, attempts: int = 3,
+                  searchable: bool = False, details: list[str] | None = None) -> str:
     if uses_prompt_ui():
-        return str(terminal_question("select", label, choices=choices, default=default))
+        if searchable and shutil.which("fzf"):
+            lines = [f"{index}\t{term.single_line(choice)}" for index, choice in enumerate(choices)]
+            previews = {str(index): term.single_line(choice) if details is None else details[index]
+                        for index, choice in enumerate(choices)}
+            index = term.fuzzy_pick(lines, previews, prompt=f"{label} > ", action="select",
+                                   cancelled=f"{label} cancelled", invalid=f"Invalid {label.lower()}")
+            return choices[index]
+        if searchable:
+            from rich.text import Text
+
+            term.console(sys.stderr).print(Text(label, style="bold"))
+        options = {"use_search_filter": True, "use_jk_keys": False} if searchable else {}
+        # Labels may contain target text; questionary receives visible literals.
+        labels = [term.single_line(choice) for choice in choices]
+        selected = str(terminal_question("select", "Choose (type to filter)" if searchable else label,
+                                        choices=labels, default=labels[choices.index(default)], **options))
+        return choices[labels.index(selected)]
     for _ in range(attempts):
         print(label, file=sys.stderr)
         for idx, choice in enumerate(choices, start=1):
