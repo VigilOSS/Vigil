@@ -65,3 +65,19 @@ def test_no_live_sessions_has_no_adoption_action(tmp_path, monkeypatch):
     state = restart_manifest.client_sessions_state(tmp_path)
     assert state.state == 'not-running'
     assert state.remedy == ''
+
+
+def test_native_bootstrap_warns_for_same_engagement_only(tmp_path, monkeypatch, capsys):
+    engagement = tmp_path / "engagements/acme"
+    monkeypatch.setattr(client_sessions, "active_client_sessions", lambda _: ({
+        "pid": 123, "engagement": str(engagement), "client": "claude", "mode": "code",
+        "application": {"root": str(tmp_path / "release"), "version": "1.0.0", "content_sha256": "a" * 64},
+    }, {
+        "pid": 456, "engagement": str(tmp_path / "engagements/other"), "client": "codex",
+        "application": {"root": str(tmp_path / "release"), "version": "1.0.0", "content_sha256": "a" * 64},
+    }))
+    with client_sessions.client_session_bootstrap(tmp_path, engagement, shared_files=False):
+        pass
+    warning = capsys.readouterr().err
+    assert "Warning:" in warning and "claude" in warning and "PID 123" in warning
+    assert warning.count("PID") == 1

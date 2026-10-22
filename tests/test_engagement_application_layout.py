@@ -177,15 +177,17 @@ def test_start_refreshes_only_selected_generated_entrypoints_for_current_release
     assert original_other == ((other / "start_codex.sh").read_bytes(), (other / "AGENTS.md").read_bytes())
 
 
-def test_start_refuses_cross_release_refresh_while_original_session_is_alive(layout, monkeypatch):
+@pytest.mark.parametrize("client", ["codex", "claude"])
+def test_concurrent_start_reuses_shared_release_without_rewriting_live_configuration(layout, monkeypatch, capsys, client):
     application, workspace = layout
     engagement = workspace / "engagements/acme"
     engagement.mkdir(parents=True)
     (engagement / "scope.json").write_text(json.dumps({"engagement_type": "code", "current_phase": "hunt"}))
-    engagements._write_prompt_wrappers(application / "agent", engagement, "codex", engagement_type="code", workspace_root=workspace)
-    engagements._write_launchers(application / "agent", engagement, "codex", skip_permissions=False, workspace_root=workspace)
+    engagements._write_prompt_wrappers(application / "agent", engagement, "both", engagement_type="code", workspace_root=workspace)
+    engagements._write_launchers(application / "agent", engagement, "both", skip_permissions=False, workspace_root=workspace)
     monkeypatch.setattr(engagements.os, "chdir", lambda *_: None)
-    monkeypatch.setattr(engagements.os, "execv", lambda *_: None)
+    launched = []
+    monkeypatch.setattr(engagements.os, "execv", lambda *args: launched.append(args))
     engagements.start_engagement(workspace, engagement, "codex", [])
     original = (engagement / "start_codex.sh").read_bytes(), (engagement / "AGENTS.md").read_bytes()
     next_application = application.parent / "application-next"
@@ -194,10 +196,16 @@ def test_start_refuses_cross_release_refresh_while_original_session_is_alive(lay
     (next_application / "agent/operator-core-code.md").write_text("new release prompt\n")
     monkeypatch.setenv("VIGIL_APPLICATION_DIR", str(next_application))
 
-    with pytest.raises(SystemExit, match="active.*release|end.*session"):
-        engagements.start_engagement(workspace, engagement, "codex", [])
+    capsys.readouterr()
+    engagements.start_engagement(workspace, engagement, client, [])
 
+    assert Path(launched[-1][0]).name == f"start_{client}.sh"
     assert original == ((engagement / "start_codex.sh").read_bytes(), (engagement / "AGENTS.md").read_bytes())
+    from vigil_cli.client_sessions import active_client_sessions
+    assert {row["application"]["root"] for row in active_client_sessions(workspace)} == {str(application)}
+    warning = capsys.readouterr().err
+    assert "Warning:" in warning and "PID" in warning
+    assert "shared" in warning and "retained" in warning
 
 
 def test_opencode_upgrade_prepares_new_context_without_rebinding_active_session_config(layout, monkeypatch):
@@ -239,6 +247,83 @@ def test_opencode_upgrade_prepares_new_context_without_rebinding_active_session_
         main_module.main(["--root", str(workspace), "engagement", "start", "acme", "--client", "opencode", "--thinking", "max", "--skip-preflight"])
 
     assert (engagement / "opencode.json").read_bytes() == original
+
+
+def test_adding_track_keeps_live_shared_clients_on_their_bound_application(layout, monkeypatch):
+    from vigil_cli import client_sessions
+
+    application, workspace = layout
+    adapter = application / "agent/scripts/hooks/goose-hook-adapter.sh"
+    adapter.parent.mkdir(parents=True)
+    adapter.write_text("#!/bin/sh\n")
+    engagement = workspace / "engagements/acme"
+    engagement.mkdir(parents=True)
+    (engagement / "scope.json").write_text(json.dumps({"engagement_type": "code", "current_phase": "hunt"}))
+    engagements._write_prompt_wrappers(application / "agent", engagement, "both", engagement_type="code", workspace_root=workspace)
+    engagements._write_goose_config(application / "agent", engagement)
+    hook_config = engagement / ".agents/plugins/vigil-standard/hooks/hooks.json"
+    hook_config.write_text('{"hooks": {}, "acme_operator_extension": true}\n')
+    original_hook_config = hook_config.read_bytes()
+    with (engagement / ".goosehints").open("a") as hints:
+        hints.write("\nAcme operator-owned Goose context\n")
+    client_sessions.record_client_session(workspace, engagement, "claude", "code")
+    next_application = application.parent / "application-next"
+    (next_application / "agent").mkdir(parents=True)
+    (next_application / "orchestrator").mkdir()
+    (next_application / "agent/AGENTS.md").write_text("next web prompt\n")
+    (next_application / "agent/operator-core-code.md").write_text("next code prompt\n")
+    monkeypatch.setenv("VIGIL_APPLICATION_DIR", str(next_application))
+    engagements.prepare_engagement_mode(workspace, engagement, "web", client="codex")
+    pointer = (engagement / "AGENTS.md").read_text()
+    assert str(application / "agent") in pointer
+    hints = (engagement / ".goosehints").read_text()
+    assert hints.startswith(pointer)
+    assert hints.endswith("\nAcme operator-owned Goose context\n")
+    assert hook_config.read_bytes() == original_hook_config
+    state = engagements._read_json(engagement / "scope.json")
+    assert state["tracks"] == {"code": {"phase": "hunt"}, "web": {"phase": "recon"}}
+
+
+@pytest.mark.parametrize(("original_client", "new_client"), [("claude", "codex"), ("codex", "claude")])
+def test_concurrent_start_initializes_a_new_client_without_rewriting_existing_files(layout, monkeypatch, original_client, new_client):
+    from vigil_cli import client_sessions
+
+    application, workspace = layout
+    engagement = workspace / "engagements/acme"
+    engagement.mkdir(parents=True)
+    (engagement / "scope.json").write_text(json.dumps({"engagement_type": "code", "current_phase": "hunt"}))
+    engagements._write_prompt_wrappers(application / "agent", engagement, original_client, engagement_type="code", workspace_root=workspace)
+    engagements._write_launchers(application / "agent", engagement, original_client, skip_permissions=False, workspace_root=workspace)
+    with (engagement / "AGENTS.md").open("a") as pointer:
+        pointer.write("\nAcme operator-owned context\n")
+    original = {path: path.read_bytes() for path in engagement.iterdir() if path.is_file()}
+    client_sessions.record_client_session(workspace, engagement, original_client, "code")
+    launched = []
+    monkeypatch.setattr(engagements.os, "chdir", lambda *_: None)
+    monkeypatch.setattr(engagements.os, "execv", lambda *args: launched.append(args))
+    engagements.start_engagement(workspace, engagement, new_client, [], "code", no_autoprompt=True)
+    assert Path(launched[-1][0]).name == f"start_{new_client}.sh"
+    assert all(path.read_bytes() == data for path, data in original.items())
+    if new_client == "claude":
+        assert (engagement / "CLAUDE.md").is_file()
+
+
+def test_track_routing_rejects_symlinked_goose_hints_before_mutation(layout):
+    application, workspace = layout
+    engagement = workspace / "engagements/acme"
+    engagement.mkdir(parents=True)
+    scope = engagement / "scope.json"
+    scope.write_text(json.dumps({"engagement_type": "code", "current_phase": "hunt"}))
+    engagements._write_prompt_wrappers(application / "agent", engagement, "both", engagement_type="code", workspace_root=workspace)
+    original = scope.read_bytes()
+    target = workspace / "operator-notes.md"
+    target.write_text((engagement / "AGENTS.md").read_text() + engagements.GOOSE_DISPATCH_DIRECTIVE)
+    contents = target.read_bytes()
+    (engagement / ".goosehints").symlink_to(target)
+    with pytest.raises(SystemExit, match="unsafe"):
+        engagements.add_engagement_track(workspace, "acme", "web")
+    assert target.read_bytes() == contents
+    assert scope.read_bytes() == original
 
 
 @pytest.mark.parametrize("client", ["codex", "claude"])

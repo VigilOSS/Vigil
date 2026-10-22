@@ -1319,12 +1319,8 @@ def _run_remediation(args: argparse.Namespace, install_root: Path) -> None:
                        if sys.stdin.isatty() and not getattr(args, "session_id", None) else "claude")
     backend = restart_manifest.backend_state(install_root, engagement_dir=eng_dir)
     if backend.state == "stale":
-        from .preflight import managed_backend_host
-
         base_url = resolve_orchestrator_base_url(install_root, eng_dir)
-        remedy = ("run `" + shlex.join(["vigil", "--root", str(install_root), "orchestrator", "restart"]) + "`"
-                  if managed_backend_host(base_url) is not None
-                  else f"restart or upgrade the configured backend at {base_url} on its owning host")
+        remedy = restart_manifest.backend_restart_remedy(install_root, base_url)
         print(
             f"Warning: backend restart required: {backend.detail}; {remedy}",
             file=sys.stderr,

@@ -156,9 +156,8 @@ def managed_backend_host(base_url: str) -> str | None:
 
 def _ensure_backend_freshness(install_root: Path, base_url: str) -> None:
     import json
-    import shlex
     from .engagements import _backend_request
-    from .restart_manifest import backend_state_from_readiness
+    from .restart_manifest import backend_restart_remedy, backend_state_from_readiness
 
     status, body, _detail, _protocol = _backend_request(base_url, "GET", "/readyz")
     try:
@@ -172,9 +171,7 @@ def _ensure_backend_freshness(install_root: Path, base_url: str) -> None:
     runtime = readiness.get("backend_runtime")
     stale = consumer.state == "stale" or (isinstance(runtime, dict) and runtime.get("restart_required") is True)
     if stale:
-        remedy = ("run `" + shlex.join(["vigil", "--root", str(install_root), "orchestrator", "restart"]) + "`"
-                  if managed_backend_host(base_url) is not None
-                  else f"restart or upgrade the configured backend at {base_url} on its owning host")
+        remedy = backend_restart_remedy(install_root, base_url)
         raise SystemExit(f"Engagement backend requires restart: {consumer.detail}; {remedy}. Pass --skip-preflight to launch anyway.")
     if consumer.state == "unknown":
         print(f"[vigil] WARN: backend freshness at {base_url} is unknown: {consumer.detail}; upgrade/restart that backend to verify its release.", file=sys.stderr)

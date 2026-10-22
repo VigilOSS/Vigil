@@ -69,11 +69,18 @@ of silently replacing the release image with a different build.
 3. Restart what `vigil status` or `vigil doctor` reports as stale.
 
 Running services and client sessions keep their loaded release until restarted. You can
-finish work in an open client while updating Vigil. To use updated prompts and helpers,
-save a handoff, exit that client, then start the engagement again. Starting it refreshes
-its generated client files; those files stay protected while another release uses them.
+finish work in an open client while updating Vigil, and start concurrent sessions in the
+same engagement. Startup warns about live official client processes. Shared-config clients
+reuse the engagement's retained release without refreshing its client files while those
+clients remain running. To adopt updated prompts and helpers, save handoffs, exit those
+clients, then start again. OpenCode and ZCode assessment projects have separate release-bound
+contexts; opening a GUI project is not proof of a live conversation.
 Pausing a client during a backend restart avoids requests during downtime, but does not
 replace its inherited helper paths or instructions already in the conversation.
+`vigil up` starts the full stack and can reuse an already-running backend.
+`vigil orchestrator restart` reloads only the backend with the selected application release.
+Recovery advice includes `--root <path>` only when needed to select the affected private
+workspace instead of your implicit default; it is not the application source directory.
 Freshness compares content digests, never timestamps; see
 [`install-integrity.md`](install-integrity.md).
 

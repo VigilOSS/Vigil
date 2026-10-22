@@ -131,6 +131,85 @@ def cli_argv(workspace, *arguments):
             "engagement", "start", *arguments, "--skip-preflight"]
 
 
+@pytest.mark.parametrize("second_client", ["codex", "claude"])
+def test_real_concurrent_shared_clients_retain_release_then_adopt_after_exit(launch_environment, tmp_path, second_client):
+    from vigil_cli import client_sessions, engagements
+
+    workspace, environment, _ = launch_environment
+    selected = engagement(workspace, "acme", dual=True)
+    releases = []
+    for version in ("1.0.0", "2.0.0"):
+        release = tmp_path / f"application-{version}"
+        (release / "agent").mkdir(parents=True)
+        (release / "orchestrator").mkdir()
+        (release / "pyproject.toml").write_text(f'[project]\nversion = "{version}"\n')
+        (release / "agent/AGENTS.md").write_text(f"Acme web prompt {version}\n")
+        (release / "agent/operator-core-code.md").write_text(f"Acme code prompt {version}\n")
+        releases.append(release)
+    old, current = releases
+    engagements._write_prompt_wrappers(old / "agent", selected, "claude", engagement_type="offensive", workspace_root=workspace)
+    engagements._write_launchers(old / "agent", selected, "claude", skip_permissions=False, workspace_root=workspace)
+    binaries = Path(environment["PATH"].split(os.pathsep)[0])
+    helper = binaries / "vigil"
+    helper.write_text(f'#!/bin/sh\nexec {sys.executable} -m vigil_cli.main "$@"\n')
+    helper.chmod(0o755)
+    for client in ("codex", "claude"):
+        executable = binaries / client
+        executable.write_text(
+            f"#!{sys.executable}\n"
+            "import json, os, pathlib, sys\n"
+            "row = {'application': os.environ['VIGIL_APPLICATION_DIR'], 'pid': os.getpid(),\n"
+            "       'engagement': os.environ['VIGIL_SESSION_ENGAGEMENT_DIR'], 'mode': os.environ['VIGIL_OPERATOR_MODE']}\n"
+            "pathlib.Path(os.environ['ACME_NATIVE_CAPTURE']).write_text(json.dumps(row))\n"
+            "print('Acme shared client ready', flush=True)\n"
+            "if os.environ.get('ACME_HOLD_CLIENT') == '1': sys.stdin.read(1)\n"
+        )
+        executable.chmod(0o755)
+    first_capture = tmp_path / "first.json"
+    first_environment = {**environment, "VIGIL_APPLICATION_DIR": str(old),
+                         "ACME_HOLD_CLIENT": "1", "ACME_NATIVE_CAPTURE": str(first_capture)}
+    first = subprocess.Popen(cli_argv(workspace, "acme", "--client", "claude", "--mode", "code", "--no-autoprompt"),
+                             env=first_environment, cwd=selected, stdin=subprocess.PIPE,
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        assert first.stdout is not None
+        ready, _, _ = select.select([first.stdout], [], [], 20)
+        assert ready, "First client did not reach its executable"
+        assert first.stdout.readline().strip() == "Acme shared client ready"
+        assert first.poll() is None
+        first_row = json.loads(first_capture.read_text())
+        shared_paths = [path for path in selected.rglob("*") if path.is_file()]
+        original = {path: (path.read_bytes(), path.resolve()) for path in shared_paths}
+        receipts = {path: path.read_bytes() for path in (workspace / "state/runtime/client-sessions").glob("*.json")}
+        second_capture = tmp_path / "second.json"
+        next_environment = {**environment, "VIGIL_APPLICATION_DIR": str(current),
+                            "ACME_NATIVE_CAPTURE": str(second_capture)}
+        result = subprocess.run(cli_argv(workspace, "acme", "--client", second_client, "--mode", "web", "--no-autoprompt"),
+                                env=next_environment, cwd=selected, stdin=subprocess.DEVNULL,
+                                capture_output=True, text=True, timeout=20)
+        assert result.returncode == 0, result.stderr
+        assert "Warning:" in result.stderr and f"PID {first.pid}" in result.stderr
+        assert "retained release 1.0.0" in result.stderr
+        second_row = json.loads(second_capture.read_text())
+        assert second_row["application"] == first_row["application"] == str(old)
+        assert second_row["mode"] == "web" and first_row["mode"] == "code"
+        assert first_row["engagement"] == second_row["engagement"] == str(selected)
+        assert first.poll() is None
+        assert all((path.read_bytes(), path.resolve()) == contents for path, contents in original.items())
+        assert all(path.read_bytes() == contents for path, contents in receipts.items())
+        assert {row["pid"] for row in client_sessions.active_client_sessions(workspace)} == {first.pid}
+        first.communicate(input="\n", timeout=5)
+        adopted = subprocess.run(cli_argv(workspace, "acme", "--client", second_client, "--mode", "web", "--no-autoprompt"),
+                                 env=next_environment, cwd=selected, stdin=subprocess.DEVNULL,
+                                 capture_output=True, text=True, timeout=20)
+        assert adopted.returncode == 0, adopted.stderr
+        assert json.loads(second_capture.read_text())["application"] == str(current)
+    finally:
+        if first.poll() is None:
+            first.kill()
+        first.communicate(timeout=5)
+
+
 @pytest.mark.parametrize("selection", ["dual", "single", "explicit", "switch", "prompted-client"])
 def test_real_cli_opencode_selection_executes_bound_native_workspace(launch_environment, selection):
     workspace, environment, capture = launch_environment

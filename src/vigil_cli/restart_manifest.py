@@ -61,6 +61,20 @@ CONSUMER_KEYS = (
 CONSUMER_STATES = ("current", "stale", "unknown", "not-running", "missing")
 
 
+def backend_restart_remedy(workspace: Path, base_url: str) -> str:
+    """Name the reload action without losing explicit workspace/remote ownership."""
+    from .paths import resolve_install_root
+    from .preflight import managed_backend_host
+
+    if managed_backend_host(base_url) is None:
+        return f"restart or upgrade the configured backend at {base_url} on its owning host"
+    explicit = workspace.resolve() != resolve_install_root().resolve()
+    argv = ["vigil", *(["--root", str(workspace)] if explicit else []), "orchestrator", "restart"]
+    scope = " (--root selects this workspace)" if explicit else ""
+    return (f"run `{shlex.join(argv)}`{scope} to reload the backend; "
+            "`vigil up` starts the full stack but can reuse the running backend")
+
+
 @dataclass(frozen=True, slots=True)
 class ConsumerState:
     """One consumer of the install, and what (if anything) it now needs.

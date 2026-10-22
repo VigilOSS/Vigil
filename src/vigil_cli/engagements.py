@@ -1349,6 +1349,17 @@ def add_engagement_track(
     *,
     actor: str = "operator",
 ) -> dict[str, Any]:
+    """Serialize track routing changes with starts and retain live client bindings."""
+    from .client_sessions import client_session_bootstrap
+
+    engagement_dir = _engagement_scope_path(install_root, key).parent
+    with client_session_bootstrap(install_root, engagement_dir, concurrent=True):
+        return _add_engagement_track(install_root, key, track, actor=actor)
+
+
+def _add_engagement_track(
+    install_root: Path, key: str, track: str, *, actor: str,
+) -> dict[str, Any]:
     """Explicitly enable a second offensive track without changing session mode.
 
     The existing track phase is preserved. Only the newly enabled track is
@@ -1362,6 +1373,12 @@ def add_engagement_track(
     engagement_dir = scope_path.parent
     rewrite_pointer = _prepare_operator_pointer_rewrite(install_root, engagement_dir)
     codex_config = engagement_dir / ".codex" / "config.toml"
+    if rewrite_pointer and (engagement_dir / ".goosehints").is_file():
+        unsafe_destination = unsafe_symlink_destination(engagement_dir, (
+            ".goosehints",
+        ))
+        if unsafe_destination is not None:
+            raise SystemExit(f"unsafe Goose configuration path: {unsafe_destination} contains a symlink.")
     if codex_config.is_file():
         unsafe_destination = unsafe_symlink_destination(
             engagement_dir, (".codex/config.toml",)
@@ -1399,7 +1416,10 @@ def add_engagement_track(
 
     scope = mutate_scope_file(scope_path, update)
     if rewrite_pointer:
+        previous_pointer = (engagement_dir / "AGENTS.md").read_text(encoding="utf-8")
         _rewrite_operator_pointer(install_root, engagement_dir)
+        if (engagement_dir / ".goosehints").is_file():
+            _write_goose_hints(engagement_dir, preserve_existing=True, previous_operator_pointer=previous_pointer)
     if codex_config.is_file():
         refresh_codex_compact_prompt(application_agent_root(install_root), engagement_dir / ".codex")
     return _track_state(scope)
@@ -1777,26 +1797,27 @@ def start_engagement(install_root: Path, engagement_dir: Path, client: str, extr
 
         start_client(install_root, engagement_dir, client, selected_mode, extra_args, no_autoprompt=no_autoprompt)
         return
-    prompt = engagement_mode_prompt(install_root, selected_mode)
-    if not prompt.is_file():
-        raise SystemExit(f"operator prompt not found at {prompt}; run `vigil install {install_root}`")
     from .client_sessions import client_session_bootstrap, record_client_session
 
-    with client_session_bootstrap(install_root, engagement_dir):
-        previous_pointer_path = engagement_dir / "AGENTS.md"
-        previous_operator_pointer = previous_pointer_path.read_text(encoding="utf-8") if previous_pointer_path.is_file() else ""
-        repair = repair_engagement_client_entrypoints(install_root, engagement_dir=engagement_dir, preserve_operator_config=True)
-        if engagement_dir.name in repair.reconciled:
-            repair_engagement_client_rosters(install_root, engagement_dir=engagement_dir, preserve_operator_config=True)
-            repair_engagement_operator_pointers(install_root, engagement_dir=engagement_dir)
-            # Goose eagerly reads its copied router, not AGENTS.md itself. Rebase
-            # it after the shared pointer changes, retaining operator additions.
-            _write_goose_config(
-                application_agent_root(install_root), engagement_dir,
-                preserve_existing=True, previous_operator_pointer=previous_operator_pointer,
-            )
-        if client == "opencode" and thinking is not None:
-            write_opencode_reasoning_config(engagement_dir, thinking)
+    with client_session_bootstrap(install_root, engagement_dir, concurrent=True) as refresh_shared:
+        prompt = engagement_mode_prompt(install_root, selected_mode)
+        if not prompt.is_file():
+            raise SystemExit(f"operator prompt not found at {prompt}; run `vigil install {install_root}`")
+        if refresh_shared:
+            previous_pointer_path = engagement_dir / "AGENTS.md"
+            previous_operator_pointer = previous_pointer_path.read_text(encoding="utf-8") if previous_pointer_path.is_file() else ""
+            repair = repair_engagement_client_entrypoints(install_root, engagement_dir=engagement_dir, preserve_operator_config=True)
+            if engagement_dir.name in repair.reconciled:
+                repair_engagement_client_rosters(install_root, engagement_dir=engagement_dir, preserve_operator_config=True)
+                repair_engagement_operator_pointers(install_root, engagement_dir=engagement_dir)
+                # Goose eagerly reads its copied router, not AGENTS.md itself.
+                _write_goose_config(
+                    application_agent_root(install_root), engagement_dir,
+                    preserve_existing=True, previous_operator_pointer=previous_operator_pointer,
+                )
+            if client == "opencode" and thinking is not None:
+                write_opencode_reasoning_config(engagement_dir, thinking)
+        _prepare_missing_primary_client(install_root, engagement_dir, client)
         record_client_session(install_root, engagement_dir, client, selected_mode)
     pointer = engagement_dir / "AGENTS.md"
     if pointer.is_file():
@@ -2752,15 +2773,19 @@ Artifacts:
             encoding="utf-8",
         )
     if client_kind in {"claude", "both"}:
-        (eng_dir / "CLAUDE.md").write_text(
-            f"{_SPECIALIST_STOP_SIGN}\n"
-            "# Engagement Workspace\n\n"
-            "Read `AGENTS.md` (in this same directory) for operator instructions.\n"
-            "Do not also load this file — it is a pointer to AGENTS.md to avoid\n"
-            "double-loading the operator prompt.\n\n"
-            f"{_ENGAGEMENT_ROE_POINTER}",
-            encoding="utf-8",
-        )
+        _write_claude_pointer(eng_dir)
+
+
+def _write_claude_pointer(eng_dir: Path) -> None:
+    (eng_dir / "CLAUDE.md").write_text(
+        f"{_SPECIALIST_STOP_SIGN}\n"
+        "# Engagement Workspace\n\n"
+        "Read `AGENTS.md` (in this same directory) for operator instructions.\n"
+        "Do not also load this file — it is a pointer to AGENTS.md to avoid\n"
+        "double-loading the operator prompt.\n\n"
+        f"{_ENGAGEMENT_ROE_POINTER}",
+        encoding="utf-8",
+    )
 
 
 def repair_engagement_operator_pointers(
@@ -2948,6 +2973,19 @@ def _write_goose_config(
     - ``.agents/plugins/vigil-standard`` — the standard hooks plugin (activity-log),
       running the SHARED shell script via the payload adapter.
     """
+    _write_goose_hints(eng_dir, preserve_existing=preserve_existing, previous_operator_pointer=previous_operator_pointer)
+    ensure_goose_recipes_link(agent_root, eng_dir / ".goose")
+    ensure_goose_standard_hooks(
+        agent_root,
+        eng_dir,
+        rendered_agent_root=rendered_agent_root,
+    )
+
+
+def _write_goose_hints(
+    eng_dir: Path, *, preserve_existing: bool, previous_operator_pointer: str | None,
+) -> None:
+    """Rebase the copied operator router without touching runtime hooks or rosters."""
     agents_md = eng_dir / "AGENTS.md"
     base = agents_md.read_text(encoding="utf-8") if agents_md.is_file() else ""
     # The dispatch directive names offensive assessment tools and roles. Goose
@@ -2967,12 +3005,6 @@ def _write_goose_config(
             body = existing
     if not hints_path.is_file() or hints_path.read_text(encoding="utf-8") != body:
         hints_path.write_text(body, encoding="utf-8")
-    ensure_goose_recipes_link(agent_root, eng_dir / ".goose")
-    ensure_goose_standard_hooks(
-        agent_root,
-        eng_dir,
-        rendered_agent_root=rendered_agent_root,
-    )
 
 
 # DeepSeek thinking levels → opencode per-model options. OpenCode deep-merges this
@@ -3402,6 +3434,29 @@ def _existing_engagement_skip_permissions(
             evidence=evidence,
         )
     return modes.pop(), None
+
+
+def _prepare_missing_primary_client(install_root: Path, eng_dir: Path, client: str) -> None:
+    """Add only a newly selected primary client's entrypoint under the bootstrap lock."""
+    if client not in {"claude", "codex"} or (eng_dir / f"start_{client}.sh").exists():
+        return
+    destinations = (f".{client}", f"start_{client}.sh", "CLAUDE.md")
+    if unsafe_symlink_destination(eng_dir, destinations) is not None:
+        raise SystemExit(f"unsafe client configuration path for {client} in {eng_dir}")
+    kind = _existing_engagement_client_kind(eng_dir)
+    skip_permissions, error = _existing_engagement_skip_permissions(eng_dir, kind or "unknown")
+    if error is not None or skip_permissions is None:
+        raise SystemExit(f"Cannot initialize {client}: existing launcher permission choice is ambiguous or custom")
+    agent_root = application_agent_root(install_root)
+    if client == "codex":
+        _write_codex_config(agent_root, eng_dir, preserve_operator_config=True)
+    else:
+        _write_claude_config(agent_root, eng_dir, preserve_operator_config=True)
+        if not (eng_dir / "CLAUDE.md").exists():
+            _write_claude_pointer(eng_dir)
+    _write_launcher(agent_root, eng_dir, client,
+                    _SKIP_PERMISSION_ARGS[client] if skip_permissions else "",
+                    extra_env=_CLAUDE_EXTRA_ENV if client == "claude" else "", workspace_root=install_root)
 
 
 def repair_engagement_client_entrypoints(

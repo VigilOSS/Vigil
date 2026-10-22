@@ -118,8 +118,6 @@ When you are about to copy one of these into a second file, stop and import.
   `main.py` resolves engagement, client, then mode before preflight without changing ambient resolution for other commands.
 - `src/vigil_cli/engagement_recency.py` owns the declared meaningful-work timestamp projection and UTC comparison;
   it reads existing database snapshots without initialization and excludes backend sync/housekeeping clocks.
-- `src/vigil_cli/client_sessions.py` owns historical launch reads and separate official-open markers;
-  picker recency never turns those markers into PID ownership or proof of native conversation readiness.
 - `agent/scripts/assess/lib/scope.py:ingest_scope_filter` must run on every new file-to-buffer ingest
   path. Arjun and proxy ingestion reuse already-filtered URLs.
 - `src/vigil_cli/engagements.py` owns durable offensive track creation, explicit add-track,
@@ -232,7 +230,7 @@ A prompt change is **not** prompt-only when the prompt defines an artifact the b
 - `vigil_build.py` — tracked publisher inputs, matched CLI/backend/agent/docs/legal bundle and locked prebuilt UI provenance; its sdist builds wheels without Git or Node.
 - `src/vigil_cli/process_identity.py` owns birth-identity checks shared by client sessions and backend process receipts;
   `orchestrator.py` uses those receipts for status/stop, preflight and restore ownership decisions.
-- `src/vigil_cli/client_sessions.py` — live PID/birth-identity release bindings and shared-file bootstrap lock; old releases retain assets and must end before rebinding the same engagement.
+- `src/vigil_cli/client_sessions.py` — live PID/birth-identity bindings, historical starts, and bootstrap lock. Concurrent shared-config starts reuse the live release without repair; native projects remain independent. Explicit maintenance guards upgrades; historical opens never prove ownership.
 - `src/vigil_cli/paths.py:resolve_orchestrator_base_url` — backend URL precedence and dotenv normalization; `vigil config resolve orchestrator_base_url` exposes it to generated client launchers at session start.
 - `src/vigil_cli/preflight.py` owns launch checks shared with blue; managed-local backend recovery never replaces a configured remote endpoint. Static code startup does not query Docker.
 - `src/vigil_cli/remediation.py` — case intake/context rendering, configured workspace/checks, reviewed PR publication, and consented development workflow commands; `remediation_browser.py` owns local browser execution. Backend APIs own case state.

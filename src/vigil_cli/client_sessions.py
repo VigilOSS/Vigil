@@ -16,6 +16,7 @@ import uuid
 from .application import application_provenance, application_root_for_workspace
 from .install_fs import atomic_write_bytes, open_pinned_directory
 from .paths import resolve_runtime_state_dir
+from .term import single_line
 
 
 from .process_identity import _process_identity
@@ -182,8 +183,15 @@ def record_client_session(workspace: Path, engagement: Path, client: str, mode: 
 
 
 @contextmanager
-def client_session_bootstrap(workspace: Path, engagement: Path, *, shared_files: bool = True) -> Iterator[None]:
-    """Serialize release checks, shared-file refresh, and the official start receipt."""
+def client_session_bootstrap(
+    workspace: Path, engagement: Path, *, shared_files: bool = True, concurrent: bool = False,
+) -> Iterator[bool]:
+    """Serialize starts; retain shared configuration while its clients are alive.
+
+    The yielded value permits shared-file refresh. Explicit maintenance retains
+    the strict upgrade guard; official starts can join the retained release.
+    Native projects do not consume the shared configuration or its release pin.
+    """
     directory = _registry_directory(workspace)
     pin = open_pinned_directory(directory, create=True)
     assert pin is not None
@@ -195,9 +203,38 @@ def client_session_bootstrap(workspace: Path, engagement: Path, *, shared_files:
                 raise SystemExit(f"Invalid client bootstrap lock: {directory / 'bootstrap.lock'}")
             fcntl.flock(descriptor, fcntl.LOCK_EX)
             pin.require_attached()
-            if shared_files:
+            if shared_files and not concurrent:
                 guard_client_session_upgrade(workspace, engagement)
-            yield
+            sessions: tuple[dict[str, Any], ...] = ()
+            if concurrent or not shared_files:
+                sessions = tuple(row for row in active_client_sessions(workspace)
+                                 if Path(row["engagement"]).resolve() == engagement.resolve())
+            shared = tuple(row for row in sessions if not (
+                row.get("client") in {"opencode", "zcode"} and row.get("mode") in {"web", "code"}
+            ))
+            previous_root = os.environ.get("VIGIL_APPLICATION_DIR")
+            try:
+                if sessions:
+                    clients = ", ".join(single_line(
+                        f"{row.get('client') or 'client'} ({row.get('mode') or 'unknown mode'}, "
+                        f"release {row['application']['version']}, PID {row['pid']})"
+                    ) for row in sessions)
+                    print(f"Warning: engagement {single_line(engagement.name)} already has active sessions: {clients}. "
+                          "Starting another session; existing clients remain running.", file=sys.stderr, flush=True)
+                if shared_files and shared:
+                    retained = shared[0]["application"]
+                    os.environ["VIGIL_APPLICATION_DIR"] = retained["root"]
+                    print(f"Warning: reusing retained release {single_line(retained['version'])} and shared client "
+                          "configuration without refreshing it. To adopt updated prompts and helpers for shared-config "
+                          "clients, exit those clients and start again. Native project clients use separate contexts.",
+                          file=sys.stderr, flush=True)
+                yield not (shared_files and shared)
+            finally:
+                if shared_files and shared:
+                    if previous_root is None:
+                        os.environ.pop("VIGIL_APPLICATION_DIR", None)
+                    else:
+                        os.environ["VIGIL_APPLICATION_DIR"] = previous_root
             pin.require_attached()
         finally:
             os.close(descriptor)

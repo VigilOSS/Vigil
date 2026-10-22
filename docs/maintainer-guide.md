@@ -322,7 +322,9 @@ initialization provenance; it is not the release identity of an already-running 
 `application.py` validates the exact bundle inventory and materializes immutable version/digest
 cache paths. Do not delete retained releases on upgrade: backend processes and client helpers may
 still use them. Official client starts serialize shared-file repair and PID/birth-identity receipts
-through `client_sessions.py`; explicit global client maintenance uses the same lock. Routine adoption
+through `client_sessions.py`; concurrent shared-config starts reuse the live release without repair.
+Native project contexts stay independent. Track routing changes retain the live shared release under
+the same lock. Explicit global client maintenance keeps its cross-release guard. Routine adoption
 does not refresh client files. Restart requirements belong to `restart_manifest.consumer_states`.
 
 `vigil_build.py` reads the tracked publisher inventory, excludes private/state/auth files, builds both

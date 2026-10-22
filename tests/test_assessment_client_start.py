@@ -26,7 +26,7 @@ def context(tmp_path, monkeypatch):
     (engagement / "scope.json").write_text(json.dumps({"status": "in_progress",
         "engagement_type": "offensive", "tracks": {"web": {"phase": "recon"},
         "code": {"phase": "ingest"}}}))
-    monkeypatch.setattr(client_sessions, "client_session_bootstrap", lambda *_, **_kw: nullcontext())
+    monkeypatch.setattr(client_sessions, "client_session_bootstrap", lambda *_, **_kw: nullcontext(True))
     receipts = []
     monkeypatch.setattr(client_sessions, "record_client_session", lambda *args: receipts.append(args))
     monkeypatch.setattr(engagements, "repair_engagement_client_entrypoints",
