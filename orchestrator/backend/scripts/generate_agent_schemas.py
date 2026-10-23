@@ -571,7 +571,7 @@ def _schema_specs() -> tuple[SchemaSpec, ...]:
                                 "link_kind": {
                                     "type": "string",
                                     "default": "related",
-                                    "description": "Relationship type (e.g. 'related', 'exploits', 'chained-with', 'variant-of').",
+                                    "description": "Relationship type. Use 'variant_of' only for an explicit child of another finding (target_kind='finding'); use 'related' for independent findings sharing a class or pattern.",
                                 },
                                 "target_kind": {
                                     "type": "string",

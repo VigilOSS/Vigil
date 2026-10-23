@@ -42,12 +42,12 @@ field:
   the supplied historical CVE/patch bug-shape evidence (including vulnerable/fixed code when
   available) to seed an additive search. Record only net-new findings after deduplication against
   the main hunt.
-  When no canonical current finding is the parent, omit `links.variant_of` rather than inventing a
+  When no canonical current finding is the parent, omit the Step 4 child-link entry in `code-variant-analysis` rather than inventing a
   relationship. This pass emits no `code-record variant-check` receipts and its handoff labels the
   work `non-covering discovery`, because it does not satisfy Phase 3 assigned-file completeness.
 - **Phase 3 receipt-bearing mode:** the numeric `variant_dispatch_id` and canonical sorted,
   non-empty `parent_finding_slugs` are both present and exactly match the registered dispatch.
-  Record each confirmed sibling with `links.variant_of` to an assigned parent and emit one
+  Record each confirmed child instance using the `links` array from skill Step 4, pointing to its assigned parent and emit one
   dispatch-bound `code-record variant-check` receipt for every current admitted file.
 
 A phase outside 2/3, either authority field in Phase 2, either missing authority field in Phase 3,
@@ -116,8 +116,8 @@ Before your dispatch returns, use the sequence selected by Operational Mode Gate
 **Phase 2 discovery mode:**
 
 1. Deduplicate each candidate against the main hunt, then run `vigil assess finding record
-   code-variant-hunter <finding-json>` for each net-new finding. Set `links.variant_of` only when a
-   canonical current parent actually exists; otherwise omit it.
+   code-variant-hunter <finding-json>` for each net-new finding. Use the skill's Step 4 `links` array entry only for an actual canonical current parent; independent same-class
+   findings use `related`, and unparented discoveries omit child ancestry.
 2. `vigil assess agent handoff --from-json <path>` with `non-covering discovery` in the summary,
    historical shapes searched, findings recorded, dedup decisions, search gaps, and next steps.
    Record no `code-record variant-check` receipts because this pass does not prove assigned-file
@@ -127,8 +127,9 @@ Before your dispatch returns, use the sequence selected by Operational Mode Gate
 
 **Phase 3 receipt-bearing mode:**
 
-1. `vigil assess finding record code-variant-hunter <finding-json> --agent-id <your-agent_id>` per variant finding, each with
-   `links.variant_of` pointing at an assigned parent slug.
+1. `vigil assess finding record code-variant-hunter <finding-json> --agent-id <your-agent_id>` per variant finding, each actual child
+   using the skill's Step 4 `links` array entry pointing at an assigned parent slug. Preserve independent
+   same-class findings with `related` rather than changing their root status.
 2. `vigil assess code-record variant-check <per-file-receipt-json>` once for **every current
    admitted file**, including clean files, guarded matches, and bounded quick non-matches for files
    that cannot instantiate, route, configure, or reach the pattern. Set the receipt object's
@@ -168,7 +169,7 @@ finding record code-variant-hunter <finding-json>` allocates the next `CV-*`
 slug under a lock and prints the canonical slug; use that returned value in
 handoffs and verifier follow-up. Source identity is not defaulted: copy the complete current
 `provenance.code_snapshot` from Code Source Identity. In Phase 2 discovery, an absent canonical
-parent means `links.variant_of` is omitted; the new `CV-*` finding remains independently reviewable.
+parent means the Step 4 child-link entry in `code-variant-analysis` is omitted; the new `CV-*` finding remains independently reviewable.
 
 ## Key Principles
 
@@ -178,7 +179,7 @@ parent means `links.variant_of` is omitted; the new `CV-*` finding remains indep
   complete `details` (evidence, impact, remediation, steps_to_reproduce, cvss_vector,
   cvss_score), not an abbreviated variant stub.
 - **Same pattern, independent severity**: each instance is graded from its own reachability and impact
-- **Link only to a real parent**: Phase 3 findings reference an assigned parent via `variant_of`.
+- **Link only to a real parent**: Actual child findings reference an assigned parent using the skill's Step 4 `links` entry; a shared class alone uses `related`.
   Phase 2 findings reference a canonical current parent when one exists and otherwise stand alone;
   historical CVE identifiers are evidence, not fabricated backend relationships. A linked finding
   is independently re-evaluated on its own trigger path and guard evidence if its parent is later
@@ -193,7 +194,7 @@ parent means `links.variant_of` is omitted; the new `CV-*` finding remains indep
   so the operator can deduplicate net-new findings and continue draining the file-analysis queue;
   this pass does not replace or close that queue.
 - **→ code-vuln-verifier** (via operator): Confirmed findings pass to verification with the same
-  evidence package as original findings. Include `variant_of` when a canonical parent exists.
+  evidence package as original findings. Use the skill's Step 4 child relationship when a canonical parent actually applies.
 - **→ report-writer** (via operator): After verification, linked variants appear with their parent;
   unlinked Phase 2 discoveries remain independently reportable.
 '''

@@ -321,7 +321,7 @@ FINDING_DETAIL_CORE_PROPERTIES: dict[str, dict[str, Any]] = {
     },
     "variant_of": {
         "type": "string",
-        "description": "Slug of the root finding when this record is a verified same-class variant (e.g. 'sqli-search-q').",
+        "description": "Informational attribution to a parent pattern. Child ancestry requires a links entry with link_kind=variant_of, target_kind=finding and the parent slug; independent same-class findings use related.",
     },
     "original_pattern": {
         "type": "string",

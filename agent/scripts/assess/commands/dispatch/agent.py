@@ -15,6 +15,7 @@ from typing import Any
 
 from assess.lib.client import AssessmentClient, AssessError
 from assess.lib.config import load_config
+from assess.lib.contract_registry import HANDOFF_SUMMARY_MAX_CHARS as _HANDOFF_SUMMARY_MAX_CHARS
 from assess.lib.contracts import (
     MIXED_ASSESSMENT_ROLES,
     default_dispatch_mode_for_role,
@@ -59,14 +60,6 @@ _HANDOFF_PATCHABLE_FIELDS = frozenset(
         "extras",
     }
 )
-# The backend rejects a longer summary with an HTTP 422, which a specialist
-# only sees after authoring the whole checkpoint and sending it. Mirroring the
-# bound here fails the write before the request while the text is still in the
-# author's editor. Characters, not bytes — Pydantic counts characters on a str.
-# KEEP IN SYNC with ``HandoffCreate.summary`` (authoritative) and
-# ``HandoffUpdate.summary`` in ``orchestrator/backend/app/api/assessment.py``.
-_HANDOFF_SUMMARY_MAX_CHARS = 2000
-
 _OVERLAP_PAGE_SIZE = 1000
 _OVERLAP_MAX_PAGES = 1000
 _OVERLAP_DISPLAY_LIMIT = 5
@@ -606,8 +599,8 @@ def _build_handoff_payload(args) -> dict:
     if isinstance(summary, str) and len(summary) > _HANDOFF_SUMMARY_MAX_CHARS:
         print(
             f"agent handoff --from-json: summary is {len(summary)} characters, over "
-            f"the {_HANDOFF_SUMMARY_MAX_CHARS}-character backend cap. Shorten it and "
-            "move the detail into the structured fields that carry it: "
+            f"the {_HANDOFF_SUMMARY_MAX_CHARS}-character persistence limit. Input is unchanged; shorten the summary and "
+            "retain evidence in working_artifacts. Use these structured fields for their meanings: "
             "coverage_gaps, next_steps, runtime_issues.",
             file=sys.stderr,
         )
@@ -655,4 +648,7 @@ def _record_handoff(args) -> None:
     print(json.dumps({
         "handoff_id": row.get("id"),
         "agent_id": row.get("agent_id"),
+        "handoff_version": row.get("handoff_version"),
+        "last_checkpoint_at": row.get("last_checkpoint_at"),
+        "summary_characters": len(row.get("summary") or payload.get("summary") or ""),
     }, ensure_ascii=False))

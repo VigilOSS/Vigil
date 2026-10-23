@@ -537,7 +537,7 @@ def _require_current_reportable_root_file_finding(
         SELECT 1
         FROM assessment_finding_links
         WHERE engagement_id = ? AND finding_id = ?
-          AND link_kind = 'variant_of' AND retired_at IS NULL
+          AND link_kind = 'variant_of' AND target_kind = 'finding' AND retired_at IS NULL
         LIMIT 1
         """,
         (engagement_id, int(finding["id"])),
@@ -1508,6 +1508,7 @@ def _valid_current_root_finding_result_sql(
                   WHERE variant_link.engagement_id = linked_finding.engagement_id
                     AND variant_link.finding_id = linked_finding.id
                     AND variant_link.link_kind = 'variant_of'
+                    AND variant_link.target_kind = 'finding'
                     AND variant_link.retired_at IS NULL
               )
               AND CASE WHEN json_valid(linked_finding.provenance_json) THEN (

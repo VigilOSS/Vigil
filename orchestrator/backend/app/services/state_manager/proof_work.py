@@ -664,6 +664,8 @@ def claim_proof_work(engagement_id: int, work_id: int, *, dispatch: dict) -> dic
         payload['dispatch_mode'] = 'deep-manual'
         payload['task'] = (payload.get('task') or work['objective']) + f"\nproof_route: {work['route']}\nproof_work_id: {work_id}\nauthorized_phase: {'exploit' if work['route'] == 'web' else 'code-verify'}"
         created = record_dispatch(engagement_id, **payload)
+        if created.get('idempotent_replay'):
+            _fail('Released proof work requires a fresh dispatch identity; inspect the previous worker before claiming again')
         connection.execute('UPDATE assessment_proof_work SET owner_dispatch_id=?,status=\'claimed\', '
                            'updated_at=CURRENT_TIMESTAMP WHERE id=?', (created['id'], work_id))
         _event(connection, work_id, 'claimed', {'dispatch_id': created['id'], 'agent_id': dispatch['agent_id']})

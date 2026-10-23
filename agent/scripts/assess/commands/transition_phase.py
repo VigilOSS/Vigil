@@ -1351,7 +1351,7 @@ def _blue_check_triage_to_investigate(
                 "L1 work was not done. Dispatch via "
                 "`vigil assess agent start --role alert-triage-specialist --tier L1 "
                 "--rate-budget '<authored tenant query budget>' --prompt-context-json "
-                "dispatch-context.json --emit-prompt`."
+                "dispatch-context.json`."
             ),
         })
 
@@ -1451,7 +1451,7 @@ def _blue_check_investigate_to_verify(
                 "not done. Dispatch via "
                 "`vigil assess agent start --role investigator --tier L2 "
                 "--rate-budget '<authored tenant query budget>' --prompt-context-json "
-                "dispatch-context.json --emit-prompt`."
+                "dispatch-context.json`."
             ),
         })
 
@@ -1500,7 +1500,7 @@ def _blue_check_verify_to_respond(
                 "did not run. Dispatch via "
                 "`vigil assess agent start --role incident-verifier --tier L3 "
                 "--rate-budget '<authored tenant query budget>' --prompt-context-json "
-                "dispatch-context.json --emit-prompt`."
+                "dispatch-context.json`."
             ),
         })
 

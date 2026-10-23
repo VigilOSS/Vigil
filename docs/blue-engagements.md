@@ -65,13 +65,15 @@ Blue dispatch uses the shared assessment-agent surface:
 ```bash
 vigil assess agent start --role <blue-role> --tier <L1|L2|L3|L4> \
   --skills <names> --rate-budget '<authored tenant query budget>' \
-  --prompt-context-json dispatch-context.json --emit-prompt
+  --prompt-context-json dispatch-context.json
 ```
 
 Use `--no-target-traffic` instead of `--rate-budget` for a genuinely offline lane.
 The emitter reads the engagement's `customer`, `platforms`, and
 `tenant_reference_paths` from `scope.json`, validates every tenant reference, and
-prints the complete prompt. The prompt-context JSON shape is documented in
+captures the canonical packet atomically with registration. Send only the receipt's short
+`launch_message` to a fresh native child; the message points to its packet path and digest.
+The optional prompt-context JSON shape is documented in
 [`dispatch-template.md`](../agent/references/runtime-guides/dispatch-template.md).
 
 Blue roles are `alert-triage-specialist`, `investigator`, `incident-verifier`, and

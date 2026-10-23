@@ -36,7 +36,7 @@ def register(subparsers) -> None:
             action.add_argument('--reasoning', default=None, choices=REASONING_CHOICES,
                                 help='Requested reasoning effort for the claimed dispatch, as for agent start.')
             action.add_argument('--prompt-context-json', required=True,
-                                help='Canonical dispatch context JSON or @file, as for agent start --emit-prompt.')
+                                help='Canonical dispatch context JSON or @file, as for agent start.')
             traffic = action.add_mutually_exclusive_group(required=True)
             traffic.add_argument('--rate-budget', help='Per-specialist target-traffic budget, as for agent start.')
             traffic.add_argument('--no-target-traffic', action='store_true')
@@ -113,6 +113,22 @@ def run(args) -> None:
                 work = client.get(f'proof-work/{args.work_id}')
                 _attach_claim_prompt(payload, work, args, cfg, client)
             result = client.post(endpoint, payload)
+            if action == 'claim' and isinstance(result, dict):
+                from assess.commands.agent import _build_launch_receipt
+                if type(result.get('launch_required')) is not bool:
+                    raise AssessError('proof-work claim: receipt omitted launch_required; inspect the durable owner before launching')
+                owner = result.get('owner_agent_id') or args.agent_id
+                packet = result.get('prompt_packet')
+                if not isinstance(packet, dict):
+                    packet = client.get(f'dispatches/{owner}/prompt-packet')
+                launch = _build_launch_receipt(
+                    {'id': result.get('owner_dispatch_id'), 'agent_id': owner, 'agent_role': args.agent_role, 'status': result.get('owner_dispatch_status'),
+                     'idempotent_replay': not result['launch_required']}, cfg,
+                    expected_identity={'agent_id': args.agent_id, 'agent_role': args.agent_role},
+                    packet=packet, launch_required=result['launch_required'],
+                )
+                result = {key: value for key, value in result.items() if key != 'prompt_packet'}
+                result['launch'] = launch
     if action not in ('list', 'get'):
         if not isinstance(result, dict):
             raise AssessError('proof-work: malformed write response; inspect durable state before retrying')
@@ -143,6 +159,8 @@ def _attach_claim_prompt(payload, work, args, cfg, client) -> None:
     payload['assessment_mode'] = work['route']
     payload['finding_slugs'] = [work['finding_slug']]
     context['assessment_mode'] = work['route']
+    context['source_identity'] = source_identity
+    context['traffic_declaration'] = {'rate_budget': args.rate_budget, 'no_target_traffic': args.no_target_traffic}
     from assess.lib.contracts import validate_specialist_dispatch_contract
     errors, warnings = validate_specialist_dispatch_contract(payload)
     if errors:
@@ -167,7 +185,7 @@ def _attach_claim_prompt(payload, work, args, cfg, client) -> None:
                   + _mandatory_load_lines(Path(cfg.agent_root), payload['agent_role'], work['route']))
     rendered = assignment + '\n\n' + _dispatch_prompt(
         payload, engagement_dir=Path(cfg.engagement_dir), agent_root=Path(cfg.agent_root),
-        source_identity=source_identity, args=render_args, client=client,
+        source_identity=source_identity, args=render_args, client=client, validated_context=context,
     )
     payload['prompt_packet'] = {'schema': 'dispatch-prompt/v1', 'context': context,
                                 'rendered_prompt': rendered}

@@ -5,6 +5,7 @@ import argparse
 import functools
 import inspect
 import json
+import hashlib
 import re
 import sys
 from pathlib import Path
@@ -114,7 +115,10 @@ class _DispatchClient:
         return []
 
     def record_dispatch(self, payload: dict) -> dict:
-        return {"id": 7, **payload, "status": "in-progress"}
+        packet = dict(payload.get("prompt_packet") or {})
+        if packet:
+            packet["sha256"] = hashlib.sha256(packet["rendered_prompt"].encode()).hexdigest()
+        return {"id": 7, **payload, "status": "in-progress", "prompt_packet": packet, "launch_required": True}
 
     def close(self) -> None:
         pass
@@ -147,9 +151,11 @@ def test_agent_start_output_explains_record_then_launch_flow(
 
     agent._start(args)
 
-    out = capsys.readouterr().out.lower()
-    assert "does not spawn" in out
-    assert "launch the specialist" in out
+    out = capsys.readouterr().out
+    receipt = json.loads(out.splitlines()[0])
+    assert receipt["launch_required"] is True
+    assert Path(receipt["packet_path"]).is_file()
+    assert receipt["packet_sha256"] in receipt["launch_message"]
 
 
 def test_agent_start_default_output_preserves_authored_rate_budget(
@@ -182,10 +188,8 @@ def test_agent_start_default_output_preserves_authored_rate_budget(
 
     agent._start(args)
 
-    assert (
-        "rate_limit_budget: maximum 2 requests/second; stop after 100 requests"
-        in capsys.readouterr().out
-    )
+    receipt = json.loads(capsys.readouterr().out.splitlines()[0])
+    assert "rate_limit_budget: maximum 2 requests/second; stop after 100 requests" in Path(receipt["packet_path"]).read_text()
 
 
 def test_agent_start_swarm_output_preserves_authored_traffic_declaration(
@@ -389,7 +393,8 @@ def test_agent_start_code_role_renders_backend_derived_source_identity(
     agent._start(args)
 
     assert client.recorded is True
-    output = capsys.readouterr().out
+    receipt = json.loads(capsys.readouterr().out.splitlines()[0])
+    output = Path(receipt["packet_path"]).read_text()
     assert output.index("## Runtime Identity") < output.index("## Code Source Identity")
     assert "repo_id: 17" in output
     assert "repo_key: example-17" in output
@@ -399,7 +404,7 @@ def test_agent_start_code_role_renders_backend_derived_source_identity(
     assert f"structural_index_schema: {STRUCTURAL_INDEX_SCHEMA}" in output
     assert "structural_index_manifest_path: /sealed/example/index/manifest.json" in output
     assert "ctags_path: /sealed/example/ctags/tags" in output
-    assert "pass it the Runtime Identity and Code Source Identity blocks above" in output
+    assert receipt["packet_sha256"] in receipt["launch_message"]
 
 
 def test_agent_start_code_repo_selector_parses() -> None:
@@ -453,13 +458,12 @@ def test_agent_start_parses_explicit_budget_and_prompt_emission() -> None:
             "item-iterating",
             "--rate-budget",
             "maximum 2 requests/second; stop after 100 requests",
-            "--emit-prompt",
         ]
     )
 
     assert args.rate_budget == "maximum 2 requests/second; stop after 100 requests"
     assert args.no_target_traffic is False
-    assert args.emit_prompt is True
+    assert args.packet_file is None
 
 
 def test_agent_continue_parses_a_linked_replacement_dispatch() -> None:
@@ -472,50 +476,27 @@ def test_agent_continue_parses_a_linked_replacement_dispatch() -> None:
     assert args.task == "Finish authorization validation"
 
 
-def test_agent_continue_replays_saved_packet_with_a_bounded_resume_delta(
-    monkeypatch, capsys
-) -> None:
-    class _ContinuationClient(_DispatchClient):
-        def get_dispatch(self, agent_id: str) -> dict:
-            assert agent_id == "analyst-previous"
-            return {
-                "id": 41,
-                "agent_id": agent_id,
-                "agent_role": "vulnerability-analyst",
-                "status": "failed",
-                "skills": ["idor-testing"],
-            }
-
-        def get(self, endpoint: str) -> dict:
-            if endpoint == "dispatches/analyst-previous/prompt-packet":
-                return {
-                    "schema": "dispatch-prompt/v1",
-                    "context": {"credential_id": "token-123"},
-                    "rendered_prompt": "original prompt",
-                }
-            assert endpoint == "resume-brief?agent_id=analyst-previous"
-            return {"recommended_next_actions": ["check the remaining route"]}
-
-        def record_dispatch(self, payload: dict) -> dict:
-            assert payload["continued_from_dispatch_id"] == 41
-            assert payload["prompt_packet"]["context"] == {"credential_id": "token-123"}
-            assert "check the remaining route" in payload["prompt_packet"]["rendered_prompt"]
-            assert "analyst-next" in payload["prompt_packet"]["rendered_prompt"]
-            assert "Finish validation" in payload["prompt_packet"]["rendered_prompt"]
-            return {"id": 42, **payload}
-
-    client = _ContinuationClient()
-    monkeypatch.setattr(
-        agent.dispatch,
-        "_client_for",
-        lambda _args: (client, SimpleNamespace()),
-    )
-
-    agent._continue(
-        SimpleNamespace(extra=["analyst-previous"], task="Finish validation", agent_id="analyst-next")
-    )
-
-    assert '"continued_from": "analyst-previous"' in capsys.readouterr().out
+def test_agent_continue_builds_current_assignment_with_immutable_history_pointer(monkeypatch, capsys, tmp_path) -> None:
+    recorded = []
+    class ContinuationClient(_DispatchClient):
+        def get_dispatch(self, agent_id):
+            return {"id": 41, "agent_id": agent_id, "agent_role": "vulnerability-analyst", "status": "failed"}
+        def get(self, endpoint):
+            assert endpoint == "dispatches/analyst-previous/prompt-packet"
+            return {"schema": "dispatch-prompt/v1", "context": {"credential_id": "credential-123", "traffic_declaration": {"no_target_traffic": True}}, "rendered_prompt": "original prompt", "sha256": "a" * 64}
+        def record_dispatch(self, payload):
+            recorded.append(payload)
+            return super().record_dispatch(payload)
+    monkeypatch.setattr(agent.dispatch, "_client_for", lambda _: (ContinuationClient(), SimpleNamespace(engagement_dir=str(tmp_path), agent_root=str(tmp_path))))
+    agent._continue(SimpleNamespace(extra=["analyst-previous"], task="Finish validation", agent_id="analyst-next"))
+    packet = recorded[0]["prompt_packet"]
+    assert recorded[0]["continued_from_dispatch_id"] == 41
+    assert packet["context"]["credential_id"] == "credential-123"
+    assert packet["rendered_prompt"].startswith("## Runtime Identity\nagent_id: analyst-next\n")
+    assert "Finish validation" in packet["rendered_prompt"]
+    assert "a" * 64 in packet["rendered_prompt"]
+    receipt = json.loads(capsys.readouterr().out.splitlines()[0])
+    assert Path(receipt["packet_path"]).read_text() == packet["rendered_prompt"]
 
 
 def test_agent_start_dry_run_validates_without_persisting(
@@ -627,7 +608,7 @@ def test_agent_start_from_json_preserves_identity_and_emits_complete_context(
         encoding="utf-8",
     )
     args = _agent_parser().parse_args(
-        ["agent", "start", "--from-json", str(payload_path), "--emit-prompt"]
+        ["agent", "start", "--from-json", str(payload_path)]
     )
     class _RecordingClient(_DispatchClient):
         def __init__(self) -> None:
@@ -659,8 +640,9 @@ def test_agent_start_from_json_preserves_identity_and_emits_complete_context(
     assert "authorized_phase: investigate" in packet["rendered_prompt"]
     output = capsys.readouterr().out
     assert '"agent_id": "json-investigator-1"' in output
-    assert "authorized_phase: investigate" in output
-    assert "rate_limit_budget: maximum 2 tenant queries/second" in output
+    captured = Path(json.loads(output.splitlines()[0])["packet_path"]).read_text()
+    assert "authorized_phase: investigate" in captured
+    assert "rate_limit_budget: maximum 2 tenant queries/second" in captured
 
 
 @pytest.mark.parametrize(
@@ -751,7 +733,8 @@ def test_agent_start_emit_prompt_injects_blue_tenant_context(
 
     agent._start(args)
 
-    output = capsys.readouterr().out
+    receipt = json.loads(capsys.readouterr().out.splitlines()[0])
+    output = Path(receipt["packet_path"]).read_text()
     assert "## Load First (tenant context" in output
     assert str(tenant_ref) in output
     assert "rate_limit_budget: not applicable — no target traffic" in output
@@ -1168,13 +1151,13 @@ def _mixed_role_continuation(prior_mode, recorded):
 
         def get(self, endpoint: str) -> dict:
             if endpoint.endswith("/prompt-packet"):
-                return {"schema": "dispatch-prompt/v1", "context": {},
-                        "rendered_prompt": "original proof prompt"}
+                return {"schema": "dispatch-prompt/v1", "context": {"traffic_declaration": {"no_target_traffic": True}, "source_identity": ["repo_id: 7", "repo_generation: 1", "source_manifest_digest: " + "a" * 64]},
+                        "rendered_prompt": "original proof prompt", "sha256": "a" * 64}
             return {}
 
         def record_dispatch(self, payload: dict) -> dict:
             recorded.append(payload)
-            return {"id": 52, **payload}
+            return super().record_dispatch(payload)
 
     return _MixedRoleClient()
 
@@ -1191,10 +1174,11 @@ def test_agent_continue_parses_an_assessment_mode() -> None:
     [("code", None, "code"), (None, "web", "web"), ("web", "web", "web")],
     ids=["inherits-prior", "flag-fills-pre-migration-null", "matching-flag"],
 )
-def test_agent_continue_carries_the_mixed_role_assessment_mode(monkeypatch, capsys, prior_mode, flag, expected):
+def test_agent_continue_carries_the_mixed_role_assessment_mode(monkeypatch, capsys, tmp_path, prior_mode, flag, expected):
     recorded: list[dict] = []
     client = _mixed_role_continuation(prior_mode, recorded)
-    monkeypatch.setattr(agent.dispatch, "_client_for", lambda _args: (client, SimpleNamespace()))
+    monkeypatch.setattr(agent.dispatch, "_client_for", lambda _args: (client, SimpleNamespace(engagement_dir=str(tmp_path), agent_root=str(tmp_path))))
+    monkeypatch.setattr(agent, "_code_source_identity_lines", lambda *a, **k: ["repo_id: 7", "repo_generation: 1", "source_manifest_digest: " + "a" * 64])
     agent._continue(SimpleNamespace(extra=["proof-previous"], task="Finish", agent_id="proof-next",
                                     assessment_mode=flag))
     printed = capsys.readouterr().out
@@ -1203,9 +1187,10 @@ def test_agent_continue_carries_the_mixed_role_assessment_mode(monkeypatch, caps
     # context and in the identity it is told to work under.
     packet = recorded[0]["prompt_packet"]
     assert packet["context"]["assessment_mode"] == expected
-    replacement_identity = packet["rendered_prompt"].split("## Active Replacement Identity\n", 1)[1]
+    replacement_identity = packet["rendered_prompt"].split("## Runtime Identity\n", 1)[1]
     assert f"assessment_mode: {expected}\n" in replacement_identity.split("## ", 1)[0]
-    assert packet["rendered_prompt"] in printed
+    receipt = json.loads(printed.splitlines()[0])
+    assert Path(receipt["packet_path"]).read_text() == packet["rendered_prompt"]
 
 
 @pytest.mark.parametrize(("prior_mode", "flag"), [(None, None), ("code", "web")],

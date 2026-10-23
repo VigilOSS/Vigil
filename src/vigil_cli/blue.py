@@ -110,7 +110,7 @@ def register_blue_parser(sub: argparse._SubParsersAction) -> None:
             "OPERATOR verbs (the LLM operator runs these inside the session):\n"
             "  alert record   record the pasted alert body into scope.json + artifact index\n"
             "  Specialist dispatch: use `vigil assess agent start ... "
-            "--prompt-context-json <file> --emit-prompt`; blue tenant refs are "
+            "--prompt-context-json <file>`; blue tenant refs are "
             "validated and injected from scope.json.\n"
             "  tier           record the current tier on a finding\n"
             "  verify         verify a finding (blue vocab -> CLI storage)\n"
@@ -514,7 +514,7 @@ def _cmd_engage(args: argparse.Namespace, install_root: Path) -> None:
         print("  Paste the alert into the operator chat; the operator records intake", file=sys.stderr)
         print(
             "  (vigil blue alert record), then dispatches triage with "
-            "`vigil assess agent start ... --prompt-context-json <file> --emit-prompt`.",
+            "`vigil assess agent start ... --prompt-context-json <file>`.",
             file=sys.stderr,
         )
         sys.stderr.flush()
@@ -531,7 +531,7 @@ def _cmd_engage(args: argparse.Namespace, install_root: Path) -> None:
     print("  After starting, paste the alert into the operator chat; the operator records intake", file=sys.stderr)
     print(
         "  (vigil blue alert record), then dispatches triage with "
-        "`vigil assess agent start ... --prompt-context-json <file> --emit-prompt`.",
+        "`vigil assess agent start ... --prompt-context-json <file>`.",
         file=sys.stderr,
     )
     print(f"  Shortcut next time: vigil blue engage --customer {customer} --platform {','.join(raw_platforms)} --start codex", file=sys.stderr)
@@ -715,7 +715,7 @@ def _cmd_alert_record(args: argparse.Namespace, install_root: Path) -> None:
     print(
         "\nnext: vigil assess agent start --role alert-triage-specialist --tier L1 "
         "--skills alert-triage --rate-budget '<authored tenant query budget>' "
-        "--prompt-context-json dispatch-context.json --emit-prompt",
+        "--prompt-context-json dispatch-context.json",
         file=sys.stderr,
     )
 
@@ -893,8 +893,8 @@ def _cmd_verify(args: argparse.Namespace, install_root: Path) -> None:
             f"vigil assess agent start --role incident-verifier --tier L3 "
             f"--skills alert-fp-verification --task 'verify {args.finding_slug}' "
             f"--rate-budget '<authored tenant query budget>' "
-            f"--prompt-context-json dispatch-context.json --emit-prompt, or rerun "
-            "with --force to record an operator-approved bypass."
+            f"--prompt-context-json dispatch-context.json\nAlternatively run "
+            f"vigil blue verify {args.finding_slug} --force to record an operator-approved bypass."
         )
 
     evidence_refs: list[str] = []
@@ -1415,7 +1415,6 @@ def _cmd_report(args: argparse.Namespace, install_root: Path) -> None:
             "--agent-id",
             agent_id,
             "--no-target-traffic",
-            "--emit-prompt",
             "--prompt-context-json",
             json.dumps(_blue_report_prompt_context(scope, eng_dir, "incident report")),
         ],
@@ -1466,7 +1465,6 @@ def _cmd_closeout(args: argparse.Namespace, install_root: Path) -> None:
             "--agent-id",
             agent_id,
             "--no-target-traffic",
-            "--emit-prompt",
             "--prompt-context-json",
             json.dumps(_blue_report_prompt_context(scope, eng_dir, "incident closeout")),
         ],

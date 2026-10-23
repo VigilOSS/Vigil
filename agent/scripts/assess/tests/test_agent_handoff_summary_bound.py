@@ -1,6 +1,6 @@
 """``agent handoff`` refuses an over-long summary before the POST.
 
-The backend caps ``summary`` at 2000 characters on both ``HandoffCreate`` and
+The backend caps ``summary`` at 16384 characters on both ``HandoffCreate`` and
 ``HandoffUpdate``, so a specialist that writes a longer one used to learn about
 it from an HTTP 422 after the request had already been built and sent. The
 bound is mirrored client-side in ``_build_handoff_payload`` — the one point
@@ -31,7 +31,7 @@ def calls(monkeypatch, tmp_path):
 
         def record_handoff(self, payload: dict, *, upsert: bool = False) -> dict:
             recorded.append(("record_handoff", payload))
-            return {"id": 1, "agent_id": payload.get("agent_id")}
+            return {"id": 1, "agent_id": payload.get("agent_id"), "summary": payload.get("summary"), "handoff_version": 3, "last_checkpoint_at": "2026-10-23T12:00:00Z"}
 
         def get_handoff(self, agent_id: str) -> dict:
             recorded.append(("get_handoff", agent_id))
@@ -70,7 +70,7 @@ def test_over_long_summary_on_a_create_payload_fails_before_any_request(
         {
             "agent_id": "recon-1",
             "agent_role": "recon-specialist",
-            "summary": "x" * 2001,
+            "summary": "x" * 16385,
         },
     )
 
@@ -79,8 +79,8 @@ def test_over_long_summary_on_a_create_payload_fails_before_any_request(
 
     assert exc.value.code != 0
     err = capsys.readouterr().err
-    assert "2001" in err
-    assert "2000" in err
+    assert "16385" in err
+    assert "16384" in err
     for field in ("coverage_gaps", "next_steps", "runtime_issues"):
         assert field in err
     assert calls == []
@@ -91,22 +91,22 @@ def test_over_long_summary_on_a_partial_update_fails_before_any_request(
 ):
     # No agent_role: the patch path, which would otherwise GET the existing
     # handoff before PATCHing the summary in.
-    args = _args(tmp_path, {"agent_id": "recon-1", "summary": "y" * 2500})
+    args = _args(tmp_path, {"agent_id": "recon-1", "summary": "y" * 17000})
 
     with pytest.raises(SystemExit) as exc:
         dispatch_agent._record_handoff(args)
 
     assert exc.value.code != 0
     err = capsys.readouterr().err
-    assert "2500" in err
-    assert "2000" in err
+    assert "17000" in err
+    assert "16384" in err
     for field in ("coverage_gaps", "next_steps", "runtime_issues"):
         assert field in err
     assert calls == []
 
 
 def test_summary_exactly_at_the_cap_is_sent_unchanged(tmp_path, calls):
-    summary = "z" * 2000
+    summary = "z" * 16384
     args = _args(
         tmp_path,
         {
@@ -157,3 +157,25 @@ def test_the_mirrored_cap_still_matches_the_backend_it_mirrors():
     assert declared_max_length(HandoffUpdate, "summary") == (
         dispatch_agent._HANDOFF_SUMMARY_MAX_CHARS
     )
+
+@pytest.mark.parametrize('summary', ['Acme audit complete. ' * 110, '界🙂' * 8192], ids=['ordinary-prose', 'unicode-boundary'])
+def test_narrative_handoff_persists_authored_text_and_version_receipt(tmp_path, calls, capsys, summary):
+    args = _args(tmp_path, {'agent_id': 'recon-1', 'agent_role': 'recon-specialist', 'summary': summary,
+                            'next_steps': [{'action': 'review Acme evidence'}]})
+    dispatch_agent._record_handoff(args)
+    assert calls[0][1]['summary'] == summary
+    assert calls[0][1]['next_steps'] == [{'action': 'review Acme evidence'}]
+    receipt = json.loads(capsys.readouterr().out)
+    assert receipt['handoff_version'] == 3
+    assert receipt['last_checkpoint_at'] == '2026-10-23T12:00:00Z'
+    assert receipt['summary_characters'] == len(summary)
+
+
+def test_rejected_narrative_preserves_input_file(tmp_path, calls, capsys):
+    args = _args(tmp_path, {'agent_id': 'recon-1', 'summary': '界' * 16385})
+    original = open(args.from_json, 'rb').read()
+    with pytest.raises(SystemExit):
+        dispatch_agent._record_handoff(args)
+    assert open(args.from_json, 'rb').read() == original
+    assert calls == []
+    assert '16385' in capsys.readouterr().err

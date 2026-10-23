@@ -186,7 +186,7 @@ describe("OastTab detail evidence", () => {
 
     const review = await screen.findByRole("button", { name: /^Needs attention/ });
     expect(review.getAttribute("aria-pressed")).toBe("true");
-    expect(review.textContent).toContain("2");
+    await waitFor(() => expect(review.textContent).toContain("2"));
     await screen.findByRole("gridcell", { name: "fired-newer" });
     expect(screen.getAllByRole("gridcell").map((cell) => cell.textContent)).toEqual(["fired-newer", "fired-older"]);
 

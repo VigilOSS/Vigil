@@ -75,7 +75,7 @@ This skill operationalizes gates that live elsewhere; read them rather than re-d
   Run every confirmed debate-skipped runtime-proven finding through it (data-exposure, write, auth-bypass, race, business-logic): it catches the real-world-impact
   gaps a CVSS-band check misses (no-PII "reads", orphan writes, insider-only enumerability,
   inflated `S:C`/`I:H`).
-- **Severity ↔ CVSS bands** — `agent/shared-specialist-core.md` "Finding IDs and the `finding record` Contract" (the canonical band table).
+- **Severity ↔ CVSS consistency** — `vigil assess contract finding record` owns the matching vector version, score and severity contract.
 
 ## Methodology
 

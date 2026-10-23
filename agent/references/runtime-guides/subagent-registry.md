@@ -53,11 +53,11 @@ vigil assess agent start \
     --dispatch-mode hypothesis-driven \
     --skills subdomain-enumeration,web-recon \
     --rate-budget "<exact operator-authored rate/concurrency instruction>" \
-    --prompt-context-json dispatch-context.json \
-    --emit-prompt
+    --prompt-context-json dispatch-context.json
+
 
 # Then launch the specialist with the client-native agent tool and pass it
-# the Runtime Identity block printed by `agent start`.
+# only launch_message from the successful receipt, pointing to its captured packet and SHA-256.
 
 # After observed native return and checking owned execution ended, close its final handoff.
 vigil assess agent render-handoff recon_a3f9

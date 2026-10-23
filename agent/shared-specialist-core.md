@@ -5,9 +5,7 @@ Load this file first alongside your role file and the family's
 `agent/shared-constraints-code.md`; blue: `agent/shared-constraints-blue.md`) — see
 "Load Sequence" below for how this fits with skill/reference loading and target-facing
 work. This file holds the universal layer shared across roles — Specialist Context
-Isolation, the Contract-First Rule, the closing-sequence wrapper, and the finding-ID
-prefix table, title formula, and CVSS↔severity mapping that is the counterpart to your
-track's full finding-recording rules.
+Isolation, the Contract-First Rule, the closing-sequence wrapper, and pointers to the executable finding-recording contract.
 Read it once; do not re-author any of this in a role file.
 
 **Canonical pointer string** — every role file references this content with
@@ -89,6 +87,13 @@ Before a terminal finding verdict, write the complete reproduction and evidence 
 review; each receipt supports one verification event. Read the proof-run, proof-receipt and
 finding-verification contracts rather than reusing a consumed receipt after a material edit.
 
+Before expensive validation, establish the actor's existing authorized capabilities from
+implementation, documentation, or controlled observation, and state what remains unknown.
+Compare the candidate outcome with those capabilities and their limits. Configuration authority
+is not authority over another OS user, tenant, asset, or security invariant. A supported admin
+operation alone is not a new privilege; memory-safety defects and escapes still require analysis.
+This question informs prioritization and impact, never excuses unread coverage or fabricates a kill.
+
 ## Reasoning quality > response brevity
 
 Reason fully through the work as you go — narrate observations between tool calls, work through
@@ -103,49 +108,12 @@ response, structured state in the backend tables (see "Output Hygiene" below).
 
 ## Finding IDs and the `finding record` Contract
 
-> **Offensive/code roles only.** Blue/IR roles use the IR-evidence confidence
-> model and `finding record` fields in `agent/shared-constraints-blue.md` (§8 +
-> the Artifact-Registration closing step) — no CVSS score, no letter prefix. The
-> prefix table and CVSS↔severity mapping below do not apply to you.
-
-| Agent | Prefix | Example |
-|-------|--------|---------|
-| exploit-developer | EX | EX-001 |
-| vulnerability-analyst | VA | VA-001 |
-| source-analyzer | SA | SA-001 |
-| recon-specialist | RE | RE-001 |
-| fuzzer | FZ | FZ-001 |
-| osint-analyst | OS | OS-001 |
-| surface-collector | SC | SC-001 |
-
-**Title formula:** `[Bug Class] in [endpoint] allows [attacker role] to [impact] [victim/scope]`
-Bad: "IDOR vulnerability found." Good: "IDOR in /api/users/{id} allows anonymous attacker to read any user's PII."
-
-**CVSS↔severity must match:**
-
-| Severity | CVSS range |
-|----------|------------|
-| critical | 9.0–10.0 |
-| high | 7.0–8.9 |
-| medium | 4.0–6.9 |
-| low | 0.1–3.9 |
-| info | 0.0 |
-
-If your CVSS score does not fall within the matching severity range, adjust one or the other before recording.
-
-Record one complete CVSS v3.1 or v4.0 base vector in `details.cvss_vector` and its matching
-base score in `details.cvss_score`; the vector prefix declares the version. Use the recipient's
-required version for an external submission. Threat, temporal, environmental, and supplemental
-metrics are not accepted in these base-score fields. The backend validates the pair using that
-version's scoring algorithm; do not translate metrics or reuse a score across versions.
-
-The recording command's canonical payload shape is `vigil assess contract finding record`;
-read it before your first record, per the Contract-First Rule below. The full recording
-rules (dedup, chain metadata, the `notes` replayable-commands requirement) live in
-whichever `shared-constraints*.md` your Load First names — `agent/shared-constraints.md`
-§4 "Finding IDs and Recording", `agent/shared-constraints-code.md` §4 "Findings Use the
-Existing Backend" plus §10 "Recording Format", or `agent/shared-constraints-blue.md`
-"Artifact Registration and `finding record`". Read them there; do not re-derive them here.
+Offensive/code roles read `vigil assess contract finding record` before recording; it owns
+allocated finding IDs, detail fields, CVSS v3.1/v4.0 base vectors and matching score/severity.
+Omit a new finding's slug and use the returned value. Describe the bug, supported actor,
+failed boundary and proved outcome in the title. A vector and its score must use the same version.
+Blue/IR roles use the evidence-confidence rules in `agent/shared-constraints-blue.md` instead.
+Recording details load on first write through the selected track's shared constraints.
 
 ---
 
@@ -218,48 +186,12 @@ it in role prompts.
 
 ## Contract-First Rule
 
-Before the **first invocation of a `vigil assess` verb in the covered list
-below**, run `vigil assess contract <verb>` (or `vigil assess contract <verb> <variant>`)
-to read the canonical schema, the required fields, the common mistakes, and
-the example payload. These verbs write payload-bearing state, dispatch runtime
-tools, or seat work-buffer rows. Schema validation errors from guessing waste a full
-round-trip, so reading the contract first is faster than re-running the
-verb after a rejection.
-
-Verbs covered by the rule — every one has a contract entry; the ones outside
-your track simply never come up:
-
-- `finding record` — `vigil assess contract finding record`
-- Lifecycle helpers (`finding verify --status <status>` — including a completed
-  counter-check for `false_positive`, `finding update` — including `--status draft`
-  to reopen, `resolve <surface|coverage-item>`) — `vigil assess contract <verb>`
-- `agent <subverb>` for sub-verbs that mutate durable dispatch state or
-  emit the canonical handoff blob:
-  `start`, `done`, `handoff`, `decision`,
-  `abort-duplicate`, `render-handoff` — `vigil assess contract agent <subverb>`
-- `intel record <type>` — `vigil assess contract intel record <type>`
-- `record-surface` — `vigil assess contract record-surface`
-- `kali <verb>` — `vigil assess contract kali <verb>`
-- `code-record <subverb>` (`classify`, `analysis`, `modules`, `threat-model`,
-  `variant-check`, `fuzz-decision`, `fuzz-campaign`) —
-  `vigil assess contract code-record <subverb>`
-
-Verbs **not** covered (skip the contract round-trip — they are read-only or,
-for `work-buffer done`, close a tokenized lease without a payload contract):
-`fetch`, `list-skills`, `work-buffer clusters`,
-`command-run list`, `command-run get`, `check-phase-readiness`,
-`scope filter`, `work-buffer stats|peek|fetch|done`,
-`dispatch list`, `dispatch get`. Reading the contract for these adds
-latency without preventing any error class.
-
-Treat the contract output as the source of truth for arg ordering, flag
-names, enum values, and required fields. Do not infer field names from
-similar tools — five of the most common dispatch errors in recent
-engagements (`record-surface` arg ordering, `finding record` agent prefix,
-`finding update` guessing a nonexistent `--details-patch` flag instead of
-the real `--details-inline`/`--details-replace`, `kali katana -H`, `kali exec
---probe-kind active`) would each have been prevented by running
-`contract` before the first call.
+Before the first durable write or runtime-tool invocation, read
+`vigil assess contract <verb> [variant]`. This includes finding record/update/verify,
+agent lifecycle/handoffs, intel record, record-surface, kali, and code-record verbs.
+The contract owns payload fields, enums, argument order, and examples; do not guess from
+another command. Read-only discovery, fetch, command-run reads, readiness checks, and
+work-buffer read/lease-close operations do not need this extra round trip.
 
 ---
 

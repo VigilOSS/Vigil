@@ -17,7 +17,7 @@ Checklist — stays in `agent/operator-core-code.md`; this doc does not restate 
 Phase 3 merges verification and applicable variant scanning into one phase. The verifier always
 runs; the variant hunter runs in parallel only when the current Phase 2 root findings produce a
 non-empty frozen parent set. That pre-verification set contains current-source findings in a
-reportable workflow status, excludes `variant_of` children and blocked/false-positive dispositions,
+reportable workflow status, excludes explicit `variant_of` finding-child links and blocked/false-positive dispositions,
 and is frozen before either parallel worker changes live verification state:
 
 - **Agent A (code-vuln-verifier)**: TOB-style false positive elimination on all findings
@@ -100,11 +100,17 @@ directive.
 
 First derive the exact current Phase 2 root set for this repository and freeze its canonical sorted
 slugs before verification starts. Include current-source findings in a reportable workflow status
-even while unreviewed or disputed; exclude `variant_of` children and verification-blocked or
+even while unreviewed or disputed; exclude explicit `variant_of` finding-child links and verification-blocked or
 false-positive findings. If that set is empty, variant-pattern review is not applicable: do **not** dispatch
 `code-variant-hunter`, create an empty-scope dispatch, or fabricate per-file receipts. Continue the
 verifier path and the Phase 4 applicability decision. Complete/fuzz readiness derives this
 non-applicability from the absence of current parent findings.
+
+Variant relationship payloads use the `links` array in `code-variant-analysis` Step 4. A same-class
+independent finding uses `related` and remains a root; naming a parent only in `details.variant_of`
+does not establish child ancestry. Added/promoted roots after a dispatch freeze require covering
+work for the new scope. Inspect `code/variant-checks?include_stale=true` currency diagnostics and
+the readiness blocker for uncovered parent slugs; preserve the frozen dispatch and old receipts.
 
 When the frozen set is non-empty, dispatch `code-variant-hunter` with
 `agent/skills/code-variant-analysis/SKILL.md` under the role prompt's **Phase 3 receipt-bearing
@@ -120,7 +126,7 @@ vigil assess agent start --agent-id <agent-id> --role code-variant-hunter \
   --task "Scan assigned files for variants of the frozen Phase 2 parent set" \
   --dispatch-mode hypothesis-driven --skills code-variant-analysis \
   --finding-slugs CH-001,CH-004 --no-target-traffic \
-  --prompt-context-json dispatch-context.json --emit-prompt
+  --prompt-context-json dispatch-context.json
 ```
 
 The specialist's dispatch context must include both values exactly as registered:

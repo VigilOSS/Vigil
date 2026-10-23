@@ -10,7 +10,7 @@ render-handoff replaces that discretion with a deterministic emitter that
 pulls from durable state (the orchestrator's assessment_dispatches +
 assessment_dispatch_handoffs tables) and emits a markdown blob the operator
 pastes verbatim into the next dispatch prompt. The context excerpt is capped at
---max-lines (default 40; 0 renders the complete recorded handoff); the findings list collapses to "... and N more"
+--max-lines (default 40, also bounded to 8000 characters; 0 renders the complete recorded handoff); the findings list collapses to "... and N more"
 before any fixed sections drop.
 """
 from __future__ import annotations
@@ -211,6 +211,12 @@ def _render_handoff(args, extra: list[str]) -> None:
         max_lines=max_lines,
         extras=extras_payload,
     )
+    # Storage is verbatim; only the default context selection is bounded. A long
+    # single paragraph must not evade the physical-line budget.
+    if max_lines and len(blob) > 8000:
+        marker = "... handoff excerpt: characters omitted; rerun render-handoff with --max-lines 0 for the complete recorded handoff"
+        selected = blob[:8000 - len(marker) - 1].splitlines()[:max(0, max_lines - 1)]
+        blob = "\n".join([*selected, marker])
     print(blob)
 
 

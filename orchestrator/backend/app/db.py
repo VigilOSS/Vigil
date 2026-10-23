@@ -2390,6 +2390,11 @@ def _create_assessment_finding_tables(connection: sqlite3.Connection) -> None:
             "ALTER TABLE assessment_finding_links ADD COLUMN retired_at TEXT"
         )
     connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_assessment_finding_links_active_parentage "
+        "ON assessment_finding_links(engagement_id, finding_id, link_kind, target_kind) "
+        "WHERE retired_at IS NULL"
+    )
+    connection.execute(
         """
             CREATE TABLE IF NOT EXISTS assessment_attack_chains (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,

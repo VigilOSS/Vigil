@@ -1489,7 +1489,10 @@ def list_code_files(
                 active_generation_by_file[file_id] = int(
                     queue_row["active_generation"]
                 )
-        parent_finding_cache: dict[int, list[str]] = {}
+        variant_projection = _load_variant_receipt_projection(
+            connection, engagement.id, file_rows=[dict(row) for row in rows],
+            restrict_to_files=True,
+        )
         records: list[dict[str, Any]] = []
         for row in rows:
             file_row = dict(row)
@@ -1532,7 +1535,7 @@ def list_code_files(
                 connection,
                 engagement.id,
                 file_row,
-                parent_finding_cache=parent_finding_cache,
+                projection=variant_projection,
             )
             records.append(payload)
         return {
@@ -5501,6 +5504,7 @@ def _current_variant_parent_rows_by_repo(
               WHERE links.engagement_id = findings.engagement_id
                 AND links.finding_id = findings.id
                 AND links.link_kind = 'variant_of'
+              AND links.target_kind = 'finding'
                 AND links.retired_at IS NULL
           )
         ORDER BY findings.slug
@@ -5659,16 +5663,22 @@ def _load_variant_receipt_projection(
     connection,
     engagement_id: int,
     *,
-    repo_rows: list[dict[str, Any]],
     file_rows: list[dict[str, Any]],
-    parent_slugs: dict[int, list[str]],
+    repo_rows: list[dict[str, Any]] | None = None,
+    parent_slugs: dict[int, list[str]] | None = None,
+    restrict_to_files: bool = False,
 ) -> _VariantReceiptProjection:
     latest_receipts: dict[int, dict[str, Any]] = {}
     dispatch_scopes: dict[int, dict[str, Any]] = {}
-    for raw_row in connection.execute(
-        _LATEST_CURRENT_VARIANT_RECEIPTS_SQL,
-        (engagement_id, _VARIANT_DISPATCH_ROLE, engagement_id),
-    ).fetchall():
+    query = _LATEST_CURRENT_VARIANT_RECEIPTS_SQL
+    params: tuple[Any, ...] = (engagement_id, _VARIANT_DISPATCH_ROLE, engagement_id)
+    if restrict_to_files:
+        file_ids = [int(row["id"]) for row in file_rows]
+        placeholders = ",".join("?" for _ in file_ids)
+        query = query.replace("ORDER BY current_files.id", f"AND current_files.id IN ({placeholders}) ORDER BY current_files.id")
+        params += tuple(file_ids)
+    raw_receipts = connection.execute(query, params).fetchall() if file_rows else []
+    for raw_row in raw_receipts:
         row = dict(raw_row)
         scope_dispatch_id = row.pop("projection_scope_dispatch_id")
         scope_slugs_json = row.pop("projection_scope_slugs_json")
@@ -5680,6 +5690,17 @@ def _load_variant_receipt_projection(
                 "parent_finding_slugs_json": scope_slugs_json,
                 "parent_finding_set_digest": scope_digest,
             }
+    if repo_rows is None:
+        repo_ids = sorted({int(row["repo_id"]) for row in latest_receipts.values()})
+        placeholders = ",".join("?" for _ in repo_ids)
+        repo_rows = [dict(row) for row in connection.execute(
+            f"SELECT * FROM code_repos WHERE engagement_id=? AND id IN ({placeholders})",
+            (engagement_id, *repo_ids),
+        ).fetchall()] if repo_ids else []
+    if parent_slugs is None:
+        parent_slugs = _current_phase2_variant_parent_slugs_by_repo(
+            connection, engagement_id, {int(row["id"]) for row in repo_rows},
+        ) if repo_rows else {}
     return _VariantReceiptProjection(
         repos={int(row["id"]): dict(row) for row in repo_rows},
         files={int(row["id"]): dict(row) for row in file_rows},
@@ -5762,6 +5783,27 @@ def _hydrate_variant_check_receipt(row: Any, *, current: bool) -> dict[str, Any]
     )
     payload["current"] = current
     return payload
+
+
+def _variant_receipt_currency(connection, engagement_id: int, row, *, current: bool,
+                              parent_finding_cache: dict[int, list[str]]) -> dict[str, Any]:
+    repo_id = int(row["repo_id"])
+    if repo_id not in parent_finding_cache:
+        parent_finding_cache[repo_id] = _current_phase2_variant_parent_slugs(connection, engagement_id, repo_id)
+    parents = parent_finding_cache[repo_id]
+    frozen = _json_decode(row["parent_finding_slugs_json"], [])
+    uncovered = sorted(set(parents) - set(frozen))
+    return {
+        "reason_codes": [] if current else ["parent_scope_expanded" if uncovered else "receipt_context_changed"],
+        "current_parent_finding_slugs": parents,
+        "uncovered_parent_finding_slugs": uncovered,
+        "no_longer_required_parent_finding_slugs": sorted(set(frozen) - set(parents)),
+        "next_action": "" if current else (
+            "Inspect current roots and source/file identity; start a new code-variant-hunter "
+            "with the exact current parent scope and record fresh covering receipts. "
+            "Historical receipts and frozen dispatch scopes are not rewritten."
+        ),
+    }
 
 
 def _variant_receipt_fingerprint(
@@ -5930,11 +5972,8 @@ def _current_variant_check_status(
     file_row: dict[str, Any],
     *,
     parent_finding_cache: dict[int, list[str]] | None = None,
-    require_done_projection: bool = True,
     projection: _VariantReceiptProjection | None = None,
 ) -> str:
-    if require_done_projection and str(file_row.get("variant_check_status", "")) != "done":
-        return "pending"
     receipt = (
         projection.latest_receipts.get(int(file_row["id"]))
         if projection is not None
@@ -6153,7 +6192,6 @@ def record_variant_check_receipt(
             connection,
             engagement.id,
             file_row,
-            require_done_projection=False,
         )
         connection.execute(
             """
@@ -6204,21 +6242,19 @@ def list_variant_check_receipts(
         parent_finding_cache: dict[int, list[str]] = {}
         if include_stale:
             rows = connection.execute(
-                query + " LIMIT ? OFFSET ?",
-                (*params, limit, offset),
+                query + " LIMIT ? OFFSET ?", (*params, limit, offset),
             ).fetchall()
-            return [
-                _hydrate_variant_check_receipt(
-                    row,
-                    current=_variant_receipt_is_current(
-                        connection,
-                        engagement.id,
-                        row,
-                        parent_finding_cache=parent_finding_cache,
-                    ),
+            records = []
+            for row in rows:
+                current = _variant_receipt_is_current(
+                    connection, engagement.id, row, parent_finding_cache=parent_finding_cache,
                 )
-                for row in rows
-            ]
+                receipt = _hydrate_variant_check_receipt(row, current=current)
+                receipt["currency"] = _variant_receipt_currency(
+                    connection, engagement.id, row, current=current, parent_finding_cache=parent_finding_cache,
+                )
+                records.append(receipt)
+            return records
 
         records: list[dict[str, Any]] = []
         current_seen = 0
@@ -6736,13 +6772,15 @@ def code_coverage_summary(
 
         variant_rows = connection.execute(
             """
-            SELECT f.*
+            SELECT DISTINCT f.*
             FROM assessment_finding_links AS links
             JOIN assessment_findings AS f
               ON f.id = links.finding_id
              AND f.engagement_id = links.engagement_id
             WHERE f.engagement_id = ?
               AND links.link_kind = 'variant_of'
+              AND links.target_kind = 'finding'
+              AND links.retired_at IS NULL
               AND f.status NOT IN ('merged', 'false_positive')
             """,
             (engagement.id,),
@@ -7933,6 +7971,16 @@ def code_readiness(
         # against every active repository — a finding in framework source is a
         # real, bindable finding. Only the per-repo obligation loop below is
         # narrowed to the repositories this engagement agreed to review.
+        ambiguous_links = connection.execute(
+            "SELECT COUNT(*) FROM assessment_finding_links WHERE engagement_id=? "
+            "AND link_kind='variant-of' AND retired_at IS NULL", (engagement.id,),
+        ).fetchone()[0]
+        if ambiguous_links:
+            structural_quality_warnings.append(
+                f"{ambiguous_links} historical ambiguous variant relationship(s) retain their recorded "
+                "generic semantics; inspect finding-links relationship_warning before explicitly "
+                "recording child or independent relationships. No historical links were rewritten."
+            )
         active_repo_ids = {int(repo["id"]) for repo in repos}
         analysis_repos = [
             repo
@@ -8492,12 +8540,22 @@ def code_readiness(
                         for file_row in variant_inventory_by_repo.get(repo_id, [])
                     )
                     if incomplete_variants:
+                        uncovered_parents = sorted({
+                            slug for file_row in variant_inventory_by_repo.get(repo_id, [])
+                            if variant_projection is not None
+                            and (receipt := variant_projection.latest_receipts.get(int(file_row["id"]))) is not None
+                            for slug in set(parent_finding_slugs) - set(_json_decode(receipt["parent_finding_slugs_json"], []))
+                        })
+                        drift_detail = (
+                            " Current roots outside the frozen receipt scope: " + ", ".join(uncovered_parents)
+                            + "; inspect code/variant-checks?include_stale=true for currency diagnostics."
+                        ) if uncovered_parents else ""
                         blockers.append(
                             _readiness_blocker(
                                 "variant_checks_incomplete",
                                 (
                                     f"Repository has {incomplete_variants} incomplete "
-                                    "admitted-file variant check(s)."
+                                    "admitted-file variant check(s)." + drift_detail
                                 ),
                                 repo_id=repo_id,
                                 overrideable=True,

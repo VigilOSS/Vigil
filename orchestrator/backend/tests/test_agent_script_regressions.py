@@ -2924,6 +2924,8 @@ def test_start_swarm_records_N_rows_with_worker_encoded_task(
                 "agent_id": payload.get("agent_id"),
                 "agent_role": payload.get("agent_role"),
                 "status": "in-progress",
+                "launch_required": True,
+                "prompt_packet": {**payload["prompt_packet"], "sha256": hashlib.sha256(payload["prompt_packet"]["rendered_prompt"].encode()).hexdigest()},
             }
 
         def get(self, endpoint: str):
@@ -2960,6 +2962,8 @@ def test_start_swarm_records_N_rows_with_worker_encoded_task(
 
     args = SimpleNamespace(
         action="start-swarm",
+        no_target_traffic=True,
+        rate_budget=None,
         agent_id=None,
         agent_role="code-vuln-hunter",
         task="scan for hardcoded credentials and exploitable patterns",
@@ -3003,8 +3007,13 @@ def test_start_swarm_records_N_rows_with_worker_encoded_task(
     assert "## Swarm Dispatch Table" in out
     assert "workers: 3" in out
     assert "batch_size: 5" in out
-    assert "## Code Source Identity" in out
-    assert "repo_id: 17" in out
+    receipts = json.loads(out.splitlines()[0])["swarm"]
+    for payload, receipt in zip(recorded, receipts, strict=True):
+        captured = Path(receipt["packet_path"]).read_text()
+        assert captured == payload["prompt_packet"]["rendered_prompt"]
+        assert "## Code Source Identity" in captured
+        assert "repo_id: 17" in captured
+        assert receipt["launch_required"] is True
 
 
 def test_start_swarm_rejects_empty_items_file(monkeypatch, tmp_path: Path, capsys) -> None:

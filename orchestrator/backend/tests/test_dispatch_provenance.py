@@ -78,8 +78,11 @@ def test_dispatch_instruction_provenance_round_trips(
     listed = client.get(f"{BASE}/dispatches")
     assert fetched.status_code == 200, fetched.text
     assert listed.status_code == 200, listed.text
-    assert fetched.json() == created.json()
-    assert listed.json() == [created.json()]
+    assert created.json()["launch_required"] is False  # Audit-only registration has no captured launch assignment.
+    assert created.json()["idempotent_replay"] is False
+    durable = {key: value for key, value in created.json().items() if key not in {"launch_required", "idempotent_replay"}}
+    assert fetched.json() == durable
+    assert listed.json() == [durable]
 
 
 def test_dispatch_rejects_caller_claimed_provider_observation(

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import hashlib
+from pathlib import Path
 
 from assess import cli
 from assess.lib import config
@@ -20,7 +22,8 @@ def test_prepare_and_claim_expose_explicit_route_and_atomic_ownership(tmp_path, 
         result = {'id': 3, 'finding_slug': 'VA-050', 'route': 'code',
                   'status': 'claimed' if endpoint.endswith('/claim') else 'prepared'}
         if endpoint.endswith('/claim'):
-            result['prompt_packet'] = payload['prompt_packet']
+            result['prompt_packet'] = _backend_claimed_packet(payload['prompt_packet'], 'code')
+            result.update(launch_required=True, owner_agent_id='PROOF-1', owner_dispatch_id=7, owner_dispatch_status='in-progress')
         return result
 
     monkeypatch.setattr(AssessmentClient, 'post', post)
@@ -61,7 +64,7 @@ def test_claim_observes_installed_instruction_identity_without_payload_handwork(
     monkeypatch.setattr(agent, '_attach_dispatch_provenance', identity)
     monkeypatch.setattr(AssessmentClient, 'get', lambda _c, endpoint: _work() if endpoint == 'proof-work/3' else {'rendered_prompt': 'saved prompt'})
     monkeypatch.setattr(AssessmentClient, 'post', lambda _c, endpoint, payload:
-                        calls.append((endpoint, payload)) or {'id': 3})
+                        calls.append((endpoint, payload)) or (_work() | {'launch_required': True, 'owner_agent_id': 'PROOF-1', 'prompt_packet': _backend_claimed_packet(payload['prompt_packet'], 'code')}))
     cli.main(['--engagement-dir', str(tmp_path), 'proof-work', 'claim', '3',
               '--agent-id', 'PROOF-1', '--agent-role', 'exploit-developer',
               '--prompt-context-json', json.dumps(_context()), '--no-target-traffic'])
@@ -71,9 +74,11 @@ def test_claim_observes_installed_instruction_identity_without_payload_handwork(
 
 def _backend_claimed_packet(packet, route):
     """What claim_proof_work persists: the route is authoritative in context and prompt."""
+    rendered = f'proof_route: {route}\n' + packet['rendered_prompt']
     return packet | {
+        'sha256': hashlib.sha256(rendered.encode()).hexdigest(),
         'context': dict(packet['context']) | {'assessment_mode': route},
-        'rendered_prompt': f'proof_route: {route}\n' + packet['rendered_prompt'],
+        'rendered_prompt': rendered,
     }
 
 
@@ -91,7 +96,7 @@ def _work():
     return {'id': 3, 'finding_slug': 'VA-050', 'route': 'code',
             'authorized_phase': 'code-verify', 'objective': 'Challenge the supported API replay',
             'target_hosts': [], 'current': True, 'owed': True,
-            'binding': {'source_binding': None}}
+            'binding': {'source_binding': None}, 'owner_dispatch_id': 7, 'owner_dispatch_status': 'in-progress'}
 
 
 def test_claim_persists_canonical_source_prompt_before_atomic_ownership(tmp_path, monkeypatch, capsys):
@@ -124,8 +129,9 @@ def test_claim_persists_canonical_source_prompt_before_atomic_ownership(tmp_path
               '--agent-id', 'PROOF-1', '--agent-role', 'exploit-developer',
               '--prompt-context-json', json.dumps(_context()), '--no-target-traffic'])
     output = json.loads(capsys.readouterr().out)
-    packet = output['prompt_packet']
-    assert packet == stored['prompt_packet']
+    packet = stored['prompt_packet']
+    assert Path(output['launch']['packet_path']).read_text() == packet['rendered_prompt']
+    assert output['launch']['packet_sha256'] == packet['sha256']
     # The backend's route line is the one authoritative copy, ahead of the assignment.
     assert packet['rendered_prompt'].startswith('proof_route: code\n## Proof assignment\n')
     assert packet['rendered_prompt'].count('proof_route:') == 1
@@ -147,6 +153,7 @@ def test_successful_claim_does_not_require_a_second_packet_read(tmp_path, monkey
     monkeypatch.setattr(agent, '_attach_dispatch_provenance', lambda *_: [])
     packet = {'schema': 'dispatch-prompt/v1', 'context': _context(),
               'rendered_prompt': 'proof_route: code\n## Proof assignment\nproof_work_id: 3'}
+    packet['sha256'] = hashlib.sha256(packet['rendered_prompt'].encode()).hexdigest()
     reads = []
 
     def get(_client, endpoint):
@@ -161,7 +168,9 @@ def test_successful_claim_does_not_require_a_second_packet_read(tmp_path, monkey
     cli.main(['--engagement-dir', str(tmp_path), 'proof-work', 'claim', '3',
               '--agent-id', 'PROOF-1', '--agent-role', 'exploit-developer',
               '--prompt-context-json', json.dumps(_context()), '--no-target-traffic'])
-    assert json.loads(capsys.readouterr().out)['prompt_packet'] == packet
+    result = json.loads(capsys.readouterr().out)
+    assert Path(result['launch']['packet_path']).read_text() == packet['rendered_prompt']
+    assert result['launch']['packet_sha256'] == packet['sha256']
     assert reads == ['proof-work/3']
 
 

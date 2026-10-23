@@ -252,7 +252,7 @@ whether entry to `fuzz` is ready. The rest of the Phase 4 document remains entry
 ## Dispatch Context Template
 
 Launch each specialist with fresh context using the actual client tool schema. When `fork_turns`
-is exposed, set it to `none`. Direct the child to the saved packet and its mandatory Load First references. Read
+is exposed, set it to `none`. Send only the returned short `launch_message` (or proof claim `launch.launch_message`), pointing to its digest-bound saved packet and mandatory Load First references. Never independently author a second launch prompt with the packet contents. Read
 `agent/agents/<role>.md` only if the native client has not already loaded that registered role. Installed instruction fingerprints describe
 files on disk, not observed child loading. Preserve credentials and evidence verbatim in the
 contained dispatch; ADR 0018 containment and ADR 0019 operator ownership apply together.
@@ -279,10 +279,10 @@ Every code analysis dispatch must include:
 - The exact **Code Source Identity** block defined in `agent/shared-constraints-code.md`. Register
   code specialists with `vigil assess agent start --code-repo-id <id>` (the flag is optional only
   when exactly one active repository exists; mixed-role `exploit-developer` and `source-analyzer`
-  require `--assessment-mode code`) and copy the backend-derived block printed immediately
-  after Runtime Identity; do not rebuild its generation, digest, snapshot, index, or ctags paths
+  require `--assessment-mode code`); the helper captures the backend-derived block in the packet
+  after Runtime Identity. Do not rebuild its generation, digest, snapshot, index, or ctags paths
   from memory. For proof work, `proof-work claim` renders and persists the same source block
-  inside its returned `prompt_packet`; pass that packet to the specialist without a separate
+  inside its captured packet; pass only `launch.launch_message` to the specialist without a separate
   `agent start` call.
 - A **Structural Coverage Debt** block when any scoped file artifact is degraded, unsupported, or
   truncated, using the exact top-of-dispatch shape below — inline per file, or above 25 files the
@@ -323,15 +323,10 @@ is never buried below the fixed role body:
 6. **Current phase + task objective**, followed by the remaining phase-specific context
 
 The Runtime Identity mechanics match `agent/operator-core.md` "Runtime Identity Block" (how the
-operator obtains `agent_id`, the specialist's `render-handoff` self-check, and including
-`resume-brief` output on a continuation) — not restated here:
+operator obtains `agent_id`, the specialist's `render-handoff` self-check, and bounded current-state
+pointers on a continuation) — not restated here:
 
-```text
-## Runtime Identity
-agent_id: <registered-dispatch-agent-id>
-agent_role: <role>
-authorized_phase: <phase>
-```
+The helper renders this identity once. Do not copy its fields into a separately authored prompt.
 
 When structural debt applies, put this block immediately after Variant Receipt Authority when that
 conditional block is present, otherwise after Code Source Identity; omit it only when every scoped
@@ -532,7 +527,7 @@ fresh verdict while finished work and its receipts remain historical. Read the f
 invalidating transition; independently verify or park a new next test as the evidence requires.
 
 Launch only when a successful claim returns `launch_required: true`; a replay requires inspecting the existing owner/run, not another native spawn. Launch the fresh specialist
-from the current native client using the returned `prompt_packet.rendered_prompt`, which carries
+from the current native client using the returned `launch.launch_message`, which carries
 the claimed identity, source context, explicit route, and current `next_test`, and wait for its
 result before ending your turn. Supply the canonical dispatch context
 and traffic budget when claiming; include existing proof/run references there. The backend-selected

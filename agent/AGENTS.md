@@ -376,31 +376,24 @@ The Pre-Dispatch Checklist below operationalizes this template — every box in 
 
 ### Runtime Identity Block
 
-Every dispatch prompt must include a Runtime Identity block so the specialist can use the exact values in its closing sequence:
+`agent start` captures one canonical packet with Runtime Identity, source identity when applicable,
+and explicit traffic/authority boundaries. Its receipt publishes a short `launch_message` pointing to
+the immutable packet path and SHA-256. Send only that envelope to the fresh native specialist, with
+the registered role selected; do not copy identity blocks into a second prompt. Read
+`agent/references/runtime-guides/dispatch-template.md` for paired assignment/launch examples.
 
-```
-## Runtime Identity
-agent_id: <registered-dispatch-agent-id>
-agent_role: <role>
-authorized_phase: <phase>
-```
+For proof work use its successful claim's `launch.launch_message`; never register a competing
+ordinary dispatch. Launch only on a new `launch_required=true` receipt. Exact retries restore the
+same capture with `launch_required=false`; inspect existing client/execution state before recovery.
+After native launch, bind its actual handle using `agent bind-client-handle`; that handle and the
+backend dispatch ID are distinct. Keep native identities and verify background completion behavior.
+After an interrupted return, inspect actual native tasks and command execution before replacement;
+ZCode details live in `docs/zcode-setup.md` **Interrupted specialists**.
 
-Choose one unique backend `agent_id` before launching the specialist (for example,
-`recon-a3f9`). Register it with `vigil assess agent start`, or obtain its successful
-`proof-work claim` when proof work owns the launch. Use that same registered ID in the
-specialist's Runtime Identity and every backend write. After native launch, bind the returned
-client session/agent handle separately with `vigil assess agent bind-client-handle`; it is not
-the backend dispatch ID. Read that command's contract for the actual client namespace and
-handle fields. A proof claim retry is inspection, not permission to spawn another worker. Launch only when
-the successful claim returns `launch_required: true`; otherwise inspect its existing owner/run.
-Keep native task identities for launched specialists and verify the client's background completion
-behavior before relying on it across turns. Otherwise wait for the result in the current turn.
-After an interrupted return, inspect native task and command execution state before replacing work;
-for ZCode use `docs/zcode-setup.md` **Interrupted specialists**.
-
-Pass this block verbatim at the top of the dispatch prompt. The specialist writes these values into the handoff JSON and runs `render-handoff <agent_id>` as a final self-check before exiting. A 404 from render-handoff means the `agent_id` in the handoff does not match the registered dispatch.
-
-If this is a continuation or resumed engagement, include the relevant `vigil assess resume-brief` output immediately after the Runtime Identity block. Specialists treat it as the compact operating picture and use the listed command/artifact IDs for drill-down instead of reconstructing state from local notes.
+Continuation creates a fresh single-identity packet with current objective and bounded live-state
+pointers, preserving the predecessor's immutable history and authority boundaries. Do not append a
+transcript or previous prompt by hand. The specialist uses its exact registered identity for all work
+and self-checks the final handoff using `agent render-handoff <agent-id>`.
 
 Require immediate backend/artifact linkage for durable notes: if a specialist creates a `.md` file under `notes/` that should matter after the current command, they must register it with `vigil assess artifact register <path>` and link it to a finding, chain, dispatch/agent, surface, request variant, or command run before closing. Unlinked markdown notes are scratch and cannot be used as resume or report input.
 
@@ -456,14 +449,14 @@ vigil assess agent start \
     --model <name> --reasoning <level> --dispatch-mode <mode> \
     --skills "<skill-name>[,<skill-name>...]" \
     --rate-budget "<exact authored rate/concurrency instruction>" \
-    --prompt-context-json dispatch-context.json --emit-prompt
+    --prompt-context-json dispatch-context.json
 ```
 
 `--assessment-mode` is required for mixed-role specialists (`exploit-developer` and
 `source-analyzer`). Proof-work launches receive the authoritative mode from their
 backend-selected `proof_route`; ordinary dispatches must supply it explicitly.
 
-`agent start` also lints `--task` for a prescriptive technique cage, runs a default-on duplicate-overlap advisory, and validates the whole `--emit-prompt` prompt-context object before the write. `vigil assess contract agent` and `vigil assess contract agent start` own all three; hand the specialist an open objective plus the measured coverage picture (`vigil assess coverage --host <h> --for-dispatch`) rather than a recipe.
+`agent start` also lints `--task` for a prescriptive technique cage, runs a default-on duplicate-overlap advisory, and validates supplied context and scoped assignment input before the write. `vigil assess contract agent` and `vigil assess contract agent start` own all three; hand the specialist an open objective plus the measured coverage picture (`vigil assess coverage --host <h> --for-dispatch`) rather than a recipe.
 For a code lane selected in a generated file, set `prompt_context.lane_file` so the emitted prompt carries the checked file/LOC manifest; `agent/references/runtime-guides/dispatch-template.md` owns the field shape.
 
 On return, bind an exposed client handle and inspect the durable handoff with
@@ -768,7 +761,7 @@ interpretation.
 
 Command reference for the RECORD FINDINGS / RECORD SURFACES steps in the Core Loop (steps 8-9) — read alongside those, not instead of them; they own the timing and the recording exceptions, this owns the exact commands and schema pointers.
 
-Use `vigil assess finding record <agent-name> <finding-json-file> --agent-id <your-agent_id>` for findings (`--agent-id` is the recording agent's dispatch id, without which no finding can ever reach a terminal verification status — the prefix table and severity↔CVSS band table are canonical in `agent/shared-specialist-core.md` "Finding IDs and the `finding record` Contract"; the payload schema and dedup rules live in `agent/shared-constraints.md` §4). For the canonical field list and examples, run `vigil assess contract finding record`. Use the lifecycle helpers — `finding verify --status <status>` for verification outcomes (terminal outcomes require independent proof receipts; `false_positive` also requires a completed structured counter-check), `finding update --status draft` to reopen a previously confirmed or false-positive finding, and `finding update` for non-verification metadata — instead of raw `post` / `patch`.
+Use `vigil assess finding record <agent-name> <finding-json-file> --agent-id <your-agent_id>` for findings (`--agent-id` is the recording agent's dispatch id, without which no finding can ever reach a terminal verification status — finding IDs, severity↔CVSS validation, and the payload schema are owned by `vigil assess contract finding record`; dedup rules live in `agent/shared-constraints.md` §4). For the canonical field list and examples, run `vigil assess contract finding record`. Use the lifecycle helpers — `finding verify --status <status>` for verification outcomes (terminal outcomes require independent proof receipts; `false_positive` also requires a completed structured counter-check), `finding update --status draft` to reopen a previously confirmed or false-positive finding, and `finding update` for non-verification metadata — instead of raw `post` / `patch`.
 
 Use `vigil assess intel record <type> <json-file>` for `#### Intelligence` rows (intel types and dedup keys in §13). report-writer uses `vigil assess finding report --mode <final|draft> --json`, which returns grouped root-cause findings with sequential `001~N` report IDs.
 
@@ -807,12 +800,12 @@ Inspect `reverification_required` separately from parked proof: a material edit 
 fresh verdict while finished work and its receipts remain historical. Read the finding and
 invalidating transition; independently verify or park a new next test as the evidence requires.
 
-The current operator launches a fresh specialist from the native client using the claim's persisted
-`prompt_packet.rendered_prompt`. Supply canonical dispatch context and the traffic budget when
+The current operator launches a fresh specialist from the native client using the claim's
+`launch.launch_message`, pointing to its persisted packet and digest. Supply canonical dispatch context and the traffic budget when
 claiming; the packet carries backend-derived source identity and route without another
 `agent start`. Its `authorized_phase` follows the proof route: web proof uses `exploit`
 and local code proof uses `code-verify`, regardless of the lead's current campaign phase.
-Do not execute the claimed specialist task in operator context. Dispatch the returned prompt
+Do not execute the claimed specialist task in operator context. Dispatch only the returned short launch message
 through the native client's specialist mechanism, wait for its result before ending your turn,
 and bind its client handle when the client exposes one; the durable dispatch row alone does not prove that a separate model context ran.
 Use existing admitted roots/access; ask only for missing authorization, access, or required

@@ -141,16 +141,16 @@ def test_handoff_summary_required_and_bounded(client, isolate_settings) -> None:
     })
     assert bad.status_code == 422
 
-    # >2000 chars → 422
+    # >16384 characters → 422
     huge = client.post(f"{BASE}/dispatch-handoffs", json={
-        "agent_id": "HUGE", "agent_role": "recon-specialist", "summary": "x" * 2001,
+        "agent_id": "HUGE", "agent_role": "recon-specialist", "summary": "x" * 16385,
     })
     assert huge.status_code == 422
 
-    # 2000 chars exactly is fine
+    # 16384 characters exactly is fine
     _register_dispatch(client, agent_id="MAX", agent_role="recon-specialist")
     ok = client.post(f"{BASE}/dispatch-handoffs", json={
-        "agent_id": "MAX", "agent_role": "recon-specialist", "summary": "x" * 2000,
+        "agent_id": "MAX", "agent_role": "recon-specialist", "summary": "x" * 16384,
     })
     assert ok.status_code == 201, ok.text
 
@@ -447,3 +447,25 @@ def test_handoff_conditional_update_preserves_a_newer_final_return(client, isola
     assert stored['handoff_status'] == 'ready'
     assert stored['summary'] == 'Acme final evidence'
     assert stored['handoff_version'] == finished.json()['handoff_version']
+
+
+def test_handoff_narrative_bound_preserves_unicode_and_previous_checkpoint(client, isolate_settings):
+    _seed(client, isolate_settings)
+    _register_dispatch(client, agent_id='NARRATIVE', agent_role='recon-specialist')
+    authored = '界🙂' * 8192
+    response = client.post(f'{BASE}/dispatch-handoffs', json={
+        'agent_id': 'NARRATIVE', 'agent_role': 'recon-specialist', 'summary': authored,
+        'next_steps': [{'action': 'review Acme evidence'}],
+    })
+    assert response.status_code == 201, response.text
+    initial = response.json()
+    assert initial['summary'] == authored
+    rejected = client.patch(f'{BASE}/dispatch-handoffs/NARRATIVE', json={'summary': authored + 'x', 'next_steps': []})
+    assert rejected.status_code == 422
+    unchanged = client.get(f'{BASE}/dispatch-handoffs/NARRATIVE').json()
+    assert unchanged['summary'] == authored
+    assert unchanged['handoff_version'] == initial['handoff_version']
+    assert unchanged['next_steps'] == [{'action': 'review Acme evidence'}]
+    patch = client.patch(f'{BASE}/dispatch-handoffs/NARRATIVE', json={'summary': 'Acme source observations. ' * 100})
+    assert patch.status_code == 200, patch.text
+    assert patch.json()['handoff_version'] == initial['handoff_version'] + 1

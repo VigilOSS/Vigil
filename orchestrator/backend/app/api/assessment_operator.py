@@ -12,6 +12,7 @@ from ..services import operator_checkpoints, state_manager
 from ..services.engagements import get_engagement_or_404
 from ..services.state_manager.coverage import MAX_ASSESSMENT_LIST_LIMIT
 from ..services.state_manager.dispatches import (
+    HANDOFF_SUMMARY_MAX_CHARS,
     list_dispatch_client_bindings,
     record_dispatch_client_binding,
 )
@@ -180,7 +181,7 @@ class HandoffCreate(BaseModel):
     agent_id: str = Field(min_length=1, max_length=256)
     agent_role: str = Field(min_length=1, max_length=128)
     phase: str | None = Field(default=None, max_length=64)
-    summary: str = Field(min_length=1, max_length=2000)
+    summary: str = Field(min_length=1, max_length=HANDOFF_SUMMARY_MAX_CHARS)
     confidence: _CONFIDENCE | None = None
     finding_slugs: list[str] | None = None
     coverage_gaps: list[dict[str, Any]] | None = None
@@ -199,7 +200,7 @@ class HandoffUpdate(BaseModel):
 
     expected_handoff_version: int | None = Field(default=None, ge=1)
 
-    summary: str | None = Field(default=None, min_length=1, max_length=2000)
+    summary: str | None = Field(default=None, min_length=1, max_length=HANDOFF_SUMMARY_MAX_CHARS)
     phase: str | None = Field(default=None, max_length=64)
     confidence: _CONFIDENCE | None = None
     finding_slugs: list[str] | None = None

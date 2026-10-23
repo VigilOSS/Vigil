@@ -568,7 +568,7 @@ vigil blue closeout --engagement-key <key>
 #   --role report-writer \
 #   --skills report-generation \
 #   --no-target-traffic \
-#   --prompt-context-json '<wrapper-derived complete report context>' --emit-prompt \
+#   --prompt-context-json '<wrapper-derived complete report context>' \
 #   --task "Render blue incident report from durable backend state. Load
 #           template at agent/skills/report-generation/templates/blue.md.
 #           Pull findings, timeline, artifacts, containment actions per the

@@ -141,7 +141,7 @@ instructions: |2
   | `coverage_gaps` | One-line strings naming the open questions L2 must close (e.g., "no IP geolocation pulled — L2 must enrich", "actor email lookup not run", "proxy retention does not cover the alert window") |
   | `mitre_techniques` | Array of MITRE ATT&CK technique IDs guessed from the alert payload; matches `details.mitre_techniques` on the draft finding |
   | `tenant_ref_paths_consulted` | Array of tenant-ref paths you actually loaded |
-  | `next_steps` | Names the downstream skill, the exact `vigil assess agent start ... --prompt-context-json <file> --emit-prompt` command for L2 (including its authored rate budget or `--no-target-traffic`), and the evidence-bar hint |
+  | `next_steps` | Names the downstream skill, the exact `vigil assess agent start ... --prompt-context-json <file>` command for L2 (including its authored rate budget or `--no-target-traffic`), and the evidence-bar hint |
   | `handoff_status` | `ready` when normalized + dispatchable, `blocked` when a tenant ref is missing or the platform is out of scope |
 
   L1 never changes `verification_status`; the finding remains `unreviewed` until L3

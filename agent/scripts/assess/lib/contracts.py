@@ -1730,7 +1730,7 @@ def _dispatch_root_contract() -> CommandContract:
         ),
         schema_name="(per-action argparse; backend-backed via assessment_dispatches / _dispatch_handoffs / _dispatch_decisions)",
         preferred_invocations=(
-            "vigil assess agent start --role <role> --task \"...\" --dispatch-mode <mode> --skills <skills> (--rate-budget <authored> | --no-target-traffic) [--prompt-context-json <context.json> --emit-prompt]",
+            "vigil assess agent start --role <role> --task \"...\" --dispatch-mode <mode> --skills <skills> (--rate-budget <authored> | --no-target-traffic) [--prompt-context-json <context.json>] [--packet-file <assignment.md>]",
             "vigil assess agent start --role exploit-developer --assessment-mode code|web --task \"...\" --dispatch-mode deep-manual --skills <skills> (--rate-budget <authored> | --no-target-traffic) (--assessment-mode is required for exploit-developer and source-analyzer)",
             "vigil assess agent bind-client-handle <agent-id> --client <client> --session-namespace <scope> --handle <session-id>",
             "vigil assess agent handoff --from-json <handoff.json>",
@@ -1760,7 +1760,7 @@ def _dispatch_root_contract() -> CommandContract:
             "`agent render-handoff` assembles the blob the next dispatch prompt pastes verbatim.",
             "`agent start` defaults a missing --dispatch-mode from the role (warn, not block) and accepts a newly-coined mode (advisory warn). "
             "--skills is optional: set it when the applicable skill is already known, otherwise the specialist selects one from the surface and names it in its handoff. The advisory overlap scan is default-on across in-progress and completed rows; it streams paged history, ranks the five displayed rows by relevance/findings produced with deterministic tie-breaks, and prints the total count. Use --allow-duplicate only when the overlap is intentional.",
-            "`agent start` also lints --task for a prescriptive 'technique cage' — a step-by-step recipe that caps a specialist's depth (>=2 of: a numbered/bulleted step list, a run of imperative test-verbs, a pre-named vuln class). This is WARN-only and NEVER blocks the dispatch; the fix is to hand the specialist the measured coverage picture instead of a script via `vigil assess coverage --host <h> --for-dispatch` (paste the COVERAGE block) plus an open objective.",
+            "`agent start` also lints authored discovery packet guidance for a prescriptive 'technique cage' — a step-by-step recipe that caps a specialist's depth (>=2 of: a numbered/bulleted step list, a run of imperative test-verbs, a pre-named vuln class). This is WARN-only and NEVER blocks the dispatch; the fix is to hand the specialist the measured coverage picture instead of a script via `vigil assess coverage --host <h> --for-dispatch` (paste the COVERAGE block) plus an open objective.",
             f"Verbs with their own contract entries: {', '.join(AGENT_VERBS)}.",
         ),
         common_mistakes=(
@@ -1933,7 +1933,7 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
     if verb == "continue":
         return CommandContract(
             name="agent continue",
-            summary="Create a replacement dispatch from an exact saved prompt packet and a bounded live-state delta.",
+            summary="Capture a fresh replacement assignment with one effective identity, current task, preserved authority boundaries, and immutable predecessor pointers.",
             schema_name="reads prior dispatch + prompt packet; writes one linked DispatchCreate row",
             preferred_invocations=(
                 "vigil assess agent continue <prior-agent-id> --task \"Finish the unresolved authorization pass\"",
@@ -1948,7 +1948,7 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
             notes=(
                 "The predecessor stays immutable history. Continue refuses a fresh in-progress predecessor so it cannot silently duplicate a live specialist; use agent start --allow-duplicate for intentional parallel work.",
                 "The replacement inherits the prior assessment_mode. An exploit-developer or source-analyzer predecessor recorded before assessment_mode existed has none, so pass --assessment-mode code|web; a value contradicting a recorded mode is refused, because the saved packet was rendered for that mode.",
-                "A saved packet exists only when the original agent start used --emit-prompt. The replacement prompt preserves the original packet verbatim and directs the specialist to hydrate current state through resume-brief before target-facing work.",
+                "Every start captures its packet. Continuation retains known traffic, authorization, and source boundaries while rendering one replacement identity and current task. It links the immutable predecessor packet by digest and directs current-state reads through resume-brief/handoff pointers instead of appending historical prompt text. Missing boundaries or changed source require a freshly scoped dispatch. Proof owners use proof-work release/reclaim.",
             ),
         )
     if verb == "start-swarm":
@@ -2003,9 +2003,9 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
                 "--dispatch-mode <mode> --skills \"<skill>[,<skill>...]\" "
                 "[--assessment-mode code|web] "
                 "(--rate-budget \"<authored>\" | --no-target-traffic) "
-                "[--prompt-context-json <context.json> --emit-prompt]",
-                "vigil assess agent start --from-json <payload.json> [--emit-prompt]",
-                "vigil assess agent start --from-json <payload.json> --dry-run [--emit-prompt]",
+                "[--prompt-context-json <context.json>] [--packet-file <assignment.md>]",
+                "vigil assess agent start --from-json <payload.json> ",
+                "vigil assess agent start --from-json <payload.json> --dry-run ",
             ),
             author_supplied_fields=(
                 "--agent-id (unique per dispatch)",
@@ -2018,27 +2018,28 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
                 "--code-repo-id (code roles: selects the active analysis repository used to render Code Source Identity; required when several analysis repositories exist; reference repositories are navigation pointers)",
                 "--finding-slugs (optional canonical related/input finding set; required for a receipt-bearing code-variant-hunter dispatch)",
                 "exactly one traffic declaration: --rate-budget <authored text> or --no-target-traffic (JSON: top-level rate_budget string or no_target_traffic=true)",
-                "--prompt-context-json when --emit-prompt is set (or JSON: top-level prompt_context object) with every canonical prompt-only field documented by dispatch-template.md",
+                "--prompt-context-json (optional partial context; or JSON: prompt_context); --packet-file captures an engagement-contained UTF-8 assignment supplement; canonical identity and authority cannot be overridden",
                 "--dry-run to perform the same validation and rendering without persisting a dispatch row",
             ),
             helper_defaults=(
                 ("status", "in-progress (set on insert)"),
                 ("dispatched_at", "now() when omitted"),
                 ("--allow-duplicate", "off — bounded ranked overlap history is checked by default"),
-                ("--emit-prompt", "off — when set, requires complete prompt context and validates it before the dispatch write"),
+                ("packet capture", "always — atomic with dispatch registration; launch receipt follows immutable local materialization"),
             ),
             notes=(
                 "This command only writes the backend dispatch row; it does not spawn or "
-                "launch the specialist. After it succeeds, launch the specialist in the active "
-                "client and pass the printed Runtime Identity block, then run "
+                "launch the specialist. After its launch_required=true receipt succeeds, launch the specialist in the active "
+                "client using only launch_message, which points to the captured packet and SHA-256, then run "
                 "`vigil assess agent bind-client-handle <agent-id> ...` so the row names the "
                 "session you launched — the handle cannot be supplied here because it does not "
                 "exist yet, and it is never a precondition for starting a dispatch. For code "
                 "roles the helper validates one active indexed repository before recording and "
-                "prints the backend-derived Code Source Identity block immediately after "
+                "captures the backend-derived Code Source Identity block immediately after "
                 "Runtime Identity.",
-                "Every output path prints the exact authored rate budget (or an explicit no-target-traffic declaration). --emit-prompt requires the complete prompt-only object (authorized_phase, target, hunt_scope, mindset_lens, depth_expectation, oob, auth_context, credential_id, prior_state, coverage, cleanup, human_reach_decision, role_specific_additions); missing or empty values fail before the dispatch write. On a blue engagement it also validates and injects customer, platforms, and every owned regular-file tenant reference from scope.json before the write.",
-                "prompt_context prior_state is authored text capped at 4096 characters. Optional queue_item_ids (1–20 current code queue IDs) are resolved against the selected analysis repository into a backend-derived file/status manifest before dispatch. Optional lane_file names a generated code queue-fetch JSON file or newline list of indexed paths; it is validated before the write and rendered as exact item/LOC totals with bounded file/directory previews. Optional prior_agent_id quotes a bounded `agent render-handoff` result inside the untrusted prior-state boundary. Missing/stale queue IDs, an invalid lane file, or a missing handoff fail before the dispatch row is written.",
+                "Every start captures a canonical packet before native launch. Success receipts identify its immutable local path, SHA-256, bytes, lines, and short launch_message. --dry-run validates without capture or launch permission. Exact registration retries recover the same dispatch with launch_required=false; changed input under the same ID conflicts. Local materialization failures print no success receipt. The helper does not attest whether a native process started; inspect client bindings and execution before recovering an uncertain launch.",
+                "Traffic classification remains explicit. Optional context fields include authorized_phase, target, hunt_scope, mindset_lens, depth_expectation, oob, auth_context, credential_id, prior_state, coverage, cleanup, human_reach_decision, role_specific_additions. Omitted fields remain unknown and grant no authority. Blue tenant refs are validated and injected before capture. --packet-file is bounded to 64KiB, UTF-8, regular, engagement-contained inputs. Size and discovery-prescription diagnostics inspect actual authored packet additions and are advisory; verification/reporting recipes are not rejected as discovery caging.",
+                "prompt_context prior_state is losslessly contained data with a 16384-character safety limit; prefer compact working-state pointers. Optional queue_item_ids (1–20 current code queue IDs) are resolved against the selected analysis repository into a backend-derived file/status manifest before dispatch. Optional lane_file names a generated code queue-fetch JSON file or newline list of indexed paths; it is validated before the write and rendered as exact item/LOC totals with bounded file/directory previews. Optional prior_agent_id quotes a bounded `agent render-handoff` result inside the untrusted prior-state boundary. Missing/stale queue IDs, an invalid lane file, or a missing handoff fail before the dispatch row is written.",
                 "`skills` on a specialist dispatch is a WARNING when missing, never a rejection. Explicitly supplied names must resolve to installed skill directories; unknown names are rejected by the CLI before dispatch creation. A specialist picks its skills from what it observes, so the honest list is often known only after the dispatch runs. Set it when the applicable skill is already clear; otherwise name it in the handoff.",
                 "requested_model and requested_reasoning record the recipe YOU selected. An ordinary dispatch carries no launcher-effective or provider-observed model/reasoning — no trusted launcher integration attests them — so the row is an asserted recipe, never measured truth, and caller-supplied actual_/launcher_effective_ fields are dropped rather than stored. Leaving either unset is visible warning debt: the dispatch stays usable but is not replayable. Never invent a runtime model the client does not expose.",
                 "Discover skill names with `vigil assess list-skills` — each value must match a directory under `agent/skills/<name>/`.",
@@ -2058,7 +2059,7 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
                         "--reasoning high --dispatch-mode item-iterating "
                         "--skills 'ssrf-testing,case-dispatching' "
                         "--rate-budget 'rate=4; concurrency=2' "
-                        "--prompt-context-json dispatch-context.json --emit-prompt"
+                        "--prompt-context-json dispatch-context.json"
                     ),
                 },
             ),
@@ -2246,14 +2247,14 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
             ),
             author_supplied_fields=(
                 "--from-json <path|-> containing the complete structured handoff",
-                "agent_id, role, and summary (≤2000 chars; required when creating a handoff)",
+                "agent_id, agent_role, and summary (target about 2000 characters, hard maximum 16384; required when creating a handoff)",
                 "structured arrays: next_steps / coverage_gaps / runtime_issues / working_artifacts / open_questions",
             ),
             helper_defaults=(
                 ("upsert", "POST then PATCH on 409 — the operation is idempotent so checkpointing is safe"),
                 ("handoff_status", "checkpointed unless --handoff-status is supplied"),
                 ("confidence", "omitted when not specified"),
-                ("summary length", "measured before the request: an over-long summary is refused locally with its character count, never truncated or split, so the 2000-char cap is not something you learn from a 422"),
+                ("summary length", "measured before the request: an over-long summary is refused locally with its character count, never truncated or split, and includes the saved version/timestamp on success"),
             ),
             notes=(
                 "Specialists call this from their closing sequence before exiting; the row is then the canonical 'what was done, what's missing, what's next' record for the dispatch.",
@@ -2262,7 +2263,7 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
                 "JSON payload schema: agent/references/runtime-guides/handoff-schema.md.",
             ),
             common_mistakes=(
-                ("transcript paste in summary", "summary is 2000 chars and bounded — use coverage_gaps / next_steps / runtime_issues for structured continuation, not a transcript dump"),
+                ("transcript paste in summary", "summary aims for about 2000 characters with a 16384-character safety limit; use coverage_gaps / next_steps / runtime_issues when their meaning fits, never to arbitrarily split prose"),
                 ("missing recommended_next_agent", "without it, the operator has to re-derive who picks up; set it from the specialist's perspective"),
             ),
             examples=(

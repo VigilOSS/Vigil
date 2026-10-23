@@ -24,6 +24,7 @@ container, workspace or backend is touched, and no traffic leaves localhost.
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
 import shutil
@@ -275,11 +276,24 @@ def _dispatch_ids(vigil: Vigil) -> set[str]:
 
 
 def _start_dispatch(vigil: Vigil, agent_id: str, role: str, task: str, *extra: str) -> None:
-    vigil.assess(
+    result = vigil.assess(
         "agent", "start", "--agent-id", agent_id, "--role", role, "--task", task,
         "--model", "claude-opus-5", "--reasoning", "high", "--dispatch-mode", "deep-manual",
         "--skills", "code-vulnerability-analysis", "--no-target-traffic", *extra,
     )
+    receipt = json.loads(result.stdout.splitlines()[0])
+    assert receipt['launch_required'] is True
+    _assert_packet_receipt(vigil, agent_id, receipt)
+
+
+def _assert_packet_receipt(vigil: Vigil, agent_id: str, receipt: dict) -> dict:
+    packet = vigil.assess_json('fetch', f'dispatches/{agent_id}/prompt-packet')
+    raw = Path(receipt['packet_path']).read_bytes()
+    assert hashlib.sha256(raw).hexdigest() == receipt['packet_sha256'] == packet['sha256']
+    assert raw.decode('utf-8') == packet['rendered_prompt']
+    assert raw.decode('utf-8').count('## Runtime Identity') == 1
+    assert '## Runtime Identity' not in (receipt['launch_message'] or '')
+    return packet
 
 
 def test_code_finding_runtime_proof_end_to_end(vigil: Vigil) -> None:
@@ -341,7 +355,7 @@ def test_code_finding_runtime_proof_end_to_end(vigil: Vigil) -> None:
     for checkpoint in (False, True):
         agent_id = 'RECOVERY-' + ('CHECKPOINT' if checkpoint else 'EMPTY')
         _start_dispatch(vigil, agent_id, 'code-vuln-hunter', 'Inspect the Acme library boundary',
-                        '--prompt-context-json', '@' + str(recovery_context), '--emit-prompt')
+                        '--prompt-context-json', '@' + str(recovery_context))
         if checkpoint:
             status, body = vigil.api('POST', 'dispatch-handoffs', {
                 'agent_id': agent_id, 'agent_role': 'code-vuln-hunter',
@@ -350,6 +364,20 @@ def test_code_finding_runtime_proof_end_to_end(vigil: Vigil) -> None:
                 'coverage_gaps': [{'path': 'acme_reports.py', 'reason': 'caller review unfinished'}],
             })
             assert status == 201, body
+            authored = 'Acme caller review remains source-only; preserve the pending evidence. ' * 60
+            handoff = vigil.assess_json('agent', 'handoff', '--from-json', str(vigil.write('long-handoff.json', {
+                'agent_id': agent_id, 'summary': authored,
+            })))
+            assert handoff['summary_characters'] == len(authored)
+            assert handoff['handoff_version'] == 2 and handoff['last_checkpoint_at']
+            status, persisted = vigil.api('GET', 'dispatch-handoffs/' + agent_id)
+            assert status == 200 and persisted['summary'] == authored
+            rejected = vigil.assess('agent', 'handoff', '--from-json', str(vigil.write('oversize-handoff.json', {
+                'agent_id': agent_id, 'summary': 'x' * 16385,
+            })), expect_ok=False)
+            assert rejected.returncode != 0
+            status, unchanged = vigil.api('GET', 'dispatch-handoffs/' + agent_id)
+            assert status == 200 and unchanged['handoff_version'] == 2 and unchanged['summary'] == authored
         refused = vigil.assess('agent', 'continue', agent_id, '--agent-id', agent_id + '-NEXT',
                                '--task', 'Continue the unfinished caller review', expect_ok=False)
         assert refused.returncode != 0
@@ -466,7 +494,8 @@ def test_code_finding_runtime_proof_end_to_end(vigil: Vigil) -> None:
     assert (claim["status"], claim["queue_state"]) == ("claimed", "in_progress")
     assert claim["owner_agent_id"] == PROVER
     prover_dispatch_id = claim["owner_dispatch_id"]
-    prompt = claim["prompt_packet"]["rendered_prompt"]
+    claimed_packet = _assert_packet_receipt(vigil, PROVER, claim["launch"])
+    prompt = claimed_packet["rendered_prompt"]
     for expected in (
         "proof_route: code",
         f"proof_work_id: {work_id}",
@@ -491,7 +520,7 @@ def test_code_finding_runtime_proof_end_to_end(vigil: Vigil) -> None:
     stored_packet = vigil.assess_json("fetch", f"dispatches/{PROVER}/prompt-packet")
     assert isinstance(stored_packet, dict)
     assert stored_packet["rendered_prompt"] == prompt
-    assert stored_packet["sha256"] == claim["prompt_packet"]["sha256"]
+    assert stored_packet["sha256"] == claim["launch"]["packet_sha256"]
 
     replay = vigil.assess_json(
         "proof-work", "claim", str(work_id), "--agent-id", PROVER,
@@ -697,8 +726,9 @@ def _web_proof(vigil: Vigil) -> None:
     claim = vigil.assess_json(*claim_args)
     owner = claim['owner_dispatch_id']
     assert claim['launch_required'] is True
-    assert claim['prompt_packet']['context']['assessment_mode'] == 'web'
-    assert 'agent/shared-constraints.md' in claim['prompt_packet']['rendered_prompt']
+    web_packet = _assert_packet_receipt(vigil, verifier, claim['launch'])
+    assert web_packet['context']['assessment_mode'] == 'web'
+    assert 'agent/shared-constraints.md' in web_packet['rendered_prompt']
 
     # Scope policy changes are operator fixture inputs; backend reads this canonical file.
     scope_path = vigil.engagement / 'scope.json'

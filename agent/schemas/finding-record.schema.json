@@ -501,7 +501,7 @@
         },
         "variant_of": {
           "type": "string",
-          "description": "Slug of the root finding when this record is a verified same-class variant (e.g. 'sqli-search-q')."
+          "description": "Informational attribution to a parent pattern. Child ancestry requires a links entry with link_kind=variant_of, target_kind=finding and the parent slug; independent same-class findings use related."
         },
         "original_pattern": {
           "type": "string",
@@ -903,11 +903,11 @@
         "properties": {
           "link_kind": {
             "default": "related",
+            "description": "Relationship type. Use 'variant_of' only for an explicit child of another finding (target_kind='finding'); use 'related' for independent findings sharing a class or pattern.",
             "maxLength": 64,
             "minLength": 1,
             "title": "Link Kind",
-            "type": "string",
-            "description": "Relationship type (e.g. 'related', 'exploits', 'chained-with', 'variant-of')."
+            "type": "string"
           },
           "target_kind": {
             "maxLength": 64,

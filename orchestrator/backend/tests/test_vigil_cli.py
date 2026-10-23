@@ -9308,7 +9308,7 @@ def test_blue_help_documents_generic_dispatch_emitter(capsys) -> None:
     help_text = capsys.readouterr().out
     assert "vigil assess agent start" in help_text
     assert "--prompt-context-json" in help_text
-    assert "--emit-prompt" in help_text
+    assert "--prompt-context-json" in help_text
 
 
 def test_blue_initial_report_scaffold_uses_customer_and_platform(
@@ -9759,7 +9759,7 @@ def test_blue_alert_record_body_file_updates_scope_and_registers_artifact(
     next_step = capsys.readouterr().err
     assert "vigil assess agent start --role alert-triage-specialist" in next_step
     assert "--rate-budget '<authored tenant query budget>'" in next_step
-    assert "--prompt-context-json dispatch-context.json --emit-prompt" in next_step
+    assert "--prompt-context-json dispatch-context.json" in next_step
 
 
 def test_blue_alert_record_rejects_second_intake_without_replace(

@@ -19,10 +19,15 @@ instructions: |2
   **MANDATORY (before any work):**
 
   - `agent/shared-specialist-core.md` — specialist context isolation, the Contract-First Rule, finding-recording format, closing-sequence wrapper, output hygiene
-  - `agent/shared-constraints.md` — scope, finding IDs, CVSS/details format, rule reminders
   - `agent/rules/reporting.md`
 
   **LOAD-ON-FIRST-USE (lazy):**
+
+  - The matching `agent/shared-constraints.md` (web) or `agent/shared-constraints-code.md` (code) —
+    before performing any fresh target/source investigation or validation. For authoring from existing
+    backend evidence, load the finding-recording reference only before editing finding content;
+    preserve exact operator-owned evidence and its source identity. A submission-writing assignment
+    does not grant new target traffic or proof approval.
 
   - `agent/skills/report-generation/SKILL.md` — full procedure required for internal-report mode (draft/QA/publish) or a blue-incident report. For the default per-finding submission mode, only its "Proof Standard by Finding Class" section is required reading; its "Submission-First Closeout" section is the full procedure your own closing verbs below summarize.
   - `agent/references/submission-format.md` — default per-finding submission mode (bugcrowd/hackerone/direct). Author each section against it and pass its pre-submission checklist — the same reference covers the supported platforms (`--platform direct` is the Bugcrowd-style structure with VRT/H1-only fields dropped). Run `vigil assess export submission <slug> --platform <p> --draft` first; it renders `submission.md` FROM the finding's own fields and consolidates everything you author the body FROM into ONE "OPERATOR DETAILS — NOT FOR SUBMISSION" reference section — so there is nothing else to load before that call. See "Per-Finding Dispatch" below for the lighter context load this mode uses instead of the full mandatory set.
@@ -125,7 +130,7 @@ instructions: |2
 
   A single submission does not need the full report-generation machinery (attack-chain synthesis, executive summary, all-findings grouped projection). The default lighter dispatch loads only:
 
-  - `agent/shared-constraints.md`
+  - `agent/shared-specialist-core.md`
   - `agent/rules/reporting.md`
   - `agent/references/submission-format.md` (or `disclosure-email-format.md` for email disclosure mode)
   - The one finding's evidence: `vigil assess fetch findings/<slug>` or `vigil assess finding report --mode draft --json` filtered to the slug
@@ -139,7 +144,7 @@ instructions: |2
   ```bash
   vigil assess finding update <slug> \
     --submission-status submitted \
-    --submission-platform <bugcrowd|hackerone|direct> \
+    --submission-platform <bugcrowd|hackerone|direct|ghsa> \
     --submission-ref <program report id> \
     --reason "Staged and submitted to program"
   ```
@@ -163,7 +168,7 @@ instructions: |2
 
   ## Title Formula
 
-  Canonical title formula and CVSS↔severity mapping: `agent/shared-specialist-core.md`. Vague-title
+  Title guidance: `agent/rules/reporting.md` Rule 8. CVSS/severity consistency: `vigil assess contract finding record`. Vague-title
   anti-patterns and the full quality bar: `agent/rules/reporting.md` Rule 8. Rewrite any upstream
   title that does not follow the formula — the report is the deliverable and titles must be
   consistent.
@@ -194,7 +199,7 @@ instructions: |2
 
   Write only the impact the Evidence block literally shows. CVSS, severity, the title, and the
   summary all follow the demonstrated outcome only — there is a single `cvss_vector` field
-  (`agent/shared-specialist-core.md` CVSS↔severity mapping), not a separate score for what a defender
+  (the finding-record contract's CVSS/severity validation), not a separate score for what a defender
   should also fix. When a further reach beyond what you proved is worth flagging, name it in
   `remediation` or one caveat sentence in `impact` — never as a second CVSS vector, and never in the
   title or summary.

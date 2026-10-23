@@ -90,6 +90,69 @@ def _relationship_collection_change(
     }
 
 
+def _validate_variant_link_target(
+    connection, engagement_id: int, *, finding_id: int, link_kind: str,
+    target_kind: str, target_id: int | None, target_ref: str,
+    excluded_link_id: int | None = None,
+) -> None:
+    if link_kind == "variant-of":
+        raise HTTPException(status_code=400, detail=(
+            "Ambiguous variant relationship: use variant_of for an explicit child finding, "
+            "or related for independent findings sharing a class or pattern."
+        ))
+    if link_kind != "variant_of":
+        return
+    if target_kind != "finding":
+        raise HTTPException(status_code=400, detail="variant_of requires target_kind='finding'; use related for other entities")
+    target = connection.execute(
+        "SELECT id FROM assessment_findings WHERE engagement_id=? AND "
+        + ("slug=?" if target_ref else "id=?"),
+        (engagement_id, target_ref if target_ref else target_id),
+    ).fetchone()
+    if target is None:
+        raise HTTPException(status_code=404, detail="variant_of parent finding not found in this engagement")
+    if int(target["id"]) == finding_id:
+        raise HTTPException(status_code=400, detail="variant_of cannot point to the same finding")
+    # UNION deduplicates visited nodes, including cycles already present in
+    # historical data. Traverse explicit active finding ancestry only; a
+    # retargeted link's old edge is not part of the proposed graph.
+    cycle = connection.execute(
+        """
+        WITH RECURSIVE ancestors(id) AS (
+            SELECT ?
+            UNION
+            SELECT parent.id FROM ancestors
+            JOIN assessment_finding_links AS links
+              ON links.finding_id=ancestors.id AND links.engagement_id=?
+             AND links.link_kind='variant_of' AND links.target_kind='finding'
+             AND links.retired_at IS NULL AND links.id<>COALESCE(?, -1)
+            JOIN assessment_findings AS parent
+              ON parent.engagement_id=links.engagement_id AND parent.id=(
+                  CASE WHEN links.target_ref<>'' THEN (
+                      SELECT id FROM assessment_findings
+                      WHERE engagement_id=links.engagement_id AND slug=links.target_ref
+                  ) ELSE links.target_id END
+              )
+        )
+        SELECT 1 FROM ancestors WHERE id=? LIMIT 1
+        """,
+        (int(target["id"]), engagement_id, excluded_link_id, finding_id),
+    ).fetchone()
+    if cycle is not None:
+        raise HTTPException(status_code=400, detail="variant_of would create a finding ancestry cycle; use related for independent findings")
+
+
+def _finding_link_read_projection(row) -> dict[str, Any]:
+    result = dict(row)
+    if result["link_kind"] == "variant-of" and result["retired_at"] is None:
+        result["relationship_warning"] = (
+            "Historical ambiguous variant relationship; retained as recorded and does not "
+            "establish child/root semantics. Review its evidence, retire it, and explicitly "
+            "record variant_of for a child or related for an independent finding."
+        )
+    return result
+
+
 def _validate_proof_run_link_target(
     connection,
     engagement_id: int,
@@ -197,6 +260,11 @@ def _upsert_finding_link(
     notes: str,
     provenance: dict[str, Any] | None,
 ) -> dict[str, Any]:
+    _validate_variant_link_target(
+        connection, engagement_id, finding_id=finding_id,
+        link_kind=link_kind, target_kind=target_kind,
+        target_id=target_id, target_ref=target_ref,
+    )
     _validate_proof_run_link_target(
         connection, engagement_id,
         link_kind=link_kind, target_kind=target_kind,
@@ -586,7 +654,7 @@ def list_finding_links(engagement_id: int) -> list[dict[str, Any]]:
             """,
             (engagement.id,),
         ).fetchall()
-    return [dict(row) for row in rows]
+    return [_finding_link_read_projection(row) for row in rows]
 
 
 def update_finding_link(
@@ -689,6 +757,13 @@ def update_finding_link(
             link_kind=str(link["link_kind"]), target_kind=next_kind,
             target_id=next_id, target_ref=next_ref,
         )
+
+        if not retired and str(link["link_kind"]) == "variant_of":
+            _validate_variant_link_target(
+                connection, engagement.id, finding_id=int(finding["id"]),
+                link_kind="variant_of", target_kind=next_kind,
+                target_id=next_id, target_ref=next_ref, excluded_link_id=int(link_id),
+            )
 
         next_notes = str(link["notes"]) if notes is None else str(notes)
         next_provenance = _merge_object_text(

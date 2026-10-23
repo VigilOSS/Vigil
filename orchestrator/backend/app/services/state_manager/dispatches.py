@@ -210,7 +210,61 @@ def record_dispatch(
     tier_value = (tier or "").strip() or None
     vuln_classes_value = (vuln_classes or "").strip() or None
     identity_value = (identity or "").strip() or None
+    registration_sha256 = None
+    if prompt_packet is not None:
+        prompt_packet = dict(prompt_packet)
+        packet_context = dict(prompt_packet["context"])
+        packet_context.pop("_registration_sha256", None)
+        prompt_packet["context"] = packet_context
+        registration_input = {
+            "agent_id": agent_id,
+            "agent_role": agent_role,
+            "task": task,
+            "application_unit_id": application_unit_id,
+            "dispatched_at": dispatched_at,
+            "status_value": status_value,
+            "requested_model": requested_model,
+            "requested_reasoning": requested_reasoning,
+            "client_name": client_name,
+            "requested_client": requested_client,
+            "launcher_effective_client": launcher_effective_client,
+            "provider_observed_client": provider_observed_client,
+            "source_revision": source_revision,
+            "operator_instruction_path": operator_instruction_path,
+            "operator_instruction_sha256": operator_instruction_sha256,
+            "specialist_instruction_path": specialist_instruction_path,
+            "specialist_instruction_sha256": specialist_instruction_sha256,
+            "instruction_identity_status": instruction_identity_status,
+            "instructions_stale": instructions_stale,
+            "dispatch_mode": dispatch_mode,
+            "assessment_mode": assessment_mode,
+            "finding_slugs": finding_slugs,
+            "skills_value": skills_value,
+            "tier_value": tier_value,
+            "vuln_classes_value": vuln_classes_value,
+            "identity_value": identity_value,
+            "continued_from_dispatch_id": continued_from_dispatch_id,
+            "prompt_packet": prompt_packet,
+        }
+        registration_sha256 = hashlib.sha256(json.dumps(registration_input, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+        packet_context["_registration_sha256"] = registration_sha256
     with _common.get_connection() as connection:
+        if not connection.in_transaction:
+            connection.execute("BEGIN IMMEDIATE")
+        existing = connection.execute(
+            "SELECT id FROM assessment_dispatches WHERE engagement_id = ? AND agent_id = ?",
+            (engagement.id, agent_id),
+        ).fetchone()
+        if existing is not None:
+            saved = connection.execute("SELECT * FROM assessment_dispatch_prompt_packets WHERE dispatch_id = ?", (existing["id"],)).fetchone()
+            if registration_sha256 is not None and saved is not None and json.loads(saved["context_json"]).get("_registration_sha256") == registration_sha256:
+                previous = connection.execute(f"{_DISPATCH_SELECT} WHERE d.id = ?", (existing["id"],)).fetchone()
+                return {**_serialize_dispatch(previous), "prompt_packet": _serialize_prompt_packet(saved),
+                        "idempotent_replay": True, "launch_required": False}
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"dispatch with agent_id={agent_id!r} already exists with different or uncaptured inputs; inspect it before choosing a fresh identity",
+            )
         _ensure_finding_slugs_exist(connection, engagement.id, finding_slugs)
         if variant_parent_slugs is not None:
             # Import lazily because code_analysis imports the finding lifecycle
@@ -266,15 +320,6 @@ def record_dispatch(
                         'for no final handoff use agent close <agent-id> --status failed '
                         '--reason <observed-return-and-execution-state>. Inspect kali sweep-orphans and '
                         'command-run list; wait or stop active execution first.'))
-        existing = connection.execute(
-            "SELECT id FROM assessment_dispatches WHERE engagement_id = ? AND agent_id = ?",
-            (engagement.id, agent_id),
-        ).fetchone()
-        if existing is not None:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail=f"dispatch with agent_id={agent_id!r} already exists for this engagement",
-            )
         cursor = connection.execute(
             """
             INSERT INTO assessment_dispatches (
@@ -371,6 +416,8 @@ def record_dispatch(
             "rendered_prompt": str(prompt_packet["rendered_prompt"]),
             "sha256": hashlib.sha256(str(prompt_packet["rendered_prompt"]).encode("utf-8")).hexdigest(),
         }
+    record["idempotent_replay"] = False
+    record["launch_required"] = prompt_packet is not None and status_value == DispatchStatus.IN_PROGRESS
     return record
 
 
@@ -764,7 +811,7 @@ def _serialize_handoff(row) -> dict[str, Any]:
             data[key] = None
     return data
 
-_HANDOFF_SUMMARY_MAX = 2000
+HANDOFF_SUMMARY_MAX_CHARS = 16384
 
 def _register_handoff_artifacts(engagement_id: int, handoff: dict[str, Any]) -> None:
     artifacts = handoff.get("working_artifacts") or []
@@ -818,10 +865,10 @@ def record_handoff(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="agent_id is required")
     if not (summary or "").strip():
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="summary is required")
-    if len(summary) > _HANDOFF_SUMMARY_MAX:
+    if len(summary) > HANDOFF_SUMMARY_MAX_CHARS:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"summary exceeds {_HANDOFF_SUMMARY_MAX} characters",
+            detail=f"summary exceeds {HANDOFF_SUMMARY_MAX_CHARS} characters",
         )
     closed_dispatch_status = _require_terminal_dispatch_status(closed_dispatch_status)
     finding_slugs = _require_canonical_finding_slugs(finding_slugs)
@@ -941,10 +988,10 @@ def update_handoff(
         if summary is not None:
             if not summary.strip():
                 raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="summary cannot be empty")
-            if len(summary) > _HANDOFF_SUMMARY_MAX:
+            if len(summary) > HANDOFF_SUMMARY_MAX_CHARS:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"summary exceeds {_HANDOFF_SUMMARY_MAX} characters",
+                    detail=f"summary exceeds {HANDOFF_SUMMARY_MAX_CHARS} characters",
                 )
             sets.append("summary = ?")
             values.append(summary)

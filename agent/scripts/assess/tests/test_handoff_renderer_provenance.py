@@ -321,3 +321,28 @@ def test_handoff_rejects_negative_excerpt_limit(tmp_path, monkeypatch, capsys):
         _run_renderer(monkeypatch, tmp_path, dispatch_slugs=[], handoff_slugs=[], max_lines=-1)
     assert stopped.value.code == 1
     assert "non-negative" in capsys.readouterr().err
+
+
+def test_default_context_excerpt_bounds_long_single_line_and_names_full_read(tmp_path, monkeypatch, capsys):
+    authored = 'Acme evidence retained verbatim. ' * 450
+    _run_renderer(monkeypatch, tmp_path, dispatch_slugs=[], handoff_slugs=[], handoff_extra={'summary': authored})
+    excerpt = capsys.readouterr().out
+    assert len(excerpt.rstrip('\n')) <= 8000
+    assert 'characters omitted' in excerpt
+    assert '--max-lines 0' in excerpt
+    assert _FakeClient.handoff['summary'] == authored
+
+
+def test_explicit_complete_handoff_preserves_long_single_line(tmp_path, monkeypatch, capsys):
+    authored = 'Acme evidence retained verbatim. ' * 450
+    _run_renderer(monkeypatch, tmp_path, dispatch_slugs=[], handoff_slugs=[], handoff_extra={'summary': authored}, max_lines=0)
+    assert authored.rstrip() in capsys.readouterr().out
+
+
+@pytest.mark.parametrize('max_lines', [1, 20, 40])
+def test_handoff_context_respects_both_display_bounds(tmp_path, monkeypatch, capsys, max_lines):
+    _run_renderer(monkeypatch, tmp_path, dispatch_slugs=[], handoff_slugs=[],
+                  handoff_extra={'summary': 'Acme proof. ' * 1200}, max_lines=max_lines)
+    output = capsys.readouterr().out.rstrip('\n')
+    assert len(output) <= 8000
+    assert len(output.splitlines()) <= max_lines

@@ -172,7 +172,7 @@ under `vigil blue <subcommand>` and are thin wrappers over the generic assess in
 | `vigil blue engage --customer <slug> --platform <p[,p...]>` | Create blue engagement and resolve tenant refs for dispatch injection. |
 | `vigil blue alert record --body-file -` | Record the alert body pasted into operator chat by piping it straight in via heredoc (`--body-file -` reads stdin); the CLI writes the canonical `ir/alerts/` copy — do **not** save a separate file first. Writes canonical alert metadata, auto-registers as `kind=alert_intake`, and logs the first `activity_entries` row. |
 | `vigil blue show <key>` | Status + alert summary + finding table + last 10 activity entries. |
-| `vigil assess agent start --role <role> --skills <names> [--tier L1|L2|L3|L4] (--rate-budget <authored> \| --no-target-traffic) --prompt-context-json <file> --emit-prompt` | Records the shared dispatch row, validates and injects blue tenant-ref paths into the emitted prompt, and writes `tier` on the dispatch row. The context file supplies every canonical prompt-only field; its schema is in `agent/references/runtime-guides/dispatch-template.md`. |
+| `vigil assess agent start --role <role> --skills <names> [--tier L1|L2|L3|L4] (--rate-budget <authored> \| --no-target-traffic) --prompt-context-json <file>` | Records the shared dispatch row, validates and injects blue tenant-ref paths into the emitted prompt, and writes `tier` on the dispatch row. Optional context supplies assignment-specific fields; the success receipt provides a short launch_message pointing to the captured packet; its schema is in `agent/references/runtime-guides/dispatch-template.md`. |
 | `vigil blue tier <finding-slug> --tier L1|L2|L3|L4 [--notes ...]` | Records current tier in parsed `details`. |
 | `vigil blue verify <finding-slug> ...` | Existing blue convenience wrapper. The canonical lifecycle contract is `vigil assess finding verify <slug> --status <status>` because terminal decisions now require proof receipts and false-positive decisions require a structured counter-check. Do not use the wrapper to bypass those evidence fields. |
 | `vigil blue propose-contain <finding-slug> --action <revoke_session\|disable_account\|isolate_host\|block_ioc\|rotate_credential\|sinkhole_domain> --target <id> --platform <gws\|m365\|aws\|okta\|edr\|network\|generic> --rollback "<plan>" --blast-radius <single-user\|multi-user\|multi-tenant\|cross-platform> [--note "..."]` | Writes a `containment_proposal` dispatch-decision row that `vigil blue contain` reads for approval. Prints `{decision_id, approval_hint}` JSON — pass `decision_id` to `vigil assess approve-proposal`, execute with audited `host-exec`, then record with `vigil blue contain <finding-slug> --proposal <decision_id> --command-run-id <id>` or `--proof-artifact <path>`. |
@@ -217,7 +217,7 @@ overrides with a stated reason.
   - [ ] Draft finding skeleton recorded for each non-noise alert: `vigil assess finding record alert-triage-specialist <finding-json> --agent-id <your-agent_id>` with `status=draft`, `verification_status=unreviewed`, severity hint, platform, suspected MITRE techniques in `details.mitre_techniques`.
   - [ ] Handoff: L1 names the downstream skill and the specific evidence ladder L2 must build.
 - **Transition:** `vigil assess transition-phase investigate`
-- **Dispatch hint:** `vigil assess agent start --role alert-triage-specialist --tier L1 --skills alert-triage --rate-budget '<authored tenant query budget>' --prompt-context-json dispatch-context.json --emit-prompt` — the helper injects every resolved tenant-ref path into the prompt's "Load First" block.
+- **Dispatch hint:** `vigil assess agent start --role alert-triage-specialist --tier L1 --skills alert-triage --rate-budget '<authored tenant query budget>' --prompt-context-json dispatch-context.json` — the helper injects every resolved tenant-ref path into the prompt's "Load First" block.
 
 ### Phase: investigate
 
@@ -231,7 +231,7 @@ overrides with a stated reason.
   - [ ] Coverage gaps named in handoff (`runtime_issues` + `next_steps`): unavailable telemetry, un-correlated identities, out-of-retention log types.
   - [ ] `verification_status=unreviewed` on every active finding (L2 never transitions it).
 - **Transition:** `vigil assess transition-phase verify`
-- **Dispatch hint:** `vigil assess agent start --role investigator --tier L2 --skills <platform-skill>[,ioc-enrichment] --rate-budget '<authored tenant query budget>' --prompt-context-json dispatch-context.json --emit-prompt` for the lead investigator; parallel `vigil assess agent start --role osint-analyst --skills osint-recon,ioc-enrichment --rate-budget '<authored target-query budget>' --prompt-context-json dispatch-context.json --emit-prompt` for IOC enrichment when applicable.
+- **Dispatch hint:** `vigil assess agent start --role investigator --tier L2 --skills <platform-skill>[,ioc-enrichment] --rate-budget '<authored tenant query budget>' --prompt-context-json dispatch-context.json` for the lead investigator; parallel `vigil assess agent start --role osint-analyst --skills osint-recon,ioc-enrichment --rate-budget '<authored target-query budget>' --prompt-context-json dispatch-context.json` for IOC enrichment when applicable.
 
 ### Phase: verify
 
@@ -245,7 +245,7 @@ overrides with a stated reason.
   - [ ] Verifier handoff includes the Devil's-advocate enumeration (Check 5) with the same evidence bar as the positive case.
   - [ ] Cross-platform correlation gaps named explicitly when the engagement carries multiple platforms (e.g., `gws + okta`): which platform clock is authoritative, which identity field bridges the two log sources.
 - **Transition:** `vigil assess transition-phase respond` (or `report` directly when no `confirmed` finding meets the response threshold).
-- **Dispatch hint:** `vigil assess agent start --role incident-verifier --tier L3 --skills alert-fp-verification --dispatch-mode deep-manual --rate-budget '<authored tenant query budget>' --prompt-context-json dispatch-context.json --emit-prompt` — the verifier reads the original telemetry artifacts via the artifact ids in the L2 handoff (not by re-reading files from disk).
+- **Dispatch hint:** `vigil assess agent start --role incident-verifier --tier L3 --skills alert-fp-verification --dispatch-mode deep-manual --rate-budget '<authored tenant query budget>' --prompt-context-json dispatch-context.json` — the verifier reads the original telemetry artifacts via the artifact ids in the L2 handoff (not by re-reading files from disk).
 
 ### Phase: respond
 
@@ -258,7 +258,7 @@ overrides with a stated reason.
   - [ ] Each approved proposal is executed through `vigil assess host-exec --phase respond --technique CONTAINMENT --finding <slug> --intent "containment proposal=<id> action=<action>" --scope-host <customer> --require-audit -- <cmd> <exact-target-argument>` so stdout/stderr and the command-run id are audited. The target must be a distinct argv argument. Then record via `vigil blue contain <slug> --proposal <id> --command-run-id <run-id>` or `--proof-artifact <path>`; command-run proof is checked against the approved finding, proposal, action, and target before workflow status changes.
   - [ ] Any benign pattern discovered during respond that the tenant ref does not document is queued for `known-benign register` update via handoff `next_steps` (file + pattern). Registration is manual; closed-loop ingest is out of scope.
 - **Transition:** `vigil assess transition-phase report`
-- **Dispatch hint:** `vigil assess agent start --role ir-lead --tier L4 --skills incident-containment[,<platform-skill-in-containment-mode>] --dispatch-mode deep-manual --rate-budget '<authored tenant query budget>' --prompt-context-json dispatch-context.json --emit-prompt`.
+- **Dispatch hint:** `vigil assess agent start --role ir-lead --tier L4 --skills incident-containment[,<platform-skill-in-containment-mode>] --dispatch-mode deep-manual --rate-budget '<authored tenant query budget>' --prompt-context-json dispatch-context.json`.
 
 ### Phase: report
 
@@ -275,7 +275,7 @@ overrides with a stated reason.
 ## Tenant Context Injection
 
 Every blue dispatch prompt MUST include every tenant ref resolved by `vigil
-assess agent start ... --emit-prompt` in its "Load First" block (full content or
+assess agent start ...` in its "Load First" block (full content or
 resolved path with explicit "load first"), immediately before the role's primary
 skill and `agent/shared-constraints-blue.md`.
 
@@ -428,7 +428,7 @@ large-file-corpus role to fan out over. Add it only if a real blue corpus
 workload shows up.)
 
 Optional fields: `model`, `reasoning`, `tenant_reference_paths[]` (validated and
-auto-injected by `agent start --emit-prompt` from the active blue engagement).
+auto-injected by `agent start` from the active blue engagement).
 
 Register the dispatch up front:
 
@@ -439,10 +439,10 @@ vigil assess agent start \
     --model <name> --reasoning <level> --dispatch-mode <mode> \
     --skills "<skill-name>[,<skill-name>...]" \
     --rate-budget "<authored tenant query budget>" \
-    --prompt-context-json dispatch-context.json --emit-prompt
+    --prompt-context-json dispatch-context.json
 ```
 
-`agent start --emit-prompt` writes tenant-ref paths into the prompt "Load First"
+`agent start` writes tenant-ref paths into the prompt "Load First"
 block and stamps `tier`. It requires the exact authored target-traffic budget,
 or `--no-target-traffic` for an offline lane; Vigil invents no numeric default.
 When the dispatch returns, mark it complete with the slugs it produced:

@@ -847,3 +847,76 @@ def test_report_findings_draft_mode_excludes_draft_workflow_status(client, isola
     assert "RP-001" in standalone_slugs
     assert "RP-002" not in standalone_slugs
     assert body["finding_count"] == 1
+
+
+def test_web_variant_relations_are_explicit_and_related_links_keep_verification(client, isolate_settings):
+    _seed(client, isolate_settings)
+    _create(client, _finding("AC-001", "Acme primary authorization defect", root_key="acme-primary"))
+    _create(client, _finding("AC-002", "Acme independent authorization defect", root_key="acme-independent"))
+    _confirm(client, "AC-002")
+    base = f"/engagements/{ENGAGEMENT_KEY}/assessment"
+    related = client.post(f"{base}/findings/AC-002/links", json={
+        "link_kind": "related", "target_kind": "finding", "target_ref": "AC-001",
+        "notes": "Independent issue sharing an authorization class.",
+    })
+    assert related.status_code == 200, related.text
+    assert client.get(f"{base}/findings/AC-002").json()["verification_status"] == "confirmed"
+    ambiguous = client.post(f"{base}/findings/AC-002/links", json={
+        "link_kind": "variant-of", "target_kind": "finding", "target_ref": "AC-001",
+    })
+    assert ambiguous.status_code == 400, ambiguous.text
+    explicit = client.post(f"{base}/findings/AC-002/links", json={
+        "link_kind": "variant_of", "target_kind": "finding", "target_ref": "AC-001",
+    })
+    assert explicit.status_code == 200, explicit.text
+    assert explicit.json()["link_kind"] == "variant_of"
+
+
+def _seed_ancestry_findings(client, isolate_settings):
+    _seed(client, isolate_settings)
+    base = f"/engagements/{ENGAGEMENT_KEY}/assessment"
+    for number in range(1, 4):
+        slug = f"AC-{number:03d}"
+        _create(client, _finding(slug, f"Acme independent issue {number}", root_key=f"acme-{number}"))
+    return base
+
+
+def test_variant_ancestry_rejects_two_and_longer_cycles(client, isolate_settings):
+    base = _seed_ancestry_findings(client, isolate_settings)
+    def link(child, parent):
+        return client.post(f"{base}/findings/{child}/links", json={
+            "link_kind": "variant_of", "target_kind": "finding", "target_ref": parent})
+    assert link("AC-001", "AC-002").status_code == 200
+    reverse = link("AC-002", "AC-001")
+    assert reverse.status_code == 400, reverse.text
+    assert "cycle" in reverse.text
+    assert link("AC-002", "AC-003").status_code == 200
+    longer = link("AC-003", "AC-001")
+    assert longer.status_code == 400, longer.text
+    assert "cycle" in longer.text
+
+
+def test_variant_ancestry_retarget_and_inline_record_cannot_bypass_cycle_guard(client, isolate_settings):
+    base = _seed_ancestry_findings(client, isolate_settings)
+    first = client.post(f"{base}/findings/AC-001/links", json={
+        "link_kind": "variant_of", "target_kind": "finding", "target_ref": "AC-002"})
+    assert first.status_code == 200, first.text
+    assert client.post(f"{base}/findings/AC-003/links", json={
+        "link_kind": "variant_of", "target_kind": "finding", "target_ref": "AC-001"}).status_code == 200
+    retarget = client.patch(f"{base}/findings/AC-001/links/{first.json()['id']}", json={"target_ref": "AC-003"})
+    assert retarget.status_code == 400, retarget.text
+    before = client.get(f"{base}/findings/AC-002").json()
+    links_before = client.get(f"{base}/finding-links").json()
+    inline = client.post(f"{base}/findings", json={
+        **_finding("AC-002", "Acme independent issue 2", root_key="acme-2"),
+        "provenance": {"agent_id": "AUTHOR-AC-002"},
+        "links": [{"link_kind": "variant_of", "target_kind": "finding", "target_ref": "AC-001"}],
+    })
+    assert inline.status_code == 400, inline.text
+    assert "cycle" in inline.text
+    assert client.get(f"{base}/findings/AC-002").json()["row_version"] == before["row_version"]
+    assert client.get(f"{base}/finding-links").json() == links_before
+    retired = client.patch(f"{base}/findings/AC-001/links/{first.json()['id']}", json={"retired": True})
+    assert retired.status_code == 200, retired.text
+    assert client.post(f"{base}/findings/AC-002/links", json={
+        "link_kind": "variant_of", "target_kind": "finding", "target_ref": "AC-003"}).status_code == 200

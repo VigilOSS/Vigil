@@ -1,8 +1,6 @@
 # CODE-MAP
 
-The repo's **invariant map**: the things a reader cannot derive by listing files
-or reading one module — which file owns a contract, what must change with it,
-and what silently breaks when it does not.
+Contract owners, coupled consumers, and invariants not evident from a file listing.
 
 **Size budget: this file stays under 32 KiB**, enforced by
 `orchestrator/backend/tests/test_doc_dead_paths.py`.
@@ -11,8 +9,7 @@ and what silently breaks when it does not.
 
 ## Single sources of truth (drift-prone invariants)
 
-These exist in exactly **one** place; every other consumer imports from there.
-When you are about to copy one of these into a second file, stop and import.
+Import contracts from their owner; pin standalone mirrors with regressions.
 
 - `agent/scripts/assess/lib/phases.py` owns all phase rosters, terminal phases, and input aliases.
   Backend/frontend mirrors are pinned by `orchestrator/backend/tests/test_phase_roster.py`.
@@ -90,24 +87,21 @@ When you are about to copy one of these into a second file, stop and import.
   input entries, digests, the image label, exclusions. Content, never mtime.
 - `tools/runtime_release.py` owns native-platform runtime publication, OCI release labels,
   multi-platform index validation, and the immutable pin written into matched release artifacts.
-  `.github/workflows/runtime-release.yml` supplies tag identity, native runners, registry
-  authentication, and draft-release upload.
-- `src/vigil_cli/restart_manifest.py:consumer_states` owns what an install invalidated, per consumer.
-  `backend_state` provides the backend-only verdict for remediation commands. Presenters consume its rows; do not derive freshness beside it. See: `docs/maintainer-guide.md` freshness section.
+  `.github/workflows/runtime-release.yml` supplies tag identity, native runners, registry auth and draft uploads.
+- `src/vigil_cli/restart_manifest.py:consumer_states` owns install invalidation; `backend_state` supplies remediation verdicts.
+  Presenters consume these rows; see the maintainer freshness recipe.
 - `src/vigil_cli/install_manifest.py` owns editable application input digests;
   `src/vigil_cli/install_fs.py` owns pinned/no-follow workspace and cache operations.
 - `src/vigil_cli/assessment_clients.py` owns immutable native-client workspace bindings,
   context-bound helpers, managed pointers, plugin release identities, and managed-file digest manifests.
-  GUI workspace opening never establishes native conversation ownership.
+  Opening a GUI workspace does not establish conversation ownership.
 - `src/vigil_cli/client_projects.py` owns stable per-engagement/client/mode project entries,
   atomic new-task selections, and immutable protocol-v1 dispatcher staging. `agent/scripts/native-client/project-binding.mjs`
   attests native task bindings and create-once session receipts; project selection never migrates an existing task.
-- `src/vigil_cli/client_checks.py` owns read-only client prerequisites and inspection of existing
-  bound workspaces, asset manifests, and exact-context hook receipts. Historical `OBSERVED` events
-  do not establish current native-build acceptance or completed backend hydration.
-- `src/vigil_cli/client_context.py` discovers validated install-owned native project identity for mode,
-  client-check and assess commands. It supplies session selectors only; application code, executable paths
-  and backend endpoints retain their existing owners. `client_checks.py:validate_context_binding` owns shared binding validation.
+- `src/vigil_cli/client_checks.py` owns client prerequisites, bound-workspace/assets and exact-context hook inspection.
+  Historical `OBSERVED` events do not attest current builds or backend hydration.
+- `src/vigil_cli/client_context.py` discovers install-owned project identity for mode/client-check/assess.
+  It supplies session selectors, not application paths or endpoints; `client_checks.py:validate_context_binding` owns validation.
 - `src/vigil_cli/argv.py:passthrough_boundary` owns the opaque `--` boundary for universal CLI routing,
   startup forwarding and assessment root-flag hoisting; each parser retains ownership of its flags and validation.
 - `src/vigil_cli/prompts.py` owns shared terminal questions and searchable start pickers for engagement and remediation, using `term.py:fuzzy_pick` or the terminal filter;
@@ -163,7 +157,7 @@ When you are about to copy one of these into a second file, stop and import.
 
 ## Prompt-to-backend coupling
 
-A prompt change is **not** prompt-only when the prompt defines an artifact the backend stores or the CLI parses.
+Prompt-defined durable artifacts are executable contracts, not prose-only changes.
 
 - `agent/operator-core-code.md` defines `guidance_hypotheses`; code dispatch normalizes it and
   `orchestrator/backend/app/api/code_analysis.py` validates it. Keep it `list[str]`.
@@ -256,12 +250,17 @@ A prompt change is **not** prompt-only when the prompt defines an artifact the b
   Operator pages `command-runs/page|facets|{id}/position` (`command_run_queries.py`) and `request-variants/page|facets|{id}`
   `[/position|/observations]` (`coverage.py`); bare lists stay the CLI contract. `findings?view=summary` omits `details`/`notes`; `PATCH oob-probes/{nonce}` audits a verdict; `oob.py:oob_verdict_entry` defines one.
   `assessment_operator.py` owns dispatch/handoff/decision/checkpoint routes; `submissions.py` owns immutable submission/sent-reply APIs.
+  `state_manager/dispatches.py` owns atomic packet registration/replay and `HANDOFF_SUMMARY_MAX_CHARS`;
+  `commands/agent.py` materializes packets and short web/code/proof launch receipts.
+  `contract_registry.py` mirrors limits; `dispatch/handoff_renderer.py` bounds excerpts, not storage.
 - `orchestrator/backend/app/api/intel.py` — per-engagement intel reads and writes. `/resolve` maps
   untyped finding intel ids through the canonical search index without guessing across entity tables;
-  it reports resolved, missing, unsupported, dangling, and ambiguous ids.
+  It distinguishes resolved, missing, unsupported, dangling and ambiguous ids.
 - `orchestrator/backend/app/api/code_analysis.py` — the only repo/file ingest write, lease-owned queue
   work, generation-bound compare-and-swap, and paginated queue reads. Its `item_ids` page and
   `code-dispatch fetch --ids-file` share ordering and current-generation filtering.
+  `state_manager/links.py` validates explicit variant-child ancestry; historical ambiguous links remain recorded.
+  `code_analysis.py` derives variant currency and stale-parent diagnostics from receipts.
   The Code view reads `analysis-results/page` (`scope=current|awaiting_verdict`) and `{id}[/position]` (`analysis-results`
   is the CLI listing), `analysis-queue?current_only=` lanes (stats SQL), `repos/review-progress`, readiness `track_enabled`.
 - `orchestrator/backend/app/services/state_manager/proof_work.py` owns current proof preparation, atomic dispatch claims, live approval independent of bindings, derived `queue_state`/`reverification_required`, and explicit release after execution ends.

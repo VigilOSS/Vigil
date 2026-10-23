@@ -5,6 +5,29 @@ versioning follows [Semantic Versioning][semver].
 
 Durable design decisions live in [`docs/adr/`](docs/adr/).
 
+## [2.3.0] - 2026-10-23
+
+### Added
+
+- Web and code dispatches capture canonical packets and return compact launch receipts with
+  content digests; identical registration retries recover the saved assignment.
+- Stale variant receipts explain parent-set drift and the next review action.
+
+### Changed
+
+- Handoff summaries accept up to 16,384 characters with saved version and timestamp receipts;
+  default context excerpts remain bounded and complete recorded handoffs remain retrievable.
+- Specialist instructions load recording examples and conditional procedures when relevant,
+  and threat modeling records actors' intended capabilities and their limits before validation.
+- Continuations create a single current assignment while preserving prior packet history.
+
+### Fixed
+
+- Explicit finding variant links use one canonical child relationship; independent related
+  findings retain root accounting and ambiguous historical links remain reviewable as recorded.
+- Variant completion reads derive current receipt evidence without per-file inventory queries.
+- Packet diagnostics inspect authored assignment content as well as the registered task.
+
 ## [2.2.0] - 2026-10-22
 
 ### Added

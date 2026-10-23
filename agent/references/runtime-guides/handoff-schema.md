@@ -33,7 +33,7 @@ prompt by `vigil assess agent render-handoff <agent-id>`.
 | `agent_id` | string | yes | The dispatching agent_id (the same id passed to `vigil assess agent start` / `POST /dispatches`). |
 | `agent_role` | string | yes | The role file the dispatch ran under (`recon-specialist`, `vulnerability-analyst`, etc.). |
 | `phase` | string | yes | The phase tag the dispatch was authorized for (canonical enum via `vigil assess list-commands --phase`; e.g. `recon`, `consume-test`, `exploit`, plus half-phase tags `recon-pivot` / `exploit-recon`). |
-| `summary` | string | yes | ≤2000 chars; one paragraph; what was done in your own words. |
+| `summary` | string | yes | target about 2000 chars; hard limit 16384 characters; what was done in your own words. |
 | `confidence` | enum | yes | `low` / `medium` / `high` based on what you proved vs. inferred. |
 | `finding_slugs` | string[] | optional | Slug strings only — the rich data lives in the findings table. The renderer fetches title + severity from the backend per slug. |
 | `coverage_gaps` | object[] | optional | Each entry: `{area, reason, recommended_followup}`. |
@@ -52,7 +52,7 @@ prompt by `vigil assess agent render-handoff <agent-id>`.
 
 ### `summary`
 
-One paragraph, ≤2000 chars, plain prose. Describe what was done and the headline
+Aim for about 2000 characters of plain prose; up to 16384 characters are accepted verbatim. Describe what was done and the headline
 outcome so the operator can decide the next dispatch quickly — name the hosts,
 the count of priority surfaces produced, and any blockers that shape the next
 phase. Example: "Phase 1 recon completed against 14 live hosts under
@@ -96,7 +96,7 @@ its rationale in `next_steps`, uncertainty in `open_questions`, and unexpected r
 `extras` or existing intel notes. State what was observed and what remains hypothetical. The
 final native response should explain those connections and the outcome, not just repeat IDs.
 Use free prose when needed; no fixed word quota, separate detailed investigation file, or new
-operator acknowledgement is required. The 2000-character summary is only one field, not a cap
+operator acknowledgement is required. The summary is only one field, not a cap
 on the investigation or its return. The operator can combine a weak clue with context you lack.
 
 ### `next_steps`
@@ -568,3 +568,11 @@ exhaustion), the latest checkpoint is what the operator gets. Step 3's
 checkpoint shown above tells the operator "wafw00f / nmap / httpx done;
 whatweb onward not run" — actionable enough to re-dispatch a continuation,
 even though the agent never reached the final synthesis call.
+
+A successful handoff write returns `handoff_version`, `last_checkpoint_at`, and
+`summary_characters`. Use this receipt to confirm the new checkpoint landed; rendering a prior
+checkpoint after a rejected write does not establish success.
+
+Default handoff rendering selects at most 40 lines and 8000 characters, with a visible
+omission notice. `render-handoff --max-lines 0` reads the complete recorded handoff;
+these display bounds never shorten the persisted summary.

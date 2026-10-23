@@ -877,7 +877,7 @@ class BlockedTechniqueRecordRequest(BaseModel):
 
 
 class FindingLinkRequest(BaseModel):
-    link_kind: str = Field(default="related", min_length=1, max_length=64)
+    link_kind: str = Field(default="related", min_length=1, max_length=64, description="Use variant_of for an explicit child finding; related for independent findings sharing a class or pattern.")
     target_kind: str = Field(min_length=1, max_length=64)
     target_id: int | None = None
     target_ref: str = Field(default="", max_length=1024)

@@ -20,7 +20,7 @@ execution via `vigil assess host-exec`, then operator recording with
 ## 1. Authorization scope — tenant, not host
 
 The unit of scope in blue mode is the **tenant**, not the host. The operator runs
-`vigil assess agent start ... --prompt-context-json <file> --emit-prompt`; that helper injects `customer` (the
+`vigil assess agent start ... --prompt-context-json <file>`; that helper injects `customer` (the
 customer slug), `platforms` (one or more platform tags), and
 `tenant_reference_paths[]` (resolved paths to per-customer-per-platform reference
 markdown). Confirm before any tenant-facing command:

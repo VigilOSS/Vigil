@@ -162,6 +162,11 @@ def test_million_file_inventory_dispatch_and_queue_retry_qualification(
                 return VirtualCursor(rows)
             if "SELECT queue.*, repos.active_generation" in statement:
                 return VirtualCursor([])
+            if "SELECT receipts.*" in statement:
+                # This inventory has no variant receipts. One page-scoped lookup
+                # must replace any per-file projection query, regardless of size.
+                assert "current_files.id IN (" in statement
+                return VirtualCursor([])
             raise AssertionError(f"unexpected virtual inventory query: {statement}")
 
     inventory = VirtualInventory()
@@ -17865,3 +17870,105 @@ def test_latest_covering_fuzz_receipt_with_invalid_evidence_fails_closed(
     assert history.status_code == 200, history.text
     assert history.json()[0]["id"] == latest.json()["id"]
     assert history.json()[0]["current"] is False
+
+
+def _seed_variant_currency_case(client, isolate_settings):
+    key = "2026-10-23-acme-variant-currency"
+    write_engagement(isolate_settings["engagements_dir"], key)
+    repo = _create_repo(client, key, repo_key="acme-variant-currency")
+    files = _create_files(client, key, int(repo["id"]))
+    _create_code_parent_finding(client, key, int(repo["id"]), slug="AC-001")
+    dispatch = _register_variant_dispatch(client, key, agent_id="acme-variant", finding_slugs=["AC-001"])
+    base = f"/engagements/{key}/assessment/code"
+    response = client.post(f"{base}/variant-checks", json=_variant_receipt_payload(
+        client, key, int(repo["id"]), files[0], dispatch, parent_finding_slugs=["AC-001"]))
+    assert response.status_code == 201, response.text
+    return key, repo, files, base, response.json()
+
+
+def test_variant_currency_ignores_stale_persisted_pending_projection(client, isolate_settings):
+    key, repo, files, base, receipt = _seed_variant_currency_case(client, isolate_settings)
+    assert receipt["current"] is True
+    with db_module.get_connection() as connection:
+        connection.execute("UPDATE code_files SET variant_check_status='pending' WHERE id=?", (files[0]["id"],))
+    assert client.get(f"{base}/files/{files[0]['id']}").json()["variant_check_status"] == "done"
+    listing = client.get(f"{base}/files?repo_id={repo['id']}&limit=100").json()["items"]
+    assert next(row for row in listing if row["id"] == files[0]["id"])["variant_check_status"] == "done"
+
+
+def test_variant_receipt_parent_drift_is_explained_without_changing_authority(client, isolate_settings):
+    key, repo, files, base, receipt = _seed_variant_currency_case(client, isolate_settings)
+    _create_code_parent_finding(client, key, int(repo["id"]), slug="AC-002")
+    assert client.get(f"{base}/variant-checks?file_id={files[0]['id']}").json() == []
+    historical = client.get(f"{base}/variant-checks?file_id={files[0]['id']}&include_stale=true").json()[0]
+    assert historical["current"] is False
+    assert historical["currency"]["uncovered_parent_finding_slugs"] == ["AC-002"]
+    assert historical["currency"]["reason_codes"] == ["parent_scope_expanded"]
+    readiness = client.get(f"{base}/readiness?target_phase=complete").json()
+    blocker = next(row for row in readiness["blockers"] if row["code"] == "variant_checks_incomplete")
+    assert "AC-002" in blocker["message"]
+    assert "include_stale" in blocker["message"]
+
+
+@pytest.mark.parametrize("kind,target_kind,target_ref", [
+    ("variant-of", "finding", "AC-001"),
+    ("variant_of", "service", "arbitrary-service"),
+])
+def test_variant_relationship_writes_require_explicit_child_semantics(client, isolate_settings, kind, target_kind, target_ref):
+    key, repo, files, base, receipt = _seed_variant_currency_case(client, isolate_settings)
+    _create_code_parent_finding(client, key, int(repo["id"]), slug="AC-002")
+    response = client.post(f"/engagements/{key}/assessment/findings/AC-002/links", json={
+        "link_kind": kind, "target_kind": target_kind, "target_ref": target_ref,
+    })
+    assert response.status_code == 400, response.text
+    assert "variant_of" in response.text
+    assert "related" in response.text or "finding" in response.text
+
+
+def test_independent_related_findings_keep_root_scope_and_terminal_citations(client, isolate_settings):
+    key, repo, files, base, receipt = _seed_variant_currency_case(client, isolate_settings)
+    finding = _create_code_parent_finding(client, key, int(repo["id"]), slug="AC-002", allow_remint=True)
+    claim = _claim_file_for_analysis(client, key, int(files[0]["id"]), agent_name="acme-hunter")
+    result = client.post(f"{base}/analysis-results", json=_owned(
+        claim, queue_item_id=claim["id"], disposition="finding", finding_slug="AC-002",
+        evidence="Independent Acme parser defect on the admitted source path."))
+    assert result.status_code == 201, result.text
+    finished = client.post(f"{base}/analysis-queue/done", json=_owned(
+        claim, item_ids=[claim["id"]], disposition="finding", cwe_coverage=_network_input_coverage(default_effort=80)))
+    assert finished.status_code == 200, finished.text
+    before = client.get(f"{base}/files/{files[0]['id']}").json()
+    linked = client.post(f"/engagements/{key}/assessment/findings/AC-002/links", json={
+        "link_kind": "related", "target_kind": "finding", "target_ref": "AC-001",
+        "notes": "Same class in an independent Acme module, not a child finding.",
+    })
+    assert linked.status_code == 200, linked.text
+    after = client.get(f"{base}/files/{files[0]['id']}").json()
+    assert after["analysis_status"] == before["analysis_status"] == "analyzed"
+    dispatch = _register_variant_dispatch(client, key, agent_id="acme-independent", finding_slugs=["AC-001", "AC-002"])
+    assert dispatch["finding_slugs"] == ["AC-001", "AC-002"]
+    children = _create_code_parent_finding(client, key, int(repo["id"]), slug="AC-003", allow_remint=True,
+        links=[{"link_kind": "variant_of", "target_kind": "finding", "target_ref": "AC-001"}])
+    assert children["links"][0]["link_kind"] == "variant_of"
+    _register_variant_dispatch(client, key, agent_id="acme-child-excluded", finding_slugs=["AC-001", "AC-002"])
+    assert client.get(f"{base}/files/{files[0]['id']}").json()["analysis_status"] == "analyzed"
+    assert finding["finding"]["slug"] == "AC-002"
+
+
+def test_historical_ambiguous_variant_link_stays_recorded_and_warns(client, isolate_settings):
+    key, repo, files, base, receipt = _seed_variant_currency_case(client, isolate_settings)
+    child = _create_code_parent_finding(client, key, int(repo["id"]), slug="AC-002", allow_remint=True)
+    with db_module.get_connection() as connection:
+        engagement_id = connection.execute("SELECT id FROM engagements WHERE key=?", (key,)).fetchone()[0]
+        connection.execute("INSERT INTO assessment_finding_links (engagement_id,finding_id,link_kind,target_kind,target_ref,notes) "
+            "VALUES (?,?,'variant-of','finding','AC-001','Historical same-class relation')",
+            (engagement_id, child["finding"]["id"]))
+        # An old free-form non-finding target never establishes child ancestry.
+        connection.execute("INSERT INTO assessment_finding_links (engagement_id,finding_id,link_kind,target_kind,target_ref) "
+            "VALUES (?,?,'variant_of','service','acme-service')",
+            (engagement_id, child["finding"]["id"]))
+    links = client.get(f"/engagements/{key}/assessment/finding-links").json()
+    historical = next(row for row in links if row["link_kind"] == "variant-of")
+    assert "ambiguous" in historical["relationship_warning"]
+    _register_variant_dispatch(client, key, agent_id="acme-historical", finding_slugs=["AC-001", "AC-002"])
+    readiness = client.get(f"{base}/readiness?target_phase=complete").json()
+    assert any("historical ambiguous variant" in row for row in readiness["quality_gate"]["warnings"])

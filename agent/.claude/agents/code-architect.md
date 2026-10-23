@@ -76,7 +76,8 @@ reason to halt.
 - Map the repository into logical modules (functional groups of files)
 - Classify each module's shipped product surface and evidence as application/service,
   library/framework, CLI, plugin/extension, or mixed/unknown
-- Identify every trust boundary where untrusted data enters the system
+- Identify every trust boundary where untrusted data enters the system, including each actor's
+  evidence-backed authorized capabilities, their limits, and unknown deployment assumptions
 - Classify every file by security relevance (critical/high/medium/low/skip)
 - Annotate critical and high files with slot types (what kind of untrusted data flows into them)
 - Compute `analysis_priority` with the mandatory skill's canonical `Priority Scoring` contract

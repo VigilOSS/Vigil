@@ -135,7 +135,19 @@ For each candidate match that survives that quick check:
 ### Step 4: Record Variants
 
 Each confirmed instance is recorded as a separate finding. In Phase 3, or when Phase 2 has an
-actual canonical current parent, link it to that parent:
+actual canonical current parent, record explicit child ancestry with this `links` array entry:
+
+```json
+{"links": [{"link_kind": "variant_of", "target_kind": "finding", "target_ref": "AC-001"}]}
+```
+
+Use the parent's actual canonical slug. This relationship makes the new finding a child and excludes
+it from the Phase 2 root set. Findings that merely share a CWE, bug class, or similar behavior while
+remaining independent use `link_kind: "related"`; neither the finding's prefix nor the scanner role
+determines ancestry. `details.variant_of` is informational attribution, not a substitute for this
+relationship. Keep severity and verification independent for each finding.
+
+For the evidence description:
 
 ```
 VARIANT FINDING: [CWE-XXX] [Brief title]
@@ -158,7 +170,7 @@ Evidence: [code snippet]
 Product reachability and attacker reachability remain separate during this assessment. Missing
 consumer/host context caps a supported-path variant's attacker claim and severity; generic
 caller-selected capability or correctness-only behavior still fails the shared net-new/impact gate.
-In Phase 2, deduplicate against main-hunt findings before recording and omit `variant_of` when no
+In Phase 2, deduplicate against main-hunt findings before recording and omit the child relationship when no
 canonical current parent exists; a historical CVE identifier is supporting evidence, not a Vigil
 finding relationship.
 
@@ -227,8 +239,8 @@ For each scan, produce:
 1. **Pattern Summary**: abstract pattern derived from original finding
 2. **Search Queries Used**: exact grep/rg commands run
 3. **Candidates Examined**: count of files/functions read and assessed
-4. **Confirmed Instances**: full finding records; include `variant_of` only for a real canonical
-   parent, which is mandatory in Phase 3
+4. **Confirmed Instances**: full finding records; include the Step 4 child-link entry only for a real canonical
+   parent of that instance; independent same-class findings use `related`
 5. **False Positives**: count with brief reasoning (e.g., "12 instances properly guarded by upstream bounds check in `validate_input()`")
 6. **Per-File Evidence (Phase 3 only)**: one engagement-owned artifact per current admitted file,
    including clean and bounded non-match files, ready for the role's dispatch-bound `code-record variant-check` step

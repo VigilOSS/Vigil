@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import hashlib
 from types import SimpleNamespace
 from typing import Any
 
@@ -156,11 +157,11 @@ def test_agent_start_names_the_bind_as_the_step_after_launching(
     engagement_dir = tmp_path / "engagements" / "acme"
     engagement_dir.mkdir(parents=True)
     stub = _StubClient()
-    stub.record_dispatch = lambda payload: {  # type: ignore[method-assign]
-        "id": 11,
-        "status": "in-progress",
-        **payload,
-    }
+    def record_dispatch(payload):
+        packet = dict(payload['prompt_packet'])
+        packet['sha256'] = hashlib.sha256(packet['rendered_prompt'].encode()).hexdigest()
+        return {'id': 11, 'status': 'in-progress', **payload, 'prompt_packet': packet, 'launch_required': True}
+    stub.record_dispatch = record_dispatch
     stub.list_dispatches = lambda **_filters: []  # type: ignore[method-assign]
     monkeypatch.setattr(
         dispatch,

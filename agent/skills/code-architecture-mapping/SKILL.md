@@ -161,6 +161,13 @@ Identify every point where external data or a supported product invocation enter
 - **APIs**: responses from external services, database query results (if attacker-influenced), IPC messages
 - **Hardware/OS**: ioctl results, /proc or /sys reads, device driver data
 
+For each boundary, record evidence-backed `actor_capabilities`: the principal, its authorized
+operations, execution identity/tenant/asset limits, enforcement or documentation source, and
+unknowns. Separate supported privileged behavior from a candidate escape; configuration authority
+must not be treated as authority to change the execution principal. Surface this context in the
+threat model before hunters choose expensive validation. Memory-safety and other invariant failures
+remain reviewable regardless of a peer's intended powers.
+
 For each boundary, record: product surface kind, reachability basis, entry function, data format,
 size constraints (if any), first consumer, what the caller/attacker can control, and which consumer
 or host context remains unknown. A public library API can be product-reachable without proving that

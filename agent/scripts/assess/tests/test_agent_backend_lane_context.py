@@ -51,7 +51,7 @@ def test_optional_queue_ids_require_integer_list_before_dispatch(capsys):
 
 def test_prior_state_rejects_unbounded_authored_text(capsys):
     fields = {field: "none" for field in agent._PROMPT_CONTEXT_FIELDS}
-    fields["prior_state"] = "x" * 4097
+    fields["prior_state"] = "x" * 16385
     args = argparse.Namespace(prompt_context=fields, prompt_context_json=None)
     with pytest.raises(SystemExit):
         agent._load_prompt_context(args)
