@@ -29,14 +29,15 @@ eight months and hundreds of hours of hands-on use. Much of that work is in the 
 how to find something worth testing, how to tell a failed test from a real negative, and how to
 keep a plausible source bug from becoming an unsupported impact claim.
 
-**You are still the operator.** Review what the agents are testing and why. Ask for another
+**You stay in charge.** Review what the agents are testing and why. Ask for another
 pass when a conclusion is weak, check the proof, and read the final report. A completed workflow
 is useful accounting; the quality of the investigation still depends on the model and your review.
 
 > **Authorized use only.** Vigil drives offensive tooling against live systems. Use it only
 > with explicit authorization and a reviewed scope. You are responsible for commands,
 > credentials, infrastructure, and target effects. See [SECURITY.md](SECURITY.md) for private
-> vulnerability reporting and the operator-data boundary, and [LICENSE](LICENSE) for the warranty.
+> vulnerability reporting and how Vigil handles your engagement data, and [LICENSE](LICENSE)
+> for the warranty.
 
 ## See it work
 
@@ -90,114 +91,87 @@ disclosure window closes.
 
 ## Quick start
 
-Install [uv](https://docs.astral.sh/uv/getting-started/installation/), then install the release.
-It includes the CLI, backend, prompts, documentation, and prebuilt UI; Git and Node are not needed.
+Install [uv](https://docs.astral.sh/uv/getting-started/installation/), then install the release
+and set up your private workspace. The release includes the CLI, backend, prompts,
+documentation, and prebuilt UI; Git and Node are not needed.
 
 ```bash
 uv tool install --from https://github.com/VigilOSS/Vigil/releases/download/v2.3.0/vigil-2.3.0-py3-none-any.whl vigil
+vigil install
 ```
 
-Install and sign in to an agent client before starting an operator. Engagement clients:
-**Claude Code, Codex, OpenCode, ZCode, Goose, Kimi, and Pi**. Setup and support differences:
-[agent clients](docs/agent-clients.md). Model access affects what testing the provider permits;
-check [models and access](docs/model-access.md).
-For ZCode desktop, follow [ZCode setup](docs/zcode-setup.md): add the printed stable
-Project folder once, enable its local plugin, and begin a fresh task.
+Install and sign in to an agent client: **Claude Code, Codex, OpenCode, ZCode, Goose, Kimi,
+or Pi**. Setup differences are in [agent clients](docs/agent-clients.md), and provider limits
+on security testing are in [models and access](docs/model-access.md). ZCode desktop has extra
+setup steps: see [ZCode setup](docs/zcode-setup.md).
 
-Start without an engagement ID to choose an existing engagement by recent work
-or client opening, or choose **Create new engagement** using the same creation
-questions. This picker works for every client and supports fzf search and previews.
-An explicit ID skips it; omitted client and mode flags are asked for next:
+Then start Vigil:
 
 ```bash
-vigil engagement start --client zcode
+vigil engagement start
 ```
 
-For ZCode, creation comes before opening the project: Vigil opens the generated
-**Project folder**, whose root `AGENTS.md` walks through setup. Enable the printed
-local plugin and start a new task in that project. Do not open the audited source
-directory or the Vigil source checkout as the engagement's ZCode project.
-Reuse that project for subsequent starts of the same engagement and mode. Each
-task receives its own retained context and absolute Vigil helper; updates select
-the context for new tasks without silently changing existing ones. Project-local
-mode/client checks inspect new-task setup; workflow commands use the task's bound
-helper. Vigil leaves ZCode's native compaction settings unchanged. Native compression
-does not guarantee Vigil recovery: use `/vigil-resume` explicitly after compaction
-when fresh recovery has not been verified. Recovery before an unattended continuation
-is not guaranteed; see [ZCode capability boundaries](docs/zcode-setup.md#capability-boundaries).
+Choose **Create new engagement**, answer the questions, then pick your client and a mode:
+`code` to audit source, `web` to test a live application. Later runs of the same command list
+your engagements by recent activity.
+
+Vigil opens your client with a lead agent. It plans the work, sends specialist agents to
+investigate, and records what they find. The CLI and prompt files call this lead agent the
+*operator*. Talk to it in your client like any other conversation.
 
 ### Audit source code
 
-Static investigation needs `uv`, your agent client, and host-side ripgrep (`rg`). You can
-start source review before building Kali or setting up browser capture.
+Source review needs only `uv`, your agent client, and ripgrep (`rg`) on the host. Docker can
+wait until the work needs to build or run the target.
 
 ```bash
-vigil install
-vigil engagement create --type code --name acme --source-dir ./acme --no-prompt
-vigil engagement start <engagement-key> --mode code --client codex
+vigil engagement create --type code --name acme --source-dir ./acme
+vigil engagement start
 ```
 
-Point `--source-dir` at the original project. The operator asks you to confirm the source,
-and that you trust its build and test code to run inside the Vigil runtime, before creating
-one sealed audit copy directly from it. The original stays untouched; loose files
-work and Git history is optional. You can also create without `--source-dir` and put files
-in the printed `source/` folder. Refreshing a snapshot requires another confirmation.
+`--source-dir` points at the original project. Before copying it, the lead agent asks you to
+confirm the source and that you trust its build and test code to run inside Vigil's sandbox.
+It then makes one sealed audit copy. The original stays untouched, and Git history is
+optional. Without `--source-dir`, put the files in the `source/` folder that `create` prints.
 
-Starting the engagement brings up Vigil's backend on the host when needed. Source intake,
-indexing, and source investigation run without Docker. Start Docker before compiling or
-running target code, reproducing a bug, or fuzzing. Vigil prepares and starts Kali when an
-audited command first needs it. If the release includes a matching image pin, Vigil pulls it; otherwise it builds
-locally, which can take time on first use. See [code analysis](docs/code-analysis.md).
+Compiling or running target code, reproducing a bug, and fuzzing happen in Vigil's Kali
+container. Start Docker before that point; Vigil starts the container on first use. The first
+start downloads the image, or builds it locally when no prebuilt image is available, which
+can take a while. See [code analysis](docs/code-analysis.md).
 
 ### Test a live application
 
 Start Docker, then create the engagement:
 
 ```bash
-vigil install
-vigil engagement create https://app.example.com --hosts app.example.com
-vigil engagement start <engagement-key> --mode web --client codex
+vigil engagement create https://app.example.com
+vigil engagement start
 ```
 
-Replace the example with your authorized target. Review `scope.json` and tell the operator
-the allowed work, exclusions, accounts, and program rules. Exploit work waits for approval
-by default. Already admitted hosts carry across sessions. New roots still need admission.
-On Docker Desktop, broad DNS and liveness recon also needs host tools;
-`vigil doctor --install-host-tools` installs missing tools. See [installation](docs/installation.md).
+Replace the example with your authorized target. Review the engagement's `scope.json`, and
+tell the lead agent what is allowed, what is excluded, which test accounts to use, and the
+program rules. Live exploit work waits for your approval by default.
 
-Kali starts when an audited command needs it. A release with a pinned runtime pulls the
-matching image; a source checkout builds locally. `vigil up` explicitly starts the full
-stack, including capture. Shared services and detached jobs outlive client sessions.
+On macOS and Windows Docker Desktop, large DNS and liveness scans run on the host instead of
+in the container; `vigil doctor --install-host-tools` installs the tools they need. See
+[installation](docs/installation.md).
 
 For authenticated testing, either import existing cookies and headers with
-`vigil auth import <engagement-key> --source cookies-and-headers.json`, or route a browser
-through `127.0.0.1:8080` after `vigil mitmproxy start` and log in. HTTPS capture needs the proxy
-CA trusted by that browser.
-Use separate accounts for cross-account tests. These are target identities, separate from
-your Claude or Codex login. See [authentication](docs/authentication.md).
+`vigil auth import <engagement-key> --source cookies-and-headers.json`, or run
+`vigil mitmproxy start`, point a browser at the proxy on `127.0.0.1:8080`, and log in. HTTPS
+capture needs the proxy's CA certificate trusted by that browser. Use separate target accounts
+for cross-account tests; they are unrelated to your Claude or Codex login. See
+[authentication](docs/authentication.md).
 
 ### Continue the investigation
 
-Start the same engagement again. The operator uses `vigil-resume` to retrieve
-recorded progress, evidence, blockers, and handoffs instead of reconstructing the investigation
-from conversation alone. In an already open conversation, run `vigil-resume` yourself. Always
-use `vigil engagement start` so preflight checks and engagement selection run. Upgrades and private workspace layout: [installation](docs/installation.md).
+Run `vigil engagement start` again and pick the same engagement. The lead agent reloads the
+recorded progress, evidence, blockers, and handoffs instead of relying on conversation
+history. In a conversation that is already open, run `vigil-resume` yourself. Always start
+through `vigil engagement start`, which checks that the client, backend, and runtime are ready.
 
-Talk to the operator in your native agent client. The UI at `http://127.0.0.1:18000` shows
-findings, evidence, coverage, and proof work. Each engagement groups its deliverables
-(findings, proof work, submissions), what is known about the target, the runs and commands
-that executed, and one Activity record of agent, operator, and system actions. A blocked proof
-stays visible while other investigations continue. The operator claims proof work before
-dispatching a specialist, so reopening a conversation is not a reason to launch the same work again.
-
-A local library or CLI bug can be proved through its supported API in Kali. A live application
-test reuses admitted targets and checks the applicable exploit approval. The specialist treats
-the candidate as a hypothesis to challenge: confirm it, disprove it, narrow it, or explain what
-blocks the test. Neither preparing work nor completing a task confirms the finding.
-
-For manual inspection or recovery, use `vigil engagement prove <engagement-key>` or open
-**Proof work** in the UI. The operator normally drives these steps; you do not need to assemble
-handoff JSON or open a second operator just to prove a code finding.
+The UI at `http://127.0.0.1:18000` shows each engagement's findings, evidence, coverage, proof
+work, the commands that ran, and an activity log of recorded actions.
 
 For example prompts to deepen code or web testing, check coverage, or challenge a
 finding, see the [engagement prompt playbook](docs/engagement-prompt-playbook.md).
@@ -257,7 +231,7 @@ One host can contain several substantial applications. Web coverage tracks appli
 inputs, identities, and probes so a quick host touch is distinguishable from deeper testing.
 Specialists concentrate on promising surfaces, change technique when attempts stop teaching
 anything, and return to unresolved breadth. Named identities support authenticated replay and
-cross-account tests; the operator still needs to provision genuinely distinct usable accounts.
+cross-account tests; you still need to provide genuinely distinct working accounts.
 
 ### Carry source findings through to runtime proof
 
@@ -266,16 +240,14 @@ supported operation, feasible preconditions, a failed security property, and a h
 Source-backed leads waiting for runtime proof remain parked. Missing access is recorded as a
 blocker. Program rules that forbid the final test are recorded alongside the unproven step.
 
-Local reproduction of a library API, parser, or other supported code path can stay in the code
-workflow and use Kali. When proof needs a live application, the current operator can dispatch
-a fresh specialist with the explicit web proof route, admitted hosts, and applicable approval.
-That specialist loads the web method; the operator does not need a second session or both
-operator cores. A broader web engagement can still use its own track. Live proof enriches
-the same finding. See [tracks and modes](docs/engagements.md#tracks-and-modes).
+Local reproduction of a library API, parser, or other supported code path stays in the code
+workflow and runs in Kali. When proof needs a live application, the lead agent can send a web
+specialist from the same session. It tests only in-scope hosts, and live work still needs
+approval under the engagement's exploit policy. The result is added to the same finding. See
+[tracks and modes](docs/engagements.md#tracks-and-modes).
 
-For bug bounties with source maps, recover the served source with
-`vigil assess code-sourcemap-extract` and admit it to the code workflow. Its findings can then
-guide live testing under the program's scope.
+For bug bounties with source maps, the lead agent can recover the served source and audit it
+in the code workflow. Those findings can then guide live testing under the program's scope.
 
 ### Make the claim survive another agent
 
@@ -308,9 +280,10 @@ Some gaps block progress, some warn, and some accept an explicit deferral or aud
 A code audit cannot be forced to complete with outstanding durable coverage debt. None of
 these checks can decide whether the reasoning was good enough or the target is free of bugs.
 
-The methodology lives in the [operator](agent/AGENTS.md), [specialist roles](agent/agents/),
-[skills](agent/skills/), and [references](agent/references/). The backend preserves the work
-and checks its relationships. Read both when evaluating what Vigil can do.
+The methodology lives in the [lead agent prompt](agent/AGENTS.md),
+[specialist roles](agent/agents/), [skills](agent/skills/), and [references](agent/references/).
+The backend preserves the work and checks its relationships. Read both when evaluating what
+Vigil can do.
 
 ## Tools and working environment
 
@@ -329,9 +302,8 @@ and checks its relationships. Read both when evaluating what Vigil can do.
   <img alt="Vigil orchestrator UI: an engagement's findings grouped by severity, workflow, and verification" src="docs/assets/findings-light.png">
 </picture>
 
-Target-facing tools run through `vigil assess kali ...` in one shared, long-lived Kali
-container. Long scans use `vigil assess kali job start ...` so they can outlive the operator
-session. DNS-heavy and bulk-liveness recon uses the host on Docker Desktop.
+Agents run target-facing tools in one shared Kali container, and every command is recorded.
+Long scans run as background jobs that keep going after you close the client.
 
 <details>
 <summary>Bundled tools</summary>
@@ -362,7 +334,7 @@ runtime experiments, variant searches, and reproduction all cost model work. Lar
 and authenticated applications can consume substantial usage. Plan for provider interruptions
 and use the persisted state to continue.
 
-The operator keeps a small working context and delegates most analysis. Specialists load
+The lead agent keeps a small working context and delegates most analysis. Specialists load
 detailed skills when the corresponding signal appears. That helps preserve context for the
 investigation, but does not remove its cost.
 
@@ -377,30 +349,23 @@ Current model selections and cyber-access restrictions: [models and access](docs
 | Web | `recon → collect → consume-test → verify → exploit → report` |
 | Code | `ingest → classify-map → hunt → verify-variant → fuzz` |
 
-The operator uses `vigil assess transition-phase` to evaluate readiness. Code findings use
-the same per-finding submission workflow as web findings. Exploit policy defaults to `pause`,
-requiring human approval before live exploit work; local sandbox proof follows the code route.
-`selected` and `full_send`
-policies are configured per engagement and applied through the operator workflow.
+The lead agent checks readiness before moving to the next phase. Code findings use the same
+per-finding submission workflow as web findings. The engagement's `exploit_policy` defaults to
+`pause`: live exploit work waits for your approval. `selected` limits it to approved targets,
+and `full_send` allows it without a separate approval for each test.
 
-Scope in `scope.json` steers recon, attribution, and coverage. It is not a destination firewall;
-the operator is responsible for staying inside the authorized boundaries. Credentials and
-evidence remain operator data and can appear verbatim in engagement views and exports.
+Scope in `scope.json` steers recon, attribution, and coverage. It is not a network firewall;
+you remain responsible for staying inside the authorized boundaries. Credentials and evidence
+appear verbatim in engagement views and exports.
 
 Other workflows: [blue incident response](docs/blue-engagements.md) and
 [remediation](docs/remediation.md) (work in progress). Remediation prepares isolated fixes,
 records verification, and requires approval before a draft PR. Blue containment separates
 proposal approval, audited execution, and explicit recording.
 
-Remediation clients: **Claude Code, OpenCode, and ZCode**. See
-[agent clients](docs/agent-clients.md#repository-context-remediation-clients).
-Run `vigil remediation start` to choose a recent remediation engagement or create
-one for your repository, then select a client. `vigil remediation --help` explains
-the ticket-to-fix workflow and the commands you need first.
-For desktop installation, Coding Plan selection, local plugin enablement, and
-workspace selection, see [ZCode setup](docs/zcode-setup.md).
+Start remediation with `vigil remediation start`.
 
-The rationale behind hunting, evidence, coverage, and operator trust is in the
+The rationale behind hunting, evidence, and coverage is in the
 [architecture decisions](docs/adr/). Particularly relevant:
 [measurement failures](docs/adr/0015-honest-instruments-distinguish-no-measurement-from-clean.md),
 [retryable negatives](docs/adr/0016-target-knowledge-is-derived-and-negatives-are-retryable.md),
