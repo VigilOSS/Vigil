@@ -838,7 +838,7 @@ wheels = [
 
 [[package]]
 name = "vigil-orchestrator-backend"
-version = "2.3.0"
+version = "2.3.1"
 source = { editable = "." }
 dependencies = [
     { name = "cvss" },

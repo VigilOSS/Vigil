@@ -98,10 +98,15 @@ directive.
 
 #### Agent B: Variant Scanning (conditional)
 
-First derive the exact current Phase 2 root set for this repository and freeze its canonical sorted
-slugs before verification starts. Include current-source findings in a reportable workflow status
-even while unreviewed or disputed; exclude explicit `variant_of` finding-child links and verification-blocked or
-false-positive findings. If that set is empty, variant-pattern review is not applicable: do **not** dispatch
+First read the exact current Phase 2 root set for this repository from the backend and freeze its
+canonical sorted slugs before verification starts: `vigil assess fetch "code/readiness?target_phase=fuzz"`
+prints it as `variant_parent_finding_slugs` on the repository's `variant_checks_incomplete` blocker, and
+the report blocker `finding_variant_receipts_incomplete` carries the same field. Its `slugs` list only the
+report-durable subset that creates the debt; never freeze that as the dispatch scope. The set includes
+current-source findings in a reportable workflow status even while unreviewed or disputed, and excludes
+explicit `variant_of` children (visible in each finding's `finding get` `links`, and in a parent's
+`inbound_links`; a row with `retired_at` set is history, not a live child) and verification-blocked or false-positive findings. A rejected `agent start` names the
+expected set. If no current root exists, variant-pattern review is not applicable: do **not** dispatch
 `code-variant-hunter`, create an empty-scope dispatch, or fabricate per-file receipts. Continue the
 verifier path and the Phase 4 applicability decision. Complete/fuzz readiness derives this
 non-applicability from the absence of current parent findings.
@@ -109,8 +114,8 @@ non-applicability from the absence of current parent findings.
 Variant relationship payloads use the `links` array in `code-variant-analysis` Step 4. A same-class
 independent finding uses `related` and remains a root; naming a parent only in `details.variant_of`
 does not establish child ancestry. Added/promoted roots after a dispatch freeze require covering
-work for the new scope. Inspect `code/variant-checks?include_stale=true` currency diagnostics and
-the readiness blocker for uncovered parent slugs; preserve the frozen dispatch and old receipts.
+work for the new scope. Inspect `vigil assess fetch --paginate "code/variant-checks?include_stale=true"` currency diagnostics and
+the readiness blocker's `variant_parent_finding_slugs` for the new scope; preserve the frozen dispatch and old receipts.
 
 When the frozen set is non-empty, dispatch `code-variant-hunter` with
 `agent/skills/code-variant-analysis/SKILL.md` under the role prompt's **Phase 3 receipt-bearing
@@ -262,8 +267,8 @@ the backend receipts returned by `code-record variant-check`. Every admitted fil
 receipt, including a bounded non-match receipt for a file that cannot instantiate, route,
 configure, or reach the pattern; scan-result prose and a handoff table do not substitute for this
 durable row. On resume,
-fetch the current rows with `vigil assess fetch
-"code/variant-checks?repo_id=<repo-id>"`. If a new current Phase 2 root appeared after dispatch,
+fetch every current row with `vigil assess fetch --paginate
+"code/variant-checks?repo_id=<repo-id>"`; without `--paginate` the read is one bounded page. If a new current Phase 2 root appeared after dispatch,
 the old-scope receipts remain historical evidence but are non-covering; register a new dispatch with
 the new exact set and repeat the file receipts. Killed, non-reportable, stale, and child findings do
 not create current debt. When the parent set was empty, do not create receipts; readiness treats

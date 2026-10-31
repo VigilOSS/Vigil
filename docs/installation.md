@@ -5,11 +5,11 @@ Install detail behind the README [Quick start](../README.md#quick-start).
 ## Install
 
 Install the versioned wheel from the
-[GitHub release](https://github.com/VigilOSS/Vigil/releases/tag/v2.3.0), then initialize your
+[GitHub release](https://github.com/VigilOSS/Vigil/releases/tag/v2.3.1), then initialize your
 workspace:
 
 ```bash
-uv tool install --from https://github.com/VigilOSS/Vigil/releases/download/v2.3.0/vigil-2.3.0-py3-none-any.whl vigil
+uv tool install --from https://github.com/VigilOSS/Vigil/releases/download/v2.3.1/vigil-2.3.1-py3-none-any.whl vigil
 vigil install
 ```
 

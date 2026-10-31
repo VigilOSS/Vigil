@@ -5,6 +5,22 @@ versioning follows [Semantic Versioning][semver].
 
 Durable design decisions live in [`docs/adr/`](docs/adr/).
 
+## [2.3.1] - 2026-10-31
+
+### Fixed
+
+- `finding get` returns the finding's recorded links and the links other findings hold on it,
+  including `variant_of` children and retired history.
+- Variant readiness blockers name the exact parent set a covering dispatch must register, which
+  is the set dispatch validation and receipt currency enforce.
+- `auth list` reports `expired` once a stored expiry passes unless a later probe observed the
+  session.
+- `proof-receipt create` reports when its run's dispatch cannot cite the evidence, and attribution
+  rejections name the carrier, its attribution, and the re-run that recovers it.
+- `finding list --root-cause` applies the common filters to siblings, and JSON rows carry
+  `created_at`.
+- The variant-check resume guidance uses `fetch --paginate` for a complete receipt read.
+
 ## [2.3.0] - 2026-10-23
 
 ### Added

@@ -10,7 +10,7 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![CI](https://github.com/VigilOSS/Vigil/actions/workflows/ci.yml/badge.svg)](https://github.com/VigilOSS/Vigil/actions/workflows/ci.yml)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
-[![Version](https://img.shields.io/badge/version-2.3.0-green.svg)](https://github.com/VigilOSS/Vigil/releases/tag/v2.3.0)
+[![Version](https://img.shields.io/badge/version-2.3.1-green.svg)](https://github.com/VigilOSS/Vigil/releases/tag/v2.3.1)
 
 </div>
 
@@ -96,7 +96,7 @@ and set up your private workspace. The release includes the CLI, backend, prompt
 documentation, and prebuilt UI; Git and Node are not needed.
 
 ```bash
-uv tool install --from https://github.com/VigilOSS/Vigil/releases/download/v2.3.0/vigil-2.3.0-py3-none-any.whl vigil
+uv tool install --from https://github.com/VigilOSS/Vigil/releases/download/v2.3.1/vigil-2.3.1-py3-none-any.whl vigil
 vigil install
 ```
 

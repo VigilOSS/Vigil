@@ -674,11 +674,19 @@ def create_proof_receipt(
                 str(tombstone_reason or ""),
             ),
         )
-        return _serialize_receipts(
+        receipt_id = int(cursor.lastrowid)
+        receipt = _serialize_receipts(
             connection,
             engagement.id,
-            [_receipt_row(connection, engagement.id, int(cursor.lastrowid))],
+            [_receipt_row(connection, engagement.id, receipt_id)],
         )[0]
+        # Attribution is immutable once a receipt binds its evidence, so a
+        # receipt its own dispatch cannot cite is known now. Say so while the
+        # run is still open, instead of at finding verify after it is sealed.
+        receipt["verifier_attribution_issue"] = _verifier_evidence_issue(
+            connection, engagement.id, receipt_id
+        )
+        return receipt
 
 
 def get_proof_receipt(engagement_id: int, receipt_id: int) -> dict[str, Any]:
@@ -1215,6 +1223,27 @@ def _require_verifier_owned_evidence(
 ) -> None:
     """Require the receipt's durable evidence to belong to its named producer."""
 
+    issue = _verifier_evidence_issue(connection, engagement_id, receipt_id)
+    if issue is not None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=issue)
+
+
+def _verifier_evidence_issue(
+    connection: sqlite3.Connection,
+    engagement_id: int,
+    receipt_id: int,
+) -> str | None:
+    """Why the receipt's evidence is not its producer dispatch's, or ``None``.
+
+    Dispatch identity is the attribution unit. A command run under a role or
+    ``operator`` label carries none: parallel lanes share roles, and an author's
+    role-labelled output would otherwise become verifier evidence by
+    re-registering it under the verifier's ``--agent-id``. So a producing
+    command decides an artifact's attribution, and only an artifact with no
+    producing command is attributed by its registered ``producer_agent_id``.
+    The reason names the carrier, its actual attribution, and the recovery.
+    """
+
     row = connection.execute(
         """
         SELECT receipts.evidence_kind, receipts.command_run_id,
@@ -1247,37 +1276,56 @@ def _require_verifier_owned_evidence(
         (engagement_id, receipt_id),
     ).fetchone()
     if row is None:
-        raise HTTPException(status_code=400, detail="proof receipt attribution is missing")
+        return "proof receipt attribution is missing"
 
     evidence_kind = str(row["evidence_kind"])
-    verifier_agent_id = str(row["verifier_agent_id"])
+    verifier = str(row["verifier_agent_id"])
+    rerun = (
+        f"re-run it under this dispatch with `--agent-id {verifier}` and no "
+        "`--agent-name` (a role or operator label is not dispatch identity)"
+    )
+    reason: str | None
     if evidence_kind == "command":
-        attributed = (
-            row["command_run_id"] is not None
-            and str(row["command_agent_id"] or "") == verifier_agent_id
+        command_agent = str(row["command_agent_id"] or "")
+        reason = None if command_agent == verifier else (
+            f"command run {row['command_run_id']} is attributed to "
+            f"{command_agent!r}, not verifier dispatch {verifier!r}; {rerun}, "
+            "then record a new receipt"
         )
     elif row["source_read_id"] is not None:
-        attributed = (
-            row["source_dispatch_id"] is not None
-            and int(row["source_dispatch_id"]) == int(row["producer_dispatch_id"])
+        owned = row["source_dispatch_id"] is not None and int(
+            row["source_dispatch_id"]
+        ) == int(row["producer_dispatch_id"])
+        reason = None if owned else (
+            f"source read {row['source_read_id']} belongs to another dispatch"
         )
     elif row["artifact_id"] is not None:
         if row["artifact_command_run_id"] is not None:
-            attributed = (
-                str(row["artifact_command_agent_id"] or "") == verifier_agent_id
+            command_agent = str(row["artifact_command_agent_id"] or "")
+            reason = None if command_agent == verifier else (
+                f"artifact {row['artifact_id']} is bound to producing command run "
+                f"{row['artifact_command_run_id']}, attributed to "
+                f"{command_agent!r}, not verifier dispatch {verifier!r}; the "
+                "producing command decides attribution, so an artifact "
+                f"--agent-id cannot override it. To use this observation, {rerun}, "
+                "and bind the new output"
             )
         else:
-            attributed = str(row["artifact_agent_id"] or "") == verifier_agent_id
+            artifact_agent = str(row["artifact_agent_id"] or "")
+            reason = None if artifact_agent == verifier else (
+                f"artifact {row['artifact_id']} is attributed to producer agent "
+                f"{artifact_agent or '(none)'!r}, not verifier dispatch "
+                f"{verifier!r}; register evidence this dispatch produced with "
+                f"`--agent-id {verifier}`"
+            )
     else:
-        attributed = False
-    if attributed:
-        return
+        reason = "the receipt names no attributable evidence"
+    if reason is None:
+        return None
     action = "was not executed" if evidence_kind == "command" else "was not produced"
-    raise HTTPException(
-        status_code=status.HTTP_409_CONFLICT,
-        detail=(
-            f"proof receipt {receipt_id} evidence {action} by the verifier dispatch"
-        ),
+    return (
+        f"proof receipt {receipt_id} evidence {action} by the verifier dispatch: "
+        f"{reason}"
     )
 
 

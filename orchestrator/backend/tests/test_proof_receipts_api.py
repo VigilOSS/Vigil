@@ -1520,3 +1520,257 @@ def test_a_for_finding_association_shows_on_runs_and_receipts_apart_from_verific
     _link_run(client, resumed.json(), "VA-903")
     read = client.get(f"{BASE}/assessment-runs/{resumed.json()['id']}").json()
     assert read["associated_finding_slugs"] == ["VA-903"]
+
+
+def _role_command_artifact_receipt(
+    client,
+    engagement_dir: Path,
+    *,
+    command_agent_name: str,
+    run_uuid: str,
+    path: str,
+    producer_agent_id: str | None = "VERIFY-1",
+    finding_slug: str | None = None,
+) -> tuple[dict, dict, dict]:
+    run = _run(client)
+    if finding_slug is not None:
+        _link_run(client, run, finding_slug)
+    command = client.post(
+        f"{BASE}/command-runs",
+        json={
+            "command": f"cat {path}", "argv": ["cat", path],
+            "tool_name": "cat", "agent_name": command_agent_name, "phase": "verify",
+            "return_code": 0, "timed_out": False, "success": True,
+            "started_at": "2026-09-09T12:00:00Z", "completed_at": "2026-09-09T12:00:01Z",
+            "duration_ms": 1000, "stdout": "observed", "stderr": "",
+            "run_uuid": run_uuid,
+        },
+    )
+    assert command.status_code == 201, command.text
+    target = engagement_dir / path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(f"verifier evidence derived from {run_uuid}")
+    artifact = client.post(
+        f"{BASE}/artifacts",
+        json={
+            "path": path, "kind": "proof",
+            "producer_agent_id": producer_agent_id,
+            "producer_command_run_id": command.json()["id"],
+        },
+    )
+    assert artifact.status_code == 201, artifact.text
+    receipt = client.post(
+        f"{BASE}/proof-receipts",
+        json={
+            "run_id": run["id"], "evidence_kind": "artifact",
+            "artifact_id": artifact.json()["id"], "observed_result": "observed",
+        },
+    )
+    assert receipt.status_code == 201, receipt.text
+    _complete_run(client, run)
+    return command.json(), artifact.json(), receipt.json()
+
+
+def _authored_finding(client, slug: str) -> None:
+    finding = client.post(
+        f"{BASE}/findings",
+        json={
+            "slug": slug,
+            "title": "Verifier evidence attribution",
+            "severity": "medium",
+            "workflow_status": "active",
+            "verification_status": "unreviewed",
+            "source_name": "vulnerability-analyst",
+            "provenance": {"agent_id": "HUNT-1"},
+        },
+    )
+    assert finding.status_code == 201, finding.text
+
+
+def test_role_attributed_command_output_is_flagged_at_receipt_create(
+    client, isolate_settings
+) -> None:
+    """The lane learns the receipt is uncitable while its run is still open.
+
+    A command run under a role label (here before the verifier's own
+    ``--agent-id`` was in play) carries no dispatch identity, and the producing
+    command decides an artifact's attribution, so the artifact's explicit
+    ``producer_agent_id`` cannot rescue it. The create response says so with
+    the recovery, and verification rejects it with the same reason.
+    """
+    engagement_dir = _seed(client, isolate_settings)
+    _authored_finding(client, "VA-916")
+    command, artifact, receipt = _role_command_artifact_receipt(
+        client,
+        engagement_dir,
+        command_agent_name="vulnerability-analyst",
+        run_uuid="proof-role-command-1",
+        path="proof/role-command-derived.txt",
+        finding_slug="VA-916",
+    )
+
+    issue = receipt["verifier_attribution_issue"]
+    assert f"artifact {artifact['id']}" in issue
+    assert f"command run {command['id']}" in issue
+    assert "'vulnerability-analyst'" in issue
+    assert "`--agent-id VERIFY-1` and no `--agent-name`" in issue
+
+    verified = client.post(
+        f"{BASE}/findings/VA-916/verify",
+        json={
+            "verification_status": "confirmed",
+            "reason_text": "Role-labelled command output is not verifier evidence.",
+            "proof_receipt_ids": [receipt["id"]],
+            "confirm_check": completed_confirm_check(receipt["id"]),
+        },
+    )
+    assert verified.status_code == 409, verified.text
+    assert issue in verified.json()["detail"]
+
+
+def test_verifier_command_output_receipt_has_no_attribution_issue(
+    client, isolate_settings
+) -> None:
+    engagement_dir = _seed(client, isolate_settings)
+    _command, _artifact, receipt = _role_command_artifact_receipt(
+        client,
+        engagement_dir,
+        command_agent_name="VERIFY-1",
+        run_uuid="proof-verifier-command-1",
+        path="proof/verifier-command-output.txt",
+    )
+
+    assert receipt["verifier_attribution_issue"] is None
+
+
+def test_verifier_reregistration_cannot_relabel_role_labelled_author_output(
+    client, isolate_settings
+) -> None:
+    engagement_dir = _seed(client, isolate_settings)
+    _authored_finding(client, "VA-918")
+    run = _run(client)
+    _link_run(client, run, "VA-918")
+    path = "proof/author-role-output.txt"
+    command = client.post(
+        f"{BASE}/command-runs",
+        json={
+            "command": f"cat {path}", "argv": ["cat", path],
+            "tool_name": "cat", "agent_name": "vulnerability-analyst", "phase": "verify",
+            "return_code": 0, "timed_out": False, "success": True,
+            "started_at": "2026-09-09T12:00:00Z", "completed_at": "2026-09-09T12:00:01Z",
+            "duration_ms": 1000, "stdout": "observed", "stderr": "",
+            "run_uuid": "proof-author-role-command-1",
+        },
+    )
+    assert command.status_code == 201, command.text
+    (engagement_dir / path).parent.mkdir(parents=True, exist_ok=True)
+    (engagement_dir / path).write_text("author output")
+    for agent_id in ("HUNT-1", "VERIFY-1"):
+        registered = client.post(
+            f"{BASE}/artifacts",
+            json={
+                "path": path, "kind": "proof", "producer_agent_id": agent_id,
+                "producer_command_run_id": command.json()["id"],
+            },
+        )
+        assert registered.status_code == 201, registered.text
+    receipt = client.post(
+        f"{BASE}/proof-receipts",
+        json={
+            "run_id": run["id"], "evidence_kind": "artifact",
+            "artifact_id": registered.json()["id"], "observed_result": "observed",
+        },
+    )
+    assert receipt.status_code == 201, receipt.text
+    assert receipt.json()["verifier_attribution_issue"]
+    _complete_run(client, run)
+
+    verified = client.post(
+        f"{BASE}/findings/VA-918/verify",
+        json={
+            "verification_status": "confirmed",
+            "reason_text": "Relabelled author output must not confirm.",
+            "proof_receipt_ids": [receipt.json()["id"]],
+            "confirm_check": completed_confirm_check(receipt.json()["id"]),
+        },
+    )
+
+    assert verified.status_code == 409, verified.text
+    assert "was not produced by the verifier dispatch" in verified.json()["detail"]
+
+
+def test_explicit_verifier_artifact_producer_cannot_launder_author_command_output(
+    client, isolate_settings
+) -> None:
+    from fastapi import HTTPException
+
+    from app.services.state_manager.proofs import _require_verifier_owned_evidence
+
+    engagement_dir = _seed(client, isolate_settings)
+    command, artifact, receipt = _role_command_artifact_receipt(
+        client,
+        engagement_dir,
+        command_agent_name="HUNT-1",
+        run_uuid="proof-author-command-1",
+        path="proof/author-command-output.txt",
+    )
+
+    with db_module.get_connection() as connection:
+        with pytest.raises(HTTPException) as rejected:
+            _require_verifier_owned_evidence(
+                connection, receipt["engagement_id"], receipt["id"]
+            )
+
+    assert rejected.value.status_code == 409
+    detail = str(rejected.value.detail)
+    assert "was not produced by the verifier dispatch" in detail
+    assert f"artifact {artifact['id']}" in detail
+    assert f"command run {command['id']}" in detail
+    assert "'HUNT-1'" in detail and "'VERIFY-1'" in detail
+
+
+def test_role_attributed_command_receipt_names_attribution_and_recovery(
+    client, isolate_settings
+) -> None:
+    _seed(client, isolate_settings)
+    _authored_finding(client, "VA-917")
+    run = _run(client)
+    _link_run(client, run, "VA-917")
+    command = client.post(
+        f"{BASE}/command-runs",
+        json={
+            "command": "python reproduce.py", "argv": ["python", "reproduce.py"],
+            "tool_name": "python", "agent_name": "code-vuln-verifier", "phase": "exploit",
+            "return_code": 0, "timed_out": False, "success": True,
+            "started_at": "2026-09-09T12:00:00Z", "completed_at": "2026-09-09T12:00:01Z",
+            "duration_ms": 1000, "stdout": "reproduced", "stderr": "",
+            "run_uuid": "proof-role-command-receipt-1",
+        },
+    )
+    assert command.status_code == 201, command.text
+    receipt = client.post(
+        f"{BASE}/proof-receipts",
+        json={
+            "run_id": run["id"], "evidence_kind": "command",
+            "command_run_id": command.json()["id"], "observed_result": "reproduced",
+        },
+    )
+    assert receipt.status_code == 201, receipt.text
+    _complete_run(client, run)
+
+    verified = client.post(
+        f"{BASE}/findings/VA-917/verify",
+        json={
+            "verification_status": "confirmed",
+            "reason_text": "A role-attributed command cannot identify the verifier lane.",
+            "proof_receipt_ids": [receipt.json()["id"]],
+            "confirm_check": completed_confirm_check(receipt.json()["id"]),
+        },
+    )
+
+    assert verified.status_code == 409, verified.text
+    detail = verified.json()["detail"]
+    assert "was not executed by the verifier dispatch" in detail
+    assert f"command run {command.json()['id']}" in detail
+    assert "'code-vuln-verifier'" in detail
+    assert "`--agent-id VERIFY-1` and no `--agent-name`" in detail

@@ -920,3 +920,51 @@ def test_variant_ancestry_retarget_and_inline_record_cannot_bypass_cycle_guard(c
     assert retired.status_code == 200, retired.text
     assert client.post(f"{base}/findings/AC-002/links", json={
         "link_kind": "variant_of", "target_kind": "finding", "target_ref": "AC-003"}).status_code == 200
+
+
+def test_finding_get_returns_outbound_and_inbound_link_state(client, isolate_settings):
+    base = _seed_ancestry_findings(client, isolate_settings)
+    _create(client, _finding("AC-004", "Acme root defect", root_key="acme-4"))
+    root_cause = client.put(f"{base}/findings/AC-001/root-cause", json={
+        "root_cause_slug": "AC-004", "root_cause_effect": "eliminates_finding",
+        "note": "Root fix removes this path."})
+    assert root_cause.status_code == 200, root_cause.text
+    variant = client.post(f"{base}/findings/AC-001/links", json={
+        "link_kind": "variant_of", "target_kind": "finding", "target_ref": "AC-002"})
+    assert variant.status_code == 200, variant.text
+    related = client.post(f"{base}/findings/AC-001/links", json={
+        "link_kind": "related", "target_kind": "finding", "target_ref": "AC-003"})
+    assert related.status_code == 200, related.text
+    retired = client.patch(
+        f"{base}/findings/AC-001/links/{related.json()['id']}", json={"retired": True})
+    assert retired.status_code == 200, retired.text
+    child = client.post(f"{base}/findings/AC-003/links", json={
+        "link_kind": "variant_of", "target_kind": "finding", "target_ref": "AC-001"})
+    assert child.status_code == 200, child.text
+
+    record = client.get(f"{base}/findings/AC-001").json()
+    engagement_links = {row["id"]: row for row in client.get(f"{base}/finding-links").json()}
+
+    outbound = {row["id"]: row for row in record["links"]}
+    evidence = [row for row in outbound.values() if row["link_kind"] == "evidence"]
+    assert [row["target_ref"] for row in evidence] == ["findings.md"]
+    assert set(outbound) == {
+        evidence[0]["id"], root_cause.json()["root_cause_link_id"],
+        variant.json()["id"], related.json()["id"],
+    }
+    assert [row["id"] for row in record["links"]] == sorted(outbound)
+    for link_id, row in outbound.items():
+        assert row == engagement_links[link_id]
+    assert outbound[variant.json()["id"]]["link_kind"] == "variant_of"
+    assert outbound[variant.json()["id"]]["target_ref"] == "AC-002"
+    assert outbound[root_cause.json()["root_cause_link_id"]]["link_kind"] == "root_cause"
+    assert outbound[related.json()["id"]]["retired_at"]
+
+    inbound = {row["id"]: row for row in record["inbound_links"]}
+    assert set(inbound) == {child.json()["id"]}
+    assert inbound[child.json()["id"]] == engagement_links[child.json()["id"]]
+    assert inbound[child.json()["id"]]["finding_slug"] == "AC-003"
+
+    root = client.get(f"{base}/findings/AC-004").json()
+    assert [row["finding_slug"] for row in root["inbound_links"]] == ["AC-001"]
+    assert [row["link_kind"] for row in root["links"]] == ["evidence"]

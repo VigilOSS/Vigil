@@ -55,6 +55,7 @@ from .links import (
     _is_root_cause_link,
     _relationship_change,
     _upsert_finding_link,
+    finding_link_state,
 )
 from .proofs import (
     TERMINAL_VERIFICATION_STATUSES,
@@ -4064,6 +4065,14 @@ def get_finding(engagement_id: int, slug: str) -> dict[str, Any]:
             }
             for link in contradictions
         ]
+        record.update(
+            finding_link_state(
+                connection,
+                engagement.id,
+                finding_id=int(row["id"]),
+                finding_slug=str(row["slug"]),
+            )
+        )
         return record
 
 def list_exploit_candidates(engagement_id: int) -> list[dict[str, Any]]:

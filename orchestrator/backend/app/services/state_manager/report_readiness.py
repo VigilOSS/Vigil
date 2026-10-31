@@ -393,6 +393,9 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
         engagement.id
     ):
         finding_slugs = list(obligation["finding_slugs"])
+        variant_parent_finding_slugs = list(
+            obligation["variant_parent_finding_slugs"]
+        )
         missing_file_ids = list(obligation["missing_file_ids"])
         missing_file_paths = list(obligation["missing_file_paths"])
         path_sample = ", ".join(missing_file_paths[:5])
@@ -403,14 +406,20 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
                 "kind": "finding_variant_receipts_incomplete",
                 "repo_id": int(obligation["repo_id"]),
                 "slugs": finding_slugs,
+                "variant_parent_finding_slugs": variant_parent_finding_slugs,
                 "missing_file_count": len(missing_file_ids),
                 "missing_file_ids": missing_file_ids,
                 "missing_file_paths": missing_file_paths,
+                # ``slugs`` names the report-durable findings that create the
+                # debt; the freezable dispatch scope is the wider Phase 2 set.
                 "detail": (
-                    "report-durable current code finding(s) "
-                    f"{', '.join(finding_slugs)} have no complete current "
+                    f"{len(finding_slugs)} report-durable current code finding(s) "
+                    "have no complete current "
                     f"variant-scan receipt for {len(missing_file_ids)} "
-                    f"admitted current repository file(s): {path_sample}"
+                    f"admitted current repository file(s): {path_sample}. "
+                    + code_analysis_service.variant_dispatch_scope_instruction(
+                        int(obligation["repo_id"]), variant_parent_finding_slugs
+                    )
                 ),
             }
         )

@@ -47,6 +47,7 @@ _JSON_LIST_FIELDS = (
     "merged_into_slug",
     "code_snapshot_status",
     "row_version",
+    "created_at",
     "updated_at",
 )
 
@@ -145,6 +146,61 @@ def _matches_search(finding: dict, search: str) -> bool:
     return search in haystack
 
 
+def _filter_group_rows(rows: list[dict], args) -> list[dict]:
+    """Apply the common list filters to a root-cause group's complete rows."""
+    severity = getattr(args, "severity", None)
+    workflow_status = getattr(args, "workflow_status", None)
+    verification_status = getattr(args, "verification_status", None)
+    source_name = getattr(args, "source_name", None)
+    slug = getattr(args, "slug", None)
+    search = getattr(args, "search", None)
+    filtered = rows
+    if severity:
+        filtered = [
+            item
+            for item in filtered
+            if str(item.get("severity", "")).lower() == severity.lower()
+        ]
+    if workflow_status:
+        filtered = [
+            item
+            for item in filtered
+            if str(item.get("workflow_status", "")).lower()
+            == workflow_status.lower()
+        ]
+    if verification_status:
+        filtered = [
+            item
+            for item in filtered
+            if str(item.get("verification_status", "")).lower()
+            == verification_status.lower()
+        ]
+    if source_name:
+        filtered = [
+            item
+            for item in filtered
+            if str(item.get("source_name", "")).lower() == source_name.lower()
+        ]
+    if slug:
+        filtered = [
+            item
+            for item in filtered
+            if str(item.get("slug", "")).lower() == slug.lower()
+        ]
+    if search:
+        needle = search.lower()
+        filtered = [item for item in filtered if _matches_search(item, needle)]
+    if getattr(args, "holding", False):
+        filtered = [
+            item
+            for item in filtered
+            if str(item.get("evidence_type", "")).lower() == "theoretical"
+            or str(item.get("verification_status", "")).lower()
+            in {"pending_runtime_proof", "blocked"}
+        ]
+    return filtered
+
+
 def compact_finding_list_row(item: dict) -> dict:
     row = {key: item[key] for key in _JSON_LIST_FIELDS if key in item}
     slug = str(item.get("slug") or "")
@@ -186,7 +242,12 @@ def _print_root_cause_group(group: dict, root_slug: str) -> None:
         f"Root: {root.get('slug', root_slug)} [{root.get('severity', 'info')}] "
         f"{root.get('title', '')}"
     )
-    print(f"Siblings: {group.get('sibling_count', 0)}")
+    total = group.get("sibling_count", 0)
+    matching = group.get("matching_sibling_count", total)
+    print(
+        f"Siblings: {total}"
+        + (f" ({matching} match the filters)" if matching != total else "")
+    )
     for sibling in group.get("siblings", []):
         order = sibling.get("sibling_order")
         prefix = f"{order}. " if order is not None else "- "
@@ -211,13 +272,19 @@ def run(args) -> None:
             # sibling effect/order/note detail (folded-in list-finding-group);
             # --json still emits the flattened root+siblings finding list below.
             if not args.json:
-                siblings = list(group.get("siblings", []))
+                # The group header always names its root; the common filters
+                # select which siblings the group view lists.
+                siblings = _filter_group_rows(list(group.get("siblings", [])), args)
                 page = page_from_complete(
                     siblings,
                     limit=int(args.limit),
                     offset=int(args.offset),
                 )
-                paged_group = {**group, "siblings": page.rows}
+                paged_group = {
+                    **group,
+                    "siblings": page.rows,
+                    "matching_sibling_count": len(siblings),
+                }
                 if page.rows or group.get("root"):
                     warn_untrusted_data()
                 _print_root_cause_group(paged_group, root_cause_slug)
@@ -271,50 +338,7 @@ def run(args) -> None:
         # so its flattened JSON view still applies the common list filters here.
         # The ordinary findings endpoint already owns these predicates; applying
         # them again in the CLI creates a second, drift-prone source of truth.
-        if args.severity:
-            filtered = [
-                item
-                for item in filtered
-                if str(item.get("severity", "")).lower() == args.severity.lower()
-            ]
-        if args.workflow_status:
-            filtered = [
-                item
-                for item in filtered
-                if str(item.get("workflow_status", "")).lower()
-                == args.workflow_status.lower()
-            ]
-        if args.verification_status:
-            filtered = [
-                item
-                for item in filtered
-                if str(item.get("verification_status", "")).lower()
-                == args.verification_status.lower()
-            ]
-        if args.source_name:
-            filtered = [
-                item
-                for item in filtered
-                if str(item.get("source_name", "")).lower()
-                == args.source_name.lower()
-            ]
-        if args.slug:
-            filtered = [
-                item
-                for item in filtered
-                if str(item.get("slug", "")).lower() == args.slug.lower()
-            ]
-        if args.search:
-            needle = args.search.lower()
-            filtered = [item for item in filtered if _matches_search(item, needle)]
-        if getattr(args, "holding", False):
-            filtered = [
-                item
-                for item in filtered
-                if str(item.get("evidence_type", "")).lower() == "theoretical"
-                or str(item.get("verification_status", "")).lower()
-                in {"pending_runtime_proof", "blocked"}
-            ]
+        filtered = _filter_group_rows(filtered, args)
     limit = int(getattr(args, "limit", 100))
     offset = int(getattr(args, "offset", 0))
     if root_cause_slug:

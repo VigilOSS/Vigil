@@ -5576,6 +5576,19 @@ def _current_phase2_variant_parent_slugs(
     )[repo_id]
 
 
+def variant_dispatch_scope_instruction(
+    repo_id: int, parent_finding_slugs: list[str]
+) -> str:
+    """Name the exact parent set a covering variant dispatch must freeze."""
+    return (
+        "Freeze the exact current Phase 2 root set "
+        f"({len(parent_finding_slugs)}) on the covering dispatch: "
+        "vigil assess agent start --role code-variant-hunter "
+        f"--code-repo-id {repo_id} "
+        f"--finding-slugs {','.join(parent_finding_slugs)}"
+    )
+
+
 def validate_variant_dispatch_parent_scope(
     connection,
     engagement_id: int,
@@ -6382,6 +6395,12 @@ def report_durable_finding_variant_receipt_obligations(
                 {
                     "repo_id": repo_id,
                     "finding_slugs": sorted(finding_slugs),
+                    # The report-durable slugs only say why coverage is owed.
+                    # Dispatch validation and receipt currency both bind the
+                    # wider Phase 2 root set, so that is the scope to freeze.
+                    "variant_parent_finding_slugs": list(
+                        currency_parent_slugs_by_repo.get(repo_id, [])
+                    ),
                     "missing_file_ids": [int(row["id"]) for row in missing_files],
                     "missing_file_paths": [
                         str(row["file_path"]) for row in missing_files
@@ -7929,6 +7948,7 @@ def _readiness_blocker(
     *,
     repo_id: int | None = None,
     overrideable: bool = False,
+    **fields: Any,
 ) -> dict[str, Any]:
     blocker: dict[str, Any] = {
         "code": code,
@@ -7937,6 +7957,7 @@ def _readiness_blocker(
     }
     if repo_id is not None:
         blocker["repo_id"] = repo_id
+    blocker.update(fields)
     return blocker
 
 
@@ -8556,9 +8577,16 @@ def code_readiness(
                                 (
                                     f"Repository has {incomplete_variants} incomplete "
                                     "admitted-file variant check(s)." + drift_detail
+                                    + " "
+                                    + variant_dispatch_scope_instruction(
+                                        repo_id, parent_finding_slugs
+                                    )
                                 ),
                                 repo_id=repo_id,
                                 overrideable=True,
+                                variant_parent_finding_slugs=list(
+                                    parent_finding_slugs
+                                ),
                             )
                         )
 

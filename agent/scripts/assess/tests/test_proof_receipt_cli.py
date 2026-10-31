@@ -354,6 +354,55 @@ def test_a_derived_health_downgrade_is_reported_not_treated_as_a_lost_write(
     assert "terminal `finding verify` will reject it" in captured.err
 
 
+def test_an_uncitable_receipt_is_reported_while_the_run_is_open(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    engagement = _engagement(tmp_path)
+    monkeypatch.setattr(config, "_verify_backend", lambda _cfg: None)
+    issue = (
+        "proof receipt 9 evidence was not executed by the verifier dispatch: "
+        "command run 4210 is attributed to 'vulnerability-analyst'"
+    )
+
+    def post(_client, endpoint: str, payload: dict):
+        receipt = _receipt(
+            run_id=payload["run_id"],
+            evidence_kind=payload["evidence_kind"],
+            expected_result=payload["expected_result"],
+            observed_result=payload["observed_result"],
+            artifact_id=None,
+            source_read_id=None,
+            command_run_id=payload["command_run_id"],
+            evidence_sha256=_SHA,
+            evidence_health="healthy",
+            tombstone_reason=payload["tombstone_reason"],
+        )
+        receipt["verifier_attribution_issue"] = issue
+        return receipt
+
+    monkeypatch.setattr(AssessmentClient, "post", post)
+    cli.main(
+        [
+            "--engagement-dir",
+            str(engagement),
+            "proof-receipt",
+            "create",
+            "--run-id",
+            "17",
+            "--kind",
+            "command",
+            "--command-run-id",
+            "4210",
+            "--observed-result",
+            "reproduced",
+        ]
+    )
+    captured = capsys.readouterr()
+    assert json.loads(captured.out)["verifier_attribution_issue"] == issue
+    assert "WARN proof-receipt create" in captured.err
+    assert issue in captured.err
+
+
 def test_a_caller_declared_health_must_still_come_back_verbatim(
     tmp_path, monkeypatch, capsys
 ) -> None:

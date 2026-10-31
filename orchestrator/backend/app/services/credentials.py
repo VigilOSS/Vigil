@@ -105,6 +105,52 @@ def _project_list_liveness(
 ) -> dict[str, Any]:
     """Return the effective liveness view for one listed identity.
 
+    ``expires_at`` is authoritative over a cached verdict: once it has passed,
+    a live or unknown verdict observed before it (or no verdict at all)
+    projects as ``expired``. A probe observed after expiry still describes the
+    session, because it looked at the target after the token's declared end;
+    that includes a scoped probe this listing cannot promote, which therefore
+    stays ``unknown``. A probe-proven ``dead`` stays ``dead``.
+    """
+    projected = _project_observed_liveness(material, requested_host=requested_host)
+    if projected.get("liveness_verdict") == "dead":
+        return projected
+    expires_at = _parse_utc(projected.get("expires_at"))
+    if expires_at is None or expires_at > datetime.now(timezone.utc):
+        return projected
+    probed_at = _parse_utc(projected.get("last_probed_at"))
+    if probed_at is not None:
+        observed_after_expiry = probed_at > expires_at
+    else:
+        observed_after_expiry = any(
+            (observed_at := _parse_utc(item.get("observed_at"))) is not None
+            and observed_at > expires_at
+            for item in (material.get("liveness_observations") or [])
+            if isinstance(item, dict) and item.get("fresh") is True
+        )
+    if not observed_after_expiry:
+        projected["liveness_verdict"] = "expired"
+    return projected
+
+
+def _parse_utc(value: Any) -> datetime | None:
+    raw = str(value or "").strip().replace("Z", "+00:00")
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _project_observed_liveness(
+    material: dict[str, Any], *, requested_host: str | None
+) -> dict[str, Any]:
+    """Return the observed (probe-derived) liveness view for one identity.
+
     The typed ``liveness_verdict``/``last_probed_at`` columns predate scoped
     observations and are only a legacy global projection.  A later origin-scoped
     probe must therefore win when the list has a defensible host (an explicit
@@ -215,14 +261,10 @@ def _origin_host(scope_key: str) -> str:
 
 
 def _liveness_order_key(item: dict[str, Any]) -> tuple[datetime, bool]:
-    raw = str(item.get("observed_at") or "").replace("Z", "+00:00")
-    try:
-        observed_at = datetime.fromisoformat(raw)
-    except ValueError:
-        observed_at = datetime.min.replace(tzinfo=timezone.utc)
-    if observed_at.tzinfo is None:
-        observed_at = observed_at.replace(tzinfo=timezone.utc)
-    return observed_at.astimezone(timezone.utc), bool(item.get("typed"))
+    observed_at = _parse_utc(item.get("observed_at")) or datetime.min.replace(
+        tzinfo=timezone.utc
+    )
+    return observed_at, bool(item.get("typed"))
 
 
 def resolve_identity(

@@ -11006,9 +11006,13 @@ def test_variant_readiness_is_not_applicable_until_a_current_phase2_root_exists(
         "code": "variant_checks_incomplete",
         "message": (
             f"Repository has {len(files)} incomplete admitted-file variant check(s)."
+            " Freeze the exact current Phase 2 root set (1) on the covering "
+            "dispatch: vigil assess agent start --role code-variant-hunter "
+            f"--code-repo-id {repo['id']} --finding-slugs WF-001"
         ),
         "overrideable": True,
         "repo_id": repo["id"],
+        "variant_parent_finding_slugs": ["WF-001"],
     }
 
 
@@ -11161,7 +11165,7 @@ def test_draft_code_finding_blocks_fuzz_and_complete_until_promoted(
         for blocker in after["blockers"]
         if blocker["code"] == "variant_checks_incomplete"
     ]
-    assert variant_blockers[0]["message"] == (
+    assert variant_blockers[0]["message"].startswith(
         f"Repository has {len(files)} incomplete admitted-file variant check(s)."
     )
     verification_blockers = [
@@ -12225,6 +12229,7 @@ def test_report_readiness_requires_current_variant_receipts_for_report_durable_c
             "kind": "finding_variant_receipts_incomplete",
             "repo_id": repo["id"],
             "slugs": ["VF-001"],
+            "variant_parent_finding_slugs": ["VF-001"],
             "missing_file_count": 3,
             "missing_file_ids": [
                 build_file["id"],
@@ -12237,9 +12242,12 @@ def test_report_readiness_requires_current_variant_receipts_for_report_durable_c
                 "src/parser.py",
             ],
             "detail": (
-                "report-durable current code finding(s) VF-001 have no complete current "
+                "1 report-durable current code finding(s) have no complete current "
                 "variant-scan receipt for 3 admitted current repository file(s): "
-                "build/CMakeLists.txt, src/helpers.py, src/parser.py"
+                "build/CMakeLists.txt, src/helpers.py, src/parser.py. Freeze the "
+                "exact current Phase 2 root set (1) on the covering dispatch: "
+                "vigil assess agent start --role code-variant-hunter "
+                f"--code-repo-id {repo['id']} --finding-slugs VF-001"
             ),
         }
     ]
@@ -12269,9 +12277,13 @@ def test_report_readiness_requires_current_variant_receipts_for_report_durable_c
                 "code": "variant_checks_incomplete",
                 "message": (
                     "Repository has 3 incomplete admitted-file variant check(s)."
+                    " Freeze the exact current Phase 2 root set (1) on the "
+                    "covering dispatch: vigil assess agent start --role code-variant-hunter "
+                    f"--code-repo-id {repo['id']} --finding-slugs VF-001"
                 ),
                 "overrideable": True,
                 "repo_id": repo["id"],
+                "variant_parent_finding_slugs": ["VF-001"],
             }
         ]
 
@@ -12329,7 +12341,12 @@ def test_report_readiness_requires_current_variant_receipts_for_report_durable_c
         blocker["message"]
         for blocker in after_medium_code["blockers"]
         if blocker["code"] == "variant_checks_incomplete"
-    ) == "Repository has 2 incomplete admitted-file variant check(s)."
+    ) == (
+        "Repository has 2 incomplete admitted-file variant check(s)."
+        " Freeze the exact current Phase 2 root set (1) on the covering "
+        "dispatch: vigil assess agent start --role code-variant-hunter "
+        f"--code-repo-id {repo['id']} --finding-slugs VF-001"
+    )
 
     low_payload = _variant_receipt_payload(
         client,
@@ -12367,7 +12384,12 @@ def test_report_readiness_requires_current_variant_receipts_for_report_durable_c
         blocker["message"]
         for blocker in after_low_code["blockers"]
         if blocker["code"] == "variant_checks_incomplete"
-    ) == "Repository has 1 incomplete admitted-file variant check(s)."
+    ) == (
+        "Repository has 1 incomplete admitted-file variant check(s)."
+        " Freeze the exact current Phase 2 root set (1) on the covering "
+        "dispatch: vigil assess agent start --role code-variant-hunter "
+        f"--code-repo-id {repo['id']} --finding-slugs VF-001"
+    )
 
     skip_payload = _variant_receipt_payload(
         client,
@@ -12409,6 +12431,96 @@ def test_report_readiness_requires_current_variant_receipts_for_report_durable_c
     assert "finding_variant_receipts_incomplete" not in {
         blocker["kind"] for blocker in cleared_phase.json()["blockers"]
     }
+
+
+def test_variant_readiness_blockers_print_the_exact_dispatch_parent_scope(
+    client, isolate_settings
+):
+    """The scope a readiness blocker prints must be the scope dispatch accepts.
+
+    A confirmed root makes the report-durable obligation; an unreviewed current
+    root still belongs to the Phase 2 parent set that dispatch validation and
+    receipt currency enforce. Acting on the report-durable list alone 409s.
+    """
+    engagement_key = "2026-08-06-variant-blocker-dispatch-scope"
+    engagement_dir = write_engagement(
+        isolate_settings["engagements_dir"], engagement_key
+    )
+    scope_path = engagement_dir / "scope.json"
+    scope = json.loads(scope_path.read_text(encoding="utf-8"))
+    scope["engagement_type"] = "code"
+    scope["current_phase"] = "verify-variant"
+    scope_path.write_text(json.dumps(scope), encoding="utf-8")
+    repo = _create_repo(client, engagement_key, repo_key="variant-blocker-scope")
+    files = _create_files(client, engagement_key, int(repo["id"]))
+    _create_code_parent_finding(client, engagement_key, int(repo["id"]), slug="CH-001")
+    _create_code_parent_finding(
+        client, engagement_key, int(repo["id"]), slug="CH-002", line=20
+    )
+    _verify_code_finding(client, engagement_key, int(repo["id"]), "CH-001")
+
+    report = client.get(f"/engagements/{engagement_key}/assessment/report-readiness")
+    assert report.status_code == 200, report.text
+    blocker = next(
+        row
+        for row in report.json()["blockers"]
+        if row["kind"] == "finding_variant_receipts_incomplete"
+    )
+    assert blocker["slugs"] == ["CH-001"]
+    assert blocker["variant_parent_finding_slugs"] == ["CH-001", "CH-002"]
+    assert "--finding-slugs CH-001,CH-002" in blocker["detail"]
+
+    code_blocker = next(
+        row
+        for row in client.get(
+            f"/engagements/{engagement_key}/assessment/code/readiness"
+            "?target_phase=fuzz"
+        ).json()["blockers"]
+        if row["code"] == "variant_checks_incomplete"
+    )
+    assert code_blocker["variant_parent_finding_slugs"] == ["CH-001", "CH-002"]
+    assert code_blocker["message"].startswith(
+        f"Repository has {len(files)} incomplete admitted-file variant check(s)."
+    )
+    assert "--finding-slugs CH-001,CH-002" in code_blocker["message"]
+
+    from assess.lib.coverage_checks import render_report_readiness
+
+    _ready, _ok, blocker_lines, _advisories = render_report_readiness(report.json())
+    assert any("--finding-slugs CH-001,CH-002" in line for line in blocker_lines)
+
+    rejected = client.post(
+        f"/engagements/{engagement_key}/assessment/dispatches",
+        json={
+            "agent_id": "variant-report-durable-only",
+            "agent_role": "code-variant-hunter",
+            "task": "Search for variants of the dispatch-registered code findings.",
+            "status": "in-progress",
+            "dispatch_mode": "hypothesis-driven",
+            "finding_slugs": blocker["slugs"],
+            "skills": "code-variant-analysis",
+        },
+    )
+    assert rejected.status_code == 409, rejected.text
+    dispatch = _register_variant_dispatch(
+        client,
+        engagement_key,
+        agent_id="variant-printed-scope",
+        finding_slugs=blocker["variant_parent_finding_slugs"],
+    )
+    receipt = client.post(
+        f"/engagements/{engagement_key}/assessment/code/variant-checks",
+        json=_variant_receipt_payload(
+            client,
+            engagement_key,
+            int(repo["id"]),
+            files[0],
+            dispatch,
+            parent_finding_slugs=blocker["variant_parent_finding_slugs"],
+        ),
+    )
+    assert receipt.status_code == 201, receipt.text
+    assert receipt.json()["current"] is True
 
 
 def test_variant_receipt_history_survives_file_replacement(client, isolate_settings):

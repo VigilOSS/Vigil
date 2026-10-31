@@ -657,6 +657,44 @@ def list_finding_links(engagement_id: int) -> list[dict[str, Any]]:
     return [_finding_link_read_projection(row) for row in rows]
 
 
+def finding_link_state(
+    connection, engagement_id: int, *, finding_id: int, finding_slug: str
+) -> dict[str, list[dict[str, Any]]]:
+    """One finding's recorded relationships in the ``/finding-links`` row shape.
+
+    ``links`` are recorded ON the finding, retired history included; ``inbound_links``
+    are recorded on other findings and target it, which is the only place a parent
+    sees its ``variant_of`` children or a root its ``root_cause`` siblings. Both keep
+    retired rows, so a reader checks ``retired_at``. A non-empty ``target_ref``
+    names the target, as in variant ancestry; ``target_id`` only when it is empty.
+    """
+    select = """
+        SELECT links.*, findings.slug AS finding_slug
+        FROM assessment_finding_links AS links
+        JOIN assessment_findings AS findings ON findings.id = links.finding_id
+        WHERE links.engagement_id = ? AND {predicate}
+        ORDER BY links.id
+    """
+    outbound = connection.execute(
+        select.format(predicate="links.finding_id = ?"),
+        (engagement_id, finding_id),
+    ).fetchall()
+    inbound = connection.execute(
+        select.format(
+            predicate=(
+                "links.finding_id <> ? AND links.target_kind = 'finding' "
+                "AND CASE WHEN links.target_ref <> '' THEN links.target_ref = ? "
+                "ELSE links.target_id = ? END"
+            )
+        ),
+        (engagement_id, finding_id, finding_slug, finding_id),
+    ).fetchall()
+    return {
+        "links": [_finding_link_read_projection(row) for row in outbound],
+        "inbound_links": [_finding_link_read_projection(row) for row in inbound],
+    }
+
+
 def update_finding_link(
     engagement_id: int,
     *,

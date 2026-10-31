@@ -240,3 +240,139 @@ def test_quarantine_returns_404_for_unknown_identity(client, isolate_settings):
     resp = client.post(f"/engagements/{KEY}/credentials/ghost/quarantine")
 
     assert resp.status_code == 404
+
+
+def _expire_and_probe(isolate_settings, *, expires_at: str, probed_at: str) -> None:
+    engagement = db.get_engagement_by_key(KEY)
+    assert engagement is not None
+    with db.get_connection() as connection:
+        connection.execute(
+            "UPDATE engagement_credentials SET expires_at=?, liveness_verdict='live', "
+            "last_probed_at=? WHERE engagement_id=? AND identity_name='user_a'",
+            (expires_at, probed_at, engagement.id),
+        )
+
+
+def test_listing_does_not_carry_a_pre_expiry_live_verdict_past_expires_at(
+    client, isolate_settings
+):
+    _seed(client, isolate_settings)
+    _put_identity(client)
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    probed_at = (now - timedelta(hours=3)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    expires_at = (now - timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    _expire_and_probe(isolate_settings, expires_at=expires_at, probed_at=probed_at)
+
+    material = client.get(f"/engagements/{KEY}/credentials").json()["identities"][
+        "user_a"
+    ]
+
+    assert material["liveness_verdict"] == "expired"
+    assert material["last_probed_at"] == probed_at
+    assert material["expires_at"] == expires_at
+
+
+def test_listing_keeps_a_live_verdict_observed_after_expires_at(
+    client, isolate_settings
+):
+    _seed(client, isolate_settings)
+    _put_identity(client)
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    expires_at = (now - timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    probed_at = (now - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    _expire_and_probe(isolate_settings, expires_at=expires_at, probed_at=probed_at)
+
+    material = client.get(f"/engagements/{KEY}/credentials").json()["identities"][
+        "user_a"
+    ]
+
+    assert material["liveness_verdict"] == "live"
+    assert material["last_probed_at"] == probed_at
+
+
+def test_listing_marks_an_unprobed_identity_past_expires_at_expired(
+    client, isolate_settings
+):
+    _seed(client, isolate_settings)
+    _put_identity(client)
+    engagement = db.get_engagement_by_key(KEY)
+    assert engagement is not None
+    expires_at = (
+        datetime.now(timezone.utc) - timedelta(minutes=5)
+    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    with db.get_connection() as connection:
+        connection.execute(
+            "UPDATE engagement_credentials SET expires_at=? "
+            "WHERE engagement_id=? AND identity_name='user_a'",
+            (expires_at, engagement.id),
+        )
+
+    listing = client.get(
+        f"/engagements/{KEY}/credentials", params={"host": "chat.example.test"}
+    ).json()
+
+    assert listing["identities"]["user_a"]["liveness_verdict"] == "expired"
+
+
+def test_a_scoped_probe_after_expiry_is_not_overridden_by_expired(
+    client, isolate_settings
+):
+    _seed(client, isolate_settings)
+    assert client.put(
+        f"/engagements/{KEY}/credentials/user_a",
+        json={"headers": {"Authorization": "Bearer acme"}, "make_active": True},
+    ).status_code == 200
+    engagement = db.get_engagement_by_key(KEY)
+    assert engagement is not None
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    expires_at = (now - timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    with db.get_connection() as connection:
+        connection.execute(
+            "UPDATE engagement_credentials SET expires_at=? "
+            "WHERE engagement_id=? AND identity_name='user_a'",
+            (expires_at, engagement.id),
+        )
+    db.record_credential_liveness(
+        engagement.id,
+        "user_a",
+        scope_key="https://app.example.com",
+        verdict="live",
+        observed_at=now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        ttl_seconds=3600,
+        source="auth-status",
+    )
+
+    unscoped = client.get(f"/engagements/{KEY}/credentials").json()
+    scoped = client.get(
+        f"/engagements/{KEY}/credentials", params={"host": "app.example.com"}
+    ).json()
+
+    assert unscoped["identities"]["user_a"]["liveness_verdict"] == "unknown"
+    assert scoped["identities"]["user_a"]["liveness_verdict"] == "live"
+
+
+def test_a_probe_proven_dead_session_stays_dead_after_expiry(
+    client, isolate_settings
+):
+    _seed(client, isolate_settings)
+    _put_identity(client)
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    probed_at = (now - timedelta(hours=3)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    assert client.post(
+        f"/engagements/{KEY}/credentials/user_a/liveness",
+        json={"verdict": "dead", "probed_at": probed_at},
+    ).status_code == 200
+    engagement = db.get_engagement_by_key(KEY)
+    assert engagement is not None
+    with db.get_connection() as connection:
+        connection.execute(
+            "UPDATE engagement_credentials SET expires_at=? "
+            "WHERE engagement_id=? AND identity_name='user_a'",
+            ((now - timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ"), engagement.id),
+        )
+
+    listing = client.get(
+        f"/engagements/{KEY}/credentials", params={"include_dead": "true"}
+    ).json()
+
+    assert listing["identities"]["user_a"]["liveness_verdict"] == "dead"

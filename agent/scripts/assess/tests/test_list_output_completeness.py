@@ -527,3 +527,102 @@ def test_command_run_list_rejects_malformed_non_list_response(
                 as_json=True,
             )
         )
+
+
+def test_finding_list_json_rows_carry_creation_time(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    class _Client(_ContextClient):
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def get(self, _endpoint: str):
+            return [
+                {
+                    **_finding(1),
+                    "created_at": "2026-10-24T09:00:00Z",
+                    "updated_at": "2026-10-30T09:00:00Z",
+                }
+            ]
+
+    monkeypatch.setattr(list_findings, "AssessmentClient", _Client)
+    monkeypatch.setattr(list_findings, "load_config", lambda _path: _config())
+
+    list_findings.run(
+        SimpleNamespace(
+            engagement_dir="/tmp/eng",
+            severity=None,
+            workflow_status=None,
+            verification_status=None,
+            source_name=None,
+            slug=None,
+            root_cause_slug=None,
+            search=None,
+            holding=False,
+            limit=10,
+            offset=0,
+            json=True,
+        )
+    )
+
+    rows = json.loads(capsys.readouterr().out)
+    assert rows[0]["created_at"] == "2026-10-24T09:00:00Z"
+    assert rows[0]["updated_at"] == "2026-10-30T09:00:00Z"
+
+
+def test_human_root_cause_list_applies_common_filters_to_siblings(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    class _Client(_ContextClient):
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def get(self, _endpoint: str):
+            return {
+                "root": {"slug": "VA-001", "severity": "low", "title": "Root"},
+                "siblings": [
+                    {
+                        "slug": "VA-002",
+                        "severity": "info",
+                        "workflow_status": "active",
+                        "verification_status": "confirmed",
+                        "title": "Info sibling",
+                    },
+                    {
+                        "slug": "VA-003",
+                        "severity": "low",
+                        "workflow_status": "active",
+                        "verification_status": "confirmed",
+                        "title": "Low sibling",
+                    },
+                ],
+                "sibling_count": 2,
+            }
+
+    monkeypatch.setattr(list_findings, "AssessmentClient", _Client)
+    monkeypatch.setattr(list_findings, "load_config", lambda _path: _config())
+
+    list_findings.run(
+        SimpleNamespace(
+            engagement_dir="/tmp/eng",
+            severity="info",
+            workflow_status=None,
+            verification_status=None,
+            source_name=None,
+            slug=None,
+            root_cause_slug="VA-001",
+            search=None,
+            holding=False,
+            limit=10,
+            offset=0,
+            json=False,
+        )
+    )
+
+    captured = capsys.readouterr()
+    assert "VA-002" in captured.out
+    assert "VA-003" not in captured.out
+    assert "showing 1-1 of 1 matching root-cause siblings" in captured.err
+    assert "Siblings: 2 (1 match the filters)" in captured.out

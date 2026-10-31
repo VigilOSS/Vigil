@@ -185,6 +185,13 @@ def _run_create(args) -> None:
             "it. Re-capture the evidence, or register/refresh its artifact.",
             file=sys.stderr,
         )
+    attribution_issue = row.get("verifier_attribution_issue")
+    if attribution_issue:
+        print(
+            "WARN proof-receipt create: recorded, but this run's dispatch cannot "
+            f"cite it in a terminal `finding verify` — {attribution_issue}",
+            file=sys.stderr,
+        )
     print(json.dumps(row, indent=2, ensure_ascii=False))
 
 
