@@ -237,6 +237,7 @@ Prompt-defined durable artifacts are executable contracts, not prose-only change
   New configured workspaces use stable numeric case directories. Check stages select early execution; all captured checks remain approval requirements. Branch finalization validates unpublished same-revision rename and retry state.
   Local verification can carry across identical trees; approvals and served-runtime proof retain revision identity.
 - `src/vigil_cli/runtime.py` + `up.py` — one shared long-lived Kali container, reached host-side by `docker exec`. There is no in-container API server or MCP bridge.
+  Resource-capacity preflight is advisory.
   `up.py:run_up` owns startup JSON/service states; `service_locks.py` serializes shared starts. `agent/scripts/assess/lib/kali_runtime_exec.py` owns first-use managed execution startup.
 - `src/vigil_cli/runtime_images.py` owns immutable release pins and label validation; `.github/workflows/runtime-release.yml` embeds the published multi-platform pin in matched artifacts.
 - `src/vigil_cli/mitmproxy.py` — the single owner of the proxy `docker build` argv, including the inputs-digest label without which the image can never be proven current.

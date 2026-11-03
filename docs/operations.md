@@ -49,12 +49,13 @@ Sizing guidance:
 | Large enterprise scope, 4-6 parallel specialists | 16 GiB | 8 |
 | All tools warm, continuous engagement | 32 GiB | 12 |
 
-`vigil up` and `vigil runtime start` refuse a memory limit of 85% or more of
-Docker memory, and warn at 60% or more. This checks configured headroom, not
-current memory usage. Lower `VIGIL_RUNTIME_MEMORY_GB` or increase Docker memory.
-An intentional override is available with `vigil up --allow-oversubscribe` or
-`vigil runtime start --allow-oversubscribe`. Restart checks run before replacing
-the existing container. Existing containers keep their limits until recreated.
+`vigil up` and `vigil runtime start` warn when the configured memory limit is
+60% or more of Docker's total memory capacity. The Rich-formatted warning is
+advisory: startup continues at every configured limit. This checks the maximum
+allowed memory, not reserved RAM or current usage. If actual usage exhausts
+Docker's shared memory, containers may be killed. Lower `VIGIL_RUNTIME_MEMORY_GB`
+or increase Docker's memory allocation to leave more headroom for other services.
+Existing containers keep their limits until recreated.
 
 The 2 GiB default suits light work; larger tools and parallel workloads may need
 an explicit higher limit. `vigil up --json` emits one result with service states

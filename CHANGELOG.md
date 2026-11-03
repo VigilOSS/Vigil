@@ -5,6 +5,13 @@ versioning follows [Semantic Versioning][semver].
 
 Durable design decisions live in [`docs/adr/`](docs/adr/).
 
+## [2.3.2] - 2026-11-03
+
+### Fixed
+
+- Docker memory headroom warnings use Rich formatting, explain the runtime memory ceiling and
+  shared capacity, and allow startup at every configured memory limit.
+
 ## [2.3.1] - 2026-10-31
 
 ### Fixed
@@ -295,16 +302,10 @@ Durable design decisions live in [`docs/adr/`](docs/adr/).
 - Resource warnings describe configured limits and available Docker capacity, go to
   stderr, and appear for limited headroom rather than merely having other containers.
 
-### Fixed
-
-- Runtime restarts check capacity before replacing a running container.
-- Memory refusals give effective recovery commands; `vigil up --allow-oversubscribe`
-  supports the advertised override.
-
 ### Added
 
 - `vigil up --json` returns one startup result with service states, configured limits,
-  and structured memory-refusal facts. Build progress goes to stderr.
+  and startup errors. Build progress goes to stderr.
 
 ## [1.2.1] - 2026-10-11
 

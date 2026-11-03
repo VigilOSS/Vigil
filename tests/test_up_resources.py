@@ -27,31 +27,32 @@ def test_default_runtime_limits(monkeypatch):
     assert (limits.memory_gb, limits.cpus) == (2, 1)
 
 
-def test_up_override_reaches_runtime(monkeypatch, tmp_path):
-    from vigil_cli import main as cli
-    calls = []
-    monkeypatch.setattr(cli, "run_up", lambda options, **kw: calls.append(options))
-    main(["--root", str(tmp_path), "up", "--allow-oversubscribe"])
-    assert calls[0].allow_oversubscribe is True
+@pytest.mark.parametrize("recreate", [False, True])
+@pytest.mark.parametrize("memory_gib", [7, 8, 16])
+def test_high_memory_limit_warns_and_allows_startup(tmp_path, capsys, monkeypatch, recreate, memory_gib):
+    monkeypatch.setattr(runtime, "_host_memory_gb", lambda: None)
+    runtime._preflight_shared_vm(config.RuntimeResources(memory_gib, 1, 512, "1g"),
+        runtime.RuntimeOptions(install_root=tmp_path, recreate=recreate), runner=capacity_runner(8))
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert f"{memory_gib} GiB" in captured.err
+    assert "8.0 GiB" in captured.err
+    assert "Starting anyway" in captured.err
+    assert "VIGIL_RUNTIME_MEMORY_GB" in captured.err
 
 
-def test_up_restart_preserves_running_container_when_capacity_refuses(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIGIL_RUNTIME_MEMORY_GB", "8")
-    monkeypatch.setattr(up, "_runtime_image_drift", lambda *a, **kw: True)
-    monkeypatch.setattr(runtime.docker, "image_exists", lambda *a, **kw: True)
-    monkeypatch.setattr(runtime.docker, "container_running", lambda *a, **kw: True)
-    removals = []
-    base_runner = capacity_runner(8)
-    def runner(argv, **kw):
-        if argv[:3] == ["docker", "ps", "-a"]:
-            return docker.DockerResult(0, "vigil\n", "")
-        if argv[:3] == ["docker", "rm", "-f"]:
-            removals.append(argv)
-        return base_runner(argv, **kw)
-    with pytest.raises(SystemExit):
-        up._start_or_restart_runtime(tmp_path, True, False, up.UpOptions(
-            install_root=tmp_path, yes_restart_runtime=True), runner=runner)
-    assert removals == []
+def test_memory_warning_uses_rich_terminal_style(tmp_path, monkeypatch):
+    import io
+    from rich.console import Console
+    stream = io.StringIO()
+    monkeypatch.setattr(runtime.sys, "stderr", stream)
+    monkeypatch.setattr(runtime.term, "console", lambda output: Console(
+        file=output, force_terminal=True, color_system="standard", width=120))
+    monkeypatch.setattr(runtime, "_host_memory_gb", lambda: None)
+    runtime._preflight_shared_vm(config.RuntimeResources(6, 1, 512, "1g"),
+        runtime.RuntimeOptions(install_root=tmp_path), runner=capacity_runner(8))
+    assert "\x1b[" in stream.getvalue()
+    assert "Docker memory headroom" in stream.getvalue()
 
 
 def test_runtime_restart_preserves_container_on_startup_refusal(monkeypatch, tmp_path):
@@ -62,22 +63,6 @@ def test_runtime_restart_preserves_container_on_startup_refusal(monkeypatch, tmp
     with pytest.raises(SystemExit, match="capacity refused"):
         main(["--root", str(tmp_path), "runtime", "restart"])
     assert removals == []
-
-
-def test_memory_refusal_gives_effective_recovery(tmp_path):
-    with pytest.raises(SystemExit) as exc:
-        runtime._preflight_shared_vm(config.RuntimeResources(8, 4, 512, "1g"),
-            runtime.RuntimeOptions(install_root=tmp_path), runner=capacity_runner(8))
-    assert "VIGIL_RUNTIME_MEMORY_GB=6 vigil up" in str(exc.value)
-    assert "vigil up --allow-oversubscribe" in str(exc.value)
-
-
-def test_restart_refusal_recovery_applies_limits_to_existing_container(tmp_path):
-    with pytest.raises(SystemExit) as exc:
-        runtime._preflight_shared_vm(config.RuntimeResources(8, 4, 512, "1g"),
-            runtime.RuntimeOptions(install_root=tmp_path, recreate=True), runner=capacity_runner(8))
-    assert "VIGIL_RUNTIME_MEMORY_GB=6 vigil runtime start --recreate" in str(exc.value)
-    assert "vigil runtime start --recreate --allow-oversubscribe" in str(exc.value)
 
 
 @pytest.mark.parametrize("neighbors", [(), ("acme-db", "vigil-proxy")])
@@ -151,3 +136,27 @@ def test_up_json_reports_process_failures(monkeypatch, tmp_path, capsys, error):
         up.run_up(up.UpOptions(install_root=tmp_path, json_output=True))
     assert exc.value.code == 1
     assert json.loads(capsys.readouterr().out)["error"]["message"] == str(error)
+
+
+@pytest.mark.parametrize("recreate", [False, True])
+def test_up_starts_runtime_with_high_memory_limit(tmp_path, monkeypatch, capsys, recreate):
+    monkeypatch.setenv("VIGIL_RUNTIME_MEMORY_GB", "16")
+    monkeypatch.setattr(runtime.docker, "daemon_status", lambda **kw: docker.DaemonStatus(True, False, ""))
+    monkeypatch.setattr(runtime.docker, "container_running", lambda *a, **kw: recreate)
+    monkeypatch.setattr(runtime.docker, "container_exists", lambda *a, **kw: recreate)
+    monkeypatch.setattr(runtime, "_host_memory_gb", lambda: None)
+    monkeypatch.setattr(up, "_runtime_image_drift", lambda *a, **kw: recreate)
+    for check in ("_validate_image_current", "_validate_mounts", "_validate_tools",
+                  "_check_runtime_ulimits", "generate_subfinder_provider_config"):
+        monkeypatch.setattr(runtime, check, lambda *a, **kw: None)
+    calls = []
+    base_runner = capacity_runner(8)
+    def runner(argv, **kwargs):
+        calls.append(argv)
+        return base_runner(argv, **kwargs)
+    state = up._start_or_restart_runtime(tmp_path, recreate, False,
+        up.UpOptions(install_root=tmp_path, yes_restart_runtime=True), runner=runner)
+    assert state == "running"
+    run = next(argv for argv in calls if argv[:2] == ["docker", "run"])
+    assert "--memory=16g" in run
+    assert "Starting anyway" in capsys.readouterr().err

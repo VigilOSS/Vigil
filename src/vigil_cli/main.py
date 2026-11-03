@@ -405,7 +405,6 @@ def _main(argv: list[str], *, project_mode: str | None = None) -> None:
     up_p.add_argument("--select", action="store_true", help=argparse.SUPPRESS)
     up_p.add_argument("--no-build", action="store_true")
     up_p.add_argument("--json", action="store_true", help="Emit one startup result as JSON; progress goes to stderr")
-    up_p.add_argument("--allow-oversubscribe", action="store_true", help="Allow a runtime memory limit of 85%% or more of Docker memory")
     up_p.add_argument("--runtime-restart-timeout", type=int, default=10)
     up_p.add_argument("--yes-restart-runtime", action="store_true")
     up_p.add_argument("--no-restart-runtime", action="store_true")
@@ -748,12 +747,6 @@ def _main(argv: list[str], *, project_mode: str | None = None) -> None:
     runtime_build.add_argument("--dev", action="store_true")
     runtime_start = runtime_sub.add_parser("start")
     runtime_start.add_argument("--recreate", action="store_true")
-    runtime_start.add_argument(
-        "--allow-oversubscribe",
-        action="store_true",
-        help="Start even when the configured memory tier exceeds a safe fraction of the "
-             "shared Docker VM (bypasses the oversubscription refusal).",
-    )
     runtime_sub.add_parser("stop")
     runtime_sub.add_parser("restart")
     runtime_sub.add_parser("status")
@@ -1420,7 +1413,6 @@ def _main(argv: list[str], *, project_mode: str | None = None) -> None:
                 ),
                 no_build=args.no_build,
                 json_output=args.json,
-                allow_oversubscribe=args.allow_oversubscribe,
                 runtime_restart_timeout=args.runtime_restart_timeout,
                 yes_restart_runtime=args.yes_restart_runtime,
                 no_restart_runtime=args.no_restart_runtime,
@@ -2557,7 +2549,6 @@ def _runtime(args: argparse.Namespace, install_root: Path) -> None:
             RuntimeOptions(
                 install_root=install_root,
                 recreate=args.recreate,
-                allow_oversubscribe=getattr(args, "allow_oversubscribe", False),
             )
         )
         if term.is_terminal(sys.stdout):

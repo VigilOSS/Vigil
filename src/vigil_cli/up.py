@@ -29,7 +29,7 @@ from .oob import (
 )
 from .orchestrator import OrchestratorOptions, start_orchestrator
 from .paths import default_runtime_container, engagements_root
-from .runtime import RuntimeCapacityError, RuntimeOptions, runtime_image_inputs, start_runtime
+from .runtime import RuntimeOptions, runtime_image_inputs, start_runtime
 from .runtime_images import ensure_runtime_image
 from .service_locks import service_start_lock
 
@@ -42,7 +42,6 @@ class UpOptions:
     runtime_restart_timeout: int = 10
     yes_restart_runtime: bool = False
     no_restart_runtime: bool = False
-    allow_oversubscribe: bool = False
     json_output: bool = False
 
 
@@ -95,9 +94,8 @@ def run_up(
             raise
         state["status"] = "error"
         state["error"] = {
-            "code": "runtime_memory_limit" if isinstance(exc, RuntimeCapacityError) else "startup_failed",
+            "code": "startup_failed",
             "message": str(exc),
-            **({"resources": exc.details} if isinstance(exc, RuntimeCapacityError) else {}),
         }
         print(json.dumps(state, indent=2))
         raise SystemExit(1) from exc
@@ -172,7 +170,7 @@ def _start_or_restart_runtime(
     *,
     runner: docker.Runner,
 ) -> str:
-    runtime_options = RuntimeOptions(install_root=install_root, allow_oversubscribe=options.allow_oversubscribe)
+    runtime_options = RuntimeOptions(install_root=install_root)
     if not runtime_was_running:
         if options.no_build and not docker.image_exists(runtime_options.image, runner=runner):
             raise SystemExit(f"Runtime image {runtime_options.image} is missing; run `vigil runtime build` or retry `vigil up` without --no-build.")
@@ -185,7 +183,7 @@ def _start_or_restart_runtime(
     if runtime_built or drifted:
         if _confirm_runtime_restart(options):
             _progress("Runtime", "restarting…")
-            start_runtime(RuntimeOptions(install_root=install_root, recreate=True, allow_oversubscribe=options.allow_oversubscribe), runner=runner, prepare_image=False)
+            start_runtime(RuntimeOptions(install_root=install_root, recreate=True), runner=runner, prepare_image=False)
             _progress("Runtime", "running")
             return "running"
         _progress("Runtime", "running; image update pending")

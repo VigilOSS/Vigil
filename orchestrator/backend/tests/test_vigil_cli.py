@@ -17008,7 +17008,7 @@ def test_agent_start_does_not_write_scope_rejection_decision(
     assert recorded_decisions == []
 
 
-# Shared-VM preflight: refuse/warn when the runtime tier oversubscribes the VM.
+# Shared-VM preflight: warn about configured limits and continue startup.
 
 def _gib(n: float) -> int:
     return int(n * (1024 ** 3))
@@ -17047,26 +17047,24 @@ def _preflight_install_root(tmp_path: Path) -> Path:
 
 
 @pytest.mark.usefixtures("_prepared_runtime_image")
-def test_runtime_start_refuses_when_tier_exceeds_vm(tmp_path, monkeypatch):
+@pytest.mark.parametrize("memory_gib", [7, 8, 16])
+def test_runtime_start_warns_and_proceeds_when_limit_exceeds_vm(tmp_path, monkeypatch, capsys, memory_gib):
     import json as _json
 
     from vigil_cli.runtime import RuntimeOptions, start_runtime
 
-    monkeypatch.setenv("VIGIL_RUNTIME_MEMORY_GB", "8")
+    monkeypatch.setenv("VIGIL_RUNTIME_MEMORY_GB", str(memory_gib))
     install_root = _preflight_install_root(tmp_path)
     commands: list[list[str]] = []
-    # 8 GB VM, 8 GB tier => 100% => refuse.
     runner = _preflight_runner(commands, info_stdout=_json.dumps({"MemTotal": _gib(8), "NCPU": 4}), install_root=install_root)
 
-    with pytest.raises(SystemExit) as exc:
-        start_runtime(RuntimeOptions(install_root=install_root), runner=runner, validate_tools=False)
-    assert "oversubscribe" in str(exc.value).lower() or "Refusing" in str(exc.value)
-    # No container was started.
-    assert not any(c[:3] == ["docker", "run", "-d"] for c in commands)
+    start_runtime(RuntimeOptions(install_root=install_root), runner=runner, validate_tools=False)
+    assert any(c[:3] == ["docker", "run", "-d"] for c in commands)
+    assert "Starting anyway" in capsys.readouterr().err
 
 
 @pytest.mark.usefixtures("_prepared_runtime_image")
-def test_runtime_start_preflights_before_removing_existing_container(tmp_path, monkeypatch):
+def test_runtime_start_warns_before_replacing_existing_container(tmp_path, monkeypatch, capsys):
     import json as _json
 
     from vigil_cli.docker import DockerResult
@@ -17075,47 +17073,19 @@ def test_runtime_start_preflights_before_removing_existing_container(tmp_path, m
     monkeypatch.setenv("VIGIL_RUNTIME_MEMORY_GB", "8")
     install_root = _preflight_install_root(tmp_path)
     commands: list[list[str]] = []
-
-    def runner(argv: list[str], **_: object) -> DockerResult:
-        commands.append(argv)
-        if argv[:3] == ["docker", "image", "inspect"]:
-            return DockerResult(0, "sha256:image\n", "")
-        if argv[:3] == ["docker", "info", "--format"]:
-            return DockerResult(0, _json.dumps({"MemTotal": _gib(8), "NCPU": 4}), "")
-        if argv[:3] == ["docker", "ps", "--format"]:
-            return DockerResult(0, "", "")
+    base_runner = _preflight_runner(commands, info_stdout=_json.dumps({"MemTotal": _gib(8), "NCPU": 4}), install_root=install_root)
+    def runner(argv: list[str], **kwargs: object) -> DockerResult:
         if argv[:3] == ["docker", "ps", "-a"]:
+            commands.append(argv)
             return DockerResult(0, "vigil\n", "")
-        return DockerResult(0, "", "")
+        if argv[:3] == ["docker", "rm", "-f"]:
+            assert "Starting anyway" in capsys.readouterr().err
+        return base_runner(argv, **kwargs)
 
-    with pytest.raises(SystemExit):
-        start_runtime(
-            RuntimeOptions(install_root=install_root, recreate=True),
-            runner=runner,
-            validate_tools=False,
-        )
-
-    assert not any(c[:3] == ["docker", "rm", "-f"] for c in commands)
-    assert not any(c[:3] == ["docker", "run", "-d"] for c in commands)
-
-
-@pytest.mark.usefixtures("_prepared_runtime_image")
-def test_runtime_start_allow_oversubscribe_bypasses_refusal(tmp_path, monkeypatch):
-    import json as _json
-
-    from vigil_cli.runtime import RuntimeOptions, start_runtime
-
-    monkeypatch.setenv("VIGIL_RUNTIME_MEMORY_GB", "8")
-    install_root = _preflight_install_root(tmp_path)
-    commands: list[list[str]] = []
-    runner = _preflight_runner(commands, info_stdout=_json.dumps({"MemTotal": _gib(8), "NCPU": 4}), install_root=install_root)
-
-    start_runtime(
-        RuntimeOptions(install_root=install_root, allow_oversubscribe=True),
-        runner=runner,
-        validate_tools=False,
-    )
-    assert any(c[:3] == ["docker", "run", "-d"] for c in commands)
+    start_runtime(RuntimeOptions(install_root=install_root, recreate=True), runner=runner, validate_tools=False)
+    removal = next(i for i, c in enumerate(commands) if c[:3] == ["docker", "rm", "-f"])
+    creation = next(i for i, c in enumerate(commands) if c[:3] == ["docker", "run", "-d"])
+    assert removal < creation
 
 
 @pytest.mark.usefixtures("_prepared_runtime_image")
