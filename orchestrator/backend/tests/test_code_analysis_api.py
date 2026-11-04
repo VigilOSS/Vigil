@@ -7369,6 +7369,30 @@ def test_freemarker_template_file_content_prioritizes_rendering_defects():
     assert not {"buffer-overflow", "integer-overflow", "type-confusion", "deserialization"} & set(families)
 
 
+@pytest.mark.parametrize(
+    ("slot", "language", "family", "applies"),
+    [
+        ("CALLBACK-DATA", "php", "use-after-free", False),
+        ("CALLBACK-DATA", "javascript", "use-after-free", False),
+        ("CALLBACK-DATA", "c", "use-after-free", True),
+        ("CALLBACK-DATA", "cpp", "use-after-free", True),
+        ("CALLBACK-DATA", "", "use-after-free", True),
+        ("FILE-CONTENT", "php", "buffer-overflow", False),
+        ("FILE-CONTENT", "java", "buffer-overflow", False),
+        ("FILE-CONTENT", "c", "buffer-overflow", True),
+        ("CALLBACK-DATA", "objectivec", "use-after-free", True),
+        ("FILE-CONTENT", "objectivec", "buffer-overflow", True),
+        ("CALLBACK-DATA", "php", "type-confusion", True),
+        ("FILE-CONTENT", "javascript", "type-confusion", True),
+        ("CALLBACK-DATA", "php", "race-condition", True),
+        ("CALLBACK-DATA", "php", "deserialization", True),
+    ],
+)
+def test_native_memory_corruption_classes_apply_only_to_memory_unsafe_languages(slot, language, family, applies):
+    families = code_analysis._applicable_families_for_file([slot], language=language)
+    assert (family in families) is applies
+
+
 def test_unknown_language_does_not_receive_a_synthetic_family_floor():
     families = code_analysis._applicable_families_for_file(
         [],

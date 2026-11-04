@@ -8881,9 +8881,15 @@ SLOT_VULN_CLASSES: dict[str, dict[str, list[str]]] = {
             "algorithmic-dos", "error-handling",
         ]
     },
-    "FILE-CONTENT": {"all": ["injection", "buffer-overflow", "type-confusion", "path-traversal", "xxe", "file-upload"]},
+    "FILE-CONTENT": {
+        "all": ["injection", "type-confusion", "path-traversal", "xxe", "file-upload"],
+        "memory-unsafe": ["buffer-overflow"],
+    },
     "CMD-ARGUMENT": {"all": ["injection", "format-string", "path-traversal"]},
-    "CALLBACK-DATA": {"all": ["use-after-free", "race-condition", "type-confusion", "deserialization"]},
+    "CALLBACK-DATA": {
+        "all": ["race-condition", "type-confusion", "deserialization"],
+        "memory-unsafe": ["use-after-free"],
+    },
     "ENV-VARIABLE": {"all": ["injection", "path-traversal"]},
     "SERIALIZED-DATA": {
         "native": ["buffer-overflow", "integer-overflow", "type-confusion", "deserialization"],
@@ -8894,6 +8900,7 @@ SLOT_VULN_CLASSES: dict[str, dict[str, list[str]]] = {
 
 
 NATIVE_LANGUAGES = frozenset({"c", "c++", "cpp"})
+MEMORY_UNSAFE_LANGUAGES = NATIVE_LANGUAGES | {"objectivec"}
 STRUCTURALLY_ANALYZED_LANGUAGES = frozenset(
     {
         "blade",
@@ -8935,6 +8942,7 @@ def _apply_grouped_families(
     *,
     is_native: bool,
     lang_known: bool,
+    is_memory_unsafe: bool,
 ) -> None:
     for group, group_families in mapping.items():
         if group == "all":
@@ -8942,6 +8950,8 @@ def _apply_grouped_families(
         elif group == "native" and (is_native or not lang_known):
             families.update(group_families)
         elif group == "managed" and (not is_native or not lang_known):
+            families.update(group_families)
+        elif group == "memory-unsafe" and (is_memory_unsafe or not lang_known):
             families.update(group_families)
 
 
@@ -8954,6 +8964,7 @@ def _applicable_families_for_file(
     """Compute canonical applicable vulnerability classes for a classified file."""
     lang_lower = language.lower().strip()
     is_native = lang_lower in NATIVE_LANGUAGES
+    is_memory_unsafe = lang_lower in MEMORY_UNSAFE_LANGUAGES
     lang_known = bool(lang_lower)
     role_lower = role.lower().strip()
 
@@ -8968,6 +8979,7 @@ def _applicable_families_for_file(
             SLOT_VULN_CLASSES.get(slot, {}),
             is_native=is_native,
             lang_known=lang_known,
+            is_memory_unsafe=is_memory_unsafe,
         )
 
     for keywords, mapping in ROLE_CONTEXT_VULN_CLASSES:
@@ -8977,16 +8989,15 @@ def _applicable_families_for_file(
                 mapping,
                 is_native=is_native,
                 lang_known=lang_known,
+                is_memory_unsafe=is_memory_unsafe,
             )
 
     if lang_lower == "freemarker":
         # FILE-CONTENT describes a template's input, not a native parser. Its
         # generic families omit the rendering bug class and demand impossible
-        # memory/serialization work from template-only source.
+        # type/serialization work from template-only source.
         families.add("web-app-injection")
-        families.difference_update(
-            {"buffer-overflow", "integer-overflow", "type-confusion", "deserialization"}
-        )
+        families.difference_update({"type-confusion", "deserialization"})
 
     return sorted(families)
 
