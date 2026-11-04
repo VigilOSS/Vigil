@@ -4,6 +4,7 @@ import hashlib
 import json
 import sqlite3
 import uuid
+from collections import Counter
 from dataclasses import dataclass
 from typing import Any
 
@@ -2276,15 +2277,64 @@ def bulk_update_structural_metadata(
                     "must publish the exact complete registry"
                 ),
             )
-        if (
-            callable_registry_published
-            and existing_callable_keys != submitted_callable_keys
-        ):
+        added_callables_by_span: dict[tuple[int, str, int, int], list[dict[str, Any]]] = {}
+        for callable_record in canonical_callables:
+            if callable_record["callable_key"] not in existing_callable_keys:
+                added_callables_by_span.setdefault(
+                    (
+                        int(callable_record["file_id"]),
+                        str(callable_record["name"]),
+                        int(callable_record["start_line"]),
+                        int(callable_record["end_line"]),
+                    ),
+                    [],
+                ).append(callable_record)
+        removed_callable_keys = json.dumps(
+            sorted(existing_callable_keys - submitted_callable_keys)
+        )
+        receipt_bound_rows = connection.execute(
+            """
+            SELECT callables.id, callables.file_id, callables.name,
+                   files.file_path, callables.qualified_name,
+                   callables.start_line, callables.end_line
+            FROM code_structural_callables AS callables
+            JOIN code_files AS files ON files.id = callables.file_id
+            WHERE callables.engagement_id = ? AND callables.repo_id = ?
+              AND callables.repo_generation = ?
+              AND callables.callable_key IN (SELECT value FROM json_each(?))
+              AND EXISTS (
+                  SELECT 1 FROM code_analysis_result_callables AS links
+                  WHERE links.callable_id = callables.id
+              )
+            ORDER BY files.file_path, callables.start_line
+            """,
+            (engagement.id, repo_id, repo_generation, removed_callable_keys),
+        ).fetchall()
+        requalified_callables: list[tuple[int, dict[str, Any]]] = []
+        receipt_bound_removals = []
+        bound_spans = Counter(
+            (int(row["file_id"]), str(row["name"]), int(row["start_line"]), int(row["end_line"]))
+            for row in receipt_bound_rows
+        )
+        for row in receipt_bound_rows:
+            span = (int(row["file_id"]), str(row["name"]), int(row["start_line"]), int(row["end_line"]))
+            candidates = added_callables_by_span.get(span, [])
+            if len(candidates) == 1 and bound_spans[span] == 1:
+                requalified_callables.append((int(row["id"]), candidates[0]))
+            else:
+                receipt_bound_removals.append(row)
+        if receipt_bound_removals:
+            shown = ", ".join(
+                f"{row['file_path']}:{row['qualified_name']}"
+                f" ({row['start_line']}-{row['end_line']})"
+                for row in receipt_bound_removals[:20]
+            )
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail=(
-                    "structural callable registry is already sealed for this repository "
-                    "generation"
+                    f"structural index would drop {len(receipt_bound_removals)} "
+                    "receipt-bound callable(s) from this repository generation: "
+                    f"{shown}; reingest to advance the generation instead"
                 ),
             )
 
@@ -2345,6 +2395,34 @@ def bulk_update_structural_metadata(
                     engagement.id,
                     repo_id,
                     int(item["file_id"]),
+                ),
+            )
+        connection.execute(
+            """
+            DELETE FROM code_structural_callables
+            WHERE engagement_id = ? AND repo_id = ? AND repo_generation = ?
+              AND callable_key IN (SELECT value FROM json_each(?))
+              AND id NOT IN (SELECT value FROM json_each(?))
+            """,
+            (
+                engagement.id,
+                repo_id,
+                repo_generation,
+                removed_callable_keys,
+                json.dumps([callable_id for callable_id, _ in requalified_callables]),
+            ),
+        )
+        for callable_id, callable_record in requalified_callables:
+            connection.execute(
+                """
+                UPDATE code_structural_callables
+                SET qualified_name = ?, callable_key = ?
+                WHERE id = ?
+                """,
+                (
+                    callable_record["qualified_name"],
+                    callable_record["callable_key"],
+                    callable_id,
                 ),
             )
         for callable_record in canonical_callables:

@@ -2366,7 +2366,7 @@ def test_analysis_result_write_rejects_legacy_function_name_field(
     assert response.json()["detail"][0]["loc"][-1] == "function_name"
 
 
-def test_empty_structural_callable_publication_is_sealed_and_idempotent(
+def test_empty_structural_callable_publication_is_idempotent_and_rebinds_unreferenced_changes(
     client, isolate_settings
 ) -> None:
     engagement_key = "2026-09-12-empty-callable-publication"
@@ -2411,8 +2411,220 @@ def test_empty_structural_callable_publication_is_sealed_and_idempotent(
             updates=updates,
         ),
     )
-    assert changed.status_code == 409, changed.text
-    assert "already sealed" in changed.json()["detail"]
+    assert changed.status_code == 200, changed.text
+    assert changed.json()["registered_callables"] == 1
+
+
+def _post_structural_callables(
+    client,
+    engagement_key: str,
+    repo_id: int,
+    files: list[dict[str, object]],
+    callables_by_file_id: dict[int, list[dict[str, object]]],
+):
+    base = f"/engagements/{engagement_key}/assessment/code"
+    binding = client.get(f"{base}/repos/{repo_id}").json()
+    updates = [
+        {
+            "file_id": file_row["id"],
+            "source_sha256": file_row["file_hash"],
+            "total_functions": len(callables_by_file_id.get(int(file_row["id"]), [])),
+            "total_entry_points": 0,
+            "total_sinks": 0,
+            "total_exports": 0,
+            "callables": callables_by_file_id.get(int(file_row["id"]), []),
+        }
+        for file_row in files
+    ]
+    return client.post(
+        f"{base}/files/bulk-structural-metadata",
+        json=_complete_structural_payload(
+            repo_id=repo_id,
+            repo_generation=int(binding["active_generation"]),
+            source_manifest_digest=str(binding["source_manifest_digest"]),
+            updates=updates,
+        ),
+    )
+
+
+def _registered_callables(repo_id: int) -> set[tuple[int, str, int, int]]:
+    connection = sqlite3.connect(str(db_module.database_path()))
+    try:
+        return {
+            (int(row[0]), str(row[1]), int(row[2]), int(row[3]))
+            for row in connection.execute(
+                """
+                SELECT file_id, qualified_name, start_line, end_line
+                FROM code_structural_callables WHERE repo_id = ?
+                """,
+                (repo_id,),
+            ).fetchall()
+        }
+    finally:
+        connection.close()
+
+
+def test_structural_republication_preserves_receipt_bound_callables(
+    client, isolate_settings
+) -> None:
+    engagement_key = "2026-11-04-callable-republication"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo = _create_repo(client, engagement_key, repo_key="callable-republication-repo")
+    repo_id = int(repo["id"])
+    files = _create_files(client, engagement_key, repo_id)
+    parser = next(row for row in files if row["file_path"] == "src/parser.py")
+    helper = next(row for row in files if row["file_path"] == "src/helpers.py")
+    parse = _structural_callable("parse", start_line=1, end_line=2)
+    normalize = _structural_callable("normalize", start_line=4, end_line=7)
+    helper_fn = _structural_callable("helper", start_line=1, end_line=2)
+    _publish_structural_callables(
+        client,
+        engagement_key,
+        repo_id,
+        files,
+        {int(parser["id"]): [parse, normalize], int(helper["id"]): [helper_fn]},
+    )
+    _classify_file(client, engagement_key, int(parser["id"]), "critical", 100)
+    claim = _claim_file_for_analysis(client, engagement_key, int(parser["id"]))
+    base = f"/engagements/{engagement_key}/assessment/code"
+    receipt = client.post(
+        f"{base}/analysis-results",
+        json=_owned(
+            claim,
+            queue_item_id=claim["id"],
+            disposition="clean",
+            receipt_kind="call_chain",
+            callable_refs=[
+                {"file_id": parser["id"], **parse},
+                {"file_id": helper["id"], **helper_fn},
+            ],
+            reviewed_spans=[],
+            evidence="parse -> helper was reviewed against the sealed source",
+            cwe_coverage=_network_input_coverage(default_effort=80),
+        ),
+    )
+    assert receipt.status_code == 201, receipt.text
+    before = _registered_callables(repo_id)
+
+    moved_parse = _structural_callable("parse", start_line=1, end_line=3)
+    refused = _post_structural_callables(
+        client,
+        engagement_key,
+        repo_id,
+        files,
+        {int(parser["id"]): [moved_parse, normalize], int(helper["id"]): [helper_fn]},
+    )
+    assert refused.status_code == 409, refused.text
+    assert "src/parser.py" in refused.json()["detail"]
+    assert "parse" in refused.json()["detail"]
+    assert _registered_callables(repo_id) == before
+
+    method = _structural_callable(
+        "normalize", start_line=4, end_line=6, qualified_name="Parser.normalize"
+    )
+    accepted = _post_structural_callables(
+        client,
+        engagement_key,
+        repo_id,
+        files,
+        {int(parser["id"]): [parse, method], int(helper["id"]): [helper_fn]},
+    )
+    assert accepted.status_code == 200, accepted.text
+    assert _registered_callables(repo_id) == {
+        (int(parser["id"]), "parse", 1, 2),
+        (int(parser["id"]), "Parser.normalize", 4, 6),
+        (int(helper["id"]), "helper", 1, 2),
+    }
+    stored = client.get(f"{base}/analysis-results?queue_item_id={claim['id']}")
+    assert stored.status_code == 200, stored.text
+    rows = stored.json()
+    rows = rows.get("items", rows) if isinstance(rows, dict) else rows
+    assert [ref["qualified_name"] for ref in rows[0]["callable_refs"]] == [
+        "parse",
+        "helper",
+    ]
+
+    requalified = _post_structural_callables(
+        client,
+        engagement_key,
+        repo_id,
+        files,
+        {
+            int(parser["id"]): [
+                _structural_callable(
+                    "parse", start_line=1, end_line=2, qualified_name="Parser.parse"
+                ),
+                method,
+            ],
+            int(helper["id"]): [helper_fn],
+        },
+    )
+    assert requalified.status_code == 200, requalified.text
+    assert (int(parser["id"]), "Parser.parse", 1, 2) in _registered_callables(repo_id)
+    connection = sqlite3.connect(str(db_module.database_path()))
+    try:
+        linked = connection.execute(
+            """
+            SELECT callables.qualified_name
+            FROM code_analysis_result_callables AS links
+            JOIN code_structural_callables AS callables ON callables.id = links.callable_id
+            ORDER BY links.ordinal
+            """
+        ).fetchall()
+    finally:
+        connection.close()
+    assert [row[0] for row in linked] == ["Parser.parse", "helper"]
+
+
+def test_structural_republication_refuses_ambiguous_receipt_bound_requalification(
+    client, isolate_settings
+) -> None:
+    engagement_key = "2026-11-04-ambiguous-requalification"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo = _create_repo(client, engagement_key, repo_key="ambiguous-requalification-repo")
+    repo_id = int(repo["id"])
+    files = _create_files(client, engagement_key, repo_id)
+    parser = next(row for row in files if row["file_path"] == "src/parser.py")
+    first = _structural_callable("t", start_line=1, end_line=1, qualified_name="A.t")
+    second = _structural_callable("t", start_line=1, end_line=1, qualified_name="B.t")
+    _publish_structural_callables(
+        client, engagement_key, repo_id, files, {int(parser["id"]): [first, second]}
+    )
+    _classify_file(client, engagement_key, int(parser["id"]), "critical", 100)
+    claim = _claim_file_for_analysis(client, engagement_key, int(parser["id"]))
+    receipt = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-results",
+        json=_owned(
+            claim,
+            queue_item_id=claim["id"],
+            disposition="clean",
+            callable_refs=[
+                {"file_id": parser["id"], **first},
+                {"file_id": parser["id"], **second},
+            ],
+            reviewed_spans=[],
+            evidence="Both one-line methods were reviewed against the sealed source",
+            cwe_coverage=_network_input_coverage(default_effort=80),
+        ),
+    )
+    assert receipt.status_code == 201, receipt.text
+    before = _registered_callables(repo_id)
+
+    refused = _post_structural_callables(
+        client,
+        engagement_key,
+        repo_id,
+        files,
+        {
+            int(parser["id"]): [
+                _structural_callable("t", start_line=1, end_line=1, qualified_name="C.t")
+            ]
+        },
+    )
+    assert refused.status_code == 409, refused.text
+    assert "A.t" in refused.json()["detail"]
+    assert "B.t" in refused.json()["detail"]
+    assert _registered_callables(repo_id) == before
 
 
 def test_complete_structural_publication_rejects_callable_registry_shortfall(
