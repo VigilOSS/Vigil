@@ -15,6 +15,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from assess.commands import dispatch
+from assess.commands.code_dispatch import _dispatch_scratch_relative
 from assess.commands.dispatch._shared import _load_json_arg
 from assess.commands.dispatch.handoff_renderer import _render_handoff
 from assess.lib.client import AssessError
@@ -1329,6 +1330,11 @@ def _validate_prompt_context(source: dict, *, allow_saved_metadata: bool) -> dic
     if not allow_saved_metadata and reserved.intersection(source):
         print("agent start: helper-owned packet metadata cannot be supplied in public prompt context; use --packet-file for captured assignment text", file=sys.stderr)
         raise SystemExit(1)
+    unknown = sorted(set(source) - {*_PROMPT_CONTEXT_FIELDS, "queue_item_ids", "prior_agent_id", "lane_file"})
+    if not allow_saved_metadata and unknown:
+        hints = {"task": "task (pass the objective with --task, or longer assignment text with --packet-file)"}
+        print("agent start: unknown prompt context keys: " + ", ".join(hints.get(key, key) for key in unknown), file=sys.stderr)
+        raise SystemExit(1)
     assignment = source.get("assignment_source")
     if assignment is not None and (not isinstance(assignment, dict)
             or not isinstance(assignment.get("text"), str)
@@ -1404,7 +1410,7 @@ def _lane_file_manifest(path: Path, *, client, source_identity: list[str]) -> li
     if not stripped:
         print("agent start: lane_file is empty", file=sys.stderr)
         raise SystemExit(1)
-    rows: list[tuple[str, int, int | None]]
+    rows: list[tuple[str, int, int | None, str | None]]
     if resolved.suffix.lower() == ".json" or stripped.startswith(("[", "{")):
         try:
             data = json.loads(stripped)
@@ -1476,7 +1482,10 @@ def _lane_file_manifest(path: Path, *, client, source_identity: list[str]) -> li
                     or type(loc) is not int or loc < 0):
                 print("agent start: unsupported, stale, or cross-repository lane-file JSON; queue items need matching repo identity/generation and current backend file facts", file=sys.stderr)
                 raise SystemExit(1)
-            rows.append((file_path.strip(), loc, item["id"]))
+            lease_token = backend_row.get("lease_token")
+            scratch = (_dispatch_scratch_relative(queue_item_id=item["id"], lease_token=lease_token).as_posix()
+                       if isinstance(lease_token, str) and lease_token else None)
+            rows.append((file_path.strip(), loc, item["id"], scratch))
     else:
         paths = [line.strip() for line in raw.splitlines() if line.strip()]
         if not paths or len(paths) > 5000 or any("\x00" in item for item in paths) or len(set(paths)) != len(paths):
@@ -1506,19 +1515,19 @@ def _lane_file_manifest(path: Path, *, client, source_identity: list[str]) -> li
         if missing:
             print("agent start: lane_file paths missing from selected repository: " + ", ".join(missing[:20]), file=sys.stderr)
             raise SystemExit(1)
-        rows = [(item, indexed[item], None) for item in paths]
+        rows = [(item, indexed[item], None, None) for item in paths]
     if len(rows) > 5000 or len({item[0] for item in rows}) != len(rows):
         print("agent start: lane_file must contain at most 5000 distinct file paths", file=sys.stderr)
         raise SystemExit(1)
     directories: dict[str, list[int]] = {}
-    for file_path, loc, _ in rows:
+    for file_path, loc, *_ in rows:
         parent = str(Path(file_path).parent)
         directories.setdefault("." if parent == "." else parent, []).append(loc)
     directory_lines = [f"  - {json.dumps(directory, ensure_ascii=False)}: {len(locs)} item(s), {sum(locs)} LOC" for directory, locs in sorted(directories.items())]
-    file_lines = [f"  - {json.dumps(file_path, ensure_ascii=False)} ({loc} LOC" + (f"; queue item {item_id}" if item_id is not None else "") + ")" for file_path, loc, item_id in rows[:25]]
+    file_lines = [f"  - {json.dumps(file_path, ensure_ascii=False)} ({loc} LOC" + (f"; queue item {item_id}" if item_id is not None else "") + (f"; scratch_dir {json.dumps(scratch)}" if scratch else "") + ")" for file_path, loc, item_id, scratch in rows[:25]]
     return [
         f"Lane file manifest (resolved from {json.dumps(str(resolved), ensure_ascii=False)}; file facts):",
-        f"- items: {len(rows)}; total LOC: {sum(loc for _, loc, _ in rows)}",
+        f"- items: {len(rows)}; total LOC: {sum(loc for _, loc, *_ in rows)}",
         "- directory breakdown:",
         *directory_lines[:25],
         *([f"  - {len(directory_lines) - 25} more directories omitted"] if len(directory_lines) > 25 else []),

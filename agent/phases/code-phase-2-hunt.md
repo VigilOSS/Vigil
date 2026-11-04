@@ -150,8 +150,8 @@ one oversized mixed batch to a single agent.
   principals -- sources the hunter should NOT treat as attacker-controlled, and the single biggest
   false-positive suppressor). Pass the complete bound envelope and add a 3-8 bullet summary for
   orientation; do not replace the envelope with those bullets.
-- **Lease scratch directory** -- pass the `scratch_dir` that `code-dispatch fetch` returned for
-  this lease, and tell the hunter to write temporary files there in preference to any scratch
+- **Lease scratch directory** -- pass the `code-dispatch fetch` JSON as prompt-context `lane_file`
+  so the packet names each leased item's `scratch_dir`, and tell the hunter to write temporary files there in preference to any scratch
   location its own client harness offers. The lease namespace is what keeps two hunters working the
   same repository from overwriting each other; a client-provided scratch path is shared per session,
   not per lease. Inside any directory the client harness also writes to, require lane-unique

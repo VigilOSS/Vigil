@@ -245,3 +245,37 @@ def test_invalid_lane_file_is_rejected_before_dispatch_persistence(
     with pytest.raises(SystemExit):
         agent._start(args)
     assert persisted == []
+
+
+def test_unknown_prompt_context_keys_are_rejected_by_name(capsys):
+    fields = {field: "none" for field in agent._PROMPT_CONTEXT_FIELDS}
+    fields.update({"task": "full objective", "lease_scratch_dir": "tools/x"})
+    args = argparse.Namespace(prompt_context=fields, prompt_context_json=None)
+    with pytest.raises(SystemExit):
+        agent._load_prompt_context(args)
+    err = capsys.readouterr().err
+    assert "lease_scratch_dir" in err
+    assert "task" in err and "--task" in err and "--packet-file" in err
+
+
+def test_lane_file_manifest_renders_leased_item_scratch_dir(tmp_path: Path):
+    from assess.commands.code_dispatch import _dispatch_scratch_relative
+
+    lane_file = tmp_path / "lane.json"
+    lane_file.write_text(json.dumps([
+        {"id": 44, "repo_generation": 3, "repo": {"id": 7}, "file": {"file_path": "src/a.py", "loc": 12}},
+    ]), encoding="utf-8")
+
+    class BackendClient:
+        def get(self, endpoint):
+            if endpoint == "code/analysis-queue?repo_id=7&limit=1000&offset=0":
+                return {"items": [{"id": 44, "file_path": "src/a.py", "repo_generation": 3, "repo_id": 7,
+                                   "status": "processing", "lease_token": "tok-1"}], "has_more": False}
+            if endpoint == "code/files?repo_id=7&limit=10000&offset=0":
+                return {"items": [{"file_path": "src/a.py", "loc": 12}], "has_more": False}
+            raise AssertionError(f"unexpected endpoint: {endpoint}")
+
+    rendered = "\n".join(agent._lane_file_manifest(
+        lane_file, client=BackendClient(), source_identity=["repo_id: 7", "repo_generation: 3"],
+    ))
+    assert _dispatch_scratch_relative(queue_item_id=44, lease_token="tok-1").as_posix() in rendered
