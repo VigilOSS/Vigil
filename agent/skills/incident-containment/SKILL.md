@@ -56,7 +56,7 @@ proposal record is the audit gate, not a comment field.
 | `vigil assess artifact register` | Register containment-proof artifacts (`kind=containment_proof`) — screenshots, command output, ticket links |
 | `vigil assess host-exec` | Out-of-band evidence pulls during eradication / recovery (e.g., post-containment verification that the session is actually revoked) |
 | `vigil assess finding update` | Move finding to `workflow_status=contained | eradicated | recovered` after each phase lands |
-| `vigil assess agent handoff --from-json <path>` | Close the L4 dispatch with a handoff naming all executed proposals and any remaining gaps |
+| `vigil assess agent handoff --agent-id <agent-id> --from-json <path>` | Close the L4 dispatch with a handoff naming all executed proposals and any remaining gaps |
 
 Forbidden from L4 without an approved proposal: direct platform CLI
 (`gam user X signout`, `gcloud iam ... disable`, `crowdstrike isolate-host`).

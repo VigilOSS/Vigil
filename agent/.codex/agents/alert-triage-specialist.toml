@@ -131,7 +131,7 @@ vigil assess finding record alert-triage-specialist <finding-json> --agent-id <y
 ## L1→L2 Handoff Contract
 
 For every alert that is **not** a mechanical-FP proposal, emit the L1→L2 handoff JSON via
-`vigil assess agent handoff --from-json <path>` with the fields required by
+`vigil assess agent handoff --agent-id <agent-id> --from-json <path>` with the fields required by
 `agent/shared-constraints-blue.md` "Dispatch Handoff Conventions". Required
 blue-specific fields:
 
@@ -205,7 +205,7 @@ Before your dispatch returns, run in this order:
    tenant_ref_paths_consulted[]}`. The disposition on this row is `null` for
    dispatch-to-L2 and `false_positive_proposed` for L3 review.
 
-6. **Emit the handoff JSON** via `vigil assess agent handoff --from-json <path>`
+6. **Emit the handoff JSON** via `vigil assess agent handoff --agent-id <agent-id> --from-json <path>`
    using the artifact IDs returned by `register` in `evidence_refs[]`.
 
 7. **Self-check.** `vigil assess agent render-handoff <agent_id>` — exit only

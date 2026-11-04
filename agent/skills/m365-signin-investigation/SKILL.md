@@ -712,7 +712,7 @@ Sequential. Do not declare the dispatch complete until all five land.
 
 5. **Emit the handoff JSON** to
    `$ENGAGEMENT_DIR/handoffs/<dispatch-id>.json` and exit with
-   `vigil assess agent handoff --from-json <path>`.
+   `vigil assess agent handoff --agent-id <agent-id> --from-json <path>`.
 
 If any step blocks (missing scope, missing tenant ref, missing Exchange
 role group, missing certificate), emit a `blocked` handoff naming the

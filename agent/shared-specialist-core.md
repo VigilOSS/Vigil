@@ -203,7 +203,7 @@ the findings table (`vigil assess finding record`), intel rows in `intel_*` tabl
 credentials and attack chains in their tables, and the cross-cutting handoff
 (summary / coverage gaps / next steps / runtime issues / working artifacts /
 open questions / specialty extras) in `assessment_dispatch_handoffs`
-(`vigil assess agent handoff --from-json <path>`).
+(`vigil assess agent handoff --agent-id <agent-id> --from-json <path>`).
 
 The operator queries those tables through bounded primitives — `resume-brief`,
 `render-handoff <agent-id>`, `artifact search/get`, `fetch findings`,

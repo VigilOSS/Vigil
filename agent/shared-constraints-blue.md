@@ -301,7 +301,7 @@ Every blue specialist dispatch closes with a handoff JSON conforming to
 `agent/references/runtime-guides/handoff-schema.md`, recorded via:
 
 ```bash
-vigil assess agent handoff --from-json <path>
+vigil assess agent handoff --agent-id <agent-id> --from-json <path>
 ```
 
 Blue handoffs include the following fields beyond the cross-mode baseline:

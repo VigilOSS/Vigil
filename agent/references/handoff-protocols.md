@@ -15,7 +15,7 @@ governed by `exploit_policy` in scope.json and belongs after Verify (Phase 5), i
 Every specialist writes a structured handoff before its dispatch returns:
 
 ```bash
-vigil assess agent handoff --from-json <handoff-json>
+vigil assess agent handoff --agent-id <agent-id> --from-json <handoff-json>
 ```
 
 The handoff captures summary, coverage gaps, next steps, runtime issues, working

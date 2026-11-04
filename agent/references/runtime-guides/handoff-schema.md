@@ -1,5 +1,5 @@
 ---
-description: Structured handoff schema written by every specialist via vigil assess agent handoff --from-json <path> — fields, length caps, per-role examples, CLI usage
+description: Structured handoff schema written by every specialist via vigil assess agent handoff --agent-id <agent-id> --from-json <path> — fields, length caps, per-role examples, CLI usage
 ---
 
 # Specialist Handoff Schema
@@ -473,7 +473,7 @@ cat > /tmp/handoff-recon-a3f9.json <<'JSON'
 }
 JSON
 
-vigil assess agent handoff --from-json /tmp/handoff-recon-a3f9.json
+vigil assess agent handoff --agent-id <agent-id> --from-json /tmp/handoff-recon-a3f9.json
 # Self-check: confirm the row is readable before exiting (404 → agent_id mismatch)
 vigil assess agent render-handoff a3f9
 ```
@@ -500,7 +500,7 @@ the next dispatch's prompt.
 
 ## Checkpointing — call `vigil assess agent handoff` as you work
 
-`vigil assess agent handoff --from-json <path>` is idempotent: every
+`vigil assess agent handoff --agent-id <agent-id> --from-json <path>` is idempotent: every
 call against the same `agent_id` either inserts the row or replaces the prior
 payload. Call it after each major step in your methodology — not just at the
 end.

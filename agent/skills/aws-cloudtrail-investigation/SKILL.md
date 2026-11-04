@@ -624,7 +624,7 @@ land in `activity_entries`.
 
 L2 dispatch closes with a handoff JSON at
 `$ENGAGEMENT_DIR/ir/handoffs/<dispatch-id>.json` submitted via
-`vigil assess agent handoff --from-json <path>`. Required shape:
+`vigil assess agent handoff --agent-id <agent-id> --from-json <path>`. Required shape:
 
 ```json
 {
@@ -707,7 +707,7 @@ a malformed dispatch the verifier rejects.
 5. **Emit the handoff JSON.**
 
    ```bash
-   vigil assess agent handoff --from-json $ENGAGEMENT_DIR/ir/handoffs/<dispatch-id>.json
+   vigil assess agent handoff --agent-id <agent-id> --from-json $ENGAGEMENT_DIR/ir/handoffs/<dispatch-id>.json
    ```
 
 If the dispatch is `blocked` (missing tenant ref, missing Athena

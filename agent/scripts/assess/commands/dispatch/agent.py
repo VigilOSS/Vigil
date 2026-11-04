@@ -592,6 +592,14 @@ def _build_handoff_payload(args) -> dict:
     if not str(loaded.get("agent_id") or "").strip():
         print("agent handoff --from-json: agent_id is required", file=sys.stderr)
         sys.exit(1)
+    expected = getattr(args, "agent_id", None)
+    if loaded["agent_id"] != expected:
+        print(
+            f"agent handoff: payload agent_id {loaded['agent_id']!r} does not match --agent-id {expected!r}; "
+            "write your own handoff file rather than re-sending another dispatch's",
+            file=sys.stderr,
+        )
+        sys.exit(1)
     # Every create payload and every partial-update patch passes through here,
     # so one check covers both writes. The summary is never trimmed or split:
     # that would ship text the specialist did not author.

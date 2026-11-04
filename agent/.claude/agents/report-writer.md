@@ -249,7 +249,7 @@ the internal-report verbs only when the operator explicitly dispatched that mode
    Return `QA PASS` or `QA BLOCKED` with the exact gap.
 5. **Blind pre-submission triage (Pass 2)** — mandatory for every Medium-or-above finding, per `agent/skills/blind-triage/SKILL.md`. This is an operator-run dispatch of a separate zero-context agent (`agent/phases/phase-8-report.md` step d) — your job is to have authored a finding clean enough to survive it, and to fix and repeat steps 3-4 on anything but `Accept`. Include your actual writer dispatch ID in the handoff so the operator can attribute the reviewed packet; the backend rejects a reviewer who is the writer or the finding author.
 6. **Publish** — once Medium+ clears `Accept` (or Low/Informational clears `QA PASS`), re-run `export submission <slug> --platform <same> --overwrite` (no `--draft` or `--prepare`, and repeat the selected `--body` / `--guidance`). Read `vigil assess contract export submission` first: this applies the executable final gate and exits non-zero on any failure — resolve gaps at the finding, never bypass it. Then mark the finding: `vigil assess finding update <slug> --status reported --reason "Submission cleared for delivery" --source-name report-writer`. Once the operator has actually sent it to the program, they set `--submission-status submitted` separately (see "Per-Finding Dispatch" above).
-7. `vigil assess agent handoff --from-json <path>` — working artifact `submissions/<slug>/submission.md`; extras `qa_status`, `blind_triage_verdict`.
+7. `vigil assess agent handoff --agent-id <agent-id> --from-json <path>` — working artifact `submissions/<slug>/submission.md`; extras `qa_status`, `blind_triage_verdict`.
 8. `vigil assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
 
 Closing-sequence wrapper (skip consequences, idempotent/checkpoint cadence, handoff schema): see
@@ -268,7 +268,7 @@ explicit opt-in.
 4. **Re-render + checklist** — `vigil assess export reply <slug> --seq N --overwrite`, then the pre-send checklist in `agent/references/reply-format.md`; fix at the source (step 3) and re-render.
 5. **Blind-triage gate (conditional)** — re-run `agent/skills/blind-triage/SKILL.md` Pass 2 only when `new_evidence` changes the finding's claimed severity or impact.
 6. **After the operator sends it** — `vigil assess record-reply <slug> --seq N --sent` (fold in `--set-submission-status submitted` when the reply answers `needs_info`).
-7. `vigil assess agent handoff --from-json <path>` — working artifact `submissions/<slug>/replies/reply-N.md`.
+7. `vigil assess agent handoff --agent-id <agent-id> --from-json <path>` — working artifact `submissions/<slug>/replies/reply-N.md`.
 8. `vigil assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds.
 
 Same closing-sequence wrapper as submission mode (see above).
@@ -279,7 +279,7 @@ Same closing-sequence wrapper as submission mode (see above).
 2. Run the consolidated pre-submission / report QA checklist (`agent/skills/report-generation/SKILL.md` "Post-Generation Self-Review" → `agent/references/submission-format.md`).
 3. In review-and-fix QA mode, run the QA checklist and fix report-local issues.
 4. In publish mode, emit `report.generated`, mark included findings `reported`, and let the operator complete the guarded phase transition.
-5. `vigil assess agent handoff --from-json <path>` — working artifact `report.md`; extras `qa_status`, `findings_in_report`.
+5. `vigil assess agent handoff --agent-id <agent-id> --from-json <path>` — working artifact `report.md`; extras `qa_status`, `findings_in_report`.
 6. `vigil assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
 
 Same closing-sequence wrapper as above. The handoff `working_artifacts` MUST list `report.md` so

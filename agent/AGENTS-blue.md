@@ -515,7 +515,7 @@ environment inheriting only what the operator explicitly hands it.
 Specialists write a structured handoff before returning:
 
 ```bash
-vigil assess agent handoff --from-json <path>   # using the agent_id from Runtime Identity
+vigil assess agent handoff --agent-id <agent-id> --from-json <path>   # using the agent_id from Runtime Identity
 vigil assess agent render-handoff <agent_id>    # self-check; exit only after render succeeds
 ```
 

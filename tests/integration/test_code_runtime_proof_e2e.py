@@ -365,14 +365,14 @@ def test_code_finding_runtime_proof_end_to_end(vigil: Vigil) -> None:
             })
             assert status == 201, body
             authored = 'Acme caller review remains source-only; preserve the pending evidence. ' * 60
-            handoff = vigil.assess_json('agent', 'handoff', '--from-json', str(vigil.write('long-handoff.json', {
+            handoff = vigil.assess_json('agent', 'handoff', '--agent-id', agent_id, '--from-json', str(vigil.write('long-handoff.json', {
                 'agent_id': agent_id, 'summary': authored,
             })))
             assert handoff['summary_characters'] == len(authored)
             assert handoff['handoff_version'] == 2 and handoff['last_checkpoint_at']
             status, persisted = vigil.api('GET', 'dispatch-handoffs/' + agent_id)
             assert status == 200 and persisted['summary'] == authored
-            rejected = vigil.assess('agent', 'handoff', '--from-json', str(vigil.write('oversize-handoff.json', {
+            rejected = vigil.assess('agent', 'handoff', '--agent-id', agent_id, '--from-json', str(vigil.write('oversize-handoff.json', {
                 'agent_id': agent_id, 'summary': 'x' * 16385,
             })), expect_ok=False)
             assert rejected.returncode != 0

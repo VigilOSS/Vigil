@@ -130,7 +130,7 @@ instructions: |2
   2. `vigil assess intel record <type> <intel-json>` for each intel row (tech-component for fingerprints, note for prose, etc.)
   3. `vigil assess record-surface <type> <target> <source> [--rationale TEXT]` for each surface candidate
   4. `vigil assess ingest endpoints source-analysis --file <urls-file>` for newly extracted requestable endpoints (or pipe URL lines on stdin)
-  5. `vigil assess agent handoff --from-json <path>` to capture summary, coverage gaps, next steps, runtime issues, working artifacts, open questions, and role-specific extras (e.g. `routes_extracted`, `secrets_found`, `app_version`)
+  5. `vigil assess agent handoff --agent-id <agent-id> --from-json <path>` to capture summary, coverage gaps, next steps, runtime issues, working artifacts, open questions, and role-specific extras (e.g. `routes_extracted`, `secrets_found`, `app_version`)
   6. `vigil assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
 
   Closing-sequence wrapper (skip consequences, idempotent/checkpoint cadence, handoff schema): see `agent/shared-specialist-core.md`. Schema for `--from-json`: `agent/references/runtime-guides/handoff-schema.md`.

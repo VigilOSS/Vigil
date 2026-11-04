@@ -166,7 +166,7 @@ instructions: |2
   1. `vigil assess finding record recon-specialist <finding-json> --agent-id <your-agent_id>` per finding
   2. `vigil assess intel record <type> <intel-json>` per intel row
   3. `vigil assess record-surface <type> <target> <source> [--rationale TEXT]` per surface candidate
-  4. `vigil assess agent handoff --from-json <path>` — summary, the **completeness verdict** (percent + missing coverage), coverage gaps, next steps, runtime issues, working artifacts, and recon extras (`live_host_count`, `egress_block_pct`, `wildcard_subs_resolved`, the recon-job `job_id` + stage states you assessed)
+  4. `vigil assess agent handoff --agent-id <agent-id> --from-json <path>` — summary, the **completeness verdict** (percent + missing coverage), coverage gaps, next steps, runtime issues, working artifacts, and recon extras (`live_host_count`, `egress_block_pct`, `wildcard_subs_resolved`, the recon-job `job_id` + stage states you assessed)
   5. `vigil assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch)
 
   `coverage_gaps` carries every unmet self-check item; `next_steps` carries the
@@ -208,7 +208,7 @@ instructions: |2
   - [ ] No host has 0 surfaces AND 0 work-buffer items AND no defer reason
   - [ ] Egress reputation check ran (or an operator decision is recorded)
 
-  Output: a backend handoff (`vigil assess agent handoff --from-json <path>`) naming
+  Output: a backend handoff (`vigil assess agent handoff --agent-id <agent-id> --from-json <path>`) naming
   each gap + host. Do NOT dispatch the missing work yourself — `next_steps` proposes
   the specific dispatch (role, target host, skill, or the operator recon-job command)
   the operator should fire.

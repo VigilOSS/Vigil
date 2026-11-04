@@ -15226,6 +15226,26 @@ def test_dispatch_record_handoff_from_json_requires_agent_id_before_client(
     assert "agent_id is required" in err
 
 
+def test_dispatch_record_handoff_refuses_payload_for_another_agent_before_client(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    module = _load_dispatch_module()
+    payload_path = tmp_path / "handoff.json"
+    payload_path.write_text(
+        json.dumps({"agent_id": "ch-2", "agent_role": "code-vuln-hunter", "summary": "sibling"}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        module.agent._record_handoff(
+            _dispatch_args("record-handoff", from_json=str(payload_path), agent_id="ch-1")
+        )
+
+    assert exc_info.value.code == 1
+    err = capsys.readouterr().err
+    assert "'ch-2'" in err and "'ch-1'" in err
+
+
 def test_dispatch_register_writes_payload(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -15834,6 +15854,7 @@ def test_dispatch_record_handoff_from_json(
         monkeypatch,
         "record-handoff",
         from_json=str(payload_path),
+        agent_id="HF-CLI-1",
     )
     payload = fake.handoff_response
     assert payload["agent_id"] == "HF-CLI-1"
@@ -15867,7 +15888,7 @@ def test_dispatch_handoff_can_patch_status_without_replacing_summary(
         '{"agent_id":"HF-PROMOTE","handoff_status":"ready"}\n',
         encoding="utf-8",
     )
-    module.agent._record_handoff(SimpleNamespace(from_json=str(payload_path)))
+    module.agent._record_handoff(SimpleNamespace(from_json=str(payload_path), agent_id="HF-PROMOTE"))
 
     row = fake.handoffs_by_id["HF-PROMOTE"]
     assert row["handoff_status"] == "ready"
@@ -15933,7 +15954,7 @@ def test_dispatch_record_handoff_is_idempotent_for_repeat_calls(
             "max_lines": 40,
             "include_evidence": False,
             "engagement_dir": None,
-            "agent_id": None,
+            "agent_id": "HF-CHECKPOINT",
             "agent_role": None,
             "task": None,
             "application_unit_id": None,

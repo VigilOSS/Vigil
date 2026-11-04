@@ -462,7 +462,7 @@ Run in order at the end of the L2 dispatch:
 4. **Emit the handoff JSON** to `/tmp/handoff.json` and record it:
 
    ```bash
-   vigil assess agent handoff --from-json /tmp/handoff.json
+   vigil assess agent handoff --agent-id <agent-id> --from-json /tmp/handoff.json
    ```
 
 ## Common Failure Modes

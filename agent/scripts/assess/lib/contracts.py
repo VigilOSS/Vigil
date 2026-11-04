@@ -1733,7 +1733,7 @@ def _dispatch_root_contract() -> CommandContract:
             "vigil assess agent start --role <role> --task \"...\" --dispatch-mode <mode> --skills <skills> (--rate-budget <authored> | --no-target-traffic) [--prompt-context-json <context.json>] [--packet-file <assignment.md>]",
             "vigil assess agent start --role exploit-developer --assessment-mode code|web --task \"...\" --dispatch-mode deep-manual --skills <skills> (--rate-budget <authored> | --no-target-traffic) (--assessment-mode is required for exploit-developer and source-analyzer)",
             "vigil assess agent bind-client-handle <agent-id> --client <client> --session-namespace <scope> --handle <session-id>",
-            "vigil assess agent handoff --from-json <handoff.json>",
+            "vigil assess agent handoff --agent-id <agent-id> --from-json <handoff.json>",
             "vigil assess agent close <agent-id>",
             "vigil assess agent done <agent-id> --status failed",
             "vigil assess agent reconcile-stale --dry-run",
@@ -2243,9 +2243,10 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
             ),
             schema_name="backend handoff-record (POST /dispatch-handoffs, idempotent upsert)",
             preferred_invocations=(
-                "vigil assess agent handoff --from-json <handoff.json>",
+                "vigil assess agent handoff --agent-id <agent-id> --from-json <handoff.json>",
             ),
             author_supplied_fields=(
+                "--agent-id <your dispatch agent_id>; the payload's agent_id must match it, so a re-sent handoff file written by another dispatch is refused",
                 "--from-json <path|-> containing the complete structured handoff",
                 "agent_id, agent_role, and summary (target about 2000 characters, hard maximum 16384; required when creating a handoff)",
                 "structured arrays: next_steps / coverage_gaps / runtime_issues / working_artifacts / open_questions",
@@ -2269,7 +2270,7 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
             examples=(
                 {
                     "command": (
-                        "vigil assess agent handoff --from-json handoff.json"
+                        "vigil assess agent handoff --agent-id <agent-id> --from-json handoff.json"
                     ),
                 },
             ),

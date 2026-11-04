@@ -123,7 +123,7 @@ Schema, per-role examples, and field-by-field guidance:
 
 ```bash
 # Specialist writes the handoff at the end of its dispatch.
-vigil assess agent handoff --from-json /tmp/handoff-recon-a3f9.json
+vigil assess agent handoff --agent-id <agent-id> --from-json /tmp/handoff-recon-a3f9.json
 
 # Operator renders the bounded markdown blob into the next dispatch's prompt.
 vigil assess agent render-handoff recon_a3f9

@@ -206,7 +206,7 @@ instructions: |2
      ```
      For the post-execution case (rare in-dispatch), use `action=containment_executed` with `metadata.containment_action` carrying action, target, proposal_id, command_run_id, and proof_artifact_id.
 
-  6. **Emit the handoff JSON** via `vigil assess agent handoff --from-json <path>`. Required fields:
+  6. **Emit the handoff JSON** via `vigil assess agent handoff --agent-id <agent-id> --from-json <path>`. Required fields:
      - `disposition` — `null` (L4 never sets `verification_status`)
      - `evidence_refs[]` — artifact IDs for every pre-WRITE evidence pull and every containment-proof artifact this dispatch produced
      - `coverage_gaps[]` — every gap that affects blast-radius assessment (missing delegate-mapping data, tenant-policy entry not yet in the tenant ref, retention-expired pre-WRITE log)

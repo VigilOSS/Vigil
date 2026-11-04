@@ -590,7 +590,7 @@ Do NOT use `grep -P` (Perl regex) -- BSD grep on macOS genuinely lacks it. Use `
 ## Handoff Reference
 
 See `agent/references/handoff-protocols.md` for the shared agent-to-agent handoff mechanics --
-Closing Sequence (`vigil assess agent handoff --from-json`), the handoff schema, `render-handoff`,
+Closing Sequence (`vigil assess agent handoff --agent-id <agent-id> --from-json`), the handoff schema, `render-handoff`,
 and the Skill Passing Protocol -- unchanged for code-track specialists despite that doc's
 per-phase "Returns" sections being written for the web track.
 

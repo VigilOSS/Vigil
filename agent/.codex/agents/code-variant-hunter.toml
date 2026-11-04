@@ -118,7 +118,7 @@ Before your dispatch returns, use the sequence selected by Operational Mode Gate
 1. Deduplicate each candidate against the main hunt, then run `vigil assess finding record
    code-variant-hunter <finding-json>` for each net-new finding. Use the skill's Step 4 `links` array entry only for an actual canonical current parent; independent same-class
    findings use `related`, and unparented discoveries omit child ancestry.
-2. `vigil assess agent handoff --from-json <path>` with `non-covering discovery` in the summary,
+2. `vigil assess agent handoff --agent-id <agent-id> --from-json <path>` with `non-covering discovery` in the summary,
    historical shapes searched, findings recorded, dedup decisions, search gaps, and next steps.
    Record no `code-record variant-check` receipts because this pass does not prove assigned-file
    coverage.
@@ -137,7 +137,7 @@ Before your dispatch returns, use the sequence selected by Operational Mode Gate
    `evidence_ref`, and the exact canonical sorted `parent_finding_slugs` set registered on the
    dispatch. Repeat that frozen set because the verifier runs in parallel and a live-state rebuild
    would detach the receipt from its dispatch. Preserve the returned receipt IDs/fingerprints.
-3. `vigil assess agent handoff --from-json <path>` with parent findings, variants found, files
+3. `vigil assess agent handoff --agent-id <agent-id> --from-json <path>` with parent findings, variants found, files
    scanned, receipt IDs, coverage gaps, next steps, runtime issues, artifacts, and open questions.
 4. `vigil assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 →
    `agent_id` mismatch).

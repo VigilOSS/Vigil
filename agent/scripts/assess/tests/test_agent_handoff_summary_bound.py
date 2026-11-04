@@ -59,7 +59,7 @@ def calls(monkeypatch, tmp_path):
 def _args(tmp_path, payload: dict) -> SimpleNamespace:
     path = tmp_path / "handoff.json"
     path.write_text(json.dumps(payload), encoding="utf-8")
-    return SimpleNamespace(from_json=str(path), engagement_dir=str(tmp_path))
+    return SimpleNamespace(from_json=str(path), engagement_dir=str(tmp_path), agent_id=payload.get("agent_id"))
 
 
 def test_over_long_summary_on_a_create_payload_fails_before_any_request(

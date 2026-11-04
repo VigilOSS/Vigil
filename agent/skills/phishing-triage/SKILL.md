@@ -712,7 +712,7 @@ Run these four steps in order before returning the handoff JSON:
    Repeat `--intel <intel-id>` in one invocation to attach several rows.
 
 5. **Emit the handoff JSON** via `vigil assess agent handoff
-   --from-json /tmp/phishing-triage-handoff.json`. Shape per Output
+   --agent-id <your dispatch agent_id> --from-json /tmp/phishing-triage-handoff.json`. Shape per Output
    Contract above. `next_specialist` routes to:
    - `verifier` for any disposition recommendation with met
      evidence rigor

@@ -62,7 +62,7 @@ are off-limits — those are L2 verbs.
 - `vigil assess log` — record the triage decision (dispatched or
   false-positive proposed) in `activity_entries` with the actor/target/platform fields
   pulled out so FTS can find them later.
-- `vigil assess agent handoff --from-json <path>` — close the L1 dispatch
+- `vigil assess agent handoff --agent-id <agent-id> --from-json <path>` — close the L1 dispatch
   with a handoff JSON that names the downstream skill, tenant refs
   consulted, mechanical-FP screen result, and confidence on the
   classification.
@@ -311,7 +311,7 @@ Run all four in order:
    record it:
 
    ```bash
-   vigil assess agent handoff --from-json /tmp/handoff.json
+   vigil assess agent handoff --agent-id <agent-id> --from-json /tmp/handoff.json
    ```
 
 4. **One-screen TSV summary** to stdout for the operator (see Output

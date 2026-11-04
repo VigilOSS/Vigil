@@ -83,7 +83,7 @@ investigator's annotations are inputs, never trusted on their own.
 - `vigil assess artifact register` — register devil's-advocate research
   notes, voting-request artifacts, and any new evidence the verifier
   pulled with `kind=ir_evidence`.
-- `vigil assess agent handoff --from-json <path>` — close the verifier
+- `vigil assess agent handoff --agent-id <agent-id> --from-json <path>` — close the verifier
   dispatch with `disposition`, `evidence_refs`, `coverage_gaps`, and the
   voting outcome (if any).
 

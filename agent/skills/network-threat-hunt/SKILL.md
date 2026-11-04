@@ -91,7 +91,7 @@ IOCs do not enter this engagement's evidence tree.
   `notes/scratch/`.
 - `vigil assess log` — activity row with `--metadata-inline` carrying
   network fields (see Activity Log Convention).
-- `vigil assess agent handoff --from-json <path>` — close dispatch.
+- `vigil assess agent handoff --agent-id <agent-id> --from-json <path>` — close dispatch.
 
 ### SIEMs
 
@@ -547,7 +547,7 @@ silent gap.
    ```
 
 5. **Emit the handoff JSON:**
-   `vigil assess agent handoff --from-json /tmp/network_handoff.json`.
+   `vigil assess agent handoff --agent-id <agent-id> --from-json /tmp/network_handoff.json`.
 
 ## Common Failure Modes
 

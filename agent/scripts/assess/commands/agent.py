@@ -214,6 +214,7 @@ def register(subparsers) -> None:
     handoff = actions.add_parser(
         "handoff", help="Create or update a handoff from JSON.", allow_abbrev=False
     )
+    handoff.add_argument("--agent-id", required=True, help="Your dispatch agent_id; the payload's agent_id must match it.")
     handoff.add_argument("--from-json", required=True)
 
     render = actions.add_parser(
@@ -1264,7 +1265,7 @@ def _dispatch_prompt(
               if prompt_context.get("assignment_source") else []),
             "",
             "## Handoff",
-            "handoff: write the JSON contract, then run `vigil assess agent handoff --from-json <path>`",
+            f"handoff: write the JSON contract, then run `vigil assess agent handoff --agent-id {payload.get('agent_id')} --from-json <path>`",
         ]
     )
 

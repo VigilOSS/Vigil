@@ -233,7 +233,7 @@ Before your dispatch returns, run in this order:
      --metadata-inline '{"tier":"L2","finding_slug":"<slug>","platform":"<platform>","confidence":"<low|medium|high>"}'
    ```
 
-6. **Emit the handoff JSON** via `vigil assess agent handoff --from-json <path>`. `evidence_refs[]` is the artifact IDs returned by `register`. `disposition=null`. `cross_platform_correlation_notes` is non-empty when `platforms.length > 1`. `coverage_gaps[]` names every open question.
+6. **Emit the handoff JSON** via `vigil assess agent handoff --agent-id <agent-id> --from-json <path>`. `evidence_refs[]` is the artifact IDs returned by `register`. `disposition=null`. `cross_platform_correlation_notes` is non-empty when `platforms.length > 1`. `coverage_gaps[]` names every open question.
 
 7. **Self-check.** `vigil assess agent render-handoff <agent_id>` — exit only after it succeeds.
 

@@ -516,7 +516,7 @@ schema. Required fields, EDR-specific:
 5. **Emit the handoff JSON**:
 
    ```bash
-   vigil assess agent handoff --from-json /tmp/handoff.json
+   vigil assess agent handoff --agent-id <agent-id> --from-json /tmp/handoff.json
    ```
 
 ## Common Failure Modes
