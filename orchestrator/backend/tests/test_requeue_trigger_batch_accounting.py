@@ -324,3 +324,40 @@ def test_requeue_rejects_conflicting_selectors(client, isolate_settings, selecto
 
     assert response.status_code == 400
     assert "one selector" in response.json()["detail"].lower()
+
+
+def test_requeue_names_a_trigger_target_missing_from_the_snapshot_and_the_closest_path(
+    client, isolate_settings
+):
+    engagement_key = "2026-09-15-code-requeue-missing-target"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo, parser, helper = _seed(client, engagement_key, "requeue-missing-target-repo")
+    _classify_file(client, engagement_key, int(parser["id"]), "critical", 100)
+    base = f"/engagements/{engagement_key}/assessment/code"
+    queue_item = _claim_file_for_analysis(client, engagement_key, int(parser["id"]), priority=100)
+    result = client.post(
+        f"{base}/analysis-results",
+        json={
+            "queue_item_id": queue_item["id"],
+            "file_id": parser["id"],
+            "agent_name": queue_item["agent_name"],
+            "lease_token": queue_item["lease_token"],
+            "reviewed_spans": [{"file_id": parser["id"], "start_line": 1, "end_line": 1}],
+            "hypothesis": "The helper may carry unvalidated bytes.",
+            "evidence": "parse() delegates to the helper before validating.",
+            "disposition": "clean",
+            "cross_file_triggers": [
+                {"file_path": "lib/helpers.py", "reason": "shared helper", "vuln_class": "web-app-injection"}
+            ],
+        },
+    )
+    assert result.status_code == 201, result.text
+    trigger = client.get(f"{base}/triggers").json()[0]
+
+    requeued = client.post(f"{base}/analysis-queue/requeue", json={"items": [{"trigger_id": trigger["id"]}]})
+
+    assert requeued.status_code == 201, requeued.text
+    [label] = requeued.json()["not_found"]
+    assert f"trigger:{trigger['id']}" in label
+    assert "lib/helpers.py" in label and "not in the repository snapshot" in label
+    assert "src/helpers.py" in label

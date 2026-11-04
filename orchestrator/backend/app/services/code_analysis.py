@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import difflib
 import hashlib
 import json
 import sqlite3
@@ -9087,6 +9088,24 @@ def _requeue_target_by_file_id(connection, engagement_id: int, file_id: int) -> 
     ).fetchone()
 
 
+def _closest_admitted_path_hint(connection, engagement_id: int, selector: dict[str, Any]) -> str:
+    target = str(selector["file_path"])
+    paths = [
+        str(row["file_path"])
+        for row in connection.execute(
+            """
+            SELECT file_path FROM code_files
+            WHERE engagement_id = ? AND repo_id = ? AND retired_at IS NULL
+            """,
+            (engagement_id, int(selector["repo_id"])),
+        ).fetchall()
+    ]
+    basename = target.rsplit("/", 1)[-1]
+    same_name = [path for path in paths if path.rsplit("/", 1)[-1] == basename]
+    closest = difflib.get_close_matches(target, same_name or paths, n=1, cutoff=0 if same_name else 0.6)
+    return f"; closest admitted path: {closest[0]!r}" if closest else ""
+
+
 def _resolve_requeue_target(
     connection, engagement_id: int, selector: dict[str, Any]
 ) -> tuple[Any, str, str]:
@@ -9137,6 +9156,11 @@ def _resolve_requeue_target(
         row, outcome, _label = _resolve_requeue_target(
             connection, engagement_id, selector
         )
+        if outcome == "not_found":
+            label += (
+                f": target path {selector['file_path']!r} is not in the repository snapshot"
+                + _closest_admitted_path_hint(connection, engagement_id, selector)
+            )
         return row, outcome, label
 
     file_path = str(selector["file_path"])
