@@ -635,6 +635,70 @@ def test_run_audit_source_read_fails_closed_before_recording_untrusted_files(
     assert "source-read record" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize("decoy_exists", [False, True])
+def test_run_audit_source_read_names_the_expected_path_for_a_wrong_one(
+    decoy_exists: bool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys,
+) -> None:
+    engagement = _engagement(tmp_path)
+    source_path = engagement / "repo" / "src" / "main.py"
+    source_path.parent.mkdir(parents=True)
+    source_path.write_bytes(b"inside\n")
+    if decoy_exists:
+        decoy = engagement / "src" / "main.py"
+        decoy.parent.mkdir()
+        decoy.write_bytes(b"inside\n")
+    source = {
+        **_source(),
+        "declared_root": "repo",
+        "content_sha256": hashlib.sha256(b"inside\n").hexdigest(),
+        "byte_size": len(b"inside\n"),
+        "line_count": 1,
+    }
+    posts: list[dict] = []
+    monkeypatch.setattr(config, "_verify_backend", lambda _cfg: None)
+    monkeypatch.setattr(
+        AssessmentClient,
+        "get",
+        lambda *_args: {
+            "items": [source],
+            "total": 1,
+            "offset": 0,
+            "limit": 1000,
+            "has_more": False,
+        },
+    )
+    monkeypatch.setattr(
+        AssessmentClient,
+        "post",
+        lambda _client, _endpoint, payload: posts.append(payload),
+    )
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(
+            [
+                "--engagement-dir",
+                str(engagement),
+                "run-audit",
+                "source-read",
+                "record",
+                "17",
+                "31",
+                "src/main.py",
+                "--agent-id",
+                "HUNT-1",
+                "--attempt",
+                "1",
+            ]
+        )
+
+    assert excinfo.value.code == 1
+    assert posts == []
+    assert "repo/src/main.py" in capsys.readouterr().err
+
+
 def test_run_audit_source_read_malformed_receipt_warns_without_retry(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:

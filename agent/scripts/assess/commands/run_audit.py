@@ -1078,13 +1078,22 @@ def _declared_source_binding(
     candidate = Path(supplied_path).expanduser()
     if not candidate.is_absolute():
         candidate = engagement_root / candidate
+    expected_hint = (
+        f"expected {PurePosixPath(str(source['declared_root'])) / relative} "
+        f"(declared root {source['declared_root']!r} + inventory path "
+        f"{relative.as_posix()!r}; relative paths resolve from the engagement root)"
+    )
     try:
         if candidate.resolve(strict=True) != expected.resolve(strict=True):
             raise AssessError(
-                f"{operation}: supplied path does not match source id {source['id']}"
+                f"{operation}: supplied path {supplied_path!r} does not match "
+                f"source id {source['id']}; {expected_hint}"
             )
     except OSError as exc:
-        raise AssessError(f"{operation}: supplied source path is unavailable") from exc
+        raise AssessError(
+            f"{operation}: supplied source path {supplied_path!r} is unavailable; "
+            f"{expected_hint}"
+        ) from exc
     try:
         expected.resolve(strict=True).relative_to(root)
     except ValueError as exc:
