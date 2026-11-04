@@ -307,6 +307,10 @@ def _run_start(args) -> None:
                 f"recover with `vigil assess finding link {slug} --link-kind "
                 f"proof_run --target-kind assessment_run --target-id {row['id']}`"
             ) from exc
+    if getattr(args, "for_findings", None):
+        with _client(args) as client:
+            response = client.get(f"assessment-runs/{row['id']}")
+        row = _require_run(response, operation="start", requested_id=int(row["id"]))
     print(json.dumps(row, indent=2, ensure_ascii=False))
 
 

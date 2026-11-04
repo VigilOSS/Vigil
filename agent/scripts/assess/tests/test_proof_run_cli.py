@@ -505,16 +505,30 @@ def test_proof_run_start_accepts_an_independent_verifier_dispatch(
 ) -> None:
     engagement = _engagement(tmp_path)
     monkeypatch.setattr(config, "_verify_backend", lambda _cfg: None)
-    monkeypatch.setattr(
-        AssessmentClient,
-        "get",
-        _findings_get(
-            {
-                "VA-047": {"slug": "VA-047", "provenance": {"agent_id": "HUNT-RUN-1"}},
-                "VA-048": {"slug": "VA-048", "provenance": {"agent_id": "HUNT-RUN-2"}},
-            }
-        ),
+    get_finding = _findings_get(
+        {
+            "VA-047": {"slug": "VA-047", "provenance": {"agent_id": "HUNT-RUN-1"}},
+            "VA-048": {"slug": "VA-048", "provenance": {"agent_id": "HUNT-RUN-2"}},
+        }
     )
+
+    def get(_client, endpoint: str):
+        if endpoint != "assessment-runs/31":
+            return get_finding(_client, endpoint)
+        linked = [path.split("/")[1] for path, _payload in posted[1:]]
+        return {
+            "id": 31,
+            "run_uuid": "verify-va-047",
+            "run_kind": "web",
+            "run_purpose": "proof",
+            "producer_dispatch_id": 9,
+            "producer_dispatch_agent_id": "VERIFY-1",
+            "status": "running",
+            "finding_slugs": [],
+            "associated_finding_slugs": linked,
+        }
+
+    monkeypatch.setattr(AssessmentClient, "get", get)
     posted: list[tuple[str, dict]] = []
 
     def post(_client, endpoint: str, payload: dict):
@@ -551,7 +565,9 @@ def test_proof_run_start_accepts_an_independent_verifier_dispatch(
         ]
     )
 
-    assert json.loads(capsys.readouterr().out)["status"] == "running"
+    printed = json.loads(capsys.readouterr().out)
+    assert printed["status"] == "running"
+    assert printed["associated_finding_slugs"] == ["VA-047", "VA-048"]
     # The run and its finding associations must both be durable writes.
     assert posted[0][1] == {
         "run_uuid": "verify-va-047",
