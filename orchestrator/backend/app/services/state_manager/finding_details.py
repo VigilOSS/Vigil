@@ -358,7 +358,7 @@ FINDING_DETAIL_CORE_PROPERTIES: dict[str, dict[str, Any]] = {
                 },
                 "reply_to_seq": {
                     "type": ["integer", "null"],
-                    "description": "Optional threading pointer to a prior reply seq (default: the last reply).",
+                    "description": "Threading pointer to a prior reply seq; null when the reply does not thread to one.",
                 },
                 "body": {
                     "type": "string",
@@ -366,11 +366,11 @@ FINDING_DETAIL_CORE_PROPERTIES: dict[str, dict[str, Any]] = {
                 },
                 "new_evidence": {
                     "type": "string",
-                    "description": "Optional NEW proof authored for THIS reply. Preserve captured credentials, tokens, PII, and other evidence verbatim.",
+                    "description": "NEW proof authored for THIS reply, or an empty string when it adds none. Preserve captured credentials, tokens, PII, and other evidence verbatim.",
                 },
                 "new_evidence_ref": {
                     "type": "string",
-                    "description": "Optional pointer to raw new-evidence (e.g. 'scans/<file>').",
+                    "description": "Pointer to raw new-evidence (e.g. 'scans/<file>'), or an empty string when there is none.",
                 },
                 "sent_status": {
                     "type": "string",

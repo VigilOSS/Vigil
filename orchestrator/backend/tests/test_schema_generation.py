@@ -39,6 +39,34 @@ def test_schema_generator_check_mode_passes_for_committed_bundle(capsys):
     assert "in sync" in capsys.readouterr().out.lower()
 
 
+def test_required_schema_properties_are_not_described_as_optional():
+    module = _load_schema_generator_module()
+
+    contradictions: list[str] = []
+
+    def walk(node: object, path: str) -> None:
+        if isinstance(node, list):
+            for child in node:
+                walk(child, path)
+            return
+        if not isinstance(node, dict):
+            return
+        required = node.get("required")
+        properties = node.get("properties")
+        if isinstance(required, list) and isinstance(properties, dict):
+            for name in required:
+                description = str(properties.get(name, {}).get("description", ""))
+                if description.strip().lower().startswith("optional"):
+                    contradictions.append(f"{path}.{name}")
+        for key, child in node.items():
+            walk(child, f"{path}.{key}")
+
+    for filename, schema in module.build_schema_bundle().items():
+        walk(schema, filename)
+
+    assert contradictions == []
+
+
 def test_finding_record_accepts_lifecycle_analysis_detail_keys():
     module = _load_schema_generator_module()
 
