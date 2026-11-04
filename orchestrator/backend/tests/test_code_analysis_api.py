@@ -5794,6 +5794,69 @@ def test_reclaimed_queue_lease_rejects_stale_result_and_closeout(client, isolate
     assert stale_closeout.status_code == 409
 
 
+def test_lease_conflicts_distinguish_typo_name_mismatch_and_reclaim(client, isolate_settings):
+    engagement_key = "2026-07-14-code-queue-lease-conflicts"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo = _create_repo(client, engagement_key, repo_key="lease-conflict-repo")
+    parser_file = next(
+        row for row in _create_files(client, engagement_key, int(repo["id"]))
+        if row["file_path"] == "src/parser.py"
+    )
+    _classify_file(client, engagement_key, int(parser_file["id"]), "critical", 100)
+    base = f"/engagements/{engagement_key}/assessment/code"
+    old_claim = _claim_file_for_analysis(client, engagement_key, int(parser_file["id"]), agent_name="ch-1")
+    token = str(old_claim["lease_token"])
+    swap = next(index for index in range(len(token) - 1) if token[index] != token[index + 1])
+    transposed = token[:swap] + token[swap + 1] + token[swap] + token[swap + 2:]
+
+    def heartbeat(agent_name, lease_token):
+        return client.post(f"{base}/analysis-queue/heartbeat", json={
+            "item_id": old_claim["id"], "agent_name": agent_name, "lease_token": lease_token,
+        })
+
+    def result(agent_name, lease_token):
+        return client.post(f"{base}/analysis-results", json={
+            "queue_item_id": old_claim["id"], "file_id": parser_file["id"],
+            "agent_name": agent_name, "lease_token": lease_token,
+            "reviewed_spans": [{"file_id": parser_file["id"], "start_line": 1, "end_line": 1}],
+            "hypothesis": "h", "evidence": "src/parser.py:1", "disposition": "clean",
+        })
+
+    def done(agent_name, lease_token):
+        return client.post(f"{base}/analysis-queue/done", json={
+            "item_ids": [old_claim["id"]], "agent_name": agent_name, "lease_token": lease_token,
+            "disposition": "clean", "notes": "n", "cwe_coverage": _network_input_coverage(default_effort=80),
+        })
+
+    for response in (heartbeat("code-vuln-hunter", token), result("code-vuln-hunter", token), done("code-vuln-hunter", token)):
+        assert response.status_code == 409
+        detail = response.json()["detail"]
+        assert "held by agent 'ch-1'" in detail and "'code-vuln-hunter'" in detail
+    for response in (heartbeat("ch-1", transposed), result("ch-1", transposed), done("ch-1", transposed)):
+        assert response.status_code == 409
+        assert "typo" in response.json()["detail"]
+    for response in (heartbeat("ch-1", "not-a-lease"), result("ch-1", "not-a-lease"), done("ch-1", "not-a-lease")):
+        assert response.status_code == 409
+        assert "no lease with token 'not-a-lease'" in response.json()["detail"]
+
+    assert result("ch-1", token).status_code == 201
+    with sqlite3.connect(str(isolate_settings["data_dir"] / "orchestrator.sqlite3")) as connection:
+        connection.execute(
+            "UPDATE code_analysis_queue SET last_heartbeat_at = ?, consumed_at = ? WHERE id = ?",
+            ("2020-01-01T00:00:00Z", "2020-01-01T00:00:00Z", old_claim["id"]),
+        )
+        connection.commit()
+    assert client.post(f"{base}/analysis-queue/reset-stale", json={"minutes": 30}).status_code == 200
+    reset_heartbeat = heartbeat("ch-1", token)
+    assert reset_heartbeat.status_code == 409
+    assert "no active lease" in reset_heartbeat.json()["detail"]
+    client.post(f"{base}/analysis-queue/fetch", json={"limit": 1, "agent_name": "ch-2"})
+    for response in (heartbeat("ch-1", token), result("ch-1", token), done("ch-1", token)):
+        assert response.status_code == 409
+        detail = response.json()["detail"]
+        assert "reclaimed" in detail and "'ch-2'" in detail
+
+
 def test_analysis_result_retry_is_idempotent_within_lease(client, isolate_settings):
     engagement_key = "2026-07-14-code-result-idempotency"
     write_engagement(isolate_settings["engagements_dir"], engagement_key)

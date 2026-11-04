@@ -3996,7 +3996,7 @@ def complete_queue_items(
     with get_connection() as connection:
         queue_rows = _get_queue_rows(connection, engagement.id, set(item_ids))
         _require_queue_status(queue_rows, expected_status="processing", action="complete")
-        _require_queue_lease(queue_rows, agent_name=agent_name, lease_token=lease_token, action="complete")
+        _require_queue_lease(connection, queue_rows, agent_name=agent_name, lease_token=lease_token, action="complete")
         _require_queue_generation(connection, engagement.id, queue_rows, action="complete")
         queue_row = next(iter(queue_rows.values()))
         file_row = _get_file_rows(connection, engagement.id, {int(queue_row["file_id"])})[
@@ -4219,7 +4219,7 @@ def error_queue_items(
     with get_connection() as connection:
         queue_rows = _get_queue_rows(connection, engagement.id, set(item_ids))
         _require_queue_status(queue_rows, expected_status="processing", action="mark as error")
-        _require_queue_lease(queue_rows, agent_name=agent_name, lease_token=lease_token, action="mark as error")
+        _require_queue_lease(connection, queue_rows, agent_name=agent_name, lease_token=lease_token, action="mark as error")
         _require_queue_generation(connection, engagement.id, queue_rows, action="mark as error")
         cursor = connection.execute(
             f"""
@@ -4258,6 +4258,7 @@ def needs_context_queue_items(
         queue_rows = _get_queue_rows(connection, engagement.id, set(item_ids))
         _require_queue_status(queue_rows, expected_status="processing", action="mark as needs_context")
         _require_queue_lease(
+            connection,
             queue_rows, agent_name=agent_name, lease_token=lease_token, action="mark as needs_context"
         )
         _require_queue_generation(
@@ -4387,9 +4388,12 @@ def heartbeat_queue_item(
             (now, engagement.id, item_id, agent_name, lease_token),
         )
         if cursor.rowcount != 1:
+            _require_queue_lease(
+                connection, queue_rows, agent_name=agent_name, lease_token=lease_token, action="heartbeat"
+            )
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
-                detail="Cannot heartbeat: queue lease is no longer owned by this agent",
+                detail=f"Cannot heartbeat: queue item {item_id} is not processing",
             )
     return {"item_id": item_id, "last_heartbeat_at": now}
 
@@ -4439,6 +4443,7 @@ def adopt_queue_lease(
             queue_rows, expected_status="processing", action="adopt the lease on"
         )
         _require_queue_lease(
+            connection,
             queue_rows,
             agent_name=expected_agent,
             lease_token=expected_lease_token,
@@ -4969,6 +4974,7 @@ def create_analysis_result(
                 action="record analysis results for",
             )
         _require_queue_lease(
+            connection,
             {int(queue_item_id): queue_row},
             agent_name=agent_name,
             lease_token=lease_token,

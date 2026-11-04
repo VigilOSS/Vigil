@@ -1195,19 +1195,64 @@ def _require_queue_status(
     )
 
 
+def _queue_lease_mismatch(
+    connection, item_id: int, row: dict[str, Any], *, agent_name: str, lease_token: str
+) -> str | None:
+    holder = str(row.get("assigned_agent") or "")
+    current = str(row.get("lease_token") or "")
+    if holder == agent_name and current == lease_token:
+        return None
+    if not holder and not current:
+        return (
+            f"queue item {item_id} has no active lease (status {row.get('status') or 'unknown'}); "
+            "it was reset, completed or never claimed"
+        )
+    if current == lease_token:
+        return (
+            f"queue item {item_id} lease is held by agent {holder!r}, but you passed {agent_name!r}; "
+            "pass the dispatch agent id the lease was fetched under, not the role name"
+        )
+    if lease_token in _attempt_lease_tokens(row)[1:]:
+        return f"lease {lease_token!r} on queue item {item_id} was adopted by agent {holder!r}"
+    if connection.execute(
+        "SELECT 1 FROM code_analysis_results WHERE queue_item_id = ? AND lease_token = ? LIMIT 1",
+        (item_id, lease_token),
+    ).fetchone():
+        return (
+            f"lease {lease_token!r} on queue item {item_id} was reset and the item reclaimed "
+            f"by agent {holder!r}"
+        )
+    if sorted(lease_token) == sorted(current):
+        return (
+            f"no lease with token {lease_token!r} exists for queue item {item_id}; it differs from "
+            f"the current lease held by agent {holder!r} only in character order, so check for a typo"
+        )
+    return (
+        f"no lease with token {lease_token!r} exists for queue item {item_id}; its current lease is "
+        f"held by agent {holder!r} since {row.get('consumed_at') or 'an unknown time'}. Check the "
+        "token for a typo; if you fetched before that time, your lease was reset and reclaimed"
+    )
+
+
 def _require_queue_lease(
-    queue_rows: dict[int, dict[str, Any]], *, agent_name: str, lease_token: str, action: str
+    connection,
+    queue_rows: dict[int, dict[str, Any]],
+    *,
+    agent_name: str,
+    lease_token: str,
+    action: str,
 ) -> None:
-    invalid = [
-        item_id
-        for item_id, row in queue_rows.items()
-        if str(row.get("assigned_agent", "")) != agent_name
-        or str(row.get("lease_token", "")) != lease_token
+    problems = [
+        problem
+        for item_id, row in sorted(queue_rows.items())
+        if (problem := _queue_lease_mismatch(
+            connection, item_id, row, agent_name=agent_name, lease_token=lease_token
+        ))
     ]
-    if invalid:
+    if problems:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail=f"Cannot {action}: queue lease is no longer owned by {agent_name}",
+            detail=f"Cannot {action}: " + "; ".join(problems),
         )
 
 
