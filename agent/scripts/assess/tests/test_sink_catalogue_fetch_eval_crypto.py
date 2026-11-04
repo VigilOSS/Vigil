@@ -1,7 +1,7 @@
 """Empirical catalogue audit: `url_fetch`, `deserialization`, `eval_exec`, `crypto`.
 
 Scope is exactly these four `_SINK_DEFINITIONS` families in
-`assess.lib.treesitter_index` (106 patterns total: 32 `url_fetch`, 20
+`assess.lib.treesitter_index` (105 patterns total: 32 `url_fetch`, 19
 `deserialization`, 23 `eval_exec`, 31 `crypto`). Every pattern was probed with
 an idiomatic, current-era (2026) fixture through the real structural indexer.
 Only the patterns that actually fire on idiomatic code get a test here; the
@@ -256,7 +256,7 @@ namespace Probe
 }
 """
 
-# ---- deserialization (20 patterns; LIVE: java x3, python x3, go x2,
+# ---- deserialization (19 patterns; LIVE: java x3, python x3, go x2,
 #      ruby x2, php x1, csharp x6 = 17) ----------------------------------------
 
 _JAVA_DESER = """
@@ -760,7 +760,7 @@ CASES: list[tuple[str, str, str, str]] = [
     # -- deserialization: ruby (2, JSON.parse excluded as MISROUTED) --
     ("deserialization", "ruby", r"\bMarshal\.load\s*\(", "Marshal.load(data)"),
     ("deserialization", "ruby", r"\bYAML\.load\s*\(", "YAML.load(data)"),
-    # -- deserialization: php (1, json_decode excluded as MISROUTED) --
+    # -- deserialization: php (1) --
     ("deserialization", "php", r"\bunserialize\s*\(", "unserialize($data)"),
     # -- deserialization: csharp (6) --
     ("deserialization", "csharp", r"\bBinaryFormatter\b", "var formatter = new BinaryFormatter();"),
@@ -894,7 +894,7 @@ _EXCLUDED: dict[tuple[str, str, str], str] = {
         "anyone requires a stdlib gem. Also REDUNDANT with URI.open( in the "
         "same family, which already covers the real call site.",
 
-    # -- deserialization (3 excluded) --
+    # -- deserialization (2 excluded) --
     ("deserialization", "go", r"\bjson\.Unmarshal\s*\("):
         "MISROUTED -- fires on ordinary typed JSON unmarshalling "
         "(json.Unmarshal(data, &v)), which is safe, ubiquitous Go and not a "
@@ -905,12 +905,6 @@ _EXCLUDED: dict[tuple[str, str, str], str] = {
         "Marshal.load/YAML.load it never instantiates arbitrary objects or "
         "calls arbitrary code); flagging it as deserialization noise is a "
         "false positive on correct code.",
-    ("deserialization", "php", r"\bjson_decode\s*\("):
-        "MISROUTED -- same reasoning as Ruby JSON.parse/Go json.Unmarshal in "
-        "this family: json_decode() only produces arrays/stdClass, never "
-        "invokes __wakeup/__destruct the way unserialize() does. Not an "
-        "explicit brief lead but the identical structural issue, verified "
-        "the same way.",
 
     # -- eval_exec (5 excluded) --
     ("eval_exec", "java", r"\bScriptEngine\.eval\s*\("):
@@ -1033,7 +1027,7 @@ def test_case_table_covers_every_live_pattern_and_no_dead_ones() -> None:
         f"{(tested | excluded) - catalogue}"
     )
 
-    # 32 + 20 + 23 + 31 = 106 (Java response reads are outbound requests).
-    assert len(catalogue) == 106
+    # 32 + 19 + 23 + 31 = 105 (Java response reads are outbound requests).
+    assert len(catalogue) == 105
     assert len(tested) == 89
-    assert len(excluded) == 17
+    assert len(excluded) == 16

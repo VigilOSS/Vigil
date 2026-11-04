@@ -109,3 +109,24 @@ $probe = fn () => new class { public function ping(): void {} };
         "<anonymous@12:11>",
         "<anonymous@20:22>",
     ]
+
+
+def test_php_database_exec_is_sql_and_json_decode_is_not_deserialization() -> None:
+    source = b"""<?php
+class AcmeImport {
+    public function run($pdo, $cmd, $payload) {
+        $pdo->exec("DELETE FROM acme_rows WHERE batch = " . $payload);
+        exec($cmd);
+        $rows = json_decode($payload, true);
+        return unserialize($payload);
+    }
+}
+"""
+
+    indexed = index_file("src/AcmeImport.php", "php", source)
+
+    assert {(item["line"], item["kind"]) for item in indexed["security_sinks"]} == {
+        (4, "sql_exec"),
+        (5, "process_exec"),
+        (7, "deserialization"),
+    }

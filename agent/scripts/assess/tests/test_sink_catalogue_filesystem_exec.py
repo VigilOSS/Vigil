@@ -1,12 +1,12 @@
 """Empirical audit of `_SINK_DEFINITIONS`' file_path / file_inclusion /
-sql_exec / process_exec families -- 108 regex patterns across 10 languages.
+sql_exec / process_exec families -- 109 regex patterns across 10 languages.
 
 Every pattern below is exercised against an idiomatic, current-era (2026)
 fixture through the real tree-sitter indexer. Only patterns that fire on
 realistic code get a case in ``CASES`` -- DEAD / REDUNDANT / MISROUTED
 patterns are named, with the file:line evidence, in ``_EXCLUDED`` instead,
 and ``test_case_table_covers_every_live_pattern_in_the_assigned_slice``
-proves the two lists together account for all 108 patterns, so the catalogue
+proves the two lists together account for all 109 patterns, so the catalogue
 cannot silently restore a dead pattern or lose a live one.
 
 Taxonomy note. Three defects this audit recorded have since been fixed in the
@@ -486,6 +486,10 @@ class ReportDao {
     public function runPrepare($pdo, $sql) {
         return $pdo->prepare($sql);
     }
+
+    public function runExec($pdo, $sql) {
+        return $pdo->exec($sql);
+    }
 }
 
 class Shell {
@@ -765,6 +769,7 @@ CASES: list[tuple[str, str, str, str, list[str] | None]] = [
     ("sql_exec", "php", r"\bmysqli_query\s*\(", "mysqli_query($mysqli, $sql)", ["sqli"]),
     ("sql_exec", "php", r"\$\w+->query\s*\(", "$pdo->query($sql)", ["sqli"]),
     ("sql_exec", "php", r"\$\w+->prepare\s*\(", "$pdo->prepare($sql)", ["sqli"]),
+    ("sql_exec", "php", r"->exec\s*\(", "$pdo->exec($sql)", ["sqli"]),
     # ---- sql_exec : csharp (treesitter_index.py:310-313) ----
     ("sql_exec", "csharp", r"\bnew\s+SqlCommand\s*\(", "new SqlCommand(sql, conn)", ["sqli"]),
     ("sql_exec", "csharp", r"\bnew\s+OleDbCommand\s*\(", "new OleDbCommand(sql, conn)", ["sqli"]),
@@ -809,7 +814,7 @@ CASES: list[tuple[str, str, str, str, list[str] | None]] = [
     ("process_exec", "ruby", r"\bIO\.popen\s*\(", "IO.popen(cmd)", ["injection"]),
     ("process_exec", "ruby", r"`[^`]*`", "`ssh #{host} uptime`", ["injection"]),
     # ---- process_exec : php (treesitter_index.py:296-297) ----
-    ("process_exec", "php", r"\bexec\s*\(", "        exec($cmd);", ["injection"]),
+    ("process_exec", "php", r"(?<!->|::)\bexec\s*\(", "        exec($cmd);", ["injection"]),
     ("process_exec", "php", r"\bsystem\s*\(", "system($cmd)", ["injection"]),
     ("process_exec", "php", r"\bshell_exec\s*\(", "shell_exec($cmd)", ["injection"]),
     ("process_exec", "php", r"\bpassthru\s*\(", "passthru($cmd)", ["injection"]),
@@ -900,7 +905,7 @@ def test_sql_exec_emits_the_canonical_sqli_class() -> None:
 
 # ---------------------------------------------------------------------------
 # Meta-test: the case table above, plus this allow-list, must account for
-# every one of the 107 patterns in the four assigned families. This is what
+# every one of the 109 patterns in the four assigned families. This is what
 # stops the catalogue drifting back to silent zero recall -- add a pattern
 # to _SINK_DEFINITIONS without touching this file and the test below fails.
 # ---------------------------------------------------------------------------
@@ -991,15 +996,15 @@ def test_case_table_covers_every_live_pattern_in_the_assigned_slice() -> None:
         f"{(tested | excluded) - all_patterns}"
     )
 
-    # Hard counts. The slice is now 108 patterns. C# was added as a
+    # Hard counts. The slice is now 109 patterns. C# was added as a
     # tree-sitter language, contributing 14 new patterns to this slice
     # (5 file_path, 7 sql_exec, 2 process_exec), all of which fire LIVE on
     # idiomatic C# -- so the case table gains 14 rows and _EXCLUDED gains
     # nothing. PHP's four inclusion constructs still account for the
     # file_path (34) / file_inclusion (4) split described above.
-    # file_path=39, file_inclusion=4, sql_exec=29, process_exec=35 -> 107.
-    assert len(all_patterns) == 108
-    assert len(tested) == 102
+    # file_path=40, file_inclusion=4, sql_exec=30, process_exec=35 -> 109.
+    assert len(all_patterns) == 109
+    assert len(tested) == 103
     assert len(excluded) == 6
 
 
