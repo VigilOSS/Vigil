@@ -15,8 +15,11 @@ import json
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
+from app.api.code_analysis import StructuralMetadataItem
 from app.services.code_analysis import FUNCTION_SCOPED_STRUCTURAL_DIMENSIONS
+from app.services.code_analysis_support import SCRIPT_SCOPE_STRUCTURAL_LANGUAGES
 
 from tests.test_code_analysis_api import (
     _claim_file_for_analysis,
@@ -25,6 +28,8 @@ from tests.test_code_analysis_api import (
     _create_files,
     _create_repo,
     _owned,
+    _refresh_repo_files,
+    _source_hash,
     write_engagement,
 )
 
@@ -151,6 +156,44 @@ def test_a_zero_callable_file_cannot_claim_complete_over_scanned_source(
     assert "callable scope" in response.text
 
 
+def _zero_callable_complete_item(indexed_language: str) -> dict[str, object]:
+    return {
+        "file_id": 1,
+        "source_sha256": "0" * 64,
+        "indexed_language": indexed_language,
+        "total_functions": 0,
+        "total_entry_points": 0,
+        "total_sinks": 1,
+        "total_exports": 0,
+        "structural_analysis_status": "complete",
+        "structural_analysis_mode": "tree_sitter",
+        "structural_degradation_reason": None,
+        "structural_source_size": 12,
+        "structural_bytes_scanned": 12,
+        "structural_unavailable_dimensions": [],
+        "structural_artifact_truncated": False,
+        "structural_truncated_dimensions": [],
+        "structural_signal_counts": {
+            "entry_points": 0,
+            "imports": 2,
+            "security_sinks": 1,
+            "security_sources": 0,
+        },
+    }
+
+
+def test_a_script_scope_language_publishes_its_measured_file_scope() -> None:
+    """A PHP script is read as its own `<top-level>` scope, callable or not, so
+    the signals it reports there are a measurement. The same payload from a
+    language whose readers only enter callables stays rejected.
+    """
+    item = StructuralMetadataItem.model_validate(_zero_callable_complete_item("php"))
+
+    assert item.structural_analysis_status == "complete"
+    with pytest.raises(ValidationError, match="callable scope"):
+        StructuralMetadataItem.model_validate(_zero_callable_complete_item("python"))
+
+
 def test_a_measured_negative_with_callables_still_publishes_complete(
     client, isolate_settings
 ) -> None:
@@ -242,6 +285,87 @@ def test_a_partial_span_cannot_review_a_file_whose_scope_was_never_scanned(
                     "file_id": parser["id"],
                     "start_line": 1,
                     "end_line": parser["loc"],
+                    "label": "whole-file manual review",
+                }
+            ],
+            evidence="Every sealed source line was read by hand.",
+        ),
+    )
+    assert whole_file.status_code == 201, whole_file.text
+
+
+def test_a_partial_span_cannot_review_a_script_scope_file_without_callables(
+    client, isolate_settings
+) -> None:
+    engagement_key = "2026-11-04-script-scope-span"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo = _create_repo(client, engagement_key, repo_key=f"{engagement_key}-repo")
+    files = _refresh_repo_files(
+        client,
+        engagement_key,
+        int(repo["id"]),
+        [
+            {
+                "file_path": "public/report.php",
+                "language": "php",
+                "loc": 80,
+                "file_hash": _source_hash("script-scope-report"),
+                "header_snippet": "<?php\n$id = $_GET['id'];\n",
+                "git_churn_score": 0,
+                "has_past_cve_fix": False,
+            }
+        ],
+    )
+    script = files[0]
+    _classify_file(client, engagement_key, int(script["id"]), "critical", 100)
+    base = f"/engagements/{engagement_key}/assessment/code"
+    binding = client.get(f"{base}/repos/{repo['id']}").json()
+    payload = _complete_structural_payload(
+        repo_id=int(repo["id"]),
+        repo_generation=int(binding["active_generation"]),
+        source_manifest_digest=str(binding["source_manifest_digest"]),
+        updates=[
+            {
+                "file_id": script["id"],
+                "source_sha256": script["file_hash"],
+                "indexed_language": "php",
+                "total_functions": 0,
+                "total_entry_points": 0,
+                "total_sinks": 3,
+                "total_exports": 0,
+                "callables": [],
+            }
+        ],
+    )
+    assert client.post(
+        f"{base}/files/bulk-structural-metadata", json=payload
+    ).status_code == 200
+    claim = _claim_file_for_analysis(client, engagement_key, int(script["id"]))
+
+    partial = client.post(
+        f"{base}/analysis-results",
+        json=_owned(
+            claim,
+            queue_item_id=claim["id"],
+            disposition="clean",
+            reviewed_spans=[{"file_id": script["id"], "start_line": 1, "end_line": 1}],
+            evidence="The header line cannot stand for the whole script.",
+        ),
+    )
+    assert partial.status_code == 409, partial.text
+    assert "whole-file coverage" in partial.json()["detail"]
+
+    whole_file = client.post(
+        f"{base}/analysis-results",
+        json=_owned(
+            claim,
+            queue_item_id=claim["id"],
+            disposition="clean",
+            reviewed_spans=[
+                {
+                    "file_id": script["id"],
+                    "start_line": 1,
+                    "end_line": script["loc"],
                     "label": "whole-file manual review",
                 }
             ],
@@ -366,6 +490,12 @@ def test_the_backend_mirror_of_the_function_scoped_dimensions_is_exact() -> None
     from assess.lib.treesitter_index import FUNCTION_SCOPED_DIMENSIONS
 
     assert FUNCTION_SCOPED_STRUCTURAL_DIMENSIONS == FUNCTION_SCOPED_DIMENSIONS
+
+
+def test_the_backend_mirror_of_the_script_scope_languages_is_exact() -> None:
+    from assess.lib.treesitter_index import SCRIPT_SCOPE_LANGUAGES
+
+    assert SCRIPT_SCOPE_STRUCTURAL_LANGUAGES == SCRIPT_SCOPE_LANGUAGES
 
 
 def test_code_index_sync_accepts_a_complete_file_with_no_signal_at_all() -> None:

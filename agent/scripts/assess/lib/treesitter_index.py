@@ -2152,6 +2152,10 @@ _LINE_COMMENT_PREFIXES = ("//", "#", "*")
 # published list back and must ask the same question of it.
 FUNCTION_SCOPED_DIMENSIONS = frozenset({"call_sites", "dataflow", "security_sinks"})
 
+# Languages whose `<top-level>` scope is read even when the file declares no
+# callable, and whose file-scope entry patterns are the full registration table.
+SCRIPT_SCOPE_LANGUAGES = frozenset({"php"})
+
 # Commentary as the grammars label it. `expression_statement` is here for the
 # bare string Python and Ruby use as a docstring: the language evaluates it, so
 # the parser cannot call it a comment, but it holds no call and no sink.
@@ -2292,7 +2296,7 @@ def _unscanned_scope_dimensions(
     if _file_is_commentary_only(tree, source_lines):
         return set()
     unscanned: set[str] = set()
-    scanned_any_scope = any(
+    scanned_any_scope = language in SCRIPT_SCOPE_LANGUAGES or any(
         _function_scan_lines(function, source_lines)
         for function in functions
         if not function.get("is_declaration", False)
@@ -2302,7 +2306,7 @@ def _unscanned_scope_dimensions(
         or _unread_reader_signal(functions, language, source_lines)
     ):
         unscanned |= FUNCTION_SCOPED_DIMENSIONS
-    if not functions and not entry_points:
+    if not functions and not entry_points and language not in SCRIPT_SCOPE_LANGUAGES:
         # Every entry-point rule but the top-level guard is keyed on a callable,
         # so with no callable the catalogue never ran and the guard found nothing.
         unscanned.add("entry_points")
@@ -2330,7 +2334,7 @@ def _top_level_scan_lines(
     still claimed complete coverage. Preserve the callable records and scan
     their complement as the synthetic ``<top-level>`` scope.
     """
-    if not functions and language != "php":
+    if not functions and language not in SCRIPT_SCOPE_LANGUAGES:
         return []
     callable_lines: set[int] = set()
     for function in functions:

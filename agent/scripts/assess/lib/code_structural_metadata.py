@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Any
 
 from assess.lib.treesitter_index import (
+    SCRIPT_SCOPE_LANGUAGES,
     STREAMING_FALLBACK_BASELINE_UNAVAILABLE,
     UNSCANNED_SCOPE_DEGRADATION_REASON,
 )
@@ -161,10 +162,12 @@ def validated_structural_metadata(
     # handed no line to the function-scoped detectors; any other signal proves
     # the file still had source to scan, so `complete` claims a measurement
     # that cannot have happened. No signal at all stays legal -- a blank or
-    # comment-only file really does measure empty.
+    # comment-only file really does measure empty. A script-scope language reads
+    # its file scope as `<top-level>`, so its signals there were measured.
     if (
         status == "complete"
         and mode == "tree_sitter"
+        and indexed.get("language") not in SCRIPT_SCOPE_LANGUAGES
         and int(indexed["total_functions"]) == 0
         and (
             int(indexed["total_exports"])

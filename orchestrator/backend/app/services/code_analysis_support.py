@@ -36,6 +36,10 @@ STRUCTURAL_CALLABLE_IDENTITY_SCHEMA = "structural-callable/v1"
 FUNCTION_SCOPED_STRUCTURAL_DIMENSIONS = frozenset(
     {"call_sites", "dataflow", "security_sinks"}
 )
+# Languages the exact parser reads as a `<top-level>` scope even with no
+# callable. Mirrors `SCRIPT_SCOPE_LANGUAGES` in the same agent module; keep
+# the two identical.
+SCRIPT_SCOPE_STRUCTURAL_LANGUAGES = frozenset({"php"})
 VARIANT_INPUT_IDENTITY_SCHEMA = "variant-input-identity/v1"
 MAX_VARIANT_RECEIPT_PAGE = 500
 DEFAULT_VARIANT_RECEIPT_PAGE = 100
@@ -919,6 +923,12 @@ def _normalize_analysis_receipt_anchors(
             # A partial span has nothing to be read against here: the index
             # never scanned a line of this file for callables or sinks.
             incomplete_reason = "index scanned no function scope"
+        elif (
+            canonical_structural_language(file_rows[file_id].get("language", ""))
+            in SCRIPT_SCOPE_STRUCTURAL_LANGUAGES
+            and not int(file_rows[file_id].get("total_functions") or 0)
+        ):
+            incomplete_reason = "file scope is the only scope it indexed"
         else:
             incomplete_reason = ""
         if incomplete_reason and (

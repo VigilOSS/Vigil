@@ -595,10 +595,13 @@ class StructuralMetadataItem(BaseModel):
         # detectors; any other signal proves the file still had source to scan, so
         # `complete` claims a measurement that cannot have happened. A file with no
         # signal at all stays legal -- it is consistent with a blank or comment-only
-        # source, which really does measure empty.
+        # source, which really does measure empty. A script-scope language reads its
+        # file scope as `<top-level>`, so its signals there were measured.
         if (
             self.structural_analysis_status == "complete"
             and self.structural_analysis_mode == "tree_sitter"
+            and self.indexed_language
+            not in code_analysis_support.SCRIPT_SCOPE_STRUCTURAL_LANGUAGES
             and not self.total_functions
             and any(
                 (

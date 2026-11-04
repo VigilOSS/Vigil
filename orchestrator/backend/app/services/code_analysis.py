@@ -28,6 +28,7 @@ from .code_analysis_support import (
     MAX_OPEN_LEASE_ROWS,
     MAX_PROGRESS_RECEIPTS,
     MAX_VARIANT_RECEIPT_PAGE,
+    SCRIPT_SCOPE_STRUCTURAL_LANGUAGES,
     STRUCTURAL_INDEX_SCHEMA,
     VARIANT_INPUT_IDENTITY_SCHEMA as VARIANT_INPUT_IDENTITY_SCHEMA,
     _CANONICAL_STRUCTURAL_LANGUAGES as _CANONICAL_STRUCTURAL_LANGUAGES,
@@ -7355,7 +7356,8 @@ def code_coverage_summary(
                 )
             file_func_rows = connection.execute(
                 f"""
-                SELECT id, total_functions, structural_unavailable_dimensions_json
+                SELECT id, language, total_functions,
+                       structural_unavailable_dimensions_json
                 FROM code_files
                 WHERE engagement_id = ? AND id IN ({placeholders})
                 """,
@@ -7375,6 +7377,11 @@ def code_coverage_summary(
                     _json_decode(r["structural_unavailable_dimensions_json"], [])
                 )
                 & FUNCTION_SCOPED_STRUCTURAL_DIMENSIONS
+                or (
+                    canonical_structural_language(r["language"])
+                    in SCRIPT_SCOPE_STRUCTURAL_LANGUAGES
+                    and not _safe_int(r["total_functions"])
+                )
             }
             # With no callable registry a whole-file span is the only review
             # proof left, which is exactly what the receipt gate now demands of
