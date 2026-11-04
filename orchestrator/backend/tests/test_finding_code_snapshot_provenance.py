@@ -1033,6 +1033,54 @@ def test_cross_track_merge_invalidates_confirmation_when_claim_dependencies_are_
     }
 
 
+def test_merge_keeps_target_code_snapshot_attestation_when_source_is_stronger(
+    client, isolate_settings
+) -> None:
+    binding = _seed_repo(client, isolate_settings)
+    _dispatch(client, "merge-attested-target-author")
+    target_payload = _finding_payload(
+        "VA-066",
+        binding,
+        location="file:src/parser.c:66",
+        author_agent_id="merge-attested-target-author",
+    )
+    assert _record(client, target_payload).status_code == 201
+    target_attestation = _attestation(client, "VA-066")
+    assert target_attestation["finding_slug"] == "VA-066"
+
+    _dispatch(client, "merge-attested-source-author")
+    source_payload = _finding_payload(
+        "VA-067",
+        binding,
+        location="file:src/parser.c:67",
+        severity="high",
+        author_agent_id="merge-attested-source-author",
+    )
+    source_payload["workflow_status"] = "exploited"
+    assert _record(client, source_payload).status_code == 201
+
+    merged = client.post(
+        f"/engagements/{_ENGAGEMENT_KEY}/assessment/findings/merge",
+        json={
+            "source_slug": "VA-067",
+            "target_slug": "VA-066",
+            "reason": "Same parser defect.",
+        },
+    )
+
+    assert merged.status_code == 200, merged.text
+    target = merged.json()["target"]
+    assert target["provenance"]["code_snapshot_attestation"] == target_attestation
+    assert target["code_snapshot_attestation_status"] == "attested"
+    assert "provenance" not in (
+        json.loads(
+            client.get(
+                f"/engagements/{_ENGAGEMENT_KEY}/assessment/findings/VA-066/transitions"
+            ).json()[0]["metadata_json"]
+        )["replaced_dependencies"]
+    )
+
+
 def test_merge_cross_track_rejects_bare_file_prefix_without_source_identity(
     client, isolate_settings
 ) -> None:

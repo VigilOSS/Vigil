@@ -3616,14 +3616,12 @@ def merge_findings(
                 "— the report is blocked until the pair agrees."
             )
         merged_details = _json_text(merged_details_obj)
-        merged_provenance_payload = _json_object(target["provenance_json"])
-        merged_provenance_payload.update(
-            _provenance_update_preserving_author(
-                target["provenance_json"],
-                _json_object(source["provenance_json"]),
-                reject_rebind=False,
-            )
+        merged_provenance_payload = _provenance_update_preserving_author(
+            target["provenance_json"], source_provenance, reject_rebind=False
         )
+        if CODE_SNAPSHOT_PROVENANCE_KEY in target_provenance:
+            merged_provenance_payload.pop(CODE_SNAPSHOT_ATTESTATION_PROVENANCE_KEY, None)
+        merged_provenance_payload.update(target_provenance)
         merged_provenance_payload["merge"] = {
             "source_slug": source_slug,
             "target_slug": target_slug,
@@ -3676,13 +3674,6 @@ def merge_findings(
             str(target["details_json"]), merged_details_obj
         ):
             replaced_verification_dependencies.append("details")
-        if any(
-            key != "merge"
-            and key in merged_provenance_payload
-            and merged_provenance_payload[key] != value
-            for key, value in target_provenance.items()
-        ):
-            replaced_verification_dependencies.append("provenance")
         verification_invalidated = bool(replaced_verification_dependencies) and (
             _row_verification_status(target) in TERMINAL_VERIFICATION_STATUSES
         )
