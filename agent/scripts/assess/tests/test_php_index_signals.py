@@ -71,3 +71,41 @@ echo file_get_contents($path);
 
     assert any(item["kind"] == "file_path" and item["line"] == 3
                for item in indexed["security_sinks"])
+
+
+def test_enum_and_anonymous_class_methods_are_qualified_by_their_class() -> None:
+    source = b"""<?php
+enum InvoiceStatus: string
+{
+    case Paid = 'paid';
+
+    public function label(): string
+    {
+        return ucfirst($this->value);
+    }
+}
+
+return new class extends Migration
+{
+    public function up(): void
+    {
+        Schema::dropIfExists('acme_invoices');
+    }
+};
+
+$probe = fn () => new class { public function ping(): void {} };
+"""
+
+    indexed = index_file("database/migrations/acme_invoices.php", "php", source)
+
+    assert [(item["name"], item["qualified_name"]) for item in indexed["functions"]] == [
+        ("label", "InvoiceStatus.label"),
+        ("up", "<anonymous@12:11>.up"),
+        ("$probe", "$probe"),
+        ("ping", "<anonymous@20:22>.ping"),
+    ]
+    assert [item["name"] for item in indexed["classes"]] == [
+        "InvoiceStatus",
+        "<anonymous@12:11>",
+        "<anonymous@20:22>",
+    ]

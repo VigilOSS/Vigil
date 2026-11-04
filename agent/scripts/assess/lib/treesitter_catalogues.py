@@ -72,6 +72,8 @@ _CLASS_QUERIES: dict[str, str] = {
         (class_declaration) @cls
         (interface_declaration) @cls
         (trait_declaration) @cls
+        (enum_declaration) @cls
+        (anonymous_class) @cls
     """,
     "csharp": """
         (class_declaration) @cls

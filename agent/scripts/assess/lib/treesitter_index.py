@@ -1497,6 +1497,9 @@ def _parse_class_node(node: Any, language: str, source: bytes) -> dict[str, Any]
         name_node = node.child_by_field_name("name")
         if name_node:
             name = _node_text(name_node, source)
+        elif node.type == "anonymous_class":
+            line, column, _end_line, _end_column = _node_character_range(node, source)
+            name = f"<anonymous@{line}:{column}>"
         for child in node.children:
             if child.type == "base_clause":
                 for gc in child.children:
@@ -2930,7 +2933,7 @@ def _enrich_qualified_names(
 
     for cls in classes:
         for func in functions:
-            if cls["line_start"] <= func["line_start"] <= func["line_end"] <= cls["line_end"]:
+            if cls["_start_byte"] <= func["_start_byte"] and func["_end_byte"] <= cls["_end_byte"]:
                 func["qualified_name"] = f"{cls['name']}.{func['name']}"
 
     _disambiguate_qualified_names(functions)
