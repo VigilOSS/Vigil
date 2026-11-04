@@ -80,7 +80,7 @@ vigil assess code-dispatch stats
 **Fetch loop:**
 ```bash
 vigil assess code-dispatch list --stale-minutes 10   # which rows are stale, and what each already carries
-vigil assess code-dispatch adopt-lease <item-id> <agent-name> --from-agent <dead-agent> --from-lease <token> --reason "<why>"   # stale row WITH receipts: keeps them
+vigil assess code-dispatch adopt-lease <item-id> <agent-id> --from-agent <dead-agent> --from-lease <token> --reason "<why>"   # stale row WITH receipts: keeps them
 vigil assess code-dispatch reset-stale 10            # remaining stale rows carrying nothing worth keeping
 vigil assess code-dispatch stats
 
@@ -88,13 +88,14 @@ vigil assess code-dispatch stats
 vigil assess code-dispatch list --repo-id <repo-id> --status pending
 vigil assess code-dispatch list --repo-id <repo-id> --batch-theme <theme> --status pending --ids-only > ids.json
 
-# Claims up to 10 queue rows atomically (a queue-claim convenience, not a dispatch batch size)
-vigil assess code-dispatch fetch 10 code-vuln-hunter
+# Claims up to 10 queue rows atomically (a queue-claim convenience, not a dispatch batch size).
+# <agent-id> is the dispatch id the hunter will run under (`agent start --agent-id`), never the role name.
+vigil assess code-dispatch fetch 10 <agent-id>
 
 # Narrow a lane atomically by repo/class/theme/queue-mode or explicit queue ids
-vigil assess code-dispatch fetch 10 code-vuln-hunter --repo-id <repo-id> --classification high --batch-theme <theme>
-vigil assess code-dispatch fetch 10 code-vuln-hunter --queue-mode trigger
-vigil assess code-dispatch fetch 10 code-vuln-hunter --ids-file ids.json
+vigil assess code-dispatch fetch 10 <agent-id> --repo-id <repo-id> --classification high --batch-theme <theme>
+vigil assess code-dispatch fetch 10 <agent-id> --queue-mode trigger
+vigil assess code-dispatch fetch 10 <agent-id> --ids-file ids.json
 ```
 
 `list` claims nothing and pages in the order `fetch` claims, so it is how you recover the ids for an
@@ -201,7 +202,7 @@ vigil assess code-record analysis <analysis-json>   # cwe_coverage + cross_file_
 vigil assess code-dispatch progress <item-id>      # what this item still owes
 
 # Preview the completion payload before committing queue history when unsure:
-vigil assess code-dispatch done <item-id> <agent-name> <lease-token> <clean|finding|suspicious|skipped> <cwe-coverage-json> ["notes"] --dry-run [--skip-reason <reason>]
+vigil assess code-dispatch done <item-id> <agent-id> <lease-token> <clean|finding|suspicious|skipped> <cwe-coverage-json> ["notes"] --dry-run [--skip-reason <reason>]
 
 # cwe-coverage-json is a file path, not inline JSON -- write the bare array (shape:
 # agent/skills/code-vulnerability-analysis/SKILL.md "CWE Coverage") to a temp file first:
@@ -209,11 +210,11 @@ cat > /tmp/cwe_<item-id>.json <<'JSON'
 [{"family": "buffer-overflow", "effort": 85, "functions_analyzed": 12, "entry_chains_traced": 3, "total_entry_chains": 3, "notes": "Traced all applicable parser entry chains"}]
 JSON
 
-vigil assess code-dispatch done <item-id> <agent-name> <lease-token> <clean|finding|suspicious|skipped> /tmp/cwe_<item-id>.json ["notes"] [--skip-reason <reason>]
+vigil assess code-dispatch done <item-id> <agent-id> <lease-token> <clean|finding|suspicious|skipped> /tmp/cwe_<item-id>.json ["notes"] [--skip-reason <reason>]
 vigil assess finding record code-vuln-hunter <finding-json> --agent-id <your-agent_id>
 vigil assess code-dispatch requeue-triggers <triggers-json>   # if analysis returned cross_file_triggers
 vigil assess code-dispatch list --stale-minutes 10   # before fetching the next batch: read first
-vigil assess code-dispatch adopt-lease <item-id> <agent-name> --from-agent <dead-agent> --from-lease <token> --reason "<why>"   # a stale row that already carries receipts
+vigil assess code-dispatch adopt-lease <item-id> <agent-id> --from-agent <dead-agent> --from-lease <token> --reason "<why>"   # a stale row that already carries receipts
 vigil assess code-dispatch reset-stale 10            # only rows the listing showed carrying nothing
 ```
 

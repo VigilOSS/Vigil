@@ -66,7 +66,7 @@ _ACTION_HELP: dict[str, str] = {
         "fetch emits a claim array. Diagnostics go to stderr.\n"
     ),
     "adopt-lease": (
-        "Usage: vigil assess code-dispatch adopt-lease <item-id> <agent-name> "
+        "Usage: vigil assess code-dispatch adopt-lease <item-id> <agent-id> "
         "--from-agent NAME --from-lease TOKEN --reason TEXT [--stale-minutes N]\n\n"
         "Move one abandoned processing lease to a replacement agent, keeping "
         "every accumulated row value and every receipt the dead lease wrote.\n"
@@ -85,18 +85,20 @@ _ACTION_HELP: dict[str, str] = {
         "lease identity chain, and the current coverage-integrity projection.\n"
     ),
     "fetch": (
-        "Usage: vigil assess code-dispatch fetch <limit> <agent-name> "
+        "Usage: vigil assess code-dispatch fetch <limit> <agent-id> "
         "[--repo-id ID] [--classification TIER] [--batch-theme THEME] "
         "[--queue-mode MODE] [--ids-file PATH]\n\n"
         "Atomically claim matching current queue items for one analysis worker.\n"
+        "<agent-id> is the dispatch agent_id the worker runs under, never the "
+        "role name; heartbeat, results and closeouts repeat it.\n"
     ),
     "heartbeat": (
         "Usage: vigil assess code-dispatch heartbeat "
-        "<item-id> <agent-name> <lease-token>\n\n"
+        "<item-id> <agent-id> <lease-token>\n\n"
         "Renew the exact active lease for one claimed queue item.\n"
     ),
     "done": (
-        "Usage: vigil assess code-dispatch done <item-id> <agent-name> "
+        "Usage: vigil assess code-dispatch done <item-id> <agent-id> "
         "<lease-token> <disposition> <cwe-coverage-json-file> [notes] "
         "[--dry-run] [--skip-reason <reason>]\n\n"
         f"Valid dispositions: {', '.join(_DONE_DISPOSITIONS)}.\n"
@@ -107,12 +109,12 @@ _ACTION_HELP: dict[str, str] = {
     ),
     "error": (
         "Usage: vigil assess code-dispatch error "
-        "<item-id> <agent-name> <lease-token> [notes]\n\n"
+        "<item-id> <agent-id> <lease-token> [notes]\n\n"
         "Close the exact active lease as an analysis error.\n"
     ),
     "needs-context": (
         "Usage: vigil assess code-dispatch needs-context "
-        "<item-id> <agent-name> <lease-token> [expansion-json-file]\n\n"
+        "<item-id> <agent-id> <lease-token> [expansion-json-file]\n\n"
         "Close the exact active lease while recording the missing context.\n"
     ),
     "reset-stale": (
@@ -205,7 +207,7 @@ def run(args) -> None:
     elif action == "adopt-lease":
         if len(extra) < 2:
             print(
-                "Usage: code-dispatch adopt-lease <item-id> <agent-name> "
+                "Usage: code-dispatch adopt-lease <item-id> <agent-id> "
                 "--from-agent NAME --from-lease TOKEN --reason TEXT "
                 "[--stale-minutes N]",
                 file=sys.stderr,
@@ -215,7 +217,7 @@ def run(args) -> None:
     elif action == "fetch":
         if len(extra) < 2:
             print(
-                "Usage: code-dispatch fetch <limit> <agent-name> "
+                "Usage: code-dispatch fetch <limit> <agent-id> "
                 "[--repo-id ID] [--classification TIER] [--batch-theme THEME] "
                 "[--queue-mode MODE] [--ids-file PATH]",
                 file=sys.stderr,
@@ -225,7 +227,7 @@ def run(args) -> None:
     elif action == "done":
         if len(extra) < 5:
             print(
-                "Usage: code-dispatch done <item-id> <agent-name> <lease-token> <disposition> <cwe-coverage-json-file> [notes] [--dry-run] [--skip-reason <reason>]\n"
+                "Usage: code-dispatch done <item-id> <agent-id> <lease-token> <disposition> <cwe-coverage-json-file> [notes] [--dry-run] [--skip-reason <reason>]\n"
                 f"Valid dispositions: {', '.join(_DONE_DISPOSITIONS)}\n"
                 "CWE coverage must be a JSON array like "
                 "[{\"family\":\"ssrf\",\"effort\":80}]\n"
@@ -277,17 +279,17 @@ def run(args) -> None:
         )
     elif action == "heartbeat":
         if len(extra) != 3:
-            print("Usage: code-dispatch heartbeat <item-id> <agent-name> <lease-token>", file=sys.stderr)
+            print("Usage: code-dispatch heartbeat <item-id> <agent-id> <lease-token>", file=sys.stderr)
             sys.exit(1)
         _heartbeat(cfg, extra[0], extra[1], extra[2])
     elif action == "error":
         if len(extra) < 3:
-            print("Usage: code-dispatch error <item-id> <agent-name> <lease-token> [notes]", file=sys.stderr)
+            print("Usage: code-dispatch error <item-id> <agent-id> <lease-token> [notes]", file=sys.stderr)
             sys.exit(1)
         _error(cfg, extra[0], extra[1], extra[2], " ".join(extra[3:]))
     elif action == "needs-context":
         if len(extra) < 3:
-            print("Usage: code-dispatch needs-context <item-id> <agent-name> <lease-token> [expansion-json-file]", file=sys.stderr)
+            print("Usage: code-dispatch needs-context <item-id> <agent-id> <lease-token> [expansion-json-file]", file=sys.stderr)
             sys.exit(1)
         expansion_file = extra[3] if len(extra) > 3 else None
         _needs_context(cfg, extra[0], extra[1], extra[2], expansion_file)

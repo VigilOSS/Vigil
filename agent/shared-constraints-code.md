@@ -277,7 +277,7 @@ cannot prove that omitted source is non-callable:
 
 If analysis is blocked by genuinely unavailable code or context, do not submit a
 disposition for that item yet. Close its lease with `vigil assess code-dispatch
-needs-context <item-id> <agent-name> <lease-token> [expansion-json-file]`, naming
+needs-context <item-id> <agent-id> <lease-token> [expansion-json-file]`, naming
 the missing dependency so the queue can route the expansion.
 
 Coverage must be structurally attributable, but write-up depth can be proportional:
@@ -394,9 +394,10 @@ taint findings; for operation/state/lifetime defects use the supported sequence 
 `agent_name`, and `lease_token`;
 the backend derives `file_id` from that queue item and rejects mismatches when `file_id` is
 supplied as an optional consistency check. Renew long-running claims with
-`vigil assess code-dispatch heartbeat <item-id> <agent-name> <lease-token>` at least twice inside
+`vigil assess code-dispatch heartbeat <item-id> <agent-id> <lease-token>` at least twice inside
 the operator's stale-reset window (the standard 10-minute window means heartbeat every 5 minutes
-or less); results and closeouts using a reclaimed lease are rejected.
+or less); results and closeouts using a reclaimed lease are rejected. `<agent-id>` is the fetched
+`agent_name`: your dispatch `agent_id` from Runtime Identity, never the role name.
 For `finding` and `suspicious`, record inline `evidence` or an engagement-owned `evidence_ref` on
 the current same-disposition result before closeout. A `clean` closeout carries non-empty family
 coverage and review notes. These disposition-specific gates preserve evidence-backed queue state
@@ -431,7 +432,7 @@ The backend derives callable coverage from exact structural references on curren
 analysis receipts and reports it as `coverage_integrity` on the `code-dispatch done` response.
 
 1. Record grouped source receipts via `code-record analysis` BEFORE calling
-   `code-dispatch done <item-id> <agent-name> <lease-token> <disposition> <coverage-json>
+   `code-dispatch done <item-id> <agent-id> <lease-token> <disposition> <coverage-json>
    [notes]` — the backend derives coverage from receipt anchors that already exist at
    completion time, not from the coverage JSON alone.
 2. `functions_analyzed` is advisory self-reporting, never coverage proof. Each file's authoritative
