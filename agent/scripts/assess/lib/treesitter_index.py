@@ -691,9 +691,16 @@ _JAVASCRIPT_CALLABLE_TYPES = frozenset(
 
 
 def _walk_named_nodes(node: Any):
-    yield node
-    for child in node.named_children:
-        yield from _walk_named_nodes(child)
+    """Every named node under *node*, itself first, in document pre-order.
+
+    An explicit stack rather than recursion, so a tree nested deeper than
+    Python's call stack walks like any other.
+    """
+    stack = [node]
+    while stack:
+        current = stack.pop()
+        yield current
+        stack.extend(reversed(current.named_children))
 
 
 def _normalized_javascript_target(value: str) -> str:
