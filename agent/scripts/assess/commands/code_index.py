@@ -1130,7 +1130,7 @@ def run(args) -> None:
                 rel_path = str(entry["file_path"])
                 try:
                     language = str(entry["language"])
-                    absolute = sealed_source_file_path(source_path, rel_path)
+                    sealed_source_file_path(source_path, rel_path)
                     supported = language in SUPPORTED_LANGUAGES
                     scanner = (
                         StreamingSecurityScanner(rel_path, language)
@@ -1146,8 +1146,12 @@ def run(args) -> None:
                     if captured.sha256 != entry.get("source_sha256") or captured.size != entry.get("size"):
                         raise ValueError(f"snapshot file no longer matches manifest: {rel_path}")
                     if supported and captured.materialized is not None:
+                        # The parser reads the file at its repository path:
+                        # path-derived values, such as an include glued onto a
+                        # raised directory, never see directories above the
+                        # snapshot.
                         indexed = index_file(
-                            str(absolute),
+                            rel_path,
                             language,
                             source=captured.materialized,
                             result_validator=lambda result: _validate_analysis_artifact(

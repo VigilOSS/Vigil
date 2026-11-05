@@ -309,3 +309,20 @@ def test_a_target_ingest_excluded_is_named_as_excluded(tmp_path, monkeypatch, re
         (4, "ambiguous", "vendor"),
         (5, "target_absent", None),
     ]
+
+
+def test_the_build_reads_each_file_at_its_repository_path(tmp_path, monkeypatch, request) -> None:
+    """A name glued onto a raised directory is computed from the file's
+    repository path, so the record is the one the per-file reader gives and no
+    directory above the snapshot leaks into it."""
+    source = b"<?php\ninclude dirname(__DIR__) . 'y.php';\ninclude __DIR__ . 'x.php';\n"
+    artifact = _build(tmp_path, monkeypatch, request, {"public/index.php": source})
+    exact = index_file("public/index.php", "php", source)
+    PhpIncludeResolver({"public/index.php": "php"}).resolve(exact, rel_path="public/index.php")
+
+    built = _includes(artifact("public/index.php"))
+    assert [(t["status"], t["path"]) for t in built] == [
+        ("target_absent", "y.php"),
+        ("target_absent", "../publicx.php"),
+    ]
+    assert built == _includes(exact)
