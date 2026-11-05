@@ -546,3 +546,95 @@ def test_a_readable_index_artifact_still_supplies_its_import_sites(
     assert not [
         row for row in payload["gaps"] if row["gap"].startswith("structural_index_artifact")
     ]
+
+
+# --------------------------------------------------------------------------- #
+# A sealed snapshot's exclusion inventory
+# --------------------------------------------------------------------------- #
+
+
+def _sealed_with_exclusions(tmp_path: Path, request, *, ingest_args=None) -> Path:
+    """Seal an origin through the real ingest predicates, as code-ingest does."""
+    from assess.commands import code_ingest
+    from assess.lib.code_snapshot import RootedSourceTree, SnapshotBuilder
+
+    origin = tmp_path / "origin"
+    _write(origin, "web/package.json", '{"name": "ui", "dependencies": {"lodash": "4.17.21"}}\n')
+    _write(origin, "web/src/app.js", "import lodash from 'lodash';\n")
+    _write(origin, "web/node_modules/lodash/index.js", "module.exports = {};\n")
+    _write(origin, "web/node_modules/left-pad/index.js", "module.exports = {};\n")
+    _write(origin, "lib/AcmeMailer-master/composer.json", '{\n    "name": "acme/mailer"\n}\n')
+    _write(origin, "lib/AcmeMailer-master/VERSION", "5.2.7\n")
+    _write(origin, "lib/AcmeMailer-master/class.mailer.php", "<?php class Mailer {}\n")
+    args = SimpleNamespace(
+        include_minified=False, include_skipped=False, include_path=[], exclude_path=[],
+        policy_preset="application",
+        max_included_skipped_bytes=code_ingest.DEFAULT_MAX_INCLUDED_SKIPPED_BYTES,
+        **(ingest_args or {}),
+    )
+    builder = SnapshotBuilder(tmp_path / "snapshots", "acme-web")
+    with RootedSourceTree(origin) as tree:
+        excluded = code_ingest._collect_excluded_records(tree, args, tmp_path / "none")
+        for rel_path in code_ingest._admitted_source_paths(tree, args, tmp_path / "none"):
+            builder.add(rel_path, tree.capture(rel_path), language="")
+    snapshot = builder.finish(
+        repo_key="acme-web", repo_name="acme-web", source_origin_path=str(origin),
+        git={"head": "", "branch": "", "dirty": None}, excluded_entries=excluded,
+    )
+
+    def make_writable() -> None:
+        for item in snapshot.source_path.parent.rglob("*"):
+            item.chmod(0o700 if item.is_dir() else 0o600)
+        snapshot.source_path.parent.chmod(0o700)
+
+    request.addfinalizer(make_writable)
+    return snapshot.source_path
+
+
+def test_a_sealed_snapshot_reports_what_ingest_excluded_but_the_tree_ships(
+    tmp_path: Path, request, capsys
+) -> None:
+    sealed = _sealed_with_exclusions(tmp_path, request)
+
+    code_dependencies.run(_args(sealed, as_json=True))
+    payload = json.loads(capsys.readouterr().out)
+
+    by_coordinate = {row["coordinate"]: row for row in payload["observations"]}
+    mailer = by_coordinate["acme/mailer"]
+    assert mailer["version"] == "5.2.7"
+    assert mailer["shipment_observation"] == "unverified_present_without_declaration"
+    assert mailer["detection"] == "vendored_copy_manifest"
+    assert {"path": "lib/AcmeMailer-master/VERSION", "line": 1, "text": "5.2.7"} in mailer["evidence"]
+    # node_modules is excluded from the snapshot, yet its layout still says what
+    # is installed: the undeclared package is reported, the declared one is not
+    # duplicated.
+    assert by_coordinate["left-pad"]["shipment_observation"] == (
+        "unverified_present_without_declaration"
+    )
+    assert by_coordinate["lodash"]["detection"] == "npm_manifest_parse"
+    assert not any(gap["gap"] == "excluded_inventory_unverified" for gap in payload["gaps"])
+
+
+def test_an_unverifiable_snapshot_manifest_is_a_gap_not_an_empty_exclusion_set(
+    tmp_path: Path, request, capsys
+) -> None:
+    sealed = _sealed_with_exclusions(tmp_path, request)
+    manifest = sealed.parent / "manifest.json"
+    manifest.chmod(0o600)
+    tampered = json.loads(manifest.read_text(encoding="utf-8"))
+    tampered["excluded_entries"] = []
+    manifest.write_text(json.dumps(tampered), encoding="utf-8")
+    manifest.chmod(0o444)
+
+    code_dependencies.run(_args(sealed, as_json=True))
+    payload = json.loads(capsys.readouterr().out)
+
+    assert "acme/mailer" not in {row["coordinate"] for row in payload["observations"]}
+    assert [gap["gap"] for gap in payload["gaps"]].count("excluded_inventory_unverified") == 1
+
+
+def test_a_plain_repository_root_needs_no_exclusion_inventory(repo: Path, capsys) -> None:
+    code_dependencies.run(_args(repo, as_json=True))
+    payload = json.loads(capsys.readouterr().out)
+
+    assert not any(gap["gap"] == "excluded_inventory_unverified" for gap in payload["gaps"])

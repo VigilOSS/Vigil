@@ -122,6 +122,9 @@ DETECTION_BY_KIND: dict[str, str] = {
     "python_poetry_lock": "python_poetry_lock_parse",
 }
 BUILD_OUTPUT_DETECTION = "build_output_layout"
+# A vendored source copy `code-ingest` excluded from analysis and identified
+# from the package manifest, licence or VERSION file at its root.
+VENDORED_COPY_DETECTION = "vendored_copy_manifest"
 
 # Which indexed languages could possibly import a component of an ecosystem. An
 # index that covers none of them cannot produce a negative result for it.
@@ -188,6 +191,23 @@ class IndexedFile:
     language: str
     analysis_status: str
     imports: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class VendoredCopy:
+    """A third-party source copy `code-ingest` recorded as excluded.
+
+    The bytes are in the tree and ship with it; nothing declares them, so
+    nothing updates them either. `ecosystem` is `unknown` when the copy's root
+    names no package manifest the ingest reader recognized.
+    """
+
+    path: str
+    ecosystem: str
+    coordinate: str
+    version: str = ""
+    version_source: str = ""
+    evidence: tuple[Evidence, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -845,6 +865,35 @@ def _build_output_records(
     return records
 
 
+def _vendored_copy_records(
+    copies: Sequence[VendoredCopy], declared: list[_Record]
+) -> list[_Record]:
+    """Vendored source copies whose identity no build file declares."""
+
+    declared_keys = {(r.ecosystem, r.coordinate) for r in declared}
+    records: list[_Record] = []
+    for copy in sorted(copies, key=lambda item: (item.ecosystem, item.coordinate, item.path)):
+        if (copy.ecosystem, copy.coordinate) in declared_keys:
+            continue
+        records.append(
+            _Record(
+                ecosystem=copy.ecosystem,
+                coordinate=copy.coordinate,
+                version=copy.version,
+                version_source=copy.version_source if copy.version else "unresolved",
+                declared_scope="",
+                declaration="vendored",
+                module_path="",
+                manifest_path="",
+                observation_origin="build_output",
+                detection=VENDORED_COPY_DETECTION,
+                evidence=list(copy.evidence)
+                or [Evidence(path=copy.path, line=0, text=copy.path)],
+            )
+        )
+    return records
+
+
 # --------------------------------------------------------------------------- #
 # Relocation, reachability, scanner correlation
 # --------------------------------------------------------------------------- #
@@ -1070,6 +1119,7 @@ def build_dependency_picture(
     *,
     parses: Sequence[ManifestParse],
     present_paths: Sequence[str] = (),
+    vendored_copies: Sequence[VendoredCopy] = (),
     indexed_files: Sequence[IndexedFile] = (),
     scan_rows: Sequence[Mapping[str, object]] = (),
 ) -> DependencyPicture:
@@ -1097,7 +1147,12 @@ def build_dependency_picture(
     records = _collapse_profile_redeclarations(records)
     records.extend(unconsumed_policy)
     records = _merge_manifest_and_lock(records)
-    records.extend(_build_output_records(present_paths, records))
+    records.extend(
+        [
+            *_build_output_records(present_paths, records),
+            *_vendored_copy_records(vendored_copies, records),
+        ]
+    )
     # A scanner report is a secondary input: it annotates the identities the
     # source derivation already established, so it runs before the observations
     # are frozen and can never introduce one.

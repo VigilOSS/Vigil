@@ -1095,3 +1095,71 @@ def test_the_picture_is_deterministic() -> None:
     second = _picture(files, present_paths=paths)
 
     assert first == second
+
+
+# --------------------------------------------------------------------------- #
+# Vendored copies recorded at ingest
+# --------------------------------------------------------------------------- #
+
+
+def _vendored_mailer(**overrides) -> dp.VendoredCopy:
+    values = dict(
+        path="lib/AcmeMailer-master",
+        ecosystem="composer",
+        coordinate="acme/mailer",
+        version="5.2.7",
+        version_source="VERSION",
+        evidence=(
+            dm.Evidence(path="lib/AcmeMailer-master/composer.json", line=2, text='"name": "acme/mailer",'),
+            dm.Evidence(path="lib/AcmeMailer-master/VERSION", line=1, text="5.2.7"),
+        ),
+    )
+    values.update(overrides)
+    return dp.VendoredCopy(**values)
+
+
+def test_a_vendored_copy_is_present_without_declaration_with_its_version() -> None:
+    picture = dp.build_dependency_picture(parses=[], vendored_copies=[_vendored_mailer()])
+
+    obs = _observation(picture, "acme/mailer")
+    assert obs.ecosystem == "composer"
+    assert obs.version == "5.2.7"
+    assert obs.version_source == "VERSION"
+    assert obs.declaration == "vendored"
+    assert obs.observation_origin == "build_output"
+    assert obs.shipment_observation == "unverified_present_without_declaration"
+    assert obs.reachability_observation == "unverified_reachability_unindexed"
+    assert obs.detection == dp.VENDORED_COPY_DETECTION
+    assert [e.path for e in obs.evidence] == [
+        "lib/AcmeMailer-master/composer.json",
+        "lib/AcmeMailer-master/VERSION",
+    ]
+    assert "unverified_version_unresolved" not in obs.qualifiers
+
+
+def test_a_vendored_copy_without_a_version_says_so() -> None:
+    picture = dp.build_dependency_picture(
+        parses=[], vendored_copies=[_vendored_mailer(version="", version_source="", evidence=())]
+    )
+
+    obs = _observation(picture, "acme/mailer")
+    assert obs.version_source == "unresolved"
+    assert "unverified_version_unresolved" in obs.qualifiers
+    assert obs.evidence == (
+        dm.Evidence(path="lib/AcmeMailer-master", line=0, text="lib/AcmeMailer-master"),
+    )
+
+
+def test_a_vendored_npm_copy_the_manifest_declares_is_not_reported_twice() -> None:
+    picture = _picture(
+        {"web/package.json": PACKAGE_JSON},
+        vendored_copies=[
+            _vendored_mailer(
+                path="web/lodash-main", ecosystem="npm", coordinate="lodash", version="4.17.21"
+            )
+        ],
+    )
+
+    assert [obs.detection for obs in picture.observations if obs.coordinate == "lodash"] == [
+        "npm_manifest_parse"
+    ]
