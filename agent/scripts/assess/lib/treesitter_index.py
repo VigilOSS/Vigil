@@ -848,6 +848,41 @@ def _parse_php_closure(node: Any, source: bytes) -> dict[str, Any]:
     return parsed
 
 
+def _php_namespace_scopes(tree: Any, source: bytes) -> list[tuple[int, int, str]]:
+    """Byte ranges each PHP namespace declaration governs, in source order.
+
+    A braced `namespace Acme\\Billing { ... }` governs its own block and the
+    statement form `namespace Acme\\Billing;` governs everything up to the next
+    declaration. The unnamed `namespace { ... }` block is the global namespace.
+    PHP admits a declaration only as a top-level statement, so the program's
+    own children are the whole inventory.
+    """
+    declarations = [
+        node for node in tree.root_node.named_children if node.type == "namespace_definition"
+    ]
+    scopes: list[tuple[int, int, str]] = []
+    for index, node in enumerate(declarations):
+        name_node = node.child_by_field_name("name")
+        name = "".join(_node_text(name_node, source).split()) if name_node is not None else ""
+        body = node.child_by_field_name("body")
+        if body is not None:
+            scopes.append((body.start_byte, body.end_byte, name))
+        else:
+            end = declarations[index + 1].start_byte if index + 1 < len(declarations) else len(source)
+            scopes.append((node.end_byte, end, name))
+    return scopes
+
+
+def _attach_php_namespaces(tree: Any, source: bytes, symbols: list[dict[str, Any]]) -> None:
+    """Record on each PHP symbol the namespace its declaration sits in."""
+    scopes = _php_namespace_scopes(tree, source)
+    for symbol in symbols:
+        symbol["_php_namespace"] = next(
+            (name for start, end, name in scopes if start <= symbol["_start_byte"] < end),
+            "",
+        )
+
+
 def _extract_php_closures(tree: Any, source: bytes) -> list[dict[str, Any]]:
     return [
         _parse_php_closure(node, source)
@@ -1060,6 +1095,7 @@ def _extract_functions_ts(tree: Any, language: str, source: bytes) -> list[dict[
             functions + _extract_php_closures(tree, source),
             key=lambda function: function["_start_byte"],
         )
+        _attach_php_namespaces(tree, source, functions)
     elif query_language == "ruby":
         functions = sorted(
             functions + _extract_ruby_route_blocks(tree, source),
@@ -1363,7 +1399,7 @@ def _extract_params(params_node: Any, source: bytes) -> list[str]:
                           "typed_parameter", "default_parameter",
                           "identifier", "typed_default_parameter",
                           "parameter_declaration", "optional_parameter_declaration",
-                          "simple_parameter",
+                          "simple_parameter", "property_promotion_parameter",
                           "variadic_parameter", "optional_parameter",
                           "keyword_parameter", "block_parameter",
                           "splat_parameter", "hash_splat_parameter"):
@@ -1395,7 +1431,9 @@ def _extract_classes_ts(tree: Any, language: str, source: bytes) -> list[dict[st
         if cls_info:
             classes.append(cls_info)
 
-    if query_language == "csharp":
+    if query_language == "php":
+        _attach_php_namespaces(tree, source, classes)
+    elif query_language == "csharp":
         local_interfaces = {
             _node_text(node.child_by_field_name("name"), source)
             for node in nodes
@@ -3267,10 +3305,22 @@ def _enrich_qualified_names(
                 )
         return
 
+    if language == "php":
+        # PHP spells a namespaced symbol with its own separator; the method
+        # separator stays `.` as in every other language here. A closure is a
+        # value bound to a variable, and variables are not namespaced.
+        for func in functions:
+            if func["_php_namespace"] and not func.get("is_closure", False):
+                func["qualified_name"] = f"{func['_php_namespace']}\\{func['name']}"
     for cls in classes:
+        owner = (
+            f"{cls['_php_namespace']}\\{cls['name']}"
+            if cls.get("_php_namespace")
+            else cls["name"]
+        )
         for func in functions:
             if cls["_start_byte"] <= func["_start_byte"] and func["_end_byte"] <= cls["_end_byte"]:
-                func["qualified_name"] = f"{cls['name']}.{func['name']}"
+                func["qualified_name"] = f"{owner}.{func['name']}"
 
     _disambiguate_qualified_names(functions)
 
@@ -3355,6 +3405,7 @@ def _remove_internal_structural_fields(
             "_cpp_declared_scope",
             "_cpp_is_friend",
             "_cpp_namespace",
+            "_php_namespace",
             "_end_byte",
             "_start_byte",
         ):
@@ -3362,6 +3413,7 @@ def _remove_internal_structural_fields(
     for cls in classes:
         for field_name in (
             "_cpp_namespace",
+            "_php_namespace",
             "_java_public",
             "_csharp_public",
             "_end_byte",

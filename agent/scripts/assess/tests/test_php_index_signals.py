@@ -130,3 +130,73 @@ class AcmeImport {
         (5, "process_exec"),
         (7, "deserialization"),
     }
+
+
+def test_constructor_promoted_parameters_are_parameters() -> None:
+    source = b"""<?php
+final class InvoiceController {
+    public function __construct(private readonly Request $request, string $plain, protected ?int $limit = null) {}
+}
+"""
+
+    indexed = index_file("src/InvoiceController.php", "php", source)
+
+    assert indexed["functions"][0]["params"] == [
+        "private readonly Request $request",
+        "string $plain",
+        "protected ?int $limit = null",
+    ]
+
+
+def test_php_symbols_are_qualified_by_the_namespace_declared_before_them() -> None:
+    source = b"""<?php
+namespace Acme\\Billing;
+
+final class InvoiceController
+{
+    public function show($id) { return $id; }
+}
+
+function invoice_total($rows) { return count($rows); }
+
+namespace Acme\\Reports;
+
+function export_csv($rows) { return $rows; }
+"""
+
+    indexed = index_file("src/billing.php", "php", source)
+
+    assert [(item["name"], item["qualified_name"]) for item in indexed["functions"]] == [
+        ("show", "Acme\\Billing\\InvoiceController.show"),
+        ("invoice_total", "Acme\\Billing\\invoice_total"),
+        ("export_csv", "Acme\\Reports\\export_csv"),
+    ]
+
+
+def test_braced_php_namespaces_qualify_only_their_own_block() -> None:
+    source = b"""<?php
+namespace Acme\\Ledger {
+    class Journal
+    {
+        public function post($entry)
+        {
+            $format = function ($line) { return trim($line); };
+            return $format($entry);
+        }
+    }
+}
+
+namespace {
+    function acme_root() { return new Acme\\Ledger\\Journal(); }
+    $probe = fn () => 1;
+}
+"""
+
+    indexed = index_file("src/ledger.php", "php", source)
+
+    assert [(item["name"], item["qualified_name"]) for item in indexed["functions"]] == [
+        ("post", "Acme\\Ledger\\Journal.post"),
+        ("$format", "Acme\\Ledger\\Journal.$format"),
+        ("acme_root", "acme_root"),
+        ("$probe", "$probe"),
+    ]

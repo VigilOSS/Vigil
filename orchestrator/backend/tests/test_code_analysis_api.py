@@ -34,6 +34,7 @@ if str(SCRIPTS_ROOT) not in sys.path:
 
 from assess.lib.code_snapshot import SnapshotBuilder, capture_regular_file  # noqa: E402
 from assess.commands import code_dispatch  # noqa: E402
+from assess.lib.treesitter_index import index_file  # noqa: E402
 from assess.lib.code_structural_identity import (  # noqa: E402
     STRUCTURAL_INDEX_SCHEMA as CLI_STRUCTURAL_INDEX_SCHEMA,
     structural_input_digest as cli_structural_input_digest,
@@ -2625,6 +2626,119 @@ def test_structural_republication_refuses_ambiguous_receipt_bound_requalificatio
     assert "A.t" in refused.json()["detail"]
     assert "B.t" in refused.json()["detail"]
     assert _registered_callables(repo_id) == before
+
+
+def test_php_namespace_qualification_rebinds_receipt_bound_callables_with_unchanged_spans(
+    client, isolate_settings
+) -> None:
+    """A rebuild by an indexer that now qualifies PHP symbols by namespace
+    changes every callable's qualified name and none of its spans, so the
+    receipts bound to the earlier registry follow the callables."""
+    source = (
+        b"<?php\n"
+        b"namespace Acme\\Billing;\n"
+        b"\n"
+        b"final class InvoiceController\n"
+        b"{\n"
+        b"    public function show($id)\n"
+        b"    {\n"
+        b"        return invoice_total([$id]);\n"
+        b"    }\n"
+        b"}\n"
+        b"\n"
+        b"function invoice_total($rows)\n"
+        b"{\n"
+        b"    return count($rows);\n"
+        b"}\n"
+    )
+    indexed = index_file("src/InvoiceController.php", "php", source)
+    upgraded = [
+        _structural_callable(
+            function["name"],
+            start_line=function["line_start"],
+            end_line=function["line_end"],
+            qualified_name=function["qualified_name"],
+        )
+        for function in indexed["functions"]
+    ]
+    assert [item["qualified_name"] for item in upgraded] == [
+        "Acme\\Billing\\InvoiceController.show",
+        "Acme\\Billing\\invoice_total",
+    ]
+    # The registry an indexer without namespace qualification published.
+    previous = [
+        {**item, "qualified_name": str(item["qualified_name"]).removeprefix("Acme\\Billing\\")}
+        for item in upgraded
+    ]
+
+    engagement_key = "2026-11-04-php-namespace-rebind"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo = _create_repo(client, engagement_key, repo_key="php-namespace-rebind-repo")
+    repo_id = int(repo["id"])
+    _create_files(client, engagement_key, repo_id)
+    files = _append_repo_files(
+        client,
+        engagement_key,
+        repo_id,
+        [
+            {
+                "file_path": "src/InvoiceController.php",
+                "language": "php",
+                "loc": indexed["total_lines"],
+                "file_hash": _source_hash("acme-invoice-controller"),
+                "header_snippet": "<?php\nnamespace Acme\\Billing;\n",
+                "git_churn_score": 1,
+                "has_past_cve_fix": False,
+            }
+        ],
+    )
+    controller = next(row for row in files if row["file_path"] == "src/InvoiceController.php")
+    controller_id = int(controller["id"])
+    _publish_structural_callables(
+        client, engagement_key, repo_id, files, {controller_id: previous}
+    )
+    _classify_file(client, engagement_key, controller_id, "critical", 100)
+    claim = _claim_file_for_analysis(client, engagement_key, controller_id)
+    receipt = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-results",
+        json=_owned(
+            claim,
+            queue_item_id=claim["id"],
+            disposition="clean",
+            receipt_kind="call_chain",
+            callable_refs=[{"file_id": controller_id, **item} for item in previous],
+            reviewed_spans=[],
+            evidence="show -> invoice_total was reviewed against the sealed source",
+            cwe_coverage=_network_input_coverage(default_effort=80),
+        ),
+    )
+    assert receipt.status_code == 201, receipt.text
+
+    rebuilt = _post_structural_callables(
+        client, engagement_key, repo_id, files, {controller_id: upgraded}
+    )
+
+    assert rebuilt.status_code == 200, rebuilt.text
+    assert {
+        (qualified_name, start_line, end_line)
+        for file_id, qualified_name, start_line, end_line in _registered_callables(repo_id)
+        if file_id == controller_id
+    } == {
+        (item["qualified_name"], item["start_line"], item["end_line"]) for item in upgraded
+    }
+    connection = sqlite3.connect(str(db_module.database_path()))
+    try:
+        linked = connection.execute(
+            """
+            SELECT callables.qualified_name
+            FROM code_analysis_result_callables AS links
+            JOIN code_structural_callables AS callables ON callables.id = links.callable_id
+            ORDER BY links.ordinal
+            """
+        ).fetchall()
+    finally:
+        connection.close()
+    assert [row[0] for row in linked] == [item["qualified_name"] for item in upgraded]
 
 
 def test_complete_structural_publication_rejects_callable_registry_shortfall(
