@@ -1147,7 +1147,7 @@ def _captured_skipped_record(
         "reason": reason,
         "size": captured.size,
         "sha256": captured.sha256,
-        "language": _detect_language(Path(rel_path).name) or "",
+        "language": _detect_language(Path(rel_path).name, captured.header) or "",
     }
     record.update(_source_hints(rel_path))
     return record
@@ -1420,10 +1420,10 @@ def _is_regular_file(filepath: str) -> bool:
     return os.path.isfile(filepath) and not os.path.islink(filepath)
 
 
-def _detect_language(filename: str) -> str | None:
+def _detect_language(filename: str, header: str | None = None) -> str | None:
     """Compatibility wrapper around the shared code-language classifier."""
 
-    return detect_language(filename)
+    return detect_language(filename, header)
 
 
 def _sha256_file(filepath: str) -> str:
@@ -1876,7 +1876,7 @@ def run(args) -> None:
                     if rel_path in included_skip_reasons:
                         included_skipped += 1
 
-                    lang = _detect_language(filename)
+                    lang = _detect_language(filename, captured.header)
                     if lang is None and getattr(args, "default_language_for_unknown", None):
                         lang = args.default_language_for_unknown
                     total_loc += captured.loc

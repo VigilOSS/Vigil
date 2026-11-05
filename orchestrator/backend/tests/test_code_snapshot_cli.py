@@ -1553,7 +1553,7 @@ def test_code_ingest_closes_capture_spool_on_record_build_failure(
     monkeypatch.setattr(
         module,
         "_detect_language",
-        lambda _filename: (_ for _ in ()).throw(RuntimeError("record build failed")),
+        lambda *_args: (_ for _ in ()).throw(RuntimeError("record build failed")),
     )
 
     with pytest.raises(RuntimeError, match="record build failed"):

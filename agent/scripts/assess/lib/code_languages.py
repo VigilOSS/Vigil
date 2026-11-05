@@ -1,6 +1,7 @@
 """Canonical filename-to-language classification for code ingestion and indexing."""
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 
@@ -139,6 +140,13 @@ CODE_LANGUAGE_ALIASES = {
     "c++": "cpp",
 }
 
+# Extensions PHP shares with other formats: C, C++ and assembler `.inc`
+# fragments, packaging `.install` lists, desktop `.theme` files. A file named
+# with one is PHP only when its header opens a PHP tag, the short `<? ` form
+# included (never `<?xml`); a caller with no header gets the name's answer.
+PHP_TAG_REQUIRED_EXTENSIONS = frozenset({".inc", ".module", ".install", ".theme"})
+_PHP_OPEN_TAG = re.compile(r"<\?(?:php(?![A-Za-z0-9_])|=|(?=\s))", re.IGNORECASE)
+
 # Longest first, so a future `.foo.blade.php` cannot be decided by a shorter
 # sibling key that happens to be scanned earlier.
 _COMPOUND_SUFFIXES: tuple[tuple[str, str], ...] = tuple(
@@ -146,8 +154,12 @@ _COMPOUND_SUFFIXES: tuple[tuple[str, str], ...] = tuple(
 )
 
 
-def detect_language(file_path: str) -> str | None:
-    """Return the canonical language for a repository-relative filename."""
+def detect_language(file_path: str, header: str | None = None) -> str | None:
+    """Return the canonical language for a repository-relative filename.
+
+    *header* is the file's leading text, when the caller has read it; it
+    decides the extensions in `PHP_TAG_REQUIRED_EXTENSIONS`.
+    """
 
     name = Path(file_path).name
     if name == "Dockerfile" or name.startswith("Dockerfile."):
@@ -159,7 +171,14 @@ def detect_language(file_path: str) -> str | None:
     for suffix, language in _COMPOUND_SUFFIXES:
         if lowered.endswith(suffix) and lowered != suffix:
             return language
-    return LANGUAGE_BY_EXTENSION.get(Path(name).suffix.lower())
+    suffix = Path(name).suffix.lower()
+    if (
+        header is not None
+        and suffix in PHP_TAG_REQUIRED_EXTENSIONS
+        and not _PHP_OPEN_TAG.search(header)
+    ):
+        return None
+    return LANGUAGE_BY_EXTENSION.get(suffix)
 
 
 def structural_language_for_file(file_path: str) -> str | None:
