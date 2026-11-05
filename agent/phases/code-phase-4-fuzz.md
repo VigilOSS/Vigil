@@ -222,8 +222,8 @@ Code findings close out as per-finding submissions through the same flow as web.
 `agent/phases/phase-8-report.md` from the ticket-count decision through publish (step e), then its
 Definition of Done; the variant, chain, and depth items there are web-only. Code differences:
 
-- Repro rehearsal tester: `code-vuln-verifier` for source-only findings, `code-fuzz-engineer` for
-  fuzz/crash findings.
+- Repro rehearsal tester: `code-vuln-verifier` for findings whose `reproduction_basis` is `source`,
+  `code-fuzz-engineer` for fuzz/crash findings.
 - Platform: `--platform direct` unless the code work runs under an active bounty program (see
   "Integration with Web Engagement" in `agent/operator-core-code.md`).
 - Fuzz findings (CF-xxx) use the crash input and ASAN report as proof (`evidence_ref`/`poc_code`);

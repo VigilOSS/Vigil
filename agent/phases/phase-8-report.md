@@ -19,10 +19,10 @@
    same-fix judgement is yours and it is not inferable from the finding rows.
 
    **Repro rehearsal — before `report-writer` dispatch.** Dispatch a fresh
-   `vulnerability-analyst` for live findings, `code-vuln-verifier` for source-only
-   findings, or `code-fuzz-engineer` for fuzz/crash findings. Give it only the
-   finding's `details.steps_to_reproduce` and `details.repro_runs`, with no author
-   handoff or chain narrative. A successful check means the tester follows the
+   `vulnerability-analyst` for live findings, `code-vuln-verifier` for findings whose
+   `reproduction_basis` is `source`, or `code-fuzz-engineer` for fuzz/crash findings.
+   Give it only the finding's `details.steps_to_reproduce` and `details.repro_runs`, with
+   no author handoff or chain narrative. A successful check means the tester follows the
    authored steps and observes the claimed outcome: a command's zero exit code
    alone is insufficient. Live and fuzz checks cite all authored `repro_runs`
    IDs checked plus at least one completed cold-verifier command-run ID;
