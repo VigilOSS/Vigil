@@ -567,3 +567,61 @@ def test_the_completion_refusal_offers_only_moves_each_listed_obligation_allows(
     accepted = blockers[gap.json()["id"]]
     assert "resolve with recorded evidence" not in accepted["action"]
     assert "partial" in accepted["action"]
+
+
+@pytest.mark.parametrize("parked_status", ["deferred", "blocked", "accepted_gap"])
+def test_a_full_read_resolves_a_parked_source_read(
+    client, isolate_settings, parked_status
+) -> None:
+    # A deferred or blocked source is still unread, and an accepted gap recorded
+    # before releases existed still blocks the run; complete byte coverage is the
+    # proof each of them is waiting for.
+    _seed(client, isolate_settings)
+    run = _recovery_parent_run(client, run_uuid=f"parked-{parked_status}")
+    content = b"VALUE = 1\n"
+    [source] = client.post(
+        f"{BASE}/assessment-runs/{run['id']}/sources",
+        json={"sources": [_source(target_key="service-a", path="src/a.py", content=content)]},
+    ).json()
+    obligation = _source_obligation(client, run, source)
+    if parked_status == "accepted_gap":
+        with db_module.get_connection() as connection:
+            connection.execute(
+                "UPDATE assessment_run_obligations SET status = 'accepted_gap', "
+                "resolution = 'recorded as a gap' WHERE id = ?",
+                (obligation["id"],),
+            )
+    else:
+        parked = client.patch(
+            f"{BASE}/assessment-runs/{run['id']}/obligations/{obligation['id']}",
+            json={"status": parked_status, "resolution": "later", "proof_receipt_ids": []},
+        )
+        assert parked.status_code == 200, parked.text
+
+    read = client.post(
+        f"{BASE}/assessment-runs/{run['id']}/source-reads",
+        json={
+            "source_id": source["id"],
+            "dispatch_agent_id": "HUNT-RUN-1",
+            "attempt": 1,
+            "byte_start": 0,
+            "byte_end": len(content),
+            "line_start": 1,
+            "line_end": 2,
+        },
+    )
+
+    assert read.status_code == 201, read.text
+    assert _source_obligation(client, run, source)["status"] == "resolved"
+    blockers = client.get(f"{BASE}/assessment-runs/{run['id']}").json()["blockers"]
+    assert not [blocker for blocker in blockers if blocker["code"] == "unread_source"]
+    connection = sqlite3.connect(str(db_module.database_path()))
+    try:
+        [event] = connection.execute(
+            "SELECT from_status, to_status FROM assessment_run_obligation_events "
+            "WHERE obligation_id = ? AND to_status = 'resolved'",
+            (obligation["id"],),
+        ).fetchall()
+    finally:
+        connection.close()
+    assert event == (parked_status, "resolved")

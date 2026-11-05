@@ -397,12 +397,24 @@ def record_source_read(
             ).fetchone()
         assert existing is not None
         if _source_fully_read(connection, run_id, source_id, size):
+            # Complete coverage is what every still-unread state waits for: an
+            # open, blocked or deferred source, and a hard legacy accepted gap.
+            unread_statuses = sorted(_RELEASABLE_OBLIGATION_STATUSES)
             obligation = connection.execute(
-                """
+                f"""
                 SELECT * FROM assessment_run_obligations
-                WHERE run_id = ? AND identity_key = ? AND status = 'open'
+                WHERE run_id = ? AND identity_key = ?
+                  AND (
+                      status IN ({", ".join("?" for _ in unread_statuses)})
+                      OR (status = ? AND hard = 1)
+                  )
                 """,
-                (run_id, f"source_read:{source_id}"),
+                (
+                    run_id,
+                    f"source_read:{source_id}",
+                    *unread_statuses,
+                    _LEGACY_RELEASABLE_SOURCE_STATUS,
+                ),
             ).fetchone()
             if obligation is not None:
                 resolution = "complete observed byte coverage"
@@ -432,10 +444,10 @@ def record_source_read(
                     INSERT INTO assessment_run_obligation_events (
                         engagement_id, run_id, obligation_id, from_status,
                         to_status, resolution, proof_receipt_ids_json
-                    ) VALUES (?, ?, ?, 'open', 'resolved',
+                    ) VALUES (?, ?, ?, ?, 'resolved',
                               'complete observed byte coverage', '[]')
                     """,
-                    (engagement.id, run_id, int(obligation["id"])),
+                    (engagement.id, run_id, int(obligation["id"]), str(obligation["status"])),
                 )
         record = dict(existing)
         record["source_sha256"] = str(source["content_sha256"])
