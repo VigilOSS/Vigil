@@ -17,7 +17,7 @@ Inputs to consult:
 Review checklist (emit one line per gap, naming the finding slug + the missing element):
 
 - [ ] Each confirmed finding evaluated for `finding link` against at least one other confirmed finding when a shared code path / shared auth boundary / shared input vector is plausible. Group obvious siblings as roots even if no one has run `finding link` yet.
-- [ ] Findings that should be grouped under one root cause but currently sit independent are surfaced — propose the `finding link` command in the handoff `next_step`.
+- [ ] Findings that should be grouped under one root cause but currently sit independent are surfaced — propose the `finding link` command in the handoff `next_step`, naming its `--effect`. Linking keeps each confirmed verdict; `eliminates_finding` additionally needs an independent claim review on a verified sibling, so say why the root fix retires it.
 - [ ] Each finding's PoC carries chain-relevant prerequisites: captured token id (in `credentials` table via `details.credential_id`), replayed credential confirmation, intermediate state needed to reach the vulnerable step. If a prerequisite is missing, recommend the operator re-dispatch VA in standard mode to capture it.
 - [ ] Each finding's stated attacker outcome (per the Dispatch Completion Gate in `agent/operator-core.md`) is concrete enough that exploit-developer can build on it without re-deriving the exploitation step.
 - [ ] Every `details.chain_required=true` flag has an actual exploit-developer dispatch recorded against the slug — no orphan chain-required flags reaching the exploit phase.

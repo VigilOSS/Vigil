@@ -522,9 +522,10 @@ Revocation does not stop a process: run `vigil assess kali sweep-orphans`, inspe
 `vigil assess command-run list` and the proof's runs/jobs, wait or stop them through their
 canonical controls, then `vigil assess proof-work reconcile <id>`. Report any stop failure.
 
-Inspect `reverification_required` separately from parked proof: a material edit can require a
-fresh verdict while finished work and its receipts remain historical. Read the finding and
-invalidating transition; independently verify or park a new next test as the evidence requires.
+Inspect `reverification_required` separately from parked proof: an invalidating edit or a reopen
+(the verdict effects in `vigil assess contract finding update`) can require a fresh verdict while
+finished work and its receipts remain historical. Read the finding and invalidating transition;
+independently verify or park a new next test as the evidence requires.
 
 Launch only when a successful claim returns `launch_required: true`; a replay requires inspecting the existing owner/run, not another native spawn. Launch the fresh specialist
 from the current native client using the returned `launch.launch_message`, which carries

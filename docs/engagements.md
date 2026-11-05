@@ -175,7 +175,17 @@ canonical run/job controls and inspect the result. Evidence remains in its origi
 The audit history records actor, confirmation or revocation reason verbatim. These fields
 record the operator's assertion; they do not authenticate a separate human principal.
 
-Finished work retains its lifecycle history after a material finding edit. The proof view's
+A write to a verified finding has a fixed effect on its verdict. Presentation edits (title,
+notes, workflow, remediation, references, filling an empty evidence reference) and root-cause
+grouping keep it. Claim wording (summary, impact, evidence or step wording, a replaced evidence
+reference) keeps a confirmed verdict but needs an independent claim-equivalence review before the
+report. Technical changes (severity, CWE, defect family, root-cause key, authentication context,
+location, CVSS exploitability, a removed proof dependency, a retraction or a reopen) return the
+finding to unreviewed for a fresh proof run. A merge keeps the target's technical claim and
+verdict and warns about a stronger source value, and a killed finding is reopened before a
+technical edit. Each finding's history shows the effect and the axes that decided it.
+
+Finished work retains its lifecycle history after an invalidating finding edit. The proof view's
 separate verification-required list names the invalidating transition and next action.
 Use `vigil assess contract proof-work` and `vigil assess contract finding update` for the
 executable lifecycle and narrow same-verifier reproduction-enrichment contracts.

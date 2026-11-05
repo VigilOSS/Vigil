@@ -1,6 +1,6 @@
 # ADR 0038 — Live proof approval and verification history
 
-- Status: Accepted — implemented
+- Status: Accepted — implemented; finding-edit verdict effects amended by [ADR 0039](0039-one-change-policy-decides-finding-verdict-effects.md)
 - Date: 2026-10-19
 
 ## Context

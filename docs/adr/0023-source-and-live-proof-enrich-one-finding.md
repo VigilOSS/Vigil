@@ -1,6 +1,6 @@
 # ADR 0023 — Source and live proof enrich one finding
 
-- Status: Accepted — implemented
+- Status: Accepted — implemented; file/live merge into a verified target amended by [ADR 0039](0039-one-change-policy-decides-finding-verdict-effects.md)
 - Date: 2026-09-12
 
 ## Context

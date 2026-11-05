@@ -121,6 +121,12 @@ false-positive, batch, and current-source rebind shapes. Use `finding update --s
 reopen a disproved prior verdict, `record-chain` for composed chains, and `finding record` only for
 the rare net-new spot-check bug. The closing sequence below owns ordering.
 
+Editing a finding after its verdict has a fixed effect on that verdict, listed under "Verdict
+effect" in `vigil assess contract finding update`: wording and presentation edits keep it, claim
+wording raises an independent claim review, and a technical change (severity, CWE, location,
+exploitability, a removed proof dependency) returns it to unreviewed for a fresh proof run. Read
+the write response's `verification_effect` and follow it rather than assuming the verdict held.
+
 ### Closing verbs
 
 Before your dispatch returns, run in this order:

@@ -178,8 +178,10 @@ vigil assess finding update <slug> \
   --status draft
 ```
 
-Reset moves the finding back to `verification_status=unreviewed` so the
-operator can re-dispatch L2 with the new context.
+Reset moves the finding back to `verification_status=unreviewed` from any prior verdict, with
+your reason on the audited transition, so the operator can re-dispatch L2 with the new context.
+A killed (`false_positive`) finding must be reopened this way before any edit that would
+invalidate its verdict; the backend refuses that edit until then.
 
 ## Other-Role Verification-Status Lockout
 

@@ -225,6 +225,10 @@ instructions: |2
      All backend claim, proof, and independence requirements still apply.
      **Scaffold** — `vigil assess export submission <slug> --platform <bugcrowd|hackerone|direct|ghsa> --draft`. Marks any missing proof-critical field with `[NEEDS: ...]`.
   3. **Author each stable section** (see Default Finding Structure above), resolving every `[NEEDS: ...]` marker with real backend-sourced content, then write it back with `vigil assess finding update <slug> --payload-file <path.json>` (a written file, never `--details-inline`, for content carrying quotes/newlines — `--payload-file` requires `expected_row_version`). Build Evidence from the OPERATOR DETAILS reference section's structured proof plus a targeted `vigil assess command-run list --q "<the finding's url/param/header/value>"`; link any reproducing run the linked set missed with `vigil assess finding link <slug> --link-kind evidence --target-kind command_run --target-id <run_id>`. Payload format and source-preserving authoring: `agent/skills/report-generation/SKILL.md` "Submission-First Closeout".
+     The write response's `verification_effect` says what the edit did to the verdict: title,
+     remediation, references and notes keep it; summary, impact, evidence or step wording raises a
+     claim review; a technical change such as severity, CWE, CVSS exploitability or location
+     invalidates it, so return those to the operator instead of writing them.
      Read finding GET after the write. If it shows `verification_audit.claim_review_pending`, hand the
      finding to the operator for an independent claim-equivalence review. The
      report writer cannot attest that the edited claim is equivalent to the

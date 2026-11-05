@@ -252,6 +252,9 @@ each other. Merge the weaker into the stronger:
 ```bash
 vigil assess finding merge <source-slug> <target-slug> "<reason>"
 ```
+The target keeps its severity, CVSS, CWE and verdict. Read the merge warnings: a stronger source
+value is applied only by the explicit `finding update` the warning names, which invalidates the
+verdict and needs a fresh proof run.
 
 **Pre-report deduplication (cross-phase):**
 Before dispatching report-writer, also check for duplicate findings between Phase 3 and Phase 4
