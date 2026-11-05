@@ -5,6 +5,33 @@ versioning follows [Semantic Versioning][semver].
 
 Durable design decisions live in [`docs/adr/`](docs/adr/).
 
+## [Unreleased]
+
+### Changed
+
+- `agent handoff` requires `--agent-id` and refuses a payload written for another dispatch.
+- Unknown `agent start` prompt-context keys are rejected by name; queue-fetch lane manifests
+  show each leased item's scratch directory.
+- Buffer-overflow and use-after-free apply only to memory-unsafe languages.
+- PHP script scope counts as measured, so fully parsed PHP files without callables are complete;
+  a review of such a file still needs a whole-file span.
+
+### Fixed
+
+- Rebuilding a structural index for the same snapshot rebinds its generation: unreferenced
+  callables are replaced and receipt-bound callables keep their links when only their qualified
+  name changes.
+- Lease conflicts name the holder and distinguish a mistyped token, a wrong agent id and a
+  reclaimed lease; lease commands name the dispatch agent id.
+- Requeueing a trigger whose target path is not in the snapshot says so and suggests the closest
+  admitted path.
+- Merging findings keeps the surviving finding's provenance and snapshot attestation.
+- `proof-run start --for-finding` prints the run with its finding associations.
+- Finding reply fields are no longer described as both required and optional.
+- `source-read record` names the expected path when the supplied one does not match.
+- PHP enum and anonymous-class methods are qualified by their class; `->exec(` is SQL execution
+  and `json_decode` is not deserialization.
+
 ## [2.3.2] - 2026-11-03
 
 ### Fixed
