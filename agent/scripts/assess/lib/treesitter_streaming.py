@@ -480,6 +480,21 @@ class StreamingSecurityScanner:
             [pattern for pattern in self._import_patterns if _gate_literals(pattern) is None],
         )
 
+    def retains_nothing_from(self, source: bytes) -> bool:
+        """Whether a sources-only scan of *source* could retain no record.
+
+        Every window is a slice of one line of the source, so a lowered
+        source holding no literal the gate looks for leaves every window to
+        the ungated patterns, and a sources-only scanner whose patterns are
+        all gated runs nothing else.
+        """
+        return (
+            self.sources_only
+            and self._literal_gate is not None
+            and not any(self._ungated_patterns)
+            and self._literal_gate.search(source.lower()) is None
+        )
+
     def _compile_sink_patterns(
         self,
     ) -> list[tuple[str, re.Pattern[bytes], list[str]]]:
@@ -857,10 +872,11 @@ def _attach_bounded_security_sources(
         counts["security_sources"] = len(indexed["security_sources"])
         indexed["signal_counts"] = counts
         return indexed
-    observed = _scan_bytes(
-        StreamingSecurityScanner(file_path, language, sources_only=True),
-        source,
-        degradation_reason="bounded_security_source_scan",
+    scanner = StreamingSecurityScanner(file_path, language, sources_only=True)
+    observed = (
+        scanner.finish(degradation_reason="bounded_security_source_scan")
+        if scanner.retains_nothing_from(source)
+        else _scan_bytes(scanner, source, degradation_reason="bounded_security_source_scan")
     )
     if "security_sources" in observed["unavailable_dimensions"]:
         raise RuntimeError(f"no bounded security-source detector for {language}")

@@ -459,3 +459,27 @@ def test_character_columns_count_decoded_characters_from_the_line_start(source) 
             reference(node.end_byte),
         )
     assert len(nodes) > 15
+
+
+@pytest.mark.parametrize(
+    "language, source, skipped",
+    [
+        ("c", b"int acme_add(int a, int b) { return a + b; }\n", True),
+        ("c", b"int acme_main(int argc, char **argv) { return argv[0][0]; }\n", False),
+        # GETENV in a comment still holds the literal; the scan decides.
+        ("python", b"# GETENV is read elsewhere\nVALUE = 1\n", False),
+        # Shell's positional parameters need no selective literal.
+        ("shell", b"echo acme\n", False),
+    ],
+)
+def test_a_source_scan_is_skipped_only_when_no_window_could_match(language, source, skipped) -> None:
+    scanner = StreamingSecurityScanner("acme.src", language, sources_only=True)
+    attached = _attach_bounded_security_sources(
+        {}, file_path="acme.src", language=language, source=source
+    )
+    full = _fallback_from_bytes("acme.src", language, source, degradation_reason="test")
+
+    assert scanner.retains_nothing_from(source) is skipped
+    assert not StreamingSecurityScanner("acme.src", language).retains_nothing_from(source)
+    assert attached["security_sources"] == full["security_sources"]
+    assert bool(full["security_sources"]) is (language == "c" and not skipped)
