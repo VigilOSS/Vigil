@@ -75,6 +75,11 @@ When access or execution is blocked, preserve the missing condition and useful n
 being unable to reproduce is not evidence that the bug is false. Keep evidence and scope
 identity separate: a source-linked finding can require a web proof with web constraints.
 
+Treat a correction relayed to you (in the dispatch, a handoff, a note, or finding history) the
+same way: it changes your conclusion only after you re-open the evidence it cites (file:line,
+command-run id, artifact id, receipt); record an uncited correction as unverified and check it
+yourself.
+
 For a claimed proof assignment, read `proof-work get <id>` before execution. Current route,
 admitted targets and recorded approval govern the task. The operator handles the human
 conversation once per work item and current preparation; proceed when authorized, or report missing/revoked approval to the operator.

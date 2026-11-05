@@ -152,10 +152,13 @@ one oversized mixed batch to a single agent.
   `code/threat-model/<repo-id>`, require `current: true` and generation/digest equality with Code
   Source Identity, then summarize the product surface profile and evidence, target-kind entry
   points, product-reachability versus attacker-control status, trust boundaries, high-value targets,
-  and **trusted inputs** (operator-owned config, env secrets, internal mTLS/IAM callers, authenticated
-  principals -- sources the hunter should NOT treat as attacker-controlled, and the single biggest
-  false-positive suppressor). Pass the complete bound envelope and add a 3-8 bullet summary for
-  orientation; do not replace the envelope with those bullets.
+  and **trusted inputs** (operator-owned config, env secrets, internal mTLS/IAM callers), each with
+  the threat-model evidence that makes it trusted. Mark them advisory: the hunter treats a source as
+  attacker-influenced when the code it reads shows a less-trusted writer or the entry has no cited
+  reason. An authenticated principal stays an attacker for anything beyond its recorded
+  `actor_capabilities` (`shared-constraints-code.md` §5 net-new capability test). Pass the complete
+  bound envelope and add a 3-8 bullet summary for orientation; do not replace the envelope with
+  those bullets.
 - **Lease scratch directory** -- pass the `code-dispatch fetch` JSON as prompt-context `lane_file`
   so the packet names each leased item's `scratch_dir`, and tell the hunter to write temporary files there in preference to any scratch
   location its own client harness offers. The lease namespace is what keeps two hunters working the
@@ -376,9 +379,9 @@ coverage pass anchors agents on "complete correctly"; this pass resets the missi
 critical that survived."
 
 **File selection is judgment, not a fixed category list.** The coverage pass likely missed
-findings where security decisions happen (auth, policy, access control, crypto), where finding
-density was high (2+ findings in a file signals more remain), in large files (>500 LOC) analyzed
-under queue pressure, or in config/policy files that define execution behavior but were classified
+findings where security decisions happen (auth, policy, access control, crypto), in files that
+already produced a finding (even one: review often stops looking once a file yields its first bug),
+in large files (>500 LOC) analyzed under queue pressure, or in config/policy files that define execution behavior but were classified
 medium. Pick the 10-20 files that represent the highest-risk attack surface for this specific
 codebase and threat model -- what an adversary would actually target, not a generic checklist.
 
@@ -390,7 +393,7 @@ codebase and threat model -- what an adversary would actually target, not a gene
   evidence.
 - Do NOT include prior findings from Phase 2A in the dispatch context — the hunter must approach
   fresh without anchoring on existing findings. This holds even when a file was selected for 2C
-  because of its Phase 2A finding density: that density is the operator's selection criterion for
+  because of its Phase 2A findings: those findings are the operator's selection criterion for
   choosing the file, not content the hunter receives — passing it through would recreate the
   anchoring the fresh pass exists to avoid.
 - Include: current Code Source Identity, its matching structural index, the complete current

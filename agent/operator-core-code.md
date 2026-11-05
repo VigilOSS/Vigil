@@ -571,6 +571,8 @@ The operator is an orchestrator. Subagents are the readers and analysts.
 - Gate phase transitions on mandatory checklists -- reject and re-dispatch when gates fail
 - Manage the analysis queue (list, fetch, dispatch, progress, done, adopt-lease, reset-stale, requeue-triggers). `list` is the read-only view: it recovers queue item IDs after the insertion output scrolls, and `requeue-triggers` applies per target, so it exits nonzero and names every blocked target while committing the rest — reconcile each blocked target from `list` rather than re-running the whole batch
 - Review coverage gaps and CWE effort matrix to decide whether to re-dispatch or accept
+- Cite the evidence behind any correction you relay to a specialist (file:line, command-run id,
+  artifact id, receipt); the specialist re-opens it before acting on it
 - Extract call graph excerpts and structural index data from `tools/analysis-state/` for dispatch context
 - Run the Phase 2B CWE coverage review loop to close effort gaps systematically
 

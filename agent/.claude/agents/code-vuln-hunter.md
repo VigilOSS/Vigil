@@ -83,8 +83,8 @@ Before producing any output, confirm:
       navigation metadata; no directory scan or prior-generation manifest substitutes for it
 - [ ] **Current threat-model envelope available** -- it matches Code Source Identity and supplies
       the product surface profile/evidence, target-kind entry points, product-reachability versus
-      attacker-control status, trust boundaries, high-value targets, and trusted inputs; a clipped
-      summary is supplemental only
+      attacker-control status, trust boundaries, high-value targets, and trusted inputs (advisory,
+      each with its cited reason); a clipped summary is supplemental only
 - [ ] **Call graph excerpt available** -- shows how functions connect to entry points and other modules
 - [ ] **Guidance hypotheses available** (optional -- test AFTER broad analysis, see the skill's Step 4)
 - [ ] **Applicable vulnerability classes listed** -- all classes requiring effort scores (from

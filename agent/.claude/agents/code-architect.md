@@ -229,7 +229,8 @@ CLI, file, env, API, IPC) was actually looked for, not just the obvious ones; ev
 `high` file has a slot-type annotation, a precise role label, and rationale in the narrative architecture/handoff artifact
 (protocol parsers, serialization handlers, and auth code classified `critical`); and the threat
 model names concrete protocols/data formats/trust relationships (including the trusted-inputs
-set) rather than generic descriptions, with historical CVE patterns distilled into bug-shapes.
+set, each with the evidence that makes it trusted) rather than generic descriptions, with
+historical CVE patterns distilled into bug-shapes.
 For anything you could not complete in one of those areas, declare it here with: which item was
 missed, why (insufficient documentation, binary-only dependency, unclear architecture), and the
 recommended operator follow-up. If nothing was missed, state "No coverage gaps — all four areas
