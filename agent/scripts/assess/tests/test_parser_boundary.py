@@ -478,7 +478,8 @@ def test_default_jobs_stay_within_a_container_cpu_quota(
     """A CPU quota shares the same cores among all jobs, so jobs past it stretch
     each child's wall clock into the backstop a serial build never meets."""
     (tmp_path / "cpu.max").write_text(cpu_max)
-    monkeypatch.setattr(parser_boundary, "_CGROUP_CPU_MAX", tmp_path / "cpu.max")
+    monkeypatch.setattr(parser_boundary, "_CGROUP_ROOT", tmp_path)
+    monkeypatch.setattr(parser_boundary, "_PROC_SELF_CGROUP", tmp_path / "missing")
     monkeypatch.setattr(parser_boundary, "_scheduler_cpu_count", lambda: 6)
     monkeypatch.setattr(parser_boundary, "_performance_cpu_count", lambda: None)
 
@@ -547,3 +548,22 @@ def test_a_server_whose_parent_is_gone_removes_the_request_copy() -> None:
         assert sorted(item.name for item in request_dir.iterdir()) == []
     finally:
         worker.close()
+
+
+def test_default_jobs_honour_the_quota_of_the_process_cgroup_and_its_parents(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without a private cgroup namespace the quota sits on the process's own
+    cgroup, or any parent of it, never on the hierarchy root."""
+    (tmp_path / "cpu.max").write_text("max 100000\n")
+    (tmp_path / "acme.slice").mkdir()
+    (tmp_path / "acme.slice" / "cpu.max").write_text("200000 100000\n")
+    (tmp_path / "acme.slice" / "build.scope").mkdir()
+    (tmp_path / "acme.slice" / "build.scope" / "cpu.max").write_text("max 100000\n")
+    (tmp_path / "self-cgroup").write_text("0::/acme.slice/build.scope\n")
+    monkeypatch.setattr(parser_boundary, "_CGROUP_ROOT", tmp_path)
+    monkeypatch.setattr(parser_boundary, "_PROC_SELF_CGROUP", tmp_path / "self-cgroup")
+    monkeypatch.setattr(parser_boundary, "_scheduler_cpu_count", lambda: 6)
+    monkeypatch.setattr(parser_boundary, "_performance_cpu_count", lambda: None)
+
+    assert parser_boundary.default_parser_jobs() == 2

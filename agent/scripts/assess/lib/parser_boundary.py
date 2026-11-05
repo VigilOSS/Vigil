@@ -272,8 +272,8 @@ def _performance_cpu_count() -> int | None:
     return value.value if value.value > 0 else None
 
 
-_CGROUP_CPU_MAX = Path("/sys/fs/cgroup/cpu.max")
-_CGROUP_V1_CPU = Path("/sys/fs/cgroup/cpu")
+_CGROUP_ROOT = Path("/sys/fs/cgroup")
+_PROC_SELF_CGROUP = Path("/proc/self/cgroup")
 
 
 def _scheduler_cpu_count() -> int:
@@ -286,16 +286,7 @@ def _scheduler_cpu_count() -> int:
     return os.cpu_count() or 1
 
 
-def _cgroup_cpu_limit() -> int | None:
-    """Whole CPUs a Linux cgroup quota grants, rounded up, or None when unlimited."""
-    try:
-        quota_text, period_text = _CGROUP_CPU_MAX.read_text(encoding="ascii").split()[:2]
-    except (OSError, ValueError):
-        try:
-            quota_text = (_CGROUP_V1_CPU / "cpu.cfs_quota_us").read_text(encoding="ascii").strip()
-            period_text = (_CGROUP_V1_CPU / "cpu.cfs_period_us").read_text(encoding="ascii").strip()
-        except OSError:
-            return None
+def _cpu_quota(quota_text: str, period_text: str) -> int | None:
     try:
         quota, period = int(quota_text), int(period_text)
     except ValueError:
@@ -303,6 +294,45 @@ def _cgroup_cpu_limit() -> int | None:
     if quota <= 0 or period <= 0:
         return None
     return max(1, math.ceil(quota / period))
+
+
+def _cgroup_cpu_limit() -> int | None:
+    """Whole CPUs a Linux cgroup quota grants, rounded up, or None when unlimited.
+
+    A quota on the process's own cgroup or any parent of it bounds the process,
+    so the tightest one along that path wins (cgroup v2, then the v1 CFS files).
+    """
+    relative = ""
+    try:
+        for line in _PROC_SELF_CGROUP.read_text(encoding="utf-8").splitlines():
+            if line.startswith("0::"):
+                relative = line[3:].strip().lstrip("/")
+    except OSError:
+        pass
+    directory = _CGROUP_ROOT / relative if relative else _CGROUP_ROOT
+    limits: list[int] = []
+    while True:
+        try:
+            fields = (directory / "cpu.max").read_text(encoding="ascii").split()
+        except OSError:
+            fields = []
+        if len(fields) >= 2 and (limit := _cpu_quota(fields[0], fields[1])) is not None:
+            limits.append(limit)
+        if directory == _CGROUP_ROOT or _CGROUP_ROOT not in directory.parents:
+            break
+        directory = directory.parent
+    if not limits:
+        try:
+            v1 = _CGROUP_ROOT / "cpu"
+            limit = _cpu_quota(
+                (v1 / "cpu.cfs_quota_us").read_text(encoding="ascii").strip(),
+                (v1 / "cpu.cfs_period_us").read_text(encoding="ascii").strip(),
+            )
+        except OSError:
+            limit = None
+        if limit is not None:
+            limits.append(limit)
+    return min(limits) if limits else None
 
 
 def default_parser_jobs() -> int:
