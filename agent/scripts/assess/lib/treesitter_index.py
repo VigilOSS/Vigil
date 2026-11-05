@@ -4036,15 +4036,19 @@ def _executable_file_scope_lines(
                 ]
                 for block in blocks:
                     lines.update(code_lines(range(block.start_point[0], block.end_point[0] + 1)))
-                if not blocks and _carries_file_scope_signal(member, language):
-                    lines.update(signals_within(member))
+                if (
+                    not blocks
+                    and (within := signals_within(member))
+                    and _carries_file_scope_signal(member, language)
+                ):
+                    lines.update(within)
             continue
         if language == "php" and node.type in {"text", "text_interpolation"}:
             lines.update(_php_output_lines(node, source))
         elif _is_executable_file_scope_node(node, language, source):
             lines.update(code_lines(_content_lines(node, source)))
-        elif _carries_file_scope_signal(node, language):
-            lines.update(signals_within(node))
+        elif (within := signals_within(node)) and _carries_file_scope_signal(node, language):
+            lines.update(within)
     return {
         line for line in lines if not _within_one_interval(intervals, starts, line, line)
     }

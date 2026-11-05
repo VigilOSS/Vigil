@@ -187,3 +187,19 @@ def test_callables_sharing_a_minified_line_each_read_its_registrations() -> None
         ("outer", "module_exports"),
         ("inner", "express_route"),
     ]
+
+
+def test_only_signals_inside_code_that_could_run_open_a_segment() -> None:
+    # Both declarations carry a source; the literal table is skipped without
+    # walking it when no signal lies inside, and read when one does.
+    source = b"""static const char *acme_help[] = {
+    "usage: set ACME_HOME, read with getenv(name)",
+    "done",
+};
+static const char *acme_home = getenv("ACME_HOME");
+int acme_main(void) { return 0; }
+"""
+    indexed = index_file("src/acme.c", "c", source)
+
+    assert [source["line"] for source in indexed["security_sources"]] == [2, 5]
+    assert indexed["top_level_segments"] == [{"line_start": 5, "line_end": 5}]
