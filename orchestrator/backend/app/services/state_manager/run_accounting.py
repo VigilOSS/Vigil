@@ -763,6 +763,8 @@ def _counts_by_run(
         f"""
         SELECT run_id, COUNT(*) AS total,
                SUM(hard = 1 AND status IN ({_LIVE_OBLIGATION_SQL})) AS open_hard,
+               SUM(hard = 1 AND obligation_kind = 'source_read'
+                   AND status IN ({_LIVE_OBLIGATION_SQL})) AS unread_sources,
                SUM(obligation_kind = 'source_read' AND status = 'released')
                    AS released_sources
         FROM assessment_run_obligations
@@ -836,6 +838,7 @@ def _counts_by_run(
             "source_reads": value(simple["source_reads"], run_id),
             "obligations": value(obligations, run_id),
             "open_hard_obligations": value(obligations, run_id, "open_hard"),
+            "unread_sources": value(obligations, run_id, "unread_sources"),
             "released_sources": value(obligations, run_id, "released_sources"),
             "candidates": value(candidates, run_id),
             "open_candidates": value(candidates, run_id, "open"),
@@ -1137,7 +1140,8 @@ def _current_blockers(
     # proves an empty result without asking again.
     obligation_rows = connection.execute(
         f"""
-        SELECT id, identity_key, status FROM assessment_run_obligations
+        SELECT id, identity_key, obligation_kind, object_key, status
+        FROM assessment_run_obligations
         WHERE engagement_id = ? AND run_id = ? AND hard = 1
           AND status IN ({_LIVE_OBLIGATION_SQL})
         ORDER BY id
@@ -1145,6 +1149,25 @@ def _current_blockers(
         (engagement_id, run_id),
     ).fetchall() if counts["open_hard_obligations"] else []
     for row in obligation_rows:
+        if str(row["obligation_kind"]) == "source_read":
+            blockers.append(
+                {
+                    "code": "unread_source",
+                    "message": (
+                        f"Imported source {row['object_key']} is unread ({row['status']})."
+                    ),
+                    "object_type": "obligation",
+                    "object_id": int(row["id"]),
+                    "action": (
+                        "read it fully with run-audit source-read record, or release "
+                        "it with run-audit obligation release when it will not be read"
+                        if str(run["run_purpose"]) == "proof"
+                        else "read it fully with run-audit source-read record or "
+                        "retain a partial run"
+                    ),
+                }
+            )
+            continue
         blockers.append(
             {
                 "code": "unresolved_obligation",
@@ -1217,6 +1240,51 @@ def _current_blockers(
                 }
             )
     return blockers
+
+
+_REFUSAL_LIST_LIMIT = 50
+
+
+def _bounded_list(values: list[str], *, separator: str) -> str:
+    shown = separator.join(values[:_REFUSAL_LIST_LIMIT])
+    hidden = len(values) - _REFUSAL_LIST_LIMIT
+    return f"{shown}{separator}and {hidden} more" if hidden > 0 else shown
+
+
+def _proof_completion_refusal(
+    run: sqlite3.Row | dict[str, Any], blockers: list[dict[str, Any]]
+) -> str:
+    """Explain why a proof run cannot be sealed completed, unread sources first.
+
+    The run's live blockers stay readable on ``proof-run get``; this message is
+    bounded so a large import still yields a readable refusal.
+    """
+
+    run_id = int(run["id"])
+    seal_partial = (
+        f"seal the truthful outcome with `proof-run finish {run_id} --status partial`"
+    )
+    unread = [blocker for blocker in blockers if blocker["code"] == "unread_source"]
+    other = [blocker for blocker in blockers if blocker["code"] != "unread_source"]
+    other_text = _bounded_list(
+        [str(blocker["message"]).rstrip(".") for blocker in other], separator="; "
+    )
+    if not unread:
+        return (
+            f"proof run {run_id} cannot complete while blockers remain: {other_text}. "
+            f"Resolve each, or {seal_partial}."
+        )
+    ids = _bounded_list([str(blocker["object_id"]) for blocker in unread], separator=", ")
+    count = len(unread)
+    message = (
+        f"proof run {run_id} cannot complete: {count} imported "
+        f"{'source is' if count == 1 else 'sources are'} unread "
+        f"({'obligation' if count == 1 else 'obligations'} {ids}). Read each with "
+        "`run-audit source-read record`, release one you will not read with "
+        f"`run-audit obligation release {run_id} <id> --agent-id "
+        f"{run['producer_dispatch_agent_id']} --reason <text>`, or {seal_partial}."
+    )
+    return f"{message} Other blockers: {other_text}." if other else message
 
 
 def _elapsed_seconds(record: dict[str, Any]) -> float | None:
@@ -2036,6 +2104,14 @@ def transition_assessment_run(
             counts = _run_counts(connection, engagement.id, run_id)
             blockers = _current_blockers(connection, run, counts=counts)
             if requested == "completed" and blockers:
+                # A proof run's completion is the claim its receipts support, so
+                # it is refused while debt remains and the run stays running. A
+                # scan's outcome is derived: its inventory accounting seals partial.
+                if str(run["run_purpose"]) == "proof":
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail=_proof_completion_refusal(run, blockers),
+                    )
                 effective = "partial"
         lifecycle_cursor = connection.execute(
             """

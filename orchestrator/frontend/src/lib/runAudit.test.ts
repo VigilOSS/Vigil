@@ -408,6 +408,16 @@ test("a completed run is green only when every receipt is healthy and nothing bl
   }));
   assert.deepEqual([obligations.key, obligations.reason], ["attention", "2 open obligations"]);
 
+  const unread = runHealth(acmeRun({
+    status: "partial",
+    blockers: [
+      { code: "unread_source", message: "a", object_type: "obligation", object_id: 3, action: "x" },
+      { code: "unread_source", message: "b", object_type: "obligation", object_id: 4, action: "x" },
+      { code: "unresolved_obligation", message: "c", object_type: "obligation", object_id: 5, action: "x" },
+    ],
+  }));
+  assert.deepEqual([unread.key, unread.reason], ["attention", "2 unread sources · 1 open obligation"]);
+
   const empty = runHealth(acmeRun({
     status: "partial",
     counts: { proof_receipts: 0 },

@@ -905,6 +905,15 @@ def _run_sources_import(args) -> None:
     rows: list[dict[str, Any]] = []
     _, client = _client(args)
     try:
+        # Read the run first: an unknown run fails before any write, and its
+        # purpose decides what the imported debt does to completion.
+        run = client.get(f"assessment-runs/{run_id}")
+        if (
+            not isinstance(run, dict)
+            or run.get("id") != run_id
+            or run.get("run_purpose") not in {"proof", "scan"}
+        ):
+            raise _read_error(operation)
         for batch_start in range(
             0, len(requested_sources), _SOURCE_IMPORT_BATCH_SIZE
         ):
@@ -937,6 +946,19 @@ def _run_sources_import(args) -> None:
     finally:
         client.close()
     print(json.dumps(rows, indent=2, ensure_ascii=False))
+    included = sum(row["inventory_status"] == "included" for row in rows)
+    if included:
+        consequence = (
+            "completion is refused until each is fully read or released."
+            if run["run_purpose"] == "proof"
+            else "a completed request seals the scan partial until each is fully read."
+        )
+        print(
+            f"run-audit sources import: {included} included "
+            f"{'source is' if included == 1 else 'sources are'} now hard "
+            f"source_read obligations on run {run_id}; {consequence}",
+            file=sys.stderr,
+        )
 
 
 def _write_object(

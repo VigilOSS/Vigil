@@ -154,8 +154,15 @@ Shared run accounting for the code, web, and blue tracks. In outline:
 - Exact generation-bound variant and fuzz receipts resolve their matching
   obligations only when a healthy artifact proof matches the receipt's evidence
   path and digest — the receipt cannot vouch for itself.
-- If hard debt is open or proof is missing, a requested completion is sealed as a
-  **`partial`** result rather than reported as success.
+- Importing a source inventory makes each included source a hard read
+  obligation. Only complete observed byte coverage closes it, or, on a proof run,
+  `run-audit obligation release` by the run's producer dispatch with a reason.
+  The run reports `unread_sources` and `released_sources` in its counts.
+- A proof run's requested completion is refused while hard debt is open or proof
+  is missing. The refusal names unread sources first, and the run stays running
+  until the debt is cleared or the run is finished as **`partial`**.
+- A scan run's requested completion with open debt is sealed as **`partial`**,
+  and `proof-run finish` warns on stderr that the scan ended partial.
 
 The orchestrator's Runs tab shows the same lifecycle, provenance, evidence health,
 paged work records, and deterministic baseline comparisons, with every recorded

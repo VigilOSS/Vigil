@@ -2571,7 +2571,7 @@ def test_comparison_treats_missing_target_and_source_identity_as_unknown(
 
     for run in (baseline, current):
         terminal = client.patch(
-            f"{BASE}/assessment-runs/{run['id']}", json={"status": "completed"}
+            f"{BASE}/assessment-runs/{run['id']}", json={"status": "partial"}
         )
         assert terminal.status_code == 200, terminal.text
     recorded = client.post(
@@ -3039,9 +3039,11 @@ def test_proof_run_without_evidence_cannot_be_sealed_completed(
     terminal = client.patch(
         f"{BASE}/assessment-runs/{run.json()['id']}", json={"status": "completed"}
     )
-    assert terminal.status_code == 200, terminal.text
-    assert terminal.json()["status"] == "partial"
-    assert terminal.json()["seal"]["blockers"][0]["code"] == "proof_missing"
+    assert terminal.status_code == 409, terminal.text
+    assert "Proof run has no recorded evidence receipt." in terminal.json()["detail"]
+    current = client.get(f"{BASE}/assessment-runs/{run.json()['id']}").json()
+    assert current["status"] == "running"
+    assert current["blockers"][0]["code"] == "proof_missing"
 
 
 def test_resumed_proof_run_replaces_unhealthy_parent_evidence_without_erasing_it(

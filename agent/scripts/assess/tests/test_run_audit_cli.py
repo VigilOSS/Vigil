@@ -192,6 +192,10 @@ def _decision_event(event_id: str = "candidate:81") -> dict:
     }
 
 
+def _run(purpose: str = "proof") -> dict:
+    return {"id": 17, "run_purpose": purpose, "status": "running"}
+
+
 def _write_case(case: str) -> tuple[list[str], str, str, dict, object]:
     if case == "sources-import":
         source = {key: value for key, value in _source().items() if key not in {"id", "run_id"}}
@@ -261,6 +265,7 @@ def test_run_audit_writes_json_documents_and_validates_bound_receipts(
         return response
 
     monkeypatch.setattr(AssessmentClient, method, write)
+    monkeypatch.setattr(AssessmentClient, "get", lambda _client, _endpoint: _run())
     cli.main(
         [
             "--engagement-dir",
@@ -298,6 +303,7 @@ def test_run_audit_writes_reject_malformed_success_without_retrying(
     payload_path.write_text(json.dumps(payload), encoding="utf-8")
     monkeypatch.setattr(config, "_verify_backend", lambda _cfg: None)
     monkeypatch.setattr(AssessmentClient, method, lambda *_args, **_kwargs: {"id": True})
+    monkeypatch.setattr(AssessmentClient, "get", lambda _client, _endpoint: _run())
 
     with pytest.raises(SystemExit) as excinfo:
         cli.main(
@@ -436,6 +442,7 @@ def test_source_inventory_import_chunks_more_than_one_api_request(
         return response
 
     monkeypatch.setattr(AssessmentClient, "post", post)
+    monkeypatch.setattr(AssessmentClient, "get", lambda _client, _endpoint: _run())
     cli.main(
         [
             "--engagement-dir",
@@ -451,6 +458,71 @@ def test_source_inventory_import_chunks_more_than_one_api_request(
     output = json.loads(capsys.readouterr().out)
     assert len(output) == 10_001
     assert batch_sizes == [1000] * 10 + [1]
+
+
+@pytest.mark.parametrize(
+    ("purpose", "consequence"),
+    [
+        (
+            "proof",
+            "completion is refused until each is fully read or released.",
+        ),
+        (
+            "scan",
+            "a completed request seals the scan partial until each is fully read.",
+        ),
+    ],
+)
+def test_source_inventory_import_warns_that_included_sources_become_hard_debt(
+    purpose: str,
+    consequence: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys,
+) -> None:
+    engagement = _engagement(tmp_path)
+    excluded = {
+        **_source(source_id=32, path="vendor/lib.py"),
+        "inventory_status": "excluded",
+        "exclusion_reason": "declared vendor boundary",
+    }
+    rows = [_source(source_id=31), _source(source_id=33, path="src/app.py"), excluded]
+    payload = {
+        "sources": [
+            {key: value for key, value in row.items() if key not in {"id", "run_id"}}
+            for row in rows
+        ]
+    }
+    payload_path = tmp_path / "inventory.json"
+    payload_path.write_text(json.dumps(payload), encoding="utf-8")
+    reads: list[str] = []
+    monkeypatch.setattr(config, "_verify_backend", lambda _cfg: None)
+    monkeypatch.setattr(AssessmentClient, "post", lambda *_args: rows)
+
+    def get(_client, endpoint: str):
+        reads.append(endpoint)
+        return _run(purpose)
+
+    monkeypatch.setattr(AssessmentClient, "get", get)
+    cli.main(
+        [
+            "--engagement-dir",
+            str(engagement),
+            "run-audit",
+            "sources",
+            "import",
+            "17",
+            str(payload_path),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == rows
+    assert reads == ["assessment-runs/17"]
+    assert (
+        "2 included sources are now hard source_read obligations on run 17; "
+        f"{consequence}"
+    ) in captured.err
 
 
 def test_source_inventory_commitment_is_local_exact_and_per_target(

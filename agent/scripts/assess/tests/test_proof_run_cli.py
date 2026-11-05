@@ -7,7 +7,7 @@ import pytest
 
 from assess import cli
 from assess.lib import config, contracts
-from assess.lib.client import AssessmentClient
+from assess.lib.client import AssessError, AssessmentClient
 
 
 def _engagement(tmp_path):
@@ -160,9 +160,133 @@ def test_proof_run_completed_request_reports_backend_enforced_partial(
         ]
     )
 
-    result = json.loads(capsys.readouterr().out)
+    captured = capsys.readouterr()
+    result = json.loads(captured.out)
     assert result["status"] == "partial"
     assert result["seal"]["requested_status"] == "completed"
+    assert "scan run 23 was sealed partial with 1 blocker(s) remaining" in captured.err
+    assert "unresolved_obligation" in captured.err
+
+
+def test_proof_run_completed_request_never_accepts_a_partial_proof_seal(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    engagement = _engagement(tmp_path)
+    monkeypatch.setattr(config, "_verify_backend", lambda _cfg: None)
+    monkeypatch.setattr(
+        AssessmentClient,
+        "patch",
+        lambda _client, _endpoint, _payload: {
+            "id": 23,
+            "run_uuid": "verify-23",
+            "run_kind": "web",
+            "run_purpose": "proof",
+            "producer_dispatch_id": 7,
+            "producer_dispatch_agent_id": "VERIFY-1",
+            "status": "partial",
+            "seal": {
+                "requested_status": "completed",
+                "effective_status": "partial",
+                "blockers": [{"code": "unread_source"}],
+            },
+        },
+    )
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(
+            [
+                "--engagement-dir",
+                str(engagement),
+                "proof-run",
+                "finish",
+                "23",
+                "--status",
+                "completed",
+            ]
+        )
+
+    assert excinfo.value.code == 1
+    assert "did not identify the canonical run" in capsys.readouterr().err
+
+
+def test_proof_run_finish_surfaces_the_backend_completion_refusal(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    engagement = _engagement(tmp_path)
+    monkeypatch.setattr(config, "_verify_backend", lambda _cfg: None)
+    detail = (
+        'proof run 23 cannot complete: 1 imported source is unread (obligation 4). '
+        'Read each with `run-audit source-read record`, release one you will not '
+        'read with `run-audit obligation release 23 <id> --agent-id VERIFY-1 '
+        '--reason <text>`, or seal the truthful outcome with '
+        '`proof-run finish 23 --status partial`.'
+    )
+
+    def refuse(_client, _endpoint, _payload):
+        raise AssessError(f"HTTP 409:\n{json.dumps({'detail': detail})}")
+
+    monkeypatch.setattr(AssessmentClient, "patch", refuse)
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(
+            [
+                "--engagement-dir",
+                str(engagement),
+                "proof-run",
+                "finish",
+                "23",
+                "--status",
+                "completed",
+            ]
+        )
+
+    assert excinfo.value.code == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert f"proof-run finish: REFUSED: {detail}" in captured.err
+
+
+def test_proof_run_finish_partial_records_the_operator_reason(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    engagement = _engagement(tmp_path)
+    calls: list[dict] = []
+    monkeypatch.setattr(config, "_verify_backend", lambda _cfg: None)
+
+    def patch(_client, _endpoint, payload):
+        calls.append(payload)
+        return {
+            "id": 23,
+            "run_uuid": "verify-23",
+            "run_kind": "web",
+            "run_purpose": "proof",
+            "producer_dispatch_id": 7,
+            "producer_dispatch_agent_id": "VERIFY-1",
+            "status": payload["status"],
+        }
+
+    monkeypatch.setattr(AssessmentClient, "patch", patch)
+
+    cli.main(
+        [
+            "--engagement-dir",
+            str(engagement),
+            "proof-run",
+            "finish",
+            "23",
+            "--status",
+            "partial",
+            "--reason",
+            "time box ended before the second file",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert json.loads(captured.out)["status"] == "partial"
+    assert captured.err == ""
+    assert calls == [
+        {"status": "partial", "reason": "time box ended before the second file"}
+    ]
 
 
 def test_proof_run_get_and_list_validate_canonical_read_shapes(

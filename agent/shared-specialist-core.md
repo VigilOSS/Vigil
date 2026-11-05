@@ -143,8 +143,13 @@ When a verification decision depends on a new observation, read
 ordered lifecycle: start a run with `vigil assess proof-run start`, record every observation
 with `vigil assess proof-receipt create`, and seal it with `vigil assess proof-run finish`.
 Use `--status completed` only when the recorded receipts fully describe the run's result;
-otherwise seal the run with its truthful failed, interrupted, or canceled status. A sealed run
-rejects later receipts, so this order preserves which evidence actually existed at completion.
+otherwise seal the run with its truthful partial, failed, interrupted, or canceled status and a
+`--reason`. A sealed run rejects later receipts, so this order preserves which evidence actually
+existed at completion. The backend refuses a proof run's completion while any blocker remains,
+and the run stays running. Each included source you import into the run becomes a hard read
+obligation: read it with `vigil assess run-audit source-read record`, or, when you will not read
+it, release it with `vigil assess run-audit obligation release` from the run's producer dispatch
+with a reason naming why. Otherwise finish `--status partial`.
 Inspect durable state with `vigil assess proof-run get|list` and
 `vigil assess proof-receipt get|list`, then cite the completed independent run's receipt IDs in
 `vigil assess finding verify`. Proof receipts identify the exact captured bytes; presentation

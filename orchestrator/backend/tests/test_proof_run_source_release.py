@@ -324,3 +324,111 @@ def test_existing_obligation_history_gains_a_nullable_release_actor(
     assert _release(
         client, run, obligation, agent_id="HUNT-RUN-1", reason="out of scope"
     ).status_code == 200
+
+
+def test_proof_run_completion_is_refused_while_imported_sources_are_unread(
+    client, isolate_settings
+) -> None:
+    _seed(client, isolate_settings)
+    run = _recovery_parent_run(client, run_uuid="unread-completion")
+    _recovery_receipt(client, run, slug="unread-completion", observed="guard absent")
+    sources = _import(client, run, 3)
+    obligation_ids = [_source_obligation(client, run, source)["id"] for source in sources]
+    before = client.get(f"{BASE}/assessment-runs/{run['id']}").json()
+
+    refused = client.patch(
+        f"{BASE}/assessment-runs/{run['id']}", json={"status": "completed"}
+    )
+
+    assert refused.status_code == 409, refused.text
+    detail = refused.json()["detail"]
+    assert detail.startswith(
+        f"proof run {run['id']} cannot complete: 3 imported sources are unread "
+        f"(obligations {', '.join(str(value) for value in obligation_ids)})."
+    )
+    assert "run-audit source-read record" in detail
+    assert (
+        f"run-audit obligation release {run['id']} <id> --agent-id HUNT-RUN-1 "
+        "--reason <text>"
+    ) in detail
+    assert f"proof-run finish {run['id']} --status partial" in detail
+    after = client.get(f"{BASE}/assessment-runs/{run['id']}").json()
+    assert after["status"] == "running"
+    assert after["seal"] is None
+    assert after["lifecycle_history"] == before["lifecycle_history"]
+    assert after["counts"]["unread_sources"] == 3
+    assert {blocker["code"] for blocker in after["blockers"]} == {"unread_source"}
+
+    for obligation_id in obligation_ids:
+        assert _release(
+            client,
+            run,
+            {"id": obligation_id},
+            agent_id="HUNT-RUN-1",
+            reason="generated fixtures outside the claimed path",
+        ).status_code == 200
+    completed = _seal(client, run)
+    assert completed["status"] == "completed"
+    assert completed["seal"]["counts"]["unread_sources"] == 0
+    assert completed["seal"]["counts"]["released_sources"] == 3
+
+
+def test_proof_run_refusal_names_other_blockers_after_unread_sources(
+    client, isolate_settings
+) -> None:
+    _seed(client, isolate_settings)
+    run = _recovery_parent_run(client, run_uuid="unread-and-unproved")
+    [source] = _import(client, run, 1)
+    obligation_id = _source_obligation(client, run, source)["id"]
+
+    refused = client.patch(
+        f"{BASE}/assessment-runs/{run['id']}", json={"status": "completed"}
+    )
+
+    assert refused.status_code == 409, refused.text
+    detail = refused.json()["detail"]
+    assert f"1 imported source is unread (obligation {obligation_id})" in detail
+    assert detail.index("unread") < detail.index("Other blockers:")
+    assert "Proof run has no recorded evidence receipt." in detail
+
+
+def test_proof_run_can_still_seal_its_truthful_partial_outcome(
+    client, isolate_settings
+) -> None:
+    _seed(client, isolate_settings)
+    run = _recovery_parent_run(client, run_uuid="explicit-partial")
+    _import(client, run, 2)
+
+    sealed = client.patch(
+        f"{BASE}/assessment-runs/{run['id']}",
+        json={"status": "partial", "reason": "time box ended before both files"},
+    )
+
+    assert sealed.status_code == 200, sealed.text
+    body = sealed.json()
+    assert body["status"] == "partial"
+    assert body["seal"]["requested_status"] == "partial"
+    assert body["seal"]["counts"]["unread_sources"] == 2
+    assert body["lifecycle_history"][-1]["reason"] == "time box ended before both files"
+
+
+def test_scan_completion_with_an_unread_source_still_seals_partial(
+    client, isolate_settings
+) -> None:
+    _seed(client, isolate_settings)
+    run = _create_scan(client, run_uuid="scan-unread")
+    assert client.patch(
+        f"{BASE}/assessment-runs/{run['id']}", json={"status": "running"}
+    ).status_code == 200
+    _import(client, run, 1)
+
+    sealed = client.patch(
+        f"{BASE}/assessment-runs/{run['id']}", json={"status": "completed"}
+    )
+
+    assert sealed.status_code == 200, sealed.text
+    assert sealed.json()["status"] == "partial"
+    assert sealed.json()["seal"]["counts"]["unread_sources"] == 1
+    assert "unread_source" in {
+        blocker["code"] for blocker in sealed.json()["seal"]["blockers"]
+    }

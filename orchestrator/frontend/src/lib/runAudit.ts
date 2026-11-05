@@ -367,6 +367,7 @@ const STOPPED_RUN_STATUSES = new Set(["failed", "interrupted", "canceled"]);
 const UNHEALTHY_RECEIPT_STATES = ["stale", "missing", "tombstoned"] as const;
 
 const BLOCKER_PHRASES: Record<string, [string, string]> = {
+  unread_source: ["unread source", "unread sources"],
   unresolved_obligation: ["open obligation", "open obligations"],
   unresolved_candidate: ["open candidate", "open candidates"],
   promoted_finding_unverified: ["unverified finding", "unverified findings"],

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 from assess.lib.client import AssessmentClient, AssessError, require_write_result
@@ -63,6 +64,9 @@ def register(subparsers) -> None:
     )
     finish.add_argument("run_id", type=int)
     finish.add_argument("--status", required=True, choices=_TERMINAL_STATUSES)
+    finish.add_argument(
+        "--reason", help="Why the run ended this way; recorded in its lifecycle history."
+    )
     finish.set_defaults(func=_run_finish)
 
     get = actions.add_parser("get", help="Read one proof run by numeric id.")
@@ -314,21 +318,65 @@ def _run_start(args) -> None:
     print(json.dumps(row, indent=2, ensure_ascii=False))
 
 
-def _transition_run(args, *, operation: str, status: str) -> None:
+def _refusal_detail(exc: AssessError) -> str | None:
+    """The backend's 409 explanation, decoded from the client's error text."""
+
+    status_line, _, body = str(exc).partition("\n")
+    if status_line.rstrip(":") != "HTTP 409":
+        return None
+    try:
+        detail = json.loads(body).get("detail")
+    except (AttributeError, json.JSONDecodeError):
+        return None
+    return detail if isinstance(detail, str) and detail.strip() else None
+
+
+def _transition_run(
+    args, *, operation: str, status: str, reason: str | None = None
+) -> None:
     run_id = int(args.run_id)
-    with _client(args) as client:
-        response = client.patch(f"assessment-runs/{run_id}", {"status": status})
+    payload = {"status": status}
+    if reason is not None:
+        payload["reason"] = reason
+    try:
+        with _client(args) as client:
+            response = client.patch(f"assessment-runs/{run_id}", payload)
+    except AssessError as exc:
+        # A refused completion leaves the run running: name what still blocks
+        # it rather than echoing the raw HTTP body.
+        detail = _refusal_detail(exc)
+        if detail is None:
+            raise
+        raise AssessError(f"proof-run {operation}: REFUSED: {detail}") from exc
     effective_status = status
     if operation == "finish" and status == "completed" and isinstance(response, dict):
         seal = response.get("seal")
-        if response.get("status") == "partial" and (
-            isinstance(seal, dict)
+        # Only a scan derives its outcome; the backend refuses a proof run's
+        # completion while blockers remain, so a partial proof seal is malformed.
+        if (
+            response.get("run_purpose") == "scan"
+            and response.get("status") == "partial"
+            and isinstance(seal, dict)
             and seal.get("requested_status") == "completed"
             and seal.get("effective_status") == "partial"
             and isinstance(seal.get("blockers"), list)
             and bool(seal["blockers"])
         ):
             effective_status = "partial"
+            codes = sorted(
+                {
+                    str(blocker.get("code"))
+                    for blocker in seal["blockers"]
+                    if isinstance(blocker, dict) and blocker.get("code")
+                }
+            )
+            print(
+                f"proof-run finish: scan run {run_id} was sealed partial with "
+                f"{len(seal['blockers'])} blocker(s) remaining "
+                f"({', '.join(codes) or 'unnamed'}); inspect them with "
+                f"`vigil assess proof-run get {run_id}`.",
+                file=sys.stderr,
+            )
     row = _require_run(
         response,
         operation=operation,
@@ -349,7 +397,12 @@ def _run_begin(args) -> None:
 
 
 def _run_finish(args) -> None:
-    _transition_run(args, operation="finish", status=str(args.status))
+    _transition_run(
+        args,
+        operation="finish",
+        status=str(args.status),
+        reason=None if args.reason is None else str(args.reason),
+    )
 
 
 def _run_get(args) -> None:
